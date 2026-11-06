@@ -1,0 +1,29 @@
+[
+ {
+  "method": "POST",
+  "url": "/actions/workflows/ci.yml/dispatches",
+  "response": {
+   "status": 204,
+   "headers": {},
+   "body": ""
+  }
+ },
+ {
+  "method": "GET",
+  "url": "/actions/runs?head_sha=ccc333",
+  "response": {
+   "status": 200,
+   "headers": {},
+   "body": {
+    "workflow_runs": [
+     {
+      "id": 11,
+      "name": "ci",
+      "status": "completed",
+      "conclusion": "success"
+     }
+    ]
+   }
+  }
+ }
+]

@@ -1,0 +1,1 @@
+[{"method": "GET", "url": "/issues", "response": {"status": 403, "headers": {"x-ratelimit-remaining": "0", "retry-after": "120"}, "body": {"message": "API rate limit exceeded"}}}]

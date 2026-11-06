@@ -1,0 +1,31 @@
+[
+ {
+  "method": "GET",
+  "url": "/actions/runs?head_sha=eee555",
+  "response": {
+   "status": 200,
+   "headers": {},
+   "body": {
+    "workflow_runs": []
+   }
+  }
+ },
+ {
+  "method": "GET",
+  "url": "/actions/runs?head_sha=eee555",
+  "response": {
+   "status": 200,
+   "headers": {},
+   "body": {
+    "workflow_runs": [
+     {
+      "id": 31,
+      "name": "ci",
+      "status": "in_progress",
+      "conclusion": null
+     }
+    ]
+   }
+  }
+ }
+]

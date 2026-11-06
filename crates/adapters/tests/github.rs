@@ -1,0 +1,308 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+//! The GitHub adapters against recorded responses (shaped as GitHub's REST API
+//! documents them; no network, no real token), and the fake host and command CI
+//! against the same conformance kits.
+
+use mason_adapter_api::http::Recorded;
+use mason_adapter_api::kit::*;
+use mason_adapter_api::service::*;
+use mason_adapters::fakehost::{CommandCi, FakeHost};
+use mason_adapters::github::{workflow_problems, GitHub, TokenRef};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+fn fixture(name: &str) -> String {
+    std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/github").join(name)).unwrap()
+}
+
+struct Gh {
+    gh: GitHub,
+    http: Arc<Recorded>,
+    _d: tempfile::TempDir,
+}
+
+fn gh(script: &str) -> Gh {
+    let d = tempfile::tempdir().unwrap();
+    let tok = d.path().join("token");
+    std::fs::write(&tok, "ghp_recorded_test_token\n").unwrap();
+    let http = Arc::new(Recorded::from_json(&fixture(script)).unwrap());
+    let gh = GitHub::new(http.clone(), "https://api.github.com", "o/r", TokenRef::File(tok));
+    Gh { gh, http, _d: d }
+}
+
+#[test]
+fn the_host_passes_its_conformance_kit_on_recorded_responses() {
+    let g = gh("host_kit.json");
+    let problems = host_kit(
+        &g.gh,
+        &HostScenario {
+            base: "develop".into(),
+            good_head: "mason/pr/x-b1".into(),
+            missing_head: "nope".into(),
+        },
+    );
+    assert!(problems.is_empty(), "{problems:?}");
+    assert!(g.http.unused().is_empty(), "the script expected more: {:?}", g.http.unused());
+}
+
+#[test]
+fn the_tracker_passes_its_conformance_kit_and_sees_prs_as_prs() {
+    let g = gh("tracker_kit.json");
+    let problems = tracker_kit(&g.gh);
+    assert!(problems.is_empty(), "{problems:?}");
+    let g = gh("tracker_kit.json");
+    let Listing::Items { items, etag } = g.gh.list(None).unwrap() else { panic!() };
+    assert_eq!(etag.as_deref(), Some("\"v1\""));
+    assert_eq!(items.len(), 4);
+    assert_eq!(items[0].priority, "high");
+    assert_eq!(items[3].priority, "urgent");
+    assert!(items[2].is_pr && !items[1].is_pr);
+    assert!(!items[3].open);
+    // The conditional request carried the ETag.
+    g.gh.list(Some("\"v1\"")).unwrap();
+    let reqs = g.http.requests();
+    assert!(reqs[1].headers.iter().any(|(k, v)| k == "If-None-Match" && v == "\"v1\""));
+}
+
+#[test]
+fn the_build_system_passes_its_conformance_kit() {
+    let mut g = gh("build_kit.json");
+    g.gh.workflow = Some("ci.yml".into());
+    assert!(build_kit(&g.gh, "mason/ci/x-b1", "ccc333").is_empty());
+    assert!(g.http.unused().is_empty());
+    // The token went in a header, never in a URL.
+    for r in g.http.requests() {
+        assert!(!r.url.contains("ghp_"), "{}", r.url);
+        assert!(r.headers.iter().any(|(k, v)| k == "Authorization" && v == "Bearer ghp_recorded_test_token"));
+    }
+}
+
+#[test]
+fn ci_red_names_the_failed_jobs_and_pending_is_pending() {
+    let g = gh("ci_red.json");
+    let CiState::Red { failed, summary } = g.gh.status("ddd444").unwrap() else { panic!() };
+    assert_eq!(failed, ["integration"]);
+    assert!(summary.contains("ci"));
+    let g = gh("ci_pending.json");
+    assert_eq!(g.gh.status("eee555").unwrap(), CiState::Pending, "no run yet is pending, not green");
+    assert_eq!(g.gh.status("eee555").unwrap(), CiState::Pending, "a run in progress is pending");
+}
+
+#[test]
+fn a_pr_waits_for_a_required_review_and_a_requested_change_is_not_a_review() {
+    let g = gh("pr_review_required.json");
+    let st = g.gh.pr_status(9).unwrap();
+    assert_eq!((st.checks, st.review, st.state), (Checks::Green, Review::Required, PrState::Open));
+    let g = gh("pr_changes_requested.json");
+    assert_eq!(g.gh.pr_status(9).unwrap().review, Review::ChangesRequested);
+    let g = gh("pr_red.json");
+    let st = g.gh.pr_status(9).unwrap();
+    assert_eq!((st.checks, st.failed), (Checks::Red, vec!["build".to_string()]));
+}
+
+#[test]
+fn the_merge_queue_is_a_graphql_mutation_and_its_refusal_is_read_from_the_body() {
+    let g = gh("enqueue.json");
+    g.gh.enqueue(7).unwrap();
+    let e = g.gh.enqueue(8).unwrap_err();
+    assert_eq!(e.kind, ErrorKind::Invalid);
+    assert!(e.detail.contains("merge queue"));
+}
+
+fn poll_once(script: &str, p: &mut Poller, now: u64) -> (PollEvent, usize) {
+    let g = gh(script);
+    let o = match g.gh.list(p.etag.as_deref()) {
+        Ok(Listing::NotModified) => Observed::Unchanged,
+        Ok(Listing::Items { etag, .. }) => Observed::Changed { etag },
+        Err(e) => Observed::Failed(e),
+    };
+    (p.observe(now, o), g.http.requests().len())
+}
+
+#[test]
+fn a_404_stops_polling_at_once_and_nothing_more_is_asked() {
+    let mut p = Poller::new(30);
+    let (e, n) = poll_once("err_404.json", &mut p, 0);
+    assert!(matches!(e, PollEvent::Stopped { ref why } if why.contains("404")), "{e:?}");
+    assert_eq!(n, 1);
+    for t in [1, 60, 3600, 86_400] {
+        assert!(!p.due(t), "a stopped poll must not ask again (t={t})");
+    }
+}
+
+#[test]
+fn a_bad_credential_is_permanent_too() {
+    let mut p = Poller::new(30);
+    let (e, _) = poll_once("err_401.json", &mut p, 0);
+    assert!(matches!(e, PollEvent::Stopped { .. }));
+}
+
+#[test]
+fn a_rate_limit_waits_as_told_and_an_outage_backs_off() {
+    let mut p = Poller::new(30);
+    let (e, _) = poll_once("err_ratelimit.json", &mut p, 1000);
+    assert_eq!(e, PollEvent::Backoff { until: 1120, why: "RateLimited { retry_after_s: Some(120) }: HTTP 403: API rate limit exceeded".into() });
+    let mut p = Poller::new(30);
+    let (e, _) = poll_once("err_503.json", &mut p, 0);
+    assert!(matches!(e, PollEvent::Backoff { until: 60, .. }), "{e:?}");
+    let mut p = Poller::new(30);
+    let (e, _) = poll_once("err_outage.json", &mut p, 0);
+    assert!(matches!(e, PollEvent::Backoff { .. }), "{e:?}");
+    assert!(p.due(10_000), "an outage is retried");
+}
+
+#[test]
+fn a_token_is_a_reference_never_a_value() {
+    assert!(TokenRef::parse("ghp_abcdef").is_err());
+    assert!(TokenRef::parse("env:").is_err());
+    assert_eq!(TokenRef::parse("env:GH_TOKEN").unwrap(), TokenRef::Env("GH_TOKEN".into()));
+    assert_eq!(TokenRef::parse("file:/p/t").unwrap(), TokenRef::File("/p/t".into()));
+    // A missing token is a permanent (Auth) error, found before any request.
+    let http = Arc::new(Recorded::from_json("[]").unwrap());
+    let g = GitHub::new(http.clone(), "https://api.github.com", "o/r", TokenRef::File("/nonexistent/token".into()));
+    let e = g.list(None).unwrap_err();
+    assert_eq!(e.kind, ErrorKind::Auth);
+    assert!(http.requests().is_empty());
+}
+
+#[test]
+fn doctor_finds_a_workflow_that_can_run_on_a_candidate_ref() {
+    let d = tempfile::tempdir().unwrap();
+    assert!(workflow_problems(d.path())[0].0.contains("no workflow"));
+    let wf = d.path().join(".github/workflows");
+    std::fs::create_dir_all(&wf).unwrap();
+    std::fs::write(wf.join("ci.yml"), "on:\n  push:\n    branches: [main]\njobs: {}\n").unwrap();
+    assert!(workflow_problems(d.path())[0].0.contains("mason/ci/**"));
+    std::fs::write(wf.join("ci.yml"), "on:\n  # push: mason/ci/**\n  push:\n    branches: [main]\n").unwrap();
+    assert!(!workflow_problems(d.path()).is_empty(), "a comment does not count");
+    std::fs::write(wf.join("ci.yml"), "on:\n  push:\n    branches: [\"mason/ci/**\"]\n").unwrap();
+    assert!(workflow_problems(d.path()).is_empty());
+    std::fs::write(wf.join("ci.yml"), "on:\n  workflow_dispatch:\n").unwrap();
+    assert!(workflow_problems(d.path()).is_empty());
+}
+
+// ---- the fake host and the command CI satisfy the same kits ----------------------------------
+
+fn sh(cwd: &Path, args: &[&str]) -> String {
+    mason_landing_git(cwd, args)
+}
+
+fn mason_landing_git(cwd: &Path, args: &[&str]) -> String {
+    let o = std::process::Command::new("git")
+        .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&o.stderr));
+    String::from_utf8_lossy(&o.stdout).trim().to_string()
+}
+
+fn fake_world() -> (tempfile::TempDir, PathBuf, PathBuf) {
+    let d = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(d.path()).unwrap();
+    let bare = root.join("host.git");
+    std::fs::create_dir_all(&bare).unwrap();
+    sh(&bare, &["init", "-q", "--bare", "-b", "develop"]);
+    let w = root.join("w");
+    sh(&root, &["clone", "-q", bare.to_str().unwrap(), "w"]);
+    sh(&w, &["checkout", "-q", "-b", "develop"]);
+    std::fs::write(w.join("a"), "1").unwrap();
+    sh(&w, &["add", "-A"]);
+    sh(&w, &["commit", "-q", "-m", "init"]);
+    sh(&w, &["push", "-q", "origin", "develop"]);
+    sh(&w, &["checkout", "-q", "-b", "feature"]);
+    std::fs::write(w.join("b"), "2").unwrap();
+    sh(&w, &["add", "-A"]);
+    sh(&w, &["commit", "-q", "-m", "feature"]);
+    sh(&w, &["push", "-q", "origin", "feature"]);
+    (d, bare, root)
+}
+
+#[test]
+fn the_fake_host_passes_the_host_kit() {
+    for require_approval in [false, true] {
+        let (_d, bare, root) = fake_world();
+        let host = FakeHost {
+            dir: root.join("state"),
+            remote: bare,
+            checks_cmd: Some("test -f b".into()),
+            require_approval,
+            merge_queue: false,
+        };
+        if require_approval {
+            // The kit expects a reviewed PR: the reviewer approves PR #1 as soon as it exists.
+            let dir = root.join("state");
+            std::thread::spawn(move || {
+                for _ in 0..200 {
+                    FakeHost::approve(&dir, 1);
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            });
+        }
+        let problems = host_kit(
+            &host,
+            &HostScenario {
+                base: "develop".into(),
+                good_head: "feature".into(),
+                missing_head: "nope".into(),
+            },
+        );
+        assert!(problems.is_empty(), "approval={require_approval}: {problems:?}");
+    }
+}
+
+#[test]
+fn the_command_ci_passes_the_build_kit() {
+    let d = tempfile::tempdir().unwrap();
+    let ci = CommandCi {
+        trigger: "echo run-$MASON_SHA".into(),
+        status: "echo green".into(),
+        cwd: d.path().into(),
+    };
+    assert!(build_kit(&ci, "mason/ci/x", "abc").is_empty());
+    assert_eq!(ci.trigger("r", "abc").unwrap(), "run-abc");
+    let red = CommandCi {
+        trigger: "true".into(),
+        status: "printf 'red\\nunit, e2e\\n'".into(),
+        cwd: d.path().into(),
+    };
+    assert_eq!(red.trigger("r", "abc").unwrap(), "abc");
+    assert_eq!(
+        red.status("abc").unwrap(),
+        CiState::Red { failed: vec!["unit".into(), "e2e".into()], summary: "unit, e2e failed".into() }
+    );
+    let pend = CommandCi { trigger: "true".into(), status: "echo".into(), cwd: d.path().into() };
+    assert_eq!(pend.status("x").unwrap(), CiState::Pending);
+}
+
+#[test]
+fn the_fake_host_merges_what_is_queued_when_it_is_green_and_drops_what_is_red() {
+    let (_d, bare, root) = fake_world();
+    let host = FakeHost {
+        dir: root.join("state"),
+        remote: bare.clone(),
+        checks_cmd: Some("test -f b".into()),
+        require_approval: false,
+        merge_queue: true,
+    };
+    let pr = host.open_pr("develop", "feature", "t", "b").unwrap();
+    host.enqueue(pr.number).unwrap();
+    assert_eq!(host.pr_status(pr.number).unwrap().state, PrState::Merged);
+    assert_eq!(sh(&bare, &["show", "develop:b"]), "2");
+    // A red PR is dropped from the queue rather than merged.
+    let w = root.join("w");
+    sh(&w, &["checkout", "-q", "-b", "broken", "develop"]);
+    sh(&w, &["fetch", "-q", "origin"]);
+    sh(&w, &["reset", "-q", "--hard", "origin/develop"]);
+    std::fs::remove_file(w.join("b")).unwrap();
+    std::fs::write(w.join("c"), "3").unwrap();
+    sh(&w, &["add", "-A"]);
+    sh(&w, &["commit", "-q", "-m", "broken"]);
+    sh(&w, &["push", "-q", "origin", "broken"]);
+    let pr2 = host.open_pr("develop", "broken", "t", "b").unwrap();
+    host.enqueue(pr2.number).unwrap();
+    let st = host.pr_status(pr2.number).unwrap();
+    assert_eq!((st.state, st.checks), (PrState::Closed, Checks::Red));
+}

@@ -9,7 +9,11 @@
 pub mod card;
 pub mod conformance;
 pub mod contract;
+pub mod http;
+pub mod kit;
 pub mod netguard;
+pub mod service;
+pub mod webhook;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};

@@ -1,0 +1,61 @@
+[
+ {
+  "method": "GET",
+  "url": "/pulls/9",
+  "response": {
+   "status": 200,
+   "headers": {},
+   "body": {
+    "number": 9,
+    "html_url": "https://github.com/o/r/pull/7",
+    "node_id": "PR_node7",
+    "state": "open",
+    "merged": false,
+    "merged_at": null,
+    "mergeable_state": "blocked",
+    "head": {
+     "sha": "fff666"
+    }
+   }
+  }
+ },
+ {
+  "method": "GET",
+  "url": "/commits/fff666/check-runs",
+  "response": {
+   "status": 200,
+   "headers": {},
+   "body": {
+    "total_count": 1,
+    "check_runs": [
+     {
+      "name": "build",
+      "status": "completed",
+      "conclusion": "success"
+     },
+     {
+      "name": "lint",
+      "status": "completed",
+      "conclusion": "success"
+     }
+    ]
+   }
+  }
+ },
+ {
+  "method": "GET",
+  "url": "/pulls/9/reviews",
+  "response": {
+   "status": 200,
+   "headers": {},
+   "body": [
+    {
+     "state": "CHANGES_REQUESTED",
+     "user": {
+      "login": "rev"
+     }
+    }
+   ]
+  }
+ }
+]

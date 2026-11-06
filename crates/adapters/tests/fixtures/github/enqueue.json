@@ -1,0 +1,74 @@
+[
+ {
+  "method": "GET",
+  "url": "/pulls/7",
+  "response": {
+   "status": 200,
+   "headers": {},
+   "body": {
+    "number": 7,
+    "html_url": "https://github.com/o/r/pull/7",
+    "node_id": "PR_node7",
+    "state": "open",
+    "merged": false,
+    "merged_at": null,
+    "mergeable_state": "clean",
+    "head": {
+     "sha": "aaa111"
+    }
+   }
+  }
+ },
+ {
+  "method": "POST",
+  "url": "/graphql",
+  "response": {
+   "status": 200,
+   "headers": {},
+   "body": {
+    "data": {
+     "enqueuePullRequest": {
+      "mergeQueueEntry": {
+       "id": "Q1"
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "method": "GET",
+  "url": "/pulls/8",
+  "response": {
+   "status": 200,
+   "headers": {},
+   "body": {
+    "number": 8,
+    "html_url": "https://github.com/o/r/pull/7",
+    "node_id": "PR_node8",
+    "state": "open",
+    "merged": false,
+    "merged_at": null,
+    "mergeable_state": "clean",
+    "head": {
+     "sha": "aaa111"
+    }
+   }
+  }
+ },
+ {
+  "method": "POST",
+  "url": "/graphql",
+  "response": {
+   "status": 200,
+   "headers": {},
+   "body": {
+    "errors": [
+     {
+      "message": "Pull request is not in a merge queue repository"
+     }
+    ]
+   }
+  }
+ }
+]

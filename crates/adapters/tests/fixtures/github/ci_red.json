@@ -1,0 +1,40 @@
+[
+ {
+  "method": "GET",
+  "url": "/actions/runs?head_sha=ddd444",
+  "response": {
+   "status": 200,
+   "headers": {},
+   "body": {
+    "workflow_runs": [
+     {
+      "id": 21,
+      "name": "ci",
+      "status": "completed",
+      "conclusion": "failure"
+     }
+    ]
+   }
+  }
+ },
+ {
+  "method": "GET",
+  "url": "/actions/runs/21/jobs",
+  "response": {
+   "status": 200,
+   "headers": {},
+   "body": {
+    "jobs": [
+     {
+      "name": "unit",
+      "conclusion": "success"
+     },
+     {
+      "name": "integration",
+      "conclusion": "failure"
+     }
+    ]
+   }
+  }
+ }
+]

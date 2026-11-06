@@ -1,0 +1,149 @@
+[
+ {
+  "method": "GET",
+  "url": "/pulls/999999",
+  "response": {
+   "status": 404,
+   "headers": {},
+   "body": {
+    "message": "Not Found",
+    "documentation_url": "https://docs.github.com/rest"
+   }
+  }
+ },
+ {
+  "method": "POST",
+  "url": "/pulls",
+  "response": {
+   "status": 422,
+   "headers": {},
+   "body": {
+    "message": "Validation Failed",
+    "errors": [
+     {
+      "resource": "PullRequest",
+      "field": "head",
+      "code": "invalid"
+     }
+    ]
+   }
+  }
+ },
+ {
+  "method": "POST",
+  "url": "/pulls",
+  "response": {
+   "status": 201,
+   "headers": {},
+   "body": {
+    "number": 7,
+    "html_url": "https://github.com/o/r/pull/7"
+   }
+  }
+ },
+ {
+  "method": "GET",
+  "url": "/pulls/7/reviews",
+  "response": {
+   "status": 200,
+   "headers": {},
+   "body": [
+    {
+     "state": "APPROVED",
+     "user": {
+      "login": "owner"
+     }
+    }
+   ]
+  },
+  "repeat": true
+ },
+ {
+  "method": "GET",
+  "url": "/commits/aaa111/check-runs",
+  "response": {
+   "status": 200,
+   "headers": {},
+   "body": {
+    "total_count": 1,
+    "check_runs": [
+     {
+      "name": "build",
+      "status": "completed",
+      "conclusion": "success"
+     },
+     {
+      "name": "lint",
+      "status": "completed",
+      "conclusion": "success"
+     }
+    ]
+   }
+  },
+  "repeat": true
+ },
+ {
+  "method": "GET",
+  "url": "/pulls/7",
+  "response": {
+   "status": 200,
+   "headers": {},
+   "body": {
+    "number": 7,
+    "html_url": "https://github.com/o/r/pull/7",
+    "node_id": "PR_node7",
+    "state": "open",
+    "merged": false,
+    "merged_at": null,
+    "mergeable_state": "clean",
+    "head": {
+     "sha": "aaa111"
+    }
+   }
+  }
+ },
+ {
+  "method": "PUT",
+  "url": "/pulls/7/merge",
+  "response": {
+   "status": 200,
+   "headers": {},
+   "body": {
+    "merged": true,
+    "sha": "bbb222"
+   }
+  }
+ },
+ {
+  "method": "GET",
+  "url": "/pulls/7",
+  "response": {
+   "status": 200,
+   "headers": {},
+   "body": {
+    "number": 7,
+    "html_url": "https://github.com/o/r/pull/7",
+    "node_id": "PR_node7",
+    "state": "closed",
+    "merged": true,
+    "merged_at": "2026-01-01T00:00:00Z",
+    "mergeable_state": "clean",
+    "head": {
+     "sha": "aaa111"
+    }
+   }
+  },
+  "repeat": true
+ },
+ {
+  "method": "PUT",
+  "url": "/pulls/7/merge",
+  "response": {
+   "status": 405,
+   "headers": {},
+   "body": {
+    "message": "Pull Request is not mergeable"
+   }
+  }
+ }
+]

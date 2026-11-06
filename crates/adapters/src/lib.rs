@@ -4,5 +4,7 @@
 
 pub mod claude;
 pub mod fake;
+pub mod fakehost;
+pub mod github;
 pub mod hosted;
 pub mod runner;
