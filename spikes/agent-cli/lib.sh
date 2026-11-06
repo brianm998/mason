@@ -9,7 +9,8 @@ claude_run() {  # claude_run [extra args] -- prompt   -> JSON on stdout
   (cd "$scratch" && claude -p --model "${MODEL:-haiku}" --mcp-config mcp.json --strict-mcp-config \
      --allowedTools "mcp__spike__run_check,mcp__spike__sleep_tool" --output-format json "$@" </dev/null)
 }
-need_login() { claude auth status 2>/dev/null | grep -q '"loggedIn": true' || { echo "claude CLI is not logged in; run 'claude' once interactively" >&2; exit 2; }; }
+need_login() { local st; st=$(claude auth status 2>&1 </dev/null) || true; echo "claude auth status: $(echo "$st" | tr -d "
+ " | cut -c1-120)" >&2; echo "(continuing regardless; a logged-out claude will show 'Not logged in' in the results)" >&2; }
 summ() { python3 -c '
 import json,sys
 d=json.load(sys.stdin); u=d.get("usage",{})
