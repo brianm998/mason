@@ -68,6 +68,7 @@ impl Sim {
         let fx = self.ok(EventKind::TaskFiled {
             project: P,
             title: "t".into(),
+            body: String::new(),
             priority: Priority::Normal,
             trust: TrustSource::Owner,
             explored,

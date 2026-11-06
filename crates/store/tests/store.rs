@@ -22,6 +22,7 @@ fn file(project: u64, title: &str) -> EventKind {
     EventKind::TaskFiled {
         project: ProjectId(project),
         title: title.into(),
+        body: String::new(),
         priority: Priority::Normal,
         trust: TrustSource::Owner,
         explored: false,
@@ -334,4 +335,22 @@ fn readers_see_consistent_progress_while_the_writer_works() {
         s.append(ev(2 + i, file(1, "t"))).unwrap();
     }
     r.join().unwrap();
+}
+
+#[test]
+fn bugs_are_filed_and_listed_and_survive_reopen() {
+    let (_d, p) = db();
+    {
+        let s = Store::open(&p).unwrap();
+        register(&s);
+        s.record_bug(10, "missed_job", "task 3 had no job").unwrap();
+        s.record_bug(20, "missed_admit", "task 4").unwrap();
+        assert_eq!(s.bugs().unwrap().len(), 2);
+        s.verify().unwrap(); // bugs are not part of the log or the projections
+    }
+    let s = Store::open(&p).unwrap();
+    assert_eq!(
+        s.bugs().unwrap()[1],
+        (20, "missed_admit".to_string(), "task 4".to_string())
+    );
 }

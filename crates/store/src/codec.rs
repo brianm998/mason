@@ -129,6 +129,13 @@ impl R<'_> {
             })
             .collect()
     }
+    /// A trailing string field that older payloads don't have.
+    fn opt_s(&mut self) -> Result<String, CodecError> {
+        match self.0.next() {
+            Some(x) => unesc(x),
+            None => Ok(String::new()),
+        }
+    }
     fn done(&mut self) -> Result<(), CodecError> {
         match self.0.next() {
             None => Ok(()),
@@ -212,6 +219,7 @@ pub fn encode(k: &EventKind) -> (&'static str, String) {
         TaskFiled {
             project,
             title,
+            body,
             priority,
             trust,
             explored,
@@ -226,7 +234,8 @@ pub fn encode(k: &EventKind) -> (&'static str, String) {
                 .b(*explored)
                 .b(*proposed)
                 .ids(blockers)
-                .ts(*not_before);
+                .ts(*not_before)
+                .s(body); // last, so logs written before bodies existed still decode
             "task_filed"
         }
         Approved { task } => {
@@ -327,6 +336,7 @@ pub fn decode(kind: &str, payload: &str) -> Result<EventKind, CodecError> {
             proposed: r.b()?,
             blockers: r.ids()?,
             not_before: r.ts()?,
+            body: r.opt_s()?,
         },
         "approved" => Approved { task: t(&mut r)? },
         "rejected" => Rejected { task: t(&mut r)? },
@@ -406,6 +416,7 @@ mod tests {
             TaskFiled {
                 project: ProjectId(1),
                 title: nasty.into(),
+                body: format!("body {nasty}"),
                 priority: Priority::Urgent,
                 trust: TrustSource::OwnerAgent,
                 explored: true,
@@ -416,6 +427,7 @@ mod tests {
             TaskFiled {
                 project: ProjectId(2),
                 title: String::new(),
+                body: String::new(),
                 priority: Priority::Low,
                 trust: TrustSource::Outside,
                 explored: false,
@@ -490,6 +502,17 @@ mod tests {
     }
 
     #[test]
+    fn a_task_filed_payload_from_before_bodies_still_decodes() {
+        let old = "1\tfirst\tnormal\towner\t0\t0\t\t-";
+        match decode("task_filed", old).unwrap() {
+            EventKind::TaskFiled { title, body, .. } => {
+                assert_eq!((title.as_str(), body.as_str()), ("first", ""))
+            }
+            e => panic!("{e:?}"),
+        }
+    }
+
+    #[test]
     fn garbage_is_rejected_not_panicked_on() {
         for (k, p) in [
             ("nope", ""),
@@ -499,6 +522,7 @@ mod tests {
             ("sent_back", "1\tbad\\q"),
             ("retried", "1\tflying"),
             ("task_filed", "1\tt\tnormal\towner\t2\t0\t\t-"),
+            ("task_filed", "1\tt\tnormal\towner\t0\t0\t\t-\tb\textra"),
         ] {
             assert!(decode(k, p).is_err(), "{k} {p:?}");
         }

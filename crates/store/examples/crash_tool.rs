@@ -46,6 +46,7 @@ fn write(db: &str) {
             EventKind::TaskFiled {
                 project: ProjectId(1),
                 title: "crash task".into(),
+                body: String::new(),
                 priority: Priority::Normal,
                 trust: TrustSource::Owner,
                 explored: false,

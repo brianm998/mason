@@ -123,6 +123,7 @@ fn apply(w: &mut World, k: &EventKind, fx: &mut Vec<Effect>) -> Result<(), Reduc
         E::TaskFiled {
             project,
             title,
+            body,
             priority,
             trust,
             explored,
@@ -142,6 +143,7 @@ fn apply(w: &mut World, k: &EventKind, fx: &mut Vec<Effect>) -> Result<(), Reduc
                 id,
                 project: *project,
                 title: title.clone(),
+                body: body.clone(),
                 priority: *priority,
                 trust: *trust,
                 enqueued_at: w.now,

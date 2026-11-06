@@ -38,6 +38,15 @@ const STEPS: &[&str] = &[
          answer   TEXT
      );
      INSERT OR REPLACE INTO meta(key, value) VALUES ('projected_seq', '0');",
+    // 3: bugs the reconcile sweep filed, when it found something the event
+    // path missed. Not part of the event log: they describe the pipeline, not
+    // a task.
+    "CREATE TABLE bugs (
+         id     INTEGER PRIMARY KEY AUTOINCREMENT,
+         at     INTEGER NOT NULL,
+         kind   TEXT NOT NULL,
+         detail TEXT NOT NULL
+     );",
 ];
 
 pub const SCHEMA_VERSION: u32 = STEPS.len() as u32;

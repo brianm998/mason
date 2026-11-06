@@ -19,6 +19,8 @@ pub enum EventKind {
     TaskFiled {
         project: ProjectId,
         title: String,
+        /// The task text from the tracker. Untrusted when `trust` is `Outside`.
+        body: String,
         priority: Priority,
         trust: TrustSource,
         explored: bool,

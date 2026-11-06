@@ -101,6 +101,7 @@ pub struct Task {
     pub id: TaskId,
     pub project: ProjectId,
     pub title: String,
+    pub body: String,
     pub priority: Priority,
     pub trust: TrustSource,
     pub enqueued_at: Timestamp,

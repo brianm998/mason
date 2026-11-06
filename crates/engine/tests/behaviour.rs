@@ -399,6 +399,7 @@ fn unknown_project_and_duplicate_project_are_refused() {
     let r = sim.try_ev(E::TaskFiled {
         project: ProjectId(9),
         title: "t".into(),
+        body: String::new(),
         priority: Priority::Low,
         trust: TrustSource::Outside,
         explored: false,
@@ -475,6 +476,7 @@ fn random_events_never_break_invariants() {
             0..=2 => E::TaskFiled {
                 project: P,
                 title: "t".into(),
+                body: String::new(),
                 priority: Priority::Normal,
                 trust: TrustSource::Owner,
                 explored: rnd(2) == 0,

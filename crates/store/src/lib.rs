@@ -68,6 +68,7 @@ enum Cmd {
     Append(Event, Sender<Result<Appended, StoreError>>),
     World(Sender<World>),
     Rebuild(Sender<Result<World, StoreError>>),
+    Bug(u64, String, String, Sender<Result<(), StoreError>>),
     Shutdown,
 }
 
@@ -355,6 +356,16 @@ fn writer_loop(mut conn: Connection, mut world: World, rx: std::sync::mpsc::Rece
                 }
                 let _ = reply.send(r);
             }
+            Cmd::Bug(at, kind, detail, reply) => {
+                let r = conn
+                    .execute(
+                        "INSERT INTO bugs(at, kind, detail) VALUES (?1, ?2, ?3)",
+                        params![at as i64, kind, detail],
+                    )
+                    .map(|_| ())
+                    .map_err(StoreError::from);
+                let _ = reply.send(r);
+            }
             Cmd::Append(ev, reply) => match append_one(&mut conn, &world, &ev) {
                 Ok((next, appended)) => {
                     world = next;
@@ -458,6 +469,26 @@ impl Store {
             .send(Cmd::Rebuild(rtx))
             .map_err(|_| StoreError::WriterGone)?;
         rrx.recv().map_err(|_| StoreError::WriterGone)?
+    }
+
+    /// File a bug: the reconcile sweep found something the event path missed.
+    pub fn record_bug(&self, at_ms: u64, kind: &str, detail: &str) -> Result<(), StoreError> {
+        let (rtx, rrx) = channel();
+        self.tx
+            .send(Cmd::Bug(at_ms, kind.into(), detail.into(), rtx))
+            .map_err(|_| StoreError::WriterGone)?;
+        rrx.recv().map_err(|_| StoreError::WriterGone)?
+    }
+
+    /// Bugs filed so far: `(at_ms, kind, detail)`, oldest first.
+    pub fn bugs(&self) -> Result<Vec<(u64, String, String)>, StoreError> {
+        let conn = self.reader.lock().expect("reader lock");
+        let mut st = conn.prepare("SELECT at, kind, detail FROM bugs ORDER BY id")?;
+        let rows = st.query_map([], |r| {
+            Ok((r.get::<_, i64>(0)? as u64, r.get(1)?, r.get(2)?))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
     }
 
     /// The projection tables as sorted text lines, for tests and diagnostics.
