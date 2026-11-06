@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+[package]
+name = "mason-pipeline"
+description = "MASON command line client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false # flipped at Stage 31 after owner approval
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "mason"
+path = "src/main.rs"

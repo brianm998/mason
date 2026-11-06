@@ -1,0 +1,22 @@
+DRAFT — AWAITING LEGAL REVIEW. This is not legal advice and must be checked
+by a lawyer before any app-store build ships (migration Stage 0 / Stage 31).
+
+Additional permission under GNU GPL version 3 section 7
+
+If you modify this Program, or any covered work, by linking or combining it
+with the Apple, Google or other platform frameworks that an application store
+requires (the "Platform Terms"), the licensors of this Program grant you
+additional permission to convey the resulting work through that store, even
+where the store's terms impose restrictions that would otherwise be further
+restrictions under section 10 of the GPL, provided that:
+
+  1. the complete corresponding source of the work, under the GPL as modified
+     by this additional permission, is made available to every recipient
+     through a channel that does not itself carry those restrictions; and
+  2. the store listing states where that source can be obtained.
+
+The copyright holders of this Program may distribute their own builds through
+such stores on the same terms. This additional permission does not affect any
+other recipient's rights under the GPL, and you may remove it from your
+version of the Program; if you do so, delete this paragraph and
+the file that contains it.

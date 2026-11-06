@@ -1,0 +1,50 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+name: CI
+
+# Plain pull_request trigger only. No secrets and no private
+# runners, so fork PRs run untrusted code safely.
+on:
+  push:
+    branches: [main, "stage/**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: bash scripts/check-spdx.sh
+      - uses: EmbarkStudios/cargo-deny-action@v2
+
+  dco:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - run: bash scripts/check-dco.sh "origin/${{ github.base_ref }}..HEAD"
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    # The 10-minute budget for the whole local suite is enforced here: the job
+    # is killed, and CI fails, if build, tests and exit scripts exceed it.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo test --workspace
+      - run: bash scripts/run-exit-scripts.sh

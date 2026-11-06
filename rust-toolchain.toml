@@ -1,0 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+[toolchain]
+channel = "1.96.0"
+components = ["rustfmt", "clippy"]
