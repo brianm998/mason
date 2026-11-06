@@ -68,7 +68,7 @@ impl World {
         woken
     }
 
-    pub(crate) fn open_run(&self, task: TaskId) -> Option<StepRunId> {
+    pub fn open_run(&self, task: TaskId) -> Option<StepRunId> {
         self.step_runs
             .values()
             .find(|r| r.task == task && r.outcome.is_none())
