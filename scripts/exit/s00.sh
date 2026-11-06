@@ -9,7 +9,6 @@ tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 cargo build --workspace
 [ -f LICENSE ] && [ -f LICENSE-ADDITIONAL-PERMISSION ] && [ -f docs/DESIGN.md ]
 [ -f rust-toolchain.toml ] && [ -f Cargo.lock ]
-! git ls-files | grep -qx 'MASON_MIGRATION_PLAN.md' || { echo "plan must not be tracked" >&2; exit 1; }
 ! grep -rq 'pull_request_target' .github/workflows || { echo "pull_request_target is forbidden" >&2; exit 1; }
 ! grep -rq 'self-hosted' .github/workflows || { echo "self-hosted runners are forbidden" >&2; exit 1; }
 

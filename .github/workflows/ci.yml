@@ -5,7 +5,7 @@ name: CI
 # runners, so fork PRs run untrusted code safely.
 on:
   push:
-    branches: [main, "stage/**"]
+    branches: [develop, "stage/**"]
   pull_request:
 
 permissions:
