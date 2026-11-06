@@ -96,6 +96,50 @@ pub enum TrustSource {
     Outside,
 }
 
+/// Why a task started where it did (Part 4, "Skipping exploration").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Route {
+    /// Exploring happens: the usual route.
+    Explore,
+    /// Skipped: the filer, trusted, declared the task already explored.
+    Flag,
+    /// Skipped: the deterministic clarity check passed.
+    Clarity,
+    /// Skipped: the project's optional classifier said the task is clear.
+    Classifier,
+    /// The owner asked for exploring after all.
+    ExploreAnyway,
+}
+
+impl Route {
+    pub fn name(self) -> &'static str {
+        match self {
+            Route::Explore => "explore",
+            Route::Flag => "flag",
+            Route::Clarity => "clarity",
+            Route::Classifier => "classifier",
+            Route::ExploreAnyway => "explore_anyway",
+        }
+    }
+
+    pub fn from_name(s: &str) -> Option<Route> {
+        [
+            Route::Explore,
+            Route::Flag,
+            Route::Clarity,
+            Route::Classifier,
+            Route::ExploreAnyway,
+        ]
+        .into_iter()
+        .find(|r| r.name() == s)
+    }
+
+    /// Did this route skip exploring?
+    pub fn skipped_exploring(self) -> bool {
+        matches!(self, Route::Flag | Route::Clarity | Route::Classifier)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Task {
     pub id: TaskId,
@@ -122,4 +166,27 @@ pub struct Task {
     pub cancel_keeps_branch: bool,
     /// Why the task last failed, until it is retried.
     pub failure: Option<String>,
+    /// Hash of the definition the task is pinned to (set when it starts).
+    pub def: String,
+    /// The step it is in (or last was in).
+    pub step: String,
+    /// Attempts per step name.
+    pub step_attempts: BTreeMap<String, u32>,
+    /// Why it started where it did (set when it starts).
+    pub route: Option<Route>,
+    /// How many times the developing agent sent it back to exploring.
+    pub explore_returns: u32,
+    /// The owner approved it (matters for tasks from outside).
+    pub approved: bool,
+    /// "Explore anyway" was asked before the task started.
+    pub force_explore: bool,
+}
+
+impl Task {
+    /// Does the `explored` flag count? Only for tasks from the owner or the
+    /// owner's agents. On anything from outside it is ignored until the owner
+    /// approves the task (Part 4).
+    pub fn explored_counts(&self) -> bool {
+        self.explored && (self.trust != TrustSource::Outside || self.approved)
+    }
 }

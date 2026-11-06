@@ -24,7 +24,10 @@ pub enum StepOutcome {
 pub struct StepRun {
     pub id: StepRunId,
     pub task: TaskId,
+    /// The step's category.
     pub step: State,
+    /// The step's name in the definition (empty for runs from older logs).
+    pub name: String,
     pub attempt: u32,
     pub started_at: Timestamp,
     pub outcome: Option<StepOutcome>,

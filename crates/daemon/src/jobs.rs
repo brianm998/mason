@@ -64,7 +64,10 @@ impl Ctx {
 
     fn succeed(&self) {
         self.d.crash.point(&format!("before_event:{:?}", self.step));
-        self.emit(EventKind::StepSucceeded { task: self.task });
+        self.emit(EventKind::StepSucceeded {
+            task: self.task,
+            next: None,
+        });
     }
 
     fn task_dir(&self) -> PathBuf {
@@ -376,10 +379,14 @@ fn finish_agent(c: &Ctx, kind: StepKind, report: StepReport, dir: &Path) {
             } else {
                 let _ = std::fs::remove_file(dir.join("feedback.txt"));
             }
-            c.emit(EventKind::StepSucceeded { task });
+            c.emit(EventKind::StepSucceeded { task, next: None });
         }
         StepEnd::ExplorationRequested { reason } => {
-            c.emit(EventKind::ExplorationRequested { task, reason });
+            c.emit(EventKind::ExplorationRequested {
+                task,
+                reason,
+                to_step: String::new(),
+            });
         }
         StepEnd::Asked { question } => {
             let q = question["ask"]
@@ -487,6 +494,7 @@ fn test_job(c: &Ctx) {
     c.emit(EventKind::SentBack {
         task: c.task,
         reason: format!("tests failed ({how})"),
+        to_step: String::new(),
     });
 }
 
@@ -531,6 +539,7 @@ fn land_job(c: &Ctx) {
             c.emit(EventKind::SentBack {
                 task: c.task,
                 reason: "tests are red after folding in the new base".into(),
+                to_step: String::new(),
             });
         }
         Err(LandError::Conflict(files)) => {
@@ -541,6 +550,7 @@ fn land_job(c: &Ctx) {
             c.emit(EventKind::SentBack {
                 task: c.task,
                 reason: format!("conflict with the new base in: {}", files.trim()),
+                to_step: String::new(),
             });
         }
         Err(e) => c.fail(format!("landing failed: {e}")),

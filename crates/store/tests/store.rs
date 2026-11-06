@@ -123,11 +123,12 @@ fn run_scenario(s: &Store, attempts: u64) -> u64 {
         let kind = match rnd(14) {
             0..=2 => file(1, &format!("task\t{i}\nline")),
             3 => EventKind::Approved { task },
-            4..=5 => EventKind::Admitted { task },
-            6..=8 => EventKind::StepSucceeded { task },
+            4..=5 => EventKind::Admitted { task, entry: None },
+            6..=8 => EventKind::StepSucceeded { task, next: None },
             9 => EventKind::SentBack {
                 task,
                 reason: "red".into(),
+                to_step: String::new(),
             },
             10 => EventKind::QuestionAsked {
                 task,
@@ -137,6 +138,7 @@ fn run_scenario(s: &Store, attempts: u64) -> u64 {
                 task,
                 decision: DecisionId(rnd(4)),
                 answer: "yes".into(),
+                step: String::new(),
             },
             12 => EventKind::StepFailed {
                 task,
@@ -146,6 +148,7 @@ fn run_scenario(s: &Store, attempts: u64) -> u64 {
                 0 => EventKind::Retried {
                     task,
                     to: State::Testing,
+                    step: String::new(),
                 },
                 1 => EventKind::Canceled {
                     task,
@@ -237,8 +240,14 @@ fn half_applied_projections_are_detected_and_repaired() {
     let s = Store::open(&p).unwrap();
     register(&s);
     s.append(ev(2, file(1, "a"))).unwrap();
-    s.append(ev(3, EventKind::Admitted { task: TaskId(0) }))
-        .unwrap();
+    s.append(ev(
+        3,
+        EventKind::Admitted {
+            task: TaskId(0),
+            entry: None,
+        },
+    ))
+    .unwrap();
     s.verify().unwrap();
     // Damage a projection behind the store's back.
     let raw = Connection::open(&p).unwrap();
@@ -352,5 +361,139 @@ fn bugs_are_filed_and_listed_and_survive_reopen() {
     assert_eq!(
         s.bugs().unwrap()[1],
         (20, "missed_admit".to_string(), "task 4".to_string())
+    );
+}
+
+#[test]
+fn definitions_are_remembered_by_hash() {
+    let (_d, p) = db();
+    {
+        let s = Store::open(&p).unwrap();
+        assert_eq!(s.definition("abc").unwrap(), None);
+        s.put_definition("abc", "schema = 1\n", 5).unwrap();
+        s.put_definition("abc", "something else", 6).unwrap(); // the first one wins: a hash names its text
+        assert_eq!(
+            s.definition("abc").unwrap().as_deref(),
+            Some("schema = 1\n")
+        );
+    }
+    let s = Store::open(&p).unwrap();
+    assert_eq!(
+        s.definition("abc").unwrap().as_deref(),
+        Some("schema = 1\n")
+    );
+}
+
+#[test]
+fn runtime_overrides_need_an_owner_and_expire() {
+    let (_d, p) = db();
+    let s = Store::open(&p).unwrap();
+    assert!(
+        s.add_override("web", "step.develop.model", "opus", "", 100, 200)
+            .is_err(),
+        "no owner"
+    );
+    assert!(
+        s.add_override("web", "step.develop.model", "opus", "brian", 100, 100)
+            .is_err(),
+        "no expiry in the future"
+    );
+    assert!(s
+        .add_override("web", "step.develop.model", "opus", "brian", 100, 50)
+        .is_err());
+    s.add_override("web", "step.develop.model", "opus", "brian", 100, 200)
+        .unwrap();
+    s.add_override("web", "step.test.max_rounds", "5", "brian", 100, 400)
+        .unwrap();
+    s.add_override("other", "step.develop.model", "x", "brian", 100, 400)
+        .unwrap();
+    // Setting the same key again replaces it.
+    s.add_override("web", "step.develop.model", "sonnet", "brian", 150, 300)
+        .unwrap();
+
+    let at = |now| {
+        s.overrides("web", now)
+            .unwrap()
+            .into_iter()
+            .map(|o| (o.key, o.value, o.owner))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(at(160).len(), 2);
+    assert!(at(160).contains(&(
+        "step.develop.model".to_string(),
+        "sonnet".to_string(),
+        "brian".to_string()
+    )));
+    // After the first expires only the other remains; expired ones are not in force even before cleanup.
+    assert_eq!(
+        at(350),
+        vec![(
+            "step.test.max_rounds".to_string(),
+            "5".to_string(),
+            "brian".to_string()
+        )]
+    );
+    // Only the one that expired at 300 is gone; the two expiring at 400 are still in force.
+    assert_eq!(s.expire_overrides(350).unwrap(), 1);
+    assert_eq!(s.overrides("web", 350).unwrap().len(), 1);
+    assert_eq!(s.overrides("other", 350).unwrap().len(), 1);
+}
+
+#[test]
+fn task_overrides_are_per_task() {
+    let (_d, p) = db();
+    let s = Store::open(&p).unwrap();
+    s.set_task_override(3, "step.develop.model", "opus", "brian", 1)
+        .unwrap();
+    s.set_task_override(3, "skip", "test", "brian", 1).unwrap();
+    s.set_task_override(4, "step.develop.model", "haiku", "brian", 1)
+        .unwrap();
+    assert_eq!(s.task_overrides(3).unwrap().len(), 2);
+    assert_eq!(
+        s.task_overrides(4).unwrap(),
+        vec![("step.develop.model".to_string(), "haiku".to_string())]
+    );
+    assert_eq!(s.clear_task_override(3, "skip").unwrap(), 1);
+    assert_eq!(s.task_overrides(3).unwrap().len(), 1);
+}
+
+#[test]
+fn old_task_payloads_without_the_new_fields_still_replay() {
+    // A v3-era database: the task events carry no step names, entries or pins.
+    let (d, old_path) = db();
+    {
+        let mut c = Connection::open(&old_path).unwrap();
+        migrations::migrate_to(&mut c, 3).unwrap();
+        for (at, kind, payload) in [
+            (1, "project_registered", "1\tdemo"),
+            (2, "task_filed", "1\tt\tnormal\towner\t1\t0\t\t-\tbody"),
+            (3, "admitted", "0"),
+            (4, "step_succeeded", "0"),
+            (5, "sent_back", "0\tred"),
+            (6, "step_succeeded", "0"),
+        ] {
+            c.execute(
+                "INSERT INTO events(at, kind, payload) VALUES (?1, ?2, ?3)",
+                rusqlite::params![at, kind, payload],
+            )
+            .unwrap();
+        }
+    }
+    let copy = d.path().join("copy.db");
+    std::fs::copy(&old_path, &copy).unwrap();
+    let s = Store::open(&copy).unwrap();
+    s.verify().unwrap();
+    let w = s.world().unwrap();
+    let t = &w.tasks[&TaskId(0)];
+    assert_eq!(t.state, State::Testing);
+    assert_eq!(
+        t.route,
+        Some(Route::Flag),
+        "explored + owner: the legacy rule"
+    );
+    let dump = s.projection_dump().unwrap().join("\n");
+    assert!(
+        dump.contains("|flag|"),
+        "the projection has the route: {dump}"
     );
 }

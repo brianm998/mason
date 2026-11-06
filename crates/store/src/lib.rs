@@ -58,6 +58,19 @@ pub struct StoredEvent {
     pub event: Event,
 }
 
+/// A runtime configuration override. Every one has an owner and an expiry:
+/// switches expire (Part 1).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OverrideRow {
+    pub id: i64,
+    pub project: String,
+    pub key: String,
+    pub value: String,
+    pub owner: String,
+    pub created_at: u64,
+    pub expires_at: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Appended {
     pub seq: u64,
@@ -69,6 +82,8 @@ enum Cmd {
     World(Sender<World>),
     Rebuild(Sender<Result<World, StoreError>>),
     Bug(u64, String, String, Sender<Result<(), StoreError>>),
+    /// Run a write on the writer thread, so there is still only one writer.
+    Write(Box<dyn FnOnce(&Connection) + Send>),
     Shutdown,
 }
 
@@ -158,7 +173,7 @@ fn activity_parts(a: &Activity) -> (&'static str, String) {
 fn task_line(t: &Task) -> String {
     let (k, d) = activity_parts(&t.activity);
     format!(
-        "task {}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+        "task {}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
         t.id.0,
         t.project.0,
         t.title,
@@ -169,6 +184,9 @@ fn task_line(t: &Task) -> String {
         t.enqueued_at.0,
         t.failures,
         t.decision.map_or("-".into(), |d| d.0.to_string()),
+        t.step,
+        t.route.map_or("", |r| r.name()),
+        t.def,
     )
 }
 
@@ -209,12 +227,12 @@ fn dump_db(conn: &Connection) -> Result<Vec<String>, StoreError> {
     }
     let mut st = conn.prepare(
         "SELECT id, project, title, state, activity_kind, activity_detail, priority,
-                enqueued_at, failures, decision FROM tasks",
+                enqueued_at, failures, decision, step, route, def FROM tasks",
     )?;
     let rows = st.query_map([], |r| {
         let dec: Option<i64> = r.get(9)?;
         Ok(format!(
-            "task {}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+            "task {}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
             r.get::<_, i64>(0)?,
             r.get::<_, i64>(1)?,
             r.get::<_, String>(2)?,
@@ -225,6 +243,9 @@ fn dump_db(conn: &Connection) -> Result<Vec<String>, StoreError> {
             r.get::<_, i64>(7)?,
             r.get::<_, i64>(8)?,
             dec.map_or("-".into(), |d| d.to_string()),
+            r.get::<_, String>(10)?,
+            r.get::<_, String>(11)?,
+            r.get::<_, String>(12)?,
         ))
     })?;
     for r in rows {
@@ -260,8 +281,8 @@ fn write_task(conn: &Connection, t: &Task) -> rusqlite::Result<()> {
     let (k, d) = activity_parts(&t.activity);
     conn.execute(
         "INSERT OR REPLACE INTO tasks(id, project, title, state, activity_kind, activity_detail,
-                                      priority, enqueued_at, failures, decision)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                                      priority, enqueued_at, failures, decision, step, route, def)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
             t.id.0 as i64,
             t.project.0 as i64,
@@ -273,6 +294,9 @@ fn write_task(conn: &Connection, t: &Task) -> rusqlite::Result<()> {
             t.enqueued_at.0 as i64,
             t.failures,
             t.decision.map(|d| d.0 as i64),
+            t.step,
+            t.route.map_or("", |r| r.name()),
+            t.def,
         ],
     )?;
     Ok(())
@@ -356,6 +380,7 @@ fn writer_loop(mut conn: Connection, mut world: World, rx: std::sync::mpsc::Rece
                 }
                 let _ = reply.send(r);
             }
+            Cmd::Write(f) => f(&conn),
             Cmd::Bug(at, kind, detail, reply) => {
                 let r = conn
                     .execute(
@@ -469,6 +494,173 @@ impl Store {
             .send(Cmd::Rebuild(rtx))
             .map_err(|_| StoreError::WriterGone)?;
         rrx.recv().map_err(|_| StoreError::WriterGone)?
+    }
+
+    /// Run `f` as a write on the single writer thread and return its result.
+    /// For writes that are not events: definitions, overrides, and the like.
+    pub fn write<T: Send + 'static>(
+        &self,
+        f: impl FnOnce(&Connection) -> rusqlite::Result<T> + Send + 'static,
+    ) -> Result<T, StoreError> {
+        let (rtx, rrx) = channel();
+        self.tx
+            .send(Cmd::Write(Box::new(move |c| {
+                let _ = rtx.send(f(c));
+            })))
+            .map_err(|_| StoreError::WriterGone)?;
+        rrx.recv()
+            .map_err(|_| StoreError::WriterGone)?
+            .map_err(StoreError::from)
+    }
+
+    /// Run a read on the read connection.
+    pub fn read<T>(
+        &self,
+        f: impl FnOnce(&Connection) -> rusqlite::Result<T>,
+    ) -> Result<T, StoreError> {
+        let conn = self.reader.lock().expect("reader lock");
+        f(&conn).map_err(StoreError::from)
+    }
+
+    /// Remember a definition by its hash, so a task pinned to it can always find it.
+    pub fn put_definition(&self, hash: &str, text: &str, at_ms: u64) -> Result<(), StoreError> {
+        let (h, t) = (hash.to_string(), text.to_string());
+        self.write(move |c| {
+            c.execute(
+                "INSERT OR IGNORE INTO definitions(hash, text, at) VALUES (?1, ?2, ?3)",
+                params![h, t, at_ms as i64],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn definition(&self, hash: &str) -> Result<Option<String>, StoreError> {
+        self.read(|c| {
+            c.query_row(
+                "SELECT text FROM definitions WHERE hash = ?1",
+                params![hash],
+                |r| r.get(0),
+            )
+            .optional()
+        })
+    }
+
+    /// Set a runtime override for a project (replacing one for the same key).
+    /// It must have an owner and expire in the future.
+    pub fn add_override(
+        &self,
+        project: &str,
+        key: &str,
+        value: &str,
+        owner: &str,
+        now_ms: u64,
+        expires_at_ms: u64,
+    ) -> Result<i64, StoreError> {
+        if owner.trim().is_empty() {
+            return Err(StoreError::Inconsistent(
+                "an override needs an owner".into(),
+            ));
+        }
+        if expires_at_ms <= now_ms {
+            return Err(StoreError::Inconsistent(
+                "an override must expire in the future".into(),
+            ));
+        }
+        let (p, k, v, o) = (
+            project.to_string(),
+            key.to_string(),
+            value.to_string(),
+            owner.to_string(),
+        );
+        self.write(move |c| {
+            c.execute("DELETE FROM overrides WHERE project = ?1 AND key = ?2", params![p, k])?;
+            c.execute(
+                "INSERT INTO overrides(project, key, value, owner, created_at, expires_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![p, k, v, o, now_ms as i64, expires_at_ms as i64],
+            )?;
+            Ok(c.last_insert_rowid())
+        })
+    }
+
+    pub fn remove_override(&self, project: &str, key: &str) -> Result<usize, StoreError> {
+        let (p, k) = (project.to_string(), key.to_string());
+        self.write(move |c| {
+            c.execute(
+                "DELETE FROM overrides WHERE project = ?1 AND key = ?2",
+                params![p, k],
+            )
+        })
+    }
+
+    /// Overrides still in force at `now_ms`, oldest first.
+    pub fn overrides(&self, project: &str, now_ms: u64) -> Result<Vec<OverrideRow>, StoreError> {
+        let p = project.to_string();
+        self.read(move |c| {
+            let mut st = c.prepare(
+                "SELECT id, project, key, value, owner, created_at, expires_at FROM overrides
+                 WHERE project = ?1 AND expires_at > ?2 ORDER BY id",
+            )?;
+            let rows = st.query_map(params![p, now_ms as i64], |r| {
+                Ok(OverrideRow {
+                    id: r.get(0)?,
+                    project: r.get(1)?,
+                    key: r.get(2)?,
+                    value: r.get(3)?,
+                    owner: r.get(4)?,
+                    created_at: r.get::<_, i64>(5)? as u64,
+                    expires_at: r.get::<_, i64>(6)? as u64,
+                })
+            })?;
+            rows.collect()
+        })
+    }
+
+    /// Delete overrides that have expired. Returns how many.
+    pub fn expire_overrides(&self, now_ms: u64) -> Result<usize, StoreError> {
+        self.write(move |c| {
+            c.execute(
+                "DELETE FROM overrides WHERE expires_at <= ?1",
+                params![now_ms as i64],
+            )
+        })
+    }
+
+    /// An override for one task only (a model choice, a skip, ...).
+    pub fn set_task_override(
+        &self,
+        task: u64,
+        key: &str,
+        value: &str,
+        owner: &str,
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
+        let (k, v, o) = (key.to_string(), value.to_string(), owner.to_string());
+        self.write(move |c| {
+            c.execute(
+                "INSERT OR REPLACE INTO task_overrides(task, key, value, owner, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![task as i64, k, v, o, now_ms as i64],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn task_overrides(&self, task: u64) -> Result<Vec<(String, String)>, StoreError> {
+        self.read(move |c| {
+            let mut st =
+                c.prepare("SELECT key, value FROM task_overrides WHERE task = ?1 ORDER BY key")?;
+            let rows = st.query_map(params![task as i64], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            rows.collect()
+        })
+    }
+
+    pub fn clear_task_override(&self, task: u64, key: &str) -> Result<usize, StoreError> {
+        let k = key.to_string();
+        self.write(move |c| {
+            c.execute(
+                "DELETE FROM task_overrides WHERE task = ?1 AND key = ?2",
+                params![task as i64, k],
+            )
+        })
     }
 
     /// File a bug: the reconcile sweep found something the event path missed.

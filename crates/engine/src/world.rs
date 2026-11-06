@@ -86,22 +86,31 @@ impl World {
     }
 
     /// Move into a step state, opening a new step run.
-    pub(crate) fn enter(&mut self, task: TaskId, step: State, fx: &mut Vec<Effect>) {
+    pub(crate) fn enter(&mut self, task: TaskId, step: State, name: &str, fx: &mut Vec<Effect>) {
         let now = self.now;
         self.waits.remove(&task);
         let run = StepRunId(self.next_run);
         self.next_run += 1;
         let t = self.tasks.get_mut(&task).expect("task exists");
-        let attempt = t.attempts.entry(step).or_insert(0);
-        *attempt += 1;
-        let attempt = *attempt;
+        let by_state = t.attempts.entry(step).or_insert(0);
+        *by_state += 1;
+        let mut attempt = *by_state;
+        if !name.is_empty() {
+            // With named steps an attempt counts that step's runs, so a second
+            // step in the same category starts again at 1.
+            let by_name = t.step_attempts.entry(name.to_string()).or_insert(0);
+            *by_name += 1;
+            attempt = *by_name;
+        }
         t.state = step;
+        t.step = name.to_string();
         self.step_runs.insert(
             run,
             StepRun {
                 id: run,
                 task,
                 step,
+                name: name.to_string(),
                 attempt,
                 started_at: now,
                 outcome: None,

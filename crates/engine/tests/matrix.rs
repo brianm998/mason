@@ -13,13 +13,26 @@ fn events(t: TaskId, other: TaskId, decision: DecisionId) -> Vec<(&'static str, 
     vec![
         ("Approved", E::Approved { task: t }),
         ("Rejected", E::Rejected { task: t }),
-        ("Admitted", E::Admitted { task: t }),
-        ("StepSucceeded", E::StepSucceeded { task: t }),
+        (
+            "Admitted",
+            E::Admitted {
+                task: t,
+                entry: None,
+            },
+        ),
+        (
+            "StepSucceeded",
+            E::StepSucceeded {
+                task: t,
+                next: None,
+            },
+        ),
         (
             "SentBack",
             E::SentBack {
                 task: t,
                 reason: "r".into(),
+                to_step: String::new(),
             },
         ),
         (
@@ -27,6 +40,7 @@ fn events(t: TaskId, other: TaskId, decision: DecisionId) -> Vec<(&'static str, 
             E::ExplorationRequested {
                 task: t,
                 reason: "r".into(),
+                to_step: String::new(),
             },
         ),
         (
@@ -42,6 +56,7 @@ fn events(t: TaskId, other: TaskId, decision: DecisionId) -> Vec<(&'static str, 
                 task: t,
                 decision,
                 answer: "a".into(),
+                step: String::new(),
             },
         ),
         (
@@ -56,6 +71,7 @@ fn events(t: TaskId, other: TaskId, decision: DecisionId) -> Vec<(&'static str, 
             E::Retried {
                 task: t,
                 to: S::Testing,
+                step: String::new(),
             },
         ),
         (
@@ -73,6 +89,13 @@ fn events(t: TaskId, other: TaskId, decision: DecisionId) -> Vec<(&'static str, 
             },
         ),
         ("Paused", E::Paused { task: t }),
+        (
+            "ExploreAnyway",
+            E::ExploreAnyway {
+                task: t,
+                step: "explore".into(),
+            },
+        ),
         ("Resumed", E::Resumed { task: t }),
         (
             "WaitStarted",
@@ -123,6 +146,7 @@ fn expected(from: State, ev: &str) -> Option<State> {
         "Canceled" if live || from == S::Proposed => Some(S::Canceled),
         "ClosedNoChange" if live => Some(S::Landed),
         "Paused" if live => Some(from),
+        "ExploreAnyway" if from == S::Queued => Some(from), // before it starts; after a skip is tested separately
         "WaitStarted" if step => Some(from),
         "BlockerAdded" if matches!(from, S::Proposed | S::Queued) => Some(from),
         "Tick" => Some(from),
@@ -165,5 +189,5 @@ fn every_state_and_event_pair() {
             checked += 1;
         }
     }
-    assert_eq!(checked, 11 * 18);
+    assert_eq!(checked, 11 * 19);
 }

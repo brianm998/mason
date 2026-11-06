@@ -97,7 +97,10 @@ impl Sim {
         let t = self.file(false, proposed);
         let succeed = |s: &mut Sim, n: usize| {
             for _ in 0..n {
-                s.ok(E::StepSucceeded { task: t });
+                s.ok(E::StepSucceeded {
+                    task: t,
+                    next: None,
+                });
             }
         };
         if matches!(target, State::Proposed | State::Queued) {
@@ -110,7 +113,10 @@ impl Sim {
             });
             return t;
         }
-        self.ok(E::Admitted { task: t });
+        self.ok(E::Admitted {
+            task: t,
+            entry: None,
+        });
         match target {
             State::Exploring => {}
             State::Developing => succeed(self, 1),

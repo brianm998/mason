@@ -8,9 +8,15 @@ use EventKind as E;
 use State as S;
 
 fn land(sim: &mut Sim, t: TaskId) {
-    sim.ok(E::Admitted { task: t });
+    sim.ok(E::Admitted {
+        task: t,
+        entry: None,
+    });
     for _ in 0..5 {
-        sim.ok(E::StepSucceeded { task: t });
+        sim.ok(E::StepSucceeded {
+            task: t,
+            next: None,
+        });
     }
 }
 
@@ -19,11 +25,17 @@ fn happy_path_lands_merged_with_one_attempt_per_step() {
     let mut sim = Sim::new();
     let t = sim.file(false, false);
     assert_eq!(sim.activity(t), Activity::Waiting(WaitReason::Slot));
-    sim.ok(E::Admitted { task: t });
+    sim.ok(E::Admitted {
+        task: t,
+        entry: None,
+    });
     assert_eq!(sim.state(t), S::Exploring);
     assert_eq!(sim.activity(t), Activity::Running);
     for _ in 0..5 {
-        sim.ok(E::StepSucceeded { task: t });
+        sim.ok(E::StepSucceeded {
+            task: t,
+            next: None,
+        });
     }
     let task = &sim.w.tasks[&t];
     assert_eq!(
@@ -38,7 +50,10 @@ fn happy_path_lands_merged_with_one_attempt_per_step() {
 fn explored_flag_goes_straight_to_developing() {
     let mut sim = Sim::new();
     let t = sim.file(true, false);
-    let fx = sim.ok(E::Admitted { task: t });
+    let fx = sim.ok(E::Admitted {
+        task: t,
+        entry: None,
+    });
     assert_eq!(sim.state(t), S::Developing);
     assert!(fx.iter().any(|e| matches!(
         e,
@@ -56,7 +71,10 @@ fn proposed_waits_for_approval() {
     let t = sim.file(false, true);
     assert_eq!(sim.activity(t), Activity::Idle);
     assert!(matches!(
-        sim.try_ev(E::Admitted { task: t }),
+        sim.try_ev(E::Admitted {
+            task: t,
+            entry: None
+        }),
         Err(ReduceError::Illegal { .. })
     ));
     sim.ok(E::Approved { task: t });
@@ -70,21 +88,36 @@ fn blocker_releases_itself_when_blocker_lands() {
     let b = sim.file_with(false, false, vec![a], None);
     assert_eq!(sim.activity(b), Activity::Held([a].into()));
     assert!(matches!(
-        sim.try_ev(E::Admitted { task: b }),
+        sim.try_ev(E::Admitted {
+            task: b,
+            entry: None
+        }),
         Err(ReduceError::NotClaimable(Activity::Held(_)))
     ));
-    sim.ok(E::Admitted { task: a });
+    sim.ok(E::Admitted {
+        task: a,
+        entry: None,
+    });
     for _ in 0..4 {
-        sim.ok(E::StepSucceeded { task: a });
+        sim.ok(E::StepSucceeded {
+            task: a,
+            next: None,
+        });
     }
     assert!(
         matches!(sim.activity(b), Activity::Held(_)),
         "not released before a lands"
     );
-    let fx = sim.ok(E::StepSucceeded { task: a });
+    let fx = sim.ok(E::StepSucceeded {
+        task: a,
+        next: None,
+    });
     assert_eq!(sim.activity(b), Activity::Waiting(WaitReason::Slot));
     assert!(fx.contains(&Effect::WakeScheduler { task: b }));
-    sim.ok(E::Admitted { task: b });
+    sim.ok(E::Admitted {
+        task: b,
+        entry: None,
+    });
 }
 
 #[test]
@@ -150,7 +183,10 @@ fn not_before_time_elapses_on_tick() {
         Activity::Waiting(WaitReason::NotBefore(Timestamp(1_000)))
     );
     assert!(matches!(
-        sim.try_ev(E::Admitted { task: t }),
+        sim.try_ev(E::Admitted {
+            task: t,
+            entry: None
+        }),
         Err(ReduceError::NotClaimable(_))
     ));
     let fx = sim.try_at(999, E::Tick).unwrap();
@@ -158,7 +194,10 @@ fn not_before_time_elapses_on_tick() {
     let fx = sim.try_at(1_000, E::Tick).unwrap();
     assert_eq!(fx, vec![Effect::WakeScheduler { task: t }]);
     assert_eq!(sim.activity(t), Activity::Waiting(WaitReason::Slot));
-    sim.ok(E::Admitted { task: t });
+    sim.ok(E::Admitted {
+        task: t,
+        entry: None,
+    });
 }
 
 #[test]
@@ -168,9 +207,13 @@ fn exploration_request_charges_no_failure_but_step_failure_does() {
     sim.ok(E::ExplorationRequested {
         task: t,
         reason: "plan wrong".into(),
+        to_step: String::new(),
     });
     assert_eq!((sim.state(t), sim.w.tasks[&t].failures), (S::Exploring, 0));
-    sim.ok(E::StepSucceeded { task: t });
+    sim.ok(E::StepSucceeded {
+        task: t,
+        next: None,
+    });
     assert_eq!(sim.w.tasks[&t].attempts[&S::Developing], 2);
     sim.ok(E::StepFailed {
         task: t,
@@ -186,10 +229,14 @@ fn sent_back_work_returns_to_developing_and_can_land_later() {
     sim.ok(E::SentBack {
         task: t,
         reason: "red".into(),
+        to_step: String::new(),
     });
     assert_eq!(sim.state(t), S::Developing);
     for _ in 0..4 {
-        sim.ok(E::StepSucceeded { task: t });
+        sim.ok(E::StepSucceeded {
+            task: t,
+            next: None,
+        });
     }
     assert_eq!(sim.state(t), S::Landed);
     assert_eq!(sim.w.tasks[&t].attempts[&S::Testing], 2);
@@ -206,7 +253,11 @@ fn retry_goes_to_any_step_and_catches_up_with_base_first() {
     ] {
         let mut sim = Sim::new();
         let t = sim.task_in(S::Failed);
-        let fx = sim.ok(E::Retried { task: t, to });
+        let fx = sim.ok(E::Retried {
+            task: t,
+            to,
+            step: String::new(),
+        });
         assert_eq!(sim.state(t), to);
         let catch = fx
             .iter()
@@ -223,7 +274,8 @@ fn retry_goes_to_any_step_and_catches_up_with_base_first() {
     assert_eq!(
         sim.try_ev(E::Retried {
             task: t,
-            to: S::Landed
+            to: S::Landed,
+            step: String::new(),
         }),
         Err(ReduceError::BadRetryTarget(S::Landed))
     );
@@ -236,6 +288,7 @@ fn retry_of_running_step_stops_its_host() {
     let fx = sim.ok(E::Retried {
         task: t,
         to: S::Developing,
+        step: String::new(),
     });
     assert!(fx.contains(&Effect::StopStepHost { task: t }));
 }
@@ -296,7 +349,8 @@ fn questions_are_tied_to_their_decision() {
         sim.try_ev(E::Answered {
             task: t,
             decision: DecisionId(42),
-            answer: "x".into()
+            answer: "x".into(),
+            step: String::new(),
         }),
         Err(ReduceError::StaleAnswer)
     );
@@ -304,6 +358,7 @@ fn questions_are_tied_to_their_decision() {
         task: t,
         decision,
         answer: "yes".into(),
+        step: String::new(),
     });
     assert_eq!(sim.state(t), S::Developing);
     assert_eq!(sim.w.decisions[&decision].answer.as_deref(), Some("yes"));
@@ -312,7 +367,8 @@ fn questions_are_tied_to_their_decision() {
         .try_ev(E::Answered {
             task: t,
             decision,
-            answer: "again".into()
+            answer: "again".into(),
+            step: String::new(),
         })
         .is_err());
 }
@@ -329,12 +385,14 @@ fn retry_while_waiting_for_owner_makes_the_old_answer_stale() {
     sim.ok(E::Retried {
         task: t,
         to: S::Developing,
+        step: String::new(),
     });
     assert!(sim
         .try_ev(E::Answered {
             task: t,
             decision: d,
-            answer: "late".into()
+            answer: "late".into(),
+            step: String::new(),
         })
         .is_err());
 }
@@ -355,7 +413,10 @@ fn pause_and_resume_change_only_activity() {
     let q = sim.file(false, false);
     sim.ok(E::Paused { task: q });
     assert!(matches!(
-        sim.try_ev(E::Admitted { task: q }),
+        sim.try_ev(E::Admitted {
+            task: q,
+            entry: None
+        }),
         Err(ReduceError::NotClaimable(Activity::Paused))
     ));
     let fx = sim.ok(E::Resumed { task: q });
@@ -381,7 +442,10 @@ fn waits_are_activity_not_state_and_clear_when_the_step_moves_on() {
         task: t,
         on: "phone".into(),
     });
-    sim.ok(E::StepSucceeded { task: t });
+    sim.ok(E::StepSucceeded {
+        task: t,
+        next: None,
+    });
     assert!(sim.w.waits.is_empty());
     assert_eq!(sim.activity(t), Activity::Running);
 }
@@ -433,7 +497,10 @@ fn replaying_the_same_events_gives_the_same_world() {
         let b = sim.file_with(true, false, vec![a], Some(Timestamp(50)));
         land(&mut sim, a);
         sim.try_at(60, E::Tick).unwrap();
-        sim.ok(E::Admitted { task: b });
+        sim.ok(E::Admitted {
+            task: b,
+            entry: None,
+        });
         sim.ok(E::QuestionAsked {
             task: b,
             question: "q".into(),
@@ -494,15 +561,17 @@ fn random_events_never_break_invariants() {
             },
             3 => E::Approved { task },
             4 => E::Rejected { task },
-            5 | 6 => E::Admitted { task },
-            7..=9 => E::StepSucceeded { task },
+            5 | 6 => E::Admitted { task, entry: None },
+            7..=9 => E::StepSucceeded { task, next: None },
             10 => E::SentBack {
                 task,
                 reason: "r".into(),
+                to_step: String::new(),
             },
             11 => E::ExplorationRequested {
                 task,
                 reason: "r".into(),
+                to_step: String::new(),
             },
             12 => E::QuestionAsked {
                 task,
@@ -512,6 +581,7 @@ fn random_events_never_break_invariants() {
                 task,
                 decision: DecisionId(rnd(6)),
                 answer: "a".into(),
+                step: String::new(),
             },
             14 => E::StepFailed {
                 task,
@@ -520,6 +590,7 @@ fn random_events_never_break_invariants() {
             15 => E::Retried {
                 task,
                 to: State::ALL[rnd(11) as usize],
+                step: String::new(),
             },
             16 => {
                 if rnd(2) == 0 {
@@ -581,5 +652,298 @@ fn random_events_never_break_invariants() {
     assert!(
         accepted > 500,
         "the soup should exercise many transitions, got {accepted}"
+    );
+}
+
+// ---- Stage 7: named steps, pins, routes ----
+
+fn entry(def: &str, step: &str, state: State, route: Route) -> Option<Entry> {
+    Some(Entry {
+        def: def.into(),
+        step: step.into(),
+        state,
+        route,
+    })
+}
+
+fn next(step: &str, state: State) -> Option<Next> {
+    Some(Next {
+        step: step.into(),
+        state,
+    })
+}
+
+#[test]
+fn a_task_is_pinned_to_the_definition_it_started_under_and_records_its_route() {
+    let mut sim = Sim::new();
+    let t = sim.file(false, false);
+    sim.ok(E::Admitted {
+        task: t,
+        entry: entry("hash-v1", "explore", State::Exploring, Route::Explore),
+    });
+    let task = &sim.w.tasks[&t];
+    assert_eq!(
+        (task.def.as_str(), task.step.as_str(), task.route),
+        ("hash-v1", "explore", Some(Route::Explore))
+    );
+    assert_eq!(sim.w.step_runs.values().next().unwrap().name, "explore");
+}
+
+#[test]
+fn a_skipped_exploring_route_cannot_start_in_exploring() {
+    let mut sim = Sim::new();
+    let t = sim.file(true, false);
+    for route in [Route::Flag, Route::Clarity, Route::Classifier] {
+        assert!(
+            matches!(
+                sim.try_ev(E::Admitted {
+                    task: t,
+                    entry: entry("h", "explore", State::Exploring, route)
+                }),
+                Err(ReduceError::Illegal { .. })
+            ),
+            "{route:?}"
+        );
+    }
+    // Entries must be steps, not parking states.
+    assert!(sim
+        .try_ev(E::Admitted {
+            task: t,
+            entry: entry("h", "x", State::Landed, Route::Explore)
+        })
+        .is_err());
+    sim.ok(E::Admitted {
+        task: t,
+        entry: entry("h", "develop", State::Developing, Route::Flag),
+    });
+    assert_eq!(sim.w.tasks[&t].route, Some(Route::Flag));
+}
+
+#[test]
+fn next_may_stay_in_a_category_or_move_forward_but_never_back() {
+    let mut sim = Sim::new();
+    let t = sim.file(false, false);
+    sim.ok(E::Admitted {
+        task: t,
+        entry: entry("h", "develop", State::Developing, Route::Flag),
+    });
+    // Lateral: a second developing step.
+    sim.ok(E::StepSucceeded {
+        task: t,
+        next: next("develop-2", State::Developing),
+    });
+    assert_eq!(sim.w.tasks[&t].step, "develop-2");
+    // Forward, skipping a category (no review step in this graph).
+    sim.ok(E::StepSucceeded {
+        task: t,
+        next: next("test", State::Testing),
+    });
+    sim.ok(E::StepSucceeded {
+        task: t,
+        next: next("land", State::Landing),
+    });
+    // Back is not what `next` is for.
+    assert!(matches!(
+        sim.try_ev(E::StepSucceeded {
+            task: t,
+            next: next("develop", State::Developing)
+        }),
+        Err(ReduceError::Illegal { .. })
+    ));
+    // Landed only from Landing, and never to a parking state.
+    sim.ok(E::StepSucceeded {
+        task: t,
+        next: next("", State::Landed),
+    });
+    assert_eq!(sim.w.tasks[&t].landed, Some(LandedOutcome::Merged));
+
+    let t2 = sim.file(false, false);
+    sim.ok(E::Admitted {
+        task: t2,
+        entry: entry("h", "develop", State::Developing, Route::Flag),
+    });
+    assert!(
+        sim.try_ev(E::StepSucceeded {
+            task: t2,
+            next: next("", State::Landed)
+        })
+        .is_err(),
+        "not from developing"
+    );
+    assert!(sim
+        .try_ev(E::StepSucceeded {
+            task: t2,
+            next: next("x", State::NeedsAttention)
+        })
+        .is_err());
+    assert!(sim
+        .try_ev(E::StepSucceeded {
+            task: t2,
+            next: next("x", State::Failed)
+        })
+        .is_err());
+}
+
+#[test]
+fn attempts_count_per_step_name_so_a_second_step_in_a_category_starts_at_one() {
+    let mut sim = Sim::new();
+    let t = sim.file(false, false);
+    sim.ok(E::Admitted {
+        task: t,
+        entry: entry("h", "develop", State::Developing, Route::Flag),
+    });
+    sim.ok(E::StepSucceeded {
+        task: t,
+        next: next("test-fast", State::Testing),
+    });
+    sim.ok(E::StepSucceeded {
+        task: t,
+        next: next("test-device", State::Testing),
+    });
+    let runs: Vec<(&str, u32)> = sim
+        .w
+        .step_runs
+        .values()
+        .map(|r| (r.name.as_str(), r.attempt))
+        .collect();
+    assert_eq!(
+        runs,
+        vec![("develop", 1), ("test-fast", 1), ("test-device", 1)]
+    );
+    // Red on the second test step goes back to a named developing step, which now has attempt 2.
+    sim.ok(E::SentBack {
+        task: t,
+        reason: "red".into(),
+        to_step: "develop".into(),
+    });
+    let last = sim.w.step_runs.values().last().unwrap();
+    assert_eq!((last.name.as_str(), last.attempt), ("develop", 2));
+    assert_eq!(sim.w.tasks[&t].step_attempts["develop"], 2);
+}
+
+#[test]
+fn exploration_requested_counts_how_often_a_skip_came_back_and_charges_nothing() {
+    let mut sim = Sim::new();
+    let t = sim.file(true, false);
+    sim.ok(E::Admitted {
+        task: t,
+        entry: entry("h", "develop", State::Developing, Route::Flag),
+    });
+    sim.ok(E::ExplorationRequested {
+        task: t,
+        reason: "plan wrong".into(),
+        to_step: "explore".into(),
+    });
+    let task = &sim.w.tasks[&t];
+    assert_eq!(
+        (
+            task.state,
+            task.explore_returns,
+            task.failures,
+            task.step.as_str()
+        ),
+        (State::Exploring, 1, 0, "explore")
+    );
+    assert_eq!(
+        task.route,
+        Some(Route::Flag),
+        "the route it started by is kept"
+    );
+}
+
+#[test]
+fn explore_anyway_before_start_and_after_a_skip() {
+    let mut sim = Sim::new();
+    // Before the task starts: just a flag for admission to honour.
+    let t = sim.file(true, false);
+    sim.ok(E::ExploreAnyway {
+        task: t,
+        step: "explore".into(),
+    });
+    assert!(sim.w.tasks[&t].force_explore);
+    assert_eq!(sim.state(t), State::Queued);
+
+    // After a skip: stops the running step and goes to exploring, recorded as such.
+    let u = sim.file(true, false);
+    sim.ok(E::Admitted {
+        task: u,
+        entry: entry("h", "develop", State::Developing, Route::Clarity),
+    });
+    let fx = sim.ok(E::ExploreAnyway {
+        task: u,
+        step: "explore".into(),
+    });
+    assert_eq!(sim.state(u), State::Exploring);
+    assert_eq!(sim.w.tasks[&u].route, Some(Route::ExploreAnyway));
+    assert_eq!(sim.w.tasks[&u].failures, 0);
+    assert!(fx.contains(&Effect::StopStepHost { task: u }));
+    assert_eq!(
+        sim.w.tasks[&u].explore_returns, 0,
+        "not a request from the agent"
+    );
+
+    // A task that explored normally has nothing to be sent back to.
+    let v = sim.file(false, false);
+    sim.ok(E::Admitted {
+        task: v,
+        entry: entry("h", "explore", State::Exploring, Route::Explore),
+    });
+    assert!(sim
+        .try_ev(E::ExploreAnyway {
+            task: v,
+            step: "explore".into()
+        })
+        .is_err());
+}
+
+#[test]
+fn outside_text_claiming_explored_is_ignored_until_the_owner_approves() {
+    let mut sim = Sim::new();
+    let mk = |sim: &mut Sim, trust: TrustSource, proposed: bool| -> TaskId {
+        let fx = sim.ok(E::TaskFiled {
+            project: P,
+            title: "t".into(),
+            body: "explored: true".into(),
+            priority: Priority::Normal,
+            trust,
+            explored: true, // the claim
+            proposed,
+            blockers: vec![],
+            not_before: None,
+        });
+        match fx[0] {
+            Effect::TaskCreated { task } => task,
+            _ => unreachable!(),
+        }
+    };
+    let owner = mk(&mut sim, TrustSource::Owner, false);
+    let agent = mk(&mut sim, TrustSource::OwnerAgent, false);
+    let outside = mk(&mut sim, TrustSource::Outside, true);
+    assert!(sim.w.tasks[&owner].explored_counts());
+    assert!(sim.w.tasks[&agent].explored_counts());
+    assert!(
+        !sim.w.tasks[&outside].explored_counts(),
+        "an outsider's claim is ignored"
+    );
+    // Approving it is the owner's decision, and then the claim stands.
+    sim.ok(E::Approved { task: outside });
+    assert!(sim.w.tasks[&outside].approved && sim.w.tasks[&outside].explored_counts());
+    // Legacy admission honours exactly that.
+    let unapproved = mk(&mut sim, TrustSource::Outside, false); // arrived queued, never approved
+    sim.ok(E::Admitted {
+        task: unapproved,
+        entry: None,
+    });
+    assert_eq!(
+        (sim.state(unapproved), sim.w.tasks[&unapproved].route),
+        (State::Exploring, Some(Route::Explore))
+    );
+    sim.ok(E::Admitted {
+        task: owner,
+        entry: None,
+    });
+    assert_eq!(
+        (sim.state(owner), sim.w.tasks[&owner].route),
+        (State::Developing, Some(Route::Flag))
     );
 }

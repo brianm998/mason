@@ -75,7 +75,13 @@ fn a_step_with_no_job_gets_one_and_a_bug_is_filed() {
     let s = Scratch::new("test -f hello.txt", happy_script());
     let d = s.start();
     let t = plain_file(&d);
-    raw(&d, EventKind::Admitted { task: t }); // the step opened, but the job was never started
+    raw(
+        &d,
+        EventKind::Admitted {
+            task: t,
+            entry: None,
+        },
+    ); // the step opened, but the job was never started
     assert_eq!(state_of(&d, t), State::Exploring);
     assert_eq!(d.job_count(), 0);
     sweep_once(&d);

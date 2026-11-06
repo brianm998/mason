@@ -2,6 +2,24 @@
 
 use crate::*;
 
+/// Where a task starts, and why. Chosen by the daemon from the task's
+/// definition; the reducer records it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Entry {
+    /// Hash of the definition the task is pinned to from now on.
+    pub def: String,
+    pub step: String,
+    pub state: State,
+    pub route: Route,
+}
+
+/// The step that follows. `state` is its category; `Landed` ends the task.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Next {
+    pub step: String,
+    pub state: State,
+}
+
 /// Every input to the reducer. Time rides along in `at`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Event {
@@ -35,24 +53,39 @@ pub enum EventKind {
     Rejected {
         task: TaskId,
     },
-    /// A queued task was claimed. Goes to `exploring`, or straight to
-    /// `developing` when the task is flagged explored.
+    /// A queued task was claimed. `entry` says where it starts, under which
+    /// definition, and why exploring was or was not skipped. `None` is the
+    /// older fixed behaviour: `exploring`, or `developing` when flagged explored.
     Admitted {
         task: TaskId,
+        entry: Option<Entry>,
     },
-    /// The current step finished successfully; moves to the next state.
+    /// The current step finished successfully. `next` names the step that
+    /// follows (its category is `state`; `Landed` ends the task). `None` is the
+    /// older fixed progression through the categories.
     StepSucceeded {
         task: TaskId,
+        next: Option<Next>,
     },
-    /// Red tests, review changes, or a landing conflict or blame.
+    /// Red tests, review changes, or a landing conflict or blame. Returns to
+    /// the developing step named `to_step` (empty: the first one).
     SentBack {
         task: TaskId,
         reason: String,
+        to_step: String,
     },
     /// The developing agent found the task doesn't hold up. No failure charged.
+    /// Returns to the exploring step named `to_step` (empty: the first one).
     ExplorationRequested {
         task: TaskId,
         reason: String,
+        to_step: String,
+    },
+    /// "Explore anyway": the owner wants exploring after all, either before the
+    /// task starts or after it skipped it. Not a failure.
+    ExploreAnyway {
+        task: TaskId,
+        step: String,
     },
     QuestionAsked {
         task: TaskId,
@@ -62,6 +95,8 @@ pub enum EventKind {
         task: TaskId,
         decision: DecisionId,
         answer: String,
+        /// The developing step to resume in (empty: the first one).
+        step: String,
     },
     StepFailed {
         task: TaskId,
@@ -71,6 +106,8 @@ pub enum EventKind {
     Retried {
         task: TaskId,
         to: State,
+        /// The step to re-enter (empty: the first one of that category).
+        step: String,
     },
     Canceled {
         task: TaskId,

@@ -286,6 +286,7 @@ fn a_failed_task_can_be_retried_and_lands() {
     d.emit(EventKind::Retried {
         task: t,
         to: State::Developing,
+        step: String::new(),
     })
     .unwrap();
     wait_state(&d, t, State::Landed, 60);

@@ -331,7 +331,13 @@ impl Daemon {
                     })
                     .min_by_key(|t| (t.enqueued_at, t.id));
                 let Some(t) = next else { break };
-                if self.emit(EventKind::Admitted { task: t.id }).is_err() {
+                if self
+                    .emit(EventKind::Admitted {
+                        task: t.id,
+                        entry: None,
+                    })
+                    .is_err()
+                {
                     break;
                 }
             }

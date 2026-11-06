@@ -47,6 +47,36 @@ const STEPS: &[&str] = &[
          kind   TEXT NOT NULL,
          detail TEXT NOT NULL
      );",
+    // 4: definitions a task can be pinned to, configuration overrides (runtime,
+    // each with an owner and an expiry, and per task), and the step, route and
+    // definition on the task projection. The projection is rebuilt from the log
+    // on the next open so the new columns fill in.
+    "CREATE TABLE definitions (
+         hash TEXT PRIMARY KEY,
+         text TEXT NOT NULL,
+         at   INTEGER NOT NULL
+     );
+     CREATE TABLE overrides (
+         id         INTEGER PRIMARY KEY AUTOINCREMENT,
+         project    TEXT NOT NULL,
+         key        TEXT NOT NULL,
+         value      TEXT NOT NULL,
+         owner      TEXT NOT NULL,
+         created_at INTEGER NOT NULL,
+         expires_at INTEGER NOT NULL
+     );
+     CREATE TABLE task_overrides (
+         task       INTEGER NOT NULL,
+         key        TEXT NOT NULL,
+         value      TEXT NOT NULL,
+         owner      TEXT NOT NULL,
+         created_at INTEGER NOT NULL,
+         PRIMARY KEY (task, key)
+     );
+     ALTER TABLE tasks ADD COLUMN step  TEXT NOT NULL DEFAULT '';
+     ALTER TABLE tasks ADD COLUMN route TEXT NOT NULL DEFAULT '';
+     ALTER TABLE tasks ADD COLUMN def   TEXT NOT NULL DEFAULT '';
+     UPDATE meta SET value = '0' WHERE key = 'projected_seq';",
 ];
 
 pub const SCHEMA_VERSION: u32 = STEPS.len() as u32;

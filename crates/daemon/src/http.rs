@@ -295,6 +295,7 @@ async fn retry(
             d2.emit(EventKind::Retried {
                 task: TaskId(id),
                 to,
+                step: String::new(),
             })
             .map_err(store_err)
         })

@@ -129,6 +129,10 @@ impl R<'_> {
             })
             .collect()
     }
+    /// Is there another field? (Newer fields trail older payloads.)
+    fn more(&self) -> bool {
+        self.0.clone().next().is_some()
+    }
     /// A trailing string field that older payloads don't have.
     fn opt_s(&mut self) -> Result<String, CodecError> {
         match self.0.next() {
@@ -246,21 +250,42 @@ pub fn encode(k: &EventKind) -> (&'static str, String) {
             w.n(task.0);
             "rejected"
         }
-        Admitted { task } => {
+        Admitted { task, entry } => {
             w.n(task.0);
+            if let Some(e) = entry {
+                w.s(&e.def)
+                    .s(&e.step)
+                    .word(state_name(e.state))
+                    .word(e.route.name());
+            }
             "admitted"
         }
-        StepSucceeded { task } => {
+        StepSucceeded { task, next } => {
             w.n(task.0);
+            if let Some(n) = next {
+                w.s(&n.step).word(state_name(n.state));
+            }
             "step_succeeded"
         }
-        SentBack { task, reason } => {
-            w.n(task.0).s(reason);
+        SentBack {
+            task,
+            reason,
+            to_step,
+        } => {
+            w.n(task.0).s(reason).s(to_step);
             "sent_back"
         }
-        ExplorationRequested { task, reason } => {
-            w.n(task.0).s(reason);
+        ExplorationRequested {
+            task,
+            reason,
+            to_step,
+        } => {
+            w.n(task.0).s(reason).s(to_step);
             "exploration_requested"
+        }
+        ExploreAnyway { task, step } => {
+            w.n(task.0).s(step);
+            "explore_anyway"
         }
         QuestionAsked { task, question } => {
             w.n(task.0).s(question);
@@ -270,16 +295,17 @@ pub fn encode(k: &EventKind) -> (&'static str, String) {
             task,
             decision,
             answer,
+            step,
         } => {
-            w.n(task.0).n(decision.0).s(answer);
+            w.n(task.0).n(decision.0).s(answer).s(step);
             "answered"
         }
         StepFailed { task, reason } => {
             w.n(task.0).s(reason);
             "step_failed"
         }
-        Retried { task, to } => {
-            w.n(task.0).word(state_name(*to));
+        Retried { task, to, step } => {
+            w.n(task.0).word(state_name(*to)).s(step);
             "retried"
         }
         Canceled {
@@ -340,15 +366,51 @@ pub fn decode(kind: &str, payload: &str) -> Result<EventKind, CodecError> {
         },
         "approved" => Approved { task: t(&mut r)? },
         "rejected" => Rejected { task: t(&mut r)? },
-        "admitted" => Admitted { task: t(&mut r)? },
-        "step_succeeded" => StepSucceeded { task: t(&mut r)? },
+        "admitted" => {
+            let task = t(&mut r)?;
+            let entry = if r.more() {
+                let def = r.s()?;
+                let step = r.s()?;
+                let state = state_from(r.raw()?)?;
+                let route =
+                    Route::from_name(r.raw()?).ok_or_else(|| CodecError("bad route".into()))?;
+                Some(Entry {
+                    def,
+                    step,
+                    state,
+                    route,
+                })
+            } else {
+                None
+            };
+            Admitted { task, entry }
+        }
+        "step_succeeded" => {
+            let task = t(&mut r)?;
+            let next = if r.more() {
+                let step = r.s()?;
+                Some(Next {
+                    step,
+                    state: state_from(r.raw()?)?,
+                })
+            } else {
+                None
+            };
+            StepSucceeded { task, next }
+        }
         "sent_back" => SentBack {
             task: t(&mut r)?,
             reason: r.s()?,
+            to_step: r.opt_s()?,
         },
         "exploration_requested" => ExplorationRequested {
             task: t(&mut r)?,
             reason: r.s()?,
+            to_step: r.opt_s()?,
+        },
+        "explore_anyway" => ExploreAnyway {
+            task: t(&mut r)?,
+            step: r.s()?,
         },
         "question_asked" => QuestionAsked {
             task: t(&mut r)?,
@@ -358,6 +420,7 @@ pub fn decode(kind: &str, payload: &str) -> Result<EventKind, CodecError> {
             task: t(&mut r)?,
             decision: DecisionId(r.n()?),
             answer: r.s()?,
+            step: r.opt_s()?,
         },
         "step_failed" => StepFailed {
             task: t(&mut r)?,
@@ -366,6 +429,7 @@ pub fn decode(kind: &str, payload: &str) -> Result<EventKind, CodecError> {
         "retried" => Retried {
             task: t(&mut r)?,
             to: state_from(r.raw()?)?,
+            step: r.opt_s()?,
         },
         "canceled" => Canceled {
             task: t(&mut r)?,
@@ -437,15 +501,50 @@ mod tests {
             },
             Approved { task: t },
             Rejected { task: t },
-            Admitted { task: t },
-            StepSucceeded { task: t },
+            Admitted {
+                task: t,
+                entry: None,
+            },
+            Admitted {
+                task: t,
+                entry: Some(Entry {
+                    def: "abc123".into(),
+                    step: nasty.into(),
+                    state: State::Developing,
+                    route: Route::Clarity,
+                }),
+            },
+            StepSucceeded {
+                task: t,
+                next: None,
+            },
+            StepSucceeded {
+                task: t,
+                next: Some(Next {
+                    step: "test-fast".into(),
+                    state: State::Testing,
+                }),
+            },
+            StepSucceeded {
+                task: t,
+                next: Some(Next {
+                    step: String::new(),
+                    state: State::Landed,
+                }),
+            },
             SentBack {
                 task: t,
                 reason: nasty.into(),
+                to_step: "develop".into(),
             },
             ExplorationRequested {
                 task: t,
                 reason: String::new(),
+                to_step: String::new(),
+            },
+            ExploreAnyway {
+                task: t,
+                step: "explore".into(),
             },
             QuestionAsked {
                 task: t,
@@ -455,6 +554,7 @@ mod tests {
                 task: t,
                 decision: DecisionId(3),
                 answer: nasty.into(),
+                step: "develop".into(),
             },
             StepFailed {
                 task: t,
@@ -463,6 +563,7 @@ mod tests {
             Retried {
                 task: t,
                 to: State::Review,
+                step: "review".into(),
             },
             Canceled {
                 task: t,
@@ -493,7 +594,7 @@ mod tests {
         let mut kinds: Vec<_> = all.iter().map(|k| encode(k).0).collect();
         kinds.sort_unstable();
         kinds.dedup();
-        assert_eq!(kinds.len(), 20, "one sample per EventKind variant");
+        assert_eq!(kinds.len(), 21, "one sample per EventKind variant");
         for k in all {
             let (kind, payload) = encode(&k);
             assert!(!payload.contains('\n'), "payload is one line");

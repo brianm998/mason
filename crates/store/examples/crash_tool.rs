@@ -56,9 +56,9 @@ fn write(db: &str) {
             },
         );
         let task = TaskId(s.world().expect("world").tasks.len() as u64 - 1);
-        append(&s, EventKind::Admitted { task });
+        append(&s, EventKind::Admitted { task, entry: None });
         for _ in 0..5 {
-            append(&s, EventKind::StepSucceeded { task });
+            append(&s, EventKind::StepSucceeded { task, next: None });
         }
     }
 }

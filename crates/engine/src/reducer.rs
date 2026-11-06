@@ -38,6 +38,7 @@ fn name(k: &EventKind) -> &'static str {
         Answered { .. } => "Answered",
         StepFailed { .. } => "StepFailed",
         Retried { .. } => "Retried",
+        ExploreAnyway { .. } => "ExploreAnyway",
         Canceled { .. } => "Canceled",
         ClosedNoChange { .. } => "ClosedNoChange",
         Paused { .. } => "Paused",
@@ -66,6 +67,19 @@ pub fn reduce(world: &World, event: &Event) -> Result<(World, Vec<Effect>), Redu
         fx.push(Effect::WakeScheduler { task });
     }
     Ok((w, fx))
+}
+
+/// How far along the graph a category is. A step may be followed by one in the
+/// same category or a later one; going back is only by sending work back.
+fn order(s: State) -> u8 {
+    match s {
+        State::Exploring => 0,
+        State::Developing => 1,
+        State::Testing => 2,
+        State::Review => 3,
+        State::Landing => 4,
+        _ => 99,
+    }
 }
 
 fn get(w: &World, id: TaskId) -> Result<&Task, ReduceError> {
@@ -159,6 +173,13 @@ fn apply(w: &mut World, k: &EventKind, fx: &mut Vec<Effect>) -> Result<(), Reduc
                 decision: None,
                 cancel_keeps_branch: true,
                 failure: None,
+                def: String::new(),
+                step: String::new(),
+                step_attempts: BTreeMap::new(),
+                route: None,
+                explore_returns: 0,
+                approved: false,
+                force_explore: false,
             };
             w.tasks.insert(id, task);
             fx.push(Effect::TaskCreated { task: id });
@@ -168,7 +189,9 @@ fn apply(w: &mut World, k: &EventKind, fx: &mut Vec<Effect>) -> Result<(), Reduc
             if from != S::Proposed {
                 return Err(illegal(from, k));
             }
-            w.tasks.get_mut(task).expect("exists").state = S::Queued;
+            let t = w.tasks.get_mut(task).expect("exists");
+            t.state = S::Queued;
+            t.approved = true;
         }
         E::Rejected { task } => {
             let from = get(w, *task)?.state;
@@ -177,7 +200,7 @@ fn apply(w: &mut World, k: &EventKind, fx: &mut Vec<Effect>) -> Result<(), Reduc
             }
             w.tasks.get_mut(task).expect("exists").state = S::Canceled;
         }
-        E::Admitted { task } => {
+        E::Admitted { task, entry } => {
             let t = get(w, *task)?;
             if t.state != S::Queued {
                 return Err(illegal(t.state, k));
@@ -185,51 +208,97 @@ fn apply(w: &mut World, k: &EventKind, fx: &mut Vec<Effect>) -> Result<(), Reduc
             if t.activity != Activity::Waiting(WaitReason::Slot) {
                 return Err(ReduceError::NotClaimable(t.activity.clone()));
             }
-            let to = if t.explored {
-                S::Developing
-            } else {
-                S::Exploring
+            let (to, name, route, def) = match entry {
+                Some(e) => {
+                    // The entry must be a step, and skipping exploring must not start in it.
+                    if !e.state.is_step()
+                        || (e.route.skipped_exploring() && e.state == S::Exploring)
+                    {
+                        return Err(illegal(t.state, k));
+                    }
+                    (e.state, e.step.clone(), e.route, e.def.clone())
+                }
+                None if t.explored_counts() => {
+                    (S::Developing, String::new(), Route::Flag, String::new())
+                }
+                None => (S::Exploring, String::new(), Route::Explore, String::new()),
             };
-            w.enter(*task, to, fx);
+            let tm = w.tasks.get_mut(task).expect("exists");
+            tm.route = Some(route);
+            tm.def = def;
+            w.enter(*task, to, &name, fx);
         }
-        E::StepSucceeded { task } => {
+        E::StepSucceeded { task, next } => {
             let from = get(w, *task)?.state;
-            let next = match from {
-                S::Exploring => S::Developing,
-                S::Developing => S::Testing,
-                S::Testing => S::Review,
-                S::Review => S::Landing,
-                S::Landing => S::Landed,
-                _ => return Err(illegal(from, k)),
+            let (target, name) = match next {
+                Some(n) => {
+                    let ok = if n.state == S::Landed {
+                        from == S::Landing
+                    } else {
+                        from.is_step() && n.state.is_step() && order(n.state) >= order(from)
+                    };
+                    if !ok {
+                        return Err(illegal(from, k));
+                    }
+                    (n.state, n.step.clone())
+                }
+                None => {
+                    let t = match from {
+                        S::Exploring => S::Developing,
+                        S::Developing => S::Testing,
+                        S::Testing => S::Review,
+                        S::Review => S::Landing,
+                        S::Landing => S::Landed,
+                        _ => return Err(illegal(from, k)),
+                    };
+                    (t, String::new())
+                }
             };
             w.leave(*task, StepOutcome::Succeeded);
             fx.push(Effect::ReleaseLeases { task: *task });
-            if next == S::Landed {
+            if target == S::Landed {
                 let t = w.tasks.get_mut(task).expect("exists");
                 t.state = S::Landed;
                 t.landed = Some(LandedOutcome::Merged);
                 w.settle(*task);
             } else {
-                w.enter(*task, next, fx);
+                w.enter(*task, target, &name, fx);
             }
         }
-        E::SentBack { task, .. } => {
+        E::SentBack { task, to_step, .. } => {
             let from = get(w, *task)?.state;
             if !matches!(from, S::Testing | S::Review | S::Landing) {
                 return Err(illegal(from, k));
             }
             w.leave(*task, StepOutcome::SentBack);
             fx.push(Effect::ReleaseLeases { task: *task });
-            w.enter(*task, S::Developing, fx);
+            w.enter(*task, S::Developing, to_step, fx);
         }
-        E::ExplorationRequested { task, .. } => {
+        E::ExplorationRequested { task, to_step, .. } => {
             let from = get(w, *task)?.state;
             if from != S::Developing {
                 return Err(illegal(from, k));
             }
             w.leave(*task, StepOutcome::ExplorationRequested);
             fx.push(Effect::ReleaseLeases { task: *task });
-            w.enter(*task, S::Exploring, fx); // no failure charged
+            w.tasks.get_mut(task).expect("exists").explore_returns += 1;
+            w.enter(*task, S::Exploring, to_step, fx); // no failure charged
+        }
+        E::ExploreAnyway { task, step } => {
+            let t = get(w, *task)?;
+            if t.state == S::Queued {
+                w.tasks.get_mut(task).expect("exists").force_explore = true;
+            } else if t.state.is_step() && t.route.is_some_and(Route::skipped_exploring) {
+                if w.leave(*task, StepOutcome::Superseded) {
+                    fx.push(Effect::StopStepHost { task: *task });
+                }
+                fx.push(Effect::ReleaseLeases { task: *task });
+                w.waits.remove(task);
+                w.tasks.get_mut(task).expect("exists").route = Some(Route::ExploreAnyway);
+                w.enter(*task, S::Exploring, step, fx);
+            } else {
+                return Err(illegal(t.state, k));
+            }
         }
         E::QuestionAsked { task, question } => {
             let from = get(w, *task)?.state;
@@ -262,6 +331,7 @@ fn apply(w: &mut World, k: &EventKind, fx: &mut Vec<Effect>) -> Result<(), Reduc
             task,
             decision,
             answer,
+            step,
         } => {
             let t = get(w, *task)?;
             if t.state != S::NeedsAttention {
@@ -275,7 +345,7 @@ fn apply(w: &mut World, k: &EventKind, fx: &mut Vec<Effect>) -> Result<(), Reduc
                 .ok_or(ReduceError::StaleAnswer)?
                 .answer = Some(answer.clone());
             w.tasks.get_mut(task).expect("exists").decision = None;
-            w.enter(*task, S::Developing, fx);
+            w.enter(*task, S::Developing, step, fx);
         }
         E::StepFailed { task, reason } => {
             let from = get(w, *task)?.state;
@@ -288,7 +358,7 @@ fn apply(w: &mut World, k: &EventKind, fx: &mut Vec<Effect>) -> Result<(), Reduc
             t.failures += 1;
             t.failure = Some(reason.clone());
         }
-        E::Retried { task, to } => {
+        E::Retried { task, to, step } => {
             let from = get(w, *task)?.state;
             if !(from.is_step() || matches!(from, S::NeedsAttention | S::Failed)) {
                 return Err(illegal(from, k));
@@ -304,7 +374,7 @@ fn apply(w: &mut World, k: &EventKind, fx: &mut Vec<Effect>) -> Result<(), Reduc
             w.tasks.get_mut(task).expect("exists").failure = None;
             w.tasks.get_mut(task).expect("exists").decision = None;
             fx.push(Effect::CatchUpWithBase { task: *task });
-            w.enter(*task, *to, fx);
+            w.enter(*task, *to, step, fx);
         }
         E::Canceled {
             task,
