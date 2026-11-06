@@ -45,7 +45,7 @@ pub fn parse_state(s: &str) -> Option<State> {
     State::ALL.into_iter().find(|x| state_name(*x) == s)
 }
 
-fn activity_text(a: &Activity) -> String {
+pub fn activity_text(a: &Activity) -> String {
     match a {
         Activity::Idle => "idle".into(),
         Activity::Running => "running".into(),
@@ -70,7 +70,10 @@ fn task_json(d: &Daemon, w: &World, t: &Task, detail: bool) -> Value {
     let project = d.project(t.project);
     let mut v = json!({
         "id": t.id.0,
-        "project": project.map_or("?".to_string(), |p| p.id.clone()),
+        "project": project.map_or_else(
+            || w.projects.get(&t.project).map_or("?".to_string(), |p| p.name.clone()),
+            |p| p.id.clone(),
+        ),
         "title": t.title,
         "state": state_name(t.state),
         "activity": activity_text(&t.activity),
@@ -1263,7 +1266,9 @@ async fn debug_stall(
     Ok(Json(json!({"blocked_ms": ms})))
 }
 
-pub fn router(d: Arc<Daemon>) -> Router {
+/// Every operation of the API, without the socket. The socket runs its
+/// commands through this same router, so there is one implementation of each.
+pub fn api_router(d: Arc<Daemon>) -> Router {
     Router::new()
         .route("/status", get(status))
         .route("/tasks", get(list_tasks).post(add_task))
@@ -1293,6 +1298,8 @@ pub fn router(d: Arc<Daemon>) -> Router {
         .route("/pauses", get(pauses_list))
         .route("/alerts", get(alerts_list))
         .route("/metrics", get(metrics))
+        .route("/demo", get(demo_status))
+        .route("/demo/next", post(demo_next))
         .route("/debts", get(debts_list))
         .route("/debts/{id}/run", post(debt_run))
         .route("/quarantine", get(quarantine_list).post(quarantine_add))
@@ -1307,6 +1314,39 @@ pub fn router(d: Arc<Daemon>) -> Router {
             record_interventions,
         ))
         .with_state(d)
+}
+
+/// The whole thing: the API and the client socket.
+pub fn router(d: Arc<Daemon>) -> Router {
+    api_router(d.clone()).merge(
+        Router::new()
+            .route("/ws", get(crate::ws::handler))
+            .with_state(d),
+    )
+}
+
+async fn demo_status(Shared(d): Shared<Arc<Daemon>>) -> Res {
+    if !d.demo {
+        return Err(fail(StatusCode::NOT_FOUND, "not a demo daemon"));
+    }
+    Ok(Json(json!({
+        "position": d.demo_position(),
+        "total": crate::demo::checkpoints(),
+    })))
+}
+
+/// Play the next step of the demo script (demo daemons only).
+async fn demo_next(Shared(d): Shared<Arc<Daemon>>) -> Res {
+    if !d.demo {
+        return Err(fail(StatusCode::NOT_FOUND, "not a demo daemon"));
+    }
+    let d2 = d.clone();
+    let at = d.pool.run(move || d2.demo_next()).await.map_err(pool_err)?;
+    Ok(Json(json!({
+        "position": d.demo_position(),
+        "total": crate::demo::checkpoints(),
+        "advanced": at.is_some(),
+    })))
 }
 
 /// Refuse to run if another daemon is already running on this data directory.

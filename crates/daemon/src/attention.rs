@@ -237,6 +237,7 @@ pub fn pause(
     d.store
         .add_pause(project, mode, owner, now, now + secs * 1000)
         .map_err(|e| e.to_string())?;
+    d.poke();
     Ok(())
 }
 
@@ -247,6 +248,7 @@ pub fn resume(d: &Arc<Daemon>, project: &str, mode: &str) -> Result<usize, Strin
         .map_err(|e| e.to_string())?;
     // Claims that were held back can go now.
     d.admit();
+    d.poke();
     Ok(n)
 }
 

@@ -11,6 +11,7 @@ pub mod config;
 pub mod crash;
 pub mod daemon;
 pub mod defs;
+pub mod demo;
 pub mod http;
 pub mod jobs;
 pub mod pool;
@@ -18,6 +19,8 @@ pub mod prompts;
 pub mod sched;
 pub mod suites;
 pub mod sweep;
+pub mod views;
 pub mod watchdog;
+pub mod ws;
 
 pub use daemon::Daemon;

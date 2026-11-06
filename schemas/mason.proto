@@ -1,0 +1,436 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// The MASON client protocol (Part 16). One schema generates Rust (prost),
+// Swift (swift-protobuf) and Kotlin (Wire). One WebSocket carries commands and
+// subscriptions; the daemon computes every view, so clients draw what they are
+// given and send commands, and never re-derive pipeline rules.
+//
+// Compatibility: field numbers are never reused or renumbered; new fields are
+// added with new numbers; a client ignores fields it does not know.
+
+syntax = "proto3";
+
+package mason.v1;
+
+// The protocol version a server and client speak. Bumped only for a change
+// that an older peer cannot ignore.
+message Version {
+  uint32 major = 1;
+}
+
+// ---- client -> server ------------------------------------------------------
+
+message ClientMessage {
+  oneof body {
+    Hello hello = 1;
+    Command command = 2;
+    Subscribe subscribe = 3;
+    Ping ping = 4;
+  }
+}
+
+// The first thing a client sends. `last_seq` is the last event sequence number
+// it has seen (0 for a new client): the server answers with a snapshot or just
+// the events it missed.
+message Hello {
+  uint32 protocol = 1;
+  uint64 last_seq = 2;
+  string client = 3;
+  // Reserved for pairing (Stage 24). Ignored on loopback.
+  string token = 4;
+  // The command line asks for no views and no pushes: just to send commands.
+  bool commands_only = 5;
+}
+
+enum ViewKind {
+  VIEW_UNSPECIFIED = 0;
+  HEADER = 1;
+  SIDEBAR = 2;
+  HOME = 3;
+  TASK_DETAIL = 4;
+  LANDING = 5;
+  USAGE = 6;
+  EDITOR = 7;
+}
+
+// Which views to keep sending. Replaces any earlier subscription.
+message Subscribe {
+  repeated ViewKind views = 1;
+  // Only tasks of this project (empty: all projects).
+  string project = 2;
+  // The task for TASK_DETAIL.
+  uint64 task = 3;
+}
+
+message Ping {
+  uint64 nonce = 1;
+}
+
+// A command. The server answers with a CommandResult carrying the same id.
+// Typed commands are the ones a monitor offers; `raw` reaches the rest of the
+// API for the command line and for debugging.
+message Command {
+  string id = 1;
+  oneof body {
+    AddTask add_task = 2;
+    TaskRef cancel = 3;
+    Retry retry = 4;
+    TaskRef approve = 5;
+    Reject reject = 6;
+    TaskRef explore_anyway = 7;
+    Answer answer = 8;
+    Skip skip = 9;
+    TaskRef land_now = 10;
+    TaskRef force = 11;
+    PauseWork pause = 12;
+    ResumeWork resume = 13;
+    SetLimit set_limit = 14;
+    Raw raw = 30;
+  }
+  // Who is acting and, optionally, why (recorded with overrides).
+  string actor = 40;
+  string reason = 41;
+}
+
+message TaskRef {
+  uint64 task = 1;
+}
+
+message AddTask {
+  string project = 1;
+  string title = 2;
+  string body = 3;
+  string priority = 4;
+  bool proposed = 5;
+  bool explored = 6;
+}
+
+message Retry {
+  uint64 task = 1;
+  // A step name or category; empty means the first developing step.
+  string from = 2;
+}
+
+message Reject {
+  uint64 task = 1;
+  string reason = 2;
+}
+
+message Answer {
+  uint64 task = 1;
+  // An option number, an option label, or free text (the "Other" box).
+  string answer = 2;
+  // The hash of the card the answerer was looking at: a stale one is refused.
+  string card_hash = 3;
+}
+
+message Skip {
+  uint64 task = 1;
+  oneof scope {
+    string suite = 2;
+    string step = 3;
+  }
+  bool deferred = 4;
+}
+
+message PauseWork {
+  string project = 1;
+  string mode = 2;
+  uint64 for_seconds = 3;
+}
+
+message ResumeWork {
+  string project = 1;
+  string mode = 2;
+}
+
+message SetLimit {
+  string resource = 1;
+  uint32 units = 2;
+}
+
+// Any other operation of the API, by HTTP-style method and path, with a JSON
+// body. The answer's JSON is in CommandResult.json.
+message Raw {
+  string method = 1;
+  string path = 2;
+  string json = 3;
+}
+
+// ---- server -> client ------------------------------------------------------
+
+message ServerMessage {
+  oneof body {
+    Welcome welcome = 1;
+    Snapshot snapshot = 2;
+    Events events = 3;
+    ViewUpdate view = 4;
+    CommandResult result = 5;
+    Pong pong = 6;
+    Error error = 7;
+  }
+}
+
+enum ResumeKind {
+  RESUME_UNSPECIFIED = 0;
+  // The client already has everything.
+  UP_TO_DATE = 1;
+  // Only the events after `last_seq` follow.
+  EVENTS = 2;
+  // The client is new, or too far behind: a snapshot follows.
+  SNAPSHOT = 3;
+}
+
+message Welcome {
+  uint32 protocol = 1;
+  // The newest event sequence number the daemon has.
+  uint64 seq = 2;
+  ResumeKind resume = 3;
+  string daemon = 4;
+  bool demo = 5;
+}
+
+message Snapshot {
+  uint64 seq = 1;
+  repeated View views = 2;
+}
+
+message Events {
+  repeated EventRecord events = 1;
+}
+
+message EventRecord {
+  uint64 seq = 1;
+  uint64 at_ms = 2;
+  string kind = 3;
+  string summary = 4;
+  // The task it is about, if any.
+  uint64 task = 5;
+}
+
+message ViewUpdate {
+  uint64 seq = 1;
+  View view = 2;
+}
+
+message CommandResult {
+  string id = 1;
+  bool ok = 2;
+  // The error text when !ok, in words a person can act on.
+  string error = 3;
+  // The HTTP-style status code of the underlying operation.
+  uint32 status = 4;
+  string json = 5;
+}
+
+message Pong {
+  uint64 nonce = 1;
+}
+
+message Error {
+  string message = 1;
+}
+
+// ---- views -----------------------------------------------------------------
+
+message View {
+  oneof body {
+    HeaderView header = 1;
+    SidebarView sidebar = 2;
+    HomeView home = 3;
+    TaskDetailView task_detail = 4;
+    LandingView landing = 5;
+    UsageView usage = 6;
+    EditorView editor = 7;
+  }
+}
+
+enum CellState {
+  CELL_UNSPECIFIED = 0;
+  // Not started.
+  EMPTY = 1;
+  // Part filled: a real count, or the typical time when there is no count.
+  PART = 2;
+  // Finished.
+  FILLED = 3;
+  // Waiting, labelled with what for.
+  HATCHED = 4;
+}
+
+message ProgressCell {
+  string step = 1;
+  CellState state = 2;
+  // What it is waiting for, or a count like "212 of 340 tests".
+  string label = 3;
+  uint32 done = 4;
+  uint32 total = 5;
+}
+
+// A task as every view shows it. `allowed_actions` is the one list of what
+// can be done to it now; a command not in it is refused.
+message TaskRow {
+  uint64 id = 1;
+  string key = 2;
+  string title = 3;
+  string project = 4;
+  string state = 5;
+  string activity = 6;
+  // Why it is waiting, in the form "Waiting for compile slot: 2nd in line, ...".
+  string why_waiting = 7;
+  uint64 enqueued_ms = 8;
+  uint64 in_state_ms = 9;
+  string model = 10;
+  repeated ProgressCell progress = 11;
+  repeated string allowed_actions = 12;
+  repeated uint64 blockers = 13;
+  // "usually 15 to 20 min", only with enough history to say.
+  string typical = 14;
+  // Running past the typical time: amber, never red.
+  bool slow = 15;
+  string step = 16;
+}
+
+message StateCount {
+  string state = 1;
+  uint32 count = 2;
+  // A state that wants the owner is tinted.
+  bool wants_you = 3;
+  string tooltip = 4;
+}
+
+message Banner {
+  string kind = 1;
+  string text = 2;
+}
+
+message HeaderView {
+  // How many things need the owner.
+  uint32 attention = 1;
+  repeated StateCount counts = 2;
+  repeated Banner banners = 3;
+  repeated string projects = 4;
+  string status = 5;
+}
+
+message SidebarSection {
+  string state = 1;
+  string title = 2;
+  uint32 count = 3;
+  // Failed, landed and canceled start collapsed.
+  bool collapsed = 4;
+  repeated TaskRow rows = 5;
+}
+
+// Tasks per state, already sorted: active states oldest first (time since
+// enqueue, so anything stuck is at the top); failed, landed and canceled
+// newest first.
+message SidebarView {
+  repeated SidebarSection sections = 1;
+  repeated string pages = 2;
+}
+
+message CardOption {
+  string label = 1;
+  bool recommended = 2;
+}
+
+message DecisionCard {
+  string ask = 1;
+  string why = 2;
+  repeated CardOption options = 3;
+  repeated string evidence = 4;
+  string hash = 5;
+  string origin = 6;
+}
+
+message AttentionItem {
+  TaskRow task = 1;
+  DecisionCard card = 2;
+}
+
+message ActiveModel {
+  string model = 1;
+  string project = 2;
+  uint64 task = 3;
+  string step = 4;
+}
+
+message HomeView {
+  string status = 1;
+  repeated AttentionItem attention = 2;
+  repeated ActiveModel active = 3;
+  // LLM sessions: held and the limit (the stepper).
+  uint32 sessions_used = 4;
+  uint32 sessions_limit = 5;
+  // The tasks in each stage, for the "detail for tasks in each stage" part.
+  repeated SidebarSection stages = 6;
+}
+
+message StepLine {
+  uint64 run = 1;
+  string name = 2;
+  string category = 3;
+  uint32 attempt = 4;
+  string outcome = 5;
+  uint64 started_ms = 6;
+}
+
+message DebtLine {
+  uint64 id = 1;
+  uint64 task = 2;
+  string scope = 3;
+  string status = 4;
+  string reason = 5;
+  bool deferred = 6;
+}
+
+message TaskDetailView {
+  TaskRow row = 1;
+  repeated StepLine steps = 2;
+  string plan = 3;
+  DecisionCard card = 4;
+  // The closing verdict and why, once there is one.
+  string closing = 5;
+  repeated DebtLine debts = 6;
+  string log_tail = 7;
+  string branch = 8;
+  string worktree = 9;
+  string definition = 10;
+  string failure = 11;
+  string body = 12;
+}
+
+message LandingView {
+  repeated DebtLine debts = 1;
+  bool frozen = 2;
+  string note = 3;
+  repeated TaskRow queue = 4;
+}
+
+message ProviderStatus {
+  string name = 1;
+  string status = 2;
+  uint32 sessions_used = 3;
+  uint32 sessions_limit = 4;
+}
+
+message UsageView {
+  repeated ProviderStatus providers = 1;
+  string note = 2;
+}
+
+message StepNode {
+  string name = 1;
+  string kind = 2;
+  string category = 3;
+  repeated string next = 4;
+  string on_red = 5;
+}
+
+message EditorView {
+  string project = 1;
+  string text = 2;
+  repeated StepNode steps = 3;
+  repeated string problems = 4;
+  string hash = 5;
+}

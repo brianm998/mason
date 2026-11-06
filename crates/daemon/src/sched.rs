@@ -353,39 +353,36 @@ impl Broker {
         let mut announced = false;
         let mut last_check = Instant::now();
         loop {
-            let text = {
-                let mut st = lock(&self.st);
-                self.pass(&mut st);
-                if st.ledger.holds(id) {
-                    None
-                } else if announced {
-                    Some(String::new())
-                } else {
-                    let (floor, free) = (st.floor_mb, self.free_memory(&mut st));
-                    let now = crate::daemon::now_ms();
-                    let waits = st.ledger.waits(now, free, floor);
-                    Some(
-                        waits
-                            .waits
-                            .get(&id)
-                            .map(|w| explain(w, now))
-                            .unwrap_or_else(|| "Waiting for resources".into()),
-                    )
-                }
-            };
-            let Some(text) = text else { break };
+            // The check and the wait share one hold of the lock, so a release
+            // that happens in between cannot be missed (it needs the lock).
+            let mut st = lock(&self.st);
+            self.pass(&mut st);
+            if st.ledger.holds(id) {
+                break;
+            }
             if !announced {
+                let (floor, free) = (st.floor_mb, self.free_memory(&mut st));
+                let now = crate::daemon::now_ms();
+                let waits = st.ledger.waits(now, free, floor);
+                let text = waits
+                    .waits
+                    .get(&id)
+                    .map(|w| explain(w, now))
+                    .unwrap_or_else(|| "Waiting for resources".into());
+                drop(st);
                 announced = true;
                 on_wait(&text);
+                continue;
             }
             if last_check.elapsed() > Duration::from_millis(400) {
+                drop(st);
                 last_check = Instant::now();
                 if !alive() {
                     self.release(id, Some(task));
                     return Err(Cancelled);
                 }
+                continue;
             }
-            let st = lock(&self.st);
             let _ = self.cv.wait_timeout(st, Duration::from_millis(100));
         }
         // The grant is accounting; the kernel locks make it real.

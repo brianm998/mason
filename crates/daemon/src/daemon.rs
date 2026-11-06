@@ -42,6 +42,11 @@ pub struct Daemon {
     pub(crate) sweep: Mutex<crate::sweep::SweepState>,
     pub(crate) defs: crate::defs::Defs,
     pub broker: Arc<crate::sched::Broker>,
+    /// Appended event sequence numbers, for the clients' sockets.
+    pub bus: tokio::sync::broadcast::Sender<u64>,
+    /// `--demo`: plays a scripted scenario; runs no work.
+    pub demo: bool,
+    pub(crate) demo_pos: Mutex<usize>,
 }
 
 fn kind_name(k: &EventKind) -> String {
@@ -56,6 +61,17 @@ impl Daemon {
     /// Open the store, register the configured projects, resume whatever was
     /// in flight when the last daemon died, and start the reconcile sweep.
     pub fn start(cfg: DaemonConfig) -> Result<Arc<Daemon>, String> {
+        Self::start_inner(cfg, false)
+    }
+
+    /// A daemon that plays a scripted scenario (`--demo`): no projects, no
+    /// agents, no git. The events are the real kinds, so the views, the
+    /// protocol and the commands are the real ones.
+    pub fn start_demo(cfg: DaemonConfig) -> Result<Arc<Daemon>, String> {
+        Self::start_inner(cfg, true)
+    }
+
+    fn start_inner(cfg: DaemonConfig, demo: bool) -> Result<Arc<Daemon>, String> {
         for d in [
             cfg.hosts_dir(),
             cfg.sockets_dir(),
@@ -67,7 +83,11 @@ impl Daemon {
             std::fs::create_dir_all(&d)
                 .map_err(|e| format!("cannot create {}: {e}", d.display()))?;
         }
-        let configured = load_projects(&cfg.config_dir).map_err(|e| e.join("\n"))?;
+        let configured = if demo {
+            vec![]
+        } else {
+            load_projects(&cfg.config_dir).map_err(|e| e.join("\n"))?
+        };
         let store =
             Store::open(cfg.store_path()).map_err(|e| format!("cannot open the store: {e}"))?;
 
@@ -130,13 +150,24 @@ impl Daemon {
             sweep: Mutex::default(),
             defs: crate::defs::Defs::default(),
             broker,
+            bus: tokio::sync::broadcast::channel(1024).0,
+            demo,
+            demo_pos: Mutex::new(0),
             cfg,
         });
-        d.load_definitions();
-        d.recover();
-        d.spawn_sweeper();
-        d.spawn_watcher();
+        if !demo {
+            d.load_definitions();
+            d.recover();
+            d.spawn_sweeper();
+            d.spawn_watcher();
+        }
         Ok(d)
+    }
+
+    /// Something other than an event changed what a client would see (a pause,
+    /// a debt, a limit): wake the sockets.
+    pub fn poke(&self) {
+        let _ = self.bus.send(self.store.last_seq().unwrap_or(0));
     }
 
     pub fn world(&self) -> Result<mason_engine::World, StoreError> {
@@ -205,6 +236,7 @@ impl Daemon {
             })?
         };
         self.crash.point(&format!("after_append:{name}"));
+        let _ = self.bus.send(appended.seq);
         self.handle_effects(&appended.effects);
         self.admit();
         Ok(appended)
@@ -233,12 +265,16 @@ impl Daemon {
             }
         };
         self.crash.point(&format!("after_append:{name}"));
+        let _ = self.bus.send(appended.seq);
         self.handle_effects(&appended.effects);
         self.admit();
         true
     }
 
     fn handle_effects(self: &Arc<Self>, effects: &[Effect]) {
+        if self.demo {
+            return;
+        }
         for e in effects {
             match e {
                 Effect::StartStep {
@@ -324,6 +360,9 @@ impl Daemon {
     /// Start queued tasks while an LLM session is free for them, best rank
     /// first across every project (Part 7).
     pub fn admit(self: &Arc<Self>) {
+        if self.demo {
+            return;
+        }
         if self.admitting.swap(true, Ordering::SeqCst) {
             self.admit_again.store(true, Ordering::SeqCst);
             return;
@@ -365,7 +404,10 @@ impl Daemon {
             .tasks
             .values()
             .filter(|t| {
-                t.state.is_step() && t.activity != approving && !self.broker.has_lease(t.id)
+                t.state.is_step()
+                    && t.activity != approving
+                    && !self.broker.has_lease(t.id)
+                    && self.step_needs_session(t)
             })
             .count() as u32;
         self.broker
@@ -373,6 +415,23 @@ impl Daemon {
             .unwrap_or(0)
             .saturating_sub(self.broker.used(&name))
             .saturating_sub(unclaimed)
+    }
+
+    /// Will this task's current step want an LLM session? Only an agent step
+    /// does; a test or landing step that has not yet asked for its resources
+    /// must not hold a session back from a task that is waiting for one.
+    fn step_needs_session(&self, t: &Task) -> bool {
+        let def = self
+            .pinned_def(&t.def)
+            .filter(|_| !t.def.is_empty())
+            .unwrap_or_else(|| self.current_def(t.project));
+        match def.step(&t.step) {
+            Some(s) => s.kind == mason_definition::StepType::Agent,
+            None => matches!(
+                t.state,
+                State::Exploring | State::Developing | State::Review
+            ),
+        }
     }
 
     /// The queued task that goes next, if an LLM session is free for it.

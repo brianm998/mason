@@ -24,6 +24,9 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: bash scripts/check-spdx.sh
+      # The two monitors stay in parity by machine check (Part 17).
+      - run: cargo run -q -p mason-conformance -- features clients/features.toml
+      - run: cargo run -q -p mason-conformance -- tokens --check
       - uses: EmbarkStudios/cargo-deny-action@v2
 
   dco:

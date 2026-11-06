@@ -1,0 +1,97 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Every feature of the monitor and its status in each client: "done", "todo"
+# or "n/a". CI (`conformance features clients/features.toml`) fails if a
+# feature is done in one client and not in the other without a recorded
+# `platform_reason`, and if anything is "n/a" without one. This is how the two
+# clients stay in parity by machine check rather than by convention (Part 17).
+
+[feature.connect-and-resume]
+description = "Connects over the protocol, resumes from its last sequence number, shows 'connection lost' as a banner"
+swift = "todo"
+compose = "todo"
+
+[feature.top-bar]
+description = "Back, forward, home; attention indicator; project filter; LLM usage; add task; mute"
+swift = "todo"
+compose = "todo"
+
+[feature.count-tiles]
+description = "One fixed-size tile per state, tinted when it wants you, a dash while disconnected"
+swift = "todo"
+compose = "todo"
+
+[feature.banners]
+description = "New version, provider outage, landing frozen, connection lost, paused"
+swift = "todo"
+compose = "todo"
+
+[feature.sidebar-sections]
+description = "A section per state, needs-you first, collapsible, collapse choices remembered per device"
+swift = "todo"
+compose = "todo"
+
+[feature.sidebar-sort]
+description = "Active states oldest first; failed, landed and canceled newest first and collapsed"
+swift = "todo"
+compose = "todo"
+
+[feature.search]
+description = "Filters every section by name, title or body, each with its own checkbox"
+swift = "todo"
+compose = "todo"
+
+[feature.home-view]
+description = "Status, attention queue, active models, session stepper, landing queue, tasks per stage"
+swift = "todo"
+compose = "todo"
+
+[feature.task-detail]
+description = "Steps, activity, live log, plan, checks, tests, history, decision card, actions"
+swift = "todo"
+compose = "todo"
+
+[feature.decision-card]
+description = "Ask, why, 2 to 4 options with one recommended, other, evidence; answers carry the card hash"
+swift = "todo"
+compose = "todo"
+
+[feature.progress-cells]
+description = "Filled, part, hatched and empty cells; no percentages; amber and never red when slow"
+swift = "todo"
+compose = "todo"
+
+[feature.overrides]
+description = "Cancel, retry, skip test, land now, force, pause, open session, from the allowed actions"
+swift = "todo"
+compose = "todo"
+
+[feature.landing-page]
+description = "Queue, batches, phases, debts and freeze status"
+swift = "todo"
+compose = "todo"
+
+[feature.usage-page]
+description = "Provider status, limit windows, tokens by project, task, step and model"
+swift = "todo"
+compose = "todo"
+
+[feature.pipeline-editor]
+description = "The graphical editor of the definition (Part 18)"
+swift = "todo"
+compose = "todo"
+
+[feature.health-page]
+description = "Digest, detector findings, runtime version, resources and who holds them"
+swift = "todo"
+compose = "todo"
+
+[feature.deep-links]
+description = "mason://task/... opens from any notification"
+swift = "todo"
+compose = "todo"
+
+[feature.text-scaling]
+description = "Text scales and reflows so it stays sharp from across the room"
+swift = "todo"
+compose = "todo"

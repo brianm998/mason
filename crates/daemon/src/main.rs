@@ -3,7 +3,8 @@
 //! `masond`: the MASON daemon.
 //!
 //! `masond [--data-dir D] [--config-dir C] [--max-concurrent N] [--sweep-ms N]
-//!         [--port P] [--host-bin B] [--mcp-bin B] [--reload-interval-ms N] [--fetch-interval-ms N] [--debug]`
+//!         [--port P] [--host-bin B] [--mcp-bin B] [--reload-interval-ms N] [--fetch-interval-ms N]
+//!         [--demo | --demo-manual] [--demo-step-ms N] [--debug]`
 
 use mason_daemon::config::DaemonConfig;
 use mason_daemon::{http, Daemon};
@@ -43,6 +44,7 @@ fn main() {
     );
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut owners_set = false;
+    let (mut demo, mut demo_manual, mut demo_step) = (false, false, Duration::from_millis(1500));
     let mut i = 0;
     while i < args.len() {
         let flag = args[i].clone();
@@ -86,6 +88,14 @@ fn main() {
                 }
                 cfg.owner_names.push(val());
             }
+            "--demo" => demo = true,
+            "--demo-manual" => {
+                demo = true;
+                demo_manual = true;
+            }
+            "--demo-step-ms" => {
+                demo_step = Duration::from_millis(val().parse().unwrap_or_else(|_| usage()))
+            }
             "--debug" => cfg.debug = true,
             _ => usage(),
         }
@@ -97,15 +107,31 @@ fn main() {
         .enable_all()
         .build()
         .expect("tokio runtime");
+    if demo {
+        // A demo keeps nothing: its own scratch data directory, no projects.
+        if !args.iter().any(|a| a == "--data-dir") {
+            cfg.data_dir = std::env::temp_dir().join(format!("mason-demo-{}", std::process::id()));
+        }
+        cfg.max_concurrent = 0;
+    }
     if let Err(e) = http::ensure_single(&cfg) {
         eprintln!("masond: {e}");
         std::process::exit(1);
     }
     let result = rt.block_on(async {
         // Starting the daemon touches git and the store: keep it off the loop.
-        let d = tokio::task::spawn_blocking(move || Daemon::start(cfg))
-            .await
-            .map_err(|e| e.to_string())??;
+        let d = tokio::task::spawn_blocking(move || {
+            if demo {
+                Daemon::start_demo(cfg)
+            } else {
+                Daemon::start(cfg)
+            }
+        })
+        .await
+        .map_err(|e| e.to_string())??;
+        if demo && !demo_manual {
+            d.spawn_demo_player(demo_step);
+        }
         http::serve(d).await.map_err(|e| e.to_string())
     });
     if let Err(e) = result {

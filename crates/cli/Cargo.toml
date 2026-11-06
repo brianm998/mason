@@ -19,6 +19,7 @@ path = "src/main.rs"
 mason-daemon = { version = "0.0.0", path = "../daemon" }
 mason-definition = { version = "0.0.0", path = "../definition" }
 mason-landing = { version = "0.0.0", path = "../landing" }
+mason-protocol = { version = "0.0.0", path = "../protocol" }
 mason-resources = { version = "0.0.0", path = "../resources" }
 mason-testing = { version = "0.0.0", path = "../testing" }
 mason-step-host = { version = "0.0.0", path = "../step-host" }

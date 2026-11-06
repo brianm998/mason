@@ -60,9 +60,21 @@ pub struct Ctx {
     pub step: Step,
     /// The step's settings after the five layers (Part 5).
     pub res: Resolved,
+    /// The step's resources, handed back the moment it reports its result
+    /// (not when its thread winds down), so the next waiter starts at once.
+    pub lease: std::sync::Mutex<Option<crate::sched::Lease>>,
 }
 
 impl Ctx {
+    /// Hand the step's resources back and let a waiting task have them.
+    pub(crate) fn release_lease(&self) {
+        let l = self.lease.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if l.is_some() {
+            drop(l);
+            self.d.admit();
+        }
+    }
+
     pub(crate) fn emit(&self, kind: EventKind) -> bool {
         self.d.emit_for_run(self.task, self.run, kind)
     }
@@ -113,6 +125,7 @@ impl Ctx {
                 });
             }
         }
+        self.release_lease();
     }
 
     pub(crate) fn green(&self) {
@@ -200,6 +213,7 @@ fn ctx(d: &Arc<Daemon>, task: TaskId, run: StepRunId) -> Result<Ctx, String> {
         def,
         step,
         res,
+        lease: std::sync::Mutex::new(None),
     })
 }
 
@@ -221,14 +235,12 @@ pub fn run(d: &Arc<Daemon>, task: TaskId, step: State, run: StepRunId) {
     // project. Time spent waiting is outside every timeout below: they all
     // start after this returns. An approval waits for a person, not for the
     // machine, so it takes nothing.
-    let _lease = if c.step.kind == StepType::Approval {
-        None
-    } else {
+    if c.step.kind != StepType::Approval {
         match acquire(&c) {
-            Ok(l) => Some(l),
+            Ok(l) => *c.lease.lock().unwrap_or_else(|e| e.into_inner()) = Some(l),
             Err(_) => return, // the task was cancelled or retried while it waited
         }
-    };
+    }
     match c.step.kind {
         StepType::Agent => agent_job(&c),
         StepType::Test if !c.step.suites.is_empty() => crate::suites::run(&c),
@@ -734,6 +746,12 @@ fn agent_job(c: &Ctx) {
 }
 
 fn finish_agent(c: &Ctx, report: StepReport, dir: &Path) {
+    finish_agent_inner(c, report, dir);
+    // Asked, or the agent gave up: either way the session is free now.
+    c.release_lease();
+}
+
+fn finish_agent_inner(c: &Ctx, report: StepReport, dir: &Path) {
     let task = c.task;
     match report.end {
         StepEnd::Accepted { submission, .. } => {

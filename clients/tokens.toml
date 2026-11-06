@@ -1,0 +1,50 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# The one design-token file. `conformance tokens --write` generates the Swift
+# and Kotlin constants from it; CI regenerates and fails on a difference, so a
+# colour is changed here and nowhere else.
+
+[color.light]
+background = "#FFFFFF"
+surface = "#F4F5F7"
+text = "#14171A"
+text_muted = "#5C6670"
+accent = "#2F6FED"
+attention = "#D93A3A"
+attention_tint = "#FDECEC"
+slow = "#C98200"
+ok = "#1E8E4E"
+border = "#D7DBE0"
+
+[color.dark]
+background = "#101214"
+surface = "#1A1D21"
+text = "#ECEEF0"
+text_muted = "#9AA4AE"
+accent = "#6C9BFF"
+attention = "#FF6B6B"
+attention_tint = "#3A1F1F"
+slow = "#E2A93B"
+ok = "#4CC38A"
+border = "#2C3137"
+
+[size]
+# Points on macOS and iOS, dp on Android, px elsewhere.
+tile_width = 96
+tile_height = 64
+sidebar_width = 300
+row_height = 56
+spacing_small = 4
+spacing = 8
+spacing_large = 16
+corner_radius = 6
+text_body = 14
+text_small = 12
+text_title = 18
+text_count = 24
+progress_cell = 14
+
+[motion]
+# Milliseconds.
+fast = 120
+normal = 220
