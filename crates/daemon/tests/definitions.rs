@@ -379,7 +379,7 @@ fn an_invalid_definition_edit_is_refused_and_the_old_one_keeps_running() {
     assert_eq!(task_of(&d, t).def, good_hash);
 
     // A valid edit replaces it and clears the report.
-    s.push_files(&[(".mason/mason.toml", &DEF_LINT)], "a good one");
+    s.push_files(&[(".mason/mason.toml", DEF_LINT)], "a good one");
     assert!(matches!(d.reload_definition(pid), Reload::Applied { .. }));
     assert!(
         d.definition_error(pid).is_none(),
@@ -705,4 +705,65 @@ fn a_lone_flagged_task_is_the_recorded_skip_run() {
     wait_for("cleanup", 15, || d.job_count() == 0);
     maybe_record(&d, "skipped_exploring");
     assert_eq!(steps_run(&d, t), vec!["develop", "test", "land"]);
+}
+
+#[test]
+fn an_optional_classifier_is_consulted_only_when_the_rules_are_unsure() {
+    // The classifier reads the task body on stdin and answers; here, by the word "obvious".
+    let classifier = "clarity_classifier = \"grep -qi obvious && echo clear || echo unclear\"";
+    let s = scratch_with(Some(DEF_SKIP), unique_script());
+    s.write_project("scratch", "test -f hello.txt", classifier);
+    let d = s.start();
+    let by_classifier = file_task_as(
+        &d,
+        "A",
+        "This one is obvious, trust me.",
+        false,
+        TrustSource::Owner,
+        false,
+    );
+    let unsure = file_task_as(
+        &d,
+        "B",
+        "Make the thing better somehow.",
+        false,
+        TrustSource::Owner,
+        false,
+    );
+    let by_rules = file_task_as(
+        &d,
+        "C",
+        &format!("{CLEAR_BODY}\nNot so obvious."),
+        false,
+        TrustSource::Owner,
+        false,
+    );
+    let by_flag = flagged(&d, "D");
+    for t in [by_classifier, unsure, by_rules, by_flag] {
+        wait_state(&d, t, State::Landed, 120);
+    }
+    assert_eq!(task_of(&d, by_classifier).route, Some(Route::Classifier));
+    assert_eq!(task_of(&d, unsure).route, Some(Route::Explore));
+    assert_eq!(
+        task_of(&d, by_rules).route,
+        Some(Route::Clarity),
+        "the deterministic check decides before any classifier"
+    );
+    assert_eq!(task_of(&d, by_flag).route, Some(Route::Flag));
+    // A classifier that fails, hangs on nothing, or says anything but "clear" means explore.
+    assert!(mason_daemon::jobs::classify("echo clear", "x"));
+    assert!(mason_daemon::jobs::classify(
+        "cat >/dev/null; echo CLEAR",
+        "x"
+    ));
+    for cmd in [
+        "echo unclear",
+        "echo clearly",
+        "exit 1",
+        "echo clear; exit 1",
+        "no-such-command-anywhere",
+        "",
+    ] {
+        assert!(!mason_daemon::jobs::classify(cmd, "x"), "{cmd:?}");
+    }
 }

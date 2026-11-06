@@ -15,6 +15,7 @@
 //! Global: `--data-dir D`, `--config-dir C` (or `MASON_DATA_DIR`, `MASON_CONFIG_DIR`).
 
 mod client;
+mod definition;
 mod doctor;
 
 use client::{CallError, Daemon};
@@ -28,14 +29,25 @@ const HELP: &str = "\
 mason: command-line client for the MASON pipeline
 
   mason task add <title> [--project P] [--body TEXT | --body-file F | --body -]
-                         [--priority urgent|high|normal|low] [--proposed]
+                         [--priority urgent|high|normal|low] [--proposed] [--explored]
   mason task list [--state S] [--json]
   mason task show <id> [--json]
   mason task cancel <id> [--delete-branch]
-  mason task retry <id> [--from exploring|developing|testing|review|landing]
+  mason task retry <id> [--from STEP]
+  mason task approve <id>             let a proposed task start, or an approval step go on
+  mason task reject <id> [--reason R] reject a proposed task or an approval step
+  mason task explore-anyway <id>      explore after all, even if it skipped exploring
+  mason task override <id> <key> <value>
   mason logs <id> [--follow]
   mason status [--json]
   mason doctor
+  mason definition check [FILE]       validate a definition (default .mason/mason.toml) and dry-run it
+  mason definition dry-run [FILE] [--scenarios FILE]
+  mason definition show [--project P] | reload [--project P]
+  mason config show [--project P]     every step's settings and where each came from
+  mason config set <key> <value> --for 2h [--project P] [--owner O]
+  mason config unset <key> [--project P] | list [--project P]
+  mason help filing                   how to say a task is already explored
 
 Global options: --data-dir D, --config-dir C (or MASON_DATA_DIR, MASON_CONFIG_DIR)";
 
@@ -127,10 +139,20 @@ fn ago(ms: u64) -> String {
 }
 
 fn main() {
+    // `mason ... | head` closes our stdout: leave quietly, as a command-line tool should,
+    // instead of panicking on the failed print.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let text = info.to_string();
+        if text.contains("Broken pipe") || text.contains("os error 32") {
+            exit(0);
+        }
+        default_hook(info);
+    }));
     let mut a = Args {
         rest: std::env::args().skip(1).collect(),
     };
-    if a.rest.is_empty() || a.flag("--help") || a.flag("-h") || a.rest[0] == "help" {
+    if a.rest.is_empty() || a.flag("--help") || a.flag("-h") {
         println!("{HELP}");
         return;
     }
@@ -152,6 +174,14 @@ fn main() {
     let json_out = a.flag("--json");
     let cmd = a.pos().unwrap_or_default();
 
+    if cmd == "help" {
+        match a.pos().as_deref() {
+            Some("filing") => print!("{}", mason_definition::filing::HELP),
+            _ => println!("{HELP}"),
+        }
+        return;
+    }
+
     if cmd == "doctor" {
         finish(&a);
         let findings = doctor::run(&data_dir, &config_dir);
@@ -170,8 +200,225 @@ fn main() {
         exit(i32::from(bad));
     }
 
+    // Looking at a definition needs no daemon.
+    if cmd == "definition"
+        && matches!(
+            a.rest.first().map(String::as_str),
+            Some("check" | "dry-run")
+        )
+    {
+        let sub = a.pos().unwrap_or_default();
+        let scenarios = a.opt("--scenarios").map(PathBuf::from);
+        let file = PathBuf::from(a.pos().unwrap_or_else(|| ".mason/mason.toml".into()));
+        finish(&a);
+        exit(if sub == "check" {
+            definition::check(&file)
+        } else {
+            definition::dry(&file, scenarios.as_deref())
+        });
+    }
+
     let d: Daemon = or_die(client::find(&data_dir));
+    // The project a command is about: --project, or the only one there is.
+    let project_of = |a: &mut Args| -> String {
+        a.opt("--project").unwrap_or_else(|| {
+            let s = or_die(d.call("GET", "/status", None));
+            let ps: Vec<String> = s["projects"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(String::from)
+                .collect();
+            match ps.as_slice() {
+                [one] => one.clone(),
+                [] => die("no projects are configured (see `mason doctor`)"),
+                many => die(&format!(
+                    "which project? use --project with one of: {}",
+                    many.join(", ")
+                )),
+            }
+        })
+    };
     match cmd.as_str() {
+        "definition" => {
+            let sub = a
+                .pos()
+                .unwrap_or_else(|| die("definition what? check, dry-run, show or reload"));
+            let project = project_of(&mut a);
+            finish(&a);
+            match sub.as_str() {
+                "show" => {
+                    let r = or_die(d.call("GET", &format!("/projects/{project}/definition"), None));
+                    if json_out {
+                        return println!("{r:#}");
+                    }
+                    println!(
+                        "definition {} (from {}), start `{}`{}",
+                        &r["hash"].as_str().unwrap_or("")
+                            [..12.min(r["hash"].as_str().unwrap_or("").len())],
+                        r["origin"].as_str().unwrap_or("?"),
+                        r["start"].as_str().unwrap_or("?"),
+                        r["explored_entry"]
+                            .as_str()
+                            .map(|e| format!(", skipping exploring starts at `{e}`"))
+                            .unwrap_or_default()
+                    );
+                    for s in r["steps"].as_array().into_iter().flatten() {
+                        let next = s["next"]
+                            .as_array()
+                            .map(|n| {
+                                n.iter()
+                                    .filter_map(Value::as_str)
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            })
+                            .unwrap_or_default();
+                        let red = s["on_red"]
+                            .as_str()
+                            .map(|r| {
+                                format!("   on red back to `{r}` ({} rounds)", s["max_rounds"])
+                            })
+                            .unwrap_or_default();
+                        println!(
+                            "  {:<12} {:<9} {:<10} next: {}{red}",
+                            s["name"].as_str().unwrap_or("?"),
+                            s["type"].as_str().unwrap_or("?"),
+                            s["category"].as_str().unwrap_or("?"),
+                            if next.is_empty() {
+                                "(ends)".into()
+                            } else {
+                                next
+                            }
+                        );
+                    }
+                    if let Some(errs) = r["error"].as_array() {
+                        println!("\nthe latest edit was REFUSED, and the definition above keeps running:");
+                        errs.iter()
+                            .filter_map(Value::as_str)
+                            .for_each(|e| println!("  {e}"));
+                    }
+                }
+                "reload" => {
+                    let r = or_die(d.call("POST", &format!("/projects/{project}/reload"), None));
+                    match r["result"].as_str() {
+                        Some("applied") => println!(
+                            "Applied {} ({}); tasks admitted from now on use it",
+                            &r["hash"].as_str().unwrap_or("")
+                                [..12.min(r["hash"].as_str().unwrap_or("").len())],
+                            r["origin"].as_str().unwrap_or("")
+                        ),
+                        Some("refused") => {
+                            println!("Refused; the current definition keeps running:");
+                            r["errors"]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .filter_map(Value::as_str)
+                                .for_each(|e| println!("  {e}"));
+                            exit(1);
+                        }
+                        _ => println!("Nothing changed"),
+                    }
+                }
+                other => die(&format!("unknown definition command {other:?}\n\n{HELP}")),
+            }
+        }
+        "config" => {
+            let sub = a
+                .pos()
+                .unwrap_or_else(|| die("config what? show, set, unset or list"));
+            match sub.as_str() {
+                "show" => {
+                    let project = project_of(&mut a);
+                    finish(&a);
+                    let r = or_die(d.call("GET", &format!("/projects/{project}/config"), None));
+                    if json_out {
+                        return println!("{r:#}");
+                    }
+                    println!(
+                        "settings for {project} (definition {})",
+                        &r["definition"].as_str().unwrap_or("")
+                            [..12.min(r["definition"].as_str().unwrap_or("").len())]
+                    );
+                    for s in r["steps"].as_array().into_iter().flatten() {
+                        println!(
+                            "  {} ({})",
+                            s["step"].as_str().unwrap_or("?"),
+                            s["type"].as_str().unwrap_or("?")
+                        );
+                        for k in ["model", "effort", "budget", "max_rounds", "command"] {
+                            if let Some(v) = s[k]["value"].as_str() {
+                                println!(
+                                    "      {k:<11} {v}   <- {}",
+                                    s[k]["from"].as_str().unwrap_or("?")
+                                );
+                            }
+                        }
+                    }
+                }
+                "set" => {
+                    let secs = a
+                        .opt("--for")
+                        .map(|v| {
+                            mason_definition::model::parse_duration(&v).unwrap_or_else(|| {
+                                die(&format!("`{v}` is not a duration; use forms like 2h, 30m"))
+                            })
+                        })
+                        .unwrap_or_else(|| {
+                            die("a runtime override must expire: say how long with --for 2h")
+                        });
+                    let owner = a
+                        .opt("--owner")
+                        .or_else(|| std::env::var("USER").ok())
+                        .unwrap_or_else(|| "owner".into());
+                    let project = project_of(&mut a);
+                    let key = a
+                        .pos()
+                        .unwrap_or_else(|| die("which setting? e.g. step.develop.model"));
+                    let value = a.pos().unwrap_or_else(|| die("which value?"));
+                    finish(&a);
+                    or_die(d.call("POST", &format!("/projects/{project}/overrides"), Some(&json!({"key": key, "value": value, "owner": owner, "expires_in_s": secs.as_secs()}))));
+                    println!(
+                        "{project}: {key} = {value}, by {owner}, for {}s",
+                        secs.as_secs()
+                    );
+                }
+                "unset" => {
+                    let project = project_of(&mut a);
+                    let key = a.pos().unwrap_or_else(|| die("which setting?"));
+                    finish(&a);
+                    let r = or_die(d.call(
+                        "POST",
+                        &format!("/projects/{project}/overrides/remove"),
+                        Some(&json!({"key": key})),
+                    ));
+                    println!("Removed {} override(s) of {key}", r["removed"]);
+                }
+                "list" => {
+                    let project = project_of(&mut a);
+                    finish(&a);
+                    let r = or_die(d.call("GET", &format!("/projects/{project}/overrides"), None));
+                    if json_out {
+                        return println!("{r:#}");
+                    }
+                    let list = r["overrides"].as_array().cloned().unwrap_or_default();
+                    if list.is_empty() {
+                        println!("no runtime overrides in force");
+                    }
+                    for o in list {
+                        println!(
+                            "{} = {}   by {}, expires at {}",
+                            o["key"].as_str().unwrap_or("?"),
+                            o["value"].as_str().unwrap_or("?"),
+                            o["owner"].as_str().unwrap_or("?"),
+                            o["expires_at"]
+                        );
+                    }
+                }
+                other => die(&format!("unknown config command {other:?}\n\n{HELP}")),
+            }
+        }
         "status" => {
             finish(&a);
             let s = or_die(d.call("GET", "/status", None));
@@ -219,6 +466,36 @@ fn main() {
             if s["bugs"].as_u64().unwrap_or(0) > 0 {
                 println!("bugs filed by the reconcile sweep: {}", s["bugs"]);
             }
+            for p in s["definitions"].as_array().into_iter().flatten() {
+                let hash = p["hash"].as_str().unwrap_or("");
+                println!(
+                    "definition for {}: {} ({})",
+                    p["project"].as_str().unwrap_or("?"),
+                    &hash[..12.min(hash.len())],
+                    p["origin"].as_str().unwrap_or("?")
+                );
+                if let Some(errs) = p["refused"].as_array() {
+                    println!("  the latest edit was REFUSED and the one above keeps running:");
+                    errs.iter()
+                        .filter_map(Value::as_str)
+                        .for_each(|e| println!("    {e}"));
+                }
+            }
+            let e = &s["exploring"];
+            let skipped: u64 = [
+                "skipped_by_flag",
+                "skipped_by_clarity",
+                "skipped_by_classifier",
+            ]
+            .iter()
+            .map(|k| e[k].as_u64().unwrap_or(0))
+            .sum();
+            if skipped + e["explored"].as_u64().unwrap_or(0) > 0 {
+                println!(
+                    "exploring: {} explored, {} skipped (flag {}, clarity {}, classifier {}), {} sent back, {} explored anyway",
+                    e["explored"], skipped, e["skipped_by_flag"], e["skipped_by_clarity"], e["skipped_by_classifier"], e["sent_back_to_exploring"], e["explore_anyway"]
+                );
+            }
         }
         "logs" => {
             let id = task_id(&mut a);
@@ -265,6 +542,7 @@ fn main() {
                     let project = a.opt("--project");
                     let priority = a.opt("--priority").unwrap_or_else(|| "normal".into());
                     let proposed = a.flag("--proposed");
+                    let explored = a.flag("--explored");
                     let title = a.pos().unwrap_or_else(|| {
                         die("give the task a title: mason task add \"Fix the thing\"")
                     });
@@ -287,7 +565,7 @@ fn main() {
                             )),
                         }
                     });
-                    let r = or_die(d.call("POST", "/tasks", Some(&json!({"project": project, "title": title, "body": body, "priority": priority, "proposed": proposed}))));
+                    let r = or_die(d.call("POST", "/tasks", Some(&json!({"project": project, "title": title, "body": body, "priority": priority, "proposed": proposed, "explored": explored}))));
                     if json_out {
                         return println!("{r:#}");
                     }
@@ -330,6 +608,34 @@ fn main() {
                     println!("  branch    {}", t["branch"].as_str().unwrap_or(""));
                     println!("  worktree  {}", t["worktree"].as_str().unwrap_or(""));
                     println!("  failures  {}", t["failures"]);
+                    if let Some(r) = t["route"].as_str() {
+                        let why = match r {
+                            "explore" => "explored first",
+                            "flag" => "skipped exploring: filed as already explored",
+                            "clarity" => "skipped exploring: the clarity check passed",
+                            "classifier" => {
+                                "skipped exploring: the project's classifier said it was clear"
+                            }
+                            "explore_anyway" => "explored, at the owner's request",
+                            _ => r,
+                        };
+                        println!(
+                            "  started   at {} ({why})",
+                            t["steps"][0]["name"]
+                                .as_str()
+                                .filter(|s| !s.is_empty())
+                                .unwrap_or("?")
+                        );
+                        if t["skipped_exploring"].as_bool().unwrap_or(false) {
+                            println!(
+                                "            `mason task explore-anyway {}` explores it after all",
+                                t["id"]
+                            );
+                        }
+                        if t["explore_returns"].as_u64().unwrap_or(0) > 0 {
+                            println!("            the developing agent sent it back to exploring {} time(s), at no cost", t["explore_returns"]);
+                        }
+                    }
                     if let Some(f) = t["failure"].as_str() {
                         println!("  failed    {f}");
                     }
@@ -342,9 +648,10 @@ fn main() {
                     println!("\nsteps:");
                     for s in t["steps"].as_array().into_iter().flatten() {
                         println!(
-                            "  run {:<3} {:<11} attempt {}  {}",
+                            "  run {:<3} {:<11} {:<12} attempt {}  {}",
                             s["run"],
                             s["step"].as_str().unwrap_or("?"),
+                            s["name"].as_str().unwrap_or(""),
                             s["attempt"],
                             s["outcome"].as_str().unwrap_or("running")
                         );
@@ -381,6 +688,44 @@ fn main() {
                         "Retrying task #{id} from {}",
                         r["to"].as_str().unwrap_or(&from)
                     );
+                }
+                "approve" => {
+                    let id = task_id(&mut a);
+                    finish(&a);
+                    or_die(d.call("POST", &format!("/tasks/{id}/approve"), None));
+                    println!("Approved task #{id}");
+                }
+                "reject" => {
+                    let id = task_id(&mut a);
+                    let reason = a
+                        .opt("--reason")
+                        .unwrap_or_else(|| "no reason given".into());
+                    finish(&a);
+                    or_die(d.call(
+                        "POST",
+                        &format!("/tasks/{id}/reject"),
+                        Some(&json!({"reason": reason})),
+                    ));
+                    println!("Rejected task #{id}");
+                }
+                "explore-anyway" => {
+                    let id = task_id(&mut a);
+                    finish(&a);
+                    let r = or_die(d.call("POST", &format!("/tasks/{id}/explore-anyway"), None));
+                    println!(
+                        "Task #{id} will explore (step {})",
+                        r["step"].as_str().unwrap_or("?")
+                    );
+                }
+                "override" => {
+                    let id = task_id(&mut a);
+                    let key = a
+                        .pos()
+                        .unwrap_or_else(|| die("which setting? e.g. step.develop.model"));
+                    let value = a.pos().unwrap_or_else(|| die("which value?"));
+                    finish(&a);
+                    or_die(d.call("POST", &format!("/tasks/{id}/overrides"), Some(&json!({"key": key, "value": value, "owner": std::env::var("USER").unwrap_or_else(|_| "owner".into())}))));
+                    println!("Task #{id}: {key} = {value}");
                 }
                 other => die(&format!("unknown task command {other:?}\n\n{HELP}")),
             }

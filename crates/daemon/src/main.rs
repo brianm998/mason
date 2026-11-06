@@ -3,7 +3,7 @@
 //! `masond`: the MASON daemon.
 //!
 //! `masond [--data-dir D] [--config-dir C] [--max-concurrent N] [--sweep-ms N]
-//!         [--port P] [--host-bin B] [--mcp-bin B] [--debug]`
+//!         [--port P] [--host-bin B] [--mcp-bin B] [--reload-interval-ms N] [--fetch-interval-ms N] [--debug]`
 
 use mason_daemon::config::DaemonConfig;
 use mason_daemon::{http, Daemon};
@@ -65,6 +65,14 @@ fn main() {
             }
             "--hold-retry-s" => {
                 cfg.hold_retry = Duration::from_secs(val().parse().unwrap_or_else(|_| usage()))
+            }
+            "--reload-ms" | "--reload-interval-ms" => {
+                cfg.reload_interval =
+                    Duration::from_millis(val().parse().unwrap_or_else(|_| usage()))
+            }
+            "--fetch-interval-ms" => {
+                cfg.fetch_interval =
+                    Duration::from_millis(val().parse().unwrap_or_else(|_| usage()))
             }
             "--debug" => cfg.debug = true,
             _ => usage(),

@@ -105,7 +105,7 @@ fn task_json(d: &Daemon, w: &World, t: &Task, detail: bool) -> Value {
             .values()
             .filter(|r| r.task == t.id)
             .map(|r| json!({
-                "run": r.id.0, "step": state_name(r.step), "attempt": r.attempt,
+                "run": r.id.0, "step": state_name(r.step), "name": r.name, "attempt": r.attempt,
                 "started_at": r.started_at.0,
                 "outcome": r.outcome.map(|o| format!("{o:?}").to_lowercase()),
             }))

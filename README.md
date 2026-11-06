@@ -5,7 +5,7 @@
 pipeline of exploring, developing, testing, review and landing, for any number
 of projects at once, with SwiftUI and Compose monitors.
 
-Status: **pre-alpha, Stage 6**: a task can be filed with `mason`, worked by an agent under a crash-proof step host, tested, and landed on a git remote. The approved design
+Status: **pre-alpha, Stage 7**: pipelines are defined in `.mason/mason.toml`, tasks are pinned to the definition they started under, and a task that is already a plan skips exploring.
 is in [docs/DESIGN.md](docs/DESIGN.md).
 
 ## Licence

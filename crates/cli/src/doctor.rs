@@ -99,6 +99,42 @@ fn check_project(p: &ProjectCfg, out: &mut Vec<Finding>) {
     } else {
         out.push(ok(format!("project {name}: base ref {base:?} exists")));
     }
+    // The pipeline definition on the base branch, if the project has one.
+    let path = format!("{base}:.mason/mason.toml");
+    if git::ok(&p.path, &["cat-file", "-e", &path]) {
+        match git::run(&p.path, &["show", &path]) {
+            Ok(text) => match mason_definition::parse(&text) {
+                Err(ps) => ps.iter().for_each(|x| {
+                    out.push(fail(format!(
+                        "project {name}: .mason/mason.toml on {base}: {x}"
+                    )))
+                }),
+                Ok(def) => {
+                    let problems =
+                        mason_definition::validate(&def, &mason_definition::Capabilities::now());
+                    if problems.is_empty() {
+                        out.push(ok(format!(
+                            "project {name}: .mason/mason.toml on {base} is valid ({} steps)",
+                            def.steps.len()
+                        )));
+                    } else {
+                        problems.iter().for_each(|x| {
+                            out.push(fail(format!(
+                                "project {name}: .mason/mason.toml on {base}: {x}"
+                            )))
+                        });
+                    }
+                }
+            },
+            Err(e) => out.push(fail(format!(
+                "project {name}: cannot read .mason/mason.toml on {base}: {e}"
+            ))),
+        }
+    } else {
+        out.push(ok(format!(
+            "project {name}: no .mason/mason.toml on {base}, so the built-in pipeline is used"
+        )));
+    }
     match &p.claude_bin {
         Some(b) if b.is_file() => out.push(ok(format!("project {name}: agent binary {}", b.display()))),
         Some(b) => out.push(fail(format!("project {name}: claude_bin {} does not exist", b.display()))),

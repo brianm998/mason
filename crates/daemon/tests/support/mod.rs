@@ -182,6 +182,15 @@ pub fn happy_script() -> Value {
     json!({"steps": {"explore": [explore_turn()], "develop": [develop_turn()]}})
 }
 
+/// Like `happy_script`, but every task commits a file of its own (see `UNIQUE_COMMIT`),
+/// for tests where tasks run one after another.
+pub fn unique_script() -> Value {
+    json!({"steps": {"explore": [explore_turn()], "develop": [[
+        {"sh": UNIQUE_COMMIT},
+        {"call": {"tool": "submit_change", "args": {"summary": "added hello.txt", "head": "$HEAD"}}}
+    ]]}})
+}
+
 pub fn file_task(d: &Arc<Daemon>, title: &str) -> TaskId {
     let pid = d.project_id_by_name("scratch").unwrap();
     let a = d
