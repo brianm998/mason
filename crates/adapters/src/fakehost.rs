@@ -25,7 +25,12 @@ pub struct FakeHost {
 
 fn git(cwd: &Path, args: &[&str]) -> Result<String, String> {
     let o = Command::new("git")
-        .args(["-c", "user.name=fake-host", "-c", "user.email=host@localhost"])
+        .args([
+            "-c",
+            "user.name=fake-host",
+            "-c",
+            "user.email=host@localhost",
+        ])
         .args(args)
         .current_dir(cwd)
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -48,7 +53,8 @@ impl FakeHost {
     }
 
     fn read(&self, n: u64) -> Result<Value, ApiError> {
-        let t = std::fs::read_to_string(self.pr_path(n)).map_err(|_| ApiError::new(ErrorKind::NotFound, format!("no PR #{n}")))?;
+        let t = std::fs::read_to_string(self.pr_path(n))
+            .map_err(|_| ApiError::new(ErrorKind::NotFound, format!("no PR #{n}")))?;
         serde_json::from_str(&t).map_err(|e| invalid(e.to_string()))
     }
 
@@ -69,8 +75,16 @@ impl FakeHost {
     }
 
     fn head_sha(&self, branch: &str) -> Result<String, ApiError> {
-        git(&self.remote, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}^{{commit}}")])
-            .map_err(|_| invalid(format!("the head branch {branch} is not on the host")))
+        git(
+            &self.remote,
+            &[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{branch}^{{commit}}"),
+            ],
+        )
+        .map_err(|_| invalid(format!("the head branch {branch} is not on the host")))
     }
 
     /// Checks for a commit, run once and remembered.
@@ -81,26 +95,55 @@ impl FakeHost {
         let cache = self.dir.join("checks").join(format!("{sha}.json"));
         if let Ok(t) = std::fs::read_to_string(&cache) {
             if let Ok(v) = serde_json::from_str::<Value>(&t) {
-                let failed: Vec<String> = v["failed"].as_array().into_iter().flatten().filter_map(|x| x.as_str().map(String::from)).collect();
-                return (if v["ok"] == true { Checks::Green } else { Checks::Red }, failed);
+                let failed: Vec<String> = v["failed"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect();
+                return (
+                    if v["ok"] == true {
+                        Checks::Green
+                    } else {
+                        Checks::Red
+                    },
+                    failed,
+                );
             }
         }
         let work = self.dir.join("work").join(sha);
         let _ = std::fs::remove_dir_all(&work);
         let _ = std::fs::create_dir_all(&work);
         let tar = Command::new("sh")
-            .args(["-c", &format!("git --git-dir='{}' archive {sha} | tar -x -C '{}'", self.remote.display(), work.display())])
+            .args([
+                "-c",
+                &format!(
+                    "git --git-dir='{}' archive {sha} | tar -x -C '{}'",
+                    self.remote.display(),
+                    work.display()
+                ),
+            ])
             .status();
         let out = if tar.is_ok_and(|s| s.success()) {
-            Command::new("sh").args(["-c", cmd]).current_dir(&work).output().ok()
+            Command::new("sh")
+                .args(["-c", cmd])
+                .current_dir(&work)
+                .output()
+                .ok()
         } else {
             None
         };
         let (ok, text) = match out {
-            Some(o) => (o.status.success(), String::from_utf8_lossy(&o.stdout).to_string()),
+            Some(o) => (
+                o.status.success(),
+                String::from_utf8_lossy(&o.stdout).to_string(),
+            ),
             None => (false, String::new()),
         };
-        let failed: Vec<String> = text.lines().filter_map(|l| l.strip_prefix("FAILED: ").map(|s| s.trim().to_string())).collect();
+        let failed: Vec<String> = text
+            .lines()
+            .filter_map(|l| l.strip_prefix("FAILED: ").map(|s| s.trim().to_string()))
+            .collect();
         let _ = std::fs::create_dir_all(self.dir.join("checks"));
         let _ = std::fs::write(&cache, json!({"ok": ok, "failed": failed}).to_string());
         let _ = std::fs::remove_dir_all(&work);
@@ -108,14 +151,42 @@ impl FakeHost {
     }
 
     fn do_merge(&self, n: u64, v: &mut Value) -> Result<(), ApiError> {
-        let (base, head) = (v["base"].as_str().unwrap_or("").to_string(), v["head"].as_str().unwrap_or("").to_string());
+        let (base, head) = (
+            v["base"].as_str().unwrap_or("").to_string(),
+            v["head"].as_str().unwrap_or("").to_string(),
+        );
         let scratch = self.dir.join("merge");
         let _ = std::fs::remove_dir_all(&scratch);
-        git(&self.dir, &["clone", "-q", &self.remote.display().to_string(), &scratch.display().to_string()]).map_err(invalid)?;
+        git(
+            &self.dir,
+            &[
+                "clone",
+                "-q",
+                &self.remote.display().to_string(),
+                &scratch.display().to_string(),
+            ],
+        )
+        .map_err(invalid)?;
         let r = (|| -> Result<(), String> {
-            git(&scratch, &["checkout", "-q", "-B", &base, &format!("origin/{base}")])?;
-            git(&scratch, &["merge", "--no-ff", "--no-edit", "-m", &format!("Merge PR #{n}"), &format!("origin/{head}")])?;
-            git(&scratch, &["push", "-q", "origin", &format!("HEAD:refs/heads/{base}")])?;
+            git(
+                &scratch,
+                &["checkout", "-q", "-B", &base, &format!("origin/{base}")],
+            )?;
+            git(
+                &scratch,
+                &[
+                    "merge",
+                    "--no-ff",
+                    "--no-edit",
+                    "-m",
+                    &format!("Merge PR #{n}"),
+                    &format!("origin/{head}"),
+                ],
+            )?;
+            git(
+                &scratch,
+                &["push", "-q", "origin", &format!("HEAD:refs/heads/{base}")],
+            )?;
             Ok(())
         })();
         let _ = std::fs::remove_dir_all(&scratch);
@@ -242,13 +313,18 @@ impl CommandCi {
         for (k, v) in env {
             c.env(k, v);
         }
-        let o = c.output().map_err(|e| ApiError::new(ErrorKind::Unavailable, e.to_string()))?;
+        let o = c
+            .output()
+            .map_err(|e| ApiError::new(ErrorKind::Unavailable, e.to_string()))?;
         if o.status.success() {
             Ok(String::from_utf8_lossy(&o.stdout).trim().to_string())
         } else {
             Err(ApiError::new(
                 ErrorKind::Unavailable,
-                format!("`{cmd}` failed: {}", String::from_utf8_lossy(&o.stderr).trim()),
+                format!(
+                    "`{cmd}` failed: {}",
+                    String::from_utf8_lossy(&o.stderr).trim()
+                ),
             ))
         }
     }
@@ -268,7 +344,13 @@ impl BuildSystemAdapter for CommandCi {
 
     fn trigger(&self, git_ref: &str, sha: &str) -> Result<String, ApiError> {
         let out = self.run(&self.trigger, &[("MASON_REF", git_ref), ("MASON_SHA", sha)])?;
-        Ok(out.lines().next().filter(|l| !l.trim().is_empty()).unwrap_or(sha).trim().to_string())
+        Ok(out
+            .lines()
+            .next()
+            .filter(|l| !l.trim().is_empty())
+            .unwrap_or(sha)
+            .trim()
+            .to_string())
     }
 
     fn status(&self, run: &str) -> Result<CiState, ApiError> {
@@ -285,7 +367,11 @@ impl BuildSystemAdapter for CommandCi {
                     .filter(|s| !s.is_empty())
                     .collect();
                 CiState::Red {
-                    summary: if failed.is_empty() { "CI is red".into() } else { format!("{} failed", failed.join(", ")) },
+                    summary: if failed.is_empty() {
+                        "CI is red".into()
+                    } else {
+                        format!("{} failed", failed.join(", "))
+                    },
                     failed,
                 }
             }

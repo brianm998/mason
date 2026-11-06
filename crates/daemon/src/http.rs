@@ -844,11 +844,18 @@ async fn github_hook(
         .pool
         .run(move || {
             for (pid, p) in &d2.projects {
-                let Some(t) = &p.services.tracker else { continue };
+                let Some(t) = &p.services.tracker else {
+                    continue;
+                };
                 if t.repo != repo {
                     continue;
                 }
-                let Some(secret) = t.webhook_secret.as_deref().and_then(|r| crate::services::token(r).ok()).and_then(|r| r.read().ok()) else {
+                let Some(secret) = t
+                    .webhook_secret
+                    .as_deref()
+                    .and_then(|r| crate::services::token(r).ok())
+                    .and_then(|r| r.read().ok())
+                else {
                     continue;
                 };
                 if mason_adapter_api::webhook::verify(&secret, &body, &sig) {
@@ -864,7 +871,10 @@ async fn github_hook(
         Ok(Json(json!({"refreshing": true})))
     } else {
         // Unknown repository, no secret, or a signature that does not verify: all the same answer.
-        Err(fail(StatusCode::UNAUTHORIZED, "the delivery was not verified"))
+        Err(fail(
+            StatusCode::UNAUTHORIZED,
+            "the delivery was not verified",
+        ))
     }
 }
 

@@ -28,7 +28,12 @@ impl TrackerAdapter for Fake {
         "fake-tracker"
     }
     fn capabilities(&self) -> TrackerCaps {
-        TrackerCaps { conditional_polling: true, comments: true, labels: true, webhooks: true }
+        TrackerCaps {
+            conditional_polling: true,
+            comments: true,
+            labels: true,
+            webhooks: true,
+        }
     }
     fn list(&self, etag: Option<&str>) -> Result<Listing, ApiError> {
         self.seen_etags.lock().unwrap().push(etag.map(String::from));
@@ -43,14 +48,20 @@ impl TrackerAdapter for Fake {
         if *self.fail_mirror.lock().unwrap() {
             return Err(ApiError::new(ErrorKind::Unavailable, "down"));
         }
-        self.sent.lock().unwrap().push((item.number, note.into(), false));
+        self.sent
+            .lock()
+            .unwrap()
+            .push((item.number, note.into(), false));
         Ok(())
     }
     fn close(&self, item: &Item, note: &str) -> Result<(), ApiError> {
         if *self.fail_mirror.lock().unwrap() {
             return Err(ApiError::new(ErrorKind::Unavailable, "down"));
         }
-        self.sent.lock().unwrap().push((item.number, note.into(), true));
+        self.sent
+            .lock()
+            .unwrap()
+            .push((item.number, note.into(), true));
         Ok(())
     }
 }
@@ -90,7 +101,12 @@ fn world() -> (Scratch, Arc<Daemon>, ProjectId) {
 }
 
 fn task_for(d: &Arc<Daemon>, n: u64) -> Option<Task> {
-    let row = d.store.tracker_items("scratch").unwrap().into_iter().find(|r| r.number == n)?;
+    let row = d
+        .store
+        .tracker_items("scratch")
+        .unwrap()
+        .into_iter()
+        .find(|r| r.number == n)?;
     d.world().unwrap().tasks.get(&TaskId(row.task)).cloned()
 }
 
@@ -105,20 +121,41 @@ fn outside_issues_are_ignored_until_the_owner_labels_them_and_stay_untrusted() {
         item(2, "A drive-by", "stranger", &[]),
         item(3, "A stranger's, labeled", "stranger", &["mason"]),
         pr,
-        Item { open: false, ..item(4, "Closed before we met", &owner, &[]) },
+        Item {
+            open: false,
+            ..item(4, "Closed before we met", &owner, &[])
+        },
     ];
     let sum = sync_items(&d, pid, "mason", &items);
     assert_eq!((sum.imported, sum.ignored), (2, 2), "{sum:?}");
     assert_eq!(task_for(&d, 1).unwrap().trust, TrustSource::Owner);
-    assert!(task_for(&d, 2).is_none(), "an unlabeled stranger's issue is not a task");
-    assert_eq!(task_for(&d, 3).unwrap().trust, TrustSource::Outside, "labeled, but the words are still untrusted");
+    assert!(
+        task_for(&d, 2).is_none(),
+        "an unlabeled stranger's issue is not a task"
+    );
+    assert_eq!(
+        task_for(&d, 3).unwrap().trust,
+        TrustSource::Outside,
+        "labeled, but the words are still untrusted"
+    );
     assert!(task_for(&d, 5).is_none(), "a pull request is never a task");
     // The owner labels the drive-by: the next look imports it.
-    let sum = sync_items(&d, pid, "mason", &[item(2, "A drive-by", "stranger", &["mason"])]);
+    let sum = sync_items(
+        &d,
+        pid,
+        "mason",
+        &[item(2, "A drive-by", "stranger", &["mason"])],
+    );
     assert_eq!(sum.imported, 1);
     assert_eq!(task_for(&d, 2).unwrap().trust, TrustSource::Outside);
     // Looking again changes nothing.
-    assert_eq!(sync_items(&d, pid, "mason", &items[..3]), mason_daemon::tracker::Summary { ignored: 0, ..Default::default() });
+    assert_eq!(
+        sync_items(&d, pid, "mason", &items[..3]),
+        mason_daemon::tracker::Summary {
+            ignored: 0,
+            ..Default::default()
+        }
+    );
 }
 
 #[test]
@@ -127,14 +164,20 @@ fn the_tracker_owns_title_body_priority_and_closure() {
     let owner = d.cfg.owner_names[0].clone();
     sync_items(&d, pid, "mason", &[item(1, "Old title", &owner, &[])]);
     let t = task_for(&d, 1).unwrap();
-    assert_eq!((t.title.as_str(), t.priority), ("Old title", Priority::Normal));
+    assert_eq!(
+        (t.title.as_str(), t.priority),
+        ("Old title", Priority::Normal)
+    );
     let mut edited = item(1, "New title", &owner, &[]);
     edited.body = "new body".into();
     edited.priority = "urgent".into();
     let sum = sync_items(&d, pid, "mason", std::slice::from_ref(&edited));
     assert_eq!(sum.updated, 1);
     let t = task_for(&d, 1).unwrap();
-    assert_eq!((t.title.as_str(), t.body.as_str(), t.priority), ("New title", "new body", Priority::Urgent));
+    assert_eq!(
+        (t.title.as_str(), t.body.as_str(), t.priority),
+        ("New title", "new body", Priority::Urgent)
+    );
     // Closed there: the task is cancelled; its state is the database's, but closure is the tracker's.
     edited.open = false;
     let sum = sync_items(&d, pid, "mason", &[edited]);
@@ -147,26 +190,57 @@ fn the_tracker_owns_title_body_priority_and_closure() {
 fn state_is_mirrored_out_best_effort_and_never_blocks_work() {
     let (_s, d, pid) = world();
     let owner = d.cfg.owner_names[0].clone();
-    sync_items(&d, pid, "mason", &[item(1, "Lands", &owner, &[]), item(2, "Fails", &owner, &[])]);
+    sync_items(
+        &d,
+        pid,
+        "mason",
+        &[item(1, "Lands", &owner, &[]), item(2, "Fails", &owner, &[])],
+    );
     let (t1, t2) = (task_for(&d, 1).unwrap().id, task_for(&d, 2).unwrap().id);
     let fake = Fake::default();
     // Nothing to say yet.
     mirror_out(&d, pid, &fake);
     assert!(fake.sent.lock().unwrap().is_empty());
-    d.emit(EventKind::Canceled { task: t2, delete_branch: false }).unwrap();
+    d.emit(EventKind::Canceled {
+        task: t2,
+        delete_branch: false,
+    })
+    .unwrap();
     // Make t1 land and t2 fail through the real events: put both in a step first.
     let def = d.current_def(pid);
     d.emit(EventKind::Admitted {
         task: t1,
-        entry: Some(Entry { def: def.hash.clone(), step: "land".into(), state: State::Landing, route: Route::Explore }),
+        entry: Some(Entry {
+            def: def.hash.clone(),
+            step: "land".into(),
+            state: State::Landing,
+            route: Route::Explore,
+        }),
     })
     .unwrap();
-    d.emit(EventKind::StepSucceeded { task: t1, next: Some(Next { step: String::new(), state: State::Landed }) }).ok();
+    d.emit(EventKind::StepSucceeded {
+        task: t1,
+        next: Some(Next {
+            step: String::new(),
+            state: State::Landed,
+        }),
+    })
+    .ok();
     // The tracker is down: mirroring fails, and nothing else is affected.
     *fake.fail_mirror.lock().unwrap() = true;
     mirror_out(&d, pid, &fake);
     assert!(fake.sent.lock().unwrap().is_empty());
-    assert_eq!(d.store.tracker_items("scratch").unwrap().iter().find(|r| r.number == 1).unwrap().mirrored, "", "not remembered, so it is tried again");
+    assert_eq!(
+        d.store
+            .tracker_items("scratch")
+            .unwrap()
+            .iter()
+            .find(|r| r.number == 1)
+            .unwrap()
+            .mirrored,
+        "",
+        "not remembered, so it is tried again"
+    );
     // It comes back: the landing closes the issue, once.
     *fake.fail_mirror.lock().unwrap() = false;
     mirror_out(&d, pid, &fake);
@@ -182,37 +256,58 @@ fn polling_is_conditional_a_permanent_error_stops_it_and_a_refresh_tries_once_mo
     let (_s, d, pid) = world();
     let owner = d.cfg.owner_names[0].clone();
     let fake = Fake::default();
-    fake.script.lock().unwrap().push(Ok(Listing::Items { items: vec![item(1, "One", &owner, &[])], etag: Some("\"e1\"".into()) }));
+    fake.script.lock().unwrap().push(Ok(Listing::Items {
+        items: vec![item(1, "One", &owner, &[])],
+        etag: Some("\"e1\"".into()),
+    }));
     let sum = poll_once(&d, pid, &fake, &cfg()).unwrap();
     assert_eq!(sum.imported, 1);
     // The next look carries the ETag and the answer is "unchanged".
     let sum = poll_once(&d, pid, &fake, &cfg()).unwrap();
     assert_eq!(sum, Default::default());
-    assert_eq!(fake.seen_etags.lock().unwrap().clone(), vec![None, Some("\"e1\"".to_string())]);
+    assert_eq!(
+        fake.seen_etags.lock().unwrap().clone(),
+        vec![None, Some("\"e1\"".to_string())]
+    );
     // The repository is gone: a permanent error. The poll stops and the owner is told at once.
-    fake.script.lock().unwrap().push(Err(ApiError::new(ErrorKind::NotFound, "HTTP 404")));
+    fake.script
+        .lock()
+        .unwrap()
+        .push(Err(ApiError::new(ErrorKind::NotFound, "HTTP 404")));
     let e = poll_once(&d, pid, &fake, &cfg()).unwrap_err();
     assert!(e.contains("stopped"), "{e}");
     assert!(d.tracker_stopped(pid).is_some());
     assert!(
-        mason_daemon::attention::alerts_now(&d).iter().any(|(_, k, t)| k == "tracker" && t.contains("stopped")),
+        mason_daemon::attention::alerts_now(&d)
+            .iter()
+            .any(|(_, k, t)| k == "tracker" && t.contains("stopped")),
         "attention is raised at once"
     );
     // A refresh asks once more; found again, the poll runs and the alert clears.
     d.tracker_refresh(pid);
     assert!(d.tracker_stopped(pid).is_none());
     poll_once(&d, pid, &fake, &cfg()).unwrap();
-    assert!(!mason_daemon::attention::alerts_now(&d).iter().any(|(_, k, _)| k == "tracker"));
+    assert!(!mason_daemon::attention::alerts_now(&d)
+        .iter()
+        .any(|(_, k, _)| k == "tracker"));
 }
 
 #[test]
 fn an_outage_is_retried_with_backoff_not_stopped() {
     let (_s, d, pid) = world();
     let fake = Fake::default();
-    fake.script.lock().unwrap().push(Err(ApiError::new(ErrorKind::Unavailable, "HTTP 503")));
+    fake.script
+        .lock()
+        .unwrap()
+        .push(Err(ApiError::new(ErrorKind::Unavailable, "HTTP 503")));
     assert!(poll_once(&d, pid, &fake, &cfg()).is_err());
-    assert!(d.tracker_stopped(pid).is_none(), "an outage is not permanent");
-    assert!(mason_daemon::attention::alerts_now(&d).iter().any(|(_, k, t)| k == "tracker" && t.contains("trying again")));
+    assert!(
+        d.tracker_stopped(pid).is_none(),
+        "an outage is not permanent"
+    );
+    assert!(mason_daemon::attention::alerts_now(&d)
+        .iter()
+        .any(|(_, k, t)| k == "tracker" && t.contains("trying again")));
 }
 
 #[test]
@@ -231,21 +326,38 @@ fn a_webhook_is_acted_on_only_when_its_signature_verifies() {
     let post = |sig: &str, body: &str| {
         let d = d.clone();
         let (sig, body) = (sig.to_string(), body.to_string());
-        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async move {
-            use tower::ServiceExt;
-            let req = axum::http::Request::builder()
-                .method("POST")
-                .uri("/hooks/github")
-                .header("x-hub-signature-256", sig)
-                .body(axum::body::Body::from(body))
-                .unwrap();
-            mason_daemon::http::api_router(d).oneshot(req).await.unwrap().status().as_u16()
-        })
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async move {
+                use tower::ServiceExt;
+                let req = axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/hooks/github")
+                    .header("x-hub-signature-256", sig)
+                    .body(axum::body::Body::from(body))
+                    .unwrap();
+                mason_daemon::http::api_router(d)
+                    .oneshot(req)
+                    .await
+                    .unwrap()
+                    .status()
+                    .as_u16()
+            })
     };
     assert_eq!(post(&sig, &body), 200);
     assert_eq!(post("sha256=00", &body), 401, "a bad signature is refused");
-    assert_eq!(post(&sig, &body.replace("labeled", "closed")), 401, "a changed body is refused");
+    assert_eq!(
+        post(&sig, &body.replace("labeled", "closed")),
+        401,
+        "a changed body is refused"
+    );
     let other = json!({"repository": {"full_name": "someone/else"}}).to_string();
     let sig2 = format!("sha256={}", hex(&hmac_sha256(b"s3cret", other.as_bytes())));
-    assert_eq!(post(&sig2, &other), 401, "a repository the project does not track is refused");
+    assert_eq!(
+        post(&sig2, &other),
+        401,
+        "a repository the project does not track is refused"
+    );
 }

@@ -172,18 +172,29 @@ fn run(point: &str, mode: &str) -> Result<(), String> {
     // Nothing of the batch is left on the host: no candidate branch, no open pull request.
     let end = Instant::now() + Duration::from_secs(40);
     loop {
-        let refs = sh(&s.origin, &["for-each-ref", "--format=%(refname:short)", "refs/heads/mason"]);
+        let refs = sh(
+            &s.origin,
+            &[
+                "for-each-ref",
+                "--format=%(refname:short)",
+                "refs/heads/mason",
+            ],
+        );
         let open_prs = std::fs::read_dir(s.root.path().join("host-state/prs"))
             .into_iter()
             .flatten()
             .flatten()
-            .filter(|e| std::fs::read_to_string(e.path()).is_ok_and(|t| t.contains("\"state\":\"open\"")))
+            .filter(|e| {
+                std::fs::read_to_string(e.path()).is_ok_and(|t| t.contains("\"state\":\"open\""))
+            })
             .count();
         if refs.trim().is_empty() && open_prs == 0 {
             break;
         }
         if Instant::now() > end {
-            return Err(format!("left on the host: branches [{refs}], {open_prs} open pull request(s)"));
+            return Err(format!(
+                "left on the host: branches [{refs}], {open_prs} open pull request(s)"
+            ));
         }
         std::thread::sleep(Duration::from_millis(200));
     }
@@ -249,9 +260,30 @@ fn killing_the_daemon_at_each_landing_phase_of_a_batch_with_a_culprit_loses_and_
 #[test]
 fn killing_the_daemon_during_ci_or_a_pull_request_leaves_nothing_behind_and_lands_once() {
     let cases: &[(&str, &[&str])] = &[
-        ("direct-ci", &["ci_pushed", "ci_finished", "batch_red", "batch_before_promote", "batch_after_promote"]),
-        ("pr-batch", &["pr_pushed", "pr_opened", "pr_checked", "batch_before_promote", "batch_after_promote"]),
-        ("host-queue", &["pr_opened", "batch_before_promote", "batch_after_promote"]),
+        (
+            "direct-ci",
+            &[
+                "ci_pushed",
+                "ci_finished",
+                "batch_red",
+                "batch_before_promote",
+                "batch_after_promote",
+            ],
+        ),
+        (
+            "pr-batch",
+            &[
+                "pr_pushed",
+                "pr_opened",
+                "pr_checked",
+                "batch_before_promote",
+                "batch_after_promote",
+            ],
+        ),
+        (
+            "host-queue",
+            &["pr_opened", "batch_before_promote", "batch_after_promote"],
+        ),
     ];
     let jobs: Vec<(String, String)> = cases
         .iter()
@@ -265,10 +297,20 @@ fn killing_the_daemon_during_ci_or_a_pull_request_leaves_nothing_behind_and_land
                 .map(|(m, p)| (format!("{m} @ {p}"), sc.spawn(move || run(p, m))))
                 .collect();
             hs.into_iter()
-                .map(|(n, h)| (n, h.join().unwrap_or_else(|_| Err("the scenario panicked".into()))))
+                .map(|(n, h)| {
+                    (
+                        n,
+                        h.join()
+                            .unwrap_or_else(|_| Err("the scenario panicked".into())),
+                    )
+                })
                 .collect()
         });
-        failures.extend(results.into_iter().filter_map(|(n, r)| r.err().map(|e| format!("{n}: {e}"))));
+        failures.extend(
+            results
+                .into_iter()
+                .filter_map(|(n, r)| r.err().map(|e| format!("{n}: {e}"))),
+        );
     }
     assert!(failures.is_empty(), "\n{}", failures.join("\n"));
 }

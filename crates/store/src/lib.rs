@@ -1212,12 +1212,22 @@ impl Store {
 
     pub fn set_ref_number(&self, id: u64, number: u64) -> Result<(), StoreError> {
         self.write(move |c| {
-            c.execute("UPDATE landing_refs SET number = ?2 WHERE id = ?1", params![id as i64, number as i64]).map(|_| ())
+            c.execute(
+                "UPDATE landing_refs SET number = ?2 WHERE id = ?1",
+                params![id as i64, number as i64],
+            )
+            .map(|_| ())
         })
     }
 
     pub fn remove_ref(&self, id: u64) -> Result<(), StoreError> {
-        self.write(move |c| c.execute("UPDATE landing_refs SET removed = 1 WHERE id = ?1", params![id as i64]).map(|_| ()))
+        self.write(move |c| {
+            c.execute(
+                "UPDATE landing_refs SET removed = 1 WHERE id = ?1",
+                params![id as i64],
+            )
+            .map(|_| ())
+        })
     }
 
     /// Refs and PRs not yet cleaned up, of a project.

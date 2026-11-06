@@ -114,6 +114,7 @@ mod tests {
             priority_jump: false,
             card_rewriter: None,
             overlay_text: String::new(),
+            services: Default::default(),
         }
     }
 

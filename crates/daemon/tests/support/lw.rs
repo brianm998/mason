@@ -9,8 +9,8 @@ use mason_core::*;
 use mason_daemon::Daemon;
 use mason_landing::git;
 use serde_json::json;
-use std::sync::Arc;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 const CHECKS: &str = r#"#!/bin/sh
@@ -61,7 +61,11 @@ pub fn world(landing_toml: &str, files: &[(&str, &str)]) -> W {
 }
 
 /// `extra`: more of the project file (its `[host]`, `[ci]` tables).
-pub fn world_with(landing_toml: &str, extra: &dyn Fn(&Scratch) -> String, files: &[(&str, &str)]) -> W {
+pub fn world_with(
+    landing_toml: &str,
+    extra: &dyn Fn(&Scratch) -> String,
+    files: &[(&str, &str)],
+) -> W {
     let s = Scratch::new("true", json!({"steps": {}}));
     s.write_project("scratch", "true", &extra(&s));
     let definition = def();
@@ -159,7 +163,6 @@ impl W {
     }
 }
 
-
 /// Fake CI: `trigger` runs the integration suite over the pushed commit and records
 /// the result (sleeping first if the tree holds `slow.ci`); `status` reads it.
 pub fn ci_scripts(root: &Path, origin: &Path) -> (String, String, PathBuf) {
@@ -192,7 +195,6 @@ pub fn ci_section(s: &Scratch) -> (String, PathBuf) {
         log,
     )
 }
-
 
 pub fn host_section(s: &Scratch, approval: bool, queue: bool) -> String {
     format!(

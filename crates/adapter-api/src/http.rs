@@ -97,14 +97,19 @@ impl Http for Curl {
         netguard::check(&r.url).map_err(|e| Transport(e.to_string()))?;
         let mut cfg = String::new();
         let q = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
-        cfg.push_str(&format!("url = \"{}\"\nrequest = \"{}\"\n", q(&r.url), q(&r.method)));
+        cfg.push_str(&format!(
+            "url = \"{}\"\nrequest = \"{}\"\n",
+            q(&r.url),
+            q(&r.method)
+        ));
         for (k, v) in &r.headers {
             if k.contains(['\n', '\r']) || v.contains(['\n', '\r']) {
                 return Err(Transport("a header contains a newline".into()));
             }
             cfg.push_str(&format!("header = \"{}: {}\"\n", q(k), q(v)));
         }
-        let hdr = std::env::temp_dir().join(format!("mason-curl-{}-{}", std::process::id(), nonce()));
+        let hdr =
+            std::env::temp_dir().join(format!("mason-curl-{}-{}", std::process::id(), nonce()));
         let mut cmd = Command::new("curl");
         cmd.args(["-sS", "--max-time", &self.timeout_s.to_string(), "-D"])
             .arg(&hdr)
@@ -113,23 +118,36 @@ impl Http for Curl {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         if let Some(b) = &r.body {
-            cfg.push_str(&format!("data-binary = \"{}\"\n", q(b).replace('\n', "\\n")));
+            cfg.push_str(&format!(
+                "data-binary = \"{}\"\n",
+                q(b).replace('\n', "\\n")
+            ));
         }
-        let mut child = cmd.spawn().map_err(|e| Transport(format!("cannot run curl: {e}")))?;
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| Transport(format!("cannot run curl: {e}")))?;
         child
             .stdin
             .take()
             .ok_or_else(|| Transport("no stdin".into()))?
             .write_all(cfg.as_bytes())
             .map_err(|e| Transport(e.to_string()))?;
-        let out = child.wait_with_output().map_err(|e| Transport(e.to_string()))?;
+        let out = child
+            .wait_with_output()
+            .map_err(|e| Transport(e.to_string()))?;
         let head = std::fs::read_to_string(&hdr).unwrap_or_default();
         let _ = std::fs::remove_file(&hdr);
         if !out.status.success() {
-            return Err(Transport(String::from_utf8_lossy(&out.stderr).trim().to_string()));
+            return Err(Transport(
+                String::from_utf8_lossy(&out.stderr).trim().to_string(),
+            ));
         }
         // The last block of headers (after any redirects or 100-continue).
-        let block = head.split("\r\n\r\n").filter(|b| b.starts_with("HTTP/")).last().unwrap_or("");
+        let block = head
+            .split("\r\n\r\n")
+            .filter(|b| b.starts_with("HTTP/"))
+            .last()
+            .unwrap_or("");
         let mut lines = block.lines();
         let status = lines
             .next()
@@ -185,14 +203,19 @@ impl Recorded {
             let r = &e["response"];
             script.push(Entry {
                 method: e["method"].as_str().unwrap_or("GET").to_string(),
-                url: e["url"].as_str().ok_or("an entry needs a `url`")?.to_string(),
+                url: e["url"]
+                    .as_str()
+                    .ok_or("an entry needs a `url`")?
+                    .to_string(),
                 status: r["status"].as_u64().map(|s| s as u16),
                 transport: e["transport_error"].as_str().map(String::from),
                 headers: r["headers"]
                     .as_object()
                     .map(|o| {
                         o.iter()
-                            .map(|(k, v)| (k.to_ascii_lowercase(), v.as_str().unwrap_or("").to_string()))
+                            .map(|(k, v)| {
+                                (k.to_ascii_lowercase(), v.as_str().unwrap_or("").to_string())
+                            })
                             .collect()
                     })
                     .unwrap_or_default(),
@@ -230,13 +253,19 @@ impl Recorded {
 
 impl Http for Recorded {
     fn send(&self, r: &Request) -> Result<Response, Transport> {
-        self.seen.lock().unwrap_or_else(|e| e.into_inner()).push(r.clone());
+        self.seen
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(r.clone());
         let mut s = self.script.lock().unwrap_or_else(|e| e.into_inner());
         let Some(e) = s
             .iter_mut()
             .find(|e| (!e.used || e.repeat) && e.method == r.method && r.url.contains(&e.url))
         else {
-            return Err(Transport(format!("no recorded response for {} {}", r.method, r.url)));
+            return Err(Transport(format!(
+                "no recorded response for {} {}",
+                r.method, r.url
+            )));
         };
         e.used = true;
         if let Some(t) = &e.transport {
@@ -244,7 +273,11 @@ impl Http for Recorded {
         }
         Ok(Response {
             status: e.status.unwrap_or(200),
-            headers: e.headers.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+            headers: e
+                .headers
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
             body: e.body.clone(),
         })
     }

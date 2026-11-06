@@ -40,7 +40,10 @@ impl ApiError {
     /// Will retrying change anything? A permanent error stops the poll and
     /// raises attention at once, rather than retrying for a day.
     pub fn permanent(&self) -> bool {
-        matches!(self.kind, ErrorKind::NotFound | ErrorKind::Invalid | ErrorKind::Auth)
+        matches!(
+            self.kind,
+            ErrorKind::NotFound | ErrorKind::Invalid | ErrorKind::Auth
+        )
     }
 }
 
@@ -57,16 +60,27 @@ pub fn classify(status: u16, headers: &[(String, String)], body: &str) -> Option
     if (200..300).contains(&status) || status == 304 {
         return None;
     }
-    let h = |n: &str| headers.iter().find(|(k, _)| k == n).map(|(_, v)| v.as_str());
+    let h = |n: &str| {
+        headers
+            .iter()
+            .find(|(k, _)| k == n)
+            .map(|(_, v)| v.as_str())
+    };
     let msg = serde_json::from_str::<serde_json::Value>(body)
         .ok()
         .and_then(|v| v["message"].as_str().map(String::from))
         .unwrap_or_else(|| body.chars().take(200).collect());
     let detail = format!("HTTP {status}: {msg}");
     let retry = h("retry-after").and_then(|v| v.trim().parse().ok());
-    let limited = status == 429 || (status == 403 && (retry.is_some() || h("x-ratelimit-remaining") == Some("0")));
+    let limited = status == 429
+        || (status == 403 && (retry.is_some() || h("x-ratelimit-remaining") == Some("0")));
     Some(if limited {
-        ApiError::new(ErrorKind::RateLimited { retry_after_s: retry }, detail)
+        ApiError::new(
+            ErrorKind::RateLimited {
+                retry_after_s: retry,
+            },
+            detail,
+        )
     } else {
         match status {
             404 => ApiError::new(ErrorKind::NotFound, detail),
@@ -82,7 +96,9 @@ pub fn classify(status: u16, headers: &[(String, String)], body: &str) -> Option
 /// What one poll found.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Observed {
-    Changed { etag: Option<String> },
+    Changed {
+        etag: Option<String>,
+    },
     /// 304: nothing changed, and it did not count against the rate limit.
     Unchanged,
     Failed(ApiError),
@@ -94,9 +110,14 @@ pub enum PollEvent {
     Changed,
     Quiet,
     /// A transient problem: next try at this time (seconds on the caller's clock).
-    Backoff { until: u64, why: String },
+    Backoff {
+        until: u64,
+        why: String,
+    },
     /// A permanent problem: the poll stops and the owner is told at once.
-    Stopped { why: String },
+    Stopped {
+        why: String,
+    },
 }
 
 /// One thing being watched, with its ETag, its schedule and its backoff.
@@ -169,7 +190,9 @@ impl Poller {
                     .min(self.max_backoff_s);
                 let wait = match e.kind {
                     // The service said how long; never come back sooner.
-                    ErrorKind::RateLimited { retry_after_s: Some(s) } => s.max(1),
+                    ErrorKind::RateLimited {
+                        retry_after_s: Some(s),
+                    } => s.max(1),
                     _ => exp,
                 };
                 self.next_at = now + wait;
@@ -272,7 +295,10 @@ pub struct Item {
 /// One poll of a list: new content with its ETag, or "unchanged".
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Listing {
-    Items { items: Vec<Item>, etag: Option<String> },
+    Items {
+        items: Vec<Item>,
+        etag: Option<String>,
+    },
     NotModified,
 }
 
@@ -325,23 +351,38 @@ mod tests {
     use super::*;
 
     fn h(v: &[(&str, &str)]) -> Vec<(String, String)> {
-        v.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+        v.iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
     }
 
     #[test]
     fn statuses_are_classified() {
         assert!(classify(200, &[], "").is_none() && classify(304, &[], "").is_none());
-        assert_eq!(classify(404, &[], "{\"message\":\"Not Found\"}").unwrap().kind, ErrorKind::NotFound);
+        assert_eq!(
+            classify(404, &[], "{\"message\":\"Not Found\"}")
+                .unwrap()
+                .kind,
+            ErrorKind::NotFound
+        );
         assert_eq!(classify(422, &[], "{}").unwrap().kind, ErrorKind::Invalid);
         assert_eq!(classify(401, &[], "").unwrap().kind, ErrorKind::Auth);
         assert_eq!(classify(403, &[], "").unwrap().kind, ErrorKind::Auth);
         assert_eq!(
-            classify(403, &h(&[("x-ratelimit-remaining", "0")]), "").unwrap().kind,
-            ErrorKind::RateLimited { retry_after_s: None }
+            classify(403, &h(&[("x-ratelimit-remaining", "0")]), "")
+                .unwrap()
+                .kind,
+            ErrorKind::RateLimited {
+                retry_after_s: None
+            }
         );
         assert_eq!(
-            classify(429, &h(&[("retry-after", "30")]), "").unwrap().kind,
-            ErrorKind::RateLimited { retry_after_s: Some(30) }
+            classify(429, &h(&[("retry-after", "30")]), "")
+                .unwrap()
+                .kind,
+            ErrorKind::RateLimited {
+                retry_after_s: Some(30)
+            }
         );
         assert_eq!(classify(503, &[], "").unwrap().kind, ErrorKind::Unavailable);
         assert!(classify(404, &[], "").unwrap().permanent());
@@ -354,15 +395,24 @@ mod tests {
     fn a_permanent_error_stops_the_poll_at_once() {
         let mut p = Poller::new(60);
         assert!(p.due(0));
-        let e = p.observe(0, Observed::Failed(ApiError::new(ErrorKind::NotFound, "gone")));
+        let e = p.observe(
+            0,
+            Observed::Failed(ApiError::new(ErrorKind::NotFound, "gone")),
+        );
         assert!(matches!(e, PollEvent::Stopped { .. }));
-        assert!(!p.due(10_000_000), "a stopped poll never asks again by itself");
+        assert!(
+            !p.due(10_000_000),
+            "a stopped poll never asks again by itself"
+        );
         assert_eq!(p.failures(), 0, "no retry was scheduled");
         // Opening the task asks once more; a permanent error stops it again.
         p.refresh();
         assert!(p.due(0));
         assert!(matches!(
-            p.observe(0, Observed::Failed(ApiError::new(ErrorKind::Invalid, "still"))),
+            p.observe(
+                0,
+                Observed::Failed(ApiError::new(ErrorKind::Invalid, "still"))
+            ),
             PollEvent::Stopped { .. }
         ));
     }
@@ -374,12 +424,17 @@ mod tests {
         let mut waits = vec![];
         let mut now = 0;
         for _ in 0..4 {
-            let PollEvent::Backoff { until, .. } = p.observe(now, out()) else { panic!() };
+            let PollEvent::Backoff { until, .. } = p.observe(now, out()) else {
+                panic!()
+            };
             waits.push(until - now);
             now = until;
         }
         assert_eq!(waits, [20, 40, 80, 160], "doubling");
-        assert!(matches!(p.observe(now, Observed::Unchanged), PollEvent::Quiet));
+        assert!(matches!(
+            p.observe(now, Observed::Unchanged),
+            PollEvent::Quiet
+        ));
         assert_eq!(p.failures(), 0);
         assert!(!p.due(now + 5) && p.due(now + 10));
     }
@@ -390,20 +445,38 @@ mod tests {
         p.max_backoff_s = 300;
         let mut last = 0;
         for _ in 0..10 {
-            if let PollEvent::Backoff { until, .. } = p.observe(0, Observed::Failed(ApiError::new(ErrorKind::Unavailable, "x"))) {
+            if let PollEvent::Backoff { until, .. } = p.observe(
+                0,
+                Observed::Failed(ApiError::new(ErrorKind::Unavailable, "x")),
+            ) {
                 last = until;
             }
         }
         assert_eq!(last, 300);
-        let e = ApiError::new(ErrorKind::RateLimited { retry_after_s: Some(900) }, "slow down");
-        let PollEvent::Backoff { until, .. } = p.observe(1000, Observed::Failed(e)) else { panic!() };
+        let e = ApiError::new(
+            ErrorKind::RateLimited {
+                retry_after_s: Some(900),
+            },
+            "slow down",
+        );
+        let PollEvent::Backoff { until, .. } = p.observe(1000, Observed::Failed(e)) else {
+            panic!()
+        };
         assert_eq!(until, 1900, "never sooner than the service said");
     }
 
     #[test]
     fn changed_stores_the_etag() {
         let mut p = Poller::new(30);
-        assert_eq!(p.observe(5, Observed::Changed { etag: Some("\"a\"".into()) }), PollEvent::Changed);
+        assert_eq!(
+            p.observe(
+                5,
+                Observed::Changed {
+                    etag: Some("\"a\"".into())
+                }
+            ),
+            PollEvent::Changed
+        );
         assert_eq!(p.etag.as_deref(), Some("\"a\""));
         assert!(!p.due(34) && p.due(35));
     }

@@ -366,7 +366,10 @@ pub fn service_problems(c: &LandingConfig, remote: bool, host: bool, ci: bool) -
     let mut p = vec![];
     let m = c.mode;
     if (m.uses_candidate_ref() || m.uses_pr()) && !remote {
-        p.push(format!("mode `{}` needs a remote that the CI system or the host can see", m.name()));
+        p.push(format!(
+            "mode `{}` needs a remote that the CI system or the host can see",
+            m.name()
+        ));
     }
     if m.uses_candidate_ref() && !ci {
         p.push(format!("mode `{}` needs a `[ci]` section in the project file: the build system that runs on the candidate ref", m.name()));
@@ -439,11 +442,26 @@ ladder = ["rerun-failed", "blame-by-impact", "bisect", "ask"]
 
     #[test]
     fn every_mode_parses_and_says_what_it_needs() {
-        for m in ["direct", "direct-ci", "local-only", "local-only-ci", "pr-each", "pr-batch", "host-queue"] {
+        for m in [
+            "direct",
+            "direct-ci",
+            "local-only",
+            "local-only-ci",
+            "pr-each",
+            "pr-batch",
+            "host-queue",
+        ] {
             let c = parse(&format!("mode = \"{m}\"")).unwrap();
             assert_eq!(c.mode.name(), m);
         }
-        let need = |m: &str, remote, host, ci| service_problems(&parse(&format!("mode = \"{m}\"")).unwrap(), remote, host, ci);
+        let need = |m: &str, remote, host, ci| {
+            service_problems(
+                &parse(&format!("mode = \"{m}\"")).unwrap(),
+                remote,
+                host,
+                ci,
+            )
+        };
         assert!(need("direct", false, false, false).is_empty());
         assert!(need("local-only", false, false, false).is_empty());
         assert!(need("direct-ci", true, false, true).is_empty());

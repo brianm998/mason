@@ -160,23 +160,39 @@ fn check_landing(p: &ProjectCfg, base: &str, out: &mut Vec<Finding>) {
         Ok(c) => c,
         Err(ps) => {
             for x in ps {
-                out.push(fail(format!("project {name}: .mason/landing.toml on {base}: {x}")));
+                out.push(fail(format!(
+                    "project {name}: .mason/landing.toml on {base}: {x}"
+                )));
             }
             return;
         }
     };
-    let needs = mason_landing::config::service_problems(&cfg, p.remote.is_some(), p.services.host.is_some(), p.services.ci.is_some());
+    let needs = mason_landing::config::service_problems(
+        &cfg,
+        p.remote.is_some(),
+        p.services.host.is_some(),
+        p.services.ci.is_some(),
+    );
     if needs.is_empty() {
-        out.push(ok(format!("project {name}: landing mode `{}` has what it needs", cfg.mode.name())));
+        out.push(ok(format!(
+            "project {name}: landing mode `{}` has what it needs",
+            cfg.mode.name()
+        )));
     }
     for x in needs {
         out.push(fail(format!("project {name}: {x}")));
     }
-    let github_ci = p.services.ci.as_ref().is_some_and(|c| matches!(c.kind, mason_daemon::config::CiKind::GithubActions { .. }));
+    let github_ci = p
+        .services
+        .ci
+        .as_ref()
+        .is_some_and(|c| matches!(c.kind, mason_daemon::config::CiKind::GithubActions { .. }));
     if github_ci && cfg.mode.uses_candidate_ref() {
         let problems = mason_adapters::github::workflow_problems_at(&p.path, base);
         if problems.is_empty() {
-            out.push(ok(format!("project {name}: a workflow runs on `mason/ci/**` or by dispatch")));
+            out.push(ok(format!(
+                "project {name}: a workflow runs on `mason/ci/**` or by dispatch"
+            )));
         }
         for x in problems {
             out.push(fail(format!("project {name}: {}", x.0)));
@@ -271,7 +287,13 @@ mod tests {
     fn repo_with(files: &[(&str, &str)]) -> tempfile::TempDir {
         let d = tempfile::tempdir().unwrap();
         let run = |a: &[&str]| {
-            assert!(std::process::Command::new("git").args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(a).current_dir(d.path()).status().unwrap().success());
+            assert!(std::process::Command::new("git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(a)
+                .current_dir(d.path())
+                .status()
+                .unwrap()
+                .success());
         };
         run(&["init", "-q", "-b", "main"]);
         for (p, t) in files {
@@ -287,12 +309,16 @@ mod tests {
     fn project(repo: &Path, extra: &str) -> ProjectCfg {
         mason_daemon::config::parse_project(
             "p",
-            &format!("path = \"{}\"\nbase = \"main\"\ntest = \"true\"\nremote = \"origin\"\n{extra}", repo.display()),
+            &format!(
+                "path = \"{}\"\nbase = \"main\"\ntest = \"true\"\nremote = \"origin\"\n{extra}",
+                repo.display()
+            ),
         )
         .unwrap()
     }
 
-    const GH_CI: &str = "[ci]\nkind = \"github-actions\"\nrepo = \"o/r\"\ntoken = \"env:GH_TOKEN\"\n";
+    const GH_CI: &str =
+        "[ci]\nkind = \"github-actions\"\nrepo = \"o/r\"\ntoken = \"env:GH_TOKEN\"\n";
 
     #[test]
     fn doctor_checks_that_ci_can_run_on_a_candidate_ref() {
@@ -302,10 +328,17 @@ mod tests {
             ("on:\n  push:\n    branches: [\"mason/ci/**\"]\n", true),
             ("on:\n  workflow_dispatch:\n", true),
         ] {
-            let d = repo_with(&[(landing, "mode = \"direct-ci\"\n"), (".github/workflows/ci.yml", wf)]);
+            let d = repo_with(&[
+                (landing, "mode = \"direct-ci\"\n"),
+                (".github/workflows/ci.yml", wf),
+            ]);
             let mut out = vec![];
             check_landing(&project(d.path(), GH_CI), "main", &mut out);
-            let bad = out.iter().filter(|f| matches!(f.level, Level::Fail)).map(|f| f.text.clone()).collect::<Vec<_>>();
+            let bad = out
+                .iter()
+                .filter(|f| matches!(f.level, Level::Fail))
+                .map(|f| f.text.clone())
+                .collect::<Vec<_>>();
             assert_eq!(bad.is_empty(), ok, "{wf:?}: {bad:?}");
             if !ok {
                 assert!(bad[0].contains("mason/ci/**"), "{bad:?}");
@@ -315,7 +348,9 @@ mod tests {
         let d = repo_with(&[(landing, "mode = \"direct-ci\"\n")]);
         let mut out = vec![];
         check_landing(&project(d.path(), GH_CI), "main", &mut out);
-        assert!(out.iter().any(|f| matches!(f.level, Level::Fail) && f.text.contains("no workflow")));
+        assert!(out
+            .iter()
+            .any(|f| matches!(f.level, Level::Fail) && f.text.contains("no workflow")));
     }
 
     #[test]
@@ -323,11 +358,21 @@ mod tests {
         let d = repo_with(&[(".mason/landing.toml", "mode = \"pr-batch\"\n")]);
         let mut out = vec![];
         check_landing(&project(d.path(), ""), "main", &mut out);
-        assert!(out.iter().any(|f| matches!(f.level, Level::Fail) && f.text.contains("[host]")), "{:?}", out.iter().map(|f| &f.text).collect::<Vec<_>>());
-        let d = repo_with(&[(".mason/landing.toml", "mode = \"direct\"\n[[tier]]\nname = \"batch\"\nci = \"x\"\n")]);
+        assert!(
+            out.iter()
+                .any(|f| matches!(f.level, Level::Fail) && f.text.contains("[host]")),
+            "{:?}",
+            out.iter().map(|f| &f.text).collect::<Vec<_>>()
+        );
+        let d = repo_with(&[(
+            ".mason/landing.toml",
+            "mode = \"direct\"\n[[tier]]\nname = \"batch\"\nci = \"x\"\n",
+        )]);
         let mut out = vec![];
         check_landing(&project(d.path(), ""), "main", &mut out);
-        assert!(out.iter().any(|f| matches!(f.level, Level::Fail) && f.text.contains("direct-ci")));
+        assert!(out
+            .iter()
+            .any(|f| matches!(f.level, Level::Fail) && f.text.contains("direct-ci")));
         // No landing.toml: the default, direct landing, which needs nothing.
         let d = repo_with(&[("README", "x")]);
         let mut out = vec![];

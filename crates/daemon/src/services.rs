@@ -23,8 +23,16 @@ fn github(api: &str, repo: &str, tok: &str, workflow: Option<String>) -> Result<
 pub fn host(p: &ProjectCfg) -> Result<Option<Arc<dyn GitHostAdapter>>, String> {
     Ok(match &p.services.host {
         None => None,
-        Some(HostCfg::Github { api, repo, token }) => Some(Arc::new(github(api, repo, token, None)?)),
-        Some(HostCfg::Fake { dir, remote, checks, require_approval, merge_queue }) => Some(Arc::new(FakeHost {
+        Some(HostCfg::Github { api, repo, token }) => {
+            Some(Arc::new(github(api, repo, token, None)?))
+        }
+        Some(HostCfg::Fake {
+            dir,
+            remote,
+            checks,
+            require_approval,
+            merge_queue,
+        }) => Some(Arc::new(FakeHost {
             dir: dir.clone(),
             remote: remote.clone(),
             checks_cmd: checks.clone(),
@@ -34,13 +42,25 @@ pub fn host(p: &ProjectCfg) -> Result<Option<Arc<dyn GitHostAdapter>>, String> {
     })
 }
 
-pub fn ci(p: &ProjectCfg) -> Result<Option<(Arc<dyn BuildSystemAdapter>, CiCfg)>, String> {
+pub type Ci = (Arc<dyn BuildSystemAdapter>, CiCfg);
+pub type Tracker = (Arc<dyn TrackerAdapter>, TrackerCfg);
+
+pub fn ci(p: &ProjectCfg) -> Result<Option<Ci>, String> {
     Ok(match &p.services.ci {
         None => None,
         Some(c) => {
             let a: Arc<dyn BuildSystemAdapter> = match &c.kind {
-                CiKind::GithubActions { api, repo, token, workflow } => Arc::new(github(api, repo, token, workflow.clone())?),
-                CiKind::Command { trigger, status, cwd } => Arc::new(CommandCi {
+                CiKind::GithubActions {
+                    api,
+                    repo,
+                    token,
+                    workflow,
+                } => Arc::new(github(api, repo, token, workflow.clone())?),
+                CiKind::Command {
+                    trigger,
+                    status,
+                    cwd,
+                } => Arc::new(CommandCi {
                     trigger: trigger.clone(),
                     status: status.clone(),
                     cwd: cwd.clone(),
@@ -51,9 +71,12 @@ pub fn ci(p: &ProjectCfg) -> Result<Option<(Arc<dyn BuildSystemAdapter>, CiCfg)>
     })
 }
 
-pub fn tracker(p: &ProjectCfg) -> Result<Option<(Arc<dyn TrackerAdapter>, TrackerCfg)>, String> {
+pub fn tracker(p: &ProjectCfg) -> Result<Option<Tracker>, String> {
     Ok(match &p.services.tracker {
         None => None,
-        Some(t) => Some((Arc::new(github(&t.api, &t.repo, &t.token, None)?), t.clone())),
+        Some(t) => Some((
+            Arc::new(github(&t.api, &t.repo, &t.token, None)?),
+            t.clone(),
+        )),
     })
 }

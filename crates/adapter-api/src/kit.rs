@@ -19,15 +19,21 @@ pub fn host_kit(h: &dyn GitHostAdapter, s: &HostScenario) -> Vec<String> {
     let mut p = vec![];
     let caps = h.capabilities();
     if !caps.pull_requests {
-        return vec!["a git host that cannot open pull requests has nothing for this kit to check".into()];
+        return vec![
+            "a git host that cannot open pull requests has nothing for this kit to check".into(),
+        ];
     }
     match h.pr_status(999_999) {
         Err(e) if e.kind == ErrorKind::NotFound => {}
-        other => p.push(format!("the status of a PR that does not exist must be NotFound, got {other:?}")),
+        other => p.push(format!(
+            "the status of a PR that does not exist must be NotFound, got {other:?}"
+        )),
     }
     match h.open_pr(&s.base, &s.missing_head, "t", "b") {
         Err(e) if e.permanent() => {}
-        other => p.push(format!("a PR from a branch that is not there must be refused for good, got {other:?}")),
+        other => p.push(format!(
+            "a PR from a branch that is not there must be refused for good, got {other:?}"
+        )),
     }
     let pr = match h.open_pr(&s.base, &s.good_head, "A change", "Why.") {
         Ok(pr) => pr,
@@ -70,19 +76,28 @@ pub fn tracker_kit(t: &dyn TrackerAdapter) -> Vec<String> {
     let caps = t.capabilities();
     let (items, etag) = match t.list(None) {
         Ok(Listing::Items { items, etag }) => (items, etag),
-        other => return vec![format!("an unconditional list returns items, got {other:?}")],
+        other => {
+            return vec![format!(
+                "an unconditional list returns items, got {other:?}"
+            )]
+        }
     };
     if items.iter().any(|i| i.number == 0 || i.title.is_empty()) {
         p.push("every item has a number and a title".into());
     }
-    if items.iter().any(|i| !["urgent", "high", "normal", "low"].contains(&i.priority.as_str())) {
+    if items
+        .iter()
+        .any(|i| !["urgent", "high", "normal", "low"].contains(&i.priority.as_str()))
+    {
         p.push("an item's priority is one of urgent, high, normal, low".into());
     }
     if caps.conditional_polling {
         match (&etag, t.list(etag.as_deref())) {
             (Some(_), Ok(Listing::NotModified)) => {}
             (None, _) => p.push("a tracker that polls conditionally returns an ETag".into()),
-            (_, other) => p.push(format!("asking again with the ETag must say NotModified, got {other:?}")),
+            (_, other) => p.push(format!(
+                "asking again with the ETag must say NotModified, got {other:?}"
+            )),
         }
     }
     p

@@ -25,14 +25,20 @@ impl TokenRef {
         match s.split_once(':') {
             Some(("env", n)) if !n.is_empty() => Ok(TokenRef::Env(n.into())),
             Some(("file", p)) if !p.is_empty() => Ok(TokenRef::File(p.into())),
-            _ => Err(format!("a token is a reference: `env:NAME` or `file:/path`, not {s:?}")),
+            _ => Err(format!(
+                "a token is a reference: `env:NAME` or `file:/path`, not {s:?}"
+            )),
         }
     }
 
     pub fn read(&self) -> Result<String, ApiError> {
         let v = match self {
-            TokenRef::Env(n) => std::env::var(n).map_err(|_| format!("the environment variable {n} is not set")),
-            TokenRef::File(p) => std::fs::read_to_string(p).map_err(|e| format!("cannot read {}: {e}", p.display())),
+            TokenRef::Env(n) => {
+                std::env::var(n).map_err(|_| format!("the environment variable {n} is not set"))
+            }
+            TokenRef::File(p) => {
+                std::fs::read_to_string(p).map_err(|e| format!("cannot read {}: {e}", p.display()))
+            }
         };
         match v {
             Ok(t) if !t.trim().is_empty() => Ok(t.trim().to_string()),
@@ -87,8 +93,12 @@ impl GitHub {
 
     fn json(&self, r: Request) -> Result<Value, ApiError> {
         let resp = self.send(r)?;
-        serde_json::from_str(&resp.body)
-            .map_err(|e| ApiError::new(ErrorKind::Unavailable, format!("the answer is not JSON: {e}")))
+        serde_json::from_str(&resp.body).map_err(|e| {
+            ApiError::new(
+                ErrorKind::Unavailable,
+                format!("the answer is not JSON: {e}"),
+            )
+        })
     }
 
     fn body(v: Value) -> String {
@@ -118,7 +128,9 @@ impl GitHostAdapter for GitHub {
             &Self::body(json!({"title": title, "head": head, "base": base, "body": body})),
         ))?;
         Ok(PrRef {
-            number: v["number"].as_u64().ok_or_else(|| ApiError::new(ErrorKind::Invalid, "no PR number in the answer"))?,
+            number: v["number"]
+                .as_u64()
+                .ok_or_else(|| ApiError::new(ErrorKind::Invalid, "no PR number in the answer"))?,
             url: v["html_url"].as_str().unwrap_or_default().to_string(),
         })
     }
@@ -133,10 +145,16 @@ impl GitHostAdapter for GitHub {
         } else {
             PrState::Open
         };
-        let runs = self.json(Request::get(&self.url(&format!("/commits/{head}/check-runs"))))?;
+        let runs = self.json(Request::get(
+            &self.url(&format!("/commits/{head}/check-runs")),
+        ))?;
         let (checks, failed) = fold_checks(&runs["check_runs"]);
         let reviews = self.json(Request::get(&self.url(&format!("/pulls/{number}/reviews"))))?;
-        let review = fold_reviews(&reviews, pr["mergeable_state"].as_str().unwrap_or(""), checks);
+        let review = fold_reviews(
+            &reviews,
+            pr["mergeable_state"].as_str().unwrap_or(""),
+            checks,
+        );
         Ok(PrStatus {
             state,
             checks,
@@ -166,10 +184,16 @@ impl GitHostAdapter for GitHub {
             "query": "mutation($id: ID!) { enqueuePullRequest(input: {pullRequestId: $id}) { mergeQueueEntry { id } } }",
             "variables": {"id": node},
         });
-        let v = self.json(Request::post(&format!("{}/graphql", self.api), &q.to_string()))?;
+        let v = self.json(Request::post(
+            &format!("{}/graphql", self.api),
+            &q.to_string(),
+        ))?;
         // GraphQL answers 200 with errors in the body.
         if let Some(e) = v["errors"].as_array().and_then(|e| e.first()) {
-            return Err(ApiError::new(ErrorKind::Invalid, e["message"].as_str().unwrap_or("refused")));
+            return Err(ApiError::new(
+                ErrorKind::Invalid,
+                e["message"].as_str().unwrap_or("refused"),
+            ));
         }
         Ok(())
     }
@@ -219,12 +243,18 @@ fn fold_reviews(reviews: &Value, mergeable_state: &str, checks: Checks) -> Revie
     for r in reviews.as_array().into_iter().flatten() {
         let state = r["state"].as_str().unwrap_or("");
         if matches!(state, "APPROVED" | "CHANGES_REQUESTED" | "DISMISSED") {
-            last.insert(r["user"]["login"].as_str().unwrap_or("?").to_string(), state.to_string());
+            last.insert(
+                r["user"]["login"].as_str().unwrap_or("?").to_string(),
+                state.to_string(),
+            );
         }
     }
     if last.values().any(|s| s == "CHANGES_REQUESTED") {
         Review::ChangesRequested
-    } else if mergeable_state == "blocked" && checks == Checks::Green && !last.values().any(|s| s == "APPROVED") {
+    } else if mergeable_state == "blocked"
+        && checks == Checks::Green
+        && !last.values().any(|s| s == "APPROVED")
+    {
         Review::Required
     } else {
         Review::Satisfied
@@ -248,7 +278,8 @@ impl TrackerAdapter for GitHub {
     }
 
     fn list(&self, etag: Option<&str>) -> Result<Listing, ApiError> {
-        let mut r = Request::get(&self.url("/issues?state=all&per_page=100&sort=updated&direction=desc"));
+        let mut r =
+            Request::get(&self.url("/issues?state=all&per_page=100&sort=updated&direction=desc"));
         if let Some(e) = etag {
             r = r.with("If-None-Match", e);
         }
@@ -256,8 +287,12 @@ impl TrackerAdapter for GitHub {
         if resp.status == 304 {
             return Ok(Listing::NotModified);
         }
-        let v: Value = serde_json::from_str(&resp.body)
-            .map_err(|e| ApiError::new(ErrorKind::Unavailable, format!("the answer is not JSON: {e}")))?;
+        let v: Value = serde_json::from_str(&resp.body).map_err(|e| {
+            ApiError::new(
+                ErrorKind::Unavailable,
+                format!("the answer is not JSON: {e}"),
+            )
+        })?;
         let items = v
             .as_array()
             .ok_or_else(|| ApiError::new(ErrorKind::Unavailable, "a list of issues was expected"))?
@@ -344,7 +379,9 @@ impl BuildSystemAdapter for GitHub {
     }
 
     fn status(&self, run: &str) -> Result<CiState, ApiError> {
-        let v = self.json(Request::get(&self.url(&format!("/actions/runs?head_sha={run}&per_page=20"))))?;
+        let v = self.json(Request::get(
+            &self.url(&format!("/actions/runs?head_sha={run}&per_page=20")),
+        ))?;
         let runs = v["workflow_runs"].as_array().cloned().unwrap_or_default();
         if runs.is_empty() {
             return Ok(CiState::Pending); // not started yet
@@ -354,7 +391,12 @@ impl BuildSystemAdapter for GitHub {
         }
         let bad: Vec<&Value> = runs
             .iter()
-            .filter(|r| !matches!(r["conclusion"].as_str(), Some("success" | "neutral" | "skipped")))
+            .filter(|r| {
+                !matches!(
+                    r["conclusion"].as_str(),
+                    Some("success" | "neutral" | "skipped")
+                )
+            })
             .collect();
         if bad.is_empty() {
             return Ok(CiState::Green);
@@ -362,9 +404,13 @@ impl BuildSystemAdapter for GitHub {
         let mut failed = vec![];
         for r in &bad {
             if let Some(id) = r["id"].as_u64() {
-                let jobs = self.json(Request::get(&self.url(&format!("/actions/runs/{id}/jobs"))))?;
+                let jobs =
+                    self.json(Request::get(&self.url(&format!("/actions/runs/{id}/jobs"))))?;
                 for j in jobs["jobs"].as_array().into_iter().flatten() {
-                    if !matches!(j["conclusion"].as_str(), Some("success" | "neutral" | "skipped")) {
+                    if !matches!(
+                        j["conclusion"].as_str(),
+                        Some("success" | "neutral" | "skipped")
+                    ) {
                         failed.push(j["name"].as_str().unwrap_or("?").to_string());
                     }
                 }
@@ -373,7 +419,10 @@ impl BuildSystemAdapter for GitHub {
         Ok(CiState::Red {
             summary: format!(
                 "{} failed",
-                bad.iter().filter_map(|r| r["name"].as_str()).collect::<Vec<_>>().join(", ")
+                bad.iter()
+                    .filter_map(|r| r["name"].as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
             failed,
         })
@@ -412,7 +461,12 @@ pub fn workflow_problems(repo: &Path) -> Vec<Problem> {
         .into_iter()
         .flatten()
         .flatten()
-        .filter(|e| matches!(e.path().extension().and_then(|x| x.to_str()), Some("yml" | "yaml")))
+        .filter(|e| {
+            matches!(
+                e.path().extension().and_then(|x| x.to_str()),
+                Some("yml" | "yaml")
+            )
+        })
         .map(|e| std::fs::read_to_string(e.path()).unwrap_or_default())
         .collect();
     scan_workflows(&texts)

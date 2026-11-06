@@ -1273,9 +1273,13 @@ fn main() {
                 "refresh" => {
                     let id = task_id(&mut a);
                     finish(&a);
-                    let r = or_die(d.call("POST", &format!("/tasks/{id}/refresh"), Some(&json!({}))));
+                    let r =
+                        or_die(d.call("POST", &format!("/tasks/{id}/refresh"), Some(&json!({}))));
                     if r["tracker"] == false {
-                        println!("{}", r["note"].as_str().unwrap_or("the project has no tracker"));
+                        println!(
+                            "{}",
+                            r["note"].as_str().unwrap_or("the project has no tracker")
+                        );
                     } else if let Some(e) = r["error"].as_str() {
                         println!("the tracker did not answer: {e}");
                     } else {
