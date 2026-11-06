@@ -374,7 +374,12 @@ pub struct ContractState {
 /// accepted (for example: the commit really is the branch tip).
 pub type Validator = Box<dyn Fn(&str, &Value) -> Result<(), Vec<String>> + Send + Sync>;
 
+/// Called with an accepted terminal submission *before* the agent is told it
+/// was accepted, so a controller can make it durable first.
+pub type OnAccept = Box<dyn Fn(&str, &Value) + Send + Sync>;
+
 struct Inner {
+    on_accept: Mutex<Option<OnAccept>>,
     validator: Option<Validator>,
     step: StepKind,
     state: Mutex<ContractState>,
@@ -400,6 +405,7 @@ impl ContractHandle {
         validator: Option<Validator>,
     ) -> ContractHandle {
         ContractHandle(Arc::new(Inner {
+            on_accept: Mutex::new(None),
             validator,
             step,
             state: Mutex::new(ContractState::default()),
@@ -412,6 +418,18 @@ impl ContractHandle {
 
     pub fn step(&self) -> StepKind {
         self.0.step
+    }
+
+    /// Run `f` for each accepted terminal submission, before replying to the agent.
+    pub fn set_on_accept(&self, f: OnAccept) {
+        *self.0.on_accept.lock().unwrap_or_else(|e| e.into_inner()) = Some(f);
+    }
+
+    /// Re-establish a submission accepted before the controller restarted.
+    pub fn restore_accepted(&self, tool: &str, args: Value) {
+        let mut st = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+        st.accepted = Some((tool.to_string(), args));
+        self.0.flag.set();
     }
 
     pub fn flag(&self) -> SubmissionFlag {
@@ -481,6 +499,15 @@ impl ContractHandle {
                 if let Err(problems) = v(tool, args) {
                     return reject(&mut st, problems);
                 }
+            }
+            if let Some(f) = self
+                .0
+                .on_accept
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+            {
+                f(tool, args);
             }
             st.accepted = Some((tool.to_string(), args.clone()));
             self.0.flag.set();
@@ -842,6 +869,34 @@ mod tests {
         assert!(
             c.call("submit_change", &json!({"summary": "s", "head": "0123abc"}))
                 .ok
+        );
+    }
+
+    #[test]
+    fn an_accepted_submission_can_be_persisted_first_and_restored_later() {
+        let seen = Arc::new(Mutex::new(vec![]));
+        let c = ContractHandle::new(StepKind::Explore, Box::new(NoChecks));
+        let s2 = seen.clone();
+        c.set_on_accept(Box::new(move |tool, args| {
+            s2.lock().unwrap().push((tool.to_string(), args.clone()))
+        }));
+        assert!(c.call("submit_plan", &json!({"summary": ""})).ok == false);
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "rejections are not persisted"
+        );
+        assert!(c.call("submit_plan", &plan()).ok);
+        assert_eq!(seen.lock().unwrap().len(), 1);
+        // A new controller starts from what was persisted.
+        let fresh = ContractHandle::new(StepKind::Explore, Box::new(NoChecks));
+        assert!(!fresh.flag().is_set());
+        let (tool, args) = seen.lock().unwrap()[0].clone();
+        fresh.restore_accepted(&tool, args);
+        assert!(fresh.flag().is_set());
+        assert_eq!(fresh.state().accepted.unwrap().0, "submit_plan");
+        assert!(
+            !fresh.call("submit_plan", &plan()).ok,
+            "and it is not accepted twice"
         );
     }
 

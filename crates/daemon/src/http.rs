@@ -90,6 +90,7 @@ fn task_json(d: &Daemon, w: &World, t: &Task, detail: bool) -> Value {
             v["branch"] = json!(p.branch(t.id.0));
             v["worktree"] = json!(p.worktree(&d.cfg, t.id.0).display().to_string());
         }
+        v["failure"] = t.failure.as_ref().map_or(Value::Null, |f| json!(f));
         v["question"] = t
             .decision
             .and_then(|id| w.decisions.get(&id))

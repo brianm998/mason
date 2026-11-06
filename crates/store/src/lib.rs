@@ -20,7 +20,7 @@ use std::sync::mpsc::{channel, Sender};
 use std::sync::Mutex;
 use std::thread::JoinHandle;
 
-pub use codec::{state_name, CodecError};
+pub use codec::{decode as decode_event, encode as encode_event, state_name, CodecError};
 
 #[derive(Debug)]
 pub enum StoreError {

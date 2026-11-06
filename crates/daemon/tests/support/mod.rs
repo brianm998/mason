@@ -190,7 +190,7 @@ pub fn state_of(d: &Arc<Daemon>, t: TaskId) -> State {
 pub fn wait_state(d: &Arc<Daemon>, t: TaskId, want: State, secs: u64) {
     wait_for(&format!("task {t} to reach {want:?}"), secs, || {
         let s = state_of(d, t);
-        if s != want && matches!(s, State::Failed | State::Canceled | State::Landed) && s != want {
+        if s != want && matches!(s, State::Failed | State::Canceled | State::Landed) {
             let evs: Vec<String> = d
                 .store
                 .read_since(0, 1000)
@@ -313,4 +313,23 @@ impl Scratch {
             now == state
         });
     }
+}
+
+/// With `UPDATE_FIXTURES=1`, save a run's event log as a replay fixture:
+/// one `at<TAB>kind<TAB>payload` line per event, in the on-disk text format.
+pub fn maybe_record(d: &Arc<Daemon>, name: &str) {
+    if std::env::var("UPDATE_FIXTURES").is_err() {
+        return;
+    }
+    let mut out = String::new();
+    for e in d.store.read_since(0, 100_000).unwrap() {
+        let (kind, payload) = mason_store::encode_event(&e.event.kind);
+        out.push_str(&format!("{}\t{kind}\t{payload}\n", e.event.at.0));
+    }
+    let path = format!(
+        "{}/tests/fixtures/{name}.events",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    std::fs::create_dir_all(std::path::Path::new(&path).parent().unwrap()).unwrap();
+    std::fs::write(path, out).unwrap();
 }

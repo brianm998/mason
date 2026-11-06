@@ -17,6 +17,7 @@ fn a_task_goes_from_queued_to_landed() {
     let t = file_task(&d, "Add a hello file");
     wait_state(&d, t, State::Landed, 60);
     wait_for("the job to finish cleaning up", 15, || d.job_count() == 0);
+    maybe_record(&d, "landed_task");
 
     let w = d.world().unwrap();
     let task = &w.tasks[&t];
@@ -84,6 +85,8 @@ fn red_tests_send_the_task_back_to_development_and_then_it_lands() {
     let d = s.start();
     let t = file_task(&d, "Needs a second try");
     wait_state(&d, t, State::Landed, 90);
+    wait_for("cleanup", 15, || d.job_count() == 0);
+    maybe_record(&d, "red_then_green");
     let w = d.world().unwrap();
     assert_eq!(w.tasks[&t].attempts[&State::Developing], 2);
     assert_eq!(w.tasks[&t].attempts[&State::Testing], 2);

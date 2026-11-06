@@ -330,6 +330,9 @@ fn main() {
                     println!("  branch    {}", t["branch"].as_str().unwrap_or(""));
                     println!("  worktree  {}", t["worktree"].as_str().unwrap_or(""));
                     println!("  failures  {}", t["failures"]);
+                    if let Some(f) = t["failure"].as_str() {
+                        println!("  failed    {f}");
+                    }
                     if let Some(q) = t["question"].as_str() {
                         println!("  question  {q}");
                     }

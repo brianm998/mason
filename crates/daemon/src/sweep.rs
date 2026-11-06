@@ -112,7 +112,13 @@ pub fn sweep_once(d: &Arc<Daemon>) -> Vec<String> {
         if git::branch_exists(&p.path, &p.branch(t.id.0))
             && confirmed(&st, format!("branch:{}", t.id))
         {
-            d.record_bug("leftover_branch", &format!("task {} was cancelled with its branch to be deleted, but the branch remained; deleted it", t.id));
+            d.record_bug(
+                "leftover_branch",
+                &format!(
+                    "task {} is finished but its branch remained; deleted it",
+                    t.id
+                ),
+            );
             filed.push("leftover_branch".to_string());
             crate::jobs::cleanup(d, t.id, true);
         }

@@ -6,7 +6,7 @@
 //! landing) and carries on.
 //!
 //! Crash-injection points used here (see `crate::crash`):
-//! `job_started:<State>`, `before_event:<State>`, `land_after_fetch`,
+//! `job_started:<State>`, `before_event:<State>`, `accepted_persisted`, `land_after_fetch`,
 //! `land_after_fold`, `land_after_ff`, `land_after_push`, `land_before_event`,
 //! `land_after_event`.
 
@@ -303,6 +303,26 @@ fn agent_job(c: &Ctx, kind: StepKind) {
     let validator = (kind == StepKind::Develop)
         .then(|| change_validator(c.wt.clone(), c.project.base_ref(), c.branch.clone()));
     let contract = ContractHandle::with_validator(kind, checks, validator);
+    // An accepted submission is made durable before the agent is told, so a
+    // daemon that dies before recording the step's result still knows it.
+    let accepted_file = dir.join(format!("accepted-r{}.json", c.run.0));
+    if let Some(v) = std::fs::read_to_string(&accepted_file)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+    {
+        contract.restore_accepted(v["tool"].as_str().unwrap_or_default(), v["args"].clone());
+    }
+    {
+        let (path, d) = (accepted_file.clone(), c.d.clone());
+        contract.set_on_accept(Box::new(move |tool, args| {
+            let tmp = path.with_extension("tmp");
+            let body = serde_json::json!({"tool": tool, "args": args}).to_string();
+            if std::fs::write(&tmp, body).is_ok() {
+                let _ = std::fs::rename(&tmp, &path);
+            }
+            d.crash.point("accepted_persisted");
+        }));
+    }
     if let Err(e) = contract.serve(&c.d.cfg.sockets_dir().join(format!("{key}.sock"))) {
         return c.fail(format!("cannot serve the step contract: {e}"));
     }
@@ -314,6 +334,9 @@ fn agent_job(c: &Ctx, kind: StepKind) {
     spec.tool_timeout = c.project.tool_timeout;
     spec.deadline = Some(c.project.step_timeout);
     spec.run_key = Some(key.clone());
+    // Wired before any reattach, so a session found again sees what was already accepted.
+    spec.accepted = contract.flag();
+    spec.contract = Some(contract.clone());
 
     let runner = StepRunner::new(&adapter, RunnerConfig::default());
     let mut report = match adapter.reattach(&key, spec.clone()) {

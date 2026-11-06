@@ -350,7 +350,62 @@ impl Daemon {
                 self.start_job(r.task, r.step, r.id);
             }
         }
+        // Cleanup after landing is an effect too, and it can be lost to a crash.
+        let d = self.clone();
+        let _ = self.pool.spawn(move || d.recover_cleanup());
         self.admit();
+    }
+
+    /// Remove the worktree and branch of any task that is finished with them
+    /// (landed, or cancelled with its branch to be deleted) but still has them.
+    /// Safe to repeat; part of normal recovery, so it files no bug.
+    fn recover_cleanup(self: &Arc<Self>) {
+        use mason_landing::git;
+        let Ok(w) = self.world() else { return };
+        let done = |t: &Task| {
+            t.state == State::Landed || (t.state == State::Canceled && !t.cancel_keeps_branch)
+        };
+        let mut stale: Vec<TaskId> = vec![];
+        for (pid, p) in &self.projects {
+            let refs = git::run(
+                &p.path,
+                &[
+                    "for-each-ref",
+                    "--format=%(refname:short)",
+                    &format!("refs/heads/mason/{}/", p.id),
+                ],
+            )
+            .unwrap_or_default();
+            for b in refs.lines() {
+                if let Some(n) = b.rsplit("/t").next().and_then(|x| x.parse::<u64>().ok()) {
+                    if w.tasks
+                        .get(&TaskId(n))
+                        .is_some_and(|t| t.project == *pid && done(t))
+                    {
+                        stale.push(TaskId(n));
+                    }
+                }
+            }
+            for e in std::fs::read_dir(self.cfg.worktrees_dir().join(&p.id))
+                .into_iter()
+                .flatten()
+                .flatten()
+            {
+                if let Ok(n) = e.file_name().to_string_lossy().parse::<u64>() {
+                    if w.tasks
+                        .get(&TaskId(n))
+                        .is_some_and(|t| t.project == *pid && done(t))
+                    {
+                        stale.push(TaskId(n));
+                    }
+                }
+            }
+        }
+        stale.sort();
+        stale.dedup();
+        for t in stale {
+            crate::jobs::cleanup(self, t, true);
+        }
     }
 
     pub fn task_dir(&self, task: TaskId) -> PathBuf {

@@ -120,4 +120,6 @@ pub struct Task {
     pub attempts: BTreeMap<State, u32>,
     pub decision: Option<DecisionId>,
     pub cancel_keeps_branch: bool,
+    /// Why the task last failed, until it is retried.
+    pub failure: Option<String>,
 }
