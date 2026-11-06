@@ -39,8 +39,10 @@ Where the plan or design left room, Stage 6 chose the following. Any can be over
   resources are Stage 8.
 - **Cancel keeps the worktree on disk** (and the branch, unless asked): only a
   landed task, or one cancelled with `--delete-branch`, is cleaned up.
-- **Agents load only project settings** (`--setting-sources project,local`). The
-  first real run showed the agent inheriting the owner's personal global
-  CLAUDE.md through `HOME`; user-level instructions and hooks have no place in an
-  unattended pipeline. Agents still tend to add a `Co-Authored-By` trailer: that
-  is Claude Code's own default, not private data.
+- **Agents use the owner's normal Claude settings.** The first real run showed
+  an agent picking up the owner's personal user-level CLAUDE.md through `HOME`.
+  Stage 6 first restricted agents to project settings (`--setting-sources
+  project,local`); **the owner chose to allow user settings**, so that
+  restriction was removed. This means user-level instructions, and any user-level
+  hooks, apply to unattended agents. Agents also tend to add a `Co-Authored-By`
+  trailer, which is Claude Code's own default.

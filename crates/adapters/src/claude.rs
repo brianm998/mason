@@ -187,10 +187,9 @@ impl ClaudeAdapter {
             .map(String::from),
         );
         args.extend(["--permission-mode".into(), "dontAsk".into()]);
-        // Only the project's own settings and instructions: never the owner's
-        // personal user-level ones (their CLAUDE.md, their hooks), which have no
-        // business steering an unattended pipeline.
-        args.extend(["--setting-sources".into(), "project,local".into()]);
+        // Settings sources are left at the CLI's default, so the owner's own
+        // user-level settings and instructions apply to their agents (their choice,
+        // docs/decisions/0003). Note that user-level hooks run too.
         args.extend(["--append-system-prompt".into(), preamble(spec.step)]);
 
         let stdin = match resume {
@@ -846,16 +845,14 @@ mod tests {
     }
 
     #[test]
-    fn the_owners_personal_settings_are_not_loaded() {
+    fn settings_sources_are_left_at_the_cli_default() {
         let a = adapter(&[("ANTHROPIC_BASE_URL", "http://127.0.0.1:1")]);
         for step in [StepKind::Explore, StepKind::Develop, StepKind::Review] {
             let c = a.build_command(&spec(step), None).unwrap();
-            let at = c
-                .args
-                .iter()
-                .position(|x| x == "--setting-sources")
-                .expect("always set");
-            assert_eq!(c.args[at + 1], "project,local", "no `user` source");
+            assert!(
+                !c.args.iter().any(|x| x == "--setting-sources"),
+                "the owner's user settings apply"
+            );
         }
     }
 
