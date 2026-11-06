@@ -169,16 +169,20 @@ impl DirectLanding<'_> {
         if let Some(r) = self.remote {
             // Plain push: refused by the remote if it is not a fast-forward.
             let dest = format!("{commit}:refs/heads/{}", self.base);
+            let before = git::rev_parse(self.landing_wt, base_ref).ok();
             return match git::run(self.landing_wt, &["push", "--porcelain", r, &dest]) {
                 Ok(_) => Ok(()),
-                Err(e)
-                    if e.stderr.contains("rejected")
-                        || e.stderr.contains("non-fast-forward")
-                        || e.stderr.contains("fetch first") =>
-                {
-                    Err(Promote::Moved)
+                Err(e) => {
+                    // Don't read git's words: ask whether the remote's base moved
+                    // since we looked. If it did, someone else landed first.
+                    let _ = git::run(self.landing_wt, &["fetch", "--prune", r]);
+                    let after = git::rev_parse(self.landing_wt, base_ref).ok();
+                    if before.is_some() && after != before {
+                        Err(Promote::Moved)
+                    } else {
+                        Err(Promote::Err(e.into()))
+                    }
                 }
-                Err(e) => Err(Promote::Err(e.into())),
             };
         }
         // No remote: move the local branch, compare-and-swap, if nobody has it checked out.

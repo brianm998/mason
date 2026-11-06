@@ -327,3 +327,24 @@ fn branch_names_are_validated() {
         assert!(!git::valid_branch(bad), "{bad:?}");
     }
 }
+
+#[test]
+fn a_push_refused_for_another_reason_is_an_error_not_a_race() {
+    use std::os::unix::fs::PermissionsExt;
+    let fx = Fx::new();
+    fx.task("a.txt");
+    // The remote refuses every push (a policy hook), though its base never moved.
+    let hook = fx.origin.join("hooks/pre-receive");
+    std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    std::fs::write(&hook, "#!/bin/sh\necho 'no pushes today' >&2\nexit 1\n").unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    match fx.landing(true).land(&mut || true, &no_point) {
+        Err(LandError::Git(e)) => assert!(
+            e.stderr.contains("no pushes today")
+                || e.stderr.contains("rejected")
+                || e.stderr.contains("failed"),
+            "{e}"
+        ),
+        other => panic!("expected a git error, got {other:?}"),
+    }
+}

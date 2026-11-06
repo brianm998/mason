@@ -45,7 +45,12 @@ pub fn run(cwd: &Path, args: &[&str]) -> Result<String, GitError> {
         Err(GitError {
             args: args.iter().map(|s| s.to_string()).collect(),
             code: out.status.code(),
-            stderr: String::from_utf8_lossy(&out.stderr).to_string(),
+            // Some git versions print the reason for a refused push on stdout.
+            stderr: format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stderr),
+                String::from_utf8_lossy(&out.stdout)
+            ),
         })
     }
 }
