@@ -210,6 +210,18 @@ pub fn run(d: &Arc<Daemon>, task: TaskId, step: State, run: StepRunId) {
         }
     };
     d.crash.point(&format!("job_started:{step:?}"));
+    // Everything the step needs, acquired at once, in rank order across every
+    // project. Time spent waiting is outside every timeout below: they all
+    // start after this returns. An approval waits for a person, not for the
+    // machine, so it takes nothing.
+    let _lease = if c.step.kind == StepType::Approval {
+        None
+    } else {
+        match acquire(&c) {
+            Ok(l) => Some(l),
+            Err(_) => return, // the task was cancelled or retried while it waited
+        }
+    };
     match c.step.kind {
         StepType::Agent => agent_job(&c),
         StepType::Command | StepType::Test => command_job(&c),
@@ -217,6 +229,51 @@ pub fn run(d: &Arc<Daemon>, task: TaskId, step: State, run: StepRunId) {
         StepType::Landing => land_job(&c),
         other => c.fail(format!("step type `{}` cannot run yet", other.name())),
     }
+}
+
+/// Wait for this step's resources (Part 7). Says why in the task's wait, once,
+/// and ends the wait when they are granted.
+fn acquire(c: &Ctx) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
+    use crate::sched::{needs_of, DEFAULT_ACCOUNT};
+    let d = &c.d;
+    let account = (c.step.kind == StepType::Agent).then_some(DEFAULT_ACCOUNT);
+    // A definition names what it uses; a name nobody declared gets its
+    // definition-given limit (or one slot).
+    for name in c.step.uses.keys() {
+        if name != crate::sched::EXCLUSIVE {
+            d.broker
+                .declare(name, c.def.resources.get(name).copied().unwrap_or(1));
+        }
+    }
+    let needs = needs_of(&c.step.uses, account);
+    let rank = match d.world().ok().and_then(|w| w.tasks.get(&c.task).cloned()) {
+        Some(t) => d.rank_for(&t, &c.def, &c.step.name),
+        None => return Err(crate::sched::Cancelled),
+    };
+    let (d2, task, run) = (d.clone(), c.task, c.run);
+    let alive = move || {
+        d2.world()
+            .map(|w| w.open_run(task) == Some(run))
+            .unwrap_or(true)
+    };
+    let mut waited = false;
+    let lease = d.broker.acquire(
+        c.task,
+        &format!("#{}", c.task.0),
+        rank,
+        needs,
+        &alive,
+        &mut |why| {
+            waited = c.emit(EventKind::WaitStarted {
+                task: c.task,
+                on: why.to_string(),
+            });
+        },
+    )?;
+    if waited {
+        c.emit(EventKind::WaitEnded { task: c.task });
+    }
+    Ok(lease)
 }
 
 /// Get the worktree ready: fetch, create it on the task's branch, and bring

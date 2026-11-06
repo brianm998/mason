@@ -456,6 +456,8 @@ dependencies = [
  "mason-definition",
  "mason-engine",
  "mason-landing",
+ "mason-resources",
+ "mason-scheduler",
  "mason-step-host",
  "mason-store",
  "nix",
@@ -500,6 +502,7 @@ dependencies = [
  "mason-daemon",
  "mason-definition",
  "mason-landing",
+ "mason-resources",
  "mason-step-host",
  "serde_json",
  "tempfile",
@@ -508,6 +511,21 @@ dependencies = [
 [[package]]
 name = "mason-protocol"
 version = "0.0.0"
+
+[[package]]
+name = "mason-resources"
+version = "0.0.0"
+dependencies = [
+ "nix",
+ "tempfile",
+]
+
+[[package]]
+name = "mason-scheduler"
+version = "0.0.0"
+dependencies = [
+ "proptest",
+]
 
 [[package]]
 name = "mason-step-host"

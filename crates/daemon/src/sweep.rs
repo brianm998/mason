@@ -57,11 +57,9 @@ pub fn sweep_once(d: &Arc<Daemon>) -> Vec<String> {
     }
 
     // 2. A queued task that could start but wasn't admitted.
-    let active = w.tasks.values().filter(|t| t.state.is_step()).count();
-    if active < d.cfg.max_concurrent {
-        for t in w.tasks.values().filter(|t| {
-            t.state == State::Queued && t.activity == Activity::Waiting(WaitReason::Slot)
-        }) {
+    if let Some(id) = d.next_admission(&w) {
+        {
+            let t = &w.tasks[&id];
             if confirmed(&st, format!("admit:{}", t.id)) {
                 d.record_bug(
                     "missed_admit",
@@ -72,7 +70,6 @@ pub fn sweep_once(d: &Arc<Daemon>) -> Vec<String> {
                 );
                 filed.push("missed_admit".to_string());
                 d.admit();
-                break;
             }
         }
     }

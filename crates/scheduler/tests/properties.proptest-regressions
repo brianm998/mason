@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 48cae4dc661cbc8d61ad3ac1cdd4a47c4c01ed848f1eeb711c8e427448f800d4 # shrinks to jobs = [Job { arrive: 0, run: 5, exclusive: false, uses: [(3, 1)], interactive: false, steps: 1, priority: 0 }, Job { arrive: 0, run: 1, exclusive: false, uses: [], interactive: false, steps: 1, priority: 0 }, Job { arrive: 0, run: 1, exclusive: false, uses: [], interactive: false, steps: 1, priority: 0 }, Job { arrive: 1, run: 1, exclusive: false, uses: [(0, 1), (3, 1)], interactive: false, steps: 1, priority: 0 }, Job { arrive: 5, run: 1, exclusive: false, uses: [(0, 1), (2, 1)], interactive: true, steps: 1, priority: 0 }, Job { arrive: 4, run: 2, exclusive: false, uses: [(2, 2)], interactive: false, steps: 1, priority: 0 }], caps = [1, 1, 1, 1, 1]

@@ -107,6 +107,9 @@ pub struct ProjectCfg {
     /// `unclear`. Optional, and only consulted when the deterministic check is
     /// unsure. Anything but `clear`, or a failure, means explore.
     pub clarity_classifier: Option<String>,
+    /// Opt in to letting top-priority tasks jump the "fewest steps remaining"
+    /// term of the scheduling rank (Part 7). Off by default.
+    pub priority_jump: bool,
     /// The overlay file's text, for the configuration layers.
     pub overlay_text: String,
 }
@@ -187,6 +190,10 @@ pub fn parse_project(id: &str, text: &str) -> Result<ProjectCfg, String> {
             .and_then(|v| v.as_integer())
             .map(|n| n.max(1) as u32),
         clarity_classifier: s("clarity_classifier").filter(|c| !c.trim().is_empty()),
+        priority_jump: doc
+            .get("priority_jumps_progress")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
         overlay_text: text.to_string(),
     })
 }

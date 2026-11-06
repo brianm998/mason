@@ -18,7 +18,7 @@ for p in m["packages"]:
 [ "$(deps mason-engine)" = "mason-core" ] || { echo "mason-engine may depend only on mason-core: $(deps mason-engine)" >&2; exit 1; }
 
 # Source: no IO, clock, threads, randomness or async runtime.
-bash scripts/check-pure.sh crates/core/src crates/engine/src
+bash scripts/check-pure.sh crates/core/src crates/engine/src crates/scheduler/src
 
 # The checker itself rejects a planted violation.
 mkdir "$tmp/bad"; printf 'fn f() { let _ = std::time::SystemTime::now(); }\n' > "$tmp/bad/x.rs"

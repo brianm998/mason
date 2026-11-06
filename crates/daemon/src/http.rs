@@ -95,6 +95,10 @@ fn task_json(d: &Daemon, w: &World, t: &Task, detail: bool) -> Value {
             v["worktree"] = json!(p.worktree(&d.cfg, t.id.0).display().to_string());
         }
         v["definition"] = json!(t.def);
+        v["wait"] = d
+            .broker
+            .explain_task(t.id)
+            .map_or(Value::Null, |w| json!(w));
         v["failure"] = t.failure.as_ref().map_or(Value::Null, |f| json!(f));
         v["question"] = t
             .decision
@@ -654,6 +658,101 @@ async fn overrides_remove(
     Ok(Json(json!({"removed": n})))
 }
 
+async fn resources(Shared(d): Shared<Arc<Daemon>>) -> Res {
+    let d2 = d.clone();
+    let v = d
+        .pool
+        .run(move || d2.broker.snapshot())
+        .await
+        .map_err(pool_err)?;
+    Ok(Json(v))
+}
+
+async fn resource_limit(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res {
+    let (name, units) = (
+        b["resource"].as_str().unwrap_or_default().to_string(),
+        b["units"].as_u64(),
+    );
+    let Some(units) = units.filter(|_| !name.is_empty()) else {
+        return Err(fail(
+            StatusCode::BAD_REQUEST,
+            "give a `resource` and `units`",
+        ));
+    };
+    let d2 = d.clone();
+    d.pool
+        .run(move || {
+            let r = d2.broker.set_limit(&name, units as u32);
+            // A raised limit may free a session for a task that is queued.
+            d2.admit();
+            r
+        })
+        .await
+        .map_err(pool_err)?
+        .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
+    Ok(Json(json!({"ok": true})))
+}
+
+/// An interactive caller asks for resources (`mason run --needs`).
+async fn lease_open(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res {
+    let mut uses = std::collections::BTreeMap::new();
+    for (k, v) in b["uses"].as_object().into_iter().flatten() {
+        match v.as_u64() {
+            Some(n) => drop(uses.insert(k.clone(), n as u32)),
+            None => {
+                return Err(fail(
+                    StatusCode::BAD_REQUEST,
+                    format!("`{k}` needs a count"),
+                ))
+            }
+        }
+    }
+    if uses.is_empty() {
+        return Err(fail(StatusCode::BAD_REQUEST, "name what it needs"));
+    }
+    let label = b["label"].as_str().unwrap_or("interactive").to_string();
+    let d2 = d.clone();
+    let id = d
+        .pool
+        .run(move || d2.broker.lease_open(&label, &uses))
+        .await
+        .map_err(pool_err)?;
+    Ok(Json(json!({"id": id})))
+}
+
+async fn lease_poll(Shared(d): Shared<Arc<Daemon>>, Path(id): Path<u64>) -> Res {
+    use crate::sched::LeaseState;
+    let d2 = d.clone();
+    let s = d
+        .pool
+        .run(move || d2.broker.lease_poll(id))
+        .await
+        .map_err(pool_err)?;
+    Ok(Json(match s {
+        LeaseState::Waiting { explain } => json!({"state": "waiting", "explain": explain}),
+        LeaseState::Granted {
+            classes,
+            exclusive,
+            capacity,
+            locks_dir,
+        } => json!({
+            "state": "granted", "classes": classes, "exclusive": exclusive,
+            "capacity": capacity, "locks_dir": locks_dir.display().to_string(),
+        }),
+        LeaseState::Gone => json!({"state": "gone"}),
+    }))
+}
+
+async fn lease_release(Shared(d): Shared<Arc<Daemon>>, Path(id): Path<u64>) -> Res {
+    let d2 = d.clone();
+    let had = d
+        .pool
+        .run(move || d2.broker.lease_close(id))
+        .await
+        .map_err(pool_err)?;
+    Ok(Json(json!({"released": had})))
+}
+
 /// Render an agent's stream-json journal as readable lines.
 fn render_agent(text: &str) -> String {
     let mut out = String::new();
@@ -802,6 +901,11 @@ pub fn router(d: Arc<Daemon>) -> Router {
         )
         .route("/projects/{name}/overrides/remove", post(overrides_remove))
         .route("/tasks/{id}/logs", get(logs))
+        .route("/resources", get(resources))
+        .route("/resources/limit", post(resource_limit))
+        .route("/leases", post(lease_open))
+        .route("/leases/{id}", get(lease_poll))
+        .route("/leases/{id}/release", post(lease_release))
         .route("/debug/stall", post(debug_stall))
         .with_state(d)
 }

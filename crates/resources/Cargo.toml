@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+[package]
+name = "mason-resources"
+description = "Machine classes held by kernel file locks"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+nix = { version = "0.31.3", features = ["fs", "process"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"

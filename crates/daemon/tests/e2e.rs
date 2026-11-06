@@ -256,16 +256,35 @@ fn admission_respects_the_concurrency_limit() {
     let ts: Vec<TaskId> = (0..2)
         .map(|i| file_task(&d, &format!("task {i}")))
         .collect();
-    let mut max_active = 0;
+    // The limit is on LLM sessions (Part 7): a task not yet claimed stays queued
+    // and gets no worktree, and never more sessions are held than the limit.
+    let (mut max_llm, mut max_unclaimed_step) = (0, 0);
+    let mut queued_while_busy = false;
     wait_for("both to finish", 150, || {
         let w = d.world().unwrap();
-        max_active = max_active.max(w.tasks.values().filter(|t| t.state.is_step()).count());
+        let llm = d.broker.used("llm:claude");
+        max_llm = max_llm.max(llm);
+        max_unclaimed_step = max_unclaimed_step.max(
+            w.tasks
+                .values()
+                .filter(|t| t.state.is_step() && !d.broker.has_lease(t.id))
+                .count(),
+        );
+        queued_while_busy |= llm == 1 && w.tasks.values().any(|t| t.state == State::Queued);
         ts.iter()
             .all(|t| w.tasks[t].state.is_terminal() || w.tasks[t].state == State::Failed)
     });
     assert_eq!(
-        max_active, 1,
-        "never more than max_concurrent in a step at once"
+        max_llm, 1,
+        "exactly the limit, never more, was held at once"
+    );
+    assert!(
+        max_unclaimed_step <= 1,
+        "a claim is never handed out without a free session"
+    );
+    assert!(
+        queued_while_busy,
+        "the second task waited in the queue, unclaimed"
     );
     let w = d.world().unwrap();
     assert!(w.tasks[&ts[0]].landed.is_some(), "the first task lands");

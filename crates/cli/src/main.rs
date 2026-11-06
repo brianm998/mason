@@ -10,6 +10,8 @@
 //! mason task retry <id> [--from exploring|developing|testing|review|landing]
 //! mason logs <id> [--follow]
 //! mason status [--json]
+//! mason run --needs compile[=N],... [--exclusive] [--label L] -- <cmd>...
+//! mason resources [--json] | mason resources limit <resource> <units>
 //! mason doctor
 //! ```
 //! Global: `--data-dir D`, `--config-dir C` (or `MASON_DATA_DIR`, `MASON_CONFIG_DIR`).
@@ -17,6 +19,7 @@
 mod client;
 mod definition;
 mod doctor;
+mod resources;
 
 use client::{CallError, Daemon};
 use serde_json::{json, Value};
@@ -41,6 +44,11 @@ mason: command-line client for the MASON pipeline
   mason logs <id> [--follow]
   mason status [--json]
   mason doctor
+  mason run --needs compile[=N],... [--exclusive] [--label L] -- <cmd>...
+                                      queue for the pipeline's resources, ahead of its work
+  mason resources [--json]            limits, who holds what, and every wait explained
+  mason resources limit <resource> <units>   change a limit while things run (llm:claude, compile, ...)
+  mason hook bash [--needs compile]   optional Claude Code PreToolUse hook: builds go through the queue
   mason definition check [FILE]       validate a definition (default .mason/mason.toml) and dry-run it
   mason definition dry-run [FILE] [--scenarios FILE]
   mason definition show [--project P] | reload [--project P]
@@ -149,9 +157,26 @@ fn main() {
         }
         default_hook(info);
     }));
-    let mut a = Args {
-        rest: std::env::args().skip(1).collect(),
-    };
+    let mut rest: Vec<String> = std::env::args().skip(1).collect();
+    // Everything after `--` in `mason run` belongs to the command, flags included.
+    let mut run_tail: Option<Vec<String>> = None;
+    // (Global options may come first: `mason --data-dir D run ...`.)
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i].as_str() {
+            "--data-dir" | "--config-dir" => i += 2,
+            "run" => {
+                if let Some(j) = rest.iter().position(|x| x == "--") {
+                    run_tail = Some(rest.split_off(j + 1));
+                    rest.pop();
+                }
+                break;
+            }
+            f if f.starts_with("--") => i += 1,
+            _ => break,
+        }
+    }
+    let mut a = Args { rest };
     if a.rest.is_empty() || a.flag("--help") || a.flag("-h") {
         println!("{HELP}");
         return;
@@ -178,6 +203,21 @@ fn main() {
         match a.pos().as_deref() {
             Some("filing") => print!("{}", mason_definition::filing::HELP),
             _ => println!("{HELP}"),
+        }
+        return;
+    }
+
+    if cmd == "hook" {
+        let sub = a.pos().unwrap_or_default();
+        let needs = a.opt("--needs").unwrap_or_else(|| "compile".into());
+        finish(&a);
+        if sub != "bash" {
+            die("the only hook is `mason hook bash`");
+        }
+        let mut input = String::new();
+        let _ = std::io::stdin().read_to_string(&mut input);
+        if let Some(out) = resources::hook_bash(&input, &needs) {
+            println!("{out}");
         }
         return;
     }
@@ -219,6 +259,43 @@ fn main() {
     }
 
     let d: Daemon = or_die(client::find(&data_dir));
+    if cmd == "run" {
+        let mut uses = resources::parse_needs(
+            &a.opt("--needs")
+                .unwrap_or_else(|| die("say what it needs: --needs compile")),
+        )
+        .unwrap_or_else(|e| die(&e));
+        if a.flag("--exclusive") {
+            uses.insert("exclusive".into(), 1);
+        }
+        let label = a.opt("--label");
+        finish(&a);
+        let command = run_tail.filter(|c| !c.is_empty()).unwrap_or_else(|| {
+            die("give the command after `--`: mason run --needs compile -- cargo build")
+        });
+        exit(resources::run(&d, uses, label, &command).unwrap_or_else(|e| die(&e)));
+    }
+    if cmd == "resources" {
+        match a.pos().as_deref() {
+            None => {
+                finish(&a);
+                resources::show(&d, json_out).unwrap_or_else(|e| die(&e));
+            }
+            Some("limit") => {
+                let name = a
+                    .pos()
+                    .unwrap_or_else(|| die("which resource? e.g. llm:claude or compile"));
+                let units: u32 = a
+                    .pos()
+                    .and_then(|u| u.parse().ok())
+                    .unwrap_or_else(|| die("give the new limit as a whole number"));
+                finish(&a);
+                resources::limit(&d, &name, units).unwrap_or_else(|e| die(&e));
+            }
+            Some(other) => die(&format!("unknown resources command {other:?}\n\n{HELP}")),
+        }
+        return;
+    }
     // The project a command is about: --project, or the only one there is.
     let project_of = |a: &mut Args| -> String {
         a.opt("--project").unwrap_or_else(|| {
@@ -598,6 +675,9 @@ fn main() {
                     println!("  project   {}", t["project"].as_str().unwrap_or("?"));
                     println!("  state     {}", t["state"].as_str().unwrap_or("?"));
                     println!("  activity  {}", t["activity"].as_str().unwrap_or("?"));
+                    if let Some(w) = t["wait"].as_str() {
+                        println!("  waiting   {w}");
+                    }
                     if let Some(l) = t["landed"].as_str() {
                         println!("  landed    {l}");
                     }

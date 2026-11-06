@@ -27,6 +27,8 @@ mason-core = { version = "0.0.0", path = "../core" }
 mason-definition = { version = "0.0.0", path = "../definition" }
 mason-engine = { version = "0.0.0", path = "../engine" }
 mason-landing = { version = "0.0.0", path = "../landing" }
+mason-resources = { version = "0.0.0", path = "../resources" }
+mason-scheduler = { version = "0.0.0", path = "../scheduler" }
 mason-step-host = { version = "0.0.0", path = "../step-host" }
 mason-store = { version = "0.0.0", path = "../store" }
 nix = { version = "0.31.3", features = ["process", "signal"] }

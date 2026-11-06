@@ -98,6 +98,32 @@ pub fn after(
     }
 }
 
+/// Steps still to run from `from`, counting `from` itself: the shortest path
+/// through `next` to a step that ends the task, ignoring `on_red` loops. A
+/// fan-out counts its shortest branch. This is what makes tasks comparable
+/// across projects with different graphs (Part 7). An unknown step, or one
+/// that cannot reach the end, counts as the whole graph.
+pub fn steps_remaining(def: &Definition, from: &str) -> u32 {
+    let mut best: std::collections::BTreeMap<&str, u32> = std::collections::BTreeMap::new();
+    let mut frontier = vec![(from, 1u32)];
+    let mut shortest: Option<u32> = None;
+    while let Some((name, depth)) = frontier.pop() {
+        if best.get(name).is_some_and(|d| *d <= depth) {
+            continue;
+        }
+        best.insert(name, depth);
+        let Some(step) = def.step(name) else { continue };
+        if step.next.is_empty() {
+            shortest = Some(shortest.map_or(depth, |s| s.min(depth)));
+            continue;
+        }
+        for n in &step.next {
+            frontier.push((n.as_str(), depth + 1));
+        }
+    }
+    shortest.unwrap_or(def.steps.len() as u32)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -167,5 +193,19 @@ mod tests {
             after(&d, d.step("land").unwrap(), Outcome::Fail, 1, None),
             Transition::Fail(_)
         ));
+    }
+
+    #[test]
+    fn steps_remaining_counts_the_shortest_path_ignoring_loops() {
+        let d = builtin();
+        // explore -> develop -> test -> land
+        assert_eq!(steps_remaining(&d, "explore"), 4);
+        assert_eq!(steps_remaining(&d, "develop"), 3);
+        assert_eq!(steps_remaining(&d, "test"), 2);
+        assert_eq!(steps_remaining(&d, "land"), 1);
+        // `test` loops back to `develop` on red; that does not lengthen anything.
+        assert_eq!(steps_remaining(&d, "develop"), 3);
+        // Unknown steps count as the whole graph.
+        assert_eq!(steps_remaining(&d, "nope"), 4);
     }
 }

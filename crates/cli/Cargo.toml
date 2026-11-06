@@ -19,6 +19,7 @@ path = "src/main.rs"
 mason-daemon = { version = "0.0.0", path = "../daemon" }
 mason-definition = { version = "0.0.0", path = "../definition" }
 mason-landing = { version = "0.0.0", path = "../landing" }
+mason-resources = { version = "0.0.0", path = "../resources" }
 mason-step-host = { version = "0.0.0", path = "../step-host" }
 serde_json = "1.0.154"
 

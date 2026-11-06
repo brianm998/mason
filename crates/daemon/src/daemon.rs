@@ -41,6 +41,7 @@ pub struct Daemon {
     worst_stall_ms: AtomicU64,
     pub(crate) sweep: Mutex<crate::sweep::SweepState>,
     pub(crate) defs: crate::defs::Defs,
+    pub broker: Arc<crate::sched::Broker>,
 }
 
 fn kind_name(k: &EventKind) -> String {
@@ -105,6 +106,13 @@ impl Daemon {
             projects.insert(id, p);
         }
 
+        let rcfg = crate::sched::load_resource_cfg(&cfg.config_dir)?;
+        let broker = crate::sched::Broker::new(
+            cfg.data_dir.join("locks"),
+            cfg.data_dir.join("limits.kv"),
+            &rcfg,
+            cfg.max_concurrent as u32,
+        )?;
         let d = Arc::new(Daemon {
             store,
             projects,
@@ -121,6 +129,7 @@ impl Daemon {
             worst_stall_ms: AtomicU64::new(0),
             sweep: Mutex::default(),
             defs: crate::defs::Defs::default(),
+            broker,
             cfg,
         });
         d.load_definitions();
@@ -312,8 +321,8 @@ impl Daemon {
         }
     }
 
-    /// Start as many queued tasks as there are free slots, oldest first.
-    /// (Ranking across projects and resources is Stage 8.)
+    /// Start queued tasks while an LLM session is free for them, best rank
+    /// first across every project (Part 7).
     pub fn admit(self: &Arc<Self>) {
         if self.admitting.swap(true, Ordering::SeqCst) {
             self.admit_again.store(true, Ordering::SeqCst);
@@ -322,25 +331,10 @@ impl Daemon {
         loop {
             self.admit_again.store(false, Ordering::SeqCst);
             while let Ok(w) = self.store.world() {
-                // A task waiting for the owner's approval holds no running slot.
-                let approving = Activity::Waiting(WaitReason::On(APPROVAL_WAIT.into()));
-                let active = w
-                    .tasks
-                    .values()
-                    .filter(|t| t.state.is_step() && t.activity != approving)
-                    .count();
-                if active >= self.cfg.max_concurrent {
+                let Some(id) = self.next_admission(&w) else {
                     break;
-                }
-                let next = w
-                    .tasks
-                    .values()
-                    .filter(|t| {
-                        t.state == State::Queued
-                            && t.activity == Activity::Waiting(WaitReason::Slot)
-                    })
-                    .min_by_key(|t| (t.enqueued_at, t.id));
-                let Some(t) = next else { break };
+                };
+                let Some(t) = w.tasks.get(&id) else { break };
                 let entry = self.entry_for(t);
                 if self
                     .emit(EventKind::Admitted {
@@ -357,6 +351,73 @@ impl Daemon {
             }
         }
         self.admitting.store(false, Ordering::SeqCst);
+    }
+
+    /// How many LLM sessions are free to promise to a newly claimed task. A
+    /// task that was claimed but has not yet asked for its step's resources
+    /// still counts as holding one, so a full pool never produces worktrees
+    /// with nothing happening in them.
+    pub fn llm_free(&self, w: &mason_engine::World) -> u32 {
+        let name = crate::sched::llm_resource(crate::sched::DEFAULT_ACCOUNT);
+        // A task waiting for the owner's approval holds nothing.
+        let approving = Activity::Waiting(WaitReason::On(APPROVAL_WAIT.into()));
+        let unclaimed = w
+            .tasks
+            .values()
+            .filter(|t| {
+                t.state.is_step() && t.activity != approving && !self.broker.has_lease(t.id)
+            })
+            .count() as u32;
+        self.broker
+            .limit(&name)
+            .unwrap_or(0)
+            .saturating_sub(self.broker.used(&name))
+            .saturating_sub(unclaimed)
+    }
+
+    /// The queued task that goes next, if an LLM session is free for it.
+    pub fn next_admission(&self, w: &mason_engine::World) -> Option<TaskId> {
+        if self.llm_free(w) == 0 {
+            return None;
+        }
+        w.tasks
+            .values()
+            .filter(|t| {
+                t.state == State::Queued && t.activity == Activity::Waiting(WaitReason::Slot)
+            })
+            .min_by_key(|t| self.queued_rank(t))
+            .map(|t| t.id)
+    }
+
+    /// A queued task's rank, from where it would start. (The clarity check
+    /// is left out: it reads git, and ranking runs on every admission.)
+    fn queued_rank(&self, t: &Task) -> mason_scheduler::Rank {
+        let def = self.current_def(t.project);
+        let skip = def.explored_entry.is_some() && t.explored_counts() && !t.force_explore;
+        let start = def
+            .entry(skip)
+            .map_or_else(|| def.start.clone(), |s| s.name.clone());
+        self.rank_for(t, &def, &start)
+    }
+
+    /// The scheduling rank of a task about to run `step` (Part 7): not
+    /// interactive, steps remaining on the shortest path to landed, tracker
+    /// priority, enqueue time, task id.
+    pub fn rank_for(
+        &self,
+        t: &Task,
+        def: &mason_definition::Definition,
+        step: &str,
+    ) -> mason_scheduler::Rank {
+        let jump = self.project(t.project).is_some_and(|p| p.priority_jump);
+        mason_scheduler::Rank::new(
+            false,
+            mason_definition::graph::steps_remaining(def, step),
+            t.priority as u8,
+            t.enqueued_at.0,
+            t.id.0,
+            jump,
+        )
     }
 
     /// Where a task starts and why, from the definition in force now (Part 4,

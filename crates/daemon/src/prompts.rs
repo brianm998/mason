@@ -111,6 +111,7 @@ mod tests {
             test_timeout: Duration::from_secs(1),
             max_test_rounds: None,
             clarity_classifier: None,
+            priority_jump: false,
             overlay_text: String::new(),
         }
     }
