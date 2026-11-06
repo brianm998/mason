@@ -9,7 +9,8 @@ tmp=$(mktemp -d /tmp/mason-s04.XXXXXX); ctl=""
 cleanup() { [ -n "$ctl" ] && kill -9 "$ctl" 2>/dev/null || true; pkill -f "step-host --dir $tmp" 2>/dev/null || true; rm -rf "$tmp"; }
 trap cleanup EXIT
 
-cargo test -q -p mason-step-host
+# CI has already run the whole workspace suite; locally this runs it.
+[ -n "${MASON_TESTS_ALREADY_RAN:-}" ] || cargo test -q -p mason-step-host
 cargo build -q -p mason-step-host --bins
 export STEP_HOST_BIN="$PWD/target/debug/step-host"
 tool=target/debug/step-host-ctl

@@ -183,6 +183,8 @@ echo "refusal cleared"
 # The rest: the definition crate's tests (validator rules, property tests, clarity,
 # layers, dry run) and the daemon's definition end-to-end tests.
 trap - EXIT; cleanup
-cargo test -p mason-definition
-cargo test -p mason-daemon --test definitions
+if [ -z "${MASON_TESTS_ALREADY_RAN:-}" ]; then
+  cargo test -p mason-definition
+  cargo test -p mason-daemon --test definitions
+fi
 echo "s07 OK"

@@ -48,3 +48,6 @@ jobs:
       - uses: actions/checkout@v4
       - run: cargo test --workspace
       - run: bash scripts/run-exit-scripts.sh
+        env:
+          # The workspace suite just ran; exit scripts skip re-running it.
+          MASON_TESTS_ALREADY_RAN: "1"

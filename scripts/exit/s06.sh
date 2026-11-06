@@ -91,5 +91,6 @@ m task show 0 | sed -n '1,8p;/^steps:/,$p'
 # Everything else: the crash-injection harness, the reconcile sweep, the end-to-end
 # tests, replay of recorded runs, and the git and landing tests.
 trap - EXIT; cleanup
-cargo test -p mason-landing -p mason-daemon -p mason-pipeline
+# (CI sets MASON_TESTS_ALREADY_RAN after `cargo test --workspace`.)
+[ -n "${MASON_TESTS_ALREADY_RAN:-}" ] || cargo test -p mason-landing -p mason-daemon -p mason-pipeline
 echo "s06 OK"
