@@ -1201,6 +1201,7 @@ impl Runner {
             .map_err(|e| e.to_string())?;
         git::run(wt, &["push", "--porcelain", &remote, &format!("{sha}:refs/heads/{name}")])
             .map_err(|e| format!("could not push {name}: {e}"))?;
+        self.point(&format!("{kind}_pushed"));
         Ok((sha, id))
     }
 
@@ -1278,6 +1279,7 @@ impl Runner {
                 })
             })
         })();
+        self.point("ci_finished");
         self.drop_candidate(&name, ref_id);
         Ok(match r? {
             CiState::Green => (true, vec![format!("CI on {name}: green")], vec![]),
@@ -1308,6 +1310,7 @@ impl Runner {
             }
         };
         let _ = self.d.store.set_ref_number(ref_id, pr.number);
+        self.point("pr_opened");
         // A newer green PR replaces an older one the batch was holding.
         if let Some(old) = self.pr.lock().unwrap_or_else(|e| e.into_inner()).take() {
             let _ = host.close_pr(old.number);
@@ -1329,6 +1332,7 @@ impl Runner {
                 return Err(e);
             }
         };
+        self.point("pr_checked");
         if st.checks == Checks::Red || st.state == PrState::Closed {
             let _ = host.close_pr(pr.number);
             self.drop_candidate(&name, ref_id);

@@ -12,47 +12,6 @@ use std::time::Duration;
 use support::lw::*;
 use support::*;
 
-/// Fake CI: `trigger` runs the integration suite over the pushed commit and records
-/// the result (sleeping first if the tree holds `slow.ci`); `status` reads it.
-fn ci_scripts(root: &Path, origin: &Path) -> (String, String, PathBuf) {
-    let state = root.join("ci-state");
-    std::fs::create_dir_all(&state).unwrap();
-    let log = state.join("triggers.log");
-    let trigger = format!(
-        "d='{st}/'$MASON_SHA; rm -rf $d; mkdir -p $d/t; git --git-dir='{o}' archive $MASON_SHA | tar -x -C $d/t; \
-         echo \"$MASON_REF $MASON_SHA\" >> '{log}'; \
-         ( cd $d/t; [ -f slow.ci ] && sleep 3; sh checks.sh integration > $d/out 2>&1; echo $? > $d/rc ) ; echo $MASON_SHA",
-        st = state.display(),
-        o = origin.display(),
-        log = log.display()
-    );
-    let status = format!(
-        "d='{st}/'$MASON_RUN; if [ -f $d/rc ]; then if [ \"$(cat $d/rc)\" = 0 ]; then echo green; else echo red; echo integration; fi; else echo pending; fi",
-        st = state.display()
-    );
-    (trigger, status, log)
-}
-
-fn q(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"")
-}
-
-fn ci_section(s: &Scratch) -> (String, PathBuf) {
-    let (trigger, status, log) = ci_scripts(s.root.path(), &s.origin);
-    (
-        format!("[ci]\nkind = \"command\"\ntrigger = \"{}\"\nstatus = \"{}\"\npoll_s = 1\ntimeout_s = 120\n", q(&trigger), q(&status)),
-        log,
-    )
-}
-
-fn host_section(s: &Scratch, approval: bool, queue: bool) -> String {
-    format!(
-        "[host]\nkind = \"fake\"\ndir = \"{}\"\nremote = \"{}\"\nchecks = \"sh checks.sh integration\"\nrequire_approval = {approval}\nmerge_queue = {queue}\n",
-        s.root.path().join("host-state").display(),
-        s.origin.display()
-    )
-}
-
 fn toml(mode: &str, more: &str) -> String {
     format!("mode = \"{mode}\"\nwindow = \"30s\"\nmax_size = 2\nmax_fold = 4\n[[tier]]\nname = \"batch\"\nsuites = [\"alpha\"]\n{more}")
 }

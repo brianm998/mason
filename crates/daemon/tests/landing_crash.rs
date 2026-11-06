@@ -11,6 +11,7 @@ use mason_store::Store;
 use serde_json::{json, Value};
 use std::os::unix::process::ExitStatusExt;
 use std::time::{Duration, Instant};
+use support::lw::{ci_section, host_section};
 use support::*;
 
 const CHECKS: &str = r#"#!/bin/sh
@@ -40,8 +41,9 @@ min_tests = 1
 level = "unit"
 "#;
 
-const LANDING: &str =
-    "window = \"4s\"\nmax_size = 2\n[[tier]]\nname = \"batch\"\nsuites = [\"integration\"]\n";
+fn landing(mode: &str) -> String {
+    format!("mode = \"{mode}\"\nwindow = \"4s\"\nmax_size = 2\n[[tier]]\nname = \"batch\"\nsuites = [\"integration\"]\n")
+}
 
 /// Task 0 adds a clean file; task 1 (its directory is named `1`) adds the red marker too.
 fn script() -> Value {
@@ -51,12 +53,21 @@ fn script() -> Value {
     ]]}})
 }
 
-fn run(point: &str) -> Result<(), String> {
+fn run(point: &str, mode: &str) -> Result<(), String> {
     let s = Scratch::new("true", script());
+    let extra = match mode {
+        "direct-ci" | "local-only-ci" => ci_section(&s).0,
+        "direct" => String::new(),
+        _ => format!(
+            "{}[ci]\nkind = \"command\"\ntrigger = \"true\"\nstatus = \"echo green\"\npoll_s = 1\n",
+            host_section(&s, false, mode == "host-queue")
+        ),
+    };
+    s.write_project("scratch", "true", &extra);
     s.push_files(
         &[
             (".mason/mason.toml", DEF),
-            (".mason/landing.toml", LANDING),
+            (".mason/landing.toml", &landing(mode)),
             ("checks.sh", CHECKS),
         ],
         "setup",
@@ -158,6 +169,24 @@ fn run(point: &str) -> Result<(), String> {
     {
         return Err("the red marker reached the base".into());
     }
+    // Nothing of the batch is left on the host: no candidate branch, no open pull request.
+    let end = Instant::now() + Duration::from_secs(40);
+    loop {
+        let refs = sh(&s.origin, &["for-each-ref", "--format=%(refname:short)", "refs/heads/mason"]);
+        let open_prs = std::fs::read_dir(s.root.path().join("host-state/prs"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| std::fs::read_to_string(e.path()).is_ok_and(|t| t.contains("\"state\":\"open\"")))
+            .count();
+        if refs.trim().is_empty() && open_prs == 0 {
+            break;
+        }
+        if Instant::now() > end {
+            return Err(format!("left on the host: branches [{refs}], {open_prs} open pull request(s)"));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
     let store = Store::open(s.data_dir.join("store.db")).map_err(|e| e.to_string())?;
     store
         .verify()
@@ -198,7 +227,7 @@ fn killing_the_daemon_at_each_landing_phase_of_a_batch_with_a_culprit_loses_and_
     let results: Vec<(String, Result<(), String>)> = std::thread::scope(|sc| {
         let hs: Vec<_> = POINTS
             .iter()
-            .map(|p| (p.to_string(), sc.spawn(move || run(p))))
+            .map(|p| (p.to_string(), sc.spawn(move || run(p, "direct"))))
             .collect();
         hs.into_iter()
             .map(|(p, h)| {
@@ -214,5 +243,32 @@ fn killing_the_daemon_at_each_landing_phase_of_a_batch_with_a_culprit_loses_and_
         .into_iter()
         .filter_map(|(p, r)| r.err().map(|e| format!("{p}: {e}")))
         .collect();
+    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+}
+
+#[test]
+fn killing_the_daemon_during_ci_or_a_pull_request_leaves_nothing_behind_and_lands_once() {
+    let cases: &[(&str, &[&str])] = &[
+        ("direct-ci", &["ci_pushed", "ci_finished", "batch_red", "batch_before_promote", "batch_after_promote"]),
+        ("pr-batch", &["pr_pushed", "pr_opened", "pr_checked", "batch_before_promote", "batch_after_promote"]),
+        ("host-queue", &["pr_opened", "batch_before_promote", "batch_after_promote"]),
+    ];
+    let jobs: Vec<(String, String)> = cases
+        .iter()
+        .flat_map(|(m, ps)| ps.iter().map(move |p| (m.to_string(), p.to_string())))
+        .collect();
+    let mut failures = vec![];
+    for chunk in jobs.chunks(6) {
+        let results: Vec<(String, Result<(), String>)> = std::thread::scope(|sc| {
+            let hs: Vec<_> = chunk
+                .iter()
+                .map(|(m, p)| (format!("{m} @ {p}"), sc.spawn(move || run(p, m))))
+                .collect();
+            hs.into_iter()
+                .map(|(n, h)| (n, h.join().unwrap_or_else(|_| Err("the scenario panicked".into()))))
+                .collect()
+        });
+        failures.extend(results.into_iter().filter_map(|(n, r)| r.err().map(|e| format!("{n}: {e}"))));
+    }
     assert!(failures.is_empty(), "\n{}", failures.join("\n"));
 }
