@@ -1158,6 +1158,9 @@ pub fn pay(d: &Arc<Daemon>, debt: u64) -> Result<String, String> {
         return Err("the debt's suite no longer exists in the definition".into());
     }
     if let Some(r) = &p.remote {
+        // (git work on a repository is one at a time: two fetches collide on its refs)
+        let lock = d.repo_lock(pid);
+        let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
         let _ = git::run(&p.path, &["fetch", "--prune", r]);
     }
     let tip = git::run(&p.path, &["rev-parse", &p.base_ref()]).map_err(|e| e.to_string())?;

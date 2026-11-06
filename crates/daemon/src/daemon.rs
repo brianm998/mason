@@ -36,7 +36,7 @@ pub struct Daemon {
     emit_lock: Mutex<()>,
     admitting: AtomicBool,
     admit_again: AtomicBool,
-    repo_locks: Mutex<HashMap<ProjectId, Arc<Mutex<()>>>>,
+    repo_locks: Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>,
     stalls: AtomicU64,
     worst_stall_ms: AtomicU64,
     pub(crate) sweep: Mutex<crate::sweep::SweepState>,
@@ -185,12 +185,17 @@ impl Daemon {
             .map(|(id, _)| *id)
     }
 
-    /// Serializes git work that touches a project's shared repository state.
+    /// Serializes git work that touches a repository's shared state. The lock
+    /// belongs to the *repository*, not the project: two projects may live in one
+    /// repository (a branch each), and two `git fetch`es there collide on its refs.
     pub fn repo_lock(&self, p: ProjectId) -> Arc<Mutex<()>> {
+        let key = self.project(p).map_or_else(PathBuf::new, |c| {
+            std::fs::canonicalize(&c.path).unwrap_or_else(|_| c.path.clone())
+        });
         self.repo_locks
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .entry(p)
+            .entry(key)
             .or_default()
             .clone()
     }
