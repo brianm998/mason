@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+[package]
+name = "mason-definition"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+mason-core = { path = "../core" }
+mason-engine = { path = "../engine" }
+mason-adapter-api = { path = "../adapter-api" }
+toml_edit = "0.25.18"
+
+[dev-dependencies]
+proptest = "1"
+
+[lints]
+workspace = true
