@@ -9,86 +9,72 @@
 [feature.connect-and-resume]
 description = "Connects over the protocol, resumes from its last sequence number, shows 'connection lost' as a banner"
 swift = "done"
-compose = "todo"
-platform_reason = "The Compose monitor is Stage 13: parity is checked when it lands, and this line goes then."
+compose = "done"
 
 [feature.top-bar]
 description = "Back, forward, home; attention indicator; project filter; LLM usage; add task; mute"
 swift = "done"
-compose = "todo"
-platform_reason = "The Compose monitor is Stage 13: parity is checked when it lands, and this line goes then."
+compose = "done"
 
 [feature.count-tiles]
 description = "One fixed-size tile per state, tinted when it wants you, a dash while disconnected"
 swift = "done"
-compose = "todo"
-platform_reason = "The Compose monitor is Stage 13: parity is checked when it lands, and this line goes then."
+compose = "done"
 
 [feature.banners]
 description = "New version, provider outage, landing frozen, connection lost, paused"
 swift = "done"
-compose = "todo"
-platform_reason = "The Compose monitor is Stage 13: parity is checked when it lands, and this line goes then."
+compose = "done"
 
 [feature.sidebar-sections]
 description = "A section per state, needs-you first, collapsible, collapse choices remembered per device"
 swift = "done"
-compose = "todo"
-platform_reason = "The Compose monitor is Stage 13: parity is checked when it lands, and this line goes then."
+compose = "done"
 
 [feature.sidebar-sort]
 description = "Active states oldest first; failed, landed and canceled newest first and collapsed"
 swift = "done"
-compose = "todo"
-platform_reason = "The Compose monitor is Stage 13: parity is checked when it lands, and this line goes then."
+compose = "done"
 
 [feature.search]
 description = "Filters every section by name, title or body, each with its own checkbox"
 swift = "done"
-compose = "todo"
-platform_reason = "The Compose monitor is Stage 13: parity is checked when it lands, and this line goes then."
+compose = "done"
 
 [feature.home-view]
 description = "Status, attention queue, active models, session stepper, landing queue, tasks per stage"
 swift = "done"
-compose = "todo"
-platform_reason = "The Compose monitor is Stage 13: parity is checked when it lands, and this line goes then."
+compose = "done"
 
 [feature.task-detail]
 description = "Steps, activity, live log, plan, checks, tests, history, decision card, actions"
 swift = "done"
-compose = "todo"
-platform_reason = "The Compose monitor is Stage 13: parity is checked when it lands, and this line goes then."
+compose = "done"
 
 [feature.decision-card]
 description = "Ask, why, 2 to 4 options with one recommended, other, evidence; answers carry the card hash"
 swift = "done"
-compose = "todo"
-platform_reason = "The Compose monitor is Stage 13: parity is checked when it lands, and this line goes then."
+compose = "done"
 
 [feature.progress-cells]
 description = "Filled, part, hatched and empty cells; no percentages; amber and never red when slow"
 swift = "done"
-compose = "todo"
-platform_reason = "The Compose monitor is Stage 13: parity is checked when it lands, and this line goes then."
+compose = "done"
 
 [feature.overrides]
 description = "Cancel, retry, skip test, land now, force, pause, open session, from the allowed actions"
 swift = "done"
-compose = "todo"
-platform_reason = "The Compose monitor is Stage 13: parity is checked when it lands, and this line goes then."
+compose = "done"
 
 [feature.landing-page]
 description = "Queue, batches, phases, debts and freeze status"
 swift = "done"
-compose = "todo"
-platform_reason = "The Compose monitor is Stage 13: parity is checked when it lands, and this line goes then."
+compose = "done"
 
 [feature.usage-page]
 description = "Provider status, limit windows, tokens by project, task, step and model"
 swift = "done"
-compose = "todo"
-platform_reason = "The Compose monitor is Stage 13: parity is checked when it lands, and this line goes then."
+compose = "done"
 
 [feature.pipeline-editor]
 description = "The graphical editor of the definition (Part 18)"
@@ -98,17 +84,14 @@ compose = "todo"
 [feature.health-page]
 description = "Digest, detector findings, runtime version, resources and who holds them"
 swift = "done"
-compose = "todo"
-platform_reason = "The Compose monitor is Stage 13: parity is checked when it lands, and this line goes then."
+compose = "done"
 
 [feature.deep-links]
 description = "mason://task/... opens from any notification"
 swift = "done"
-compose = "todo"
-platform_reason = "The Compose monitor is Stage 13: parity is checked when it lands, and this line goes then."
+compose = "done"
 
 [feature.text-scaling]
 description = "Text scales and reflows so it stays sharp from across the room"
 swift = "done"
-compose = "todo"
-platform_reason = "The Compose monitor is Stage 13: parity is checked when it lands, and this line goes then."
+compose = "done"

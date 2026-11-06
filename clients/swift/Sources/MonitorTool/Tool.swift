@@ -12,6 +12,8 @@ import SwiftUI
 ///     monitor-tool conformance --port P --out DIR   dump what the client shows at every demo checkpoint
 ///     monitor-tool snapshot --port P --out DIR      render screenshots from `masond --demo-manual`
 ///     monitor-tool answer --port P --task N [--option 1]   answer a task's open question as the monitor does
+///     monitor-tool cancel --port P --task N         cancel a task as the Cancel button does
+///     monitor-tool skip --port P --task N [--step S]  skip a test step as the Skip button does
 @main
 struct Tool {
     @MainActor
@@ -22,7 +24,7 @@ struct Tool {
         let cmd = args.removeFirst()
         guard let port = Discovery.port(arguments: args) else { fail("--port P (or --data-dir D)") }
         var out = URL(fileURLWithPath: "/tmp")
-        if cmd != "answer" {
+        if !["answer", "cancel", "skip"].contains(cmd) {
             guard let o = args.firstIndex(of: "--out"), o + 1 < args.count else { fail("--out DIR") }
             out = URL(fileURLWithPath: args[o + 1])
             try? FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
@@ -37,6 +39,7 @@ struct Tool {
         case "conformance": await conformance(model, out)
         case "snapshot": await snapshots(model, out)
         case "answer": await answer(model, args)
+        case "cancel", "skip": await act(model, cmd, args)
         default: fail("unknown command \(cmd)")
         }
         exit(0)
@@ -85,6 +88,31 @@ struct Tool {
         await until("the demo to advance") { advanced != nil }
         await settle(model)
         return advanced ?? false
+    }
+
+    // MARK: cancel and skip
+
+    /// What the Cancel and Skip buttons send: the same commands, with the owner's identity.
+    @MainActor
+    static func act(_ model: MonitorModel, _ cmd: String, _ args: [String]) async {
+        func opt(_ n: String) -> String? {
+            args.firstIndex(of: n).flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil }
+        }
+        guard let t = opt("--task").flatMap(UInt64.init) else { fail("--task N") }
+        var result: Mason_V1_CommandResult?
+        model.onResult = { r in if r.id == cmd { result = r } }
+        var c = Mason_V1_Command()
+        c.id = cmd
+        if cmd == "cancel" {
+            c.cancel = .with { $0.task = t }
+        } else {
+            let step = opt("--step") ?? "test"
+            c.skip = .with { $0.task = t; $0.step = step }
+        }
+        model.send(c)
+        await until("the result") { result != nil }
+        guard result?.ok == true else { fail("the daemon refused: \(result?.error ?? "?")") }
+        print(cmd == "cancel" ? "cancelled task #\(t)" : "skipped step \(opt("--step") ?? "test") of task #\(t)")
     }
 
     // MARK: answering

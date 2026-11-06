@@ -1,0 +1,88 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+package mason.monitor
+
+import mason.v1.DecisionCard
+import mason.v1.TaskRow
+import org.json.JSONArray
+
+/**
+ * One thing on screen, as the conformance runner compares it: an id, the texts a
+ * person can read in it, the actions it offers, its place among its siblings.
+ * (The same shape `conformance` builds from the server's views, and the SwiftUI
+ * client builds from what it draws.)
+ */
+data class Item(
+    val id: String,
+    val texts: List<String>,
+    val actions: List<String> = emptyList(),
+    val order: Int = 0,
+) {
+    fun toJson(): Map<String, Any> = mapOf("id" to id, "texts" to texts, "actions" to actions.sorted(), "order" to order)
+}
+
+fun TaskRow.item(prefix: String, order: Int): Item {
+    val texts = mutableListOf(key, title, project, state)
+    if (why_waiting.isNotEmpty()) texts += why_waiting
+    return Item("$prefix:$id", texts, allowed_actions, order)
+}
+
+fun DecisionCard.item(task: Long): Item {
+    val texts = mutableListOf(ask, why)
+    options.forEachIndexed { i, o -> texts += "${i + 1}. ${o.label}${if (o.recommended) " (recommended)" else ""}" }
+    texts += evidence
+    val actions = options.indices.map { "option:${it + 1}" } + "other"
+    return Item("card:$task", texts, actions)
+}
+
+/**
+ * Everything this client is showing, as items: what the conformance run reads.
+ * Built from the same state the views draw, so the two cannot disagree; every view
+ * also carries the item's id as its test tag, so a harness reading the real
+ * accessibility tree finds the same ids.
+ */
+fun MonitorModel.visibleItems(): List<Item> {
+    val out = mutableListOf<Item>()
+    header?.let { h ->
+        out += Item("status", listOf(if (connected) h.status else "Not connected"))
+        h.counts.forEachIndexed { i, c -> out += Item("tile:${c.state}", listOf(tileCount(c), c.state), order = i) }
+        h.banners.forEachIndexed { i, b -> out += Item("banner:$i", listOf(b.text), order = i) }
+    }
+    sidebar?.let { s ->
+        s.sections.forEachIndexed { i, sec ->
+            val open = isExpanded(sec)
+            out += Item(
+                "section:${sec.state}",
+                listOf(sec.title, sec.count.toString(), if (open) "expanded" else "collapsed"),
+                order = i,
+            )
+            if (open) filteredRows(sec).forEachIndexed { j, r -> out += r.item("row:${sec.state}", j) }
+        }
+    }
+    if (page == Page.Home) home?.let { h ->
+        h.attention.forEach { a ->
+            val t = a.task
+            val c = a.card
+            if (t != null && c != null) out += c.item(t.id)
+        }
+        h.active.forEachIndexed { i, a ->
+            out += Item("active:${a.task}", listOf(a.model, a.project, "#${a.task}", a.step), order = i)
+        }
+        out += Item("sessions", listOf("${h.sessions_used} of ${h.sessions_limit}"), listOf("increase", "decrease"))
+    }
+    if (page is Page.Task) taskDetail?.let { d ->
+        val r = d.row
+        if (r != null) {
+            out += r.item("detail", 0)
+            d.steps.forEachIndexed { i, s -> out += Item("step:${s.run}", listOf(s.name, s.outcome), order = i) }
+            d.card?.let { out += it.item(r.id) }
+        }
+    }
+    return out
+}
+
+/** The items as JSON text, for the conformance dump. */
+fun List<Item>.toJsonText(): String {
+    val a = JSONArray()
+    forEach { a.put(org.json.JSONObject(it.toJson())) }
+    return a.toString(2)
+}

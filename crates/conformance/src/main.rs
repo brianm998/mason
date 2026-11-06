@@ -48,7 +48,7 @@ fn generated(root: &Path) -> Vec<(PathBuf, String)> {
             tokens::swift(&text).unwrap_or_else(|e| die(&e)),
         ),
         (
-            root.join("clients/compose/src/main/kotlin/mason/Tokens.kt"),
+            root.join("clients/compose/core/src/main/kotlin/mason/Tokens.kt"),
             tokens::kotlin(&text).unwrap_or_else(|e| die(&e)),
         ),
     ]

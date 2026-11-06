@@ -4,3 +4,6 @@ target/
 clients/swift/.build/
 clients/swift/.swiftpm/
 /build/
+clients/compose/.gradle/
+clients/compose/**/build/
+clients/compose/.kotlin/
