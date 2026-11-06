@@ -43,12 +43,13 @@ pub struct Scratch {
     pub script: PathBuf,
 }
 
-pub const TASK_SCRIPT_COMMIT: &str =
-    "echo hello > hello.txt && git add -A && git -c user.name=t -c user.email=t@t commit -qm 'add hello'";
+/// What the scripted agent commits. Every task's worktree also gets a file of its
+/// own, so a task that starts after another has landed still has something to
+/// commit, whatever the timing (identical commits would leave it with nothing).
+pub const TASK_SCRIPT_COMMIT: &str = "echo hello > hello.txt && echo task > unique-$(basename \"$PWD\").txt && git add -A && git -c user.name=t -c user.email=t@t commit -qm 'add hello'";
 
-/// Like `TASK_SCRIPT_COMMIT`, but each task's worktree also gets a file of its
-/// own, so a task that starts after another has landed still has something to commit.
-pub const UNIQUE_COMMIT: &str = "echo hello > hello.txt && date +%s%N > unique-$(basename \"$PWD\").txt && git add -A && git -c user.name=t -c user.email=t@t commit -qm 'add hello'";
+/// The same as `TASK_SCRIPT_COMMIT` (kept for the tests that named it).
+pub const UNIQUE_COMMIT: &str = TASK_SCRIPT_COMMIT;
 
 pub fn sh(cwd: &Path, args: &[&str]) -> String {
     git::run(cwd, args).unwrap_or_else(|e| panic!("{e}"))

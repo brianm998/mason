@@ -767,3 +767,21 @@ fn an_optional_classifier_is_consulted_only_when_the_rules_are_unsure() {
         assert!(!mason_daemon::jobs::classify(cmd, "x"), "{cmd:?}");
     }
 }
+
+#[test]
+fn two_tasks_one_strictly_after_the_other_both_land() {
+    // The case that failed on CI by timing: with one slot the second task starts only
+    // after the first has landed, so the shared scripted commit must not be empty.
+    let s = scratch_with(Some(DEF_SKIP), happy_script());
+    let d = s.start_with(|c| c.max_concurrent = 1);
+    let a = flagged(&d, "First");
+    let b = flagged(&d, "Second");
+    wait_state(&d, a, State::Landed, 90);
+    wait_state(&d, b, State::Landed, 90);
+    let log = s.origin_log();
+    assert_eq!(
+        log.iter().filter(|m| *m == "add hello").count(),
+        2,
+        "{log:?}"
+    );
+}
