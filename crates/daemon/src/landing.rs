@@ -219,6 +219,7 @@ fn coordinate(weak: Weak<Daemon>, pid: ProjectId) {
         // Batches from a daemon that died did not finish; their tasks are back in the queue.
         if let Some(p) = d.project(pid) {
             let _ = d.store.abandon_batches(&p.id, now_ms());
+            sweep_integration(&d, pid);
         }
     }
     let mut last = Instant::now();
@@ -242,6 +243,27 @@ fn coordinate(weak: Weak<Daemon>, pid: ProjectId) {
                     .unwrap_or_else(|e| e.into_inner());
             }
         }
+    }
+}
+
+/// A dead daemon's batches left integration branches behind (and a worktree
+/// standing on one). They are disposable: detach the worktrees and delete the
+/// branches. Nothing else lives under `mason/int/<project>/`.
+fn sweep_integration(d: &Arc<Daemon>, pid: ProjectId) {
+    let Some(p) = d.project(pid) else { return };
+    let lock = d.repo_lock(pid);
+    let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let prefix = format!("mason/int/{}/", p.id);
+    let Ok(wts) = git::worktrees(&p.path) else { return };
+    for (path, branch) in wts {
+        if branch.as_deref().is_some_and(|b| b.starts_with(&prefix)) {
+            let _ = git::run(&path, &["checkout", "--detach", "--quiet"]);
+        }
+    }
+    let list = git::run(&p.path, &["for-each-ref", "--format=%(refname:short)", &format!("refs/heads/{prefix}")])
+        .unwrap_or_default();
+    for b in list.lines().filter(|b| !b.is_empty()) {
+        let _ = git::run(&p.path, &["branch", "-D", b]);
     }
 }
 
