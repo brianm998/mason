@@ -476,8 +476,9 @@ fn an_answer_carries_the_card_hash_over_the_socket_too() {
         actor: actor.into(),
         reason: String::new(),
     };
+    let who = d.cfg.owner_names[0].clone();
     let (r, _) = c
-        .command(cmd("0000000000000000", "brian"), Duration::from_secs(5))
+        .command(cmd("0000000000000000", &who), Duration::from_secs(5))
         .unwrap();
     assert!(
         !r.ok && r.status == 409 && r.error.contains("stale"),
@@ -485,7 +486,6 @@ fn an_answer_carries_the_card_hash_over_the_socket_too() {
     );
     let w = d.world().unwrap();
     let card = mason_daemon::attention::card_of(&d, &w.tasks[&TaskId(2)]).unwrap();
-    let who = d.cfg.owner_names[0].clone();
     let (r, _) = c
         .command(cmd(&card.1, "mallory"), Duration::from_secs(5))
         .unwrap();
