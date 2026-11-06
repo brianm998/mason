@@ -309,16 +309,18 @@ fn the_fake_host_passes_the_host_kit() {
             require_approval,
             merge_queue: false,
         };
-        if require_approval {
-            // The kit expects a reviewed PR: the reviewer approves PR #1 as soon as it exists.
-            let dir = root.join("state");
+        // The kit expects a reviewed PR: the reviewer approves PR #1 as soon as it exists,
+        // for as long as the kit runs.
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reviewer = require_approval.then(|| {
+            let (dir, stop) = (root.join("state"), stop.clone());
             std::thread::spawn(move || {
-                for _ in 0..200 {
+                while !stop.load(std::sync::atomic::Ordering::SeqCst) {
                     FakeHost::approve(&dir, 1);
                     std::thread::sleep(std::time::Duration::from_millis(10));
                 }
-            });
-        }
+            })
+        });
         let problems = host_kit(
             &host,
             &HostScenario {
@@ -327,6 +329,10 @@ fn the_fake_host_passes_the_host_kit() {
                 missing_head: "nope".into(),
             },
         );
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(r) = reviewer {
+            r.join().unwrap();
+        }
         assert!(
             problems.is_empty(),
             "approval={require_approval}: {problems:?}"

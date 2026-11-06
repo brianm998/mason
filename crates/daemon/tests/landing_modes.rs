@@ -188,7 +188,11 @@ fn pr_world(mode: &str, approval: bool, queue: bool) -> W {
 }
 
 fn prs(w: &W) -> usize {
-    std::fs::read_dir(w.s.root.path().join("host-state/prs")).map_or(0, |d| d.count())
+    std::fs::read_dir(w.s.root.path().join("host-state/prs")).map_or(0, |d| {
+        d.flatten()
+            .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+            .count()
+    })
 }
 
 #[test]

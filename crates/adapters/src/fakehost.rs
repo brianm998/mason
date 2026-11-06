@@ -63,14 +63,11 @@ impl FakeHost {
         let _ = std::fs::write(self.pr_path(n), v.to_string());
     }
 
-    /// The person approves, as a reviewer would on the host.
+    /// The person approves, as a reviewer would on the host: a file of its own, so
+    /// that approving never races with the host rewriting the PR's state.
     pub fn approve(dir: &Path, n: u64) {
-        let p = dir.join("prs").join(format!("{n}.json"));
-        if let Ok(t) = std::fs::read_to_string(&p) {
-            if let Ok(mut v) = serde_json::from_str::<Value>(&t) {
-                v["approved"] = json!(true);
-                let _ = std::fs::write(p, v.to_string());
-            }
+        if dir.join("prs").join(format!("{n}.json")).exists() {
+            let _ = std::fs::write(dir.join("prs").join(format!("{n}.approved")), "");
         }
     }
 
@@ -195,8 +192,9 @@ impl FakeHost {
         Ok(())
     }
 
-    fn review_of(&self, v: &Value) -> Review {
-        if self.require_approval && v["approved"] != true {
+    fn review_of(&self, n: u64, v: &Value) -> Review {
+        let _ = v;
+        if self.require_approval && !self.dir.join("prs").join(format!("{n}.approved")).exists() {
             Review::Required
         } else {
             Review::Satisfied
@@ -221,7 +219,12 @@ impl GitHostAdapter for FakeHost {
     fn open_pr(&self, base: &str, head: &str, title: &str, _body: &str) -> Result<PrRef, ApiError> {
         self.head_sha(head)?;
         self.head_sha(base)?;
-        let n = std::fs::read_dir(self.dir.join("prs")).map_or(0, |d| d.count()) as u64 + 1;
+        let n = std::fs::read_dir(self.dir.join("prs")).map_or(0, |d| {
+            d.flatten()
+                .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+                .count()
+        }) as u64
+            + 1;
         self.write(n, &json!({"base": base, "head": head, "title": title, "state": "open", "approved": false, "queued": false}));
         Ok(PrRef {
             number: n,
@@ -233,7 +236,7 @@ impl GitHostAdapter for FakeHost {
         let mut v = self.read(n)?;
         let head = self.head_sha(v["head"].as_str().unwrap_or(""))?;
         let (checks, failed) = self.checks_of(&head);
-        let review = self.review_of(&v);
+        let review = self.review_of(n, &v);
         // The "queue": merges whatever is queued once it is green and reviewed, drops it if red.
         if v["state"] == "open" && v["queued"] == true {
             if checks == Checks::Green && review == Review::Satisfied {
@@ -265,7 +268,7 @@ impl GitHostAdapter for FakeHost {
         if self.checks_of(&head).0 != Checks::Green {
             return Err(invalid("checks have not passed"));
         }
-        if self.review_of(&v) != Review::Satisfied {
+        if self.review_of(n, &v) != Review::Satisfied {
             return Err(invalid("a review is required"));
         }
         self.do_merge(n, &mut v)?;
