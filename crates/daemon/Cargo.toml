@@ -24,6 +24,7 @@ axum = "0.8.9"
 mason-adapter-api = { version = "0.0.0", path = "../adapter-api" }
 mason-adapters = { version = "0.0.0", path = "../adapters" }
 mason-core = { version = "0.0.0", path = "../core" }
+mason-definition = { version = "0.0.0", path = "../definition" }
 mason-engine = { version = "0.0.0", path = "../engine" }
 mason-landing = { version = "0.0.0", path = "../landing" }
 mason-step-host = { version = "0.0.0", path = "../step-host" }

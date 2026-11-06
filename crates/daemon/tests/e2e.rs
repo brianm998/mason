@@ -34,10 +34,9 @@ fn a_task_goes_from_queued_to_landed() {
             State::Exploring,
             State::Developing,
             State::Testing,
-            State::Review,
             State::Landing
         ],
-        "the fixed graph, in order, once each"
+        "the built-in graph, in order, once each"
     );
     // It really reached the remote, exactly once, with the agent's work.
     let log = s.origin_log();

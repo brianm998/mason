@@ -9,6 +9,7 @@
 pub mod config;
 pub mod crash;
 pub mod daemon;
+pub mod defs;
 pub mod http;
 pub mod jobs;
 pub mod pool;

@@ -1,17 +1,20 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! The jobs behind the fixed graph: explore, develop, test, review and land.
-//! One job per open step run, resumable: starting it again after a restart
-//! finds the work where it was left (worktree, agent session, test host,
-//! landing) and carries on.
+//! The jobs behind a definition's steps. One job per open step run, resumable:
+//! starting it again after a restart finds the work where it was left
+//! (worktree, agent session, command host, landing) and carries on.
+//!
+//! Which step runs, and what follows it, comes from the definition the task is
+//! pinned to; where it goes next is decided by `mason_definition::graph::after`,
+//! the same function the dry run walks.
 //!
 //! Crash-injection points used here (see `crate::crash`):
-//! `job_started:<State>`, `before_event:<State>`, `accepted_persisted`, `land_after_fetch`,
-//! `land_after_fold`, `land_after_ff`, `land_after_push`, `land_before_event`,
-//! `land_after_event`.
+//! `job_started:<State>`, `before_event:<State>`, `accepted_persisted`,
+//! `land_after_fetch`, `land_after_fold`, `land_after_ff`, `land_after_push`,
+//! `land_before_event`, `land_after_event`.
 
 use crate::config::ProjectCfg;
-use crate::daemon::Daemon;
+use crate::daemon::{now_ms, Daemon};
 use mason_adapter_api::contract::{CheckHandler, CheckRun, ContractHandle, Validator};
 use mason_adapter_api::{AgentAdapter, SessionSpec, StepKind};
 use mason_adapters::claude::ClaudeAdapter;
@@ -20,6 +23,10 @@ use mason_adapters::runner::{
     hold_note, FailReason, HoldReason, RunnerConfig, StepEnd, StepReport, StepRunner,
 };
 use mason_core::*;
+use mason_definition::graph::{after, Outcome, Transition};
+use mason_definition::layers::{resolve, Resolved, RuntimeOverride};
+use mason_definition::validate::contract_kind;
+use mason_definition::{Definition, Step, StepType};
 use mason_landing::direct::{DirectLanding, LandError};
 use mason_landing::git::{self, CatchUp};
 use mason_step_host::client::{collect_to_file, ClientError, HostClient};
@@ -33,12 +40,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// Everything a job needs to know about its task, read once at the start.
+/// Everything a job needs to know, read once at the start.
 pub struct Ctx {
     pub d: Arc<Daemon>,
     pub task: TaskId,
     pub run: StepRunId,
-    pub step: State,
+    /// The step's category.
+    pub state: State,
+    /// How many times this step has run for the task, this run included.
     pub attempt: u32,
     pub project: ProjectCfg,
     pub project_id: ProjectId,
@@ -47,6 +56,10 @@ pub struct Ctx {
     pub trust: TrustSource,
     pub wt: PathBuf,
     pub branch: String,
+    pub def: Arc<Definition>,
+    pub step: Step,
+    /// The step's settings after the five layers (Part 5).
+    pub res: Resolved,
 }
 
 impl Ctx {
@@ -54,20 +67,58 @@ impl Ctx {
         self.d.emit_for_run(self.task, self.run, kind)
     }
 
-    fn fail(&self, reason: impl Into<String>) {
-        self.d.crash.point(&format!("before_event:{:?}", self.step));
-        self.emit(EventKind::StepFailed {
-            task: self.task,
-            reason: reason.into(),
-        });
+    /// End the step and let the graph say what follows.
+    fn conclude(&self, outcome: Outcome, reason: String, feedback: Option<String>) {
+        self.d
+            .crash
+            .point(&format!("before_event:{:?}", self.state));
+        let rounds = self.res.max_rounds.as_ref().map(|a| a.value);
+        match after(&self.def, &self.step, outcome, self.attempt, rounds) {
+            Transition::Next { step, state } => {
+                self.emit(EventKind::StepSucceeded {
+                    task: self.task,
+                    next: Some(Next { step, state }),
+                });
+            }
+            Transition::Land => {
+                self.emit(EventKind::StepSucceeded {
+                    task: self.task,
+                    next: Some(Next {
+                        step: String::new(),
+                        state: State::Landed,
+                    }),
+                });
+            }
+            Transition::SendBack { step } => {
+                if let Some(f) = feedback {
+                    let _ = std::fs::write(self.task_dir().join("feedback.txt"), f);
+                }
+                self.emit(EventKind::SentBack {
+                    task: self.task,
+                    reason,
+                    to_step: step,
+                });
+            }
+            Transition::Fail(why) => {
+                let reason = match (outcome, reason.is_empty()) {
+                    (Outcome::Fail, false) => reason,
+                    (_, true) => why,
+                    (_, false) => format!("{reason}; {why}"),
+                };
+                self.emit(EventKind::StepFailed {
+                    task: self.task,
+                    reason,
+                });
+            }
+        }
     }
 
-    fn succeed(&self) {
-        self.d.crash.point(&format!("before_event:{:?}", self.step));
-        self.emit(EventKind::StepSucceeded {
-            task: self.task,
-            next: None,
-        });
+    fn green(&self) {
+        self.conclude(Outcome::Green, String::new(), None);
+    }
+
+    fn fail(&self, reason: impl Into<String>) {
+        self.conclude(Outcome::Fail, reason.into(), None);
     }
 
     fn task_dir(&self) -> PathBuf {
@@ -77,16 +128,65 @@ impl Ctx {
     }
 }
 
-fn ctx(d: &Arc<Daemon>, task: TaskId, step: State, run: StepRunId) -> Option<Ctx> {
-    let w = d.world().ok()?;
-    let t = w.tasks.get(&task)?;
-    let r = w.step_runs.get(&run)?;
-    let project = d.project(t.project)?.clone();
-    Some(Ctx {
+fn ctx(d: &Arc<Daemon>, task: TaskId, run: StepRunId) -> Result<Ctx, String> {
+    let w = d.world().map_err(|e| e.to_string())?;
+    let t = w.tasks.get(&task).ok_or("the task is gone")?;
+    let r = w.step_runs.get(&run).ok_or("the step run is gone")?;
+    let project = d
+        .project(t.project)
+        .ok_or("the task's project is not configured")?
+        .clone();
+    let def = d.pinned_def(&t.def).ok_or_else(|| {
+        format!(
+            "the definition {} this task is pinned to is not in the store",
+            t.def
+        )
+    })?;
+    let step = if r.name.is_empty() {
+        def.first_in(r.step)
+    } else {
+        def.step(&r.name)
+    }
+    .ok_or_else(|| {
+        format!(
+            "step `{}` is not in the definition this task is pinned to",
+            r.name
+        )
+    })?
+    .clone();
+    let now = now_ms();
+    let runtime: Vec<RuntimeOverride> = d
+        .store
+        .overrides(&project.id, now)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|o| RuntimeOverride {
+            key: o.key,
+            value: o.value,
+            owner: o.owner,
+            expires_at: o.expires_at,
+        })
+        .collect();
+    let task_overrides = d.store.task_overrides(task.0).map_err(|e| e.to_string())?;
+    let res = resolve(
+        &def,
+        &step,
+        &d.overlay(t.project),
+        &runtime,
+        &task_overrides,
+        now,
+    )
+    .map_err(|p| {
+        p.iter()
+            .map(|x| x.to_string())
+            .collect::<Vec<_>>()
+            .join("; ")
+    })?;
+    Ok(Ctx {
         d: d.clone(),
         task,
         run,
-        step,
+        state: r.step,
         attempt: r.attempt,
         wt: project.worktree(&d.cfg, task.0),
         branch: project.branch(task.0),
@@ -95,31 +195,27 @@ fn ctx(d: &Arc<Daemon>, task: TaskId, step: State, run: StepRunId) -> Option<Ctx
         title: t.title.clone(),
         body: t.body.clone(),
         trust: t.trust,
+        def,
+        step,
+        res,
     })
 }
 
 pub fn run(d: &Arc<Daemon>, task: TaskId, step: State, run: StepRunId) {
-    let Some(c) = ctx(d, task, step, run) else {
-        // The task's project is no longer configured.
-        d.emit_for_run(
-            task,
-            run,
-            EventKind::StepFailed {
-                task,
-                reason: "the task's project is not configured".into(),
-            },
-        );
-        return;
+    let c = match ctx(d, task, run) {
+        Ok(c) => c,
+        Err(why) => {
+            d.emit_for_run(task, run, EventKind::StepFailed { task, reason: why });
+            return;
+        }
     };
     d.crash.point(&format!("job_started:{step:?}"));
-    match step {
-        State::Exploring => agent_job(&c, StepKind::Explore),
-        State::Developing => agent_job(&c, StepKind::Develop),
-        State::Testing => test_job(&c),
-        // The fixed graph has no review step yet: it passes straight through.
-        State::Review => c.succeed(),
-        State::Landing => land_job(&c),
-        _ => {}
+    match c.step.kind {
+        StepType::Agent => agent_job(&c),
+        StepType::Command | StepType::Test => command_job(&c),
+        StepType::Approval => approval_job(&c),
+        StepType::Landing => land_job(&c),
+        other => c.fail(format!("step type `{}` cannot run yet", other.name())),
     }
 }
 
@@ -142,6 +238,13 @@ fn prepare(c: &Ctx) -> Result<(), String> {
         Ok(_) => Ok(()),
         Err(e) => Err(e.to_string()),
     }
+}
+
+fn prepare_worktree_only(c: &Ctx) -> Result<(), String> {
+    let lock = c.d.repo_lock(c.project_id);
+    let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+    git::ensure_worktree(&c.project.path, &c.wt, &c.branch, &c.project.base_ref())
+        .map_err(|e| e.to_string())
 }
 
 /// Run `sh -c cmd` in `cwd`, giving up after `timeout`. Returns whether it
@@ -199,19 +302,54 @@ pub fn tail(text: &str, lines: usize) -> String {
     v[v.len().saturating_sub(lines)..].join("\n")
 }
 
+/// The project's optional classifier: the task body on its stdin, and `clear`
+/// on stdout means skip exploring. Anything else, or any failure, means explore.
+pub fn classify(cmd: &str, body: &str) -> bool {
+    use std::io::{Read, Write};
+    let Ok(mut child) = Command::new("sh")
+        .args(["-c", cmd])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+    if let Some(mut sin) = child.stdin.take() {
+        let _ = sin.write_all(body.as_bytes());
+    }
+    let mut out = String::new();
+    let (tx, rx) = std::sync::mpsc::channel();
+    if let Some(mut so) = child.stdout.take() {
+        std::thread::spawn(move || {
+            let mut s = String::new();
+            let _ = so.read_to_string(&mut s);
+            let _ = tx.send(s);
+        });
+    }
+    match rx.recv_timeout(Duration::from_secs(30)) {
+        Ok(s) => out = s,
+        Err(_) => {
+            let _ = child.kill();
+        }
+    }
+    let ok = child.wait().map(|s| s.success()).unwrap_or(false);
+    ok && out.trim().eq_ignore_ascii_case("clear")
+}
+
 /// `run_check` for the develop step: the only check is the project's tests.
 struct TestChecks {
-    cmd: String,
+    cmd: Option<String>,
     wt: PathBuf,
     timeout: Duration,
 }
 
 impl CheckHandler for TestChecks {
     fn run(&self, name: &str) -> CheckRun {
-        if name != "tests" {
+        let (true, Some(cmd)) = (name == "tests", &self.cmd) else {
             return CheckRun::Unknown;
-        }
-        let (passed, out) = run_shell(&self.cmd, &self.wt, self.timeout);
+        };
+        let (passed, out) = run_shell(cmd, &self.wt, self.timeout);
         CheckRun::Done {
             passed,
             summary: format!("Last output:\n{out}"),
@@ -220,7 +358,10 @@ impl CheckHandler for TestChecks {
 }
 
 /// Proof before acceptance: the submitted commit really is the tip of the
-/// task's branch, the tree is clean, and the branch has work in it.
+/// task's branch, the tree is clean, the branch has work in it, and if the
+/// change edits the pipeline's own definition, the new one is valid. (The
+/// definition that judges *this* task is the pinned one, never the edited one:
+/// a change cannot relax the gates it is judged by.)
 fn change_validator(wt: PathBuf, base_ref: String, branch: String) -> Validator {
     Box::new(move |tool, args| {
         if tool != "submit_change" {
@@ -251,6 +392,23 @@ fn change_validator(wt: PathBuf, base_ref: String, branch: String) -> Validator 
             Err(e) => problems.push(format!("cannot compare with {base_ref}: {e}")),
             Ok(_) => {}
         }
+        let changed = git::run(&wt, &["diff", "--name-only", &format!("{base_ref}...HEAD")])
+            .unwrap_or_default();
+        if changed.lines().any(|f| f == ".mason/mason.toml") {
+            if let Ok(text) = git::run(&wt, &["show", "HEAD:.mason/mason.toml"]) {
+                let bad = match mason_definition::parse(&text) {
+                    Err(e) => e,
+                    Ok(def) => {
+                        mason_definition::validate(&def, &mason_definition::Capabilities::now())
+                    }
+                };
+                for p in bad {
+                    problems.push(format!(
+                        "your change edits .mason/mason.toml, and the new definition is invalid ({p}); it takes effect only after landing, so it must be valid first"
+                    ));
+                }
+            }
+        }
         if problems.is_empty() {
             Ok(())
         } else {
@@ -275,7 +433,13 @@ fn adapter(c: &Ctx) -> ClaudeAdapter {
     )
 }
 
-fn agent_job(c: &Ctx, kind: StepKind) {
+fn agent_job(c: &Ctx) {
+    let Some(kind) = contract_kind(c.state) else {
+        return c.fail(format!(
+            "an agent step cannot be in the {:?} category",
+            c.state
+        ));
+    };
     if let Err(why) = prepare(c) {
         return c.fail(why);
     }
@@ -295,17 +459,49 @@ fn agent_job(c: &Ctx, kind: StepKind) {
             plan.as_ref(),
             feedback.as_deref(),
         ),
-        _ => crate::prompts::explore_prompt(c.task.0, &c.title, &c.body, c.trust, &c.project),
+        StepKind::Review => crate::prompts::review_prompt(
+            c.task.0,
+            &c.title,
+            &c.body,
+            c.trust,
+            &c.project,
+            plan.as_ref(),
+        ),
+        StepKind::Explore => {
+            crate::prompts::explore_prompt(c.task.0, &c.title, &c.body, c.trust, &c.project)
+        }
     };
 
+    let tests_cmd = c.d.world().ok().and_then(|_| {
+        // `run_check` runs the project's tests: the command of its test step, as layered.
+        c.def
+            .steps
+            .iter()
+            .find(|s| s.kind == StepType::Test)
+            .and_then(|s| {
+                mason_definition::layers::resolve(
+                    &c.def,
+                    s,
+                    &c.d.overlay(c.project_id),
+                    &[],
+                    &[],
+                    now_ms(),
+                )
+                .ok()
+                .and_then(|r| r.command.map(|a| a.value))
+            })
+    });
     let checks = Box::new(TestChecks {
-        cmd: c.project.test_cmd.clone(),
+        cmd: tests_cmd,
         wt: c.wt.clone(),
         timeout: c.project.test_timeout,
     });
     let validator = (kind == StepKind::Develop)
         .then(|| change_validator(c.wt.clone(), c.project.base_ref(), c.branch.clone()));
     let contract = ContractHandle::with_validator(kind, checks, validator);
+    if let Some(tools) = &c.step.tools {
+        contract.restrict_tools(tools.clone());
+    }
     // An accepted submission is made durable before the agent is told, so a
     // daemon that dies before recording the step's result still knows it.
     let accepted_file = dir.join(format!("accepted-r{}.json", c.run.0));
@@ -332,11 +528,18 @@ fn agent_job(c: &Ctx, kind: StepKind) {
 
     let adapter = adapter(c);
     let mut spec = SessionSpec::new(kind, &prompt, &c.wt);
-    spec.model = c.project.model.clone();
+    spec.model = c.res.model.as_ref().map(|a| a.value.clone());
+    spec.effort = c.res.effort.as_ref().map(|a| a.value.clone());
     spec.env = c.project.agent_env.clone();
     spec.tool_timeout = c.project.tool_timeout;
-    spec.deadline = Some(c.project.step_timeout);
+    spec.deadline = Some(
+        c.res
+            .budget
+            .as_ref()
+            .map_or(c.project.step_timeout, |a| a.value),
+    );
     spec.run_key = Some(key.clone());
+    spec.tools = c.step.tools.clone();
     // Wired before any reattach, so a session found again sees what was already accepted.
     spec.accepted = contract.flag();
     spec.contract = Some(contract.clone());
@@ -366,70 +569,89 @@ fn agent_job(c: &Ctx, kind: StepKind) {
         report = runner.resume(report, hold_note(), spec.clone(), &contract);
     }
     contract.shutdown();
-    finish_agent(c, kind, report, &dir);
+    finish_agent(c, report, &dir);
 }
 
-fn finish_agent(c: &Ctx, kind: StepKind, report: StepReport, dir: &Path) {
-    c.d.crash.point(&format!("before_event:{:?}", c.step));
+fn finish_agent(c: &Ctx, report: StepReport, dir: &Path) {
     let task = c.task;
     match report.end {
         StepEnd::Accepted { submission, .. } => {
-            if kind == StepKind::Explore {
-                let _ = std::fs::write(dir.join("plan.json"), submission.to_string());
-            } else {
-                let _ = std::fs::remove_file(dir.join("feedback.txt"));
+            match c.state {
+                State::Exploring => {
+                    let _ = std::fs::write(dir.join("plan.json"), submission.to_string());
+                }
+                State::Developing => {
+                    let _ = std::fs::remove_file(dir.join("feedback.txt"));
+                }
+                _ => {}
             }
-            c.emit(EventKind::StepSucceeded { task, next: None });
+            // A reviewer who asks for changes is red, not an error.
+            if c.state == State::Review && submission["verdict"] == "changes" {
+                let findings: Vec<String> = submission["findings"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|f| format!("- {}{}", f["issue"].as_str().unwrap_or(""), f["file"].as_str().map(|p| format!(" ({p})")).unwrap_or_default()))
+                    .collect();
+                let feedback = format!("The reviewer asked for changes: {}\n{}", submission["summary"].as_str().unwrap_or(""), findings.join("\n"));
+                return c.conclude(Outcome::Red, "the reviewer asked for changes".into(), Some(feedback));
+            }
+            c.green();
         }
-        StepEnd::ExplorationRequested { reason } => {
-            c.emit(EventKind::ExplorationRequested {
-                task,
-                reason,
-                to_step: String::new(),
-            });
-        }
+        StepEnd::ExplorationRequested { reason } => match c.def.first_in(State::Exploring) {
+            Some(first) => {
+                c.d.crash.point(&format!("before_event:{:?}", c.state));
+                c.emit(EventKind::ExplorationRequested { task, reason, to_step: first.name.clone() });
+            }
+            None => c.fail(format!("the agent asked to go back to exploring ({reason}), but this definition has no exploring step")),
+        },
         StepEnd::Asked { question } => {
-            let q = question["ask"]
-                .as_str()
-                .unwrap_or("(no question text)")
-                .to_string();
+            let q = question["ask"].as_str().unwrap_or("(no question text)").to_string();
+            c.d.crash.point(&format!("before_event:{:?}", c.state));
             c.emit(EventKind::QuestionAsked { task, question: q });
         }
-        // A long check is not used by the fixed graph; if one appears, say so.
-        StepEnd::Suspended { check_id } => {
-            c.emit(EventKind::StepFailed {
-                task,
-                reason: format!("unexpected suspended check {check_id}"),
-            });
-        }
+        // A long check is not used yet; if one appears, say so.
+        StepEnd::Suspended { check_id } => c.fail(format!("unexpected suspended check {check_id}")),
         StepEnd::Failed(why) => {
             let reason = match why {
-                FailReason::NoResult { nudges } => format!(
-                    "the agent ended its turn {} times without submitting",
-                    nudges + 1
-                ),
+                FailReason::NoResult { nudges } => format!("the agent ended its turn {} times without submitting", nudges + 1),
                 FailReason::Timeout => "the step ran out of time".to_string(),
                 FailReason::Crash { detail } => format!("the agent failed: {detail}"),
             };
-            c.emit(EventKind::StepFailed { task, reason });
+            c.fail(reason);
         }
         StepEnd::Hold(_) => {} // handled by the caller's loop
     }
 }
 
-fn test_job(c: &Ctx) {
+/// A command or test step: run `command` in the worktree under a step host, so
+/// a daemon restart does not lose the run. Exit 0 is green.
+fn command_job(c: &Ctx) {
+    let Some(cmd) = c.res.command.as_ref().map(|a| a.value.clone()) else {
+        return c.fail("this step has no command: set `command` on the step, or `test` in the project's local overlay");
+    };
     if let Err(why) = prepare_worktree_only(c) {
         return c.fail(why);
     }
-    let id = format!("t{}r{}-test", c.task.0, c.run.0);
+    let suffix = if c.step.kind == StepType::Test {
+        "test"
+    } else {
+        "cmd"
+    };
+    let id = format!("t{}r{}-{suffix}", c.task.0, c.run.0);
     let hosts = c.d.cfg.hosts_dir();
     let dir = hosts.join(&id);
+    let limit = c
+        .res
+        .budget
+        .as_ref()
+        .map_or(c.project.test_timeout, |a| a.value);
     if !dir.join("host.kv").exists() {
         let o = SpawnOptions {
             host_bin: c.d.cfg.host_bin.clone(),
             root: hosts.clone(),
             id: id.clone(),
-            cmd: vec!["sh".into(), "-c".into(), c.project.test_cmd.clone()],
+            cmd: vec!["sh".into(), "-c".into(), cmd],
             cwd: Some(c.wt.clone()),
             env: vec![],
             clear_env: false,
@@ -438,13 +660,13 @@ fn test_job(c: &Ctx) {
             heartbeat: c.d.cfg.heartbeat,
         };
         if let Err(e) = spawn_host(&o) {
-            return c.fail(format!("cannot start the test run: {e}"));
+            return c.fail(format!("cannot start the command: {e}"));
         }
     }
     // Stop the run if it takes too long.
     let done = Arc::new(AtomicBool::new(false));
     {
-        let (done, sock, limit) = (done.clone(), dir.join("sock"), c.project.test_timeout);
+        let (done, sock) = (done.clone(), dir.join("sock"));
         std::thread::spawn(move || {
             let end = Instant::now() + limit;
             while Instant::now() < end {
@@ -458,23 +680,21 @@ fn test_job(c: &Ctx) {
             }
         });
     }
-    let log = c.task_dir().join(format!("test-r{}.log", c.run.0));
+    let log = c.task_dir().join(format!("{suffix}-r{}.log", c.run.0));
     let result = collect_to_file(
         &dir,
         &log,
-        &c.task_dir().join(format!("test-r{}.exit", c.run.0)),
+        &c.task_dir().join(format!("{suffix}-r{}.exit", c.run.0)),
     );
     done.store(true, Ordering::SeqCst);
     let rec = match result {
         Ok(r) => r,
-        Err(ClientError::HostLost { .. }) => {
-            return c.fail("the test run was lost (its host died)")
-        }
-        Err(e) => return c.fail(format!("cannot collect the test result: {e}")),
+        Err(ClientError::HostLost { .. }) => return c.fail("the command was lost (its host died)"),
+        Err(e) => return c.fail(format!("cannot collect the command's result: {e}")),
     };
     if rec.code == 0 && rec.signal == 0 {
         let _ = std::fs::remove_file(c.task_dir().join("feedback.txt"));
-        return c.succeed();
+        return c.green();
     }
     let output = tail(&std::fs::read_to_string(&log).unwrap_or_default(), 60);
     let how = if rec.signal != 0 {
@@ -482,27 +702,39 @@ fn test_job(c: &Ctx) {
     } else {
         format!("exit status {}", rec.code)
     };
-    let rounds = c.attempt;
-    if rounds >= c.project.max_test_rounds {
-        return c.fail(format!("tests still red after {rounds} rounds ({how})"));
-    }
-    let _ = std::fs::write(
-        c.task_dir().join("feedback.txt"),
-        format!("tests failed ({how}). Last output:\n{output}"),
+    c.conclude(
+        Outcome::Red,
+        format!("`{}` failed ({how})", c.step.name),
+        Some(format!(
+            "`{}` failed ({how}). Last output:\n{output}",
+            c.step.name
+        )),
     );
-    c.d.crash.point("before_event:Testing");
-    c.emit(EventKind::SentBack {
-        task: c.task,
-        reason: format!("tests failed ({how})"),
-        to_step: String::new(),
-    });
 }
 
-fn prepare_worktree_only(c: &Ctx) -> Result<(), String> {
-    let lock = c.d.repo_lock(c.project_id);
-    let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
-    git::ensure_worktree(&c.project.path, &c.wt, &c.branch, &c.project.base_ref())
-        .map_err(|e| e.to_string())
+/// An approval step waits for the owner. The run stays open, holding no slot,
+/// until `mason task approve` or `reject` ends it.
+fn approval_job(c: &Ctx) {
+    let waiting = Activity::Waiting(WaitReason::On(APPROVAL_WAIT.into()));
+    let already =
+        c.d.world()
+            .ok()
+            .is_some_and(|w| w.tasks.get(&c.task).is_some_and(|t| t.activity == waiting));
+    if !already
+        && !c.emit(EventKind::WaitStarted {
+            task: c.task,
+            on: APPROVAL_WAIT.into(),
+        })
+    {
+        return;
+    }
+    loop {
+        std::thread::sleep(Duration::from_millis(250));
+        match c.d.world() {
+            Ok(w) if w.open_run(c.task) == Some(c.run) => {}
+            _ => return, // approved, rejected, cancelled or retried
+        }
+    }
 }
 
 fn land_job(c: &Ctx) {
@@ -511,6 +743,24 @@ fn land_job(c: &Ctx) {
     }
     let landing_wt = c.project.landing_worktree(&c.d.cfg);
     let lock = c.d.repo_lock(c.project_id);
+    // The tests that re-verify after a moved base: the definition's test step, as layered.
+    let verify_cmd = c
+        .def
+        .steps
+        .iter()
+        .find(|s| s.kind == StepType::Test)
+        .and_then(|s| {
+            mason_definition::layers::resolve(
+                &c.def,
+                s,
+                &c.d.overlay(c.project_id),
+                &[],
+                &[],
+                now_ms(),
+            )
+            .ok()
+            .and_then(|r| r.command.map(|a| a.value))
+        });
     let result = {
         let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
         let l = DirectLanding {
@@ -521,39 +771,107 @@ fn land_job(c: &Ctx) {
             base: &c.project.base,
             remote: c.project.remote.as_deref(),
         };
-        let mut verify = || run_shell(&c.project.test_cmd, &c.wt, c.project.test_timeout).0;
+        let mut verify = || match &verify_cmd {
+            Some(cmd) => run_shell(cmd, &c.wt, c.project.test_timeout).0,
+            None => true,
+        };
         l.land(&mut verify, &|p| c.d.crash.point(p))
     };
     match result {
         Ok(_) => {
             c.d.crash.point("land_before_event");
-            c.succeed();
+            c.green();
             c.d.crash.point("land_after_event");
             cleanup(&c.d, c.task, true);
+            // The base branch just moved, perhaps including this project's own definition.
+            let _ = c.d.reload_definition(c.project_id);
         }
-        Err(LandError::RedAfterFold) => {
-            let _ = std::fs::write(
-                c.task_dir().join("feedback.txt"),
-                "Tests were red after folding in the latest base branch. Fix the interaction.",
-            );
-            c.emit(EventKind::SentBack {
-                task: c.task,
-                reason: "tests are red after folding in the new base".into(),
-                to_step: String::new(),
-            });
-        }
-        Err(LandError::Conflict(files)) => {
-            let _ = std::fs::write(
-                c.task_dir().join("feedback.txt"),
-                format!("The base branch moved and now conflicts with your change in: {files}"),
-            );
-            c.emit(EventKind::SentBack {
-                task: c.task,
-                reason: format!("conflict with the new base in: {}", files.trim()),
-                to_step: String::new(),
-            });
-        }
+        Err(LandError::RedAfterFold) => c.conclude(
+            Outcome::Red,
+            "tests are red after folding in the new base".into(),
+            Some(
+                "Tests were red after folding in the latest base branch. Fix the interaction."
+                    .into(),
+            ),
+        ),
+        Err(LandError::Conflict(files)) => c.conclude(
+            Outcome::Red,
+            format!("conflict with the new base in: {}", files.trim()),
+            Some(format!(
+                "The base branch moved and now conflicts with your change in: {files}"
+            )),
+        ),
         Err(e) => c.fail(format!("landing failed: {e}")),
+    }
+}
+
+/// The owner approves or rejects the approval step a task is waiting in.
+/// Approving goes where the graph says; rejecting is red (back to development
+/// if the step has `on_red`, otherwise the task fails).
+pub fn conclude_approval(
+    d: &Arc<Daemon>,
+    task: TaskId,
+    outcome: Outcome,
+    reason: &str,
+) -> Result<(), String> {
+    let w = d.world().map_err(|e| e.to_string())?;
+    let t = w
+        .tasks
+        .get(&task)
+        .ok_or_else(|| format!("no task #{}", task.0))?;
+    let run = w
+        .open_run(task)
+        .ok_or_else(|| format!("task #{} is not in a step ({:?})", task.0, t.state))?;
+    let r = &w.step_runs[&run];
+    let def = d
+        .pinned_def(&t.def)
+        .ok_or("the task's definition is not in the store")?;
+    let step = if r.name.is_empty() {
+        def.first_in(r.step)
+    } else {
+        def.step(&r.name)
+    }
+    .ok_or("the step is not in the definition")?;
+    if step.kind != StepType::Approval {
+        return Err(format!(
+            "task #{} is in step `{}` ({}), which is not waiting for approval",
+            task.0,
+            step.name,
+            step.kind.name()
+        ));
+    }
+    let kind = match after(&def, step, outcome, r.attempt, step.max_rounds) {
+        Transition::Next { step, state } => EventKind::StepSucceeded {
+            task,
+            next: Some(Next { step, state }),
+        },
+        Transition::Land => EventKind::StepSucceeded {
+            task,
+            next: Some(Next {
+                step: String::new(),
+                state: State::Landed,
+            }),
+        },
+        Transition::SendBack { step: back } => {
+            let _ = std::fs::write(
+                d.task_dir(task).join("feedback.txt"),
+                format!("The owner rejected the work at `{}`: {reason}", step.name),
+            );
+            EventKind::SentBack {
+                task,
+                reason: format!("rejected by the owner: {reason}"),
+                to_step: back,
+            }
+        }
+        Transition::Fail(why) => EventKind::StepFailed {
+            task,
+            reason: format!("rejected by the owner: {reason} ({why})"),
+        },
+    };
+    if d.emit_for_run(task, run, kind) {
+        Ok(())
+    } else {
+        Err("the step ended while you were deciding".into())
     }
 }
 

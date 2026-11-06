@@ -51,6 +51,8 @@ pub struct SessionSpec {
     /// Names this step run so a restarted controller can find its session
     /// again (see [`AgentAdapter::reattach`]). Required for hosted launches.
     pub run_key: Option<String>,
+    /// Narrow the step's contract tools to these (a definition's `tools`).
+    pub tools: Option<Vec<String>>,
 }
 
 impl SessionSpec {
@@ -67,6 +69,7 @@ impl SessionSpec {
             contract: None,
             accepted: SubmissionFlag::default(),
             run_key: None,
+            tools: None,
         }
     }
 }

@@ -29,15 +29,12 @@ const POINTS: &[&str] = &[
     "job_started:Testing",
     "before_event:Testing",
     "after_append:StepSucceeded@3", // tests green
-    "job_started:Review",
-    "before_event:Review",
-    "after_append:StepSucceeded@4", // review passed
     "job_started:Landing",
     "land_after_fetch",
     "land_after_ff",
     "land_after_push",              // pushed to the remote, not yet recorded
     "land_before_event",            // same, after the landing call returned
-    "after_append:StepSucceeded@5", // recorded as landed, cleanup not done
+    "after_append:StepSucceeded@4", // recorded as landed, cleanup not done
     "land_after_event",
 ];
 
@@ -83,7 +80,6 @@ fn check_landed_exactly_once(s: &Scratch, task: u64) -> Result<(), String> {
     let want = [
         "TaskFiled",
         "Admitted",
-        "StepSucceeded",
         "StepSucceeded",
         "StepSucceeded",
         "StepSucceeded",

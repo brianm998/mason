@@ -19,7 +19,17 @@ struct Bridge {
 
 impl Bridge {
     fn start(step: &str, sock: &std::path::Path, retry_secs: u32) -> Bridge {
+        Self::start_with(step, sock, retry_secs, &[])
+    }
+
+    fn start_with(
+        step: &str,
+        sock: &std::path::Path,
+        retry_secs: u32,
+        env: &[(&str, &str)],
+    ) -> Bridge {
         let mut child = Command::new(env!("CARGO_BIN_EXE_mason-mcp"))
+            .envs(env.iter().copied())
             .env("MASON_STEP_KIND", step)
             .env("MASON_CONTRACT_SOCK", sock)
             .env("MASON_BRIDGE_RETRY_SECS", retry_secs.to_string())
@@ -165,4 +175,24 @@ fn a_controller_that_never_returns_is_reported_not_hung() {
         "{text}"
     );
     assert!(start.elapsed() < Duration::from_secs(5));
+}
+
+#[test]
+fn a_definition_can_narrow_the_tools_the_bridge_offers() {
+    let d = tempfile::tempdir().unwrap();
+    let mut b = Bridge::start_with(
+        "develop",
+        &sock(&d),
+        1,
+        &[("MASON_TOOLS", "submit_change,report_progress")],
+    );
+    let r = b.rpc("tools/list", json!({}));
+    let mut names: Vec<&str> = r["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    names.sort();
+    assert_eq!(names, vec!["report_progress", "submit_change"]);
 }

@@ -37,7 +37,7 @@ fn the_cli_drives_a_task_from_filing_to_landing() {
         show.contains("landed    merged") && show.contains("Create hello.txt containing hello."),
         "{show}"
     );
-    for step in ["exploring", "developing", "testing", "review", "landing"] {
+    for step in ["exploring", "developing", "testing", "landing"] {
         assert!(show.contains(step), "{step} in {show}");
     }
     let logs = s.mason_ok(&["logs", "0"]);

@@ -66,6 +66,30 @@ pub fn develop_prompt(
     )
 }
 
+pub fn review_prompt(
+    task: u64,
+    title: &str,
+    body: &str,
+    trust: TrustSource,
+    p: &ProjectCfg,
+    plan: Option<&Value>,
+) -> String {
+    let plan_text = plan.map_or_else(
+        || "(no plan was recorded)".to_string(),
+        |v| serde_json::to_string_pretty(v).unwrap_or_default(),
+    );
+    format!(
+        "You are reviewing the change for task #{task} in project {proj}. It is committed on the branch you are \
+         on; look at what it changes against the base branch (git diff {base}...HEAD) and read the code around \
+         it. Do not change any files.\n\n{task_text}\n\nThe plan:\n{plan_text}\n\n\
+         Check that it does what the task asks, that the acceptance criteria hold, and that it breaks nothing. \
+         Call submit_review with verdict \"approve\", or \"changes\" with at least one concrete finding.",
+        proj = p.id,
+        base = p.base_ref(),
+        task_text = fenced(&format!("TASK #{task}: {title}"), trust, body),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -85,7 +109,9 @@ mod tests {
             tool_timeout: Duration::from_secs(1),
             step_timeout: Duration::from_secs(1),
             test_timeout: Duration::from_secs(1),
-            max_test_rounds: 3,
+            max_test_rounds: None,
+            clarity_classifier: None,
+            overlay_text: String::new(),
         }
     }
 

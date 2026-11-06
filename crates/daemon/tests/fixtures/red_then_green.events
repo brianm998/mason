@@ -1,10 +1,9 @@
-1793937642516	project_registered	1	scratch
-1793937642517	task_filed	1	Needs a second try	normal	owner	0	0		-	Please do: Needs a second try
-1793937642518	admitted	0
-1793937643400	step_succeeded	0
-1793937643656	step_succeeded	0
-1793937643713	sent_back	0	tests failed (exit status 1)
-1793937643939	step_succeeded	0
-1793937643989	step_succeeded	0
-1793937643990	step_succeeded	0
-1793937644298	step_succeeded	0
+1793974014610	project_registered	1	scratch
+1793974014734	task_filed	1	Needs a second try	normal	owner	0	0		-	Please do: Needs a second try
+1793974014756	admitted	0	dc484723d559565e8d597853e8b678fd	explore	exploring	explore
+1793974015461	step_succeeded	0	develop	developing
+1793974015688	step_succeeded	0	test	testing
+1793974015746	sent_back	0	`test` failed (exit status 1)	develop
+1793974015941	step_succeeded	0	test	testing
+1793974015995	step_succeeded	0	land	landing
+1793974016233	step_succeeded	0		landed

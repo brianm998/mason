@@ -453,6 +453,7 @@ dependencies = [
  "mason-adapter-api",
  "mason-adapters",
  "mason-core",
+ "mason-definition",
  "mason-engine",
  "mason-landing",
  "mason-step-host",
@@ -497,6 +498,7 @@ name = "mason-pipeline"
 version = "0.0.0"
 dependencies = [
  "mason-daemon",
+ "mason-definition",
  "mason-landing",
  "mason-step-host",
  "serde_json",

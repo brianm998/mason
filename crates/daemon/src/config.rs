@@ -27,6 +27,13 @@ pub struct DaemonConfig {
     pub hold_retry: Duration,
     /// Enables `POST /debug/stall`.
     pub debug: bool,
+    /// How often the definition watcher looks for a changed base branch or
+    /// overlay file.
+    pub reload_interval: Duration,
+    /// How often the watcher fetches each project's remote to see whether the
+    /// base branch (and so its definition) changed. Local changes are seen at
+    /// `reload_interval`; an explicit reload always fetches.
+    pub fetch_interval: Duration,
 }
 
 impl DaemonConfig {
@@ -48,6 +55,8 @@ impl DaemonConfig {
             stall_threshold: Duration::from_millis(500),
             hold_retry: Duration::from_secs(60),
             debug: false,
+            reload_interval: Duration::from_secs(5),
+            fetch_interval: Duration::from_secs(60),
         }
     }
 
@@ -92,8 +101,14 @@ pub struct ProjectCfg {
     pub tool_timeout: Duration,
     pub step_timeout: Duration,
     pub test_timeout: Duration,
-    /// Test rounds (red, back to developing) before the task fails.
-    pub max_test_rounds: u32,
+    /// Test rounds before the task fails, if the overlay sets one (layer 3).
+    pub max_test_rounds: Option<u32>,
+    /// A command that reads a task body on stdin and prints `clear` or
+    /// `unclear`. Optional, and only consulted when the deterministic check is
+    /// unsure. Anything but `clear`, or a failure, means explore.
+    pub clarity_classifier: Option<String>,
+    /// The overlay file's text, for the configuration layers.
+    pub overlay_text: String,
 }
 
 impl ProjectCfg {
@@ -167,7 +182,12 @@ pub fn parse_project(id: &str, text: &str) -> Result<ProjectCfg, String> {
         tool_timeout: Duration::from_secs(secs("tool_timeout_s", 600)),
         step_timeout: Duration::from_secs(secs("step_timeout_s", 4 * 3600)),
         test_timeout: Duration::from_secs(secs("test_timeout_s", 1800)),
-        max_test_rounds: secs("max_test_rounds", 3) as u32,
+        max_test_rounds: doc
+            .get("max_test_rounds")
+            .and_then(|v| v.as_integer())
+            .map(|n| n.max(1) as u32),
+        clarity_classifier: s("clarity_classifier").filter(|c| !c.trim().is_empty()),
+        overlay_text: text.to_string(),
     })
 }
 
@@ -220,7 +240,7 @@ mod tests {
             (p.base.as_str(), p.test_cmd.as_str(), p.remote.clone()),
             ("develop", "make test", None)
         );
-        assert_eq!(p.max_test_rounds, 3);
+        assert_eq!(p.max_test_rounds, None);
         assert_eq!(p.branch(7), "mason/web-api/t7");
         assert_eq!(p.base_ref(), "develop");
     }

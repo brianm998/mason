@@ -33,6 +33,8 @@ next = "land"
 [step.land]
 type = "landing"
 category = "landing"
+max_rounds = 3
+on_red = "develop"
 "#;
 
 pub fn builtin() -> Definition {

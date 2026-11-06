@@ -49,21 +49,29 @@ fn a_recorded_clean_run_replays_to_a_landed_task() {
         (t.state, t.landed, t.failures),
         (State::Landed, Some(LandedOutcome::Merged), 0)
     );
-    let steps: Vec<State> = w.step_runs.values().map(|r| r.step).collect();
+    let steps: Vec<(&str, State)> = w
+        .step_runs
+        .values()
+        .map(|r| (r.name.as_str(), r.step))
+        .collect();
     assert_eq!(
         steps,
         vec![
-            State::Exploring,
-            State::Developing,
-            State::Testing,
-            State::Review,
-            State::Landing
+            ("explore", State::Exploring),
+            ("develop", State::Developing),
+            ("test", State::Testing),
+            ("land", State::Landing)
         ]
     );
     assert!(w
         .step_runs
         .values()
         .all(|r| r.outcome == Some(StepOutcome::Succeeded)));
+    assert_eq!(t.route, Some(Route::Explore));
+    assert!(
+        !t.def.is_empty(),
+        "the task is pinned to the definition it started under"
+    );
     assert_eq!(replay(&events), w, "replaying is deterministic");
     reencodes_identically(&text, &events);
 }
@@ -81,16 +89,74 @@ fn a_recorded_red_then_green_run_replays_through_the_loop_back() {
         (t.attempts[&State::Developing], t.attempts[&State::Testing]),
         (2, 2)
     );
-    let outcomes: Vec<(State, StepOutcome)> = w
+    assert_eq!(
+        (t.step_attempts["develop"], t.step_attempts["test"]),
+        (2, 2)
+    );
+    let outcomes: Vec<(&str, StepOutcome)> = w
         .step_runs
         .values()
-        .map(|r| (r.step, r.outcome.unwrap()))
+        .map(|r| (r.name.as_str(), r.outcome.unwrap()))
         .collect();
     assert!(
-        outcomes.contains(&(State::Testing, StepOutcome::SentBack)),
+        outcomes.contains(&("test", StepOutcome::SentBack)),
         "{outcomes:?}"
     );
     reencodes_identically(&text, &events);
+}
+
+#[test]
+fn a_recorded_flagged_run_skips_exploring_and_records_why() {
+    let (text, events) = load("skipped_exploring");
+    let w = replay(&events);
+    let t = &w.tasks[&TaskId(0)];
+    assert_eq!(
+        (t.state, t.route, t.explore_returns),
+        (State::Landed, Some(Route::Flag), 0)
+    );
+    let steps: Vec<&str> = w.step_runs.values().map(|r| r.name.as_str()).collect();
+    assert_eq!(
+        steps,
+        vec!["develop", "test", "land"],
+        "no exploring step ever ran"
+    );
+    reencodes_identically(&text, &events);
+}
+
+/// Logs written before steps had names, entries and pins (Stage 6) still decode
+/// and replay, with the older fixed progression through the categories. They are
+/// not re-encoded: the format has grown since.
+#[test]
+fn logs_recorded_before_definitions_existed_still_replay() {
+    for name in ["stage6_landed_task", "stage6_red_then_green"] {
+        let (_, events) = load(name);
+        let w = replay(&events);
+        let t = &w.tasks[&TaskId(0)];
+        assert_eq!(
+            (t.state, t.landed),
+            (State::Landed, Some(LandedOutcome::Merged)),
+            "{name}"
+        );
+        assert!(
+            w.step_runs.values().all(|r| r.name.is_empty()),
+            "no names in old logs"
+        );
+        let steps: Vec<State> = w
+            .step_runs
+            .values()
+            .filter(|r| {
+                r.outcome == Some(StepOutcome::Succeeded)
+                    || r.outcome == Some(StepOutcome::SentBack)
+            })
+            .map(|r| r.step)
+            .collect();
+        assert!(
+            steps.contains(&State::Review),
+            "the old graph had a review step: {steps:?}"
+        );
+        assert_eq!(t.route, Some(Route::Explore));
+        assert!(t.def.is_empty());
+    }
 }
 
 fn reencodes_identically(text: &str, events: &[Event]) {
@@ -107,8 +173,14 @@ fn reencodes_identically(text: &str, events: &[Event]) {
 #[test]
 fn every_prefix_of_a_recorded_run_is_a_valid_state() {
     // A crash can stop the log after any event. Every prefix must replay and keep its invariants.
-    let (_, events) = load("red_then_green");
-    for n in 0..=events.len() {
-        replay(&events[..n]);
+    for name in [
+        "red_then_green",
+        "skipped_exploring",
+        "stage6_red_then_green",
+    ] {
+        let (_, events) = load(name);
+        for n in 0..=events.len() {
+            replay(&events[..n]);
+        }
     }
 }

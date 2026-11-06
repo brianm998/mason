@@ -55,6 +55,10 @@ fn main() {
         .ok()
         .and_then(|s| StepKind::from_name(&s));
     let sock = std::env::var("MASON_CONTRACT_SOCK").unwrap_or_default();
+    // A definition may narrow the step's tools.
+    let only: Option<Vec<String>> = std::env::var("MASON_TOOLS")
+        .ok()
+        .map(|s| s.split(',').map(String::from).collect());
     let retry = Duration::from_secs(
         std::env::var("MASON_BRIDGE_RETRY_SECS")
             .ok()
@@ -83,6 +87,7 @@ fn main() {
                     .map(|s| s.tools().to_vec())
                     .unwrap_or_default()
                     .into_iter()
+                    .filter(|t| only.as_ref().is_none_or(|o| o.iter().any(|x| x == t)))
                     .filter_map(|t| {
                         tool_spec(t).map(|(d, schema)| json!({"name": t, "description": d, "inputSchema": schema}))
                     })

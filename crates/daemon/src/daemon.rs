@@ -40,6 +40,7 @@ pub struct Daemon {
     stalls: AtomicU64,
     worst_stall_ms: AtomicU64,
     pub(crate) sweep: Mutex<crate::sweep::SweepState>,
+    pub(crate) defs: crate::defs::Defs,
 }
 
 fn kind_name(k: &EventKind) -> String {
@@ -119,10 +120,13 @@ impl Daemon {
             stalls: AtomicU64::new(0),
             worst_stall_ms: AtomicU64::new(0),
             sweep: Mutex::default(),
+            defs: crate::defs::Defs::default(),
             cfg,
         });
+        d.load_definitions();
         d.recover();
         d.spawn_sweeper();
+        d.spawn_watcher();
         Ok(d)
     }
 
@@ -318,7 +322,13 @@ impl Daemon {
         loop {
             self.admit_again.store(false, Ordering::SeqCst);
             while let Ok(w) = self.store.world() {
-                let active = w.tasks.values().filter(|t| t.state.is_step()).count();
+                // A task waiting for the owner's approval holds no running slot.
+                let approving = Activity::Waiting(WaitReason::On(APPROVAL_WAIT.into()));
+                let active = w
+                    .tasks
+                    .values()
+                    .filter(|t| t.state.is_step() && t.activity != approving)
+                    .count();
                 if active >= self.cfg.max_concurrent {
                     break;
                 }
@@ -331,10 +341,11 @@ impl Daemon {
                     })
                     .min_by_key(|t| (t.enqueued_at, t.id));
                 let Some(t) = next else { break };
+                let entry = self.entry_for(t);
                 if self
                     .emit(EventKind::Admitted {
                         task: t.id,
-                        entry: None,
+                        entry: Some(entry),
                     })
                     .is_err()
                 {
@@ -346,6 +357,51 @@ impl Daemon {
             }
         }
         self.admitting.store(false, Ordering::SeqCst);
+    }
+
+    /// Where a task starts and why, from the definition in force now (Part 4,
+    /// "Skipping exploration"). The definition's `explored_entry` is what makes
+    /// skipping possible at all.
+    pub fn entry_for(&self, t: &Task) -> Entry {
+        let def = self.current_def(t.project);
+        let route = self.choose_route(t, &def);
+        let step = def
+            .entry(route.skipped_exploring())
+            .or_else(|| def.step(&def.start))
+            .expect("a validated definition has its start step");
+        Entry {
+            def: def.hash.clone(),
+            step: step.name.clone(),
+            state: step.category,
+            route,
+        }
+    }
+
+    fn choose_route(&self, t: &Task, def: &mason_definition::Definition) -> Route {
+        // Without an explored_entry a project always explores; so does "Explore anyway".
+        if def.explored_entry.is_none() || t.force_explore {
+            return Route::Explore;
+        }
+        // The flag counts only from the owner and the owner's agents (or once approved).
+        if t.explored_counts() {
+            return Route::Flag;
+        }
+        // The deterministic check: no model, and anything uncertain explores.
+        if let Some(idx) = self.file_index(t.project) {
+            if mason_definition::clarity::check(&t.body, &|p| idx.exists(p)).clear {
+                return Route::Clarity;
+            }
+        }
+        // The project may add a classifier for tasks the rules cannot call.
+        if let Some(cmd) = self
+            .project(t.project)
+            .and_then(|p| p.clarity_classifier.as_deref())
+        {
+            if crate::jobs::classify(cmd, &t.body) {
+                return Route::Classifier;
+            }
+        }
+        Route::Explore
     }
 
     /// Resume what was in flight: a job for every open step run. This is the

@@ -380,6 +380,7 @@ pub type OnAccept = Box<dyn Fn(&str, &Value) + Send + Sync>;
 
 struct Inner {
     on_accept: Mutex<Option<OnAccept>>,
+    allowed: Mutex<Option<Vec<String>>>,
     validator: Option<Validator>,
     step: StepKind,
     state: Mutex<ContractState>,
@@ -406,6 +407,7 @@ impl ContractHandle {
     ) -> ContractHandle {
         ContractHandle(Arc::new(Inner {
             on_accept: Mutex::new(None),
+            allowed: Mutex::new(None),
             validator,
             step,
             state: Mutex::new(ContractState::default()),
@@ -418,6 +420,11 @@ impl ContractHandle {
 
     pub fn step(&self) -> StepKind {
         self.0.step
+    }
+
+    /// Offer only these tools, a subset of the step's. Others are refused.
+    pub fn restrict_tools(&self, tools: Vec<String>) {
+        *self.0.allowed.lock().unwrap_or_else(|e| e.into_inner()) = Some(tools);
     }
 
     /// Run `f` for each accepted terminal submission, before replying to the agent.
@@ -475,8 +482,24 @@ impl ContractHandle {
                 text: format!("rejected, fix and call {tool} again:\n{}", list.join("\n")),
             }
         };
-        if !step.tools().contains(&tool) {
-            let avail = step.tools().join(", ");
+        let restricted = self
+            .0
+            .allowed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let offered = |t: &str| {
+            step.tools().contains(&t)
+                && restricted.as_ref().is_none_or(|r| r.iter().any(|x| x == t))
+        };
+        if !offered(tool) {
+            let avail: Vec<&str> = step
+                .tools()
+                .iter()
+                .copied()
+                .filter(|t| offered(t))
+                .collect();
+            let avail = avail.join(", ");
             return reject(
                 &mut st,
                 vec![format!(
@@ -866,6 +889,32 @@ mod tests {
             r.text
         );
         assert!(!c.flag().is_set());
+        assert!(
+            c.call("submit_change", &json!({"summary": "s", "head": "0123abc"}))
+                .ok
+        );
+    }
+
+    #[test]
+    fn a_step_may_narrow_its_tools_and_the_rest_are_refused() {
+        let c = ContractHandle::new(StepKind::Develop, Box::new(NoChecks));
+        c.restrict_tools(vec!["submit_change".into(), "report_progress".into()]);
+        let r = c.call("run_check", &json!({"name": "tests"}));
+        assert!(
+            !r.ok
+                && r.text.contains("not available")
+                && r.text.contains("submit_change, report_progress"),
+            "{}",
+            r.text
+        );
+        assert!(
+            !c.call(
+                "ask",
+                &json!({"ask": "q", "options": [{"label": "a"}, {"label": "b"}]})
+            )
+            .ok
+        );
+        assert!(c.call("report_progress", &json!({"message": "hi"})).ok);
         assert!(
             c.call("submit_change", &json!({"summary": "s", "head": "0123abc"}))
                 .ok

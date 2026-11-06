@@ -96,6 +96,10 @@ pub enum TrustSource {
     Outside,
 }
 
+/// What a task waits on while it sits in an approval step. Such a wait can last
+/// days, so it does not hold one of the daemon's running slots.
+pub const APPROVAL_WAIT: &str = "approval by the owner";
+
 /// Why a task started where it did (Part 4, "Skipping exploration").
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Route {

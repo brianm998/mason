@@ -166,7 +166,11 @@ impl ClaudeAdapter {
         };
         args.extend(["--tools".into(), builtins.join(",")]);
         let mut allowed: Vec<String> = builtins.iter().map(|s| s.to_string()).collect();
-        allowed.extend(spec.step.tools().iter().map(|t| format!("mcp__mason__{t}")));
+        let offered: Vec<String> = match &spec.tools {
+            Some(t) => t.clone(),
+            None => spec.step.tools().iter().map(|s| s.to_string()).collect(),
+        };
+        allowed.extend(offered.iter().map(|t| format!("mcp__mason__{t}")));
         args.push("--allowedTools".into());
         args.extend(allowed);
         // Belt and braces on top of the missing credentials and the git
@@ -214,6 +218,9 @@ impl ClaudeAdapter {
         let dir = self.state_dir.join(format!("{}-{n}", std::process::id()));
         std::fs::create_dir_all(&dir).map_err(AdapterError::Spawn)?;
         let mut env = json!({"MASON_STEP_KIND": spec.step.name()});
+        if let Some(t) = &spec.tools {
+            env["MASON_TOOLS"] = json!(t.join(","));
+        }
         if let Some(s) = sock {
             env["MASON_CONTRACT_SOCK"] = json!(s.display().to_string());
         }
@@ -854,6 +861,31 @@ mod tests {
                 "the owner's user settings apply"
             );
         }
+    }
+
+    #[test]
+    fn a_definitions_tool_list_narrows_what_the_agent_is_allowed() {
+        let a = adapter(&[("ANTHROPIC_BASE_URL", "http://127.0.0.1:1")]);
+        let mut sp = spec(StepKind::Develop);
+        sp.tools = Some(vec!["submit_change".into(), "report_progress".into()]);
+        let c = a.build_command(&sp, None).unwrap();
+        let joined = c.args.join(" ");
+        assert!(
+            joined.contains("mcp__mason__submit_change")
+                && joined.contains("mcp__mason__report_progress")
+        );
+        assert!(
+            !joined.contains("mcp__mason__run_check") && !joined.contains("mcp__mason__ask"),
+            "{joined}"
+        );
+        let cfg = std::fs::read_to_string(
+            c.args[c.args.iter().position(|x| x == "--mcp-config").unwrap() + 1].clone(),
+        )
+        .unwrap();
+        assert!(
+            cfg.contains("MASON_TOOLS") && cfg.contains("submit_change,report_progress"),
+            "{cfg}"
+        );
     }
 
     #[test]

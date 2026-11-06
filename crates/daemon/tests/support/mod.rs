@@ -46,6 +46,10 @@ pub struct Scratch {
 pub const TASK_SCRIPT_COMMIT: &str =
     "echo hello > hello.txt && git add -A && git -c user.name=t -c user.email=t@t commit -qm 'add hello'";
 
+/// Like `TASK_SCRIPT_COMMIT`, but each task's worktree also gets a file of its
+/// own, so a task that starts after another has landed still has something to commit.
+pub const UNIQUE_COMMIT: &str = "echo hello > hello.txt && date +%s%N > unique-$(basename \"$PWD\").txt && git add -A && git -c user.name=t -c user.email=t@t commit -qm 'add hello'";
+
 pub fn sh(cwd: &Path, args: &[&str]) -> String {
     git::run(cwd, args).unwrap_or_else(|e| panic!("{e}"))
 }
@@ -119,6 +123,39 @@ impl Scratch {
         Daemon::start(self.config()).expect("daemon starts")
     }
 
+    /// Start a daemon after letting `f` adjust its configuration.
+    pub fn start_with(&self, f: impl FnOnce(&mut DaemonConfig)) -> Arc<Daemon> {
+        let mut c = self.config();
+        f(&mut c);
+        Daemon::start(c).expect("daemon starts")
+    }
+
+    /// Commit files to the remote's `main`, as somebody else would (a landed
+    /// change to `.mason/`, a new source file, ...), without touching our clone.
+    pub fn push_files(&self, files: &[(&str, &str)], msg: &str) {
+        let dir = self.repo.parent().unwrap().join("pusher");
+        if !dir.exists() {
+            sh(
+                self.repo.parent().unwrap(),
+                &[
+                    "clone",
+                    "-q",
+                    self.origin.to_str().unwrap(),
+                    dir.to_str().unwrap(),
+                ],
+            );
+        }
+        sh(&dir, &["pull", "-q", "origin", "main"]);
+        for (path, body) in files {
+            let p = dir.join(path);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        }
+        sh(&dir, &["add", "-A"]);
+        sh(&dir, &["commit", "-q", "-m", msg]);
+        sh(&dir, &["push", "-q", "origin", "HEAD:main"]);
+    }
+
     pub fn origin_log(&self) -> Vec<String> {
         sh(&self.origin, &["log", "--format=%s", "main"])
             .lines()
@@ -170,6 +207,56 @@ pub fn file_task(d: &Arc<Daemon>, title: &str) -> TaskId {
             }
         })
         .unwrap()
+}
+
+/// File a task with a body and an explicit explored claim and trust.
+pub fn file_task_as(
+    d: &Arc<Daemon>,
+    title: &str,
+    body: &str,
+    explored: bool,
+    trust: TrustSource,
+    proposed: bool,
+) -> TaskId {
+    let pid = d.project_id_by_name("scratch").unwrap();
+    let a = d
+        .emit(EventKind::TaskFiled {
+            project: pid,
+            title: title.into(),
+            body: body.into(),
+            priority: Priority::Normal,
+            trust,
+            explored,
+            proposed,
+            blockers: vec![],
+            not_before: None,
+        })
+        .unwrap();
+    a.effects
+        .iter()
+        .find_map(|e| {
+            if let Effect::TaskCreated { task } = e {
+                Some(*task)
+            } else {
+                None
+            }
+        })
+        .unwrap()
+}
+
+pub fn task_of(d: &Arc<Daemon>, t: TaskId) -> Task {
+    d.world().unwrap().tasks[&t].clone()
+}
+
+/// The step names a task ran, in order.
+pub fn steps_run(d: &Arc<Daemon>, t: TaskId) -> Vec<String> {
+    d.world()
+        .unwrap()
+        .step_runs
+        .values()
+        .filter(|r| r.task == t)
+        .map(|r| r.name.clone())
+        .collect()
 }
 
 pub fn wait_for(what: &str, secs: u64, mut f: impl FnMut() -> bool) {

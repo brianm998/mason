@@ -1,0 +1,6 @@
+1793974012069	project_registered	1	scratch
+1793974012225	task_filed	1	Already planned	normal	owner	1	0		-	Do the thing.
+1793974012225	admitted	0	f82aed591362eb19a1c5164b5d719e30	develop	developing	flag
+1793974013006	step_succeeded	0	test	testing
+1793974013055	step_succeeded	0	land	landing
+1793974013287	step_succeeded	0		landed
