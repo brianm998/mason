@@ -1,0 +1,9 @@
+    Starting 3 tests across 1 binary
+        PASS [   0.004s] mason-core ids::tests::task_ids
+        FAIL [   0.006s] mason-core ids::tests::timestamps
+ TRY 1 FAIL [   0.006s] mason-core ids::tests::flaky_one
+ FLAKY 2/2 [   0.010s] mason-core ids::tests::flaky_one
+------------
+     Summary [   0.012s] 3 tests run: 2 passed, 1 failed, 0 skipped
+        FAIL [   0.006s] mason-core ids::tests::timestamps
+error: test run failed

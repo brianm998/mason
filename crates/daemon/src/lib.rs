@@ -15,6 +15,7 @@ pub mod jobs;
 pub mod pool;
 pub mod prompts;
 pub mod sched;
+pub mod suites;
 pub mod sweep;
 pub mod watchdog;
 

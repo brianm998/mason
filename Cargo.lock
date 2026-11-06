@@ -460,6 +460,7 @@ dependencies = [
  "mason-scheduler",
  "mason-step-host",
  "mason-store",
+ "mason-testing",
  "nix",
  "rusqlite",
  "serde_json",
@@ -477,6 +478,7 @@ dependencies = [
  "mason-adapter-api",
  "mason-core",
  "mason-engine",
+ "mason-testing",
  "proptest",
  "toml_edit",
 ]
@@ -504,6 +506,7 @@ dependencies = [
  "mason-landing",
  "mason-resources",
  "mason-step-host",
+ "mason-testing",
  "serde_json",
  "tempfile",
 ]
@@ -548,6 +551,11 @@ dependencies = [
 [[package]]
 name = "mason-testing"
 version = "0.0.0"
+dependencies = [
+ "proptest",
+ "regex",
+ "serde_json",
+]
 
 [[package]]
 name = "matchers"
@@ -723,6 +731,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "60aa6af80be32871323012e02e6e65f8a7cc7890931ae421d217ad8fe0df2ccf"
 dependencies = [
  "rand_core",
+]
+
+[[package]]
+name = "regex"
+version = "1.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f020237b6c8eed93db2e2cb53c00c60a8e1bc73da7d073199a1180401450218d"
+dependencies = [
+ "aho-corasick",
+ "memchr",
+ "regex-automata",
+ "regex-syntax",
 ]
 
 [[package]]

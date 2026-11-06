@@ -1,0 +1,2 @@
+Test Suite 'All tests' started at 2026-11-06 10:00:00.000
+Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.001) seconds

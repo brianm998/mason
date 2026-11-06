@@ -1,0 +1,2 @@
+◇ Test run started.
+✔ Test run with 0 tests passed after 0.001 seconds.

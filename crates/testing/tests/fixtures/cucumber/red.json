@@ -1,0 +1,53 @@
+[
+ {
+  "name": "Login",
+  "elements": [
+   {
+    "type": "scenario",
+    "name": "valid user",
+    "steps": [
+     {
+      "keyword": "Given",
+      "name": "x",
+      "result": {
+       "status": "passed"
+      }
+     }
+    ]
+   },
+   {
+    "type": "scenario",
+    "name": "bad password",
+    "steps": [
+     {
+      "keyword": "Given",
+      "name": "x",
+      "result": {
+       "status": "passed"
+      }
+     },
+     {
+      "keyword": "Given",
+      "name": "x",
+      "result": {
+       "status": "failed"
+      }
+     }
+    ]
+   },
+   {
+    "type": "scenario",
+    "name": "undefined step",
+    "steps": [
+     {
+      "keyword": "Given",
+      "name": "x",
+      "result": {
+       "status": "undefined"
+      }
+     }
+    ]
+   }
+  ]
+ }
+]

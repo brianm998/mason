@@ -1,0 +1,6 @@
+collected 3 items
+
+tests/test_calc.py::test_add PASSED                                      [ 33%]
+tests/test_calc.py::test_div FAILED                                      [ 66%]
+tests/test_calc.py::test_parse ERROR                                     [100%]
+=================== 1 failed, 1 error, 1 passed in 0.03s ===================

@@ -1,0 +1,6 @@
+    Starting 3 tests across 1 binary
+        PASS [   0.004s] mason-core ids::tests::task_ids
+        PASS [   0.005s] mason-core ids::tests::timestamps
+        SKIP [         ] mason-core ids::tests::ignored
+------------
+     Summary [   0.006s] 3 tests run: 2 passed, 1 skipped

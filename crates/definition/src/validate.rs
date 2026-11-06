@@ -51,6 +51,129 @@ impl Capabilities {
     }
 }
 
+/// Gates a test step may name.
+pub const GATES: &[&str] = &["negative_control", "assertion_scan", "acceptance"];
+
+/// Suites, environments, bindings, the impact map and signatures all refer to
+/// each other and to the definition's resources; every reference must exist.
+fn validate_testing(def: &Definition, p: &mut Vec<Problem>) {
+    let t = &def.testing;
+    let suite_names: BTreeSet<&str> = t.suites.iter().map(|s| s.name.as_str()).collect();
+    let levels: BTreeSet<&str> = t.suites.iter().map(|s| s.level.as_str()).collect();
+    for s in &t.suites {
+        let base = format!("suite.{}", s.name);
+        if !s.env.is_empty() && t.environment(&s.env).is_none() {
+            p.push(Problem::new(
+                format!("{base}.env"),
+                format!(
+                    "there is no environment `{}`; define [environment.{}]",
+                    s.env, s.env
+                ),
+            ));
+        }
+        for r in s.uses.keys() {
+            if !def.resources.contains_key(r) {
+                p.push(Problem::new(
+                    format!("{base}.uses.{r}"),
+                    format!("there is no resource `{r}`; declare it as [resource.{r}]"),
+                ));
+            }
+        }
+        if let Some(r) = &s.rerun {
+            if !r.contains("{tests}") {
+                p.push(Problem::new(
+                    format!("{base}.rerun"),
+                    "must contain `{tests}`, where the failing test names go",
+                ));
+            }
+        }
+        if s.parser == mason_testing::ParserKind::Regex
+            && s.pass_regex.is_none()
+            && s.fail_regex.is_none()
+        {
+            p.push(Problem::new(
+                format!("{base}.parser"),
+                "the regex parser needs pass_regex or fail_regex",
+            ));
+        }
+        for (k, v) in [("pass_regex", &s.pass_regex), ("fail_regex", &s.fail_regex)] {
+            if let Some(Err(e)) = v.as_deref().map(mason_testing::parse::check_regex) {
+                p.push(Problem::new(format!("{base}.{k}"), e));
+            }
+        }
+    }
+    for e in &t.environments {
+        for r in e.uses.keys() {
+            if !def.resources.contains_key(r) {
+                p.push(Problem::new(
+                    format!("environment.{}.uses.{r}", e.name),
+                    format!("there is no resource `{r}`; declare it as [resource.{r}]"),
+                ));
+            }
+        }
+        if e.kind == mason_testing::EnvKind::Compose && e.file.is_none() {
+            p.push(Problem::new(
+                format!("environment.{}.file", e.name),
+                "a compose environment needs its compose file",
+            ));
+        }
+    }
+    for b in &t.bindings {
+        if !levels.contains(b.level.as_str()) {
+            p.push(Problem::new(
+                format!("binding.{}", b.level),
+                format!("no suite has level `{}`", b.level),
+            ));
+        }
+    }
+    for (glob, suites) in &t.impact.entries {
+        for s in suites {
+            if !suite_names.contains(s.as_str()) {
+                p.push(Problem::new(
+                    format!("impact.{glob}"),
+                    format!("there is no suite `{s}`"),
+                ));
+            }
+        }
+    }
+    for g in &t.signatures {
+        if let Err(e) = mason_testing::parse::check_regex(&g.pattern) {
+            p.push(Problem::new(format!("signature.{}.pattern", g.name), e));
+        }
+    }
+    for s in &def.steps {
+        let base = format!("step.{}", s.name);
+        for (i, name) in s.suites.iter().enumerate() {
+            if !suite_names.contains(name.as_str()) {
+                p.push(Problem::new(
+                    format!("{base}.suites[{i}]"),
+                    format!("there is no suite `{name}`; define [suite.{name}]"),
+                ));
+            }
+        }
+        for (i, g) in s.gates.iter().enumerate() {
+            if !GATES.contains(&g.as_str()) {
+                p.push(Problem::new(
+                    format!("{base}.gates[{i}]"),
+                    format!("unknown gate `{g}`; the gates are {}", GATES.join(", ")),
+                ));
+            }
+        }
+        if !s.suites.is_empty() && s.command.is_some() {
+            p.push(Problem::new(
+                format!("{base}.command"),
+                "a step runs either its suites or one command, not both",
+            ));
+        }
+        if !s.gates.is_empty() && s.suites.is_empty() {
+            p.push(Problem::new(
+                format!("{base}.gates"),
+                "gates judge suites; this step names none",
+            ));
+        }
+    }
+}
+
 /// The contract tools for a category's agent steps.
 pub fn contract_kind(c: State) -> Option<StepKind> {
     match c {
@@ -67,7 +190,7 @@ fn type_keys(k: StepType) -> &'static [&'static str] {
     match k {
         StepType::Agent => &["agent", "model", "effort", "budget", "tools", "read_only"],
         StepType::Command => &["command", "budget"],
-        StepType::Test => &["command", "suites", "budget"],
+        StepType::Test => &["command", "suites", "budget", "gates"],
         StepType::Gate => &["command", "suites", "budget"],
         StepType::Approval => &[],
         StepType::Ci => &["suites", "budget", "policy"],
@@ -104,6 +227,9 @@ fn set_keys(s: &Step) -> Vec<&'static str> {
     }
     if s.policy.is_some() {
         v.push("policy");
+    }
+    if !s.gates.is_empty() {
+        v.push("gates");
     }
     v
 }
@@ -148,6 +274,8 @@ pub fn validate(def: &Definition, caps: &Capabilities) -> Vec<Problem> {
     if def.steps.is_empty() {
         p.push(Problem::new("step", "a definition needs at least one step"));
     }
+
+    validate_testing(def, &mut p);
 
     let names: BTreeSet<&str> = def.steps.iter().map(|s| s.name.as_str()).collect();
     let max_rounds_ok = |s: &Step| s.max_rounds.is_some();

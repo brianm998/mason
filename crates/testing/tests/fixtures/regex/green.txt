@@ -1,0 +1,3 @@
+RUN checks
+[ok] checks/alpha
+[ok] checks/beta

@@ -5,7 +5,7 @@
 pipeline of exploring, developing, testing, review and landing, for any number
 of projects at once, with SwiftUI and Compose monitors.
 
-Status: **pre-alpha, Stage 8**: pipelines are defined in `.mason/mason.toml`, tasks are pinned to the definition they started under, a task that is already a plan skips exploring, and one scheduler orders every contended resource across projects (`mason run --needs compile -- <cmd>`, `mason resources`).
+Status: **pre-alpha, Stage 9**: pipelines are defined in `.mason/mason.toml`, one scheduler orders every contended resource across projects, and test verdicts are proven from output (a pass that ran no tests is red; reds are classified before anyone is blamed).
 is in [docs/DESIGN.md](docs/DESIGN.md).
 
 ## Licence

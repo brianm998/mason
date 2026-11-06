@@ -1,0 +1,8 @@
+Test Suite 'All tests' started at 2026-11-06 10:00:00.000
+Test Suite 'CalcTests' started at 2026-11-06 10:00:00.001
+Test Case '-[CalcTests.CalcTests testAdd]' started.
+Test Case '-[CalcTests.CalcTests testAdd]' passed (0.001 seconds).
+Test Case '-[CalcTests.CalcTests testSub]' started.
+Test Case '-[CalcTests.CalcTests testSub]' passed (0.001 seconds).
+Test Case '-[CalcTests.CalcTests testSlow]' skipped (0.000 seconds).
+Executed 3 tests, with 0 failures (0 unexpected) in 0.003 (0.004) seconds

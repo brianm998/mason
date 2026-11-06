@@ -34,6 +34,9 @@ pub struct DaemonConfig {
     /// base branch (and so its definition) changed. Local changes are seen at
     /// `reload_interval`; an explicit reload always fetches.
     pub fetch_interval: Duration,
+    /// How long a suite waits before trying again after an environmental
+    /// failure (no device, the stack would not come up). Charged to no task.
+    pub env_retry: Duration,
 }
 
 impl DaemonConfig {
@@ -57,6 +60,7 @@ impl DaemonConfig {
             debug: false,
             reload_interval: Duration::from_secs(5),
             fetch_interval: Duration::from_secs(60),
+            env_retry: Duration::from_secs(30),
         }
     }
 

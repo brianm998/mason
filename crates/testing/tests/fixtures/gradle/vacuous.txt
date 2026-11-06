@@ -1,0 +1,3 @@
+> Task :test NO-SOURCE
+
+BUILD SUCCESSFUL in 1s

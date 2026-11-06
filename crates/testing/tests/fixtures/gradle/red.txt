@@ -1,0 +1,10 @@
+> Task :test
+
+com.example.CalcTest > adds() PASSED
+
+com.example.CalcTest > divides() FAILED
+    org.opentest4j.AssertionFailedError at CalcTest.kt:20
+
+2 tests completed, 1 failed
+
+> Task :test FAILED

@@ -15,6 +15,11 @@ const TOP_KEYS: &[&str] = &[
     "step",
     "agent",
     "resource",
+    "suite",
+    "environment",
+    "binding",
+    "impact",
+    "signature",
 ];
 pub const STEP_KEYS: &[&str] = &[
     "type",
@@ -34,6 +39,7 @@ pub const STEP_KEYS: &[&str] = &[
     "uses",
     "join",
     "policy",
+    "gates",
 ];
 
 fn distance(a: &str, b: &str) -> usize {
@@ -173,6 +179,7 @@ fn parse_step(name: &str, item: &Item, out: &mut Vec<Problem>) -> Option<Step> {
             "suites" => step.suites = strings(v, &path, out).unwrap_or_default(),
             "when" => step.when = string(v, &path, out),
             "policy" => step.policy = string(v, &path, out),
+            "gates" => step.gates = strings(v, &path, out).unwrap_or_default(),
             "join" => {
                 if let Some(s) = string(v, &path, out) {
                     match s.as_str() {
@@ -308,9 +315,12 @@ pub fn parse(text: &str) -> Result<Definition, Vec<Problem>> {
                     "must be a table, like [resource.phone]",
                 )),
             },
+            // Read together below.
+            "suite" | "environment" | "binding" | "impact" | "signature" => {}
             other => out.push(unknown_key("", other, TOP_KEYS)),
         }
     }
+    let testing = crate::testing_parse::parse(&doc, &mut out);
     if schema.is_none() && doc.get("schema").is_none() {
         out.push(Problem::new(
             "schema",
@@ -333,6 +343,7 @@ pub fn parse(text: &str) -> Result<Definition, Vec<Problem>> {
         steps,
         agents,
         resources,
+        testing,
         hash: hash(text),
     })
 }

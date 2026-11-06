@@ -1,0 +1,4 @@
+Test Case '-[CalcTests.CalcTests testAdd]' passed (0.001 seconds).
+/src/CalcTests.swift:12: error: -[CalcTests.CalcTests testSub] : XCTAssertEqual failed: ("3") is not equal to ("2")
+Test Case '-[CalcTests.CalcTests testSub]' failed (0.002 seconds).
+Executed 2 tests, with 1 failure (0 unexpected) in 0.003 (0.004) seconds

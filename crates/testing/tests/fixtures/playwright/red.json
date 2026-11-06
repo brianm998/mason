@@ -1,0 +1,39 @@
+{
+ "config": {},
+ "suites": [
+  {
+   "title": "login.spec.ts",
+   "specs": [
+    {
+     "title": "signs in",
+     "ok": true,
+     "tests": [
+      {
+       "status": "expected",
+       "results": [
+        {
+         "status": "passed"
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "title": "signs out",
+     "ok": false,
+     "tests": [
+      {
+       "status": "unexpected",
+       "results": [
+        {
+         "status": "failed"
+        }
+       ]
+      }
+     ]
+    }
+   ],
+   "suites": []
+  }
+ ]
+}

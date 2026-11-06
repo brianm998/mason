@@ -1,0 +1,9 @@
+> Task :test
+
+com.example.CalcTest > adds() PASSED
+
+com.example.CalcTest > subtracts() PASSED
+
+com.example.CalcTest > slow() SKIPPED
+
+BUILD SUCCESSFUL in 2s

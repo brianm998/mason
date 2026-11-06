@@ -1,0 +1,52 @@
+{
+ "config": {},
+ "suites": [
+  {
+   "title": "login.spec.ts",
+   "specs": [
+    {
+     "title": "signs in",
+     "ok": true,
+     "tests": [
+      {
+       "status": "expected",
+       "results": [
+        {
+         "status": "passed"
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "title": "retries once",
+     "ok": true,
+     "tests": [
+      {
+       "status": "flaky",
+       "results": [
+        {
+         "status": "failed"
+        },
+        {
+         "status": "passed"
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "title": "mobile only",
+     "ok": true,
+     "tests": [
+      {
+       "status": "skipped",
+       "results": []
+      }
+     ]
+    }
+   ],
+   "suites": []
+  }
+ ]
+}

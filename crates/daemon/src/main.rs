@@ -74,6 +74,9 @@ fn main() {
                 cfg.fetch_interval =
                     Duration::from_millis(val().parse().unwrap_or_else(|_| usage()))
             }
+            "--env-retry-ms" => {
+                cfg.env_retry = Duration::from_millis(val().parse().unwrap_or_else(|_| usage()))
+            }
             "--debug" => cfg.debug = true,
             _ => usage(),
         }

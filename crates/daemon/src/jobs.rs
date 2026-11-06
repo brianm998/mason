@@ -63,12 +63,12 @@ pub struct Ctx {
 }
 
 impl Ctx {
-    fn emit(&self, kind: EventKind) -> bool {
+    pub(crate) fn emit(&self, kind: EventKind) -> bool {
         self.d.emit_for_run(self.task, self.run, kind)
     }
 
     /// End the step and let the graph say what follows.
-    fn conclude(&self, outcome: Outcome, reason: String, feedback: Option<String>) {
+    pub(crate) fn conclude(&self, outcome: Outcome, reason: String, feedback: Option<String>) {
         self.d
             .crash
             .point(&format!("before_event:{:?}", self.state));
@@ -88,6 +88,8 @@ impl Ctx {
                         state: State::Landed,
                     }),
                 });
+                // What was skipped and asked to run later runs now.
+                crate::suites::after_landing(&self.d, self.task);
             }
             Transition::SendBack { step } => {
                 if let Some(f) = feedback {
@@ -113,15 +115,15 @@ impl Ctx {
         }
     }
 
-    fn green(&self) {
+    pub(crate) fn green(&self) {
         self.conclude(Outcome::Green, String::new(), None);
     }
 
-    fn fail(&self, reason: impl Into<String>) {
+    pub(crate) fn fail(&self, reason: impl Into<String>) {
         self.conclude(Outcome::Fail, reason.into(), None);
     }
 
-    fn task_dir(&self) -> PathBuf {
+    pub(crate) fn task_dir(&self) -> PathBuf {
         let p = self.d.task_dir(self.task);
         let _ = std::fs::create_dir_all(&p);
         p
@@ -224,6 +226,7 @@ pub fn run(d: &Arc<Daemon>, task: TaskId, step: State, run: StepRunId) {
     };
     match c.step.kind {
         StepType::Agent => agent_job(&c),
+        StepType::Test if !c.step.suites.is_empty() => crate::suites::run(&c),
         StepType::Command | StepType::Test => command_job(&c),
         StepType::Approval => approval_job(&c),
         StepType::Landing => land_job(&c),
@@ -239,13 +242,22 @@ fn acquire(c: &Ctx) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
     let account = (c.step.kind == StepType::Agent).then_some(DEFAULT_ACCOUNT);
     // A definition names what it uses; a name nobody declared gets its
     // definition-given limit (or one slot).
-    for name in c.step.uses.keys() {
-        if name != crate::sched::EXCLUSIVE {
+    let mut needs = needs_of(&c.step.uses, account);
+    if c.step.kind == StepType::Test && !c.step.suites.is_empty() {
+        // The step holds what its suites (and their environments) use.
+        let more = crate::suites::needs_for(&c.project, &c.def, &c.step, &c.branch);
+        needs.exclusive |= more.exclusive;
+        for (k, v) in more.amounts {
+            let have = needs.amounts.entry(k).or_insert(0);
+            *have = (*have).max(v);
+        }
+    }
+    for name in needs.amounts.keys() {
+        if !name.starts_with("llm:") {
             d.broker
                 .declare(name, c.def.resources.get(name).copied().unwrap_or(1));
         }
     }
-    let needs = needs_of(&c.step.uses, account);
     let rank = match d.world().ok().and_then(|w| w.tasks.get(&c.task).cloned()) {
         Some(t) => d.rank_for(&t, &c.def, &c.step.name),
         None => return Err(crate::sched::Cancelled),
@@ -297,7 +309,7 @@ fn prepare(c: &Ctx) -> Result<(), String> {
     }
 }
 
-fn prepare_worktree_only(c: &Ctx) -> Result<(), String> {
+pub(crate) fn prepare_worktree_only(c: &Ctx) -> Result<(), String> {
     let lock = c.d.repo_lock(c.project_id);
     let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
     git::ensure_worktree(&c.project.path, &c.wt, &c.branch, &c.project.base_ref())

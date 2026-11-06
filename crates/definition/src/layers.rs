@@ -118,7 +118,7 @@ pub fn check_override(
     if !OVERRIDABLE.contains(&attr) {
         let why = if matches!(
             attr,
-            "type" | "category" | "next" | "on_red" | "join" | "tools" | "when" | "uses"
+            "type" | "category" | "next" | "on_red" | "join" | "tools" | "when" | "uses" | "gates"
         ) {
             " (it changes the graph or the gates; edit .mason/mason.toml and land the change)"
         } else {
@@ -164,6 +164,7 @@ pub fn parse_overlay(text: &str) -> Result<Overlay, Vec<Problem>> {
                             | "uses"
                             | "agent"
                             | "suites"
+                            | "gates"
                             | "read_only"
                             | "policy"
                     );

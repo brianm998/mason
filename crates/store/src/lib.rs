@@ -58,6 +58,23 @@ pub struct StoredEvent {
     pub event: Event,
 }
 
+/// A debt: something skipped by force and not yet paid.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DebtRow {
+    pub id: u64,
+    pub at: u64,
+    pub task: u64,
+    pub project: String,
+    /// `suite:NAME` or `step:NAME`.
+    pub scope: String,
+    pub reason: String,
+    pub owner: String,
+    /// Run it again after landing.
+    pub deferred: bool,
+    /// `open` or `paid`.
+    pub status: String,
+}
+
 /// A runtime configuration override. Every one has an owner and an expiry:
 /// switches expire (Part 1).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -660,6 +677,275 @@ impl Store {
                 "DELETE FROM task_overrides WHERE task = ?1 AND key = ?2",
                 params![task as i64, k],
             )
+        })
+    }
+
+    // ---- the testing system's memory (Stage 9) ----
+
+    /// Remember a green result for this exact tree and suite.
+    pub fn put_evidence(
+        &self,
+        tree: &str,
+        suite: &str,
+        executed: usize,
+        passed: usize,
+        task: u64,
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
+        let (t, s) = (tree.to_string(), suite.to_string());
+        self.write(move |c| {
+            c.execute(
+                "INSERT OR REPLACE INTO evidence(tree, suite, executed, passed, at, task) VALUES (?1,?2,?3,?4,?5,?6)",
+                params![t, s, executed as i64, passed as i64, now_ms as i64, task as i64],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// `(executed, passed, task)` if this tree already passed this suite.
+    pub fn evidence(
+        &self,
+        tree: &str,
+        suite: &str,
+    ) -> Result<Option<(usize, usize, u64)>, StoreError> {
+        let (t, s) = (tree.to_string(), suite.to_string());
+        self.read(move |c| {
+            c.query_row(
+                "SELECT executed, passed, task FROM evidence WHERE tree = ?1 AND suite = ?2",
+                params![t, s],
+                |r| {
+                    Ok((
+                        r.get::<_, i64>(0)? as usize,
+                        r.get::<_, i64>(1)? as usize,
+                        r.get::<_, i64>(2)? as u64,
+                    ))
+                },
+            )
+            .optional()
+        })
+    }
+
+    /// What fails at a base commit, cached so it is only worked out once.
+    pub fn put_baseline(
+        &self,
+        base: &str,
+        suite: &str,
+        failing: &[String],
+        names: &[String],
+        executed: usize,
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
+        let (b, s, f, n) = (
+            base.to_string(),
+            suite.to_string(),
+            failing.join("\n"),
+            names.join("\n"),
+        );
+        self.write(move |c| {
+            c.execute(
+                "INSERT OR REPLACE INTO baselines(base, suite, failing, names, executed, at) VALUES (?1,?2,?3,?4,?5,?6)",
+                params![b, s, f, n, executed as i64, now_ms as i64],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// `(failing, all test names)` at a base commit, if it was worked out.
+    #[allow(clippy::type_complexity)]
+    pub fn baseline(
+        &self,
+        base: &str,
+        suite: &str,
+    ) -> Result<Option<(Vec<String>, Vec<String>)>, StoreError> {
+        let (b, s) = (base.to_string(), suite.to_string());
+        self.read(move |c| {
+            c.query_row(
+                "SELECT failing, names FROM baselines WHERE base = ?1 AND suite = ?2",
+                params![b, s],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map(|o| {
+                o.map(|(f, n)| {
+                    (
+                        f.lines().map(String::from).collect(),
+                        n.lines().map(String::from).collect(),
+                    )
+                })
+            })
+        })
+    }
+
+    pub fn record_flaky(
+        &self,
+        suite: &str,
+        test: &str,
+        task: u64,
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
+        let (s, t) = (suite.to_string(), test.to_string());
+        self.write(move |c| {
+            c.execute(
+                "INSERT INTO flaky(at, suite, test, task) VALUES (?1,?2,?3,?4)",
+                params![now_ms as i64, s, t, task as i64],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// `(suite, test, at_ms)` for every flake since `since_ms`.
+    pub fn flaky_since(&self, since_ms: u64) -> Result<Vec<(String, String, u64)>, StoreError> {
+        self.read(move |c| {
+            let mut st =
+                c.prepare("SELECT suite, test, at FROM flaky WHERE at >= ?1 ORDER BY id")?;
+            let rows = st.query_map(params![since_ms as i64], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? as u64))
+            })?;
+            rows.collect()
+        })
+    }
+
+    /// Record a debt: something skipped by force. `scope` is `suite:NAME` or
+    /// `step:NAME`. Returns its id.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_debt(
+        &self,
+        task: u64,
+        project: &str,
+        scope: &str,
+        reason: &str,
+        owner: &str,
+        deferred: bool,
+        now_ms: u64,
+    ) -> Result<u64, StoreError> {
+        let (p, s, r, o) = (
+            project.to_string(),
+            scope.to_string(),
+            reason.to_string(),
+            owner.to_string(),
+        );
+        self.write(move |c| {
+            c.execute(
+                "INSERT INTO debts(at, task, project, scope, reason, owner, deferred, status) VALUES (?1,?2,?3,?4,?5,?6,?7,'open')",
+                params![now_ms as i64, task as i64, p, s, r, o, i64::from(deferred)],
+            )?;
+            Ok(c.last_insert_rowid() as u64)
+        })
+    }
+
+    /// `(id, at, task, project, scope, reason, owner, deferred, status)`.
+    #[allow(clippy::type_complexity)]
+    pub fn debts(&self, task: Option<u64>, open_only: bool) -> Result<Vec<DebtRow>, StoreError> {
+        self.read(move |c| {
+            let mut st = c.prepare(
+                "SELECT id, at, task, project, scope, reason, owner, deferred, status FROM debts
+                 WHERE (?1 IS NULL OR task = ?1) AND (?2 = 0 OR status = 'open') ORDER BY id",
+            )?;
+            let rows =
+                st.query_map(params![task.map(|t| t as i64), i64::from(open_only)], |r| {
+                    Ok(DebtRow {
+                        id: r.get::<_, i64>(0)? as u64,
+                        at: r.get::<_, i64>(1)? as u64,
+                        task: r.get::<_, i64>(2)? as u64,
+                        project: r.get(3)?,
+                        scope: r.get(4)?,
+                        reason: r.get(5)?,
+                        owner: r.get(6)?,
+                        deferred: r.get::<_, i64>(7)? != 0,
+                        status: r.get(8)?,
+                    })
+                })?;
+            rows.collect()
+        })
+    }
+
+    pub fn pay_debt(&self, id: u64, now_ms: u64) -> Result<bool, StoreError> {
+        self.write(move |c| {
+            c.execute(
+                "UPDATE debts SET status = 'paid', paid_at = ?2 WHERE id = ?1 AND status = 'open'",
+                params![id as i64, now_ms as i64],
+            )
+            .map(|n| n > 0)
+        })
+    }
+
+    pub fn put_quarantine(
+        &self,
+        suite: &str,
+        test: &str,
+        owner: &str,
+        expires_at_ms: u64,
+        reason: &str,
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
+        let (s, t, o, r) = (
+            suite.to_string(),
+            test.to_string(),
+            owner.to_string(),
+            reason.to_string(),
+        );
+        self.write(move |c| {
+            c.execute(
+                "INSERT OR REPLACE INTO quarantine(suite, test, owner, expires_at, reason, at) VALUES (?1,?2,?3,?4,?5,?6)",
+                params![s, t, o, expires_at_ms as i64, r, now_ms as i64],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn remove_quarantine(&self, suite: &str, test: &str) -> Result<usize, StoreError> {
+        let (s, t) = (suite.to_string(), test.to_string());
+        self.write(move |c| {
+            c.execute(
+                "DELETE FROM quarantine WHERE suite = ?1 AND test = ?2",
+                params![s, t],
+            )
+        })
+    }
+
+    /// `(suite, test, owner, expires_at_ms, reason)` still in force at `now_ms`.
+    #[allow(clippy::type_complexity)]
+    pub fn quarantined(
+        &self,
+        now_ms: u64,
+    ) -> Result<Vec<(String, String, String, u64, String)>, StoreError> {
+        self.read(move |c| {
+            let mut st = c.prepare(
+                "SELECT suite, test, owner, expires_at, reason FROM quarantine WHERE expires_at > ?1 ORDER BY suite, test",
+            )?;
+            let rows = st.query_map(params![now_ms as i64], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get::<_, i64>(3)? as u64, r.get(4)?))
+            })?;
+            rows.collect()
+        })
+    }
+
+    pub fn set_closing(
+        &self,
+        task: u64,
+        verdict: &str,
+        note: &str,
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
+        let (v, n) = (verdict.to_string(), note.to_string());
+        self.write(move |c| {
+            c.execute(
+                "INSERT OR REPLACE INTO closings(task, verdict, note, at) VALUES (?1,?2,?3,?4)",
+                params![task as i64, v, n, now_ms as i64],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// `(verdict, note)`.
+    pub fn closing(&self, task: u64) -> Result<Option<(String, String)>, StoreError> {
+        self.read(move |c| {
+            c.query_row(
+                "SELECT verdict, note FROM closings WHERE task = ?1",
+                params![task as i64],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
         })
     }
 

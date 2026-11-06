@@ -126,6 +126,9 @@ pub struct Step {
     pub uses: BTreeMap<String, u32>,
     pub join: Option<Join>,
     pub policy: Option<String>,
+    /// Optional gates on a test step: `negative_control`, `assertion_scan`,
+    /// `acceptance` (Part 8).
+    pub gates: Vec<String>,
 }
 
 impl Step {
@@ -149,6 +152,7 @@ impl Step {
             uses: BTreeMap::new(),
             join: None,
             policy: None,
+            gates: vec![],
         }
     }
 }
@@ -169,6 +173,8 @@ pub struct Definition {
     pub steps: Vec<Step>,
     pub agents: BTreeMap<String, AgentProfile>,
     pub resources: BTreeMap<String, u32>,
+    /// Suites, environments, bindings, the impact map and signatures.
+    pub testing: mason_testing::Testing,
     /// Identity of the definition text it was parsed from.
     pub hash: String,
 }

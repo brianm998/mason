@@ -99,6 +99,17 @@ fn task_json(d: &Daemon, w: &World, t: &Task, detail: bool) -> Value {
             .broker
             .explain_task(t.id)
             .map_or(Value::Null, |w| json!(w));
+        v["closing"] = d.store.closing(t.id.0).ok().flatten().map_or(
+            Value::Null,
+            |(verdict, note)| json!({"verdict": verdict, "note": note}),
+        );
+        v["debts"] = json!(d
+            .store
+            .debts(Some(t.id.0), false)
+            .unwrap_or_default()
+            .iter()
+            .map(debt_json)
+            .collect::<Vec<_>>());
         v["failure"] = t.failure.as_ref().map_or(Value::Null, |f| json!(f));
         v["question"] = t
             .decision
@@ -658,6 +669,144 @@ async fn overrides_remove(
     Ok(Json(json!({"removed": n})))
 }
 
+fn debt_json(x: &mason_store::DebtRow) -> Value {
+    json!({
+        "id": x.id, "task": x.task, "project": x.project, "scope": x.scope,
+        "reason": x.reason, "owner": x.owner, "deferred": x.deferred,
+        "status": x.status, "at": x.at,
+    })
+}
+
+/// Force-skip a suite or a step, now or ahead of time. Records a debt.
+async fn skip_task(
+    Shared(d): Shared<Arc<Daemon>>,
+    Path(id): Path<u64>,
+    Json(b): Json<Value>,
+) -> Res {
+    let scope = match (b["suite"].as_str(), b["step"].as_str()) {
+        (Some(s), None) => format!("suite:{s}"),
+        (None, Some(s)) => format!("step:{s}"),
+        _ => {
+            return Err(fail(
+                StatusCode::BAD_REQUEST,
+                "name one `suite` or one `step` to skip",
+            ))
+        }
+    };
+    let (reason, owner) = (
+        b["reason"].as_str().unwrap_or_default().to_string(),
+        b["owner"].as_str().unwrap_or_default().to_string(),
+    );
+    let deferred = b["deferred"].as_bool().unwrap_or(false);
+    let d2 = d.clone();
+    let debt = d
+        .pool
+        .run(move || crate::suites::skip(&d2, TaskId(id), &scope, &reason, &owner, deferred))
+        .await
+        .map_err(pool_err)?
+        .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
+    Ok(Json(json!({"debt": debt})))
+}
+
+async fn debts_list(
+    Shared(d): Shared<Arc<Daemon>>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Res {
+    let open = q.get("open").is_some_and(|v| v != "0");
+    let d2 = d.clone();
+    let rows = d
+        .pool
+        .run(move || d2.store.debts(None, open))
+        .await
+        .map_err(pool_err)?
+        .map_err(store_err)?;
+    Ok(Json(
+        json!({"debts": rows.iter().map(debt_json).collect::<Vec<_>>()}),
+    ))
+}
+
+/// Pay a debt by running the skipped suite on the base branch now.
+async fn debt_run(Shared(d): Shared<Arc<Daemon>>, Path(id): Path<u64>) -> Res {
+    let d2 = d.clone();
+    let r = d
+        .pool
+        .run(move || crate::suites::pay(&d2, id))
+        .await
+        .map_err(pool_err)?;
+    match r {
+        Ok(m) => Ok(Json(json!({"paid": true, "detail": m}))),
+        Err(e) => Ok(Json(json!({"paid": false, "detail": e}))),
+    }
+}
+
+async fn quarantine_list(Shared(d): Shared<Arc<Daemon>>) -> Res {
+    let d2 = d.clone();
+    let (rows, flaky) = d
+        .pool
+        .run(move || {
+            let now = now_ms();
+            (
+                d2.store.quarantined(now).unwrap_or_default(),
+                d2.store
+                    .flaky_since(now.saturating_sub(7 * 86_400_000))
+                    .unwrap_or_default(),
+            )
+        })
+        .await
+        .map_err(pool_err)?;
+    let candidates =
+        mason_testing::gates::quarantine_candidates(&flaky, now_ms(), 7 * 86_400_000, 3);
+    Ok(Json(json!({
+        "quarantined": rows.iter().map(|(s, t, o, e, r)| json!({"suite": s, "test": t, "owner": o, "expires_at": e, "reason": r})).collect::<Vec<_>>(),
+        "candidates": candidates.iter().map(|(s, t)| json!({"suite": s, "test": t})).collect::<Vec<_>>(),
+    })))
+}
+
+/// Quarantine a test: always with an owner and an expiry.
+async fn quarantine_add(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res {
+    let now = now_ms();
+    let q = mason_testing::gates::Quarantine {
+        suite: b["suite"].as_str().unwrap_or_default().to_string(),
+        test: b["test"].as_str().unwrap_or_default().to_string(),
+        owner: b["owner"].as_str().unwrap_or_default().to_string(),
+        expires_at_ms: now + b["days"].as_u64().unwrap_or(0) * 86_400_000,
+        reason: b["reason"].as_str().unwrap_or_default().to_string(),
+    };
+    if q.suite.is_empty() || q.test.is_empty() {
+        return Err(fail(
+            StatusCode::BAD_REQUEST,
+            "name the `suite` and the `test`",
+        ));
+    }
+    mason_testing::gates::check_quarantine(&q, now, 90)
+        .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
+    let d2 = d.clone();
+    d.pool
+        .run(move || {
+            d2.store
+                .put_quarantine(&q.suite, &q.test, &q.owner, q.expires_at_ms, &q.reason, now)
+        })
+        .await
+        .map_err(pool_err)?
+        .map_err(store_err)?;
+    Ok(Json(json!({"ok": true})))
+}
+
+async fn quarantine_remove(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res {
+    let (s, t) = (
+        b["suite"].as_str().unwrap_or_default().to_string(),
+        b["test"].as_str().unwrap_or_default().to_string(),
+    );
+    let d2 = d.clone();
+    let n = d
+        .pool
+        .run(move || d2.store.remove_quarantine(&s, &t))
+        .await
+        .map_err(pool_err)?
+        .map_err(store_err)?;
+    Ok(Json(json!({"removed": n})))
+}
+
 async fn resources(Shared(d): Shared<Arc<Daemon>>) -> Res {
     let d2 = d.clone();
     let v = d
@@ -902,6 +1051,11 @@ pub fn router(d: Arc<Daemon>) -> Router {
         .route("/projects/{name}/overrides/remove", post(overrides_remove))
         .route("/tasks/{id}/logs", get(logs))
         .route("/resources", get(resources))
+        .route("/tasks/{id}/skip", post(skip_task))
+        .route("/debts", get(debts_list))
+        .route("/debts/{id}/run", post(debt_run))
+        .route("/quarantine", get(quarantine_list).post(quarantine_add))
+        .route("/quarantine/remove", post(quarantine_remove))
         .route("/resources/limit", post(resource_limit))
         .route("/leases", post(lease_open))
         .route("/leases/{id}", get(lease_poll))

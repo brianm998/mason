@@ -1,0 +1,6 @@
+◇ Test run started.
+◇ Test add() started.
+✔ Test add() passed after 0.001 seconds.
+◇ Test "subtracts two numbers" started.
+✔ Test "subtracts two numbers" passed after 0.001 seconds.
+✔ Test run with 2 tests passed after 0.002 seconds.

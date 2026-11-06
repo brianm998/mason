@@ -1,0 +1,2 @@
+[ok] checks/alpha
+[FAIL] checks/beta: wrong

@@ -1,0 +1,53 @@
+[
+ {
+  "name": "Login",
+  "elements": [
+   {
+    "type": "background",
+    "name": "",
+    "steps": [
+     {
+      "keyword": "Given",
+      "name": "x",
+      "result": {
+       "status": "passed"
+      }
+     }
+    ]
+   },
+   {
+    "type": "scenario",
+    "name": "valid user",
+    "steps": [
+     {
+      "keyword": "Given",
+      "name": "x",
+      "result": {
+       "status": "passed"
+      }
+     },
+     {
+      "keyword": "Given",
+      "name": "x",
+      "result": {
+       "status": "passed"
+      }
+     }
+    ]
+   },
+   {
+    "type": "scenario",
+    "name": "not yet",
+    "steps": [
+     {
+      "keyword": "Given",
+      "name": "x",
+      "result": {
+       "status": "skipped"
+      }
+     }
+    ]
+   }
+  ]
+ }
+]

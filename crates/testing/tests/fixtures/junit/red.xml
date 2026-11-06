@@ -1,0 +1,5 @@
+<testsuites><testsuite name="calc" tests="3" failures="1" errors="1">
+  <testcase classname="calc.Adder" name="adds_two"/>
+  <testcase classname="calc.Adder" name="divides"><failure message="expected 2 but was 3 &amp; more" type="AssertionError">trace</failure></testcase>
+  <testcase classname="calc.Adder" name="parses"><error message="boom"/></testcase>
+</testsuite></testsuites>

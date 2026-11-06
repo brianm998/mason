@@ -22,6 +22,7 @@ pub mod graph;
 pub mod layers;
 pub mod model;
 pub mod parse;
+mod testing_parse;
 pub mod validate;
 
 pub use model::{AgentProfile, Definition, Join, Problem, Step, StepType};

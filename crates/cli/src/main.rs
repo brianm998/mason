@@ -9,6 +9,10 @@
 //! mason task cancel <id> [--delete-branch]
 //! mason task retry <id> [--from exploring|developing|testing|review|landing]
 //! mason logs <id> [--follow]
+//! mason task skip <id> (--suite S | --step S) [--reason R] [--deferred]
+//! mason debt list | run <id>
+//! mason quarantine list | add <suite> <test> --owner O --days N [--reason R] | remove <suite> <test>
+//! mason test parse <parser> <file> [--min N]
 //! mason status [--json]
 //! mason run --needs compile[=N],... [--exclusive] [--label L] -- <cmd>...
 //! mason resources [--json] | mason resources limit <resource> <units>
@@ -20,6 +24,7 @@ mod client;
 mod definition;
 mod doctor;
 mod resources;
+mod testing;
 
 use client::{CallError, Daemon};
 use serde_json::{json, Value};
@@ -41,6 +46,11 @@ mason: command-line client for the MASON pipeline
   mason task reject <id> [--reason R] reject a proposed task or an approval step
   mason task explore-anyway <id>      explore after all, even if it skipped exploring
   mason task override <id> <key> <value>
+  mason task skip <id> (--suite S | --step S) [--reason R] [--deferred]
+                                      skip a suite or step by force, even mid-run; records a debt
+  mason debt list | run <id>          what was skipped and not yet proven; run one on the base branch
+  mason quarantine list | add <suite> <test> --owner O --days N [--reason R] | remove <suite> <test>
+  mason test parse <parser> <file> [--min N]   read a results file the way a suite would, and judge it
   mason logs <id> [--follow]
   mason status [--json]
   mason doctor
@@ -134,6 +144,18 @@ fn row(v: &Value) -> String {
     )
 }
 
+fn ago_until(ms: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64);
+    let s = ms.saturating_sub(now) / 1000;
+    match s {
+        0..=3599 => format!("in {}m", s / 60),
+        3600..=172_799 => format!("in {}h", s / 3600),
+        _ => format!("in {}d", s / 86_400),
+    }
+}
+
 fn ago(ms: u64) -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -220,6 +242,19 @@ fn main() {
             println!("{out}");
         }
         return;
+    }
+
+    // Reading a results file needs no daemon: it is the same judgment a suite gets.
+    if cmd == "test" {
+        let sub = a.pos().unwrap_or_default();
+        if sub != "parse" {
+            die("the only test command is `mason test parse <parser> <file> [--min N]`");
+        }
+        let min: u32 = a.opt("--min").and_then(|v| v.parse().ok()).unwrap_or(1);
+        let kind = a.pos().unwrap_or_else(|| die("which parser?"));
+        let file = a.pos().unwrap_or_else(|| die("which file?"));
+        finish(&a);
+        exit(testing::parse(&kind, std::path::Path::new(&file), min));
     }
 
     if cmd == "doctor" {
@@ -496,6 +531,109 @@ fn main() {
                 other => die(&format!("unknown config command {other:?}\n\n{HELP}")),
             }
         }
+        "debt" => match a.pos().as_deref() {
+            Some("list") | None => {
+                let all = a.flag("--all");
+                finish(&a);
+                let r = or_die(d.call("GET", &format!("/debts?open={}", u8::from(!all)), None));
+                if json_out {
+                    return println!("{r:#}");
+                }
+                let list = r["debts"].as_array().cloned().unwrap_or_default();
+                if list.is_empty() {
+                    println!("no debts");
+                }
+                for x in list {
+                    println!(
+                        "#{:<3} task #{:<4} {:<22} {}{}  {}",
+                        x["id"],
+                        x["task"],
+                        x["scope"].as_str().unwrap_or("?"),
+                        x["status"].as_str().unwrap_or("?"),
+                        if x["deferred"].as_bool().unwrap_or(false) {
+                            " (deferred)"
+                        } else {
+                            ""
+                        },
+                        x["reason"].as_str().unwrap_or("")
+                    );
+                }
+            }
+            Some("run") => {
+                let id: u64 = a
+                    .pos()
+                    .and_then(|s| s.trim_start_matches('#').parse().ok())
+                    .unwrap_or_else(|| die("which debt? give its number"));
+                finish(&a);
+                let r = or_die(d.call("POST", &format!("/debts/{id}/run"), None));
+                println!("{}", r["detail"].as_str().unwrap_or(""));
+                if r["paid"] != json!(true) {
+                    exit(1);
+                }
+            }
+            Some(other) => die(&format!("unknown debt command {other:?}\n\n{HELP}")),
+        },
+        "quarantine" => match a.pos().as_deref() {
+            Some("list") | None => {
+                finish(&a);
+                let r = or_die(d.call("GET", "/quarantine", None));
+                if json_out {
+                    return println!("{r:#}");
+                }
+                let list = r["quarantined"].as_array().cloned().unwrap_or_default();
+                if list.is_empty() {
+                    println!("nothing is quarantined");
+                }
+                for x in list {
+                    println!(
+                        "{} :: {}   owner {}, expires {}   {}",
+                        x["suite"].as_str().unwrap_or("?"),
+                        x["test"].as_str().unwrap_or("?"),
+                        x["owner"].as_str().unwrap_or("?"),
+                        ago_until(x["expires_at"].as_u64().unwrap_or(0)),
+                        x["reason"].as_str().unwrap_or("")
+                    );
+                }
+                for x in r["candidates"].as_array().into_iter().flatten() {
+                    println!(
+                        "candidate: {} :: {} flaked 3 or more times this week",
+                        x["suite"].as_str().unwrap_or("?"),
+                        x["test"].as_str().unwrap_or("?")
+                    );
+                }
+            }
+            Some("add") => {
+                let owner = a
+                    .opt("--owner")
+                    .unwrap_or_else(|| die("a quarantine needs an owner: --owner NAME"));
+                let days: u64 = a
+                    .opt("--days")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or_else(|| die("a quarantine needs an expiry: --days N"));
+                let reason = a.opt("--reason").unwrap_or_default();
+                let suite = a.pos().unwrap_or_else(|| die("which suite?"));
+                let test = a.pos().unwrap_or_else(|| die("which test?"));
+                finish(&a);
+                or_die(d.call(
+                    "POST",
+                    "/quarantine",
+                    Some(&json!({"suite": suite, "test": test, "owner": owner, "days": days, "reason": reason})),
+                ));
+                println!("Quarantined {suite} :: {test} for {days} day(s), owned by {owner}");
+            }
+            Some("remove") => {
+                let suite = a.pos().unwrap_or_else(|| die("which suite?"));
+                let test = a.pos().unwrap_or_else(|| die("which test?"));
+                finish(&a);
+                let r = or_die(d.call(
+                    "POST",
+                    "/quarantine/remove",
+                    Some(&json!({"suite": suite, "test": test})),
+                ));
+                println!("Removed {} quarantine(s)", r["removed"]);
+            }
+            Some(other) => die(&format!("unknown quarantine command {other:?}\n\n{HELP}")),
+        },
         "status" => {
             finish(&a);
             let s = or_die(d.call("GET", "/status", None));
@@ -719,6 +857,22 @@ fn main() {
                     if let Some(f) = t["failure"].as_str() {
                         println!("  failed    {f}");
                     }
+                    if let Some(c) = t["closing"]["note"].as_str() {
+                        println!("  tests     {c}");
+                    }
+                    for x in t["debts"].as_array().into_iter().flatten() {
+                        println!(
+                            "  debt #{:<3} {} {}{}",
+                            x["id"],
+                            x["scope"].as_str().unwrap_or("?"),
+                            x["status"].as_str().unwrap_or("?"),
+                            if x["deferred"].as_bool().unwrap_or(false) {
+                                " (runs after landing)"
+                            } else {
+                                ""
+                            }
+                        );
+                    }
                     if let Some(q) = t["question"].as_str() {
                         println!("  question  {q}");
                     }
@@ -767,6 +921,34 @@ fn main() {
                     println!(
                         "Retrying task #{id} from {}",
                         r["to"].as_str().unwrap_or(&from)
+                    );
+                }
+                "skip" => {
+                    let id = task_id(&mut a);
+                    let suite = a.opt("--suite");
+                    let step = a.opt("--step");
+                    let reason = a.opt("--reason").unwrap_or_default();
+                    let owner = a
+                        .opt("--owner")
+                        .or_else(|| std::env::var("USER").ok())
+                        .unwrap_or_default();
+                    let deferred = a.flag("--deferred");
+                    finish(&a);
+                    let mut body = json!({"reason": reason, "owner": owner, "deferred": deferred});
+                    match (suite, step) {
+                        (Some(s), None) => body["suite"] = json!(s),
+                        (None, Some(s)) => body["step"] = json!(s),
+                        _ => die("name one suite or one step: --suite S or --step S"),
+                    }
+                    let r = or_die(d.call("POST", &format!("/tasks/{id}/skip"), Some(&body)));
+                    println!(
+                        "Skipped by force. Debt #{} is open{}; its closing verdict is downgraded.",
+                        r["debt"],
+                        if deferred {
+                            " and will run after landing"
+                        } else {
+                            ""
+                        }
                     );
                 }
                 "approve" => {

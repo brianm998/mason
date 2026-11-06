@@ -77,6 +77,64 @@ const STEPS: &[&str] = &[
      ALTER TABLE tasks ADD COLUMN route TEXT NOT NULL DEFAULT '';
      ALTER TABLE tasks ADD COLUMN def   TEXT NOT NULL DEFAULT '';
      UPDATE meta SET value = '0' WHERE key = 'projected_seq';",
+    // 5: the testing system's memory. Evidence per tree hash and suite (so
+    // identical code never tests twice), baseline failures per base commit,
+    // the flaky log, debts (what was skipped by force and not yet paid),
+    // quarantine (always with an owner and an expiry), and each task's closing
+    // verdict. Not part of the event log: they describe code, not a task's
+    // progress, and evidence outlives any one task.
+    "CREATE TABLE evidence (
+         tree     TEXT NOT NULL,
+         suite    TEXT NOT NULL,
+         executed INTEGER NOT NULL,
+         passed   INTEGER NOT NULL,
+         at       INTEGER NOT NULL,
+         task     INTEGER NOT NULL,
+         PRIMARY KEY (tree, suite)
+     );
+     CREATE TABLE baselines (
+         base     TEXT NOT NULL,
+         suite    TEXT NOT NULL,
+         failing  TEXT NOT NULL,
+         names    TEXT NOT NULL,
+         executed INTEGER NOT NULL,
+         at       INTEGER NOT NULL,
+         PRIMARY KEY (base, suite)
+     );
+     CREATE TABLE flaky (
+         id    INTEGER PRIMARY KEY AUTOINCREMENT,
+         at    INTEGER NOT NULL,
+         suite TEXT NOT NULL,
+         test  TEXT NOT NULL,
+         task  INTEGER NOT NULL
+     );
+     CREATE TABLE debts (
+         id       INTEGER PRIMARY KEY AUTOINCREMENT,
+         at       INTEGER NOT NULL,
+         task     INTEGER NOT NULL,
+         project  TEXT NOT NULL,
+         scope    TEXT NOT NULL,
+         reason   TEXT NOT NULL,
+         owner    TEXT NOT NULL,
+         deferred INTEGER NOT NULL,
+         status   TEXT NOT NULL,
+         paid_at  INTEGER
+     );
+     CREATE TABLE quarantine (
+         suite      TEXT NOT NULL,
+         test       TEXT NOT NULL,
+         owner      TEXT NOT NULL,
+         expires_at INTEGER NOT NULL,
+         reason     TEXT NOT NULL,
+         at         INTEGER NOT NULL,
+         PRIMARY KEY (suite, test)
+     );
+     CREATE TABLE closings (
+         task    INTEGER PRIMARY KEY,
+         verdict TEXT NOT NULL,
+         note    TEXT NOT NULL,
+         at      INTEGER NOT NULL
+     );",
 ];
 
 pub const SCHEMA_VERSION: u32 = STEPS.len() as u32;
