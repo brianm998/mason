@@ -9,3 +9,28 @@ publish = false
 
 [lints]
 workspace = true
+
+[dependencies]
+mason-adapter-api = { version = "0.0.0", path = "../adapter-api" }
+nix = { version = "0.31.3", features = ["process", "signal"] }
+serde_json = "1.0.154"
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
+[lib]
+name = "mason_adapters"
+path = "src/lib.rs"
+
+# MCP stdio bridge: exposes the step contract's tools to an agent CLI and
+# forwards each call to the contract socket.
+[[bin]]
+name = "mason-mcp"
+path = "src/bin/mason-mcp.rs"
+
+# A scripted stand-in for the `claude` CLI. It speaks the real stream-json
+# format (replaying captured fixtures) and calls the contract socket, so the
+# Claude adapter can be exercised end to end with no network and no LLM.
+[[bin]]
+name = "fake-claude"
+path = "src/bin/fake-claude.rs"

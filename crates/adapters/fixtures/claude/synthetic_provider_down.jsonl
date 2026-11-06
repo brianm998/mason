@@ -1,0 +1,4 @@
+{"type":"system","subtype":"init","cwd":"/scratch","session_id":"synthetic-0001","tools":[],"mcp_servers":[],"model":"claude-haiku-5-5","permissionMode":"dontAsk","apiKeySource":"none","claude_code_version":"2.1.317"}
+{"type":"system","subtype":"api_retry","attempt":1,"max_retries":10,"retry_delay_ms":1000,"error_status":529,"error":"overloaded_error","session_id":"synthetic-0001"}
+{"type":"system","subtype":"api_retry","attempt":2,"max_retries":10,"retry_delay_ms":2000,"error_status":529,"error":"overloaded_error","session_id":"synthetic-0001"}
+{"type":"result","subtype":"success","is_error":true,"api_error_status":529,"result":"API Error: 529 overloaded_error","session_id":"synthetic-0001","total_cost_usd":0,"usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0},"terminal_reason":"api_error"}
