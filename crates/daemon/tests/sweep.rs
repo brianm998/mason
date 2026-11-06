@@ -153,11 +153,11 @@ fn a_healthy_daemon_files_no_bugs_across_many_passes() {
 fn drifted_projections_are_detected_and_rebuilt() {
     let s = Scratch::new("test -f hello.txt", happy_script());
     let d = s.start();
-    let _ = plain_file(&d);
-    // Damage a projection behind the store's back.
+    // Damage a projection behind the store's back. No task is running, so nothing
+    // rewrites the damaged row by accident.
     let raw_db = rusqlite::Connection::open(d.cfg.store_path()).unwrap();
     raw_db
-        .execute("UPDATE tasks SET state = 'landed'", [])
+        .execute("UPDATE projects SET name = 'drifted'", [])
         .unwrap();
     drop(raw_db);
     let mut filed = vec![];
