@@ -21,6 +21,9 @@ version = "0.0.0"
 [[package]]
 name = "mason-engine"
 version = "0.0.0"
+dependencies = [
+ "mason-core",
+]
 
 [[package]]
 name = "mason-landing"
