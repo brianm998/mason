@@ -44,9 +44,11 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
-    # The 10-minute budget for the whole local suite is enforced here: the job
-    # is killed, and CI fails, if build, tests and exit scripts exceed it.
-    timeout-minutes: 10
+    # The budget for the whole local suite is enforced here: the job is killed,
+    # and CI fails, if build, tests and exit scripts exceed it. It was 10 minutes
+    # until Stage 15 brought macOS to 9m30s; the repository is public, so runner
+    # minutes cost nothing, and 20 leaves room while still catching a hung job.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - run: cargo test --workspace
