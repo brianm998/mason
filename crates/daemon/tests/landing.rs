@@ -304,10 +304,14 @@ fn land_now_skips_the_window_and_force_skips_verification_leaving_debts() {
     let forced = w.task("forced", &[("red.integration", "x")]);
     // One after the other: a forced red on the base would (rightly) fail the
     // verification of whatever lands after it.
-    w.d.store.set_landing_flag(now.0, "now", "owner", 1).unwrap();
+    w.d.store
+        .set_landing_flag(now.0, "now", "owner", 1)
+        .unwrap();
     w.d.landing().wake();
     wait_for("land now to land", 90, || w.landed(now));
-    w.d.store.set_landing_flag(forced.0, "force", "owner", 1).unwrap();
+    w.d.store
+        .set_landing_flag(forced.0, "force", "owner", 1)
+        .unwrap();
     w.d.landing().wake();
     wait_for("force to land", 90, || w.landed(forced));
     assert!(!w.landed(slow), "the window is 10 minutes");

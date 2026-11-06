@@ -171,7 +171,7 @@ wait_state "$c" canceled 30
 rm -f "$root/slow.flag"
 echo "== land now and force are recorded as an override and a debt"
 m task land-now "$s" --reason "in a hurry" | tee "$root/ln.out"
-grep -q "landing control arrives in Stage 14" "$root/ln.out"
+grep -q "the landing engine acts on it" "$root/ln.out"
 m task force "$s" | head -1
 m debt list | grep -E "landing:land_now|landing:force"
 

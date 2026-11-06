@@ -983,9 +983,12 @@ async fn land_override(
                 .project(t.project)
                 .map_or(String::new(), |p| p.id.clone());
             let flag = if kind == "force" { "force" } else { "now" };
-            d2.store
-                .set_landing_flag(id, flag, &who, now_ms())
-                .map_err(store_err)?;
+            // A mark is for a task that has yet to land.
+            if !matches!(t.state, State::Landed | State::Canceled) {
+                d2.store
+                    .set_landing_flag(id, flag, &who, now_ms())
+                    .map_err(store_err)?;
+            }
             let debt = d2
                 .store
                 .add_debt(

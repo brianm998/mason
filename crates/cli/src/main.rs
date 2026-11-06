@@ -53,7 +53,7 @@ mason: command-line client for the MASON pipeline
   mason task override <id> <key> <value>
   mason task answer <id> <option number | text> [--card HASH] [--as NAME]
                                       answer the open question; the card's hash guards against a stale one
-  mason task land-now <id> | force <id> [--reason R]   recorded as an override and a debt (acts from Stage 14)
+  mason task land-now <id> | force <id> [--reason R]   marks the task and records an override and a debt
   mason task open <id> [--anyway]     open an interactive agent in the task's worktree, resuming its session
   mason pause [--project P] [--mode all|claims|landing] --for 2h   hold work back (all stops at the next step)
   mason resume [--project P] [--mode M] | mason pause list
