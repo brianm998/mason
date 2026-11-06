@@ -13,6 +13,9 @@ pub struct HostScenario {
     /// mergeable (and, where reviews are required, approved).
     pub good_head: String,
     pub missing_head: String,
+    /// Where a review is required: what the reviewer does once the PR exists
+    /// (given its number). `None` when no review is needed.
+    pub reviewer: Option<Box<dyn Fn(u64) + Send + Sync>>,
 }
 
 pub fn host_kit(h: &dyn GitHostAdapter, s: &HostScenario) -> Vec<String> {
@@ -52,6 +55,9 @@ pub fn host_kit(h: &dyn GitHostAdapter, s: &HostScenario) -> Vec<String> {
             }
         }
         Err(e) => p.push(format!("the status of a new PR: {e}")),
+    }
+    if let Some(review) = &s.reviewer {
+        review(pr.number);
     }
     if caps.merge_queue {
         // (Not exercised here: it would consume the PR.)

@@ -17,6 +17,9 @@ cd "$(git rev-parse --show-toplevel)"
 cargo build -q --workspace --bins
 
 t() {  # PACKAGE TEST-FILE TEST-NAME
+  # CI runs `cargo test --workspace` first, which runs every one of these tests;
+  # running each again would only spend the job's 10-minute budget twice.
+  [ -z "${MASON_TESTS_ALREADY_RAN:-}" ] || return 0
   cargo test -q -p "$1" --test "$2" -- --exact "$3" 2>&1 | tail -3 | grep -q 'test result: ok. 1 passed' \
     || { echo "FAILED: $2::$3" >&2; cargo test -p "$1" --test "$2" -- --exact "$3" 2>&1 | tail -25 >&2; exit 1; }
 }
@@ -34,7 +37,7 @@ t mason-daemon landing_crash killing_the_daemon_at_each_landing_phase_of_a_batch
 echo "   batch_formed batch_merged batch_red batch_verified batch_before_promote batch_after_promote land_before_event: each recovered"
 
 echo "== 4. the rest of the engine"
-cargo test -q -p mason-landing 2>&1 | grep -E 'test result' | head -5
+[ -n "${MASON_TESTS_ALREADY_RAN:-}" ] || cargo test -q -p mason-landing 2>&1 | grep -E 'test result' | head -5
 for name in \
   the_red_ladder_blames_by_impact_before_it_bisects \
   a_flaky_red_passes_on_the_rerun \

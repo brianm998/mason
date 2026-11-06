@@ -50,6 +50,7 @@ fn the_host_passes_its_conformance_kit_on_recorded_responses() {
             base: "develop".into(),
             good_head: "mason/pr/x-b1".into(),
             missing_head: "nope".into(),
+            reviewer: None,
         },
     );
     assert!(problems.is_empty(), "{problems:?}");
@@ -309,30 +310,19 @@ fn the_fake_host_passes_the_host_kit() {
             require_approval,
             merge_queue: false,
         };
-        // The kit expects a reviewed PR: the reviewer approves PR #1 as soon as it exists,
-        // for as long as the kit runs.
-        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let reviewer = require_approval.then(|| {
-            let (dir, stop) = (root.join("state"), stop.clone());
-            std::thread::spawn(move || {
-                while !stop.load(std::sync::atomic::Ordering::SeqCst) {
-                    FakeHost::approve(&dir, 1);
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                }
-            })
-        });
+        let dir = root.join("state");
         let problems = host_kit(
             &host,
             &HostScenario {
                 base: "develop".into(),
                 good_head: "feature".into(),
                 missing_head: "nope".into(),
+                // The kit expects a reviewed PR: the reviewer approves it once it exists.
+                reviewer: require_approval.then(|| {
+                    Box::new(move |n| FakeHost::approve(&dir, n)) as Box<dyn Fn(u64) + Send + Sync>
+                }),
             },
         );
-        stop.store(true, std::sync::atomic::Ordering::SeqCst);
-        if let Some(r) = reviewer {
-            r.join().unwrap();
-        }
         assert!(
             problems.is_empty(),
             "approval={require_approval}: {problems:?}"

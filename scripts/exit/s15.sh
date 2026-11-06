@@ -17,6 +17,9 @@ cd "$(git rev-parse --show-toplevel)"
 cargo build -q --workspace --bins
 
 t() {  # PACKAGE TEST-FILE TEST-NAME
+  # CI runs `cargo test --workspace` first, which runs every one of these tests;
+  # running each again would only spend the job's 10-minute budget twice.
+  [ -z "${MASON_TESTS_ALREADY_RAN:-}" ] || return 0
   cargo test -q -p "$1" --test "$2" -- --exact "$3" 2>&1 | tail -3 | grep -q 'test result: ok. 1 passed' \
     || { echo "FAILED: $2::$3" >&2; cargo test -p "$1" --test "$2" -- --exact "$3" 2>&1 | tail -30 >&2; exit 1; }
 }
@@ -53,16 +56,20 @@ t mason-daemon landing_crash killing_the_daemon_during_ci_or_a_pull_request_leav
 echo "   direct-ci: ci_pushed ci_finished batch_red before/after promote; pr-batch: pr_pushed pr_opened pr_checked ...; host-queue: pr_opened ...: each recovered, nothing left on the host"
 
 echo "== 3. the adapters on recorded responses"
+if [ -z "${MASON_TESTS_ALREADY_RAN:-}" ]; then
 cargo test -q -p mason-adapter-api 2>&1 | grep 'test result'
 cargo test -q -p mason-adapters --test github 2>&1 | grep 'test result'
+fi
 echo "   conformance kits (host, tracker, build system), 404 stops the poll at once, rate limit waits as told, outage backs off, signatures verified"
 
 echo "== 4. the tracker"
-cargo test -q -p mason-daemon --test tracker 2>&1 | grep 'test result'
+[ -n "${MASON_TESTS_ALREADY_RAN:-}" ] || cargo test -q -p mason-daemon --test tracker 2>&1 | grep 'test result'
 
 echo "== 5. mason doctor"
+if [ -z "${MASON_TESTS_ALREADY_RAN:-}" ]; then
 cargo test -q -p mason-pipeline doctor 2>&1 | grep 'test result'
 cargo test -q -p mason-landing config 2>&1 | grep 'test result' | head -1
+fi
 
 if [ -z "${MASON_TESTS_ALREADY_RAN:-}" ]; then
   cargo test -q -p mason-engine -p mason-store 2>&1 | grep 'test result' | head -3
