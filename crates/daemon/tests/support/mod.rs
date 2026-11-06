@@ -254,7 +254,11 @@ impl Scratch {
             ])
             .args(extra_args)
             .stdout(Stdio::null())
-            .stderr(Stdio::inherit());
+            .stderr(if std::env::var("MASON_TEST_LOG").is_ok() {
+                Stdio::inherit()
+            } else {
+                Stdio::null()
+            });
         for (k, v) in env {
             cmd.env(k, v);
         }

@@ -880,7 +880,7 @@ mod tests {
         c.set_on_accept(Box::new(move |tool, args| {
             s2.lock().unwrap().push((tool.to_string(), args.clone()))
         }));
-        assert!(c.call("submit_plan", &json!({"summary": ""})).ok == false);
+        assert!(!c.call("submit_plan", &json!({"summary": ""})).ok);
         assert!(
             seen.lock().unwrap().is_empty(),
             "rejections are not persisted"

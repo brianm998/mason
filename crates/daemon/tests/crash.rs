@@ -197,7 +197,7 @@ fn crash_at(point: &str) -> Result<(), String> {
         std::thread::sleep(Duration::from_millis(100));
     }
     // Cleanup after landing may be done by recovery: give it a moment, then look.
-    let p = format!("mason/scratch/t0");
+    let p = "mason/scratch/t0".to_string();
     let end = Instant::now() + Duration::from_secs(30);
     while mason_landing::git::branch_exists(&s.repo, &p) || s.data_dir.join("w/scratch/0").exists()
     {

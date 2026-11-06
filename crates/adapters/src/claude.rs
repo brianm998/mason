@@ -187,6 +187,10 @@ impl ClaudeAdapter {
             .map(String::from),
         );
         args.extend(["--permission-mode".into(), "dontAsk".into()]);
+        // Only the project's own settings and instructions: never the owner's
+        // personal user-level ones (their CLAUDE.md, their hooks), which have no
+        // business steering an unattended pipeline.
+        args.extend(["--setting-sources".into(), "project,local".into()]);
         args.extend(["--append-system-prompt".into(), preamble(spec.step)]);
 
         let stdin = match resume {
@@ -839,6 +843,20 @@ mod tests {
         let tools_at = c.args.iter().position(|x| x == "--tools").unwrap();
         assert!(c.args[tools_at + 1].contains("Edit") && c.args[tools_at + 1].contains("Bash"));
         assert!(c.args.join(" ").contains("mcp__mason__run_check"));
+    }
+
+    #[test]
+    fn the_owners_personal_settings_are_not_loaded() {
+        let a = adapter(&[("ANTHROPIC_BASE_URL", "http://127.0.0.1:1")]);
+        for step in [StepKind::Explore, StepKind::Develop, StepKind::Review] {
+            let c = a.build_command(&spec(step), None).unwrap();
+            let at = c
+                .args
+                .iter()
+                .position(|x| x == "--setting-sources")
+                .expect("always set");
+            assert_eq!(c.args[at + 1], "project,local", "no `user` source");
+        }
     }
 
     #[test]

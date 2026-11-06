@@ -5,7 +5,7 @@
 pipeline of exploring, developing, testing, review and landing, for any number
 of projects at once, with SwiftUI and Compose monitors.
 
-Status: **pre-alpha, Stage 0** (repository skeleton only). The approved design
+Status: **pre-alpha, Stage 6**: a task can be filed with `mason`, worked by an agent under a crash-proof step host, tested, and landed on a git remote. The approved design
 is in [docs/DESIGN.md](docs/DESIGN.md).
 
 ## Licence
