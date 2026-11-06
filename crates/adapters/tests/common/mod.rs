@@ -9,7 +9,8 @@ pub fn step_host_bin() -> PathBuf {
     let exe = std::env::current_exe().unwrap();
     let target = exe.parent().unwrap().parent().unwrap(); // target/debug
     let bin = target.join("step-host");
-    if !bin.exists() {
+    static BUILT: std::sync::Once = std::sync::Once::new();
+    BUILT.call_once(|| {
         let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
         let ok = std::process::Command::new(cargo)
             .args(["build", "-q", "-p", "mason-step-host", "--bin", "step-host"])
@@ -17,6 +18,6 @@ pub fn step_host_bin() -> PathBuf {
             .unwrap()
             .success();
         assert!(ok, "could not build step-host");
-    }
+    });
     bin
 }

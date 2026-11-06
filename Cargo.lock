@@ -376,6 +376,7 @@ dependencies = [
  "mason-step-host",
  "mason-store",
  "nix",
+ "rusqlite",
  "serde_json",
  "tempfile",
  "tokio",

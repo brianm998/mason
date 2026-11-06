@@ -119,7 +119,7 @@ pub fn sweep_once(d: &Arc<Daemon>) -> Vec<String> {
     }
 
     // 5. Projections that no longer match the log (every tenth pass; it replays everything).
-    if st.passes % 10 == 0 {
+    if st.passes.is_multiple_of(10) {
         if let Err(e) = d.store.verify() {
             d.record_bug(
                 "projection_drift",

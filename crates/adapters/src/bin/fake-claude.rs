@@ -106,10 +106,12 @@ fn main() {
         .unwrap_or(0);
     let _ = std::fs::write(&count_path, (n + 1).to_string());
     let empty = vec![];
-    let turn = script["turns"]
-        .get(n)
-        .and_then(Value::as_array)
-        .unwrap_or(&empty);
+    let turns = if script.get("steps").is_some() {
+        &script["steps"][kind.as_str()]
+    } else {
+        &script["turns"]
+    };
+    let turn = turns.get(n).and_then(Value::as_array).unwrap_or(&empty);
 
     let sid = resume.unwrap_or_else(|| "fake-claude-session".to_string());
     let mut inited = false;

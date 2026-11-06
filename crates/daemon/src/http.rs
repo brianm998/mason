@@ -330,7 +330,9 @@ fn render_agent(text: &str) -> String {
                 for b in v["message"]["content"].as_array().into_iter().flatten() {
                     if b["type"] == "tool_result" {
                         let t = b["content"][0]["text"].as_str().unwrap_or_default();
-                        out.push_str(&format!("result: {}\n", t.lines().next().unwrap_or("")));
+                        let flat: String = t.lines().collect::<Vec<_>>().join(" | ");
+                        let shown: String = flat.chars().take(500).collect();
+                        out.push_str(&format!("result: {shown}\n"));
                     }
                 }
             }
