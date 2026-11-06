@@ -215,6 +215,7 @@ const STEPS: &[&str] = &[
          body     TEXT NOT NULL,
          priority TEXT NOT NULL,
          open     INTEGER NOT NULL,
+         mirrored TEXT NOT NULL DEFAULT '',
          PRIMARY KEY (project, number)
      );",
 ];

@@ -48,6 +48,7 @@ pub struct Daemon {
     pub demo: bool,
     pub(crate) demo_pos: Mutex<usize>,
     pub(crate) landing: crate::landing::Landing,
+    pub(crate) tracker: crate::tracker::Hub,
 }
 
 fn kind_name(k: &EventKind) -> String {
@@ -155,6 +156,7 @@ impl Daemon {
             demo,
             demo_pos: Mutex::new(0),
             landing: Default::default(),
+            tracker: Default::default(),
             cfg,
         });
         if !demo {
@@ -162,6 +164,7 @@ impl Daemon {
             d.recover();
             d.spawn_sweeper();
             d.spawn_watcher();
+            crate::tracker::spawn(&d);
         }
         Ok(d)
     }
@@ -170,6 +173,16 @@ impl Daemon {
     /// a debt, a limit): wake the sockets.
     pub fn poke(&self) {
         let _ = self.bus.send(self.store.last_seq().unwrap_or(0));
+    }
+
+    /// Why a project's tracker poll stopped, if it did.
+    pub fn tracker_stopped(&self, p: ProjectId) -> Option<String> {
+        self.tracker.stopped(p)
+    }
+
+    /// Ask the project's tracker again at once.
+    pub fn tracker_refresh(&self, p: ProjectId) {
+        self.tracker.refresh(p);
     }
 
     /// The landing queues (for the views, and for tests).

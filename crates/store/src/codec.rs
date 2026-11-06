@@ -339,6 +339,15 @@ pub fn encode(k: &EventKind) -> (&'static str, String) {
             w.n(task.0).n(blocker.0);
             "blocker_added"
         }
+        TrackerEdited {
+            task,
+            title,
+            body,
+            priority,
+        } => {
+            w.n(task.0).s(title).s(body).s(priority_name(*priority));
+            "tracker_edited"
+        }
         Tick => "tick",
     };
     (kind, w.out())
@@ -449,6 +458,12 @@ pub fn decode(kind: &str, payload: &str) -> Result<EventKind, CodecError> {
         "blocker_added" => BlockerAdded {
             task: t(&mut r)?,
             blocker: t(&mut r)?,
+        },
+        "tracker_edited" => TrackerEdited {
+            task: t(&mut r)?,
+            title: r.s()?,
+            body: r.s()?,
+            priority: priority_from(&r.s()?)?,
         },
         "tick" => {
             // The only event with no fields; its payload is empty.
@@ -584,6 +599,12 @@ mod tests {
                 task: t,
                 blocker: TaskId(2),
             },
+            TrackerEdited {
+                task: t,
+                title: nasty.into(),
+                body: "line\ntwo\t".into(),
+                priority: Priority::High,
+            },
             Tick,
         ]
     }
@@ -594,7 +615,7 @@ mod tests {
         let mut kinds: Vec<_> = all.iter().map(|k| encode(k).0).collect();
         kinds.sort_unstable();
         kinds.dedup();
-        assert_eq!(kinds.len(), 21, "one sample per EventKind variant");
+        assert_eq!(kinds.len(), 22, "one sample per EventKind variant");
         for k in all {
             let (kind, payload) = encode(&k);
             assert!(!payload.contains('\n'), "payload is one line");

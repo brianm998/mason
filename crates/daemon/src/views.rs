@@ -746,6 +746,7 @@ pub fn summarize(kind: &EventKind) -> (String, String, u64) {
         | EventKind::Resumed { task }
         | EventKind::WaitStarted { task, .. }
         | EventKind::WaitEnded { task }
+        | EventKind::TrackerEdited { task, .. }
         | EventKind::BlockerAdded { task, .. } => task.0,
         _ => 0,
     };
@@ -755,6 +756,7 @@ pub fn summarize(kind: &EventKind) -> (String, String, u64) {
         EventKind::SentBack { reason, .. } => format!("sent back: {reason}"),
         EventKind::WaitStarted { on, .. } => format!("waiting: {on}"),
         EventKind::Canceled { .. } => "canceled".into(),
+        EventKind::TrackerEdited { .. } => "edited in the tracker".into(),
         EventKind::StepSucceeded { next, .. } => match next {
             Some(n) if n.state == State::Landed => "landed".into(),
             Some(n) => format!("step done, next: {}", n.step),

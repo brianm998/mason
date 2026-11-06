@@ -135,6 +135,14 @@ pub enum EventKind {
         task: TaskId,
         blocker: TaskId,
     },
+    /// The tracker, which owns a task's title, body and priority, said they
+    /// changed (Part 11: authority is split). Applies in any live state.
+    TrackerEdited {
+        task: TaskId,
+        title: String,
+        body: String,
+        priority: Priority,
+    },
     /// Time passing, so not-before times can elapse.
     Tick,
 }

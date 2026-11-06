@@ -677,6 +677,7 @@ dependencies = [
 name = "mason-pipeline"
 version = "0.0.0"
 dependencies = [
+ "mason-adapters",
  "mason-daemon",
  "mason-definition",
  "mason-landing",

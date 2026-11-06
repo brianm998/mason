@@ -16,6 +16,7 @@ name = "mason"
 path = "src/main.rs"
 
 [dependencies]
+mason-adapters = { version = "0.0.0", path = "../adapters" }
 mason-daemon = { version = "0.0.0", path = "../daemon" }
 mason-definition = { version = "0.0.0", path = "../definition" }
 mason-landing = { version = "0.0.0", path = "../landing" }

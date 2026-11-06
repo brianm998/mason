@@ -822,6 +822,76 @@ async fn landing_status(Shared(d): Shared<Arc<Daemon>>) -> Res {
     Ok(Json(v))
 }
 
+/// A webhook from GitHub (directly, or through a relay such as `gh webhook
+/// forward`). Only a delivery whose signature verifies, under the secret the
+/// project names, is acted on, and acting is only to look again now.
+async fn github_hook(
+    Shared(d): Shared<Arc<Daemon>>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> Res {
+    let sig = headers
+        .get("x-hub-signature-256")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    let repo = serde_json::from_slice::<Value>(&body)
+        .ok()
+        .and_then(|v| v["repository"]["full_name"].as_str().map(String::from))
+        .unwrap_or_default();
+    let d2 = d.clone();
+    let hit = d
+        .pool
+        .run(move || {
+            for (pid, p) in &d2.projects {
+                let Some(t) = &p.services.tracker else { continue };
+                if t.repo != repo {
+                    continue;
+                }
+                let Some(secret) = t.webhook_secret.as_deref().and_then(|r| crate::services::token(r).ok()).and_then(|r| r.read().ok()) else {
+                    continue;
+                };
+                if mason_adapter_api::webhook::verify(&secret, &body, &sig) {
+                    d2.tracker.refresh(*pid);
+                    return true;
+                }
+            }
+            false
+        })
+        .await
+        .map_err(pool_err)?;
+    if hit {
+        Ok(Json(json!({"refreshing": true})))
+    } else {
+        // Unknown repository, no secret, or a signature that does not verify: all the same answer.
+        Err(fail(StatusCode::UNAUTHORIZED, "the delivery was not verified"))
+    }
+}
+
+/// Ask the tracker now (what opening a task in a monitor does), and say what it changed.
+async fn refresh_tracker(Shared(d): Shared<Arc<Daemon>>, Path(id): Path<u64>) -> Res {
+    let d2 = d.clone();
+    let v = d
+        .pool
+        .run(move || {
+            let w = d2.world().map_err(store_err)?;
+            let t = w.tasks.get(&TaskId(id)).ok_or_else(|| fail(StatusCode::NOT_FOUND, format!("no task #{id}")))?;
+            let pid = t.project;
+            let p = d2.project(pid).ok_or_else(|| fail(StatusCode::NOT_FOUND, "no such project"))?;
+            let Some((adapter, cfg)) = crate::services::tracker(p).map_err(|e| fail(StatusCode::BAD_REQUEST, e))? else {
+                return Ok(json!({"tracker": false, "note": "the project has no tracker"}));
+            };
+            d2.tracker.refresh(pid);
+            match crate::tracker::poll_once(&d2, pid, adapter.as_ref(), &cfg) {
+                Ok(s) => Ok(json!({"tracker": true, "imported": s.imported, "updated": s.updated, "closed": s.closed})),
+                Err(e) => Ok(json!({"tracker": true, "error": e})),
+            }
+        })
+        .await
+        .map_err(pool_err)??;
+    Ok(Json(v))
+}
+
 async fn debts_list(
     Shared(d): Shared<Arc<Daemon>>,
     Query(q): Query<HashMap<String, String>>,
@@ -1367,6 +1437,8 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/demo", get(demo_status))
         .route("/demo/next", post(demo_next))
         .route("/landing", get(landing_status))
+        .route("/hooks/github", post(github_hook))
+        .route("/tasks/{id}/refresh", post(refresh_tracker))
         .route("/debts", get(debts_list))
         .route("/debts/{id}/run", post(debt_run))
         .route("/quarantine", get(quarantine_list).post(quarantine_add))

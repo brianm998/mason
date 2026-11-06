@@ -46,6 +46,7 @@ fn name(k: &EventKind) -> &'static str {
         WaitStarted { .. } => "WaitStarted",
         WaitEnded { .. } => "WaitEnded",
         BlockerAdded { .. } => "BlockerAdded",
+        TrackerEdited { .. } => "TrackerEdited",
         Tick => "Tick",
     }
 }
@@ -454,6 +455,21 @@ fn apply(w: &mut World, k: &EventKind, fx: &mut Vec<Effect>) -> Result<(), Reduc
                 .expect("exists")
                 .blockers
                 .insert(*blocker);
+        }
+        E::TrackerEdited {
+            task,
+            title,
+            body,
+            priority,
+        } => {
+            let from = get(w, *task)?.state;
+            if !(from.is_step() || matches!(from, S::Proposed | S::Queued | S::NeedsAttention)) {
+                return Err(illegal(from, k));
+            }
+            let t = w.tasks.get_mut(task).expect("exists");
+            t.title = title.clone();
+            t.body = body.clone();
+            t.priority = *priority;
         }
         E::Tick => {}
     }

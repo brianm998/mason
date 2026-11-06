@@ -384,23 +384,16 @@ impl BuildSystemAdapter for GitHub {
     }
 }
 
-/// Can some workflow run on `mason/ci/**` or by dispatch? A text scan of
-/// `.github/workflows/*`: no YAML parser is needed to find the trigger.
-pub fn workflow_problems(repo: &Path) -> Vec<Problem> {
-    let dir = repo.join(".github/workflows");
-    let files: Vec<_> = std::fs::read_dir(&dir)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter(|e| matches!(e.path().extension().and_then(|x| x.to_str()), Some("yml" | "yaml")))
-        .collect();
-    if files.is_empty() {
-        return vec![Problem(
-            "there is no workflow in .github/workflows; direct-ci needs one that runs on `mason/ci/**` or by `workflow_dispatch`".into(),
-        )];
+const NO_WORKFLOW: &str = "there is no workflow in .github/workflows; direct-ci needs one that runs on `mason/ci/**` or by `workflow_dispatch`";
+const NO_TRIGGER: &str = "no workflow runs on `mason/ci/**` or `workflow_dispatch`; add `on: { push: { branches: [\"mason/ci/**\"] } }` (or `workflow_dispatch`) to the workflow that builds and tests";
+
+/// Does any of these workflow files run on `mason/ci/**` or by dispatch? A
+/// text scan: no YAML parser is needed to find the trigger. Comments do not count.
+fn scan_workflows(texts: &[String]) -> Vec<Problem> {
+    if texts.is_empty() {
+        return vec![Problem(NO_WORKFLOW.into())];
     }
-    let ok = files.iter().any(|f| {
-        let t = std::fs::read_to_string(f.path()).unwrap_or_default();
+    let ok = texts.iter().any(|t| {
         t.lines()
             .filter(|l| !l.trim_start().starts_with('#'))
             .any(|l| l.contains("mason/ci/**") || l.contains("workflow_dispatch"))
@@ -408,8 +401,39 @@ pub fn workflow_problems(repo: &Path) -> Vec<Problem> {
     if ok {
         vec![]
     } else {
-        vec![Problem(
-            "no workflow runs on `mason/ci/**` or `workflow_dispatch`; add `on: { push: { branches: [\"mason/ci/**\"] } }` (or `workflow_dispatch`) to the workflow that builds and tests".into(),
-        )]
+        vec![Problem(NO_TRIGGER.into())]
     }
+}
+
+/// From the working tree.
+pub fn workflow_problems(repo: &Path) -> Vec<Problem> {
+    let dir = repo.join(".github/workflows");
+    let texts: Vec<String> = std::fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| matches!(e.path().extension().and_then(|x| x.to_str()), Some("yml" | "yaml")))
+        .map(|e| std::fs::read_to_string(e.path()).unwrap_or_default())
+        .collect();
+    scan_workflows(&texts)
+}
+
+/// From a commit, so the base branch is what is checked, not whatever is checked out.
+pub fn workflow_problems_at(repo: &Path, git_ref: &str) -> Vec<Problem> {
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+    };
+    let names = git(&["ls-tree", "--name-only", git_ref, ".github/workflows/"]).unwrap_or_default();
+    let texts: Vec<String> = names
+        .lines()
+        .filter(|n| n.ends_with(".yml") || n.ends_with(".yaml"))
+        .filter_map(|n| git(&["show", &format!("{git_ref}:{n}")]))
+        .collect();
+    scan_workflows(&texts)
 }

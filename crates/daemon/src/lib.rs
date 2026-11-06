@@ -20,6 +20,7 @@ pub mod prompts;
 pub mod sched;
 pub mod services;
 pub mod suites;
+pub mod tracker;
 pub mod sweep;
 pub mod views;
 pub mod watchdog;

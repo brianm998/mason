@@ -151,6 +151,8 @@ pub struct TrackerItemRow {
     pub body: String,
     pub priority: String,
     pub open: bool,
+    /// The task state last mirrored out to the tracker (`landed`, `failed`, ...).
+    pub mirrored: String,
 }
 
 /// A project's landing freeze: its post-land tier is red, so only the fix may land.
@@ -1243,8 +1245,8 @@ impl Store {
         let r = row.clone();
         self.write(move |c| {
             c.execute(
-                "INSERT OR REPLACE INTO tracker_items(project, number, task, title, body, priority, open) VALUES (?1,?2,?3,?4,?5,?6,?7)",
-                params![r.project, r.number as i64, r.task as i64, r.title, r.body, r.priority, r.open],
+                "INSERT OR REPLACE INTO tracker_items(project, number, task, title, body, priority, open, mirrored) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                params![r.project, r.number as i64, r.task as i64, r.title, r.body, r.priority, r.open, r.mirrored],
             )
             .map(|_| ())
         })
@@ -1254,7 +1256,7 @@ impl Store {
         let p = project.to_string();
         self.read(move |c| {
             let mut st = c.prepare(
-                "SELECT project, number, task, title, body, priority, open FROM tracker_items WHERE project = ?1 ORDER BY number",
+                "SELECT project, number, task, title, body, priority, open, mirrored FROM tracker_items WHERE project = ?1 ORDER BY number",
             )?;
             let rows = st.query_map(params![p], |r| {
                 Ok(TrackerItemRow {
@@ -1265,6 +1267,7 @@ impl Store {
                     body: r.get(4)?,
                     priority: r.get(5)?,
                     open: r.get::<_, i64>(6)? != 0,
+                    mirrored: r.get(7)?,
                 })
             })?;
             rows.collect()

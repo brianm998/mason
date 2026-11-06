@@ -53,6 +53,7 @@ mason: command-line client for the MASON pipeline
   mason task override <id> <key> <value>
   mason task answer <id> <option number | text> [--card HASH] [--as NAME]
                                       answer the open question; the card's hash guards against a stale one
+  mason task refresh <id>             ask the tracker now (what opening a task does)
   mason task land-now <id> | force <id> [--reason R]   marks the task and records an override and a debt
   mason task open <id> [--anyway]     open an interactive agent in the task's worktree, resuming its session
   mason pause [--project P] [--mode all|claims|landing] --for 2h   hold work back (all stops at the next step)
@@ -1268,6 +1269,21 @@ fn main() {
                         r["debt"],
                         r["note"].as_str().unwrap_or("")
                     );
+                }
+                "refresh" => {
+                    let id = task_id(&mut a);
+                    finish(&a);
+                    let r = or_die(d.call("POST", &format!("/tasks/{id}/refresh"), Some(&json!({}))));
+                    if r["tracker"] == false {
+                        println!("{}", r["note"].as_str().unwrap_or("the project has no tracker"));
+                    } else if let Some(e) = r["error"].as_str() {
+                        println!("the tracker did not answer: {e}");
+                    } else {
+                        println!(
+                            "asked the tracker: {} imported, {} updated, {} closed",
+                            r["imported"], r["updated"], r["closed"]
+                        );
+                    }
                 }
                 "open" => {
                     let id = task_id(&mut a);
