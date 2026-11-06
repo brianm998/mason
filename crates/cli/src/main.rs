@@ -252,12 +252,21 @@ fn main() {
     } else {
         // Written before the command (`mason --reason R task skip ...`), they
         // are still global; after it, the command takes them itself.
-        while matches!(a.rest.first().map(String::as_str), Some("--as" | "--reason"))
-            && a.rest.len() >= 2
+        while matches!(
+            a.rest.first().map(String::as_str),
+            Some("--as" | "--reason")
+        ) && a.rest.len() >= 2
         {
             let name = a.rest.remove(0);
             let value = a.rest.remove(0);
-            std::env::set_var(if name == "--as" { "MASON_AS" } else { "MASON_REASON" }, value);
+            std::env::set_var(
+                if name == "--as" {
+                    "MASON_AS"
+                } else {
+                    "MASON_REASON"
+                },
+                value,
+            );
         }
     }
     let json_out = a.flag("--json");
