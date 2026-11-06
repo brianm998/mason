@@ -135,6 +135,36 @@ const STEPS: &[&str] = &[
          note    TEXT NOT NULL,
          at      INTEGER NOT NULL
      );",
+    // 6: the owner's interventions (the metric's numerator), pauses (runtime
+    // overrides with an owner and an expiry, per project or global), and alerts
+    // tied to live conditions (raised when a condition appears, cleared when it
+    // goes). Like the testing tables, these describe the pipeline rather than a
+    // task's progress, so they are not in the event log.
+    "CREATE TABLE interventions (
+         id      INTEGER PRIMARY KEY AUTOINCREMENT,
+         at      INTEGER NOT NULL,
+         kind    TEXT NOT NULL,
+         task    INTEGER,
+         project TEXT NOT NULL,
+         who     TEXT NOT NULL,
+         detail  TEXT NOT NULL,
+         reason  TEXT NOT NULL
+     );
+     CREATE TABLE pauses (
+         id         INTEGER PRIMARY KEY AUTOINCREMENT,
+         project    TEXT NOT NULL,
+         mode       TEXT NOT NULL,
+         owner      TEXT NOT NULL,
+         created_at INTEGER NOT NULL,
+         expires_at INTEGER NOT NULL
+     );
+     CREATE TABLE alerts (
+         key        TEXT PRIMARY KEY,
+         kind       TEXT NOT NULL,
+         text       TEXT NOT NULL,
+         since      INTEGER NOT NULL,
+         cleared_at INTEGER
+     );",
 ];
 
 pub const SCHEMA_VERSION: u32 = STEPS.len() as u32;

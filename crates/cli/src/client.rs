@@ -64,7 +64,15 @@ impl Daemon {
         s.set_read_timeout(Some(Duration::from_secs(120))).ok();
         let payload = body.map(|b| b.to_string()).unwrap_or_default();
         let req = format!(
-            "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{payload}",
+            "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nContent-Type: application/json\r\n{}Content-Length: {}\r\n\r\n{payload}",
+            // Who is acting and why, for the record of interventions (Part 10).
+            ["MASON_AS", "MASON_REASON"]
+                .iter()
+                .filter_map(|k| {
+                    let v = std::env::var(k).ok()?.replace(['\r', '\n'], " ");
+                    Some(format!("X-Mason-{}: {v}\r\n", if *k == "MASON_AS" { "As" } else { "Reason" }))
+                })
+                .collect::<String>(),
             payload.len()
         );
         s.write_all(req.as_bytes())

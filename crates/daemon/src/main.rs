@@ -42,6 +42,7 @@ fn main() {
         sibling("mason-mcp"),
     );
     let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut owners_set = false;
     let mut i = 0;
     while i < args.len() {
         let flag = args[i].clone();
@@ -76,6 +77,14 @@ fn main() {
             }
             "--env-retry-ms" => {
                 cfg.env_retry = Duration::from_millis(val().parse().unwrap_or_else(|_| usage()))
+            }
+            "--owner" => {
+                // The first --owner replaces the default identity; more add to it.
+                if !owners_set {
+                    cfg.owner_names.clear();
+                    owners_set = true;
+                }
+                cfg.owner_names.push(val());
             }
             "--debug" => cfg.debug = true,
             _ => usage(),

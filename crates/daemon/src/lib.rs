@@ -6,6 +6,7 @@
 //! agent sessions, test runs) on bounded worker pools and reports back as new
 //! events. Nothing blocks the async event loop.
 
+pub mod attention;
 pub mod config;
 pub mod crash;
 pub mod daemon;

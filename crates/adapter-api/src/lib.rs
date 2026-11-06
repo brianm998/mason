@@ -6,6 +6,7 @@
 //! A step ends only by passing validation: the agent calls a contract tool and
 //! the contract replies "accepted" or says precisely what is wrong.
 
+pub mod card;
 pub mod conformance;
 pub mod contract;
 pub mod netguard;

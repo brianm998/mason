@@ -13,6 +13,11 @@
 //! mason debt list | run <id>
 //! mason quarantine list | add <suite> <test> --owner O --days N [--reason R] | remove <suite> <test>
 //! mason test parse <parser> <file> [--min N]
+//! mason task answer <id> <option number | text> [--card HASH] [--as NAME]
+//! mason task land-now <id> | force <id> [--reason R]
+//! mason task open <id> [--anyway]
+//! mason pause [--project P] [--mode all|claims|landing] --for 2h | mason resume [--project P] [--mode M] | mason pause list
+//! mason alerts [--all] | mason metrics [--days N]
 //! mason status [--json]
 //! mason run --needs compile[=N],... [--exclusive] [--label L] -- <cmd>...
 //! mason resources [--json] | mason resources limit <resource> <units>
@@ -46,6 +51,14 @@ mason: command-line client for the MASON pipeline
   mason task reject <id> [--reason R] reject a proposed task or an approval step
   mason task explore-anyway <id>      explore after all, even if it skipped exploring
   mason task override <id> <key> <value>
+  mason task answer <id> <option number | text> [--card HASH] [--as NAME]
+                                      answer the open question; the card's hash guards against a stale one
+  mason task land-now <id> | force <id> [--reason R]   recorded as an override and a debt (acts from Stage 14)
+  mason task open <id> [--anyway]     open an interactive agent in the task's worktree, resuming its session
+  mason pause [--project P] [--mode all|claims|landing] --for 2h   hold work back (all stops at the next step)
+  mason resume [--project P] [--mode M] | mason pause list
+  mason alerts [--all]                what needs a look right now (and, with --all, what already cleared)
+  mason metrics [--days N]            interventions per landed task
   mason task skip <id> (--suite S | --step S) [--reason R] [--deferred]
                                       skip a suite or step by force, even mid-run; records a debt
   mason debt list | run <id>          what was skipped and not yet proven; run one on the base branch
@@ -67,7 +80,8 @@ mason: command-line client for the MASON pipeline
   mason config unset <key> [--project P] | list [--project P]
   mason help filing                   how to say a task is already explored
 
-Global options: --data-dir D, --config-dir C (or MASON_DATA_DIR, MASON_CONFIG_DIR)";
+Global options: --data-dir D, --config-dir C (or MASON_DATA_DIR, MASON_CONFIG_DIR),
+  --as NAME and --reason TEXT (who is acting and why; both optional, recorded with overrides)";
 
 fn home() -> PathBuf {
     std::env::var_os("HOME")
@@ -218,6 +232,34 @@ fn main() {
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("MASON_CONFIG_DIR").map(PathBuf::from))
         .unwrap_or_else(|| home().join(".config/mason"));
+    // Who is acting and why, for the record of interventions. Optional: a
+    // required reason adds friction exactly when someone is in a hurry.
+    // (`reject`, `skip`, `land-now`, `force` and `answer` read their own
+    // `--reason` and `--as`; for the rest they are global.)
+    let reads_own = a.rest.iter().any(|x| {
+        matches!(
+            x.as_str(),
+            "reject" | "skip" | "land-now" | "force" | "answer"
+        )
+    });
+    if !reads_own {
+        if let Some(who) = a.opt("--as") {
+            std::env::set_var("MASON_AS", who);
+        }
+        if let Some(why) = a.opt("--reason") {
+            std::env::set_var("MASON_REASON", why);
+        }
+    } else {
+        // Written before the command (`mason --reason R task skip ...`), they
+        // are still global; after it, the command takes them itself.
+        while matches!(a.rest.first().map(String::as_str), Some("--as" | "--reason"))
+            && a.rest.len() >= 2
+        {
+            let name = a.rest.remove(0);
+            let value = a.rest.remove(0);
+            std::env::set_var(if name == "--as" { "MASON_AS" } else { "MASON_REASON" }, value);
+        }
+    }
     let json_out = a.flag("--json");
     let cmd = a.pos().unwrap_or_default();
 
@@ -529,6 +571,131 @@ fn main() {
                     }
                 }
                 other => die(&format!("unknown config command {other:?}\n\n{HELP}")),
+            }
+        }
+        "pause" => match a.pos().as_deref() {
+            Some("list") => {
+                finish(&a);
+                let r = or_die(d.call("GET", "/pauses", None));
+                if json_out {
+                    return println!("{r:#}");
+                }
+                let list = r["pauses"].as_array().cloned().unwrap_or_default();
+                if list.is_empty() {
+                    println!("nothing is paused");
+                }
+                for p in list {
+                    println!(
+                        "{} for {}, by {}, until {}",
+                        p["mode"].as_str().unwrap_or("?"),
+                        if p["project"].as_str().unwrap_or("").is_empty() {
+                            "everything"
+                        } else {
+                            p["project"].as_str().unwrap_or("")
+                        },
+                        p["owner"].as_str().unwrap_or("?"),
+                        ago_until(p["expires_at"].as_u64().unwrap_or(0))
+                    );
+                }
+            }
+            first => {
+                // `mason pause --for 2h`: the first word was a flag, put it back.
+                if let Some(f) = first {
+                    a.rest.insert(0, f.to_string());
+                }
+                let project = a.opt("--project").unwrap_or_default();
+                let mode = a.opt("--mode").unwrap_or_else(|| "all".into());
+                let secs = a
+                    .opt("--for")
+                    .and_then(|v| mason_definition::model::parse_duration(&v))
+                    .map(|d| d.as_secs())
+                    .unwrap_or_else(|| die("a pause needs an expiry: --for 2h"));
+                let owner = std::env::var("MASON_AS")
+                    .or_else(|_| std::env::var("USER"))
+                    .unwrap_or_default();
+                finish(&a);
+                or_die(d.call(
+                    "POST",
+                    "/pause",
+                    Some(&json!({"project": project, "mode": mode, "for_s": secs, "owner": owner})),
+                ));
+                println!(
+                    "Paused ({mode}) for {}, for {secs}s. `mason resume` lifts it. {}",
+                    if project.is_empty() {
+                        "everything"
+                    } else {
+                        &project
+                    },
+                    if mode == "all" {
+                        "Running steps finish; nothing new starts."
+                    } else {
+                        ""
+                    }
+                );
+            }
+        },
+        "resume" => {
+            let project = a.opt("--project").unwrap_or_default();
+            let mode = a.opt("--mode").unwrap_or_default();
+            finish(&a);
+            let r = or_die(d.call(
+                "POST",
+                "/resume",
+                Some(&json!({"project": project, "mode": mode})),
+            ));
+            println!("Lifted {} pause(s)", r["lifted"]);
+        }
+        "alerts" => {
+            let all = a.flag("--all");
+            finish(&a);
+            let r = or_die(d.call("GET", &format!("/alerts?all={}", u8::from(all)), None));
+            if json_out {
+                return println!("{r:#}");
+            }
+            let list = r["alerts"].as_array().cloned().unwrap_or_default();
+            if list.is_empty() {
+                println!("nothing needs a look");
+            }
+            for x in list {
+                println!(
+                    "{} {:<12} {}",
+                    if x["cleared_at"].is_null() { "!" } else { "." },
+                    x["kind"].as_str().unwrap_or("?"),
+                    x["text"].as_str().unwrap_or("")
+                );
+            }
+        }
+        "metrics" => {
+            let days = a.opt("--days").unwrap_or_else(|| "0".into());
+            finish(&a);
+            let r = or_die(d.call("GET", &format!("/metrics?days={days}"), None));
+            if json_out {
+                return println!("{r:#}");
+            }
+            println!(
+                "{} intervention(s) for {} landed task(s): {} per landed task",
+                r["interventions"],
+                r["landed"],
+                r["per_landed"]
+                    .as_f64()
+                    .map_or("n/a".to_string(), |v| format!("{v:.2}"))
+            );
+            if let Some(k) = r["by_kind"].as_object() {
+                for (kind, n) in k {
+                    println!("  {kind:<16} {n}");
+                }
+            }
+            if r["acknowledged"].as_u64().unwrap_or(0) > 0 {
+                println!(
+                    "  ({} question(s) acknowledged rather than asked again)",
+                    r["acknowledged"]
+                );
+            }
+            if r["refused_answers"].as_u64().unwrap_or(0) > 0 {
+                println!(
+                    "  ({} answer(s) refused: not the owner's identity)",
+                    r["refused_answers"]
+                );
             }
         }
         "debt" => match a.pos().as_deref() {
@@ -873,8 +1040,58 @@ fn main() {
                             }
                         );
                     }
-                    if let Some(q) = t["question"].as_str() {
-                        println!("  question  {q}");
+                    if let Some(c) = t["card"].as_object().filter(|c| !c.is_empty()) {
+                        let get = |k: &str| c.get(k).and_then(Value::as_str).unwrap_or("");
+                        println!("\n  QUESTION  {}", get("ask"));
+                        if !get("why").is_empty() {
+                            println!("  why you   {}", get("why"));
+                        }
+                        for (i, o) in c
+                            .get("options")
+                            .and_then(Value::as_array)
+                            .into_iter()
+                            .flatten()
+                            .enumerate()
+                        {
+                            println!(
+                                "  {}. {}{}",
+                                i + 1,
+                                o["label"].as_str().unwrap_or(""),
+                                if o["recommended"].as_bool().unwrap_or(false) {
+                                    "   (recommended)"
+                                } else {
+                                    ""
+                                }
+                            );
+                        }
+                        println!("  other     any other text");
+                        for l in c
+                            .get("evidence")
+                            .and_then(Value::as_array)
+                            .into_iter()
+                            .flatten()
+                        {
+                            println!("    | {}", l.as_str().unwrap_or(""));
+                        }
+                        if get("origin") != "agent" {
+                            println!(
+                                "  (this card was {} because the agent's did not fit: {})",
+                                get("origin"),
+                                c.get("problems")
+                                    .and_then(Value::as_array)
+                                    .map(|p| p
+                                        .iter()
+                                        .filter_map(Value::as_str)
+                                        .collect::<Vec<_>>()
+                                        .join("; "))
+                                    .unwrap_or_default()
+                            );
+                        }
+                        println!(
+                            "  card      {}   (answer with `mason task answer {} <option>`)",
+                            get("hash"),
+                            t["id"]
+                        );
                     }
                     if let Some(b) = t["body"].as_str().filter(|b| !b.trim().is_empty()) {
                         println!("\n{}", b.trim());
@@ -928,6 +1145,7 @@ fn main() {
                     let suite = a.opt("--suite");
                     let step = a.opt("--step");
                     let reason = a.opt("--reason").unwrap_or_default();
+                    std::env::set_var("MASON_REASON", &reason);
                     let owner = a
                         .opt("--owner")
                         .or_else(|| std::env::var("USER").ok())
@@ -951,6 +1169,76 @@ fn main() {
                         }
                     );
                 }
+                "answer" => {
+                    let id = task_id(&mut a);
+                    let who = a
+                        .opt("--as")
+                        .or_else(|| std::env::var("MASON_AS").ok())
+                        .or_else(|| std::env::var("USER").ok())
+                        .unwrap_or_default();
+                    let card = a.opt("--card");
+                    let answer: Vec<String> = std::mem::take(&mut a.rest);
+                    if answer.is_empty() {
+                        die("give the answer: an option number, or text for \"Other\"");
+                    }
+                    // Without --card, answer the card as it stands now.
+                    let hash = match card {
+                        Some(h) => h,
+                        None => {
+                            let t = or_die(d.call("GET", &format!("/tasks/{id}"), None));
+                            t["card"]["hash"].as_str().unwrap_or_default().to_string()
+                        }
+                    };
+                    let r = or_die(d.call(
+                        "POST",
+                        &format!("/tasks/{id}/answer"),
+                        Some(&json!({"answer": answer.join(" "), "hash": hash, "as": who})),
+                    ));
+                    println!(
+                        "Answered task #{id}: {}",
+                        r["answer"].as_str().unwrap_or("")
+                    );
+                }
+                "land-now" | "force" => {
+                    let id = task_id(&mut a);
+                    let reason = a.opt("--reason").unwrap_or_default();
+                    std::env::set_var("MASON_REASON", &reason);
+                    finish(&a);
+                    let r = or_die(d.call(
+                        "POST",
+                        &format!("/tasks/{id}/{sub}"),
+                        Some(&json!({"reason": reason})),
+                    ));
+                    println!(
+                        "Debt #{} recorded. {}",
+                        r["debt"],
+                        r["note"].as_str().unwrap_or("")
+                    );
+                }
+                "open" => {
+                    let id = task_id(&mut a);
+                    let anyway = a.flag("--anyway");
+                    finish(&a);
+                    let s = or_die(d.call("GET", &format!("/tasks/{id}/session"), None));
+                    if !s["idle"].as_bool().unwrap_or(true) && !anyway {
+                        die("the step is running; a second session would collide with it. Wait for it to be idle, or pass --anyway");
+                    }
+                    let bin = s["claude"].as_str().unwrap_or("claude").to_string();
+                    let wt = s["worktree"].as_str().unwrap_or(".").to_string();
+                    let mut cmd = std::process::Command::new(&bin);
+                    cmd.current_dir(&wt);
+                    match s["session"].as_str() {
+                        Some(sid) => {
+                            println!("Resuming the agent's session {sid} in {wt}");
+                            cmd.args(["--resume", sid]);
+                        }
+                        None => println!("No session to resume; starting a fresh one in {wt}"),
+                    }
+                    match cmd.status() {
+                        Ok(st) => exit(st.code().unwrap_or(1)),
+                        Err(e) => die(&format!("cannot run `{bin}`: {e}")),
+                    }
+                }
                 "approve" => {
                     let id = task_id(&mut a);
                     finish(&a);
@@ -962,6 +1250,7 @@ fn main() {
                     let reason = a
                         .opt("--reason")
                         .unwrap_or_else(|| "no reason given".into());
+                    std::env::set_var("MASON_REASON", &reason);
                     finish(&a);
                     or_die(d.call(
                         "POST",

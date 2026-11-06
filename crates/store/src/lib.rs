@@ -58,6 +58,42 @@ pub struct StoredEvent {
     pub event: Event,
 }
 
+/// One thing the owner did to the pipeline (an override, an answer, an
+/// approval): what the "interventions per landed task" metric counts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InterventionRow {
+    pub id: u64,
+    pub at: u64,
+    pub kind: String,
+    pub task: Option<u64>,
+    pub project: String,
+    pub who: String,
+    pub detail: String,
+    pub reason: String,
+}
+
+/// A pause in force: `project` is empty for the whole pipeline; `mode` is
+/// `all`, `claims` or `landing`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PauseRow {
+    pub id: u64,
+    pub project: String,
+    pub mode: String,
+    pub owner: String,
+    pub created_at: u64,
+    pub expires_at: u64,
+}
+
+/// An alert tied to a live condition.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AlertRow {
+    pub key: String,
+    pub kind: String,
+    pub text: String,
+    pub since: u64,
+    pub cleared_at: Option<u64>,
+}
+
 /// A debt: something skipped by force and not yet paid.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DebtRow {
@@ -677,6 +713,167 @@ impl Store {
                 "DELETE FROM task_overrides WHERE task = ?1 AND key = ?2",
                 params![task as i64, k],
             )
+        })
+    }
+
+    // ---- attention and overrides (Stage 10) ----
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_intervention(
+        &self,
+        kind: &str,
+        task: Option<u64>,
+        project: &str,
+        who: &str,
+        detail: &str,
+        reason: &str,
+        now_ms: u64,
+    ) -> Result<u64, StoreError> {
+        let (k, p, w, d, r) = (
+            kind.to_string(),
+            project.to_string(),
+            who.to_string(),
+            detail.to_string(),
+            reason.to_string(),
+        );
+        self.write(move |c| {
+            c.execute(
+                "INSERT INTO interventions(at, kind, task, project, who, detail, reason) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                params![now_ms as i64, k, task.map(|t| t as i64), p, w, d, r],
+            )?;
+            Ok(c.last_insert_rowid() as u64)
+        })
+    }
+
+    /// Interventions since `since_ms`, oldest first.
+    pub fn interventions(&self, since_ms: u64) -> Result<Vec<InterventionRow>, StoreError> {
+        self.read(move |c| {
+            let mut st = c.prepare(
+                "SELECT id, at, kind, task, project, who, detail, reason FROM interventions WHERE at >= ?1 ORDER BY id",
+            )?;
+            let rows = st.query_map(params![since_ms as i64], |r| {
+                Ok(InterventionRow {
+                    id: r.get::<_, i64>(0)? as u64,
+                    at: r.get::<_, i64>(1)? as u64,
+                    kind: r.get(2)?,
+                    task: r.get::<_, Option<i64>>(3)?.map(|t| t as u64),
+                    project: r.get(4)?,
+                    who: r.get(5)?,
+                    detail: r.get(6)?,
+                    reason: r.get(7)?,
+                })
+            })?;
+            rows.collect()
+        })
+    }
+
+    pub fn add_pause(
+        &self,
+        project: &str,
+        mode: &str,
+        owner: &str,
+        now_ms: u64,
+        expires_at_ms: u64,
+    ) -> Result<u64, StoreError> {
+        let (p, m, o) = (project.to_string(), mode.to_string(), owner.to_string());
+        self.write(move |c| {
+            c.execute(
+                "INSERT INTO pauses(project, mode, owner, created_at, expires_at) VALUES (?1,?2,?3,?4,?5)",
+                params![p, m, o, now_ms as i64, expires_at_ms as i64],
+            )?;
+            Ok(c.last_insert_rowid() as u64)
+        })
+    }
+
+    /// Lift pauses: those of `project` (empty: the global ones) in `mode`
+    /// (empty: any). Returns how many.
+    pub fn remove_pauses(&self, project: &str, mode: &str) -> Result<usize, StoreError> {
+        let (p, m) = (project.to_string(), mode.to_string());
+        self.write(move |c| {
+            c.execute(
+                "DELETE FROM pauses WHERE project = ?1 AND (?2 = '' OR mode = ?2)",
+                params![p, m],
+            )
+        })
+    }
+
+    /// Pauses still in force at `now_ms`.
+    pub fn pauses(&self, now_ms: u64) -> Result<Vec<PauseRow>, StoreError> {
+        self.read(move |c| {
+            let mut st = c.prepare(
+                "SELECT id, project, mode, owner, created_at, expires_at FROM pauses WHERE expires_at > ?1 ORDER BY id",
+            )?;
+            let rows = st.query_map(params![now_ms as i64], |r| {
+                Ok(PauseRow {
+                    id: r.get::<_, i64>(0)? as u64,
+                    project: r.get(1)?,
+                    mode: r.get(2)?,
+                    owner: r.get(3)?,
+                    created_at: r.get::<_, i64>(4)? as u64,
+                    expires_at: r.get::<_, i64>(5)? as u64,
+                })
+            })?;
+            rows.collect()
+        })
+    }
+
+    /// Make the alert table match the conditions that are true now: raise the
+    /// new ones, keep the ones still true, clear the ones that went away.
+    /// `now` is `(key, kind, text)`. Returns `(raised, cleared)` keys.
+    #[allow(clippy::type_complexity)]
+    pub fn sync_alerts(
+        &self,
+        now: &[(String, String, String)],
+        now_ms: u64,
+    ) -> Result<(Vec<String>, Vec<String>), StoreError> {
+        let now = now.to_vec();
+        self.write(move |c| {
+            let mut raised = vec![];
+            let mut cleared = vec![];
+            let active: Vec<String> = {
+                let mut st = c.prepare("SELECT key FROM alerts WHERE cleared_at IS NULL")?;
+                let rows = st.query_map([], |r| r.get::<_, String>(0))?;
+                rows.collect::<Result<_, _>>()?
+            };
+            for (key, kind, text) in &now {
+                if active.contains(key) {
+                    c.execute("UPDATE alerts SET text = ?2 WHERE key = ?1", params![key, text])?;
+                } else {
+                    c.execute(
+                        "INSERT OR REPLACE INTO alerts(key, kind, text, since, cleared_at) VALUES (?1,?2,?3,?4,NULL)",
+                        params![key, kind, text, now_ms as i64],
+                    )?;
+                    raised.push(key.clone());
+                }
+            }
+            for key in active {
+                if !now.iter().any(|(k, _, _)| *k == key) {
+                    c.execute(
+                        "UPDATE alerts SET cleared_at = ?2 WHERE key = ?1",
+                        params![key, now_ms as i64],
+                    )?;
+                    cleared.push(key);
+                }
+            }
+            Ok((raised, cleared))
+        })
+    }
+
+    pub fn alerts(&self, active_only: bool) -> Result<Vec<AlertRow>, StoreError> {
+        self.read(move |c| {
+            let mut st = c.prepare(
+                "SELECT key, kind, text, since, cleared_at FROM alerts WHERE (?1 = 0 OR cleared_at IS NULL) ORDER BY since, key",
+            )?;
+            let rows = st.query_map(params![i64::from(active_only)], |r| {
+                Ok(AlertRow {
+                    key: r.get(0)?,
+                    kind: r.get(1)?,
+                    text: r.get(2)?,
+                    since: r.get::<_, i64>(3)? as u64,
+                    cleared_at: r.get::<_, Option<i64>>(4)?.map(|t| t as u64),
+                })
+            })?;
+            rows.collect()
         })
     }
 

@@ -149,14 +149,22 @@ pub fn tool_spec(tool: &str) -> Option<(String, Value)> {
         ),
         "ask" => s(
             "Ask the owner a question only when the ticket, repository and notes cannot settle it. \
-             After calling this, end your turn: you will be resumed with the answer.",
+             The question is a decision card: one sentence, why only the owner can settle it, 2 to 4 \
+             complete answers with exactly one recommended, and at most 10 lines of evidence. A card \
+             that does not fit is rewritten for you. After calling this, end your turn: you will be \
+             resumed with the answer.",
             json!({
                 "ask": {"type": "string", "description": "One sentence, at most 200 characters"},
+                "why": {"type": "string", "description": "Why the ticket, repository and notes cannot settle it (at most 400 characters)"},
                 "options": {"type": "array", "items": {"type": "object", "properties": {
-                    "label": {"type": "string"}, "recommended": {"type": "boolean"}}, "required": ["label"]},
-                    "description": "2 to 4 complete answers"}
+                    "label": {"type": "string", "description": "A complete answer, saying what would happen"},
+                    "recommended": {"type": "boolean"}}, "required": ["label"]},
+                    "description": "2 to 4 complete answers, exactly one with recommended: true"},
+                "evidence": {"type": "array", "items": {"type": "string"}, "description": "At most 10 short lines. Quote the decisive ones; never paste a log."},
+                "links": {"type": "array", "items": {"type": "string"}, "description": "Links to stored logs or files"},
+                "key": {"type": "string", "description": "What this is about, such as a gate's name"}
             }),
-            &["ask", "options"],
+            &["ask", "why", "options"],
         ),
         "run_check" => s(
             "Run a named check. Short checks return their result. A long check returns at once and \
@@ -286,10 +294,8 @@ pub fn validate(tool: &str, a: &Value) -> Result<(), Vec<String>> {
             }
         }
         "ask" => {
-            text(a, "ask", 200, &mut p);
-            match a.get("options").and_then(Value::as_array) {
-                Some(o) if o.len() >= 2 => {}
-                _ => p.push("options: need at least 2".into()),
+            if let Err(problems) = crate::card::parse(a) {
+                p.extend(problems);
             }
         }
         "run_check" => {
@@ -378,7 +384,12 @@ pub type Validator = Box<dyn Fn(&str, &Value) -> Result<(), Vec<String>> + Send 
 /// was accepted, so a controller can make it durable first.
 pub type OnAccept = Box<dyn Fn(&str, &Value) + Send + Sync>;
 
+/// Rewrites a card that does not fit, given the card and what is wrong with
+/// it. Returns a replacement card (which must itself fit) or `None`.
+pub type AskRewriter = Box<dyn Fn(&Value, &[String]) -> Option<Value> + Send + Sync>;
+
 struct Inner {
+    ask_rewriter: Mutex<Option<AskRewriter>>,
     on_accept: Mutex<Option<OnAccept>>,
     allowed: Mutex<Option<Vec<String>>>,
     validator: Option<Validator>,
@@ -406,6 +417,7 @@ impl ContractHandle {
         validator: Option<Validator>,
     ) -> ContractHandle {
         ContractHandle(Arc::new(Inner {
+            ask_rewriter: Mutex::new(None),
             on_accept: Mutex::new(None),
             allowed: Mutex::new(None),
             validator,
@@ -425,6 +437,16 @@ impl ContractHandle {
     /// Offer only these tools, a subset of the step's. Others are refused.
     pub fn restrict_tools(&self, tools: Vec<String>) {
         *self.0.allowed.lock().unwrap_or_else(|e| e.into_inner()) = Some(tools);
+    }
+
+    /// A cheap rewriter for decision cards that do not fit (Part 10). Without
+    /// one, or if it fails, a deterministic fallback is used.
+    pub fn set_ask_rewriter(&self, f: AskRewriter) {
+        *self
+            .0
+            .ask_rewriter
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(f);
     }
 
     /// Run `f` for each accepted terminal submission, before replying to the agent.
@@ -507,6 +529,46 @@ impl ContractHandle {
                     step.name()
                 )],
             );
+        }
+        if tool == "ask" {
+            // A card that does not fit is never refused: refusing would only
+            // make the agent loop. It is rewritten, and if that fails, rebuilt
+            // deterministically, so no question is ever lost.
+            let (card, note) = match crate::card::parse(args) {
+                Ok(c) => (c, String::new()),
+                Err(problems) => {
+                    let rewritten = self
+                        .0
+                        .ask_rewriter
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .as_ref()
+                        .and_then(|f| f(args, &problems))
+                        .and_then(|v| crate::card::accept_rewrite(&v, &problems));
+                    let how = if rewritten.is_some() {
+                        "rewritten"
+                    } else {
+                        "rebuilt"
+                    };
+                    let card = rewritten.unwrap_or_else(|| crate::card::fallback(args, &problems));
+                    st.rejections += 1;
+                    let list: Vec<String> = problems.iter().map(|m| format!("- {m}")).collect();
+                    (
+                        card,
+                        format!(
+                            "Your card did not fit the decision-card shape and was {how}:\n{}\nNext time: one sentence, why only the owner can settle it, 2 to 4 complete answers with exactly one recommended, at most 10 lines of evidence. ",
+                            list.join("\n")
+                        ),
+                    )
+                }
+            };
+            st.asked = Some(card.to_json());
+            return ToolReply {
+                ok: true,
+                text: format!(
+                    "{note}Recorded. Do not wait or poll: end your turn now. You will be resumed with the owner's answer."
+                ),
+            };
         }
         if let Err(problems) = validate(tool, args) {
             return reject(&mut st, problems);

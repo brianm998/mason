@@ -385,6 +385,11 @@ impl Daemon {
             .filter(|t| {
                 t.state == State::Queued && t.activity == Activity::Waiting(WaitReason::Slot)
             })
+            // A pause on claims (or on everything) holds a project's queue back.
+            .filter(|t| {
+                let name = self.project(t.project).map_or("", |p| p.id.as_str());
+                crate::attention::paused(self, name, crate::attention::What::Claim).is_none()
+            })
             .min_by_key(|t| self.queued_rank(t))
             .map(|t| t.id)
     }

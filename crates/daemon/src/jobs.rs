@@ -212,6 +212,11 @@ pub fn run(d: &Arc<Daemon>, task: TaskId, step: State, run: StepRunId) {
         }
     };
     d.crash.point(&format!("job_started:{step:?}"));
+    // A pause stops work at the step boundary: nothing new starts until it
+    // lifts or runs out. (A running step finishes.)
+    if let Err(()) = wait_while_paused(&c) {
+        return;
+    }
     // Everything the step needs, acquired at once, in rank order across every
     // project. Time spent waiting is outside every timeout below: they all
     // start after this returns. An approval waits for a person, not for the
@@ -232,6 +237,44 @@ pub fn run(d: &Arc<Daemon>, task: TaskId, step: State, run: StepRunId) {
         StepType::Landing => land_job(&c),
         other => c.fail(format!("step type `{}` cannot run yet", other.name())),
     }
+}
+
+/// Hold a step back while the owner has paused its project (Part 10). The
+/// wait is shown on the task; `Err` means the task went away meanwhile.
+fn wait_while_paused(c: &Ctx) -> Result<(), ()> {
+    use crate::attention::{paused, What};
+    let what = if c.step.kind == StepType::Landing {
+        What::Landing
+    } else {
+        What::Step
+    };
+    let mut announced = false;
+    while let Some(p) = paused(&c.d, &c.project.id, what) {
+        if !announced {
+            announced = true;
+            let scope = if p.project.is_empty() {
+                "everything"
+            } else {
+                &p.project
+            };
+            let on = format!("paused by {} ({} for {scope})", p.owner, p.mode);
+            if !c.emit(EventKind::WaitStarted { task: c.task, on }) {
+                return Err(());
+            }
+        }
+        std::thread::sleep(Duration::from_millis(200));
+        let alive =
+            c.d.world()
+                .map(|w| w.open_run(c.task) == Some(c.run))
+                .unwrap_or(true);
+        if !alive {
+            return Err(());
+        }
+    }
+    if announced {
+        c.emit(EventKind::WaitEnded { task: c.task });
+    }
+    Ok(())
 }
 
 /// Wait for this step's resources (Part 7). Says why in the task's wait, once,
@@ -373,6 +416,37 @@ pub fn tail(text: &str, lines: usize) -> String {
 
 /// The project's optional classifier: the task body on its stdin, and `clear`
 /// on stdout means skip exploring. Anything else, or any failure, means explore.
+/// Run `cmd` with `input` on stdin; its stdout if it succeeds within 30 s.
+pub fn run_filter(cmd: &str, input: &str) -> Option<String> {
+    use std::io::{Read, Write};
+    let mut child = Command::new("sh")
+        .args(["-c", cmd])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    if let Some(mut sin) = child.stdin.take() {
+        let _ = sin.write_all(input.as_bytes());
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    if let Some(mut so) = child.stdout.take() {
+        std::thread::spawn(move || {
+            let mut s = String::new();
+            let _ = so.read_to_string(&mut s);
+            let _ = tx.send(s);
+        });
+    }
+    let out = match rx.recv_timeout(Duration::from_secs(30)) {
+        Ok(s) => s,
+        Err(_) => {
+            let _ = child.kill();
+            return None;
+        }
+    };
+    child.wait().ok().filter(|s| s.success()).map(|_| out)
+}
+
 pub fn classify(cmd: &str, body: &str) -> bool {
     use std::io::{Read, Write};
     let Ok(mut child) = Command::new("sh")
@@ -518,6 +592,7 @@ fn agent_job(c: &Ctx) {
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok());
     let feedback = std::fs::read_to_string(dir.join("feedback.txt")).ok();
+    let decisions = std::fs::read_to_string(dir.join("decisions.txt")).ok();
     let prompt = match kind {
         StepKind::Develop => crate::prompts::develop_prompt(
             c.task.0,
@@ -539,6 +614,14 @@ fn agent_job(c: &Ctx) {
         StepKind::Explore => {
             crate::prompts::explore_prompt(c.task.0, &c.title, &c.body, c.trust, &c.project)
         }
+    };
+
+    let prompt = match decisions.filter(|t| !t.trim().is_empty()) {
+        Some(d) => format!(
+            "{prompt}\n\nThe owner has already answered these questions of yours; do not ask them again:\n{}",
+            d.trim_end()
+        ),
+        None => prompt,
     };
 
     let tests_cmd = c.d.world().ok().and_then(|_| {
@@ -570,6 +653,15 @@ fn agent_job(c: &Ctx) {
     let contract = ContractHandle::with_validator(kind, checks, validator);
     if let Some(tools) = &c.step.tools {
         contract.restrict_tools(tools.clone());
+    }
+    // A decision card that does not fit gets a cheap rewrite if the project
+    // has one; otherwise (or if that fails) the contract rebuilds it.
+    if let Some(cmd) = c.project.card_rewriter.clone() {
+        contract.set_ask_rewriter(Box::new(move |card, problems| {
+            let input = serde_json::json!({"card": card, "problems": problems}).to_string();
+            let out = run_filter(&cmd, &input)?;
+            serde_json::from_str(out.trim()).ok()
+        }));
     }
     // An accepted submission is made durable before the agent is told, so a
     // daemon that dies before recording the step's result still knows it.
@@ -675,9 +767,27 @@ fn finish_agent(c: &Ctx, report: StepReport, dir: &Path) {
             None => c.fail(format!("the agent asked to go back to exploring ({reason}), but this definition has no exploring step")),
         },
         StepEnd::Asked { question } => {
-            let q = question["ask"].as_str().unwrap_or("(no question text)").to_string();
+            // `question` is already a decision card that fits (the contract
+            // rewrote it if it did not). Asked again about something the owner
+            // already answered, it is acknowledged, not asked: no loops.
+            let card = mason_adapter_api::card::Card::from_json(&question)
+                .unwrap_or_else(|| mason_adapter_api::card::fallback(&question, &[]));
             c.d.crash.point(&format!("before_event:{:?}", c.state));
-            c.emit(EventKind::QuestionAsked { task, question: q });
+            let earlier = crate::attention::earlier_answer(&c.d, task, &card.key);
+            if !c.emit(EventKind::QuestionAsked { task, question: card.to_text() }) {
+                return;
+            }
+            if let Some(prev) = earlier {
+                let w = c.d.world().ok();
+                let decision = w.as_ref().and_then(|w| w.tasks.get(&task)).and_then(|t| t.decision);
+                if let Some(decision) = decision {
+                    let answer = format!("(acknowledged, not asked again) {prev}");
+                    let step = c.def.first_in(State::Developing).map(|s| s.name.clone()).unwrap_or_default();
+                    crate::attention::remember(&c.d, task, &card.ask, &answer);
+                    let _ = c.d.emit(EventKind::Answered { task, decision, answer, step });
+                    crate::attention::intervene(&c.d, "acknowledged", Some(task), "pipeline", &card.key, "the same question was already answered");
+                }
+            }
         }
         // A long check is not used yet; if one appears, say so.
         StepEnd::Suspended { check_id } => c.fail(format!("unexpected suspended check {check_id}")),

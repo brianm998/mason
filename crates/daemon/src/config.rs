@@ -37,6 +37,9 @@ pub struct DaemonConfig {
     /// How long a suite waits before trying again after an environmental
     /// failure (no device, the stack would not come up). Charged to no task.
     pub env_retry: Duration,
+    /// Identities whose answers count (Part 10). Default: the user running the
+    /// daemon.
+    pub owner_names: Vec<String>,
 }
 
 impl DaemonConfig {
@@ -61,6 +64,9 @@ impl DaemonConfig {
             reload_interval: Duration::from_secs(5),
             fetch_interval: Duration::from_secs(60),
             env_retry: Duration::from_secs(30),
+            owner_names: vec![std::env::var("USER")
+                .or_else(|_| std::env::var("LOGNAME"))
+                .unwrap_or_else(|_| "owner".into())],
         }
     }
 
@@ -114,6 +120,10 @@ pub struct ProjectCfg {
     /// Opt in to letting top-priority tasks jump the "fewest steps remaining"
     /// term of the scheduling rank (Part 7). Off by default.
     pub priority_jump: bool,
+    /// A cheap command that rewrites a decision card that does not fit: it reads
+    /// `{"card": ..., "problems": [...]}` on stdin and prints a card as JSON.
+    /// Optional; without it (or if it fails) a deterministic fallback is used.
+    pub card_rewriter: Option<String>,
     /// The overlay file's text, for the configuration layers.
     pub overlay_text: String,
 }
@@ -194,6 +204,7 @@ pub fn parse_project(id: &str, text: &str) -> Result<ProjectCfg, String> {
             .and_then(|v| v.as_integer())
             .map(|n| n.max(1) as u32),
         clarity_classifier: s("clarity_classifier").filter(|c| !c.trim().is_empty()),
+        card_rewriter: s("card_rewriter").filter(|c| !c.trim().is_empty()),
         priority_jump: doc
             .get("priority_jumps_progress")
             .and_then(|v| v.as_bool())

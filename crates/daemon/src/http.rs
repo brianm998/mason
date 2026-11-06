@@ -111,10 +111,9 @@ fn task_json(d: &Daemon, w: &World, t: &Task, detail: bool) -> Value {
             .map(debt_json)
             .collect::<Vec<_>>());
         v["failure"] = t.failure.as_ref().map_or(Value::Null, |f| json!(f));
-        v["question"] = t
-            .decision
-            .and_then(|id| w.decisions.get(&id))
-            .map_or(Value::Null, |q| json!(q.question));
+        v["question"] = crate::attention::card_of(d, t).map_or(Value::Null, |(c, _)| json!(c.ask));
+        v["card"] = crate::attention::card_of(d, t)
+            .map_or(Value::Null, |(c, h)| crate::attention::card_json(&c, &h));
         v["steps"] = json!(w
             .step_runs
             .values()
@@ -669,6 +668,64 @@ async fn overrides_remove(
     Ok(Json(json!({"removed": n})))
 }
 
+/// Every successful override leaves a record, whichever client made it: the
+/// "interventions per landed task" metric counts these (Part 10).
+async fn record_interventions(
+    Shared(d): Shared<Arc<Daemon>>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let post = req.method() == axum::http::Method::POST;
+    let path = req.uri().path().to_string();
+    let (who, reason) = {
+        let get = |h: &axum::http::HeaderMap, name: &str| {
+            h.get(name).and_then(|v| v.to_str().ok()).map(String::from)
+        };
+        let h = req.headers();
+        (
+            get(h, "x-mason-as")
+                .unwrap_or_else(|| d.cfg.owner_names.first().cloned().unwrap_or_default()),
+            get(h, "x-mason-reason").unwrap_or_default(),
+        )
+    };
+    let resp = next.run(req).await;
+    if post && resp.status().is_success() {
+        if let Some((kind, task)) = override_kind(&path) {
+            let d2 = d.clone();
+            let _ = d.pool.spawn(move || {
+                crate::attention::intervene(&d2, kind, task.map(TaskId), &who, &path, &reason)
+            });
+        }
+    }
+    resp
+}
+
+/// Which override a POST is, and its task. (Answers record themselves.)
+fn override_kind(path: &str) -> Option<(&'static str, Option<u64>)> {
+    let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
+    match parts.as_slice() {
+        ["tasks", id, what] => {
+            let kind = match *what {
+                "cancel" => "cancel",
+                "retry" => "retry",
+                "approve" => "approve",
+                "reject" => "reject",
+                "explore-anyway" => "explore_anyway",
+                "overrides" => "task_override",
+                "skip" => "skip_test",
+                "land-now" => "land_now",
+                "force" => "force",
+                _ => return None,
+            };
+            Some((kind, id.parse().ok()))
+        }
+        ["pause"] => Some(("pause", None)),
+        ["resume"] => Some(("resume", None)),
+        ["projects", _, "overrides"] => Some(("override", None)),
+        _ => None,
+    }
+}
+
 fn debt_json(x: &mason_store::DebtRow) -> Value {
     json!({
         "id": x.id, "task": x.task, "project": x.project, "scope": x.scope,
@@ -805,6 +862,182 @@ async fn quarantine_remove(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>)
         .map_err(pool_err)?
         .map_err(store_err)?;
     Ok(Json(json!({"removed": n})))
+}
+
+/// Answer a task's open question. The answer carries the hash of the card the
+/// answerer was looking at, and counts only from the owner's identity.
+async fn answer_task(
+    Shared(d): Shared<Arc<Daemon>>,
+    Path(id): Path<u64>,
+    Json(b): Json<Value>,
+) -> Res {
+    let (answer, hash, who) = (
+        b["answer"].as_str().unwrap_or_default().to_string(),
+        b["hash"].as_str().unwrap_or_default().to_string(),
+        b["as"].as_str().unwrap_or_default().to_string(),
+    );
+    let d2 = d.clone();
+    let r = d
+        .pool
+        .run(move || crate::attention::answer(&d2, TaskId(id), &answer, &hash, &who))
+        .await
+        .map_err(pool_err)?;
+    match r {
+        Ok(text) => Ok(Json(json!({"ok": true, "answer": text}))),
+        Err((code, msg)) => Err(fail(
+            StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_REQUEST),
+            msg,
+        )),
+    }
+}
+
+/// Land now and force are recorded as an override and a debt; what they do
+/// arrives with landing control (Stage 14).
+async fn land_override(
+    Shared(d): Shared<Arc<Daemon>>,
+    Path((id, kind)): Path<(u64, String)>,
+    body: Option<Json<Value>>,
+) -> Res {
+    let kind = match kind.as_str() {
+        "land-now" | "force" => kind,
+        _ => return Err(fail(StatusCode::NOT_FOUND, "not found")),
+    };
+    let reason = body
+        .as_ref()
+        .and_then(|b| b["reason"].as_str())
+        .unwrap_or_default()
+        .to_string();
+    let who = body
+        .as_ref()
+        .and_then(|b| b["as"].as_str())
+        .map(String::from)
+        .unwrap_or_else(|| d.cfg.owner_names.first().cloned().unwrap_or_default());
+    let d2 = d.clone();
+    let debt = d
+        .pool
+        .run(move || {
+            let w = d2.world().map_err(store_err)?;
+            let t = w
+                .tasks
+                .get(&TaskId(id))
+                .ok_or_else(|| fail(StatusCode::NOT_FOUND, format!("no task #{id}")))?;
+            let project = d2
+                .project(t.project)
+                .map_or(String::new(), |p| p.id.clone());
+            d2.store
+                .add_debt(
+                    id,
+                    &project,
+                    &format!("landing:{}", kind.replace('-', "_")),
+                    &reason,
+                    &who,
+                    false,
+                    now_ms(),
+                )
+                .map_err(store_err)
+        })
+        .await
+        .map_err(pool_err)??;
+    Ok(Json(json!({
+        "debt": debt,
+        "applied": false,
+        "note": "recorded as an override and a debt; landing control arrives in Stage 14, so nothing was changed",
+    })))
+}
+
+async fn open_session(Shared(d): Shared<Arc<Daemon>>, Path(id): Path<u64>) -> Res {
+    let d2 = d.clone();
+    let v = d
+        .pool
+        .run(move || {
+            let v = crate::attention::session_for(&d2, TaskId(id));
+            if v.is_ok() {
+                let who = d2.cfg.owner_names.first().cloned().unwrap_or_default();
+                crate::attention::intervene(&d2, "open_session", Some(TaskId(id)), &who, "", "");
+            }
+            v
+        })
+        .await
+        .map_err(pool_err)?
+        .map_err(|e| fail(StatusCode::NOT_FOUND, e))?;
+    Ok(Json(v))
+}
+
+async fn pause_set(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res {
+    let project = b["project"].as_str().unwrap_or_default().to_string();
+    let mode = b["mode"].as_str().unwrap_or("all").to_string();
+    let owner = b["owner"].as_str().unwrap_or_default().to_string();
+    let secs = b["for_s"].as_u64().unwrap_or(0);
+    let d2 = d.clone();
+    d.pool
+        .run(move || crate::attention::pause(&d2, &project, &mode, &owner, secs))
+        .await
+        .map_err(pool_err)?
+        .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
+    Ok(Json(json!({"ok": true})))
+}
+
+async fn pause_clear(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res {
+    let project = b["project"].as_str().unwrap_or_default().to_string();
+    let mode = b["mode"].as_str().unwrap_or_default().to_string();
+    let d2 = d.clone();
+    let n = d
+        .pool
+        .run(move || crate::attention::resume(&d2, &project, &mode))
+        .await
+        .map_err(pool_err)?
+        .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
+    Ok(Json(json!({"lifted": n})))
+}
+
+async fn pauses_list(Shared(d): Shared<Arc<Daemon>>) -> Res {
+    let d2 = d.clone();
+    let rows = d
+        .pool
+        .run(move || d2.store.pauses(now_ms()))
+        .await
+        .map_err(pool_err)?
+        .map_err(store_err)?;
+    Ok(Json(json!({"pauses": rows.iter().map(|p| json!({
+        "project": p.project, "mode": p.mode, "owner": p.owner,
+        "since": p.created_at, "expires_at": p.expires_at,
+    })).collect::<Vec<_>>()})))
+}
+
+async fn alerts_list(
+    Shared(d): Shared<Arc<Daemon>>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Res {
+    let all = q.get("all").is_some_and(|v| v != "0");
+    let d2 = d.clone();
+    let rows = d
+        .pool
+        .run(move || {
+            crate::attention::sync_alerts(&d2);
+            d2.store.alerts(!all)
+        })
+        .await
+        .map_err(pool_err)?
+        .map_err(store_err)?;
+    Ok(Json(json!({"alerts": rows.iter().map(|a| json!({
+        "key": a.key, "kind": a.kind, "text": a.text, "since": a.since, "cleared_at": a.cleared_at,
+    })).collect::<Vec<_>>()})))
+}
+
+async fn metrics(Shared(d): Shared<Arc<Daemon>>, Query(q): Query<HashMap<String, String>>) -> Res {
+    let days: u64 = q.get("days").and_then(|s| s.parse().ok()).unwrap_or(0);
+    let since = if days == 0 {
+        0
+    } else {
+        now_ms().saturating_sub(days * 86_400_000)
+    };
+    let d2 = d.clone();
+    let v = d
+        .pool
+        .run(move || crate::attention::metrics(&d2, since))
+        .await
+        .map_err(pool_err)?;
+    Ok(Json(v))
 }
 
 async fn resources(Shared(d): Shared<Arc<Daemon>>) -> Res {
@@ -1052,6 +1285,14 @@ pub fn router(d: Arc<Daemon>) -> Router {
         .route("/tasks/{id}/logs", get(logs))
         .route("/resources", get(resources))
         .route("/tasks/{id}/skip", post(skip_task))
+        .route("/tasks/{id}/answer", post(answer_task))
+        .route("/tasks/{id}/session", get(open_session))
+        .route("/tasks/{id}/{kind}", post(land_override))
+        .route("/pause", post(pause_set))
+        .route("/resume", post(pause_clear))
+        .route("/pauses", get(pauses_list))
+        .route("/alerts", get(alerts_list))
+        .route("/metrics", get(metrics))
         .route("/debts", get(debts_list))
         .route("/debts/{id}/run", post(debt_run))
         .route("/quarantine", get(quarantine_list).post(quarantine_add))
@@ -1061,6 +1302,10 @@ pub fn router(d: Arc<Daemon>) -> Router {
         .route("/leases/{id}", get(lease_poll))
         .route("/leases/{id}/release", post(lease_release))
         .route("/debug/stall", post(debug_stall))
+        .layer(axum::middleware::from_fn_with_state(
+            d.clone(),
+            record_interventions,
+        ))
         .with_state(d)
 }
 

@@ -112,6 +112,7 @@ mod tests {
             max_test_rounds: None,
             clarity_classifier: None,
             priority_jump: false,
+            card_rewriter: None,
             overlay_text: String::new(),
         }
     }
