@@ -31,6 +31,10 @@ pub struct HostConfig {
     pub cmd: Vec<String>,
     pub cwd: Option<PathBuf>,
     pub env: Vec<(String, String)>,
+    /// Start the child with an empty environment plus `env`, not ours.
+    pub clear_env: bool,
+    /// The child's standard input (a file), or none.
+    pub stdin: Option<PathBuf>,
     /// How long to wait for a controller to collect the result after the
     /// child exits before the host goes away (files stay on disk).
     pub linger: Duration,
@@ -81,13 +85,20 @@ pub fn run(cfg: HostConfig) -> io::Result<()> {
 
     let (reader, writer) = io::pipe()?;
     let mut cmd = Command::new(&cfg.cmd[0]);
+    let stdin = match &cfg.stdin {
+        Some(p) => Stdio::from(File::open(p)?),
+        None => Stdio::null(),
+    };
     cmd.args(&cfg.cmd[1..])
-        .stdin(Stdio::null())
+        .stdin(stdin)
         .stdout(writer.try_clone()?)
         .stderr(writer)
         .process_group(0);
     if let Some(c) = &cfg.cwd {
         cmd.current_dir(c);
+    }
+    if cfg.clear_env {
+        cmd.env_clear();
     }
     cmd.envs(cfg.env.iter().map(|(k, v)| (k, v)));
     let spawned = cmd.spawn();

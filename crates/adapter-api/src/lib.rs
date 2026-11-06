@@ -48,6 +48,9 @@ pub struct SessionSpec {
     pub deadline: Option<Duration>,
     pub contract: Option<ContractHandle>,
     pub accepted: SubmissionFlag,
+    /// Names this step run so a restarted controller can find its session
+    /// again (see [`AgentAdapter::reattach`]). Required for hosted launches.
+    pub run_key: Option<String>,
 }
 
 impl SessionSpec {
@@ -63,6 +66,7 @@ impl SessionSpec {
             deadline: None,
             contract: None,
             accepted: SubmissionFlag::default(),
+            run_key: None,
         }
     }
 }
@@ -169,6 +173,16 @@ pub trait AgentAdapter: Send + Sync {
         note: String,
         spec: SessionSpec,
     ) -> Result<Box<dyn SessionHandle>, AdapterError>;
+
+    /// After the controller restarted: find the live (or just-finished)
+    /// session for `run_key` and keep following it. `None` if there is none.
+    fn reattach(
+        &self,
+        _run_key: &str,
+        _spec: SessionSpec,
+    ) -> Result<Option<Box<dyn SessionHandle>>, AdapterError> {
+        Ok(None)
+    }
 }
 
 /// Stops a session from any thread, even while another is blocked in

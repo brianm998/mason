@@ -186,6 +186,19 @@ impl<'a> StepRunner<'a> {
         }
     }
 
+    /// Take over a session that is already running, found again after the
+    /// controller restarted. Nudge and failure counts start afresh.
+    pub fn adopt(
+        &self,
+        handle: Box<dyn mason_adapter_api::SessionHandle>,
+        mut spec: SessionSpec,
+        contract: &ContractHandle,
+    ) -> StepReport {
+        spec.accepted = contract.flag();
+        spec.contract = Some(contract.clone());
+        self.drive(StepReport::empty(), handle, spec, contract)
+    }
+
     /// Continue a step that ended `Asked`, `Suspended` or `Hold`, with a note
     /// saying what happened. Totals accumulate onto `prior`.
     pub fn resume(

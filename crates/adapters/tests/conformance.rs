@@ -8,9 +8,12 @@ use mason_adapter_api::contract::ContractHandle;
 use mason_adapter_api::{netguard, AgentAdapter, SessionSpec, StepKind};
 use mason_adapters::claude::ClaudeAdapter;
 use mason_adapters::fake::{FakeAction, FakeAdapter};
+use mason_adapters::hosted::HostLaunch;
 use serde_json::json;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
+
+mod common;
 
 fn call(tool: &str, args: serde_json::Value) -> FakeAction {
     FakeAction::Call {
@@ -60,15 +63,27 @@ fn fixture(name: &str) -> String {
 struct ClaudeHarness {
     dir: tempfile::TempDir,
     n: AtomicUsize,
+    hosted: bool,
 }
 
 impl ClaudeHarness {
     fn new() -> Self {
+        Self::build(false)
+    }
+
+    /// The CLI runs under a step host, as it does in the daemon.
+    fn hosted() -> Self {
+        Self::build(true)
+    }
+
+    fn build(hosted: bool) -> Self {
         // Test mode: the adapter refuses any provider endpoint that is not loopback.
         netguard::enable_test_mode();
+        // Short paths: a host's socket lives under the registry root.
         ClaudeHarness {
-            dir: tempfile::tempdir().unwrap(),
+            dir: tempfile::tempdir_in("/tmp").unwrap(),
             n: AtomicUsize::new(0),
+            hosted,
         }
     }
 }
@@ -84,6 +99,14 @@ impl Harness for ClaudeHarness {
             "PATH".into(),
             std::env::var("PATH").unwrap_or_default(),
         )]);
+        if self.hosted {
+            a = a.with_host(HostLaunch {
+                host_bin: common::step_host_bin(),
+                root: self.dir.path().join("h"),
+                heartbeat: Duration::from_millis(100),
+                linger: Duration::from_secs(30),
+            });
+        }
         Box::new(a)
     }
 
@@ -113,6 +136,7 @@ impl Harness for ClaudeHarness {
             ("FAKE_CLAUDE_SCRIPT".into(), script.display().to_string()),
             ("ANTHROPIC_BASE_URL".into(), "http://127.0.0.1:9".into()),
         ];
+        spec.run_key = Some(format!("k{n}"));
         spec
     }
 }
@@ -158,4 +182,77 @@ fn a_captured_real_run_replayed_through_the_adapter_reports_real_figures() {
         Some(real_id),
         "the session id comes from the captured stream"
     );
+}
+
+#[test]
+fn the_claude_adapter_passes_the_conformance_kit_with_the_cli_under_a_step_host() {
+    let h = ClaudeHarness::hosted();
+    run_all(&h).unwrap_or_else(|f| panic!("{}", f.join("\n")));
+    let hosts = std::fs::read_dir(h.dir.path().join("h"))
+        .expect("hosts were really used")
+        .count();
+    assert!(hosts >= 8, "one host per scenario, got {hosts} entries");
+}
+
+#[test]
+fn a_restarted_controller_picks_the_session_up_again() {
+    use mason_adapter_api::contract::NoChecks;
+    use mason_adapter_api::{AgentEvent, Outcome};
+    let h = ClaudeHarness::hosted();
+    let script = h.dir.path().join("slow.json");
+    std::fs::write(
+        &script,
+        json!({"turns": [[
+            {"say": "working"}, {"sleep_ms": 1200},
+            {"call": {"tool": "submit_plan", "args": valid_plan()}}]]})
+        .to_string(),
+    )
+    .unwrap();
+    let mut spec = SessionSpec::new(StepKind::Explore, "explore this", h.dir.path());
+    spec.env = vec![
+        ("FAKE_CLAUDE_SCRIPT".into(), script.display().to_string()),
+        ("ANTHROPIC_BASE_URL".into(), "http://127.0.0.1:9".into()),
+    ];
+    spec.run_key = Some("restart".into());
+    let sock = h.dir.path().join("c.sock");
+    let adapter = h.adapter(Scenario::Accepted);
+
+    // First controller: starts the session, then "dies" (its handle is dropped).
+    let c1 = ContractHandle::new(StepKind::Explore, Box::new(NoChecks));
+    c1.serve(&sock).unwrap();
+    let mut s1 = spec.clone();
+    s1.contract = Some(c1.clone());
+    s1.accepted = c1.flag();
+    let first = adapter.start(s1).unwrap();
+    drop(first);
+    c1.shutdown();
+    drop(c1);
+
+    // The agent is still running and its contract call is retrying. A new
+    // controller serves the same socket and reattaches by run key.
+    std::thread::sleep(Duration::from_millis(300));
+    let c2 = ContractHandle::new(StepKind::Explore, Box::new(NoChecks));
+    c2.serve(&sock).unwrap();
+    let mut s2 = spec.clone();
+    s2.contract = Some(c2.clone());
+    s2.accepted = c2.flag();
+    let mut again = adapter
+        .reattach("restart", s2)
+        .unwrap()
+        .expect("a session to reattach to");
+    let mut saw_text = false;
+    let outcome = loop {
+        match again.next_event().unwrap() {
+            AgentEvent::Text(t) if t == "working" => saw_text = true,
+            AgentEvent::Finished(o) => break o,
+            _ => {}
+        }
+    };
+    assert!(saw_text, "the journal is replayed from the start");
+    assert_eq!(outcome, Outcome::Accepted);
+    assert!(
+        c2.flag().is_set(),
+        "the new controller received the submission"
+    );
+    assert!(adapter.reattach("never-started", spec).unwrap().is_none());
 }

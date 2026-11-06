@@ -370,7 +370,12 @@ pub struct ContractState {
     pub calls: Vec<String>,
 }
 
+/// Extra, project-specific proof required before a terminal submission is
+/// accepted (for example: the commit really is the branch tip).
+pub type Validator = Box<dyn Fn(&str, &Value) -> Result<(), Vec<String>> + Send + Sync>;
+
 struct Inner {
+    validator: Option<Validator>,
     step: StepKind,
     state: Mutex<ContractState>,
     checks: Box<dyn CheckHandler>,
@@ -384,7 +389,18 @@ pub struct ContractHandle(Arc<Inner>);
 
 impl ContractHandle {
     pub fn new(step: StepKind, checks: Box<dyn CheckHandler>) -> ContractHandle {
+        Self::with_validator(step, checks, None)
+    }
+
+    /// Like [`new`](Self::new), plus a validator run on terminal submissions
+    /// after the schema check and before acceptance.
+    pub fn with_validator(
+        step: StepKind,
+        checks: Box<dyn CheckHandler>,
+        validator: Option<Validator>,
+    ) -> ContractHandle {
         ContractHandle(Arc::new(Inner {
+            validator,
             step,
             state: Mutex::new(ContractState::default()),
             checks,
@@ -460,6 +476,11 @@ impl ContractHandle {
                     ok: false,
                     text: format!("already accepted ({done}); end your turn"),
                 };
+            }
+            if let Some(v) = &self.0.validator {
+                if let Err(problems) = v(tool, args) {
+                    return reject(&mut st, problems);
+                }
             }
             st.accepted = Some((tool.to_string(), args.clone()));
             self.0.flag.set();
@@ -799,6 +820,29 @@ mod tests {
         assert!(r.ok && r.text.contains("End your turn"));
         assert_eq!(c.state().suspended_check.as_deref(), Some("chk-7"));
         assert!(!c.call("run_check", &json!({"name": "mystery"})).ok);
+    }
+
+    #[test]
+    fn a_validator_can_refuse_a_schema_valid_submission_with_reasons() {
+        let v: Validator = Box::new(|tool, a| {
+            if tool == "submit_change" && a["head"] != "0123abc" {
+                Err(vec!["head: not the tip of the task branch".into()])
+            } else {
+                Ok(())
+            }
+        });
+        let c = ContractHandle::with_validator(StepKind::Develop, Box::new(NoChecks), Some(v));
+        let r = c.call("submit_change", &json!({"summary": "s", "head": "deadbee"}));
+        assert!(
+            !r.ok && r.text.contains("not the tip of the task branch"),
+            "{}",
+            r.text
+        );
+        assert!(!c.flag().is_set());
+        assert!(
+            c.call("submit_change", &json!({"summary": "s", "head": "0123abc"}))
+                .ok
+        );
     }
 
     #[test]

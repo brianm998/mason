@@ -140,6 +140,7 @@ name = "mason-adapters"
 version = "0.0.0"
 dependencies = [
  "mason-adapter-api",
+ "mason-step-host",
  "nix",
  "serde_json",
  "tempfile",

@@ -19,6 +19,8 @@ pub struct SpawnOptions {
     pub cmd: Vec<String>,
     pub cwd: Option<PathBuf>,
     pub env: Vec<(String, String)>,
+    pub clear_env: bool,
+    pub stdin: Option<PathBuf>,
     pub linger: Duration,
     pub heartbeat: Duration,
 }
@@ -37,6 +39,8 @@ impl SpawnOptions {
             cmd: cmd.iter().map(|s| s.to_string()).collect(),
             cwd: None,
             env: vec![],
+            clear_env: false,
+            stdin: None,
             linger: Duration::from_secs(600),
             heartbeat: Duration::from_secs(1),
         }
@@ -53,6 +57,12 @@ pub fn spawn_host(o: &SpawnOptions) -> io::Result<HostInfo> {
     cmd.arg("--hb-ms").arg(o.heartbeat.as_millis().to_string());
     if let Some(c) = &o.cwd {
         cmd.arg("--cwd").arg(c);
+    }
+    if o.clear_env {
+        cmd.arg("--clear-env");
+    }
+    if let Some(p) = &o.stdin {
+        cmd.arg("--stdin").arg(p);
     }
     for (k, v) in &o.env {
         cmd.arg("--env").arg(format!("{k}={v}"));

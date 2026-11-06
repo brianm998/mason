@@ -5,13 +5,19 @@
 //! `stream-json` lines in the real CLI's format. Tool calls go to the contract
 //! socket in `MASON_CONTRACT_SOCK`, exactly where the MCP bridge would send them.
 //!
-//! The script is `{"turns": [[action, ...], ...]}`. Invocation N (counted in
-//! `<script>.count`) plays turn N, so a resume plays the next turn. Actions:
+//! The script is `{"turns": [[action, ...], ...]}` or, to give each kind of
+//! step its own, `{"steps": {"explore": [[...]], "develop": [[...]]}}` (the kind
+//! comes from `MASON_STEP_KIND`). Invocation N, counted per step kind and
+//! working directory in `<script>.<kind>.<dir hash>.count`, plays turn N, so a
+//! resume plays the next turn. Actions:
 //! `{"replay": "<fixture path>"}`, `{"init": "<session id>"}`, `{"say": "..."}`,
 //! `{"call": {"tool": "...", "args": {...}}}`, `{"rate_limit": {...}}`,
 //! `{"api_retry": {"attempt": 1, "status": 529}}`, `{"sleep_ms": 100}`,
 //! `{"result": {"is_error": false, "text": "...", "api_error_status": null}}`,
-//! `{"stderr": "..."}` and `{"exit": 1}` (die with no result).
+//! `{"stderr": "..."}`, `{"exit": 1}` (die with no result) and
+//! `{"sh": "..."}` (run a shell command in the working directory, so the
+//! "agent" can really edit and commit). In a call's arguments the string
+//! `"$HEAD"` is replaced by `git rev-parse HEAD`.
 //! A turn with no `result` or `exit` gets a normal successful result.
 
 use serde_json::{json, Value};
@@ -24,11 +30,38 @@ fn out(v: &Value) {
     let _ = o.flush();
 }
 
+fn head() -> String {
+    let o = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .output();
+    o.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default()
+}
+
+fn subst(v: &Value) -> Value {
+    match v {
+        Value::String(s) if s == "$HEAD" => Value::String(head()),
+        Value::Array(a) => Value::Array(a.iter().map(subst).collect()),
+        Value::Object(o) => Value::Object(o.iter().map(|(k, v)| (k.clone(), subst(v))).collect()),
+        other => other.clone(),
+    }
+}
+
+/// Like the MCP bridge: ride out a controller that is briefly away.
+fn connect() -> Option<UnixStream> {
+    let sock = std::env::var("MASON_CONTRACT_SOCK").ok()?;
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        match UnixStream::connect(&sock) {
+            Ok(s) => return Some(s),
+            Err(_) if std::time::Instant::now() >= end => return None,
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(100)),
+        }
+    }
+}
+
 fn call(tool: &str, args: &Value) -> (bool, String) {
-    let Ok(sock) = std::env::var("MASON_CONTRACT_SOCK") else {
-        return (false, "no contract socket".into());
-    };
-    let Ok(mut s) = UnixStream::connect(sock) else {
+    let Some(mut s) = connect() else {
         return (false, "contract unavailable".into());
     };
     let _ = writeln!(s, "{}", json!({"tool": tool, "args": args}));
@@ -55,7 +88,18 @@ fn main() {
     let script: Value =
         serde_json::from_str(&std::fs::read_to_string(&script_path).expect("script"))
             .expect("json");
-    let count_path = format!("{script_path}.count");
+    let kind = std::env::var("MASON_STEP_KIND").unwrap_or_default();
+    let cwd = std::env::current_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    let h = cwd
+        .bytes()
+        .fold(0u64, |a, b| a.wrapping_mul(31).wrapping_add(u64::from(b)));
+    let count_path = if script.get("steps").is_some() {
+        format!("{script_path}.{kind}.{h:x}.count")
+    } else {
+        format!("{script_path}.count")
+    };
     let n: usize = std::fs::read_to_string(&count_path)
         .ok()
         .and_then(|s| s.trim().parse().ok())
@@ -108,12 +152,13 @@ fn main() {
         } else if let Some(c) = a.get("call") {
             calls += 1;
             let tool = c["tool"].as_str().unwrap_or_default();
+            let cargs = subst(&c["args"]);
             let tid = format!("toolu_fake_{calls}");
             out(
                 &json!({"type": "assistant", "session_id": sid, "message": {"role": "assistant",
-                "content": [{"type": "tool_use", "id": tid, "name": format!("mcp__mason__{tool}"), "input": c["args"]}]}}),
+                "content": [{"type": "tool_use", "id": tid, "name": format!("mcp__mason__{tool}"), "input": cargs}]}}),
             );
-            let (ok, text) = call(tool, &c["args"]);
+            let (ok, text) = call(tool, &cargs);
             out(
                 &json!({"type": "user", "session_id": sid, "message": {"role": "user", "content": [
                 {"tool_use_id": tid, "type": "tool_result", "is_error": !ok, "content": [{"type": "text", "text": text}]}]}}),
@@ -129,6 +174,11 @@ fn main() {
                 &json!({"type": "system", "subtype": "api_retry", "session_id": sid, "attempt": r["attempt"],
                 "max_retries": 10, "retry_delay_ms": 1, "error_status": r["status"], "error": "overloaded_error"}),
             );
+        } else if let Some(cmd) = a.get("sh").and_then(Value::as_str) {
+            let st = std::process::Command::new("sh").args(["-c", cmd]).status();
+            if !st.map(|s| s.success()).unwrap_or(false) {
+                eprintln!("fake-claude: sh action failed: {cmd}");
+            }
         } else if let Some(ms) = a.get("sleep_ms").and_then(Value::as_u64) {
             std::thread::sleep(std::time::Duration::from_millis(ms));
         } else if let Some(s) = a.get("stderr").and_then(Value::as_str) {

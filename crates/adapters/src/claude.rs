@@ -91,6 +91,8 @@ pub struct ClaudeAdapter {
     pub state_dir: PathBuf,
     /// The environment to filter. Defaults to this process's.
     pub parent_env: Option<Vec<(String, String)>>,
+    /// Run the CLI under a step host (so it survives the controller).
+    pub host: Option<crate::hosted::HostLaunch>,
 }
 
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -106,7 +108,13 @@ impl ClaudeAdapter {
             mcp_bin: mcp_bin.into(),
             state_dir: state_dir.into(),
             parent_env: None,
+            host: None,
         }
+    }
+
+    pub fn with_host(mut self, h: crate::hosted::HostLaunch) -> Self {
+        self.host = Some(h);
+        self
     }
 
     fn parent(&self) -> Vec<(String, String)> {
@@ -218,6 +226,22 @@ impl ClaudeAdapter {
         cmd: AgentCommand,
         spec: &SessionSpec,
     ) -> Result<Box<dyn SessionHandle>, AdapterError> {
+        if let Some(h) = &self.host {
+            let key = spec
+                .run_key
+                .as_deref()
+                .ok_or_else(|| AdapterError::Other("a hosted launch needs spec.run_key".into()))?;
+            let id = crate::hosted::spawn(
+                h,
+                key,
+                &cmd.program,
+                &cmd.args,
+                &cmd.env,
+                &cmd.cwd,
+                &cmd.stdin,
+            )?;
+            return Ok(crate::hosted::attach(h, id, spec));
+        }
         let mut c = Command::new(&cmd.program);
         c.args(&cmd.args)
             .current_dir(&cmd.cwd)
@@ -355,6 +379,18 @@ impl AgentAdapter for ClaudeAdapter {
     ) -> Result<Box<dyn SessionHandle>, AdapterError> {
         let cmd = self.build_command(&spec, Some((id, &note)))?;
         self.launch(cmd, &spec)
+    }
+
+    fn reattach(
+        &self,
+        run_key: &str,
+        spec: SessionSpec,
+    ) -> Result<Option<Box<dyn SessionHandle>>, AdapterError> {
+        let Some(h) = &self.host else {
+            return Ok(None);
+        };
+        Ok(crate::hosted::latest_invocation(&h.root, run_key)
+            .map(|id| crate::hosted::attach(h, id, &spec)))
     }
 }
 
@@ -504,6 +540,11 @@ pub fn parse_line(line: &str, st: &mut ParseState) -> Vec<AgentEvent> {
 }
 
 /// Decide how an invocation ended, from its stream and exit.
+pub fn decide(st: &ParseState, accepted: bool, exit_code: Option<i32>, stderr: &str) -> Outcome {
+    final_outcome(st, accepted, exit_code, stderr)
+}
+
+/// See [`decide`].
 pub fn final_outcome(
     st: &ParseState,
     accepted: bool,

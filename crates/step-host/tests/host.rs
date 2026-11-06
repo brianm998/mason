@@ -445,3 +445,35 @@ fn large_output_streams_in_order() {
     assert!(bytes.iter().all(|b| *b == b'x'));
     assert_eq!(rec.output_len, 3_000_000);
 }
+
+#[test]
+fn stdin_comes_from_a_file_and_clear_env_hides_ours() {
+    let (d, r) = root();
+    let input = d.path().join("in.txt");
+    std::fs::write(&input, "from a file\n").unwrap();
+    // A variable in *our* environment, inherited by the host, must not reach a cleared child.
+    std::env::set_var("MASON_LEAK_CHECK", "leaked");
+    let mut o = SpawnOptions::new(
+        HOST,
+        &r,
+        "a",
+        &[
+            "sh",
+            "-c",
+            "cat; echo leak=[$MASON_LEAK_CHECK] kept=[$KEEP]",
+        ],
+    );
+    o.stdin = Some(input);
+    o.clear_env = true;
+    o.env = vec![
+        ("PATH".into(), std::env::var("PATH").unwrap()),
+        ("KEEP".into(), "yes".into()),
+    ];
+    let info = spawn_host(&o).unwrap();
+    let (bytes, rec, _) = drain(&mut connect(&info.sock), 0);
+    assert_eq!(
+        String::from_utf8(bytes).unwrap(),
+        "from a file\nleak=[] kept=[yes]\n"
+    );
+    assert_eq!(rec.code, 0);
+}
