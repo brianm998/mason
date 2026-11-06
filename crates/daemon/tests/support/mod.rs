@@ -207,3 +207,110 @@ pub fn wait_state(d: &Arc<Daemon>, t: TaskId, want: State, secs: u64) {
         s == want
     });
 }
+
+// ---- running the real binaries ----
+
+use std::process::{Child, Command, Output, Stdio};
+
+pub struct Masond {
+    pub child: Child,
+    data_dir: PathBuf,
+}
+
+impl Drop for Masond {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        kill_hosts(&self.data_dir);
+    }
+}
+
+/// Step hosts outlive the daemon by design; tests must not leak them.
+pub fn kill_hosts(data_dir: &Path) {
+    use nix::sys::signal::{kill, killpg, Signal};
+    use nix::unistd::Pid;
+    let reg = mason_step_host::registry::Registry::new(data_dir.join("h"));
+    for h in reg.scan().unwrap_or_default() {
+        let _ = killpg(Pid::from_raw(h.info.child_pid as i32), Signal::SIGKILL);
+        let _ = kill(Pid::from_raw(h.info.host_pid as i32), Signal::SIGKILL);
+    }
+}
+
+impl Scratch {
+    pub fn masond(&self, extra_args: &[&str], env: &[(&str, &str)]) -> Masond {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_masond"));
+        let cfg = self.config();
+        cmd.args(["--data-dir", &self.data_dir.display().to_string()])
+            .args(["--config-dir", &self.config_dir.display().to_string()])
+            .args(["--host-bin", &cfg.host_bin.display().to_string()])
+            .args(["--mcp-bin", &cfg.mcp_bin.display().to_string()])
+            .args([
+                "--heartbeat-ms",
+                "100",
+                "--hold-retry-s",
+                "1",
+                "--sweep-ms",
+                "3600000",
+            ])
+            .args(extra_args)
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit());
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        let child = cmd.spawn().expect("masond starts");
+        Masond {
+            child,
+            data_dir: self.data_dir.clone(),
+        }
+    }
+
+    /// Wait until the daemon has announced itself and answers.
+    pub fn wait_daemon(&self, m: &mut Masond) {
+        wait_for("masond to answer", 60, || {
+            if let Ok(Some(st)) = m.child.try_wait() {
+                panic!("masond exited early: {st}");
+            }
+            self.mason(&["status", "--json"]).status.success()
+        });
+    }
+
+    pub fn mason(&self, args: &[&str]) -> Output {
+        Command::new(bin("mason-pipeline", "mason"))
+            .args(["--data-dir", &self.data_dir.display().to_string()])
+            .args(["--config-dir", &self.config_dir.display().to_string()])
+            .args(args)
+            .output()
+            .expect("mason runs")
+    }
+
+    pub fn mason_ok(&self, args: &[&str]) -> String {
+        let o = self.mason(args);
+        assert!(
+            o.status.success(),
+            "mason {args:?} failed: {}{}",
+            String::from_utf8_lossy(&o.stdout),
+            String::from_utf8_lossy(&o.stderr)
+        );
+        String::from_utf8_lossy(&o.stdout).to_string()
+    }
+
+    pub fn task_json(&self, id: u64) -> Value {
+        serde_json::from_str(&self.mason_ok(&["task", "show", &id.to_string(), "--json"])).unwrap()
+    }
+
+    pub fn wait_task(&self, id: u64, state: &str, secs: u64) {
+        wait_for(&format!("task {id} to be {state}"), secs, || {
+            let o = self.mason(&["task", "show", &id.to_string(), "--json"]);
+            if !o.status.success() {
+                return false; // the daemon may be down or restarting
+            }
+            let v: Value = serde_json::from_slice(&o.stdout).unwrap_or(Value::Null);
+            let now = v["state"].as_str().unwrap_or("");
+            if now != state && matches!(now, "failed" | "canceled" | "landed") {
+                panic!("task {id} ended {now}, wanted {state}: {v:#}");
+            }
+            now == state
+        });
+    }
+}

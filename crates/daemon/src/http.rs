@@ -283,9 +283,11 @@ async fn retry(
     Path(id): Path<u64>,
     body: Option<Json<Value>>,
 ) -> Res {
-    let to = body
-        .and_then(|b| b["to"].as_str().and_then(parse_state))
-        .unwrap_or(State::Developing);
+    let to = match body.as_ref().and_then(|b| b["to"].as_str()) {
+        None => State::Developing,
+        Some(name) => parse_state(name)
+            .ok_or_else(|| fail(StatusCode::BAD_REQUEST, format!("unknown step {name:?}")))?,
+    };
     let d2 = d.clone();
     d.pool
         .run(move || {
@@ -440,10 +442,10 @@ pub fn router(d: Arc<Daemon>) -> Router {
         .with_state(d)
 }
 
-/// Bind loopback, announce ourselves in `daemon.json`, run the watchdog, serve.
-pub async fn serve(d: Arc<Daemon>) -> std::io::Result<()> {
-    let info = d.cfg.info_path();
-    if let Ok(text) = std::fs::read_to_string(&info) {
+/// Refuse to run if another daemon is already running on this data directory.
+/// Call this *before* opening the store or resuming any work.
+pub fn ensure_single(cfg: &crate::config::DaemonConfig) -> std::io::Result<()> {
+    if let Ok(text) = std::fs::read_to_string(cfg.info_path()) {
         if let Some(pid) = serde_json::from_str::<Value>(&text)
             .ok()
             .and_then(|v| v["pid"].as_u64())
@@ -456,6 +458,13 @@ pub async fn serve(d: Arc<Daemon>) -> std::io::Result<()> {
             }
         }
     }
+    Ok(())
+}
+
+/// Bind loopback, announce ourselves in `daemon.json`, run the watchdog, serve.
+pub async fn serve(d: Arc<Daemon>) -> std::io::Result<()> {
+    ensure_single(&d.cfg)?;
+    let info = d.cfg.info_path();
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", d.cfg.port)).await?;
     let port = listener.local_addr()?.port();
     let tmp = info.with_extension("tmp");

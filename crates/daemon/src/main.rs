@@ -71,10 +71,16 @@ fn main() {
         }
         i += 1;
     }
-    let rt = tokio::runtime::Builder::new_multi_thread()
+    // One event loop, as the design says (Part 2): it only dispatches. Anything
+    // that blocks belongs on a pool, and the watchdog proves nothing blocks it.
+    let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("tokio runtime");
+    if let Err(e) = http::ensure_single(&cfg) {
+        eprintln!("masond: {e}");
+        std::process::exit(1);
+    }
     let result = rt.block_on(async {
         // Starting the daemon touches git and the store: keep it off the loop.
         let d = tokio::task::spawn_blocking(move || Daemon::start(cfg))

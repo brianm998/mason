@@ -402,6 +402,13 @@ dependencies = [
 [[package]]
 name = "mason-pipeline"
 version = "0.0.0"
+dependencies = [
+ "mason-daemon",
+ "mason-landing",
+ "mason-step-host",
+ "serde_json",
+ "tempfile",
+]
 
 [[package]]
 name = "mason-protocol"

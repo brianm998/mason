@@ -8,7 +8,6 @@ use mason_core::*;
 use mason_daemon::http::render_logs;
 use mason_landing::git;
 use serde_json::json;
-use std::time::Duration;
 use support::*;
 
 #[test]
