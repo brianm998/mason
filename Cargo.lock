@@ -164,6 +164,9 @@ dependencies = [
 [[package]]
 name = "mason-landing"
 version = "0.0.0"
+dependencies = [
+ "tempfile",
+]
 
 [[package]]
 name = "mason-pipeline"
