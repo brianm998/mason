@@ -41,7 +41,7 @@ for name in \
   land_now_skips_the_window_and_force_skips_verification_leaving_debts \
   a_red_post_land_tier_freezes_landing_until_the_fix_lands \
   a_tier_that_names_ci_is_refused_with_a_pointer_to_the_ci_mode \
-  modes_after_this_stage_are_refused_for_now \
+  a_mode_that_needs_a_service_the_project_lacks_is_refused_naming_it \
   landing_with_no_config_is_the_old_direct_landing; do
   t mason-daemon landing "$name"
   echo "   ok  $name"

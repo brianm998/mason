@@ -126,6 +126,114 @@ pub struct ProjectCfg {
     pub card_rewriter: Option<String>,
     /// The overlay file's text, for the configuration layers.
     pub overlay_text: String,
+    /// The outside services: git host, build system, issue tracker.
+    pub services: ServicesCfg,
+}
+
+/// `[host]`, `[ci]` and `[tracker]` of the project file. Credentials are
+/// references (`env:NAME`, `file:/path`), never values.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ServicesCfg {
+    pub host: Option<HostCfg>,
+    pub ci: Option<CiCfg>,
+    pub tracker: Option<TrackerCfg>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HostCfg {
+    Github { api: String, repo: String, token: String },
+    /// A bare repository and a directory of files standing in for a host (tests).
+    Fake { dir: PathBuf, remote: PathBuf, checks: Option<String>, require_approval: bool, merge_queue: bool },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CiCfg {
+    pub kind: CiKind,
+    /// Seconds between looks at a run.
+    pub poll_s: u64,
+    /// Give up on a run after this long.
+    pub timeout_s: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CiKind {
+    GithubActions { api: String, repo: String, token: String, workflow: Option<String> },
+    Command { trigger: String, status: String, cwd: PathBuf },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TrackerCfg {
+    pub api: String,
+    pub repo: String,
+    pub token: String,
+    /// The label the owner puts on an outside issue to have it imported.
+    pub label: String,
+    pub interval_s: u64,
+    /// A reference to the webhook secret (`env:`/`file:`), when a relay delivers.
+    pub webhook_secret: Option<String>,
+}
+
+fn parse_services(id: &str, doc: &DocumentMut) -> Result<ServicesCfg, String> {
+    let table = |k: &str| doc.get(k).and_then(|v| v.as_table_like());
+    let get = |t: &dyn toml_edit::TableLike, k: &str| t.get(k).and_then(|v| v.as_str()).map(String::from);
+    let need = |t: &dyn toml_edit::TableLike, sec: &str, k: &str| {
+        get(t, k).filter(|v| !v.trim().is_empty()).ok_or_else(|| format!("{id}: `[{sec}] {k}` is required"))
+    };
+    let token = |t: &dyn toml_edit::TableLike, sec: &str| -> Result<String, String> {
+        let v = need(t, sec, "token")?;
+        if v.starts_with("env:") || v.starts_with("file:") {
+            Ok(v)
+        } else {
+            Err(format!("{id}: `[{sec}] token` is a reference, `env:NAME` or `file:/path`, never the token itself"))
+        }
+    };
+    let int = |t: &dyn toml_edit::TableLike, k: &str, d: u64| t.get(k).and_then(|v| v.as_integer()).map_or(d, |n| n.max(1) as u64);
+    let api = |t: &dyn toml_edit::TableLike| get(t, "api").unwrap_or_else(|| "https://api.github.com".into());
+    let mut out = ServicesCfg::default();
+    if let Some(t) = table("host") {
+        out.host = Some(match need(t, "host", "kind")?.as_str() {
+            "github" => HostCfg::Github { api: api(t), repo: need(t, "host", "repo")?, token: token(t, "host")? },
+            "fake" => HostCfg::Fake {
+                dir: need(t, "host", "dir")?.into(),
+                remote: need(t, "host", "remote")?.into(),
+                checks: get(t, "checks"),
+                require_approval: t.get("require_approval").and_then(|v| v.as_bool()).unwrap_or(false),
+                merge_queue: t.get("merge_queue").and_then(|v| v.as_bool()).unwrap_or(false),
+            },
+            o => return Err(format!("{id}: `[host] kind` is `github` or `fake`, not {o:?}")),
+        });
+    }
+    if let Some(t) = table("ci") {
+        let kind = match need(t, "ci", "kind")?.as_str() {
+            "github-actions" => CiKind::GithubActions { api: api(t), repo: need(t, "ci", "repo")?, token: token(t, "ci")?, workflow: get(t, "workflow") },
+            "command" => CiKind::Command {
+                trigger: need(t, "ci", "trigger")?,
+                status: need(t, "ci", "status")?,
+                cwd: get(t, "cwd").map_or_else(|| PathBuf::from("."), PathBuf::from),
+            },
+            o => return Err(format!("{id}: `[ci] kind` is `github-actions` or `command`, not {o:?}")),
+        };
+        out.ci = Some(CiCfg { kind, poll_s: int(t, "poll_s", 20), timeout_s: int(t, "timeout_s", 7200) });
+    }
+    if let Some(t) = table("tracker") {
+        match need(t, "tracker", "kind")?.as_str() {
+            "github" => {}
+            o => return Err(format!("{id}: `[tracker] kind` is `github` (the local tracker needs no section), not {o:?}")),
+        }
+        let secret = get(t, "webhook_secret");
+        if secret.as_ref().is_some_and(|s| !(s.starts_with("env:") || s.starts_with("file:"))) {
+            return Err(format!("{id}: `[tracker] webhook_secret` is a reference, `env:NAME` or `file:/path`"));
+        }
+        out.tracker = Some(TrackerCfg {
+            api: api(t),
+            repo: need(t, "tracker", "repo")?,
+            token: token(t, "tracker")?,
+            label: get(t, "label").unwrap_or_else(|| "mason".into()),
+            interval_s: int(t, "interval_s", 60),
+            webhook_secret: secret,
+        });
+    }
+    Ok(out)
 }
 
 impl ProjectCfg {
@@ -210,6 +318,7 @@ pub fn parse_project(id: &str, text: &str) -> Result<ProjectCfg, String> {
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
         overlay_text: text.to_string(),
+        services: parse_services(id, &doc)?,
     })
 }
 

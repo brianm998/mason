@@ -4,6 +4,8 @@
 //! A scratch world for end-to-end tests: a bare "origin", a clone, a project
 //! file pointing at the scripted stand-in for `claude`, and a daemon config.
 
+pub mod lw;
+
 use mason_core::*;
 use mason_daemon::config::DaemonConfig;
 use mason_daemon::Daemon;

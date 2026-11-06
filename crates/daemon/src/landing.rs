@@ -18,6 +18,9 @@ use crate::daemon::{now_ms, Daemon};
 use crate::jobs::{run_shell, Ctx};
 use mason_core::*;
 use mason_landing::batch::{Assembled, Batch, BatchTask, Finish};
+use mason_adapter_api::service::{
+    BuildSystemAdapter, Checks, CiState, GitHostAdapter, Observed, PollEvent, Poller, PrState, Review,
+};
 use mason_landing::config::{self, LandingConfig, Rung};
 use mason_landing::git;
 use mason_landing::plan::{self, Bisect, Candidate, Footprint, Formation};
@@ -63,6 +66,8 @@ struct State {
     idle_ms: HashMap<ProjectId, u64>,
     /// Bumped by every wake, so a wake between a look and a wait is not lost.
     gen: u64,
+    /// Things the owner should know while they are true: `(project, key) -> (kind, text)`.
+    attention: HashMap<(ProjectId, String), (String, String)>,
 }
 
 /// The landing queues of every project.
@@ -77,6 +82,23 @@ impl Landing {
     pub fn wake(&self) {
         self.lock().gen += 1;
         self.cv.notify_all();
+    }
+
+    pub fn raise(&self, p: ProjectId, key: &str, kind: &str, text: &str) {
+        self.lock().attention.insert((p, key.to_string()), (kind.to_string(), text.to_string()));
+    }
+
+    pub fn clear(&self, p: ProjectId, key: &str) {
+        self.lock().attention.remove(&(p, key.to_string()));
+    }
+
+    /// `(key, kind, text)` of what is true now, for the alerts.
+    pub fn attention(&self) -> Vec<(String, String, String)> {
+        self.lock()
+            .attention
+            .iter()
+            .map(|((p, k), (kind, text))| (format!("landing:{}:{k}", p.0), kind.clone(), text.clone()))
+            .collect()
     }
 
     pub fn idle_ms(&self, p: ProjectId) -> u64 {
@@ -119,7 +141,10 @@ pub fn load_config(d: &Daemon, pid: ProjectId) -> Result<LandingConfig, String> 
     let text = git::run(&p.path, &["show", &spec]).unwrap_or_default();
     let c = config::parse(&text)
         .map_err(|e| format!("{} (.mason/landing.toml): {}", p.id, e.join("; ")))?;
-    config::check_runnable(&c).map_err(|e| format!("{}: {e}", p.id))?;
+    let problems = config::service_problems(&c, p.remote.is_some(), p.services.host.is_some(), p.services.ci.is_some());
+    if !problems.is_empty() {
+        return Err(format!("{}: {}", p.id, problems.join("; ")));
+    }
     if let Some(b) = &c.base {
         if *b != p.base {
             return Err(format!(
@@ -217,6 +242,7 @@ fn coordinate(weak: Weak<Daemon>, pid: ProjectId) {
         if let Some(p) = d.project(pid) {
             let _ = d.store.abandon_batches(&p.id, now_ms());
             sweep_integration(&d, pid);
+            remove_refs(&d, pid, None);
         }
     }
     let mut last = Instant::now();
@@ -352,7 +378,8 @@ fn form_and_start(
     let mut guard = 0;
     loop {
         guard += 1;
-        match plan::form_batch(&normal, now, cfg.window, cfg.max_size) {
+        let max_size = if cfg.mode == config::Mode::PrEach { 1 } else { cfg.max_size };
+        match plan::form_batch(&normal, now, cfg.window, max_size) {
             Formation::Empty => break,
             Formation::Wait(t) => {
                 next_wait = Some(t);
@@ -423,16 +450,32 @@ fn start(d: &Arc<Daemon>, pid: ProjectId, members: Vec<Wait>, cfg: LandingConfig
                 .iter()
                 .map(|w| (w.task.0, w.footprint.clone()))
                 .collect();
-            Runner {
-                d: d2.clone(),
-                pid,
-                cfg,
-                slot,
-                kind,
-                fps,
-                runs: Default::default(),
+            let p = d2.project(pid).expect("project exists");
+            let built = (|| -> Result<_, String> {
+                Ok((crate::services::ci(p)?, crate::services::host(p)?))
+            })();
+            match built {
+                Ok((ci, host)) => Runner {
+                    d: d2.clone(),
+                    pid,
+                    cfg,
+                    slot,
+                    kind,
+                    fps,
+                    runs: Default::default(),
+                    batch_id: Default::default(),
+                    ci,
+                    host,
+                    pr: Mutex::new(None),
+                    service_error: Mutex::new(None),
+                }
+                .run(tasks),
+                Err(e) => {
+                    for (t, _) in &tasks {
+                        deliver(&d2, *t, Verdict::Failed(format!("the project's services are not usable: {e}")));
+                    }
+                }
             }
-            .run(tasks);
             if let Some(r) = d2.landing.lock().running.get_mut(&pid) {
                 r.retain(|x| x.slot != slot);
             }
@@ -443,6 +486,41 @@ fn start(d: &Arc<Daemon>, pid: ProjectId, members: Vec<Wait>, cfg: LandingConfig
         if let Some(r) = d.landing.lock().running.get_mut(&pid) {
             r.retain(|x| x.slot != slot);
         }
+    }
+}
+
+fn end_reason(e: &Result<PrEnd, String>) -> Option<String> {
+    match e {
+        Ok(PrEnd::Closed(w)) => Some(format!("the pull request was {w}")),
+        _ => None,
+    }
+}
+
+enum PrEnd {
+    Merged(String),
+    Red,
+    ChangesRequested,
+    Closed(String),
+    Conflict,
+    BaseKeptMoving,
+}
+
+/// Close the pull requests and delete the candidate refs a batch (or, with
+/// `None`, every batch a dead daemon left) put on the remote.
+fn remove_refs(d: &Arc<Daemon>, pid: ProjectId, batch: Option<u64>) {
+    let Some(p) = d.project(pid) else { return };
+    let host = crate::services::host(p).ok().flatten();
+    for r in d.store.open_refs(&p.id).unwrap_or_default() {
+        if batch.is_some_and(|b| b != r.batch) {
+            continue;
+        }
+        if let (Some(h), Some(n), "pr") = (&host, r.number, r.kind.as_str()) {
+            let _ = h.close_pr(n);
+        }
+        if let Some(remote) = &p.remote {
+            let _ = git::run(&p.path, &["push", remote, "--delete", &format!("refs/heads/{}", r.name)]);
+        }
+        let _ = d.store.remove_ref(r.id);
     }
 }
 
@@ -458,6 +536,20 @@ struct Runner {
     fps: HashMap<u64, Footprint>,
     /// Makes each suite run's host id its own: a host id names one run.
     runs: std::sync::atomic::AtomicU64,
+    batch_id: std::sync::atomic::AtomicU64,
+    ci: Option<(Arc<dyn BuildSystemAdapter>, crate::config::CiCfg)>,
+    host: Option<Arc<dyn GitHostAdapter>>,
+    /// The pull request the batch is about to merge (pr modes).
+    pr: Mutex<Option<OpenPr>>,
+    /// Set when a service could not answer: the batch ends with this reason.
+    service_error: Mutex<Option<String>>,
+}
+
+#[derive(Clone, Debug)]
+struct OpenPr {
+    number: u64,
+    branch: String,
+    ref_id: u64,
 }
 
 struct Parked {
@@ -535,6 +627,7 @@ impl Runner {
             }
             return;
         };
+        self.batch_id.store(batch_id, std::sync::atomic::Ordering::SeqCst);
         self.point("batch_formed");
         let def = d.current_def(self.pid);
         let remote = if self.cfg.mode.local_only() {
@@ -639,6 +732,9 @@ impl Runner {
                 &log_dir,
                 &format!("b{batch_id}-r{rounds}"),
             );
+            if let Some(e) = self.take_service_error() {
+                break Err(e);
+            }
             if vr.green && !vr.notes.is_empty() {
                 note = vr.notes.join("; ");
             }
@@ -667,6 +763,9 @@ impl Runner {
                                 &log_dir,
                                 &format!("b{batch_id}-r{rounds}x"),
                             );
+                            if let Some(e) = self.take_service_error() {
+                                break 'outer Err(e);
+                            }
                             if r2.green {
                                 note = format!(
                                     "{} was red once and green on a rerun",
@@ -720,7 +819,11 @@ impl Runner {
                                     )
                                     .green
                             };
-                            if let Bisect::Culprit(id) = plan::bisect(&ids, &mut red) {
+                            let found = plan::bisect(&ids, &mut red);
+                            if let Some(e) = self.take_service_error() {
+                                break 'outer Err(e);
+                            }
+                            if let Bisect::Culprit(id) = found {
                                 self.park(&mut parked, &mut active, &[id], batch_id, &vr);
                                 continue 'outer;
                             }
@@ -789,12 +892,14 @@ impl Runner {
                 if force {
                     return true;
                 }
-                if suites.is_empty() {
+                let outside = self.cfg.mode.uses_candidate_ref();
+                if suites.is_empty() && !outside {
                     return legacy
                         .as_ref()
                         .is_none_or(|cmd| run_shell(cmd, &wt_for_cmd, p.test_timeout).0);
                 }
-                if !plan::needs_reverify(moved, &union_fp, &impacts) {
+                // A moved base means CI runs again on the new tip, whatever moved.
+                if !outside && !plan::needs_reverify(moved, &union_fp, &impacts) {
                     return true;
                 }
                 self.verify(
@@ -807,6 +912,39 @@ impl Runner {
                 )
                 .green
             };
+            if self.cfg.mode.uses_pr() && !force {
+                let end = self.finish_pr(&batch, &int_wt);
+                match end {
+                    Err(e) => break Err(e),
+                    Ok(PrEnd::Merged(c)) => {
+                        commit = c;
+                        *self.pr.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                        for t in &active {
+                            landed.push(t.id);
+                        }
+                        break Ok(());
+                    }
+                    // Red after it was green, or a conflict with the moved base: assemble again.
+                    Ok(PrEnd::Red) | Ok(PrEnd::Conflict) => continue 'outer,
+                    Ok(PrEnd::BaseKeptMoving) => {
+                        break Err(format!("the base moved more than {} times while landing", self.cfg.max_fold))
+                    }
+                    Ok(PrEnd::ChangesRequested) | Ok(PrEnd::Closed(_)) => {
+                        let why = match end_reason(&end) {
+                            Some(w) => w,
+                            None => "a reviewer asked for changes on the pull request".to_string(),
+                        };
+                        for t in active.drain(..) {
+                            parked.push(Parked {
+                                task: t.id,
+                                reason: format!("batch #{batch_id}: {why}"),
+                                feedback: format!("Your change was not merged: {why}."),
+                            });
+                        }
+                        break Err(why);
+                    }
+                }
+            }
             let fin = {
                 let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
                 batch.finish(&asm, &mut reverify, &point)
@@ -857,6 +995,7 @@ impl Runner {
             &commit,
             true,
         );
+        self.clean_outside();
         // The integration branch was disposable.
         {
             let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -956,24 +1095,321 @@ impl Runner {
         log_dir: &Path,
         prefix: &str,
     ) -> crate::suites::OverRun {
-        if suites.is_empty() {
-            return crate::suites::OverRun {
-                green: true,
-                failed: BTreeSet::new(),
-                notes: vec![],
-            };
+        let green = || crate::suites::OverRun {
+            green: true,
+            failed: BTreeSet::new(),
+            notes: vec![],
+        };
+        // Force lands past verification, CI included.
+        if self.kind == "force" {
+            return green();
         }
-        let n = self.runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        crate::suites::run_over(
-            &self.d,
-            self.project(),
-            def,
-            suites,
-            wt,
-            base,
-            log_dir,
-            &format!("{prefix}-{n}"),
-        )
+        // Names that are not suites (CI job names) have nothing to run locally.
+        let local: Vec<String> = suites.iter().filter(|s| def.testing.suite(s).is_some() || self.cfg.batch_suites().is_some_and(|t| t.contains(s))).cloned().collect();
+        let mut r = if local.is_empty() {
+            green()
+        } else {
+            let n = self.runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            crate::suites::run_over(
+                &self.d,
+                self.project(),
+                def,
+                &local,
+                wt,
+                base,
+                log_dir,
+                &format!("{prefix}-{n}"),
+            )
+        };
+        if !r.green {
+            return r;
+        }
+        let outside = if self.cfg.mode.uses_candidate_ref() {
+            self.ci_verify(wt)
+        } else if self.cfg.mode.uses_pr() {
+            self.pr_verify(wt)
+        } else {
+            return r;
+        };
+        match outside {
+            Ok((true, notes, _)) => r.notes.extend(notes),
+            Ok((false, notes, failed)) => {
+                r.green = false;
+                r.failed.extend(failed);
+                r.notes.extend(notes);
+            }
+            Err(e) => {
+                // The service could not say: not the task's fault, and not red.
+                // The batch cannot go on; it ends with this reason.
+                self.service_error.lock().unwrap_or_else(|x| x.into_inner()).get_or_insert(e.clone());
+                r.green = false;
+                r.notes.push(e);
+            }
+        }
+        r
+    }
+
+    fn take_service_error(&self) -> Option<String> {
+        self.service_error.lock().unwrap_or_else(|e| e.into_inner()).take()
+    }
+
+    // ---- the outside: candidate refs, CI, pull requests ---------------------------------
+
+    fn remote(&self) -> Result<String, String> {
+        self.project().remote.clone().ok_or_else(|| "the project has no remote".to_string())
+    }
+
+    /// Push the worktree's HEAD to a branch of its own on the remote (never
+    /// forced) and remember it, so that a crash cannot leave it behind unseen.
+    fn push_candidate(&self, wt: &Path, kind: &str, name: &str) -> Result<(String, u64), String> {
+        let remote = self.remote()?;
+        let batch = self.batch_id.load(std::sync::atomic::Ordering::SeqCst);
+        let sha = git::rev_parse(wt, "HEAD").map_err(|e| e.to_string())?;
+        let id = self
+            .d
+            .store
+            .add_ref(batch, &self.project().id, kind, name, None, now_ms())
+            .map_err(|e| e.to_string())?;
+        git::run(wt, &["push", "--porcelain", &remote, &format!("{sha}:refs/heads/{name}")])
+            .map_err(|e| format!("could not push {name}: {e}"))?;
+        Ok((sha, id))
+    }
+
+    fn drop_candidate(&self, name: &str, ref_id: u64) {
+        if let Ok(remote) = self.remote() {
+            let _ = git::run(&self.project().path, &["push", &remote, "--delete", &format!("refs/heads/{name}")]);
+        }
+        let _ = self.d.store.remove_ref(ref_id);
+    }
+
+    fn next_n(&self) -> u64 {
+        self.runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn alert_key(&self, what: &str) -> String {
+        format!("{what}:b{}", self.batch_id.load(std::sync::atomic::Ordering::SeqCst))
+    }
+
+    /// Sleep, but not through a daemon that is gone.
+    fn nap(&self, secs: u64) {
+        std::thread::sleep(Duration::from_secs(secs.max(1)));
+    }
+
+    /// Ask until a service answers with something final. A transient failure backs
+    /// off; a permanent one raises attention at once and ends the wait.
+    fn ask<T>(&self, what: &str, started: Instant, timeout_s: u64, poll_s: u64, mut f: impl FnMut() -> Result<Option<T>, mason_adapter_api::service::ApiError>) -> Result<T, String> {
+        let mut poller = Poller::new(poll_s);
+        let key = self.alert_key("service");
+        loop {
+            if started.elapsed().as_secs() > timeout_s {
+                return Err(format!("{what}: still not finished after {timeout_s} s"));
+            }
+            let now = started.elapsed().as_secs();
+            match f() {
+                Ok(Some(v)) => {
+                    self.d.landing.clear(self.pid, &key);
+                    return Ok(v);
+                }
+                Ok(None) => {
+                    self.d.landing.clear(self.pid, &key);
+                    poller.observe(now, Observed::Unchanged);
+                    self.nap(poll_s);
+                }
+                Err(e) => match poller.observe(now, Observed::Failed(e)) {
+                    PollEvent::Stopped { why } => {
+                        let text = format!("{}: {what}: {why}", self.project().id);
+                        self.d.landing.raise(self.pid, &key, "landing", &text);
+                        self.d.poke();
+                        return Err(text);
+                    }
+                    PollEvent::Backoff { until, why } => {
+                        self.d.landing.raise(self.pid, &key, "landing", &format!("{}: {what}: {why}; trying again", self.project().id));
+                        self.nap(until.saturating_sub(now));
+                    }
+                    _ => {}
+                },
+            }
+        }
+    }
+
+    /// `direct-ci` and `local-only-ci`: push `mason/ci/<project>-b<batch>-<n>`, run CI
+    /// on it, take the answer, delete the ref. `(green, notes, failed job names)`.
+    fn ci_verify(&self, wt: &Path) -> Result<(bool, Vec<String>, Vec<String>), String> {
+        let (ci, cfg) = self.ci.clone().ok_or("the project has no [ci] section")?;
+        let batch = self.batch_id.load(std::sync::atomic::Ordering::SeqCst);
+        let name = format!("mason/ci/{}-b{batch}-{}", self.project().id, self.next_n());
+        let (sha, ref_id) = self.push_candidate(wt, "ci", &name)?;
+        let started = Instant::now();
+        let r = (|| {
+            let run = self.ask("CI trigger", started, cfg.timeout_s, cfg.poll_s, || ci.trigger(&name, &sha).map(Some))?;
+            self.ask("CI", started, cfg.timeout_s, cfg.poll_s, || {
+                Ok(match ci.status(&run)? {
+                    CiState::Pending => None,
+                    done => Some(done),
+                })
+            })
+        })();
+        self.drop_candidate(&name, ref_id);
+        Ok(match r? {
+            CiState::Green => (true, vec![format!("CI on {name}: green")], vec![]),
+            CiState::Red { failed, summary } => (false, vec![format!("CI on {name}: {summary}")], failed),
+            CiState::Pending => unreachable!("pending is waited out"),
+        })
+    }
+
+    /// The pull-request modes: push a branch, open a PR from it, wait for its checks.
+    /// Red closes the PR; green keeps it (in `self.pr`) for the merge.
+    fn pr_verify(&self, wt: &Path) -> Result<(bool, Vec<String>, Vec<String>), String> {
+        let host = self.host.clone().ok_or("the project has no [host] section")?;
+        let timeout = self.project().services.ci.as_ref().map_or(7200, |c| c.timeout_s);
+        let poll = self.project().services.ci.as_ref().map_or(20, |c| c.poll_s);
+        let batch = self.batch_id.load(std::sync::atomic::Ordering::SeqCst);
+        let name = format!("mason/pr/{}-b{batch}-{}", self.project().id, self.next_n());
+        let (_sha, ref_id) = self.push_candidate(wt, "pr", &name)?;
+        let started = Instant::now();
+        let ids = self.fps.keys().map(|k| format!("#{k}")).collect::<Vec<_>>().join(" ");
+        let opened = self.ask("opening the pull request", started, timeout, poll, || {
+            host.open_pr(&self.project().base, &name, &format!("MASON batch {batch}: tasks {ids}"), &format!("Landed by MASON (batch {batch}): {ids}.")).map(Some)
+        });
+        let pr = match opened {
+            Ok(pr) => pr,
+            Err(e) => {
+                self.drop_candidate(&name, ref_id);
+                return Err(e);
+            }
+        };
+        let _ = self.d.store.set_ref_number(ref_id, pr.number);
+        // A newer green PR replaces an older one the batch was holding.
+        if let Some(old) = self.pr.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            let _ = host.close_pr(old.number);
+            self.drop_candidate(&old.branch, old.ref_id);
+        }
+        let st = self.ask("the pull request's checks", started, timeout, poll, || {
+            let st = host.pr_status(pr.number)?;
+            Ok(match (st.state, st.checks) {
+                (PrState::Closed, _) => Some(st),
+                (_, Checks::Pending) => None,
+                _ => Some(st),
+            })
+        });
+        let st = match st {
+            Ok(st) => st,
+            Err(e) => {
+                let _ = host.close_pr(pr.number);
+                self.drop_candidate(&name, ref_id);
+                return Err(e);
+            }
+        };
+        if st.checks == Checks::Red || st.state == PrState::Closed {
+            let _ = host.close_pr(pr.number);
+            self.drop_candidate(&name, ref_id);
+            let why = if st.state == PrState::Closed && st.checks != Checks::Red { "the PR was closed" } else { "checks failed" };
+            return Ok((false, vec![format!("PR #{} ({name}): {why}: {}", pr.number, st.failed.join(", "))], st.failed));
+        }
+        *self.pr.lock().unwrap_or_else(|e| e.into_inner()) = Some(OpenPr { number: pr.number, branch: name.clone(), ref_id });
+        Ok((true, vec![format!("PR #{}: checks green", pr.number)], vec![]))
+    }
+
+    /// Merge the verified PR (or hand it to the host's queue), waiting for any
+    /// review it needs. If the base moved so the host refuses, fold the new tip
+    /// in and push (a plain push: the PR's own branch only grows), and the
+    /// checks run again.
+    fn finish_pr(&self, batch: &Batch, int_wt: &Path) -> Result<PrEnd, String> {
+        let host = self.host.clone().ok_or("the project has no [host] section")?;
+        let open = self.pr.lock().unwrap_or_else(|e| e.into_inner()).clone().ok_or("no pull request is open for the batch")?;
+        let timeout = self.project().services.ci.as_ref().map_or(7200, |c| c.timeout_s);
+        let poll = self.project().services.ci.as_ref().map_or(20, |c| c.poll_s);
+        let started = Instant::now();
+        let base_ref = batch.base_ref();
+        let waiting = self.alert_key("review");
+        let queue = self.cfg.mode == config::Mode::HostQueue;
+        let mut queued = false;
+        let mut folds = 0;
+        let mut last_head = git::rev_parse(int_wt, "HEAD").map_err(|e| e.to_string())?;
+        self.point("batch_before_promote");
+        loop {
+            let st = self.ask("the pull request", started, timeout, poll, || host.pr_status(open.number).map(Some))?;
+            match st.state {
+                PrState::Merged => {
+                    self.d.landing.clear(self.pid, &waiting);
+                    let _ = git::run(&self.project().path, &["fetch", "--prune", &self.remote()?]);
+                    let commit = git::rev_parse(&self.project().path, &base_ref).map_err(|e| e.to_string())?;
+                    self.point("batch_after_promote");
+                    return Ok(PrEnd::Merged(commit));
+                }
+                PrState::Closed => {
+                    self.d.landing.clear(self.pid, &waiting);
+                    return Ok(PrEnd::Closed(if queue { "dropped from the host's merge queue".into() } else { "closed without merging".into() }));
+                }
+                PrState::Open => {}
+            }
+            if st.checks == Checks::Red {
+                self.d.landing.clear(self.pid, &waiting);
+                return Ok(PrEnd::Red);
+            }
+            if st.review == Review::ChangesRequested {
+                self.d.landing.clear(self.pid, &waiting);
+                return Ok(PrEnd::ChangesRequested);
+            }
+            if st.checks == Checks::Pending {
+                self.nap(poll);
+                continue;
+            }
+            if st.review == Review::Required {
+                self.d.landing.raise(self.pid, &waiting, "needs_you", &format!("{}: pull request #{} is waiting for an approval", self.project().id, open.number));
+                self.d.poke();
+                self.nap(poll);
+                continue;
+            }
+            self.d.landing.clear(self.pid, &waiting);
+            if queue {
+                if !queued {
+                    self.ask("the merge queue", started, timeout, poll, || host.enqueue(open.number).map(Some))?;
+                    queued = true;
+                }
+                self.nap(poll);
+                continue;
+            }
+            match host.merge_pr(open.number) {
+                Ok(()) => continue, // read Merged on the next look
+                Err(e) if e.permanent() => {
+                    // Refused. Did the base move under us? Then fold it in and let checks run again.
+                    let remote = self.remote()?;
+                    let _ = git::run(&self.project().path, &["fetch", "--prune", &remote]);
+                    let tip = git::rev_parse(&self.project().path, &base_ref).map_err(|e| e.to_string())?;
+                    if git::is_ancestor(int_wt, &tip, "HEAD") {
+                        return Err(format!("the host refused to merge pull request #{}: {}", open.number, e.detail));
+                    }
+                    folds += 1;
+                    if folds > self.cfg.max_fold {
+                        return Ok(PrEnd::BaseKeptMoving);
+                    }
+                    match git::catch_up(int_wt, &base_ref).map_err(|e| e.to_string())? {
+                        git::CatchUp::Conflict(_) => return Ok(PrEnd::Conflict),
+                        _ => {}
+                    }
+                    let head = git::rev_parse(int_wt, "HEAD").map_err(|e| e.to_string())?;
+                    if head != last_head {
+                        git::run(int_wt, &["push", "--porcelain", &remote, &format!("{head}:refs/heads/{}", open.branch)]).map_err(|e| format!("could not update {}: {e}", open.branch))?;
+                        last_head = head;
+                    }
+                    self.nap(poll);
+                }
+                Err(e) => {
+                    // Transient: look again.
+                    self.d.landing.raise(self.pid, &self.alert_key("service"), "landing", &format!("{}: merging: {}", self.project().id, e.detail));
+                    self.nap(poll);
+                }
+            }
+        }
+    }
+
+    /// Take down whatever the batch put on the outside: close its PR, delete its refs.
+    fn clean_outside(&self) {
+        let batch = self.batch_id.load(std::sync::atomic::Ordering::SeqCst);
+        remove_refs(&self.d, self.pid, Some(batch));
+        self.d.landing.clear(self.pid, &self.alert_key("review"));
+        self.d.landing.clear(self.pid, &self.alert_key("service"));
     }
 
     fn park(

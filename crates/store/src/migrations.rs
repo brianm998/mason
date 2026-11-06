@@ -194,6 +194,29 @@ const STEPS: &[&str] = &[
          at    INTEGER NOT NULL,
          owner TEXT NOT NULL
      );",
+    // 8: what a batch put on the outside (candidate refs for CI, pull
+    // requests), so that whatever a crash leaves there is found and removed
+    // on restart, and the tracker's items, with what the tracker last said.
+    "CREATE TABLE landing_refs (
+         id      INTEGER PRIMARY KEY AUTOINCREMENT,
+         batch   INTEGER NOT NULL,
+         project TEXT NOT NULL,
+         kind    TEXT NOT NULL,
+         name    TEXT NOT NULL,
+         number  INTEGER,
+         at      INTEGER NOT NULL,
+         removed INTEGER NOT NULL DEFAULT 0
+     );
+     CREATE TABLE tracker_items (
+         project  TEXT NOT NULL,
+         number   INTEGER NOT NULL,
+         task     INTEGER NOT NULL,
+         title    TEXT NOT NULL,
+         body     TEXT NOT NULL,
+         priority TEXT NOT NULL,
+         open     INTEGER NOT NULL,
+         PRIMARY KEY (project, number)
+     );",
 ];
 
 pub const SCHEMA_VERSION: u32 = STEPS.len() as u32;

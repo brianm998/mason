@@ -18,6 +18,7 @@ pub mod landing;
 pub mod pool;
 pub mod prompts;
 pub mod sched;
+pub mod services;
 pub mod suites;
 pub mod sweep;
 pub mod views;

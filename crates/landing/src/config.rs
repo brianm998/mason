@@ -58,9 +58,14 @@ impl Mode {
         Mode::ALL.into_iter().find(|m| m.name() == s)
     }
 
-    /// The modes this version can land with.
-    pub fn runnable(self) -> bool {
-        matches!(self, Mode::Direct | Mode::LocalOnly)
+    /// The modes whose candidate is a pull request, not a pushed fast-forward.
+    pub fn uses_pr(self) -> bool {
+        matches!(self, Mode::PrEach | Mode::PrBatch | Mode::HostQueue)
+    }
+
+    /// Modes that push a candidate ref for CI to run on.
+    pub fn uses_candidate_ref(self) -> bool {
+        matches!(self, Mode::DirectCi | Mode::LocalOnlyCi)
     }
 
     /// Does this mode stop at the local base branch, leaving the push to the owner?
@@ -354,16 +359,22 @@ pub fn validate(c: &LandingConfig) -> Vec<String> {
     p
 }
 
-/// Can this version land with the config? Modes beyond `direct` and
-/// `local-only` parse and validate but do not run yet.
-pub fn check_runnable(c: &LandingConfig) -> Result<(), String> {
-    if c.mode.runnable() {
-        return Ok(());
+/// What a mode needs of the project's services, as problems (empty: nothing
+/// missing). `host` and `ci` say whether the project configures a git host
+/// with pull requests and a build system.
+pub fn service_problems(c: &LandingConfig, remote: bool, host: bool, ci: bool) -> Vec<String> {
+    let mut p = vec![];
+    let m = c.mode;
+    if (m.uses_candidate_ref() || m.uses_pr()) && !remote {
+        p.push(format!("mode `{}` needs a remote that the CI system or the host can see", m.name()));
     }
-    Err(format!(
-        "mode `{}` arrives in Stage 15 (GitHub, CI and PR landing); this version lands with `direct` and `local-only`",
-        c.mode.name()
-    ))
+    if m.uses_candidate_ref() && !ci {
+        p.push(format!("mode `{}` needs a `[ci]` section in the project file: the build system that runs on the candidate ref", m.name()));
+    }
+    if m.uses_pr() && !host {
+        p.push(format!("mode `{}` needs a `[host]` section in the project file: the git host that opens the pull requests", m.name()));
+    }
+    p
 }
 
 #[cfg(test)]
@@ -401,7 +412,6 @@ ladder = ["rerun-failed", "blame-by-impact", "bisect", "ask"]
         assert_eq!(c.batch_suites().unwrap(), ["integration"]);
         assert_eq!(c.post_land().unwrap().on_red.as_deref(), Some("freeze"));
         assert_eq!(c.ladder.len(), 4);
-        assert!(check_runnable(&c).is_ok());
     }
 
     #[test]
@@ -423,26 +433,25 @@ ladder = ["rerun-failed", "blame-by-impact", "bisect", "ask"]
         );
         let e = parse(&mk("local-only")).unwrap_err();
         assert!(e[0].contains("use `local-only-ci`"), "{e:?}");
-        // The CI modes accept it (and do not run yet).
-        let c = parse(&mk("direct-ci")).unwrap();
-        assert!(check_runnable(&c).unwrap_err().contains("Stage 15"));
+        // The CI modes accept it.
+        assert!(parse(&mk("direct-ci")).is_ok() && parse(&mk("local-only-ci")).is_ok());
     }
 
     #[test]
-    fn modes_beyond_this_stage_parse_but_do_not_run() {
-        for m in [
-            "direct-ci",
-            "local-only-ci",
-            "pr-each",
-            "pr-batch",
-            "host-queue",
-        ] {
+    fn every_mode_parses_and_says_what_it_needs() {
+        for m in ["direct", "direct-ci", "local-only", "local-only-ci", "pr-each", "pr-batch", "host-queue"] {
             let c = parse(&format!("mode = \"{m}\"")).unwrap();
-            assert!(check_runnable(&c).unwrap_err().contains(m), "{m}");
+            assert_eq!(c.mode.name(), m);
         }
-        for m in ["direct", "local-only"] {
-            assert!(check_runnable(&parse(&format!("mode = \"{m}\"")).unwrap()).is_ok());
-        }
+        let need = |m: &str, remote, host, ci| service_problems(&parse(&format!("mode = \"{m}\"")).unwrap(), remote, host, ci);
+        assert!(need("direct", false, false, false).is_empty());
+        assert!(need("local-only", false, false, false).is_empty());
+        assert!(need("direct-ci", true, false, true).is_empty());
+        assert!(need("direct-ci", true, false, false)[0].contains("[ci]"));
+        assert!(need("local-only-ci", false, false, true)[0].contains("remote"));
+        assert!(need("pr-batch", true, true, false).is_empty());
+        assert!(need("pr-each", true, false, false)[0].contains("[host]"));
+        assert!(need("host-queue", false, false, false).len() == 2);
     }
 
     #[test]

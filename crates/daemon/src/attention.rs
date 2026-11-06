@@ -290,6 +290,7 @@ pub fn alerts_now(d: &Daemon) -> Vec<(String, String, String)> {
             }
         }
     }
+    out.extend(d.landing().attention());
     for (pid, p) in &d.projects {
         if let Some(problems) = d.definition_error(*pid) {
             out.push((

@@ -6,152 +6,11 @@
 
 mod support;
 use mason_core::*;
-use mason_daemon::Daemon;
 use mason_landing::git;
-use serde_json::json;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use support::lw::*;
 use support::*;
-
-const CHECKS: &str = r#"#!/bin/sh
-n="$1"
-[ -n "$(find . -name "slow.$n" -not -path "./.git/*")" ] && sleep 3
-echo "1..1"
-if [ -n "$(find . -name "red.$n" -not -path "./.git/*")" ]; then echo "not ok 1 - $n"; exit 1; fi
-echo "ok 1 - $n"
-"#;
-
-fn def() -> String {
-    let mut s = String::from(
-        r#"schema = 1
-start = "develop"
-
-[step.develop]
-type = "agent"
-category = "developing"
-next = "land"
-
-[step.land]
-type = "landing"
-category = "landing"
-on_red = "develop"
-max_rounds = 3
-
-[impact]
-"a/**" = ["alpha"]
-"b/**" = ["beta"]
-"c/**" = ["alpha"]
-"#,
-    );
-    for n in ["alpha", "beta", "integration", "smoke"] {
-        s.push_str(&format!(
-            "\n[suite.{n}]\ncommand = \"sh checks.sh {n}\"\nparser = \"tap\"\nmin_tests = 1\nlevel = \"unit\"\n"
-        ));
-    }
-    s
-}
-
-struct W {
-    s: Scratch,
-    d: Arc<Daemon>,
-}
-
-fn world(landing_toml: &str, files: &[(&str, &str)]) -> W {
-    let s = Scratch::new("true", json!({"steps": {}}));
-    let definition = def();
-    let mut all: Vec<(&str, &str)> = vec![
-        (".mason/mason.toml", &definition),
-        (".mason/landing.toml", landing_toml),
-        ("checks.sh", CHECKS),
-        ("shared.txt", "base\n"),
-    ];
-    all.extend_from_slice(files);
-    s.push_files(&all, "project setup");
-    sh(&s.repo, &["fetch", "-q", "origin"]);
-    let d = s.start_with(|c| c.env_retry = Duration::from_millis(200));
-    // Nothing is claimed by the scheduler: the test places tasks itself.
-    mason_daemon::attention::pause(&d, "", "claims", "test", 3600).unwrap();
-    W { s, d }
-}
-
-impl W {
-    /// A task already in its landing step, with a branch carrying `files`.
-    fn task(&self, title: &str, files: &[(&str, &str)]) -> TaskId {
-        let t = file_task_as(&self.d, title, "x", true, TrustSource::Owner, false);
-        let pid = self.d.project_id_by_name("scratch").unwrap();
-        let br = format!("mason/scratch/t{}", t.0);
-        let tmp = self.s.root.path().join(format!("mk{}", t.0));
-        // The remote's main may have moved: start from it.
-        sh(&self.s.repo, &["fetch", "-q", "origin"]);
-        sh(
-            &self.s.repo,
-            &[
-                "worktree",
-                "add",
-                "-q",
-                "-b",
-                &br,
-                tmp.to_str().unwrap(),
-                "origin/main",
-            ],
-        );
-        for (p, body) in files {
-            let f = tmp.join(p);
-            std::fs::create_dir_all(f.parent().unwrap()).unwrap();
-            std::fs::write(f, body).unwrap();
-        }
-        sh(&tmp, &["add", "-A"]);
-        sh(
-            &tmp,
-            &[
-                "-c",
-                "user.name=t",
-                "-c",
-                "user.email=t@t",
-                "commit",
-                "-qm",
-                title,
-            ],
-        );
-        sh(
-            &self.s.repo,
-            &["worktree", "remove", "--force", tmp.to_str().unwrap()],
-        );
-        let def = self.d.current_def(pid);
-        self.d
-            .emit(EventKind::Admitted {
-                task: t,
-                entry: Some(Entry {
-                    def: def.hash.clone(),
-                    step: "land".into(),
-                    state: State::Landing,
-                    route: Route::Explore,
-                }),
-            })
-            .unwrap();
-        t
-    }
-
-    fn sent_back(&self, t: TaskId) -> Option<String> {
-        self.d
-            .store
-            .read_since(0, 100_000)
-            .unwrap()
-            .iter()
-            .find_map(|e| match &e.event.kind {
-                EventKind::SentBack { task, reason, .. } if *task == t => Some(reason.clone()),
-                _ => None,
-            })
-    }
-
-    fn on_main(&self, path: &str) -> bool {
-        git::ok(&self.s.origin, &["cat-file", "-e", &format!("main:{path}")])
-    }
-
-    fn landed(&self, t: TaskId) -> bool {
-        state_of(&self.d, t) == State::Landed
-    }
-}
 
 #[test]
 fn a_batch_of_five_lands_three_ejects_the_conflict_and_parks_the_culprit() {
@@ -406,11 +265,11 @@ fn a_tier_that_names_ci_is_refused_with_a_pointer_to_the_ci_mode() {
 }
 
 #[test]
-fn modes_after_this_stage_are_refused_for_now() {
+fn a_mode_that_needs_a_service_the_project_lacks_is_refused_naming_it() {
     let w = world("mode = \"pr-batch\"\n", &[]);
     let t = w.task("never lands", &[("x/n.txt", "1")]);
     wait_state(&w.d, t, State::Failed, 60);
-    assert!(task_of(&w.d, t).failure.unwrap().contains("Stage 15"));
+    assert!(task_of(&w.d, t).failure.unwrap().contains("[host]"));
 }
 
 #[test]

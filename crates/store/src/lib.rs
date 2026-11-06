@@ -128,6 +128,31 @@ pub struct BatchRow {
     pub head: String,
 }
 
+/// Something a batch put on the outside: a candidate ref or a pull request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RefRow {
+    pub id: u64,
+    pub batch: u64,
+    pub project: String,
+    /// `ci` or `pr`.
+    pub kind: String,
+    /// The branch name on the remote.
+    pub name: String,
+    pub number: Option<u64>,
+}
+
+/// A tracker item imported as a task, with what the tracker last said.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TrackerItemRow {
+    pub project: String,
+    pub number: u64,
+    pub task: u64,
+    pub title: String,
+    pub body: String,
+    pub priority: String,
+    pub open: bool,
+}
+
 /// A project's landing freeze: its post-land tier is red, so only the fix may land.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FreezeRow {
@@ -1161,6 +1186,88 @@ impl Store {
                  WHERE project=?1 AND finished_at IS NULL",
                 params![p, now_ms as i64],
             )
+        })
+    }
+
+    pub fn add_ref(
+        &self,
+        batch: u64,
+        project: &str,
+        kind: &str,
+        name: &str,
+        number: Option<u64>,
+        now_ms: u64,
+    ) -> Result<u64, StoreError> {
+        let (p, k, n) = (project.to_string(), kind.to_string(), name.to_string());
+        self.write(move |c| {
+            c.execute(
+                "INSERT INTO landing_refs(batch, project, kind, name, number, at) VALUES (?1,?2,?3,?4,?5,?6)",
+                params![batch as i64, p, k, n, number.map(|x| x as i64), now_ms as i64],
+            )?;
+            Ok(c.last_insert_rowid() as u64)
+        })
+    }
+
+    pub fn set_ref_number(&self, id: u64, number: u64) -> Result<(), StoreError> {
+        self.write(move |c| {
+            c.execute("UPDATE landing_refs SET number = ?2 WHERE id = ?1", params![id as i64, number as i64]).map(|_| ())
+        })
+    }
+
+    pub fn remove_ref(&self, id: u64) -> Result<(), StoreError> {
+        self.write(move |c| c.execute("UPDATE landing_refs SET removed = 1 WHERE id = ?1", params![id as i64]).map(|_| ()))
+    }
+
+    /// Refs and PRs not yet cleaned up, of a project.
+    pub fn open_refs(&self, project: &str) -> Result<Vec<RefRow>, StoreError> {
+        let p = project.to_string();
+        self.read(move |c| {
+            let mut st = c.prepare(
+                "SELECT id, batch, project, kind, name, number FROM landing_refs WHERE project = ?1 AND removed = 0 ORDER BY id",
+            )?;
+            let rows = st.query_map(params![p], |r| {
+                Ok(RefRow {
+                    id: r.get::<_, i64>(0)? as u64,
+                    batch: r.get::<_, i64>(1)? as u64,
+                    project: r.get(2)?,
+                    kind: r.get(3)?,
+                    name: r.get(4)?,
+                    number: r.get::<_, Option<i64>>(5)?.map(|x| x as u64),
+                })
+            })?;
+            rows.collect()
+        })
+    }
+
+    pub fn put_tracker_item(&self, row: &TrackerItemRow) -> Result<(), StoreError> {
+        let r = row.clone();
+        self.write(move |c| {
+            c.execute(
+                "INSERT OR REPLACE INTO tracker_items(project, number, task, title, body, priority, open) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                params![r.project, r.number as i64, r.task as i64, r.title, r.body, r.priority, r.open],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn tracker_items(&self, project: &str) -> Result<Vec<TrackerItemRow>, StoreError> {
+        let p = project.to_string();
+        self.read(move |c| {
+            let mut st = c.prepare(
+                "SELECT project, number, task, title, body, priority, open FROM tracker_items WHERE project = ?1 ORDER BY number",
+            )?;
+            let rows = st.query_map(params![p], |r| {
+                Ok(TrackerItemRow {
+                    project: r.get(0)?,
+                    number: r.get::<_, i64>(1)? as u64,
+                    task: r.get::<_, i64>(2)? as u64,
+                    title: r.get(3)?,
+                    body: r.get(4)?,
+                    priority: r.get(5)?,
+                    open: r.get::<_, i64>(6)? != 0,
+                })
+            })?;
+            rows.collect()
         })
     }
 
