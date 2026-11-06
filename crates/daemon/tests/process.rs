@@ -576,7 +576,14 @@ fn the_cli_leaves_quietly_when_its_output_is_cut_off() {
     let f = s.root.path().join("d.toml");
     std::fs::write(&f, DEF).unwrap();
     let out = std::process::Command::new("sh")
-        .args(["-c", &format!("set -o pipefail 2>/dev/null; {} --data-dir /nonexistent definition check {} | head -1", bin("mason-pipeline", "mason").display(), f.display())])
+        .args([
+            "-c",
+            &format!(
+                "{} --data-dir /nonexistent definition check {} | head -1",
+                bin("mason-pipeline", "mason").display(),
+                f.display()
+            ),
+        ])
         .output()
         .unwrap();
     let err = String::from_utf8_lossy(&out.stderr);
