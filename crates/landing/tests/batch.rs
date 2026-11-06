@@ -79,14 +79,20 @@ fn nop(_: &str) {}
 #[test]
 fn a_clean_batch_merges_and_promotes() {
     let fx = Fx::new();
-    let ts = [fx.branch("t1", "a.txt", "a\n"), fx.branch("t2", "b.txt", "b\n"), fx.branch("t3", "c.txt", "c\n")];
+    let ts = [
+        fx.branch("t1", "a.txt", "a\n"),
+        fx.branch("t2", "b.txt", "b\n"),
+        fx.branch("t3", "c.txt", "c\n"),
+    ];
     let b = fx.batch(None, true);
     let a = b.assemble(&ts, &nop).unwrap();
     assert_eq!(a.merged, [1, 2, 3]);
     assert!(a.ejected.is_empty() && a.already.is_empty());
     assert_eq!(b.union_diff(&a), ["a.txt", "b.txt", "c.txt"]);
     let f = b.finish(&a, &mut |_| true, &nop).unwrap().unwrap();
-    let Finish::Promoted { commit, folds } = f else { panic!("{f:?}") };
+    let Finish::Promoted { commit, folds } = f else {
+        panic!("{f:?}")
+    };
     assert_eq!(folds, 0);
     assert_eq!(fx.origin_main(), commit);
 }
@@ -105,7 +111,10 @@ fn a_conflicting_task_is_ejected_and_the_rest_land() {
     assert_eq!(a.ejected[0].files, "shared.txt");
     // The merge was undone: the tree is clean and holds only the others.
     assert_eq!(sh(&fx.int_wt, &["status", "--porcelain"]), "");
-    assert_eq!(std::fs::read_to_string(fx.int_wt.join("shared.txt")).unwrap(), "from one\n");
+    assert_eq!(
+        std::fs::read_to_string(fx.int_wt.join("shared.txt")).unwrap(),
+        "from one\n"
+    );
 }
 
 #[test]
@@ -118,7 +127,10 @@ fn the_resolver_can_resolve_a_conflict() {
     assert_eq!(a.merged, [1, 2]);
     assert_eq!(a.resolved, [2]);
     assert!(a.ejected.is_empty());
-    assert_eq!(std::fs::read_to_string(fx.int_wt.join("shared.txt")).unwrap(), "both\n");
+    assert_eq!(
+        std::fs::read_to_string(fx.int_wt.join("shared.txt")).unwrap(),
+        "both\n"
+    );
     assert_eq!(sh(&fx.int_wt, &["status", "--porcelain"]), "");
 }
 
@@ -138,7 +150,10 @@ fn a_resolver_that_fails_or_leaves_conflicts_ejects_only_that_task() {
 #[test]
 fn assembling_again_gives_the_same_batch() {
     let fx = Fx::new();
-    let ts = [fx.branch("t1", "a.txt", "a\n"), fx.branch("t2", "b.txt", "b\n")];
+    let ts = [
+        fx.branch("t1", "a.txt", "a\n"),
+        fx.branch("t2", "b.txt", "b\n"),
+    ];
     let b = fx.batch(None, true);
     let first = b.assemble(&ts, &nop).unwrap();
     // Dirt from a crash: an untracked file and a stray edit.
@@ -154,7 +169,10 @@ fn assembling_again_gives_the_same_batch() {
 #[test]
 fn a_task_already_in_the_base_is_not_landed_twice() {
     let fx = Fx::new();
-    let ts = [fx.branch("t1", "a.txt", "a\n"), fx.branch("t2", "b.txt", "b\n")];
+    let ts = [
+        fx.branch("t1", "a.txt", "a\n"),
+        fx.branch("t2", "b.txt", "b\n"),
+    ];
     let b = fx.batch(None, true);
     let a = b.assemble(&ts, &nop).unwrap();
     b.finish(&a, &mut |_| true, &nop).unwrap().unwrap();
@@ -188,16 +206,33 @@ fn a_moved_base_is_folded_in_and_reverified() {
     let a = b.assemble(&ts, &nop).unwrap();
     // Someone lands first.
     let other = fx.root.join("other");
-    sh(&fx.root, &["clone", "-q", fx.origin.to_str().unwrap(), other.to_str().unwrap()]);
+    sh(
+        &fx.root,
+        &[
+            "clone",
+            "-q",
+            fx.origin.to_str().unwrap(),
+            other.to_str().unwrap(),
+        ],
+    );
     write_commit(&other, "z.txt", "z\n");
     sh(&other, &["push", "-q", "origin", "HEAD:main"]);
 
     let mut moved_seen = vec![];
     let f = b
-        .finish(&a, &mut |m| { moved_seen = m.to_vec(); true }, &nop)
+        .finish(
+            &a,
+            &mut |m| {
+                moved_seen = m.to_vec();
+                true
+            },
+            &nop,
+        )
         .unwrap()
         .unwrap();
-    let Finish::Promoted { commit, folds } = f else { panic!("{f:?}") };
+    let Finish::Promoted { commit, folds } = f else {
+        panic!("{f:?}")
+    };
     assert_eq!(folds, 1);
     assert_eq!(moved_seen, ["z.txt"]);
     assert_eq!(fx.origin_main(), commit);
@@ -213,7 +248,15 @@ fn red_after_the_fold_does_not_promote() {
     let b = fx.batch(None, true);
     let a = b.assemble(&ts, &nop).unwrap();
     let other = fx.root.join("other");
-    sh(&fx.root, &["clone", "-q", fx.origin.to_str().unwrap(), other.to_str().unwrap()]);
+    sh(
+        &fx.root,
+        &[
+            "clone",
+            "-q",
+            fx.origin.to_str().unwrap(),
+            other.to_str().unwrap(),
+        ],
+    );
     write_commit(&other, "z.txt", "z\n");
     sh(&other, &["push", "-q", "origin", "HEAD:main"]);
     let before = fx.origin_main();
@@ -229,11 +272,22 @@ fn a_moved_base_that_conflicts_is_reported() {
     let b = fx.batch(None, true);
     let a = b.assemble(&ts, &nop).unwrap();
     let other = fx.root.join("other");
-    sh(&fx.root, &["clone", "-q", fx.origin.to_str().unwrap(), other.to_str().unwrap()]);
+    sh(
+        &fx.root,
+        &[
+            "clone",
+            "-q",
+            fx.origin.to_str().unwrap(),
+            other.to_str().unwrap(),
+        ],
+    );
     write_commit(&other, "shared.txt", "theirs\n");
     sh(&other, &["push", "-q", "origin", "HEAD:main"]);
     let f = b.finish(&a, &mut |_| true, &nop).unwrap().unwrap();
-    assert!(matches!(f, Finish::Conflict(ref s) if s.contains("shared.txt")), "{f:?}");
+    assert!(
+        matches!(f, Finish::Conflict(ref s) if s.contains("shared.txt")),
+        "{f:?}"
+    );
 }
 
 #[test]
@@ -244,7 +298,10 @@ fn without_a_remote_the_local_base_moves_by_compare_and_swap() {
     let ts = [fx.branch("t1", "a.txt", "a\n")];
     let b = fx.batch(None, false);
     let a = b.assemble(&ts, &nop).unwrap();
-    let Finish::Promoted { commit, .. } = b.finish(&a, &mut |_| true, &nop).unwrap().unwrap() else { panic!() };
+    let Finish::Promoted { commit, .. } = b.finish(&a, &mut |_| true, &nop).unwrap().unwrap()
+    else {
+        panic!()
+    };
     assert_eq!(sh(&fx.repo, &["rev-parse", "main"]), commit);
 }
 

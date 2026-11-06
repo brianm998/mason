@@ -30,15 +30,15 @@ const POINTS: &[&str] = &[
     "before_event:Testing",
     "after_append:StepSucceeded@3", // tests green
     "job_started:Landing",
-    "batch_formed",         // a batch is recorded, nothing merged yet
-    "batch_merged",         // the integration branch holds the batch
+    "batch_formed", // a batch is recorded, nothing merged yet
+    "batch_merged", // the integration branch holds the batch
     "land_after_fetch",
     "land_after_ff",
     "batch_verified",       // the suites passed over the union, nothing promoted
     "batch_before_promote", // folded and checked, the base not yet moved
     "batch_after_promote",  // the base moved, no verdict delivered
-    "land_after_push",              // pushed to the remote, not yet recorded
-    "land_before_event",            // same, after the landing call returned
+    "land_after_push",      // pushed to the remote, not yet recorded
+    "land_before_event",    // same, after the landing call returned
     "after_append:StepSucceeded@4", // recorded as landed, cleanup not done
     "land_after_event",
 ];

@@ -1237,8 +1237,11 @@ impl Store {
 
     pub fn clear_landing_flag(&self, task: u64) -> Result<(), StoreError> {
         self.write(move |c| {
-            c.execute("DELETE FROM landing_flags WHERE task = ?1", params![task as i64])
-                .map(|_| ())
+            c.execute(
+                "DELETE FROM landing_flags WHERE task = ?1",
+                params![task as i64],
+            )
+            .map(|_| ())
         })
     }
 

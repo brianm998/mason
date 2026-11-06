@@ -768,6 +768,60 @@ async fn skip_task(
     Ok(Json(json!({"debt": debt})))
 }
 
+/// Batches, freezes, queue idle time and what is waiting, per project.
+async fn landing_status(Shared(d): Shared<Arc<Daemon>>) -> Res {
+    let d2 = d.clone();
+    let v = d
+        .pool
+        .run(move || {
+            let projects: Vec<Value> = d2
+                .projects
+                .iter()
+                .map(|(pid, p)| {
+                    json!({
+                        "project": p.id,
+                        "config": match crate::landing::load_config(&d2, *pid) {
+                            Ok(c) => json!({
+                                "mode": c.mode.name(),
+                                "window_s": c.window.as_secs(),
+                                "max_size": c.max_size,
+                                "parallel": c.parallel,
+                            }),
+                            Err(e) => json!({"error": e}),
+                        },
+                        "queued": d2.landing().queued(*pid).iter().map(|t| t.0).collect::<Vec<_>>(),
+                        "running_batches": d2.landing().running_batches(*pid),
+                        "queue_idle_ms": d2.landing().idle_ms(*pid),
+                    })
+                })
+                .collect();
+            let batches: Vec<Value> = d2
+                .store
+                .batches(None, 50)
+                .unwrap_or_default()
+                .iter()
+                .map(|b| {
+                    json!({
+                        "id": b.id, "project": b.project, "phase": b.phase, "tasks": b.tasks,
+                        "landed": b.landed, "parked": b.parked, "note": b.note, "head": b.head,
+                        "at": b.at, "finished_at": b.finished_at,
+                    })
+                })
+                .collect();
+            let freezes: Vec<Value> = d2
+                .store
+                .freezes()
+                .unwrap_or_default()
+                .iter()
+                .map(|f| json!({"project": f.project, "reason": f.reason, "fix_task": f.fix_task, "since": f.since}))
+                .collect();
+            json!({"projects": projects, "batches": batches, "freezes": freezes})
+        })
+        .await
+        .map_err(pool_err)?;
+    Ok(Json(v))
+}
+
 async fn debts_list(
     Shared(d): Shared<Arc<Daemon>>,
     Query(q): Query<HashMap<String, String>>,
@@ -1309,6 +1363,7 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/metrics", get(metrics))
         .route("/demo", get(demo_status))
         .route("/demo/next", post(demo_next))
+        .route("/landing", get(landing_status))
         .route("/debts", get(debts_list))
         .route("/debts/{id}/run", post(debt_run))
         .route("/quarantine", get(quarantine_list).post(quarantine_add))

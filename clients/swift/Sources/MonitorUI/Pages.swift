@@ -243,11 +243,30 @@ struct LandingPage: View {
             VStack(alignment: .leading, spacing: theme.spacingLarge) {
                 Text("Landing").font(theme.title())
                 if let l = model.landing {
-                    Text(l.note).font(theme.body()).foregroundStyle(theme.muted)
+                    if !l.note.isEmpty {
+                        Text(l.note).font(theme.body()).foregroundStyle(l.frozen ? theme.attention : theme.muted)
+                    }
+                    ForEach(l.modes, id: \.self) { m in
+                        Text(m).font(theme.body()).foregroundStyle(theme.muted)
+                    }
+                    ForEach(l.freezes, id: \.project) { f in
+                        Text("Frozen: \(f.project): \(f.reason)\(f.fixTask > 0 ? " (fix: task #\(f.fixTask))" : "")")
+                            .font(theme.body()).foregroundStyle(theme.attention)
+                    }
                     section("Queue", theme: theme) {
                         if l.queue.isEmpty { Text("Nothing is landing.").font(theme.body()).foregroundStyle(theme.muted) }
                         ForEach(l.queue, id: \.id) { r in
                             Button("\(r.key) \(r.title)") { model.go(.task(r.id)) }.buttonStyle(.link)
+                        }
+                    }
+                    section("Batches", theme: theme) {
+                        if l.batches.isEmpty { Text("No batch has formed yet.").font(theme.body()).foregroundStyle(theme.muted) }
+                        ForEach(l.batches, id: \.id) { b in
+                            Text(batchText(b)).font(theme.body())
+                        }
+                        if l.queueIdleMs > 0 {
+                            Text("Queue idle: \(l.queueIdleMs / 1000) s with tasks waiting and nothing landing.")
+                                .font(theme.body()).foregroundStyle(theme.muted)
                         }
                     }
                     section("Debts", theme: theme) {
@@ -261,6 +280,16 @@ struct LandingPage: View {
             }.padding(theme.spacingLarge)
         }
     }
+}
+
+/// One line per batch: where it is, who landed, who was parked, and why.
+func batchText(_ b: Mason_V1_BatchLine) -> String {
+    func list(_ v: [UInt64]) -> String { v.map { "#\($0)" }.joined(separator: " ") }
+    var t = "Batch #\(b.id) \(b.project) \(b.phase)\(b.running ? " (running)" : ""): \(list(b.tasks))"
+    if !b.landed.isEmpty { t += ", landed \(list(b.landed))" }
+    if !b.parked.isEmpty { t += ", parked \(list(b.parked))" }
+    if !b.note.isEmpty { t += ". \(b.note)" }
+    return t
 }
 
 struct UsagePage: View {

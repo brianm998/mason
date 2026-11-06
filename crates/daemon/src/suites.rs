@@ -1258,6 +1258,7 @@ pub struct OverRun {
 /// They belong to no task: nothing can skip them. Evidence is by tree, so a
 /// tree that was green is not run twice, whoever asks. `base` is where the
 /// batch started (baselines are taken there).
+#[allow(clippy::too_many_arguments)]
 pub fn run_over(
     d: &Arc<Daemon>,
     p: &crate::config::ProjectCfg,
@@ -1294,8 +1295,9 @@ pub fn run_over(
         let Some(suite) = def.testing.suite(name) else {
             out.green = false;
             out.failed.insert(name.clone());
-            out.notes
-                .push(format!("{name}: the landing tier names a suite the definition does not have"));
+            out.notes.push(format!(
+                "{name}: the landing tier names a suite the definition does not have"
+            ));
             continue;
         };
         match run_suite(&who, &p.path, &lock, def, suite, wt, &tree, &mut |_| {}) {

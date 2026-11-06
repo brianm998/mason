@@ -116,10 +116,7 @@ fn rank_of(p: Priority, task: TaskId) -> u64 {
 pub fn load_config(d: &Daemon, pid: ProjectId) -> Result<LandingConfig, String> {
     let p = d.project(pid).ok_or("no such project")?;
     let spec = format!("{}:.mason/landing.toml", p.base_ref());
-    let text = match git::run(&p.path, &["show", &spec]) {
-        Ok(t) => t,
-        Err(_) => String::new(),
-    };
+    let text = git::run(&p.path, &["show", &spec]).unwrap_or_default();
     let c = config::parse(&text)
         .map_err(|e| format!("{} (.mason/landing.toml): {}", p.id, e.join("; ")))?;
     config::check_runnable(&c).map_err(|e| format!("{}: {e}", p.id))?;
@@ -254,14 +251,23 @@ fn sweep_integration(d: &Arc<Daemon>, pid: ProjectId) {
     let lock = d.repo_lock(pid);
     let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
     let prefix = format!("mason/int/{}/", p.id);
-    let Ok(wts) = git::worktrees(&p.path) else { return };
+    let Ok(wts) = git::worktrees(&p.path) else {
+        return;
+    };
     for (path, branch) in wts {
         if branch.as_deref().is_some_and(|b| b.starts_with(&prefix)) {
             let _ = git::run(&path, &["checkout", "--detach", "--quiet"]);
         }
     }
-    let list = git::run(&p.path, &["for-each-ref", "--format=%(refname:short)", &format!("refs/heads/{prefix}")])
-        .unwrap_or_default();
+    let list = git::run(
+        &p.path,
+        &[
+            "for-each-ref",
+            "--format=%(refname:short)",
+            &format!("refs/heads/{prefix}"),
+        ],
+    )
+    .unwrap_or_default();
     for b in list.lines().filter(|b| !b.is_empty()) {
         let _ = git::run(&p.path, &["branch", "-D", b]);
     }
@@ -269,8 +275,18 @@ fn sweep_integration(d: &Arc<Daemon>, pid: ProjectId) {
 
 /// One look at the queue: start whatever may start. Returns how many tasks
 /// wait and how long until the next batch is due.
-fn form_and_start(d: &Arc<Daemon>, pid: ProjectId, last: &mut Instant) -> (usize, Option<Duration>) {
-    let waiting: Vec<Wait> = d.landing.lock().waiting.get(&pid).cloned().unwrap_or_default();
+fn form_and_start(
+    d: &Arc<Daemon>,
+    pid: ProjectId,
+    last: &mut Instant,
+) -> (usize, Option<Duration>) {
+    let waiting: Vec<Wait> = d
+        .landing
+        .lock()
+        .waiting
+        .get(&pid)
+        .cloned()
+        .unwrap_or_default();
     let elapsed = last.elapsed();
     *last = Instant::now();
     {
@@ -288,7 +304,11 @@ fn form_and_start(d: &Arc<Daemon>, pid: ProjectId, last: &mut Instant) -> (usize
             // Nothing can land with a configuration that is refused: say so, once per look.
             for w in &waiting {
                 take(d, pid, w.task);
-                deliver(d, w.task, Verdict::Failed(format!("landing is not configured: {e}")));
+                deliver(
+                    d,
+                    w.task,
+                    Verdict::Failed(format!("landing is not configured: {e}")),
+                );
             }
             return (0, None);
         }
@@ -308,7 +328,10 @@ fn form_and_start(d: &Arc<Daemon>, pid: ProjectId, last: &mut Instant) -> (usize
             Some(k @ ("force" | "now")) => singles.push((w.clone(), k.to_string())),
             _ => {
                 // Frozen: only the fix passes.
-                if freeze.as_ref().is_some_and(|f| f.fix_task != Some(w.task.0)) {
+                if freeze
+                    .as_ref()
+                    .is_some_and(|f| f.fix_task != Some(w.task.0))
+                {
                     continue;
                 }
                 normal.push(Candidate {
@@ -394,9 +417,12 @@ fn start(d: &Arc<Daemon>, pid: ProjectId, members: Vec<Wait>, cfg: LandingConfig
     let spawned = std::thread::Builder::new()
         .name(format!("batch-{slot}"))
         .spawn(move || {
-            let tasks: Vec<(TaskId, String)> = members.iter().map(|w| (w.task, w.branch.clone())).collect();
-            let fps: HashMap<u64, Footprint> =
-                members.iter().map(|w| (w.task.0, w.footprint.clone())).collect();
+            let tasks: Vec<(TaskId, String)> =
+                members.iter().map(|w| (w.task, w.branch.clone())).collect();
+            let fps: HashMap<u64, Footprint> = members
+                .iter()
+                .map(|w| (w.task.0, w.footprint.clone()))
+                .collect();
             Runner {
                 d: d2.clone(),
                 pid,
@@ -466,9 +492,27 @@ impl Runner {
         }
     }
 
-    fn record(&self, id: u64, phase: &str, landed: &[u64], parked: &[Parked], note: &str, head: &str, done: bool) {
-        let l = landed.iter().map(u64::to_string).collect::<Vec<_>>().join(",");
-        let p = parked.iter().map(|x| x.task.to_string()).collect::<Vec<_>>().join(",");
+    #[allow(clippy::too_many_arguments)]
+    fn record(
+        &self,
+        id: u64,
+        phase: &str,
+        landed: &[u64],
+        parked: &[Parked],
+        note: &str,
+        head: &str,
+        done: bool,
+    ) {
+        let l = landed
+            .iter()
+            .map(u64::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let p = parked
+            .iter()
+            .map(|x| x.task.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
         let _ = self
             .d
             .store
@@ -483,13 +527,21 @@ impl Runner {
         let listed = ids.iter().map(u64::to_string).collect::<Vec<_>>().join(",");
         let Ok(batch_id) = d.store.add_batch(&p.id, &listed, now_ms()) else {
             for (t, _) in &tasks {
-                deliver(d, *t, Verdict::Failed("the batch could not be recorded".into()));
+                deliver(
+                    d,
+                    *t,
+                    Verdict::Failed("the batch could not be recorded".into()),
+                );
             }
             return;
         };
         self.point("batch_formed");
         let def = d.current_def(self.pid);
-        let remote = if self.cfg.mode.local_only() { None } else { p.remote.as_deref() };
+        let remote = if self.cfg.mode.local_only() {
+            None
+        } else {
+            p.remote.as_deref()
+        };
         let int_wt = self.int_wt();
         let int_branch = format!("mason/int/{}/b{batch_id}", p.id);
         let batch = Batch {
@@ -502,12 +554,21 @@ impl Runner {
             max_fold: self.cfg.max_fold,
         };
         let lock = d.repo_lock(self.pid);
-        let log_dir = d.cfg.task_dir(0).parent().map_or_else(|| PathBuf::from("."), Path::to_path_buf).join("batches").join(batch_id.to_string());
+        let log_dir = d
+            .cfg
+            .task_dir(0)
+            .parent()
+            .map_or_else(|| PathBuf::from("."), Path::to_path_buf)
+            .join("batches")
+            .join(batch_id.to_string());
         let point = |s: &str| self.point(s);
 
         let mut active: Vec<BatchTask> = tasks
             .iter()
-            .map(|(t, b)| BatchTask { id: t.0, branch: b.clone() })
+            .map(|(t, b)| BatchTask {
+                id: t.0,
+                branch: b.clone(),
+            })
             .collect();
         let mut parked: Vec<Parked> = vec![];
         let mut landed: Vec<u64> = vec![];
@@ -548,30 +609,69 @@ impl Runner {
             if !asm.resolved.is_empty() {
                 note = format!("conflicts in tasks {:?} were resolved", asm.resolved);
             }
-            self.record(batch_id, "merged", &landed, &parked, &note, &asm.head, false);
+            self.record(
+                batch_id, "merged", &landed, &parked, &note, &asm.head, false,
+            );
             if active.is_empty() {
                 break Ok(());
             }
 
             // -- verify the union once
-            let suites = if force { vec![] } else { self.suites_for(&def, &batch, &asm) };
-            self.record(batch_id, "verifying", &landed, &parked, &note, &asm.head, false);
-            let mut vr = self.verify(&def, &suites, &int_wt, &asm.base_tip, &log_dir, &format!("b{batch_id}-r{rounds}"));
+            let suites = if force {
+                vec![]
+            } else {
+                self.suites_for(&def, &batch, &asm)
+            };
+            self.record(
+                batch_id,
+                "verifying",
+                &landed,
+                &parked,
+                &note,
+                &asm.head,
+                false,
+            );
+            let mut vr = self.verify(
+                &def,
+                &suites,
+                &int_wt,
+                &asm.base_tip,
+                &log_dir,
+                &format!("b{batch_id}-r{rounds}"),
+            );
             if vr.green && !vr.notes.is_empty() {
                 note = vr.notes.join("; ");
             }
             if !vr.green {
                 self.point("batch_red");
-                self.record(batch_id, "red", &landed, &parked, &vr.failed.iter().cloned().collect::<Vec<_>>().join(", "), &asm.head, false);
+                self.record(
+                    batch_id,
+                    "red",
+                    &landed,
+                    &parked,
+                    &vr.failed.iter().cloned().collect::<Vec<_>>().join(", "),
+                    &asm.head,
+                    false,
+                );
                 // The red ladder.
                 let mut resolved = false;
                 for rung in &self.cfg.ladder {
                     match rung {
                         Rung::RerunFailed => {
                             let again: Vec<String> = vr.failed.iter().cloned().collect();
-                            let r2 = self.verify(&def, &again, &int_wt, &asm.base_tip, &log_dir, &format!("b{batch_id}-r{rounds}x"));
+                            let r2 = self.verify(
+                                &def,
+                                &again,
+                                &int_wt,
+                                &asm.base_tip,
+                                &log_dir,
+                                &format!("b{batch_id}-r{rounds}x"),
+                            );
                             if r2.green {
-                                note = format!("{} was red once and green on a rerun", again.join(", "));
+                                note = format!(
+                                    "{} was red once and green on a rerun",
+                                    again.join(", ")
+                                );
                                 vr.green = true;
                                 resolved = true;
                                 break;
@@ -583,7 +683,9 @@ impl Runner {
                                 .filter_map(|t| self.fps.get(&t.id).map(|f| (t.id, f)))
                                 .collect();
                             let blamed = plan::blame_by_impact(&vr.failed, &fps);
-                            if !blamed.is_empty() && (blamed.len() < active.len() || active.len() == 1) {
+                            if !blamed.is_empty()
+                                && (blamed.len() < active.len() || active.len() == 1)
+                            {
                                 self.park(&mut parked, &mut active, &blamed, batch_id, &vr);
                                 continue 'outer;
                             }
@@ -596,14 +698,27 @@ impl Runner {
                             }
                             let ids: Vec<u64> = active.iter().map(|t| t.id).collect();
                             let mut red = |subset: &[u64]| -> bool {
-                                let sub: Vec<BatchTask> = active.iter().filter(|t| subset.contains(&t.id)).cloned().collect();
+                                let sub: Vec<BatchTask> = active
+                                    .iter()
+                                    .filter(|t| subset.contains(&t.id))
+                                    .cloned()
+                                    .collect();
                                 let a = {
                                     let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
                                     batch.assemble(&sub, &|_| {})
                                 };
                                 let Ok(a) = a else { return false };
                                 let s = self.suites_for(&def, &batch, &a);
-                                !self.verify(&def, &s, &int_wt, &a.base_tip, &log_dir, &format!("b{batch_id}-r{rounds}-bis")).green
+                                !self
+                                    .verify(
+                                        &def,
+                                        &s,
+                                        &int_wt,
+                                        &a.base_tip,
+                                        &log_dir,
+                                        &format!("b{batch_id}-r{rounds}-bis"),
+                                    )
+                                    .green
                             };
                             if let Bisect::Culprit(id) = plan::bisect(&ids, &mut red) {
                                 self.park(&mut parked, &mut active, &[id], batch_id, &vr);
@@ -621,7 +736,20 @@ impl Runner {
                         "batch #{batch_id} is red in {} and the red cannot be pinned on one task",
                         vr.failed.iter().cloned().collect::<Vec<_>>().join(", ")
                     );
-                    let _ = d.store.set_batch(batch_id, "red", &landed.iter().map(u64::to_string).collect::<Vec<_>>().join(","), &listed, &why, &asm.head, false, now_ms());
+                    let _ = d.store.set_batch(
+                        batch_id,
+                        "red",
+                        &landed
+                            .iter()
+                            .map(u64::to_string)
+                            .collect::<Vec<_>>()
+                            .join(","),
+                        &listed,
+                        &why,
+                        &asm.head,
+                        false,
+                        now_ms(),
+                    );
                     for t in &all {
                         parked.push(Parked {
                             task: *t,
@@ -636,7 +764,15 @@ impl Runner {
             self.point("batch_verified");
 
             // -- promote
-            self.record(batch_id, "promoting", &landed, &parked, &note, &asm.head, false);
+            self.record(
+                batch_id,
+                "promoting",
+                &landed,
+                &parked,
+                &note,
+                &asm.head,
+                false,
+            );
             let union_fp = Footprint {
                 files: batch.union_diff(&asm).into_iter().collect(),
                 suites: suites.iter().cloned().collect(),
@@ -661,7 +797,15 @@ impl Runner {
                 if !plan::needs_reverify(moved, &union_fp, &impacts) {
                     return true;
                 }
-                self.verify(&def, &suites, &wt_for_cmd, &asm.base_tip, &log_dir, &format!("b{batch_id}-r{rounds}-fold")).green
+                self.verify(
+                    &def,
+                    &suites,
+                    &wt_for_cmd,
+                    &asm.base_tip,
+                    &log_dir,
+                    &format!("b{batch_id}-r{rounds}-fold"),
+                )
+                .green
             };
             let fin = {
                 let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -672,13 +816,16 @@ impl Runner {
                 Ok(Err(_red)) => continue 'outer, // red after folding: assemble on the new base, blame properly
                 Ok(Ok(Finish::Conflict(_))) => continue 'outer, // the conflict shows up as an ejection
                 Ok(Ok(Finish::BaseKeptMoving)) => {
-                    break Err(format!("the base moved more than {} times while landing", self.cfg.max_fold))
+                    break Err(format!(
+                        "the base moved more than {} times while landing",
+                        self.cfg.max_fold
+                    ))
                 }
                 Ok(Ok(Finish::LocalBaseCheckedOut(path))) => {
                     break Err(format!(
-                        "the base branch is checked out at {}; use a remote, or the local-only mode",
-                        path.display()
-                    ))
+                    "the base branch is checked out at {}; use a remote, or the local-only mode",
+                    path.display()
+                ))
                 }
                 Ok(Ok(Finish::Promoted { commit: c, .. })) => {
                     commit = c;
@@ -701,7 +848,15 @@ impl Runner {
             Err(w) => w.clone(),
             Ok(()) => note.clone(),
         };
-        self.record(batch_id, phase, &landed, &parked, &final_note, &commit, true);
+        self.record(
+            batch_id,
+            phase,
+            &landed,
+            &parked,
+            &final_note,
+            &commit,
+            true,
+        );
         // The integration branch was disposable.
         {
             let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -720,14 +875,28 @@ impl Runner {
                         let _ = d.store.clear_landing_flag(*id);
                         deliver(d, TaskId(*id), Verdict::Landed);
                     } else if let Some(pk) = parked.iter().find(|x| x.task == *id) {
-                        deliver(d, TaskId(*id), Verdict::SentBack { reason: pk.reason.clone(), feedback: pk.feedback.clone() });
+                        deliver(
+                            d,
+                            TaskId(*id),
+                            Verdict::SentBack {
+                                reason: pk.reason.clone(),
+                                feedback: pk.feedback.clone(),
+                            },
+                        );
                     }
                 }
             }
             Err(why) => {
                 for id in &all_ids {
                     if let Some(pk) = parked.iter().find(|x| x.task == *id) {
-                        deliver(d, TaskId(*id), Verdict::SentBack { reason: pk.reason.clone(), feedback: pk.feedback.clone() });
+                        deliver(
+                            d,
+                            TaskId(*id),
+                            Verdict::SentBack {
+                                reason: pk.reason.clone(),
+                                feedback: pk.feedback.clone(),
+                            },
+                        );
                     } else if landed.contains(id) {
                         deliver(d, TaskId(*id), Verdict::Landed);
                     } else {
@@ -743,8 +912,15 @@ impl Runner {
 
     /// The suites to run over this assembly's union diff: the batch tier's,
     /// selected by what changed.
-    fn suites_for(&self, def: &mason_definition::Definition, batch: &Batch, a: &Assembled) -> Vec<String> {
-        let Some(tier) = self.cfg.batch_suites() else { return vec![] };
+    fn suites_for(
+        &self,
+        def: &mason_definition::Definition,
+        batch: &Batch,
+        a: &Assembled,
+    ) -> Vec<String> {
+        let Some(tier) = self.cfg.batch_suites() else {
+            return vec![];
+        };
         let paths = batch.union_diff(a);
         match def.testing.impact.select(&paths, tier) {
             Selection::All => tier.to_vec(),
@@ -754,11 +930,21 @@ impl Runner {
 
     fn legacy_cmd(&self, def: &mason_definition::Definition) -> Option<String> {
         use mason_definition::model::StepType;
-        def.steps.iter().find(|s| s.kind == StepType::Test).and_then(|s| {
-            mason_definition::layers::resolve(def, s, &self.d.overlay(self.pid), &[], &[], now_ms())
+        def.steps
+            .iter()
+            .find(|s| s.kind == StepType::Test)
+            .and_then(|s| {
+                mason_definition::layers::resolve(
+                    def,
+                    s,
+                    &self.d.overlay(self.pid),
+                    &[],
+                    &[],
+                    now_ms(),
+                )
                 .ok()
                 .and_then(|r| r.command.map(|a| a.value))
-        })
+            })
     }
 
     fn verify(
@@ -771,13 +957,33 @@ impl Runner {
         prefix: &str,
     ) -> crate::suites::OverRun {
         if suites.is_empty() {
-            return crate::suites::OverRun { green: true, failed: BTreeSet::new(), notes: vec![] };
+            return crate::suites::OverRun {
+                green: true,
+                failed: BTreeSet::new(),
+                notes: vec![],
+            };
         }
         let n = self.runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        crate::suites::run_over(&self.d, self.project(), def, suites, wt, base, log_dir, &format!("{prefix}-{n}"))
+        crate::suites::run_over(
+            &self.d,
+            self.project(),
+            def,
+            suites,
+            wt,
+            base,
+            log_dir,
+            &format!("{prefix}-{n}"),
+        )
     }
 
-    fn park(&self, parked: &mut Vec<Parked>, active: &mut Vec<BatchTask>, blamed: &[u64], batch_id: u64, vr: &crate::suites::OverRun) {
+    fn park(
+        &self,
+        parked: &mut Vec<Parked>,
+        active: &mut Vec<BatchTask>,
+        blamed: &[u64],
+        batch_id: u64,
+        vr: &crate::suites::OverRun,
+    ) {
         for id in blamed {
             parked.push(Parked {
                 task: *id,
@@ -794,28 +1000,56 @@ impl Runner {
 
     /// The post-land tier: suites on the base after it moved. Red freezes
     /// landing (only a fix passes) and files a top-priority fix task.
-    fn post_land(&self, batch_id: u64, commit: &str, def: &mason_definition::Definition, log_dir: &Path) {
+    fn post_land(
+        &self,
+        batch_id: u64,
+        commit: &str,
+        def: &mason_definition::Definition,
+        log_dir: &Path,
+    ) {
         let d = &self.d;
         let p = self.project().clone();
-        let Some(tier) = self.cfg.post_land().cloned() else { return };
+        let Some(tier) = self.cfg.post_land().cloned() else {
+            return;
+        };
         if tier.suites.is_empty() {
             return;
         }
-        let wt = self.int_wt().with_file_name(format!("{}-post{}", p.id, self.slot));
+        let wt = self
+            .int_wt()
+            .with_file_name(format!("{}-post{}", p.id, self.slot));
         let lock = d.repo_lock(self.pid);
         {
             let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
             git::remove_worktree(&p.path, &wt);
-            if git::run(&p.path, &["worktree", "add", "--detach", &wt.to_string_lossy(), commit]).is_err() {
+            if git::run(
+                &p.path,
+                &["worktree", "add", "--detach", &wt.to_string_lossy(), commit],
+            )
+            .is_err()
+            {
                 return;
             }
         }
-        let r = crate::suites::run_over(d, &p, def, &tier.suites, &wt, commit, log_dir, &format!("b{batch_id}-post"));
+        let r = crate::suites::run_over(
+            d,
+            &p,
+            def,
+            &tier.suites,
+            &wt,
+            commit,
+            log_dir,
+            &format!("b{batch_id}-post"),
+        );
         {
             let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
             git::remove_worktree(&p.path, &wt);
         }
-        let frozen = d.store.freezes().ok().and_then(|v| v.into_iter().find(|f| f.project == p.id));
+        let frozen = d
+            .store
+            .freezes()
+            .ok()
+            .and_then(|v| v.into_iter().find(|f| f.project == p.id));
         if r.green {
             if frozen.is_some() {
                 let _ = d.store.clear_freeze(&p.id);
@@ -828,7 +1062,10 @@ impl Runner {
             let fix = d
                 .emit(EventKind::TaskFiled {
                     project: self.pid,
-                    title: format!("Fix the base: {} red after batch #{batch_id}", r.failed.iter().cloned().collect::<Vec<_>>().join(", ")),
+                    title: format!(
+                        "Fix the base: {} red after batch #{batch_id}",
+                        r.failed.iter().cloned().collect::<Vec<_>>().join(", ")
+                    ),
                     body: format!("{reason}.\n\n{}", r.notes.join("\n")),
                     priority: Priority::Urgent,
                     trust: TrustSource::Owner,

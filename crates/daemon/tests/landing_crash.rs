@@ -40,7 +40,8 @@ min_tests = 1
 level = "unit"
 "#;
 
-const LANDING: &str = "window = \"4s\"\nmax_size = 2\n[[tier]]\nname = \"batch\"\nsuites = [\"integration\"]\n";
+const LANDING: &str =
+    "window = \"4s\"\nmax_size = 2\n[[tier]]\nname = \"batch\"\nsuites = [\"integration\"]\n";
 
 /// Task 0 adds a clean file; task 1 (its directory is named `1`) adds the red marker too.
 fn script() -> Value {
@@ -53,7 +54,11 @@ fn script() -> Value {
 fn run(point: &str) -> Result<(), String> {
     let s = Scratch::new("true", script());
     s.push_files(
-        &[(".mason/mason.toml", DEF), (".mason/landing.toml", LANDING), ("checks.sh", CHECKS)],
+        &[
+            (".mason/mason.toml", DEF),
+            (".mason/landing.toml", LANDING),
+            ("checks.sh", CHECKS),
+        ],
         "setup",
     );
     sh(&s.repo, &["fetch", "-q", "origin"]);
@@ -94,14 +99,16 @@ fn run(point: &str) -> Result<(), String> {
         std::thread::sleep(Duration::from_millis(50));
     }
     // A crash before a task was recorded: the client files it again.
-    let listed: Value = serde_json::from_str(&s.mason_ok(&["task", "list", "--json"])).map_err(|e| e.to_string())?;
+    let listed: Value = serde_json::from_str(&s.mason_ok(&["task", "list", "--json"]))
+        .map_err(|e| e.to_string())?;
     let have = listed["tasks"].as_array().map_or(0, Vec::len);
     for t in ["clean", "culprit"].iter().skip(have) {
         s.mason_ok(&["task", "add", t, "--body", "Do it.", "--explored"]);
     }
     let end = Instant::now() + Duration::from_secs(150);
     loop {
-        let v: Value = serde_json::from_slice(&s.mason(&["task", "show", "0", "--json"]).stdout).unwrap_or(Value::Null);
+        let v: Value = serde_json::from_slice(&s.mason(&["task", "show", "0", "--json"]).stdout)
+            .unwrap_or(Value::Null);
         if v["state"].as_str() == Some("landed") {
             break;
         }
@@ -114,7 +121,8 @@ fn run(point: &str) -> Result<(), String> {
     // or waiting; what matters is that it never landed.
     let end = Instant::now() + Duration::from_secs(60);
     loop {
-        let v: Value = serde_json::from_slice(&s.mason(&["task", "show", "1", "--json"]).stdout).unwrap_or(Value::Null);
+        let v: Value = serde_json::from_slice(&s.mason(&["task", "show", "1", "--json"]).stdout)
+            .unwrap_or(Value::Null);
         if v["state"].as_str() != Some("landing") && v["state"].as_str() != Some("testing") {
             if v["state"].as_str() == Some("landed") {
                 return Err("the culprit landed".into());
@@ -126,21 +134,34 @@ fn run(point: &str) -> Result<(), String> {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+    // The command line shows the batches: the clean task landed, the culprit was parked.
+    let shown = s.mason_ok(&["landing"]);
+    if !shown.contains("batch #") || !shown.contains("landed [0]") || !shown.contains("parked [1]")
+    {
+        return Err(format!("`mason landing` does not show the batch:\n{shown}"));
+    }
     drop(second);
     kill_hosts(&s.data_dir);
     let log = s.origin_log();
     let clean = log.iter().filter(|m| *m == "work 0").count();
     if clean != 1 {
-        return Err(format!("the clean commit is on the remote {clean} times: {log:?}"));
+        return Err(format!(
+            "the clean commit is on the remote {clean} times: {log:?}"
+        ));
     }
     if log.iter().any(|m| m == "work 1") {
         return Err(format!("the culprit's commit reached the remote: {log:?}"));
     }
-    if sh(&s.origin, &["ls-tree", "--name-only", "main"]).lines().any(|f| f == "red.integration") {
+    if sh(&s.origin, &["ls-tree", "--name-only", "main"])
+        .lines()
+        .any(|f| f == "red.integration")
+    {
         return Err("the red marker reached the base".into());
     }
     let store = Store::open(s.data_dir.join("store.db")).map_err(|e| e.to_string())?;
-    store.verify().map_err(|e| format!("log and projections disagree: {e}"))?;
+    store
+        .verify()
+        .map_err(|e| format!("log and projections disagree: {e}"))?;
     let w = store.world().map_err(|e| e.to_string())?;
     if w.tasks[&TaskId(0)].landed != Some(LandedOutcome::Merged) {
         return Err("the clean task is not recorded as merged".into());
@@ -180,7 +201,13 @@ fn killing_the_daemon_at_each_landing_phase_of_a_batch_with_a_culprit_loses_and_
             .map(|p| (p.to_string(), sc.spawn(move || run(p))))
             .collect();
         hs.into_iter()
-            .map(|(p, h)| (p, h.join().unwrap_or_else(|_| Err("the scenario panicked".into()))))
+            .map(|(p, h)| {
+                (
+                    p,
+                    h.join()
+                        .unwrap_or_else(|_| Err("the scenario panicked".into())),
+                )
+            })
             .collect()
     });
     let failures: Vec<String> = results

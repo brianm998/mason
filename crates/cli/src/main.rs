@@ -75,6 +75,7 @@ mason: command-line client for the MASON pipeline
   mason definition check [FILE]       validate a definition (default .mason/mason.toml) and dry-run it
   mason definition dry-run [FILE] [--scenarios FILE]
   mason definition show [--project P] | reload [--project P]
+  mason landing                       batches, phases, freezes, and the landing queue
   mason config show [--project P]     every step's settings and where each came from
   mason config set <key> <value> --for 2h [--project P] [--owner O]
   mason config unset <key> [--project P] | list [--project P]
@@ -704,6 +705,50 @@ fn main() {
                 println!(
                     "  ({} answer(s) refused: not the owner's identity)",
                     r["refused_answers"]
+                );
+            }
+        }
+        "landing" => {
+            finish(&a);
+            let r = or_die(d.call("GET", "/landing", None));
+            if json_out {
+                return println!("{r:#}");
+            }
+            for p in r["projects"].as_array().into_iter().flatten() {
+                let c = &p["config"];
+                if let Some(e) = c["error"].as_str() {
+                    println!("{}: {e}", p["project"].as_str().unwrap_or("?"));
+                    continue;
+                }
+                println!(
+                    "{}: {} (window {}s, max {}, {} at once); {} queued, {} landing, queue idle {} s",
+                    p["project"].as_str().unwrap_or("?"),
+                    c["mode"].as_str().unwrap_or("?"),
+                    c["window_s"],
+                    c["max_size"],
+                    c["parallel"],
+                    p["queued"].as_array().map_or(0, Vec::len),
+                    p["running_batches"],
+                    p["queue_idle_ms"].as_u64().unwrap_or(0) / 1000
+                );
+            }
+            for f in r["freezes"].as_array().into_iter().flatten() {
+                println!(
+                    "FROZEN {}: {} (fix: task #{})",
+                    f["project"].as_str().unwrap_or("?"),
+                    f["reason"].as_str().unwrap_or(""),
+                    f["fix_task"]
+                );
+            }
+            for b in r["batches"].as_array().into_iter().flatten().take(15) {
+                println!(
+                    "batch #{:<3} {:<10} tasks [{}] landed [{}] parked [{}] {}",
+                    b["id"],
+                    b["phase"].as_str().unwrap_or("?"),
+                    b["tasks"].as_str().unwrap_or(""),
+                    b["landed"].as_str().unwrap_or(""),
+                    b["parked"].as_str().unwrap_or(""),
+                    b["note"].as_str().unwrap_or("")
                 );
             }
         }

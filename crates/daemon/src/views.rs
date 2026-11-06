@@ -537,6 +537,57 @@ impl<'a> Ctx<'a> {
     }
 
     pub fn landing(&self, project: &str) -> LandingView {
+        let in_scope = |p: &str| project.is_empty() || p == project;
+        let freezes: Vec<FreezeLine> = self
+            .d
+            .store
+            .freezes()
+            .unwrap_or_default()
+            .iter()
+            .filter(|f| in_scope(&f.project))
+            .map(|f| FreezeLine {
+                project: f.project.clone(),
+                reason: f.reason.clone(),
+                fix_task: f.fix_task.unwrap_or(0),
+                since_ms: f.since,
+            })
+            .collect();
+        let mut modes = vec![];
+        let mut idle = 0;
+        let mut running_total = 0;
+        for (pid, p) in &self.d.projects {
+            if !in_scope(&p.id) {
+                continue;
+            }
+            idle += self.d.landing().idle_ms(*pid);
+            running_total += self.d.landing().running_batches(*pid);
+            modes.push(match crate::landing::load_config(self.d, *pid) {
+                Ok(c) => {
+                    let mut s = format!("{}: {}", p.id, c.mode.name());
+                    if !c.window.is_zero() {
+                        s.push_str(&format!(", window {}s", c.window.as_secs()));
+                    }
+                    if c.max_size > 0 {
+                        s.push_str(&format!(", up to {} per batch", c.max_size));
+                    }
+                    if c.parallel > 1 {
+                        s.push_str(&format!(", {} batches at once", c.parallel));
+                    }
+                    s
+                }
+                Err(e) => e,
+            });
+        }
+        let live: std::collections::BTreeSet<u64> = self
+            .d
+            .store
+            .batches(None, 200)
+            .unwrap_or_default()
+            .iter()
+            .filter(|b| b.finished_at.is_none())
+            .map(|b| b.id)
+            .collect();
+        let ids = |s: &str| -> Vec<u64> { s.split(',').filter_map(|x| x.parse().ok()).collect() };
         LandingView {
             debts: self
                 .d
@@ -544,12 +595,18 @@ impl<'a> Ctx<'a> {
                 .debts(None, true)
                 .unwrap_or_default()
                 .iter()
-                .filter(|x| project.is_empty() || x.project == project)
+                .filter(|x| in_scope(&x.project))
                 .map(debt_line)
                 .collect(),
-            frozen: false,
-            note: "Batch landing and freezing arrive in Stage 14; tasks land directly until then."
-                .into(),
+            frozen: !freezes.is_empty(),
+            note: if !freezes.is_empty() {
+                "Landing is frozen: only the fix task lands until the post-land suites are green."
+                    .into()
+            } else if running_total > 0 {
+                format!("{running_total} batch(es) landing now.")
+            } else {
+                String::new()
+            },
             queue: self
                 .w
                 .tasks
@@ -557,6 +614,28 @@ impl<'a> Ctx<'a> {
                 .filter(|t| t.state == State::Landing && self.matches(t, project))
                 .map(|t| self.row(t))
                 .collect(),
+            modes,
+            batches: self
+                .d
+                .store
+                .batches(None, 40)
+                .unwrap_or_default()
+                .iter()
+                .filter(|b| in_scope(&b.project))
+                .take(12)
+                .map(|b| BatchLine {
+                    id: b.id,
+                    project: b.project.clone(),
+                    phase: b.phase.clone(),
+                    tasks: ids(&b.tasks),
+                    landed: ids(&b.landed),
+                    parked: ids(&b.parked),
+                    note: b.note.clone(),
+                    running: live.contains(&b.id),
+                })
+                .collect(),
+            freezes,
+            queue_idle_ms: idle,
         }
     }
 

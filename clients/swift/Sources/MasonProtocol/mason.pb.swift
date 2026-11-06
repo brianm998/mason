@@ -1409,6 +1409,53 @@ public nonisolated struct Mason_V1_TaskDetailView: @unchecked Sendable {
   fileprivate var _storage = _StorageClass.defaultInstance
 }
 
+/// A batch the landing engine formed, and where it is.
+public nonisolated struct Mason_V1_BatchLine: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var id: UInt64 = 0
+
+  public var project: String = String()
+
+  /// forming, merged, verifying, red, promoting, landed, parked, failed, abandoned
+  public var phase: String = String()
+
+  public var tasks: [UInt64] = []
+
+  public var landed: [UInt64] = []
+
+  public var parked: [UInt64] = []
+
+  public var note: String = String()
+
+  public var running: Bool = false
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// A project whose post-land tier went red: only the fix may land.
+public nonisolated struct Mason_V1_FreezeLine: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var project: String = String()
+
+  public var reason: String = String()
+
+  public var fixTask: UInt64 = 0
+
+  public var sinceMs: UInt64 = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
 public nonisolated struct Mason_V1_LandingView: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -1421,6 +1468,16 @@ public nonisolated struct Mason_V1_LandingView: Sendable {
   public var note: String = String()
 
   public var queue: [Mason_V1_TaskRow] = []
+
+  /// How each project lands, in words: mode, window, size, batches at once.
+  public var modes: [String] = []
+
+  public var batches: [Mason_V1_BatchLine] = []
+
+  public var freezes: [Mason_V1_FreezeLine] = []
+
+  /// Milliseconds tasks waited while no batch was running.
+  public var queueIdleMs: UInt64 = 0
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -4032,9 +4089,119 @@ nonisolated extension Mason_V1_TaskDetailView: SwiftProtobuf.Message, SwiftProto
   }
 }
 
+nonisolated extension Mason_V1_BatchLine: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".BatchLine"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{1}project\0\u{1}phase\0\u{1}tasks\0\u{1}landed\0\u{1}parked\0\u{1}note\0\u{1}running\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularUInt64Field(value: &self.id) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.project) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.phase) }()
+      case 4: try { try decoder.decodeRepeatedUInt64Field(value: &self.tasks) }()
+      case 5: try { try decoder.decodeRepeatedUInt64Field(value: &self.landed) }()
+      case 6: try { try decoder.decodeRepeatedUInt64Field(value: &self.parked) }()
+      case 7: try { try decoder.decodeSingularStringField(value: &self.note) }()
+      case 8: try { try decoder.decodeSingularBoolField(value: &self.running) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if self.id != 0 {
+      try visitor.visitSingularUInt64Field(value: self.id, fieldNumber: 1)
+    }
+    if !self.project.isEmpty {
+      try visitor.visitSingularStringField(value: self.project, fieldNumber: 2)
+    }
+    if !self.phase.isEmpty {
+      try visitor.visitSingularStringField(value: self.phase, fieldNumber: 3)
+    }
+    if !self.tasks.isEmpty {
+      try visitor.visitPackedUInt64Field(value: self.tasks, fieldNumber: 4)
+    }
+    if !self.landed.isEmpty {
+      try visitor.visitPackedUInt64Field(value: self.landed, fieldNumber: 5)
+    }
+    if !self.parked.isEmpty {
+      try visitor.visitPackedUInt64Field(value: self.parked, fieldNumber: 6)
+    }
+    if !self.note.isEmpty {
+      try visitor.visitSingularStringField(value: self.note, fieldNumber: 7)
+    }
+    if self.running != false {
+      try visitor.visitSingularBoolField(value: self.running, fieldNumber: 8)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Mason_V1_BatchLine, rhs: Mason_V1_BatchLine) -> Bool {
+    if lhs.id != rhs.id {return false}
+    if lhs.project != rhs.project {return false}
+    if lhs.phase != rhs.phase {return false}
+    if lhs.tasks != rhs.tasks {return false}
+    if lhs.landed != rhs.landed {return false}
+    if lhs.parked != rhs.parked {return false}
+    if lhs.note != rhs.note {return false}
+    if lhs.running != rhs.running {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Mason_V1_FreezeLine: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".FreezeLine"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}project\0\u{1}reason\0\u{3}fix_task\0\u{3}since_ms\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.project) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.reason) }()
+      case 3: try { try decoder.decodeSingularUInt64Field(value: &self.fixTask) }()
+      case 4: try { try decoder.decodeSingularUInt64Field(value: &self.sinceMs) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.project.isEmpty {
+      try visitor.visitSingularStringField(value: self.project, fieldNumber: 1)
+    }
+    if !self.reason.isEmpty {
+      try visitor.visitSingularStringField(value: self.reason, fieldNumber: 2)
+    }
+    if self.fixTask != 0 {
+      try visitor.visitSingularUInt64Field(value: self.fixTask, fieldNumber: 3)
+    }
+    if self.sinceMs != 0 {
+      try visitor.visitSingularUInt64Field(value: self.sinceMs, fieldNumber: 4)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Mason_V1_FreezeLine, rhs: Mason_V1_FreezeLine) -> Bool {
+    if lhs.project != rhs.project {return false}
+    if lhs.reason != rhs.reason {return false}
+    if lhs.fixTask != rhs.fixTask {return false}
+    if lhs.sinceMs != rhs.sinceMs {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
 nonisolated extension Mason_V1_LandingView: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".LandingView"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}debts\0\u{1}frozen\0\u{1}note\0\u{1}queue\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}debts\0\u{1}frozen\0\u{1}note\0\u{1}queue\0\u{1}modes\0\u{1}batches\0\u{1}freezes\0\u{3}queue_idle_ms\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -4046,6 +4213,10 @@ nonisolated extension Mason_V1_LandingView: SwiftProtobuf.Message, SwiftProtobuf
       case 2: try { try decoder.decodeSingularBoolField(value: &self.frozen) }()
       case 3: try { try decoder.decodeSingularStringField(value: &self.note) }()
       case 4: try { try decoder.decodeRepeatedMessageField(value: &self.queue) }()
+      case 5: try { try decoder.decodeRepeatedStringField(value: &self.modes) }()
+      case 6: try { try decoder.decodeRepeatedMessageField(value: &self.batches) }()
+      case 7: try { try decoder.decodeRepeatedMessageField(value: &self.freezes) }()
+      case 8: try { try decoder.decodeSingularUInt64Field(value: &self.queueIdleMs) }()
       default: break
       }
     }
@@ -4064,6 +4235,18 @@ nonisolated extension Mason_V1_LandingView: SwiftProtobuf.Message, SwiftProtobuf
     if !self.queue.isEmpty {
       try visitor.visitRepeatedMessageField(value: self.queue, fieldNumber: 4)
     }
+    if !self.modes.isEmpty {
+      try visitor.visitRepeatedStringField(value: self.modes, fieldNumber: 5)
+    }
+    if !self.batches.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.batches, fieldNumber: 6)
+    }
+    if !self.freezes.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.freezes, fieldNumber: 7)
+    }
+    if self.queueIdleMs != 0 {
+      try visitor.visitSingularUInt64Field(value: self.queueIdleMs, fieldNumber: 8)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -4072,6 +4255,10 @@ nonisolated extension Mason_V1_LandingView: SwiftProtobuf.Message, SwiftProtobuf
     if lhs.frozen != rhs.frozen {return false}
     if lhs.note != rhs.note {return false}
     if lhs.queue != rhs.queue {return false}
+    if lhs.modes != rhs.modes {return false}
+    if lhs.batches != rhs.batches {return false}
+    if lhs.freezes != rhs.freezes {return false}
+    if lhs.queueIdleMs != rhs.queueIdleMs {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

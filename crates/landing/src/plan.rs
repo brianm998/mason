@@ -27,7 +27,10 @@ pub struct Footprint {
 }
 
 impl Footprint {
-    pub fn new<'a>(files: impl IntoIterator<Item = &'a str>, suites: impl IntoIterator<Item = &'a str>) -> Self {
+    pub fn new<'a>(
+        files: impl IntoIterator<Item = &'a str>,
+        suites: impl IntoIterator<Item = &'a str>,
+    ) -> Self {
         Footprint {
             files: files.into_iter().map(String::from).collect(),
             suites: suites.into_iter().map(String::from).collect(),
@@ -72,7 +75,11 @@ pub fn form_batch(waiting: &[Candidate], now: u64, window: Duration, max_size: u
     }
     let mut v: Vec<&Candidate> = waiting.iter().collect();
     v.sort_by_key(|c| (c.rank, c.id));
-    let take = if max_size == 0 { v.len() } else { max_size.min(v.len()) };
+    let take = if max_size == 0 {
+        v.len()
+    } else {
+        max_size.min(v.len())
+    };
     Formation::Form(v[..take].iter().map(|c| c.id).collect())
 }
 
@@ -136,9 +143,9 @@ pub fn needs_reverify(
     batch: &Footprint,
     impacts: &dyn Fn(&str) -> Vec<String>,
 ) -> bool {
-    moved.iter().any(|p| {
-        batch.files.contains(p) || impacts(p).iter().any(|s| batch.suites.contains(s))
-    })
+    moved
+        .iter()
+        .any(|p| batch.files.contains(p) || impacts(p).iter().any(|s| batch.suites.contains(s)))
 }
 
 #[cfg(test)]
@@ -163,14 +170,20 @@ mod tests {
     #[test]
     fn a_zero_window_goes_at_once_in_rank_order() {
         let w = [cand(3, 2, 10), cand(1, 5, 10), cand(2, 2, 10)];
-        assert_eq!(form_batch(&w, 10, Duration::ZERO, 0), Formation::Form(vec![2, 3, 1]));
+        assert_eq!(
+            form_batch(&w, 10, Duration::ZERO, 0),
+            Formation::Form(vec![2, 3, 1])
+        );
     }
 
     #[test]
     fn the_window_runs_from_the_oldest_task() {
         let w = [cand(1, 1, 100), cand(2, 1, 130)];
         let win = Duration::from_secs(60);
-        assert_eq!(form_batch(&w, 120, win, 0), Formation::Wait(Duration::from_secs(40)));
+        assert_eq!(
+            form_batch(&w, 120, win, 0),
+            Formation::Wait(Duration::from_secs(40))
+        );
         assert_eq!(form_batch(&w, 160, win, 0), Formation::Form(vec![1, 2]));
     }
 
@@ -180,7 +193,10 @@ mod tests {
         let win = Duration::from_secs(600);
         assert_eq!(form_batch(&w, 100, win, 2), Formation::Form(vec![2, 3]));
         // Not full yet: wait.
-        assert!(matches!(form_batch(&w[..1], 100, win, 2), Formation::Wait(_)));
+        assert!(matches!(
+            form_batch(&w[..1], 100, win, 2),
+            Formation::Wait(_)
+        ));
     }
 
     #[test]
@@ -189,9 +205,9 @@ mod tests {
         let same_file = Footprint::new(["src/a.rs"], []);
         let same_suite = Footprint::new(["b.rs"], ["unit"]);
         let apart = Footprint::new(["docs/x.md"], ["docs"]);
-        assert!(!may_run_alongside(&[a.clone()], &same_file, 4));
-        assert!(!may_run_alongside(&[a.clone()], &same_suite, 4));
-        assert!(may_run_alongside(&[a.clone()], &apart, 4));
+        assert!(!may_run_alongside(std::slice::from_ref(&a), &same_file, 4));
+        assert!(!may_run_alongside(std::slice::from_ref(&a), &same_suite, 4));
+        assert!(may_run_alongside(std::slice::from_ref(&a), &apart, 4));
         // The cap holds even for disjoint batches.
         assert!(!may_run_alongside(&[a], &apart, 1));
     }
@@ -204,7 +220,10 @@ mod tests {
             Footprint::new([], ["unit", "docs"]),
         );
         let failed: BTreeSet<String> = ["unit".to_string()].into();
-        assert_eq!(blame_by_impact(&failed, &[(1, &a), (2, &b), (3, &c)]), vec![1, 3]);
+        assert_eq!(
+            blame_by_impact(&failed, &[(1, &a), (2, &b), (3, &c)]),
+            vec![1, 3]
+        );
         let none: BTreeSet<String> = ["e2e".to_string()].into();
         assert!(blame_by_impact(&none, &[(1, &a)]).is_empty());
     }

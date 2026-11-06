@@ -102,9 +102,14 @@ impl Rung {
     }
 
     pub fn from_name(s: &str) -> Option<Rung> {
-        [Rung::RerunFailed, Rung::BlameByImpact, Rung::Bisect, Rung::Ask]
-            .into_iter()
-            .find(|r| r.name() == s)
+        [
+            Rung::RerunFailed,
+            Rung::BlameByImpact,
+            Rung::Bisect,
+            Rung::Ask,
+        ]
+        .into_iter()
+        .find(|r| r.name() == s)
     }
 }
 
@@ -148,7 +153,12 @@ impl Default for LandingConfig {
             max_size: 0,
             parallel: 1,
             tiers: vec![],
-            ladder: vec![Rung::RerunFailed, Rung::BlameByImpact, Rung::Bisect, Rung::Ask],
+            ladder: vec![
+                Rung::RerunFailed,
+                Rung::BlameByImpact,
+                Rung::Bisect,
+                Rung::Ask,
+            ],
             resolver: None,
             max_fold: 3,
         }
@@ -253,10 +263,14 @@ pub fn parse(text: &str) -> Result<LandingConfig, Vec<String>> {
                                 "name" => tier.name = tv.as_str().unwrap_or_default().to_string(),
                                 "suites" => match tv.as_array() {
                                     Some(a) => {
-                                        tier.suites =
-                                            a.iter().filter_map(|x| x.as_str().map(String::from)).collect()
+                                        tier.suites = a
+                                            .iter()
+                                            .filter_map(|x| x.as_str().map(String::from))
+                                            .collect()
                                     }
-                                    None => p.push(format!("tier[{i}].suites: must be a list of suite names")),
+                                    None => p.push(format!(
+                                        "tier[{i}].suites: must be a list of suite names"
+                                    )),
                                 },
                                 "ci" => tier.ci = tv.as_str().map(String::from),
                                 "on_red" => tier.on_red = tv.as_str().map(String::from),
@@ -268,7 +282,10 @@ pub fn parse(text: &str) -> Result<LandingConfig, Vec<String>> {
                         }
                         if let Some(r) = &tier.on_red {
                             if r != "freeze" {
-                                p.push(format!("tier `{}`.on_red: only \"freeze\" is known, not {r:?}", tier.name));
+                                p.push(format!(
+                                    "tier `{}`.on_red: only \"freeze\" is known, not {r:?}",
+                                    tier.name
+                                ));
                             }
                         }
                         c.tiers.push(tier);
@@ -295,7 +312,9 @@ pub fn parse(text: &str) -> Result<LandingConfig, Vec<String>> {
                 None => p.push("on_red: only `ladder` is known".into()),
             },
             other => {
-                let close = TOP.iter().find(|t| t.starts_with(&other[..other.len().min(2)]));
+                let close = TOP
+                    .iter()
+                    .find(|t| t.starts_with(&other[..other.len().min(2)]));
                 p.push(format!(
                     "unknown key `{other}`{}",
                     close.map_or(String::new(), |c| format!("; did you mean `{c}`?"))
@@ -394,9 +413,14 @@ ladder = ["rerun-failed", "blame-by-impact", "bisect", "ask"]
 
     #[test]
     fn the_non_ci_modes_refuse_a_tier_that_names_ci_and_point_to_the_ci_version() {
-        let mk = |mode: &str| format!("mode = \"{mode}\"\n[[tier]]\nname = \"batch\"\nsuites = [\"x\"]\nci = \"github-actions\"\n");
+        let mk = |mode: &str| {
+            format!("mode = \"{mode}\"\n[[tier]]\nname = \"batch\"\nsuites = [\"x\"]\nci = \"github-actions\"\n")
+        };
         let e = parse(&mk("direct")).unwrap_err();
-        assert!(e[0].contains("names ci") && e[0].contains("use `direct-ci`"), "{e:?}");
+        assert!(
+            e[0].contains("names ci") && e[0].contains("use `direct-ci`"),
+            "{e:?}"
+        );
         let e = parse(&mk("local-only")).unwrap_err();
         assert!(e[0].contains("use `local-only-ci`"), "{e:?}");
         // The CI modes accept it (and do not run yet).
@@ -406,7 +430,13 @@ ladder = ["rerun-failed", "blame-by-impact", "bisect", "ask"]
 
     #[test]
     fn modes_beyond_this_stage_parse_but_do_not_run() {
-        for m in ["direct-ci", "local-only-ci", "pr-each", "pr-batch", "host-queue"] {
+        for m in [
+            "direct-ci",
+            "local-only-ci",
+            "pr-each",
+            "pr-batch",
+            "host-queue",
+        ] {
             let c = parse(&format!("mode = \"{m}\"")).unwrap();
             assert!(check_runnable(&c).unwrap_err().contains(m), "{m}");
         }
@@ -424,15 +454,27 @@ ladder = ["rerun-failed", "blame-by-impact", "bisect", "ask"]
             ("max_size = -1", "max_size:"),
             ("parallel = 0", "parallel:"),
             ("base = \"a b\"", "base:"),
-            ("modee = \"direct\"", "unknown key `modee`; did you mean `mode`?"),
+            (
+                "modee = \"direct\"",
+                "unknown key `modee`; did you mean `mode`?",
+            ),
             ("[on_red]\nladder = [\"pray\"]", "unknown rung"),
             ("[[tier]]\nsuites = [\"a\"]", "tier[0].name: required"),
-            ("[[tier]]\nname = \"post-land\"\non_red = \"explode\"", "only \"freeze\""),
-            ("[[tier]]\nname = \"a\"\n[[tier]]\nname = \"a\"", "defined twice"),
+            (
+                "[[tier]]\nname = \"post-land\"\non_red = \"explode\"",
+                "only \"freeze\"",
+            ),
+            (
+                "[[tier]]\nname = \"a\"\n[[tier]]\nname = \"a\"",
+                "defined twice",
+            ),
             ("not toml [", "not valid TOML"),
         ] {
             let e = parse(text).unwrap_err();
-            assert!(e.iter().any(|m| m.contains(want)), "{text:?} wanted `{want}` in {e:?}");
+            assert!(
+                e.iter().any(|m| m.contains(want)),
+                "{text:?} wanted `{want}` in {e:?}"
+            );
         }
     }
 

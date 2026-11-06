@@ -408,11 +408,38 @@ message TaskDetailView {
   uint32 explore_returns = 15;
 }
 
+// A batch the landing engine formed, and where it is.
+message BatchLine {
+  uint64 id = 1;
+  string project = 2;
+  // forming, merged, verifying, red, promoting, landed, parked, failed, abandoned
+  string phase = 3;
+  repeated uint64 tasks = 4;
+  repeated uint64 landed = 5;
+  repeated uint64 parked = 6;
+  string note = 7;
+  bool running = 8;
+}
+
+// A project whose post-land tier went red: only the fix may land.
+message FreezeLine {
+  string project = 1;
+  string reason = 2;
+  uint64 fix_task = 3;
+  uint64 since_ms = 4;
+}
+
 message LandingView {
   repeated DebtLine debts = 1;
   bool frozen = 2;
   string note = 3;
   repeated TaskRow queue = 4;
+  // How each project lands, in words: mode, window, size, batches at once.
+  repeated string modes = 5;
+  repeated BatchLine batches = 6;
+  repeated FreezeLine freezes = 7;
+  // Milliseconds tasks waited while no batch was running.
+  uint64 queue_idle_ms = 8;
 }
 
 message ProviderStatus {

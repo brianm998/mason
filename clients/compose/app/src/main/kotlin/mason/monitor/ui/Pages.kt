@@ -217,10 +217,27 @@ fun LandingPage(model: MonitorModel) {
     Scrolling {
         Text("Landing", style = theme.title())
         model.landing?.let { l ->
-            Text(l.note, style = theme.body(color = theme.muted))
+            if (l.note.isNotEmpty()) Text(l.note, style = theme.body(color = if (l.frozen) theme.attention else theme.muted))
+            l.modes.forEach { Text(it, style = theme.body(color = theme.muted)) }
+            l.freezes.forEach { f ->
+                Text(
+                    "Frozen: ${f.project}: ${f.reason}${if (f.fix_task > 0) " (fix: task #${f.fix_task})" else ""}",
+                    style = theme.body(color = theme.attention),
+                )
+            }
             Section("Queue") {
                 if (l.queue.isEmpty()) Text("Nothing is landing.", style = theme.body(color = theme.muted))
                 l.queue.forEach { r -> Link("${r.key} ${r.title}") { model.go(Page.Task(r.id)) } }
+            }
+            Section("Batches") {
+                if (l.batches.isEmpty()) Text("No batch has formed yet.", style = theme.body(color = theme.muted))
+                l.batches.forEach { Text(batchText(it), style = theme.body()) }
+                if (l.queue_idle_ms > 0) {
+                    Text(
+                        "Queue idle: ${l.queue_idle_ms / 1000} s with tasks waiting and nothing landing.",
+                        style = theme.body(color = theme.muted),
+                    )
+                }
             }
             Section("Debts") {
                 if (l.debts.isEmpty()) Text("Nothing is owed.", style = theme.body(color = theme.muted))
@@ -230,6 +247,16 @@ fun LandingPage(model: MonitorModel) {
             }
         }
     }
+}
+
+/** One line per batch: where it is, who landed, who was parked, and why. */
+fun batchText(b: mason.v1.BatchLine): String {
+    fun list(v: List<Long>) = v.joinToString(" ") { "#$it" }
+    var t = "Batch #${b.id} ${b.project} ${b.phase}${if (b.running) " (running)" else ""}: ${list(b.tasks)}"
+    if (b.landed.isNotEmpty()) t += ", landed ${list(b.landed)}"
+    if (b.parked.isNotEmpty()) t += ", parked ${list(b.parked)}"
+    if (b.note.isNotEmpty()) t += ". ${b.note}"
+    return t
 }
 
 @Composable

@@ -119,7 +119,10 @@ impl Batch<'_> {
         let wt = self.int_wt;
         // A crash may have left a merge half done.
         let _ = git::run(wt, &["merge", "--abort"]);
-        git::run(wt, &["checkout", "--force", "-B", self.int_branch, &base_tip])?;
+        git::run(
+            wt,
+            &["checkout", "--force", "-B", self.int_branch, &base_tip],
+        )?;
         git::run(wt, &["reset", "--hard", "--quiet", &base_tip])?;
         // Untracked files go; ignored ones (build caches) stay so builds are incremental.
         git::run(wt, &["clean", "-fd", "--quiet"])?;
@@ -182,7 +185,9 @@ impl Batch<'_> {
         if git::run(wt, &["add", "-A"]).is_err() {
             return false;
         }
-        if git::run(wt, &["diff", "--cached", "--check"]).is_err_and(|e| e.stderr.contains("conflict marker")) {
+        if git::run(wt, &["diff", "--cached", "--check"])
+            .is_err_and(|e| e.stderr.contains("conflict marker"))
+        {
             return false;
         }
         // The resolver may have committed itself (MERGE_HEAD gone) or left it to us.

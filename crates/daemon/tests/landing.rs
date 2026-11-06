@@ -85,7 +85,15 @@ impl W {
         sh(&self.s.repo, &["fetch", "-q", "origin"]);
         sh(
             &self.s.repo,
-            &["worktree", "add", "-q", "-b", &br, tmp.to_str().unwrap(), "origin/main"],
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                &br,
+                tmp.to_str().unwrap(),
+                "origin/main",
+            ],
         );
         for (p, body) in files {
             let f = tmp.join(p);
@@ -93,8 +101,22 @@ impl W {
             std::fs::write(f, body).unwrap();
         }
         sh(&tmp, &["add", "-A"]);
-        sh(&tmp, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", title]);
-        sh(&self.s.repo, &["worktree", "remove", "--force", tmp.to_str().unwrap()]);
+        sh(
+            &tmp,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-qm",
+                title,
+            ],
+        );
+        sh(
+            &self.s.repo,
+            &["worktree", "remove", "--force", tmp.to_str().unwrap()],
+        );
         let def = self.d.current_def(pid);
         self.d
             .emit(EventKind::Admitted {
@@ -152,7 +174,10 @@ fn a_batch_of_five_lands_three_ejects_the_conflict_and_parks_the_culprit() {
     let r5 = w.sent_back(t5).unwrap();
     assert!(r5.contains("red") && r5.contains("integration"), "{r5}");
     let r4 = w.sent_back(t4).unwrap();
-    assert!(r4.contains("conflicts") && r4.contains("shared.txt"), "{r4}");
+    assert!(
+        r4.contains("conflicts") && r4.contains("shared.txt"),
+        "{r4}"
+    );
     for t in [t1, t2, t3] {
         assert!(w.sent_back(t).is_none(), "task {t} must not be parked");
     }
@@ -162,12 +187,21 @@ fn a_batch_of_five_lands_three_ejects_the_conflict_and_parks_the_culprit() {
     assert!(!w.on_main("red.integration"));
     // One batch, recorded with who landed and who was parked.
     let rows = w.d.store.batches(Some("scratch"), 10).unwrap();
-    let b = rows.iter().find(|b| b.phase == "landed").expect("a landed batch");
+    let b = rows
+        .iter()
+        .find(|b| b.phase == "landed")
+        .expect("a landed batch");
     assert_eq!(b.landed, format!("{},{},{}", t1.0, t2.0, t3.0));
     assert_eq!(b.parked, format!("{},{}", t4.0, t5.0));
     // The integration branch is gone; the owner's checkout was not touched.
-    assert!(!git::branch_exists(&w.s.repo, &format!("mason/int/scratch/b{}", b.id)));
-    assert_eq!(sh(&w.s.repo, &["rev-parse", "--abbrev-ref", "HEAD"]), "owner-work");
+    assert!(!git::branch_exists(
+        &w.s.repo,
+        &format!("mason/int/scratch/b{}", b.id)
+    ));
+    assert_eq!(
+        sh(&w.s.repo, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "owner-work"
+    );
     w.d.store.verify().unwrap();
 }
 
@@ -181,7 +215,9 @@ fn the_red_ladder_blames_by_impact_before_it_bisects() {
     let t1 = w.task("bee", &[("b/ok.txt", "1")]);
     let t2 = w.task("ay", &[("a/red.alpha", "x")]);
     wait_for("the innocent task to land", 90, || w.landed(t1));
-    wait_for("the culprit to be sent back", 60, || w.sent_back(t2).is_some());
+    wait_for("the culprit to be sent back", 60, || {
+        w.sent_back(t2).is_some()
+    });
     assert!(w.sent_back(t2).unwrap().contains("alpha"));
     assert!(w.on_main("b/ok.txt") && !w.on_main("a/red.alpha"));
 }
@@ -227,7 +263,9 @@ fn disjoint_batches_run_in_parallel_and_overlapping_ones_wait() {
     let pid = w.d.project_id_by_name("scratch").unwrap();
     // A is slow (alpha takes 3 s); B touches only beta: it runs beside A.
     let a = w.task("alpha slow", &[("a/one.txt", "1"), ("a/slow.alpha", "x")]);
-    wait_for("A's batch to start", 30, || w.d.landing().running_batches(pid) == 1);
+    wait_for("A's batch to start", 30, || {
+        w.d.landing().running_batches(pid) == 1
+    });
     let b = w.task("beta", &[("b/one.txt", "1")]);
     wait_for("B to run beside A", 30, || {
         peak.load(std::sync::atomic::Ordering::SeqCst) >= 2
@@ -264,11 +302,14 @@ fn land_now_skips_the_window_and_force_skips_verification_leaving_debts() {
     let slow = w.task("waits for the window", &[("x/slow.txt", "1")]);
     let now = w.task("now", &[("x/now.txt", "1")]);
     let forced = w.task("forced", &[("red.integration", "x")]);
-    for (t, kind) in [(now, "now"), (forced, "force")] {
-        w.d.store.set_landing_flag(t.0, kind, "owner", 1).unwrap();
-    }
+    // One after the other: a forced red on the base would (rightly) fail the
+    // verification of whatever lands after it.
+    w.d.store.set_landing_flag(now.0, "now", "owner", 1).unwrap();
     w.d.landing().wake();
-    wait_for("the marked tasks to land", 90, || w.landed(now) && w.landed(forced));
+    wait_for("land now to land", 90, || w.landed(now));
+    w.d.store.set_landing_flag(forced.0, "force", "owner", 1).unwrap();
+    w.d.landing().wake();
+    wait_for("force to land", 90, || w.landed(forced));
     assert!(!w.landed(slow), "the window is 10 minutes");
     assert!(w.on_main("x/now.txt"));
     assert!(w.on_main("red.integration"), "force skips verification");
@@ -282,7 +323,9 @@ fn a_red_post_land_tier_freezes_landing_until_the_fix_lands() {
     );
     let bad = w.task("breaks smoke", &[("red.smoke", "x")]);
     wait_for("it to land", 90, || w.landed(bad));
-    wait_for("the freeze", 60, || !w.d.store.freezes().unwrap().is_empty());
+    wait_for("the freeze", 60, || {
+        !w.d.store.freezes().unwrap().is_empty()
+    });
     let f = w.d.store.freezes().unwrap().remove(0);
     let fix = TaskId(f.fix_task.expect("a fix task was filed"));
     let wd = w.d.world().unwrap();
@@ -296,10 +339,35 @@ fn a_red_post_land_tier_freezes_landing_until_the_fix_lands() {
     let tmp = w.s.root.path().join("fixmk");
     let br = format!("mason/scratch/t{}", fix.0);
     sh(&w.s.repo, &["fetch", "-q", "origin"]);
-    sh(&w.s.repo, &["worktree", "add", "-q", "-b", &br, tmp.to_str().unwrap(), "origin/main"]);
+    sh(
+        &w.s.repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            &br,
+            tmp.to_str().unwrap(),
+            "origin/main",
+        ],
+    );
     sh(&tmp, &["rm", "-q", "red.smoke"]);
-    sh(&tmp, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "fix"]);
-    sh(&w.s.repo, &["worktree", "remove", "--force", tmp.to_str().unwrap()]);
+    sh(
+        &tmp,
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-qm",
+            "fix",
+        ],
+    );
+    sh(
+        &w.s.repo,
+        &["worktree", "remove", "--force", tmp.to_str().unwrap()],
+    );
     let pid = w.d.project_id_by_name("scratch").unwrap();
     // The fix task was queued (claims are paused): admit it straight into landing.
     let def = w.d.current_def(pid);
@@ -314,7 +382,9 @@ fn a_red_post_land_tier_freezes_landing_until_the_fix_lands() {
     })
     .unwrap();
     wait_for("the fix to land", 90, || w.landed(fix));
-    wait_for("the freeze to lift", 60, || w.d.store.freezes().unwrap().is_empty());
+    wait_for("the freeze to lift", 60, || {
+        w.d.store.freezes().unwrap().is_empty()
+    });
     wait_for("the ordinary task to land", 90, || w.landed(other));
 }
 

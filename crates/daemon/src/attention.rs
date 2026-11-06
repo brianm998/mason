@@ -354,7 +354,9 @@ pub fn metrics(d: &Daemon, since_ms: u64) -> Value {
         let n = by_kind.get(&r.kind).and_then(Value::as_u64).unwrap_or(0);
         by_kind.insert(r.kind.clone(), json!(n + 1));
     }
+    let idle: u64 = d.projects.keys().map(|p| d.landing().idle_ms(*p)).sum();
     json!({
+        "queue_idle_ms": idle,
         "interventions": counted.len(),
         "landed": landed,
         "per_landed": if landed == 0 { Value::Null } else { json!(counted.len() as f64 / landed as f64) },
