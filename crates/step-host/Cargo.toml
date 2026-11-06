@@ -9,3 +9,22 @@ publish = false
 
 [lints]
 workspace = true
+
+[dependencies]
+nix = { version = "0.31.3", features = ["process", "signal"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
+[lib]
+name = "mason_step_host"
+path = "src/lib.rs"
+
+[[bin]]
+name = "step-host"
+path = "src/bin/step-host.rs"
+
+# Stand-in for the daemon's side, used by tests and scripts/exit/s04.sh.
+[[bin]]
+name = "step-host-ctl"
+path = "src/bin/step-host-ctl.rs"
