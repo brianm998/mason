@@ -664,6 +664,9 @@ impl Runner {
             })
             .collect();
         let mut parked: Vec<Parked> = vec![];
+        // A parked task goes back to development at once, not when the batch ends: a
+        // batch may wait hours for a review it needs.
+        let mut delivered: HashSet<u64> = HashSet::new();
         let mut landed: Vec<u64> = vec![];
         let mut rounds = 0usize;
         let limit = self.cfg.max_fold as usize + ids.len() + 3;
@@ -672,6 +675,16 @@ impl Runner {
         let force = self.kind == "force";
 
         let outcome: Result<(), String> = 'outer: loop {
+            for pk in parked.iter().filter(|x| delivered.insert(x.task)) {
+                deliver(
+                    d,
+                    TaskId(pk.task),
+                    Verdict::SentBack {
+                        reason: pk.reason.clone(),
+                        feedback: pk.feedback.clone(),
+                    },
+                );
+            }
             rounds += 1;
             if rounds > limit {
                 break Err(format!("gave up after {rounds} rounds: the base kept moving or the batch kept changing"));
@@ -697,6 +710,16 @@ impl Runner {
                         e.files
                     ),
                 });
+            }
+            for pk in parked.iter().filter(|x| delivered.insert(x.task)) {
+                deliver(
+                    d,
+                    TaskId(pk.task),
+                    Verdict::SentBack {
+                        reason: pk.reason.clone(),
+                        feedback: pk.feedback.clone(),
+                    },
+                );
             }
             active.retain(|t| asm.merged.contains(&t.id));
             if !asm.resolved.is_empty() {
@@ -1010,6 +1033,9 @@ impl Runner {
         match &outcome {
             Ok(()) => {
                 for id in &all_ids {
+                    if delivered.contains(id) {
+                        continue;
+                    }
                     if landed.contains(id) {
                         let _ = d.store.clear_landing_flag(*id);
                         deliver(d, TaskId(*id), Verdict::Landed);
@@ -1027,6 +1053,9 @@ impl Runner {
             }
             Err(why) => {
                 for id in &all_ids {
+                    if delivered.contains(id) {
+                        continue;
+                    }
                     if let Some(pk) = parked.iter().find(|x| x.task == *id) {
                         deliver(
                             d,
