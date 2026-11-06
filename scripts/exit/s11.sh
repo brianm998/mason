@@ -60,27 +60,22 @@ stop_demo
 echo "== 4. the parity tooling"
 "$bin/conformance" features clients/features.toml
 # A planted imbalance: done in one client, todo in the other, no reason given.
-sed 's/^swift = "todo"/swift = "done"/;' clients/features.toml | awk '/^\[feature\.top-bar\]/{f=1} {print}' > "$root/imbalance.toml"
-python3 - "$root/imbalance.toml" <<'PY'
-import sys
-t = open(sys.argv[1]).read()
-# Keep exactly one feature done in swift only.
-parts = t.split("[feature.")
-out = [parts[0]]
-for i, p in enumerate(parts[1:]):
-    out.append("[feature." + (p if i == 0 else p.replace('swift = "done"', 'swift = "todo"')))
-open(sys.argv[1], "w").write("".join(out))
-PY
+cat > "$root/imbalance.toml" <<'TOML'
+[feature.one]
+description = "a balanced feature"
+swift = "todo"
+compose = "todo"
+
+[feature.two]
+description = "an imbalanced one"
+swift = "done"
+compose = "todo"
+TOML
 if out=$("$bin/conformance" features "$root/imbalance.toml" 2>&1); then echo "the planted imbalance passed the feature check" >&2; exit 1; fi
 echo "$out" | head -4
 echo "$out" | grep -q 'no platform_reason'
 # With a recorded platform reason it is allowed.
-python3 - "$root/imbalance.toml" <<'PY'
-import sys
-t = open(sys.argv[1]).read()
-t = t.replace('swift = "done"', 'swift = "done"\nplatform_reason = "Compose has no equivalent on this platform"', 1)
-open(sys.argv[1], "w").write(t)
-PY
+sed -i.bak 's/^swift = "done"/swift = "done"\nplatform_reason = "Compose has no equivalent on this platform"/' "$root/imbalance.toml"
 "$bin/conformance" features "$root/imbalance.toml" | tail -1
 
 "$bin/conformance" tokens --check

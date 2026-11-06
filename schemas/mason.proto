@@ -288,6 +288,8 @@ message TaskRow {
   // Running past the typical time: amber, never red.
   bool slow = 15;
   string step = 16;
+  // The task's text, for search (the sidebar search can match the body).
+  string body = 17;
 }
 
 message StateCount {
@@ -398,6 +400,12 @@ message TaskDetailView {
   string definition = 10;
   string failure = 11;
   string body = 12;
+  // How the task started and why exploring was or was not skipped, in words.
+  string route = 13;
+  // Where it started: the step name.
+  string started_at = 14;
+  // Times the developing agent sent it back to exploring, at no cost.
+  uint32 explore_returns = 15;
 }
 
 message LandingView {

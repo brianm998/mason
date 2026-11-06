@@ -54,3 +54,14 @@ jobs:
         env:
           # The workspace suite just ran; exit scripts skip re-running it.
           MASON_TESTS_ALREADY_RAN: "1"
+          # The Swift monitor has a job of its own (below); this one is the Rust job.
+          MASON_SKIP_SWIFT: "1"
+
+  # The macOS monitor: builds, its tests, and the conformance run against
+  # `masond --demo` (no window is opened on the runner).
+  monitor-swift:
+    runs-on: macos-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - run: MASON_NO_GUI=1 bash scripts/exit/s12.sh

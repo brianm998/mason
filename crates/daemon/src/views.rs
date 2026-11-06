@@ -272,6 +272,7 @@ impl<'a> Ctx<'a> {
             // Past the typical time is amber, never red: slow is not broken.
             slow: typical.is_some_and(|(_, hi)| t.state.is_step() && in_state > hi),
             step: t.step.clone(),
+            body: t.body.chars().take(2000).collect(),
         }
     }
 
@@ -513,6 +514,25 @@ impl<'a> Ctx<'a> {
             definition: t.def.clone(),
             failure: t.failure.clone().unwrap_or_default(),
             body: t.body.clone(),
+            route: match t.route {
+                None => String::new(),
+                Some(Route::Explore) => "explored first".into(),
+                Some(Route::Flag) => "skipped exploring: filed as already explored".into(),
+                Some(Route::Clarity) => "skipped exploring: the clarity check passed".into(),
+                Some(Route::Classifier) => {
+                    "skipped exploring: the project's classifier said it was clear".into()
+                }
+                Some(Route::ExploreAnyway) => "explored, at the owner's request".into(),
+            },
+            started_at: self
+                .w
+                .step_runs
+                .values()
+                .filter(|r| r.task == t.id)
+                .min_by_key(|r| r.id)
+                .map(|r| r.name.clone())
+                .unwrap_or_default(),
+            explore_returns: t.explore_returns,
         })
     }
 

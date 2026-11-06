@@ -1,1 +1,6 @@
 target/
+
+# The macOS monitor
+clients/swift/.build/
+clients/swift/.swiftpm/
+/build/
