@@ -27,7 +27,6 @@ use mason_definition::graph::{after, Outcome, Transition};
 use mason_definition::layers::{resolve, Resolved, RuntimeOverride};
 use mason_definition::validate::contract_kind;
 use mason_definition::{Definition, Step, StepType};
-use mason_landing::direct::{DirectLanding, LandError};
 use mason_landing::git::{self, CatchUp};
 use mason_step_host::client::{collect_to_file, ClientError, HostClient};
 use mason_step_host::launcher::{spawn_host, SpawnOptions};
@@ -938,44 +937,12 @@ fn land_job(c: &Ctx) {
     if let Err(why) = prepare_worktree_only(c) {
         return c.fail(why);
     }
-    let landing_wt = c.project.landing_worktree(&c.d.cfg);
-    let lock = c.d.repo_lock(c.project_id);
-    // The tests that re-verify after a moved base: the definition's test step, as layered.
-    let verify_cmd = c
-        .def
-        .steps
-        .iter()
-        .find(|s| s.kind == StepType::Test)
-        .and_then(|s| {
-            mason_definition::layers::resolve(
-                &c.def,
-                s,
-                &c.d.overlay(c.project_id),
-                &[],
-                &[],
-                now_ms(),
-            )
-            .ok()
-            .and_then(|r| r.command.map(|a| a.value))
-        });
-    let result = {
-        let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
-        let l = DirectLanding {
-            repo: &c.project.path,
-            task_wt: &c.wt,
-            task_branch: &c.branch,
-            landing_wt: &landing_wt,
-            base: &c.project.base,
-            remote: c.project.remote.as_deref(),
-        };
-        let mut verify = || match &verify_cmd {
-            Some(cmd) => run_shell(cmd, &c.wt, c.project.test_timeout).0,
-            None => true,
-        };
-        l.land(&mut verify, &|p| c.d.crash.point(p))
+    // Landing is batched per project: join the queue and wait for the verdict.
+    let Some(verdict) = crate::landing::submit_and_wait(c) else {
+        return; // approved, rejected, cancelled or retried while waiting
     };
-    match result {
-        Ok(_) => {
+    match verdict {
+        crate::landing::Verdict::Landed => {
             c.d.crash.point("land_before_event");
             c.green();
             c.d.crash.point("land_after_event");
@@ -983,22 +950,10 @@ fn land_job(c: &Ctx) {
             // The base branch just moved, perhaps including this project's own definition.
             let _ = c.d.reload_definition(c.project_id);
         }
-        Err(LandError::RedAfterFold) => c.conclude(
-            Outcome::Red,
-            "tests are red after folding in the new base".into(),
-            Some(
-                "Tests were red after folding in the latest base branch. Fix the interaction."
-                    .into(),
-            ),
-        ),
-        Err(LandError::Conflict(files)) => c.conclude(
-            Outcome::Red,
-            format!("conflict with the new base in: {}", files.trim()),
-            Some(format!(
-                "The base branch moved and now conflicts with your change in: {files}"
-            )),
-        ),
-        Err(e) => c.fail(format!("landing failed: {e}")),
+        crate::landing::Verdict::SentBack { reason, feedback } => {
+            c.conclude(Outcome::Red, reason, Some(feedback))
+        }
+        crate::landing::Verdict::Failed(why) => c.fail(format!("landing failed: {why}")),
     }
 }
 

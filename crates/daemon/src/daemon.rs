@@ -47,6 +47,7 @@ pub struct Daemon {
     /// `--demo`: plays a scripted scenario; runs no work.
     pub demo: bool,
     pub(crate) demo_pos: Mutex<usize>,
+    pub(crate) landing: crate::landing::Landing,
 }
 
 fn kind_name(k: &EventKind) -> String {
@@ -153,6 +154,7 @@ impl Daemon {
             bus: tokio::sync::broadcast::channel(1024).0,
             demo,
             demo_pos: Mutex::new(0),
+            landing: Default::default(),
             cfg,
         });
         if !demo {
@@ -168,6 +170,11 @@ impl Daemon {
     /// a debt, a limit): wake the sockets.
     pub fn poke(&self) {
         let _ = self.bus.send(self.store.last_seq().unwrap_or(0));
+    }
+
+    /// The landing queues (for the views, and for tests).
+    pub fn landing(&self) -> &crate::landing::Landing {
+        &self.landing
     }
 
     pub fn world(&self) -> Result<mason_engine::World, StoreError> {

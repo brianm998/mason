@@ -1,0 +1,830 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+//! The landing engine's coordinator (Part 9). Tasks in the landing step join a
+//! per-project queue; a coordinator thread forms batches from it by rank,
+//! window and size; each batch merges its tasks into a disposable integration
+//! branch in a persistent worktree, runs the suites once over the union diff,
+//! walks the red ladder if they fail (rerun the failures, blame by impact,
+//! bisect by halves, then ask), and promotes by fast-forward under the
+//! repository lock. Only the tasks to blame are parked; the rest land.
+//!
+//! Nothing here is the only copy of anything: a task's landing job waits for
+//! its verdict and a restarted daemon re-queues every task still in the
+//! landing step. Assembling a batch resets the integration branch and merges
+//! again, and a task already in the base is reported as landed, so a crash at
+//! any phase resumes by doing the same steps over.
+
+use crate::daemon::{now_ms, Daemon};
+use crate::jobs::{run_shell, Ctx};
+use mason_core::*;
+use mason_landing::batch::{Assembled, Batch, BatchTask, Finish};
+use mason_landing::config::{self, LandingConfig, Rung};
+use mason_landing::git;
+use mason_landing::plan::{self, Bisect, Candidate, Footprint, Formation};
+use mason_testing::Selection;
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Condvar, Mutex, Weak};
+use std::time::{Duration, Instant};
+
+/// How a task's landing ended, as its landing job sees it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Verdict {
+    /// In the base (or was already).
+    Landed,
+    /// Back to development, with the reason and what to tell the agent.
+    SentBack { reason: String, feedback: String },
+    /// Could not land and retrying will not help.
+    Failed(String),
+}
+
+#[derive(Clone, Debug)]
+struct Wait {
+    task: TaskId,
+    branch: String,
+    rank: u64,
+    ready_at: u64,
+    footprint: Footprint,
+}
+
+#[derive(Clone, Debug)]
+struct Running {
+    slot: usize,
+    footprint: Footprint,
+}
+
+#[derive(Default)]
+struct State {
+    waiting: HashMap<ProjectId, Vec<Wait>>,
+    verdicts: HashMap<TaskId, Verdict>,
+    running: HashMap<ProjectId, Vec<Running>>,
+    coordinators: HashSet<ProjectId>,
+    /// Milliseconds tasks waited with nothing running, per project.
+    idle_ms: HashMap<ProjectId, u64>,
+    /// Bumped by every wake, so a wake between a look and a wait is not lost.
+    gen: u64,
+}
+
+/// The landing queues of every project.
+#[derive(Default)]
+pub struct Landing {
+    m: Mutex<State>,
+    cv: Condvar,
+}
+
+impl Landing {
+    /// Something changed (a task flagged, a freeze lifted): look at the queue again.
+    pub fn wake(&self) {
+        self.lock().gen += 1;
+        self.cv.notify_all();
+    }
+
+    pub fn idle_ms(&self, p: ProjectId) -> u64 {
+        self.lock().idle_ms.get(&p).copied().unwrap_or(0)
+    }
+
+    pub fn queued(&self, p: ProjectId) -> Vec<TaskId> {
+        self.lock()
+            .waiting
+            .get(&p)
+            .map(|v| v.iter().map(|w| w.task).collect())
+            .unwrap_or_default()
+    }
+
+    pub fn running_batches(&self, p: ProjectId) -> usize {
+        self.lock().running.get(&p).map_or(0, Vec::len)
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, State> {
+        self.m.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+fn rank_of(p: Priority, task: TaskId) -> u64 {
+    let p = match p {
+        Priority::Urgent => 0,
+        Priority::High => 1,
+        Priority::Normal => 2,
+        Priority::Low => 3,
+    };
+    p * 1_000_000_000 + task.0
+}
+
+// ---- configuration ------------------------------------------------------------
+
+/// `.mason/landing.toml` on the base branch; absent means the defaults.
+pub fn load_config(d: &Daemon, pid: ProjectId) -> Result<LandingConfig, String> {
+    let p = d.project(pid).ok_or("no such project")?;
+    let spec = format!("{}:.mason/landing.toml", p.base_ref());
+    let text = match git::run(&p.path, &["show", &spec]) {
+        Ok(t) => t,
+        Err(_) => String::new(),
+    };
+    let c = config::parse(&text)
+        .map_err(|e| format!("{} (.mason/landing.toml): {}", p.id, e.join("; ")))?;
+    config::check_runnable(&c).map_err(|e| format!("{}: {e}", p.id))?;
+    if let Some(b) = &c.base {
+        if *b != p.base {
+            return Err(format!(
+                "{}: landing.toml says base `{b}` but the project's base is `{}`",
+                p.id, p.base
+            ));
+        }
+    }
+    Ok(c)
+}
+
+// ---- the landing job's side ------------------------------------------------------
+
+/// Join the project's queue and wait for the verdict. `None`: the task left the
+/// step (cancelled, retried) while waiting.
+pub fn submit_and_wait(c: &Ctx) -> Option<Verdict> {
+    let d = &c.d;
+    let pid = c.project_id;
+    let paths = crate::suites::changed_paths(&c.project.path, &c.project.base_ref(), &c.branch)
+        .unwrap_or_default();
+    let def = d.current_def(pid);
+    let all: Vec<String> = def.testing.suites.iter().map(|s| s.name.clone()).collect();
+    let suites: BTreeSet<String> = match def.testing.impact.select(&paths, &all) {
+        Selection::All => all.into_iter().collect(),
+        Selection::Some(v) => v.into_iter().collect(),
+    };
+    let priority = d
+        .world()
+        .ok()
+        .and_then(|w| w.tasks.get(&c.task).map(|t| t.priority))
+        .unwrap_or(Priority::Normal);
+    let wait = Wait {
+        task: c.task,
+        branch: c.branch.clone(),
+        rank: rank_of(priority, c.task),
+        ready_at: d.started.elapsed().as_secs(),
+        footprint: Footprint {
+            files: paths.into_iter().collect(),
+            suites,
+        },
+    };
+    {
+        let mut g = d.landing.lock();
+        g.verdicts.remove(&c.task);
+        let q = g.waiting.entry(pid).or_default();
+        q.retain(|w| w.task != c.task);
+        q.push(wait);
+        if g.coordinators.insert(pid) {
+            spawn_coordinator(d, pid);
+        }
+    }
+    d.landing.wake();
+    loop {
+        let mut g = d.landing.lock();
+        if let Some(v) = g.verdicts.remove(&c.task) {
+            return Some(v);
+        }
+        let (g2, _) = d
+            .landing
+            .cv
+            .wait_timeout(g, Duration::from_millis(400))
+            .unwrap_or_else(|e| e.into_inner());
+        g = g2;
+        if let Some(v) = g.verdicts.remove(&c.task) {
+            return Some(v);
+        }
+        let in_step = matches!(d.world(), Ok(w) if w.open_run(c.task) == Some(c.run));
+        if !in_step {
+            if let Some(q) = g.waiting.get_mut(&pid) {
+                q.retain(|w| w.task != c.task);
+            }
+            return None;
+        }
+    }
+}
+
+fn deliver(d: &Daemon, task: TaskId, v: Verdict) {
+    d.landing.lock().verdicts.insert(task, v);
+    d.landing.wake();
+}
+
+// ---- the coordinator ----------------------------------------------------------------
+
+fn spawn_coordinator(d: &Arc<Daemon>, pid: ProjectId) {
+    let weak: Weak<Daemon> = Arc::downgrade(d);
+    let name = d.project(pid).map_or("?".into(), |p| p.id.clone());
+    let _ = std::thread::Builder::new()
+        .name(format!("landing-{name}"))
+        .spawn(move || coordinate(weak, pid));
+}
+
+fn coordinate(weak: Weak<Daemon>, pid: ProjectId) {
+    if let Some(d) = weak.upgrade() {
+        // Batches from a daemon that died did not finish; their tasks are back in the queue.
+        if let Some(p) = d.project(pid) {
+            let _ = d.store.abandon_batches(&p.id, now_ms());
+        }
+    }
+    let mut last = Instant::now();
+    loop {
+        let Some(d) = weak.upgrade() else { return };
+        let seen = d.landing.lock().gen;
+        let (queue_len, wait) = form_and_start(&d, pid, &mut last);
+        let timeout = if queue_len == 0 {
+            Duration::from_secs(5)
+        } else {
+            wait.unwrap_or(Duration::from_secs(1))
+                .clamp(Duration::from_millis(50), Duration::from_secs(5))
+        };
+        {
+            let g = d.landing.lock();
+            if g.gen == seen {
+                let _ = d
+                    .landing
+                    .cv
+                    .wait_timeout(g, timeout)
+                    .unwrap_or_else(|e| e.into_inner());
+            }
+        }
+    }
+}
+
+/// One look at the queue: start whatever may start. Returns how many tasks
+/// wait and how long until the next batch is due.
+fn form_and_start(d: &Arc<Daemon>, pid: ProjectId, last: &mut Instant) -> (usize, Option<Duration>) {
+    let waiting: Vec<Wait> = d.landing.lock().waiting.get(&pid).cloned().unwrap_or_default();
+    let elapsed = last.elapsed();
+    *last = Instant::now();
+    {
+        let mut g = d.landing.lock();
+        if !waiting.is_empty() && g.running.get(&pid).is_none_or(Vec::is_empty) {
+            *g.idle_ms.entry(pid).or_default() += elapsed.as_millis() as u64;
+        }
+    }
+    if waiting.is_empty() {
+        return (0, None);
+    }
+    let cfg = match load_config(d, pid) {
+        Ok(c) => c,
+        Err(e) => {
+            // Nothing can land with a configuration that is refused: say so, once per look.
+            for w in &waiting {
+                take(d, pid, w.task);
+                deliver(d, w.task, Verdict::Failed(format!("landing is not configured: {e}")));
+            }
+            return (0, None);
+        }
+    };
+    let pname = d.project(pid).map(|p| p.id.clone()).unwrap_or_default();
+    let freeze = d
+        .store
+        .freezes()
+        .ok()
+        .and_then(|v| v.into_iter().find(|f| f.project == pname));
+    let flag = |t: TaskId| d.store.landing_flag(t.0).ok().flatten();
+
+    let mut normal: Vec<Candidate> = vec![];
+    let mut singles: Vec<(Wait, String)> = vec![];
+    for w in &waiting {
+        match flag(w.task).as_deref() {
+            Some(k @ ("force" | "now")) => singles.push((w.clone(), k.to_string())),
+            _ => {
+                // Frozen: only the fix passes.
+                if freeze.as_ref().is_some_and(|f| f.fix_task != Some(w.task.0)) {
+                    continue;
+                }
+                normal.push(Candidate {
+                    id: w.task.0,
+                    rank: w.rank,
+                    ready_at: w.ready_at,
+                    footprint: w.footprint.clone(),
+                });
+            }
+        }
+    }
+    for (w, kind) in singles {
+        take(d, pid, w.task);
+        start(d, pid, vec![w], cfg.clone(), &kind);
+    }
+    let now = d.started.elapsed().as_secs();
+    let mut next_wait = None;
+    let mut guard = 0;
+    loop {
+        guard += 1;
+        match plan::form_batch(&normal, now, cfg.window, cfg.max_size) {
+            Formation::Empty => break,
+            Formation::Wait(t) => {
+                next_wait = Some(t);
+                break;
+            }
+            Formation::Form(ids) => {
+                let members: Vec<Wait> = ids
+                    .iter()
+                    .filter_map(|i| waiting.iter().find(|w| w.task.0 == *i).cloned())
+                    .collect();
+                let fp = members
+                    .iter()
+                    .fold(Footprint::default(), |a, w| a.union(&w.footprint));
+                let running: Vec<Footprint> = d
+                    .landing
+                    .lock()
+                    .running
+                    .get(&pid)
+                    .map(|v| v.iter().map(|r| r.footprint.clone()).collect())
+                    .unwrap_or_default();
+                if !plan::may_run_alongside(&running, &fp, cfg.parallel) {
+                    break; // a running batch overlaps or the cap is reached: wait for it
+                }
+                for w in &members {
+                    take(d, pid, w.task);
+                }
+                normal.retain(|c| !ids.contains(&c.id));
+                start(d, pid, members, cfg.clone(), "batch");
+            }
+        }
+        if guard > 64 {
+            break;
+        }
+    }
+    let left = d.landing.lock().waiting.get(&pid).map_or(0, Vec::len);
+    (left, next_wait)
+}
+
+fn take(d: &Daemon, pid: ProjectId, task: TaskId) {
+    if let Some(q) = d.landing.lock().waiting.get_mut(&pid) {
+        q.retain(|w| w.task != task);
+    }
+}
+
+/// Start a batch on its own thread, in the lowest free integration slot.
+fn start(d: &Arc<Daemon>, pid: ProjectId, members: Vec<Wait>, cfg: LandingConfig, kind: &str) {
+    let fp = members
+        .iter()
+        .fold(Footprint::default(), |a, w| a.union(&w.footprint));
+    let slot = {
+        let mut g = d.landing.lock();
+        let r = g.running.entry(pid).or_default();
+        let slot = (0..).find(|s| r.iter().all(|x| x.slot != *s)).unwrap_or(0);
+        r.push(Running {
+            slot,
+            footprint: fp,
+        });
+        slot
+    };
+    let d2 = d.clone();
+    let kind = kind.to_string();
+    let spawned = std::thread::Builder::new()
+        .name(format!("batch-{slot}"))
+        .spawn(move || {
+            let tasks: Vec<(TaskId, String)> = members.iter().map(|w| (w.task, w.branch.clone())).collect();
+            let fps: HashMap<u64, Footprint> =
+                members.iter().map(|w| (w.task.0, w.footprint.clone())).collect();
+            Runner {
+                d: d2.clone(),
+                pid,
+                cfg,
+                slot,
+                kind,
+                fps,
+                runs: Default::default(),
+            }
+            .run(tasks);
+            if let Some(r) = d2.landing.lock().running.get_mut(&pid) {
+                r.retain(|x| x.slot != slot);
+            }
+            d2.landing.wake();
+            d2.poke();
+        });
+    if spawned.is_err() {
+        if let Some(r) = d.landing.lock().running.get_mut(&pid) {
+            r.retain(|x| x.slot != slot);
+        }
+    }
+}
+
+// ---- one batch ----------------------------------------------------------------------
+
+struct Runner {
+    d: Arc<Daemon>,
+    pid: ProjectId,
+    cfg: LandingConfig,
+    slot: usize,
+    /// `batch`, `now` or `force`.
+    kind: String,
+    fps: HashMap<u64, Footprint>,
+    /// Makes each suite run's host id its own: a host id names one run.
+    runs: std::sync::atomic::AtomicU64,
+}
+
+struct Parked {
+    task: u64,
+    reason: String,
+    feedback: String,
+}
+
+impl Runner {
+    fn project(&self) -> &crate::config::ProjectCfg {
+        self.d.project(self.pid).expect("project exists")
+    }
+
+    fn int_wt(&self) -> PathBuf {
+        self.d
+            .cfg
+            .landing_dir()
+            .join(format!("{}-b{}", self.project().id, self.slot))
+    }
+
+    fn point(&self, p: &str) {
+        let c = &self.d.crash;
+        c.point(p);
+        // The names of the single-task lander's boundaries still mean something.
+        match p {
+            "batch_merged" => {
+                c.point("land_after_fetch");
+                c.point("land_after_ff");
+            }
+            "batch_after_promote" => c.point("land_after_push"),
+            _ => {}
+        }
+    }
+
+    fn record(&self, id: u64, phase: &str, landed: &[u64], parked: &[Parked], note: &str, head: &str, done: bool) {
+        let l = landed.iter().map(u64::to_string).collect::<Vec<_>>().join(",");
+        let p = parked.iter().map(|x| x.task.to_string()).collect::<Vec<_>>().join(",");
+        let _ = self
+            .d
+            .store
+            .set_batch(id, phase, &l, &p, note, head, done, now_ms());
+        self.d.poke();
+    }
+
+    fn run(&self, tasks: Vec<(TaskId, String)>) {
+        let d = &self.d;
+        let p = self.project().clone();
+        let ids: Vec<u64> = tasks.iter().map(|t| t.0 .0).collect();
+        let listed = ids.iter().map(u64::to_string).collect::<Vec<_>>().join(",");
+        let Ok(batch_id) = d.store.add_batch(&p.id, &listed, now_ms()) else {
+            for (t, _) in &tasks {
+                deliver(d, *t, Verdict::Failed("the batch could not be recorded".into()));
+            }
+            return;
+        };
+        self.point("batch_formed");
+        let def = d.current_def(self.pid);
+        let remote = if self.cfg.mode.local_only() { None } else { p.remote.as_deref() };
+        let int_wt = self.int_wt();
+        let int_branch = format!("mason/int/{}/b{batch_id}", p.id);
+        let batch = Batch {
+            repo: &p.path,
+            int_wt: &int_wt,
+            int_branch: &int_branch,
+            base: &p.base,
+            remote,
+            resolver: self.cfg.resolver.as_deref(),
+            max_fold: self.cfg.max_fold,
+        };
+        let lock = d.repo_lock(self.pid);
+        let log_dir = d.cfg.task_dir(0).parent().map_or_else(|| PathBuf::from("."), Path::to_path_buf).join("batches").join(batch_id.to_string());
+        let point = |s: &str| self.point(s);
+
+        let mut active: Vec<BatchTask> = tasks
+            .iter()
+            .map(|(t, b)| BatchTask { id: t.0, branch: b.clone() })
+            .collect();
+        let mut parked: Vec<Parked> = vec![];
+        let mut landed: Vec<u64> = vec![];
+        let mut rounds = 0usize;
+        let limit = self.cfg.max_fold as usize + ids.len() + 3;
+        let mut note = String::new();
+        let mut commit = String::new();
+        let force = self.kind == "force";
+
+        let outcome: Result<(), String> = 'outer: loop {
+            rounds += 1;
+            if rounds > limit {
+                break Err(format!("gave up after {rounds} rounds: the base kept moving or the batch kept changing"));
+            }
+            // -- assemble
+            let asm = {
+                let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+                batch.assemble(&active, &point)
+            };
+            let asm = match asm {
+                Ok(a) => a,
+                Err(e) => break Err(format!("could not assemble the batch: {e}")),
+            };
+            for t in &asm.already {
+                landed.push(*t);
+            }
+            for e in &asm.ejected {
+                parked.push(Parked {
+                    task: e.id,
+                    reason: format!("conflicts with the rest of its batch in {}", e.files),
+                    feedback: format!(
+                        "Your change conflicts with other changes landing at the same time (batch #{batch_id}) in: {}. Bring in the latest base branch and resolve it.",
+                        e.files
+                    ),
+                });
+            }
+            active.retain(|t| asm.merged.contains(&t.id));
+            if !asm.resolved.is_empty() {
+                note = format!("conflicts in tasks {:?} were resolved", asm.resolved);
+            }
+            self.record(batch_id, "merged", &landed, &parked, &note, &asm.head, false);
+            if active.is_empty() {
+                break Ok(());
+            }
+
+            // -- verify the union once
+            let suites = if force { vec![] } else { self.suites_for(&def, &batch, &asm) };
+            self.record(batch_id, "verifying", &landed, &parked, &note, &asm.head, false);
+            let mut vr = self.verify(&def, &suites, &int_wt, &asm.base_tip, &log_dir, &format!("b{batch_id}-r{rounds}"));
+            if vr.green && !vr.notes.is_empty() {
+                note = vr.notes.join("; ");
+            }
+            if !vr.green {
+                self.point("batch_red");
+                self.record(batch_id, "red", &landed, &parked, &vr.failed.iter().cloned().collect::<Vec<_>>().join(", "), &asm.head, false);
+                // The red ladder.
+                let mut resolved = false;
+                for rung in &self.cfg.ladder {
+                    match rung {
+                        Rung::RerunFailed => {
+                            let again: Vec<String> = vr.failed.iter().cloned().collect();
+                            let r2 = self.verify(&def, &again, &int_wt, &asm.base_tip, &log_dir, &format!("b{batch_id}-r{rounds}x"));
+                            if r2.green {
+                                note = format!("{} was red once and green on a rerun", again.join(", "));
+                                vr.green = true;
+                                resolved = true;
+                                break;
+                            }
+                        }
+                        Rung::BlameByImpact => {
+                            let fps: Vec<(u64, &Footprint)> = active
+                                .iter()
+                                .filter_map(|t| self.fps.get(&t.id).map(|f| (t.id, f)))
+                                .collect();
+                            let blamed = plan::blame_by_impact(&vr.failed, &fps);
+                            if !blamed.is_empty() && (blamed.len() < active.len() || active.len() == 1) {
+                                self.park(&mut parked, &mut active, &blamed, batch_id, &vr);
+                                continue 'outer;
+                            }
+                        }
+                        Rung::Bisect => {
+                            if active.len() == 1 {
+                                let id = active[0].id;
+                                self.park(&mut parked, &mut active, &[id], batch_id, &vr);
+                                continue 'outer;
+                            }
+                            let ids: Vec<u64> = active.iter().map(|t| t.id).collect();
+                            let mut red = |subset: &[u64]| -> bool {
+                                let sub: Vec<BatchTask> = active.iter().filter(|t| subset.contains(&t.id)).cloned().collect();
+                                let a = {
+                                    let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+                                    batch.assemble(&sub, &|_| {})
+                                };
+                                let Ok(a) = a else { return false };
+                                let s = self.suites_for(&def, &batch, &a);
+                                !self.verify(&def, &s, &int_wt, &a.base_tip, &log_dir, &format!("b{batch_id}-r{rounds}-bis")).green
+                            };
+                            if let Bisect::Culprit(id) = plan::bisect(&ids, &mut red) {
+                                self.park(&mut parked, &mut active, &[id], batch_id, &vr);
+                                continue 'outer;
+                            }
+                        }
+                        Rung::Ask => break,
+                    }
+                }
+                if !resolved {
+                    // Asking: the owner is told by an alert; nothing lands, and the batch's
+                    // tasks go back with the evidence rather than waiting on a guess.
+                    let all: Vec<u64> = active.iter().map(|t| t.id).collect();
+                    let why = format!(
+                        "batch #{batch_id} is red in {} and the red cannot be pinned on one task",
+                        vr.failed.iter().cloned().collect::<Vec<_>>().join(", ")
+                    );
+                    let _ = d.store.set_batch(batch_id, "red", &landed.iter().map(u64::to_string).collect::<Vec<_>>().join(","), &listed, &why, &asm.head, false, now_ms());
+                    for t in &all {
+                        parked.push(Parked {
+                            task: *t,
+                            reason: why.clone(),
+                            feedback: format!("{why}.\n{}", vr.notes.join("\n")),
+                        });
+                    }
+                    active.clear();
+                    break Err(why);
+                }
+            }
+            self.point("batch_verified");
+
+            // -- promote
+            self.record(batch_id, "promoting", &landed, &parked, &note, &asm.head, false);
+            let union_fp = Footprint {
+                files: batch.union_diff(&asm).into_iter().collect(),
+                suites: suites.iter().cloned().collect(),
+            };
+            let impacts = |path: &str| -> Vec<String> {
+                match def.testing.impact.select(&[path.to_string()], &suites) {
+                    Selection::All => suites.clone(),
+                    Selection::Some(v) => v,
+                }
+            };
+            let legacy = self.legacy_cmd(&def);
+            let wt_for_cmd = int_wt.clone();
+            let mut reverify = |moved: &[String]| -> bool {
+                if force {
+                    return true;
+                }
+                if suites.is_empty() {
+                    return legacy
+                        .as_ref()
+                        .is_none_or(|cmd| run_shell(cmd, &wt_for_cmd, p.test_timeout).0);
+                }
+                if !plan::needs_reverify(moved, &union_fp, &impacts) {
+                    return true;
+                }
+                self.verify(&def, &suites, &wt_for_cmd, &asm.base_tip, &log_dir, &format!("b{batch_id}-r{rounds}-fold")).green
+            };
+            let fin = {
+                let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+                batch.finish(&asm, &mut reverify, &point)
+            };
+            match fin {
+                Err(e) => break Err(format!("landing failed: {e}")),
+                Ok(Err(_red)) => continue 'outer, // red after folding: assemble on the new base, blame properly
+                Ok(Ok(Finish::Conflict(_))) => continue 'outer, // the conflict shows up as an ejection
+                Ok(Ok(Finish::BaseKeptMoving)) => {
+                    break Err(format!("the base moved more than {} times while landing", self.cfg.max_fold))
+                }
+                Ok(Ok(Finish::LocalBaseCheckedOut(path))) => {
+                    break Err(format!(
+                        "the base branch is checked out at {}; use a remote, or the local-only mode",
+                        path.display()
+                    ))
+                }
+                Ok(Ok(Finish::Promoted { commit: c, .. })) => {
+                    commit = c;
+                    for t in &active {
+                        landed.push(t.id);
+                    }
+                    break Ok(());
+                }
+            }
+        };
+
+        let phase = match (&outcome, landed.is_empty(), parked.is_empty()) {
+            (Ok(()), _, true) => "landed",
+            (Ok(()), false, false) => "landed",
+            (Ok(()), true, false) => "parked",
+            (Err(_), _, false) => "parked",
+            (Err(_), _, true) => "failed",
+        };
+        let final_note = match &outcome {
+            Err(w) => w.clone(),
+            Ok(()) => note.clone(),
+        };
+        self.record(batch_id, phase, &landed, &parked, &final_note, &commit, true);
+        // The integration branch was disposable.
+        {
+            let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+            if int_wt.join(".git").exists() {
+                let _ = git::run(&int_wt, &["checkout", "--detach", "--quiet"]);
+            }
+            let _ = git::run(&p.path, &["branch", "-D", &int_branch]);
+        }
+        // -- the verdicts
+        let was_ok = outcome.is_ok();
+        let all_ids: Vec<u64> = ids.clone();
+        match &outcome {
+            Ok(()) => {
+                for id in &all_ids {
+                    if landed.contains(id) {
+                        let _ = d.store.clear_landing_flag(*id);
+                        deliver(d, TaskId(*id), Verdict::Landed);
+                    } else if let Some(pk) = parked.iter().find(|x| x.task == *id) {
+                        deliver(d, TaskId(*id), Verdict::SentBack { reason: pk.reason.clone(), feedback: pk.feedback.clone() });
+                    }
+                }
+            }
+            Err(why) => {
+                for id in &all_ids {
+                    if let Some(pk) = parked.iter().find(|x| x.task == *id) {
+                        deliver(d, TaskId(*id), Verdict::SentBack { reason: pk.reason.clone(), feedback: pk.feedback.clone() });
+                    } else if landed.contains(id) {
+                        deliver(d, TaskId(*id), Verdict::Landed);
+                    } else {
+                        deliver(d, TaskId(*id), Verdict::Failed(why.clone()));
+                    }
+                }
+            }
+        }
+        if was_ok && !commit.is_empty() {
+            self.post_land(batch_id, &commit, &def, &log_dir);
+        }
+    }
+
+    /// The suites to run over this assembly's union diff: the batch tier's,
+    /// selected by what changed.
+    fn suites_for(&self, def: &mason_definition::Definition, batch: &Batch, a: &Assembled) -> Vec<String> {
+        let Some(tier) = self.cfg.batch_suites() else { return vec![] };
+        let paths = batch.union_diff(a);
+        match def.testing.impact.select(&paths, tier) {
+            Selection::All => tier.to_vec(),
+            Selection::Some(v) => v,
+        }
+    }
+
+    fn legacy_cmd(&self, def: &mason_definition::Definition) -> Option<String> {
+        use mason_definition::model::StepType;
+        def.steps.iter().find(|s| s.kind == StepType::Test).and_then(|s| {
+            mason_definition::layers::resolve(def, s, &self.d.overlay(self.pid), &[], &[], now_ms())
+                .ok()
+                .and_then(|r| r.command.map(|a| a.value))
+        })
+    }
+
+    fn verify(
+        &self,
+        def: &mason_definition::Definition,
+        suites: &[String],
+        wt: &Path,
+        base: &str,
+        log_dir: &Path,
+        prefix: &str,
+    ) -> crate::suites::OverRun {
+        if suites.is_empty() {
+            return crate::suites::OverRun { green: true, failed: BTreeSet::new(), notes: vec![] };
+        }
+        let n = self.runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        crate::suites::run_over(&self.d, self.project(), def, suites, wt, base, log_dir, &format!("{prefix}-{n}"))
+    }
+
+    fn park(&self, parked: &mut Vec<Parked>, active: &mut Vec<BatchTask>, blamed: &[u64], batch_id: u64, vr: &crate::suites::OverRun) {
+        for id in blamed {
+            parked.push(Parked {
+                task: *id,
+                reason: format!("red in batch #{batch_id}: {}", vr.failed.iter().cloned().collect::<Vec<_>>().join(", ")),
+                feedback: format!(
+                    "Your change made {} red when it landed with the others (batch #{batch_id}).\n{}",
+                    vr.failed.iter().cloned().collect::<Vec<_>>().join(", "),
+                    vr.notes.join("\n")
+                ),
+            });
+        }
+        active.retain(|t| !blamed.contains(&t.id));
+    }
+
+    /// The post-land tier: suites on the base after it moved. Red freezes
+    /// landing (only a fix passes) and files a top-priority fix task.
+    fn post_land(&self, batch_id: u64, commit: &str, def: &mason_definition::Definition, log_dir: &Path) {
+        let d = &self.d;
+        let p = self.project().clone();
+        let Some(tier) = self.cfg.post_land().cloned() else { return };
+        if tier.suites.is_empty() {
+            return;
+        }
+        let wt = self.int_wt().with_file_name(format!("{}-post{}", p.id, self.slot));
+        let lock = d.repo_lock(self.pid);
+        {
+            let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+            git::remove_worktree(&p.path, &wt);
+            if git::run(&p.path, &["worktree", "add", "--detach", &wt.to_string_lossy(), commit]).is_err() {
+                return;
+            }
+        }
+        let r = crate::suites::run_over(d, &p, def, &tier.suites, &wt, commit, log_dir, &format!("b{batch_id}-post"));
+        {
+            let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+            git::remove_worktree(&p.path, &wt);
+        }
+        let frozen = d.store.freezes().ok().and_then(|v| v.into_iter().find(|f| f.project == p.id));
+        if r.green {
+            if frozen.is_some() {
+                let _ = d.store.clear_freeze(&p.id);
+            }
+        } else if tier.on_red.as_deref() == Some("freeze") && frozen.is_none() {
+            let reason = format!(
+                "after batch #{batch_id} landed, {} went red on the base",
+                r.failed.iter().cloned().collect::<Vec<_>>().join(", ")
+            );
+            let fix = d
+                .emit(EventKind::TaskFiled {
+                    project: self.pid,
+                    title: format!("Fix the base: {} red after batch #{batch_id}", r.failed.iter().cloned().collect::<Vec<_>>().join(", ")),
+                    body: format!("{reason}.\n\n{}", r.notes.join("\n")),
+                    priority: Priority::Urgent,
+                    trust: TrustSource::Owner,
+                    explored: false,
+                    proposed: false,
+                    blockers: vec![],
+                    not_before: None,
+                })
+                .ok()
+                .and_then(|a| {
+                    a.effects.iter().find_map(|e| match e {
+                        Effect::TaskCreated { task } => Some(task.0),
+                        _ => None,
+                    })
+                });
+            let _ = d.store.set_freeze(&p.id, &reason, fix, now_ms());
+        }
+        d.landing.wake();
+        d.poke();
+    }
+}

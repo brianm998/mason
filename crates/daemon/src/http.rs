@@ -894,8 +894,9 @@ async fn answer_task(
     }
 }
 
-/// Land now and force are recorded as an override and a debt; what they do
-/// arrives with landing control (Stage 14).
+/// Land now (its own batch, without waiting for the window) and force (no
+/// verification, past a freeze). Each is recorded as an override and leaves a
+/// debt; the landing engine reads the mark when the task is in the queue.
 async fn land_override(
     Shared(d): Shared<Arc<Daemon>>,
     Path((id, kind)): Path<(u64, String)>,
@@ -927,7 +928,12 @@ async fn land_override(
             let project = d2
                 .project(t.project)
                 .map_or(String::new(), |p| p.id.clone());
+            let flag = if kind == "force" { "force" } else { "now" };
             d2.store
+                .set_landing_flag(id, flag, &who, now_ms())
+                .map_err(store_err)?;
+            let debt = d2
+                .store
                 .add_debt(
                     id,
                     &project,
@@ -937,14 +943,17 @@ async fn land_override(
                     false,
                     now_ms(),
                 )
-                .map_err(store_err)
+                .map_err(store_err)?;
+            d2.landing.wake();
+            d2.poke();
+            Ok(debt)
         })
         .await
         .map_err(pool_err)??;
     Ok(Json(json!({
         "debt": debt,
-        "applied": false,
-        "note": "recorded as an override and a debt; landing control arrives in Stage 14, so nothing was changed",
+        "applied": true,
+        "note": "marked; the landing engine acts on it when the task is in the landing step, and the debt stays open",
     })))
 }
 

@@ -42,7 +42,7 @@ pub struct Sel {
 }
 
 /// Paths the task's branch changes against its base.
-fn changed_paths(repo: &Path, base_ref: &str, branch: &str) -> Option<Vec<String>> {
+pub(crate) fn changed_paths(repo: &Path, base_ref: &str, branch: &str) -> Option<Vec<String>> {
     let out = git::run(
         repo,
         &["diff", "--name-only", &format!("{base_ref}...{branch}")],
@@ -1242,4 +1242,88 @@ pub fn after_landing(d: &Arc<Daemon>, task: TaskId) {
                 Err(e) => tracing::warn!(debt = r.id, "deferred run: {e}"),
             });
     }
+}
+
+/// What running suites over a batch's integration branch said.
+pub struct OverRun {
+    pub green: bool,
+    /// The suites that were red.
+    pub failed: std::collections::BTreeSet<String>,
+    /// One line per suite, and the feedback of a red.
+    pub notes: Vec<String>,
+}
+
+/// Run the named suites in `wt` (a batch's integration worktree, at the tree
+/// to be landed) once, as the landing engine does over a batch's union diff.
+/// They belong to no task: nothing can skip them. Evidence is by tree, so a
+/// tree that was green is not run twice, whoever asks. `base` is where the
+/// batch started (baselines are taken there).
+pub fn run_over(
+    d: &Arc<Daemon>,
+    p: &crate::config::ProjectCfg,
+    def: &Definition,
+    suites: &[String],
+    wt: &Path,
+    base: &str,
+    log_dir: &Path,
+    id_prefix: &str,
+) -> OverRun {
+    let lock = d.repo_lock(d.project_id_by_name(&p.id).unwrap_or(ProjectId(0)));
+    let tree_hash = git::run(wt, &["rev-parse", "HEAD^{tree}"])
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    let tree = Tree {
+        tree: tree_hash,
+        base: base.to_string(),
+    };
+    let who = Who {
+        d: d.clone(),
+        task: None,
+        step: String::new(),
+        project: p.id.clone(),
+        log_dir: log_dir.to_path_buf(),
+        id_prefix: id_prefix.to_string(),
+    };
+    let _ = std::fs::create_dir_all(log_dir);
+    let mut out = OverRun {
+        green: true,
+        failed: Default::default(),
+        notes: vec![],
+    };
+    for name in suites {
+        let Some(suite) = def.testing.suite(name) else {
+            out.green = false;
+            out.failed.insert(name.clone());
+            out.notes
+                .push(format!("{name}: the landing tier names a suite the definition does not have"));
+            continue;
+        };
+        match run_suite(&who, &p.path, &lock, def, suite, wt, &tree, &mut |_| {}) {
+            SuiteRun::Done {
+                outcome:
+                    SuiteOutcome::Proven
+                    | SuiteOutcome::Reused
+                    | SuiteOutcome::Flaky
+                    | SuiteOutcome::NotSelected,
+                notes,
+                ..
+            } => out.notes.push(notes.join("; ")),
+            SuiteRun::Done { notes, .. } => {
+                out.green = false;
+                out.failed.insert(name.clone());
+                out.notes.push(notes.join("; "));
+            }
+            SuiteRun::Product { feedback } => {
+                out.green = false;
+                out.failed.insert(name.clone());
+                out.notes.push(format!("{name}: {}", tail(&feedback, 12)));
+            }
+            SuiteRun::Gone => {
+                out.green = false;
+                out.failed.insert(name.clone());
+                out.notes.push(format!("{name}: stopped"));
+            }
+        }
+    }
+    out
 }

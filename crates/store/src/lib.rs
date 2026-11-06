@@ -111,6 +111,32 @@ pub struct DebtRow {
     pub status: String,
 }
 
+/// A batch the landing engine formed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BatchRow {
+    pub id: u64,
+    pub project: String,
+    pub at: u64,
+    pub finished_at: Option<u64>,
+    /// `forming`, `merged`, `verifying`, `red`, `promoting`, `landed`, `parked`, `failed`.
+    pub phase: String,
+    /// Task ids, comma separated, in landing order.
+    pub tasks: String,
+    pub landed: String,
+    pub parked: String,
+    pub note: String,
+    pub head: String,
+}
+
+/// A project's landing freeze: its post-land tier is red, so only the fix may land.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FreezeRow {
+    pub project: String,
+    pub since: u64,
+    pub reason: String,
+    pub fix_task: Option<u64>,
+}
+
 /// A runtime configuration override. Every one has an owner and an expiry:
 /// switches expire (Part 1).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1053,6 +1079,166 @@ impl Store {
                     })
                 })?;
             rows.collect()
+        })
+    }
+
+    // ---- landing (Stage 14) ----
+
+    pub fn add_batch(&self, project: &str, tasks: &str, now_ms: u64) -> Result<u64, StoreError> {
+        let (p, t) = (project.to_string(), tasks.to_string());
+        self.write(move |c| {
+            c.execute(
+                "INSERT INTO batches(project, at, phase, tasks) VALUES (?1,?2,'forming',?3)",
+                params![p, now_ms as i64, t],
+            )?;
+            Ok(c.last_insert_rowid() as u64)
+        })
+    }
+
+    /// Move a batch to a phase and record what is known so far. `finished`
+    /// stamps the end.
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_batch(
+        &self,
+        id: u64,
+        phase: &str,
+        landed: &str,
+        parked: &str,
+        note: &str,
+        head: &str,
+        finished: bool,
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
+        let (ph, l, pk, n, h) = (
+            phase.to_string(),
+            landed.to_string(),
+            parked.to_string(),
+            note.to_string(),
+            head.to_string(),
+        );
+        self.write(move |c| {
+            c.execute(
+                "UPDATE batches SET phase=?2, landed=?3, parked=?4, note=?5, head=?6,
+                 finished_at = CASE WHEN ?7 THEN ?8 ELSE finished_at END WHERE id=?1",
+                params![id as i64, ph, l, pk, n, h, finished, now_ms as i64],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// Newest first.
+    pub fn batches(&self, project: Option<&str>, limit: u32) -> Result<Vec<BatchRow>, StoreError> {
+        let p = project.map(String::from);
+        self.read(move |c| {
+            let mut st = c.prepare(
+                "SELECT id, project, at, finished_at, phase, tasks, landed, parked, note, head
+                 FROM batches WHERE (?1 IS NULL OR project = ?1) ORDER BY id DESC LIMIT ?2",
+            )?;
+            let rows = st.query_map(params![p, limit], |r| {
+                Ok(BatchRow {
+                    id: r.get::<_, i64>(0)? as u64,
+                    project: r.get(1)?,
+                    at: r.get::<_, i64>(2)? as u64,
+                    finished_at: r.get::<_, Option<i64>>(3)?.map(|t| t as u64),
+                    phase: r.get(4)?,
+                    tasks: r.get(5)?,
+                    landed: r.get(6)?,
+                    parked: r.get(7)?,
+                    note: r.get(8)?,
+                    head: r.get(9)?,
+                })
+            })?;
+            rows.collect()
+        })
+    }
+
+    /// Batches a dead daemon left unfinished.
+    pub fn abandon_batches(&self, project: &str, now_ms: u64) -> Result<usize, StoreError> {
+        let p = project.to_string();
+        self.write(move |c| {
+            c.execute(
+                "UPDATE batches SET phase='abandoned', note='the daemon restarted; its tasks were queued again', finished_at=?2
+                 WHERE project=?1 AND finished_at IS NULL",
+                params![p, now_ms as i64],
+            )
+        })
+    }
+
+    pub fn set_freeze(
+        &self,
+        project: &str,
+        reason: &str,
+        fix_task: Option<u64>,
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
+        let (p, r) = (project.to_string(), reason.to_string());
+        self.write(move |c| {
+            c.execute(
+                "INSERT OR REPLACE INTO freezes(project, since, reason, fix_task) VALUES (?1,?2,?3,?4)",
+                params![p, now_ms as i64, r, fix_task.map(|t| t as i64)],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn clear_freeze(&self, project: &str) -> Result<bool, StoreError> {
+        let p = project.to_string();
+        self.write(move |c| {
+            c.execute("DELETE FROM freezes WHERE project = ?1", params![p])
+                .map(|n| n > 0)
+        })
+    }
+
+    pub fn freezes(&self) -> Result<Vec<FreezeRow>, StoreError> {
+        self.read(move |c| {
+            let mut st =
+                c.prepare("SELECT project, since, reason, fix_task FROM freezes ORDER BY project")?;
+            let rows = st.query_map([], |r| {
+                Ok(FreezeRow {
+                    project: r.get(0)?,
+                    since: r.get::<_, i64>(1)? as u64,
+                    reason: r.get(2)?,
+                    fix_task: r.get::<_, Option<i64>>(3)?.map(|t| t as u64),
+                })
+            })?;
+            rows.collect()
+        })
+    }
+
+    /// Mark a task `now` (its own batch, ahead of the window) or `force`
+    /// (no verification, past a freeze).
+    pub fn set_landing_flag(
+        &self,
+        task: u64,
+        kind: &str,
+        owner: &str,
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
+        let (k, o) = (kind.to_string(), owner.to_string());
+        self.write(move |c| {
+            c.execute(
+                "INSERT OR REPLACE INTO landing_flags(task, kind, at, owner) VALUES (?1,?2,?3,?4)",
+                params![task as i64, k, now_ms as i64, o],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn landing_flag(&self, task: u64) -> Result<Option<String>, StoreError> {
+        self.read(move |c| {
+            c.query_row(
+                "SELECT kind FROM landing_flags WHERE task = ?1",
+                params![task as i64],
+                |r| r.get(0),
+            )
+            .optional()
+        })
+    }
+
+    pub fn clear_landing_flag(&self, task: u64) -> Result<(), StoreError> {
+        self.write(move |c| {
+            c.execute("DELETE FROM landing_flags WHERE task = ?1", params![task as i64])
+                .map(|_| ())
         })
     }
 

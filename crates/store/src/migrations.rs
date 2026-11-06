@@ -165,6 +165,35 @@ const STEPS: &[&str] = &[
          since      INTEGER NOT NULL,
          cleared_at INTEGER
      );",
+    // 7: landing (Part 9). Batches the landing engine formed and how each
+    // ended; a freeze per project (the post-land tier went red: only fixes
+    // land until it is green again); and the owner's land-now and force marks,
+    // which a task carries into the queue. Like debts, these describe the
+    // pipeline rather than a task's progress, so they are not in the event log.
+    "CREATE TABLE batches (
+         id          INTEGER PRIMARY KEY AUTOINCREMENT,
+         project     TEXT NOT NULL,
+         at          INTEGER NOT NULL,
+         finished_at INTEGER,
+         phase       TEXT NOT NULL,
+         tasks       TEXT NOT NULL,
+         landed      TEXT NOT NULL DEFAULT '',
+         parked      TEXT NOT NULL DEFAULT '',
+         note        TEXT NOT NULL DEFAULT '',
+         head        TEXT NOT NULL DEFAULT ''
+     );
+     CREATE TABLE freezes (
+         project  TEXT PRIMARY KEY,
+         since    INTEGER NOT NULL,
+         reason   TEXT NOT NULL,
+         fix_task INTEGER
+     );
+     CREATE TABLE landing_flags (
+         task  INTEGER PRIMARY KEY,
+         kind  TEXT NOT NULL,
+         at    INTEGER NOT NULL,
+         owner TEXT NOT NULL
+     );",
 ];
 
 pub const SCHEMA_VERSION: u32 = STEPS.len() as u32;
