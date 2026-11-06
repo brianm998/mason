@@ -668,7 +668,9 @@ dependencies = [
 name = "mason-landing"
 version = "0.0.0"
 dependencies = [
+ "proptest",
  "tempfile",
+ "toml_edit",
 ]
 
 [[package]]

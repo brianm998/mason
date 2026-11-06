@@ -10,5 +10,9 @@ publish = false
 [lints]
 workspace = true
 
+[dependencies]
+toml_edit = "0.25.18"
+
 [dev-dependencies]
 tempfile = "3.27.0"
+proptest = "1"

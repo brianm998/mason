@@ -9,6 +9,7 @@
 //! a limit.
 
 use crate::git::{self, CatchUp, GitError};
+use crate::promote::{promote, PromoteError};
 use std::path::{Path, PathBuf};
 
 pub const MAX_ATTEMPTS: u32 = 3;
@@ -132,13 +133,23 @@ impl DirectLanding<'_> {
             let commit = git::rev_parse(self.landing_wt, "HEAD")?;
             point("land_after_ff");
 
-            match self.promote(&commit, &base_ref) {
+            match promote(
+                self.repo,
+                self.landing_wt,
+                self.remote,
+                self.base,
+                &base_ref,
+                &commit,
+            ) {
                 Ok(()) => {
                     point("land_after_push");
                     return Ok(Landed::Promoted { commit });
                 }
-                Err(Promote::Moved) => continue, // someone else landed first: fold and retry
-                Err(Promote::Err(e)) => return Err(e),
+                Err(PromoteError::Moved) => continue, // someone else landed first: fold and retry
+                Err(PromoteError::Git(e)) => return Err(e.into()),
+                Err(PromoteError::LocalBaseCheckedOut(p)) => {
+                    return Err(LandError::LocalBaseCheckedOut(p))
+                }
             }
         }
         Err(LandError::BaseKeptMoving)
@@ -164,52 +175,4 @@ impl DirectLanding<'_> {
         )
         .map(|_| ())
     }
-
-    fn promote(&self, commit: &str, base_ref: &str) -> Result<(), Promote> {
-        if let Some(r) = self.remote {
-            // Plain push: refused by the remote if it is not a fast-forward.
-            let dest = format!("{commit}:refs/heads/{}", self.base);
-            let before = git::rev_parse(self.landing_wt, base_ref).ok();
-            return match git::run(self.landing_wt, &["push", "--porcelain", r, &dest]) {
-                Ok(_) => Ok(()),
-                Err(e) => {
-                    // Don't read git's words: ask whether the remote's base moved
-                    // since we looked. If it did, someone else landed first.
-                    let _ = git::run(self.landing_wt, &["fetch", "--prune", r]);
-                    let after = git::rev_parse(self.landing_wt, base_ref).ok();
-                    if before.is_some() && after != before {
-                        Err(Promote::Moved)
-                    } else {
-                        Err(Promote::Err(e.into()))
-                    }
-                }
-            };
-        }
-        // No remote: move the local branch, compare-and-swap, if nobody has it checked out.
-        let old = git::rev_parse(self.repo, base_ref).map_err(|e| Promote::Err(e.into()))?;
-        let wts = git::worktrees(self.repo).map_err(|e| Promote::Err(e.into()))?;
-        if let Some((p, _)) = wts
-            .into_iter()
-            .find(|(_, b)| b.as_deref() == Some(self.base))
-        {
-            return Err(Promote::Err(LandError::LocalBaseCheckedOut(p)));
-        }
-        match git::run(
-            self.repo,
-            &[
-                "update-ref",
-                &format!("refs/heads/{}", self.base),
-                commit,
-                &old,
-            ],
-        ) {
-            Ok(_) => Ok(()),
-            Err(_) => Err(Promote::Moved),
-        }
-    }
-}
-
-enum Promote {
-    Moved,
-    Err(LandError),
 }
