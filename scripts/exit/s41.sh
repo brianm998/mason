@@ -69,9 +69,11 @@ cleanup_lines() {
   echo "trap 'rm -rf \$T || true' EXIT"
   echo 'command -v jq >/dev/null 2>&1 || true'
 }
+# MASON hands out the number of a task's exit script (s43); the agent reads it from its prompt.
+N=$(printf '%s' "$FAKE_PROMPT" | sed -n 's/.*your exit script is scripts\/exit\/s\([0-9]*\)\.sh.*/\1/p' | head -1)
 case $(basename "$PWD") in
-  0) cleanup_lines > scripts/exit/s99.sh ;;
-  1) cleanup_lines > scripts/exit/s98.sh; echo 'bash scripts/exit/s98.sh' >> scripts/run-exit-scripts.sh ;;
+  0) cleanup_lines > scripts/exit/s$N.sh ;;
+  1) cleanup_lines > scripts/exit/s$N.sh; echo "bash scripts/exit/s$N.sh" >> scripts/run-exit-scripts.sh ;;
   2) echo 'cargo test || true' >> scripts/exit/s17.sh ;;
   3) # another task lands a protected change first; this one merges that base in
      g checkout -q -b side; echo 'cargo test || true' >> scripts/exit/s16.sh
@@ -102,15 +104,17 @@ until m status >/dev/null 2>&1; do kill -0 "$daemon" || { cat "$root/masond.log"
 echo "== 1. a new exit script with cleanup lines is not held"
 m task add "new exit script" --project mason --explored --body "x" >/dev/null   # 0
 wait_state 0 landed 90
-on_origin scripts/exit/s99.sh
-echo "task #0 (a new scripts/exit/s99.sh full of kill/wait/rm/trap ... || true) landed freely"
+n0=$(m task show 0 | sed -n 's/^  number    exit \([0-9]*\):.*/\1/p')
+on_origin scripts/exit/s$n0.sh
+echo "task #0 (a new scripts/exit/s$n0.sh, its reserved number, full of kill/wait/rm/trap ... || true) landed freely"
 
 echo "== 2. a new exit script wired into the runner is held on the runner only"
 m task add "wire an exit script" --project mason --explored --body "x" >/dev/null   # 1
 wait_held 1 90
 m task show 1 | grep 'waiting for your approval'
 m self | grep 'task #1' | grep -q 'touches scripts/run-exit-scripts.sh:[0-9]'
-if m self | grep 'task #1' | grep -q 's98.sh'; then echo "the new exit script was held by its path" >&2; exit 1; fi
+n1=$(m task show 1 | sed -n 's/^  number    exit \([0-9]*\):.*/\1/p')
+if m self | grep 'task #1' | grep -q "s$n1.sh"; then echo "the new exit script was held by its path" >&2; exit 1; fi
 if m self | grep 'task #1' | grep -q 'broadened skip'; then echo "a cleanup line was flagged" >&2; exit 1; fi
 m self | grep 'task #1' | grep -q 'Decide: approve only if this change is intended'
 m self | grep 'task #1' | grep -q 'Diff: git -C .* diff .*\.\.\.'
