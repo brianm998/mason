@@ -654,6 +654,7 @@ dependencies = [
  "mason-engine",
  "mason-testing",
  "proptest",
+ "serde_json",
  "toml_edit",
 ]
 
@@ -669,6 +670,7 @@ name = "mason-landing"
 version = "0.0.0"
 dependencies = [
  "proptest",
+ "serde_json",
  "tempfile",
  "toml_edit",
 ]

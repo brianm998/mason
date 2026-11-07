@@ -40,6 +40,7 @@ pub const STEP_KEYS: &[&str] = &[
     "join",
     "policy",
     "gates",
+    "extends",
 ];
 
 fn distance(a: &str, b: &str) -> usize {
@@ -192,6 +193,11 @@ fn parse_step(name: &str, item: &Item, out: &mut Vec<Problem>) -> Option<Step> {
                     }
                 }
             }
+            // Resolved before the step is read (see `resolve_extends`): by now the step
+            // already holds what it took from the one it extends.
+            "extends" => {
+                string(v, &path, out);
+            }
             "uses" => match v.as_table_like() {
                 Some(u) => {
                     for (r, n) in u.iter() {
@@ -231,6 +237,45 @@ fn mson_cat() -> mason_core::State {
     mason_core::State::Exploring
 }
 
+/// A step that `extends` another takes every key the other has (and what that one
+/// extends) that it does not set itself. One level of inheritance at a time, followed
+/// to the end; a missing step or a loop is a problem on the `extends` key.
+fn resolve_extends(
+    steps: &dyn toml_edit::TableLike,
+    name: &str,
+    chain: &mut Vec<String>,
+) -> Result<toml_edit::Table, Problem> {
+    let path = format!("step.{name}.extends");
+    let Some(item) = steps.get(name) else {
+        return Err(Problem::new(&path, format!("`{name}` is not a step")));
+    };
+    let Some(own) = item.as_table_like() else {
+        return Err(Problem::new(format!("step.{name}"), "must be a table"));
+    };
+    let mut merged = toml_edit::Table::new();
+    if let Some(parent) = own.get("extends").and_then(|v| v.as_str()) {
+        if chain.iter().any(|c| c == parent) || parent == name {
+            return Err(Problem::new(&path, format!("`{name}` extends itself through `{parent}`")));
+        }
+        chain.push(name.to_string());
+        let p = resolve_extends(steps, parent, chain).map_err(|e| {
+            if e.path.ends_with(".extends") && e.message.contains("is not a step") {
+                Problem::new(&path, e.message)
+            } else {
+                e
+            }
+        })?;
+        chain.pop();
+        for (k, v) in p.iter() {
+            merged.insert(k, v.clone());
+        }
+    }
+    for (k, v) in own.iter() {
+        merged.insert(k, v.clone());
+    }
+    Ok(merged)
+}
+
 /// Read a definition. `Err` lists every problem found.
 pub fn parse(text: &str) -> Result<Definition, Vec<Problem>> {
     let doc: DocumentMut = text.parse().map_err(|e: toml_edit::TomlError| {
@@ -255,7 +300,19 @@ pub fn parse(text: &str) -> Result<Definition, Vec<Problem>> {
             "step" => match v.as_table_like() {
                 Some(t) => {
                     for (name, item) in t.iter() {
-                        if let Some(s) = parse_step(name, item, &mut out) {
+                        let has_parent = item.as_table_like().is_some_and(|x| x.get("extends").is_some());
+                        let resolved = if has_parent {
+                            match resolve_extends(t, name, &mut vec![]) {
+                                Ok(table) => Item::Table(table),
+                                Err(p) => {
+                                    out.push(p);
+                                    continue;
+                                }
+                            }
+                        } else {
+                            item.clone()
+                        };
+                        if let Some(s) = parse_step(name, &resolved, &mut out) {
                             steps.push(s);
                         }
                     }

@@ -9,6 +9,7 @@
 //!   loop has a bound, fan-out and joins behave, every reference exists.
 //! * [`layers`] merges the five configuration layers, remembering where each
 //!   value came from.
+//! * [`editor`] is the graphical editor's engine: operations, refusal, layout.
 //! * [`dryrun`] walks scripted tasks through a graph, through the real reducer,
 //!   with no model and no network.
 //! * [`clarity`] and [`filing`] decide whether a task may skip exploring.
@@ -17,6 +18,7 @@ pub mod builtin;
 pub mod clarity;
 pub mod dryrun;
 pub mod edit;
+pub mod editor;
 pub mod filing;
 pub mod graph;
 pub mod layers;

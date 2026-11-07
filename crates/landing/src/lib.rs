@@ -10,6 +10,7 @@
 pub mod batch;
 pub mod config;
 pub mod direct;
+pub mod edit;
 pub mod git;
 pub mod plan;
 pub mod promote;
