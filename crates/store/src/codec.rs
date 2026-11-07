@@ -627,7 +627,7 @@ mod tests {
         let mut kinds: Vec<_> = all.iter().map(|k| encode(k).0).collect();
         kinds.sort_unstable();
         kinds.dedup();
-        assert_eq!(kinds.len(), 22, "one sample per EventKind variant");
+        assert_eq!(kinds.len(), 23, "one sample per EventKind variant");
         for k in all {
             let (kind, payload) = encode(&k);
             assert!(!payload.contains('\n'), "payload is one line");
