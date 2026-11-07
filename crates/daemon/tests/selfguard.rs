@@ -185,8 +185,8 @@ fn self_tasks_are_limited_in_number_per_week_and_by_a_cooldown() {
     let pid = w.d.project_id_by_name("scratch").unwrap();
     assert!(selfguard::check_filing(&w.d, pid).is_ok());
     // Two open tasks: the third is refused with the number and the limit.
-    file_task_as(&w.d, "one", "x", true, TrustSource::Owner, true);
-    file_task_as(&w.d, "two", "x", true, TrustSource::Owner, true);
+    file_task_as(&w.d, "one", "x", true, TrustSource::Owner, false);
+    file_task_as(&w.d, "two", "x", true, TrustSource::Owner, false);
     let e = selfguard::check_filing(&w.d, pid).unwrap_err();
     assert!(
         e.contains("2 self-tasks are open") && e.contains("limit is 2"),
@@ -297,8 +297,8 @@ fn a_flood_of_agent_proposals_hits_the_weekly_cap_while_the_owner_keeps_filing()
 fn cancelling_before_any_step_frees_a_slot_and_the_owner_is_still_held_by_max_open() {
     let w = self_world("max_open = 3\nper_week = 2\n");
     let pid = w.d.project_id_by_name("scratch").unwrap();
-    let a = file_task_as(&w.d, "a", "x", false, TrustSource::OwnerAgent, true);
-    file_task_as(&w.d, "b", "x", false, TrustSource::OwnerAgent, true);
+    let a = file_task_as(&w.d, "a", "x", false, TrustSource::OwnerAgent, false);
+    file_task_as(&w.d, "b", "x", false, TrustSource::OwnerAgent, false);
     assert!(selfguard::check_filing_as(&w.d, pid, TrustSource::Outside).is_err());
     w.d.emit(EventKind::Canceled {
         task: a,
@@ -307,8 +307,8 @@ fn cancelling_before_any_step_frees_a_slot_and_the_owner_is_still_held_by_max_op
     .unwrap();
     assert!(selfguard::check_filing_as(&w.d, pid, TrustSource::Outside).is_ok());
     // Three open (b and two of the owner's): the owner is refused by max_open.
-    file_task_as(&w.d, "m1", "x", false, TrustSource::Owner, true);
-    file_task_as(&w.d, "m2", "x", false, TrustSource::Owner, true);
+    file_task_as(&w.d, "m1", "x", false, TrustSource::Owner, false);
+    file_task_as(&w.d, "m2", "x", false, TrustSource::Owner, false);
     let e = selfguard::check_filing_as(&w.d, pid, TrustSource::Owner).unwrap_err();
     assert!(e.contains("3 self-tasks are open"), "{e}");
 }
@@ -474,4 +474,72 @@ mod scan {
             "the new exit script is not held by path: {text}"
         );
     }
+}
+
+// ---- Stage 46: held tasks do not take a slot --------------------------------------------------
+
+fn file_behind(w: &W, title: &str, blockers: Vec<TaskId>) -> TaskId {
+    let pid = w.d.project_id_by_name("scratch").unwrap();
+    let a =
+        w.d.emit(EventKind::TaskFiled {
+            project: pid,
+            title: title.into(),
+            body: "x".into(),
+            priority: Priority::Normal,
+            trust: TrustSource::Owner,
+            explored: false,
+            proposed: false,
+            blockers,
+            not_before: None,
+        })
+        .unwrap();
+    a.effects
+        .iter()
+        .find_map(|e| match e {
+            Effect::TaskCreated { task } => Some(*task),
+            _ => None,
+        })
+        .unwrap()
+}
+
+#[test]
+fn ten_held_tasks_do_not_block_a_filing_but_three_counted_ones_do() {
+    let w = self_world("max_open = 3\nper_week = 100\n");
+    let pid = w.d.project_id_by_name("scratch").unwrap();
+    let cfg = w.d.project(pid).unwrap().self_cfg.clone().unwrap();
+    // A proposed task never starts, so it stays an unlanded blocker; proposed is not counted.
+    let blocker = file_task_as(&w.d, "blocker", "x", false, TrustSource::Owner, true);
+    for i in 0..10 {
+        assert!(
+            selfguard::check_filing_as(&w.d, pid, TrustSource::Owner).is_ok(),
+            "{i}"
+        );
+        file_behind(&w, &format!("h{i}"), vec![blocker]);
+    }
+    let s = selfguard::status(&w.d, pid, &cfg, mason_daemon::daemon::now_ms());
+    assert_eq!((s.open, s.held), (0, 10));
+    assert!(selfguard::check_filing_as(&w.d, pid, TrustSource::Owner).is_ok());
+    // Three counted tasks fill the slots, whatever the held ones.
+    for i in 0..3 {
+        assert!(
+            selfguard::check_filing_as(&w.d, pid, TrustSource::Owner).is_ok(),
+            "{i}"
+        );
+        file_task_as(
+            &w.d,
+            &format!("r{i}"),
+            "x",
+            false,
+            TrustSource::Owner,
+            false,
+        );
+    }
+    let e = selfguard::check_filing_as(&w.d, pid, TrustSource::Owner).unwrap_err();
+    assert!(
+        e.contains("3 self-tasks are open")
+            && e.contains("limit is 3")
+            && e.contains("10 held behind others")
+            && e.contains("not counted"),
+        "{e}"
+    );
 }

@@ -8,7 +8,7 @@
 //!   guard, budget, verdict or trust file, or weakens one anywhere (a removed
 //!   assertion, a raised limit, a broadened skip), the task waits for the owner,
 //!   and the approval is for that exact diff.
-//! - **Limits.** Open self-tasks, tasks per week and agent steps per period are
+//! - **Limits.** Open self-tasks (not those held behind a blocker, nor proposed ones), tasks per week and agent steps per period are
 //!   capped; filing past a cap is refused with the number and the limit.
 //! - **Rollback.** A rollback starts a cooldown during which no self-task may be
 //!   filed, and files one proposal (waiting for the owner) saying what failed.
@@ -207,7 +207,11 @@ pub fn approve(d: &Arc<Daemon>, task: TaskId, who: &str) -> Result<bool, (u16, S
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Status {
+    /// Tasks doing or about to do work: running, queued and claimable, paused, or waiting
+    /// on the owner. Held (blocked) and proposed tasks are not counted.
     pub open: u32,
+    /// Tasks held behind unlanded blockers: admitted, but not counted in `open` yet.
+    pub held: u32,
     pub week: u32,
     pub steps: u32,
     pub cooldown_until_ms: Option<u64>,
@@ -238,20 +242,30 @@ pub fn count<'a>(tasks: impl Iterator<Item = &'a Task>, now: u64) -> (u32, u32) 
     (counted, yours)
 }
 
+/// `(open, held)` for tasks of one project. `open` is every task whose activity is neither
+/// idle (proposed, landed, failed, canceled) nor held (blocked by unlanded tasks); `held` is
+/// the held ones. Decision 0024.
+pub fn open_counts<'a>(tasks: impl Iterator<Item = &'a Task>) -> (u32, u32) {
+    let (mut open, mut held) = (0, 0);
+    for t in tasks {
+        match t.activity {
+            Activity::Idle => {}
+            Activity::Held(_) => held += 1,
+            _ => open += 1,
+        }
+    }
+    (open, held)
+}
+
 pub fn status(d: &Daemon, pid: ProjectId, cfg: &SelfCfg, now: u64) -> Status {
     usage(d, pid, cfg, now).status
 }
 
 pub fn usage(d: &Daemon, pid: ProjectId, cfg: &SelfCfg, now: u64) -> Usage {
     let w = d.world().ok();
-    let (mut open, mut week, mut yours, mut steps) = (0, 0, 0, 0);
+    let (mut open, mut held, mut week, mut yours, mut steps) = (0, 0, 0, 0, 0);
     if let Some(w) = &w {
-        open = w
-            .tasks
-            .values()
-            .filter(|t| t.project == pid)
-            .filter(|t| !matches!(t.state, State::Landed | State::Failed | State::Canceled))
-            .count() as u32;
+        (open, held) = open_counts(w.tasks.values().filter(|t| t.project == pid));
         (week, yours) = count(w.tasks.values().filter(|t| t.project == pid), now);
         let period = cfg.period_h * 3600 * 1000;
         steps = w
@@ -269,6 +283,7 @@ pub fn usage(d: &Daemon, pid: ProjectId, cfg: &SelfCfg, now: u64) -> Usage {
     Usage {
         status: Status {
             open,
+            held,
             week,
             steps,
             cooldown_until_ms,
@@ -315,8 +330,8 @@ pub fn check_as(s: &Status, yours: u32, cfg: &SelfCfg, trust: TrustSource) -> Re
     }
     if s.open >= cfg.max_open {
         return Err(format!(
-            "{} self-tasks are open and the limit is {}: let some land first",
-            s.open, cfg.max_open
+            "{} self-tasks are open and the limit is {}: let some land first (counted: running, queued, paused or waiting for you; {} held behind others and proposed tasks are not counted)",
+            s.open, cfg.max_open, s.held
         ));
     }
     if trust != TrustSource::Owner && s.week >= cfg.per_week {
@@ -400,6 +415,7 @@ mod tests {
     fn st(open: u32, week: u32, steps: u32, cooldown: Option<u64>) -> Status {
         Status {
             open,
+            held: 0,
             week,
             steps,
             cooldown_until_ms: cooldown,
@@ -423,6 +439,63 @@ mod tests {
         let e = check(&st(0, 0, 40, None), &c).unwrap_err();
         assert!(
             e.contains("40 agent steps in the last 24 hours") && e.contains("limit is 40"),
+            "{e}"
+        );
+    }
+
+    fn with_activity(a: Activity, state: State) -> Task {
+        let mut t = task(TrustSource::OwnerAgent, state, false, 0);
+        t.activity = a;
+        t
+    }
+
+    #[test]
+    fn running_and_queued_count_held_and_proposed_do_not() {
+        let blockers: std::collections::BTreeSet<TaskId> = [TaskId(9)].into();
+        let ts = [
+            with_activity(Activity::Running, State::Developing),
+            with_activity(Activity::Waiting(WaitReason::Slot), State::Queued),
+            with_activity(Activity::Paused, State::Queued),
+            with_activity(Activity::Held(blockers.clone()), State::Queued),
+            with_activity(Activity::Held(blockers.clone()), State::Queued),
+            with_activity(Activity::Idle, State::Proposed),
+            with_activity(Activity::Idle, State::Landed),
+        ];
+        assert_eq!(open_counts(ts.iter()), (3, 2));
+        // Released: the same task, no longer held, counts once.
+        let mut released = ts[3].clone();
+        released.activity = Activity::Waiting(WaitReason::Slot);
+        let after = [ts[0].clone(), ts[1].clone(), released];
+        assert_eq!(open_counts(after.iter()), (3, 0));
+    }
+
+    #[test]
+    fn ten_held_do_not_block_filing_but_three_counted_do() {
+        let c = cfg();
+        let blockers: std::collections::BTreeSet<TaskId> = [TaskId(9)].into();
+        let mut ts: Vec<Task> = (0..10)
+            .map(|_| with_activity(Activity::Held(blockers.clone()), State::Queued))
+            .collect();
+        ts.push(with_activity(Activity::Running, State::Developing));
+        let (open, held) = open_counts(ts.iter());
+        assert_eq!((open, held), (1, 10));
+        let s = Status {
+            open,
+            held,
+            ..st(0, 0, 0, None)
+        };
+        assert!(check(&s, &c).is_ok());
+        let s = Status {
+            open: 3,
+            held: 10,
+            ..st(0, 0, 0, None)
+        };
+        let e = check(&s, &c).unwrap_err();
+        assert!(
+            e.contains("3 self-tasks are open")
+                && e.contains("limit is 3")
+                && e.contains("10 held behind others")
+                && e.contains("not counted"),
             "{e}"
         );
     }
