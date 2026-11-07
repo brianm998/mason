@@ -500,4 +500,33 @@ final class MonitorCoreTests: XCTestCase {
         m.openFirstNeedingYou()
         XCTAssertEqual(m.page, .task(3))
     }
+
+    // MARK: graph layout
+
+    private let masonEdges: [GraphLayout.BackEdge] = [
+        .init(fromX: 440, toX: 240, labeled: true), .init(fromX: 640, toX: 240, labeled: true)]
+
+    func testGraphNothingClippedLeft() {
+        let h = GraphLayout.horizontal(nodeXs: [40, 240, 440, 640], backEdges: masonEdges, viewport: 0)
+        XCTAssertGreaterThanOrEqual(h.left + h.dx, 0)
+        XCTAssertGreaterThanOrEqual(h.right + h.dx + GraphLayout.pad, 0)
+        XCTAssertLessThanOrEqual(h.right + h.dx, h.width)
+    }
+
+    func testGraphCenteredWhenViewportWider() {
+        let h = GraphLayout.horizontal(nodeXs: [40, 240, 440, 640], backEdges: masonEdges, viewport: 2000)
+        XCTAssertEqual(h.width, 2000)
+        XCTAssertEqual(h.left + h.dx, h.width - (h.right + h.dx), accuracy: 0.5)
+    }
+
+    func testGraphWiderThanViewportKeepsPad() {
+        let h = GraphLayout.horizontal(nodeXs: [0, 2000], backEdges: [.init(fromX: 2000, toX: 0, labeled: true)], viewport: 500)
+        XCTAssertEqual(h.dx, GraphLayout.pad - h.left)
+        XCTAssertEqual(h.left + h.dx, GraphLayout.pad)
+    }
+
+    func testGraphNegativeLayoutX() {
+        let h = GraphLayout.horizontal(nodeXs: [-300, 100], backEdges: [], viewport: 0)
+        XCTAssertGreaterThanOrEqual(h.left + h.dx, 0)
+    }
 }

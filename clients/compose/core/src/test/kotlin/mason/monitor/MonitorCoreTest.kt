@@ -447,4 +447,30 @@ class MonitorCoreTest {
         m.openFirstNeedingYou()
         assertEquals(Page.Task(3), m.page)
     }
+
+    // ---- graph layout ----
+
+    private val masonBack = listOf(GraphLayout.BackEdge(440.0, 240.0, true), GraphLayout.BackEdge(640.0, 240.0, true))
+
+    @Test fun graphNothingClippedLeft() {
+        val h = GraphLayout.horizontal(listOf(40.0, 240.0, 440.0, 640.0), masonBack, 0.0)
+        assertTrue(h.left + h.dx >= 0.0)
+        assertTrue(h.right + h.dx <= h.width)
+    }
+
+    @Test fun graphCenteredWhenViewportWider() {
+        val h = GraphLayout.horizontal(listOf(40.0, 240.0, 440.0, 640.0), masonBack, 2000.0)
+        assertEquals(2000.0, h.width)
+        assertEquals(h.left + h.dx, h.width - (h.right + h.dx), 0.5)
+    }
+
+    @Test fun graphWiderThanViewportKeepsPad() {
+        val h = GraphLayout.horizontal(listOf(0.0, 2000.0), listOf(GraphLayout.BackEdge(2000.0, 0.0, true)), 500.0)
+        assertEquals(GraphLayout.PAD, h.left + h.dx)
+    }
+
+    @Test fun graphNegativeLayoutX() {
+        val h = GraphLayout.horizontal(listOf(-300.0, 100.0), emptyList(), 0.0)
+        assertTrue(h.left + h.dx >= 0.0)
+    }
 }

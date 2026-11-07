@@ -92,8 +92,10 @@ fun EditorPage(model: MonitorModel) {
 private fun GraphTab(model: MonitorModel, e: EditorView) {
     val theme = LocalTheme.current
     Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(theme.spacingLarge)) {
-        Box(Modifier.weight(1f).fillMaxHeight().background(theme.surface).verticalScroll(rememberScrollState()).horizontalScroll(rememberScrollState())) {
-            Canvas(model, e)
+        BoxWithConstraints(Modifier.weight(1f).fillMaxHeight().background(theme.surface)) {
+            Box(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).horizontalScroll(rememberScrollState())) {
+                Canvas(model, e, maxWidth.value.toDouble())
+            }
         }
         Column(Modifier.width(340.dp).fillMaxHeight().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(theme.spacingLarge)) {
             Palette(model, e)
@@ -104,9 +106,17 @@ private fun GraphTab(model: MonitorModel, e: EditorView) {
 }
 
 @Composable
-private fun Canvas(model: MonitorModel, e: EditorView) {
+private fun Canvas(model: MonitorModel, e: EditorView, viewport: Double) {
     val theme = LocalTheme.current
-    val w = maxOf(700, (e.nodes.maxOfOrNull { it.x } ?: 0L).toInt() + NODE_W + 60)
+    val xs = e.nodes.associate { it.name to it.x.toDouble() }
+    val back = e.edges.filter { it.kind == "on_red" }.mapNotNull { ed ->
+        val f = xs[ed.from] ?: return@mapNotNull null
+        val t = xs[ed.to] ?: return@mapNotNull null
+        mason.monitor.GraphLayout.BackEdge(f, t, ed.bound > 0)
+    }
+    val hz = mason.monitor.GraphLayout.horizontal(xs.values.toList(), back, viewport)
+    val w = kotlin.math.ceil(hz.width).toInt()
+    val dx = hz.dx.toInt()
     val h = maxOf(e.lanes.size * LANE_H, ((e.nodes.maxOfOrNull { it.y } ?: 0L).toInt()) + NODE_H + 40)
     Box(Modifier.size(w.dp, h.dp)) {
         e.lanes.forEachIndexed { i, l ->
@@ -121,8 +131,8 @@ private fun Canvas(model: MonitorModel, e: EditorView) {
                 val a = byName[edge.from] ?: return@forEach
                 val b = byName[edge.to] ?: return@forEach
                 val back = edge.kind == "on_red"
-                val s = if (back) Offset(a.x.dp.toPx(), (a.y + NODE_H / 2).dp.toPx()) else Offset((a.x + NODE_W / 2).dp.toPx(), (a.y + NODE_H).dp.toPx())
-                val t = if (back) Offset(b.x.dp.toPx(), (b.y + NODE_H / 2).dp.toPx()) else Offset((b.x + NODE_W / 2).dp.toPx(), b.y.dp.toPx())
+                val s = if (back) Offset((a.x + dx).dp.toPx(), (a.y + NODE_H / 2).dp.toPx()) else Offset((a.x + dx + NODE_W / 2).dp.toPx(), (a.y + NODE_H).dp.toPx())
+                val t = if (back) Offset((b.x + dx).dp.toPx(), (b.y + NODE_H / 2).dp.toPx()) else Offset((b.x + dx + NODE_W / 2).dp.toPx(), b.y.dp.toPx())
                 val path = Path().apply {
                     moveTo(s.x, s.y)
                     if (back) cubicTo(s.x - 70.dp.toPx(), s.y, t.x - 70.dp.toPx(), t.y, t.x, t.y)
@@ -140,22 +150,22 @@ private fun Canvas(model: MonitorModel, e: EditorView) {
         }
         e.edges.filter { it.kind == "on_red" && it.bound > 0 }.distinctBy { it.from }.forEach { edge ->
             byName[edge.from]?.let { a ->
-                Text("red, at most ${edge.bound}×", style = theme.small(color = red), modifier = Modifier.offset((a.x - 100).dp, (a.y + NODE_H / 2 - 18).dp))
+                Text("red, at most ${edge.bound}×", style = theme.small(color = red), modifier = Modifier.offset((a.x + dx - 100).dp, (a.y + NODE_H / 2 - 18).dp))
             }
         }
-        e.nodes.forEach { n -> NodeBox(model, n, e.selected == n.name) }
+        e.nodes.forEach { n -> NodeBox(model, n, e.selected == n.name, dx) }
     }
 }
 
 @Composable
-private fun NodeBox(model: MonitorModel, n: EditorNode, selected: Boolean) {
+private fun NodeBox(model: MonitorModel, n: EditorNode, selected: Boolean, dx: Int) {
     val theme = LocalTheme.current
     var drag by remember(n.name, n.x, n.y) { mutableStateOf(Offset.Zero) }
     val density = LocalDensity.current
     val border = if (selected) theme.accent else if (n.problems.isEmpty()) theme.border else theme.attention
     Column(
         Modifier
-            .offset { IntOffset((with(density) { n.x.dp.toPx() } + drag.x).toInt(), (with(density) { n.y.dp.toPx() } + drag.y).toInt()) }
+            .offset { IntOffset((with(density) { (n.x + dx).dp.toPx() } + drag.x).toInt(), (with(density) { n.y.dp.toPx() } + drag.y).toInt()) }
             .size(NODE_W.dp, NODE_H.dp)
             .background(theme.background, RoundedCornerShape(8.dp))
             .border(if (selected) 3.dp else 1.5.dp, border, RoundedCornerShape(8.dp))
