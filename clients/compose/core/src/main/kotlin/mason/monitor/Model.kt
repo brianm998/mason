@@ -139,6 +139,24 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
         scrollTarget = state
     }
 
+    /** What a tile click does: reveal on every click; the second click of a double also opens the lone task. */
+    fun tileClicked(state: String, clickCount: Int) {
+        reveal(state)
+        if (clickCount == 2) revealAndOpenIfOne(state)
+    }
+
+    /** Reveal the section and, if it holds exactly one task right now (search ignored), open it. Nothing while disconnected. */
+    fun revealAndOpenIfOne(state: String) {
+        if (!connected) return
+        reveal(state)
+        val sec = sidebar?.sections?.firstOrNull { it.state == state } ?: return
+        if (sec.rows.size == 1) go(Page.Task(sec.rows[0].id))
+    }
+
+    /** The tile's tooltip; a count of exactly one says a double-click opens it. */
+    fun tileTooltip(c: StateCount): String =
+        if (connected && c.count == 1) c.tooltip + "\nDouble-click to open it" else c.tooltip
+
     // ---- search ----
 
     fun filteredRows(s: SidebarSection): List<TaskRow> = s.rows.filter { search.matches(it) }

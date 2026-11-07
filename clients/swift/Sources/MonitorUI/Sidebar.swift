@@ -27,8 +27,9 @@ struct SidebarPane: View {
             }
             .onChange(of: model.scrollTarget) { _, target in
                 guard let t = target else { return }
-                withAnimation { proxy.scrollTo(t, anchor: .top) }
                 model.scrollTarget = nil
+                // Next turn: the expanded section's rows are laid out by then.
+                DispatchQueue.main.async { withAnimation { proxy.scrollTo(t, anchor: .top) } }
             }
         }
         .frame(width: theme.sidebarWidth)

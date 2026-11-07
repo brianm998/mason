@@ -103,6 +103,55 @@ class MonitorCoreTest {
         assertEquals("failed", m.scrollTarget)
     }
 
+    @Test fun doubleClickOnAStateWithOneTaskExpandsScrollsAndOpensIt() {
+        val m = model()
+        m.tileClicked("failed", 1)
+        assertEquals(Page.Home, m.page)
+        m.tileClicked("failed", 2)
+        assertTrue(m.isExpanded(m.sidebar!!.sections[1]))
+        assertEquals("failed", m.scrollTarget)
+        assertEquals(Page.Task(3), m.page)
+    }
+
+    @Test fun doubleClickWithSeveralTasksExpandsAndScrollsButKeepsThePage() {
+        val m = model()
+        m.tileClicked("queued", 2)
+        assertTrue(m.isExpanded(m.sidebar!!.sections[0]))
+        assertEquals("queued", m.scrollTarget)
+        assertEquals(Page.Home, m.page)
+    }
+
+    @Test fun doubleClickOnAnEmptyStateChangesNothingBeyondTheReveal() {
+        val m = model()
+        m.sidebar = m.sidebar!!.copy(sections = m.sidebar!!.sections + section("canceled", collapsed = true))
+        m.tileClicked("canceled", 2)
+        assertEquals(Page.Home, m.page)
+    }
+
+    @Test fun doubleClickStillOpensTheLoneTaskWhenSearchHidesIt() {
+        val m = model()
+        m.search = m.search.copy(text = "zzz-no-match")
+        m.tileClicked("failed", 2)
+        assertEquals(Page.Task(3), m.page)
+        assertEquals("zzz-no-match", m.search.text)
+    }
+
+    @Test fun doubleClickWhileDisconnectedDoesNothing() {
+        val m = model(connected = false)
+        m.revealAndOpenIfOne("failed")
+        assertEquals(Page.Home, m.page)
+        assertEquals(null, m.scrollTarget)
+        assertFalse(m.isExpanded(m.sidebar!!.sections[1]))
+    }
+
+    @Test fun tooltipMentionsDoubleClickOnlyForACountOfOne() {
+        val m = model()
+        assertEquals("tip\nDouble-click to open it", m.tileTooltip(StateCount(state = "failed", count = 1, tooltip = "tip")))
+        assertEquals("tip", m.tileTooltip(StateCount(state = "failed", count = 2, tooltip = "tip")))
+        m.connected = false
+        assertEquals("tip", m.tileTooltip(StateCount(state = "failed", count = 1, tooltip = "tip")))
+    }
+
     @Test fun searchMatchesNameTitleAndBodyEachWithItsOwnCheckbox() {
         val m = model()
         val sec = m.sidebar!!.sections[0]
