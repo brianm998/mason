@@ -226,7 +226,7 @@ private fun TaskDetail(model: MonitorModel, d: TaskDetailView) {
     if (d.debts.isNotEmpty()) Section("Debts") {
         d.debts.forEach { Text("#${it.id} ${it.scope}, ${it.status}${if (it.deferred) ", runs after landing" else ""}", style = theme.body()) }
     }
-    if (d.plan.isNotEmpty()) Section("Plan") { SelectionContainer { Text(d.plan, style = theme.mono()) } }
+    if (d.plan.isNotEmpty() || d.plan_view != null) Section("Plan") { PlanSection(d) }
     if (d.body.isNotEmpty()) Section("Task") { SelectionContainer { Text(d.body, style = theme.body()) } }
     if (d.log_tail.isNotEmpty()) Section("Log") {
         SelectionContainer {

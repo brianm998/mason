@@ -245,10 +245,8 @@ struct TaskDetailPage: View {
                     }
                 }
             }
-            if !d.plan.isEmpty {
-                section("Plan", theme: theme) {
-                    Text(d.plan).font(theme.mono()).textSelection(.enabled)
-                }
+            if !d.plan.isEmpty || d.hasPlanView {
+                section("Plan", theme: theme) { PlanSection(detail: d) }
             }
             if !d.body.isEmpty {
                 section("Task", theme: theme) { Text(d.body).font(theme.body()).textSelection(.enabled) }

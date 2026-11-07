@@ -1655,11 +1655,75 @@ public nonisolated struct Mason_V1_TaskDetailView: @unchecked Sendable {
     set {_uniqueStorage()._numbers = newValue}
   }
 
+  /// The plan, parsed by the daemon so the clients do no JSON work. `plan` (3) stays for older clients.
+  public var planView: Mason_V1_PlanView {
+    get {_storage._planView ?? Mason_V1_PlanView()}
+    set {_uniqueStorage()._planView = newValue}
+  }
+  /// Returns true if `planView` has been explicitly set.
+  public var hasPlanView: Bool {_storage._planView != nil}
+  /// Clears the value of `planView`. Subsequent reads from it will return its default value.
+  public mutating func clearPlanView() {_uniqueStorage()._planView = nil}
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
 
   fileprivate var _storage = _StorageClass.defaultInstance
+}
+
+/// A task's exploration plan as readable parts.
+public nonisolated struct Mason_V1_PlanView: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  /// The summary split on blank lines.
+  public var summaryParagraphs: [String] = []
+
+  /// True when the approach was a numbered or bulleted list: `steps` are then list items.
+  /// False: `steps` are the approach's paragraphs.
+  public var stepsAreList: Bool = false
+
+  public var steps: [String] = []
+
+  /// Text before the first list marker of the approach.
+  public var lead: String = String()
+
+  public var files: [String] = []
+
+  public var criteria: [String] = []
+
+  public var other: [Mason_V1_PlanExtra] = []
+
+  /// The original JSON, for copying.
+  public var raw: String = String()
+
+  /// Set when the plan could not be read as a plan: then only `raw` and this are filled.
+  public var note: String = String()
+
+  /// Each step's own number as the agent wrote it ("0", "1", ...), one per step, when the approach was a
+  /// numbered list. Empty for a bulleted list (show a bullet) and for paragraphs.
+  public var stepNumbers: [String] = []
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// An extra key of the plan: label and an already readable value.
+public nonisolated struct Mason_V1_PlanExtra: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var label: String = String()
+
+  public var value: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
 }
 
 /// One number handed to a task. A cancelled task's numbers are shown released: never reused.
@@ -4783,7 +4847,7 @@ nonisolated extension Mason_V1_DebtLine: SwiftProtobuf.Message, SwiftProtobuf._M
 
 nonisolated extension Mason_V1_TaskDetailView: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".TaskDetailView"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}row\0\u{1}steps\0\u{1}plan\0\u{1}card\0\u{1}closing\0\u{1}debts\0\u{3}log_tail\0\u{1}branch\0\u{1}worktree\0\u{1}definition\0\u{1}failure\0\u{1}body\0\u{1}route\0\u{3}started_at\0\u{3}explore_returns\0\u{2}\u{2}approval\0\u{1}numbers\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}row\0\u{1}steps\0\u{1}plan\0\u{1}card\0\u{1}closing\0\u{1}debts\0\u{3}log_tail\0\u{1}branch\0\u{1}worktree\0\u{1}definition\0\u{1}failure\0\u{1}body\0\u{1}route\0\u{3}started_at\0\u{3}explore_returns\0\u{2}\u{2}approval\0\u{1}numbers\0\u{3}plan_view\0")
 
   fileprivate class _StorageClass {
     var _row: Mason_V1_TaskRow? = nil
@@ -4803,6 +4867,7 @@ nonisolated extension Mason_V1_TaskDetailView: SwiftProtobuf.Message, SwiftProto
     var _exploreReturns: UInt32 = 0
     var _approval: Mason_V1_Approval? = nil
     var _numbers: [Mason_V1_NumberLine] = []
+    var _planView: Mason_V1_PlanView? = nil
 
       // This property is used as the initial default value for new instances of the type.
       // The type itself is protecting the reference to its storage via CoW semantics.
@@ -4830,6 +4895,7 @@ nonisolated extension Mason_V1_TaskDetailView: SwiftProtobuf.Message, SwiftProto
       _exploreReturns = source._exploreReturns
       _approval = source._approval
       _numbers = source._numbers
+      _planView = source._planView
     }
   }
 
@@ -4865,6 +4931,7 @@ nonisolated extension Mason_V1_TaskDetailView: SwiftProtobuf.Message, SwiftProto
         case 15: try { try decoder.decodeSingularUInt32Field(value: &_storage._exploreReturns) }()
         case 17: try { try decoder.decodeSingularMessageField(value: &_storage._approval) }()
         case 18: try { try decoder.decodeRepeatedMessageField(value: &_storage._numbers) }()
+        case 19: try { try decoder.decodeSingularMessageField(value: &_storage._planView) }()
         default: break
         }
       }
@@ -4928,6 +4995,9 @@ nonisolated extension Mason_V1_TaskDetailView: SwiftProtobuf.Message, SwiftProto
       if !_storage._numbers.isEmpty {
         try visitor.visitRepeatedMessageField(value: _storage._numbers, fieldNumber: 18)
       }
+      try { if let v = _storage._planView {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 19)
+      } }()
     }
     try unknownFields.traverse(visitor: &visitor)
   }
@@ -4954,10 +5024,121 @@ nonisolated extension Mason_V1_TaskDetailView: SwiftProtobuf.Message, SwiftProto
         if _storage._exploreReturns != rhs_storage._exploreReturns {return false}
         if _storage._approval != rhs_storage._approval {return false}
         if _storage._numbers != rhs_storage._numbers {return false}
+        if _storage._planView != rhs_storage._planView {return false}
         return true
       }
       if !storagesAreEqual {return false}
     }
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Mason_V1_PlanView: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".PlanView"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}summary_paragraphs\0\u{3}steps_are_list\0\u{1}steps\0\u{1}lead\0\u{1}files\0\u{1}criteria\0\u{1}other\0\u{1}raw\0\u{1}note\0\u{3}step_numbers\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeRepeatedStringField(value: &self.summaryParagraphs) }()
+      case 2: try { try decoder.decodeSingularBoolField(value: &self.stepsAreList) }()
+      case 3: try { try decoder.decodeRepeatedStringField(value: &self.steps) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.lead) }()
+      case 5: try { try decoder.decodeRepeatedStringField(value: &self.files) }()
+      case 6: try { try decoder.decodeRepeatedStringField(value: &self.criteria) }()
+      case 7: try { try decoder.decodeRepeatedMessageField(value: &self.other) }()
+      case 8: try { try decoder.decodeSingularStringField(value: &self.raw) }()
+      case 9: try { try decoder.decodeSingularStringField(value: &self.note) }()
+      case 10: try { try decoder.decodeRepeatedStringField(value: &self.stepNumbers) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.summaryParagraphs.isEmpty {
+      try visitor.visitRepeatedStringField(value: self.summaryParagraphs, fieldNumber: 1)
+    }
+    if self.stepsAreList != false {
+      try visitor.visitSingularBoolField(value: self.stepsAreList, fieldNumber: 2)
+    }
+    if !self.steps.isEmpty {
+      try visitor.visitRepeatedStringField(value: self.steps, fieldNumber: 3)
+    }
+    if !self.lead.isEmpty {
+      try visitor.visitSingularStringField(value: self.lead, fieldNumber: 4)
+    }
+    if !self.files.isEmpty {
+      try visitor.visitRepeatedStringField(value: self.files, fieldNumber: 5)
+    }
+    if !self.criteria.isEmpty {
+      try visitor.visitRepeatedStringField(value: self.criteria, fieldNumber: 6)
+    }
+    if !self.other.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.other, fieldNumber: 7)
+    }
+    if !self.raw.isEmpty {
+      try visitor.visitSingularStringField(value: self.raw, fieldNumber: 8)
+    }
+    if !self.note.isEmpty {
+      try visitor.visitSingularStringField(value: self.note, fieldNumber: 9)
+    }
+    if !self.stepNumbers.isEmpty {
+      try visitor.visitRepeatedStringField(value: self.stepNumbers, fieldNumber: 10)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Mason_V1_PlanView, rhs: Mason_V1_PlanView) -> Bool {
+    if lhs.summaryParagraphs != rhs.summaryParagraphs {return false}
+    if lhs.stepsAreList != rhs.stepsAreList {return false}
+    if lhs.steps != rhs.steps {return false}
+    if lhs.lead != rhs.lead {return false}
+    if lhs.files != rhs.files {return false}
+    if lhs.criteria != rhs.criteria {return false}
+    if lhs.other != rhs.other {return false}
+    if lhs.raw != rhs.raw {return false}
+    if lhs.note != rhs.note {return false}
+    if lhs.stepNumbers != rhs.stepNumbers {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Mason_V1_PlanExtra: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".PlanExtra"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}label\0\u{1}value\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.label) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.value) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.label.isEmpty {
+      try visitor.visitSingularStringField(value: self.label, fieldNumber: 1)
+    }
+    if !self.value.isEmpty {
+      try visitor.visitSingularStringField(value: self.value, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Mason_V1_PlanExtra, rhs: Mason_V1_PlanExtra) -> Bool {
+    if lhs.label != rhs.label {return false}
+    if lhs.value != rhs.value {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

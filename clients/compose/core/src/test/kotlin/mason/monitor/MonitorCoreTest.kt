@@ -473,4 +473,54 @@ class MonitorCoreTest {
         val h = GraphLayout.horizontal(listOf(-300.0, 100.0), emptyList(), 0.0)
         assertTrue(h.left + h.dx >= 0.0)
     }
+
+    // ---- readable plan ----
+
+    private fun planView(numbers: List<String> = listOf("0", "1")) = PlanView(
+        summary_paragraphs = listOf("First.", "Second `x`."),
+        steps_are_list = true,
+        steps = listOf("do a\nmore a", "do b"),
+        step_numbers = numbers,
+        files = listOf("a.rs", "b.rs"),
+        criteria = listOf("it works"),
+        other = listOf(PlanExtra(label = "Risks", value_ = "- one")),
+        raw = "{\"summary\":\"First.\"}",
+    )
+
+    @Test
+    fun planCopyAsTextKeepsTheAgentsNumbers() {
+        val t = PlanText.copyAsText(planView())
+        assertEquals(
+            "## Summary\n\nFirst.\n\nSecond `x`.\n\n## Steps\n\n0. do a\n   more a\n1. do b\n\n" +
+                "## Files (2)\n\n- `a.rs`\n- `b.rs`\n\n## Acceptance criteria (1)\n\n- [ ] it works\n\n" +
+                "## Other\n\n### Risks\n\n- one\n",
+            t,
+        )
+        assertFalse(t.contains("{"))
+    }
+
+    @Test
+    fun planCopyAsTextBulletsAndUnreadable() {
+        val v = planView(numbers = emptyList())
+        assertTrue(PlanText.copyAsText(v).contains("- do a\n  more a\n- do b"))
+        assertNull(PlanText.marker(PlanView(), 0))
+        assertEquals("•", PlanText.marker(v, 0))
+        assertEquals("not json", PlanText.copyAsText(PlanView(raw = "not json", note = "n")))
+    }
+
+    @Test
+    fun planExpandRule() {
+        assertTrue(PlanText.expandedByDefault(0))
+        assertTrue(PlanText.expandedByDefault(9))
+        assertFalse(PlanText.expandedByDefault(10))
+        assertFalse(PlanText.expandedByDefault(25))
+    }
+
+    @Test
+    fun planInlineMarkdown() {
+        assertEquals(
+            listOf(PlanText.Span("a "), PlanText.Span("b", code = true), PlanText.Span(" "), PlanText.Span("c", bold = true), PlanText.Span(" `open")),
+            PlanText.inline("a `b` **c** `open"),
+        )
+    }
 }
