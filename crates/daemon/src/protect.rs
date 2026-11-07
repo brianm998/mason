@@ -210,7 +210,7 @@ fn or_true_is_harmless(lower: &str) -> bool {
         }
         seen = true;
         // `... || true; exit 1`: the script still fails.
-        let tail = after.split("exit").skip(1).next().map(str::trim_start);
+        let tail = after.split("exit").nth(1).map(str::trim_start);
         if let Some(n) = tail {
             let n: String = n.chars().take_while(|c| c.is_ascii_digit()).collect();
             if !n.is_empty() && n.chars().any(|c| c != '0') {
