@@ -557,12 +557,18 @@ fn garbage_and_early_commands_get_an_error_not_a_crash() {
     // (A Welcome first, so that a client can read what is needed; then the reason.)
     assert!(matches!(
         c.recv(Duration::from_secs(5)).unwrap(),
-        Some(ServerMessage { body: Some(server_message::Body::Welcome(_)) })
+        Some(ServerMessage {
+            body: Some(server_message::Body::Welcome(_))
+        })
     ));
     match c.recv(Duration::from_secs(5)).unwrap() {
         Some(ServerMessage {
             body: Some(server_message::Body::Error(e)),
-        }) => assert!(e.message.contains("serves protocols 1 to 1"), "{}", e.message),
+        }) => assert!(
+            e.message.contains("serves protocols 1 to 1"),
+            "{}",
+            e.message
+        ),
         other => panic!("{other:?}"),
     }
     // Ping works after hello.

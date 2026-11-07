@@ -110,6 +110,23 @@ fun BannersView(model: MonitorModel) {
     val theme = LocalTheme.current
     Column {
         if (!model.connected) banner("Connection lost. Reconnecting…", "connection", theme)
+        model.readOnlyReason?.let { banner("Read-only: $it", "read-only", theme) }
+        if (model.updateAvailable || model.updating != null) {
+            Row(
+                modifier = Modifier.fillMaxWidth().background(theme.slow.copy(alpha = 0.18f))
+                    .padding(horizontal = theme.spacingLarge, vertical = theme.spacing).testTag("monitor-update-banner"),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    model.updating ?: "A newer monitor is available (${model.daemonVersion.take(8)}).",
+                    style = theme.body(FontWeight.Medium),
+                    modifier = Modifier.weight(1f),
+                )
+                if (model.updating == null) {
+                    Button(onClick = { model.onUpdate?.invoke() }, modifier = Modifier.testTag("monitor-update")) { Text("Update") }
+                }
+            }
+        }
         model.header?.banners?.forEachIndexed { i, b -> banner(b.text, "banner:$i", theme) }
     }
 }

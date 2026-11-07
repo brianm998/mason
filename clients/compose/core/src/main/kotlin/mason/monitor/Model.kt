@@ -27,6 +27,26 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     var lastSeq by mutableStateOf(0L)
     var connected by mutableStateOf(false)
 
+    // About versions (Part 15).
+    /** This monitor's own build: a commit, or "dev" for a build nobody versioned. */
+    var ownVersion: String = System.getenv("MASON_MONITOR_VERSION") ?: "dev"
+
+    /** The daemon's build, from its welcome. */
+    var daemonVersion by mutableStateOf("")
+
+    /** Set when the daemon needs a newer protocol than this monitor speaks: nothing can be sent. */
+    var readOnlyReason by mutableStateOf<String?>(null)
+
+    /** What the update is doing (or why it cannot), once the user has asked for one. */
+    var updating by mutableStateOf<String?>(null)
+
+    /** Run when the user presses the update button (the app does the work). */
+    var onUpdate: (() -> Unit)? = null
+
+    /** Is there a newer monitor? Only when both builds are real versions and differ. */
+    val updateAvailable: Boolean
+        get() = daemonVersion.isNotEmpty() && daemonVersion != "dev" && ownVersion != "dev" && daemonVersion != ownVersion
+
     // The user's.
     var history by mutableStateOf(NavHistory())
         private set
@@ -116,6 +136,10 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     // ---- commands ----
 
     fun send(c: Command) {
+        readOnlyReason?.let {
+            lastResult = "Read-only: $it"
+            return
+        }
         sender?.invoke(if (c.actor.isEmpty()) c.copy(actor = identity) else c)
     }
 
@@ -147,6 +171,10 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
         m.welcome?.let { w ->
             connected = true
             if (w.resume == ResumeKind.SNAPSHOT) lastSeq = 0
+            daemonVersion = w.version
+            readOnlyReason = if (w.min_protocol > PROTOCOL)
+                "This monitor speaks protocol $PROTOCOL, but the daemon needs ${w.min_protocol} or newer. Update the monitor; until then it can only look."
+            else null
         }
         m.snapshot?.let { s ->
             lastSeq = max(lastSeq, s.seq)
@@ -177,6 +205,8 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     fun disconnected() { connected = false }
 
     companion object {
+        /** The protocol this monitor speaks. */
+        const val PROTOCOL = 1
         const val KEY_SCALE = "textScale"
         const val KEY_MUTE = "muted"
         const val SCALE_MIN = 0.8

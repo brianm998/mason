@@ -12,7 +12,46 @@ final class Session: ObservableObject {
     private var connection: MonitorConnection?
     private var finder: Task<Void, Never>?
 
+    /// The update button: build the new monitor from source, launch it, close this one.
+    func updateMonitor() {
+        switch ClientUpdate.plan(env: ProcessInfo.processInfo.environment) {
+        case .unavailable(let why):
+            model.updating = why
+        case .openPage(let url):
+            if let u = URL(string: url) { NSWorkspace.shared.open(u) }
+        case .buildFromSource(let dir):
+            model.updating = "Building the new monitor…"
+            let out = NSTemporaryDirectory() + "mason-monitor-update-\(ProcessInfo.processInfo.processIdentifier)"
+            Task.detached {
+                let p = Process()
+                p.executableURL = URL(fileURLWithPath: "/bin/sh")
+                p.arguments = ["-c", "cd '\(dir)' && scripts/bundle-monitor.sh '\(out)'"]
+                p.standardOutput = FileHandle.nullDevice
+                p.standardError = FileHandle.nullDevice
+                try? p.run()
+                p.waitUntilExit()
+                await MainActor.run {
+                    guard p.terminationStatus == 0 else {
+                        self.model.updating = "The build of the new monitor failed; this one keeps running."
+                        return
+                    }
+                    self.model.updating = "Starting the new monitor…"
+                    NSWorkspace.shared.openApplication(
+                        at: URL(fileURLWithPath: out + "/MASON.app"),
+                        configuration: NSWorkspace.OpenConfiguration()
+                    ) { _, error in
+                        DispatchQueue.main.async {
+                            if error == nil { NSApp.terminate(nil) }
+                            else { self.model.updating = "The new monitor would not start; this one keeps running." }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     func start() {
+        model.onUpdate = { [weak self] in self?.updateMonitor() }
         guard connection == nil, finder == nil else { return }
         // The daemon may not be up yet: look for it until it is.
         finder = Task { @MainActor in

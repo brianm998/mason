@@ -84,6 +84,22 @@ struct BannersView: View {
             if !model.connected {
                 banner("Connection lost. Reconnecting…", id: "connection")
             }
+            if let why = model.readOnlyReason {
+                banner("Read-only: \(why)", id: "read-only")
+            }
+            if model.updateAvailable || model.updating != nil {
+                HStack(spacing: theme.spacing) {
+                    Text(model.updating ?? "A newer monitor is available (\(String(model.daemonVersion.prefix(8)))).")
+                        .font(theme.body(.medium))
+                    Spacer()
+                    if model.updating == nil {
+                        Button("Update") { model.onUpdate?() }.accessibilityIdentifier("monitor-update")
+                    }
+                }
+                .padding(.horizontal, theme.spacingLarge).padding(.vertical, theme.spacing)
+                .background(theme.slow.opacity(0.18))
+                .accessibilityIdentifier("monitor-update-banner")
+            }
             ForEach(Array((model.header?.banners ?? []).enumerated()), id: \.offset) { i, b in
                 banner(b.text, id: "banner:\(i)")
             }

@@ -30,6 +30,26 @@ public final class MonitorModel: ObservableObject {
     @Published public var lastSeq: UInt64 = 0
     @Published public var connected = false
 
+    // About versions (Part 15).
+    /// The protocol this monitor speaks.
+    public static let protocolVersion: UInt32 = 1
+    /// This monitor's own build: a commit, or "dev" for a build nobody versioned.
+    public var ownVersion: String = ProcessInfo.processInfo.environment["MASON_MONITOR_VERSION"] ?? "dev"
+    /// The daemon's build, from its welcome.
+    @Published public var daemonVersion = ""
+    /// Set when the daemon needs a newer protocol than this monitor speaks: nothing
+    /// can be sent, and this says why.
+    @Published public var readOnlyReason: String?
+    /// What the update is doing (or why it cannot), while the user has asked for one.
+    @Published public var updating: String?
+    /// Run when the user presses the update button (the app does the work).
+    public var onUpdate: (() -> Void)?
+
+    /// Is there a newer monitor? Only when both builds are real versions and differ.
+    public var updateAvailable: Bool {
+        !daemonVersion.isEmpty && daemonVersion != "dev" && ownVersion != "dev" && daemonVersion != ownVersion
+    }
+
     // The user's.
     @Published public private(set) var history = NavHistory()
     @Published public var search = SearchState()
@@ -132,6 +152,10 @@ public final class MonitorModel: ObservableObject {
     public var identity: String = ProcessInfo.processInfo.environment["MASON_AS"] ?? NSUserName()
 
     public func send(_ c: Mason_V1_Command) {
+        if let why = readOnlyReason {
+            lastResult = "Read-only: \(why)"
+            return
+        }
         var c = c
         if c.actor.isEmpty { c.actor = identity }
         sender?(c)
@@ -178,6 +202,10 @@ public final class MonitorModel: ObservableObject {
         case .welcome(let w)?:
             connected = true
             if w.resume == .snapshot { lastSeq = 0 }
+            daemonVersion = w.version
+            readOnlyReason = w.minProtocol > Self.protocolVersion
+                ? "This monitor speaks protocol \(Self.protocolVersion), but the daemon needs \(w.minProtocol) or newer. Update the monitor; until then it can only look."
+                : nil
         case .snapshot(let s)?:
             lastSeq = max(lastSeq, s.seq)
             s.views.forEach(apply)

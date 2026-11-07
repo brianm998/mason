@@ -40,6 +40,7 @@ class MonitorConnection(private val model: MonitorModel, private val port: Int) 
                             protocol = 1,
                             last_seq = model.lastSeq,
                             client = "mason-monitor-compose",
+                            client_version = model.ownVersion,
                         )))
                     }
 

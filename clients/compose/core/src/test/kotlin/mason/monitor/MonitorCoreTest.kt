@@ -226,4 +226,53 @@ class MonitorCoreTest {
         assertEquals(listOf("#4: Waiting for compile slot"), h.waiting)
         assertEquals(emptyList(), HealthSnapshot.parse("not json").resources)
     }
+
+    // ---- versions (Part 15) ----
+
+    private fun welcome(version: String = "dev", minProtocol: Int = 1) =
+        ServerMessage(welcome = Welcome(protocol = 1, resume = ResumeKind.UP_TO_DATE, version = version, min_protocol = minProtocol))
+
+    @Test fun aMonitorOffersToUpdateOnlyWhenBothBuildsAreRealAndDiffer() {
+        val m = MonitorModel()
+        m.ownVersion = "aaa111"
+        m.apply(welcome("bbb222"))
+        assertTrue(m.updateAvailable)
+        m.apply(welcome("aaa111"))
+        assertFalse(m.updateAvailable)
+        m.apply(welcome("dev"))
+        assertFalse(m.updateAvailable)
+        m.ownVersion = "dev"
+        m.apply(welcome("bbb222"))
+        assertFalse(m.updateAvailable)
+    }
+
+    @Test fun aMonitorTooOldForTheProtocolIsReadOnlyAndSaysWhy() {
+        val m = MonitorModel()
+        var sent = 0
+        m.sender = { sent += 1 }
+        m.apply(welcome(minProtocol = 1))
+        m.cancel(3)
+        assertEquals(1, sent)
+        assertNull(m.readOnlyReason)
+        m.apply(welcome(minProtocol = 2))
+        assertTrue(m.readOnlyReason!!.contains("protocol 1") && m.readOnlyReason!!.contains("2 or newer"))
+        m.cancel(3)
+        m.answer(1, "yes", "x")
+        assertEquals(1, sent)
+        assertTrue(m.lastResult!!.startsWith("Read-only:"))
+        m.apply(welcome(minProtocol = 1))
+        assertNull(m.readOnlyReason)
+        m.cancel(3)
+        assertEquals(2, sent)
+    }
+
+    @Test fun theUpdateButtonKnowsHowItWillGetANewerMonitor() {
+        assertEquals(UpdatePlan.BuildFromSource("/src"), ClientUpdate.plan(mapOf("MASON_SOURCE_DIR" to "/src")) { it == "/src/clients/compose/settings.gradle.kts" })
+        val bad = ClientUpdate.plan(mapOf("MASON_SOURCE_DIR" to "/nope")) { false }
+        assertTrue(bad is UpdatePlan.Unavailable && bad.why.contains("/nope"))
+        assertEquals(UpdatePlan.OpenPage("https://example.org/mason"), ClientUpdate.plan(mapOf("MASON_INSTALL_URL" to "https://example.org/mason")))
+        assertTrue(ClientUpdate.plan(mapOf("MASON_INSTALL_URL" to "http://insecure")) is UpdatePlan.Unavailable)
+        val none = ClientUpdate.plan(emptyMap())
+        assertTrue(none is UpdatePlan.Unavailable && none.why.contains("MASON_SOURCE_DIR"))
+    }
 }

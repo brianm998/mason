@@ -251,4 +251,63 @@ final class MonitorCoreTests: XCTestCase {
         XCTAssertEqual(h.waiting, ["#4: Waiting for compile slot"])
         XCTAssertEqual(HealthSnapshot(json: "not json").resources, [])
     }
+
+    // ---- versions (Part 15) ----
+
+    private func welcome(version: String = "dev", minProtocol: UInt32 = 1) -> Mason_V1_ServerMessage {
+        var w = Mason_V1_Welcome()
+        w.protocol = 1
+        w.resume = .upToDate
+        w.version = version
+        w.minProtocol = minProtocol
+        var m = Mason_V1_ServerMessage()
+        m.welcome = w
+        return m
+    }
+
+    func testAMonitorOffersToUpdateOnlyWhenBothBuildsAreRealAndDiffer() {
+        let m = MonitorModel()
+        m.ownVersion = "aaa111"
+        m.apply(welcome(version: "bbb222"))
+        XCTAssertTrue(m.updateAvailable)
+        m.apply(welcome(version: "aaa111"))
+        XCTAssertFalse(m.updateAvailable, "the same build")
+        m.apply(welcome(version: "dev"))
+        XCTAssertFalse(m.updateAvailable, "a daemon run from a build directory has no version to compare")
+        m.ownVersion = "dev"
+        m.apply(welcome(version: "bbb222"))
+        XCTAssertFalse(m.updateAvailable, "a development monitor does not nag")
+    }
+
+    func testAMonitorTooOldForTheProtocolIsReadOnlyAndSaysWhy() {
+        let m = MonitorModel()
+        var sent = 0
+        m.sender = { _ in sent += 1 }
+        m.apply(welcome(minProtocol: 1))
+        m.cancel(3)
+        XCTAssertEqual(sent, 1)
+        XCTAssertNil(m.readOnlyReason)
+        m.apply(welcome(minProtocol: 2))
+        XCTAssertNotNil(m.readOnlyReason)
+        XCTAssertTrue(m.readOnlyReason!.contains("protocol 1") && m.readOnlyReason!.contains("2 or newer"))
+        m.cancel(3)
+        m.answer(task: 1, "yes", cardHash: "x")
+        XCTAssertEqual(sent, 1, "nothing is sent while read-only")
+        XCTAssertTrue(m.lastResult?.hasPrefix("Read-only:") ?? false)
+        // A daemon that serves it again lifts the restriction.
+        m.apply(welcome(minProtocol: 1))
+        XCTAssertNil(m.readOnlyReason)
+        m.cancel(3)
+        XCTAssertEqual(sent, 2)
+    }
+
+    func testTheUpdateButtonKnowsHowItWillGetANewerMonitor() {
+        XCTAssertEqual(ClientUpdate.plan(env: ["MASON_SOURCE_DIR": "/src"], exists: { $0 == "/src/scripts/bundle-monitor.sh" }), .buildFromSource("/src"))
+        if case .unavailable(let why) = ClientUpdate.plan(env: ["MASON_SOURCE_DIR": "/nope"], exists: { _ in false }) {
+            XCTAssertTrue(why.contains("/nope"))
+        } else { XCTFail("a checkout without the script is not a source") }
+        XCTAssertEqual(ClientUpdate.plan(env: ["MASON_INSTALL_URL": "https://example.org/mason"]), .openPage("https://example.org/mason"))
+        if case .unavailable = ClientUpdate.plan(env: ["MASON_INSTALL_URL": "http://insecure"]) {} else { XCTFail("only https pages") }
+        if case .unavailable(let why) = ClientUpdate.plan(env: [:]) { XCTAssertTrue(why.contains("MASON_SOURCE_DIR")) } else { XCTFail() }
+    }
 }

@@ -73,6 +73,7 @@ public final class MonitorConnection {
         h.protocol = 1
         h.lastSeq = model.lastSeq
         h.client = "mason-monitor-swiftui"
+        h.clientVersion = model.ownVersion
         var m = Mason_V1_ClientMessage()
         m.hello = h
         try await t.send(.string(try m.jsonString()))
