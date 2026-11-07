@@ -1,4 +1,4 @@
-# 0022: scripts/gen-*.sh are protected (s44)
+# 0024: scripts/gen-*.sh are protected (s46)
 
 `crates/daemon/src/protect.rs` is a trust file: this change waits for the owner. It adds a protected path and narrows nothing; no entry of `PROTECTED` or `ADDED_OK` was removed or changed.
 

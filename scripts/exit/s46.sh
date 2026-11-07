@@ -5,7 +5,7 @@
 # Through the CLI of a real masond.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
-root=$(mktemp -d /tmp/mason-s44.XXXXXX); daemon=""
+root=$(mktemp -d /tmp/mason-s46.XXXXXX); daemon=""
 cleanup() {
   [ -n "$daemon" ] && kill -9 "$daemon" 2>/dev/null || true
   for f in "$root"/d/h/*/host.kv; do
@@ -98,4 +98,4 @@ trap - EXIT; cleanup
 if [ -z "${MASON_TESTS_ALREADY_RAN:-}" ]; then
   cargo test -q -p mason-daemon --lib protect 2>&1 | grep 'test result'
 fi
-echo "s44 OK"
+echo "s46 OK"
