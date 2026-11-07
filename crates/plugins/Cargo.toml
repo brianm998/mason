@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+[package]
+name = "mason-plugins"
+description = "The plugin protocol: manifests, JSON-RPC over stdio, content hashes, and the conformance kit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+serde_json = "1.0.154"
+toml_edit = "0.25.18"
+
+[dev-dependencies]
+tempfile = "3.27.0"

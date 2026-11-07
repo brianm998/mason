@@ -1,0 +1,25 @@
+{
+  "type": "object",
+  "title": "Migration check",
+  "additionalProperties": false,
+  "required": ["directory"],
+  "properties": {
+    "directory": {
+      "type": "string",
+      "title": "Migrations directory",
+      "description": "Where the .sql files are, relative to the worktree.",
+      "minLength": 1
+    },
+    "require": {
+      "type": "string",
+      "title": "Required line",
+      "description": "Each file must contain this text.",
+      "default": "-- reversible"
+    },
+    "log": {
+      "type": "string",
+      "title": "Log file",
+      "description": "Optional: append a line here each time the step runs."
+    }
+  }
+}

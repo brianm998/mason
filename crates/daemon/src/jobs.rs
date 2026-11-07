@@ -246,8 +246,71 @@ pub fn run(d: &Arc<Daemon>, task: TaskId, step: State, run: StepRunId) {
         StepType::Command | StepType::Test => command_job(&c),
         StepType::Approval => approval_job(&c),
         StepType::Landing => land_job(&c),
+        StepType::Plugin => crate::plugins::plugin_job(&c),
         other => c.fail(format!("step type `{}` cannot run yet", other.name())),
     }
+}
+
+/// The facts a script step or plugin gets about its task, as `MASON_*` variables.
+pub(crate) fn step_env_pairs(c: &Ctx) -> Vec<(String, String)> {
+    vec![
+        ("MASON_TASK".into(), c.task.0.to_string()),
+        ("MASON_TITLE".into(), c.title.clone()),
+        ("MASON_PROJECT".into(), c.project.id.clone()),
+        ("MASON_WORKTREE".into(), c.wt.to_string_lossy().into_owned()),
+        ("MASON_BRANCH".into(), c.branch.clone()),
+        ("MASON_BASE".into(), c.project.base_ref()),
+        ("MASON_STEP".into(), c.step.name.clone()),
+        ("MASON_ATTEMPT".into(), c.attempt.to_string()),
+        (
+            "MASON_RESULT_FILE".into(),
+            result_file(c).to_string_lossy().into_owned(),
+        ),
+    ]
+}
+
+pub(crate) fn step_env(c: &Ctx) -> Value {
+    Value::Object(
+        step_env_pairs(c)
+            .into_iter()
+            .map(|(k, v)| (k, Value::String(v)))
+            .collect(),
+    )
+}
+
+/// Where a script step may write its JSON result: `{"passed": bool, "summary": "..."}`.
+fn result_file(c: &Ctx) -> PathBuf {
+    c.task_dir()
+        .join(format!("result-{}-r{}.json", c.step.name, c.run.0))
+}
+
+/// What a script step's result file says. `passed` is optional: without it the exit
+/// status decides. An unreadable file is an error, not a pass.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct ScriptResult {
+    pub passed: Option<bool>,
+    pub summary: String,
+}
+
+pub(crate) fn read_script_result(text: &str) -> Result<ScriptResult, String> {
+    let v: Value = serde_json::from_str(text).map_err(|e| format!("it is not JSON ({e})"))?;
+    let o = v.as_object().ok_or("it must be a JSON object")?;
+    for k in o.keys() {
+        if k != "passed" && k != "summary" && k != "data" {
+            return Err(format!("unknown key `{k}`; use passed and summary"));
+        }
+    }
+    let passed = match o.get("passed") {
+        None => None,
+        Some(Value::Bool(b)) => Some(*b),
+        Some(_) => return Err("`passed` must be true or false".into()),
+    };
+    let summary = match o.get("summary") {
+        None => String::new(),
+        Some(Value::String(s)) => s.clone(),
+        Some(_) => return Err("`summary` must be a string".into()),
+    };
+    Ok(ScriptResult { passed, summary })
 }
 
 /// Hold a step back while the owner has paused its project (Part 10). The
@@ -516,7 +579,12 @@ impl CheckHandler for TestChecks {
 /// change edits the pipeline's own definition, the new one is valid. (The
 /// definition that judges *this* task is the pinned one, never the edited one:
 /// a change cannot relax the gates it is judged by.)
-fn change_validator(wt: PathBuf, base_ref: String, branch: String) -> Validator {
+fn change_validator(
+    wt: PathBuf,
+    base_ref: String,
+    branch: String,
+    caps: mason_definition::Capabilities,
+) -> Validator {
     Box::new(move |tool, args| {
         if tool != "submit_change" {
             return Ok(());
@@ -550,11 +618,12 @@ fn change_validator(wt: PathBuf, base_ref: String, branch: String) -> Validator 
             .unwrap_or_default();
         if changed.lines().any(|f| f == ".mason/mason.toml") {
             if let Ok(text) = git::run(&wt, &["show", "HEAD:.mason/mason.toml"]) {
-                let bad = match mason_definition::parse(&text) {
+                let bad = match mason_definition::parse_with(
+                    &text,
+                    mason_definition::Plugins::Named(&caps.plugin_names()),
+                ) {
                     Err(e) => e,
-                    Ok(def) => {
-                        mason_definition::validate(&def, &mason_definition::Capabilities::now())
-                    }
+                    Ok(def) => mason_definition::validate(&def, &caps),
                 };
                 for p in bad {
                     problems.push(format!(
@@ -604,26 +673,46 @@ fn agent_job(c: &Ctx) {
         .and_then(|t| serde_json::from_str(&t).ok());
     let feedback = std::fs::read_to_string(dir.join("feedback.txt")).ok();
     let decisions = std::fs::read_to_string(dir.join("decisions.txt")).ok();
-    let prompt = match kind {
-        StepKind::Develop => crate::prompts::develop_prompt(
-            c.task.0,
-            &c.title,
-            &c.body,
-            c.trust,
-            &c.project,
-            plan.as_ref(),
-            feedback.as_deref(),
-        ),
-        StepKind::Review => crate::prompts::review_prompt(
-            c.task.0,
-            &c.title,
-            &c.body,
-            c.trust,
-            &c.project,
-            plan.as_ref(),
-        ),
-        StepKind::Explore => {
-            crate::prompts::explore_prompt(c.task.0, &c.title, &c.body, c.trust, &c.project)
+    let pack_name = match kind {
+        StepKind::Develop => "develop",
+        StepKind::Review => "review",
+        StepKind::Explore => "explore",
+    };
+    let prompt = if let Some(pack) = crate::prompts::load_pack(&c.project, pack_name) {
+        crate::prompts::from_pack(
+            &pack,
+            &crate::prompts::PackVars {
+                number: c.task.0,
+                title: &c.title,
+                body: &c.body,
+                trust: c.trust,
+                project: &c.project,
+                plan: plan.as_ref(),
+                feedback: feedback.as_deref(),
+            },
+        )
+    } else {
+        match kind {
+            StepKind::Develop => crate::prompts::develop_prompt(
+                c.task.0,
+                &c.title,
+                &c.body,
+                c.trust,
+                &c.project,
+                plan.as_ref(),
+                feedback.as_deref(),
+            ),
+            StepKind::Review => crate::prompts::review_prompt(
+                c.task.0,
+                &c.title,
+                &c.body,
+                c.trust,
+                &c.project,
+                plan.as_ref(),
+            ),
+            StepKind::Explore => {
+                crate::prompts::explore_prompt(c.task.0, &c.title, &c.body, c.trust, &c.project)
+            }
         }
     };
 
@@ -659,8 +748,14 @@ fn agent_job(c: &Ctx) {
         wt: c.wt.clone(),
         timeout: c.project.test_timeout,
     });
-    let validator = (kind == StepKind::Develop)
-        .then(|| change_validator(c.wt.clone(), c.project.base_ref(), c.branch.clone()));
+    let validator = (kind == StepKind::Develop).then(|| {
+        change_validator(
+            c.wt.clone(),
+            c.project.base_ref(),
+            c.branch.clone(),
+            c.d.caps_for(&c.project),
+        )
+    });
     let contract = ContractHandle::with_validator(kind, checks, validator);
     if let Some(tools) = &c.step.tools {
         contract.restrict_tools(tools.clone());
@@ -843,13 +938,14 @@ fn command_job(c: &Ctx) {
         .as_ref()
         .map_or(c.project.test_timeout, |a| a.value);
     if !dir.join("host.kv").exists() {
+        let _ = std::fs::remove_file(result_file(c));
         let o = SpawnOptions {
             host_bin: c.d.cfg.host_bin.clone(),
             root: hosts.clone(),
             id: id.clone(),
             cmd: vec!["sh".into(), "-c".into(), cmd],
             cwd: Some(c.wt.clone()),
-            env: vec![],
+            env: step_env_pairs(c),
             clear_env: false,
             stdin: None,
             linger: Duration::from_secs(600),
@@ -888,7 +984,42 @@ fn command_job(c: &Ctx) {
         Err(ClientError::HostLost { .. }) => return c.fail("the command was lost (its host died)"),
         Err(e) => return c.fail(format!("cannot collect the command's result: {e}")),
     };
-    if rec.code == 0 && rec.signal == 0 {
+    // A script may say more than its exit status in a JSON result file.
+    let script = match std::fs::read_to_string(result_file(c)) {
+        Ok(t) => match read_script_result(&t) {
+            Ok(r) => Some(r),
+            Err(e) => {
+                return c.fail(format!(
+                    "`{}` wrote a result file that cannot be used: {e}",
+                    c.step.name
+                ))
+            }
+        },
+        Err(_) => None,
+    };
+    let exited_ok = rec.code == 0 && rec.signal == 0;
+    if let Some(r) = &script {
+        if !r.summary.is_empty() {
+            let _ = std::fs::write(
+                c.task_dir().join(format!("{suffix}-r{}.result", c.run.0)),
+                &r.summary,
+            );
+        }
+        if r.passed == Some(false) {
+            let why = if r.summary.is_empty() {
+                "reported a failure".to_string()
+            } else {
+                r.summary.clone()
+            };
+            return c.conclude(
+                Outcome::Red,
+                format!("`{}` failed: {why}", c.step.name),
+                Some(format!("`{}` failed: {why}", c.step.name)),
+            );
+        }
+    }
+    let said_pass = script.as_ref().is_some_and(|r| r.passed == Some(true));
+    if (exited_ok || said_pass) && rec.signal == 0 {
         let _ = std::fs::remove_file(c.task_dir().join("feedback.txt"));
         return c.green();
     }
@@ -1047,6 +1178,35 @@ pub fn cleanup(d: &Arc<Daemon>, task: TaskId, delete_branch: bool) {
         let b = p.branch(task.0);
         if git::branch_exists(&p.path, &b) {
             let _ = git::run(&p.path, &["branch", "-D", &b]);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_script_steps_result_file_sets_passed_and_summary() {
+        let r = read_script_result(r#"{"passed": false, "summary": "3 rows differ"}"#).unwrap();
+        assert_eq!(
+            r,
+            ScriptResult {
+                passed: Some(false),
+                summary: "3 rows differ".into()
+            }
+        );
+        // Without `passed` the exit status decides.
+        let r = read_script_result(r#"{"summary": "ran"}"#).unwrap();
+        assert_eq!((r.passed, r.summary.as_str()), (None, "ran"));
+        for bad in [
+            "not json",
+            "[]",
+            r#"{"passed": "yes"}"#,
+            r#"{"summary": 3}"#,
+            r#"{"pased": true}"#,
+        ] {
+            assert!(read_script_result(bad).is_err(), "{bad}");
         }
     }
 }

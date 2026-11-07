@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# An example process plugin (Stage 19): it adds the step type `migration-check`.
+# Put a folder like this in `.mason/extensions/` on the base branch, then approve it:
+#   mason extension approve migration-check
+name = "migration-check"
+version = "1.0.0"
+protocol = 1
+description = "Every .sql file in a directory must contain a marker line, like `-- reversible`."
+provides = ["step-type:migration-check"]
+run = "./check.py"
+config_schema = "schema.json"   # the editor builds this step's form from it
+categories = ["testing", "review"]

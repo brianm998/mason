@@ -101,17 +101,25 @@ fn check_project(p: &ProjectCfg, out: &mut Vec<Finding>) {
     }
     // The pipeline definition on the base branch, if the project has one.
     let path = format!("{base}:.mason/mason.toml");
+    // The step types the base branch's extensions provide (read from the commit, never run).
+    let caps = mason_definition::Capabilities::now().with_plugins(
+        git::rev_parse(&p.path, &base)
+            .map(|sha| mason_daemon::plugins::scan_commit(&p.path, &sha).types())
+            .unwrap_or_default(),
+    );
     if git::ok(&p.path, &["cat-file", "-e", &path]) {
         match git::run(&p.path, &["show", &path]) {
-            Ok(text) => match mason_definition::parse(&text) {
+            Ok(text) => match mason_definition::parse_with(
+                &text,
+                mason_definition::Plugins::Named(&caps.plugin_names()),
+            ) {
                 Err(ps) => ps.iter().for_each(|x| {
                     out.push(fail(format!(
                         "project {name}: .mason/mason.toml on {base}: {x}"
                     )))
                 }),
                 Ok(def) => {
-                    let problems =
-                        mason_definition::validate(&def, &mason_definition::Capabilities::now());
+                    let problems = mason_definition::validate(&def, &caps);
                     if problems.is_empty() {
                         out.push(ok(format!(
                             "project {name}: .mason/mason.toml on {base} is valid ({} steps)",
