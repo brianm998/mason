@@ -113,6 +113,13 @@ fn events(t: TaskId, other: TaskId, decision: DecisionId) -> Vec<(&'static str, 
             },
         ),
         (
+            "BlockerRemoved",
+            E::BlockerRemoved {
+                task: t,
+                blocker: other,
+            },
+        ),
+        (
             "TrackerEdited",
             E::TrackerEdited {
                 task: t,
@@ -158,6 +165,7 @@ fn expected(from: State, ev: &str) -> Option<State> {
         "ExploreAnyway" if from == S::Queued => Some(from), // before it starts; after a skip is tested separately
         "WaitStarted" if step => Some(from),
         "BlockerAdded" if matches!(from, S::Proposed | S::Queued) => Some(from),
+        "BlockerRemoved" if matches!(from, S::Proposed | S::Queued) => Some(from),
         "TrackerEdited" if live || from == S::Proposed => Some(from),
         "Tick" => Some(from),
         _ => None, // includes Resumed (never paused) and WaitEnded (no wait)
@@ -199,5 +207,5 @@ fn every_state_and_event_pair() {
             checked += 1;
         }
     }
-    assert_eq!(checked, 11 * 20);
+    assert_eq!(checked, 11 * 21);
 }

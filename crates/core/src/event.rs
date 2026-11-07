@@ -135,6 +135,12 @@ pub enum EventKind {
         task: TaskId,
         blocker: TaskId,
     },
+    /// A blocker was withdrawn (the tracker's dependency was removed). Only a
+    /// proposed or queued task takes it; a started one is not pulled back.
+    BlockerRemoved {
+        task: TaskId,
+        blocker: TaskId,
+    },
     /// The tracker, which owns a task's title, body and priority, said they
     /// changed (Part 11: authority is split). Applies in any live state.
     TrackerEdited {

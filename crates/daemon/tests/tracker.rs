@@ -33,6 +33,7 @@ impl TrackerAdapter for Fake {
             comments: true,
             labels: true,
             webhooks: true,
+            dependencies: false,
         }
     }
     fn list(&self, etag: Option<&str>) -> Result<Listing, ApiError> {
@@ -359,5 +360,219 @@ fn a_webhook_is_acted_on_only_when_its_signature_verifies() {
         post(&sig2, &other),
         401,
         "a repository the project does not track is refused"
+    );
+}
+
+// ---- dependencies ----------------------------------------------------------------------
+
+use mason_daemon::tracker::{sync_with_deps, NativeDeps};
+
+fn native(pairs: &[(u64, &[(u64, bool)])]) -> NativeDeps {
+    pairs
+        .iter()
+        .map(|(n, bs)| {
+            (
+                *n,
+                bs.iter()
+                    .map(|(b, open)| Blocker {
+                        number: *b,
+                        open: *open,
+                    })
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
+fn with_body(mut i: Item, body: &str) -> Item {
+    i.body = body.into();
+    i
+}
+
+fn alerts(d: &Arc<Daemon>) -> Vec<String> {
+    mason_daemon::attention::alerts_now(d)
+        .into_iter()
+        .filter(|(_, k, _)| k == "tracker")
+        .map(|(_, _, t)| t)
+        .collect()
+}
+
+#[test]
+fn a_chain_is_imported_in_dependency_order_whatever_the_listing_order() {
+    let (_s, d, pid) = world();
+    let o = d.cfg.owner_names[0].clone();
+    // Newest first, as GitHub lists: 103 (body line) on 102 (native) on 101.
+    let items = vec![
+        with_body(item(103, "Third", &o, &[]), "Depends on #102"),
+        item(102, "Second", &o, &[]),
+        item(101, "First", &o, &[]),
+    ];
+    let nat = native(&[(103, &[]), (102, &[(101, true)]), (101, &[])]);
+    let sum = sync_with_deps(&d, pid, "mason", "o/r", &items, Some(&nat));
+    assert_eq!(sum.imported, 3, "{sum:?}");
+    let (t1, t2, t3) = (
+        task_for(&d, 101).unwrap(),
+        task_for(&d, 102).unwrap(),
+        task_for(&d, 103).unwrap(),
+    );
+    assert!(t1.id < t2.id && t2.id < t3.id, "dependency order");
+    assert!(t1.blockers.is_empty());
+    assert_eq!(t2.blockers.iter().copied().collect::<Vec<_>>(), vec![t1.id]);
+    assert_eq!(t3.blockers.iter().copied().collect::<Vec<_>>(), vec![t2.id]);
+    assert!(matches!(t3.activity, Activity::Held(_)));
+    assert!(alerts(&d).is_empty());
+}
+
+#[test]
+fn an_issue_whose_open_blocker_is_not_a_task_waits_and_says_so() {
+    let (_s, d, pid) = world();
+    let o = d.cfg.owner_names[0].clone();
+    let items = vec![
+        with_body(item(2, "Dependent", &o, &[]), "Blocked by #1"),
+        item(1, "A stranger's, unlabeled", "stranger", &[]),
+    ];
+    let sum = sync_with_deps(&d, pid, "mason", "o/r", &items, None);
+    assert_eq!(sum.imported, 0);
+    assert!(task_for(&d, 2).is_none());
+    assert!(
+        alerts(&d)
+            .iter()
+            .any(|t| t.contains("issue #2 is not imported") && t.contains("#1")),
+        "{:?}",
+        alerts(&d)
+    );
+    // The owner labels it: both come in, in order.
+    let items = vec![
+        with_body(item(2, "Dependent", &o, &[]), "Blocked by #1"),
+        item(1, "A stranger's, labeled", "stranger", &["mason"]),
+    ];
+    assert_eq!(
+        sync_with_deps(&d, pid, "mason", "o/r", &items, None).imported,
+        2
+    );
+    assert!(alerts(&d).is_empty());
+    assert!(task_for(&d, 1).unwrap().id < task_for(&d, 2).unwrap().id);
+}
+
+#[test]
+fn a_closed_blocker_that_was_never_a_task_is_nothing_to_wait_for() {
+    let (_s, d, pid) = world();
+    let o = d.cfg.owner_names[0].clone();
+    let items = vec![
+        item(7, "Dependent", &o, &[]),
+        Item {
+            open: false,
+            ..item(3, "Long closed", &o, &[])
+        },
+    ];
+    // Native names #3 (closed) and #99 (not listed, closed): both ignored.
+    let nat = native(&[(7, &[(3, false), (99, false)])]);
+    assert_eq!(
+        sync_with_deps(&d, pid, "mason", "o/r", &items, Some(&nat)).imported,
+        1
+    );
+    assert!(task_for(&d, 7).unwrap().blockers.is_empty());
+}
+
+#[test]
+fn a_cycle_among_issues_is_not_imported_and_the_alert_names_it() {
+    let (_s, d, pid) = world();
+    let o = d.cfg.owner_names[0].clone();
+    let items = vec![
+        with_body(item(4, "Four", &o, &[]), "Depends on #5"),
+        with_body(item(5, "Five", &o, &[]), "Depends on #4"),
+        item(6, "Fine", &o, &[]),
+    ];
+    let sum = sync_with_deps(&d, pid, "mason", "o/r", &items, None);
+    assert_eq!(sum.imported, 1);
+    assert!(task_for(&d, 4).is_none() && task_for(&d, 5).is_none());
+    assert!(
+        alerts(&d).iter().any(|t| t.contains("#4 -> #5 -> #4")),
+        "{:?}",
+        alerts(&d)
+    );
+}
+
+#[test]
+fn a_change_on_the_tracker_holds_or_releases_a_queued_task_but_never_pulls_back_a_started_one() {
+    let (_s, d, pid) = world();
+    let o = d.cfg.owner_names[0].clone();
+    let items = vec![
+        item(1, "A", &o, &[]),
+        item(2, "B", &o, &[]),
+        item(3, "C", &o, &[]),
+    ];
+    let nat = native(&[(1, &[]), (2, &[]), (3, &[])]);
+    sync_with_deps(&d, pid, "mason", "o/r", &items, Some(&nat));
+    assert!(task_for(&d, 2).unwrap().blockers.is_empty());
+    // A blocker is added on the tracker: the queued task is held.
+    let nat = native(&[(1, &[]), (2, &[(1, true)]), (3, &[(1, true)])]);
+    sync_with_deps(&d, pid, "mason", "o/r", &items, Some(&nat));
+    assert!(matches!(
+        task_for(&d, 2).unwrap().activity,
+        Activity::Held(_)
+    ));
+    // The tracker's blocker goes away again: the queued task is released.
+    let nat = native(&[(1, &[]), (2, &[]), (3, &[(1, true)])]);
+    sync_with_deps(&d, pid, "mason", "o/r", &items, Some(&nat));
+    assert!(
+        task_for(&d, 2).unwrap().blockers.is_empty(),
+        "removing a blocker releases a queued task"
+    );
+    assert_eq!(
+        task_for(&d, 2).unwrap().activity,
+        Activity::Waiting(WaitReason::Slot)
+    );
+    // A started task: add a new blocker after it started.
+    let t1 = task_for(&d, 1).unwrap().id;
+    let t2 = task_for(&d, 2).unwrap().id;
+    d.emit(EventKind::Admitted {
+        task: t2,
+        entry: None,
+    })
+    .unwrap();
+    let nat = native(&[(1, &[]), (2, &[(1, true)]), (3, &[(1, true)])]);
+    sync_with_deps(&d, pid, "mason", "o/r", &items, Some(&nat));
+    let t = task_for(&d, 2).unwrap();
+    assert!(
+        !t.blockers.contains(&t1),
+        "a started task is not pulled back"
+    );
+    assert!(
+        alerts(&d)
+            .iter()
+            .any(|a| a.contains("task #") && a.contains("not pulled back")),
+        "{:?}",
+        alerts(&d)
+    );
+}
+
+#[test]
+fn a_canceled_blocker_keeps_the_dependent_held_and_raises_an_alert() {
+    let (_s, d, pid) = world();
+    let o = d.cfg.owner_names[0].clone();
+    let items = vec![item(1, "A", &o, &[]), item(2, "B", &o, &[])];
+    let nat = native(&[(1, &[]), (2, &[(1, true)])]);
+    sync_with_deps(&d, pid, "mason", "o/r", &items, Some(&nat));
+    // Issue 1 is closed on the tracker without landing: its task is canceled.
+    let items = vec![
+        Item {
+            open: false,
+            ..item(1, "A", &o, &[])
+        },
+        item(2, "B", &o, &[]),
+    ];
+    sync_with_deps(&d, pid, "mason", "o/r", &items, Some(&nat));
+    assert_eq!(task_for(&d, 1).unwrap().state, State::Canceled);
+    assert!(matches!(
+        task_for(&d, 2).unwrap().activity,
+        Activity::Held(_)
+    ));
+    assert!(
+        alerts(&d)
+            .iter()
+            .any(|a| a.contains("was canceled") && a.contains("held")),
+        "{:?}",
+        alerts(&d)
     );
 }

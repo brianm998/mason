@@ -179,6 +179,22 @@ private fun TaskDetail(model: MonitorModel, d: TaskDetailView) {
         if (r.typical.isNotEmpty()) Text(r.typical, style = theme.small())
     }
     ActionButtons(model, r, hasApprovalView = d.approval != null)
+    if (r.blockers.isNotEmpty()) {
+        Row(horizontalArrangement = Arrangement.spacedBy(theme.spacingSmall), modifier = Modifier.testTag("waiting-for")) {
+            Text("waiting for", style = theme.body(color = theme.muted))
+            r.blockers.forEach { b ->
+                Text("#$b", style = theme.body(color = theme.accent), modifier = Modifier.clickable { model.go(Page.Task(b)) })
+            }
+        }
+    }
+    if (r.blocks.isNotEmpty()) {
+        Row(horizontalArrangement = Arrangement.spacedBy(theme.spacingSmall), modifier = Modifier.testTag("blocks")) {
+            Text("blocks", style = theme.body(color = theme.muted))
+            r.blocks.forEach { b ->
+                Text("#$b", style = theme.body(color = theme.accent), modifier = Modifier.clickable { model.go(Page.Task(b)) })
+            }
+        }
+    }
     if (d.route.isNotEmpty()) {
         Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing)) {
             Text("Started at ${d.started_at}: ${d.route}.", style = theme.body(color = theme.muted))

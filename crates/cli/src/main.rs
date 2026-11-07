@@ -43,6 +43,7 @@ mason: command-line client for the MASON pipeline
 
   mason task add <title> [--project P] [--body TEXT | --body-file F | --body -]
                          [--priority urgent|high|normal|low] [--proposed] [--explored]
+                         [--after ID[,ID...]]   wait for those tasks to land first
   mason task list [--state S] [--json]
   mason task show <id> [--json]
   mason task cancel <id> [--delete-branch]
@@ -1400,6 +1401,23 @@ fn main() {
                     let priority = a.opt("--priority").unwrap_or_else(|| "normal".into());
                     let proposed = a.flag("--proposed");
                     let explored = a.flag("--explored");
+                    let after: Vec<u64> = a
+                        .opt("--after")
+                        .map(|v| {
+                            v.split(',')
+                                .map(|x| {
+                                    x.trim()
+                                        .trim_start_matches('#')
+                                        .parse::<u64>()
+                                        .unwrap_or_else(|_| {
+                                            die(&format!(
+                                                "--after takes task ids like 3,4, not {x:?}"
+                                            ))
+                                        })
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
                     let title = a.pos().unwrap_or_else(|| {
                         die("give the task a title: mason task add \"Fix the thing\"")
                     });
@@ -1422,7 +1440,7 @@ fn main() {
                             )),
                         }
                     });
-                    let r = or_die(d.call("POST", "/tasks", Some(&json!({"project": project, "title": title, "body": body, "priority": priority, "proposed": proposed, "explored": explored}))));
+                    let r = or_die(d.call("POST", "/tasks", Some(&json!({"project": project, "title": title, "body": body, "priority": priority, "proposed": proposed, "explored": explored, "after": after}))));
                     if json_out {
                         return println!("{r:#}");
                     }
@@ -1455,6 +1473,21 @@ fn main() {
                     println!("  project   {}", t["project"].as_str().unwrap_or("?"));
                     println!("  state     {}", t["state"].as_str().unwrap_or("?"));
                     println!("  activity  {}", t["activity"].as_str().unwrap_or("?"));
+                    let ids = |k: &str| {
+                        t[k].as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(Value::as_u64)
+                            .map(|n| format!("#{n}"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    };
+                    if !ids("blocked_by").is_empty() {
+                        println!("  blocked by {}", ids("blocked_by"));
+                    }
+                    if !ids("blocks").is_empty() {
+                        println!("  blocks    {}", ids("blocks"));
+                    }
                     if let Some(w) = t["wait"].as_str() {
                         println!("  waiting   {w}");
                     }

@@ -579,7 +579,7 @@ fn the_cli_leaves_quietly_when_its_output_is_cut_off() {
         .args([
             "-c",
             &format!(
-                "{} --data-dir /nonexistent definition check {} | head -1",
+                "'{}' --data-dir /nonexistent definition check '{}' | head -1",
                 bin("mason-pipeline", "mason").display(),
                 f.display()
             ),
@@ -591,5 +591,8 @@ fn the_cli_leaves_quietly_when_its_output_is_cut_off() {
         !err.contains("panicked") && !err.contains("Broken pipe"),
         "{err}"
     );
-    assert!(String::from_utf8_lossy(&out.stdout).starts_with("ok  4 steps"));
+    assert!(
+        String::from_utf8_lossy(&out.stdout).starts_with("ok  4 steps"),
+        "{out:?}"
+    );
 }

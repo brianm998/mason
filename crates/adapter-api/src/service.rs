@@ -275,6 +275,15 @@ pub struct TrackerCaps {
     pub comments: bool,
     pub labels: bool,
     pub webhooks: bool,
+    /// Can say what an issue is blocked by (`TrackerAdapter::blocked_by`).
+    pub dependencies: bool,
+}
+
+/// An issue another issue is blocked by, as the tracker's own relationship says.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Blocker {
+    pub number: u64,
+    pub open: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -310,6 +319,12 @@ pub trait TrackerAdapter: Send + Sync {
     /// Mirror a state change out (best effort: the caller ignores failure).
     fn mirror(&self, item: &Item, note: &str) -> Result<(), ApiError>;
     fn close(&self, item: &Item, note: &str) -> Result<(), ApiError>;
+    /// The issues of this repository that `number` is blocked by (the tracker's
+    /// own relationship; text in the body is read by the caller). A tracker
+    /// without the relationship says so in its capabilities and returns none.
+    fn blocked_by(&self, _number: u64) -> Result<Vec<Blocker>, ApiError> {
+        Ok(vec![])
+    }
 }
 
 // ---- build system ------------------------------------------------------------------

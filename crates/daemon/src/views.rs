@@ -335,6 +335,13 @@ impl<'a> Ctx<'a> {
             progress: self.progress(t),
             allowed_actions: self.allowed_actions(t),
             blockers: t.blockers.iter().map(|b| b.0).collect(),
+            blocks: self
+                .w
+                .tasks
+                .values()
+                .filter(|o| o.blockers.contains(&t.id))
+                .map(|o| o.id.0)
+                .collect(),
             typical: typical.map_or_else(String::new, |(lo, hi)| {
                 format!("usually {} to {} min", lo / 60_000, hi.div_ceil(60_000))
             }),
@@ -905,6 +912,7 @@ pub fn summarize(kind: &EventKind) -> (String, String, u64) {
         | EventKind::WaitStarted { task, .. }
         | EventKind::WaitEnded { task }
         | EventKind::TrackerEdited { task, .. }
+        | EventKind::BlockerRemoved { task, .. }
         | EventKind::BlockerAdded { task, .. } => task.0,
         _ => 0,
     };

@@ -19,7 +19,8 @@ pub enum ReduceError {
     /// The answer names a decision that is not the task's open one.
     StaleAnswer,
     BadRetryTarget(State),
-    BlockerCycle,
+    /// Adding the blocker would close a loop; the path starts and ends at the task.
+    BlockerCycle(Vec<TaskId>),
     NoSuchWait,
 }
 
@@ -46,6 +47,7 @@ fn name(k: &EventKind) -> &'static str {
         WaitStarted { .. } => "WaitStarted",
         WaitEnded { .. } => "WaitEnded",
         BlockerAdded { .. } => "BlockerAdded",
+        BlockerRemoved { .. } => "BlockerRemoved",
         TrackerEdited { .. } => "TrackerEdited",
         Tick => "Tick",
     }
@@ -94,20 +96,29 @@ fn illegal(from: State, k: &EventKind) -> ReduceError {
     }
 }
 
-fn would_cycle(w: &World, task: TaskId, blocker: TaskId) -> bool {
+/// The path `task -> blocker -> ... -> task` that adding the edge would close, if any.
+fn would_cycle(w: &World, task: TaskId, blocker: TaskId) -> Option<Vec<TaskId>> {
     let mut seen = BTreeSet::new();
-    let mut stack = vec![blocker];
-    while let Some(n) = stack.pop() {
+    // Each stack entry is the path from `blocker` to the node under test.
+    let mut stack = vec![vec![blocker]];
+    while let Some(path) = stack.pop() {
+        let n = *path.last().expect("never empty");
         if n == task {
-            return true;
+            let mut full = vec![task];
+            full.extend(path);
+            return Some(full);
         }
         if seen.insert(n) {
             if let Some(t) = w.tasks.get(&n) {
-                stack.extend(t.blockers.iter().copied());
+                for b in &t.blockers {
+                    let mut p = path.clone();
+                    p.push(*b);
+                    stack.push(p);
+                }
             }
         }
     }
-    false
+    None
 }
 
 /// Stop whatever is running and release what it held.
@@ -447,14 +458,27 @@ fn apply(w: &mut World, k: &EventKind, fx: &mut Vec<Effect>) -> Result<(), Reduc
             if !matches!(from, S::Proposed | S::Queued) {
                 return Err(illegal(from, k));
             }
-            if would_cycle(w, *task, *blocker) {
-                return Err(ReduceError::BlockerCycle);
+            if let Some(path) = would_cycle(w, *task, *blocker) {
+                return Err(ReduceError::BlockerCycle(path));
             }
             w.tasks
                 .get_mut(task)
                 .expect("exists")
                 .blockers
                 .insert(*blocker);
+        }
+        E::BlockerRemoved { task, blocker } => {
+            // A task already past queued is not pulled back: its blockers were
+            // satisfied (or ignored) when it started.
+            let from = get(w, *task)?.state;
+            if !matches!(from, S::Proposed | S::Queued) {
+                return Err(illegal(from, k));
+            }
+            w.tasks
+                .get_mut(task)
+                .expect("exists")
+                .blockers
+                .remove(blocker);
         }
         E::TrackerEdited {
             task,

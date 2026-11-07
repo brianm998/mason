@@ -79,5 +79,30 @@
    },
    "body": ""
   }
+ },
+ {
+  "method": "GET",
+  "url": "/issues/3/dependencies/blocked_by",
+  "response": {
+   "status": 200,
+   "body": [
+    {
+     "number": 2,
+     "state": "closed",
+     "state_reason": "completed",
+     "repository_url": "https://api.github.com/repos/o/r"
+    },
+    {
+     "number": 9,
+     "state": "open",
+     "repository_url": "https://api.github.com/repos/o/r"
+    },
+    {
+     "number": 5,
+     "state": "open",
+     "repository_url": "https://api.github.com/repos/other/thing"
+    }
+   ]
+  }
  }
 ]

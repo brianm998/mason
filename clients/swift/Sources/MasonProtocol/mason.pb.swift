@@ -516,6 +516,10 @@ public nonisolated struct Mason_V1_AddTask: Sendable {
 
   public var explored: Bool = false
 
+  /// Tasks this one waits for, by id (additive). Landed ones are already satisfied;
+  /// a canceled or failed one is refused.
+  public var after: [UInt64] = []
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -1104,6 +1108,12 @@ public nonisolated struct Mason_V1_TaskRow: @unchecked Sendable {
   public var body: String {
     get {_storage._body}
     set {_uniqueStorage()._body = newValue}
+  }
+
+  /// Tasks that wait for this one (the reverse of `blockers`).
+  public var blocks: [UInt64] {
+    get {_storage._blocks}
+    set {_uniqueStorage()._blocks = newValue}
   }
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
@@ -2516,7 +2526,7 @@ nonisolated extension Mason_V1_TaskRef: SwiftProtobuf.Message, SwiftProtobuf._Me
 
 nonisolated extension Mason_V1_AddTask: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".AddTask"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}project\0\u{1}title\0\u{1}body\0\u{1}priority\0\u{1}proposed\0\u{1}explored\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}project\0\u{1}title\0\u{1}body\0\u{1}priority\0\u{1}proposed\0\u{1}explored\0\u{1}after\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -2530,6 +2540,7 @@ nonisolated extension Mason_V1_AddTask: SwiftProtobuf.Message, SwiftProtobuf._Me
       case 4: try { try decoder.decodeSingularStringField(value: &self.priority) }()
       case 5: try { try decoder.decodeSingularBoolField(value: &self.proposed) }()
       case 6: try { try decoder.decodeSingularBoolField(value: &self.explored) }()
+      case 7: try { try decoder.decodeRepeatedUInt64Field(value: &self.after) }()
       default: break
       }
     }
@@ -2554,6 +2565,9 @@ nonisolated extension Mason_V1_AddTask: SwiftProtobuf.Message, SwiftProtobuf._Me
     if self.explored != false {
       try visitor.visitSingularBoolField(value: self.explored, fieldNumber: 6)
     }
+    if !self.after.isEmpty {
+      try visitor.visitPackedUInt64Field(value: self.after, fieldNumber: 7)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -2564,6 +2578,7 @@ nonisolated extension Mason_V1_AddTask: SwiftProtobuf.Message, SwiftProtobuf._Me
     if lhs.priority != rhs.priority {return false}
     if lhs.proposed != rhs.proposed {return false}
     if lhs.explored != rhs.explored {return false}
+    if lhs.after != rhs.after {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -3616,7 +3631,7 @@ nonisolated extension Mason_V1_ProgressCell: SwiftProtobuf.Message, SwiftProtobu
 
 nonisolated extension Mason_V1_TaskRow: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".TaskRow"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{1}key\0\u{1}title\0\u{1}project\0\u{1}state\0\u{1}activity\0\u{3}why_waiting\0\u{3}enqueued_ms\0\u{3}in_state_ms\0\u{1}model\0\u{1}progress\0\u{3}allowed_actions\0\u{1}blockers\0\u{1}typical\0\u{1}slow\0\u{1}step\0\u{1}body\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{1}key\0\u{1}title\0\u{1}project\0\u{1}state\0\u{1}activity\0\u{3}why_waiting\0\u{3}enqueued_ms\0\u{3}in_state_ms\0\u{1}model\0\u{1}progress\0\u{3}allowed_actions\0\u{1}blockers\0\u{1}typical\0\u{1}slow\0\u{1}step\0\u{1}body\0\u{1}blocks\0")
 
   fileprivate class _StorageClass {
     var _id: UInt64 = 0
@@ -3636,6 +3651,7 @@ nonisolated extension Mason_V1_TaskRow: SwiftProtobuf.Message, SwiftProtobuf._Me
     var _slow: Bool = false
     var _step: String = String()
     var _body: String = String()
+    var _blocks: [UInt64] = []
 
       // This property is used as the initial default value for new instances of the type.
       // The type itself is protecting the reference to its storage via CoW semantics.
@@ -3663,6 +3679,7 @@ nonisolated extension Mason_V1_TaskRow: SwiftProtobuf.Message, SwiftProtobuf._Me
       _slow = source._slow
       _step = source._step
       _body = source._body
+      _blocks = source._blocks
     }
   }
 
@@ -3698,6 +3715,7 @@ nonisolated extension Mason_V1_TaskRow: SwiftProtobuf.Message, SwiftProtobuf._Me
         case 15: try { try decoder.decodeSingularBoolField(value: &_storage._slow) }()
         case 16: try { try decoder.decodeSingularStringField(value: &_storage._step) }()
         case 17: try { try decoder.decodeSingularStringField(value: &_storage._body) }()
+        case 18: try { try decoder.decodeRepeatedUInt64Field(value: &_storage._blocks) }()
         default: break
         }
       }
@@ -3757,6 +3775,9 @@ nonisolated extension Mason_V1_TaskRow: SwiftProtobuf.Message, SwiftProtobuf._Me
       if !_storage._body.isEmpty {
         try visitor.visitSingularStringField(value: _storage._body, fieldNumber: 17)
       }
+      if !_storage._blocks.isEmpty {
+        try visitor.visitPackedUInt64Field(value: _storage._blocks, fieldNumber: 18)
+      }
     }
     try unknownFields.traverse(visitor: &visitor)
   }
@@ -3783,6 +3804,7 @@ nonisolated extension Mason_V1_TaskRow: SwiftProtobuf.Message, SwiftProtobuf._Me
         if _storage._slow != rhs_storage._slow {return false}
         if _storage._step != rhs_storage._step {return false}
         if _storage._body != rhs_storage._body {return false}
+        if _storage._blocks != rhs_storage._blocks {return false}
         return true
       }
       if !storagesAreEqual {return false}

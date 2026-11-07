@@ -156,14 +156,14 @@ fn blocker_cycles_and_unknowns_are_refused() {
             task: a,
             blocker: c
         }),
-        Err(ReduceError::BlockerCycle)
+        Err(ReduceError::BlockerCycle(vec![a, c, b, a]))
     );
     assert_eq!(
         sim.try_ev(E::BlockerAdded {
             task: a,
             blocker: a
         }),
-        Err(ReduceError::BlockerCycle)
+        Err(ReduceError::BlockerCycle(vec![a, a]))
     );
     assert_eq!(
         sim.try_ev(E::BlockerAdded {
@@ -946,4 +946,43 @@ fn outside_text_claiming_explored_is_ignored_until_the_owner_approves() {
         (sim.state(owner), sim.w.tasks[&owner].route),
         (State::Developing, Some(Route::Flag))
     );
+}
+
+#[test]
+fn removing_a_blocker_releases_a_queued_task_and_wakes_the_scheduler() {
+    let mut sim = Sim::new();
+    let a = sim.file(false, false);
+    let b = sim.file_with(false, false, vec![a], None);
+    assert!(matches!(sim.activity(b), Activity::Held(_)));
+    let fx = sim.ok(E::BlockerRemoved {
+        task: b,
+        blocker: a,
+    });
+    assert_eq!(sim.activity(b), Activity::Waiting(WaitReason::Slot));
+    assert!(fx.contains(&Effect::WakeScheduler { task: b }));
+}
+
+#[test]
+fn a_started_task_is_not_pulled_back_by_a_removed_blocker() {
+    let mut sim = Sim::new();
+    let a = sim.file(false, false);
+    let b = sim.file(false, false);
+    sim.ok(E::Admitted {
+        task: b,
+        entry: None,
+    });
+    assert!(matches!(
+        sim.try_ev(E::BlockerAdded {
+            task: b,
+            blocker: a
+        }),
+        Err(ReduceError::Illegal { .. })
+    ));
+    assert!(matches!(
+        sim.try_ev(E::BlockerRemoved {
+            task: b,
+            blocker: a
+        }),
+        Err(ReduceError::Illegal { .. })
+    ));
 }

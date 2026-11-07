@@ -31,6 +31,11 @@ extension TaskRow {
     func item(prefix: String, order: Int) -> Item {
         var texts = [key, title, project, state]
         if !whyWaiting.isEmpty { texts.append(whyWaiting) }
+        // The task page says what it waits for and what waits for it.
+        if prefix == "detail" {
+            if !blockers.isEmpty { texts.append("waiting for " + blockers.map { "#\($0)" }.joined(separator: ", ")) }
+            if !blocks.isEmpty { texts.append("blocks " + blocks.map { "#\($0)" }.joined(separator: ", ")) }
+        }
         return Item(id: "\(prefix):\(id)", texts: texts, actions: allowedActions, order: order)
     }
 }

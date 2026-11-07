@@ -24,6 +24,11 @@ data class Item(
 fun TaskRow.item(prefix: String, order: Int): Item {
     val texts = mutableListOf(key, title, project, state)
     if (why_waiting.isNotEmpty()) texts += why_waiting
+    // The task page says what it waits for and what waits for it.
+    if (prefix == "detail") {
+        if (blockers.isNotEmpty()) texts += "waiting for " + blockers.joinToString(", ") { "#$it" }
+        if (blocks.isNotEmpty()) texts += "blocks " + blocks.joinToString(", ") { "#$it" }
+    }
     return Item("$prefix:$id", texts, allowed_actions, order)
 }
 

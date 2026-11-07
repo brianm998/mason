@@ -1,0 +1,35 @@
+[
+ {
+  "number": 103,
+  "node_id": "I_103",
+  "title": "Stage C",
+  "body": "Third in the chain.\n\nDepends on #102 (a body line only: no GitHub link).\n",
+  "state": "open",
+  "user": {
+   "login": "OWNER"
+  },
+  "labels": []
+ },
+ {
+  "number": 102,
+  "node_id": "I_102",
+  "title": "Stage B",
+  "body": "Second; GitHub says it is blocked by 101.",
+  "state": "open",
+  "user": {
+   "login": "OWNER"
+  },
+  "labels": []
+ },
+ {
+  "number": 101,
+  "node_id": "I_101",
+  "title": "Stage A",
+  "body": "First in the chain.",
+  "state": "open",
+  "user": {
+   "login": "OWNER"
+  },
+  "labels": []
+ }
+]
