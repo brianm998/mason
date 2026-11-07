@@ -380,6 +380,7 @@ impl Scratch {
 
     pub fn mason(&self, args: &[&str]) -> Output {
         Command::new(bin("mason-pipeline", "mason"))
+            .env("MASON_UPDATE_WAIT_S", "8")
             .args(["--data-dir", &self.data_dir.display().to_string()])
             .args(["--config-dir", &self.config_dir.display().to_string()])
             .args(args)

@@ -761,7 +761,10 @@ fn main() {
                     }
                     or_die(d.call("POST", "/update", Some(&body)));
                     // Follow it until it finishes, or the daemon is replaced.
-                    let (mut shown, mut last_phase, mut seen_down) = (0usize, String::new(), false);
+                    let (mut shown, mut seen_down) = (0usize, false);
+                    let mut target: Option<String> = None;
+                    let patience: u64 = std::env::var("MASON_UPDATE_WAIT_S").ok().and_then(|v| v.parse().ok()).unwrap_or(30);
+                    let mut down_since: Option<std::time::Instant> = None;
                     let end = std::time::Instant::now() + std::time::Duration::from_secs(3600);
                     loop {
                         std::thread::sleep(std::time::Duration::from_millis(500));
@@ -770,23 +773,31 @@ fn main() {
                         }
                         let Ok(r) = d.call("GET", "/update", None) else {
                             seen_down = true; // the daemon is being replaced
+                            let since = *down_since.get_or_insert_with(std::time::Instant::now);
+                            if since.elapsed().as_secs() > patience {
+                                die("the daemon went away while taking over and has not come back. If the new build is crashing it is rolled back by itself after three crashes; `mason update status` shows where things stand once a daemon answers");
+                            }
                             continue;
                         };
+                        down_since = None;
                         for l in r["log"].as_array().into_iter().flatten().skip(shown) {
                             println!("  {}", l.as_str().unwrap_or(""));
                             shown += 1;
+                        }
+                        if let Some(t) = r["target"].as_str() {
+                            target = Some(t.to_string());
                         }
                         let phase = r["phase"].as_str().unwrap_or("").to_string();
                         if phase == "failed" {
                             die(&format!("the update failed, and the running daemon is unchanged: {}", r["error"].as_str().unwrap_or("")));
                         }
-                        if phase == "idle" && (check || r["running"].as_str() == r["target"].as_str() || seen_down) {
+                        // Done when it is idle and either only checking, or the new runtime is the
+                        // one that was being built (a restarted daemon has forgotten the target).
+                        if phase == "idle" && (check || (target.is_some() && r["running"].as_str() == target.as_deref())) {
                             println!("running {}", r["running"].as_str().unwrap_or("(a build directory)"));
                             break;
                         }
-                        if phase != last_phase {
-                            last_phase = phase;
-                        }
+                        let _ = seen_down;
                     }
                 }
             }

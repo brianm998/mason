@@ -172,6 +172,8 @@ fn main() {
             };
             if rt.is_ready(&chosen) {
                 use std::os::unix::process::CommandExt;
+                // Recorded here, not by the daemon: a build that dies at once never would.
+                boots.record(now, &chosen, "start");
                 let mut a = cfg.exec_args.clone();
                 a.extend(["--runtime-sha".into(), chosen.clone()]);
                 let err = std::process::Command::new(rt.masond(&chosen)).args(&a).exec();
@@ -182,7 +184,6 @@ fn main() {
     if let Some(sha) = &cfg.runtime_sha {
         use mason_daemon::update::{Boots, Runtimes};
         let boots = Boots::new(&Runtimes::new(&cfg.data_dir));
-        boots.record(mason_daemon::daemon::now_ms(), sha, "start");
         let (sha, after) = (sha.clone(), cfg.healthy_after);
         std::thread::spawn(move || {
             std::thread::sleep(after);

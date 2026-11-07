@@ -530,6 +530,7 @@ pub fn take_over(d: &Arc<Daemon>, sha: &str) -> String {
     if let Err(e) = rt.set_current(sha) {
         return fail(d, format!("could not record the new runtime: {e}"));
     }
+    Boots::new(&rt).record(now_ms(), sha, "start");
     // Let an event being appended finish; nothing is half-written when we go.
     d.quiesce();
     let mut args = d.cfg.exec_args.clone();
