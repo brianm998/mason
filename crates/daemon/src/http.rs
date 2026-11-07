@@ -570,6 +570,84 @@ async fn project_definition(Shared(d): Shared<Arc<Daemon>>, Path(name): Path<Str
     Ok(Json(v))
 }
 
+// ---- the graphical editor (Part 18) -----------------------------------------------------------
+
+fn who_of(h: &axum::http::HeaderMap) -> String {
+    h.get("x-mason-as").and_then(|v| v.to_str().ok()).unwrap_or_default().to_string()
+}
+
+/// The canvas model of a project's draft (`?step=NAME` selects a step for the inspector).
+async fn editor_get(Shared(d): Shared<Arc<Daemon>>, Path(name): Path<String>, Query(q): Query<HashMap<String, String>>) -> Res {
+    let pid = project_of(&d, &name)?;
+    let step = q.get("step").cloned().unwrap_or_default();
+    let d2 = d.clone();
+    let v = d.pool.run(move || crate::editor::model(&d2, pid, &step)).await.map_err(pool_err)?;
+    Ok(Json(v))
+}
+
+/// One operation on the draft. Refused edits answer 422 with the reasons.
+async fn editor_op(Shared(d): Shared<Arc<Daemon>>, Path(name): Path<String>, Json(b): Json<Value>) -> Res {
+    let pid = project_of(&d, &name)?;
+    let d2 = d.clone();
+    let r = d.pool.run(move || crate::editor::operate(&d2, pid, &b)).await.map_err(pool_err)?;
+    d.poke();
+    match r {
+        Ok(()) => Ok(Json(json!({"ok": true}))),
+        Err(reasons) => Err((StatusCode::UNPROCESSABLE_ENTITY, Json(json!({"error": reasons.join("; "), "reasons": reasons})))),
+    }
+}
+
+async fn editor_history(Shared(d): Shared<Arc<Daemon>>, Path((name, what)): Path<(String, String)>) -> Res {
+    let pid = project_of(&d, &name)?;
+    let d2 = d.clone();
+    let changed = d
+        .pool
+        .run(move || match what.as_str() {
+            "undo" => Ok(crate::editor::undo(&d2, pid)),
+            "redo" => Ok(crate::editor::redo(&d2, pid)),
+            "discard" => {
+                crate::editor::discard(&d2, pid);
+                Ok(true)
+            }
+            _ => Err(()),
+        })
+        .await
+        .map_err(pool_err)?
+        .map_err(|()| fail(StatusCode::NOT_FOUND, "not found"))?;
+    d.poke();
+    Ok(Json(json!({"ok": true, "changed": changed})))
+}
+
+/// Walk scripted tasks through the draft (the standard set, or the one in the body).
+async fn editor_simulate(Shared(d): Shared<Arc<Daemon>>, Path(name): Path<String>, body: Option<Json<Value>>) -> Res {
+    let pid = project_of(&d, &name)?;
+    let d2 = d.clone();
+    let custom = body.map(|b| b.0).filter(|b| b.get("results").is_some() || b.get("explored").is_some() || b.get("clear").is_some());
+    let v = d
+        .pool
+        .run(move || crate::editor::simulate(&d2, pid, custom.as_ref()))
+        .await
+        .map_err(pool_err)?
+        .map_err(|e| fail(StatusCode::UNPROCESSABLE_ENTITY, e))?;
+    d.poke();
+    Ok(Json(v))
+}
+
+/// Commit the draft to the base branch (or open a pull request). Owner only.
+async fn editor_apply(Shared(d): Shared<Arc<Daemon>>, headers: axum::http::HeaderMap, Path(name): Path<String>, body: Option<Json<Value>>) -> Res {
+    let pid = project_of(&d, &name)?;
+    let who = who_of(&headers);
+    let message = body.as_ref().and_then(|b| b["message"].as_str()).unwrap_or_default().to_string();
+    let d2 = d.clone();
+    let v = d
+        .pool
+        .run(move || crate::editor::apply(&d2, pid, &who, &message))
+        .await
+        .map_err(pool_err)?
+        .map_err(|(code, msg)| fail(StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_REQUEST), msg))?;
+    Ok(Json(v))
+}
+
 async fn project_reload(Shared(d): Shared<Arc<Daemon>>, Path(name): Path<String>) -> Res {
     let pid = project_of(&d, &name)?;
     let d2 = d.clone();
@@ -1581,6 +1659,11 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/tasks/{id}/explore-anyway", post(explore_anyway))
         .route("/tasks/{id}/overrides", post(task_override))
         .route("/projects/{name}/definition", get(project_definition))
+        .route("/projects/{name}/editor", get(editor_get))
+        .route("/projects/{name}/editor/op", post(editor_op))
+        .route("/projects/{name}/editor/simulate", post(editor_simulate))
+        .route("/projects/{name}/editor/apply", post(editor_apply))
+        .route("/projects/{name}/editor/{what}", post(editor_history))
         .route("/projects/{name}/reload", post(project_reload))
         .route("/projects/{name}/config", get(project_config))
         .route(

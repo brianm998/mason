@@ -75,6 +75,7 @@ mason: command-line client for the MASON pipeline
   mason hook bash [--needs compile]   optional Claude Code PreToolUse hook: builds go through the queue
   mason definition check [FILE]       validate a definition (default .mason/mason.toml) and dry-run it
   mason definition dry-run [FILE] [--scenarios FILE]
+  mason editor show|op|undo|redo|discard|simulate|apply [--project P]   the pipeline editor, without a screen
   mason definition show [--project P] | reload [--project P]
   mason landing                       batches, phases, freezes, and the landing queue
   mason self                          MASON on its own repository: limits, and changes held for you
@@ -409,6 +410,93 @@ fn main() {
         })
     };
     match cmd.as_str() {
+        "editor" => {
+            let sub = a.pos().unwrap_or_else(|| die("editor what? show, op, undo, redo, discard, simulate or apply"));
+            let project = project_of(&mut a);
+            let step = a.opt("--step").unwrap_or_default();
+            let message = a.opt("-m").or_else(|| a.opt("--message")).unwrap_or_default();
+            let json_arg = if sub == "op" || sub == "simulate" { a.pos() } else { None };
+            // Applying is the owner's act: say who.
+            if sub == "apply" && std::env::var("MASON_AS").is_err() {
+                if let Ok(u) = std::env::var("USER") {
+                    std::env::set_var("MASON_AS", u);
+                }
+            }
+            finish(&a);
+            let base = format!("/projects/{project}/editor");
+            let body = |s: &Option<String>| -> Option<Value> { s.as_ref().map(|t| serde_json::from_str(t).unwrap_or_else(|e| die(&format!("that is not JSON: {e}")))) };
+            match sub.as_str() {
+                "show" => {
+                    let q = if step.is_empty() { String::new() } else { format!("?step={step}") };
+                    let r = or_die(d.call("GET", &format!("{base}{q}"), None));
+                    if json_out {
+                        return println!("{r:#}");
+                    }
+                    for l in r["lanes"].as_array().into_iter().flatten() {
+                        let cat = l["category"].as_str().unwrap_or("");
+                        let nodes: Vec<String> = r["nodes"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter(|n| n["category"] == cat)
+                            .map(|n| format!("{} ({}){}", n["name"].as_str().unwrap_or(""), n["kind"].as_str().unwrap_or(""), if n["problems"].as_array().is_some_and(|p| !p.is_empty()) { " !" } else { "" }))
+                            .collect();
+                        println!("{:<11} {}", l["title"].as_str().unwrap_or(""), nodes.join("   "));
+                    }
+                    for e in r["edges"].as_array().into_iter().flatten() {
+                        println!("  {} -{}-> {}{}", e["from"].as_str().unwrap_or(""), if e["kind"] == "on_red" { "red" } else { "ok" }, e["to"].as_str().unwrap_or(""), e["bound"].as_u64().map_or(String::new(), |b| format!(" (at most {b} times)")));
+                    }
+                    for n in r["nodes"].as_array().into_iter().flatten() {
+                        for p in n["problems"].as_array().into_iter().flatten() {
+                            println!("  PROBLEM on {}: {}", n["name"].as_str().unwrap_or(""), p.as_str().unwrap_or(""));
+                        }
+                    }
+                    for p in r["problems"].as_array().into_iter().flatten() {
+                        println!("  PROBLEM: {}", p.as_str().unwrap_or(""));
+                    }
+                    println!("{}{}", if r["dirty"] == true { "draft changed" } else { "draft is the base" }, if r["can_undo"] == true { " (can undo)" } else { "" });
+                    for c in r["changes"].as_array().into_iter().flatten() {
+                        println!("  this {}", c.as_str().unwrap_or(""));
+                    }
+                    for c in r["affected"].as_array().into_iter().flatten() {
+                        println!("  {}", c.as_str().unwrap_or(""));
+                    }
+                    if let Some(diff) = r["diff"].as_str().filter(|d| !d.is_empty()) {
+                        println!("{diff}");
+                    }
+                }
+                "op" => {
+                    let b = body(&json_arg).unwrap_or_else(|| die("give the operation as JSON"));
+                    match d.call("POST", &format!("{base}/op"), Some(&b)) {
+                        Ok(_) => println!("ok"),
+                        Err(e) => die(&format!("refused: {e}")),
+                    }
+                }
+                "undo" | "redo" | "discard" => {
+                    let r = or_die(d.call("POST", &format!("{base}/{sub}"), Some(&json!({}))));
+                    println!("{}", if r["changed"] == true { "done" } else { "nothing to do" });
+                }
+                "simulate" => {
+                    let r = or_die(d.call("POST", &format!("{base}/simulate"), Some(&body(&json_arg).unwrap_or(json!({})))));
+                    if json_out {
+                        return println!("{r:#}");
+                    }
+                    for s in r["scenarios"].as_array().into_iter().flatten() {
+                        let path: Vec<String> = s["steps"].as_array().into_iter().flatten().map(|x| format!("{}{}", x["step"].as_str().unwrap_or(""), if x["outcome"] == "green" { String::new() } else { format!(" ({})", x["outcome"].as_str().unwrap_or("")) })).collect();
+                        println!("{:<44} {}  =>  {}", s["name"].as_str().unwrap_or(""), path.join(" > "), s["end"].as_str().unwrap_or(s["error"].as_str().unwrap_or("")));
+                    }
+                }
+                "apply" => {
+                    let r = or_die(d.call("POST", &format!("{base}/apply"), Some(&json!({"message": message}))));
+                    if r["applied"] == true {
+                        println!("applied: {}", r["commit"].as_str().unwrap_or(""));
+                    } else {
+                        println!("{}: {}", r["note"].as_str().unwrap_or("not applied"), r["pull_request"].as_str().unwrap_or(""));
+                    }
+                }
+                other => die(&format!("editor {other}? use show, op, undo, redo, discard, simulate or apply")),
+            }
+        }
         "definition" => {
             let sub = a
                 .pos()

@@ -50,6 +50,7 @@ pub struct Daemon {
     pub(crate) landing: crate::landing::Landing,
     pub(crate) tracker: crate::tracker::Hub,
     pub update_status: Mutex<crate::update::Status>,
+    pub(crate) drafts: crate::editor::Drafts,
 }
 
 fn kind_name(k: &EventKind) -> String {
@@ -158,6 +159,7 @@ impl Daemon {
             demo_pos: Mutex::new(0),
             landing: Default::default(),
             tracker: Default::default(),
+            drafts: Default::default(),
             update_status: Mutex::new(crate::update::Status {
                 phase: "idle".into(),
                 ..Default::default()
