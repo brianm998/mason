@@ -1,0 +1,33 @@
+schema = 1
+# MASON's own pipeline, for MASON working on this repository (Stage 17).
+# It is the built-in graph written out, so that a change to it is a change to a
+# gate: this directory is protected, and a change here waits for the owner.
+start = "explore"
+explored_entry = "develop"
+
+[step.explore]
+type = "agent"
+category = "exploring"
+agent = "fast"
+next = "develop"
+
+[step.develop]
+type = "agent"
+category = "developing"
+agent = "deep"
+budget = "4h"
+next = "test"
+
+# The project's `test` command (the whole workspace) runs here.
+[step.test]
+type = "test"
+category = "testing"
+max_rounds = 3
+on_red = "develop"
+next = "land"
+
+[step.land]
+type = "landing"
+category = "landing"
+max_rounds = 3
+on_red = "develop"

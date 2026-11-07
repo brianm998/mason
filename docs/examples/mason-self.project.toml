@@ -1,0 +1,19 @@
+# `<config dir>/projects/mason.toml`: MASON working on its own repository.
+# Registering it is the owner's act; nothing in the repository turns this on.
+path = "/path/to/your/mason/checkout"
+base = "develop"
+remote = "origin"
+test = "cargo test --workspace"
+
+# The presence of [self] makes this MASON's own repository. Without it the project
+# is an ordinary one, with no holds and no limits.
+[self]
+# Added to the compiled list of protected paths (a change can never remove from it).
+protect = []
+# Self-tasks open at once, filed per week, and agent steps per period (the cap on spend).
+max_open = 3
+per_week = 10
+max_steps = 40
+period_h = 24
+# After a rollback, nothing is filed for this long (and one proposal is).
+cooldown_h = 24
