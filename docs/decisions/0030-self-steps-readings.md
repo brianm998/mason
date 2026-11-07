@@ -1,4 +1,4 @@
-# 0024: Readings made while changing the self-hosting step cap (s46)
+# 0030: Readings made while changing the self-hosting step cap (s52)
 
 This changes `crates/daemon/src/selfguard.rs`, a trust file; it loosens a guard and waits for the owner's approval.
 

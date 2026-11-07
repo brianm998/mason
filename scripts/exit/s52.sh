@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Self-hosting max_steps (s46) exit test: the step cap counts only work MASON starts for itself.
+# Self-hosting max_steps (s52) exit test: the step cap counts only work MASON starts for itself.
 # A real masond on a project with [self] max_steps = 1, command steps in the developing category
 # (the cap counts step runs by category, so the count needs no agent), and a fake GitHub.
 #  1. A labeled outside issue runs its step (1 of 1 counted); a second one is not imported.
@@ -8,7 +8,7 @@
 #     mason self shows the split.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
-root=$(mktemp -d /tmp/mason-s46.XXXXXX); daemon=""; gh=""
+root=$(mktemp -d /tmp/mason-s52.XXXXXX); daemon=""; gh=""
 cleanup() {
   [ -n "$daemon" ] && kill -9 "$daemon" 2>/dev/null || true
   [ -n "$gh" ] && kill -9 "$gh" 2>/dev/null || true
@@ -126,4 +126,4 @@ self_line | grep -q '1 of 1 agent steps in 24 h (3 of yours not counted)' || fai
 ! m self | grep -q 'filing is blocked' || fail "mason self says filing is blocked for the owner"
 
 trap - EXIT; cleanup
-echo "s46 OK"
+echo "s52 OK"

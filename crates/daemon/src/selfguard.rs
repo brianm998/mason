@@ -226,7 +226,7 @@ pub struct Usage {
 }
 
 /// Did the owner file this task? The one definition, shared by `count` (per_week) and
-/// `count_steps` (max_steps); decision 0022 and 0024.
+/// `count_steps` (max_steps); decision 0022 and 0030.
 pub fn is_owner_filed(t: &Task) -> bool {
     t.trust == TrustSource::Owner
 }
@@ -568,7 +568,7 @@ mod tests {
         assert!(check_as(&s, yours, &c, TrustSource::Owner).is_ok());
         // The other limits still stop the owner.
         assert!(check_as(&st(3, 0, 0, None), 0, &c, TrustSource::Owner).is_err());
-        // Changed by task 18 (decision 0024): the owner is no longer held to the step cap.
+        // Changed by task 18 (decision 0030): the owner is no longer held to the step cap.
         assert!(check_as(&st(0, 0, 40, None), 0, &c, TrustSource::Owner).is_ok());
         assert!(check_as(&st(0, 0, 40, None), 0, &c, TrustSource::OwnerAgent).is_err());
         assert!(check_as(&st(0, 0, 40, None), 0, &c, TrustSource::Outside).is_err());

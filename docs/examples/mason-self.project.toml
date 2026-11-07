@@ -14,7 +14,7 @@ protect = []
 # Self-tasks open at once, filed per week, and agent steps per period (the cap on spend).
 max_open = 3
 per_week = 10
-# Counts only agent and outside tasks' steps; the owner's own are shown, not counted (0024).
+# Counts only agent and outside tasks' steps; the owner's own are shown, not counted (0030).
 max_steps = 40
 period_h = 24
 # After a rollback, nothing is filed for this long (and one proposal is).
