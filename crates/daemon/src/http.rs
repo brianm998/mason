@@ -301,7 +301,7 @@ async fn add_task(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res {
                     ),
                 ));
             };
-            crate::selfguard::check_filing(&d2, pid)
+            crate::selfguard::check_filing_as(&d2, pid, TrustSource::Owner)
                 .map_err(|e| fail(StatusCode::TOO_MANY_REQUESTS, e))?;
             let title = b["title"].as_str().unwrap_or_default().trim().to_string();
             if title.is_empty() || title.chars().count() > 200 {
@@ -1246,14 +1246,15 @@ async fn self_status(Shared(d): Shared<Arc<Daemon>>) -> Res {
                 .iter()
                 .filter_map(|(pid, p)| p.self_cfg.as_ref().map(|c| (pid, p, c)))
                 .map(|(pid, p, c)| {
-                    let s = crate::selfguard::status(&d2, *pid, c, now);
+                    let u = crate::selfguard::usage(&d2, *pid, c, now);
+                    let s = u.status.clone();
                     json!({
                         "project": p.id,
                         "open": s.open, "max_open": c.max_open,
-                        "week": s.week, "per_week": c.per_week,
+                        "week": s.week, "per_week": c.per_week, "yours_not_counted": u.yours,
                         "steps": s.steps, "max_steps": c.max_steps, "period_h": c.period_h,
                         "cooldown_until_ms": s.cooldown_until_ms,
-                        "blocked": crate::selfguard::check(&s, c).err(),
+                        "blocked": crate::selfguard::check_as(&s, u.yours, c, TrustSource::Owner).err(),
                         "protect_extra": c.protect,
                     })
                 })

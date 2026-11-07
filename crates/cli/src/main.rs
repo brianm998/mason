@@ -1103,12 +1103,13 @@ fn main() {
             }
             for p in list {
                 println!(
-                    "{}: {}/{} open, {}/{} this week, {}/{} agent steps in {} h{}",
+                    "{}: {}/{} open, {} of {} this week ({} of yours not counted), {}/{} agent steps in {} h{}",
                     p["project"].as_str().unwrap_or("?"),
                     p["open"],
                     p["max_open"],
                     p["week"],
                     p["per_week"],
+                    p["yours_not_counted"].as_u64().unwrap_or(0),
                     p["steps"],
                     p["max_steps"],
                     p["period_h"],
