@@ -1297,7 +1297,13 @@ impl Store {
 
     /// Record that a task's change needs approval. A hold for the same diff keeps its
     /// approval; a different diff starts over, because an approval is for one diff.
-    pub fn put_hold(&self, task: u64, diff_hash: &str, reasons: &str, now_ms: u64) -> Result<HoldRow, StoreError> {
+    pub fn put_hold(
+        &self,
+        task: u64,
+        diff_hash: &str,
+        reasons: &str,
+        now_ms: u64,
+    ) -> Result<HoldRow, StoreError> {
         let (h, r) = (diff_hash.to_string(), reasons.to_string());
         self.write(move |c| {
             let same: bool = c
@@ -1365,7 +1371,13 @@ impl Store {
     }
 
     pub fn clear_hold(&self, task: u64) -> Result<(), StoreError> {
-        self.write(move |c| c.execute("DELETE FROM self_holds WHERE task = ?1", params![task as i64]).map(|_| ()))
+        self.write(move |c| {
+            c.execute(
+                "DELETE FROM self_holds WHERE task = ?1",
+                params![task as i64],
+            )
+            .map(|_| ())
+        })
     }
 
     pub fn set_freeze(

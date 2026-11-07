@@ -843,21 +843,35 @@ fn main() {
             }
             let list = r["projects"].as_array().cloned().unwrap_or_default();
             if list.is_empty() {
-                println!("no project is MASON's own (a project file with a [self] section makes it so)");
+                println!(
+                    "no project is MASON's own (a project file with a [self] section makes it so)"
+                );
             }
             for p in list {
                 println!(
                     "{}: {}/{} open, {}/{} this week, {}/{} agent steps in {} h{}",
                     p["project"].as_str().unwrap_or("?"),
-                    p["open"], p["max_open"], p["week"], p["per_week"], p["steps"], p["max_steps"], p["period_h"],
-                    p["blocked"].as_str().map_or(String::new(), |b| format!("\n  filing is blocked: {b}"))
+                    p["open"],
+                    p["max_open"],
+                    p["week"],
+                    p["per_week"],
+                    p["steps"],
+                    p["max_steps"],
+                    p["period_h"],
+                    p["blocked"]
+                        .as_str()
+                        .map_or(String::new(), |b| format!("\n  filing is blocked: {b}"))
                 );
             }
             for h in r["holds"].as_array().into_iter().flatten() {
                 println!(
                     "task #{:<4} {}: {}",
                     h["task"],
-                    if h["approved_by"].is_null() { "WAITING FOR YOU" } else { "approved" },
+                    if h["approved_by"].is_null() {
+                        "WAITING FOR YOU"
+                    } else {
+                        "approved"
+                    },
                     h["reasons"].as_str().unwrap_or("")
                 );
             }

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 # How MASON lands changes to itself: a batch at a time, straight to the base,
 # after the tests. Changes to gates wait for the owner before they get this far
 # (see docs/self-hosting.md).

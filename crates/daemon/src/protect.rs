@@ -17,39 +17,90 @@ use std::collections::BTreeMap;
 /// Paths whose change always stops for the owner, and why.
 pub const PROTECTED: &[(&str, &str)] = &[
     // gates: what must pass before anything lands
-    (".mason/**", "gates: the pipeline definition and landing rules"),
+    (
+        ".mason/**",
+        "gates: the pipeline definition and landing rules",
+    ),
     ("scripts/exit/**", "gates: the exit tests"),
     ("scripts/check-*.sh", "gates: the repository checks"),
     ("scripts/run-exit-scripts.sh", "gates: the exit-test runner"),
     (".github/workflows/**", "gates: CI"),
     ("deny.toml", "gates: dependency policy"),
     ("clients/features.toml", "gates: client parity"),
-    ("crates/daemon/tests/fixtures/**", "gates: golden event logs"),
+    (
+        "crates/daemon/tests/fixtures/**",
+        "gates: golden event logs",
+    ),
     // verdict logic: what counts as green
-    ("crates/testing/**", "verdict logic: parsers, proof, classification, gates"),
-    ("crates/daemon/src/suites.rs", "verdict logic: running suites"),
-    ("crates/daemon/src/selftest.rs", "gates: what a new build proves before it takes over"),
+    (
+        "crates/testing/**",
+        "verdict logic: parsers, proof, classification, gates",
+    ),
+    (
+        "crates/daemon/src/suites.rs",
+        "verdict logic: running suites",
+    ),
+    (
+        "crates/daemon/src/selftest.rs",
+        "gates: what a new build proves before it takes over",
+    ),
     // guards: what keeps work safe
-    ("crates/adapter-api/src/netguard.rs", "guards: the test-mode network guard"),
-    ("crates/adapter-api/src/contract.rs", "guards: the step contract's validation"),
-    ("crates/adapter-api/src/webhook.rs", "guards: webhook verification"),
-    ("crates/landing/**", "guards: how work is merged and promoted"),
-    ("crates/daemon/src/landing.rs", "guards: batching, the red ladder, the freeze"),
-    ("crates/daemon/src/update.rs", "guards: updates, rollback, no downgrades"),
+    (
+        "crates/adapter-api/src/netguard.rs",
+        "guards: the test-mode network guard",
+    ),
+    (
+        "crates/adapter-api/src/contract.rs",
+        "guards: the step contract's validation",
+    ),
+    (
+        "crates/adapter-api/src/webhook.rs",
+        "guards: webhook verification",
+    ),
+    (
+        "crates/landing/**",
+        "guards: how work is merged and promoted",
+    ),
+    (
+        "crates/daemon/src/landing.rs",
+        "guards: batching, the red ladder, the freeze",
+    ),
+    (
+        "crates/daemon/src/update.rs",
+        "guards: updates, rollback, no downgrades",
+    ),
     // budgets: what limits spending and concurrency
     ("crates/resources/**", "budgets: shared resources"),
     ("crates/scheduler/**", "budgets: the scheduler"),
     ("crates/daemon/src/sched.rs", "budgets: leases and limits"),
     // trust: whose words count
-    ("crates/daemon/src/prompts.rs", "trust: fencing of outside text"),
+    (
+        "crates/daemon/src/prompts.rs",
+        "trust: fencing of outside text",
+    ),
     ("crates/daemon/src/attention.rs", "trust: who may answer"),
     ("crates/core/src/task.rs", "trust: task trust sources"),
-    ("crates/definition/src/layers.rs", "trust: configuration layers"),
-    ("crates/definition/src/validate.rs", "trust: definition validation"),
-    ("crates/definition/src/filing.rs", "trust: what a filing may claim"),
+    (
+        "crates/definition/src/layers.rs",
+        "trust: configuration layers",
+    ),
+    (
+        "crates/definition/src/validate.rs",
+        "trust: definition validation",
+    ),
+    (
+        "crates/definition/src/filing.rs",
+        "trust: what a filing may claim",
+    ),
     // self-change rules: this check, and the limits
-    ("crates/daemon/src/protect.rs", "self-change rules: this check"),
-    ("crates/daemon/src/selfguard.rs", "self-change rules: holds and limits"),
+    (
+        "crates/daemon/src/protect.rs",
+        "self-change rules: this check",
+    ),
+    (
+        "crates/daemon/src/selfguard.rs",
+        "self-change rules: holds and limits",
+    ),
 ];
 
 /// Does `path` match a glob? `**` is any number of path segments (even none),
@@ -68,7 +119,9 @@ pub fn glob(pattern: &str, path: &str) -> bool {
         match p.first() {
             None => s.is_empty(),
             Some(&"**") => (0..=s.len()).any(|i| go(&p[1..], &s[i..])),
-            Some(seg_p) => !s.is_empty() && seg(seg_p.as_bytes(), s[0].as_bytes()) && go(&p[1..], &s[1..]),
+            Some(seg_p) => {
+                !s.is_empty() && seg(seg_p.as_bytes(), s[0].as_bytes()) && go(&p[1..], &s[1..])
+            }
         }
     }
     let p: Vec<&str> = pattern.split('/').collect();
@@ -85,7 +138,10 @@ pub fn protected_because(path: &str, extra: &[String]) -> Option<String> {
             return Some((*why).to_string());
         }
     }
-    extra.iter().find(|g| glob(g, path)).map(|g| format!("protected by the owner: {g}"))
+    extra
+        .iter()
+        .find(|g| glob(g, path))
+        .map(|g| format!("protected by the owner: {g}"))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -97,19 +153,48 @@ pub struct Finding {
 
 impl Finding {
     fn new(file: &str, kind: &'static str, detail: impl Into<String>) -> Finding {
-        Finding { file: file.into(), kind, detail: detail.into() }
+        Finding {
+            file: file.into(),
+            kind,
+            detail: detail.into(),
+        }
     }
 }
 
 const ASSERTS: &[&str] = &[
-    "assert!(", "assert_eq!(", "assert_ne!(", "debug_assert", "XCTAssert", "assertEquals(", "assertTrue(", "assertFalse(", "assertNull(", "assertNotNull(", "assertThat(",
+    "assert!(",
+    "assert_eq!(",
+    "assert_ne!(",
+    "debug_assert",
+    "XCTAssert",
+    "assertEquals(",
+    "assertTrue(",
+    "assertFalse(",
+    "assertNull(",
+    "assertNotNull(",
+    "assertThat(",
 ];
 const TESTS: &[&str] = &["#[test]", "@Test", "func test"];
-const LIMIT_WORDS: &[&str] = &["limit", "max", "timeout", "budget", "cap", "threshold", "quota", "retries", "attempts", "rounds", "ceiling"];
+const LIMIT_WORDS: &[&str] = &[
+    "limit",
+    "max",
+    "timeout",
+    "budget",
+    "cap",
+    "threshold",
+    "quota",
+    "retries",
+    "attempts",
+    "rounds",
+    "ceiling",
+];
 const FLOOR_WORDS: &[&str] = &["min", "floor", "required", "coverage", "at_least"];
 
 fn count_in(lines: &[String], pats: &[&str]) -> usize {
-    lines.iter().filter(|l| pats.iter().any(|p| l.contains(p))).count()
+    lines
+        .iter()
+        .filter(|l| pats.iter().any(|p| l.contains(p)))
+        .count()
 }
 
 /// `name = 30`, `const NAME: u32 = 30;`, `name: 30,`, `--name 30`: the name and the number.
@@ -176,24 +261,49 @@ pub fn scan_diff(diff: &str) -> Vec<Finding> {
     }
     let mut out = vec![];
     for (file, f) in &files {
-        let is_test_path = file.contains("/tests/") || file.contains("/test/") || file.contains("Test") || file.ends_with("_test.rs") || file.starts_with("tests/");
+        let is_test_path = file.contains("/tests/")
+            || file.contains("/test/")
+            || file.contains("Test")
+            || file.ends_with("_test.rs")
+            || file.starts_with("tests/");
         if f.deleted && is_test_path {
-            out.push(Finding::new(file, "removed-test-file", "a test file was deleted"));
+            out.push(Finding::new(
+                file,
+                "removed-test-file",
+                "a test file was deleted",
+            ));
             continue;
         }
         let (ra, aa) = (count_in(&f.removed, ASSERTS), count_in(&f.added, ASSERTS));
         if ra > aa {
-            out.push(Finding::new(file, "removed-assertion", format!("{} assertion(s) removed, {} added", ra, aa)));
+            out.push(Finding::new(
+                file,
+                "removed-assertion",
+                format!("{} assertion(s) removed, {} added", ra, aa),
+            ));
         }
         let (rt, at) = (count_in(&f.removed, TESTS), count_in(&f.added, TESTS));
         if rt > at {
-            out.push(Finding::new(file, "removed-test", format!("{} test(s) removed, {} added", rt, at)));
+            out.push(Finding::new(
+                file,
+                "removed-test",
+                format!("{} test(s) removed, {} added", rt, at),
+            ));
         }
         for l in &f.added {
             let t = l.trim();
-            let ignored = t.contains("#[ignore") || t.contains("@Ignore") || t.contains("@Disabled") || t.contains(".skip(") || t.starts_with("xit(") || t.starts_with("xdescribe(");
+            let ignored = t.contains("#[ignore")
+                || t.contains("@Ignore")
+                || t.contains("@Disabled")
+                || t.contains(".skip(")
+                || t.starts_with("xit(")
+                || t.starts_with("xdescribe(");
             if ignored {
-                out.push(Finding::new(file, "ignored-test", t.chars().take(100).collect::<String>()));
+                out.push(Finding::new(
+                    file,
+                    "ignored-test",
+                    t.chars().take(100).collect::<String>(),
+                ));
             }
             let lower = t.to_lowercase();
             let broadened = lower.contains("|| true")
@@ -202,17 +312,37 @@ pub fn scan_diff(diff: &str) -> Vec<Finding> {
                 || lower.replace(' ', "").contains("skip:true")
                 || (file.ends_with(".sh") && (lower == "exit 0" || lower.starts_with("exit 0 ")));
             if broadened {
-                out.push(Finding::new(file, "broadened-skip", t.chars().take(100).collect::<String>()));
+                out.push(Finding::new(
+                    file,
+                    "broadened-skip",
+                    t.chars().take(100).collect::<String>(),
+                ));
             }
         }
-        let removed: Vec<(String, f64)> = f.removed.iter().filter_map(|l| name_and_number(l)).collect();
+        let removed: Vec<(String, f64)> = f
+            .removed
+            .iter()
+            .filter_map(|l| name_and_number(l))
+            .collect();
         for l in &f.added {
-            let Some((name, new)) = name_and_number(l) else { continue };
-            let Some((_, old)) = removed.iter().find(|(n, _)| *n == name) else { continue };
+            let Some((name, new)) = name_and_number(l) else {
+                continue;
+            };
+            let Some((_, old)) = removed.iter().find(|(n, _)| *n == name) else {
+                continue;
+            };
             if LIMIT_WORDS.iter().any(|w| name.contains(w)) && new > *old {
-                out.push(Finding::new(file, "raised-limit", format!("{name}: {old} -> {new}")));
+                out.push(Finding::new(
+                    file,
+                    "raised-limit",
+                    format!("{name}: {old} -> {new}"),
+                ));
             } else if FLOOR_WORDS.iter().any(|w| name.contains(w)) && new < *old {
-                out.push(Finding::new(file, "lowered-floor", format!("{name}: {old} -> {new}")));
+                out.push(Finding::new(
+                    file,
+                    "lowered-floor",
+                    format!("{name}: {old} -> {new}"),
+                ));
             }
         }
     }
@@ -245,7 +375,12 @@ impl Inspection {
             }
         }
         for f in &self.weakening {
-            parts.push(format!("{} in {}: {}", f.kind.replace('-', " "), f.file, f.detail));
+            parts.push(format!(
+                "{} in {}: {}",
+                f.kind.replace('-', " "),
+                f.file,
+                f.detail
+            ));
         }
         parts.join("; ")
     }
@@ -279,7 +414,9 @@ mod tests {
         assert!(glob("scripts/check-*.sh", "scripts/check-spdx.sh"));
         assert!(!glob("scripts/check-*.sh", "scripts/check/x.sh"));
         assert!(glob("deny.toml", "deny.toml") && !glob("deny.toml", "x/deny.toml"));
-        assert!(glob("**/x.rs", "x.rs") && glob("**/x.rs", "a/b/x.rs") && !glob("**/x.rs", "a/b/y.rs"));
+        assert!(
+            glob("**/x.rs", "x.rs") && glob("**/x.rs", "a/b/x.rs") && !glob("**/x.rs", "a/b/y.rs")
+        );
         assert!(glob("a/?.rs", "a/b.rs") && !glob("a/?.rs", "a/bc.rs"));
     }
 
@@ -297,11 +434,19 @@ mod tests {
         ] {
             assert!(protected_because(p, &[]).is_some(), "{p}");
         }
-        for p in ["docs/stages/s17.md", "crates/engine/src/reducer.rs", "clients/swift/Sources/MonitorUI/Pages.swift", "README.md"] {
+        for p in [
+            "docs/stages/s17.md",
+            "crates/engine/src/reducer.rs",
+            "clients/swift/Sources/MonitorUI/Pages.swift",
+            "README.md",
+        ] {
             assert!(protected_because(p, &[]).is_none(), "{p}");
         }
         // The owner can add, with a reason that names the glob.
-        assert_eq!(protected_because("docs/secret.md", &["docs/secret*".into()]).unwrap(), "protected by the owner: docs/secret*");
+        assert_eq!(
+            protected_because("docs/secret.md", &["docs/secret*".into()]).unwrap(),
+            "protected by the owner: docs/secret*"
+        );
     }
 
     #[test]
@@ -328,41 +473,102 @@ mod tests {
 
     #[test]
     fn a_removed_assertion_is_flagged_but_a_changed_one_is_not() {
-        assert_eq!(kinds(&diff("src/a.rs", &["    assert_eq!(x, 1);"], &[])), ["removed-assertion"]);
-        assert_eq!(kinds(&diff("src/a.rs", &["    assert_eq!(x, 1);"], &["    assert_eq!(x, 2);"])), Vec::<&str>::new());
-        assert_eq!(kinds(&diff("T.kt", &["assertEquals(1, x)"], &[])), ["removed-assertion"]);
+        assert_eq!(
+            kinds(&diff("src/a.rs", &["    assert_eq!(x, 1);"], &[])),
+            ["removed-assertion"]
+        );
+        assert_eq!(
+            kinds(&diff(
+                "src/a.rs",
+                &["    assert_eq!(x, 1);"],
+                &["    assert_eq!(x, 2);"]
+            )),
+            Vec::<&str>::new()
+        );
+        assert_eq!(
+            kinds(&diff("T.kt", &["assertEquals(1, x)"], &[])),
+            ["removed-assertion"]
+        );
         // Adding assertions is never a finding.
         assert!(kinds(&diff("src/a.rs", &[], &["assert!(ok);"])).is_empty());
     }
 
     #[test]
     fn removed_and_ignored_tests_are_flagged() {
-        assert_eq!(kinds(&diff("src/a.rs", &["#[test]", "fn it_works() {}"], &[])), ["removed-test"]);
-        assert_eq!(kinds(&diff("src/a.rs", &[], &["#[test]", "#[ignore]", "fn flaky() {}"])), ["ignored-test"]);
-        assert!(kinds(&diff("T.kt", &[], &["@Ignore", "@Test fun x() {}"])).contains(&"ignored-test"));
+        assert_eq!(
+            kinds(&diff("src/a.rs", &["#[test]", "fn it_works() {}"], &[])),
+            ["removed-test"]
+        );
+        assert_eq!(
+            kinds(&diff(
+                "src/a.rs",
+                &[],
+                &["#[test]", "#[ignore]", "fn flaky() {}"]
+            )),
+            ["ignored-test"]
+        );
+        assert!(
+            kinds(&diff("T.kt", &[], &["@Ignore", "@Test fun x() {}"])).contains(&"ignored-test")
+        );
         let deleted = "--- a/crates/x/tests/it.rs\n+++ /dev/null\n@@ -1 +0,0 @@\n-fn a() {}\n";
         assert_eq!(kinds(deleted), ["removed-test-file"]);
     }
 
     #[test]
     fn a_raised_limit_or_lowered_floor_is_flagged_by_name() {
-        let f = scan_diff(&diff("src/a.rs", &["pub const MAX_ATTEMPTS: u32 = 3;"], &["pub const MAX_ATTEMPTS: u32 = 30;"]));
+        let f = scan_diff(&diff(
+            "src/a.rs",
+            &["pub const MAX_ATTEMPTS: u32 = 3;"],
+            &["pub const MAX_ATTEMPTS: u32 = 30;"],
+        ));
         assert_eq!(f.len(), 1);
-        assert_eq!((f[0].kind, f[0].detail.as_str()), ("raised-limit", "max_attempts: 3 -> 30"));
-        assert_eq!(kinds(&diff(".x.toml", &["test_timeout_s = 60"], &["test_timeout_s = 6000"])), ["raised-limit"]);
-        assert_eq!(kinds(&diff("a.toml", &["min_tests = 5"], &["min_tests = 1"])), ["lowered-floor"]);
+        assert_eq!(
+            (f[0].kind, f[0].detail.as_str()),
+            ("raised-limit", "max_attempts: 3 -> 30")
+        );
+        assert_eq!(
+            kinds(&diff(
+                ".x.toml",
+                &["test_timeout_s = 60"],
+                &["test_timeout_s = 6000"]
+            )),
+            ["raised-limit"]
+        );
+        assert_eq!(
+            kinds(&diff("a.toml", &["min_tests = 5"], &["min_tests = 1"])),
+            ["lowered-floor"]
+        );
         // Tightened, or unrelated names, are fine.
-        assert!(kinds(&diff("src/a.rs", &["const MAX_ATTEMPTS: u32 = 3;"], &["const MAX_ATTEMPTS: u32 = 2;"])).is_empty());
+        assert!(kinds(&diff(
+            "src/a.rs",
+            &["const MAX_ATTEMPTS: u32 = 3;"],
+            &["const MAX_ATTEMPTS: u32 = 2;"]
+        ))
+        .is_empty());
         assert!(kinds(&diff("src/a.rs", &["let width = 3;"], &["let width = 30;"])).is_empty());
-        assert!(kinds(&diff("src/a.rs", &["const MAX_X: u32 = 3;"], &["const OTHER_MAX: u32 = 30;"])).is_empty());
+        assert!(kinds(&diff(
+            "src/a.rs",
+            &["const MAX_X: u32 = 3;"],
+            &["const OTHER_MAX: u32 = 30;"]
+        ))
+        .is_empty());
     }
 
     #[test]
     fn a_broadened_skip_is_flagged() {
-        assert_eq!(kinds(&diff("run.sh", &[], &["cargo test || true"])), ["broadened-skip"]);
+        assert_eq!(
+            kinds(&diff("run.sh", &[], &["cargo test || true"])),
+            ["broadened-skip"]
+        );
         assert_eq!(kinds(&diff("run.sh", &[], &["exit 0"])), ["broadened-skip"]);
-        assert_eq!(kinds(&diff("ci.yml", &[], &["    continue-on-error: true"])), ["broadened-skip"]);
-        assert_eq!(kinds(&diff("d.toml", &[], &["skip = true"])), ["broadened-skip"]);
+        assert_eq!(
+            kinds(&diff("ci.yml", &[], &["    continue-on-error: true"])),
+            ["broadened-skip"]
+        );
+        assert_eq!(
+            kinds(&diff("d.toml", &[], &["skip = true"])),
+            ["broadened-skip"]
+        );
         assert!(kinds(&diff("src/a.rs", &[], &["// we must not skip anything"])).is_empty());
     }
 
@@ -375,9 +581,19 @@ mod tests {
         );
         assert!(!i.clean());
         let e = i.explain();
-        assert!(e.contains("crates/testing/src/verdict.rs") && e.contains("verdict logic") && e.contains("removed assertion in crates/engine/tests/m.rs"), "{e}");
+        assert!(
+            e.contains("crates/testing/src/verdict.rs")
+                && e.contains("verdict logic")
+                && e.contains("removed assertion in crates/engine/tests/m.rs"),
+            "{e}"
+        );
         assert!(!e.contains("docs/x.md"));
-        assert!(inspect(&["docs/x.md".into()], &diff("docs/x.md", &["a"], &["b"]), &[]).clean());
+        assert!(inspect(
+            &["docs/x.md".into()],
+            &diff("docs/x.md", &["a"], &["b"]),
+            &[]
+        )
+        .clean());
     }
 
     #[test]

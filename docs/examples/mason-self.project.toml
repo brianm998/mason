@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 # `<config dir>/projects/mason.toml`: MASON working on its own repository.
 # Registering it is the owner's act; nothing in the repository turns this on.
 path = "/path/to/your/mason/checkout"

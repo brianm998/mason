@@ -167,7 +167,11 @@ fn parse_self(id: &str, doc: &DocumentMut) -> Result<Option<SelfCfg>, String> {
     let int = |k: &str, d: u64| -> Result<u64, String> {
         match t.get(k) {
             None => Ok(d),
-            Some(v) => v.as_integer().filter(|n| *n >= 1).map(|n| n as u64).ok_or_else(|| format!("{id}: `[self] {k}` must be a whole number from 1")),
+            Some(v) => v
+                .as_integer()
+                .filter(|n| *n >= 1)
+                .map(|n| n as u64)
+                .ok_or_else(|| format!("{id}: `[self] {k}` must be a whole number from 1")),
         }
     };
     let protect: Vec<String> = match t.get("protect") {

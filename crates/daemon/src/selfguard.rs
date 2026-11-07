@@ -39,8 +39,16 @@ pub enum Gate {
 pub fn change_of(p: &ProjectCfg, branch: &str) -> Result<(Vec<String>, String), String> {
     let range = format!("{}...{branch}", p.base_ref());
     let names = git::run(&p.path, &["diff", "--name-only", &range]).map_err(|e| e.to_string())?;
-    let diff = git::run(&p.path, &["diff", "-U0", "--no-color", &range]).map_err(|e| e.to_string())?;
-    Ok((names.lines().map(String::from).filter(|l| !l.is_empty()).collect(), diff))
+    let diff =
+        git::run(&p.path, &["diff", "-U0", "--no-color", &range]).map_err(|e| e.to_string())?;
+    Ok((
+        names
+            .lines()
+            .map(String::from)
+            .filter(|l| !l.is_empty())
+            .collect(),
+        diff,
+    ))
 }
 
 /// Run by the landing job before the task joins the queue.
@@ -53,7 +61,11 @@ pub fn gate(c: &Ctx) -> Gate {
         Ok(x) => x,
         Err(e) => {
             // If it cannot be read it cannot be vouched for: it waits like a flagged change.
-            return wait_for_owner(c, &format!("its change could not be read ({e})"), "unreadable");
+            return wait_for_owner(
+                c,
+                &format!("its change could not be read ({e})"),
+                "unreadable",
+            );
         }
     };
     let found = protect::inspect(&paths, &diff, &cfg.protect);
@@ -88,7 +100,12 @@ fn wait_for_owner(c: &Ctx, why: &str, hash: &str) -> Gate {
         if !matches!(d.world(), Ok(w) if w.open_run(c.task) == Some(c.run)) {
             break Gate::Gone;
         }
-        if d.store.hold(c.task.0).ok().flatten().is_some_and(|h| h.approved_by.is_some() && h.diff_hash == hash) {
+        if d.store
+            .hold(c.task.0)
+            .ok()
+            .flatten()
+            .is_some_and(|h| h.approved_by.is_some() && h.diff_hash == hash)
+        {
             break Gate::Go;
         }
     };
@@ -107,13 +124,29 @@ pub fn approve(d: &Arc<Daemon>, task: TaskId, who: &str) -> Result<bool, (u16, S
         return Ok(false); // not a held task: the ordinary approve applies
     };
     if hold.approved_by.is_some() {
-        return Err((409, format!("task #{} was already approved by {}", task.0, hold.approved_by.unwrap_or_default())));
+        return Err((
+            409,
+            format!(
+                "task #{} was already approved by {}",
+                task.0,
+                hold.approved_by.unwrap_or_default()
+            ),
+        ));
     }
     if !crate::attention::is_owner(d, who) {
-        crate::attention::intervene(d, "refused_answer", Some(task), who, "not the owner's identity", "");
+        crate::attention::intervene(
+            d,
+            "refused_answer",
+            Some(task),
+            who,
+            "not the owner's identity",
+            "",
+        );
         return Err((403, format!("{who:?} is not the owner's identity; only the owner can approve a change to MASON's own rules")));
     }
-    d.store.approve_hold(task.0, who, now_ms()).map_err(|e| (500, e.to_string()))?;
+    d.store
+        .approve_hold(task.0, who, now_ms())
+        .map_err(|e| (500, e.to_string()))?;
     crate::attention::intervene(d, "self_approve", Some(task), who, &hold.reasons, "");
     d.landing().wake();
     d.poke();
@@ -157,14 +190,23 @@ pub fn status(d: &Daemon, pid: ProjectId, cfg: &SelfCfg, now: u64) -> Status {
         .rollback()
         .map(|(at, ..)| at + cfg.cooldown_h * 3600 * 1000)
         .filter(|until| *until > now);
-    Status { open, week, steps, cooldown_until_ms }
+    Status {
+        open,
+        week,
+        steps,
+        cooldown_until_ms,
+    }
 }
 
 /// May a task be filed in this project now? Not for MASON's own repository past a cap
 /// or during a cooldown. (Other projects have no such limits.)
 pub fn check_filing(d: &Daemon, pid: ProjectId) -> Result<(), String> {
-    let Some(p) = d.project(pid) else { return Ok(()) };
-    let Some(cfg) = &p.self_cfg else { return Ok(()) };
+    let Some(p) = d.project(pid) else {
+        return Ok(());
+    };
+    let Some(cfg) = &p.self_cfg else {
+        return Ok(());
+    };
     check(&status(d, pid, cfg, now_ms()), cfg)
 }
 
@@ -174,13 +216,22 @@ pub fn check(s: &Status, cfg: &SelfCfg) -> Result<(), String> {
         return Err(format!("self-tasks are cooling down after a rollback, for about {hours} more hour(s); look at the proposal it filed"));
     }
     if s.open >= cfg.max_open {
-        return Err(format!("{} self-tasks are open and the limit is {}: let some land first", s.open, cfg.max_open));
+        return Err(format!(
+            "{} self-tasks are open and the limit is {}: let some land first",
+            s.open, cfg.max_open
+        ));
     }
     if s.week >= cfg.per_week {
-        return Err(format!("{} self-tasks were filed this week and the limit is {}", s.week, cfg.per_week));
+        return Err(format!(
+            "{} self-tasks were filed this week and the limit is {}",
+            s.week, cfg.per_week
+        ));
     }
     if s.steps >= cfg.max_steps {
-        return Err(format!("self-tasks have started {} agent steps in the last {} hours and the limit is {}", s.steps, cfg.period_h, cfg.max_steps));
+        return Err(format!(
+            "self-tasks have started {} agent steps in the last {} hours and the limit is {}",
+            s.steps, cfg.period_h, cfg.max_steps
+        ));
     }
     Ok(())
 }
@@ -189,7 +240,9 @@ pub fn check(s: &Status, cfg: &SelfCfg) -> Result<(), String> {
 /// of MASON's own projects, waiting for the owner, with what is known.
 pub fn on_start(d: &Arc<Daemon>) {
     let rt = Runtimes::new(&d.cfg.data_dir);
-    let Some((at, from, to, filed)) = rt.rollback() else { return };
+    let Some((at, from, to, filed)) = rt.rollback() else {
+        return;
+    };
     if filed {
         return;
     }
@@ -232,11 +285,23 @@ mod tests {
     use super::*;
 
     fn cfg() -> SelfCfg {
-        SelfCfg { protect: vec![], max_open: 3, per_week: 10, max_steps: 40, period_h: 24, cooldown_h: 24 }
+        SelfCfg {
+            protect: vec![],
+            max_open: 3,
+            per_week: 10,
+            max_steps: 40,
+            period_h: 24,
+            cooldown_h: 24,
+        }
     }
 
     fn st(open: u32, week: u32, steps: u32, cooldown: Option<u64>) -> Status {
-        Status { open, week, steps, cooldown_until_ms: cooldown }
+        Status {
+            open,
+            week,
+            steps,
+            cooldown_until_ms: cooldown,
+        }
     }
 
     #[test]
@@ -244,17 +309,29 @@ mod tests {
         let c = cfg();
         assert!(check(&st(2, 9, 39, None), &c).is_ok());
         let e = check(&st(3, 0, 0, None), &c).unwrap_err();
-        assert!(e.contains("3 self-tasks are open") && e.contains("limit is 3"), "{e}");
+        assert!(
+            e.contains("3 self-tasks are open") && e.contains("limit is 3"),
+            "{e}"
+        );
         let e = check(&st(0, 10, 0, None), &c).unwrap_err();
-        assert!(e.contains("10 self-tasks were filed this week") && e.contains("limit is 10"), "{e}");
+        assert!(
+            e.contains("10 self-tasks were filed this week") && e.contains("limit is 10"),
+            "{e}"
+        );
         let e = check(&st(0, 0, 40, None), &c).unwrap_err();
-        assert!(e.contains("40 agent steps in the last 24 hours") && e.contains("limit is 40"), "{e}");
+        assert!(
+            e.contains("40 agent steps in the last 24 hours") && e.contains("limit is 40"),
+            "{e}"
+        );
     }
 
     #[test]
     fn a_cooldown_comes_first_and_says_how_long() {
         let until = now_ms() + 5 * 3_600_000 - 1000;
         let e = check(&st(99, 99, 99, Some(until)), &cfg()).unwrap_err();
-        assert!(e.contains("cooling down after a rollback") && e.contains("5 more hour"), "{e}");
+        assert!(
+            e.contains("cooling down after a rollback") && e.contains("5 more hour"),
+            "{e}"
+        );
     }
 }

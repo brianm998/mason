@@ -113,9 +113,10 @@ fn task_json(d: &Daemon, w: &World, t: &Task, detail: bool) -> Value {
             .iter()
             .map(debt_json)
             .collect::<Vec<_>>());
-        v["self_hold"] = d.store.hold(t.id.0).ok().flatten().map_or(Value::Null, |h| {
-            json!({"reasons": h.reasons, "approved_by": h.approved_by, "since": h.at})
-        });
+        v["self_hold"] = d.store.hold(t.id.0).ok().flatten().map_or(
+            Value::Null,
+            |h| json!({"reasons": h.reasons, "approved_by": h.approved_by, "since": h.at}),
+        );
         v["failure"] = t.failure.as_ref().map_or(Value::Null, |f| json!(f));
         v["question"] = crate::attention::card_of(d, t).map_or(Value::Null, |(c, _)| json!(c.ask));
         v["card"] = crate::attention::card_of(d, t)
@@ -400,7 +401,10 @@ async fn approve(
                 Ok(true) => return Ok(()),
                 Ok(false) => {}
                 Err((code, msg)) => {
-                    return Err(fail(StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_REQUEST), msg))
+                    return Err(fail(
+                        StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_REQUEST),
+                        msg,
+                    ))
                 }
             }
             let w = d2.world().map_err(store_err)?;
