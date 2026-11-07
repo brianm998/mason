@@ -169,8 +169,10 @@ impl Finding {
 /// is not a test that stopped mattering. A `|| true` after one of these hides no check.
 const CLEANUP_WORDS: &[&str] = &[
     "kill", "pkill", "killall", "rm", "rmdir", "unlink", "wait", "trap", "command", "which",
-    "type", "test", "[", "[[", "pgrep",
+    "type", "pgrep",
 ];
+// `test`, `[` and `[[` are deliberately not here: `[ "$n" -gt 0 ] || true` turns an assertion
+// into a no-op. A `[ ... ] && kill ... || true` chain is still fine, its last command is `kill`.
 
 /// The last simple command of a shell fragment, its first word.
 fn last_command_word(fragment: &str) -> String {
@@ -857,6 +859,20 @@ mod tests {
             "for p in $PIDS; do kill $p || true; done",
             "cargo test || true",
         );
+    }
+
+    #[test]
+    fn an_assertion_followed_by_or_true_is_still_a_broadened_skip() {
+        for line in [
+            "[ \"$n\" -gt 0 ] || true",
+            "[[ -s out ]] || true",
+            "test -s out || true",
+            "test \"$a\" = \"$b\" || true",
+        ] {
+            let f = scan_diff(&diff("scripts/exit/s9.sh", &[], &[line]));
+            assert_eq!(f.len(), 1, "{line:?} turns a check into a no-op: {f:?}");
+            assert_eq!(f[0].kind, "broadened-skip");
+        }
     }
 
     #[test]
