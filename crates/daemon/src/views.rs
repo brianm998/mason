@@ -497,7 +497,13 @@ impl<'a> Ctx<'a> {
             .filter(|t| t.state == State::NeedsAttention || self.needs_approval(t))
             .collect();
         attention.sort_by_key(|t| (t.enqueued_at, t.id));
-        let llm = crate::sched::llm_resource(crate::sched::DEFAULT_ACCOUNT);
+        let (sessions_used, sessions_limit) = self.d.accounts.iter().fold((0, 0), |(u, l), a| {
+            let r = crate::sched::llm_resource(&a.name);
+            (
+                u + self.d.broker.used(&r),
+                l + self.d.broker.limit(&r).unwrap_or(0),
+            )
+        });
         HomeView {
             status: self.header(project).status,
             attention: attention
@@ -522,8 +528,8 @@ impl<'a> Ctx<'a> {
                 })
                 .filter(|a| !a.model.is_empty())
                 .collect(),
-            sessions_used: self.d.broker.used(&llm),
-            sessions_limit: self.d.broker.limit(&llm).unwrap_or(0),
+            sessions_used,
+            sessions_limit,
             stages: [
                 State::Exploring,
                 State::Developing,
@@ -733,15 +739,26 @@ impl<'a> Ctx<'a> {
     }
 
     pub fn usage(&self) -> UsageView {
-        let name = crate::sched::DEFAULT_ACCOUNT;
-        let llm = crate::sched::llm_resource(name);
         UsageView {
-            providers: vec![ProviderStatus {
-                name: name.into(),
-                status: "ok".into(),
-                sessions_used: self.d.broker.used(&llm),
-                sessions_limit: self.d.broker.limit(&llm).unwrap_or(0),
-            }],
+            providers: self
+                .d
+                .accounts
+                .iter()
+                .map(|a| {
+                    let llm = crate::sched::llm_resource(&a.name);
+                    ProviderStatus {
+                        name: a.name.clone(),
+                        status: "ok".into(),
+                        sessions_used: self.d.broker.used(&llm),
+                        sessions_limit: self.d.broker.limit(&llm).unwrap_or(0),
+                        adapter: crate::providers::adapter_name(a.adapter).into(),
+                        billing: a.billing.name().into(),
+                        warn_at: a.warn_at,
+                        overage: a.overage.name().into(),
+                        monthly_budget_usd: a.monthly_budget_usd.unwrap_or(0.0),
+                    }
+                })
+                .collect(),
             note: "Token counts and limit windows arrive with the usage tracking stage.".into(),
         }
     }

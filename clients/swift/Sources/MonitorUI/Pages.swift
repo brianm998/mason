@@ -333,7 +333,7 @@ struct UsagePage: View {
         VStack(alignment: .leading, spacing: theme.spacingLarge) {
             Text("LLM usage").font(theme.title())
             ForEach(model.usage?.providers ?? [], id: \.name) { p in
-                Text("\(p.name): \(p.status), \(p.sessionsUsed) of \(p.sessionsLimit) sessions in use").font(theme.body())
+                Text("\(p.name) (\(p.adapter), \(p.billing)): \(p.status), \(p.sessionsUsed) of \(p.sessionsLimit) sessions in use; warn at \(Int(p.warnAt * 100))%, overage \(p.overage)" + (p.monthlyBudgetUsd > 0 ? ", budget $\(Int(p.monthlyBudgetUsd))/month" : "")).font(theme.body())
             }
             if let n = model.usage?.note { Text(n).font(theme.body()).foregroundStyle(theme.muted) }
             SessionStepper(model: model)

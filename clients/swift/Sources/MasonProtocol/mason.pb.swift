@@ -1773,6 +1773,21 @@ public nonisolated struct Mason_V1_ProviderStatus: Sendable {
 
   public var sessionsLimit: UInt32 = 0
 
+  /// The account's configuration (providers.toml).
+  public var adapter: String = String()
+
+  /// "subscription" | "api"
+  public var billing: String = String()
+
+  /// fraction of a limit at which to warn
+  public var warnAt: Double = 0
+
+  /// "allow" | "hold"
+  public var overage: String = String()
+
+  /// api accounts; 0 when none is set
+  public var monthlyBudgetUsd: Double = 0
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -5190,7 +5205,7 @@ nonisolated extension Mason_V1_LandingView: SwiftProtobuf.Message, SwiftProtobuf
 
 nonisolated extension Mason_V1_ProviderStatus: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ProviderStatus"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}name\0\u{1}status\0\u{3}sessions_used\0\u{3}sessions_limit\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}name\0\u{1}status\0\u{3}sessions_used\0\u{3}sessions_limit\0\u{1}adapter\0\u{1}billing\0\u{3}warn_at\0\u{1}overage\0\u{3}monthly_budget_usd\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -5202,6 +5217,11 @@ nonisolated extension Mason_V1_ProviderStatus: SwiftProtobuf.Message, SwiftProto
       case 2: try { try decoder.decodeSingularStringField(value: &self.status) }()
       case 3: try { try decoder.decodeSingularUInt32Field(value: &self.sessionsUsed) }()
       case 4: try { try decoder.decodeSingularUInt32Field(value: &self.sessionsLimit) }()
+      case 5: try { try decoder.decodeSingularStringField(value: &self.adapter) }()
+      case 6: try { try decoder.decodeSingularStringField(value: &self.billing) }()
+      case 7: try { try decoder.decodeSingularDoubleField(value: &self.warnAt) }()
+      case 8: try { try decoder.decodeSingularStringField(value: &self.overage) }()
+      case 9: try { try decoder.decodeSingularDoubleField(value: &self.monthlyBudgetUsd) }()
       default: break
       }
     }
@@ -5220,6 +5240,21 @@ nonisolated extension Mason_V1_ProviderStatus: SwiftProtobuf.Message, SwiftProto
     if self.sessionsLimit != 0 {
       try visitor.visitSingularUInt32Field(value: self.sessionsLimit, fieldNumber: 4)
     }
+    if !self.adapter.isEmpty {
+      try visitor.visitSingularStringField(value: self.adapter, fieldNumber: 5)
+    }
+    if !self.billing.isEmpty {
+      try visitor.visitSingularStringField(value: self.billing, fieldNumber: 6)
+    }
+    if self.warnAt.bitPattern != 0 {
+      try visitor.visitSingularDoubleField(value: self.warnAt, fieldNumber: 7)
+    }
+    if !self.overage.isEmpty {
+      try visitor.visitSingularStringField(value: self.overage, fieldNumber: 8)
+    }
+    if self.monthlyBudgetUsd.bitPattern != 0 {
+      try visitor.visitSingularDoubleField(value: self.monthlyBudgetUsd, fieldNumber: 9)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -5228,6 +5263,11 @@ nonisolated extension Mason_V1_ProviderStatus: SwiftProtobuf.Message, SwiftProto
     if lhs.status != rhs.status {return false}
     if lhs.sessionsUsed != rhs.sessionsUsed {return false}
     if lhs.sessionsLimit != rhs.sessionsLimit {return false}
+    if lhs.adapter != rhs.adapter {return false}
+    if lhs.billing != rhs.billing {return false}
+    if lhs.warnAt != rhs.warnAt {return false}
+    if lhs.overage != rhs.overage {return false}
+    if lhs.monthlyBudgetUsd != rhs.monthlyBudgetUsd {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

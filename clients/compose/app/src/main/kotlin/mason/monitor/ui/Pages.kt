@@ -290,7 +290,8 @@ fun UsagePage(model: MonitorModel) {
     Scrolling {
         Text("LLM usage", style = theme.title())
         model.usage?.providers?.forEach {
-            Text("${it.name}: ${it.status}, ${it.sessions_used} of ${it.sessions_limit} sessions in use", style = theme.body())
+            val budget = if (it.monthly_budget_usd > 0) ", budget \$${it.monthly_budget_usd.toInt()}/month" else ""
+            Text("${it.name} (${it.adapter}, ${it.billing}): ${it.status}, ${it.sessions_used} of ${it.sessions_limit} sessions in use; warn at ${(it.warn_at * 100).toInt()}%, overage ${it.overage}$budget", style = theme.body())
         }
         model.usage?.note?.let { Text(it, style = theme.body(color = theme.muted)) }
         SessionStepper(model)

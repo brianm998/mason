@@ -385,3 +385,34 @@ fn two_projects_share_the_pool_and_admission_follows_the_rank() {
     assert!(on("short").contains("add hello"));
     assert!(on("main").contains("add hello"));
 }
+
+/// s56: two accounts with a session each. A full (here: zero-session) account
+/// holds back only its own project; the other account's task goes through.
+#[test]
+fn a_full_account_does_not_block_another_accounts_task() {
+    let s = Scratch::new("test -f hello.txt", unique_script());
+    std::fs::write(
+        s.config_dir.join("providers.toml"),
+        "[provider.a]\nadapter = \"claude\"\nbilling = \"subscription\"\nsessions = 1\n\
+         [provider.b]\nadapter = \"claude\"\nbilling = \"api\"\nsessions = 1\n",
+    )
+    .unwrap();
+    s.write_project("scratch", "test -f hello.txt", "account = \"a\"");
+    s.write_project("other", "test -f hello.txt", "account = \"b\"");
+    let d = s.start();
+    assert_eq!(d.broker.limit("llm:a"), Some(1));
+    assert_eq!(d.broker.limit("llm:b"), Some(1));
+    assert_eq!(d.broker.limit("llm:claude"), None);
+    d.broker.set_limit("llm:a", 0).unwrap();
+    let held = file_in(&d, "scratch", "on the full account");
+    let free = file_in(&d, "other", "on the free account");
+    wait_state(&d, free, State::Landed, 90);
+    assert_eq!(state_of(&d, held), State::Queued);
+    let w = d.world().unwrap();
+    assert_eq!(d.llm_free(&w, "a"), 0);
+    assert_eq!(d.llm_free(&w, "b"), 1);
+    assert_eq!(d.account_of(task_of(&d, held).project), "a");
+    d.broker.set_limit("llm:a", 1).unwrap();
+    d.admit();
+    wait_state(&d, held, State::Landed, 90);
+}

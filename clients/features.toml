@@ -125,3 +125,8 @@ compose = "done"
 description = "The task detail lists the stage, exit-script and decision numbers MASON reserved for the task; a cancelled task's are shown as released, never reused"
 swift = "done"
 compose = "done"
+
+[feature.provider-accounts]
+description = "The usage page lists every LLM provider account with its adapter, billing kind, sessions in use, warn level, overage setting and monthly budget"
+swift = "done"
+compose = "done"

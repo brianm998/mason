@@ -553,6 +553,12 @@ message ProviderStatus {
   string status = 2;
   uint32 sessions_used = 3;
   uint32 sessions_limit = 4;
+  // The account's configuration (providers.toml).
+  string adapter = 5;            // "claude" | "codex"
+  string billing = 6;            // "subscription" | "api"
+  double warn_at = 7;            // fraction of a limit at which to warn
+  string overage = 8;            // "allow" | "hold"
+  double monthly_budget_usd = 9; // api accounts; 0 when none is set
 }
 
 message UsageView {
