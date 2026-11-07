@@ -41,15 +41,30 @@ extension TaskRow {
 }
 
 extension Mason_V1_DecisionCard {
-    func item(task: UInt64) -> Item {
+    func item(task: UInt64, owner: Bool = true) -> Item {
         var texts = [ask, why]
         for (i, o) in options.enumerated() {
             texts.append("\(i + 1). \(o.label)\(o.recommended ? " (recommended)" : "")")
         }
         texts.append(contentsOf: evidence)
-        var actions = (1...max(options.count, 1)).prefix(options.count).map { "option:\($0)" }
-        actions.append("other")
+        var actions: [String] = []
+        if owner {
+            actions = (1...max(options.count, 1)).prefix(options.count).map { "option:\($0)" }
+            actions.append("other")
+        }
         return Item(id: "card:\(task)", texts: texts, actions: actions)
+    }
+}
+
+extension Mason_V1_Approval {
+    /// What an approval shows: what the task waits on in full; Approve and Reject for the owner only.
+    func item(task: UInt64, owner: Bool = true) -> Item {
+        var texts = [waitingFor]
+        texts.append(contentsOf: lines)
+        if !diffHash.isEmpty { texts.append("diff \(diffHash)") }
+        if !branch.isEmpty { texts.append(branch) }
+        if !diffCommand.isEmpty { texts.append(diffCommand) }
+        return Item(id: "approval:\(task)", texts: texts, actions: owner ? ["approve", "reject"] : [])
     }
 }
 
@@ -87,7 +102,10 @@ extension MonitorModel {
         }
         if page == .home, let h = home {
             for a in h.attention where a.hasTask && a.hasCard {
-                out.append(a.card.item(task: a.task.id))
+                out.append(a.card.item(task: a.task.id, owner: canAct))
+            }
+            for a in h.attention where a.hasTask && a.hasApproval {
+                out.append(a.approval.item(task: a.task.id, owner: canAct))
             }
             for (i, a) in h.active.enumerated() {
                 out.append(Item(
@@ -108,7 +126,8 @@ extension MonitorModel {
             for (i, s) in d.steps.enumerated() {
                 out.append(Item(id: "step:\(s.run)", texts: [s.name, s.outcome], order: i))
             }
-            if d.hasCard { out.append(d.card.item(task: d.row.id)) }
+            if d.hasCard { out.append(d.card.item(task: d.row.id, owner: canAct)) }
+            if d.hasApproval { out.append(d.approval.item(task: d.row.id, owner: canAct)) }
         }
         return out
     }

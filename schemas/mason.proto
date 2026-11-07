@@ -43,6 +43,9 @@ message Hello {
   // The monitor's own build (a commit, or "dev"), so the daemon can say whether
   // a newer one exists.
   string client_version = 6;
+  // Who this connection acts as. The daemon says in Welcome.owner whether that
+  // is the owner, so a monitor can hide the buttons only the owner may use.
+  string actor = 7;
 }
 
 enum ViewKind {
@@ -90,6 +93,8 @@ message Command {
     PauseWork pause = 12;
     ResumeWork resume = 13;
     SetLimit set_limit = 14;
+    // Approve a held self-change: the exact diff the owner was shown.
+    ApproveHold approve_hold = 15;
     Raw raw = 30;
   }
   // Who is acting and, optionally, why (recorded with overrides).
@@ -130,6 +135,12 @@ message Answer {
   string answer = 2;
   // The hash of the card the answerer was looking at: a stale one is refused.
   string card_hash = 3;
+}
+
+message ApproveHold {
+  uint64 task = 1;
+  // The diff hash the owner was shown. A hold for another diff refuses (409).
+  string diff_hash = 2;
 }
 
 message Skip {
@@ -202,6 +213,8 @@ message Welcome {
   // The oldest client protocol this daemon serves. A monitor older than that
   // stays read-only and says why.
   uint32 min_protocol = 7;
+  // True when the Hello.actor is one of the owner's identities.
+  bool owner = 8;
 }
 
 message Snapshot {
@@ -361,9 +374,24 @@ message DecisionCard {
   string origin = 6;
 }
 
+// What a task waiting for the owner's approval is waiting on, in full.
+message Approval {
+  // "proposed", "approval" (an approval step) or "hold" (a self-hosting hold).
+  string kind = 1;
+  string waiting_for = 2;
+  // The touched gate and trust files, the broadened skips, one per line.
+  repeated string lines = 3;
+  // The hash of the held diff; Approve sends it back. Empty unless a hold.
+  string diff_hash = 4;
+  string branch = 5;
+  // A command that shows the diff.
+  string diff_command = 6;
+}
+
 message AttentionItem {
   TaskRow task = 1;
   DecisionCard card = 2;
+  Approval approval = 3;
 }
 
 message ActiveModel {
@@ -422,6 +450,7 @@ message TaskDetailView {
   string started_at = 14;
   // Times the developing agent sent it back to exploring, at no cost.
   uint32 explore_returns = 15;
+  Approval approval = 17;
 }
 
 // A batch the landing engine formed, and where it is.

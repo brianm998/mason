@@ -27,6 +27,13 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     var lastSeq by mutableStateOf(0L)
     var connected by mutableStateOf(false)
 
+    /**
+     * Whether the daemon took this connection's identity for the owner's (its welcome says).
+     * Only then are the answer, approve and reject buttons drawn: anyone else sees the card.
+     */
+    var isOwner by mutableStateOf(false)
+    val canAct: Boolean get() = isOwner && readOnlyReason == null
+
     // About versions (Part 15).
     /** This monitor's own build: a commit, or "dev" for a build nobody versioned. */
     var ownVersion: String = System.getenv("MASON_MONITOR_VERSION") ?: "dev"
@@ -150,6 +157,22 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     fun cancel(task: Long) = send(Command(cancel = TaskRef(task = task)))
     fun retry(task: Long, from: String = "") = send(Command(retry = Retry(task = task, from = from)))
     fun approve(task: Long) = send(Command(approve = TaskRef(task = task)))
+    /** Approve a held self-change: the exact diff the owner was shown. */
+    fun approveHold(task: Long, diffHash: String) =
+        send(Command(approve_hold = ApproveHold(task = task, diff_hash = diffHash)))
+
+    /** What Approve sends for an approval: the held diff's hash when there is one, else a plain approve. */
+    fun approve(task: Long, a: Approval) = if (a.diff_hash.isEmpty()) approve(task) else approveHold(task, a.diff_hash)
+
+    /** The first task that needs the owner, in the Home queue's order. */
+    val firstNeedingYou: Long? get() = if (connected) home?.attention?.firstOrNull()?.task?.id else null
+
+    /** What clicking the attention count does: open the first task that needs the owner. */
+    fun openFirstNeedingYou() {
+        val t = firstNeedingYou
+        if (t != null) go(Page.Task(t)) else goHome()
+    }
+
     fun reject(task: Long, reason: String = "") = send(Command(reject = Reject(task = task, reason = reason)))
     fun exploreAnyway(task: Long) = send(Command(explore_anyway = TaskRef(task = task)))
     fun landNow(task: Long) = send(Command(land_now = TaskRef(task = task)))
@@ -193,6 +216,7 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
             connected = true
             if (w.resume == ResumeKind.SNAPSHOT) lastSeq = 0
             daemonVersion = w.version
+            isOwner = w.owner
             readOnlyReason = if (w.min_protocol > PROTOCOL)
                 "This monitor speaks protocol $PROTOCOL, but the daemon needs ${w.min_protocol} or newer. Update the monitor; until then it can only look."
             else null

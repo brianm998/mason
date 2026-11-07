@@ -86,6 +86,7 @@ mod tests {
                 token: String::new(),
                 commands_only: false,
                 client_version: "abc123".into(),
+                actor: "brian".into(),
             })),
         };
         for e in [Encoding::Protobuf, Encoding::Json] {
@@ -105,6 +106,7 @@ mod tests {
                 demo: false,
                 version: "dev".into(),
                 min_protocol: MIN_PROTOCOL,
+                owner: true,
             })),
         };
         let text = String::from_utf8(encode_server(&m, Encoding::Json)).unwrap();

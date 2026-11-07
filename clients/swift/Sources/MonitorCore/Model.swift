@@ -29,6 +29,10 @@ public final class MonitorModel: ObservableObject {
     @Published public var health: HealthSnapshot?
     @Published public var lastSeq: UInt64 = 0
     @Published public var connected = false
+    /// Whether the daemon took this connection's identity for the owner's (its welcome says).
+    /// Only then are the answer, approve and reject buttons drawn: anyone else sees the card.
+    @Published public var isOwner = false
+    public var canAct: Bool { isOwner && readOnlyReason == nil }
 
     // About versions (Part 15).
     /// The protocol this monitor speaks.
@@ -182,6 +186,24 @@ public final class MonitorModel: ObservableObject {
     public func answer(task: UInt64, _ text: String, cardHash: String) {
         command { $0.answer = .with { $0.task = task; $0.answer = text; $0.cardHash = cardHash } }
     }
+    /// Approve a held self-change: the exact diff the owner was shown.
+    public func approveHold(_ task: UInt64, diffHash: String) {
+        command { $0.approveHold = .with { $0.task = task; $0.diffHash = diffHash } }
+    }
+
+    /// What Approve sends for an approval: the held diff's hash when there is one, else a plain approve.
+    public func approve(_ task: UInt64, _ a: Mason_V1_Approval) {
+        if a.diffHash.isEmpty { approve(task) } else { approveHold(task, diffHash: a.diffHash) }
+    }
+
+    /// The first task that needs the owner, in the Home queue's order.
+    public var firstNeedingYou: UInt64? { connected ? home?.attention.first?.task.id : nil }
+
+    /// What clicking the attention count does: open the first task that needs the owner.
+    public func openFirstNeedingYou() {
+        if let t = firstNeedingYou { go(.task(t)) } else { goHome() }
+    }
+
     public func addTask(project: String, title: String, body: String) {
         command { $0.addTask = .with { $0.project = project; $0.title = title; $0.body = body } }
     }
@@ -227,6 +249,7 @@ public final class MonitorModel: ObservableObject {
             connected = true
             if w.resume == .snapshot { lastSeq = 0 }
             daemonVersion = w.version
+            isOwner = w.owner
             readOnlyReason = w.minProtocol > Self.protocolVersion
                 ? "This monitor speaks protocol \(Self.protocolVersion), but the daemon needs \(w.minProtocol) or newer. Update the monitor; until then it can only look."
                 : nil

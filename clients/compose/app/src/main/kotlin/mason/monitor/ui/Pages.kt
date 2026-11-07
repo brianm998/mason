@@ -85,6 +85,7 @@ fun HomePage(model: MonitorModel) {
                             modifier = Modifier.clickable { model.go(Page.Task(t.id)) },
                         )
                         a.card?.let { DecisionCardView(model, t.id, it) }
+                        a.approval?.let { ApprovalView(model, t.id, it) }
                     }
                 }
             }
@@ -177,7 +178,7 @@ private fun TaskDetail(model: MonitorModel, d: TaskDetailView) {
         ProgressCells(r.progress, r.slow)
         if (r.typical.isNotEmpty()) Text(r.typical, style = theme.small())
     }
-    ActionButtons(model, r)
+    ActionButtons(model, r, hasApprovalView = d.approval != null)
     if (r.blockers.isNotEmpty()) {
         Row(horizontalArrangement = Arrangement.spacedBy(theme.spacingSmall), modifier = Modifier.testTag("waiting-for")) {
             Text("waiting for", style = theme.body(color = theme.muted))
@@ -202,6 +203,7 @@ private fun TaskDetail(model: MonitorModel, d: TaskDetailView) {
         }
     }
     d.card?.let { DecisionCardView(model, r.id, it) }
+    d.approval?.let { ApprovalView(model, r.id, it) }
     if (d.failure.isNotEmpty()) Text("Failed: ${d.failure}", style = theme.body(color = theme.attention))
     Section("Steps") {
         d.steps.forEach { s ->

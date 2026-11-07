@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 package mason.monitor
 
+import mason.v1.Approval
 import mason.v1.DecisionCard
 import mason.v1.TaskRow
 import org.json.JSONArray
@@ -31,12 +32,22 @@ fun TaskRow.item(prefix: String, order: Int): Item {
     return Item("$prefix:$id", texts, allowed_actions, order)
 }
 
-fun DecisionCard.item(task: Long): Item {
+fun DecisionCard.item(task: Long, owner: Boolean = true): Item {
     val texts = mutableListOf(ask, why)
     options.forEachIndexed { i, o -> texts += "${i + 1}. ${o.label}${if (o.recommended) " (recommended)" else ""}" }
     texts += evidence
-    val actions = options.indices.map { "option:${it + 1}" } + "other"
+    val actions = if (owner) options.indices.map { "option:${it + 1}" } + "other" else emptyList()
     return Item("card:$task", texts, actions)
+}
+
+/** What an approval shows: what the task waits on in full; Approve and Reject for the owner only. */
+fun Approval.item(task: Long, owner: Boolean = true): Item {
+    val texts = mutableListOf(waiting_for)
+    texts += lines
+    if (diff_hash.isNotEmpty()) texts += "diff $diff_hash"
+    if (branch.isNotEmpty()) texts += branch
+    if (diff_command.isNotEmpty()) texts += diff_command
+    return Item("approval:$task", texts, if (owner) listOf("approve", "reject") else emptyList())
 }
 
 /**
@@ -67,7 +78,12 @@ fun MonitorModel.visibleItems(): List<Item> {
         h.attention.forEach { a ->
             val t = a.task
             val c = a.card
-            if (t != null && c != null) out += c.item(t.id)
+            if (t != null && c != null) out += c.item(t.id, canAct)
+        }
+        h.attention.forEach { a ->
+            val t = a.task
+            val x = a.approval
+            if (t != null && x != null) out += x.item(t.id, canAct)
         }
         h.active.forEachIndexed { i, a ->
             out += Item("active:${a.task}", listOf(a.model, a.project, "#${a.task}", a.step), order = i)
@@ -80,7 +96,8 @@ fun MonitorModel.visibleItems(): List<Item> {
         if (r != null) {
             out += r.item("detail", 0)
             d.steps.forEachIndexed { i, s -> out += Item("step:${s.run}", listOf(s.name, s.outcome), order = i) }
-            d.card?.let { out += it.item(r.id) }
+            d.card?.let { out += it.item(r.id, canAct) }
+            d.approval?.let { out += it.item(r.id, canAct) }
         }
     }
     return out

@@ -337,4 +337,114 @@ class MonitorCoreTest {
         assertEquals("integer", f[2].type)
         assertEquals(emptyList(), mason.monitor.EditorJson.fields("not json"))
     }
+
+    // ---- answers and approvals by clicking (Stage 20) ----
+
+    private fun card(hash: String = "h1") = DecisionCard(
+        ask = "One hour or one day?", why = "The ticket is silent.",
+        options = listOf(CardOption(label = "One hour", recommended = true), CardOption(label = "One day")),
+        evidence = listOf("the ticket says tokens expire"), hash = hash,
+    )
+
+    private fun approval(hold: Boolean) = Approval(
+        kind = if (hold) "hold" else "approval",
+        waiting_for = "Your approval of a change to MASON's own rules",
+        lines = listOf("touches crates/testing/src/verdict.rs (verdict logic)"),
+        diff_hash = if (hold) "abc123" else "",
+        branch = "mason/scratch/t3",
+        diff_command = "git diff main...mason/scratch/t3",
+    )
+
+    private fun ownerModel(owner: Boolean = true): Pair<MonitorModel, MutableList<Command>> {
+        val m = MonitorModel()
+        val sent = mutableListOf<Command>()
+        m.sender = { sent += it }
+        m.identity = "brian"
+        m.apply(ServerMessage(welcome = Welcome(protocol = 1, owner = owner)))
+        return m to sent
+    }
+
+    @Test fun answeringByOptionSendsTheNumberAndTheCardsHash() {
+        val (m, sent) = ownerModel()
+        m.answer(2, "1", card().hash)
+        val a = sent[0].answer!!
+        assertEquals(listOf("1", "h1"), listOf(a.answer, a.card_hash))
+        assertEquals("brian", sent[0].actor, "the owner's identity goes with it")
+    }
+
+    @Test fun otherTextIsSentAsFreeTextTrimmedAndNeverWhenBlank() {
+        val (m, sent) = ownerModel()
+        assertNull(otherAnswer("  \n "))
+        m.answer(2, otherAnswer("  use two hours\nplease \n")!!, "h1")
+        val a = sent[0].answer!!
+        assertEquals("use two hours\nplease", a.answer)
+        assertEquals("h1", a.card_hash)
+    }
+
+    @Test fun aStaleCardHashIsSentAsItWasAndTheRefusalIsShown() {
+        val (m, sent) = ownerModel()
+        m.answer(2, "1", card("old").hash)
+        assertEquals("old", sent[0].answer!!.card_hash)
+        m.apply(ServerMessage(result = CommandResult(id = "m1", ok = false, status = 409, error = "stale: that card has changed")))
+        assertEquals("stale: that card has changed", m.lastResult, "the card shows the refusal")
+    }
+
+    @Test fun arrowsMoveTheSelectionAndReturnPicksIt() {
+        var s = OptionSelection.starting(3, 1)
+        assertEquals("2", s.answer, "it starts on the recommended option")
+        s = s.down(); assertEquals("3", s.answer)
+        s = s.down(); assertEquals("3", s.answer, "it stops at the end")
+        s = s.up().up().up(); assertEquals("1", s.answer)
+        val none = OptionSelection.starting(2, null)
+        assertNull(none.answer, "nothing is picked until a key is pressed")
+        assertEquals("2", none.up().answer)
+        assertEquals(OtherKey.SEND, otherBoxKey(shift = false))
+        assertEquals(OtherKey.NEWLINE, otherBoxKey(shift = true))
+    }
+
+    @Test fun approveSendsTheDiffHashShownForAHoldAndAPlainApproveOtherwise() {
+        val (m, sent) = ownerModel()
+        m.approve(3, approval(hold = true))
+        m.approve(4, approval(hold = false))
+        assertEquals(3L, sent[0].approve_hold!!.task)
+        assertEquals("abc123", sent[0].approve_hold!!.diff_hash)
+        assertEquals(4L, sent[1].approve!!.task)
+        assertNull(sent[1].approve_hold)
+    }
+
+    @Test fun rejectSendsTheReason() {
+        val (m, sent) = ownerModel()
+        m.reject(3, "too broad")
+        assertEquals(3L, sent[0].reject!!.task)
+        assertEquals("too broad", sent[0].reject!!.reason)
+    }
+
+    private fun homeWith(c: DecisionCard?, a: Approval?) = ServerMessage(
+        view = ViewUpdate(seq = 1, view = View(home = HomeView(attention = listOf(AttentionItem(task = row(3, "needs_attention"), card = c, approval = a))))),
+    )
+
+    @Test fun theOwnerSeesTheButtonsAndANonOwnerSeesTheCardAndNone() {
+        for (owner in listOf(true, false)) {
+            val (m, _) = ownerModel(owner)
+            m.apply(homeWith(card(), approval(hold = true)))
+            val items = m.visibleItems()
+            val c = items.first { it.id == "card:3" }
+            val a = items.first { it.id == "approval:3" }
+            assertTrue("1. One hour (recommended)" in c.texts && "the ticket says tokens expire" in c.texts)
+            assertTrue("diff abc123" in a.texts && "git diff main...mason/scratch/t3" in a.texts)
+            assertEquals(if (owner) listOf("option:1", "option:2", "other") else emptyList(), c.actions)
+            assertEquals(if (owner) listOf("approve", "reject") else emptyList(), a.actions)
+            assertEquals(owner, m.canAct)
+        }
+    }
+
+    @Test fun clickingTheAttentionCountOpensTheFirstTaskThatNeedsYou() {
+        val (m, _) = ownerModel()
+        m.openFirstNeedingYou()
+        assertEquals(Page.Home, m.page, "nothing to open: stay on home")
+        m.apply(ServerMessage(view = ViewUpdate(seq = 2, view = View(header_ = HeaderView(attention = 1)))))
+        m.apply(homeWith(card(), null))
+        m.openFirstNeedingYou()
+        assertEquals(Page.Task(3), m.page)
+    }
 }
