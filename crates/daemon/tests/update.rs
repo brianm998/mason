@@ -299,6 +299,8 @@ fn a_build_that_crashes_is_rolled_back_by_itself_with_an_alert() {
     );
     assert!(Instant::now() < end);
     let _ = daemon.kill();
+    let _ = daemon.wait();
+    kill_hosts(&s.data_dir);
 }
 
 #[test]

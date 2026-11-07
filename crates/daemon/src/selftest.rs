@@ -41,10 +41,7 @@ const GOLDEN: [(&str, &str); 5] = [
 ];
 
 pub fn run(db_copy: &Path) -> Result<String, String> {
-    let mut said = vec![];
-    said.push(migrations(db_copy)?);
-    said.push(golden()?);
-    said.push(scripted_task()?);
+    let said = [migrations(db_copy)?, golden()?, scripted_task()?];
     Ok(said.join("\n"))
 }
 
