@@ -245,3 +245,153 @@ fn a_project_that_is_not_masons_own_has_no_holds_and_no_limits() {
     let pid = w.d.project_id_by_name("scratch").unwrap();
     assert!(selfguard::check_filing(&w.d, pid).is_ok());
 }
+
+// ---- Stage 41: which diff is read -----------------------------------------------------------
+
+mod scan {
+    use mason_daemon::selfguard::{change_in, scan_base};
+    use std::path::Path;
+    use std::process::Command;
+
+    fn git(dir: &Path, args: &[&str]) {
+        let o = Command::new("git")
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            o.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+    }
+
+    fn put(dir: &Path, f: &str, text: &str) {
+        let p = dir.join(f);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, text).unwrap();
+    }
+
+    fn commit(dir: &Path, f: &str, text: &str) {
+        put(dir, f, text);
+        git(dir, &["add", "-A"]);
+        git(dir, &["commit", "-q", "-m", f]);
+    }
+
+    /// A clone with `origin/develop` and a local `develop`, both at the first commit.
+    fn repo() -> (tempfile::TempDir, std::path::PathBuf) {
+        let t = tempfile::tempdir().unwrap();
+        let (origin, work) = (t.path().join("origin.git"), t.path().join("work"));
+        std::fs::create_dir_all(&work).unwrap();
+        git(
+            t.path(),
+            &[
+                "init",
+                "-q",
+                "--bare",
+                "-b",
+                "develop",
+                origin.to_str().unwrap(),
+            ],
+        );
+        git(&work, &["init", "-q", "-b", "develop"]);
+        git(
+            &work,
+            &["remote", "add", "origin", origin.to_str().unwrap()],
+        );
+        commit(&work, "scripts/exit/s17.sh", "echo gate\n");
+        commit(&work, "docs/a.md", "a\n");
+        git(&work, &["push", "-q", "origin", "develop"]);
+        (t, work)
+    }
+
+    fn paths(c: &mason_daemon::selfguard::Change) -> Vec<String> {
+        c.files.iter().map(|f| f.path.clone()).collect()
+    }
+
+    #[test]
+    fn a_base_merged_into_the_branch_does_not_count_as_the_tasks_change() {
+        let (_t, w) = repo();
+        git(&w, &["checkout", "-q", "-b", "task"]);
+        commit(&w, "docs/task.md", "mine\n");
+        // The base moves on with a protected change that lands (local develop and origin).
+        git(&w, &["checkout", "-q", "develop"]);
+        commit(&w, "scripts/exit/s20.sh", "kill $P || true\n");
+        git(&w, &["push", "-q", "origin", "develop"]);
+        git(&w, &["fetch", "-q", "origin"]);
+        // The task merges the base in.
+        git(&w, &["checkout", "-q", "task"]);
+        git(&w, &["merge", "-q", "--no-edit", "develop"]);
+        let c = change_in(&w, "origin/develop", "develop", "task").unwrap();
+        assert_eq!(paths(&c), ["docs/task.md"], "{}", c.diff);
+        assert!(!c.diff.contains("s20.sh"));
+        assert!(c.range.ends_with("...task"));
+    }
+
+    #[test]
+    fn a_stale_remote_ref_does_not_make_landed_work_the_tasks_own() {
+        let (_t, w) = repo();
+        git(&w, &["checkout", "-q", "-b", "task"]);
+        commit(&w, "docs/task.md", "mine\n");
+        // Local develop moves ahead of origin/develop (landed, not yet pushed or fetched).
+        git(&w, &["checkout", "-q", "develop"]);
+        commit(&w, "scripts/exit/s20.sh", "kill $P || true\n");
+        git(&w, &["checkout", "-q", "task"]);
+        git(&w, &["merge", "-q", "--no-edit", "develop"]);
+        assert_eq!(scan_base(&w, "origin/develop", "develop"), "develop");
+        let c = change_in(&w, "origin/develop", "develop", "task").unwrap();
+        assert_eq!(paths(&c), ["docs/task.md"]);
+        // Against the stale ref alone, the landed file would have been blamed on the task.
+        let stale = change_in(&w, "origin/develop", "origin/develop", "task").unwrap();
+        assert!(paths(&stale).contains(&"scripts/exit/s20.sh".to_string()));
+    }
+
+    #[test]
+    fn a_siblings_unlanded_protected_change_merged_in_is_still_listed() {
+        let (_t, w) = repo();
+        git(&w, &["checkout", "-q", "-b", "sibling"]);
+        commit(&w, "scripts/exit/s30.sh", "kill $P || true\n");
+        git(&w, &["checkout", "-q", "develop"]);
+        git(&w, &["checkout", "-q", "-b", "task"]);
+        commit(&w, "docs/task.md", "mine\n");
+        git(&w, &["merge", "-q", "--no-edit", "sibling"]);
+        let c = change_in(&w, "origin/develop", "develop", "task").unwrap();
+        let p = paths(&c);
+        assert!(p.contains(&"scripts/exit/s30.sh".to_string()), "{p:?}");
+        assert!(
+            c.files
+                .iter()
+                .find(|f| f.path == "scripts/exit/s30.sh")
+                .unwrap()
+                .added
+        );
+    }
+
+    #[test]
+    fn an_edit_to_an_existing_exit_script_is_an_edit_and_names_its_line() {
+        let (_t, w) = repo();
+        git(&w, &["checkout", "-q", "-b", "task"]);
+        commit(&w, "scripts/exit/s17.sh", "echo gate\ncargo test || true\n");
+        commit(&w, "scripts/exit/s50.sh", "echo new\n");
+        let c = change_in(&w, "origin/develop", "develop", "task").unwrap();
+        let i = mason_daemon::protect::inspect_changed(&c.files, &c.diff, &[]);
+        let text = i.short(&format!("git diff {}", c.range));
+        assert!(text.contains("touches scripts/exit/s17.sh:2"), "{text}");
+        assert!(
+            text.contains("broadened skip at scripts/exit/s17.sh:2"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("s50.sh"),
+            "the new exit script is not held by path: {text}"
+        );
+    }
+}

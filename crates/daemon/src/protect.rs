@@ -149,16 +149,79 @@ pub struct Finding {
     pub file: String,
     pub kind: &'static str,
     pub detail: String,
+    /// The line in the new version of the file (the added line, or the first
+    /// changed line for findings about removals).
+    pub line: Option<usize>,
 }
 
 impl Finding {
-    fn new(file: &str, kind: &'static str, detail: impl Into<String>) -> Finding {
+    fn new(file: &str, kind: &'static str, detail: impl Into<String>, line: usize) -> Finding {
         Finding {
             file: file.into(),
             kind,
             detail: detail.into(),
+            line: Some(line).filter(|l| *l > 0),
         }
     }
+}
+
+/// Commands whose failure is ordinary at cleanup or in a probe: `kill $pid || true`
+/// is not a test that stopped mattering. A `|| true` after one of these hides no check.
+const CLEANUP_WORDS: &[&str] = &[
+    "kill", "pkill", "killall", "rm", "rmdir", "unlink", "wait", "trap", "command", "which",
+    "type", "test", "[", "[[", "pgrep",
+];
+
+/// The last simple command of a shell fragment, its first word.
+fn last_command_word(fragment: &str) -> String {
+    let mut seg = fragment;
+    for sep in ["&&", ";", "|"] {
+        if let Some(i) = seg.rfind(sep) {
+            seg = &seg[i + sep.len()..];
+        }
+    }
+    let mut words = seg.split_whitespace().peekable();
+    while let Some(w) = words.peek() {
+        if matches!(*w, "do" | "then" | "else" | "{" | "(" | "!") {
+            words.next();
+        } else {
+            break;
+        }
+    }
+    words.next().unwrap_or("").to_string()
+}
+
+/// Is every `|| true` on this (lowercased) line one that hides nothing: it follows a
+/// cleanup or probe command, or the same line then exits non-zero?
+fn or_true_is_harmless(lower: &str) -> bool {
+    let ops: Vec<&str> = lower.split("||").collect();
+    let mut seen = false;
+    for k in 1..ops.len() {
+        let rest = ops[k].trim_start();
+        let Some(after) = rest.strip_prefix("true") else {
+            continue;
+        };
+        if after
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_')
+        {
+            continue;
+        }
+        seen = true;
+        // `... || true; exit 1`: the script still fails.
+        let tail = after.split("exit").skip(1).next().map(str::trim_start);
+        if let Some(n) = tail {
+            let n: String = n.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if !n.is_empty() && n.chars().any(|c| c != '0') {
+                continue;
+            }
+        }
+        if !CLEANUP_WORDS.contains(&last_command_word(ops[k - 1]).as_str()) {
+            return false;
+        }
+    }
+    seen
 }
 
 const ASSERTS: &[&str] = &[
@@ -229,15 +292,26 @@ fn name_and_number(line: &str) -> Option<(String, f64)> {
 /// added ignore or skip; limits whose number went up and floors whose went down
 /// (matched by name between a removed and an added line).
 pub fn scan_diff(diff: &str) -> Vec<Finding> {
+    scan_full(diff).0
+}
+
+/// The findings, and for each file the first changed line (new side).
+fn scan_full(diff: &str) -> (Vec<Finding>, BTreeMap<String, usize>) {
     #[derive(Default)]
     struct F {
         removed: Vec<String>,
         added: Vec<String>,
+        /// The new-side line of each added line.
+        at: Vec<usize>,
         deleted: bool,
+        /// Added whole: its old side is /dev/null, so nothing was weakened by exiting early.
+        new: bool,
+        first: usize,
     }
     let mut files: BTreeMap<String, F> = BTreeMap::new();
     let mut cur: Option<String> = None;
     let mut old_name: Option<String> = None;
+    let mut next = 0usize;
     for l in diff.lines() {
         if let Some(p) = l.strip_prefix("--- ") {
             old_name = Some(p.trim_start_matches("a/").to_string());
@@ -248,18 +322,42 @@ pub fn scan_diff(diff: &str) -> Vec<Finding> {
                 cur = Some(n);
             } else {
                 let n = p.trim_start_matches("b/").to_string();
-                files.entry(n.clone()).or_default();
+                let f = files.entry(n.clone()).or_default();
+                f.new = old_name.as_deref() == Some("/dev/null");
                 cur = Some(n);
+            }
+        } else if let Some(h) = l.strip_prefix("@@ ") {
+            // `@@ -a,b +c,d @@`: c is where the new side starts.
+            let c = h
+                .split_whitespace()
+                .find_map(|w| w.strip_prefix('+'))
+                .and_then(|w| w.split(',').next())
+                .and_then(|w| w.parse::<usize>().ok())
+                .unwrap_or(0);
+            next = c;
+            if let Some(f) = cur.as_ref().and_then(|c| files.get_mut(c)) {
+                if f.first == 0 {
+                    f.first = c.max(1);
+                }
             }
         } else if let Some(f) = cur.as_ref().and_then(|c| files.get_mut(c)) {
             if let Some(a) = l.strip_prefix('+') {
                 f.added.push(a.to_string());
+                f.at.push(next);
+                next += 1;
+            } else if l.starts_with(' ') {
+                next += 1;
             } else if let Some(r) = l.strip_prefix('-') {
                 f.removed.push(r.to_string());
             }
         }
     }
     let mut out = vec![];
+    let firsts: BTreeMap<String, usize> = files
+        .iter()
+        .map(|(k, f)| (k.clone(), f.first))
+        .filter(|(_, l)| *l > 0)
+        .collect();
     for (file, f) in &files {
         let is_test_path = file.contains("/tests/")
             || file.contains("/test/")
@@ -271,6 +369,7 @@ pub fn scan_diff(diff: &str) -> Vec<Finding> {
                 file,
                 "removed-test-file",
                 "a test file was deleted",
+                f.first,
             ));
             continue;
         }
@@ -280,6 +379,7 @@ pub fn scan_diff(diff: &str) -> Vec<Finding> {
                 file,
                 "removed-assertion",
                 format!("{} assertion(s) removed, {} added", ra, aa),
+                f.first,
             ));
         }
         let (rt, at) = (count_in(&f.removed, TESTS), count_in(&f.added, TESTS));
@@ -288,9 +388,11 @@ pub fn scan_diff(diff: &str) -> Vec<Finding> {
                 file,
                 "removed-test",
                 format!("{} test(s) removed, {} added", rt, at),
+                f.first,
             ));
         }
-        for l in &f.added {
+        for (i, l) in f.added.iter().enumerate() {
+            let line = f.at[i];
             let t = l.trim();
             let ignored = t.contains("#[ignore")
                 || t.contains("@Ignore")
@@ -303,19 +405,23 @@ pub fn scan_diff(diff: &str) -> Vec<Finding> {
                     file,
                     "ignored-test",
                     t.chars().take(100).collect::<String>(),
+                    line,
                 ));
             }
             let lower = t.to_lowercase();
-            let broadened = lower.contains("|| true")
+            let broadened = (lower.contains("|| true") && !or_true_is_harmless(&lower))
                 || lower.contains("continue-on-error: true")
                 || lower.replace(' ', "").contains("skip=true")
                 || lower.replace(' ', "").contains("skip:true")
-                || (file.ends_with(".sh") && (lower == "exit 0" || lower.starts_with("exit 0 ")));
+                || (file.ends_with(".sh")
+                    && !f.new
+                    && (lower == "exit 0" || lower.starts_with("exit 0 ")));
             if broadened {
                 out.push(Finding::new(
                     file,
                     "broadened-skip",
                     t.chars().take(100).collect::<String>(),
+                    line,
                 ));
             }
         }
@@ -324,7 +430,7 @@ pub fn scan_diff(diff: &str) -> Vec<Finding> {
             .iter()
             .filter_map(|l| name_and_number(l))
             .collect();
-        for l in &f.added {
+        for (i, l) in f.added.iter().enumerate() {
             let Some((name, new)) = name_and_number(l) else {
                 continue;
             };
@@ -336,18 +442,34 @@ pub fn scan_diff(diff: &str) -> Vec<Finding> {
                     file,
                     "raised-limit",
                     format!("{name}: {old} -> {new}"),
+                    f.at[i],
                 ));
             } else if FLOOR_WORDS.iter().any(|w| name.contains(w)) && new < *old {
                 out.push(Finding::new(
                     file,
                     "lowered-floor",
                     format!("{name}: {old} -> {new}"),
+                    f.at[i],
                 ));
             }
         }
     }
-    out
+    (out, firsts)
 }
+
+/// A path a change touches, and whether the change added it (it did not exist before).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Changed {
+    pub path: String,
+    pub added: bool,
+}
+
+/// Protected paths where *adding* a file is not held by its path. A new exit script
+/// has no earlier version to weaken, and it only runs once the runner lists it, which
+/// is a change to `scripts/run-exit-scripts.sh` and is held. Editing an existing
+/// gate, and every other protected path, stays held (decision 0019). The content of
+/// a new file is still scanned for weakening.
+const ADDED_OK: &[&str] = &["scripts/exit/**"];
 
 /// What the check found in a change.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -355,6 +477,8 @@ pub struct Inspection {
     /// `(path, why)` of each protected file the change touches.
     pub protected: Vec<(String, String)>,
     pub weakening: Vec<Finding>,
+    /// The first changed line of each file in the diff.
+    pub first_lines: BTreeMap<String, usize>,
 }
 
 impl Inspection {
@@ -384,15 +508,65 @@ impl Inspection {
         }
         parts.join("; ")
     }
+
+    /// The short form the owner reads: each finding with file and line, what is asked,
+    /// and the diff to look at. `mason task show` and `mason self` print this text.
+    pub fn short(&self, diff_cmd: &str) -> String {
+        let at = |file: &str, line: Option<usize>| match line {
+            Some(l) => format!("{file}:{l}"),
+            None => file.to_string(),
+        };
+        let clip = |s: &str| -> String { s.replace(';', ",").chars().take(60).collect() };
+        let mut parts = vec![];
+        for (p, why) in &self.protected {
+            parts.push(format!(
+                "touches {} ({})",
+                at(p, self.first_lines.get(p).copied()),
+                why
+            ));
+        }
+        for f in &self.weakening {
+            parts.push(format!(
+                "{} at {} ({})",
+                f.kind.replace('-', " "),
+                at(&f.file, f.line),
+                clip(&f.detail)
+            ));
+        }
+        format!(
+            "{}. Decide: approve only if this change is intended. Diff: {diff_cmd}",
+            parts.join("; ")
+        )
+    }
 }
 
+/// Paths that exist already (all treated as edits).
 pub fn inspect(paths: &[String], diff: &str, extra: &[String]) -> Inspection {
+    let changed: Vec<Changed> = paths
+        .iter()
+        .map(|p| Changed {
+            path: p.clone(),
+            added: false,
+        })
+        .collect();
+    inspect_changed(&changed, diff, extra)
+}
+
+pub fn inspect_changed(files: &[Changed], diff: &str, extra: &[String]) -> Inspection {
+    let (weakening, first_lines) = scan_full(diff);
     Inspection {
-        protected: paths
+        protected: files
             .iter()
-            .filter_map(|p| protected_because(p, extra).map(|w| (p.clone(), w)))
+            .filter(|c| {
+                !(c.added
+                    && ADDED_OK
+                        .iter()
+                        .any(|g| glob(g, c.path.trim_start_matches("./"))))
+            })
+            .filter_map(|c| protected_because(&c.path, extra).map(|w| (c.path.clone(), w)))
             .collect(),
-        weakening: scan_diff(diff),
+        weakening,
+        first_lines,
     }
 }
 
@@ -603,5 +777,165 @@ mod tests {
         assert_eq!(diff_hash(&a), diff_hash(&a));
         assert_ne!(diff_hash(&a), diff_hash(&b));
         assert_eq!(diff_hash(&a).len(), 64);
+    }
+
+    // ---- Stage 41: what a task really weakens ----------------------------------------------
+
+    /// A cleanup line, plus one real weakening in the same file: exactly the weakening is found.
+    fn only_the_real_one(file: &str, cleanup: &str, real: &str) {
+        let d = diff(file, &[], &[cleanup, real]);
+        let f = scan_diff(&d);
+        assert_eq!(f.len(), 1, "{cleanup:?} must not be flagged: {f:?}");
+        assert_eq!(f[0].kind, "broadened-skip");
+        assert_eq!(f[0].detail, real);
+        assert!(
+            scan_diff(&diff(file, &[], &[cleanup])).is_empty(),
+            "{cleanup:?} alone"
+        );
+    }
+
+    #[test]
+    fn a_kill_cleanup_is_not_a_broadened_skip() {
+        only_the_real_one(
+            "scripts/exit/s9.sh",
+            "kill \"$PID\" 2>/dev/null || true",
+            "cargo test || true",
+        );
+    }
+
+    #[test]
+    fn an_rm_cleanup_is_not_a_broadened_skip() {
+        only_the_real_one(
+            "scripts/exit/s9.sh",
+            "rm -rf \"$TMP\" || true",
+            "grep -c x out || true",
+        );
+    }
+
+    #[test]
+    fn a_wait_cleanup_is_not_a_broadened_skip() {
+        only_the_real_one(
+            "scripts/exit/s9.sh",
+            "wait \"$PID\" 2>/dev/null || true",
+            "cargo test || true",
+        );
+    }
+
+    #[test]
+    fn a_trap_is_not_a_broadened_skip() {
+        only_the_real_one(
+            "scripts/exit/s9.sh",
+            "trap 'kill $PID 2>/dev/null || true; rm -rf \"$T\"' EXIT",
+            "cargo test || true",
+        );
+        // `trap` as the command itself.
+        only_the_real_one(
+            "scripts/exit/s9.sh",
+            "trap - EXIT || true",
+            "cargo test || true",
+        );
+    }
+
+    #[test]
+    fn a_command_probe_is_not_a_broadened_skip() {
+        only_the_real_one(
+            "scripts/exit/s9.sh",
+            "command -v jq >/dev/null 2>&1 || true",
+            "grep -c x out || true",
+        );
+    }
+
+    #[test]
+    fn a_kill_chain_is_not_a_broadened_skip() {
+        only_the_real_one(
+            "scripts/exit/s9.sh",
+            "[ -n \"$PID\" ] && kill \"$PID\" || true",
+            "cargo test || true",
+        );
+        only_the_real_one(
+            "scripts/exit/s9.sh",
+            "for p in $PIDS; do kill $p || true; done",
+            "cargo test || true",
+        );
+    }
+
+    #[test]
+    fn a_diagnostic_then_a_failing_exit_is_not_a_broadened_skip() {
+        only_the_real_one(
+            "scripts/exit/s9.sh",
+            "tail -5 log || true; exit 1",
+            "cargo test || true",
+        );
+        // `exit 0` after it does not excuse it.
+        let f = scan_diff(&diff(
+            "scripts/exit/s9.sh",
+            &[],
+            &["tail -5 log || true; exit 0"],
+        ));
+        assert_eq!(f.len(), 1, "{f:?}");
+    }
+
+    #[test]
+    fn a_bare_exit_zero_is_flagged_in_an_old_file_and_not_in_a_new_one() {
+        let new = "--- /dev/null\n+++ b/scripts/exit/s9.sh\n@@ -0,0 +1,2 @@\n+echo hi\n+exit 0\n";
+        assert!(scan_diff(new).is_empty());
+        // The same line in an existing file is the case the rule is for.
+        let f = scan_diff(&diff("scripts/exit/s9.sh", &[], &["exit 0"]));
+        assert_eq!(f.len(), 1);
+        // A new file with a real `|| true` is still flagged.
+        let new = "--- /dev/null\n+++ b/scripts/exit/s9.sh\n@@ -0,0 +1,2 @@\n+cargo test || true\n+exit 0\n";
+        let f = scan_diff(new);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!(
+            (f[0].detail.as_str(), f[0].line),
+            ("cargo test || true", Some(1))
+        );
+    }
+
+    #[test]
+    fn findings_carry_the_line_of_the_added_line() {
+        let d = "--- a/scripts/exit/s9.sh\n+++ b/scripts/exit/s9.sh\n@@ -3,0 +4,2 @@\n+echo a\n+cargo test || true\n@@ -20 +22 @@\n-x\n+exit 0\n";
+        let f = scan_diff(d);
+        let got: Vec<_> = f.iter().map(|f| (f.detail.as_str(), f.line)).collect();
+        assert_eq!(got, [("cargo test || true", Some(5)), ("exit 0", Some(22))]);
+        // Removals carry the first hunk.
+        let f = scan_diff("--- a/src/a.rs\n+++ b/src/a.rs\n@@ -7 +6,0 @@\n-    assert!(x);\n");
+        assert_eq!((f[0].kind, f[0].line), ("removed-assertion", Some(6)));
+    }
+
+    #[test]
+    fn a_new_exit_script_is_not_held_by_its_path_but_edits_and_the_runner_are() {
+        let add = |p: &str| Changed {
+            path: p.into(),
+            added: true,
+        };
+        let edit = |p: &str| Changed {
+            path: p.into(),
+            added: false,
+        };
+        let d = "--- /dev/null\n+++ b/scripts/exit/s99.sh\n@@ -0,0 +1 @@\n+echo ok\n";
+        assert!(inspect_changed(&[add("scripts/exit/s99.sh")], d, &[]).clean());
+        // An existing gate edited, the runner (even if "added"), and other gates stay held.
+        assert!(!inspect_changed(&[edit("scripts/exit/s17.sh")], d, &[]).clean());
+        assert!(!inspect_changed(&[add("scripts/run-exit-scripts.sh")], d, &[]).clean());
+        assert!(!inspect_changed(&[add("scripts/check-new.sh")], d, &[]).clean());
+        assert!(!inspect_changed(&[add(".github/workflows/x.yml")], d, &[]).clean());
+        // `inspect` treats every path as an existing one.
+        assert!(!inspect(&["scripts/exit/s99.sh".into()], d, &[]).clean());
+    }
+
+    #[test]
+    fn the_hold_text_is_short_with_file_line_and_a_decision() {
+        let d = "--- a/scripts/exit/s17.sh\n+++ b/scripts/exit/s17.sh\n@@ -3,0 +4 @@\n+cargo test || true\n";
+        let i = inspect(&["scripts/exit/s17.sh".into()], d, &[]);
+        let t = i.short("git -C /r diff origin/develop...b");
+        assert!(
+            t.contains("touches scripts/exit/s17.sh:4 (gates: the exit tests)")
+                && t.contains("broadened skip at scripts/exit/s17.sh:4 (cargo test || true)")
+                && t.contains("Decide: approve only if this change is intended")
+                && t.ends_with("Diff: git -C /r diff origin/develop...b"),
+            "{t}"
+        );
+        assert!(!t.contains('\n'));
     }
 }
