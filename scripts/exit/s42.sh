@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Stage 21 exit test: task dependencies. A real masond, a fake GitHub (fake-github, over recorded
-# JSON in scripts/exit/fixtures/s21; loopback only) and a bare repository to land on. No network.
+# Task dependencies (s42) exit test: task dependencies. A real masond, a fake GitHub (fake-github, over recorded
+# JSON in scripts/exit/fixtures/s42; loopback only) and a bare repository to land on. No network.
 #  1. A chain of three issues (101; 102 blocked by 101 through GitHub's own link; 103 with only a
 #     "Depends on #102" body line, listed newest first) is imported in order. Only the first runs,
 #     and each one starts when the one before lands, promptly (the poll interval is five minutes,
@@ -15,7 +15,7 @@
 #     or unknown id is refused naming it.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
-root=$(mktemp -d /tmp/mason-s21.XXXXXX); daemon=""; gh=""
+root=$(mktemp -d /tmp/mason-s42.XXXXXX); daemon=""; gh=""
 cleanup() {
   [ -n "$daemon" ] && kill -9 "$daemon" 2>/dev/null || true
   [ -n "$gh" ] && kill -9 "$gh" 2>/dev/null || true
@@ -28,7 +28,7 @@ cleanup() {
 trap cleanup EXIT
 cargo build -q --workspace --bins
 bin=target/debug
-fx=scripts/exit/fixtures/s21
+fx=scripts/exit/fixtures/s42
 owner=${USER:-owner}
 m() { "$bin/mason" --data-dir "$root/d" --config-dir "$root/c" "$@"; }
 fail() { echo "FAILED: $*" >&2; m task list >&2 2>&1 || true; m alerts >&2 2>&1 || true; tail -20 "$root/masond.log" >&2 || true; exit 1; }
@@ -211,4 +211,4 @@ echo "== the tracker was asked politely"
 echo "   requests to the fake GitHub: $(wc -l < "$root/gh/requests.log" | tr -d ' ') (listings: $(grep -c 'GET /repos/o/r/issues?' "$root/gh/requests.log"), dependency lookups: $(grep -c 'blocked_by' "$root/gh/requests.log"))"
 
 trap - EXIT; cleanup
-echo "s21 OK"
+echo "s42 OK"
