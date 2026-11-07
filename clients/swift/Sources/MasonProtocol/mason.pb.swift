@@ -1506,11 +1506,40 @@ public nonisolated struct Mason_V1_TaskDetailView: @unchecked Sendable {
   /// Clears the value of `approval`. Subsequent reads from it will return its default value.
   public mutating func clearApproval() {_uniqueStorage()._approval = nil}
 
+  /// The numbers MASON reserved for the task's stage note, exit script and decision record.
+  public var numbers: [Mason_V1_NumberLine] {
+    get {_storage._numbers}
+    set {_uniqueStorage()._numbers = newValue}
+  }
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
 
   fileprivate var _storage = _StorageClass.defaultInstance
+}
+
+/// One number handed to a task. A cancelled task's numbers are shown released: never reused.
+public nonisolated struct Mason_V1_NumberLine: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  /// "exit" (the stage note and exit script share it) or "decision".
+  public var kind: String = String()
+
+  public var number: UInt32 = 0
+
+  public var released: Bool = false
+
+  public var path: String = String()
+
+  /// "reserved", or "stage" when the task kept the stage its title names.
+  public var source: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
 }
 
 /// A batch the landing engine formed, and where it is.
@@ -4430,7 +4459,7 @@ nonisolated extension Mason_V1_DebtLine: SwiftProtobuf.Message, SwiftProtobuf._M
 
 nonisolated extension Mason_V1_TaskDetailView: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".TaskDetailView"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}row\0\u{1}steps\0\u{1}plan\0\u{1}card\0\u{1}closing\0\u{1}debts\0\u{3}log_tail\0\u{1}branch\0\u{1}worktree\0\u{1}definition\0\u{1}failure\0\u{1}body\0\u{1}route\0\u{3}started_at\0\u{3}explore_returns\0\u{2}\u{2}approval\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}row\0\u{1}steps\0\u{1}plan\0\u{1}card\0\u{1}closing\0\u{1}debts\0\u{3}log_tail\0\u{1}branch\0\u{1}worktree\0\u{1}definition\0\u{1}failure\0\u{1}body\0\u{1}route\0\u{3}started_at\0\u{3}explore_returns\0\u{2}\u{2}approval\0\u{1}numbers\0")
 
   fileprivate class _StorageClass {
     var _row: Mason_V1_TaskRow? = nil
@@ -4449,6 +4478,7 @@ nonisolated extension Mason_V1_TaskDetailView: SwiftProtobuf.Message, SwiftProto
     var _startedAt: String = String()
     var _exploreReturns: UInt32 = 0
     var _approval: Mason_V1_Approval? = nil
+    var _numbers: [Mason_V1_NumberLine] = []
 
       // This property is used as the initial default value for new instances of the type.
       // The type itself is protecting the reference to its storage via CoW semantics.
@@ -4475,6 +4505,7 @@ nonisolated extension Mason_V1_TaskDetailView: SwiftProtobuf.Message, SwiftProto
       _startedAt = source._startedAt
       _exploreReturns = source._exploreReturns
       _approval = source._approval
+      _numbers = source._numbers
     }
   }
 
@@ -4509,6 +4540,7 @@ nonisolated extension Mason_V1_TaskDetailView: SwiftProtobuf.Message, SwiftProto
         case 14: try { try decoder.decodeSingularStringField(value: &_storage._startedAt) }()
         case 15: try { try decoder.decodeSingularUInt32Field(value: &_storage._exploreReturns) }()
         case 17: try { try decoder.decodeSingularMessageField(value: &_storage._approval) }()
+        case 18: try { try decoder.decodeRepeatedMessageField(value: &_storage._numbers) }()
         default: break
         }
       }
@@ -4569,6 +4601,9 @@ nonisolated extension Mason_V1_TaskDetailView: SwiftProtobuf.Message, SwiftProto
       try { if let v = _storage._approval {
         try visitor.visitSingularMessageField(value: v, fieldNumber: 17)
       } }()
+      if !_storage._numbers.isEmpty {
+        try visitor.visitRepeatedMessageField(value: _storage._numbers, fieldNumber: 18)
+      }
     }
     try unknownFields.traverse(visitor: &visitor)
   }
@@ -4594,10 +4629,61 @@ nonisolated extension Mason_V1_TaskDetailView: SwiftProtobuf.Message, SwiftProto
         if _storage._startedAt != rhs_storage._startedAt {return false}
         if _storage._exploreReturns != rhs_storage._exploreReturns {return false}
         if _storage._approval != rhs_storage._approval {return false}
+        if _storage._numbers != rhs_storage._numbers {return false}
         return true
       }
       if !storagesAreEqual {return false}
     }
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Mason_V1_NumberLine: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".NumberLine"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}kind\0\u{1}number\0\u{1}released\0\u{1}path\0\u{1}source\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.kind) }()
+      case 2: try { try decoder.decodeSingularUInt32Field(value: &self.number) }()
+      case 3: try { try decoder.decodeSingularBoolField(value: &self.released) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.path) }()
+      case 5: try { try decoder.decodeSingularStringField(value: &self.source) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.kind.isEmpty {
+      try visitor.visitSingularStringField(value: self.kind, fieldNumber: 1)
+    }
+    if self.number != 0 {
+      try visitor.visitSingularUInt32Field(value: self.number, fieldNumber: 2)
+    }
+    if self.released != false {
+      try visitor.visitSingularBoolField(value: self.released, fieldNumber: 3)
+    }
+    if !self.path.isEmpty {
+      try visitor.visitSingularStringField(value: self.path, fieldNumber: 4)
+    }
+    if !self.source.isEmpty {
+      try visitor.visitSingularStringField(value: self.source, fieldNumber: 5)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Mason_V1_NumberLine, rhs: Mason_V1_NumberLine) -> Bool {
+    if lhs.kind != rhs.kind {return false}
+    if lhs.number != rhs.number {return false}
+    if lhs.released != rhs.released {return false}
+    if lhs.path != rhs.path {return false}
+    if lhs.source != rhs.source {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

@@ -1048,3 +1048,7 @@ Every requirement from your message and where it's answered.
 | Priority order: queue position, tracker priority, enqueue time | 7 |
 | Notices it changed and reloads itself | 15 |
 | Monitor notified of a new version, with a button to switch | 15 |
+
+# Numbered files (added in s43)
+
+MASON hands out the numbers of the stage note (`docs/stages/sNN.md`), exit script (`scripts/exit/sNN.sh`) and decision record (`docs/decisions/NNNN-*.md`) a task adds; a task is told its numbers in its prompt and never looks for "the next one". The README status block is generated from the stage notes when changes land. See `docs/decisions/0021-numbers-readings.md`.

@@ -108,6 +108,17 @@ fn task_json(d: &Daemon, w: &World, t: &Task, detail: bool) -> Value {
             v["worktree"] = json!(p.worktree(&d.cfg, t.id.0).display().to_string());
         }
         v["definition"] = json!(t.def);
+        v["numbers"] = json!(d
+            .number_lines(t)
+            .iter()
+            .map(|n| json!({
+                "kind": n.kind,
+                "number": n.number,
+                "released": n.released,
+                "path": n.path,
+                "source": n.source,
+            }))
+            .collect::<Vec<_>>());
         v["blocked_by"] = json!(t.blockers.iter().map(|b| b.0).collect::<Vec<_>>());
         v["blocks"] = json!(w
             .tasks
@@ -307,6 +318,20 @@ async fn add_task(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res {
                     StatusCode::BAD_REQUEST,
                     "body is limited to 100,000 bytes",
                 ));
+            }
+            if crate::numbers::stage_of_task(&title, &body).is_none() {
+                let room = d2.project(pid).is_none_or(|p| d2.adhoc_exit_room(p));
+                if !room {
+                    return Err(fail(
+                        StatusCode::CONFLICT,
+                        format!(
+                            "the range of stage and exit-script numbers for ad-hoc tasks (from {} to {}) is used up; \
+                             widening the two-digit `s[0-9][0-9].sh` glob is a gate change that waits for the owner",
+                            d2.cfg.adhoc_exit_start,
+                            crate::numbers::EXIT_CEILING
+                        ),
+                    ));
+                }
             }
             let priority = match b["priority"].as_str().unwrap_or("normal") {
                 "urgent" => Priority::Urgent,

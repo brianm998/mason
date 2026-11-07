@@ -16,6 +16,7 @@ pub mod editor;
 pub mod http;
 pub mod jobs;
 pub mod landing;
+pub mod numbers;
 pub mod plugins;
 pub mod pool;
 pub mod prompts;

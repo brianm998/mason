@@ -267,6 +267,7 @@ impl Daemon {
     /// Append an event, then carry out what the reducer asked for.
     pub fn emit(self: &Arc<Self>, kind: EventKind) -> Result<Appended, StoreError> {
         let name = kind_name(&kind);
+        let kind_for_release = kind.clone();
         let appended = {
             let _g = self.emit_lock.lock().unwrap_or_else(|e| e.into_inner());
             self.store.append(Event {
@@ -275,6 +276,10 @@ impl Daemon {
             })?
         };
         self.crash.point(&format!("after_append:{name}"));
+        if let EventKind::Canceled { task, .. } = &kind_for_release {
+            // Its numbers are released, never handed out again.
+            let _ = self.store.release_numbers(task.0);
+        }
         let _ = self.bus.send(appended.seq);
         self.handle_effects(&appended.effects);
         self.admit();
@@ -414,6 +419,13 @@ impl Daemon {
                 };
                 let Some(t) = w.tasks.get(&id) else { break };
                 let entry = self.entry_for(t);
+                // The task's numbers are handed out when it is first claimed.
+                if let Err(why) = self.ensure_numbers(t.id) {
+                    self.record_bug(
+                        "numbers",
+                        &format!("no numbers could be reserved for task {}: {why}", t.id),
+                    );
+                }
                 if self
                     .emit(EventKind::Admitted {
                         task: t.id,

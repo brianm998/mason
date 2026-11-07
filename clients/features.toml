@@ -120,3 +120,8 @@ compose = "done"
 description = "The top bar says how many tasks need the owner; clicking it opens the first one"
 swift = "done"
 compose = "done"
+
+[feature.reserved-numbers]
+description = "The task detail lists the stage, exit-script and decision numbers MASON reserved for the task; a cancelled task's are shown as released, never reused"
+swift = "done"
+compose = "done"

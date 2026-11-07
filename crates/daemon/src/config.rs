@@ -47,6 +47,9 @@ pub struct DaemonConfig {
     pub exec_args: Vec<String>,
     /// How long a start must live to be called healthy (and not a crash).
     pub healthy_after: Duration,
+    /// Where the stage and exit-script numbers of ad-hoc tasks start (above the planned
+    /// stages). Read from `MASON_ADHOC_EXIT_START`; default 40.
+    pub adhoc_exit_start: u32,
 }
 
 impl DaemonConfig {
@@ -74,6 +77,11 @@ impl DaemonConfig {
             runtime_sha: None,
             exec_args: vec![],
             healthy_after: Duration::from_secs(30),
+            adhoc_exit_start: std::env::var("MASON_ADHOC_EXIT_START")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .filter(|n| (1..=99).contains(n))
+                .unwrap_or(crate::numbers::DEFAULT_ADHOC_START),
             owner_names: vec![std::env::var("USER")
                 .or_else(|_| std::env::var("LOGNAME"))
                 .unwrap_or_else(|_| "owner".into())],

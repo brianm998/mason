@@ -748,6 +748,17 @@ fn agent_job(c: &Ctx) {
         }
     };
 
+    // The numbers MASON reserved for this task (a task claimed before numbers existed gets
+    // them now), stated as facts in every explore and develop prompt.
+    let prompt = if kind == StepKind::Review {
+        prompt
+    } else {
+        match c.d.ensure_numbers(c.task) {
+            Ok(m) => format!("{prompt}\n\n{}", crate::numbers::prompt_block(&m)),
+            Err(why) => return c.fail(format!("no numbers could be reserved: {why}")),
+        }
+    };
+
     let prompt = match decisions.filter(|t| !t.trim().is_empty()) {
         Some(d) => format!(
             "{prompt}\n\nThe owner has already answered these questions of yours; do not ask them again:\n{}",

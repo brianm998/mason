@@ -209,6 +209,12 @@ struct TaskDetailPage: View {
                 }
             }
 
+            ForEach(d.numbers, id: \.kind) { n in
+                Text("Number \(n.kind) \(n.number): \(n.path)\(n.source == "stage" ? " (its stage)" : "")\(n.released ? " (released, not reused)" : "")")
+                    .font(theme.small()).foregroundStyle(theme.muted)
+                    .accessibilityIdentifier("number:\(n.kind)")
+            }
+
             if d.hasCard { DecisionCardView(model: model, task: r.id, card: d.card) }
             if d.hasApproval { ApprovalView(model: model, task: r.id, approval: d.approval) }
             if !d.failure.isEmpty {

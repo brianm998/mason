@@ -451,6 +451,19 @@ message TaskDetailView {
   // Times the developing agent sent it back to exploring, at no cost.
   uint32 explore_returns = 15;
   Approval approval = 17;
+  // The numbers MASON reserved for the task's stage note, exit script and decision record.
+  repeated NumberLine numbers = 18;
+}
+
+// One number handed to a task. A cancelled task's numbers are shown released: never reused.
+message NumberLine {
+  // "exit" (the stage note and exit script share it) or "decision".
+  string kind = 1;
+  uint32 number = 2;
+  bool released = 3;
+  string path = 4;
+  // "reserved", or "stage" when the task kept the stage its title names.
+  string source = 5;
 }
 
 // A batch the landing engine formed, and where it is.

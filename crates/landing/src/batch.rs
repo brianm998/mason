@@ -20,6 +20,9 @@ pub struct BatchTask {
     pub branch: String,
 }
 
+/// The subject of the commit that regenerates the README status block.
+pub const STATUS_SUBJECT: &str = "Regenerate the README status block";
+
 #[derive(Clone, Debug)]
 pub struct Batch<'a> {
     /// Any checkout of the repository.
@@ -164,6 +167,39 @@ impl Batch<'_> {
         Ok(out)
     }
 
+    /// Regenerate the README status block from the stage notes with the repository's
+    /// own `scripts/gen-status.sh`, and commit it on the integration branch. Tasks never
+    /// edit the block, so two tasks never touch the same line. Does nothing when the
+    /// repository has no such script. Returns true if a commit was made.
+    pub fn regenerate_status(&self) -> bool {
+        let wt = self.int_wt;
+        if !wt.join("scripts/gen-status.sh").is_file() {
+            return false;
+        }
+        let ran = Command::new("bash")
+            .args(["scripts/gen-status.sh"])
+            .current_dir(wt)
+            .output();
+        if !matches!(ran, Ok(o) if o.status.success()) {
+            return false;
+        }
+        let dirty = git::run(wt, &["status", "--porcelain", "--", "README.md"]).unwrap_or_default();
+        if dirty.trim().is_empty() {
+            return false;
+        }
+        git::run(wt, &["add", "README.md"]).is_ok()
+            && git::run(wt, &["commit", "-q", "-s", "-m", STATUS_SUBJECT]).is_ok()
+    }
+
+    /// Take off the regeneration commit, if the integration head is one, so a moved base
+    /// folds in without a conflict in the generated block; it is made again after.
+    pub fn drop_status_commit(&self) {
+        let wt = self.int_wt;
+        if git::run(wt, &["log", "-1", "--format=%s"]).is_ok_and(|s| s == STATUS_SUBJECT) {
+            let _ = git::run(wt, &["reset", "--hard", "--quiet", "HEAD~1"]);
+        }
+    }
+
     /// Run the resolver on a conflicted merge. True if it left the merge
     /// complete: no conflict markers left unmerged, committed.
     fn resolve(&self, task: u64, files: &str) -> bool {
@@ -231,9 +267,12 @@ impl Batch<'_> {
             let tip = git::rev_parse(self.repo, &base_ref)?;
             if tip != seen {
                 // The base moved while the batch was verified: fold it in.
+                self.drop_status_commit();
                 match git::catch_up(wt, &base_ref)? {
                     CatchUp::Conflict(files) => return Ok(Ok(Finish::Conflict(files))),
-                    CatchUp::UpToDate | CatchUp::Merged => {}
+                    CatchUp::UpToDate | CatchUp::Merged => {
+                        self.regenerate_status();
+                    }
                 }
                 folds += 1;
                 if folds > self.max_fold {
