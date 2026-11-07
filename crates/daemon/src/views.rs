@@ -48,6 +48,15 @@ fn title_of(s: State) -> &'static str {
     }
 }
 
+/// The text on a count tile: the state name with spaces, except that
+/// needs_attention reads "stuck". The sidebar title is separate (`title_of`).
+fn tile_label_of(s: State) -> String {
+    match s {
+        State::NeedsAttention => "stuck".into(),
+        _ => state_name(s).replace('_', " "),
+    }
+}
+
 fn tooltip_of(s: State) -> &'static str {
     match s {
         State::NeedsAttention => "A task has asked you a question and is waiting for your answer.",
@@ -416,6 +425,7 @@ impl<'a> Ctx<'a> {
                     count: count(s),
                     wants_you: wants_you(s) && count(s) > 0,
                     tooltip: tooltip_of(s).into(),
+                    label: tile_label_of(s),
                 })
                 .collect(),
             banners,
@@ -947,4 +957,18 @@ pub fn summarize(kind: &EventKind) -> (String, String, u64) {
     };
     let _ = card::ASK_MAX;
     (name, summary, task)
+}
+
+#[cfg(test)]
+mod tile_label_tests {
+    use super::*;
+
+    #[test]
+    fn needs_attention_reads_stuck_and_the_rest_keep_their_names() {
+        assert_eq!(tile_label_of(State::NeedsAttention), "stuck");
+        assert_eq!(tile_label_of(State::Queued), "queued");
+        assert_eq!(tile_label_of(State::Exploring), "exploring");
+        assert_eq!(tile_label_of(State::Landed), "landed");
+        assert_eq!(title_of(State::NeedsAttention), "Needs you");
+    }
 }

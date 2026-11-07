@@ -106,6 +106,15 @@ final class MonitorCoreTests: XCTestCase {
         XCTAssertEqual(item.texts.first, "–")
     }
 
+    func testTileLabelIsTheDaemonsLabelOrTheUnderscoreFallback() {
+        let m = model(connected: true)
+        var c = StateCount()
+        c.state = "needs_attention"
+        XCTAssertEqual(m.tileLabel(c), "needs attention", "an older daemon sends no label")
+        c.label = "stuck"
+        XCTAssertEqual(m.tileLabel(c), "stuck")
+    }
+
     // MARK: sidebar
 
     func testHistorySectionsStartCollapsedAndChoicesAreRemembered() {

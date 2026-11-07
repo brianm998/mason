@@ -112,6 +112,11 @@ public final class MonitorModel: ObservableObject {
 
     // MARK: counts and tiles
 
+    /// The tile text: the daemon's label, or (older daemon) the state with spaces.
+    public func tileLabel(_ c: StateCount) -> String {
+        c.label.isEmpty ? c.state.replacingOccurrences(of: "_", with: " ") : c.label
+    }
+
     /// A dash while disconnected: never a stale count, never a false zero.
     public func tileCount(_ c: StateCount) -> String {
         connected ? String(c.count) : "–"

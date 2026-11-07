@@ -1280,6 +1280,9 @@ public nonisolated struct Mason_V1_StateCount: Sendable {
 
   public var tooltip: String = String()
 
+  /// The text on the tile; empty from an older daemon.
+  public var label: String = String()
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -4169,7 +4172,7 @@ nonisolated extension Mason_V1_TaskRow: SwiftProtobuf.Message, SwiftProtobuf._Me
 
 nonisolated extension Mason_V1_StateCount: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".StateCount"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}state\0\u{1}count\0\u{3}wants_you\0\u{1}tooltip\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}state\0\u{1}count\0\u{3}wants_you\0\u{1}tooltip\0\u{1}label\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -4181,6 +4184,7 @@ nonisolated extension Mason_V1_StateCount: SwiftProtobuf.Message, SwiftProtobuf.
       case 2: try { try decoder.decodeSingularUInt32Field(value: &self.count) }()
       case 3: try { try decoder.decodeSingularBoolField(value: &self.wantsYou) }()
       case 4: try { try decoder.decodeSingularStringField(value: &self.tooltip) }()
+      case 5: try { try decoder.decodeSingularStringField(value: &self.label) }()
       default: break
       }
     }
@@ -4199,6 +4203,9 @@ nonisolated extension Mason_V1_StateCount: SwiftProtobuf.Message, SwiftProtobuf.
     if !self.tooltip.isEmpty {
       try visitor.visitSingularStringField(value: self.tooltip, fieldNumber: 4)
     }
+    if !self.label.isEmpty {
+      try visitor.visitSingularStringField(value: self.label, fieldNumber: 5)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -4207,6 +4214,7 @@ nonisolated extension Mason_V1_StateCount: SwiftProtobuf.Message, SwiftProtobuf.
     if lhs.count != rhs.count {return false}
     if lhs.wantsYou != rhs.wantsYou {return false}
     if lhs.tooltip != rhs.tooltip {return false}
+    if lhs.label != rhs.label {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

@@ -149,7 +149,14 @@ pub fn visible(views: &[View], owner: bool) -> Vec<Item> {
                 for (i, c) in h.counts.iter().enumerate() {
                     out.push(Item::new(
                         format!("tile:{}", c.state),
-                        vec![c.count.to_string(), c.state.clone()],
+                        vec![
+                            c.count.to_string(),
+                            if c.label.is_empty() {
+                                c.state.replace('_', " ")
+                            } else {
+                                c.label.clone()
+                            },
+                        ],
                         vec![],
                         i,
                     ));

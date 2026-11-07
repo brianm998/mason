@@ -60,7 +60,7 @@ fun MonitorModel.visibleItems(): List<Item> {
     val out = mutableListOf<Item>()
     header?.let { h ->
         out += Item("status", listOf(if (connected) h.status else "Not connected"))
-        h.counts.forEachIndexed { i, c -> out += Item("tile:${c.state}", listOf(tileCount(c), c.state), order = i) }
+        h.counts.forEachIndexed { i, c -> out += Item("tile:${c.state}", listOf(tileCount(c), tileLabel(c)), order = i) }
         h.banners.forEachIndexed { i, b -> out += Item("banner:$i", listOf(b.text), order = i) }
     }
     sidebar?.let { s ->

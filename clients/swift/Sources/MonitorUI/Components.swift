@@ -74,8 +74,8 @@ struct Hatch: Shape {
     }
 }
 
-/// A count tile: a large count over a one-line label, a fixed size so a
-/// narrow window squeezes other text and never breaks a label; tinted when
+/// A count tile: a large count over a one-line label, sized to its label so a
+/// narrow window squeezes other text and never a tile or label; tinted when
 /// the state wants the owner; a dash while disconnected.
 struct CountTile: View {
     @Environment(\.theme) var theme
@@ -88,7 +88,9 @@ struct CountTile: View {
             Text(model.tileCount(count)).font(theme.count()).foregroundStyle(wants ? theme.attention : theme.text)
             Text(label).font(theme.small()).foregroundStyle(theme.muted).lineLimit(1).fixedSize()
         }
-        .frame(width: theme.tileWidth, height: theme.tileHeight)
+        .padding(.horizontal, theme.spacing)
+        .frame(minWidth: theme.tileMinWidth, minHeight: theme.tileHeight, maxHeight: theme.tileHeight)
+        .fixedSize(horizontal: true, vertical: false)
         .background(RoundedRectangle(cornerRadius: theme.radius).fill(wants ? theme.attentionTint : theme.surface))
         .overlay(RoundedRectangle(cornerRadius: theme.radius).stroke(wants ? theme.attention : theme.border, lineWidth: 1))
         .contentShape(Rectangle())
@@ -100,7 +102,7 @@ struct CountTile: View {
         .accessibilityAddTraits(.isButton)
     }
 
-    var label: String { count.state.replacingOccurrences(of: "_", with: " ") }
+    var label: String { model.tileLabel(count) }
 }
 
 struct Pill: ViewModifier {

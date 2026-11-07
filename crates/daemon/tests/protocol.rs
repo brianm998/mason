@@ -259,6 +259,14 @@ fn live_changes_arrive_as_events_and_fresh_views() {
     assert_eq!(header.attention, 1);
     let queued = header.counts.iter().find(|c| c.state == "queued").unwrap();
     assert_eq!(queued.count, 4);
+    assert_eq!(queued.label, "queued");
+    let stuck = header
+        .counts
+        .iter()
+        .find(|c| c.state == "needs_attention")
+        .unwrap();
+    assert_eq!(stuck.label, "stuck", "the label is on the wire");
+    assert!(header.counts.iter().all(|c| !c.label.is_empty()));
     let proposed = header
         .counts
         .iter()

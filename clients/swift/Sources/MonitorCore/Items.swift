@@ -79,7 +79,7 @@ extension MonitorModel {
         if let h = header {
             out.append(Item(id: "status", texts: [connected ? h.status : "Not connected"]))
             for (i, c) in h.counts.enumerated() {
-                out.append(Item(id: "tile:\(c.state)", texts: [tileCount(c), c.state], order: i))
+                out.append(Item(id: "tile:\(c.state)", texts: [tileCount(c), tileLabel(c)], order: i))
             }
             for (i, b) in h.banners.enumerated() {
                 out.append(Item(id: "banner:\(i)", texts: [b.text], order: i))
