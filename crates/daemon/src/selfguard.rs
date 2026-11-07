@@ -226,3 +226,35 @@ pub fn on_start(d: &Arc<Daemon>) {
         rt.mark_rollback_filed();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg() -> SelfCfg {
+        SelfCfg { protect: vec![], max_open: 3, per_week: 10, max_steps: 40, period_h: 24, cooldown_h: 24 }
+    }
+
+    fn st(open: u32, week: u32, steps: u32, cooldown: Option<u64>) -> Status {
+        Status { open, week, steps, cooldown_until_ms: cooldown }
+    }
+
+    #[test]
+    fn each_limit_refuses_with_its_number_and_its_limit() {
+        let c = cfg();
+        assert!(check(&st(2, 9, 39, None), &c).is_ok());
+        let e = check(&st(3, 0, 0, None), &c).unwrap_err();
+        assert!(e.contains("3 self-tasks are open") && e.contains("limit is 3"), "{e}");
+        let e = check(&st(0, 10, 0, None), &c).unwrap_err();
+        assert!(e.contains("10 self-tasks were filed this week") && e.contains("limit is 10"), "{e}");
+        let e = check(&st(0, 0, 40, None), &c).unwrap_err();
+        assert!(e.contains("40 agent steps in the last 24 hours") && e.contains("limit is 40"), "{e}");
+    }
+
+    #[test]
+    fn a_cooldown_comes_first_and_says_how_long() {
+        let until = now_ms() + 5 * 3_600_000 - 1000;
+        let e = check(&st(99, 99, 99, Some(until)), &cfg()).unwrap_err();
+        assert!(e.contains("cooling down after a rollback") && e.contains("5 more hour"), "{e}");
+    }
+}
