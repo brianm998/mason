@@ -26,12 +26,17 @@ struct TopBar: View {
             .buttonStyle(.bordered)
 
             if model.attention > 0 {
-                HStack(spacing: theme.spacingSmall) {
-                    Circle().fill(theme.attention).frame(width: theme.cell * 0.7, height: theme.cell * 0.7)
-                    Text("\(model.attention) need\(model.attention == 1 ? "s" : "") you")
-                        .font(theme.body(.semibold)).foregroundStyle(theme.attention)
-                        .lineLimit(1).fixedSize()
+                // Clicking it opens the first task that needs the owner.
+                Button { model.openFirstNeedingYou() } label: {
+                    HStack(spacing: theme.spacingSmall) {
+                        Circle().fill(theme.attention).frame(width: theme.cell * 0.7, height: theme.cell * 0.7)
+                        Text("\(model.attention) need\(model.attention == 1 ? "s" : "") you")
+                            .font(theme.body(.semibold)).foregroundStyle(theme.attention)
+                            .lineLimit(1).fixedSize()
+                    }
                 }
+                .buttonStyle(.plain)
+                .help("Open the first task that needs you")
                 .accessibilityIdentifier("attention")
             }
 

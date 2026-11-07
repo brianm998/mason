@@ -154,6 +154,15 @@ struct DecisionCardView: View {
     let task: UInt64
     let card: Mason_V1_DecisionCard
     @State private var other = ""
+    @State private var selection = OptionSelection(count: 0)
+    @FocusState private var cardFocused: Bool
+    @FocusState private var otherFocused: Bool
+
+    private func sendOther() {
+        guard let text = otherAnswer(other) else { return }
+        model.answer(task: task, text, cardHash: card.hash)
+        other = ""
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: theme.spacing) {
@@ -163,30 +172,49 @@ struct DecisionCardView: View {
             }
             VStack(alignment: .leading, spacing: theme.spacingSmall) {
                 ForEach(Array(card.options.enumerated()), id: \.offset) { i, o in
-                    Button { model.answer(task: task, String(i + 1), cardHash: card.hash) } label: {
-                        HStack {
-                            Text("\(i + 1).")
-                            Text(o.label)
-                            if o.recommended {
-                                Text("recommended").font(theme.small()).foregroundStyle(Color.white.opacity(0.85))
-                            }
-                            Spacer(minLength: 0)
+                    if model.canAct {
+                        Button { model.answer(task: task, String(i + 1), cardHash: card.hash) } label: {
+                            optionLabel(i, o)
+                                .pill(prominent: o.recommended)
+                                .overlay(RoundedRectangle(cornerRadius: theme.radius)
+                                    .stroke(theme.text, lineWidth: selection.index == i ? 2 : 0))
                         }
-                        .pill(prominent: o.recommended)
+                        .buttonStyle(.plain)
+                        .accessibilityIdentifier("card:\(task):option:\(i + 1)")
+                    } else {
+                        optionLabel(i, o).font(theme.body()).foregroundStyle(theme.text)
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityIdentifier("card:\(task):option:\(i + 1)")
                 }
-                HStack {
-                    TextField("Other…", text: $other)
-                        .textFieldStyle(.roundedBorder)
-                        .font(theme.body())
-                        .accessibilityIdentifier("card:\(task):other")
-                    Button("Send") {
-                        model.answer(task: task, other, cardHash: card.hash)
-                        other = ""
+                if model.canAct {
+                    HStack(alignment: .top) {
+                        ZStack(alignment: .topLeading) {
+                            // Multi-line: Enter sends, Shift-Enter starts a new line.
+                            TextEditor(text: $other)
+                                .font(theme.body())
+                                .scrollContentBackground(.hidden)
+                                .focused($otherFocused)
+                                .frame(minHeight: theme.cell * 2.2, maxHeight: theme.cell * 8)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .onKeyPress(.return, phases: .down) { press in
+                                    switch otherBoxKey(shift: press.modifiers.contains(.shift)) {
+                                    case .send: sendOther(); return .handled
+                                    case .newline: return .ignored
+                                    }
+                                }
+                                .accessibilityIdentifier("card:\(task):other")
+                            if other.isEmpty {
+                                Text("Other… (Enter sends, Shift-Enter for a new line)")
+                                    .font(theme.body()).foregroundStyle(theme.muted)
+                                    .padding(.leading, 5).padding(.top, 0).allowsHitTesting(false)
+                            }
+                        }
+                        .padding(4)
+                        .background(RoundedRectangle(cornerRadius: theme.radius).fill(theme.surface))
+                        .overlay(RoundedRectangle(cornerRadius: theme.radius).stroke(theme.muted.opacity(0.5), lineWidth: 1))
+                        Button("Send") { sendOther() }
+                            .disabled(otherAnswer(other) == nil)
+                            .accessibilityIdentifier("card:\(task):send")
                     }
-                    .disabled(other.trimmingCharacters(in: .whitespaces).isEmpty)
                 }
             }
             if !card.evidence.isEmpty {
@@ -200,12 +228,119 @@ struct DecisionCardView: View {
                 Text("This card was \(card.origin) because the agent's did not fit.")
                     .font(theme.small()).foregroundStyle(theme.muted)
             }
+            if !model.canAct && model.connected {
+                Text("Only the owner can answer. You are connected as \(model.identity).")
+                    .font(theme.small()).foregroundStyle(theme.muted)
+                    .accessibilityIdentifier("card:\(task):not-owner")
+            }
+            if let refused = model.lastResult {
+                Text(refused).font(theme.body()).foregroundStyle(theme.attention)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("card:\(task):refused")
+            }
+        }
+        .padding(theme.spacingLarge)
+        .background(RoundedRectangle(cornerRadius: theme.radius).fill(theme.attentionTint))
+        .overlay(RoundedRectangle(cornerRadius: theme.radius).stroke(theme.attention, lineWidth: 1))
+        // Arrow keys move the selection and Return answers with it, as in Claude Code's prompts.
+        .focusable()
+        .focused($cardFocused)
+        .onKeyPress(.upArrow) { guard model.canAct else { return .ignored }; selection.up(); return .handled }
+        .onKeyPress(.downArrow) { guard model.canAct else { return .ignored }; selection.down(); return .handled }
+        .onKeyPress(.return) {
+            guard model.canAct, let a = selection.answer else { return .ignored }
+            model.answer(task: task, a, cardHash: card.hash)
+            return .handled
+        }
+        .onAppear {
+            selection = OptionSelection(count: card.options.count, recommended: card.options.firstIndex { $0.recommended })
+        }
+        .onChange(of: card.hash) { _, _ in
+            selection = OptionSelection(count: card.options.count, recommended: card.options.firstIndex { $0.recommended })
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("card:\(task)")
+    }
+
+    private func optionLabel(_ i: Int, _ o: Mason_V1_CardOption) -> some View {
+        HStack {
+            Text("\(i + 1).")
+            Text(o.label)
+            if o.recommended {
+                Text("recommended").font(theme.small()).foregroundStyle(Color.white.opacity(0.85))
+            }
+            Spacer(minLength: 0)
+        }
+    }
+}
+
+/// What a task waiting for the owner's approval waits on, in full, with Approve and Reject.
+struct ApprovalView: View {
+    @Environment(\.theme) var theme
+    @ObservedObject var model: MonitorModel
+    let task: UInt64
+    let approval: Mason_V1_Approval
+    @State private var reason = ""
+    @State private var rejecting = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: theme.spacing) {
+            Text(approval.waitingFor).font(theme.title()).foregroundStyle(theme.text)
+                .fixedSize(horizontal: false, vertical: true)
+            ForEach(Array(approval.lines.enumerated()), id: \.offset) { _, l in
+                Text("• \(l)").font(theme.body()).foregroundStyle(theme.text)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if !approval.diffHash.isEmpty {
+                Text("Diff \(approval.diffHash)").font(theme.mono()).foregroundStyle(theme.muted)
+                    .textSelection(.enabled)
+            }
+            if !approval.branch.isEmpty {
+                Text("Branch \(approval.branch)").font(theme.mono()).foregroundStyle(theme.muted)
+                    .textSelection(.enabled)
+            }
+            if !approval.diffCommand.isEmpty {
+                HStack {
+                    Text(approval.diffCommand).font(theme.mono()).foregroundStyle(theme.muted)
+                        .textSelection(.enabled)
+                    Button("Copy") { copyToPasteboard(approval.diffCommand) }
+                        .accessibilityIdentifier("approval:\(task):copy-diff")
+                }
+            }
+            if model.canAct {
+                HStack(spacing: theme.spacing) {
+                    Button { model.approve(task, approval) } label: { Text("Approve").pill(prominent: true) }
+                        .buttonStyle(.plain)
+                        .accessibilityIdentifier("approval:\(task):approve")
+                    Button { rejecting.toggle() } label: { Text("Reject").pill(prominent: false) }
+                        .buttonStyle(.plain)
+                        .accessibilityIdentifier("approval:\(task):reject")
+                }
+                if rejecting {
+                    HStack(alignment: .top) {
+                        TextField("Why? (optional)", text: $reason, axis: .vertical)
+                            .textFieldStyle(.roundedBorder).font(theme.body())
+                            .onSubmit { model.reject(task, reason: reason); reason = ""; rejecting = false }
+                            .accessibilityIdentifier("approval:\(task):reason")
+                        Button("Send rejection") { model.reject(task, reason: reason); reason = ""; rejecting = false }
+                            .accessibilityIdentifier("approval:\(task):send-reject")
+                    }
+                }
+            } else if model.connected {
+                Text("Only the owner can approve or reject. You are connected as \(model.identity).")
+                    .font(theme.small()).foregroundStyle(theme.muted)
+            }
+            if let refused = model.lastResult {
+                Text(refused).font(theme.body()).foregroundStyle(theme.attention)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("approval:\(task):refused")
+            }
         }
         .padding(theme.spacingLarge)
         .background(RoundedRectangle(cornerRadius: theme.radius).fill(theme.attentionTint))
         .overlay(RoundedRectangle(cornerRadius: theme.radius).stroke(theme.attention, lineWidth: 1))
         .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("card:\(task)")
+        .accessibilityIdentifier("approval:\(task)")
     }
 }
 
@@ -214,15 +349,25 @@ struct ActionButtons: View {
     @Environment(\.theme) var theme
     @ObservedObject var model: MonitorModel
     let row: TaskRow
+    var hasApprovalView = false
 
     var body: some View {
         HStack(spacing: theme.spacing) {
-            ForEach(row.allowedActions.filter { $0 != "answer" && $0 != "edit" }, id: \.self) { a in
+            // Approve and Reject have their own view (ApprovalView) wherever there is one; a
+            // non-owner sees no buttons at all for what only the owner may do.
+            ForEach(row.allowedActions.filter { shown($0) }, id: \.self) { a in
                 Button { run(a) } label: { Text(label(a)).pill(prominent: a == "approve") }
                     .buttonStyle(.plain)
                     .accessibilityIdentifier("action:\(row.id):\(a)")
             }
         }
+    }
+
+    func shown(_ a: String) -> Bool {
+        if a == "answer" || a == "edit" { return false }
+        if hasApprovalView && (a == "approve" || a == "reject") { return false }
+        if !model.canAct && ["approve", "reject"].contains(a) { return false }
+        return true
     }
 
     func label(_ a: String) -> String {

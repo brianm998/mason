@@ -387,7 +387,15 @@ async fn approve(
     Shared(d): Shared<Arc<Daemon>>,
     headers: axum::http::HeaderMap,
     Path(id): Path<u64>,
+    body: Option<Json<Value>>,
 ) -> Res {
+    // The diff the owner was shown, if the client says (a monitor does): a hold for
+    // another diff is refused, as a stale card is.
+    let shown = body
+        .as_ref()
+        .and_then(|b| b["diff_hash"].as_str())
+        .filter(|h| !h.is_empty())
+        .map(String::from);
     let who = headers
         .get("x-mason-as")
         .and_then(|v| v.to_str().ok())
@@ -396,6 +404,14 @@ async fn approve(
     let d2 = d.clone();
     d.pool
         .run(move || {
+            if let (Some(shown), Ok(Some(h))) = (&shown, d2.store.hold(id)) {
+                if h.approved_by.is_none() && &h.diff_hash != shown {
+                    return Err(fail(
+                        StatusCode::CONFLICT,
+                        format!("the change on task #{id} is not the diff you were shown (it is {}); look again before approving", h.diff_hash),
+                    ));
+                }
+            }
             // A self-change held for the owner is approved by the owner's identity alone.
             match crate::selfguard::approve(&d2, TaskId(id), &who) {
                 Ok(true) => return Ok(()),
@@ -433,9 +449,15 @@ async fn approve(
 
 async fn reject(
     Shared(d): Shared<Arc<Daemon>>,
+    headers: axum::http::HeaderMap,
     Path(id): Path<u64>,
     body: Option<Json<Value>>,
 ) -> Res {
+    let who = headers
+        .get("x-mason-as")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
     let reason = body
         .as_ref()
         .and_then(|b| b["reason"].as_str())
@@ -452,6 +474,28 @@ async fn reject(
             if t.state == State::Proposed {
                 d2.emit(EventKind::Rejected { task: TaskId(id) })
                     .map_err(store_err)?;
+                Ok(())
+            } else if d2
+                .store
+                .hold(id)
+                .ok()
+                .flatten()
+                .is_some_and(|h| h.approved_by.is_none())
+            {
+                // Rejecting a held self-change cancels the task: the hold loop then
+                // sees the run gone and stops waiting.
+                if !crate::attention::is_owner(&d2, &who) {
+                    return Err(fail(
+                        StatusCode::FORBIDDEN,
+                        format!("{who:?} is not the owner's identity; only the owner can reject a change to MASON's own rules"),
+                    ));
+                }
+                crate::attention::intervene(&d2, "self_reject", Some(TaskId(id)), &who, &reason, &reason);
+                d2.emit(EventKind::Canceled {
+                    task: TaskId(id),
+                    delete_branch: false,
+                })
+                .map_err(store_err)?;
                 Ok(())
             } else {
                 crate::jobs::conclude_approval(

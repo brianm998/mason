@@ -5,7 +5,9 @@
 //! ```text
 //! conformance features [FILE]                        check clients/features.toml
 //! conformance tokens --write|--check [--root DIR]    generate / verify the design tokens
-//! conformance expected --port P --out DIR            play a manual demo daemon, write each checkpoint
+//! conformance expected --port P --out DIR [--actor NAME] [--now]
+//!                                                      play a manual demo daemon, write each checkpoint
+//!                                                      (--now: only the present state, for a real daemon)
 //! conformance plugin-kit DIR [--timeout SECS]        run the plugin conformance kit on an extension folder
 //! conformance check --expected DIR --actual DIR      compare a client's dumps with the expected ones
 //! conformance resume --port P                        connect, disconnect, resume: only what was missed arrives
@@ -53,6 +55,14 @@ fn generated(root: &Path) -> Vec<(PathBuf, String)> {
             tokens::kotlin(&text).unwrap_or_else(|e| die(&e)),
         ),
     ]
+}
+
+/// Who a client acts as when nothing says: the same fallback the daemon's owner list has.
+fn default_actor() -> String {
+    std::env::var("MASON_AS")
+        .or_else(|_| std::env::var("USER"))
+        .or_else(|_| std::env::var("LOGNAME"))
+        .unwrap_or_else(|_| "owner".into())
 }
 
 fn all_views(c: &mut Client) -> Vec<View> {
@@ -143,13 +153,16 @@ fn main() {
                 .unwrap_or_else(|| die("--port P"));
             let out = PathBuf::from(opt(&mut args, "--out").unwrap_or_else(|| die("--out DIR")));
             std::fs::create_dir_all(&out).unwrap_or_else(|e| die(&e.to_string()));
+            let actor = opt(&mut args, "--actor").unwrap_or_else(default_actor);
+            let now_only = flag(&mut args, "--now");
             let mut c = Client::connect(port, Encoding::Json).unwrap_or_else(|e| die(&e));
-            c.hello(0, false).unwrap_or_else(|e| die(&e));
+            c.acting_as(&actor);
+            let owner = c.hello(0, false).unwrap_or_else(|e| die(&e)).owner;
             // Checkpoint 0 is the state before the script; then one per step.
             let mut k = 0;
             loop {
                 let views = all_views(&mut c);
-                let items: Vec<serde_json::Value> = conformance::visible(&views)
+                let items: Vec<serde_json::Value> = conformance::visible(&views, owner)
                     .iter()
                     .map(|i| i.to_json())
                     .collect();
@@ -160,6 +173,9 @@ fn main() {
                 )
                 .unwrap_or_else(|e| die(&e.to_string()));
                 println!("checkpoint {k}: {} visible items", items.len());
+                if now_only {
+                    break;
+                }
                 let (r, _) = c
                     .command(
                         Command {
@@ -234,7 +250,7 @@ fn main() {
                     }
                 }
             }
-            let items: Vec<serde_json::Value> = conformance::visible(&views)
+            let items: Vec<serde_json::Value> = conformance::visible(&views, true)
                 .iter()
                 .map(|i| i.to_json())
                 .collect();

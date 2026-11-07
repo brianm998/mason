@@ -367,4 +367,137 @@ final class MonitorCoreTests: XCTestCase {
         XCTAssertEqual(m.editorStep, "test")
         XCTAssertEqual(subscribed, 1)
     }
+
+    // MARK: answers and approvals by clicking (Stage 20)
+
+    func card(hash: String = "h1") -> Mason_V1_DecisionCard {
+        .with {
+            $0.ask = "One hour or one day?"
+            $0.why = "The ticket is silent."
+            $0.options = [.with { $0.label = "One hour"; $0.recommended = true }, .with { $0.label = "One day" }]
+            $0.evidence = ["the ticket says tokens expire"]
+            $0.hash = hash
+        }
+    }
+
+    func ownerModel(owner: Bool = true) -> (MonitorModel, () -> [Mason_V1_Command]) {
+        let m = MonitorModel()
+        var sent: [Mason_V1_Command] = []
+        m.sender = { sent.append($0) }
+        m.identity = "brian"
+        var w = Mason_V1_ServerMessage()
+        w.welcome = .with { $0.protocol = 1; $0.owner = owner }
+        m.apply(w)
+        return (m, { sent })
+    }
+
+    func testAnsweringByOptionSendsTheNumberAndTheCardsHash() {
+        let (m, sent) = ownerModel()
+        m.answer(task: 2, "1", cardHash: card().hash)
+        guard case .answer(let a)? = sent()[0].body else { return XCTFail() }
+        XCTAssertEqual([a.answer, a.cardHash], ["1", "h1"])
+        XCTAssertEqual(sent()[0].actor, "brian", "the owner's identity goes with it")
+    }
+
+    func testOtherTextIsSentAsFreeTextTrimmedAndNeverWhenBlank() {
+        let (m, sent) = ownerModel()
+        XCTAssertNil(otherAnswer("  \n "))
+        let text = otherAnswer("  use two hours\nplease \n")!
+        m.answer(task: 2, text, cardHash: "h1")
+        guard case .answer(let a)? = sent()[0].body else { return XCTFail() }
+        XCTAssertEqual(a.answer, "use two hours\nplease")
+        XCTAssertEqual(a.cardHash, "h1")
+    }
+
+    func testAStaleCardHashIsSentAsItWasAndTheRefusalIsShown() {
+        let (m, sent) = ownerModel()
+        // The card on screen is the old one; the hash goes as the card said, and the daemon decides.
+        m.answer(task: 2, "1", cardHash: card(hash: "old").hash)
+        guard case .answer(let a)? = sent()[0].body else { return XCTFail() }
+        XCTAssertEqual(a.cardHash, "old")
+        var r = Mason_V1_ServerMessage()
+        r.result = .with { $0.id = "m1"; $0.ok = false; $0.status = 409; $0.error = "stale: that card has changed" }
+        m.apply(r)
+        XCTAssertEqual(m.lastResult, "stale: that card has changed", "the card shows the refusal")
+    }
+
+    func testArrowsMoveTheSelectionAndReturnPicksIt() {
+        var s = OptionSelection(count: 3, recommended: 1)
+        XCTAssertEqual(s.answer, "2", "it starts on the recommended option")
+        s.down(); XCTAssertEqual(s.answer, "3")
+        s.down(); XCTAssertEqual(s.answer, "3", "it stops at the end")
+        s.up(); s.up(); s.up(); XCTAssertEqual(s.answer, "1")
+        var none = OptionSelection(count: 2)
+        XCTAssertNil(none.answer, "nothing is picked until a key is pressed")
+        none.up(); XCTAssertEqual(none.answer, "2")
+        XCTAssertEqual(otherBoxKey(shift: false), .send)
+        XCTAssertEqual(otherBoxKey(shift: true), .newline)
+    }
+
+    func approval(hold: Bool) -> Mason_V1_Approval {
+        .with {
+            $0.kind = hold ? "hold" : "approval"
+            $0.waitingFor = "Your approval of a change to MASON's own rules"
+            $0.lines = ["touches crates/testing/src/verdict.rs (verdict logic)"]
+            $0.diffHash = hold ? "abc123" : ""
+            $0.branch = "mason/scratch/t3"
+            $0.diffCommand = "git diff main...mason/scratch/t3"
+        }
+    }
+
+    func testApproveSendsTheDiffHashShownForAHoldAndAPlainApproveOtherwise() {
+        let (m, sent) = ownerModel()
+        m.approve(3, approval(hold: true))
+        m.approve(4, approval(hold: false))
+        guard case .approveHold(let h)? = sent()[0].body else { return XCTFail() }
+        XCTAssertEqual([h.task, UInt64(h.diffHash == "abc123" ? 1 : 0)], [3, 1])
+        guard case .approve(let p)? = sent()[1].body else { return XCTFail() }
+        XCTAssertEqual(p.task, 4)
+    }
+
+    func testRejectSendsTheReason() {
+        let (m, sent) = ownerModel()
+        m.reject(3, reason: "too broad")
+        guard case .reject(let r)? = sent()[0].body else { return XCTFail() }
+        XCTAssertEqual([r.task, UInt64(r.reason == "too broad" ? 1 : 0)], [3, 1])
+    }
+
+    func homeWith(card c: Mason_V1_DecisionCard?, approval a: Mason_V1_Approval?) -> Mason_V1_ServerMessage {
+        var item = Mason_V1_AttentionItem()
+        item.task = row(3, state: "needs_attention")
+        if let c { item.card = c }
+        if let a { item.approval = a }
+        var v = Mason_V1_View()
+        v.home = .with { $0.attention = [item] }
+        var msg = Mason_V1_ServerMessage()
+        msg.view = .with { $0.seq = 1; $0.view = v }
+        return msg
+    }
+
+    func testTheOwnerSeesTheButtonsAndANonOwnerSeesTheCardAndNone() {
+        for owner in [true, false] {
+            let (m, _) = ownerModel(owner: owner)
+            m.apply(homeWith(card: card(), approval: approval(hold: true)))
+            let items = m.visibleItems()
+            let c = items.first { $0.id == "card:3" }!
+            let a = items.first { $0.id == "approval:3" }!
+            XCTAssertTrue(c.texts.contains("1. One hour (recommended)") && c.texts.contains("the ticket says tokens expire"))
+            XCTAssertTrue(a.texts.contains("diff abc123") && a.texts.contains("git diff main...mason/scratch/t3"))
+            XCTAssertEqual(c.actions, owner ? ["option:1", "option:2", "other"] : [])
+            XCTAssertEqual(a.actions, owner ? ["approve", "reject"] : [])
+            XCTAssertEqual(m.canAct, owner)
+        }
+    }
+
+    func testClickingTheAttentionCountOpensTheFirstTaskThatNeedsYou() {
+        let (m, _) = ownerModel()
+        m.openFirstNeedingYou()
+        XCTAssertEqual(m.page, .home, "nothing to open: stay on home")
+        var h = Mason_V1_ServerMessage()
+        h.view = .with { $0.seq = 2; $0.view = .with { $0.header = .with { $0.attention = 1 } } }
+        m.apply(h)
+        m.apply(homeWith(card: card(), approval: nil))
+        m.openFirstNeedingYou()
+        XCTAssertEqual(m.page, .task(3))
+    }
 }

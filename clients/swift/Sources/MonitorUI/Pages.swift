@@ -56,6 +56,7 @@ struct HomePage: View {
                                         .font(theme.body(.semibold)).foregroundStyle(theme.muted)
                                 }.buttonStyle(.plain)
                                 if a.hasCard { DecisionCardView(model: model, task: a.task.id, card: a.card) }
+                                if a.hasApproval { ApprovalView(model: model, task: a.task.id, approval: a.approval) }
                             }
                         }
                     }
@@ -169,7 +170,7 @@ struct TaskDetailPage: View {
                 if !r.typical.isEmpty { Text(r.typical).font(theme.small()).foregroundStyle(theme.muted) }
             }
 
-            ActionButtons(model: model, row: r)
+            ActionButtons(model: model, row: r, hasApprovalView: d.hasApproval)
 
             if !d.route.isEmpty {
                 HStack(spacing: theme.spacing) {
@@ -184,6 +185,7 @@ struct TaskDetailPage: View {
             }
 
             if d.hasCard { DecisionCardView(model: model, task: r.id, card: d.card) }
+            if d.hasApproval { ApprovalView(model: model, task: r.id, approval: d.approval) }
             if !d.failure.isEmpty {
                 Text("Failed: \(d.failure)").font(theme.body()).foregroundStyle(theme.attention)
             }
