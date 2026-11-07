@@ -26,7 +26,7 @@ tool=clients/swift/.build/debug/monitor-tool
 
 start_demo() {
   rm -rf "$root/d"; mkdir -p "$root/d"
-  "$bin/masond" --demo-manual --data-dir "$root/d" --config-dir "$root/c" 2>>"$root/masond.log" &
+  "$bin/masond" --port 0 --demo-manual --data-dir "$root/d" --config-dir "$root/c" 2>>"$root/masond.log" &
   daemon=$!
   until [ -s "$root/d/daemon.json" ]; do kill -0 "$daemon" || { cat "$root/masond.log" >&2; exit 1; }; sleep 0.1; done
 }

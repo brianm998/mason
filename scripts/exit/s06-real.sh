@@ -53,7 +53,7 @@ step_timeout_s = 300
 TOML
 
 m doctor | grep -v '^warn' || true
-"$bin/masond" --data-dir "$root/d" --config-dir "$root/c" --sweep-ms 3600000 2>"$root/masond.log" &
+"$bin/masond" --port 0 --data-dir "$root/d" --config-dir "$root/c" --sweep-ms 3600000 2>"$root/masond.log" &
 daemon=$!
 until m status >/dev/null 2>&1; do kill -0 "$daemon" || { cat "$root/masond.log" >&2; exit 1; }; sleep 0.2; done
 

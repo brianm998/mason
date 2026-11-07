@@ -26,7 +26,7 @@ cargo test -q -p mason-conformance 2>&1 | grep -E "test result" | head -1
 
 echo "== 2. the owner is offered the buttons and a non-owner sees the card and none"
 rm -rf "$root/d"; mkdir -p "$root/d"
-"$bin/masond" --demo-manual --data-dir "$root/d" --config-dir "$root/c" 2>>"$root/masond.log" &
+"$bin/masond" --port 0 --demo-manual --data-dir "$root/d" --config-dir "$root/c" 2>>"$root/masond.log" &
 daemon=$!
 until [ -s "$root/d/daemon.json" ]; do kill -0 "$daemon" || { cat "$root/masond.log" >&2; exit 1; }; sleep 0.1; done
 port=$(sed -n 's/.*"port": *\([0-9]*\).*/\1/p' "$root/d/daemon.json")
@@ -34,7 +34,7 @@ owner=${MASON_AS:-${USER:-owner}}
 "$bin/conformance" expected --port "$port" --actor "$owner" --out "$root/owner" >/dev/null
 kill -9 "$daemon" 2>/dev/null || true; wait "$daemon" 2>/dev/null || true
 rm -rf "$root/d"; mkdir -p "$root/d"
-"$bin/masond" --demo-manual --data-dir "$root/d" --config-dir "$root/c" 2>>"$root/masond.log" &
+"$bin/masond" --port 0 --demo-manual --data-dir "$root/d" --config-dir "$root/c" 2>>"$root/masond.log" &
 daemon=$!
 until [ -s "$root/d/daemon.json" ]; do kill -0 "$daemon" || { cat "$root/masond.log" >&2; exit 1; }; sleep 0.1; done
 port=$(sed -n 's/.*"port": *\([0-9]*\).*/\1/p' "$root/d/daemon.json")

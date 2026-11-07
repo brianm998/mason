@@ -11,6 +11,11 @@ description = "Connects over the protocol, resumes from its last sequence number
 swift = "done"
 compose = "done"
 
+[feature.reconnect-on-restart]
+description = "After a daemon restart or stall it re-reads daemon.json and retries (1, 2, 4, 8 s, then every 10), shows 'Daemon restarting, reconnecting', follows a changed pid, start time or port, and resumes from its last sequence number without a relaunch"
+swift = "done"
+compose = "done"
+
 [feature.top-bar]
 description = "Back, forward, home; attention indicator; project filter; LLM usage; add task; mute"
 swift = "done"

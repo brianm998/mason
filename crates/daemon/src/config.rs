@@ -52,6 +52,59 @@ pub struct DaemonConfig {
     pub adhoc_exit_start: u32,
 }
 
+/// The loopback port `masond` listens on when neither `--port` nor `[daemon] port`
+/// says otherwise. Fixed, so a running monitor finds the daemon again after a
+/// restart. (7421, first proposed, is assigned in /etc/services.)
+pub const DEFAULT_PORT: u16 = 7423;
+
+/// Which port to bind: `--port`, then `[daemon] port` in `daemon.toml`, then the
+/// default. A demo keeps nothing and runs beside the real daemon, so it takes a
+/// free port (0) unless told otherwise.
+pub fn resolve_port(cli: Option<u16>, file: Option<u16>, demo: bool) -> u16 {
+    cli.or(file).unwrap_or(if demo { 0 } else { DEFAULT_PORT })
+}
+
+/// `daemon.toml` in the config directory:
+///
+/// ```toml
+/// [daemon]
+/// port = 7423   # 0 asks the OS for a free port each start
+/// ```
+pub fn parse_daemon_port(text: &str) -> Result<Option<u16>, String> {
+    let doc: toml_edit::DocumentMut = text.parse().map_err(|e| format!("daemon.toml: {e}"))?;
+    let mut port = None;
+    for (key, item) in doc.iter() {
+        let table = item
+            .as_table_like()
+            .filter(|_| key == "daemon")
+            .ok_or_else(|| format!("daemon.toml: unknown setting `{key}`"))?;
+        for (name, v) in table.iter() {
+            match name {
+                "port" => {
+                    port = Some(
+                        v.as_integer()
+                            .and_then(|n| u16::try_from(n).ok())
+                            .ok_or_else(|| {
+                                "daemon.toml: daemon.port must be a whole number from 0 to 65535"
+                                    .to_string()
+                            })?,
+                    )
+                }
+                other => return Err(format!("daemon.toml: unknown setting daemon.{other}")),
+            }
+        }
+    }
+    Ok(port)
+}
+
+pub fn load_daemon_port(config_dir: &std::path::Path) -> Result<Option<u16>, String> {
+    match std::fs::read_to_string(config_dir.join("daemon.toml")) {
+        Ok(t) => parse_daemon_port(&t),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("daemon.toml: {e}")),
+    }
+}
+
 impl DaemonConfig {
     pub fn new(
         data_dir: impl Into<PathBuf>,

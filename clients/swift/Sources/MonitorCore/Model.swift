@@ -29,6 +29,9 @@ public final class MonitorModel: ObservableObject {
     @Published public var health: HealthSnapshot?
     @Published public var lastSeq: UInt64 = 0
     @Published public var connected = false
+    /// The connection is down and being retried: the daemon is restarting or has
+    /// not answered. Shown as "reconnecting", never as a hard error.
+    @Published public var reconnecting = false
     /// Whether the daemon took this connection's identity for the owner's (its welcome says).
     /// Only then are the answer, approve and reject buttons drawn: anyone else sees the card.
     @Published public var isOwner = false
@@ -247,6 +250,7 @@ public final class MonitorModel: ObservableObject {
         switch m.body {
         case .welcome(let w)?:
             connected = true
+            reconnecting = false
             if w.resume == .snapshot { lastSeq = 0 }
             daemonVersion = w.version
             isOwner = w.owner
@@ -289,6 +293,7 @@ public final class MonitorModel: ObservableObject {
 
     public func disconnected() {
         connected = false
+        reconnecting = true
     }
 }
 

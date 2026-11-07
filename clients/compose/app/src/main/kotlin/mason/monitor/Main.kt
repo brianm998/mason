@@ -18,9 +18,8 @@ fun main(args: Array<String>) = application {
     LaunchedEffect(Unit) {
         // The daemon may not be up yet: look for it until it is.
         while (true) {
-            val port = Discovery.port(args.toList())
-            if (port != null) {
-                MonitorConnection(model, port).start()
+            if (Discovery.info(args.toList()) != null) {
+                MonitorConnection(model, { Discovery.info(args.toList()) }).start()
                 break
             }
             kotlinx.coroutines.delay(1000)

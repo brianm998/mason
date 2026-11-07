@@ -70,7 +70,7 @@ test_timeout_s = 600
 FAKE_CLAUDE_SCRIPT = "$root/script.json"
 TOML
 printf 'repo = "%s"\nchannel = "main"\n' "$root/origin.git" > "$root/c/update.toml"
-"$bin/masond" --managed --data-dir "$root/d" --config-dir "$root/c" --heartbeat-ms 100 --sweep-ms 3600000 --max-concurrent 4 --owner "$owner" --healthy-after-ms 2000 2>>"$root/masond.log" &
+"$bin/masond" --port 0 --managed --data-dir "$root/d" --config-dir "$root/c" --heartbeat-ms 100 --sweep-ms 3600000 --max-concurrent 4 --owner "$owner" --healthy-after-ms 2000 2>>"$root/masond.log" &
 daemon=$!
 until m status >/dev/null 2>&1; do kill -0 "$daemon" || { cat "$root/masond.log" >&2; exit 1; }; sleep 0.2; done
 m self | head -1
