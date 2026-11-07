@@ -291,6 +291,9 @@ pub fn alerts_now(d: &Daemon) -> Vec<(String, String, String)> {
         }
     }
     out.extend(d.landing().attention());
+    if let Some(text) = crate::update::Runtimes::new(&d.cfg.data_dir).alert() {
+        out.push(("runtime".into(), "runtime".into(), text));
+    }
     for (pid, p) in &d.projects {
         if let Some(problems) = d.definition_error(*pid) {
             out.push((

@@ -77,6 +77,8 @@ mason: command-line client for the MASON pipeline
   mason definition dry-run [FILE] [--scenarios FILE]
   mason definition show [--project P] | reload [--project P]
   mason landing                       batches, phases, freezes, and the landing queue
+  mason update [--channel stable|main|branch:X | --sha S] [--rollback] [--check]
+  mason update status | ack           the runtimes, a rollback alert, an update in progress
   mason config show [--project P]     every step's settings and where each came from
   mason config set <key> <value> --for 2h [--project P] [--owner O]
   mason config unset <key> [--project P] | list [--project P]
@@ -707,6 +709,86 @@ fn main() {
                     "  ({} answer(s) refused: not the owner's identity)",
                     r["refused_answers"]
                 );
+            }
+        }
+        "update" => {
+            // `status` and `ack` are words; everything else is flags for an update.
+            let sub = match a.rest.first().map(String::as_str) {
+                Some(w @ ("status" | "ack")) => {
+                    let w = w.to_string();
+                    a.rest.remove(0);
+                    Some(w)
+                }
+                _ => None,
+            };
+            match sub.as_deref() {
+                Some("status") => {
+                    finish(&a);
+                    let r = or_die(d.call("GET", "/update", None));
+                    if json_out {
+                        return println!("{r:#}");
+                    }
+                    println!("running   {}", r["running"].as_str().unwrap_or("(not from a runtime: a build directory)"));
+                    println!("current   {}", r["current"].as_str().unwrap_or("-"));
+                    println!("previous  {}", r["previous"].as_str().unwrap_or("-"));
+                    println!("channel   {}", r["channel"].as_str().unwrap_or("(no update.toml)"));
+                    if let Some(b) = r["bad"].as_array().filter(|b| !b.is_empty()) {
+                        println!("bad       {}", b.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(", "));
+                    }
+                    if let Some(al) = r["alert"].as_str() {
+                        println!("ALERT     {al}  (`mason update ack` when you have seen it)");
+                    }
+                    println!("update    {}{}", r["phase"].as_str().unwrap_or("?"), r["error"].as_str().map_or(String::new(), |e| format!(": {e}")));
+                }
+                Some("ack") => {
+                    finish(&a);
+                    or_die(d.call("POST", "/update/ack", Some(&json!({}))));
+                    println!("acknowledged");
+                }
+                _ => {
+                    // `mason update [--channel C | --sha S] [--rollback] [--check]`
+                    let channel = a.opt("--channel");
+                    let sha = a.opt("--sha");
+                    let rollback = a.flag("--rollback");
+                    let check = a.flag("--check");
+                    finish(&a);
+                    let mut body = json!({"rollback": rollback, "check": check});
+                    if let Some(c) = channel {
+                        body["channel"] = json!(c);
+                    }
+                    if let Some(s) = sha {
+                        body["sha"] = json!(s);
+                    }
+                    or_die(d.call("POST", "/update", Some(&body)));
+                    // Follow it until it finishes, or the daemon is replaced.
+                    let (mut shown, mut last_phase, mut seen_down) = (0usize, String::new(), false);
+                    let end = std::time::Instant::now() + std::time::Duration::from_secs(3600);
+                    loop {
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                        if std::time::Instant::now() > end {
+                            die("gave up waiting after an hour");
+                        }
+                        let Ok(r) = d.call("GET", "/update", None) else {
+                            seen_down = true; // the daemon is being replaced
+                            continue;
+                        };
+                        for l in r["log"].as_array().into_iter().flatten().skip(shown) {
+                            println!("  {}", l.as_str().unwrap_or(""));
+                            shown += 1;
+                        }
+                        let phase = r["phase"].as_str().unwrap_or("").to_string();
+                        if phase == "failed" {
+                            die(&format!("the update failed, and the running daemon is unchanged: {}", r["error"].as_str().unwrap_or("")));
+                        }
+                        if phase == "idle" && (check || r["running"].as_str() == r["target"].as_str() || seen_down) {
+                            println!("running {}", r["running"].as_str().unwrap_or("(a build directory)"));
+                            break;
+                        }
+                        if phase != last_phase {
+                            last_phase = phase;
+                        }
+                    }
+                }
             }
         }
         "landing" => {

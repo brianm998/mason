@@ -43,6 +43,22 @@ fn main() {
         sibling("mason-mcp"),
     );
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // `masond selftest --db COPY`: what a new build proves before it takes over.
+    if args.first().map(String::as_str) == Some("selftest") {
+        let db = args.iter().position(|a| a == "--db").and_then(|i| args.get(i + 1)).map(PathBuf::from);
+        let Some(db) = db else { usage() };
+        match mason_daemon::selftest::run(&db) {
+            Ok(said) => {
+                println!("{said}\nself-test passed");
+                std::process::exit(0);
+            }
+            Err(e) => {
+                eprintln!("self-test FAILED: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+    let managed = args.iter().any(|a| a == "--managed");
     let mut owners_set = false;
     let (mut demo, mut demo_manual, mut demo_step) = (false, false, Duration::from_millis(1500));
     let mut i = 0;
@@ -97,9 +113,81 @@ fn main() {
                 demo_step = Duration::from_millis(val().parse().unwrap_or_else(|_| usage()))
             }
             "--debug" => cfg.debug = true,
+            "--managed" => {}
+            "--runtime-sha" => cfg.runtime_sha = Some(val()),
+            "--healthy-after-ms" => {
+                cfg.healthy_after = Duration::from_millis(val().parse().unwrap_or_else(|_| usage()))
+            }
             _ => usage(),
         }
         i += 1;
+    }
+    // What to start again with when a new runtime takes over.
+    {
+        let mut keep = vec![];
+        let mut it = args.iter();
+        while let Some(a) = it.next() {
+            match a.as_str() {
+                "--managed" => {}
+                "--runtime-sha" => {
+                    it.next();
+                }
+                _ => keep.push(a.clone()),
+            }
+        }
+        // Explicit paths, so the new runtime finds the same data and configuration.
+        if !keep.iter().any(|a| a == "--data-dir") {
+            keep.extend(["--data-dir".into(), cfg.data_dir.display().to_string()]);
+        }
+        if !keep.iter().any(|a| a == "--config-dir") {
+            keep.extend(["--config-dir".into(), cfg.config_dir.display().to_string()]);
+        }
+        cfg.exec_args = keep;
+    }
+    // Run from `runtimes/<sha>/`: the loader picks the runtime, rolling back by itself
+    // after three crashes in five minutes.
+    if managed && cfg.runtime_sha.is_none() {
+        use mason_daemon::update::{decide, Boots, Decision, Runtimes};
+        let rt = Runtimes::new(&cfg.data_dir);
+        if let Some(cur) = rt.current().filter(|c| rt.is_ready(c)) {
+            let boots = Boots::new(&rt);
+            let now = mason_daemon::daemon::now_ms();
+            let chosen = match decide(&cur, rt.previous().as_deref(), &boots.all(), now) {
+                Decision::Run(s) => s,
+                Decision::RollBack { from, to } => {
+                    rt.mark_bad(&from);
+                    let _ = rt.set_current(&to);
+                    rt.leave_alert(&format!(
+                        "{} crashed three times in five minutes and was rolled back to {}",
+                        &from[..from.len().min(12)],
+                        &to[..to.len().min(12)]
+                    ));
+                    eprintln!("masond: {from} crashed three times in five minutes: rolling back to {to}");
+                    to
+                }
+                Decision::RunAnyway { sha, crashes } => {
+                    rt.leave_alert(&format!("{} has crashed {crashes} times and there is no earlier runtime to go back to", &sha[..sha.len().min(12)]));
+                    sha
+                }
+            };
+            if rt.is_ready(&chosen) {
+                use std::os::unix::process::CommandExt;
+                let mut a = cfg.exec_args.clone();
+                a.extend(["--runtime-sha".into(), chosen.clone()]);
+                let err = std::process::Command::new(rt.masond(&chosen)).args(&a).exec();
+                eprintln!("masond: cannot start runtime {chosen}: {err}; running this build instead");
+            }
+        }
+    }
+    if let Some(sha) = &cfg.runtime_sha {
+        use mason_daemon::update::{Boots, Runtimes};
+        let boots = Boots::new(&Runtimes::new(&cfg.data_dir));
+        boots.record(mason_daemon::daemon::now_ms(), sha, "start");
+        let (sha, after) = (sha.clone(), cfg.healthy_after);
+        std::thread::spawn(move || {
+            std::thread::sleep(after);
+            boots.record(mason_daemon::daemon::now_ms(), &sha, "healthy");
+        });
     }
     // One event loop, as the design says (Part 2): it only dispatches. Anything
     // that blocks belongs on a pool, and the watchdog proves nothing blocks it.

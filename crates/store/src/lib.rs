@@ -1483,6 +1483,15 @@ impl Store {
 
     /// Check that the log is contiguous and replays cleanly, and that the
     /// projections match that replay exactly (nothing half-applied).
+    /// A consistent copy of the whole database in a new file (`VACUUM INTO`):
+    /// the backup taken before a new build takes over, and the copy a new
+    /// build proves its migrations on.
+    pub fn backup_to(&self, dest: &Path) -> Result<(), StoreError> {
+        let d = dest.display().to_string();
+        let _ = std::fs::remove_file(dest);
+        self.read(move |c| c.execute("VACUUM INTO ?1", params![d]).map(|_| ()))
+    }
+
     pub fn verify(&self) -> Result<(), StoreError> {
         let conn = self.reader.lock().expect("reader lock");
         let n: i64 = conn.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))?;

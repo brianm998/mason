@@ -822,6 +822,77 @@ async fn landing_status(Shared(d): Shared<Arc<Daemon>>) -> Res {
     Ok(Json(v))
 }
 
+/// Where the daemon's own code stands: the runtime it runs from, the runtimes it
+/// has, any rollback alert, and the update in progress.
+async fn update_status(Shared(d): Shared<Arc<Daemon>>) -> Res {
+    let d2 = d.clone();
+    let v = d
+        .pool
+        .run(move || {
+            let rt = crate::update::Runtimes::new(&d2.cfg.data_dir);
+            let s = d2.update_status.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            json!({
+                "running": d2.cfg.runtime_sha,
+                "current": rt.current(),
+                "previous": rt.previous(),
+                "bad": rt.bad(),
+                "alert": rt.alert(),
+                "channel": crate::update::UpdateCfg::load(&d2.cfg.config_dir).ok().map(|c| c.channel.name()),
+                "phase": s.phase, "target": s.target, "error": s.error, "log": s.log,
+            })
+        })
+        .await
+        .map_err(pool_err)?;
+    Ok(Json(v))
+}
+
+/// Start an update: it builds, proves itself and takes over in the background.
+/// `{"channel": .., "sha": .., "rollback": bool, "check": bool}`.
+async fn update_start(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res {
+    let channel = match b["channel"].as_str() {
+        Some(c) => Some(crate::update::Channel::parse(c).map_err(|e| fail(StatusCode::BAD_REQUEST, e))?),
+        None => None,
+    };
+    let sha = b["sha"].as_str().map(String::from);
+    if sha.as_deref().is_some_and(|s| s.is_empty() || s.starts_with('-') || !s.chars().all(|c| c.is_ascii_alphanumeric() || "/_.-".contains(c))) {
+        return Err(fail(StatusCode::BAD_REQUEST, "that is not a commit name"));
+    }
+    let req = crate::update::Request {
+        channel,
+        sha,
+        rollback: b["rollback"].as_bool().unwrap_or(false),
+        check_only: b["check"].as_bool().unwrap_or(false),
+    };
+    if matches!(d.update_status.lock().unwrap_or_else(|e| e.into_inner()).phase.as_str(), "fetching" | "building" | "testing" | "taking over") {
+        return Err(fail(StatusCode::CONFLICT, "an update is already in progress"));
+    }
+    let d2 = d.clone();
+    let check = req.check_only;
+    let _ = std::thread::Builder::new().name("update".into()).spawn(move || {
+        if let Ok(sha) = crate::update::run(&d2, &req) {
+            if !check {
+                // Let the answer to `mason update` and any open request leave first.
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                crate::update::take_over(&d2, &sha);
+            }
+        }
+    });
+    Ok(Json(json!({"started": true})))
+}
+
+/// The owner has seen the rollback alert.
+async fn update_ack(Shared(d): Shared<Arc<Daemon>>) -> Res {
+    let d2 = d.clone();
+    d.pool
+        .run(move || {
+            crate::update::Runtimes::new(&d2.cfg.data_dir).take_alert();
+            d2.poke();
+        })
+        .await
+        .map_err(pool_err)?;
+    Ok(Json(json!({"acknowledged": true})))
+}
+
 /// A webhook from GitHub (directly, or through a relay such as `gh webhook
 /// forward`). Only a delivery whose signature verifies, under the secret the
 /// project names, is acted on, and acting is only to look again now.
@@ -1448,6 +1519,8 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/demo/next", post(demo_next))
         .route("/landing", get(landing_status))
         .route("/hooks/github", post(github_hook))
+        .route("/update", get(update_status).post(update_start))
+        .route("/update/ack", post(update_ack))
         .route("/tasks/{id}/refresh", post(refresh_tracker))
         .route("/debts", get(debts_list))
         .route("/debts/{id}/run", post(debt_run))

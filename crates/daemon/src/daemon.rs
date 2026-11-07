@@ -49,6 +49,7 @@ pub struct Daemon {
     pub(crate) demo_pos: Mutex<usize>,
     pub(crate) landing: crate::landing::Landing,
     pub(crate) tracker: crate::tracker::Hub,
+    pub update_status: Mutex<crate::update::Status>,
 }
 
 fn kind_name(k: &EventKind) -> String {
@@ -157,6 +158,7 @@ impl Daemon {
             demo_pos: Mutex::new(0),
             landing: Default::default(),
             tracker: Default::default(),
+            update_status: Mutex::new(crate::update::Status { phase: "idle".into(), ..Default::default() }),
             cfg,
         });
         if !demo {
@@ -173,6 +175,12 @@ impl Daemon {
     /// a debt, a limit): wake the sockets.
     pub fn poke(&self) {
         let _ = self.bus.send(self.store.last_seq().unwrap_or(0));
+    }
+
+    /// Wait for an event being appended to finish, then hold off none: used just
+    /// before this process is replaced.
+    pub fn quiesce(&self) {
+        drop(self.emit_lock.lock().unwrap_or_else(|e| e.into_inner()));
     }
 
     /// Why a project's tracker poll stopped, if it did.

@@ -40,6 +40,13 @@ pub struct DaemonConfig {
     /// Identities whose answers count (Part 10). Default: the user running the
     /// daemon.
     pub owner_names: Vec<String>,
+    /// The commit of the runtime this process is (set when started from
+    /// `runtimes/<sha>/`); `None` when run from a build directory.
+    pub runtime_sha: Option<String>,
+    /// The arguments to start again with when taking over, port included.
+    pub exec_args: Vec<String>,
+    /// How long a start must live to be called healthy (and not a crash).
+    pub healthy_after: Duration,
 }
 
 impl DaemonConfig {
@@ -64,6 +71,9 @@ impl DaemonConfig {
             reload_interval: Duration::from_secs(5),
             fetch_interval: Duration::from_secs(60),
             env_retry: Duration::from_secs(30),
+            runtime_sha: None,
+            exec_args: vec![],
+            healthy_after: Duration::from_secs(30),
             owner_names: vec![std::env::var("USER")
                 .or_else(|_| std::env::var("LOGNAME"))
                 .unwrap_or_else(|_| "owner".into())],
