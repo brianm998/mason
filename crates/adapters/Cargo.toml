@@ -35,3 +35,9 @@ path = "src/bin/mason-mcp.rs"
 [[bin]]
 name = "fake-claude"
 path = "src/bin/fake-claude.rs"
+
+# A scripted stand-in for the `codex` CLI, the counterpart of fake-claude: it
+# prints `codex exec --json` events and calls the contract socket.
+[[bin]]
+name = "fake-codex"
+path = "src/bin/fake-codex.rs"

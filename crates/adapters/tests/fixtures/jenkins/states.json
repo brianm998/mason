@@ -1,0 +1,12 @@
+[
+  {"method": "GET", "url": "/queue/item/41/api/json",
+   "response": {"status": 200, "body": {"id": 41, "cancelled": false, "why": "Waiting for next available executor"}}},
+  {"method": "GET", "url": "/queue/item/42/api/json",
+   "response": {"status": 200, "body": {"id": 42, "cancelled": false, "executable": {"number": 6}}}},
+  {"method": "GET", "url": "/job/team/job/app/6/api/json",
+   "response": {"status": 200, "body": {"building": true, "number": 6, "result": null}}},
+  {"method": "GET", "url": "/job/team/job/app/7/api/json",
+   "response": {"status": 200, "body": {"building": false, "number": 7, "result": "SUCCESS"}}},
+  {"method": "GET", "url": "/job/team/job/app/8/api/json",
+   "response": {"status": 200, "body": {"building": false, "number": 8, "result": "UNSTABLE"}}}
+]

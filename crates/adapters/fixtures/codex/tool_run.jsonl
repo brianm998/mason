@@ -1,0 +1,7 @@
+{"type":"thread.started","thread_id":"0199-codex-thread-2"}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_0","type":"command_execution","command":"ls -la","aggregated_output":"","status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_0","type":"command_execution","command":"ls -la","aggregated_output":"total 0\n","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_1","type":"mcp_tool_call","server":"mason","tool":"submit_plan","arguments":{"summary":"s"},"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"Submitted."}}
+{"type":"turn.completed","usage":{"input_tokens":900,"cached_input_tokens":700,"output_tokens":60}}

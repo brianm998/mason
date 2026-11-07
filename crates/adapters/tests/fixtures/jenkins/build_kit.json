@@ -1,0 +1,10 @@
+[
+  {"method": "GET", "url": "/crumbIssuer/api/json",
+   "response": {"status": 200, "body": {"_class": "hudson.security.csrf.DefaultCrumbIssuer", "crumb": "crumb-value", "crumbRequestField": "Jenkins-Crumb"}}},
+  {"method": "POST", "url": "/job/team/job/app/buildWithParameters",
+   "response": {"status": 201, "headers": {"Location": "https://ci.example.com/queue/item/41/"}, "body": ""}},
+  {"method": "GET", "url": "/queue/item/41/api/json",
+   "response": {"status": 200, "body": {"_class": "hudson.model.Queue$LeftItem", "id": 41, "cancelled": false, "executable": {"_class": "hudson.model.FreeStyleBuild", "number": 7}}}},
+  {"method": "GET", "url": "/job/team/job/app/7/api/json",
+   "response": {"status": 200, "body": {"building": false, "number": 7, "result": "SUCCESS"}}}
+]

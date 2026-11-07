@@ -123,3 +123,36 @@ pub fn build_kit(b: &dyn BuildSystemAdapter, git_ref: &str, sha: &str) -> Vec<St
     }
     p
 }
+
+/// What a git host with no features must do: plain git over a transport has
+/// no pull requests, labels, checks or merge queue. It declares so, and refuses
+/// every PR call for good rather than pretending. (`host_kit` is for hosts that
+/// do have pull requests; this is its counterpart.)
+pub fn plain_host_kit(h: &dyn GitHostAdapter) -> Vec<String> {
+    let mut p = vec![];
+    let caps = h.capabilities();
+    if caps.pull_requests || caps.labels || caps.checks || caps.merge_queue {
+        p.push(format!(
+            "a plain git host declares no host features, got {caps:?}"
+        ));
+    }
+    match h.open_pr("main", "feature", "t", "b") {
+        Err(e) if e.permanent() => {}
+        other => p.push(format!(
+            "opening a PR on a plain host must be refused for good, got {other:?}"
+        )),
+    }
+    match h.pr_status(1) {
+        Err(e) if e.kind == ErrorKind::NotFound => {}
+        other => p.push(format!(
+            "the status of a PR on a plain host must be NotFound, got {other:?}"
+        )),
+    }
+    if h.merge_pr(1).is_ok() {
+        p.push("a plain host must refuse to merge a PR".into());
+    }
+    if h.enqueue(1).is_ok() {
+        p.push("a plain host must refuse to enqueue a PR".into());
+    }
+    p
+}
