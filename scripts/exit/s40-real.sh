@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Stage 20, against a real daemon (not --demo): the monitors answer questions and decide
+# Monitor answers (s40), against a real daemon (not --demo): the monitors answer questions and decide
 # approvals the way their buttons do, through the monitor-tool of each client.
 #  1. Four tasks stop to ask a question; a non-owner connection gets the card and no
 #     buttons, and what each monitor shows matches the daemon's views (conformance).
@@ -14,8 +14,8 @@
 # half runs when gradle is installed.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
-[ "$(uname)" = Darwin ] && command -v swift >/dev/null || { echo "s20-real skipped: needs macOS and Swift"; exit 0; }
-root=$(mktemp -d /tmp/mason-s20r.XXXXXX); daemon=""
+[ "$(uname)" = Darwin ] && command -v swift >/dev/null || { echo "s40-real skipped: needs macOS and Swift"; exit 0; }
+root=$(mktemp -d /tmp/mason-s40r.XXXXXX); daemon=""
 cleanup() {
   [ -n "$daemon" ] && kill -9 "$daemon" 2>/dev/null || true
   for f in "$root"/d/h/*/host.kv; do
@@ -153,4 +153,4 @@ echo "task #2 landed after Approve (the diff hash it showed)"
 wait_state 3 canceled 60
 echo "task #3 was canceled by Reject"
 m metrics | head -3
-echo "s20-real OK"
+echo "s40-real OK"

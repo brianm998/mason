@@ -1,6 +1,6 @@
-# 0017: Readings made while letting the monitors answer and approve (Stage 20)
+# 0018: Readings made while letting the monitors answer and approve (Monitor answers (s40))
 
-Where the task or the design left room, Stage 20 chose the following. Any can be overruled.
+Where the task or the design left room, Monitor answers (s40) chose the following. Any can be overruled.
 
 - **Multi-select is not built.** The task says to allow multi-select questions "if the protocol's question type has them". It does not: `DecisionCard` and the agent's `ask` tool carry options and a recommended one, with no "several may be chosen" flag, and the daemon's `pick` takes one option or free text. So the card has option buttons (one click answers) and the Other box, and no check boxes. Adding multi-select means a protocol change (a flag on the card, an answer that names several) and a change to the `ask` tool's schema; neither is made here.
 - **The protocol change is additive.** `Hello.actor = 7`, `Welcome.owner = 8`, `Command.approve_hold = 15` (`ApproveHold {task, diff_hash}`), `message Approval`, `AttentionItem.approval = 3`, `TaskDetailView.approval = 17`. No field is renamed or renumbered, and the protocol version stays 1: an older monitor ignores the new fields (it sees no approval view, and its answers still work), and an older daemon leaves `owner` false, so a newer monitor shows the card without buttons and says why.

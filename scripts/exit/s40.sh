@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Stage 20 exit test (the part that needs no Swift or Compose): answering and approving
+# Monitor answers (s40) exit test (the part that needs no Swift or Compose): answering and approving
 # by clicking, as the daemon sees it.
 #  1. Against a real daemon in-process (cargo tests): a question answered by option and
 #     by text, a stale card refused (409), a non-owner refused (403); a self-hosting hold
@@ -9,10 +9,10 @@
 #  2. Against `masond --demo`: the card offers its buttons to the owner and none to a
 #     non-owner, in the daemon's own list of what a client must show (conformance).
 #  3. The two clients are in parity on the feature list.
-# The monitors themselves are driven against a real daemon by s20-real.sh.
+# The monitors themselves are driven against a real daemon by s40-real.sh.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
-root=$(mktemp -d /tmp/mason-s20.XXXXXX); daemon=""
+root=$(mktemp -d /tmp/mason-s40.XXXXXX); daemon=""
 cleanup() { [ -n "$daemon" ] && kill -9 "$daemon" 2>/dev/null || true; rm -rf "$root"; }
 trap cleanup EXIT
 
@@ -65,4 +65,4 @@ echo "a client that shows no buttons to the owner fails conformance"
 
 echo "== 3. parity"
 "$bin/conformance" features clients/features.toml | tail -1
-echo "s20 OK"
+echo "s40 OK"
