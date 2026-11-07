@@ -16,6 +16,7 @@ use crate::builtin::builtin_profile_names;
 use crate::model::*;
 use mason_adapter_api::contract::StepKind;
 use mason_core::State;
+use mason_plugins::PluginType;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// What this version of MASON can actually run.
@@ -24,6 +25,8 @@ pub struct Capabilities {
     pub step_types: Vec<StepType>,
     pub fan_out: bool,
     pub conditions: bool,
+    /// The step types plugins provide (Stage 19).
+    pub plugins: Vec<PluginType>,
 }
 
 impl Capabilities {
@@ -37,7 +40,23 @@ impl Capabilities {
             step_types: vec![Agent, Command, Test, Approval, Landing],
             fan_out: false,
             conditions: false,
+            plugins: vec![],
         }
+    }
+
+    /// The same, plus the step types these plugins provide.
+    pub fn with_plugins(mut self, plugins: Vec<PluginType>) -> Capabilities {
+        self.plugins = plugins;
+        self
+    }
+
+    /// The names of the plugin step types, for [`crate::parse_with`].
+    pub fn plugin_names(&self) -> Vec<String> {
+        self.plugins.iter().map(|p| p.name.clone()).collect()
+    }
+
+    pub fn plugin(&self, name: &str) -> Option<&PluginType> {
+        self.plugins.iter().find(|p| p.name == name)
     }
 
     /// Everything the language can express, for checking a definition's shape
@@ -47,6 +66,7 @@ impl Capabilities {
             step_types: StepType::ALL.to_vec(),
             fan_out: true,
             conditions: true,
+            plugins: vec![],
         }
     }
 }
@@ -196,6 +216,8 @@ fn type_keys(k: StepType) -> &'static [&'static str] {
         StepType::Ci => &["suites", "budget", "policy"],
         StepType::Pr => &["budget", "policy"],
         StepType::Landing => &["policy", "budget"],
+        // Settings are checked against the plugin's schema instead.
+        StepType::Plugin => &["budget"],
     }
 }
 
@@ -283,7 +305,48 @@ pub fn validate(def: &Definition, caps: &Capabilities) -> Vec<Problem> {
     for s in &def.steps {
         let base = format!("step.{}", s.name);
 
-        if !s.kind.categories().contains(&s.category) {
+        let plugin = match s.kind {
+            StepType::Plugin => {
+                let name = s.plugin.as_deref().unwrap_or_default();
+                match caps.plugin(name) {
+                    Some(pt) => Some(pt),
+                    None => {
+                        p.push(Problem::new(
+                            format!("{base}.type"),
+                            format!(
+                                "no extension provides the step type `{name}`; it must be in .mason/extensions/ on the base branch, and valid"
+                            ),
+                        ));
+                        continue;
+                    }
+                }
+            }
+            _ => None,
+        };
+        if let Some(pt) = plugin {
+            if !pt
+                .categories
+                .iter()
+                .any(|c| *c == category_name(s.category))
+            {
+                p.push(Problem::new(
+                    format!("{base}.category"),
+                    format!(
+                        "a {} step cannot be in `{}`; use {}",
+                        pt.name,
+                        category_name(s.category),
+                        pt.categories.join(" or ")
+                    ),
+                ));
+            }
+            let settings = serde_json::Value::Object(s.config.clone().into_iter().collect());
+            for m in mason_plugins::schema::validate(&pt.config_schema, &settings) {
+                p.push(Problem::new(
+                    format!("{base}.settings"),
+                    format!("{m} (the {} plugin's settings)", pt.name),
+                ));
+            }
+        } else if !s.kind.categories().contains(&s.category) {
             let allowed: Vec<&str> = s
                 .kind
                 .categories()
@@ -294,18 +357,18 @@ pub fn validate(def: &Definition, caps: &Capabilities) -> Vec<Problem> {
                 format!("{base}.category"),
                 format!(
                     "a {} step cannot be in `{}`; use {}",
-                    s.kind.name(),
+                    s.type_name(),
                     category_name(s.category),
                     allowed.join(" or ")
                 ),
             ));
         }
-        if !caps.step_types.contains(&s.kind) {
+        if s.kind != StepType::Plugin && !caps.step_types.contains(&s.kind) {
             p.push(Problem::new(
                 format!("{base}.type"),
                 format!(
                     "step type `{}` cannot run yet (it arrives in {})",
-                    s.kind.name(),
+                    s.type_name(),
                     stage_for(s.kind)
                 ),
             ));
@@ -314,7 +377,7 @@ pub fn validate(def: &Definition, caps: &Capabilities) -> Vec<Problem> {
             if !type_keys(s.kind).contains(&k) {
                 p.push(Problem::new(
                     format!("{base}.{k}"),
-                    format!("`{k}` does not apply to {} steps", s.kind.name()),
+                    format!("`{k}` does not apply to {} steps", s.type_name()),
                 ));
             }
         }
@@ -443,7 +506,7 @@ pub fn validate(def: &Definition, caps: &Capabilities) -> Vec<Problem> {
             ));
         }
         if s.next.is_empty() && s.kind != StepType::Landing {
-            p.push(Problem::new(format!("{base}.next"), format!("this {} step ends the path but is not a landing step, so tasks would be stranded here; give it a `next`", s.kind.name())));
+            p.push(Problem::new(format!("{base}.next"), format!("this {} step ends the path but is not a landing step, so tasks would be stranded here; give it a `next`", s.type_name())));
         }
         if !s.next.is_empty() && s.kind == StepType::Landing {
             p.push(Problem::new(

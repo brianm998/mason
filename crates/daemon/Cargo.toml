@@ -26,6 +26,7 @@ mason-adapters = { version = "0.0.0", path = "../adapters" }
 mason-core = { version = "0.0.0", path = "../core" }
 mason-definition = { version = "0.0.0", path = "../definition" }
 mason-engine = { version = "0.0.0", path = "../engine" }
+mason-plugins = { version = "0.0.0", path = "../plugins" }
 mason-landing = { version = "0.0.0", path = "../landing" }
 mason-protocol = { version = "0.0.0", path = "../protocol" }
 mason-resources = { version = "0.0.0", path = "../resources" }

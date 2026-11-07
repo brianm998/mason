@@ -693,6 +693,48 @@ async fn editor_apply(
     Ok(Json(v))
 }
 
+/// The project's extensions and whether each may run (Part 12).
+async fn extensions_list(Shared(d): Shared<Arc<Daemon>>, Path(name): Path<String>) -> Res {
+    let pid = project_of(&d, &name)?;
+    let d2 = d.clone();
+    let v = d
+        .pool
+        .run(move || {
+            d2.project(pid)
+                .map(|p| crate::plugins::list(&d2, p))
+                .unwrap_or_default()
+        })
+        .await
+        .map_err(pool_err)?;
+    Ok(Json(v))
+}
+
+/// Approve the extension's current content. Owner only.
+async fn extension_approve(
+    Shared(d): Shared<Arc<Daemon>>,
+    headers: axum::http::HeaderMap,
+    Path((name, ext)): Path<(String, String)>,
+) -> Res {
+    let pid = project_of(&d, &name)?;
+    let who = who_of(&headers);
+    let d2 = d.clone();
+    let v = d
+        .pool
+        .run(move || match d2.project(pid) {
+            Some(p) => crate::plugins::approve(&d2, p, &ext, &who),
+            None => Err((404, "no such project".to_string())),
+        })
+        .await
+        .map_err(pool_err)?
+        .map_err(|(code, msg)| {
+            fail(
+                StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_REQUEST),
+                msg,
+            )
+        })?;
+    Ok(Json(v))
+}
+
 async fn project_reload(Shared(d): Shared<Arc<Daemon>>, Path(name): Path<String>) -> Res {
     let pid = project_of(&d, &name)?;
     let d2 = d.clone();
@@ -1704,6 +1746,11 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/tasks/{id}/explore-anyway", post(explore_anyway))
         .route("/tasks/{id}/overrides", post(task_override))
         .route("/projects/{name}/definition", get(project_definition))
+        .route("/projects/{name}/extensions", get(extensions_list))
+        .route(
+            "/projects/{name}/extensions/{ext}/approve",
+            post(extension_approve),
+        )
         .route("/projects/{name}/editor", get(editor_get))
         .route("/projects/{name}/editor/op", post(editor_op))
         .route("/projects/{name}/editor/simulate", post(editor_simulate))

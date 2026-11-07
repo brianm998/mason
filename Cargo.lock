@@ -607,6 +607,7 @@ dependencies = [
 name = "mason-conformance"
 version = "0.0.0"
 dependencies = [
+ "mason-plugins",
  "mason-protocol",
  "serde_json",
  "tempfile",
@@ -628,6 +629,7 @@ dependencies = [
  "mason-definition",
  "mason-engine",
  "mason-landing",
+ "mason-plugins",
  "mason-protocol",
  "mason-resources",
  "mason-scheduler",
@@ -652,6 +654,7 @@ dependencies = [
  "mason-adapter-api",
  "mason-core",
  "mason-engine",
+ "mason-plugins",
  "mason-testing",
  "proptest",
  "serde_json",
@@ -689,6 +692,15 @@ dependencies = [
  "mason-testing",
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "mason-plugins"
+version = "0.0.0"
+dependencies = [
+ "serde_json",
+ "tempfile",
+ "toml_edit",
 ]
 
 [[package]]

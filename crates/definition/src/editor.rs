@@ -12,6 +12,7 @@
 use crate::model::*;
 use crate::validate::{validate, Capabilities};
 use mason_core::State;
+use mason_plugins::PluginType;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use toml_edit::{value, Array, DocumentMut, InlineTable, Item, Table};
@@ -505,7 +506,7 @@ fn problem_keys(ps: &[Problem]) -> BTreeSet<(String, String)> {
 
 /// Problems of a definition text: parse problems if it will not parse, else validation's.
 pub fn problems_of(text: &str, caps: &Capabilities) -> Vec<Problem> {
-    match crate::parse(text) {
+    match crate::parse_with(text, crate::Plugins::Named(&caps.plugin_names())) {
         Err(p) => p,
         Ok(def) => validate(&def, caps),
     }
@@ -620,7 +621,10 @@ fn layout_positions(layout: &str) -> BTreeMap<String, (i64, i64)> {
 /// the graph (loops back do not count), unless the person placed them by hand.
 pub fn picture(files: &Files, caps: &Capabilities) -> Picture {
     let problems = problems_of(&files.definition, caps);
-    let Ok(def) = crate::parse(&files.definition) else {
+    let Ok(def) = crate::parse_with(
+        &files.definition,
+        crate::Plugins::Named(&caps.plugin_names()),
+    ) else {
         return Picture {
             lanes: LANES
                 .iter()
@@ -693,6 +697,13 @@ pub fn picture(files: &Files, caps: &Capabilities) -> Picture {
                 .or_else(|| s.model.clone())
                 .unwrap_or_default(),
             StepType::Test => s.suites.join(", "),
+            StepType::Plugin => s
+                .config
+                .values()
+                .filter_map(|v| v.as_str())
+                .next()
+                .unwrap_or_default()
+                .to_string(),
             StepType::Command | StepType::Approval | StepType::Gate => s
                 .command
                 .clone()
@@ -702,7 +713,7 @@ pub fn picture(files: &Files, caps: &Capabilities) -> Picture {
         };
         nodes.push(Node {
             name: s.name.clone(),
-            kind: s.kind.name().into(),
+            kind: s.type_name().into(),
             category: category_name(s.category).into(),
             lane,
             x,
@@ -797,7 +808,7 @@ pub fn grid_of(def: &Definition) -> Grid {
 /// What can be dragged from the palette: each built-in step type with the
 /// categories it may sit in and what it is for.
 pub fn palette(caps: &Capabilities) -> Vec<Value> {
-    StepType::ALL
+    let mut entries: Vec<Value> = StepType::ALL
         .iter()
         .map(|k| {
             json!({
@@ -819,10 +830,24 @@ pub fn palette(caps: &Capabilities) -> Vec<Value> {
                     StepType::Ci => "Run CI on the change.",
                     StepType::Pr => "Open a pull request.",
                     StepType::Landing => "Land the change.",
+                    StepType::Plugin => "",
                 },
             })
         })
-        .collect()
+        .collect();
+    // A plugin's step type sits beside the built-in ones; its form comes from `inspector.schema`.
+    for pt in &caps.plugins {
+        entries.push(json!({
+            "type": pt.name,
+            "plugin": pt.plugin,
+            "categories": pt.categories,
+            "available": true,
+            "fields": mason_plugins::schema::sample_config(&pt.config_schema),
+            "about": pt.about,
+            "schema": plugin_schema(pt, &Definition::empty()),
+        }));
+    }
+    entries
 }
 
 /// A JSON Schema for a step of this kind in this definition, so a client can build its
@@ -887,7 +912,7 @@ pub fn step_schema(kind: StepType, def: &Definition) -> Value {
                 json!({"type": "string", "title": "Command"}),
             );
         }
-        StepType::Ci | StepType::Pr | StepType::Landing => {}
+        StepType::Ci | StepType::Pr | StepType::Landing | StepType::Plugin => {}
     }
     props.insert("uses".into(), json!({"type": "object", "title": "Resources", "additionalProperties": {"type": "integer", "minimum": 1}, "x-choices": def.resources.keys().collect::<Vec<_>>(), "description": "Resources the step holds while it runs, like compile = 1."}));
     // The form shows fields in a deliberate order, not the alphabetical one a JSON object keeps.
@@ -918,6 +943,33 @@ pub fn step_schema(kind: StepType, def: &Definition) -> Value {
         "type": "object",
         "properties": props,
         "x-order": order,
+    })
+}
+
+/// The same, for a step of a type a plugin provides: the step's own keys, then the
+/// settings the plugin's `config_schema` describes, so the form needs no client code.
+pub fn plugin_schema(pt: &PluginType, def: &Definition) -> Value {
+    let mut props = serde_json::Map::new();
+    props.insert("category".into(), json!({"type": "string", "title": "Category", "enum": pt.categories, "description": "The swimlane: which stage of a task this step belongs to."}));
+    let mut order = vec!["category".to_string()];
+    if let Some(own) = pt.config_schema["properties"].as_object() {
+        for (k, v) in own {
+            props.insert(k.clone(), v.clone());
+            order.push(k.clone());
+        }
+    }
+    props.insert("budget".into(), json!({"type": "string", "title": "Time budget", "description": "Like 10m or 90s. How long the plugin may take."}));
+    props.insert("max_rounds".into(), json!({"type": "integer", "minimum": 1, "title": "Rounds", "description": "How many times this step may loop back to `on_red` before the task fails. Required when it has an on_red edge."}));
+    props.insert("uses".into(), json!({"type": "object", "title": "Resources", "additionalProperties": {"type": "integer", "minimum": 1}, "x-choices": def.resources.keys().collect::<Vec<_>>(), "description": "Resources the step holds while it runs, like compile = 1."}));
+    order.extend(["budget".into(), "max_rounds".into(), "uses".into()]);
+    json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": if pt.config_schema["title"].is_string() { pt.config_schema["title"].clone() } else { json!(format!("{} step", pt.name)) },
+        "type": "object",
+        "properties": props,
+        "required": pt.config_schema["required"].clone(),
+        "x-order": order,
+        "x-plugin": pt.plugin,
     })
 }
 

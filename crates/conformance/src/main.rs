@@ -6,6 +6,7 @@
 //! conformance features [FILE]                        check clients/features.toml
 //! conformance tokens --write|--check [--root DIR]    generate / verify the design tokens
 //! conformance expected --port P --out DIR            play a manual demo daemon, write each checkpoint
+//! conformance plugin-kit DIR [--timeout SECS]        run the plugin conformance kit on an extension folder
 //! conformance check --expected DIR --actual DIR      compare a client's dumps with the expected ones
 //! conformance resume --port P                        connect, disconnect, resume: only what was missed arrives
 //! conformance latency --port P [--limit-ms N]        how long a state change takes to reach a client
@@ -180,6 +181,32 @@ fn main() {
                 }
                 k += 1;
             }
+        }
+        "plugin-kit" => {
+            // The conformance kit for plugins (Stage 19): run it on any extension folder.
+            let secs: u64 = opt(&mut args, "--timeout")
+                .and_then(|t| t.parse().ok())
+                .unwrap_or(10);
+            let dir = args
+                .first()
+                .cloned()
+                .unwrap_or_else(|| die("plugin-kit DIR"));
+            let checks = mason_plugins::kit::plugin_kit(Path::new(&dir), Duration::from_secs(secs));
+            let mut failed = 0;
+            for c in &checks {
+                println!(
+                    "{:<4} {:<20} {}",
+                    if c.ok { "ok" } else { "FAIL" },
+                    c.name,
+                    c.detail
+                );
+                failed += usize::from(!c.ok);
+            }
+            if failed > 0 {
+                eprintln!("the plugin failed {failed} of {} checks", checks.len());
+                exit(1);
+            }
+            println!("the plugin passes all {} checks", checks.len());
         }
         "editor-expected" => {
             // What the daemon says the pipeline editor shows for a project's draft (a real daemon:

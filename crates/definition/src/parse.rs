@@ -98,7 +98,60 @@ fn strings(item: &Item, path: &str, out: &mut Vec<Problem>) -> Option<Vec<String
     Some(v)
 }
 
-fn parse_step(name: &str, item: &Item, out: &mut Vec<Problem>) -> Option<Step> {
+/// Which step type names beyond the built-in ones a definition may use.
+#[derive(Clone, Copy)]
+pub enum Plugins<'a> {
+    /// Exactly these (the types the project's approved-or-not extensions provide).
+    Named(&'a [String]),
+    /// Any name: for a definition already validated and stored (a pinned one).
+    Any,
+}
+
+impl Plugins<'_> {
+    fn allows(&self, name: &str) -> bool {
+        match self {
+            Plugins::Named(n) => n.iter().any(|x| x == name),
+            Plugins::Any => true,
+        }
+    }
+}
+
+/// A TOML value as JSON, for a plugin step's settings.
+fn to_json(item: &Item) -> Option<serde_json::Value> {
+    use serde_json::Value;
+    use toml_edit::Value as T;
+    if let Some(t) = item.as_table_like() {
+        return Some(Value::Object(
+            t.iter()
+                .map(|(k, v)| Some((k.to_string(), to_json(v)?)))
+                .collect::<Option<_>>()?,
+        ));
+    }
+    Some(match item.as_value()? {
+        T::String(s) => Value::String(s.value().clone()),
+        T::Integer(i) => Value::from(*i.value()),
+        T::Float(f) => serde_json::Number::from_f64(*f.value()).map(Value::Number)?,
+        T::Boolean(b) => Value::Bool(*b.value()),
+        T::Array(a) => Value::Array(
+            a.iter()
+                .map(|v| to_json(&Item::Value(v.clone())))
+                .collect::<Option<_>>()?,
+        ),
+        T::InlineTable(t) => Value::Object(
+            t.iter()
+                .map(|(k, v)| Some((k.to_string(), to_json(&Item::Value(v.clone()))?)))
+                .collect::<Option<_>>()?,
+        ),
+        T::Datetime(d) => Value::String(d.value().to_string()),
+    })
+}
+
+fn parse_step(
+    name: &str,
+    item: &Item,
+    plugins: Plugins<'_>,
+    out: &mut Vec<Problem>,
+) -> Option<Step> {
     let base = format!("step.{name}");
     let Some(t) = item.as_table_like() else {
         out.push(Problem::new(&base, "must be a table"));
@@ -113,6 +166,16 @@ fn parse_step(name: &str, item: &Item, out: &mut Vec<Problem>) -> Option<Step> {
     let mut kind = None;
     let mut category = None;
     let mut step = Step::new(name, StepType::Agent, mson_cat());
+    // A type that is not built in but a plugin provides: its other keys are its settings.
+    let plugin_type = t
+        .get("type")
+        .and_then(|v| v.as_str())
+        .filter(|s| StepType::from_name(s).is_none() && plugins.allows(s))
+        .map(String::from);
+    if let Some(pt) = &plugin_type {
+        kind = Some(StepType::Plugin);
+        step.plugin = Some(pt.clone());
+    }
     for (k, v) in t.iter() {
         let path = format!("{base}.{k}");
         match k {
@@ -120,11 +183,18 @@ fn parse_step(name: &str, item: &Item, out: &mut Vec<Problem>) -> Option<Step> {
                 if let Some(s) = string(v, &path, out) {
                     match StepType::from_name(&s) {
                         Some(t) => kind = Some(t),
+                        None if plugin_type.is_some() => {}
                         None => out.push(Problem::new(
                             &path,
                             format!(
-                                "unknown step type `{s}`; the built-in types are {} (plugins add more in a later stage)",
-                                StepType::ALL.map(StepType::name).join(", ")
+                                "unknown step type `{s}`; the built-in types are {}{}",
+                                StepType::ALL.map(StepType::name).join(", "),
+                                match plugins {
+                                    Plugins::Named(n) if !n.is_empty() => {
+                                        format!(" and the plugins' {}", n.join(", "))
+                                    }
+                                    _ => String::new(),
+                                }
                             ),
                         )),
                     }
@@ -214,6 +284,12 @@ fn parse_step(name: &str, item: &Item, out: &mut Vec<Problem>) -> Option<Step> {
                 }
                 None => out.push(Problem::new(&path, "must be a table like { phone = 1 }")),
             },
+            other if plugin_type.is_some() => match to_json(v) {
+                Some(j) => {
+                    step.config.insert(other.to_string(), j);
+                }
+                None => out.push(Problem::new(&path, "this value cannot be a plugin setting")),
+            },
             other => out.push(unknown_key(&base, other, STEP_KEYS)),
         }
     }
@@ -279,8 +355,14 @@ fn resolve_extends(
     Ok(merged)
 }
 
-/// Read a definition. `Err` lists every problem found.
+/// Read a definition. `Err` lists every problem found. Only the built-in step types
+/// are known; see [`parse_with`] for plugins.
 pub fn parse(text: &str) -> Result<Definition, Vec<Problem>> {
+    parse_with(text, Plugins::Named(&[]))
+}
+
+/// Read a definition that may use the step types plugins provide.
+pub fn parse_with(text: &str, plugins: Plugins<'_>) -> Result<Definition, Vec<Problem>> {
     let doc: DocumentMut = text.parse().map_err(|e: toml_edit::TomlError| {
         vec![Problem::new("", format!("not valid TOML: {e}"))]
     })?;
@@ -317,7 +399,7 @@ pub fn parse(text: &str) -> Result<Definition, Vec<Problem>> {
                         } else {
                             item.clone()
                         };
-                        if let Some(s) = parse_step(name, &resolved, &mut out) {
+                        if let Some(s) = parse_step(name, &resolved, plugins, &mut out) {
                             steps.push(s);
                         }
                     }

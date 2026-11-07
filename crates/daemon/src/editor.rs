@@ -17,7 +17,7 @@ use mason_definition::builtin::BUILTIN;
 use mason_definition::dryrun::{default_scenarios, dry_run, End, Scenario};
 use mason_definition::editor::{self as ed, Edge, Files, Op};
 use mason_definition::graph::Outcome;
-use mason_definition::{parse, Capabilities};
+use mason_definition::{parse_with, Capabilities, Plugins};
 use mason_landing::{edit as landing_edit, git};
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
@@ -221,14 +221,21 @@ fn parse_op(v: &Value) -> Result<Parsed, String> {
     })
 }
 
+/// What the project's definition may use: the built-in steps and its extensions' step types.
+fn project_caps(d: &Daemon, pid: ProjectId) -> Capabilities {
+    d.project(pid)
+        .map_or_else(Capabilities::now, |p| d.caps_for(p))
+}
+
 /// One operation on the project's draft. `Err` is why it was refused (the draft is
 /// unchanged, and the reasons are remembered for the view).
 pub fn operate(d: &Daemon, pid: ProjectId, op: &Value) -> Result<(), Vec<String>> {
     let parsed = parse_op(op).map_err(|e| vec![e])?;
+    let caps = project_caps(d, pid);
     d.with_draft(pid, |st| {
         let cur = st.current().clone();
         let r: Result<Files, Vec<String>> = match &parsed {
-            Parsed::Pipeline(o) => ed::apply(o, &cur, &Capabilities::now()).map_err(|ps| {
+            Parsed::Pipeline(o) => ed::apply(o, &cur, &caps).map_err(|ps| {
                 ps.iter()
                     .map(|p| {
                         if p.path.is_empty() {
@@ -331,12 +338,14 @@ pub fn simulate(d: &Daemon, pid: ProjectId, custom: Option<&Value>) -> Result<Va
     let files = d
         .with_draft(pid, |st| st.current().clone())
         .ok_or("no such project")?;
-    let def = parse(&files.definition).map_err(|ps| {
-        ps.iter()
-            .map(|p| p.message.clone())
-            .collect::<Vec<_>>()
-            .join("; ")
-    })?;
+    let caps = project_caps(d, pid);
+    let def =
+        parse_with(&files.definition, Plugins::Named(&caps.plugin_names())).map_err(|ps| {
+            ps.iter()
+                .map(|p| p.message.clone())
+                .collect::<Vec<_>>()
+                .join("; ")
+        })?;
     let scenarios = match custom {
         Some(v) => vec![scenario(v)?],
         None => default_scenarios(&def),
@@ -385,7 +394,7 @@ pub fn model(d: &Daemon, pid: ProjectId, selected: &str) -> Value {
     let Some(p) = d.project(pid) else {
         return json!({"error": "no such project"});
     };
-    let caps = Capabilities::now();
+    let caps = project_caps(d, pid);
     let (files, base, can_undo, can_redo, dirty, last_error, simulation) = d
         .with_draft(pid, |st| {
             (
@@ -400,14 +409,23 @@ pub fn model(d: &Daemon, pid: ProjectId, selected: &str) -> Value {
         })
         .expect("project exists");
     let pic = ed::picture(&files, &caps);
-    let def = parse(&files.definition).ok();
-    let old = parse(&base.definition).ok();
+    let names = caps.plugin_names();
+    let def = parse_with(&files.definition, Plugins::Named(&names)).ok();
+    let old = parse_with(&base.definition, Plugins::Named(&names)).ok();
     let kind = def.as_ref().and_then(|d| d.step(selected)).map(|s| s.kind);
+    let plugin_type = def
+        .as_ref()
+        .and_then(|d| d.step(selected))
+        .and_then(|s| s.plugin.as_deref())
+        .and_then(|n| caps.plugin(n));
     let inspector = match (&def, kind) {
         (Some(def), Some(k)) => json!({
             "step": selected,
-            "kind": k.name(),
-            "schema": ed::step_schema(k, def),
+            "kind": def.step(selected).map_or(k.name(), |s| s.type_name()),
+            "schema": match plugin_type {
+                Some(pt) => ed::plugin_schema(pt, def),
+                None => ed::step_schema(k, def),
+            },
             "values": ed::step_values(&files.definition, selected),
             "extends": ed::step_values(&files.definition, selected).get("extends").cloned(),
         }),
@@ -511,7 +529,7 @@ pub fn apply(
     if files == base {
         return Err((409, "there is nothing to apply".into()));
     }
-    let problems = ed::problems_of(&files.definition, &Capabilities::now());
+    let problems = ed::problems_of(&files.definition, &project_caps(d, pid));
     if !problems.is_empty() {
         return Err((
             422,

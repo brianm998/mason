@@ -77,6 +77,7 @@ mason: command-line client for the MASON pipeline
   mason definition dry-run [FILE] [--scenarios FILE]
   mason editor show|op|undo|redo|discard|simulate|apply [--project P]   the pipeline editor, without a screen
   mason definition show [--project P] | reload [--project P]
+  mason extension list|show|approve [NAME] [--project P]   project extensions; approving is the owner's
   mason landing                       batches, phases, freezes, and the landing queue
   mason self                          MASON on its own repository: limits, and changes held for you
   mason update [--channel stable|main|branch:X | --sha S] [--rollback] [--check]
@@ -595,6 +596,70 @@ fn main() {
                 other => die(&format!(
                     "editor {other}? use show, op, undo, redo, discard, simulate or apply"
                 )),
+            }
+        }
+        "extension" => {
+            let sub = a
+                .pos()
+                .unwrap_or_else(|| die("extension what? list, show or approve"));
+            let name = a.pos();
+            let project = project_of(&mut a);
+            // Approving is the owner's act: say who.
+            if sub == "approve" && std::env::var("MASON_AS").is_err() {
+                if let Ok(u) = std::env::var("USER") {
+                    std::env::set_var("MASON_AS", u);
+                }
+            }
+            finish(&a);
+            let base = format!("/projects/{project}/extensions");
+            let r = match sub.as_str() {
+                "approve" => {
+                    let n = name
+                        .clone()
+                        .unwrap_or_else(|| die("extension approve NAME"));
+                    let r = or_die(d.call("POST", &format!("{base}/{n}/approve"), None));
+                    if !json_out {
+                        println!(
+                            "approved {n} {} (by {})",
+                            r["hash"].as_str().unwrap_or(""),
+                            r["approved_by"].as_str().unwrap_or("")
+                        );
+                    }
+                    r
+                }
+                "list" | "show" => or_die(d.call("GET", &base, None)),
+                other => die(&format!("extension {other}? use list, show or approve")),
+            };
+            if json_out {
+                return println!("{r:#}");
+            }
+            if sub != "approve" {
+                for e in r["extensions"].as_array().into_iter().flatten() {
+                    let n = e["name"].as_str().unwrap_or("");
+                    if sub == "show" && name.as_deref().is_some_and(|w| w != n) {
+                        continue;
+                    }
+                    println!(
+                        "{n}  {}  {}  {}",
+                        e["status"].as_str().unwrap_or(""),
+                        e["hash"].as_str().unwrap_or(""),
+                        e["provides"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(Value::as_str)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                    if let Some(why) = e["refused"].as_str() {
+                        println!("    refused: {why}");
+                    }
+                    if sub == "show" {
+                        for f in e["files"].as_array().into_iter().flatten() {
+                            println!("    {}", f.as_str().unwrap_or(""));
+                        }
+                    }
+                }
             }
         }
         "definition" => {

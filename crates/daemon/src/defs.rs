@@ -10,7 +10,7 @@ use crate::daemon::{now_ms, Daemon};
 use mason_core::ProjectId;
 use mason_definition::builtin::BUILTIN;
 use mason_definition::layers::{parse_overlay, Overlay};
-use mason_definition::{parse, validate, Capabilities, Definition};
+use mason_definition::{parse_with, validate, Definition, Plugins};
 use mason_landing::git;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -56,6 +56,8 @@ pub struct Defs {
     by_project: Mutex<HashMap<ProjectId, ProjectDefs>>,
     cache: Mutex<HashMap<String, Arc<Definition>>>,
     files: Mutex<HashMap<ProjectId, (String, Arc<FileIndex>)>>,
+    /// Extensions on each project's base commit.
+    pub(crate) exts: Mutex<HashMap<String, (String, Arc<crate::plugins::Scan>)>>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -111,8 +113,10 @@ impl Daemon {
             _ => (BUILTIN.to_string(), Origin::Builtin),
         };
         let what = format!(".mason/mason.toml on {base_ref}");
-        let def = parse(&text).map_err(|e| describe(&what, &e))?;
-        let problems = validate(&def, &Capabilities::now());
+        let caps = self.caps_for(p);
+        let def = parse_with(&text, Plugins::Named(&caps.plugin_names()))
+            .map_err(|e| describe(&what, &e))?;
+        let problems = validate(&def, &caps);
         if !problems.is_empty() {
             return Err(describe(&what, &problems));
         }
@@ -394,7 +398,7 @@ impl Daemon {
             return Some(d.clone());
         }
         let text = self.store.definition(hash).ok().flatten()?;
-        let def = Arc::new(parse(&text).ok()?);
+        let def = Arc::new(parse_with(&text, Plugins::Any).ok()?);
         self.defs
             .cache
             .lock()

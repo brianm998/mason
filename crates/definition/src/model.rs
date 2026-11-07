@@ -14,6 +14,9 @@ pub enum StepType {
     Ci,
     Pr,
     Landing,
+    /// A step type a plugin provides (Stage 19). Which one is `Step::plugin`.
+    /// Not in [`StepType::ALL`]: that lists the built-in types.
+    Plugin,
 }
 
 impl StepType {
@@ -38,6 +41,7 @@ impl StepType {
             StepType::Ci => "ci",
             StepType::Pr => "pr",
             StepType::Landing => "landing",
+            StepType::Plugin => "plugin",
         }
     }
 
@@ -57,6 +61,8 @@ impl StepType {
             StepType::Ci => &[Testing, Landing],
             StepType::Pr => &[Review, Landing],
             StepType::Landing => &[Landing],
+            // The plugin's own list narrows this (see `validate`).
+            StepType::Plugin => &[Exploring, Developing, Testing, Review, Landing],
         }
     }
 }
@@ -129,9 +135,18 @@ pub struct Step {
     /// Optional gates on a test step: `negative_control`, `assertion_scan`,
     /// `acceptance` (Part 8).
     pub gates: Vec<String>,
+    /// For a plugin step: the step type's name, as written in `type = "..."`.
+    pub plugin: Option<String>,
+    /// For a plugin step: its settings (every key the built-in steps do not use).
+    pub config: BTreeMap<String, serde_json::Value>,
 }
 
 impl Step {
+    /// The type as written in the definition: a plugin's own name for its steps.
+    pub fn type_name(&self) -> &str {
+        self.plugin.as_deref().unwrap_or(self.kind.name())
+    }
+
     pub fn new(name: &str, kind: StepType, category: State) -> Step {
         Step {
             name: name.to_string(),
@@ -153,6 +168,8 @@ impl Step {
             join: None,
             policy: None,
             gates: vec![],
+            plugin: None,
+            config: BTreeMap::new(),
         }
     }
 }
@@ -180,6 +197,20 @@ pub struct Definition {
 }
 
 impl Definition {
+    /// A definition with nothing in it (for a schema that needs none of its names).
+    pub fn empty() -> Definition {
+        Definition {
+            schema: 1,
+            start: String::new(),
+            explored_entry: None,
+            steps: vec![],
+            agents: BTreeMap::new(),
+            resources: BTreeMap::new(),
+            testing: mason_testing::Testing::default(),
+            hash: String::new(),
+        }
+    }
+
     pub fn step(&self, name: &str) -> Option<&Step> {
         self.steps.iter().find(|s| s.name == name)
     }
@@ -292,5 +323,10 @@ mod tests {
             assert!(!t.categories().is_empty());
         }
         assert!(StepType::from_name("magic").is_none());
+        assert!(
+            StepType::from_name("plugin").is_none(),
+            "a plugin is never named `plugin`"
+        );
+        assert!(!StepType::Plugin.categories().is_empty());
     }
 }

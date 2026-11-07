@@ -13,6 +13,7 @@ mason-core = { path = "../core" }
 mason-engine = { path = "../engine" }
 mason-adapter-api = { path = "../adapter-api" }
 mason-testing = { path = "../testing" }
+mason-plugins = { path = "../plugins" }
 toml_edit = "0.25.18"
 
 [dev-dependencies]

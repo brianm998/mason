@@ -28,5 +28,5 @@ mod testing_parse;
 pub mod validate;
 
 pub use model::{AgentProfile, Definition, Join, Problem, Step, StepType};
-pub use parse::parse;
+pub use parse::{parse, parse_with, Plugins};
 pub use validate::{validate, Capabilities};
