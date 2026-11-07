@@ -100,3 +100,18 @@ compose = "done"
 description = "Text scales and reflows so it stays sharp from across the room"
 swift = "done"
 compose = "done"
+
+[feature.decision-card-keyboard]
+description = "Arrow keys move the selection and Return answers; Other has a multi-line box (Enter sends, Shift-Enter a new line); a non-owner sees the card and no buttons"
+swift = "done"
+compose = "done"
+
+[feature.approval-view]
+description = "A task waiting on a proposal, an approval step or a self-hosting hold shows what it waits on in full, with Approve (the diff hash shown) and Reject with a reason, for the owner only"
+swift = "done"
+compose = "done"
+
+[feature.attention-link]
+description = "The top bar says how many tasks need the owner; clicking it opens the first one"
+swift = "done"
+compose = "done"

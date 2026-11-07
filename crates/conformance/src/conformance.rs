@@ -76,7 +76,7 @@ fn row_item(r: &TaskRow, order: usize, prefix: &str) -> Item {
     )
 }
 
-fn card_item(task: u64, c: &DecisionCard) -> Item {
+fn card_item(task: u64, c: &DecisionCard, owner: bool) -> Item {
     let mut texts = vec![c.ask.clone(), c.why.clone()];
     for (i, o) in c.options.iter().enumerate() {
         texts.push(format!(
@@ -87,16 +87,44 @@ fn card_item(task: u64, c: &DecisionCard) -> Item {
         ));
     }
     texts.extend(c.evidence.iter().cloned());
-    // Pick an option, or type an answer: what the card offers.
-    let mut actions: Vec<String> = (1..=c.options.len())
-        .map(|i| format!("option:{i}"))
-        .collect();
-    actions.push("other".into());
+    // Pick an option, or type an answer: what the card offers the owner. Anyone
+    // else sees the card and no buttons.
+    let mut actions: Vec<String> = vec![];
+    if owner {
+        actions = (1..=c.options.len())
+            .map(|i| format!("option:{i}"))
+            .collect();
+        actions.push("other".into());
+    }
     Item::new(format!("card:{task}"), texts, actions, 0)
 }
 
-/// Everything the views say is visible, as a flat list.
-pub fn visible(views: &[View]) -> Vec<Item> {
+/// What a task waiting for the owner's approval shows: what it waits on, in full, and
+/// Approve and Reject for the owner only.
+fn approval_item(task: u64, a: &Approval, owner: bool) -> Item {
+    let mut texts = vec![a.waiting_for.clone()];
+    texts.extend(a.lines.iter().cloned());
+    if !a.diff_hash.is_empty() {
+        texts.push(format!("diff {}", a.diff_hash));
+    }
+    if !a.branch.is_empty() {
+        texts.push(a.branch.clone());
+    }
+    if !a.diff_command.is_empty() {
+        texts.push(a.diff_command.clone());
+    }
+    let actions = if owner {
+        vec!["approve".to_string(), "reject".to_string()]
+    } else {
+        vec![]
+    };
+    Item::new(format!("approval:{task}"), texts, actions, 0)
+}
+
+/// Everything the views say is visible, as a flat list. `owner` says whether the
+/// client's connection acts as the owner (the Welcome says so): only then are the
+/// answer, approve and reject buttons offered.
+pub fn visible(views: &[View], owner: bool) -> Vec<Item> {
     let mut out = vec![];
     for v in views {
         match v.body.as_ref() {
@@ -147,7 +175,10 @@ pub fn visible(views: &[View]) -> Vec<Item> {
             Some(Body::Home(h)) => {
                 for a in &h.attention {
                     if let (Some(t), Some(c)) = (&a.task, &a.card) {
-                        out.push(card_item(t.id, c));
+                        out.push(card_item(t.id, c, owner));
+                    }
+                    if let (Some(t), Some(x)) = (&a.task, &a.approval) {
+                        out.push(approval_item(t.id, x, owner));
                     }
                 }
                 for (i, a) in h.active.iter().enumerate() {
@@ -183,7 +214,10 @@ pub fn visible(views: &[View]) -> Vec<Item> {
                     ));
                 }
                 if let (Some(c), Some(r)) = (&t.card, &t.row) {
-                    out.push(card_item(r.id, c));
+                    out.push(card_item(r.id, c, owner));
+                }
+                if let (Some(a), Some(r)) = (&t.approval, &t.row) {
+                    out.push(approval_item(r.id, a, owner));
                 }
             }
             Some(Body::Editor(e)) => out.extend(editor_items(e)),
@@ -310,7 +344,7 @@ pub fn compare(expected: &[Item], actual: &[Item]) -> Vec<String> {
     }
     let want: BTreeMap<&str, &Item> = expected.iter().map(|i| (i.id.as_str(), i)).collect();
     for a in actual {
-        if (a.id.starts_with("row:") || a.id.starts_with("card:"))
+        if (a.id.starts_with("row:") || a.id.starts_with("card:") || a.id.starts_with("approval:"))
             && !want.contains_key(a.id.as_str())
         {
             problems.push(format!(
@@ -415,6 +449,49 @@ mod tests {
         assert!(compare(&e, &a).is_empty());
         let a = vec![item("tile:queued", &["4"], &["click"], 0)];
         assert!(!compare(&e, &a).is_empty());
+    }
+
+    #[test]
+    fn only_the_owner_is_offered_the_buttons() {
+        let card = DecisionCard {
+            ask: "Which?".into(),
+            why: "because".into(),
+            options: vec![
+                CardOption {
+                    label: "A".into(),
+                    recommended: true,
+                },
+                CardOption {
+                    label: "B".into(),
+                    recommended: false,
+                },
+            ],
+            evidence: vec![],
+            hash: "h".into(),
+            origin: "agent".into(),
+        };
+        let owner = card_item(7, &card, true);
+        assert_eq!(owner.actions, vec!["option:1", "option:2", "other"]);
+        assert!(owner.texts.contains(&"1. A (recommended)".to_string()));
+        let other = card_item(7, &card, false);
+        assert!(other.actions.is_empty(), "a non-owner sees the card only");
+        assert_eq!(other.texts, owner.texts);
+        let a = Approval {
+            kind: "hold".into(),
+            waiting_for: "Your approval".into(),
+            lines: vec!["touches crates/x.rs (a gate)".into()],
+            diff_hash: "abc".into(),
+            branch: "mason/p/t1".into(),
+            diff_command: "git diff main...mason/p/t1".into(),
+        };
+        assert_eq!(
+            approval_item(7, &a, true).actions,
+            vec!["approve", "reject"]
+        );
+        assert!(approval_item(7, &a, false).actions.is_empty());
+        assert!(approval_item(7, &a, true)
+            .texts
+            .contains(&"touches crates/x.rs (a gate)".to_string()));
     }
 
     #[test]

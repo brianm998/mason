@@ -160,6 +160,7 @@ async fn session(d: Arc<Daemon>, mut sock: WebSocket) {
             demo: d.demo,
             version: d.cfg.runtime_sha.clone().unwrap_or_else(|| "dev".into()),
             min_protocol: mason_protocol::MIN_PROTOCOL,
+            owner: false,
         };
         let _ = send(&mut sock, server(S::Welcome(welcome)), enc).await;
         let _ = send(&mut sock, server(S::Error(Error { message: msg })), enc).await;
@@ -195,6 +196,7 @@ async fn session(d: Arc<Daemon>, mut sock: WebSocket) {
         demo: d.demo,
         version: d.cfg.runtime_sha.clone().unwrap_or_else(|| "dev".into()),
         min_protocol: mason_protocol::MIN_PROTOCOL,
+        owner: crate::attention::is_owner(&d, &hello.actor),
     };
     if !send(&mut sock, server(S::Welcome(welcome)), enc).await {
         return;
@@ -364,6 +366,11 @@ fn call_for(c: &Command) -> Result<Call, String> {
             format!("/tasks/{}/approve", t.task),
             None,
             Some((t.task, "approve")),
+        ),
+        Cmd::ApproveHold(h) => post(
+            format!("/tasks/{}/approve", h.task),
+            Some(json!({"diff_hash": h.diff_hash})),
+            Some((h.task, "approve")),
         ),
         Cmd::Reject(r) => post(
             format!("/tasks/{}/reject", r.task),

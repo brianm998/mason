@@ -35,7 +35,8 @@ fun TopBar(model: MonitorModel) {
         NavButton("⌂ Home", "nav:home", true) { model.goHome() }
 
         if (model.attention > 0) {
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.testTag("attention")) {
+            // Clicking it opens the first task that needs the owner.
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.clickable { model.openFirstNeedingYou() }.testTag("attention")) {
                 Box(Modifier.size(theme.cell * 0.7f).background(theme.attention, CircleShape))
                 Spacer(Modifier.width(theme.spacingSmall))
                 Text(

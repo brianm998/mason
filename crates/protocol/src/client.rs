@@ -12,6 +12,7 @@ pub struct Client {
     ws: WebSocket<TcpStream>,
     enc: Encoding,
     next_id: u64,
+    actor: String,
 }
 
 fn io(e: impl std::fmt::Display) -> String {
@@ -29,7 +30,13 @@ impl Client {
             ws,
             enc,
             next_id: 1,
+            actor: String::new(),
         })
+    }
+
+    /// Say who this connection acts as in the hello; the welcome says if that is the owner.
+    pub fn acting_as(&mut self, actor: &str) {
+        self.actor = actor.to_string();
     }
 
     fn timeout(&mut self, d: Option<Duration>) {
@@ -89,6 +96,7 @@ impl Client {
                 token: String::new(),
                 commands_only,
                 client_version: "dev".into(),
+                actor: self.actor.clone(),
             })),
         })?;
         match self.recv(Duration::from_secs(10))? {

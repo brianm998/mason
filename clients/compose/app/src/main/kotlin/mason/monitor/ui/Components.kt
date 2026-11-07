@@ -28,6 +28,22 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import mason.monitor.MonitorModel
 import mason.v1.CellState
+import androidx.compose.foundation.focusable
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isShiftPressed
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.input.TextFieldValue
+import mason.monitor.OptionSelection
+import mason.monitor.OtherKey
+import mason.monitor.otherAnswer
+import mason.monitor.otherBoxKey
+import mason.v1.Approval
 import mason.v1.DecisionCard
 import mason.v1.ProgressCell
 import mason.v1.StateCount
@@ -152,52 +168,94 @@ fun CopyButton(label: String, value: String) {
  * with one recommended, "Other" with a text box, and the evidence. An answer carries the
  * card's hash, so a late click on a stale card is refused.
  */
+@OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
 @Composable
 fun DecisionCardView(model: MonitorModel, task: Long, card: DecisionCard) {
     val theme = LocalTheme.current
-    var other by remember { mutableStateOf("") }
+    var other by remember { mutableStateOf(TextFieldValue("")) }
+    var selection by remember(card.hash) {
+        mutableStateOf(OptionSelection.starting(card.options.size, card.options.indexOfFirst { it.recommended }.takeIf { it >= 0 }))
+    }
     val shape = RoundedCornerShape(theme.radius)
+    val focus = remember { FocusRequester() }
+    fun sendOther() {
+        val text = otherAnswer(other.text) ?: return
+        model.answer(task, text, card.hash)
+        other = TextFieldValue("")
+    }
     Column(
         verticalArrangement = Arrangement.spacedBy(theme.spacing),
         modifier = Modifier.fillMaxWidth()
             .background(theme.attentionTint, shape)
             .border(BorderStroke(1.dp, theme.attention), shape)
             .padding(theme.spacingLarge)
+            // Arrow keys move the selection and Return answers with it, as in Claude Code's prompts.
+            .focusRequester(focus)
+            .focusable()
+            .onPreviewKeyEvent { e ->
+                if (!model.canAct || e.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                when (e.key) {
+                    Key.DirectionDown -> { selection = selection.down(); true }
+                    Key.DirectionUp -> { selection = selection.up(); true }
+                    Key.Enter, Key.NumPadEnter -> {
+                        val a = selection.answer
+                        if (a != null) { model.answer(task, a, card.hash); true } else false
+                    }
+                    else -> false
+                }
+            }
             .testTag("card:$task"),
     ) {
         Text(card.ask, style = theme.title())
         if (card.why.isNotEmpty()) Text(card.why, style = theme.body(color = theme.muted))
         Column(verticalArrangement = Arrangement.spacedBy(theme.spacingSmall)) {
             card.options.forEachIndexed { i, o ->
-                Pill(
-                    "${i + 1}.  ${o.label}${if (o.recommended) "   recommended" else ""}",
-                    prominent = o.recommended,
-                    modifier = Modifier.fillMaxWidth().testTag("card:$task:option:${i + 1}"),
-                ) { model.answer(task, (i + 1).toString(), card.hash) }
+                val label = "${i + 1}.  ${o.label}${if (o.recommended) "   recommended" else ""}"
+                if (model.canAct) {
+                    Pill(
+                        label,
+                        prominent = o.recommended,
+                        modifier = Modifier.fillMaxWidth()
+                            .border(BorderStroke(if (selection.index == i) 2.dp else 0.dp, theme.text), shape)
+                            .testTag("card:$task:option:${i + 1}"),
+                    ) { model.answer(task, (i + 1).toString(), card.hash) }
+                } else {
+                    Text(label, style = theme.body())
+                }
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing), verticalAlignment = Alignment.CenterVertically) {
+            if (model.canAct) Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing), verticalAlignment = Alignment.Top) {
+                // Multi-line: Enter sends, Shift-Enter starts a new line.
                 androidx.compose.foundation.text.BasicTextField(
                     value = other,
                     onValueChange = { other = it },
                     textStyle = theme.body(),
-                    singleLine = true,
+                    singleLine = false,
                     decorationBox = { inner ->
                         Box(
                             Modifier.fillMaxWidth().background(theme.background, RoundedCornerShape(theme.radius))
                                 .border(1.dp, theme.border, RoundedCornerShape(theme.radius)).padding(theme.spacing),
                         ) {
-                            if (other.isEmpty()) Text("Other…", style = theme.body(color = theme.muted))
+                            if (other.text.isEmpty()) Text("Other… (Enter sends, Shift-Enter for a new line)", style = theme.body(color = theme.muted))
                             inner()
                         }
                     },
-                    modifier = Modifier.weight(1f).testTag("card:$task:other"),
+                    modifier = Modifier.weight(1f)
+                        .onPreviewKeyEvent { e ->
+                            if (e.type == KeyEventType.KeyDown && (e.key == Key.Enter || e.key == Key.NumPadEnter)) {
+                                when (otherBoxKey(e.isShiftPressed)) {
+                                    OtherKey.SEND -> { sendOther(); true }
+                                    OtherKey.NEWLINE -> {
+                                        val t = other
+                                        val text = t.text.replaceRange(t.selection.min, t.selection.max, "\n")
+                                        other = TextFieldValue(text, TextRange(t.selection.min + 1))
+                                        true
+                                    }
+                                }
+                            } else false
+                        }
+                        .testTag("card:$task:other"),
                 )
-                Pill("Send", modifier = Modifier.testTag("card:$task:send")) {
-                    if (other.isNotBlank()) {
-                        model.answer(task, other, card.hash)
-                        other = ""
-                    }
-                }
+                Pill("Send", modifier = Modifier.testTag("card:$task:send")) { sendOther() }
             }
         }
         if (card.evidence.isNotEmpty()) {
@@ -208,15 +266,85 @@ fun DecisionCardView(model: MonitorModel, task: Long, card: DecisionCard) {
         if (card.origin != "agent") {
             Text("This card was ${card.origin} because the agent's did not fit.", style = theme.small())
         }
+        if (!model.canAct && model.connected) {
+            Text("Only the owner can answer. You are connected as ${model.identity}.", style = theme.small(), modifier = Modifier.testTag("card:$task:not-owner"))
+        }
+        model.lastResult?.let { Text(it, style = theme.body(color = theme.attention), modifier = Modifier.testTag("card:$task:refused")) }
+    }
+}
+
+/** What a task waiting for the owner's approval waits on, in full, with Approve and Reject. */
+@Composable
+fun ApprovalView(model: MonitorModel, task: Long, approval: Approval) {
+    val theme = LocalTheme.current
+    var reason by remember { mutableStateOf("") }
+    var rejecting by remember { mutableStateOf(false) }
+    val shape = RoundedCornerShape(theme.radius)
+    fun reject() { model.reject(task, reason); reason = ""; rejecting = false }
+    Column(
+        verticalArrangement = Arrangement.spacedBy(theme.spacing),
+        modifier = Modifier.fillMaxWidth()
+            .background(theme.attentionTint, shape)
+            .border(BorderStroke(1.dp, theme.attention), shape)
+            .padding(theme.spacingLarge)
+            .testTag("approval:$task"),
+    ) {
+        Text(approval.waiting_for, style = theme.title())
+        approval.lines.forEach { Text("• $it", style = theme.body()) }
+        if (approval.diff_hash.isNotEmpty()) Text("Diff ${approval.diff_hash}", style = theme.mono(color = theme.muted))
+        if (approval.branch.isNotEmpty()) Text("Branch ${approval.branch}", style = theme.mono(color = theme.muted))
+        if (approval.diff_command.isNotEmpty()) {
+            Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing), verticalAlignment = Alignment.CenterVertically) {
+                Text(approval.diff_command, style = theme.mono(color = theme.muted))
+                CopyButton("copy", approval.diff_command)
+            }
+        }
+        if (model.canAct) {
+            Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing)) {
+                Pill("Approve", prominent = true, modifier = Modifier.testTag("approval:$task:approve")) { model.approve(task, approval) }
+                Pill("Reject", modifier = Modifier.testTag("approval:$task:reject")) { rejecting = !rejecting }
+            }
+            if (rejecting) Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing), verticalAlignment = Alignment.CenterVertically) {
+                androidx.compose.foundation.text.BasicTextField(
+                    value = reason,
+                    onValueChange = { reason = it },
+                    textStyle = theme.body(),
+                    decorationBox = { inner ->
+                        Box(
+                            Modifier.fillMaxWidth().background(theme.background, RoundedCornerShape(theme.radius))
+                                .border(1.dp, theme.border, RoundedCornerShape(theme.radius)).padding(theme.spacing),
+                        ) {
+                            if (reason.isEmpty()) Text("Why? (optional)", style = theme.body(color = theme.muted))
+                            inner()
+                        }
+                    },
+                    modifier = Modifier.weight(1f)
+                        .onPreviewKeyEvent { e ->
+                            if (e.type == KeyEventType.KeyDown && e.key == Key.Enter) { reject(); true } else false
+                        }
+                        .testTag("approval:$task:reason"),
+                )
+                Pill("Send rejection", modifier = Modifier.testTag("approval:$task:send-reject")) { reject() }
+            }
+        } else if (model.connected) {
+            Text("Only the owner can approve or reject. You are connected as ${model.identity}.", style = theme.small())
+        }
+        model.lastResult?.let { Text(it, style = theme.body(color = theme.attention), modifier = Modifier.testTag("approval:$task:refused")) }
     }
 }
 
 /** The actions a task offers now: exactly the daemon's `allowed_actions`. */
 @Composable
-fun ActionButtons(model: MonitorModel, row: TaskRow) {
+fun ActionButtons(model: MonitorModel, row: TaskRow, hasApprovalView: Boolean = false) {
     val theme = LocalTheme.current
     Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing)) {
-        row.allowed_actions.filter { it != "answer" && it != "edit" }.forEach { a ->
+        // Approve and Reject have their own view wherever there is one; a non-owner sees no
+        // buttons at all for what only the owner may do.
+        row.allowed_actions.filter {
+            it != "answer" && it != "edit" &&
+                !(hasApprovalView && (it == "approve" || it == "reject")) &&
+                !(!model.canAct && (it == "approve" || it == "reject"))
+        }.forEach { a ->
             Pill(label(a), prominent = a == "approve", modifier = Modifier.testTag("action:${row.id}:$a")) { run(model, row, a) }
         }
     }

@@ -121,13 +121,82 @@ impl<'a> Ctx<'a> {
         };
         let waiting_approval =
             t.activity == Activity::Waiting(WaitReason::On(APPROVAL_WAIT.into()));
-        if waiting_approval {
+        if (waiting_approval || self.pending_hold(t).is_some()) && !a.contains(&"approve") {
             a.extend(["approve", "reject"]);
         }
         if t.state.is_step() && t.route.is_some_and(Route::skipped_exploring) {
             a.push("explore_anyway");
         }
         a.into_iter().map(String::from).collect()
+    }
+
+    /// A self-hosting hold nobody has approved yet, for a task still going.
+    fn pending_hold(&self, t: &Task) -> Option<mason_store::HoldRow> {
+        if !t.state.is_step() {
+            return None;
+        }
+        self.d
+            .store
+            .hold(t.id.0)
+            .ok()
+            .flatten()
+            .filter(|h| h.approved_by.is_none())
+    }
+
+    /// Does the task wait for the owner's decision on something other than a question?
+    fn needs_approval(&self, t: &Task) -> bool {
+        t.state == State::Proposed
+            || t.activity == Activity::Waiting(WaitReason::On(APPROVAL_WAIT.into()))
+            || self.pending_hold(t).is_some()
+    }
+
+    /// What the task is waiting on for approval, in full.
+    fn approval(&self, t: &Task) -> Option<Approval> {
+        let p = self.d.project(t.project);
+        let branch = p.map_or_else(String::new, |p| p.branch(t.id.0));
+        let diff_command = p.map_or_else(String::new, |p| {
+            format!(
+                "git -C {} diff {}...{branch}",
+                p.path.display(),
+                p.base_ref()
+            )
+        });
+        if let Some(h) = self.pending_hold(t) {
+            return Some(Approval {
+                kind: "hold".into(),
+                waiting_for: "Your approval of a change to MASON's own rules".into(),
+                lines: h
+                    .reasons
+                    .split("; ")
+                    .filter(|l| !l.is_empty())
+                    .map(String::from)
+                    .collect(),
+                diff_hash: h.diff_hash,
+                branch,
+                diff_command,
+            });
+        }
+        if t.activity == Activity::Waiting(WaitReason::On(APPROVAL_WAIT.into())) {
+            return Some(Approval {
+                kind: "approval".into(),
+                waiting_for: format!("Your approval at the {} step", t.step),
+                lines: vec![],
+                diff_hash: String::new(),
+                branch,
+                diff_command,
+            });
+        }
+        if t.state == State::Proposed {
+            return Some(Approval {
+                kind: "proposed".into(),
+                waiting_for: "Your approval to start this proposed task".into(),
+                lines: vec![],
+                diff_hash: String::new(),
+                branch: String::new(),
+                diff_command: String::new(),
+            });
+        }
+        None
     }
 
     fn why_waiting(&self, t: &Task) -> String {
@@ -296,7 +365,7 @@ impl<'a> Ctx<'a> {
                 matches!(
                     t.state,
                     State::NeedsAttention | State::Failed | State::Proposed
-                )
+                ) || self.needs_approval(t)
             })
             .count() as u32;
         let mut banners = vec![];
@@ -415,7 +484,7 @@ impl<'a> Ctx<'a> {
             .collect();
         let mut attention: Vec<&&Task> = tasks
             .iter()
-            .filter(|t| t.state == State::NeedsAttention)
+            .filter(|t| t.state == State::NeedsAttention || self.needs_approval(t))
             .collect();
         attention.sort_by_key(|t| (t.enqueued_at, t.id));
         let llm = crate::sched::llm_resource(crate::sched::DEFAULT_ACCOUNT);
@@ -426,6 +495,7 @@ impl<'a> Ctx<'a> {
                 .map(|t| AttentionItem {
                     task: Some(self.row(t)),
                     card: self.card(t),
+                    approval: self.approval(t),
                 })
                 .collect(),
             active: tasks
@@ -533,6 +603,7 @@ impl<'a> Ctx<'a> {
                 .map(|r| r.name.clone())
                 .unwrap_or_default(),
             explore_returns: t.explore_returns,
+            approval: self.approval(t),
         })
     }
 

@@ -17,7 +17,10 @@ import kotlin.system.exitProcess
  *
  *     conformance --port P --out DIR     dump what the client shows at every demo checkpoint
  *     snapshot --port P --out DIR        render screenshots from `masond --demo-manual`
- *     answer --port P --task N [--option 1]   answer a task's open question as the card does
+ *     answer --port P --task N [--option 1 | --text WORDS] [--hash H]   answer a task's open question as the card does
+ *     approve --port P --task N [--diff HASH]   what the Approve button sends (the hold's diff hash, as shown)
+ *     reject --port P --task N [--reason WORDS]   what the Reject button sends
+ *     dump --port P --out DIR            write what the home page shows now (a real daemon), as items
  *     cancel --port P --task N           cancel a task as the Cancel button does
  *     skip --port P --task N [--step S]  skip a test step as the Skip button does
  */
@@ -75,6 +78,15 @@ fun main(argv: Array<String>) {
         "editor" -> editor(model, args, File(args.opt("--out") ?: fail("--out DIR")))
         "snapshot" -> snapshots(model, File(args.opt("--out") ?: fail("--out DIR")))
         "answer" -> answer(model, args)
+        "approve", "reject" -> approval(model, cmd, args)
+        "dump" -> {
+            val out = File(args.opt("--out") ?: fail("--out DIR"))
+            out.mkdirs()
+            settle(model)
+            val items = model.visibleItems()
+            File(out, "checkpoint-0.json").writeText(items.toJsonText())
+            println("the monitor shows ${items.size} items")
+        }
         "cancel" -> {
             val t = args.opt("--task")?.toLongOrNull() ?: fail("--task N")
             val r = call(model, Command(cancel = mason.v1.TaskRef(task = t), actor = model.identity), "cancel")
@@ -95,15 +107,50 @@ fun main(argv: Array<String>) {
 
 private fun answer(model: MonitorModel, args: List<String>) {
     val t = args.opt("--task")?.toLongOrNull() ?: fail("--task N")
-    val option = args.opt("--option") ?: "1"
+    // An option number, or text for the Other box (sent as free text, as the CLI does).
+    val text = args.opt("--text")
+    val option = text ?: args.opt("--option") ?: "1"
     until("task #$t's decision card") { model.home?.attention?.any { it.task?.id == t && it.card != null } == true }
     val card = model.home!!.attention.first { it.task?.id == t }.card!!
     println("card: ${card.ask}")
+    if (!model.canAct) { println("not the owner: the card shows no buttons"); return }
     println("options: " + card.options.joinToString(" | ") { it.label + if (it.recommended) " (recommended)" else "" })
-    val r = call(model, Command(answer = Answer(task = t, answer = option, card_hash = card.hash), actor = model.identity), "answer")
-    if (!r.ok) fail("the daemon refused the answer: ${r.error}")
+    // --hash sends a card hash the owner was not looking at, to see a stale card refused.
+    val r = call(model, Command(answer = Answer(task = t, answer = option, card_hash = args.opt("--hash") ?: card.hash), actor = model.identity), "answer")
+    if (!r.ok) fail("the daemon refused the answer (${r.status}): ${r.error}")
+    // What the daemon recorded as the answer ("Other: ..." for free text).
+    (Codec.json(r.json)?.get("answer") as? String)?.let { println("the daemon recorded: $it") }
     until("the task to leave needs-you") { model.home?.attention?.none { it.task?.id == t } == true }
-    println("answered task #$t with option $option; it is no longer waiting for the owner")
+    println("answered task #$t with ${if (text != null) "text \"$option\"" else "option $option"}; it is no longer waiting for the owner")
+}
+
+/**
+ * What the Approve and Reject buttons do: find the task's approval in the Home view, print what it
+ * shows, and send Approve (with the diff hash shown, or `--diff` to try another) or Reject.
+ */
+private fun approval(model: MonitorModel, cmd: String, args: List<String>) {
+    val t = args.opt("--task")?.toLongOrNull() ?: fail("--task N")
+    until("task #$t's approval") { model.home?.attention?.any { it.task?.id == t && it.approval != null } == true }
+    val a = model.home!!.attention.first { it.task?.id == t }.approval!!
+    println("waiting for: ${a.waiting_for}")
+    a.lines.forEach { println("  - $it") }
+    if (a.diff_hash.isNotEmpty()) println("diff: ${a.diff_hash}")
+    if (a.diff_command.isNotEmpty()) println("show it: ${a.diff_command}")
+    if (!model.canAct) { println("not the owner: the view shows no buttons"); return }
+    val c = if (cmd == "approve") {
+        val d = args.opt("--diff")
+        when {
+            d != null -> Command(approve_hold = mason.v1.ApproveHold(task = t, diff_hash = d), actor = model.identity)
+            a.diff_hash.isEmpty() -> Command(approve = mason.v1.TaskRef(task = t), actor = model.identity)
+            else -> Command(approve_hold = mason.v1.ApproveHold(task = t, diff_hash = a.diff_hash), actor = model.identity)
+        }
+    } else {
+        Command(reject = mason.v1.Reject(task = t, reason = args.opt("--reason") ?: ""), actor = model.identity)
+    }
+    val r = call(model, c, cmd)
+    if (!r.ok) fail("the daemon refused (${r.status}): ${r.error}")
+    until("the task to leave needs-you") { model.home?.attention?.none { it.task?.id == t && it.approval != null } == true }
+    println("${if (cmd == "approve") "approved" else "rejected"} task #$t; it no longer waits for the owner")
 }
 
 /**
