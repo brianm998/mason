@@ -2,6 +2,7 @@
 package mason.monitor
 
 import mason.v1.Approval
+import mason.v1.CellState
 import mason.v1.DecisionCard
 import mason.v1.TaskRow
 import org.json.JSONArray
@@ -31,6 +32,11 @@ fun TaskRow.item(prefix: String, order: Int): Item {
     }
     return Item("$prefix:$id", texts, allowed_actions, order)
 }
+
+/** One item per running step with a live record: what its progress says, with no clock text. */
+fun TaskRow.progressItems(now: Long): List<Item> =
+    progress.filter { it.state == CellState.PART && it.run != 0L }
+        .map { Item("progress:$id:${it.step}", it.progressTexts(now)) }
 
 fun DecisionCard.item(task: Long, owner: Boolean = true): Item {
     val texts = mutableListOf(ask, why)
@@ -71,7 +77,10 @@ fun MonitorModel.visibleItems(): List<Item> {
                 listOf(sec.title, sec.count.toString(), if (open) "expanded" else "collapsed"),
                 order = i,
             )
-            if (open) filteredRows(sec).forEachIndexed { j, r -> out += r.item("row:${sec.state}", j) }
+            if (open) filteredRows(sec).forEachIndexed { j, r ->
+                out += r.item("row:${sec.state}", j)
+                out += r.progressItems(daemonNow())
+            }
         }
     }
     if (page == Page.Home) home?.let { h ->
@@ -95,6 +104,7 @@ fun MonitorModel.visibleItems(): List<Item> {
         val r = d.row
         if (r != null) {
             out += r.item("detail", 0)
+            out += r.progressItems(daemonNow())
             d.steps.forEachIndexed { i, s -> out += Item("step:${s.run}", listOf(s.name, s.outcome), order = i) }
             d.card?.let { out += it.item(r.id, canAct) }
             d.approval?.let { out += it.item(r.id, canAct) }

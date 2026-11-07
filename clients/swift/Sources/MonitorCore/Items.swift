@@ -40,6 +40,15 @@ extension TaskRow {
     }
 }
 
+extension TaskRow {
+    /// One item per running step with a live record: what its progress says, with no clock text.
+    func progressItems(now: UInt64) -> [Item] {
+        progress.filter { $0.state == .part && $0.run != 0 }.map {
+            Item(id: "progress:\(id):\($0.step)", texts: $0.progressTexts(now: now))
+        }
+    }
+}
+
 extension Mason_V1_DecisionCard {
     func item(task: UInt64, owner: Bool = true) -> Item {
         var texts = [ask, why]
@@ -96,6 +105,7 @@ extension MonitorModel {
                 if open {
                     for (j, r) in filteredRows(sec).enumerated() {
                         out.append(r.item(prefix: "row:\(sec.state)", order: j))
+                        out.append(contentsOf: r.progressItems(now: daemonNow()))
                     }
                 }
             }
@@ -123,6 +133,7 @@ extension MonitorModel {
         if page == .pipeline, let e = editor { out.append(contentsOf: e.items()) }
         if case .task = page, let d = taskDetail, d.hasRow {
             out.append(d.row.item(prefix: "detail", order: 0))
+            out.append(contentsOf: d.row.progressItems(now: daemonNow()))
             for (i, s) in d.steps.enumerated() {
                 out.append(Item(id: "step:\(s.run)", texts: [s.name, s.outcome], order: i))
             }

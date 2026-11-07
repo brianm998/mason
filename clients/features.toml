@@ -62,7 +62,7 @@ swift = "done"
 compose = "done"
 
 [feature.progress-cells]
-description = "Filled, part, hatched and empty cells; no percentages; amber and never red when slow"
+description = "Filled, part, hatched and empty cells; a running cell fills in proportion to a real total, lighter for a typical one, outline for none; a percentage only from a real total, the count and typical range for a history total, the count alone for none; a progress line per running step with a counting time; amber and never red when slow or quiet"
 swift = "done"
 compose = "done"
 

@@ -12,9 +12,11 @@
 //! else. A ticker flushes the sends that came due and does the writing.
 
 use crate::daemon::{now_ms, Daemon};
-use mason_core::progress::{history_total, Change, Progress, Push, Source, SubProgress, Throttle};
+use mason_core::progress::{
+    middle_half, stale_after, Change, Progress, Push, Source, SubProgress, Throttle, TodoItem,
+};
 use mason_core::*;
-use mason_protocol::{CellState, ProgressCell, ProgressSource};
+use mason_protocol::{CellState, ProgressCell, ProgressSource, ProgressSub, TodoItem as PbTodo};
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
@@ -34,6 +36,8 @@ pub struct Update {
     pub run: u64,
     pub cell: ProgressCell,
     pub now_ms: u64,
+    /// Whole output lines since the last push (at most 40).
+    pub log: Vec<String>,
 }
 
 struct Live {
@@ -85,17 +89,41 @@ pub fn cell_of(p: &Progress, state: CellState, label: &str) -> ProgressCell {
         started_ms: p.started_ms,
         updated_at_ms: p.updated_at_ms,
         run: p.run,
+        subs: p
+            .subs
+            .iter()
+            .map(|s| ProgressSub {
+                name: s.name.clone(),
+                unit: s.unit.clone(),
+                done: n(s.done.value),
+                total: n(s.total.value),
+                done_source: source(s.done.source) as i32,
+                total_source: source(s.total.source) as i32,
+            })
+            .collect(),
+        todo: p
+            .todo
+            .iter()
+            .map(|t| PbTodo {
+                text: t.text.clone(),
+                status: t.status.clone(),
+            })
+            .collect(),
+        total_low: n(p.total_low),
+        history_samples: p.history_samples,
+        stale_after_ms: p.stale_after_ms,
     }
 }
 
 impl Daemon {
-    fn progress_update(&self, l: &Live, state: CellState, now: u64) -> Update {
+    fn progress_update(&self, l: &mut Live, state: CellState, now: u64) -> Update {
         Update {
             task: l.task.0,
             project: l.project.0,
             run: l.p.run,
             cell: cell_of(&l.p, state, "running"),
             now_ms: now,
+            log: std::mem::take(&mut l.p.pending_log),
         }
     }
 
@@ -127,7 +155,15 @@ impl Daemon {
             .into_iter()
             .map(|(done, _)| done)
             .collect();
-        p.offer_history_total(history_total(&samples).filter(|t| *t > 0));
+        p.offer_history_total(
+            middle_half(&samples).filter(|(_, hi)| *hi > 0),
+            samples.len(),
+        );
+        let gaps = self
+            .store
+            .history_gaps(project, &r.name)
+            .unwrap_or_default();
+        p.stale_after_ms = stale_after(&gaps);
         let now = now_ms();
         let l = Live {
             task,
@@ -138,6 +174,20 @@ impl Daemon {
             dirty: !resumed,
         };
         self.progress.lock().insert(run.0, l);
+    }
+
+    /// Demo only: put a ready-made record in the book, as if its step were running.
+    /// Nothing is pushed or stored; the views carry it.
+    pub fn progress_seed(&self, task: TaskId, project: ProjectId, p: Progress) {
+        let l = Live {
+            task,
+            project,
+            p,
+            th: Throttle::new(now_ms()),
+            persisted_ms: now_ms(),
+            dirty: false,
+        };
+        self.progress.lock().insert(l.p.run, l);
     }
 
     /// Output of a run's step host, at an absolute offset into the stream.
@@ -240,6 +290,18 @@ impl Daemon {
         });
     }
 
+    /// Replace the agent's todo list of a run.
+    pub fn progress_todo(&self, run: StepRunId, todo: Vec<TodoItem>) {
+        self.progress_report(run, |p, now| {
+            if p.todo == todo {
+                return Change::None;
+            }
+            p.todo = todo;
+            p.updated_at_ms = now;
+            Change::Urgent
+        });
+    }
+
     /// The live record of a run, if it is in progress.
     pub fn progress_of(&self, run: u64) -> Option<Progress> {
         self.progress.lock().get(&run).map(|l| l.p.clone())
@@ -262,7 +324,7 @@ impl Daemon {
     /// typical figures; any outcome drops the live record. A run that is
     /// still open (the daemon is stopping) keeps its stored one.
     pub fn progress_finish(&self, run: StepRunId) {
-        let Some(l) = self.progress.lock().remove(&run.0) else {
+        let Some(mut l) = self.progress.lock().remove(&run.0) else {
             return;
         };
         let now = now_ms();
@@ -285,6 +347,7 @@ impl Daemon {
                 &l.p.step,
                 l.p.done.value,
                 l.p.output.lines,
+                l.p.max_gap_ms,
                 now,
             );
         }
@@ -294,7 +357,8 @@ impl Daemon {
         } else {
             CellState::Empty
         };
-        self.progress_publish(self.progress_update(&l, state, now));
+        let u = self.progress_update(&mut l, state, now);
+        self.progress_publish(u);
     }
 
     /// Flush the sends that came due and write the records that are old.

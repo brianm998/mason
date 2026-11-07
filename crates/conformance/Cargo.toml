@@ -20,6 +20,7 @@ name = "conformance"
 path = "src/main.rs"
 
 [dependencies]
+mason-core = { version = "0.0.0", path = "../core" }
 mason-plugins = { version = "0.0.0", path = "../plugins" }
 mason-protocol = { version = "0.0.0", path = "../protocol" }
 serde_json = "1.0.154"
