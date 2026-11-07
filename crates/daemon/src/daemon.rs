@@ -170,6 +170,7 @@ impl Daemon {
             d.spawn_sweeper();
             d.spawn_watcher();
             crate::tracker::spawn(&d);
+            crate::selfguard::on_start(&d);
         }
         Ok(d)
     }

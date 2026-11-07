@@ -113,6 +113,9 @@ fn task_json(d: &Daemon, w: &World, t: &Task, detail: bool) -> Value {
             .iter()
             .map(debt_json)
             .collect::<Vec<_>>());
+        v["self_hold"] = d.store.hold(t.id.0).ok().flatten().map_or(Value::Null, |h| {
+            json!({"reasons": h.reasons, "approved_by": h.approved_by, "since": h.at})
+        });
         v["failure"] = t.failure.as_ref().map_or(Value::Null, |f| json!(f));
         v["question"] = crate::attention::card_of(d, t).map_or(Value::Null, |(c, _)| json!(c.ask));
         v["card"] = crate::attention::card_of(d, t)
@@ -228,6 +231,8 @@ async fn add_task(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res {
                     ),
                 ));
             };
+            crate::selfguard::check_filing(&d2, pid)
+                .map_err(|e| fail(StatusCode::TOO_MANY_REQUESTS, e))?;
             let title = b["title"].as_str().unwrap_or_default().trim().to_string();
             if title.is_empty() || title.chars().count() > 200 {
                 return Err(fail(
@@ -377,10 +382,27 @@ async fn retry(
 }
 
 /// Approve: a proposed task (let it start) or an approval step (let it go on).
-async fn approve(Shared(d): Shared<Arc<Daemon>>, Path(id): Path<u64>) -> Res {
+async fn approve(
+    Shared(d): Shared<Arc<Daemon>>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<u64>,
+) -> Res {
+    let who = headers
+        .get("x-mason-as")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
     let d2 = d.clone();
     d.pool
         .run(move || {
+            // A self-change held for the owner is approved by the owner's identity alone.
+            match crate::selfguard::approve(&d2, TaskId(id), &who) {
+                Ok(true) => return Ok(()),
+                Ok(false) => {}
+                Err((code, msg)) => {
+                    return Err(fail(StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_REQUEST), msg))
+                }
+            }
             let w = d2.world().map_err(store_err)?;
             let t = w
                 .tasks
@@ -911,6 +933,44 @@ async fn update_ack(Shared(d): Shared<Arc<Daemon>>) -> Res {
         .await
         .map_err(pool_err)?;
     Ok(Json(json!({"acknowledged": true})))
+}
+
+/// MASON working on itself: the limits and where they stand, and the changes held for you.
+async fn self_status(Shared(d): Shared<Arc<Daemon>>) -> Res {
+    let d2 = d.clone();
+    let v = d
+        .pool
+        .run(move || {
+            let now = now_ms();
+            let projects: Vec<Value> = d2
+                .projects
+                .iter()
+                .filter_map(|(pid, p)| p.self_cfg.as_ref().map(|c| (pid, p, c)))
+                .map(|(pid, p, c)| {
+                    let s = crate::selfguard::status(&d2, *pid, c, now);
+                    json!({
+                        "project": p.id,
+                        "open": s.open, "max_open": c.max_open,
+                        "week": s.week, "per_week": c.per_week,
+                        "steps": s.steps, "max_steps": c.max_steps, "period_h": c.period_h,
+                        "cooldown_until_ms": s.cooldown_until_ms,
+                        "blocked": crate::selfguard::check(&s, c).err(),
+                        "protect_extra": c.protect,
+                    })
+                })
+                .collect();
+            let holds: Vec<Value> = d2
+                .store
+                .holds()
+                .unwrap_or_default()
+                .iter()
+                .map(|h| json!({"task": h.task, "reasons": h.reasons, "since": h.at, "approved_by": h.approved_by}))
+                .collect();
+            json!({"projects": projects, "holds": holds})
+        })
+        .await
+        .map_err(pool_err)?;
+    Ok(Json(v))
 }
 
 /// A webhook from GitHub (directly, or through a relay such as `gh webhook
@@ -1538,6 +1598,7 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/demo", get(demo_status))
         .route("/demo/next", post(demo_next))
         .route("/landing", get(landing_status))
+        .route("/self", get(self_status))
         .route("/hooks/github", post(github_hook))
         .route("/update", get(update_status).post(update_start))
         .route("/update/ack", post(update_ack))

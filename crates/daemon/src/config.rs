@@ -138,6 +138,55 @@ pub struct ProjectCfg {
     pub overlay_text: String,
     /// The outside services: git host, build system, issue tracker.
     pub services: ServicesCfg,
+    /// Present when this project is MASON's own repository (`[self]`): its changes
+    /// to gates and the like stop for the owner, and its self-tasks are limited.
+    pub self_cfg: Option<SelfCfg>,
+}
+
+/// `[self]` of the project file (Part 13).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SelfCfg {
+    /// More globs to protect, added to the compiled list (never removing from it).
+    pub protect: Vec<String>,
+    /// Self-tasks that may be open (not landed, failed or cancelled) at once.
+    pub max_open: u32,
+    /// Self-tasks that may be filed in a week.
+    pub per_week: u32,
+    /// Agent steps self-tasks may start per period: the cap on spend. (Token cost is
+    /// not recorded yet, so steps are the measure.)
+    pub max_steps: u32,
+    pub period_h: u64,
+    /// After a rollback, no self-task is filed for this long.
+    pub cooldown_h: u64,
+}
+
+fn parse_self(id: &str, doc: &DocumentMut) -> Result<Option<SelfCfg>, String> {
+    let Some(t) = doc.get("self").and_then(|v| v.as_table_like()) else {
+        return Ok(None);
+    };
+    let int = |k: &str, d: u64| -> Result<u64, String> {
+        match t.get(k) {
+            None => Ok(d),
+            Some(v) => v.as_integer().filter(|n| *n >= 1).map(|n| n as u64).ok_or_else(|| format!("{id}: `[self] {k}` must be a whole number from 1")),
+        }
+    };
+    let protect: Vec<String> = match t.get("protect") {
+        None => vec![],
+        Some(v) => v
+            .as_array()
+            .ok_or_else(|| format!("{id}: `[self] protect` must be a list of globs"))?
+            .iter()
+            .filter_map(|x| x.as_str().map(String::from))
+            .collect(),
+    };
+    Ok(Some(SelfCfg {
+        protect,
+        max_open: int("max_open", 3)? as u32,
+        per_week: int("per_week", 10)? as u32,
+        max_steps: int("max_steps", 40)? as u32,
+        period_h: int("period_h", 24)?,
+        cooldown_h: int("cooldown_h", 24)?,
+    }))
 }
 
 /// `[host]`, `[ci]` and `[tracker]` of the project file. Credentials are
@@ -389,6 +438,7 @@ pub fn parse_project(id: &str, text: &str) -> Result<ProjectCfg, String> {
             .unwrap_or(false),
         overlay_text: text.to_string(),
         services: parse_services(id, &doc)?,
+        self_cfg: parse_self(id, &doc)?,
     })
 }
 

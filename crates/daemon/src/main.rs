@@ -160,6 +160,7 @@ fn main() {
                 Decision::Run(s) => s,
                 Decision::RollBack { from, to } => {
                     rt.mark_bad(&from);
+                    rt.record_rollback(&from, &to, now);
                     let _ = rt.set_current(&to);
                     rt.leave_alert(&format!(
                         "{} crashed three times in five minutes and was rolled back to {}",

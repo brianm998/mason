@@ -937,6 +937,11 @@ fn land_job(c: &Ctx) {
     if let Err(why) = prepare_worktree_only(c) {
         return c.fail(why);
     }
+    // MASON's own repository: a change to its gates (or one that weakens them) waits for
+    // the owner, by the running version's rules, before it may join the queue.
+    if let crate::selfguard::Gate::Gone = crate::selfguard::gate(c) {
+        return;
+    }
     // Landing is batched per project: join the queue and wait for the verdict.
     let Some(verdict) = crate::landing::submit_and_wait(c) else {
         return; // approved, rejected, cancelled or retried while waiting

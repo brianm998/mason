@@ -1,0 +1,228 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+//! MASON working on its own repository (Part 13), as the *running* daemon sees
+//! it. A project with a `[self]` section is MASON's own:
+//!
+//! - **Holds.** Before a self-change joins the landing queue, the running
+//!   version's compiled rules (`protect`) look at its diff. If it touches a gate,
+//!   guard, budget, verdict or trust file, or weakens one anywhere (a removed
+//!   assertion, a raised limit, a broadened skip), the task waits for the owner,
+//!   and the approval is for that exact diff.
+//! - **Limits.** Open self-tasks, tasks per week and agent steps per period are
+//!   capped; filing past a cap is refused with the number and the limit.
+//! - **Rollback.** A rollback starts a cooldown during which no self-task may be
+//!   filed, and files one proposal (waiting for the owner) saying what failed.
+
+use crate::config::{ProjectCfg, SelfCfg};
+use crate::daemon::now_ms;
+use crate::jobs::Ctx;
+use crate::protect;
+use crate::update::{Boots, Runtimes};
+use crate::Daemon;
+use mason_core::*;
+use mason_landing::git;
+use std::sync::Arc;
+use std::time::Duration;
+
+pub fn is_self(p: &ProjectCfg) -> bool {
+    p.self_cfg.is_some()
+}
+
+pub enum Gate {
+    /// Nothing stops it (or the owner approved this diff).
+    Go,
+    /// The task left the step while it waited.
+    Gone,
+}
+
+/// The change a task's branch makes: its paths and its diff, against the base.
+pub fn change_of(p: &ProjectCfg, branch: &str) -> Result<(Vec<String>, String), String> {
+    let range = format!("{}...{branch}", p.base_ref());
+    let names = git::run(&p.path, &["diff", "--name-only", &range]).map_err(|e| e.to_string())?;
+    let diff = git::run(&p.path, &["diff", "-U0", "--no-color", &range]).map_err(|e| e.to_string())?;
+    Ok((names.lines().map(String::from).filter(|l| !l.is_empty()).collect(), diff))
+}
+
+/// Run by the landing job before the task joins the queue.
+pub fn gate(c: &Ctx) -> Gate {
+    let Some(cfg) = c.project.self_cfg.clone() else {
+        return Gate::Go;
+    };
+    let d = &c.d;
+    let (paths, diff) = match change_of(&c.project, &c.branch) {
+        Ok(x) => x,
+        Err(e) => {
+            // If it cannot be read it cannot be vouched for: it waits like a flagged change.
+            return wait_for_owner(c, &format!("its change could not be read ({e})"), "unreadable");
+        }
+    };
+    let found = protect::inspect(&paths, &diff, &cfg.protect);
+    if found.clean() {
+        let _ = d.store.clear_hold(c.task.0);
+        return Gate::Go;
+    }
+    wait_for_owner(c, &found.explain(), &protect::diff_hash(&diff))
+}
+
+fn wait_for_owner(c: &Ctx, why: &str, hash: &str) -> Gate {
+    let d = &c.d;
+    let hold = match d.store.put_hold(c.task.0, hash, why, now_ms()) {
+        Ok(h) => h,
+        Err(_) => return Gate::Gone,
+    };
+    if hold.approved_by.is_some() {
+        return Gate::Go; // approved before (a restart, or a retry of the same diff)
+    }
+    let on = format!("waiting for your approval: this change {why}");
+    let key = format!("self-hold:{}", c.task.0);
+    d.landing().raise(
+        c.project_id,
+        &key,
+        "needs_you",
+        &format!("Task #{} changes MASON's own rules and waits for your approval: {why}. Approve with `mason task approve {}`.", c.task.0, c.task.0),
+    );
+    d.poke();
+    let waited = c.emit(EventKind::WaitStarted { task: c.task, on });
+    let result = loop {
+        std::thread::sleep(Duration::from_millis(300));
+        if !matches!(d.world(), Ok(w) if w.open_run(c.task) == Some(c.run)) {
+            break Gate::Gone;
+        }
+        if d.store.hold(c.task.0).ok().flatten().is_some_and(|h| h.approved_by.is_some() && h.diff_hash == hash) {
+            break Gate::Go;
+        }
+    };
+    d.landing().clear(c.project_id, &key);
+    if waited && matches!(result, Gate::Go) {
+        c.emit(EventKind::WaitEnded { task: c.task });
+    }
+    d.poke();
+    result
+}
+
+/// The owner approves a held self-change. Only the owner's identity counts, as
+/// for an answer; the approval is for the diff that was held.
+pub fn approve(d: &Arc<Daemon>, task: TaskId, who: &str) -> Result<bool, (u16, String)> {
+    let Some(hold) = d.store.hold(task.0).map_err(|e| (500, e.to_string()))? else {
+        return Ok(false); // not a held task: the ordinary approve applies
+    };
+    if hold.approved_by.is_some() {
+        return Err((409, format!("task #{} was already approved by {}", task.0, hold.approved_by.unwrap_or_default())));
+    }
+    if !crate::attention::is_owner(d, who) {
+        crate::attention::intervene(d, "refused_answer", Some(task), who, "not the owner's identity", "");
+        return Err((403, format!("{who:?} is not the owner's identity; only the owner can approve a change to MASON's own rules")));
+    }
+    d.store.approve_hold(task.0, who, now_ms()).map_err(|e| (500, e.to_string()))?;
+    crate::attention::intervene(d, "self_approve", Some(task), who, &hold.reasons, "");
+    d.landing().wake();
+    d.poke();
+    Ok(true)
+}
+
+// ---- limits ---------------------------------------------------------------------------------
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Status {
+    pub open: u32,
+    pub week: u32,
+    pub steps: u32,
+    pub cooldown_until_ms: Option<u64>,
+}
+
+const WEEK_MS: u64 = 7 * 24 * 3600 * 1000;
+
+pub fn status(d: &Daemon, pid: ProjectId, cfg: &SelfCfg, now: u64) -> Status {
+    let w = d.world().ok();
+    let (mut open, mut week, mut steps) = (0, 0, 0);
+    if let Some(w) = &w {
+        for t in w.tasks.values().filter(|t| t.project == pid) {
+            if !matches!(t.state, State::Landed | State::Failed | State::Canceled) {
+                open += 1;
+            }
+            if now.saturating_sub(t.enqueued_at.0) <= WEEK_MS {
+                week += 1;
+            }
+        }
+        let period = cfg.period_h * 3600 * 1000;
+        steps = w
+            .step_runs
+            .values()
+            .filter(|r| w.tasks.get(&r.task).is_some_and(|t| t.project == pid))
+            .filter(|r| matches!(r.step, State::Exploring | State::Developing | State::Review))
+            .filter(|r| now.saturating_sub(r.started_at.0) <= period)
+            .count() as u32;
+    }
+    let cooldown_until_ms = Runtimes::new(&d.cfg.data_dir)
+        .rollback()
+        .map(|(at, ..)| at + cfg.cooldown_h * 3600 * 1000)
+        .filter(|until| *until > now);
+    Status { open, week, steps, cooldown_until_ms }
+}
+
+/// May a task be filed in this project now? Not for MASON's own repository past a cap
+/// or during a cooldown. (Other projects have no such limits.)
+pub fn check_filing(d: &Daemon, pid: ProjectId) -> Result<(), String> {
+    let Some(p) = d.project(pid) else { return Ok(()) };
+    let Some(cfg) = &p.self_cfg else { return Ok(()) };
+    check(&status(d, pid, cfg, now_ms()), cfg)
+}
+
+pub fn check(s: &Status, cfg: &SelfCfg) -> Result<(), String> {
+    if let Some(until) = s.cooldown_until_ms {
+        let hours = until.saturating_sub(now_ms()).div_ceil(3_600_000);
+        return Err(format!("self-tasks are cooling down after a rollback, for about {hours} more hour(s); look at the proposal it filed"));
+    }
+    if s.open >= cfg.max_open {
+        return Err(format!("{} self-tasks are open and the limit is {}: let some land first", s.open, cfg.max_open));
+    }
+    if s.week >= cfg.per_week {
+        return Err(format!("{} self-tasks were filed this week and the limit is {}", s.week, cfg.per_week));
+    }
+    if s.steps >= cfg.max_steps {
+        return Err(format!("self-tasks have started {} agent steps in the last {} hours and the limit is {}", s.steps, cfg.period_h, cfg.max_steps));
+    }
+    Ok(())
+}
+
+/// At start: if the last rollback has not been looked into, file one proposal in each
+/// of MASON's own projects, waiting for the owner, with what is known.
+pub fn on_start(d: &Arc<Daemon>) {
+    let rt = Runtimes::new(&d.cfg.data_dir);
+    let Some((at, from, to, filed)) = rt.rollback() else { return };
+    if filed {
+        return;
+    }
+    let boots: Vec<String> = Boots::new(&rt)
+        .all()
+        .into_iter()
+        .filter(|b| b.sha == from)
+        .rev()
+        .take(8)
+        .map(|b| format!("{} {} {}", b.at_ms, &b.sha[..b.sha.len().min(12)], b.event))
+        .collect();
+    let mut any = false;
+    for (pid, p) in &d.projects {
+        if !is_self(p) {
+            continue;
+        }
+        any = true;
+        let _ = d.emit(EventKind::TaskFiled {
+            project: *pid,
+            title: format!("Investigate the rollback from {}", &from[..from.len().min(12)]),
+            body: format!(
+                "The update to {from} crashed three times in five minutes and the daemon rolled back to {to} (at {at} ms).\\n\\nStarts of that build, newest first:\\n{}\\n\\nFind out why it crashed and fix it. Self-tasks are on hold until the cooldown ends.",
+                boots.join("\\n")
+            ),
+            priority: Priority::High,
+            trust: TrustSource::Owner,
+            explored: false,
+            proposed: true,
+            blockers: vec![],
+            not_before: None,
+        });
+    }
+    if any {
+        rt.mark_rollback_filed();
+    }
+}

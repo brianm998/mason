@@ -218,6 +218,17 @@ const STEPS: &[&str] = &[
          mirrored TEXT NOT NULL DEFAULT '',
          PRIMARY KEY (project, number)
      );",
+    // 9: self-change holds (Part 13): a change to MASON's own repository that
+    // touches a gate, guard, budget, verdict or trust rule (or weakens one) waits
+    // here for the owner, and the approval is for that exact diff.
+    "CREATE TABLE self_holds (
+         task        INTEGER PRIMARY KEY,
+         diff_hash   TEXT NOT NULL,
+         reasons     TEXT NOT NULL,
+         at          INTEGER NOT NULL,
+         approved_by TEXT,
+         approved_at INTEGER
+     );",
 ];
 
 pub const SCHEMA_VERSION: u32 = STEPS.len() as u32;

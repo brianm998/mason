@@ -185,6 +185,26 @@ impl Runtimes {
         }
     }
 
+    /// A rollback happened: remembered so the daemon can start a cooldown on self-tasks
+    /// and file a proposal about it, once.
+    pub fn record_rollback(&self, from: &str, to: &str, at_ms: u64) {
+        let _ = std::fs::create_dir_all(&self.root);
+        let _ = atomic_write(&self.root.join("rollback"), &format!("{at_ms} {from} {to} open"));
+    }
+
+    /// `(at_ms, from, to, proposal_filed)` of the last rollback.
+    pub fn rollback(&self) -> Option<(u64, String, String, bool)> {
+        let t = self.read("rollback")?;
+        let mut p = t.split_whitespace();
+        Some((p.next()?.parse().ok()?, p.next()?.to_string(), p.next()?.to_string(), p.next()? == "filed"))
+    }
+
+    pub fn mark_rollback_filed(&self) {
+        if let Some((at, from, to, _)) = self.rollback() {
+            let _ = atomic_write(&self.root.join("rollback"), &format!("{at} {from} {to} filed"));
+        }
+    }
+
     /// A note for the next daemon to raise as an alert (it is read once).
     pub fn leave_alert(&self, text: &str) {
         let _ = std::fs::create_dir_all(&self.root);

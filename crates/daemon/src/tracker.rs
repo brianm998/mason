@@ -197,6 +197,12 @@ pub fn sync_items(d: &Arc<Daemon>, pid: ProjectId, label: &str, items: &[Item]) 
                     sum.ignored += 1;
                     continue;
                 }
+                // MASON's own repository takes tasks only within its limits; the item stays
+                // unimported and is looked at again next time.
+                if crate::selfguard::check_filing(d, pid).is_err() {
+                    sum.ignored += 1;
+                    continue;
+                }
                 let appended = d.emit(EventKind::TaskFiled {
                     project: pid,
                     title: it.title.clone(),

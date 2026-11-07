@@ -77,6 +77,7 @@ mason: command-line client for the MASON pipeline
   mason definition dry-run [FILE] [--scenarios FILE]
   mason definition show [--project P] | reload [--project P]
   mason landing                       batches, phases, freezes, and the landing queue
+  mason self                          MASON on its own repository: limits, and changes held for you
   mason update [--channel stable|main|branch:X | --sha S] [--rollback] [--check]
   mason update status | ack           the runtimes, a rollback alert, an update in progress
   mason config show [--project P]     every step's settings and where each came from
@@ -832,6 +833,33 @@ fn main() {
                         let _ = seen_down;
                     }
                 }
+            }
+        }
+        "self" => {
+            finish(&a);
+            let r = or_die(d.call("GET", "/self", None));
+            if json_out {
+                return println!("{r:#}");
+            }
+            let list = r["projects"].as_array().cloned().unwrap_or_default();
+            if list.is_empty() {
+                println!("no project is MASON's own (a project file with a [self] section makes it so)");
+            }
+            for p in list {
+                println!(
+                    "{}: {}/{} open, {}/{} this week, {}/{} agent steps in {} h{}",
+                    p["project"].as_str().unwrap_or("?"),
+                    p["open"], p["max_open"], p["week"], p["per_week"], p["steps"], p["max_steps"], p["period_h"],
+                    p["blocked"].as_str().map_or(String::new(), |b| format!("\n  filing is blocked: {b}"))
+                );
+            }
+            for h in r["holds"].as_array().into_iter().flatten() {
+                println!(
+                    "task #{:<4} {}: {}",
+                    h["task"],
+                    if h["approved_by"].is_null() { "WAITING FOR YOU" } else { "approved" },
+                    h["reasons"].as_str().unwrap_or("")
+                );
             }
         }
         "landing" => {

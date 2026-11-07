@@ -115,6 +115,7 @@ mod tests {
             card_rewriter: None,
             overlay_text: String::new(),
             services: Default::default(),
+            self_cfg: None,
         }
     }
 

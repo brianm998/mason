@@ -155,6 +155,17 @@ pub struct TrackerItemRow {
     pub mirrored: String,
 }
 
+/// A self-change waiting for (or given) the owner's approval.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HoldRow {
+    pub task: u64,
+    pub diff_hash: String,
+    pub reasons: String,
+    pub at: u64,
+    pub approved_by: Option<String>,
+    pub approved_at: Option<u64>,
+}
+
 /// A project's landing freeze: its post-land tier is red, so only the fix may land.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FreezeRow {
@@ -1282,6 +1293,79 @@ impl Store {
             })?;
             rows.collect()
         })
+    }
+
+    /// Record that a task's change needs approval. A hold for the same diff keeps its
+    /// approval; a different diff starts over, because an approval is for one diff.
+    pub fn put_hold(&self, task: u64, diff_hash: &str, reasons: &str, now_ms: u64) -> Result<HoldRow, StoreError> {
+        let (h, r) = (diff_hash.to_string(), reasons.to_string());
+        self.write(move |c| {
+            let same: bool = c
+                .query_row("SELECT diff_hash = ?2 FROM self_holds WHERE task = ?1", params![task as i64, h], |x| x.get(0))
+                .optional()?
+                .unwrap_or(false);
+            if !same {
+                c.execute(
+                    "INSERT OR REPLACE INTO self_holds(task, diff_hash, reasons, at) VALUES (?1,?2,?3,?4)",
+                    params![task as i64, h, r, now_ms as i64],
+                )?;
+            }
+            Ok(())
+        })?;
+        Ok(self.hold(task)?.expect("just written"))
+    }
+
+    pub fn hold(&self, task: u64) -> Result<Option<HoldRow>, StoreError> {
+        self.read(move |c| {
+            c.query_row(
+                "SELECT task, diff_hash, reasons, at, approved_by, approved_at FROM self_holds WHERE task = ?1",
+                params![task as i64],
+                |r| {
+                    Ok(HoldRow {
+                        task: r.get::<_, i64>(0)? as u64,
+                        diff_hash: r.get(1)?,
+                        reasons: r.get(2)?,
+                        at: r.get::<_, i64>(3)? as u64,
+                        approved_by: r.get(4)?,
+                        approved_at: r.get::<_, Option<i64>>(5)?.map(|x| x as u64),
+                    })
+                },
+            )
+            .optional()
+        })
+    }
+
+    pub fn holds(&self) -> Result<Vec<HoldRow>, StoreError> {
+        self.read(move |c| {
+            let mut st = c.prepare("SELECT task, diff_hash, reasons, at, approved_by, approved_at FROM self_holds ORDER BY task")?;
+            let rows = st.query_map([], |r| {
+                Ok(HoldRow {
+                    task: r.get::<_, i64>(0)? as u64,
+                    diff_hash: r.get(1)?,
+                    reasons: r.get(2)?,
+                    at: r.get::<_, i64>(3)? as u64,
+                    approved_by: r.get(4)?,
+                    approved_at: r.get::<_, Option<i64>>(5)?.map(|x| x as u64),
+                })
+            })?;
+            rows.collect()
+        })
+    }
+
+    /// Approve the hold, if there is an unapproved one. True if it was approved now.
+    pub fn approve_hold(&self, task: u64, who: &str, now_ms: u64) -> Result<bool, StoreError> {
+        let w = who.to_string();
+        self.write(move |c| {
+            c.execute(
+                "UPDATE self_holds SET approved_by = ?2, approved_at = ?3 WHERE task = ?1 AND approved_by IS NULL",
+                params![task as i64, w, now_ms as i64],
+            )
+            .map(|n| n > 0)
+        })
+    }
+
+    pub fn clear_hold(&self, task: u64) -> Result<(), StoreError> {
+        self.write(move |c| c.execute("DELETE FROM self_holds WHERE task = ?1", params![task as i64]).map(|_| ()))
     }
 
     pub fn set_freeze(
