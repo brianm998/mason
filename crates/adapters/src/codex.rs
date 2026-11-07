@@ -290,12 +290,10 @@ pub fn parse_line(line: &str, st: &mut ParseState) -> Vec<AgentEvent> {
             let m = v["error"]["message"].as_str().unwrap_or("the turn failed");
             st.result = Some(failure(m));
         }
-        Some("error") => {
-            // `turn.failed` follows with the same message and wins; this covers a
-            // stream that ends after the bare error.
-            if st.result.is_none() {
-                st.result = Some(failure(v["message"].as_str().unwrap_or("error")));
-            }
+        // `turn.failed` follows with the same message and wins; this covers a
+        // stream that ends after the bare error.
+        Some("error") if st.result.is_none() => {
+            st.result = Some(failure(v["message"].as_str().unwrap_or("error")));
         }
         _ => {}
     }

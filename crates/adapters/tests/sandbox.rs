@@ -12,6 +12,7 @@ fn policy(kind: SandboxKind) -> SandboxPolicy {
         kind,
         worktree: "/work/wt".into(),
         state_dir: "/work/state".into(),
+        extra: vec![],
     }
 }
 

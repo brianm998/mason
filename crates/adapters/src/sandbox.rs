@@ -48,6 +48,9 @@ pub struct SandboxPolicy {
     pub kind: SandboxKind,
     pub worktree: PathBuf,
     pub state_dir: PathBuf,
+    /// More places the CLI must write (its own session and config directory in
+    /// the home directory). Only paths that exist are bound.
+    pub extra: Vec<PathBuf>,
 }
 
 /// Is the sandbox's binary on `PATH`?
@@ -68,6 +71,7 @@ impl SandboxPolicy {
             kind,
             worktree: canon(worktree),
             state_dir: canon(state_dir),
+            extra: vec![],
         }
     }
 }
@@ -88,7 +92,7 @@ fn sbpl(p: &Path) -> Result<String, String> {
 pub fn sandbox_exec_profile(p: &SandboxPolicy) -> Result<String, String> {
     let mut s =
         String::from("(version 1)\n(allow default)\n(deny file-write*)\n(allow file-write*\n");
-    for path in [&p.worktree, &p.state_dir] {
+    for path in [&p.worktree, &p.state_dir].into_iter().chain(&p.extra) {
         s.push_str(&format!("  {}\n", sbpl(path)?));
     }
     for scratch in ["/private/tmp", "/private/var/folders", "/dev"] {
@@ -117,7 +121,13 @@ pub fn bwrap_args(p: &SandboxPolicy) -> Vec<String> {
     ]
     .map(String::from)
     .to_vec();
-    for d in [&wt, &st] {
+    let extra: Vec<String> = p
+        .extra
+        .iter()
+        .filter(|e| e.exists())
+        .map(|e| e.display().to_string())
+        .collect();
+    for d in [&wt, &st].into_iter().chain(&extra) {
         a.extend(["--bind".into(), d.clone(), d.clone()]);
     }
     a.extend(["--unshare-pid".into(), "--die-with-parent".into()]);

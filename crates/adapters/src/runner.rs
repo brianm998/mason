@@ -65,6 +65,46 @@ pub enum StepEnd {
     Failed(FailReason),
 }
 
+/// Would a stronger model help? Yes after an agent that ended its turns with no
+/// result or crashed; no after a timeout (more model is not more time), a hold
+/// (a wait), a question (the owner's turn) or anything that succeeded.
+pub fn worth_a_stronger_model(end: &StepEnd) -> bool {
+    matches!(
+        end,
+        StepEnd::Failed(FailReason::NoResult { .. } | FailReason::Crash { .. })
+    )
+}
+
+#[cfg(test)]
+mod ladder_tests {
+    use super::*;
+
+    #[test]
+    fn only_no_result_and_a_crash_move_up_a_model() {
+        assert!(worth_a_stronger_model(&StepEnd::Failed(
+            FailReason::NoResult { nudges: 2 }
+        )));
+        assert!(worth_a_stronger_model(&StepEnd::Failed(
+            FailReason::Crash { detail: "x".into() }
+        )));
+        for end in [
+            StepEnd::Failed(FailReason::Timeout),
+            StepEnd::Hold(HoldReason::UsageLimit { resets_at: None }),
+            StepEnd::Hold(HoldReason::ProviderDown { detail: "d".into() }),
+            StepEnd::Asked {
+                question: serde_json::json!({}),
+            },
+            StepEnd::Accepted {
+                tool: "t".into(),
+                submission: serde_json::json!({}),
+            },
+            StepEnd::ExplorationRequested { reason: "r".into() },
+        ] {
+            assert!(!worth_a_stronger_model(&end), "{end:?}");
+        }
+    }
+}
+
 /// Sums of what the stream reported. A field is `None` unless some invocation
 /// reported it, so a provider that reports nothing shows nothing.
 #[derive(Clone, Debug, Default, PartialEq)]
