@@ -250,6 +250,9 @@ final class MonitorCoreTests: XCTestCase {
         XCTAssertEqual(h.resources, [.init(name: "compile", kind: "machine", used: 1, limit: 2)])
         XCTAssertEqual(h.waiting, ["#4: Waiting for compile slot"])
         XCTAssertEqual(HealthSnapshot(json: "not json").resources, [])
+        let c = HealthSnapshot(json: ##"{"cpu":{"busy_pct":71,"compile_max_pct":50}}"##)
+        XCTAssertEqual(c.cpuLine, "CPU 71% busy; a compile starts below 50%.")
+        XCTAssertEqual(HealthSnapshot(json: ##"{"cpu":{"busy_pct":null,"compile_max_pct":80}}"##).cpuLine, "CPU not readable; a compile starts below 80%.")
     }
 
     // ---- versions (Part 15) ----

@@ -294,7 +294,7 @@ fn a_flood_of_agent_proposals_hits_the_weekly_cap_while_the_owner_keeps_filing()
 }
 
 #[test]
-fn cancelling_before_any_step_frees_a_slot_and_the_owner_is_still_held_by_max_open() {
+fn cancelling_before_any_step_frees_a_slot_and_the_owner_is_never_held_by_a_count() {
     let w = self_world("max_open = 3\nper_week = 2\n");
     let pid = w.d.project_id_by_name("scratch").unwrap();
     let a = file_task_as(&w.d, "a", "x", false, TrustSource::OwnerAgent, true);
@@ -306,10 +306,19 @@ fn cancelling_before_any_step_frees_a_slot_and_the_owner_is_still_held_by_max_op
     })
     .unwrap();
     assert!(selfguard::check_filing_as(&w.d, pid, TrustSource::Outside).is_ok());
-    // Three open (b and two of the owner's): the owner is refused by max_open.
-    file_task_as(&w.d, "m1", "x", false, TrustSource::Owner, true);
-    file_task_as(&w.d, "m2", "x", false, TrustSource::Owner, true);
-    let e = selfguard::check_filing_as(&w.d, pid, TrustSource::Owner).unwrap_err();
+    // More than max_open of the owner's own tasks: all accepted, none counted.
+    for i in 0..12 {
+        assert!(selfguard::check_filing_as(&w.d, pid, TrustSource::Owner).is_ok());
+        file_task_as(&w.d, &format!("m{i}"), "x", false, TrustSource::Owner, true);
+    }
+    assert!(selfguard::check_filing_as(&w.d, pid, TrustSource::Owner).is_ok());
+    let cfg = w.d.project(pid).unwrap().self_cfg.clone().unwrap();
+    let u = selfguard::usage(&w.d, pid, &cfg, mason_daemon::daemon::now_ms());
+    assert_eq!((u.status.open, u.yours_open), (1, 12));
+    // Others still hit max_open once three of theirs are open.
+    file_task_as(&w.d, "c", "x", false, TrustSource::OwnerAgent, true);
+    file_task_as(&w.d, "d", "x", false, TrustSource::OwnerAgent, true);
+    let e = selfguard::check_filing_as(&w.d, pid, TrustSource::OwnerAgent).unwrap_err();
     assert!(e.contains("3 self-tasks are open"), "{e}");
 }
 

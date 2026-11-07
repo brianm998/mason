@@ -119,6 +119,8 @@ impl Scratch {
         c.sweep_interval = Duration::from_secs(3600);
         c.heartbeat = Duration::from_millis(100);
         c.hold_retry = Duration::from_millis(300);
+        // Tests never read the machine's real load.
+        c.cpu = Some(mason_daemon::cpu::FakeCpu::new(0));
         c
     }
 

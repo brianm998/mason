@@ -26,7 +26,16 @@ data class HealthSnapshot(
     val resources: List<Resource> = emptyList(),
     val waiting: List<String> = emptyList(),
     val holders: List<String> = emptyList(),
+    /** Overall CPU use now, if the daemon could read it. */
+    val cpuBusy: Int? = null,
+    /** A compile starts only while CPU use is below this percent. */
+    val compileCpuMax: Int = 50,
 ) {
+    /** The CPU line of the Health page. */
+    val cpuLine: String
+        get() = cpuBusy?.let { "CPU $it% busy; a compile starts below $compileCpuMax%." }
+            ?: "CPU not readable; a compile starts below $compileCpuMax%."
+
     data class Resource(val name: String, val kind: String, val used: Int, val limit: Int)
 
     companion object {
@@ -45,6 +54,8 @@ data class HealthSnapshot(
                 },
                 waiting = list("waiting").map { "${it["label"] ?: "?"}: ${it["explain"] ?: ""}" },
                 holders = list("holders").map { it["label"] as? String ?: "?" },
+                cpuBusy = ((v["cpu"] as? Map<String, Any?>)?.get("busy_pct") as? Number)?.toInt(),
+                compileCpuMax = ((v["cpu"] as? Map<String, Any?>)?.get("compile_max_pct") as? Number)?.toInt() ?: 50,
             )
         }
     }

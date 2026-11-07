@@ -8,6 +8,7 @@
 
 pub mod attention;
 pub mod config;
+pub mod cpu;
 pub mod crash;
 pub mod daemon;
 pub mod defs;

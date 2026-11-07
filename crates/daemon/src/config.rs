@@ -14,9 +14,12 @@ use toml_edit::DocumentMut;
 pub struct DaemonConfig {
     pub data_dir: PathBuf,
     pub config_dir: PathBuf,
-    /// Tasks in a step at once. Admission waits when this many are running.
+    /// Agent sessions at once: the default of the `llm:claude` limit. It is not a cap
+    /// on tasks; `resources.toml` and `mason resources limit` override it.
     pub max_concurrent: usize,
     pub sweep_interval: Duration,
+    /// Where CPU use is read for the compile gate. `None`: `MASON_CPU_FILE`, else the OS.
+    pub cpu: Option<std::sync::Arc<dyn crate::cpu::CpuSource>>,
     pub heartbeat: Duration,
     pub host_bin: PathBuf,
     pub mcp_bin: PathBuf,
@@ -62,7 +65,8 @@ impl DaemonConfig {
         DaemonConfig {
             data_dir: data_dir.into(),
             config_dir: config_dir.into(),
-            max_concurrent: 2,
+            max_concurrent: 10,
+            cpu: None,
             sweep_interval: Duration::from_secs(120),
             heartbeat: Duration::from_secs(1),
             host_bin,
