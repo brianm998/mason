@@ -72,9 +72,11 @@ private struct GraphTab: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: theme.spacingLarge) {
-            ScrollView([.horizontal, .vertical]) { canvas }
-                .frame(minWidth: 520, maxWidth: .infinity, minHeight: 360, maxHeight: .infinity)
-                .background(theme.surface)
+            GeometryReader { geo in
+                ScrollView([.horizontal, .vertical]) { canvas(viewport: geo.size.width) }
+            }
+            .frame(minWidth: 520, maxWidth: .infinity, minHeight: 360, maxHeight: .infinity)
+            .background(theme.surface)
             ScrollView {
                 VStack(alignment: .leading, spacing: theme.spacingLarge) {
                     Palette(model: model, e: e)
@@ -85,16 +87,28 @@ private struct GraphTab: View {
         }
     }
 
-    var canvasSize: CGSize {
-        let w = (e.nodes.map { CGFloat($0.x) }.max() ?? 0) + Self.nodeW + 60
+    func horizontal(_ viewport: CGFloat) -> GraphLayout.Horizontal {
+        let x = Dictionary(e.nodes.map { ($0.name, Double($0.x)) }, uniquingKeysWith: { a, _ in a })
+        let back = e.edges.filter { $0.kind == "on_red" }.compactMap { ed -> GraphLayout.BackEdge? in
+            guard let f = x[ed.from], let t = x[ed.to] else { return nil }
+            return .init(fromX: f, toX: t, labeled: ed.bound > 0)
+        }
+        return GraphLayout.horizontal(nodeXs: Array(x.values), backEdges: back, viewport: Double(viewport))
+    }
+
+    func canvasSize(_ hz: GraphLayout.Horizontal) -> CGSize {
+        let w = CGFloat(hz.width)
         let h = max(CGFloat(e.lanes.count) * Self.laneH, (e.nodes.map { CGFloat($0.y) }.max() ?? 0) + Self.nodeH + 40)
-        return CGSize(width: max(w, 700), height: h)
+        return CGSize(width: w, height: h)
     }
 
     func center(_ n: Mason_V1_EditorNode) -> CGPoint { CGPoint(x: CGFloat(n.x) + Self.nodeW / 2, y: CGFloat(n.y) + Self.nodeH / 2) }
 
-    var canvas: some View {
-        ZStack(alignment: .topLeading) {
+    func canvas(viewport: CGFloat) -> some View {
+        let hz = horizontal(viewport)
+        let dx = CGFloat(hz.dx)
+        let canvasSize = canvasSize(hz)
+        return ZStack(alignment: .topLeading) {
             ForEach(Array(e.lanes.enumerated()), id: \.offset) { i, l in
                 Rectangle().fill(i % 2 == 0 ? theme.background.opacity(0.5) : Color.clear)
                     .frame(width: canvasSize.width, height: Self.laneH).offset(y: CGFloat(i) * Self.laneH)
@@ -107,8 +121,8 @@ private struct GraphTab: View {
                     var p = Path()
                     let back = edge.kind == "on_red"
                     let (s, t) = back
-                        ? (CGPoint(x: CGFloat(a.x), y: center(a).y), CGPoint(x: CGFloat(b.x), y: center(b).y))
-                        : (CGPoint(x: center(a).x, y: CGFloat(a.y) + Self.nodeH), CGPoint(x: center(b).x, y: CGFloat(b.y)))
+                        ? (CGPoint(x: CGFloat(a.x) + dx, y: center(a).y), CGPoint(x: CGFloat(b.x) + dx, y: center(b).y))
+                        : (CGPoint(x: center(a).x + dx, y: CGFloat(a.y) + Self.nodeH), CGPoint(x: center(b).x + dx, y: CGFloat(b.y)))
                     p.move(to: s)
                     if back { p.addCurve(to: t, control1: CGPoint(x: s.x - 70, y: s.y), control2: CGPoint(x: t.x - 70, y: t.y)) }
                     else { p.addCurve(to: t, control1: CGPoint(x: s.x, y: s.y + 40), control2: CGPoint(x: t.x, y: t.y - 40)) }
@@ -124,18 +138,18 @@ private struct GraphTab: View {
             ForEach(e.edges.filter { $0.kind == "on_red" && $0.bound > 0 }, id: \.self.from) { edge in
                 if let a = e.nodes.first(where: { $0.name == edge.from }) {
                     Text("red, at most \(edge.bound)×").font(theme.small()).foregroundStyle(theme.attention)
-                        .offset(x: CGFloat(a.x) - 100, y: center(a).y - 18)
+                        .offset(x: CGFloat(a.x) + dx - 100, y: center(a).y - 18)
                 }
             }
-            ForEach(e.nodes, id: \.name) { n in node(n) }
+            ForEach(e.nodes, id: \.name) { n in node(n, dx: dx) }
         }
         .frame(width: canvasSize.width, height: canvasSize.height, alignment: .topLeading)
     }
 
-    func node(_ n: Mason_V1_EditorNode) -> some View {
+    func node(_ n: Mason_V1_EditorNode, dx: CGFloat) -> some View {
         let selected = e.selected == n.name
         return NodeView(model: model, n: n, selected: selected)
-            .offset(x: CGFloat(n.x), y: CGFloat(n.y))
+            .offset(x: CGFloat(n.x) + dx, y: CGFloat(n.y))
     }
 }
 
