@@ -221,6 +221,32 @@ const WEEK_MS: u64 = 7 * 24 * 3600 * 1000;
 pub struct Usage {
     pub status: Status,
     pub yours: u32,
+    /// Agent steps of owner-filed tasks in the period: shown, never counted against `max_steps`.
+    pub yours_steps: u32,
+}
+
+/// Did the owner file this task? The one definition, shared by `count` (per_week) and
+/// `count_steps` (max_steps); decision 0022 and 0024.
+pub fn is_owner_filed(t: &Task) -> bool {
+    t.trust == TrustSource::Owner
+}
+
+/// Agent steps started within `period_ms` as `(counted, yours)`: a step counts unless its
+/// task was filed by the owner.
+pub fn count_steps<'a>(
+    runs: impl Iterator<Item = (&'a Task, u64)>,
+    now: u64,
+    period_ms: u64,
+) -> (u32, u32) {
+    let (mut counted, mut yours) = (0, 0);
+    for (t, _) in runs.filter(|(_, st)| now.saturating_sub(*st) <= period_ms) {
+        if is_owner_filed(t) {
+            yours += 1;
+        } else {
+            counted += 1;
+        }
+    }
+    (counted, yours)
 }
 
 /// The week's filings as `(counted, not_counted)`. A task counts unless the owner filed it,
@@ -229,7 +255,7 @@ pub fn count<'a>(tasks: impl Iterator<Item = &'a Task>, now: u64) -> (u32, u32) 
     let (mut counted, mut yours) = (0, 0);
     for t in tasks.filter(|t| now.saturating_sub(t.enqueued_at.0) <= WEEK_MS) {
         let unstarted = t.state == State::Canceled && t.attempts.is_empty();
-        if t.trust == TrustSource::Owner || unstarted {
+        if is_owner_filed(t) || unstarted {
             yours += 1;
         } else {
             counted += 1;
@@ -244,7 +270,7 @@ pub fn status(d: &Daemon, pid: ProjectId, cfg: &SelfCfg, now: u64) -> Status {
 
 pub fn usage(d: &Daemon, pid: ProjectId, cfg: &SelfCfg, now: u64) -> Usage {
     let w = d.world().ok();
-    let (mut open, mut week, mut yours, mut steps) = (0, 0, 0, 0);
+    let (mut open, mut week, mut yours, mut steps, mut yours_steps) = (0, 0, 0, 0, 0);
     if let Some(w) = &w {
         open = w
             .tasks
@@ -254,13 +280,17 @@ pub fn usage(d: &Daemon, pid: ProjectId, cfg: &SelfCfg, now: u64) -> Usage {
             .count() as u32;
         (week, yours) = count(w.tasks.values().filter(|t| t.project == pid), now);
         let period = cfg.period_h * 3600 * 1000;
-        steps = w
-            .step_runs
-            .values()
-            .filter(|r| w.tasks.get(&r.task).is_some_and(|t| t.project == pid))
-            .filter(|r| matches!(r.step, State::Exploring | State::Developing | State::Review))
-            .filter(|r| now.saturating_sub(r.started_at.0) <= period)
-            .count() as u32;
+        (steps, yours_steps) = count_steps(
+            w.step_runs
+                .values()
+                .filter(|r| matches!(r.step, State::Exploring | State::Developing | State::Review))
+                .filter_map(|r| {
+                    let t = w.tasks.get(&r.task)?;
+                    (t.project == pid).then_some((t, r.started_at.0))
+                }),
+            now,
+            period,
+        );
     }
     let cooldown_until_ms = Runtimes::new(&d.cfg.data_dir)
         .rollback()
@@ -274,6 +304,7 @@ pub fn usage(d: &Daemon, pid: ProjectId, cfg: &SelfCfg, now: u64) -> Usage {
             cooldown_until_ms,
         },
         yours,
+        yours_steps,
     }
 }
 
@@ -329,9 +360,9 @@ pub fn check_as(s: &Status, yours: u32, cfg: &SelfCfg, trust: TrustSource) -> Re
             yours
         ));
     }
-    if s.steps >= cfg.max_steps {
+    if trust != TrustSource::Owner && s.steps >= cfg.max_steps {
         return Err(format!(
-            "self-tasks have started {} agent steps in the last {} hours and the limit is {}",
+            "self-tasks have started {} agent steps in the last {} hours and the limit is {}: only agent and outside tasks' steps count, the owner's own are not counted",
             s.steps, cfg.period_h, cfg.max_steps
         ));
     }
@@ -493,6 +524,28 @@ mod tests {
     }
 
     #[test]
+    fn steps_count_only_agent_and_outside_work() {
+        let now = 10_000_000_000;
+        let o = task(TrustSource::Owner, State::Developing, true, now);
+        let a = task(TrustSource::OwnerAgent, State::Developing, true, now);
+        let x = task(TrustSource::Outside, State::Developing, true, now);
+        let period = 24 * 3600 * 1000;
+        let runs = vec![
+            (&o, now),
+            (&o, now),
+            (&a, now),
+            (&x, now),
+            (&a, now - period - 1), // outside the period
+        ];
+        assert_eq!(count_steps(runs.into_iter(), now, period), (2, 2));
+        let c = cfg();
+        let s = st(0, 0, 40, None);
+        assert!(check_as(&s, 0, &c, TrustSource::OwnerAgent).is_err());
+        assert!(check_as(&s, 0, &c, TrustSource::Outside).is_err());
+        assert!(check_as(&s, 0, &c, TrustSource::Owner).is_ok());
+    }
+
+    #[test]
     fn the_limit_refuses_at_ten_counted_but_not_the_owner() {
         let c = cfg();
         let now = 10 * WEEK_MS;
@@ -515,7 +568,10 @@ mod tests {
         assert!(check_as(&s, yours, &c, TrustSource::Owner).is_ok());
         // The other limits still stop the owner.
         assert!(check_as(&st(3, 0, 0, None), 0, &c, TrustSource::Owner).is_err());
-        assert!(check_as(&st(0, 0, 40, None), 0, &c, TrustSource::Owner).is_err());
+        // Changed by task 18 (decision 0024): the owner is no longer held to the step cap.
+        assert!(check_as(&st(0, 0, 40, None), 0, &c, TrustSource::Owner).is_ok());
+        assert!(check_as(&st(0, 0, 40, None), 0, &c, TrustSource::OwnerAgent).is_err());
+        assert!(check_as(&st(0, 0, 40, None), 0, &c, TrustSource::Outside).is_err());
         let until = now_ms() + 3_600_000;
         assert!(check_as(&st(0, 0, 0, Some(until)), 0, &c, TrustSource::Owner).is_err());
     }
