@@ -246,6 +246,86 @@ fn a_project_that_is_not_masons_own_has_no_holds_and_no_limits() {
     assert!(selfguard::check_filing(&w.d, pid).is_ok());
 }
 
+// ---- Stage 44: the weekly cap counts only work MASON starts for itself -----------------------
+
+#[test]
+fn a_flood_of_agent_proposals_hits_the_weekly_cap_while_the_owner_keeps_filing() {
+    let w = self_world("max_open = 50\nper_week = 3\n");
+    let pid = w.d.project_id_by_name("scratch").unwrap();
+    for i in 0..3 {
+        assert!(selfguard::check_filing_as(&w.d, pid, TrustSource::OwnerAgent).is_ok());
+        let trust = if i == 1 {
+            TrustSource::Outside
+        } else {
+            TrustSource::OwnerAgent
+        };
+        file_task_as(&w.d, &format!("p{i}"), "x", false, trust, true);
+    }
+    for trust in [TrustSource::OwnerAgent, TrustSource::Outside] {
+        let e = selfguard::check_filing_as(&w.d, pid, trust).unwrap_err();
+        assert!(
+            e.contains("3 self-tasks were filed this week")
+                && e.contains("limit is 3")
+                && e.contains("3 of the 3 are agent or outside tasks"),
+            "{e}"
+        );
+    }
+    // The strict check is unchanged.
+    assert!(selfguard::check_filing(&w.d, pid).is_err());
+    for i in 0..5 {
+        assert!(selfguard::check_filing_as(&w.d, pid, TrustSource::Owner).is_ok());
+        file_task_as(
+            &w.d,
+            &format!("mine{i}"),
+            "x",
+            false,
+            TrustSource::Owner,
+            true,
+        );
+    }
+    let e = selfguard::check_filing_as(&w.d, pid, TrustSource::Outside).unwrap_err();
+    assert!(
+        e.contains("3 of the 8") && e.contains("5 of yours do not"),
+        "{e}"
+    );
+    let cfg = w.d.project(pid).unwrap().self_cfg.clone().unwrap();
+    let u = selfguard::usage(&w.d, pid, &cfg, mason_daemon::daemon::now_ms());
+    assert_eq!((u.status.week, u.yours), (3, 5));
+}
+
+#[test]
+fn cancelling_before_any_step_frees_a_slot_and_the_owner_is_still_held_by_max_open() {
+    let w = self_world("max_open = 3\nper_week = 2\n");
+    let pid = w.d.project_id_by_name("scratch").unwrap();
+    let a = file_task_as(&w.d, "a", "x", false, TrustSource::OwnerAgent, true);
+    file_task_as(&w.d, "b", "x", false, TrustSource::OwnerAgent, true);
+    assert!(selfguard::check_filing_as(&w.d, pid, TrustSource::Outside).is_err());
+    w.d.emit(EventKind::Canceled {
+        task: a,
+        delete_branch: false,
+    })
+    .unwrap();
+    assert!(selfguard::check_filing_as(&w.d, pid, TrustSource::Outside).is_ok());
+    // Three open (b and two of the owner's): the owner is refused by max_open.
+    file_task_as(&w.d, "m1", "x", false, TrustSource::Owner, true);
+    file_task_as(&w.d, "m2", "x", false, TrustSource::Owner, true);
+    let e = selfguard::check_filing_as(&w.d, pid, TrustSource::Owner).unwrap_err();
+    assert!(e.contains("3 self-tasks are open"), "{e}");
+}
+
+#[test]
+fn the_cooldown_still_stops_the_owner() {
+    let w = self_world("");
+    let pid = w.d.project_id_by_name("scratch").unwrap();
+    mason_daemon::update::Runtimes::new(&w.d.cfg.data_dir).record_rollback(
+        "aaaaaaaaaaaa",
+        "bbbbbbbbbbbb",
+        mason_daemon::daemon::now_ms(),
+    );
+    let e = selfguard::check_filing_as(&w.d, pid, TrustSource::Owner).unwrap_err();
+    assert!(e.contains("cooling down after a rollback"), "{e}");
+}
+
 // ---- Stage 41: which diff is read -----------------------------------------------------------
 
 mod scan {
