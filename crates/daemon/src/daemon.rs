@@ -44,6 +44,9 @@ pub struct Daemon {
     pub broker: Arc<crate::sched::Broker>,
     /// Appended event sequence numbers, for the clients' sockets.
     pub bus: tokio::sync::broadcast::Sender<u64>,
+    /// The live progress records of running steps, and their changes for the sockets.
+    pub(crate) progress: crate::progress::Book,
+    pub progress_bus: tokio::sync::broadcast::Sender<crate::progress::Update>,
     /// `--demo`: plays a scripted scenario; runs no work.
     pub demo: bool,
     pub(crate) demo_pos: Mutex<usize>,
@@ -155,6 +158,8 @@ impl Daemon {
             defs: crate::defs::Defs::default(),
             broker,
             bus: tokio::sync::broadcast::channel(1024).0,
+            progress: Default::default(),
+            progress_bus: tokio::sync::broadcast::channel(1024).0,
             demo,
             demo_pos: Mutex::new(0),
             landing: Default::default(),
@@ -168,7 +173,9 @@ impl Daemon {
         });
         if !demo {
             d.load_definitions();
+            d.progress_cleanup();
             d.recover();
+            d.spawn_progress_ticker();
             d.spawn_sweeper();
             d.spawn_watcher();
             crate::tracker::spawn(&d);
@@ -350,6 +357,7 @@ impl Daemon {
         let spawned = std::thread::Builder::new()
             .name(format!("job-t{}r{}", task.0, run.0))
             .spawn(move || {
+                d.progress_begin(task, run);
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     crate::jobs::run(&d, task, step, run)
                 }));
@@ -364,6 +372,7 @@ impl Daemon {
                         },
                     );
                 }
+                d.progress_finish(run);
                 d.jobs
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())

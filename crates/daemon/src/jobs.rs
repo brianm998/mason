@@ -32,7 +32,7 @@ use mason_definition::layers::{resolve, Resolved, RuntimeOverride};
 use mason_definition::validate::contract_kind;
 use mason_definition::{Definition, Step, StepType};
 use mason_landing::git::{self, CatchUp};
-use mason_step_host::client::{collect_to_file, ClientError, HostClient};
+use mason_step_host::client::{collect_to_file_observed, ClientError, HostClient};
 use mason_step_host::launcher::{spawn_host, SpawnOptions};
 use mason_step_host::protocol::{CURRENT, PREVIOUS};
 use serde_json::Value;
@@ -866,6 +866,12 @@ fn agent_job(c: &Ctx) {
     );
     spec.run_key = Some(key.clone());
     spec.tools = c.step.tools.clone();
+    {
+        let (d, run) = (c.d.clone(), c.run);
+        spec.progress = Some(Arc::new(move |stream, off, bytes| {
+            d.progress_observe(run, stream, off, bytes)
+        }));
+    }
     // Wired before any reattach, so a session found again sees what was already accepted.
     spec.accepted = contract.flag();
     spec.contract = Some(contract.clone());
@@ -1065,10 +1071,14 @@ fn command_job(c: &Ctx) {
         });
     }
     let log = c.task_dir().join(format!("{suffix}-r{}.log", c.run.0));
-    let result = collect_to_file(
+    // Lines and bytes of the output, counted as they arrive. A run found again after a
+    // restart first counts what its log holds beyond what the stored record had.
+    c.d.progress_catch_up(c.run, "", &log);
+    let result = collect_to_file_observed(
         &dir,
         &log,
         &c.task_dir().join(format!("{suffix}-r{}.exit", c.run.0)),
+        &mut |off, b| c.d.progress_observe(c.run, "", off, b),
     );
     done.store(true, Ordering::SeqCst);
     let rec = match result {

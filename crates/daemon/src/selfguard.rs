@@ -215,18 +215,44 @@ pub struct Status {
 
 const WEEK_MS: u64 = 7 * 24 * 3600 * 1000;
 
-pub fn status(d: &Daemon, pid: ProjectId, cfg: &SelfCfg, now: u64) -> Status {
-    let w = d.world().ok();
-    let (mut open, mut week, mut steps) = (0, 0, 0);
-    if let Some(w) = &w {
-        for t in w.tasks.values().filter(|t| t.project == pid) {
-            if !matches!(t.state, State::Landed | State::Failed | State::Canceled) {
-                open += 1;
-            }
-            if now.saturating_sub(t.enqueued_at.0) <= WEEK_MS {
-                week += 1;
-            }
+/// What the week's filings come to: `status.week` counts only the work MASON started for
+/// itself; `yours` is what the owner filed, or cancelled before it spent anything.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Usage {
+    pub status: Status,
+    pub yours: u32,
+}
+
+/// The week's filings as `(counted, not_counted)`. A task counts unless the owner filed it,
+/// or it was cancelled before any agent step started (it spent nothing).
+pub fn count<'a>(tasks: impl Iterator<Item = &'a Task>, now: u64) -> (u32, u32) {
+    let (mut counted, mut yours) = (0, 0);
+    for t in tasks.filter(|t| now.saturating_sub(t.enqueued_at.0) <= WEEK_MS) {
+        let unstarted = t.state == State::Canceled && t.attempts.is_empty();
+        if t.trust == TrustSource::Owner || unstarted {
+            yours += 1;
+        } else {
+            counted += 1;
         }
+    }
+    (counted, yours)
+}
+
+pub fn status(d: &Daemon, pid: ProjectId, cfg: &SelfCfg, now: u64) -> Status {
+    usage(d, pid, cfg, now).status
+}
+
+pub fn usage(d: &Daemon, pid: ProjectId, cfg: &SelfCfg, now: u64) -> Usage {
+    let w = d.world().ok();
+    let (mut open, mut week, mut yours, mut steps) = (0, 0, 0, 0);
+    if let Some(w) = &w {
+        open = w
+            .tasks
+            .values()
+            .filter(|t| t.project == pid)
+            .filter(|t| !matches!(t.state, State::Landed | State::Failed | State::Canceled))
+            .count() as u32;
+        (week, yours) = count(w.tasks.values().filter(|t| t.project == pid), now);
         let period = cfg.period_h * 3600 * 1000;
         steps = w
             .step_runs
@@ -240,16 +266,20 @@ pub fn status(d: &Daemon, pid: ProjectId, cfg: &SelfCfg, now: u64) -> Status {
         .rollback()
         .map(|(at, ..)| at + cfg.cooldown_h * 3600 * 1000)
         .filter(|until| *until > now);
-    Status {
-        open,
-        week,
-        steps,
-        cooldown_until_ms,
+    Usage {
+        status: Status {
+            open,
+            week,
+            steps,
+            cooldown_until_ms,
+        },
+        yours,
     }
 }
 
 /// May a task be filed in this project now? Not for MASON's own repository past a cap
-/// or during a cooldown. (Other projects have no such limits.)
+/// or during a cooldown. (Other projects have no such limits.) Strict: the weekly cap
+/// applies whoever files; see `check_filing_as`.
 pub fn check_filing(d: &Daemon, pid: ProjectId) -> Result<(), String> {
     let Some(p) = d.project(pid) else {
         return Ok(());
@@ -260,7 +290,25 @@ pub fn check_filing(d: &Daemon, pid: ProjectId) -> Result<(), String> {
     check(&status(d, pid, cfg, now_ms()), cfg)
 }
 
+/// As `check_filing`, for a task of this trust: the owner's own filings are not held to
+/// the weekly cap (they are not MASON starting work for itself), but still to the
+/// open-task and step caps and the cooldown.
+pub fn check_filing_as(d: &Daemon, pid: ProjectId, trust: TrustSource) -> Result<(), String> {
+    let Some(p) = d.project(pid) else {
+        return Ok(());
+    };
+    let Some(cfg) = &p.self_cfg else {
+        return Ok(());
+    };
+    let u = usage(d, pid, cfg, now_ms());
+    check_as(&u.status, u.yours, cfg, trust)
+}
+
 pub fn check(s: &Status, cfg: &SelfCfg) -> Result<(), String> {
+    check_as(s, 0, cfg, TrustSource::OwnerAgent)
+}
+
+pub fn check_as(s: &Status, yours: u32, cfg: &SelfCfg, trust: TrustSource) -> Result<(), String> {
     if let Some(until) = s.cooldown_until_ms {
         let hours = until.saturating_sub(now_ms()).div_ceil(3_600_000);
         return Err(format!("self-tasks are cooling down after a rollback, for about {hours} more hour(s); look at the proposal it filed"));
@@ -271,10 +319,14 @@ pub fn check(s: &Status, cfg: &SelfCfg) -> Result<(), String> {
             s.open, cfg.max_open
         ));
     }
-    if s.week >= cfg.per_week {
+    if trust != TrustSource::Owner && s.week >= cfg.per_week {
         return Err(format!(
-            "{} self-tasks were filed this week and the limit is {}",
-            s.week, cfg.per_week
+            "{} self-tasks were filed this week and the limit is {}: {} of the {} are agent or outside tasks, which count; {} of yours do not",
+            s.week,
+            cfg.per_week,
+            s.week,
+            s.week + yours,
+            yours
         ));
     }
     if s.steps >= cfg.max_steps {
@@ -383,5 +435,88 @@ mod tests {
             e.contains("cooling down after a rollback") && e.contains("5 more hour"),
             "{e}"
         );
+    }
+
+    fn task(trust: TrustSource, state: State, started: bool, at: u64) -> Task {
+        let mut t = Task {
+            id: TaskId(0),
+            project: ProjectId(0),
+            title: String::new(),
+            body: String::new(),
+            priority: Priority::Normal,
+            trust,
+            enqueued_at: Timestamp(at),
+            state,
+            activity: Activity::Idle,
+            landed: None,
+            explored: false,
+            blockers: Default::default(),
+            not_before: None,
+            paused: false,
+            failures: 0,
+            attempts: Default::default(),
+            decision: None,
+            cancel_keeps_branch: true,
+            failure: None,
+            def: String::new(),
+            step: String::new(),
+            step_attempts: Default::default(),
+            route: None,
+            explore_returns: 0,
+            approved: false,
+            force_explore: false,
+        };
+        if started {
+            t.attempts.insert(State::Developing, 1);
+        }
+        t
+    }
+
+    #[test]
+    fn only_work_masons_starts_for_itself_counts() {
+        let now = 10 * WEEK_MS;
+        let ts = [
+            task(TrustSource::Owner, State::Queued, false, now),
+            task(TrustSource::Owner, State::Landed, true, now),
+            task(TrustSource::OwnerAgent, State::Queued, false, now),
+            task(TrustSource::Outside, State::Queued, false, now),
+            task(TrustSource::Outside, State::Canceled, false, now),
+            task(TrustSource::OwnerAgent, State::Canceled, true, now),
+            task(
+                TrustSource::OwnerAgent,
+                State::Queued,
+                false,
+                now - WEEK_MS - 1,
+            ),
+        ];
+        assert_eq!(count(ts.iter(), now), (3, 3));
+    }
+
+    #[test]
+    fn the_limit_refuses_at_ten_counted_but_not_the_owner() {
+        let c = cfg();
+        let now = 10 * WEEK_MS;
+        let mut ts: Vec<Task> = (0..10)
+            .map(|_| task(TrustSource::OwnerAgent, State::Queued, false, now))
+            .collect();
+        ts.extend((0..5).map(|_| task(TrustSource::Owner, State::Queued, false, now)));
+        let (week, yours) = count(ts.iter(), now);
+        assert_eq!((week, yours), (10, 5));
+        let s = st(0, week, 0, None);
+        let e = check_as(&s, yours, &c, TrustSource::OwnerAgent).unwrap_err();
+        assert!(
+            e.contains("10 self-tasks were filed this week")
+                && e.contains("limit is 10")
+                && e.contains("10 of the 15 are agent or outside tasks")
+                && e.contains("5 of yours do not"),
+            "{e}"
+        );
+        assert!(check_as(&s, yours, &c, TrustSource::Outside).is_err());
+        assert!(check_as(&s, yours, &c, TrustSource::Owner).is_ok());
+        // The other limits still stop the owner.
+        assert!(check_as(&st(3, 0, 0, None), 0, &c, TrustSource::Owner).is_err());
+        assert!(check_as(&st(0, 0, 40, None), 0, &c, TrustSource::Owner).is_err());
+        let until = now_ms() + 3_600_000;
+        assert!(check_as(&st(0, 0, 0, Some(until)), 0, &c, TrustSource::Owner).is_err());
     }
 }

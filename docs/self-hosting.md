@@ -25,6 +25,8 @@ The task shows why it waits (`mason task show N`), the alert says so, and `mason
 
 Open self-tasks, tasks filed per week, and agent steps per period (the cap on spend: token cost is not recorded yet, so steps are what is counted) each have a limit in `[self]`. Filing past a limit is refused with the number and the limit, by the command line, the API and the tracker import (an issue left unimported is looked at again later). `mason self` shows where each stands. The urgent fix task the landing freeze files is not counted: restoring the base comes first.
 
+**The weekly cap counts only work MASON starts for itself.** `per_week` counts tasks whose trust is not the owner's: agent proposals and outside issues you labeled. Tasks you file (the command line or API as the owner, the monitor, a tracker issue by an owner name) are not counted, and neither is a task cancelled before any agent step started. `mason self` reads "N of 10 this week (M of yours not counted)", and the refusal says how many of the counted are agent or outside tasks. `max_open`, `max_steps` and the cooldown apply to every filing, yours included. **An owner identity can therefore file without a weekly cap**; the guards that remain are `max_open`, `max_steps`, the cooldown and the holds on protected files (see `docs/decisions/0022-self-cap-readings.md`).
+
 ## A rollback
 
 If a new build crashes three times in five minutes, the daemon rolls back (Stage 16). That also starts a **cooldown** (`cooldown_h`, default 24) during which no self-task may be filed, and files **one proposal**, waiting for you, with what is known about the failure.

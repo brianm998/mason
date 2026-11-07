@@ -469,7 +469,12 @@ pub fn sync_with_deps(
             }
             // MASON's own repository takes tasks only within its limits; the item stays
             // unimported and is looked at again next time.
-            if crate::selfguard::check_filing(d, pid).is_err() {
+            let trust = if by_owner {
+                TrustSource::Owner
+            } else {
+                TrustSource::Outside
+            };
+            if crate::selfguard::check_filing_as(d, pid, trust).is_err() {
                 continue;
             }
             let held: Vec<(u64, TaskId)> = resolved
@@ -485,11 +490,7 @@ pub fn sync_with_deps(
                 body: it.body.clone(),
                 priority: priority(&it.priority),
                 // Someone else's words stay untrusted, however they got in.
-                trust: if by_owner {
-                    TrustSource::Owner
-                } else {
-                    TrustSource::Outside
-                },
+                trust,
                 explored: false,
                 proposed: false,
                 blockers: held.iter().map(|(_, t)| *t).collect(),

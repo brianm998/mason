@@ -187,6 +187,8 @@ message ServerMessage {
     CommandResult result = 5;
     Pong pong = 6;
     Error error = 7;
+    // A running step's progress moved (additive; older clients skip it).
+    StepProgress step_progress = 8;
   }
 }
 
@@ -215,6 +217,23 @@ message Welcome {
   uint32 min_protocol = 7;
   // True when the Hello.actor is one of the owner's identities.
   bool owner = 8;
+  // The daemon's own clock, ms since the epoch: a monitor counts "updated 4 s
+  // ago" from the absolute times in progress records against this, correctly
+  // even when its clock and the daemon's differ.
+  uint64 now_ms = 9;
+}
+
+// One running step's progress, pushed when it moves (at most once a second for
+// output alone, at once for a count, message or state change). Views carry the
+// same record in `ProgressCell`.
+message StepProgress {
+  uint64 seq = 1;
+  uint64 task = 2;
+  uint64 run = 3;
+  string step = 4;
+  ProgressCell progress = 5;
+  // The daemon's clock when this was sent (ms since the epoch).
+  uint64 now_ms = 6;
 }
 
 message Snapshot {
@@ -291,6 +310,35 @@ message ProgressCell {
   string label = 3;
   uint32 done = 4;
   uint32 total = 5;
+  // Additive from here. What `done` and `total` count, in words ("lines",
+  // "tests"); empty when nothing is counted.
+  string unit = 6;
+  ProgressSource done_source = 7;
+  // A HISTORY total is the typical figure from past runs, never a real total.
+  ProgressSource total_source = 8;
+  // The step's latest one-line "what I am doing now", if it gave one.
+  string message = 9;
+  // Output so far, from the step host's journal.
+  uint64 lines = 10;
+  uint64 bytes = 11;
+  // Absolute times, ms since the epoch (0 for none): the last output, the
+  // step run's start, and the last time anything in the record moved.
+  uint64 last_output_ms = 12;
+  uint64 started_ms = 13;
+  uint64 updated_at_ms = 14;
+  // The step run this record is of (0 when the cell has no run).
+  uint64 run = 15;
+}
+
+// Where a figure came from.
+enum ProgressSource {
+  SOURCE_NONE = 0;
+  // The step said so.
+  SOURCE_REPORTED = 1;
+  // The daemon counted it.
+  SOURCE_COUNTED = 2;
+  // The typical figure from this project's past successful runs.
+  SOURCE_HISTORY = 3;
 }
 
 // A task as every view shows it. `allowed_actions` is the one list of what
