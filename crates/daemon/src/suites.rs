@@ -18,7 +18,7 @@ use mason_definition::graph::Outcome;
 use mason_definition::{Definition, Step};
 use mason_landing::git;
 use mason_scheduler::Needs;
-use mason_step_host::client::{collect_to_file, ClientError, HostClient};
+use mason_step_host::client::{collect_to_file, collect_to_file_observed, ClientError, HostClient};
 use mason_step_host::launcher::{spawn_host, SpawnOptions};
 use mason_step_host::protocol::{CURRENT, PREVIOUS};
 use mason_testing::env as lifecycle;
@@ -152,6 +152,7 @@ fn run_hosted(
     limit: Duration,
     log_dir: &Path,
     check: Check,
+    run: Option<StepRunId>,
 ) -> Result<Ran, String> {
     let hosts = d.cfg.hosts_dir();
     let dir = hosts.join(id);
@@ -208,7 +209,17 @@ fn run_hosted(
     }
     let _ = std::fs::create_dir_all(log_dir);
     let log = log_dir.join(format!("{id}.log"));
-    let rec = collect_to_file(&dir, &log, &log_dir.join(format!("{id}.exit")));
+    // The step's generic progress: lines and bytes of this suite's output as it arrives.
+    let exit = log_dir.join(format!("{id}.exit"));
+    let rec = match run {
+        Some(run) => {
+            d.progress_catch_up(run, id, &log);
+            collect_to_file_observed(&dir, &log, &exit, &mut |off, b| {
+                d.progress_observe(run, id, off, b)
+            })
+        }
+        None => collect_to_file(&dir, &log, &exit),
+    };
     done.store(true, Ordering::SeqCst);
     let rec = match rec {
         Ok(r) => r,
@@ -444,6 +455,7 @@ fn baseline(
             suite.timeout.unwrap_or(Duration::from_secs(1800)),
             &who.log_dir,
             who.check(&suite.name),
+            who.task.map(|(_, r)| r),
         )
         .ok()?;
         if ran.stop != Stop::No {
@@ -550,7 +562,16 @@ fn run_suite(
         } else {
             format!("{}-u{}-{}", who.id_prefix, now_ms(), suite.name)
         };
-        let ran = match run_hosted(d, &id, &suite.command, cwd, limit, &who.log_dir, check) {
+        let ran = match run_hosted(
+            d,
+            &id,
+            &suite.command,
+            cwd,
+            limit,
+            &who.log_dir,
+            check,
+            who.task.map(|(_, r)| r),
+        ) {
             Ok(r) => r,
             Err(e) => {
                 env_down(who, def, suite, cwd);
@@ -777,6 +798,7 @@ fn rerun_failing(
         suite.timeout.unwrap_or(Duration::from_secs(1800)),
         &who.log_dir,
         who.check(&suite.name),
+        who.task.map(|(_, r)| r),
     )
     .ok()?;
     if ran.stop != Stop::No {
@@ -1075,6 +1097,7 @@ fn run_new_tests_at_base(c: &Ctx, who: &Who, suite: &Suite, base: &str) -> Optio
             suite.timeout.unwrap_or(Duration::from_secs(1800)),
             &who.log_dir,
             who.check(&suite.name),
+            who.task.map(|(_, r)| r),
         )
         .ok()?;
         Some(judge_ran(suite, &ran, &wt).results)

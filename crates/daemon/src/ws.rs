@@ -161,6 +161,7 @@ async fn session(d: Arc<Daemon>, mut sock: WebSocket) {
             version: d.cfg.runtime_sha.clone().unwrap_or_else(|| "dev".into()),
             min_protocol: mason_protocol::MIN_PROTOCOL,
             owner: false,
+            now_ms: crate::daemon::now_ms(),
         };
         let _ = send(&mut sock, server(S::Welcome(welcome)), enc).await;
         let _ = send(&mut sock, server(S::Error(Error { message: msg })), enc).await;
@@ -168,6 +169,7 @@ async fn session(d: Arc<Daemon>, mut sock: WebSocket) {
     }
     // Subscribe to the bus before reading, so nothing slips between.
     let mut bus = d.bus.subscribe();
+    let mut progress_bus = d.progress_bus.subscribe();
     let mut sub = Sub::default();
     if hello.commands_only {
         sub.views.clear();
@@ -197,6 +199,7 @@ async fn session(d: Arc<Daemon>, mut sock: WebSocket) {
         version: d.cfg.runtime_sha.clone().unwrap_or_else(|| "dev".into()),
         min_protocol: mason_protocol::MIN_PROTOCOL,
         owner: crate::attention::is_owner(&d, &hello.actor),
+        now_ms: crate::daemon::now_ms(),
     };
     if !send(&mut sock, server(S::Welcome(welcome)), enc).await {
         return;
@@ -275,6 +278,25 @@ async fn session(d: Arc<Daemon>, mut sock: WebSocket) {
                     }
                 }
             }
+            update = progress_bus.recv() => {
+                use tokio::sync::broadcast::error::RecvError;
+                let u = match update {
+                    Ok(u) => u,
+                    // Missed some: the next one carries the whole record anyway.
+                    Err(RecvError::Lagged(_)) => continue,
+                    Err(RecvError::Closed) => return,
+                };
+                if !wants_progress(&d, &sub, &u) { continue }
+                let m = StepProgress {
+                    seq: sent,
+                    task: u.task,
+                    run: u.run,
+                    step: u.cell.step.clone(),
+                    progress: Some(u.cell),
+                    now_ms: u.now_ms,
+                };
+                if !send(&mut sock, server(S::StepProgress(m)), enc).await { return }
+            }
             tick = bus.recv() => {
                 match tick {
                     Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
@@ -294,6 +316,25 @@ async fn session(d: Arc<Daemon>, mut sock: WebSocket) {
             }
         }
     }
+}
+
+/// Does a subscription show this run's row? The task it watches, or a list
+/// (sidebar, home) of its project.
+fn wants_progress(d: &Daemon, sub: &Sub, u: &crate::progress::Update) -> bool {
+    if sub.views.is_empty() {
+        return false;
+    }
+    if sub.task == u.task {
+        return true;
+    }
+    let lists = sub
+        .views
+        .iter()
+        .any(|v| matches!(v, ViewKind::Sidebar | ViewKind::Home));
+    lists
+        && (sub.project.is_empty()
+            || d.project(ProjectId(u.project))
+                .is_some_and(|p| p.id == sub.project))
 }
 
 async fn push_views(d: &Arc<Daemon>, sock: &mut WebSocket, sub: &Sub, e: Encoding) -> bool {

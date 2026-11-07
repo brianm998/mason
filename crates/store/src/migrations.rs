@@ -250,6 +250,47 @@ const STEPS: &[&str] = &[
          PRIMARY KEY (task, kind),
          UNIQUE (kind, number)
      );",
+    // 12: the live progress of each open step run (written every few seconds, so a restart
+    // shows the same figures and counts on from there), its sub-counts, and the final counts
+    // of successful runs (the history the typical figures come from).
+    "CREATE TABLE step_progress (
+         run            INTEGER PRIMARY KEY,
+         task           INTEGER NOT NULL,
+         step           TEXT NOT NULL,
+         unit           TEXT NOT NULL,
+         done           INTEGER NOT NULL,
+         done_src       INTEGER NOT NULL,
+         total          INTEGER NOT NULL,
+         total_src      INTEGER NOT NULL,
+         message        TEXT NOT NULL,
+         lines          INTEGER NOT NULL,
+         bytes          INTEGER NOT NULL,
+         marks          TEXT NOT NULL,
+         last_output_ms INTEGER NOT NULL,
+         started_ms     INTEGER NOT NULL,
+         updated_at     INTEGER NOT NULL
+     );
+     CREATE INDEX step_progress_task ON step_progress(task);
+     CREATE TABLE step_progress_subs (
+         run       INTEGER NOT NULL,
+         name      TEXT NOT NULL,
+         unit      TEXT NOT NULL,
+         done      INTEGER NOT NULL,
+         done_src  INTEGER NOT NULL,
+         total     INTEGER NOT NULL,
+         total_src INTEGER NOT NULL,
+         PRIMARY KEY (run, name)
+     );
+     CREATE TABLE step_history (
+         run     INTEGER PRIMARY KEY,
+         task    INTEGER NOT NULL,
+         project TEXT NOT NULL,
+         step    TEXT NOT NULL,
+         done    INTEGER NOT NULL,
+         lines   INTEGER NOT NULL,
+         at      INTEGER NOT NULL
+     );
+     CREATE INDEX step_history_step ON step_history(project, step);",
 ];
 
 pub const SCHEMA_VERSION: u32 = STEPS.len() as u32;

@@ -107,6 +107,7 @@ mod tests {
                 version: "dev".into(),
                 min_protocol: MIN_PROTOCOL,
                 owner: true,
+                now_ms: 5,
             })),
         };
         let text = String::from_utf8(encode_server(&m, Encoding::Json)).unwrap();

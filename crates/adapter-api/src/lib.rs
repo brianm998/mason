@@ -58,7 +58,14 @@ pub struct SessionSpec {
     pub run_key: Option<String>,
     /// Narrow the step's contract tools to these (a definition's `tools`).
     pub tools: Option<Vec<String>>,
+    /// Told of every chunk of a step host's output as it arrives, with the host's
+    /// id and the chunk's absolute offset in its journal (a journal read again is
+    /// offered again from 0, so the receiver counts by stream and offset).
+    pub progress: Option<ProgressSink>,
 }
+
+/// Receives `(host id, offset, bytes)` of a step's output.
+pub type ProgressSink = std::sync::Arc<dyn Fn(&str, u64, &[u8]) + Send + Sync>;
 
 impl SessionSpec {
     pub fn new(step: StepKind, prompt: &str, workdir: impl Into<PathBuf>) -> Self {
@@ -75,6 +82,7 @@ impl SessionSpec {
             accepted: SubmissionFlag::default(),
             run_key: None,
             tools: None,
+            progress: None,
         }
     }
 }

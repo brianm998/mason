@@ -19,6 +19,7 @@ pub mod landing;
 pub mod numbers;
 pub mod plugins;
 pub mod pool;
+pub mod progress;
 pub mod prompts;
 pub mod protect;
 pub mod sched;

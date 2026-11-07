@@ -576,3 +576,75 @@ fn two_tasks_claimed_at_once_never_share_a_number() {
     got.dedup();
     assert_eq!(got.len(), 8);
 }
+
+#[test]
+fn migration_12_applies_to_an_existing_database() {
+    let (_d, p) = db();
+    {
+        let mut c = Connection::open(&p).unwrap();
+        migrations::migrate_to(&mut c, 11).unwrap();
+        assert_eq!(migrations::version(&c).unwrap(), 11);
+    }
+    let s = Store::open(&p).unwrap();
+    s.verify().unwrap();
+    assert!(s.progress_rows(None).unwrap().is_empty());
+    drop(s);
+    let c = Connection::open(&p).unwrap();
+    assert_eq!(migrations::version(&c).unwrap(), migrations::SCHEMA_VERSION);
+}
+
+#[test]
+fn live_progress_is_kept_per_run_and_dropped_when_not_open() {
+    use mason_core::progress::{Figure, Progress, SubProgress};
+    let (_d, p) = db();
+    let s = Store::open(&p).unwrap();
+    let mut a = Progress::new(7, "work", 100);
+    a.output("t0r7-cmd", 0, b"x\ny\n", 150);
+    a.offer_history_total(Some(9));
+    a.subs.push(SubProgress {
+        name: "unit".into(),
+        unit: "tests".into(),
+        done: Figure::reported(3),
+        total: Figure::reported(8),
+    });
+    s.put_progress(0, &a).unwrap();
+    s.put_progress(1, &Progress::new(8, "work", 100)).unwrap();
+    let rows = s.progress_rows(Some(0)).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].1, a,
+        "what was written comes back, marks and subs included"
+    );
+    // Written again, it is replaced, not added.
+    a.output("t0r7-cmd", 4, b"z\n", 200);
+    s.put_progress(0, &a).unwrap();
+    assert_eq!(s.progress_rows(None).unwrap().len(), 2);
+    assert_eq!(s.progress_rows(Some(0)).unwrap()[0].1.output.lines, 3);
+    // At daemon start only the open runs keep theirs.
+    assert_eq!(s.drop_progress_except(vec![8]).unwrap(), 1);
+    let left = s.progress_rows(None).unwrap();
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0].1.run, 8);
+    s.drop_progress(8).unwrap();
+    assert!(s.progress_rows(None).unwrap().is_empty());
+}
+
+#[test]
+fn history_keeps_final_counts_per_project_and_step() {
+    let (_d, p) = db();
+    let s = Store::open(&p).unwrap();
+    for (run, done) in [(1u64, 10u64), (2, 20), (3, 30)] {
+        s.record_history("web", 0, run, "work", done, done + 1, 5)
+            .unwrap();
+    }
+    s.record_history("api", 1, 4, "work", 99, 99, 6).unwrap();
+    s.record_history("web", 0, 5, "check", 7, 7, 7).unwrap();
+    assert_eq!(
+        s.history_samples("web", "work").unwrap(),
+        vec![(10, 11), (20, 21), (30, 31)]
+    );
+    assert_eq!(s.history_samples("api", "work").unwrap(), vec![(99, 99)]);
+    // A run recorded twice counts once.
+    s.record_history("web", 0, 1, "work", 10, 11, 9).unwrap();
+    assert_eq!(s.history_samples("web", "work").unwrap().len(), 3);
+}

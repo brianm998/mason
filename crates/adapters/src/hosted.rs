@@ -93,9 +93,19 @@ struct Feed {
     stderr: String,
     tx: Sender<AgentEvent>,
     session_id: Arc<Mutex<Option<String>>>,
+    progress: Option<mason_adapter_api::ProgressSink>,
+    stream: String,
 }
 
 impl Feed {
+    /// Output at an absolute journal offset: counted, then parsed.
+    fn chunk(&mut self, offset: u64, b: &[u8]) {
+        if let Some(p) = &self.progress {
+            p(&self.stream, offset, b);
+        }
+        self.bytes(b);
+    }
+
     fn bytes(&mut self, b: &[u8]) {
         self.partial.extend_from_slice(b);
         while let Some(i) = self.partial.iter().position(|c| *c == b'\n') {
@@ -170,6 +180,7 @@ pub fn attach_as(
 
     let accepted = spec.accepted.clone();
     {
+        let progress = spec.progress.clone();
         let (sid, cancelled, timed_out, done) = (
             session_id.clone(),
             cancelled.clone(),
@@ -183,6 +194,10 @@ pub fn attach_as(
                 stderr: String::new(),
                 tx: tx.clone(),
                 session_id: sid,
+                progress,
+                stream: dir
+                    .file_name()
+                    .map_or(String::new(), |n| n.to_string_lossy().into_owned()),
             };
             let exit = follow(&dir, &sock, &mut feed);
             feed.flush();
@@ -232,8 +247,9 @@ fn follow(dir: &Path, sock: &Path, feed: &mut Feed) -> Option<ExitRecord> {
                 loop {
                     match c.next_event() {
                         Ok(Event::Data { offset, bytes }) if offset == have => {
+                            let at = have;
                             have += bytes.len() as u64;
-                            feed.bytes(&bytes);
+                            feed.chunk(at, &bytes);
                         }
                         Ok(Event::Exit(mut rec)) => {
                             rec.ended_ms = ExitRecord::read(dir).map_or(0, |r| r.ended_ms);
@@ -267,8 +283,9 @@ fn drain_disk(dir: &Path, have: &mut u64, until: u64, feed: &mut Feed) {
         let want = ((until - *have).min(64 * 1024)) as usize;
         match read_journal(dir, *have, want) {
             Ok(b) if !b.is_empty() => {
+                let at = *have;
                 *have += b.len() as u64;
-                feed.bytes(&b);
+                feed.chunk(at, &b);
             }
             _ => break,
         }

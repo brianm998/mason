@@ -1849,6 +1849,43 @@ async fn logs(
     Ok(Json(v))
 }
 
+/// The live progress records of a task's open step runs.
+async fn task_progress(Shared(d): Shared<Arc<Daemon>>, Path(id): Path<u64>) -> Res {
+    let d2 = d.clone();
+    let v = d
+        .pool
+        .run(move || {
+            let w = d2.world().map_err(store_err)?;
+            if !w.tasks.contains_key(&TaskId(id)) {
+                return Err(fail(StatusCode::NOT_FOUND, format!("no task #{id}")));
+            }
+            let fig = |f: &mason_core::progress::Figure| {
+                json!({"value": f.value, "source": format!("{:?}", f.source).to_lowercase()})
+            };
+            let runs: Vec<Value> = d2
+                .progress_of_task(TaskId(id))
+                .iter()
+                .map(|p| {
+                    json!({
+                        "run": p.run, "step": p.step, "unit": p.unit,
+                        "done": fig(&p.done), "total": fig(&p.total),
+                        "message": p.message,
+                        "output": {"lines": p.output.lines, "bytes": p.output.bytes,
+                                   "last_output_ms": p.output.last_output_ms},
+                        "started_ms": p.started_ms, "updated_at_ms": p.updated_at_ms,
+                        "subs": p.subs.iter().map(|s| json!({
+                            "name": s.name, "unit": s.unit,
+                            "done": fig(&s.done), "total": fig(&s.total)})).collect::<Vec<_>>(),
+                    })
+                })
+                .collect();
+            Ok(json!({"task": id, "now_ms": crate::daemon::now_ms(), "runs": runs}))
+        })
+        .await
+        .map_err(pool_err)??;
+    Ok(Json(v))
+}
+
 /// Deliberately blocks the event loop, to prove the watchdog notices.
 async fn debug_stall(
     Shared(d): Shared<Arc<Daemon>>,
@@ -1894,6 +1931,7 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         )
         .route("/projects/{name}/overrides/remove", post(overrides_remove))
         .route("/tasks/{id}/logs", get(logs))
+        .route("/tasks/{id}/progress", get(task_progress))
         .route("/resources", get(resources))
         .route("/tasks/{id}/skip", post(skip_task))
         .route("/tasks/{id}/answer", post(answer_task))

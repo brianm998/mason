@@ -256,15 +256,12 @@ impl<'a> Ctx<'a> {
                 spans.push(end.saturating_sub(r.started_at.0));
             }
         }
-        if spans.len() < 5 {
-            return None;
-        }
-        spans.sort_unstable();
-        Some((spans[spans.len() / 4], spans[spans.len() * 3 / 4]))
+        mason_core::progress::middle_half(&spans)
     }
 
     fn progress(&self, t: &Task) -> Vec<ProgressCell> {
         let def = self.def_of(t);
+        let live = self.d.progress_of_task(t.id);
         let runs: Vec<&StepRun> = self
             .w
             .step_runs
@@ -290,12 +287,18 @@ impl<'a> Ctx<'a> {
                 } else {
                     (CellState::Empty, String::new())
                 };
+                // A running step carries its live record: what it has counted, the
+                // output so far and when it last moved.
+                if current && state == CellState::Part {
+                    if let Some(p) = live.iter().rev().find(|p| p.step == s.name) {
+                        return crate::progress::cell_of(p, state, &label);
+                    }
+                }
                 ProgressCell {
                     step: s.name.clone(),
                     state: state as i32,
                     label,
-                    done: 0,
-                    total: 0,
+                    ..Default::default()
                 }
             })
             .collect()

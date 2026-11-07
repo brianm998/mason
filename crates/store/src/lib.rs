@@ -1523,6 +1523,220 @@ impl Store {
         })
     }
 
+    /// Keep the latest record of a running step run (and its sub-counts).
+    pub fn put_progress(
+        &self,
+        task: u64,
+        p: &mason_core::progress::Progress,
+    ) -> Result<(), StoreError> {
+        let p = p.clone();
+        self.write(move |c| {
+            let tx = c.unchecked_transaction()?;
+            tx.execute(
+                "INSERT OR REPLACE INTO step_progress(run, task, step, unit, done, done_src, total, \
+                 total_src, message, lines, bytes, marks, last_output_ms, started_ms, updated_at) \
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
+                params![
+                    p.run as i64,
+                    task as i64,
+                    p.step,
+                    p.unit,
+                    p.done.value as i64,
+                    src_code(p.done.source),
+                    p.total.value as i64,
+                    src_code(p.total.source),
+                    p.message,
+                    p.output.lines as i64,
+                    p.output.bytes as i64,
+                    marks_text(&p.marks),
+                    p.output.last_output_ms as i64,
+                    p.started_ms as i64,
+                    p.updated_at_ms as i64
+                ],
+            )?;
+            tx.execute(
+                "DELETE FROM step_progress_subs WHERE run = ?1",
+                params![p.run as i64],
+            )?;
+            for s in &p.subs {
+                tx.execute(
+                    "INSERT INTO step_progress_subs(run, name, unit, done, done_src, total, total_src) \
+                     VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                    params![
+                        p.run as i64,
+                        s.name,
+                        s.unit,
+                        s.done.value as i64,
+                        src_code(s.done.source),
+                        s.total.value as i64,
+                        src_code(s.total.source)
+                    ],
+                )?;
+            }
+            tx.commit()
+        })
+    }
+
+    /// The stored records of a task's runs (`task` of None: every task's).
+    pub fn progress_rows(
+        &self,
+        task: Option<u64>,
+    ) -> Result<Vec<(u64, mason_core::progress::Progress)>, StoreError> {
+        use mason_core::progress::{Figure, Output, Progress, SubProgress};
+        self.read(|c| {
+            let mut st = c.prepare(
+                "SELECT task, run, step, unit, done, done_src, total, total_src, message, lines, bytes, \
+                 marks, last_output_ms, started_ms, updated_at FROM step_progress ORDER BY run",
+            )?;
+            let mut out: Vec<(u64, Progress)> = vec![];
+            let rows = st.query_map([], |r| {
+                let g = |i: usize| r.get::<_, i64>(i).map(|v| v as u64);
+                Ok((
+                    g(0)?,
+                    Progress {
+                        run: g(1)?,
+                        step: r.get(2)?,
+                        unit: r.get(3)?,
+                        done: Figure {
+                            value: g(4)?,
+                            source: src_of(r.get(5)?),
+                        },
+                        total: Figure {
+                            value: g(6)?,
+                            source: src_of(r.get(7)?),
+                        },
+                        message: r.get(8)?,
+                        output: Output {
+                            lines: g(9)?,
+                            bytes: g(10)?,
+                            last_output_ms: g(12)?,
+                        },
+                        marks: marks_of(&r.get::<_, String>(11)?),
+                        started_ms: g(13)?,
+                        updated_at_ms: g(14)?,
+                        subs: vec![],
+                    },
+                ))
+            })?;
+            for row in rows {
+                let (t, p) = row?;
+                if task.is_none_or(|x| x == t) {
+                    out.push((t, p));
+                }
+            }
+            let mut sub = c.prepare(
+                "SELECT name, unit, done, done_src, total, total_src FROM step_progress_subs \
+                 WHERE run = ?1 ORDER BY name",
+            )?;
+            for (_, p) in out.iter_mut() {
+                p.subs = sub
+                    .query_map(params![p.run as i64], |r| {
+                        Ok(SubProgress {
+                            name: r.get(0)?,
+                            unit: r.get(1)?,
+                            done: Figure {
+                                value: r.get::<_, i64>(2)? as u64,
+                                source: src_of(r.get(3)?),
+                            },
+                            total: Figure {
+                                value: r.get::<_, i64>(4)? as u64,
+                                source: src_of(r.get(5)?),
+                            },
+                        })
+                    })?
+                    .collect::<Result<_, _>>()?;
+            }
+            Ok(out)
+        })
+    }
+
+    /// Drop the stored record of a run (it ended).
+    pub fn drop_progress(&self, run: u64) -> Result<(), StoreError> {
+        self.write(move |c| {
+            c.execute(
+                "DELETE FROM step_progress WHERE run = ?1",
+                params![run as i64],
+            )?;
+            c.execute(
+                "DELETE FROM step_progress_subs WHERE run = ?1",
+                params![run as i64],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Drop every stored record whose run is not in `open` (at daemon start).
+    pub fn drop_progress_except(&self, open: Vec<u64>) -> Result<usize, StoreError> {
+        self.write(move |c| {
+            let runs: Vec<i64> = {
+                let mut st = c.prepare("SELECT run FROM step_progress")?;
+                let rows = st.query_map([], |r| r.get(0))?;
+                rows.collect::<Result<_, _>>()?
+            };
+            let mut n = 0;
+            for run in runs {
+                if !open.contains(&(run as u64)) {
+                    c.execute("DELETE FROM step_progress WHERE run = ?1", params![run])?;
+                    c.execute(
+                        "DELETE FROM step_progress_subs WHERE run = ?1",
+                        params![run],
+                    )?;
+                    n += 1;
+                }
+            }
+            Ok(n)
+        })
+    }
+
+    /// A step run succeeded: keep its final counts, for the typical figures.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_history(
+        &self,
+        project: &str,
+        task: u64,
+        run: u64,
+        step: &str,
+        done: u64,
+        lines: u64,
+        at_ms: u64,
+    ) -> Result<(), StoreError> {
+        let (project, step) = (project.to_string(), step.to_string());
+        self.write(move |c| {
+            c.execute(
+                "INSERT OR REPLACE INTO step_history(run, task, project, step, done, lines, at) \
+                 VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                params![
+                    run as i64,
+                    task as i64,
+                    project,
+                    step,
+                    done as i64,
+                    lines as i64,
+                    at_ms as i64
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// The `(done, lines)` of this project's successful runs of a step.
+    pub fn history_samples(
+        &self,
+        project: &str,
+        step: &str,
+    ) -> Result<Vec<(u64, u64)>, StoreError> {
+        let (project, step) = (project.to_string(), step.to_string());
+        self.read(move |c| {
+            let mut st = c.prepare(
+                "SELECT done, lines FROM step_history WHERE project = ?1 AND step = ?2 ORDER BY run",
+            )?;
+            let rows = st.query_map(params![project, step], |r| {
+                Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64))
+            })?;
+            rows.collect()
+        })
+    }
+
     /// The task is cancelled: mark its numbers released. They stay taken.
     pub fn release_numbers(&self, task: u64) -> Result<usize, StoreError> {
         self.write(move |c| {
@@ -1774,4 +1988,40 @@ impl Drop for Store {
             let _ = h.join();
         }
     }
+}
+
+fn src_code(s: mason_core::progress::Source) -> i64 {
+    use mason_core::progress::Source::*;
+    match s {
+        None => 0,
+        Reported => 1,
+        Counted => 2,
+        History => 3,
+    }
+}
+
+fn src_of(n: i64) -> mason_core::progress::Source {
+    use mason_core::progress::Source::*;
+    match n {
+        1 => Reported,
+        2 => Counted,
+        3 => History,
+        _ => None,
+    }
+}
+
+fn marks_text(m: &std::collections::BTreeMap<String, u64>) -> String {
+    m.iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+fn marks_of(t: &str) -> std::collections::BTreeMap<String, u64> {
+    t.split(';')
+        .filter_map(|p| {
+            let (k, v) = p.rsplit_once('=')?;
+            Some((k.to_string(), v.parse().ok()?))
+        })
+        .collect()
 }
