@@ -158,6 +158,29 @@ refused '{"op":"landing_set","key":"parallel","value":0}' 'parallel'
 m editor show | grep -q 'this changes how the project lands'
 m editor show | grep -q 'runs `e2e` batch (integration)'
 
+echo "== 4b. both monitors show the editor exactly as the daemon says (conformance)"
+swift_ok=0; kt_ok=0
+if [ "$(uname)" = Darwin ] && command -v swift >/dev/null && [ -z "${MASON_SKIP_SWIFT:-}" ]; then swift_ok=1; fi
+if command -v java >/dev/null && command -v gradle >/dev/null && [ -z "${MASON_SKIP_COMPOSE:-}" ]; then kt_ok=1; fi
+port=$(sed -n 's/.*"port": *\([0-9]*\).*/\1/p' "$root/d/daemon.json")
+for step in "" test; do
+  rm -rf "$root/exp" "$root/sw" "$root/kt"
+  "$bin/conformance" editor-expected --port "$port" --project web --step "$step" --out "$root/exp"
+  if [ $swift_ok = 1 ]; then
+    (cd clients/swift && swift build 2>&1 | tail -1)
+    clients/swift/.build/debug/monitor-tool editor --port "$port" --project web --step "$step" --out "$root/sw"
+    "$bin/conformance" check --expected "$root/exp" --actual "$root/sw"
+  fi
+  if [ $kt_ok = 1 ]; then
+    (cd clients/compose && gradle --no-daemon -q :app:installDist 2>&1 | grep -vE '^$' | head -5 || true)
+    clients/compose/app/build/install/app/bin/app editor --port "$port" --project web --step "$step" --out "$root/kt"
+    "$bin/conformance" check --expected "$root/exp" --actual "$root/kt"
+  fi
+  if [ $swift_ok = 1 ] && [ $kt_ok = 1 ]; then "$bin/conformance" check --expected "$root/sw" --actual "$root/kt"; fi
+done
+[ $swift_ok = 1 ] || echo "(SwiftUI skipped: needs macOS and Swift; the monitor-swift CI job covers it)"
+[ $kt_ok = 1 ] || echo "(Compose skipped: needs Java and Gradle; the monitor-compose CI job covers it)"
+
 echo "== 5. apply commits the draft to the base branch, for the owner only"
 if out=$(m --as mallory editor apply -m "sneaky" 2>&1); then echo "a stranger applied an edit" >&2; exit 1; fi
 echo "$out"; echo "$out" | grep -q "not the owner's identity"

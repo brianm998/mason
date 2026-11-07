@@ -275,4 +275,66 @@ class MonitorCoreTest {
         val none = ClientUpdate.plan(emptyMap())
         assertTrue(none is UpdatePlan.Unavailable && none.why.contains("MASON_SOURCE_DIR"))
     }
+
+    // ---- the pipeline editor (Part 18) ----
+
+    private fun editorView() = EditorView(
+        project = "web",
+        lanes = listOf(EditorLane("developing", "Developing"), EditorLane("testing", "Testing")),
+        nodes = listOf(
+            EditorNode(name = "develop", kind = "agent", category = "developing", is_start = true, summary = "deep"),
+            EditorNode(name = "test", kind = "test", category = "testing", summary = "unit", problems = listOf("needs a bound")),
+        ),
+        edges = listOf(EditorEdge(from = "develop", to = "test", kind = "next"), EditorEdge(from = "test", to = "develop", kind = "on_red", bound = 2)),
+        grid = TestGridView(columns = listOf("development", "test_step"), rows = listOf(GridRowView(suite = "unit", level = "unit", cells = listOf(false, true)))),
+        problems = listOf("suite.x: odd"),
+        dirty = true,
+        can_undo = true,
+        changes = listOf("adds step `lint`"),
+    )
+
+    @Test fun theEditorsItemsAreWhatTheViewSays() {
+        val items = editorView().items().associateBy { it.id }
+        assertEquals(listOf("develop", "agent", "developing", "deep", "start"), items["node:develop"]?.texts)
+        assertEquals(listOf("test", "test", "testing", "unit", "needs a bound"), items["node:test"]?.texts)
+        assertEquals(listOf("test", "develop", "on red", "at most 2 times"), items["edge:test:on_red:develop"]?.texts)
+        assertEquals(listOf("develop", "test", "next"), items["edge:develop:next:test"]?.texts)
+        assertEquals(listOf("unit", "unit", "test step"), items["grid:unit"]?.texts)
+        assertEquals(listOf("suite.x: odd"), items["problem:0"]?.texts)
+        assertEquals(listOf("Testing"), items["lane:testing"]?.texts)
+        assertEquals(listOf("apply", "discard", "simulate", "undo"), items["draft"]?.actions?.sorted())
+        assertEquals(listOf("adds step `lint`"), items["change:0"]?.texts)
+        val clean = editorView().copy(dirty = false, can_undo = false, can_redo = true).items().first { it.id == "draft" }
+        assertEquals(listOf("redo", "simulate"), clean.actions.sorted())
+    }
+
+    @Test fun editsAreSentAsTheOperationsTheDaemonTakes() {
+        val m = MonitorModel()
+        val sent = mutableListOf<Command>()
+        m.sender = { sent += it }
+        m.project = "web"
+        m.editorOp(mapOf("op" to "move", "step" to "develop", "x" to 10L, "y" to 20L))
+        m.editorCall("undo")
+        assertEquals(listOf("POST", "POST"), sent.map { it.raw?.method })
+        assertEquals(listOf("/projects/web/editor/op", "/projects/web/editor/undo"), sent.map { it.raw?.path })
+        val body = org.json.JSONObject(sent[0].raw!!.json)
+        assertEquals("move", body.getString("op"))
+        assertEquals(10, body.getInt("x"))
+        var subscribed = 0
+        m.subscribe = { subscribed += 1 }
+        m.selectStep("test")
+        assertEquals("test", m.editorStep)
+        assertEquals(1, subscribed)
+    }
+
+    @Test fun aFormIsBuiltFromTheSchemaAloneInTheOrderItGives() {
+        val schema = """{"properties": {"max_rounds": {"type": "integer", "title": "Rounds"}, "category": {"type": "string", "enum": ["testing"], "title": "Category"}, "suites": {"type": "array", "items": {"type": "string", "enum": ["unit", "e2e"]}, "title": "Suites"}}, "x-order": ["category", "suites", "max_rounds"]}"""
+        val f = mason.monitor.EditorJson.fields(schema)
+        assertEquals(listOf("category", "suites", "max_rounds"), f.map { it.key })
+        assertEquals(listOf("testing"), f[0].choices)
+        assertEquals(listOf("unit", "e2e"), f[1].choices)
+        assertEquals("array", f[1].type)
+        assertEquals("integer", f[2].type)
+        assertEquals(emptyList(), mason.monitor.EditorJson.fields("not json"))
+    }
 }

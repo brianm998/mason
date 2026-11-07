@@ -255,7 +255,10 @@ fn resolve_extends(
     let mut merged = toml_edit::Table::new();
     if let Some(parent) = own.get("extends").and_then(|v| v.as_str()) {
         if chain.iter().any(|c| c == parent) || parent == name {
-            return Err(Problem::new(&path, format!("`{name}` extends itself through `{parent}`")));
+            return Err(Problem::new(
+                &path,
+                format!("`{name}` extends itself through `{parent}`"),
+            ));
         }
         chain.push(name.to_string());
         let p = resolve_extends(steps, parent, chain).map_err(|e| {
@@ -300,7 +303,9 @@ pub fn parse(text: &str) -> Result<Definition, Vec<Problem>> {
             "step" => match v.as_table_like() {
                 Some(t) => {
                     for (name, item) in t.iter() {
-                        let has_parent = item.as_table_like().is_some_and(|x| x.get("extends").is_some());
+                        let has_parent = item
+                            .as_table_like()
+                            .is_some_and(|x| x.get("extends").is_some());
                         let resolved = if has_parent {
                             match resolve_extends(t, name, &mut vec![]) {
                                 Ok(table) => Item::Table(table),

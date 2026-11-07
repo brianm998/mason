@@ -10,18 +10,35 @@ use toml_edit::{value, Array, ArrayOfTables, DocumentMut, Item, Table};
 #[derive(Clone, Debug, PartialEq)]
 pub enum Op {
     /// A top-level key: `mode`, `base`, `window`, `max_size`, `parallel`, `max_fold`, `resolver`.
-    Set { key: String, value: serde_json::Value },
-    Unset { key: String },
-    AddTier { name: String, suites: Vec<String> },
-    RemoveTier { name: String },
+    Set {
+        key: String,
+        value: serde_json::Value,
+    },
+    Unset {
+        key: String,
+    },
+    AddTier {
+        name: String,
+        suites: Vec<String>,
+    },
+    RemoveTier {
+        name: String,
+    },
     /// A key of a tier: `suites` (a list), `ci` or `on_red` (text).
-    SetTier { name: String, key: String, value: serde_json::Value },
+    SetTier {
+        name: String,
+        key: String,
+        value: serde_json::Value,
+    },
     /// The red ladder, in order.
-    SetLadder { rungs: Vec<String> },
+    SetLadder {
+        rungs: Vec<String>,
+    },
 }
 
 fn doc(text: &str) -> Result<DocumentMut, String> {
-    text.parse().map_err(|e: toml_edit::TomlError| format!("not valid TOML: {e}"))
+    text.parse()
+        .map_err(|e: toml_edit::TomlError| format!("not valid TOML: {e}"))
 }
 
 fn item(v: &serde_json::Value) -> Result<Item, String> {
@@ -54,13 +71,17 @@ fn keep(t: &mut dyn toml_edit::TableLike, key: &str, mut new: Item) {
     t.insert(key, new);
 }
 
-const KEYS: &[&str] = &["mode", "base", "window", "max_size", "parallel", "max_fold", "resolver"];
+const KEYS: &[&str] = &[
+    "mode", "base", "window", "max_size", "parallel", "max_fold", "resolver",
+];
 
 fn tiers_mut(d: &mut DocumentMut) -> &mut ArrayOfTables {
     if d.get("tier").and_then(|t| t.as_array_of_tables()).is_none() {
         d.insert("tier", Item::ArrayOfTables(ArrayOfTables::new()));
     }
-    d.get_mut("tier").and_then(|t| t.as_array_of_tables_mut()).expect("just made")
+    d.get_mut("tier")
+        .and_then(|t| t.as_array_of_tables_mut())
+        .expect("just made")
 }
 
 /// The text after the operation. Whether it is *valid* is [`apply`]'s concern.
@@ -69,7 +90,10 @@ fn change(op: &Op, text: &str) -> Result<String, String> {
     match op {
         Op::Set { key, value: v } => {
             if !KEYS.contains(&key.as_str()) {
-                return Err(format!("`{key}` is not a landing setting; they are {}", KEYS.join(", ")));
+                return Err(format!(
+                    "`{key}` is not a landing setting; they are {}",
+                    KEYS.join(", ")
+                ));
             }
             keep(d.as_table_mut(), key, item(v)?);
         }
@@ -78,7 +102,10 @@ fn change(op: &Op, text: &str) -> Result<String, String> {
         }
         Op::AddTier { name, suites } => {
             let tiers = tiers_mut(&mut d);
-            if tiers.iter().any(|t| t.get("name").and_then(|n| n.as_str()) == Some(name)) {
+            if tiers
+                .iter()
+                .any(|t| t.get("name").and_then(|n| n.as_str()) == Some(name))
+            {
                 return Err(format!("there is already a tier `{name}`"));
             }
             let mut t = Table::new();
@@ -101,9 +128,15 @@ fn change(op: &Op, text: &str) -> Result<String, String> {
                 d.remove("tier");
             }
         }
-        Op::SetTier { name, key, value: v } => {
+        Op::SetTier {
+            name,
+            key,
+            value: v,
+        } => {
             if !matches!(key.as_str(), "suites" | "ci" | "on_red") {
-                return Err(format!("`{key}` is not a tier setting; they are suites, ci and on_red"));
+                return Err(format!(
+                    "`{key}` is not a tier setting; they are suites, ci and on_red"
+                ));
             }
             let tiers = tiers_mut(&mut d);
             let t = tiers
@@ -129,7 +162,10 @@ fn change(op: &Op, text: &str) -> Result<String, String> {
             if d.get("on_red").is_none() {
                 d.insert("on_red", Item::Table(Table::new()));
             }
-            let t = d.get_mut("on_red").and_then(|t| t.as_table_like_mut()).ok_or("`on_red` is not a table")?;
+            let t = d
+                .get_mut("on_red")
+                .and_then(|t| t.as_table_like_mut())
+                .ok_or("`on_red` is not a table")?;
             keep(t, "ladder", value(a));
         }
     }
@@ -152,7 +188,10 @@ pub fn apply(op: &Op, text: &str) -> Result<String, Vec<String>> {
         return Ok(new);
     }
     let before = problems(text);
-    let fresh: Vec<String> = problems(&new).into_iter().filter(|p| !before.contains(p)).collect();
+    let fresh: Vec<String> = problems(&new)
+        .into_iter()
+        .filter(|p| !before.contains(p))
+        .collect();
     if fresh.is_empty() {
         Ok(new)
     } else {
@@ -203,50 +242,193 @@ ladder = [\"rerun-failed\", \"bisect\", \"ask\"]
 
     #[test]
     fn a_setting_changes_in_place_and_comments_survive() {
-        let t = apply(&Op::Set { key: "max_size".into(), value: json!(8) }, TEXT).unwrap();
-        assert!(t.contains("# How this project lands.") && t.contains("# no PRs"), "{t}");
-        let changed: Vec<_> = TEXT.lines().zip(t.lines()).filter(|(a, b)| a != b).collect();
+        let t = apply(
+            &Op::Set {
+                key: "max_size".into(),
+                value: json!(8),
+            },
+            TEXT,
+        )
+        .unwrap();
+        assert!(
+            t.contains("# How this project lands.") && t.contains("# no PRs"),
+            "{t}"
+        );
+        let changed: Vec<_> = TEXT
+            .lines()
+            .zip(t.lines())
+            .filter(|(a, b)| a != b)
+            .collect();
         assert_eq!(changed, vec![("max_size = 5", "max_size = 8")]);
-        let t = apply(&Op::Set { key: "mode".into(), value: json!("local-only") }, &t).unwrap();
+        let t = apply(
+            &Op::Set {
+                key: "mode".into(),
+                value: json!("local-only"),
+            },
+            &t,
+        )
+        .unwrap();
         assert!(t.contains("mode     = \"local-only\"   # no PRs"), "{t}");
     }
 
     #[test]
     fn invalid_edits_are_refused_with_the_reason() {
-        let e = apply(&Op::Set { key: "mode".into(), value: json!("yolo") }, TEXT).unwrap_err();
+        let e = apply(
+            &Op::Set {
+                key: "mode".into(),
+                value: json!("yolo"),
+            },
+            TEXT,
+        )
+        .unwrap_err();
         assert!(e[0].contains("unknown `yolo`"), "{e:?}");
-        let e = apply(&Op::Set { key: "parallel".into(), value: json!(0) }, TEXT).unwrap_err();
+        let e = apply(
+            &Op::Set {
+                key: "parallel".into(),
+                value: json!(0),
+            },
+            TEXT,
+        )
+        .unwrap_err();
         assert!(e[0].contains("parallel"), "{e:?}");
-        let e = apply(&Op::Set { key: "windo".into(), value: json!("1m") }, TEXT).unwrap_err();
+        let e = apply(
+            &Op::Set {
+                key: "windo".into(),
+                value: json!("1m"),
+            },
+            TEXT,
+        )
+        .unwrap_err();
         assert!(e[0].contains("not a landing setting"), "{e:?}");
-        let e = apply(&Op::Set { key: "window".into(), value: json!("soon") }, TEXT).unwrap_err();
+        let e = apply(
+            &Op::Set {
+                key: "window".into(),
+                value: json!("soon"),
+            },
+            TEXT,
+        )
+        .unwrap_err();
         assert!(e[0].contains("window"), "{e:?}");
         // A CI tier under a mode without CI is refused, pointing at the CI mode.
-        let e = apply(&Op::SetTier { name: "batch".into(), key: "ci".into(), value: json!("github-actions") }, TEXT).unwrap_err();
+        let e = apply(
+            &Op::SetTier {
+                name: "batch".into(),
+                key: "ci".into(),
+                value: json!("github-actions"),
+            },
+            TEXT,
+        )
+        .unwrap_err();
         assert!(e[0].contains("direct-ci"), "{e:?}");
         // Switching the mode first makes it fine.
-        let t = apply(&Op::Set { key: "mode".into(), value: json!("direct-ci") }, TEXT).unwrap();
-        assert!(apply(&Op::SetTier { name: "batch".into(), key: "ci".into(), value: json!("github-actions") }, &t).is_ok());
+        let t = apply(
+            &Op::Set {
+                key: "mode".into(),
+                value: json!("direct-ci"),
+            },
+            TEXT,
+        )
+        .unwrap();
+        assert!(apply(
+            &Op::SetTier {
+                name: "batch".into(),
+                key: "ci".into(),
+                value: json!("github-actions")
+            },
+            &t
+        )
+        .is_ok());
     }
 
     #[test]
     fn tiers_and_the_ladder() {
-        let t = apply(&Op::AddTier { name: "post-land".into(), suites: vec!["smoke".into()] }, TEXT).unwrap();
-        assert!(t.contains("name = \"post-land\"") && t.contains("# How this project lands."), "{t}");
-        assert!(apply(&Op::AddTier { name: "post-land".into(), suites: vec![] }, &t).is_err());
-        let t = apply(&Op::SetTier { name: "post-land".into(), key: "on_red".into(), value: json!("freeze") }, &t).unwrap();
+        let t = apply(
+            &Op::AddTier {
+                name: "post-land".into(),
+                suites: vec!["smoke".into()],
+            },
+            TEXT,
+        )
+        .unwrap();
+        assert!(
+            t.contains("name = \"post-land\"") && t.contains("# How this project lands."),
+            "{t}"
+        );
+        assert!(apply(
+            &Op::AddTier {
+                name: "post-land".into(),
+                suites: vec![]
+            },
+            &t
+        )
+        .is_err());
+        let t = apply(
+            &Op::SetTier {
+                name: "post-land".into(),
+                key: "on_red".into(),
+                value: json!("freeze"),
+            },
+            &t,
+        )
+        .unwrap();
         assert!(t.contains("on_red = \"freeze\""));
-        assert!(apply(&Op::SetTier { name: "post-land".into(), key: "on_red".into(), value: json!("explode") }, &t).is_err());
-        let t = apply(&Op::SetTier { name: "batch".into(), key: "suites".into(), value: json!(["integration", "e2e"]) }, &t).unwrap();
+        assert!(apply(
+            &Op::SetTier {
+                name: "post-land".into(),
+                key: "on_red".into(),
+                value: json!("explode")
+            },
+            &t
+        )
+        .is_err());
+        let t = apply(
+            &Op::SetTier {
+                name: "batch".into(),
+                key: "suites".into(),
+                value: json!(["integration", "e2e"]),
+            },
+            &t,
+        )
+        .unwrap();
         assert!(t.contains("suites = [\"integration\", \"e2e\"]"));
-        let t = apply(&Op::RemoveTier { name: "post-land".into() }, &t).unwrap();
+        let t = apply(
+            &Op::RemoveTier {
+                name: "post-land".into(),
+            },
+            &t,
+        )
+        .unwrap();
         assert!(!t.contains("post-land"));
-        assert!(apply(&Op::RemoveTier { name: "ghost".into() }, &t).is_err());
-        let t = apply(&Op::SetLadder { rungs: vec!["ask".into(), "bisect".into()] }, &t).unwrap();
+        assert!(apply(
+            &Op::RemoveTier {
+                name: "ghost".into()
+            },
+            &t
+        )
+        .is_err());
+        let t = apply(
+            &Op::SetLadder {
+                rungs: vec!["ask".into(), "bisect".into()],
+            },
+            &t,
+        )
+        .unwrap();
         assert!(t.contains("ladder = [\"ask\", \"bisect\"]"), "{t}");
-        assert!(apply(&Op::SetLadder { rungs: vec!["pray".into()] }, &t).is_err());
+        assert!(apply(
+            &Op::SetLadder {
+                rungs: vec!["pray".into()]
+            },
+            &t
+        )
+        .is_err());
         // Starting from nothing works too.
-        let t = apply(&Op::SetLadder { rungs: vec!["ask".into()] }, "").unwrap();
+        let t = apply(
+            &Op::SetLadder {
+                rungs: vec!["ask".into()],
+            },
+            "",
+        )
+        .unwrap();
         assert!(t.contains("[on_red]"));
     }
 
@@ -260,7 +442,13 @@ ladder = [\"rerun-failed\", \"bisect\", \"ask\"]
         assert_eq!(f["ladder"], json!(["rerun-failed", "bisect", "ask"]));
         assert_eq!(f["modes"].as_array().unwrap().len(), 7);
         assert!(f["problems"].as_array().unwrap().is_empty());
-        assert_eq!(form("mode = \"yolo\"")["problems"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            form("mode = \"yolo\"")["problems"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
         assert_eq!(form("")["mode"], "direct", "no file is the default");
     }
 }

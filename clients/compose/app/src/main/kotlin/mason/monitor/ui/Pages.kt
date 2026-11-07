@@ -27,7 +27,7 @@ fun MainPane(model: MonitorModel, modifier: Modifier = Modifier) {
             is Page.Task -> TaskDetailPage(model, p.id)
             Page.Landing -> LandingPage(model)
             Page.Usage -> UsagePage(model)
-            Page.Pipeline -> PipelinePage(model)
+            Page.Pipeline -> EditorPage(model)
             Page.Health -> HealthPage(model)
         }
     }
@@ -269,30 +269,6 @@ fun UsagePage(model: MonitorModel) {
         }
         model.usage?.note?.let { Text(it, style = theme.body(color = theme.muted)) }
         SessionStepper(model)
-    }
-}
-
-/** Until the graphical editor: the definition as it stands, its steps and any problem. */
-@Composable
-fun PipelinePage(model: MonitorModel) {
-    val theme = LocalTheme.current
-    Scrolling {
-        Text("Pipeline", style = theme.title())
-        Text("The graphical editor arrives in a later stage. This is the definition the daemon is running.", style = theme.body(color = theme.muted))
-        model.editor?.let { e ->
-            e.problems.forEach { Text(it, style = theme.body(color = theme.attention)) }
-            Section("Steps (${e.project})") {
-                e.steps.forEach { s ->
-                    Text(
-                        "${s.name}  ${s.kind}, ${s.category}" +
-                            (if (s.next.isEmpty()) "" else "  →  ${s.next.joinToString(", ")}") +
-                            (if (s.on_red.isEmpty()) "" else "  (red: ${s.on_red})"),
-                        style = theme.mono(color = theme.text),
-                    )
-                }
-            }
-            if (e.text.isNotEmpty()) SelectionContainer { Text(e.text, style = theme.mono()) }
-        }
     }
 }
 

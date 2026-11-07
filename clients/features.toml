@@ -82,9 +82,9 @@ swift = "done"
 compose = "done"
 
 [feature.pipeline-editor]
-description = "The graphical editor of the definition (Part 18)"
-swift = "todo"
-compose = "todo"
+description = "The graphical editor of the definition (Part 18): canvas with swimlanes, palette, inspector forms from JSON Schema, test grid, landing editor, simulate, diff and impact, undo and redo, apply"
+swift = "done"
+compose = "done"
 
 [feature.health-page]
 description = "Digest, detector findings, runtime version, resources and who holds them"

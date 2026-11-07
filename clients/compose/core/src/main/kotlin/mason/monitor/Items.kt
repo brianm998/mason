@@ -69,6 +69,7 @@ fun MonitorModel.visibleItems(): List<Item> {
         }
         out += Item("sessions", listOf("${h.sessions_used} of ${h.sessions_limit}"), listOf("increase", "decrease"))
     }
+    if (page == Page.Pipeline) editor?.let { out += it.items() }
     if (page is Page.Task) taskDetail?.let { d ->
         val r = d.row
         if (r != null) {
@@ -85,4 +86,40 @@ fun List<Item>.toJsonText(): String {
     val a = JSONArray()
     forEach { a.put(org.json.JSONObject(it.toJson())) }
     return a.toString(2)
+}
+
+/**
+ * What the pipeline editor shows, as items (the same list the daemon's
+ * `conformance::editor_items` builds from the same view).
+ */
+fun mason.v1.EditorView.items(): List<Item> {
+    val out = mutableListOf<Item>()
+    lanes.forEachIndexed { i, l -> out += Item("lane:${l.category}", listOf(l.title), order = i) }
+    nodes.forEachIndexed { i, n ->
+        val texts = mutableListOf(n.name, n.kind, n.category)
+        if (n.summary.isNotEmpty()) texts += n.summary
+        if (n.is_start) texts += "start"
+        texts += n.problems
+        out += Item("node:${n.name}", texts, order = i)
+    }
+    edges.forEachIndexed { i, x ->
+        val texts = mutableListOf(x.from, x.to, if (x.kind == "on_red") "on red" else "next")
+        if (x.bound > 0) texts += "at most ${x.bound} times"
+        out += Item("edge:${x.from}:${x.kind}:${x.to}", texts, order = i)
+    }
+    grid?.let { g ->
+        g.rows.forEachIndexed { i, r ->
+            val texts = mutableListOf(r.suite, r.level)
+            g.columns.zip(r.cells).filter { it.second }.forEach { texts += it.first.replace('_', ' ') }
+            out += Item("grid:${r.suite}", texts, order = i)
+        }
+    }
+    problems.forEachIndexed { i, p -> out += Item("problem:$i", listOf(p), order = i) }
+    val actions = mutableListOf("simulate")
+    if (can_undo) actions += "undo"
+    if (can_redo) actions += "redo"
+    if (dirty) actions += listOf("discard", "apply")
+    out += Item("draft", listOf(if (dirty) "changed" else "unchanged"), actions)
+    changes.forEachIndexed { i, c -> out += Item("change:$i", listOf(c), order = i) }
+    return out
 }

@@ -89,7 +89,7 @@ class MonitorConnection(private val model: MonitorModel, private val port: Int) 
             Page.Health -> model.raw("GET", "/resources", id = "health")
             else -> {}
         }
-        write(ClientMessage(subscribe = Subscribe(views = views, project = model.project, task = task)))
+        write(ClientMessage(subscribe = Subscribe(views = views, project = model.project, task = task, editor_step = model.editorStep)))
     }
 
     private fun send(c: Command) {

@@ -654,12 +654,25 @@ impl<'a> Ctx<'a> {
     }
 
     pub fn editor(&self, project: &str, step: &str) -> EditorView {
-        let pid = self.w.projects.values().find(|p| project.is_empty() || p.name == project).map(|p| p.id);
+        let pid = self
+            .w
+            .projects
+            .values()
+            .find(|p| project.is_empty() || p.name == project)
+            .map(|p| p.id);
         let Some(pid) = pid else {
             return EditorView::default();
         };
         let m = crate::editor::model(self.d, pid, step);
-        let strs = |v: &serde_json::Value| -> Vec<String> { v.as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default() };
+        let strs = |v: &serde_json::Value| -> Vec<String> {
+            v.as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
         let def = self.d.current_def(pid);
         EditorView {
             project: m["project"].as_str().unwrap_or_default().into(),
@@ -677,7 +690,15 @@ impl<'a> Ctx<'a> {
                 .collect(),
             problems: strs(&m["problems"]),
             hash: def.hash.clone(),
-            lanes: m["lanes"].as_array().into_iter().flatten().map(|l| EditorLane { category: l["category"].as_str().unwrap_or_default().into(), title: l["title"].as_str().unwrap_or_default().into() }).collect(),
+            lanes: m["lanes"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|l| EditorLane {
+                    category: l["category"].as_str().unwrap_or_default().into(),
+                    title: l["title"].as_str().unwrap_or_default().into(),
+                })
+                .collect(),
             nodes: m["nodes"]
                 .as_array()
                 .into_iter()
@@ -699,7 +720,12 @@ impl<'a> Ctx<'a> {
                 .as_array()
                 .into_iter()
                 .flatten()
-                .map(|e| EditorEdge { from: e["from"].as_str().unwrap_or_default().into(), to: e["to"].as_str().unwrap_or_default().into(), kind: e["kind"].as_str().unwrap_or_default().into(), bound: e["bound"].as_u64().unwrap_or(0) as u32 })
+                .map(|e| EditorEdge {
+                    from: e["from"].as_str().unwrap_or_default().into(),
+                    to: e["to"].as_str().unwrap_or_default().into(),
+                    kind: e["kind"].as_str().unwrap_or_default().into(),
+                    bound: e["bound"].as_u64().unwrap_or(0) as u32,
+                })
                 .collect(),
             grid: Some(TestGridView {
                 columns: strs(&m["grid"]["columns"]),
@@ -708,7 +734,14 @@ impl<'a> Ctx<'a> {
                     .as_array()
                     .into_iter()
                     .flatten()
-                    .map(|r| GridRowView { suite: r["suite"].as_str().unwrap_or_default().into(), level: r["level"].as_str().unwrap_or_default().into(), cells: r["cells"].as_array().map(|c| c.iter().map(|x| x.as_bool().unwrap_or(false)).collect()).unwrap_or_default() })
+                    .map(|r| GridRowView {
+                        suite: r["suite"].as_str().unwrap_or_default().into(),
+                        level: r["level"].as_str().unwrap_or_default().into(),
+                        cells: r["cells"]
+                            .as_array()
+                            .map(|c| c.iter().map(|x| x.as_bool().unwrap_or(false)).collect())
+                            .unwrap_or_default(),
+                    })
                     .collect(),
             }),
             inspector: if m["inspector"].is_null() {
@@ -722,7 +755,12 @@ impl<'a> Ctx<'a> {
                 })
             },
             landing: m["landing"].to_string(),
-            palette: m["palette"].as_array().into_iter().flatten().map(|p| p.to_string()).collect(),
+            palette: m["palette"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|p| p.to_string())
+                .collect(),
             suites: strs(&m["suites"]),
             step_names: strs(&m["steps"]),
             dirty: m["dirty"].as_bool().unwrap_or(false),
@@ -731,7 +769,11 @@ impl<'a> Ctx<'a> {
             diff: m["diff"].as_str().unwrap_or_default().into(),
             changes: strs(&m["changes"]),
             affected: strs(&m["affected"]),
-            simulation: if m["simulation"].is_null() { String::new() } else { m["simulation"].to_string() },
+            simulation: if m["simulation"].is_null() {
+                String::new()
+            } else {
+                m["simulation"].to_string()
+            },
             last_error: strs(&m["last_error"]),
             selected: m["selected"].as_str().unwrap_or_default().into(),
             protected: m["protected"].as_bool().unwrap_or(false),

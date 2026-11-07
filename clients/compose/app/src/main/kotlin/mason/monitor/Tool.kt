@@ -72,6 +72,7 @@ fun main(argv: Array<String>) {
     until("a connection") { model.connected && model.header != null && model.sidebar != null && model.home != null }
     when (cmd) {
         "conformance" -> conformance(model, File(args.opt("--out") ?: fail("--out DIR")))
+        "editor" -> editor(model, args, File(args.opt("--out") ?: fail("--out DIR")))
         "snapshot" -> snapshots(model, File(args.opt("--out") ?: fail("--out DIR")))
         "answer" -> answer(model, args)
         "cancel" -> {
@@ -103,6 +104,25 @@ private fun answer(model: MonitorModel, args: List<String>) {
     if (!r.ok) fail("the daemon refused the answer: ${r.error}")
     until("the task to leave needs-you") { model.home?.attention?.none { it.task?.id == t } == true }
     println("answered task #$t with option $option; it is no longer waiting for the owner")
+}
+
+/**
+ * What the pipeline editor shows for a project's draft, as items: the pipeline page,
+ * opened on a project with a step selected, and its `visibleItems()` written out.
+ * (Needs a real daemon: the demo has no repositories.)
+ */
+private fun editor(model: MonitorModel, args: List<String>, out: File) {
+    val project = args.opt("--project") ?: fail("--project NAME")
+    val step = args.opt("--step") ?: ""
+    out.mkdirs()
+    model.project = project
+    model.selectStep(step)
+    model.go(Page.Pipeline)
+    until("the editor for $project") { model.editor?.project == project && model.editor?.selected == step }
+    settle(model)
+    val items = model.visibleItems()
+    File(out, "checkpoint-0.json").writeText(items.toJsonText())
+    println("the editor shows ${items.size} items")
 }
 
 private fun conformance(model: MonitorModel, out: File) {

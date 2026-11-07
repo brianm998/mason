@@ -62,6 +62,10 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     var scrollTarget by mutableStateOf<String?>(null)
     var lastResult by mutableStateOf<String?>(null)
 
+    /** The step selected in the pipeline editor (for its inspector). */
+    var editorStep by mutableStateOf("")
+        private set
+
     var sender: ((Command) -> Unit)? = null
     var subscribe: (() -> Unit)? = null
 
@@ -162,8 +166,25 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     fun pause(mode: String, seconds: Long) =
         send(Command(pause = PauseWork(project = project, mode = mode, for_seconds = seconds)))
     fun resume() = send(Command(resume = ResumeWork(project = project)))
-    fun raw(method: String, path: String, id: String = "") =
-        send(Command(id = id, raw = Raw(method = method, path = path)))
+    fun raw(method: String, path: String, id: String = "", json: String = "") =
+        send(Command(id = id, raw = Raw(method = method, path = path, json = json)))
+
+    // ---- the pipeline editor (Part 18) ----
+
+    /** The project the editor is about: the one picked, else the first there is. */
+    val editorProject: String get() = project.ifEmpty { header?.projects?.firstOrNull() ?: "" }
+
+    fun selectStep(name: String) {
+        editorStep = name
+        subscribe?.invoke()
+    }
+
+    /** One operation on the draft, as the daemon's editor API takes it. */
+    fun editorOp(op: Map<String, Any?>) = raw("POST", "/projects/$editorProject/editor/op", json = EditorJson.text(op))
+
+    /** `undo`, `redo`, `discard`, `simulate` or `apply`. */
+    fun editorCall(what: String, body: Map<String, Any?> = emptyMap()) =
+        raw("POST", "/projects/$editorProject/editor/$what", json = EditorJson.text(body))
 
     // ---- updates from the daemon ----
 

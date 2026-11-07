@@ -10,6 +10,7 @@ dependencies {
     implementation(project(":core"))
     implementation(compose.desktop.currentOs)
     implementation(compose.material3)
+    implementation("org.json:json:20240303")
     testImplementation(kotlin("test"))
 }
 
