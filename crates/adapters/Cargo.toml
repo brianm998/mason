@@ -41,3 +41,11 @@ path = "src/bin/fake-claude.rs"
 [[bin]]
 name = "fake-codex"
 path = "src/bin/fake-codex.rs"
+
+# A stand-in for GitHub's REST API over a directory of JSON files, for exit
+# tests: the issue listing (with an ETag of its content), each issue's
+# "blocked by" relationship (which can change without the ETag changing, as on
+# GitHub), comments and closing. Loopback only.
+[[bin]]
+name = "fake-github"
+path = "src/bin/fake-github.rs"

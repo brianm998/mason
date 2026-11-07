@@ -106,6 +106,18 @@ pub fn tracker_kit(t: &dyn TrackerAdapter) -> Vec<String> {
             )),
         }
     }
+    if caps.dependencies {
+        if let Some(i) = items.iter().find(|i| !i.is_pr) {
+            if let Err(e) = t.blocked_by(i.number) {
+                p.push(format!(
+                    "a tracker with dependencies answers blocked_by: {e}"
+                ));
+            }
+        }
+    } else if matches!(items.first().map(|i| t.blocked_by(i.number)), Some(Ok(v)) if !v.is_empty())
+    {
+        p.push("a tracker without dependencies reports none".into());
+    }
     p
 }
 

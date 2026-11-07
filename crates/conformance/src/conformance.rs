@@ -58,6 +58,13 @@ impl Item {
     }
 }
 
+fn hash_list(ids: &[u64]) -> String {
+    ids.iter()
+        .map(|n| format!("#{n}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn row_item(r: &TaskRow, order: usize, prefix: &str) -> Item {
     let mut texts = vec![
         r.key.clone(),
@@ -67,6 +74,15 @@ fn row_item(r: &TaskRow, order: usize, prefix: &str) -> Item {
     ];
     if !r.why_waiting.is_empty() {
         texts.push(r.why_waiting.clone());
+    }
+    // The task page says what it waits for and what waits for it.
+    if prefix == "detail" {
+        if !r.blockers.is_empty() {
+            texts.push(format!("waiting for {}", hash_list(&r.blockers)));
+        }
+        if !r.blocks.is_empty() {
+            texts.push(format!("blocks {}", hash_list(&r.blocks)));
+        }
     }
     Item::new(
         format!("{prefix}:{}", r.id),

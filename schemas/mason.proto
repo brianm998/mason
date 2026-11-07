@@ -108,6 +108,9 @@ message AddTask {
   string priority = 4;
   bool proposed = 5;
   bool explored = 6;
+  // Tasks this one waits for, by id (additive). Landed ones are already satisfied;
+  // a canceled or failed one is refused.
+  repeated uint64 after = 7;
 }
 
 message Retry {
@@ -301,6 +304,8 @@ message TaskRow {
   string step = 16;
   // The task's text, for search (the sidebar search can match the body).
   string body = 17;
+  // Tasks that wait for this one (the reverse of `blockers`).
+  repeated uint64 blocks = 18;
 }
 
 message StateCount {

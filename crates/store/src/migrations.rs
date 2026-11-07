@@ -229,6 +229,15 @@ const STEPS: &[&str] = &[
          approved_by TEXT,
          approved_at INTEGER
      );",
+    // 10: the dependencies the tracker last said an issue has (issue number to
+    // blocker issue number), so a change there can be told from an `--after`
+    // edge and applied to the task.
+    "CREATE TABLE tracker_deps (
+         project        TEXT NOT NULL,
+         number         INTEGER NOT NULL,
+         blocker_number INTEGER NOT NULL,
+         PRIMARY KEY (project, number, blocker_number)
+     );",
 ];
 
 pub const SCHEMA_VERSION: u32 = STEPS.len() as u32;

@@ -343,6 +343,7 @@ fn call_for(c: &Command) -> Result<Call, String> {
                 "project": a.project, "title": a.title, "body": a.body,
                 "priority": if a.priority.is_empty() { "normal" } else { &a.priority },
                 "proposed": a.proposed, "explored": a.explored,
+                "after": a.after,
             })),
             None,
         ),

@@ -274,7 +274,36 @@ impl TrackerAdapter for GitHub {
             comments: true,
             labels: true,
             webhooks: true,
+            dependencies: true,
         }
+    }
+
+    fn blocked_by(&self, number: u64) -> Result<Vec<Blocker>, ApiError> {
+        let v = self.json(Request::get(&self.url(&format!(
+            "/issues/{number}/dependencies/blocked_by?per_page=100"
+        ))))?;
+        let own = format!("/repos/{}", self.repo);
+        Ok(v.as_array()
+            .ok_or_else(|| {
+                ApiError::new(
+                    ErrorKind::Unavailable,
+                    "a list of blocking issues was expected",
+                )
+            })?
+            .iter()
+            // A blocker in another repository is outside this tracker.
+            .filter(|b| {
+                b["repository_url"]
+                    .as_str()
+                    .is_none_or(|u| u.to_ascii_lowercase().ends_with(&own.to_ascii_lowercase()))
+            })
+            .filter_map(|b| {
+                Some(Blocker {
+                    number: b["number"].as_u64()?,
+                    open: b["state"] == "open",
+                })
+            })
+            .collect())
     }
 
     fn list(&self, etag: Option<&str>) -> Result<Listing, ApiError> {

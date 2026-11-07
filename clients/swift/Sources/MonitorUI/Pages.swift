@@ -171,6 +171,31 @@ struct TaskDetailPage: View {
 
             ActionButtons(model: model, row: r)
 
+            if !r.blockers.isEmpty {
+                HStack(spacing: theme.spacingSmall) {
+                    Text("waiting for").font(theme.body()).foregroundStyle(theme.muted)
+                    ForEach(r.blockers, id: \.self) { b in
+                        Button("#\(b)") { model.go(.task(b)) }
+                            .buttonStyle(.link).font(theme.body())
+                    }
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("waiting for \(r.blockers.map { "#\($0)" }.joined(separator: ", "))")
+                .accessibilityIdentifier("waiting-for")
+            }
+            if !r.blocks.isEmpty {
+                HStack(spacing: theme.spacingSmall) {
+                    Text("blocks").font(theme.body()).foregroundStyle(theme.muted)
+                    ForEach(r.blocks, id: \.self) { b in
+                        Button("#\(b)") { model.go(.task(b)) }
+                            .buttonStyle(.link).font(theme.body())
+                    }
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("blocks \(r.blocks.map { "#\($0)" }.joined(separator: ", "))")
+                .accessibilityIdentifier("blocks")
+            }
+
             if !d.route.isEmpty {
                 HStack(spacing: theme.spacing) {
                     Text("Started at \(d.startedAt): \(d.route).").font(theme.body()).foregroundStyle(theme.muted)

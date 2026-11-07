@@ -83,6 +83,21 @@ fn the_tracker_passes_its_conformance_kit_and_sees_prs_as_prs() {
         .headers
         .iter()
         .any(|(k, v)| k == "If-None-Match" && v == "\"v1\""));
+    // Native "blocked by": the other repository's issue is outside this tracker.
+    let blockers = g.gh.blocked_by(3).unwrap();
+    assert_eq!(
+        blockers,
+        vec![
+            Blocker {
+                number: 2,
+                open: false
+            },
+            Blocker {
+                number: 9,
+                open: true
+            }
+        ]
+    );
 }
 
 #[test]

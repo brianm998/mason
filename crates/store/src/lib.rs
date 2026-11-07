@@ -1273,6 +1273,52 @@ impl Store {
         })
     }
 
+    /// The dependencies the tracker last reported: issue number to blocker issue numbers.
+    pub fn tracker_deps(
+        &self,
+        project: &str,
+    ) -> Result<std::collections::BTreeMap<u64, std::collections::BTreeSet<u64>>, StoreError> {
+        let p = project.to_string();
+        self.read(move |c| {
+            let mut st =
+                c.prepare("SELECT number, blocker_number FROM tracker_deps WHERE project = ?1")?;
+            let rows = st.query_map(params![p], |r| {
+                Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64))
+            })?;
+            let mut m: std::collections::BTreeMap<u64, std::collections::BTreeSet<u64>> =
+                Default::default();
+            for r in rows {
+                let (n, b) = r?;
+                m.entry(n).or_default().insert(b);
+            }
+            Ok(m)
+        })
+    }
+
+    /// Replace what the tracker said an issue is blocked by.
+    pub fn set_tracker_deps(
+        &self,
+        project: &str,
+        number: u64,
+        blockers: &[u64],
+    ) -> Result<(), StoreError> {
+        let p = project.to_string();
+        let bs = blockers.to_vec();
+        self.write(move |c| {
+            c.execute(
+                "DELETE FROM tracker_deps WHERE project = ?1 AND number = ?2",
+                params![p, number as i64],
+            )?;
+            for b in &bs {
+                c.execute(
+                    "INSERT OR IGNORE INTO tracker_deps(project, number, blocker_number) VALUES (?1,?2,?3)",
+                    params![p, number as i64, *b as i64],
+                )?;
+            }
+            Ok(())
+        })
+    }
+
     pub fn tracker_items(&self, project: &str) -> Result<Vec<TrackerItemRow>, StoreError> {
         let p = project.to_string();
         self.read(move |c| {

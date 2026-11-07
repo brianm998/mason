@@ -36,6 +36,16 @@ fn pool_err(e: PoolError) -> (StatusCode, Json<Value>) {
 
 fn store_err(e: StoreError) -> (StatusCode, Json<Value>) {
     match e {
+        StoreError::Rejected(mason_engine::ReduceError::BlockerCycle(path)) => fail(
+            StatusCode::CONFLICT,
+            format!(
+                "not allowed: that would make a dependency cycle: {}",
+                path.iter()
+                    .map(|t| format!("#{}", t.0))
+                    .collect::<Vec<_>>()
+                    .join(" -> ")
+            ),
+        ),
         StoreError::Rejected(r) => fail(StatusCode::CONFLICT, format!("not allowed: {r:?}")),
         other => fail(StatusCode::INTERNAL_SERVER_ERROR, other.to_string()),
     }
@@ -98,6 +108,13 @@ fn task_json(d: &Daemon, w: &World, t: &Task, detail: bool) -> Value {
             v["worktree"] = json!(p.worktree(&d.cfg, t.id.0).display().to_string());
         }
         v["definition"] = json!(t.def);
+        v["blocked_by"] = json!(t.blockers.iter().map(|b| b.0).collect::<Vec<_>>());
+        v["blocks"] = json!(w
+            .tasks
+            .values()
+            .filter(|o| o.blockers.contains(&t.id))
+            .map(|o| o.id.0)
+            .collect::<Vec<_>>());
         v["wait"] = d
             .broker
             .explain_task(t.id)
@@ -213,6 +230,47 @@ async fn list_tasks(
     Ok(Json(v))
 }
 
+/// The `after` field of a filing: a list of task ids.
+fn parse_after(v: &Value) -> Result<Vec<TaskId>, String> {
+    let Some(list) = v.as_array() else {
+        return if v.is_null() {
+            Ok(vec![])
+        } else {
+            Err("after must be a list of task ids".into())
+        };
+    };
+    let mut out: Vec<TaskId> = vec![];
+    for x in list {
+        let n = x
+            .as_u64()
+            .ok_or_else(|| format!("after: {x} is not a task id"))?;
+        if !out.contains(&TaskId(n)) {
+            out.push(TaskId(n));
+        }
+    }
+    Ok(out)
+}
+
+/// Every id exists, and none is a task that can never land (so would hold the
+/// new one forever). A landed one is already satisfied.
+pub fn check_after(d: &Arc<Daemon>, ids: &[TaskId]) -> Result<(), String> {
+    let w = d.world().map_err(|e| e.to_string())?;
+    for id in ids {
+        match w.tasks.get(id) {
+            None => return Err(format!("after: no task #{}", id.0)),
+            Some(t) if matches!(t.state, State::Canceled | State::Failed) => {
+                return Err(format!(
+                    "after: task #{} is {} and will never land, so a task after it would be held forever",
+                    id.0,
+                    state_name(t.state)
+                ))
+            }
+            Some(_) => {}
+        }
+    }
+    Ok(())
+}
+
 async fn add_task(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res {
     let d2 = d.clone();
     let v = d
@@ -262,6 +320,9 @@ async fn add_task(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res {
                     ))
                 }
             };
+            let after = parse_after(&b["after"])
+                .and_then(|ids| check_after(&d2, &ids).map(|()| ids))
+                .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
             let appended = d2
                 .emit(EventKind::TaskFiled {
                     project: pid,
@@ -271,7 +332,7 @@ async fn add_task(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res {
                     trust: TrustSource::Owner, // filed from the owner's own CLI
                     explored,
                     proposed: b["proposed"].as_bool().unwrap_or(false),
-                    blockers: vec![],
+                    blockers: after,
                     not_before: None,
                 })
                 .map_err(store_err)?;

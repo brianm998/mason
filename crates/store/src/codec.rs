@@ -339,6 +339,10 @@ pub fn encode(k: &EventKind) -> (&'static str, String) {
             w.n(task.0).n(blocker.0);
             "blocker_added"
         }
+        BlockerRemoved { task, blocker } => {
+            w.n(task.0).n(blocker.0);
+            "blocker_removed"
+        }
         TrackerEdited {
             task,
             title,
@@ -456,6 +460,10 @@ pub fn decode(kind: &str, payload: &str) -> Result<EventKind, CodecError> {
         },
         "wait_ended" => WaitEnded { task: t(&mut r)? },
         "blocker_added" => BlockerAdded {
+            task: t(&mut r)?,
+            blocker: t(&mut r)?,
+        },
+        "blocker_removed" => BlockerRemoved {
             task: t(&mut r)?,
             blocker: t(&mut r)?,
         },
@@ -596,6 +604,10 @@ mod tests {
             },
             WaitEnded { task: t },
             BlockerAdded {
+                task: t,
+                blocker: TaskId(2),
+            },
+            BlockerRemoved {
                 task: t,
                 blocker: TaskId(2),
             },
