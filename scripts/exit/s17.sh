@@ -84,7 +84,7 @@ m task show 0 | grep 'waiting for your approval'
 m task show 1 | grep 'waiting for your approval'
 m self
 m self | grep -q 'task #0 .*WAITING FOR YOU.*crates/testing/src/verdict.rs'
-m self | grep -q 'task #1 .*WAITING FOR YOU.*removed assertion in crates/engine/tests/matrix.rs'
+m self | grep -q 'task #1 .*WAITING FOR YOU.*removed assertion at crates/engine/tests/matrix.rs'
 sleep 2
 if on_origin crates/testing/src/verdict.rs; then echo "the gate change landed without approval" >&2; exit 1; fi
 if [ "$(git -C "$root/origin.git" show main:crates/engine/tests/matrix.rs | grep -c assert_eq)" != 2 ]; then echo "the weakening landed without approval" >&2; exit 1; fi
