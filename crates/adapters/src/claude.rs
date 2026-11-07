@@ -40,9 +40,23 @@ pub fn sanitized_env(
     parent: impl IntoIterator<Item = (String, String)>,
     contract_sock: Option<&Path>,
 ) -> Vec<(String, String)> {
+    sanitized_env_for(spec, parent, contract_sock, PASS_PREFIX)
+}
+
+/// [`sanitized_env`] with the provider's own variable prefixes (`OPENAI_`,
+/// `CODEX_` for Codex): the same allowlist and hardening, a different provider.
+pub fn sanitized_env_for(
+    spec: &SessionSpec,
+    parent: impl IntoIterator<Item = (String, String)>,
+    contract_sock: Option<&Path>,
+    prefixes: &[&str],
+) -> Vec<(String, String)> {
+    let prefixes: Vec<&str> = std::iter::once("LC_")
+        .chain(prefixes.iter().copied().filter(|p| *p != "LC_"))
+        .collect();
     let mut env: Vec<(String, String)> = parent
         .into_iter()
-        .filter(|(k, _)| PASS.contains(&k.as_str()) || PASS_PREFIX.iter().any(|p| k.starts_with(p)))
+        .filter(|(k, _)| PASS.contains(&k.as_str()) || prefixes.iter().any(|p| k.starts_with(p)))
         .collect();
     let mut set = |k: &str, v: String| {
         env.retain(|(ek, _)| ek != k);
@@ -93,6 +107,8 @@ pub struct ClaudeAdapter {
     pub parent_env: Option<Vec<(String, String)>>,
     /// Run the CLI under a step host (so it survives the controller).
     pub host: Option<crate::hosted::HostLaunch>,
+    /// Run the CLI under an OS sandbox (off by default).
+    pub sandbox: Option<crate::sandbox::SandboxPolicy>,
 }
 
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -109,6 +125,7 @@ impl ClaudeAdapter {
             state_dir: state_dir.into(),
             parent_env: None,
             host: None,
+            sandbox: None,
         }
     }
 
@@ -236,127 +253,8 @@ impl ClaudeAdapter {
         cmd: AgentCommand,
         spec: &SessionSpec,
     ) -> Result<Box<dyn SessionHandle>, AdapterError> {
-        if let Some(h) = &self.host {
-            let key = spec
-                .run_key
-                .as_deref()
-                .ok_or_else(|| AdapterError::Other("a hosted launch needs spec.run_key".into()))?;
-            let id = crate::hosted::spawn(
-                h,
-                key,
-                &cmd.program,
-                &cmd.args,
-                &cmd.env,
-                &cmd.cwd,
-                &cmd.stdin,
-            )?;
-            return Ok(crate::hosted::attach(h, id, spec));
-        }
-        let mut c = Command::new(&cmd.program);
-        c.args(&cmd.args)
-            .current_dir(&cmd.cwd)
-            .env_clear()
-            .envs(cmd.env.iter().map(|(k, v)| (k, v)))
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .process_group(0);
-        let mut child = c.spawn().map_err(AdapterError::Spawn)?;
-        let pid = child.id();
-        if let Some(mut sin) = child.stdin.take() {
-            let _ = sin.write_all(cmd.stdin.as_bytes());
-        }
-        let stdout = child.stdout.take().expect("piped stdout");
-        let mut stderr = child.stderr.take().expect("piped stderr");
-        let tail = Arc::new(Mutex::new(String::new()));
-        {
-            let tail = tail.clone();
-            thread::spawn(move || {
-                let mut s = String::new();
-                let _ = stderr.read_to_string(&mut s);
-                let keep: String = s
-                    .chars()
-                    .rev()
-                    .take(2000)
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .rev()
-                    .collect();
-                *tail.lock().unwrap_or_else(|e| e.into_inner()) = keep;
-            });
-        }
-        let (tx, rx) = channel();
-        let session_id = Arc::new(Mutex::new(None));
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let timed_out = Arc::new(AtomicBool::new(false));
-        let done = Arc::new(AtomicBool::new(false));
-
-        // Deadline watchdog: kill the whole process group when time is up.
-        if let Some(d) = spec.deadline {
-            let (timed_out, done) = (timed_out.clone(), done.clone());
-            thread::spawn(move || {
-                let end = Instant::now() + d;
-                while Instant::now() < end {
-                    if done.load(Ordering::SeqCst) {
-                        return;
-                    }
-                    thread::sleep(Duration::from_millis(20));
-                }
-                timed_out.store(true, Ordering::SeqCst);
-                let _ = killpg(Pid::from_raw(pid as i32), Signal::SIGKILL);
-            });
-        }
-
-        let accepted = spec.accepted.clone();
-        {
-            let (sid, cancelled, timed_out, done) = (
-                session_id.clone(),
-                cancelled.clone(),
-                timed_out.clone(),
-                done.clone(),
-            );
-            thread::spawn(move || {
-                let mut st = ParseState::default();
-                for line in BufReader::new(stdout).lines() {
-                    let Ok(line) = line else { break };
-                    for ev in parse_line(&line, &mut st) {
-                        if let Some(id) = &st.session_id {
-                            *sid.lock().unwrap_or_else(|e| e.into_inner()) = Some(id.clone());
-                        }
-                        let _ = tx.send(ev);
-                    }
-                }
-                let status = child.wait();
-                done.store(true, Ordering::SeqCst);
-                let _ = killpg(Pid::from_raw(pid as i32), Signal::SIGKILL); // stragglers
-                std::thread::sleep(Duration::from_millis(20)); // let the stderr reader finish
-                let detail = tail
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .trim()
-                    .to_string();
-                let outcome = if timed_out.load(Ordering::SeqCst) {
-                    Outcome::Timeout
-                } else if cancelled.load(Ordering::SeqCst) {
-                    Outcome::NoResult
-                } else {
-                    final_outcome(
-                        &st,
-                        accepted.is_set(),
-                        status.ok().and_then(|s| s.code()),
-                        &detail,
-                    )
-                };
-                let _ = tx.send(AgentEvent::Finished(outcome));
-            });
-        }
-        Ok(Box::new(ProcessSession {
-            rx,
-            session_id,
-            cancelled,
-            pid,
-            finished: false,
-        }))
+        let cmd = crate::sandbox::apply(cmd, self.sandbox.as_ref())?;
+        launch_process(self.host.as_ref(), cmd, spec, Dialect::Claude)
     }
 }
 
@@ -402,6 +300,137 @@ impl AgentAdapter for ClaudeAdapter {
         Ok(crate::hosted::latest_invocation(&h.root, run_key)
             .map(|id| crate::hosted::attach(h, id, &spec)))
     }
+}
+
+/// Start the CLI described by `cmd`, directly or under a step host, and follow
+/// its output as `dialect`.
+pub(crate) fn launch_process(
+    host: Option<&crate::hosted::HostLaunch>,
+    cmd: AgentCommand,
+    spec: &SessionSpec,
+    dialect: Dialect,
+) -> Result<Box<dyn SessionHandle>, AdapterError> {
+    if let Some(h) = host {
+        let key = spec
+            .run_key
+            .as_deref()
+            .ok_or_else(|| AdapterError::Other("a hosted launch needs spec.run_key".into()))?;
+        let id = crate::hosted::spawn(
+            h,
+            key,
+            &cmd.program,
+            &cmd.args,
+            &cmd.env,
+            &cmd.cwd,
+            &cmd.stdin,
+        )?;
+        return Ok(crate::hosted::attach_as(h, id, spec, dialect));
+    }
+    let mut c = Command::new(&cmd.program);
+    c.args(&cmd.args)
+        .current_dir(&cmd.cwd)
+        .env_clear()
+        .envs(cmd.env.iter().map(|(k, v)| (k, v)))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0);
+    let mut child = c.spawn().map_err(AdapterError::Spawn)?;
+    let pid = child.id();
+    if let Some(mut sin) = child.stdin.take() {
+        let _ = sin.write_all(cmd.stdin.as_bytes());
+    }
+    let stdout = child.stdout.take().expect("piped stdout");
+    let mut stderr = child.stderr.take().expect("piped stderr");
+    let tail = Arc::new(Mutex::new(String::new()));
+    {
+        let tail = tail.clone();
+        thread::spawn(move || {
+            let mut s = String::new();
+            let _ = stderr.read_to_string(&mut s);
+            let keep: String = s
+                .chars()
+                .rev()
+                .take(2000)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            *tail.lock().unwrap_or_else(|e| e.into_inner()) = keep;
+        });
+    }
+    let (tx, rx) = channel();
+    let session_id = Arc::new(Mutex::new(None));
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let timed_out = Arc::new(AtomicBool::new(false));
+    let done = Arc::new(AtomicBool::new(false));
+
+    // Deadline watchdog: kill the whole process group when time is up.
+    if let Some(d) = spec.deadline {
+        let (timed_out, done) = (timed_out.clone(), done.clone());
+        thread::spawn(move || {
+            let end = Instant::now() + d;
+            while Instant::now() < end {
+                if done.load(Ordering::SeqCst) {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+            timed_out.store(true, Ordering::SeqCst);
+            let _ = killpg(Pid::from_raw(pid as i32), Signal::SIGKILL);
+        });
+    }
+
+    let accepted = spec.accepted.clone();
+    {
+        let (sid, cancelled, timed_out, done) = (
+            session_id.clone(),
+            cancelled.clone(),
+            timed_out.clone(),
+            done.clone(),
+        );
+        thread::spawn(move || {
+            let mut st = ParseState::new(dialect);
+            for line in BufReader::new(stdout).lines() {
+                let Ok(line) = line else { break };
+                for ev in parse_line(&line, &mut st) {
+                    if let Some(id) = &st.session_id {
+                        *sid.lock().unwrap_or_else(|e| e.into_inner()) = Some(id.clone());
+                    }
+                    let _ = tx.send(ev);
+                }
+            }
+            let status = child.wait();
+            done.store(true, Ordering::SeqCst);
+            let _ = killpg(Pid::from_raw(pid as i32), Signal::SIGKILL); // stragglers
+            std::thread::sleep(Duration::from_millis(20)); // let the stderr reader finish
+            let detail = tail
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .trim()
+                .to_string();
+            let outcome = if timed_out.load(Ordering::SeqCst) {
+                Outcome::Timeout
+            } else if cancelled.load(Ordering::SeqCst) {
+                Outcome::NoResult
+            } else {
+                final_outcome(
+                    &st,
+                    accepted.is_set(),
+                    status.ok().and_then(|s| s.code()),
+                    &detail,
+                )
+            };
+            let _ = tx.send(AgentEvent::Finished(outcome));
+        });
+    }
+    Ok(Box::new(ProcessSession {
+        rx,
+        session_id,
+        cancelled,
+        pid,
+        finished: false,
+    }))
 }
 
 struct ProcessSession {
@@ -452,9 +481,18 @@ impl SessionHandle for ProcessSession {
     }
 }
 
+/// Which CLI's output a stream is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Dialect {
+    #[default]
+    Claude,
+    Codex,
+}
+
 /// What the parser has learned so far from one invocation's stream.
 #[derive(Default, Debug)]
 pub struct ParseState {
+    pub dialect: Dialect,
     pub session_id: Option<String>,
     pub result: Option<ResultInfo>,
     /// Latest limit status seen, for classifying a failed result.
@@ -468,11 +506,20 @@ pub struct ResultInfo {
     pub api_error_status: Option<u32>,
 }
 
-fn num(v: &Value, k: &str) -> Option<u64> {
+impl ParseState {
+    pub fn new(dialect: Dialect) -> Self {
+        ParseState {
+            dialect,
+            ..Default::default()
+        }
+    }
+}
+
+pub(crate) fn num(v: &Value, k: &str) -> Option<u64> {
     v.get(k).and_then(Value::as_u64)
 }
 
-fn clip(s: &str, n: usize) -> String {
+pub(crate) fn clip(s: &str, n: usize) -> String {
     if s.chars().count() <= n {
         s.to_string()
     } else {
@@ -482,6 +529,9 @@ fn clip(s: &str, n: usize) -> String {
 
 /// Parse one `stream-json` line. Unknown or malformed lines yield nothing.
 pub fn parse_line(line: &str, st: &mut ParseState) -> Vec<AgentEvent> {
+    if st.dialect == Dialect::Codex {
+        return crate::codex::parse_line(line, st);
+    }
     let Ok(v) = serde_json::from_str::<Value>(line) else {
         return vec![];
     };

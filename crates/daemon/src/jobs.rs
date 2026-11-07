@@ -14,14 +14,18 @@
 //! `land_before_event`, `land_after_event`.
 
 use crate::config::ProjectCfg;
+use crate::config::Provider;
 use crate::daemon::{now_ms, Daemon};
 use mason_adapter_api::contract::{CheckHandler, CheckRun, ContractHandle, Validator};
 use mason_adapter_api::{AgentAdapter, SessionSpec, StepKind};
 use mason_adapters::claude::ClaudeAdapter;
+use mason_adapters::codex::CodexAdapter;
 use mason_adapters::hosted::HostLaunch;
 use mason_adapters::runner::{
-    hold_note, FailReason, HoldReason, RunnerConfig, StepEnd, StepReport, StepRunner,
+    hold_note, worth_a_stronger_model, FailReason, HoldReason, RunnerConfig, StepEnd, StepReport,
+    StepRunner,
 };
+use mason_adapters::sandbox::{SandboxKind, SandboxPolicy};
 use mason_core::*;
 use mason_definition::graph::{after, Outcome, Transition};
 use mason_definition::layers::{resolve, Resolved, RuntimeOverride};
@@ -640,20 +644,48 @@ fn change_validator(
     })
 }
 
-fn adapter(c: &Ctx) -> ClaudeAdapter {
-    let bin = c
-        .project
-        .claude_bin
-        .clone()
-        .unwrap_or_else(|| PathBuf::from("claude"));
-    ClaudeAdapter::new(bin, c.d.cfg.mcp_bin.clone(), c.d.cfg.agent_state_dir()).with_host(
-        HostLaunch {
-            host_bin: c.d.cfg.host_bin.clone(),
-            root: c.d.cfg.hosts_dir(),
-            heartbeat: c.d.cfg.heartbeat,
-            linger: Duration::from_secs(600),
-        },
-    )
+/// The agent CLI for this project's provider, under the step host and, if the
+/// project asks for one, an OS sandbox.
+fn adapter(c: &Ctx) -> Box<dyn AgentAdapter> {
+    let agent = c.project.agent();
+    let host = HostLaunch {
+        host_bin: c.d.cfg.host_bin.clone(),
+        root: c.d.cfg.hosts_dir(),
+        heartbeat: c.d.cfg.heartbeat,
+        linger: Duration::from_secs(600),
+    };
+    let sandbox = (agent.sandbox != SandboxKind::None).then(|| {
+        let mut p = SandboxPolicy::new(agent.sandbox, &c.wt, &c.d.cfg.agent_state_dir());
+        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+            p.extra = [".claude", ".claude.json", ".codex"]
+                .iter()
+                .map(|f| home.join(f))
+                .collect();
+        }
+        // A worktree's commits are written into the main repository's `.git`.
+        p.extra.push(c.project.path.join(".git"));
+        p
+    });
+    match agent.provider {
+        Provider::Claude => {
+            let bin = c
+                .project
+                .claude_bin
+                .clone()
+                .unwrap_or_else(|| PathBuf::from("claude"));
+            let mut a = ClaudeAdapter::new(bin, c.d.cfg.mcp_bin.clone(), c.d.cfg.agent_state_dir())
+                .with_host(host);
+            a.sandbox = sandbox;
+            Box::new(a)
+        }
+        Provider::Codex => {
+            let bin = agent.codex_bin.unwrap_or_else(|| PathBuf::from("codex"));
+            let mut a = CodexAdapter::new(bin, c.d.cfg.mcp_bin.clone(), c.d.cfg.agent_state_dir())
+                .with_host(host);
+            a.sandbox = sandbox;
+            Box::new(a)
+        }
+    }
 }
 
 fn agent_job(c: &Ctx) {
@@ -795,7 +827,23 @@ fn agent_job(c: &Ctx) {
 
     let adapter = adapter(c);
     let mut spec = SessionSpec::new(kind, &prompt, &c.wt);
-    spec.model = c.res.model.as_ref().map(|a| a.value.clone());
+    let agent = c.project.agent();
+    // Codex does not know the built-in profiles' Claude model names: its model
+    // is the project's `model`, else the bottom of its ladder, else the CLI's
+    // own default. For Claude, a ladder with no model set starts at its bottom.
+    spec.model = match agent.provider {
+        Provider::Codex => c
+            .project
+            .model
+            .clone()
+            .or_else(|| agent.ladder.first().cloned()),
+        Provider::Claude => c
+            .res
+            .model
+            .as_ref()
+            .map(|a| a.value.clone())
+            .or_else(|| agent.ladder.first().cloned()),
+    };
     spec.effort = c.res.effort.as_ref().map(|a| a.value.clone());
     spec.env = c.project.agent_env.clone();
     spec.tool_timeout = c.project.tool_timeout;
@@ -811,13 +859,47 @@ fn agent_job(c: &Ctx) {
     spec.accepted = contract.flag();
     spec.contract = Some(contract.clone());
 
-    let runner = StepRunner::new(&adapter, RunnerConfig::default());
-    let mut report = match adapter.reattach(&key, spec.clone()) {
+    let runner = StepRunner::new(adapter.as_ref(), RunnerConfig::default());
+    let first = match adapter.reattach(&key, spec.clone()) {
         Ok(Some(h)) => runner.adopt(h, spec.clone(), &contract),
         _ => runner.run(spec.clone(), &contract),
     };
+    let Some(mut report) = settle_holds(c, &runner, first, &spec, &contract) else {
+        return;
+    };
 
-    // A provider hold is a wait, never a failure: show it, wait, resume.
+    // The retry ladder: a step that ended with no result, or whose agent
+    // crashed, is tried again from a fresh session on the next model up. Not
+    // after a timeout (more model would not be more time), a hold (a wait) or a
+    // question (the owner's turn). An empty ladder never retries.
+    let mut tries = 0;
+    while tries < agent.max_retries && worth_a_stronger_model(&report.end) {
+        let Some(next) = mason_definition::builtin::next_up(&agent.ladder, spec.model.as_deref())
+        else {
+            break;
+        };
+        tries += 1;
+        spec.model = Some(next.to_string());
+        spec.run_key = Some(format!("{key}u{tries}"));
+        let again = runner.run(spec.clone(), &contract);
+        let Some(r) = settle_holds(c, &runner, again, &spec, &contract) else {
+            return;
+        };
+        report = r;
+    }
+    contract.shutdown();
+    finish_agent(c, report, &dir);
+}
+
+/// A provider hold is a wait, never a failure: show it, wait, resume. `None`
+/// when the task went away while waiting.
+fn settle_holds(
+    c: &Ctx,
+    runner: &StepRunner,
+    mut report: StepReport,
+    spec: &SessionSpec,
+    contract: &ContractHandle,
+) -> Option<StepReport> {
     while let StepEnd::Hold(reason) = &report.end {
         let on = match reason {
             HoldReason::UsageLimit { resets_at } => format!(
@@ -827,16 +909,15 @@ fn agent_job(c: &Ctx) {
             HoldReason::ProviderDown { .. } => "provider outage".to_string(),
         };
         if !c.emit(EventKind::WaitStarted { task: c.task, on }) {
-            return;
+            return None;
         }
         std::thread::sleep(c.d.cfg.hold_retry);
         if !c.emit(EventKind::WaitEnded { task: c.task }) {
-            return;
+            return None;
         }
-        report = runner.resume(report, hold_note(), spec.clone(), &contract);
+        report = runner.resume(report, hold_note(), spec.clone(), contract);
     }
-    contract.shutdown();
-    finish_agent(c, report, &dir);
+    Some(report)
 }
 
 fn finish_agent(c: &Ctx, report: StepReport, dir: &Path) {

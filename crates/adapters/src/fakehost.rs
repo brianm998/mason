@@ -309,27 +309,60 @@ pub struct CommandCi {
     pub cwd: PathBuf,
 }
 
+/// Run `cmd` with `sh -c` in `cwd` with extra environment; its trimmed stdout, or
+/// `Unavailable` when it fails. Shared by the command CI and the generic adapter.
+pub fn run_command(cwd: &Path, cmd: &str, env: &[(&str, &str)]) -> Result<String, ApiError> {
+    let mut c = Command::new("sh");
+    c.args(["-c", cmd]).current_dir(cwd);
+    for (k, v) in env {
+        c.env(k, v);
+    }
+    let o = c
+        .output()
+        .map_err(|e| ApiError::new(ErrorKind::Unavailable, e.to_string()))?;
+    if o.status.success() {
+        Ok(String::from_utf8_lossy(&o.stdout).trim().to_string())
+    } else {
+        Err(ApiError::new(
+            ErrorKind::Unavailable,
+            format!(
+                "`{cmd}` failed: {}",
+                String::from_utf8_lossy(&o.stderr).trim()
+            ),
+        ))
+    }
+}
+
+/// The status protocol: first line `pending`, `green` or `red` (anything else is
+/// pending); after `red`, a second line may list failed jobs, comma separated.
+pub fn parse_status(out: &str) -> CiState {
+    let mut lines = out.lines();
+    match lines.next().map(str::trim) {
+        Some("green") => CiState::Green,
+        Some("red") => {
+            let failed: Vec<String> = lines
+                .next()
+                .unwrap_or("")
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            CiState::Red {
+                summary: if failed.is_empty() {
+                    "CI is red".into()
+                } else {
+                    format!("{} failed", failed.join(", "))
+                },
+                failed,
+            }
+        }
+        _ => CiState::Pending,
+    }
+}
+
 impl CommandCi {
     fn run(&self, cmd: &str, env: &[(&str, &str)]) -> Result<String, ApiError> {
-        let mut c = Command::new("sh");
-        c.args(["-c", cmd]).current_dir(&self.cwd);
-        for (k, v) in env {
-            c.env(k, v);
-        }
-        let o = c
-            .output()
-            .map_err(|e| ApiError::new(ErrorKind::Unavailable, e.to_string()))?;
-        if o.status.success() {
-            Ok(String::from_utf8_lossy(&o.stdout).trim().to_string())
-        } else {
-            Err(ApiError::new(
-                ErrorKind::Unavailable,
-                format!(
-                    "`{cmd}` failed: {}",
-                    String::from_utf8_lossy(&o.stderr).trim()
-                ),
-            ))
-        }
+        run_command(&self.cwd, cmd, env)
     }
 }
 
@@ -358,28 +391,7 @@ impl BuildSystemAdapter for CommandCi {
 
     fn status(&self, run: &str) -> Result<CiState, ApiError> {
         let out = self.run(&self.status, &[("MASON_RUN", run)])?;
-        let mut lines = out.lines();
-        Ok(match lines.next().map(str::trim) {
-            Some("green") => CiState::Green,
-            Some("red") => {
-                let failed: Vec<String> = lines
-                    .next()
-                    .unwrap_or("")
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect();
-                CiState::Red {
-                    summary: if failed.is_empty() {
-                        "CI is red".into()
-                    } else {
-                        format!("{} failed", failed.join(", "))
-                    },
-                    failed,
-                }
-            }
-            _ => CiState::Pending,
-        })
+        Ok(parse_status(&out))
     }
 
     fn doctor(&self, _repo: &Path) -> Vec<Problem> {

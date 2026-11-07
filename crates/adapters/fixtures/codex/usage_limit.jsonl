@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"0199-codex-thread-3"}
+{"type":"turn.started"}
+{"type":"error","message":"You've hit your usage limit. Try again at 3:00 PM."}
+{"type":"turn.failed","error":{"message":"You've hit your usage limit. Try again at 3:00 PM."}}

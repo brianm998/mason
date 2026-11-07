@@ -1,0 +1,5 @@
+{"type":"thread.started","thread_id":"0199-codex-thread-4"}
+{"type":"turn.started"}
+{"type":"error","message":"Reconnecting... 1/5"}
+{"type":"error","message":"stream disconnected before completion: unexpected status 503 Service Unavailable"}
+{"type":"turn.failed","error":{"message":"stream disconnected before completion: unexpected status 503 Service Unavailable"}}

@@ -68,6 +68,14 @@ pub fn default_profile(category: mason_core::State) -> &'static str {
     }
 }
 
+/// The next model up a retry ladder (models listed weakest to strongest) from
+/// `current`. `None` when the ladder is empty, `current` is not on it, or it is
+/// already the top: then nothing changes.
+pub fn next_up<'a>(ladder: &'a [String], current: Option<&str>) -> Option<&'a str> {
+    let at = ladder.iter().position(|m| Some(m.as_str()) == current)?;
+    ladder.get(at + 1).map(String::as_str)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -81,6 +89,21 @@ mod tests {
         assert_eq!(
             d.steps.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
             ["explore", "develop", "test", "land"]
+        );
+    }
+
+    #[test]
+    fn a_ladder_moves_up_one_rung_and_stops_at_the_top() {
+        let l: Vec<String> = ["small", "mid", "big"].map(String::from).to_vec();
+        assert_eq!(next_up(&l, Some("small")), Some("mid"));
+        assert_eq!(next_up(&l, Some("mid")), Some("big"));
+        assert_eq!(next_up(&l, Some("big")), None);
+        assert_eq!(next_up(&l, Some("elsewhere")), None);
+        assert_eq!(next_up(&l, None), None);
+        assert_eq!(
+            next_up(&[], Some("small")),
+            None,
+            "an empty ladder changes nothing"
         );
     }
 }

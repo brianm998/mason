@@ -4,7 +4,7 @@
 //! controller. The session is followed through the host's journal; after a
 //! restart [`attach`] picks the same session up again from byte zero.
 
-use crate::claude::{decide, parse_line, ParseState};
+use crate::claude::{decide, parse_line, Dialect, ParseState};
 use mason_adapter_api::{AdapterError, AgentEvent, Canceller, Outcome, SessionHandle, SessionSpec};
 use mason_step_host::client::{ClientError, Event, HostClient};
 use mason_step_host::launcher::{spawn_host, SpawnOptions};
@@ -135,6 +135,16 @@ impl Feed {
 
 /// Follow a host's journal to the end and report how the session ended.
 pub fn attach(h: &HostLaunch, id: String, spec: &SessionSpec) -> Box<dyn SessionHandle> {
+    attach_as(h, id, spec, Dialect::Claude)
+}
+
+/// [`attach`] for a CLI whose output is `dialect`.
+pub fn attach_as(
+    h: &HostLaunch,
+    id: String,
+    spec: &SessionSpec,
+    dialect: Dialect,
+) -> Box<dyn SessionHandle> {
     let dir = h.root.join(&id);
     let sock = dir.join("sock");
     let (tx, rx) = channel();
@@ -168,7 +178,7 @@ pub fn attach(h: &HostLaunch, id: String, spec: &SessionSpec) -> Box<dyn Session
         );
         thread::spawn(move || {
             let mut feed = Feed {
-                st: ParseState::default(),
+                st: ParseState::new(dialect),
                 partial: vec![],
                 stderr: String::new(),
                 tx: tx.clone(),
