@@ -7,7 +7,9 @@ use crate::config::{CiCfg, CiKind, HostCfg, ProjectCfg, TrackerCfg};
 use mason_adapter_api::http::Curl;
 use mason_adapter_api::service::*;
 use mason_adapters::fakehost::{CommandCi, FakeHost};
+use mason_adapters::generic::Generic;
 use mason_adapters::github::{GitHub, TokenRef};
+use mason_adapters::jenkins::Jenkins;
 use std::sync::Arc;
 
 pub fn token(r: &str) -> Result<TokenRef, String> {
@@ -56,6 +58,29 @@ pub fn ci(p: &ProjectCfg) -> Result<Option<Ci>, String> {
                     token,
                     workflow,
                 } => Arc::new(github(api, repo, token, workflow.clone())?),
+                CiKind::Jenkins {
+                    url,
+                    job,
+                    token: tok,
+                    user,
+                    crumb,
+                } => {
+                    let mut j = Jenkins::new(Arc::new(Curl::default()), url, job, token(tok)?);
+                    j.user = user.clone();
+                    j.crumb = *crumb;
+                    Arc::new(j)
+                }
+                CiKind::Generic {
+                    trigger,
+                    status,
+                    cwd,
+                    token: tok,
+                } => {
+                    let mut g = Generic::new(trigger.clone(), status.clone(), cwd.clone())
+                        .with_http(Arc::new(Curl::default()));
+                    g.token = tok.as_deref().map(token).transpose()?;
+                    Arc::new(g)
+                }
                 CiKind::Command {
                     trigger,
                     status,

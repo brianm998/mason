@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"0199-codex-thread-1"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"pong"}}
+{"type":"turn.completed","usage":{"input_tokens":120,"cached_input_tokens":100,"output_tokens":4}}

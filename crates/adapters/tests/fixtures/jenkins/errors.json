@@ -1,0 +1,5 @@
+[
+  {"method": "POST", "url": "/buildWithParameters", "response": {"status": 401, "body": "Unauthorized"}},
+  {"method": "GET", "url": "/job/team/job/app/9/api/json", "response": {"status": 404, "body": "Not Found"}},
+  {"method": "GET", "url": "/job/team/job/app/10/api/json", "transport_error": "connection refused"}
+]

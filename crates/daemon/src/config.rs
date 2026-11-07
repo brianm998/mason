@@ -143,6 +143,71 @@ pub struct ProjectCfg {
     pub self_cfg: Option<SelfCfg>,
 }
 
+/// Which agent CLI runs a project's agent steps.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Provider {
+    #[default]
+    Claude,
+    Codex,
+}
+
+/// The agent keys of the project file: provider, the retry ladder and the
+/// sandbox. Read from the overlay text, so the definition, the layers and the
+/// validator need to know nothing of them.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AgentCfg {
+    pub provider: Provider,
+    pub codex_bin: Option<PathBuf>,
+    /// Models weakest to strongest. A step that ends with no result, or crashes,
+    /// is tried again from a fresh session on the next model up. Empty: no change.
+    pub ladder: Vec<String>,
+    /// Retries up the ladder per step.
+    pub max_retries: u32,
+    pub sandbox: mason_adapters::sandbox::SandboxKind,
+}
+
+pub fn parse_agent(id: &str, doc: &DocumentMut) -> Result<AgentCfg, String> {
+    let s = |k: &str| doc.get(k).and_then(|v| v.as_str()).map(String::from);
+    let provider = match s("provider").as_deref() {
+        None | Some("claude") => Provider::Claude,
+        Some("codex") => Provider::Codex,
+        Some(o) => {
+            return Err(format!(
+                "{id}: `provider` is `claude` or `codex`, not {o:?}"
+            ))
+        }
+    };
+    let ladder: Vec<String> = match doc.get("ladder") {
+        None => vec![],
+        Some(v) => v
+            .as_array()
+            .ok_or_else(|| format!("{id}: `ladder` must be a list of model names"))?
+            .iter()
+            .map(|x| {
+                x.as_str()
+                    .filter(|m| !m.trim().is_empty())
+                    .map(String::from)
+                    .ok_or_else(|| format!("{id}: `ladder` holds model names (strings)"))
+            })
+            .collect::<Result<_, _>>()?,
+    };
+    Ok(AgentCfg {
+        provider,
+        codex_bin: s("codex_bin").map(PathBuf::from),
+        ladder,
+        max_retries: doc
+            .get("max_retries")
+            .and_then(|v| v.as_integer())
+            .map_or(1, |n| n.clamp(0, 5) as u32),
+        sandbox: match s("sandbox") {
+            None => Default::default(),
+            Some(v) => {
+                mason_adapters::sandbox::SandboxKind::parse(&v).map_err(|e| format!("{id}: {e}"))?
+            }
+        },
+    })
+}
+
 /// `[self]` of the project file (Part 13).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SelfCfg {
@@ -241,6 +306,21 @@ pub enum CiKind {
         status: String,
         cwd: PathBuf,
     },
+    /// Jenkins: a parameterised job taking `REF` and `SHA`.
+    Jenkins {
+        url: String,
+        job: String,
+        token: String,
+        user: Option<String>,
+        crumb: bool,
+    },
+    /// Trigger and status, each a command or a URL.
+    Generic {
+        trigger: mason_adapters::generic::Half,
+        status: mason_adapters::generic::Half,
+        cwd: PathBuf,
+        token: Option<String>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -321,9 +401,44 @@ fn parse_services(id: &str, doc: &DocumentMut) -> Result<ServicesCfg, String> {
                 status: need(t, "ci", "status")?,
                 cwd: get(t, "cwd").map_or_else(|| PathBuf::from("."), PathBuf::from),
             },
+            "jenkins" => CiKind::Jenkins {
+                url: need(t, "ci", "url")?,
+                job: need(t, "ci", "job")?,
+                token: token(t, "ci")?,
+                user: get(t, "user"),
+                crumb: t.get("crumb").and_then(|v| v.as_bool()).unwrap_or(false),
+            },
+            "generic" => {
+                use mason_adapters::generic::Half;
+                let half = |c: &str, u: &str| -> Result<Half, String> {
+                    match (get(t, c), get(t, u)) {
+                        (Some(c), None) if !c.trim().is_empty() => Ok(Half::Command(c)),
+                        (None, Some(u)) if !u.trim().is_empty() => Ok(Half::Url(u)),
+                        _ => Err(format!(
+                            "{id}: `[ci]` needs exactly one of `{c}` (a command) or `{u}` (a URL)"
+                        )),
+                    }
+                };
+                let (trigger, status) = (half("trigger", "trigger_url")?, half("status", "status_url")?);
+                let tok = get(t, "token");
+                if tok
+                    .as_ref()
+                    .is_some_and(|v| !(v.starts_with("env:") || v.starts_with("file:")))
+                {
+                    return Err(format!(
+                        "{id}: `[ci] token` is a reference, `env:NAME` or `file:/path`, never the token itself"
+                    ));
+                }
+                CiKind::Generic {
+                    trigger,
+                    status,
+                    cwd: get(t, "cwd").map_or_else(|| PathBuf::from("."), PathBuf::from),
+                    token: tok,
+                }
+            }
             o => {
                 return Err(format!(
-                    "{id}: `[ci] kind` is `github-actions` or `command`, not {o:?}"
+                    "{id}: `[ci] kind` is `github-actions`, `jenkins`, `generic` or `command`, not {o:?}"
                 ))
             }
         };
@@ -360,6 +475,14 @@ fn parse_services(id: &str, doc: &DocumentMut) -> Result<ServicesCfg, String> {
 }
 
 impl ProjectCfg {
+    /// Provider, retry ladder and sandbox, from the overlay.
+    pub fn agent(&self) -> AgentCfg {
+        self.overlay_text
+            .parse::<DocumentMut>()
+            .ok()
+            .and_then(|d| parse_agent(&self.id, &d).ok())
+            .unwrap_or_default()
+    }
     pub fn branch(&self, task: u64) -> String {
         format!("mason/{}/t{task}", self.id)
     }
@@ -418,6 +541,7 @@ pub fn parse_project(id: &str, text: &str) -> Result<ProjectCfg, String> {
             "{id}: base branch {base:?} is not a plain branch name"
         ));
     }
+    parse_agent(id, &doc)?;
     Ok(ProjectCfg {
         id: id.to_string(),
         path: PathBuf::from(need("path")?),
@@ -508,6 +632,75 @@ mod tests {
         assert_eq!(p.agent_env, vec![("FOO".to_string(), "bar".to_string())]);
         assert_eq!(p.step_timeout, Duration::from_secs(60));
         assert_eq!(p.model.as_deref(), Some("haiku"));
+    }
+
+    #[test]
+    fn agent_keys_default_to_claude_with_no_ladder_and_no_sandbox() {
+        let p = parse_project("p", "path=\"/r\"\nbase=\"m\"\ntest=\"t\"\n").unwrap();
+        let a = p.agent();
+        assert_eq!(a.provider, Provider::Claude);
+        assert!(a.ladder.is_empty() && a.codex_bin.is_none());
+        assert_eq!(a.max_retries, 1);
+        assert_eq!(a.sandbox, mason_adapters::sandbox::SandboxKind::None);
+    }
+
+    #[test]
+    fn agent_keys_are_read_and_mistakes_named() {
+        let base = "path=\"/r\"\nbase=\"m\"\ntest=\"t\"\n";
+        let p = parse_project(
+            "p",
+            &format!("{base}provider=\"codex\"\nladder=[\"a\",\"b\"]\nmax_retries=2\nsandbox=\"bubblewrap\"\ncodex_bin=\"/x/codex\"\n"),
+        )
+        .unwrap();
+        let a = p.agent();
+        assert_eq!(
+            (a.provider, a.ladder.len(), a.max_retries),
+            (Provider::Codex, 2, 2)
+        );
+        assert_eq!(a.sandbox, mason_adapters::sandbox::SandboxKind::Bubblewrap);
+        for (extra, want) in [
+            ("provider=\"gemini\"", "`claude` or `codex`"),
+            ("ladder=\"a\"", "list of model names"),
+            (
+                "sandbox=\"docker\"",
+                "`none`, `sandbox-exec` or `bubblewrap`",
+            ),
+        ] {
+            let e = parse_project("p", &format!("{base}{extra}\n")).unwrap_err();
+            assert!(e.contains(want), "{e}");
+        }
+    }
+
+    #[test]
+    fn ci_kinds_jenkins_and_generic_parse_and_refuse_a_literal_token() {
+        let base = "path=\"/r\"\nbase=\"m\"\ntest=\"t\"\n";
+        let j = parse_project("p", &format!("{base}[ci]\nkind=\"jenkins\"\nurl=\"https://ci\"\njob=\"a/b\"\ntoken=\"env:J\"\ncrumb=true\n")).unwrap();
+        assert!(matches!(
+            j.services.ci.unwrap().kind,
+            CiKind::Jenkins { crumb: true, .. }
+        ));
+        let g = parse_project("p", &format!("{base}[ci]\nkind=\"generic\"\ntrigger=\"echo\"\nstatus_url=\"https://x/{{run}}\"\n")).unwrap();
+        assert!(matches!(
+            g.services.ci.unwrap().kind,
+            CiKind::Generic { .. }
+        ));
+        for (ci, want) in [
+            (
+                "kind=\"jenkins\"\nurl=\"u\"\njob=\"j\"\ntoken=\"secret\"",
+                "never the token itself",
+            ),
+            (
+                "kind=\"generic\"\ntrigger=\"a\"\ntrigger_url=\"b\"\nstatus=\"c\"",
+                "exactly one of",
+            ),
+            (
+                "kind=\"generic\"\ntrigger=\"a\"\nstatus=\"c\"\ntoken=\"raw\"",
+                "never the token itself",
+            ),
+        ] {
+            let e = parse_project("p", &format!("{base}[ci]\n{ci}\n")).unwrap_err();
+            assert!(e.contains(want), "{e}");
+        }
     }
 
     #[test]
