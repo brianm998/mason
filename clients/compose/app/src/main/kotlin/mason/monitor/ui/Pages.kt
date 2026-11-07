@@ -202,6 +202,13 @@ private fun TaskDetail(model: MonitorModel, d: TaskDetailView) {
             if (d.explore_returns > 0) Text("Sent back to exploring ${d.explore_returns} time(s), at no cost.", style = theme.small())
         }
     }
+    d.numbers.forEach { n ->
+        Text(
+            "Number ${n.kind} ${n.number}: ${n.path}" + (if (n.source == "stage") " (its stage)" else "") + (if (n.released) " (released, not reused)" else ""),
+            style = theme.small(),
+            modifier = Modifier.testTag("number:${n.kind}"),
+        )
+    }
     d.card?.let { DecisionCardView(model, r.id, it) }
     d.approval?.let { ApprovalView(model, r.id, it) }
     if (d.failure.isNotEmpty()) Text("Failed: ${d.failure}", style = theme.body(color = theme.attention))

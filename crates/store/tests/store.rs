@@ -497,3 +497,82 @@ fn old_task_payloads_without_the_new_fields_still_replay() {
         "the projection has the route: {dump}"
     );
 }
+
+#[test]
+fn reserved_numbers_start_above_the_floor_and_above_every_reservation() {
+    let (_d, p) = db();
+    let s = Store::open(&p).unwrap();
+    // Above the base's highest (42), then above the other task's reservation.
+    let a = s.reserve_number(1, "exit", 42, 99, 10).unwrap().unwrap();
+    let b = s.reserve_number(2, "exit", 42, 99, 11).unwrap().unwrap();
+    assert_eq!((a.number, b.number), (43, 44));
+    // A floor above every reservation wins.
+    let c = s.reserve_number(3, "exit", 60, 99, 12).unwrap().unwrap();
+    assert_eq!(c.number, 61);
+    // Kinds count separately.
+    let d = s
+        .reserve_number(1, "decision", 20, 9999, 13)
+        .unwrap()
+        .unwrap();
+    assert_eq!(d.number, 21);
+}
+
+#[test]
+fn a_task_keeps_its_number_and_a_released_number_is_never_reused() {
+    let (_d, p) = db();
+    let s = Store::open(&p).unwrap();
+    let a = s.reserve_number(1, "exit", 42, 99, 10).unwrap().unwrap();
+    // Asking again (a retry, a restart) returns the same row, even with a higher floor.
+    let again = s.reserve_number(1, "exit", 70, 99, 20).unwrap().unwrap();
+    assert_eq!(a, again);
+    assert_eq!(s.release_numbers(1).unwrap(), 1);
+    assert!(s.reservations(1).unwrap()[0].released);
+    // The next task does not get the released number.
+    let b = s.reserve_number(2, "exit", 42, 99, 30).unwrap().unwrap();
+    assert_eq!(b.number, a.number + 1);
+    // The ceiling is a refusal, not an overflow.
+    assert_eq!(
+        s.reserve_number(3, "exit", 98, 99, 40)
+            .unwrap()
+            .unwrap()
+            .number,
+        99
+    );
+    assert_eq!(s.reserve_number(4, "exit", 42, 99, 41).unwrap(), None);
+}
+
+#[test]
+fn reservations_survive_a_restart_and_the_counter_goes_on_from_them() {
+    let (_d, p) = db();
+    {
+        let s = Store::open(&p).unwrap();
+        s.reserve_number(1, "exit", 42, 99, 10).unwrap();
+        s.reserve_number(2, "exit", 42, 99, 11).unwrap();
+        s.release_numbers(2).unwrap();
+    }
+    let s = Store::open(&p).unwrap();
+    assert_eq!(s.all_reservations().unwrap().len(), 2);
+    let c = s.reserve_number(3, "exit", 42, 99, 12).unwrap().unwrap();
+    assert_eq!(c.number, 45);
+}
+
+#[test]
+fn two_tasks_claimed_at_once_never_share_a_number() {
+    let (_d, p) = db();
+    let s = std::sync::Arc::new(Store::open(&p).unwrap());
+    let hs: Vec<_> = (1..=8u64)
+        .map(|t| {
+            let s = s.clone();
+            std::thread::spawn(move || {
+                s.reserve_number(t, "exit", 42, 99, t)
+                    .unwrap()
+                    .unwrap()
+                    .number
+            })
+        })
+        .collect();
+    let mut got: Vec<u32> = hs.into_iter().map(|h| h.join().unwrap()).collect();
+    got.sort();
+    got.dedup();
+    assert_eq!(got.len(), 8);
+}

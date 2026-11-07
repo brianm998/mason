@@ -611,6 +611,18 @@ impl<'a> Ctx<'a> {
                 .unwrap_or_default(),
             explore_returns: t.explore_returns,
             approval: self.approval(t),
+            numbers: self
+                .d
+                .number_lines(t)
+                .into_iter()
+                .map(|n| NumberLine {
+                    kind: n.kind,
+                    number: n.number,
+                    released: n.released,
+                    path: n.path,
+                    source: n.source,
+                })
+                .collect(),
         })
     }
 

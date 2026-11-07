@@ -16,7 +16,7 @@
 //! `{"result": {"is_error": false, "text": "...", "api_error_status": null}}`,
 //! `{"stderr": "..."}`, `{"exit": 1}` (die with no result) and
 //! `{"sh": "..."}` (run a shell command in the working directory, so the
-//! "agent" can really edit and commit). In a call's arguments the string
+//! "agent" can really edit and commit; the prompt is in `$FAKE_PROMPT`). In a call's arguments the string
 //! `"$HEAD"` is replaced by `git rev-parse HEAD`.
 //! A turn with no `result` or `exit` gets a normal successful result.
 
@@ -177,7 +177,12 @@ fn main() {
                 "max_retries": 10, "retry_delay_ms": 1, "error_status": r["status"], "error": "overloaded_error"}),
             );
         } else if let Some(cmd) = a.get("sh").and_then(Value::as_str) {
-            let st = std::process::Command::new("sh").args(["-c", cmd]).status();
+            // The prompt is handed to the command, so a scripted "agent" can read what
+            // it was told (its reserved numbers, say) the way a real one would.
+            let st = std::process::Command::new("sh")
+                .args(["-c", cmd])
+                .env("FAKE_PROMPT", &prompt)
+                .status();
             if !st.map(|s| s.success()).unwrap_or(false) {
                 eprintln!("fake-claude: sh action failed: {cmd}");
             }

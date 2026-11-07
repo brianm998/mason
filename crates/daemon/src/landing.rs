@@ -172,6 +172,12 @@ pub fn load_config(d: &Daemon, pid: ProjectId) -> Result<LandingConfig, String> 
 pub fn submit_and_wait(c: &Ctx) -> Option<Verdict> {
     let d = &c.d;
     let pid = c.project_id;
+    // Numbered files must carry the task's own reserved numbers. Checked before the task
+    // joins the queue, so a wrong number is sent back with the number to use, instead of
+    // surfacing later as a fold conflict.
+    if let Some(v) = check_numbers(c) {
+        return Some(v);
+    }
     let paths = crate::suites::changed_paths(&c.project.path, &c.project.base_ref(), &c.branch)
         .unwrap_or_default();
     let def = d.current_def(pid);
@@ -228,6 +234,33 @@ pub fn submit_and_wait(c: &Ctx) -> Option<Verdict> {
             return None;
         }
     }
+}
+
+/// A task that adds a stage note, exit script or decision record under a number that is
+/// not one of its reserved numbers, or under a number the base already uses, goes back.
+fn check_numbers(c: &Ctx) -> Option<Verdict> {
+    let w = c.d.world().ok()?;
+    let t = w.tasks.get(&c.task)?;
+    let mine = c.d.numbers_of(t);
+    if mine.exit.is_none() && mine.decision.is_none() {
+        return None; // numbers were never reserved (a demo or an old task): nothing to hold it to
+    }
+    let added = crate::numbers::added_files(&c.project.path, &c.project.base_ref(), &c.branch);
+    let bad = crate::numbers::check_added(&added, &crate::numbers::base_paths(&c.project), &mine);
+    if bad.is_empty() {
+        return None;
+    }
+    let reason = format!(
+        "uses numbers that are not its own: {}",
+        bad.iter()
+            .map(|v| v.to_string())
+            .collect::<Vec<_>>()
+            .join("; ")
+    );
+    Some(Verdict::SentBack {
+        reason,
+        feedback: crate::numbers::feedback(&bad),
+    })
 }
 
 fn deliver(d: &Daemon, task: TaskId, v: Verdict) {
@@ -720,10 +753,18 @@ impl Runner {
                 let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
                 batch.assemble(&active, &point)
             };
-            let asm = match asm {
+            let mut asm = match asm {
                 Ok(a) => a,
                 Err(e) => break Err(format!("could not assemble the batch: {e}")),
             };
+            // MASON, not the tasks, writes the README status block, from the stage notes
+            // the batch brings. It is committed here so the union that is verified is the
+            // union that lands.
+            if !asm.merged.is_empty() && batch.regenerate_status() {
+                if let Ok(h) = git::rev_parse(&int_wt, "HEAD") {
+                    asm.head = h;
+                }
+            }
             for t in &asm.already {
                 landed.push(*t);
             }

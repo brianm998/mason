@@ -1488,6 +1488,24 @@ fn main() {
                     if !ids("blocks").is_empty() {
                         println!("  blocks    {}", ids("blocks"));
                     }
+                    for n in t["numbers"].as_array().into_iter().flatten() {
+                        println!(
+                            "  number    {} {}: {}{}{}",
+                            n["kind"].as_str().unwrap_or("?"),
+                            n["number"],
+                            n["path"].as_str().unwrap_or(""),
+                            if n["source"] == "stage" {
+                                " (its stage)"
+                            } else {
+                                ""
+                            },
+                            if n["released"] == true {
+                                " (released, not reused)"
+                            } else {
+                                ""
+                            }
+                        );
+                    }
                     if let Some(w) = t["wait"].as_str() {
                         println!("  waiting   {w}");
                     }

@@ -238,6 +238,18 @@ const STEPS: &[&str] = &[
          blocker_number INTEGER NOT NULL,
          PRIMARY KEY (project, number, blocker_number)
      );",
+    // 11: numbers MASON hands out (decision records and exit scripts / stage notes), one
+    // row per task and kind. A number is never given twice, not even after the task that
+    // held it is cancelled (the row is kept, marked released).
+    "CREATE TABLE number_reservations (
+         task     INTEGER NOT NULL,
+         kind     TEXT NOT NULL CHECK (kind IN ('decision', 'exit')),
+         number   INTEGER NOT NULL,
+         released INTEGER NOT NULL DEFAULT 0,
+         at       INTEGER NOT NULL,
+         PRIMARY KEY (task, kind),
+         UNIQUE (kind, number)
+     );",
 ];
 
 pub const SCHEMA_VERSION: u32 = STEPS.len() as u32;

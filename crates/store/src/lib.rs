@@ -166,6 +166,18 @@ pub struct HoldRow {
     pub approved_at: Option<u64>,
 }
 
+/// A number MASON reserved for a task: a decision record, or an exit script / stage note.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReservationRow {
+    pub task: u64,
+    /// `decision` or `exit`.
+    pub kind: String,
+    pub number: u32,
+    /// The task was cancelled: the number is not reused.
+    pub released: bool,
+    pub at: u64,
+}
+
 /// A project's landing freeze: its post-land tier is red, so only the fix may land.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FreezeRow {
@@ -1423,6 +1435,101 @@ impl Store {
                 params![task as i64],
             )
             .map(|_| ())
+        })
+    }
+
+    /// The task's number of `kind`, reserving one if it has none. The counter is the
+    /// highest of `floor` (what the base branch already uses) and every number reserved
+    /// for any task, plus one: it only goes up and a released number is never handed out
+    /// again. Taken in one writer transaction, so two tasks never get the same number.
+    /// `Ok(None)`: the next number would be above `ceiling`.
+    pub fn reserve_number(
+        &self,
+        task: u64,
+        kind: &str,
+        floor: u32,
+        ceiling: u32,
+        now_ms: u64,
+    ) -> Result<Option<ReservationRow>, StoreError> {
+        let k = kind.to_string();
+        let got = self.write(move |c| {
+            let tx = c.unchecked_transaction()?;
+            let have: Option<i64> = tx
+                .query_row(
+                    "SELECT number FROM number_reservations WHERE task = ?1 AND kind = ?2",
+                    params![task as i64, k],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if have.is_some() {
+                // A task that comes back (retried, restarted) keeps what it had.
+                tx.execute(
+                    "UPDATE number_reservations SET released = 0 WHERE task = ?1 AND kind = ?2",
+                    params![task as i64, k],
+                )?;
+                tx.commit()?;
+                return Ok(true);
+            }
+            let top: i64 = tx.query_row(
+                "SELECT COALESCE(MAX(number), 0) FROM number_reservations WHERE kind = ?1",
+                params![k],
+                |r| r.get(0),
+            )?;
+            let n = top.max(floor as i64) + 1;
+            if n > ceiling as i64 {
+                return Ok(false);
+            }
+            tx.execute(
+                "INSERT INTO number_reservations(task, kind, number, released, at) VALUES (?1,?2,?3,0,?4)",
+                params![task as i64, k, n, now_ms as i64],
+            )?;
+            tx.commit()?;
+            Ok(true)
+        })?;
+        if !got {
+            return Ok(None);
+        }
+        Ok(self
+            .reservations(task)?
+            .into_iter()
+            .find(|r| r.kind == kind))
+    }
+
+    /// The numbers reserved for a task.
+    pub fn reservations(&self, task: u64) -> Result<Vec<ReservationRow>, StoreError> {
+        Ok(self
+            .all_reservations()?
+            .into_iter()
+            .filter(|r| r.task == task)
+            .collect())
+    }
+
+    /// Every reservation, released ones included.
+    pub fn all_reservations(&self) -> Result<Vec<ReservationRow>, StoreError> {
+        self.read(|c| {
+            let mut st = c.prepare(
+                "SELECT task, kind, number, released, at FROM number_reservations ORDER BY task, kind",
+            )?;
+            let rows = st.query_map([], |r| {
+                Ok(ReservationRow {
+                    task: r.get::<_, i64>(0)? as u64,
+                    kind: r.get(1)?,
+                    number: r.get::<_, i64>(2)? as u32,
+                    released: r.get::<_, i64>(3)? != 0,
+                    at: r.get::<_, i64>(4)? as u64,
+                })
+            })?;
+            rows.collect()
+        })
+    }
+
+    /// The task is cancelled: mark its numbers released. They stay taken.
+    pub fn release_numbers(&self, task: u64) -> Result<usize, StoreError> {
+        self.write(move |c| {
+            c.execute(
+                "UPDATE number_reservations SET released = 1 WHERE task = ?1 AND released = 0",
+                params![task as i64],
+            )
         })
     }
 
