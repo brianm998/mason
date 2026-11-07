@@ -1469,6 +1469,13 @@ fn main() {
                 "approve" => {
                     let id = task_id(&mut a);
                     finish(&a);
+                    // A change to MASON's own rules is approved by the owner's identity: this
+                    // user's, unless `--as` said otherwise.
+                    if std::env::var("MASON_AS").is_err() {
+                        if let Ok(u) = std::env::var("USER") {
+                            std::env::set_var("MASON_AS", u);
+                        }
+                    }
                     or_die(d.call("POST", &format!("/tasks/{id}/approve"), None));
                     println!("Approved task #{id}");
                 }
