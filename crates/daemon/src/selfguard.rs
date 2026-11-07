@@ -35,20 +35,69 @@ pub enum Gate {
     Gone,
 }
 
-/// The change a task's branch makes: its paths and its diff, against the base.
-pub fn change_of(p: &ProjectCfg, branch: &str) -> Result<(Vec<String>, String), String> {
-    let range = format!("{}...{branch}", p.base_ref());
-    let names = git::run(&p.path, &["diff", "--name-only", &range]).map_err(|e| e.to_string())?;
-    let diff =
-        git::run(&p.path, &["diff", "-U0", "--no-color", &range]).map_err(|e| e.to_string())?;
-    Ok((
-        names
-            .lines()
-            .map(String::from)
-            .filter(|l| !l.is_empty())
-            .collect(),
-        diff,
-    ))
+/// The change a task's branch makes against what it lands on.
+pub struct Change {
+    pub files: Vec<protect::Changed>,
+    pub diff: String,
+    /// The git range the diff was read from, for the owner to open.
+    pub range: String,
+}
+
+fn resolves(repo: &std::path::Path, r: &str) -> bool {
+    git::run(
+        repo,
+        &["rev-parse", "--verify", "-q", &format!("{r}^{{commit}}")],
+    )
+    .is_ok()
+}
+
+fn is_ancestor(repo: &std::path::Path, a: &str, b: &str) -> bool {
+    git::run(repo, &["merge-base", "--is-ancestor", a, b]).is_ok()
+}
+
+/// The ref to diff against: the freshest of the remote-tracking base and the local
+/// base (the one whose history holds the other). A stale `origin/develop` would make
+/// work that already landed look like this task's change. Never fetches.
+pub fn scan_base(repo: &std::path::Path, base_ref: &str, base: &str) -> String {
+    if base_ref == base || !resolves(repo, base) {
+        return base_ref.to_string();
+    }
+    if !resolves(repo, base_ref) || is_ancestor(repo, base_ref, base) {
+        return base.to_string();
+    }
+    base_ref.to_string()
+}
+
+/// The change `branch` adds to `base_ref` (or the local `base` if that is ahead):
+/// only what the branch did since the merge-base, so files that came in by merging
+/// the base into the branch do not count.
+pub fn change_in(
+    repo: &std::path::Path,
+    base_ref: &str,
+    base: &str,
+    branch: &str,
+) -> Result<Change, String> {
+    let from = scan_base(repo, base_ref, base);
+    let range = format!("{from}...{branch}");
+    let names = git::run(
+        repo,
+        &["diff", "--name-status", "-z", "--no-renames", &range],
+    )
+    .map_err(|e| e.to_string())?;
+    let diff = git::run(repo, &["diff", "-U0", "--no-color", &range]).map_err(|e| e.to_string())?;
+    let mut files = vec![];
+    let mut it = names.split('\0').filter(|x| !x.is_empty());
+    while let (Some(status), Some(path)) = (it.next(), it.next()) {
+        files.push(protect::Changed {
+            path: path.to_string(),
+            added: status == "A",
+        });
+    }
+    Ok(Change { files, diff, range })
+}
+
+pub fn change_of(p: &ProjectCfg, branch: &str) -> Result<Change, String> {
+    change_in(&p.path, &p.base_ref(), &p.base, branch)
 }
 
 /// Run by the landing job before the task joins the queue.
@@ -57,7 +106,7 @@ pub fn gate(c: &Ctx) -> Gate {
         return Gate::Go;
     };
     let d = &c.d;
-    let (paths, diff) = match change_of(&c.project, &c.branch) {
+    let ch = match change_of(&c.project, &c.branch) {
         Ok(x) => x,
         Err(e) => {
             // If it cannot be read it cannot be vouched for: it waits like a flagged change.
@@ -68,12 +117,13 @@ pub fn gate(c: &Ctx) -> Gate {
             );
         }
     };
-    let found = protect::inspect(&paths, &diff, &cfg.protect);
+    let found = protect::inspect_changed(&ch.files, &ch.diff, &cfg.protect);
     if found.clean() {
         let _ = d.store.clear_hold(c.task.0);
         return Gate::Go;
     }
-    wait_for_owner(c, &found.explain(), &protect::diff_hash(&diff))
+    let cmd = format!("git -C {} diff {}", c.project.path.display(), ch.range);
+    wait_for_owner(c, &found.short(&cmd), &protect::diff_hash(&ch.diff))
 }
 
 fn wait_for_owner(c: &Ctx, why: &str, hash: &str) -> Gate {
@@ -85,7 +135,7 @@ fn wait_for_owner(c: &Ctx, why: &str, hash: &str) -> Gate {
     if hold.approved_by.is_some() {
         return Gate::Go; // approved before (a restart, or a retry of the same diff)
     }
-    let on = format!("waiting for your approval: this change {why}");
+    let on = format!("waiting for your approval: {why}");
     let key = format!("self-hold:{}", c.task.0);
     d.landing().raise(
         c.project_id,
