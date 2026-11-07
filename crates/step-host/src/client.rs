@@ -149,6 +149,18 @@ pub fn collect_to_file(
     received: &Path,
     exit_path: &Path,
 ) -> Result<ExitRecord, ClientError> {
+    collect_to_file_observed(host_dir, received, exit_path, &mut |_, _| {})
+}
+
+/// [`collect_to_file`], calling `observe(offset, bytes)` for every chunk as it
+/// is written (from the live stream or from the journal on disk), so a caller
+/// can count the output as it arrives without reading the file again.
+pub fn collect_to_file_observed(
+    host_dir: &Path,
+    received: &Path,
+    exit_path: &Path,
+    observe: &mut dyn FnMut(u64, &[u8]),
+) -> Result<ExitRecord, ClientError> {
     let mut out = OpenOptions::new()
         .create(true)
         .append(true)
@@ -173,6 +185,7 @@ pub fn collect_to_file(
                         );
                     }
                     out.write_all(&bytes)?;
+                    observe(have, &bytes);
                     have += bytes.len() as u64;
                 }
                 Ok(Event::Heartbeat { .. }) => {}
@@ -210,6 +223,7 @@ pub fn collect_to_file(
                     )));
                 }
                 out.write_all(&bytes)?;
+                observe(have, &bytes);
                 have += bytes.len() as u64;
             }
             out.sync_all()?;
@@ -224,6 +238,7 @@ pub fn collect_to_file(
                     break;
                 }
                 out.write_all(&bytes)?;
+                observe(have, &bytes);
                 have += bytes.len() as u64;
             }
             Err(ClientError::HostLost {

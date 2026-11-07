@@ -191,6 +191,55 @@ public nonisolated enum Mason_V1_CellState: SwiftProtobuf.Enum, Swift.CaseIterab
 
 }
 
+/// Where a figure came from.
+public nonisolated enum Mason_V1_ProgressSource: SwiftProtobuf.Enum, Swift.CaseIterable {
+  public typealias RawValue = Int
+  case sourceNone // = 0
+
+  /// The step said so.
+  case sourceReported // = 1
+
+  /// The daemon counted it.
+  case sourceCounted // = 2
+
+  /// The typical figure from this project's past successful runs.
+  case sourceHistory // = 3
+  case UNRECOGNIZED(Int)
+
+  public init() {
+    self = .sourceNone
+  }
+
+  public init?(rawValue: Int) {
+    switch rawValue {
+    case 0: self = .sourceNone
+    case 1: self = .sourceReported
+    case 2: self = .sourceCounted
+    case 3: self = .sourceHistory
+    default: self = .UNRECOGNIZED(rawValue)
+    }
+  }
+
+  public var rawValue: Int {
+    switch self {
+    case .sourceNone: return 0
+    case .sourceReported: return 1
+    case .sourceCounted: return 2
+    case .sourceHistory: return 3
+    case .UNRECOGNIZED(let i): return i
+    }
+  }
+
+  // The compiler won't synthesize support with the UNRECOGNIZED case.
+  public static let allCases: [Mason_V1_ProgressSource] = [
+    .sourceNone,
+    .sourceReported,
+    .sourceCounted,
+    .sourceHistory,
+  ]
+
+}
+
 /// The protocol version a server and client speak. Bumped only for a change
 /// that an older peer cannot ignore.
 public nonisolated struct Mason_V1_Version: Sendable {
@@ -750,6 +799,15 @@ public nonisolated struct Mason_V1_ServerMessage: Sendable {
     set {body = .error(newValue)}
   }
 
+  /// A running step's progress moved (additive; older clients skip it).
+  public var stepProgress: Mason_V1_StepProgress {
+    get {
+      if case .stepProgress(let v)? = body {return v}
+      return Mason_V1_StepProgress()
+    }
+    set {body = .stepProgress(newValue)}
+  }
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public nonisolated enum OneOf_Body: Equatable, Sendable {
@@ -760,6 +818,8 @@ public nonisolated struct Mason_V1_ServerMessage: Sendable {
     case result(Mason_V1_CommandResult)
     case pong(Mason_V1_Pong)
     case error(Mason_V1_Error)
+    /// A running step's progress moved (additive; older clients skip it).
+    case stepProgress(Mason_V1_StepProgress)
 
   }
 
@@ -793,9 +853,64 @@ public nonisolated struct Mason_V1_Welcome: Sendable {
   /// True when the Hello.actor is one of the owner's identities.
   public var owner: Bool = false
 
+  /// The daemon's own clock, ms since the epoch: a monitor counts "updated 4 s
+  /// ago" from the absolute times in progress records against this, correctly
+  /// even when its clock and the daemon's differ.
+  public var nowMs: UInt64 = 0
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
+}
+
+/// One running step's progress, pushed when it moves (at most once a second for
+/// output alone, at once for a count, message or state change). Views carry the
+/// same record in `ProgressCell`.
+public nonisolated struct Mason_V1_StepProgress: @unchecked Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var seq: UInt64 {
+    get {_storage._seq}
+    set {_uniqueStorage()._seq = newValue}
+  }
+
+  public var task: UInt64 {
+    get {_storage._task}
+    set {_uniqueStorage()._task = newValue}
+  }
+
+  public var run: UInt64 {
+    get {_storage._run}
+    set {_uniqueStorage()._run = newValue}
+  }
+
+  public var step: String {
+    get {_storage._step}
+    set {_uniqueStorage()._step = newValue}
+  }
+
+  public var progress: Mason_V1_ProgressCell {
+    get {_storage._progress ?? Mason_V1_ProgressCell()}
+    set {_uniqueStorage()._progress = newValue}
+  }
+  /// Returns true if `progress` has been explicitly set.
+  public var hasProgress: Bool {_storage._progress != nil}
+  /// Clears the value of `progress`. Subsequent reads from it will return its default value.
+  public mutating func clearProgress() {_uniqueStorage()._progress = nil}
+
+  /// The daemon's clock when this was sent (ms since the epoch).
+  public var nowMs: UInt64 {
+    get {_storage._nowMs}
+    set {_uniqueStorage()._nowMs = newValue}
+  }
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _storage = _StorageClass.defaultInstance
 }
 
 public nonisolated struct Mason_V1_Snapshot: Sendable {
@@ -1008,6 +1123,34 @@ public nonisolated struct Mason_V1_ProgressCell: Sendable {
   public var done: UInt32 = 0
 
   public var total: UInt32 = 0
+
+  /// Additive from here. What `done` and `total` count, in words ("lines",
+  /// "tests"); empty when nothing is counted.
+  public var unit: String = String()
+
+  public var doneSource: Mason_V1_ProgressSource = .sourceNone
+
+  /// A HISTORY total is the typical figure from past runs, never a real total.
+  public var totalSource: Mason_V1_ProgressSource = .sourceNone
+
+  /// The step's latest one-line "what I am doing now", if it gave one.
+  public var message: String = String()
+
+  /// Output so far, from the step host's journal.
+  public var lines: UInt64 = 0
+
+  public var bytes: UInt64 = 0
+
+  /// Absolute times, ms since the epoch (0 for none): the last output, the
+  /// step run's start, and the last time anything in the record moved.
+  public var lastOutputMs: UInt64 = 0
+
+  public var startedMs: UInt64 = 0
+
+  public var updatedAtMs: UInt64 = 0
+
+  /// The step run this record is of (0 when the cell has no run).
+  public var run: UInt64 = 0
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -1952,6 +2095,10 @@ nonisolated extension Mason_V1_ResumeKind: SwiftProtobuf._ProtoNameProviding {
 
 nonisolated extension Mason_V1_CellState: SwiftProtobuf._ProtoNameProviding {
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0CELL_UNSPECIFIED\0\u{1}EMPTY\0\u{1}PART\0\u{1}FILLED\0\u{1}HATCHED\0")
+}
+
+nonisolated extension Mason_V1_ProgressSource: SwiftProtobuf._ProtoNameProviding {
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0SOURCE_NONE\0\u{1}SOURCE_REPORTED\0\u{1}SOURCE_COUNTED\0\u{1}SOURCE_HISTORY\0")
 }
 
 nonisolated extension Mason_V1_Version: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
@@ -2977,7 +3124,7 @@ nonisolated extension Mason_V1_Raw: SwiftProtobuf.Message, SwiftProtobuf._Messag
 
 nonisolated extension Mason_V1_ServerMessage: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ServerMessage"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}welcome\0\u{1}snapshot\0\u{1}events\0\u{1}view\0\u{1}result\0\u{1}pong\0\u{1}error\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}welcome\0\u{1}snapshot\0\u{1}events\0\u{1}view\0\u{1}result\0\u{1}pong\0\u{1}error\0\u{3}step_progress\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -3076,6 +3223,19 @@ nonisolated extension Mason_V1_ServerMessage: SwiftProtobuf.Message, SwiftProtob
           self.body = .error(v)
         }
       }()
+      case 8: try {
+        var v: Mason_V1_StepProgress?
+        var hadOneofValue = false
+        if let current = self.body {
+          hadOneofValue = true
+          if case .stepProgress(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.body = .stepProgress(v)
+        }
+      }()
       default: break
       }
     }
@@ -3115,6 +3275,10 @@ nonisolated extension Mason_V1_ServerMessage: SwiftProtobuf.Message, SwiftProtob
       guard case .error(let v)? = self.body else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 7)
     }()
+    case .stepProgress?: try {
+      guard case .stepProgress(let v)? = self.body else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 8)
+    }()
     case nil: break
     }
     try unknownFields.traverse(visitor: &visitor)
@@ -3129,7 +3293,7 @@ nonisolated extension Mason_V1_ServerMessage: SwiftProtobuf.Message, SwiftProtob
 
 nonisolated extension Mason_V1_Welcome: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".Welcome"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}protocol\0\u{1}seq\0\u{1}resume\0\u{1}daemon\0\u{1}demo\0\u{1}version\0\u{3}min_protocol\0\u{1}owner\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}protocol\0\u{1}seq\0\u{1}resume\0\u{1}daemon\0\u{1}demo\0\u{1}version\0\u{3}min_protocol\0\u{1}owner\0\u{3}now_ms\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -3145,6 +3309,7 @@ nonisolated extension Mason_V1_Welcome: SwiftProtobuf.Message, SwiftProtobuf._Me
       case 6: try { try decoder.decodeSingularStringField(value: &self.version) }()
       case 7: try { try decoder.decodeSingularUInt32Field(value: &self.minProtocol) }()
       case 8: try { try decoder.decodeSingularBoolField(value: &self.owner) }()
+      case 9: try { try decoder.decodeSingularUInt64Field(value: &self.nowMs) }()
       default: break
       }
     }
@@ -3175,6 +3340,9 @@ nonisolated extension Mason_V1_Welcome: SwiftProtobuf.Message, SwiftProtobuf._Me
     if self.owner != false {
       try visitor.visitSingularBoolField(value: self.owner, fieldNumber: 8)
     }
+    if self.nowMs != 0 {
+      try visitor.visitSingularUInt64Field(value: self.nowMs, fieldNumber: 9)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -3187,6 +3355,112 @@ nonisolated extension Mason_V1_Welcome: SwiftProtobuf.Message, SwiftProtobuf._Me
     if lhs.version != rhs.version {return false}
     if lhs.minProtocol != rhs.minProtocol {return false}
     if lhs.owner != rhs.owner {return false}
+    if lhs.nowMs != rhs.nowMs {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Mason_V1_StepProgress: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".StepProgress"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}seq\0\u{1}task\0\u{1}run\0\u{1}step\0\u{1}progress\0\u{3}now_ms\0")
+
+  fileprivate class _StorageClass {
+    var _seq: UInt64 = 0
+    var _task: UInt64 = 0
+    var _run: UInt64 = 0
+    var _step: String = String()
+    var _progress: Mason_V1_ProgressCell? = nil
+    var _nowMs: UInt64 = 0
+
+      // This property is used as the initial default value for new instances of the type.
+      // The type itself is protecting the reference to its storage via CoW semantics.
+      // This will force a copy to be made of this reference when the first mutation occurs;
+      // hence, it is safe to mark this as `nonisolated(unsafe)`.
+      static nonisolated(unsafe) let defaultInstance = _StorageClass()
+
+    private init() {}
+
+    init(copying source: _StorageClass) {
+      _seq = source._seq
+      _task = source._task
+      _run = source._run
+      _step = source._step
+      _progress = source._progress
+      _nowMs = source._nowMs
+    }
+  }
+
+  fileprivate mutating func _uniqueStorage() -> _StorageClass {
+    if !isKnownUniquelyReferenced(&_storage) {
+      _storage = _StorageClass(copying: _storage)
+    }
+    return _storage
+  }
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    _ = _uniqueStorage()
+    try withExtendedLifetime(_storage) { (_storage: _StorageClass) in
+      while let fieldNumber = try decoder.nextFieldNumber() {
+        // The use of inline closures is to circumvent an issue where the compiler
+        // allocates stack space for every case branch when no optimizations are
+        // enabled. https://github.com/apple/swift-protobuf/issues/1034
+        switch fieldNumber {
+        case 1: try { try decoder.decodeSingularUInt64Field(value: &_storage._seq) }()
+        case 2: try { try decoder.decodeSingularUInt64Field(value: &_storage._task) }()
+        case 3: try { try decoder.decodeSingularUInt64Field(value: &_storage._run) }()
+        case 4: try { try decoder.decodeSingularStringField(value: &_storage._step) }()
+        case 5: try { try decoder.decodeSingularMessageField(value: &_storage._progress) }()
+        case 6: try { try decoder.decodeSingularUInt64Field(value: &_storage._nowMs) }()
+        default: break
+        }
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    try withExtendedLifetime(_storage) { (_storage: _StorageClass) in
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every if/case branch local when no optimizations
+      // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+      // https://github.com/apple/swift-protobuf/issues/1182
+      if _storage._seq != 0 {
+        try visitor.visitSingularUInt64Field(value: _storage._seq, fieldNumber: 1)
+      }
+      if _storage._task != 0 {
+        try visitor.visitSingularUInt64Field(value: _storage._task, fieldNumber: 2)
+      }
+      if _storage._run != 0 {
+        try visitor.visitSingularUInt64Field(value: _storage._run, fieldNumber: 3)
+      }
+      if !_storage._step.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._step, fieldNumber: 4)
+      }
+      try { if let v = _storage._progress {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 5)
+      } }()
+      if _storage._nowMs != 0 {
+        try visitor.visitSingularUInt64Field(value: _storage._nowMs, fieldNumber: 6)
+      }
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Mason_V1_StepProgress, rhs: Mason_V1_StepProgress) -> Bool {
+    if lhs._storage !== rhs._storage {
+      let storagesAreEqual: Bool = withExtendedLifetime((lhs._storage, rhs._storage)) { (_args: (_StorageClass, _StorageClass)) in
+        let _storage = _args.0
+        let rhs_storage = _args.1
+        if _storage._seq != rhs_storage._seq {return false}
+        if _storage._task != rhs_storage._task {return false}
+        if _storage._run != rhs_storage._run {return false}
+        if _storage._step != rhs_storage._step {return false}
+        if _storage._progress != rhs_storage._progress {return false}
+        if _storage._nowMs != rhs_storage._nowMs {return false}
+        return true
+      }
+      if !storagesAreEqual {return false}
+    }
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -3610,7 +3884,7 @@ nonisolated extension Mason_V1_View: SwiftProtobuf.Message, SwiftProtobuf._Messa
 
 nonisolated extension Mason_V1_ProgressCell: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ProgressCell"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}step\0\u{1}state\0\u{1}label\0\u{1}done\0\u{1}total\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}step\0\u{1}state\0\u{1}label\0\u{1}done\0\u{1}total\0\u{1}unit\0\u{3}done_source\0\u{3}total_source\0\u{1}message\0\u{1}lines\0\u{1}bytes\0\u{3}last_output_ms\0\u{3}started_ms\0\u{3}updated_at_ms\0\u{1}run\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -3623,6 +3897,16 @@ nonisolated extension Mason_V1_ProgressCell: SwiftProtobuf.Message, SwiftProtobu
       case 3: try { try decoder.decodeSingularStringField(value: &self.label) }()
       case 4: try { try decoder.decodeSingularUInt32Field(value: &self.done) }()
       case 5: try { try decoder.decodeSingularUInt32Field(value: &self.total) }()
+      case 6: try { try decoder.decodeSingularStringField(value: &self.unit) }()
+      case 7: try { try decoder.decodeSingularEnumField(value: &self.doneSource) }()
+      case 8: try { try decoder.decodeSingularEnumField(value: &self.totalSource) }()
+      case 9: try { try decoder.decodeSingularStringField(value: &self.message) }()
+      case 10: try { try decoder.decodeSingularUInt64Field(value: &self.lines) }()
+      case 11: try { try decoder.decodeSingularUInt64Field(value: &self.bytes) }()
+      case 12: try { try decoder.decodeSingularUInt64Field(value: &self.lastOutputMs) }()
+      case 13: try { try decoder.decodeSingularUInt64Field(value: &self.startedMs) }()
+      case 14: try { try decoder.decodeSingularUInt64Field(value: &self.updatedAtMs) }()
+      case 15: try { try decoder.decodeSingularUInt64Field(value: &self.run) }()
       default: break
       }
     }
@@ -3644,6 +3928,36 @@ nonisolated extension Mason_V1_ProgressCell: SwiftProtobuf.Message, SwiftProtobu
     if self.total != 0 {
       try visitor.visitSingularUInt32Field(value: self.total, fieldNumber: 5)
     }
+    if !self.unit.isEmpty {
+      try visitor.visitSingularStringField(value: self.unit, fieldNumber: 6)
+    }
+    if self.doneSource != .sourceNone {
+      try visitor.visitSingularEnumField(value: self.doneSource, fieldNumber: 7)
+    }
+    if self.totalSource != .sourceNone {
+      try visitor.visitSingularEnumField(value: self.totalSource, fieldNumber: 8)
+    }
+    if !self.message.isEmpty {
+      try visitor.visitSingularStringField(value: self.message, fieldNumber: 9)
+    }
+    if self.lines != 0 {
+      try visitor.visitSingularUInt64Field(value: self.lines, fieldNumber: 10)
+    }
+    if self.bytes != 0 {
+      try visitor.visitSingularUInt64Field(value: self.bytes, fieldNumber: 11)
+    }
+    if self.lastOutputMs != 0 {
+      try visitor.visitSingularUInt64Field(value: self.lastOutputMs, fieldNumber: 12)
+    }
+    if self.startedMs != 0 {
+      try visitor.visitSingularUInt64Field(value: self.startedMs, fieldNumber: 13)
+    }
+    if self.updatedAtMs != 0 {
+      try visitor.visitSingularUInt64Field(value: self.updatedAtMs, fieldNumber: 14)
+    }
+    if self.run != 0 {
+      try visitor.visitSingularUInt64Field(value: self.run, fieldNumber: 15)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -3653,6 +3967,16 @@ nonisolated extension Mason_V1_ProgressCell: SwiftProtobuf.Message, SwiftProtobu
     if lhs.label != rhs.label {return false}
     if lhs.done != rhs.done {return false}
     if lhs.total != rhs.total {return false}
+    if lhs.unit != rhs.unit {return false}
+    if lhs.doneSource != rhs.doneSource {return false}
+    if lhs.totalSource != rhs.totalSource {return false}
+    if lhs.message != rhs.message {return false}
+    if lhs.lines != rhs.lines {return false}
+    if lhs.bytes != rhs.bytes {return false}
+    if lhs.lastOutputMs != rhs.lastOutputMs {return false}
+    if lhs.startedMs != rhs.startedMs {return false}
+    if lhs.updatedAtMs != rhs.updatedAtMs {return false}
+    if lhs.run != rhs.run {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

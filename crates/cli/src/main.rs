@@ -1635,6 +1635,33 @@ fn main() {
                         );
                     }
                 }
+                "progress" => {
+                    let id = task_id(&mut a);
+                    let watch = a.flag("--watch") || a.flag("-w");
+                    finish(&a);
+                    let mut last = String::new();
+                    loop {
+                        let r = or_die(d.call("GET", &format!("/tasks/{id}/progress"), None));
+                        let text = if json_out {
+                            format!("{r:#}")
+                        } else {
+                            progress_lines(&r)
+                        };
+                        // A watch prints a line only when something moved.
+                        if !watch || text != last {
+                            println!("{text}");
+                            last = text;
+                        }
+                        if !watch {
+                            break;
+                        }
+                        let t = or_die(d.call("GET", &format!("/tasks/{id}"), None));
+                        if matches!(t["state"].as_str(), Some("landed" | "failed" | "canceled")) {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(1000));
+                    }
+                }
                 "cancel" => {
                     let id = task_id(&mut a);
                     let del = a.flag("--delete-branch");
@@ -1836,4 +1863,46 @@ fn main() {
         }
         other => die(&format!("unknown command {other:?}\n\n{HELP}")),
     }
+}
+
+/// One line per running step run: what it has done, of how many, and when it
+/// last moved, counted from the daemon's clock.
+fn progress_lines(r: &Value) -> String {
+    let now = r["now_ms"].as_u64().unwrap_or(0);
+    let ago = |t: u64| {
+        if t == 0 {
+            "never".to_string()
+        } else {
+            format!("{} s ago", now.saturating_sub(t) / 1000)
+        }
+    };
+    let runs = r["runs"].as_array().cloned().unwrap_or_default();
+    if runs.is_empty() {
+        return "no step is running".to_string();
+    }
+    runs.iter()
+        .map(|p| {
+            let unit = p["unit"].as_str().unwrap_or("");
+            let total = match p["total"]["source"].as_str() {
+                Some("reported" | "counted") => format!(" of {}", p["total"]["value"]),
+                Some("history") => format!(" (typically {})", p["total"]["value"]),
+                _ => String::new(),
+            };
+            let mut line = format!(
+                "{}  {}{} {unit}, {} lines, {} bytes, last output {}; updated {}",
+                p["step"].as_str().unwrap_or("?"),
+                p["done"]["value"],
+                total,
+                p["output"]["lines"],
+                p["output"]["bytes"],
+                ago(p["output"]["last_output_ms"].as_u64().unwrap_or(0)),
+                ago(p["updated_at_ms"].as_u64().unwrap_or(0)),
+            );
+            if let Some(m) = p["message"].as_str().filter(|m| !m.is_empty()) {
+                line.push_str(&format!("; {m}"));
+            }
+            line
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
