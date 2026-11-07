@@ -45,7 +45,11 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     // `masond selftest --db COPY`: what a new build proves before it takes over.
     if args.first().map(String::as_str) == Some("selftest") {
-        let db = args.iter().position(|a| a == "--db").and_then(|i| args.get(i + 1)).map(PathBuf::from);
+        let db = args
+            .iter()
+            .position(|a| a == "--db")
+            .and_then(|i| args.get(i + 1))
+            .map(PathBuf::from);
         let Some(db) = db else { usage() };
         match mason_daemon::selftest::run(&db) {
             Ok(said) => {
@@ -162,7 +166,9 @@ fn main() {
                         &from[..from.len().min(12)],
                         &to[..to.len().min(12)]
                     ));
-                    eprintln!("masond: {from} crashed three times in five minutes: rolling back to {to}");
+                    eprintln!(
+                        "masond: {from} crashed three times in five minutes: rolling back to {to}"
+                    );
                     to
                 }
                 Decision::RunAnyway { sha, crashes } => {
@@ -176,8 +182,12 @@ fn main() {
                 boots.record(now, &chosen, "start");
                 let mut a = cfg.exec_args.clone();
                 a.extend(["--runtime-sha".into(), chosen.clone()]);
-                let err = std::process::Command::new(rt.masond(&chosen)).args(&a).exec();
-                eprintln!("masond: cannot start runtime {chosen}: {err}; running this build instead");
+                let err = std::process::Command::new(rt.masond(&chosen))
+                    .args(&a)
+                    .exec();
+                eprintln!(
+                    "masond: cannot start runtime {chosen}: {err}; running this build instead"
+                );
             }
         }
     }

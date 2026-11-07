@@ -20,6 +20,15 @@ use prost::Message;
 /// The protocol version this build speaks.
 pub const PROTOCOL: u32 = 1;
 
+/// The oldest client protocol this build still serves: current and previous, so
+/// that a daemon and its monitors need not update at the same moment.
+pub const MIN_PROTOCOL: u32 = if PROTOCOL > 1 { PROTOCOL - 1 } else { 1 };
+
+/// May a client that speaks `v` connect?
+pub fn accepts(v: u32) -> bool {
+    (MIN_PROTOCOL..=PROTOCOL).contains(&v)
+}
+
 /// Frames are binary protobuf, or text in the proto3 JSON mapping.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Encoding {
@@ -60,6 +69,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn current_and_previous_are_served_and_older_or_newer_are_not() {
+        assert!(accepts(PROTOCOL));
+        assert!(!accepts(0));
+        assert!(!accepts(PROTOCOL + 1));
+        assert!(MIN_PROTOCOL <= PROTOCOL && PROTOCOL - MIN_PROTOCOL <= 1);
+    }
+
+    #[test]
     fn a_hello_round_trips_in_both_encodings() {
         let m = ClientMessage {
             body: Some(client_message::Body::Hello(Hello {
@@ -68,6 +85,7 @@ mod tests {
                 client: "test".into(),
                 token: String::new(),
                 commands_only: false,
+                client_version: "abc123".into(),
             })),
         };
         for e in [Encoding::Protobuf, Encoding::Json] {
@@ -85,6 +103,8 @@ mod tests {
                 resume: ResumeKind::Events as i32,
                 daemon: "masond".into(),
                 demo: false,
+                version: "dev".into(),
+                min_protocol: MIN_PROTOCOL,
             })),
         };
         let text = String::from_utf8(encode_server(&m, Encoding::Json)).unwrap();

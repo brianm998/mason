@@ -158,7 +158,10 @@ impl Daemon {
             demo_pos: Mutex::new(0),
             landing: Default::default(),
             tracker: Default::default(),
-            update_status: Mutex::new(crate::update::Status { phase: "idle".into(), ..Default::default() }),
+            update_status: Mutex::new(crate::update::Status {
+                phase: "idle".into(),
+                ..Default::default()
+            }),
             cfg,
         });
         if !demo {

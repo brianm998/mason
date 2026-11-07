@@ -136,6 +136,40 @@ fn a_new_client_gets_a_snapshot_in_either_encoding() {
 }
 
 #[test]
+fn the_welcome_names_the_daemons_build_and_the_oldest_client_it_serves() {
+    let (_d, port, _dir) = demo();
+    let mut c = Client::connect(port, Encoding::Json).unwrap();
+    let w = c.hello(0, false).unwrap();
+    assert_eq!(w.version, "dev", "not started from a runtime");
+    assert_eq!(w.min_protocol, mason_protocol::MIN_PROTOCOL);
+}
+
+#[test]
+fn a_client_too_old_gets_a_welcome_it_can_read_then_an_explanation_and_no_views() {
+    for enc in [Encoding::Json, Encoding::Protobuf] {
+        let (_d, port, _dir) = demo();
+        let mut c = Client::connect(port, enc).unwrap();
+        let w = c.hello_as(0, 0, false).unwrap();
+        assert_eq!(
+            (w.min_protocol, w.protocol),
+            (mason_protocol::MIN_PROTOCOL, PROTOCOL),
+            "{enc:?}"
+        );
+        match c.recv(Duration::from_secs(5)).unwrap().map(|m| m.body) {
+            Some(Some(server_message::Body::Error(e))) => {
+                assert!(e.message.contains("serves protocols"), "{}", e.message)
+            }
+            other => panic!("expected the explanation, got {other:?}"),
+        }
+        // Nothing else comes: no snapshot, no views.
+        assert!(matches!(
+            c.recv(Duration::from_millis(500)),
+            Ok(None) | Err(_)
+        ));
+    }
+}
+
+#[test]
 fn a_client_that_reconnects_gets_only_what_it_missed() {
     let (d, port, _dir) = demo();
     let mut a = Client::connect(port, Encoding::Json).unwrap();
@@ -520,10 +554,15 @@ fn garbage_and_early_commands_get_an_error_not_a_crash() {
         })),
     })
     .unwrap();
+    // (A Welcome first, so that a client can read what is needed; then the reason.)
+    assert!(matches!(
+        c.recv(Duration::from_secs(5)).unwrap(),
+        Some(ServerMessage { body: Some(server_message::Body::Welcome(_)) })
+    ));
     match c.recv(Duration::from_secs(5)).unwrap() {
         Some(ServerMessage {
             body: Some(server_message::Body::Error(e)),
-        }) => assert!(e.message.contains("protocol 1")),
+        }) => assert!(e.message.contains("serves protocols 1 to 1"), "{}", e.message),
         other => panic!("{other:?}"),
     }
     // Ping works after hello.

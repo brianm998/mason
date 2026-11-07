@@ -850,11 +850,19 @@ async fn update_status(Shared(d): Shared<Arc<Daemon>>) -> Res {
 /// `{"channel": .., "sha": .., "rollback": bool, "check": bool}`.
 async fn update_start(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res {
     let channel = match b["channel"].as_str() {
-        Some(c) => Some(crate::update::Channel::parse(c).map_err(|e| fail(StatusCode::BAD_REQUEST, e))?),
+        Some(c) => {
+            Some(crate::update::Channel::parse(c).map_err(|e| fail(StatusCode::BAD_REQUEST, e))?)
+        }
         None => None,
     };
     let sha = b["sha"].as_str().map(String::from);
-    if sha.as_deref().is_some_and(|s| s.is_empty() || s.starts_with('-') || !s.chars().all(|c| c.is_ascii_alphanumeric() || "/_.-".contains(c))) {
+    if sha.as_deref().is_some_and(|s| {
+        s.is_empty()
+            || s.starts_with('-')
+            || !s
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "/_.-".contains(c))
+    }) {
         return Err(fail(StatusCode::BAD_REQUEST, "that is not a commit name"));
     }
     let req = crate::update::Request {
@@ -863,20 +871,32 @@ async fn update_start(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> R
         rollback: b["rollback"].as_bool().unwrap_or(false),
         check_only: b["check"].as_bool().unwrap_or(false),
     };
-    if matches!(d.update_status.lock().unwrap_or_else(|e| e.into_inner()).phase.as_str(), "fetching" | "building" | "testing" | "taking over") {
-        return Err(fail(StatusCode::CONFLICT, "an update is already in progress"));
+    if matches!(
+        d.update_status
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .phase
+            .as_str(),
+        "fetching" | "building" | "testing" | "taking over"
+    ) {
+        return Err(fail(
+            StatusCode::CONFLICT,
+            "an update is already in progress",
+        ));
     }
     let d2 = d.clone();
     let check = req.check_only;
-    let _ = std::thread::Builder::new().name("update".into()).spawn(move || {
-        if let Ok(sha) = crate::update::run(&d2, &req) {
-            if !check {
-                // Let the answer to `mason update` and any open request leave first.
-                std::thread::sleep(std::time::Duration::from_millis(500));
-                crate::update::take_over(&d2, &sha);
+    let _ = std::thread::Builder::new()
+        .name("update".into())
+        .spawn(move || {
+            if let Ok(sha) = crate::update::run(&d2, &req) {
+                if !check {
+                    // Let the answer to `mason update` and any open request leave first.
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    crate::update::take_over(&d2, &sha);
+                }
             }
-        }
-    });
+        });
     Ok(Json(json!({"started": true})))
 }
 

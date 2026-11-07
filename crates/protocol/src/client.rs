@@ -71,13 +71,24 @@ impl Client {
 
     /// Say hello with the last sequence number seen; returns the welcome.
     pub fn hello(&mut self, last_seq: u64, commands_only: bool) -> Result<Welcome, String> {
+        self.hello_as(PROTOCOL, last_seq, commands_only)
+    }
+
+    /// Say hello as a client that speaks `protocol` (for testing the version rules).
+    pub fn hello_as(
+        &mut self,
+        protocol: u32,
+        last_seq: u64,
+        commands_only: bool,
+    ) -> Result<Welcome, String> {
         self.send(&ClientMessage {
             body: Some(client_message::Body::Hello(Hello {
-                protocol: PROTOCOL,
+                protocol,
                 last_seq,
                 client: "mason-client".into(),
                 token: String::new(),
                 commands_only,
+                client_version: "dev".into(),
             })),
         })?;
         match self.recv(Duration::from_secs(10))? {

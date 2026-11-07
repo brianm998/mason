@@ -277,6 +277,10 @@ public nonisolated struct Mason_V1_Hello: Sendable {
   /// The command line asks for no views and no pushes: just to send commands.
   public var commandsOnly: Bool = false
 
+  /// The monitor's own build (a commit, or "dev"), so the daemon can say whether
+  /// a newer one exists.
+  public var clientVersion: String = String()
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -740,6 +744,14 @@ public nonisolated struct Mason_V1_Welcome: Sendable {
   public var daemon: String = String()
 
   public var demo: Bool = false
+
+  /// The daemon's build: the commit of the runtime it runs from, or "dev".
+  /// A monitor with a different, real version offers to update itself.
+  public var version: String = String()
+
+  /// The oldest client protocol this daemon serves. A monitor older than that
+  /// stays read-only and says why.
+  public var minProtocol: UInt32 = 0
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -1705,7 +1717,7 @@ nonisolated extension Mason_V1_ClientMessage: SwiftProtobuf.Message, SwiftProtob
 
 nonisolated extension Mason_V1_Hello: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".Hello"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}protocol\0\u{3}last_seq\0\u{1}client\0\u{1}token\0\u{3}commands_only\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}protocol\0\u{3}last_seq\0\u{1}client\0\u{1}token\0\u{3}commands_only\0\u{3}client_version\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1718,6 +1730,7 @@ nonisolated extension Mason_V1_Hello: SwiftProtobuf.Message, SwiftProtobuf._Mess
       case 3: try { try decoder.decodeSingularStringField(value: &self.client) }()
       case 4: try { try decoder.decodeSingularStringField(value: &self.token) }()
       case 5: try { try decoder.decodeSingularBoolField(value: &self.commandsOnly) }()
+      case 6: try { try decoder.decodeSingularStringField(value: &self.clientVersion) }()
       default: break
       }
     }
@@ -1739,6 +1752,9 @@ nonisolated extension Mason_V1_Hello: SwiftProtobuf.Message, SwiftProtobuf._Mess
     if self.commandsOnly != false {
       try visitor.visitSingularBoolField(value: self.commandsOnly, fieldNumber: 5)
     }
+    if !self.clientVersion.isEmpty {
+      try visitor.visitSingularStringField(value: self.clientVersion, fieldNumber: 6)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -1748,6 +1764,7 @@ nonisolated extension Mason_V1_Hello: SwiftProtobuf.Message, SwiftProtobuf._Mess
     if lhs.client != rhs.client {return false}
     if lhs.token != rhs.token {return false}
     if lhs.commandsOnly != rhs.commandsOnly {return false}
+    if lhs.clientVersion != rhs.clientVersion {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -2675,7 +2692,7 @@ nonisolated extension Mason_V1_ServerMessage: SwiftProtobuf.Message, SwiftProtob
 
 nonisolated extension Mason_V1_Welcome: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".Welcome"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}protocol\0\u{1}seq\0\u{1}resume\0\u{1}daemon\0\u{1}demo\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}protocol\0\u{1}seq\0\u{1}resume\0\u{1}daemon\0\u{1}demo\0\u{1}version\0\u{3}min_protocol\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -2688,6 +2705,8 @@ nonisolated extension Mason_V1_Welcome: SwiftProtobuf.Message, SwiftProtobuf._Me
       case 3: try { try decoder.decodeSingularEnumField(value: &self.resume) }()
       case 4: try { try decoder.decodeSingularStringField(value: &self.daemon) }()
       case 5: try { try decoder.decodeSingularBoolField(value: &self.demo) }()
+      case 6: try { try decoder.decodeSingularStringField(value: &self.version) }()
+      case 7: try { try decoder.decodeSingularUInt32Field(value: &self.minProtocol) }()
       default: break
       }
     }
@@ -2709,6 +2728,12 @@ nonisolated extension Mason_V1_Welcome: SwiftProtobuf.Message, SwiftProtobuf._Me
     if self.demo != false {
       try visitor.visitSingularBoolField(value: self.demo, fieldNumber: 5)
     }
+    if !self.version.isEmpty {
+      try visitor.visitSingularStringField(value: self.version, fieldNumber: 6)
+    }
+    if self.minProtocol != 0 {
+      try visitor.visitSingularUInt32Field(value: self.minProtocol, fieldNumber: 7)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -2718,6 +2743,8 @@ nonisolated extension Mason_V1_Welcome: SwiftProtobuf.Message, SwiftProtobuf._Me
     if lhs.resume != rhs.resume {return false}
     if lhs.daemon != rhs.daemon {return false}
     if lhs.demo != rhs.demo {return false}
+    if lhs.version != rhs.version {return false}
+    if lhs.minProtocol != rhs.minProtocol {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

@@ -728,17 +728,37 @@ fn main() {
                     if json_out {
                         return println!("{r:#}");
                     }
-                    println!("running   {}", r["running"].as_str().unwrap_or("(not from a runtime: a build directory)"));
+                    println!(
+                        "running   {}",
+                        r["running"]
+                            .as_str()
+                            .unwrap_or("(not from a runtime: a build directory)")
+                    );
                     println!("current   {}", r["current"].as_str().unwrap_or("-"));
                     println!("previous  {}", r["previous"].as_str().unwrap_or("-"));
-                    println!("channel   {}", r["channel"].as_str().unwrap_or("(no update.toml)"));
+                    println!(
+                        "channel   {}",
+                        r["channel"].as_str().unwrap_or("(no update.toml)")
+                    );
                     if let Some(b) = r["bad"].as_array().filter(|b| !b.is_empty()) {
-                        println!("bad       {}", b.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(", "));
+                        println!(
+                            "bad       {}",
+                            b.iter()
+                                .filter_map(|x| x.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        );
                     }
                     if let Some(al) = r["alert"].as_str() {
                         println!("ALERT     {al}  (`mason update ack` when you have seen it)");
                     }
-                    println!("update    {}{}", r["phase"].as_str().unwrap_or("?"), r["error"].as_str().map_or(String::new(), |e| format!(": {e}")));
+                    println!(
+                        "update    {}{}",
+                        r["phase"].as_str().unwrap_or("?"),
+                        r["error"]
+                            .as_str()
+                            .map_or(String::new(), |e| format!(": {e}"))
+                    );
                 }
                 Some("ack") => {
                     finish(&a);
@@ -763,7 +783,10 @@ fn main() {
                     // Follow it until it finishes, or the daemon is replaced.
                     let (mut shown, mut seen_down) = (0usize, false);
                     let mut target: Option<String> = None;
-                    let patience: u64 = std::env::var("MASON_UPDATE_WAIT_S").ok().and_then(|v| v.parse().ok()).unwrap_or(30);
+                    let patience: u64 = std::env::var("MASON_UPDATE_WAIT_S")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(30);
                     let mut down_since: Option<std::time::Instant> = None;
                     let end = std::time::Instant::now() + std::time::Duration::from_secs(3600);
                     loop {
@@ -789,12 +812,21 @@ fn main() {
                         }
                         let phase = r["phase"].as_str().unwrap_or("").to_string();
                         if phase == "failed" {
-                            die(&format!("the update failed, and the running daemon is unchanged: {}", r["error"].as_str().unwrap_or("")));
+                            die(&format!(
+                                "the update failed, and the running daemon is unchanged: {}",
+                                r["error"].as_str().unwrap_or("")
+                            ));
                         }
                         // Done when it is idle and either only checking, or the new runtime is the
                         // one that was being built (a restarted daemon has forgotten the target).
-                        if phase == "idle" && (check || (target.is_some() && r["running"].as_str() == target.as_deref())) {
-                            println!("running {}", r["running"].as_str().unwrap_or("(a build directory)"));
+                        if phase == "idle"
+                            && (check
+                                || (target.is_some() && r["running"].as_str() == target.as_deref()))
+                        {
+                            println!(
+                                "running {}",
+                                r["running"].as_str().unwrap_or("(a build directory)")
+                            );
                             break;
                         }
                         let _ = seen_down;

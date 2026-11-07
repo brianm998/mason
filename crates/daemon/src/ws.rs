@@ -142,11 +142,24 @@ async fn session(d: Arc<Daemon>, mut sock: WebSocket) {
             return;
         }
     };
-    if hello.protocol != PROTOCOL {
+    if !mason_protocol::accepts(hello.protocol) {
+        // Too old (or newer than this daemon): say what is needed, in a Welcome the
+        // client can still read, so that it can stay read-only and tell its user why.
         let msg = format!(
-            "this daemon speaks protocol {PROTOCOL}, not {}",
+            "this daemon serves protocols {} to {PROTOCOL}, not {}",
+            mason_protocol::MIN_PROTOCOL,
             hello.protocol
         );
+        let welcome = Welcome {
+            protocol: PROTOCOL,
+            seq: 0,
+            resume: ResumeKind::UpToDate as i32,
+            daemon: "masond".into(),
+            demo: d.demo,
+            version: d.cfg.runtime_sha.clone().unwrap_or_else(|| "dev".into()),
+            min_protocol: mason_protocol::MIN_PROTOCOL,
+        };
+        let _ = send(&mut sock, server(S::Welcome(welcome)), enc).await;
         let _ = send(&mut sock, server(S::Error(Error { message: msg })), enc).await;
         return;
     }
@@ -178,6 +191,8 @@ async fn session(d: Arc<Daemon>, mut sock: WebSocket) {
         resume: resume as i32,
         daemon: "masond".into(),
         demo: d.demo,
+        version: d.cfg.runtime_sha.clone().unwrap_or_else(|| "dev".into()),
+        min_protocol: mason_protocol::MIN_PROTOCOL,
     };
     if !send(&mut sock, server(S::Welcome(welcome)), enc).await {
         return;

@@ -40,6 +40,9 @@ message Hello {
   string token = 4;
   // The command line asks for no views and no pushes: just to send commands.
   bool commands_only = 5;
+  // The monitor's own build (a commit, or "dev"), so the daemon can say whether
+  // a newer one exists.
+  string client_version = 6;
 }
 
 enum ViewKind {
@@ -188,6 +191,12 @@ message Welcome {
   ResumeKind resume = 3;
   string daemon = 4;
   bool demo = 5;
+  // The daemon's build: the commit of the runtime it runs from, or "dev".
+  // A monitor with a different, real version offers to update itself.
+  string version = 6;
+  // The oldest client protocol this daemon serves. A monitor older than that
+  // stays read-only and says why.
+  uint32 min_protocol = 7;
 }
 
 message Snapshot {

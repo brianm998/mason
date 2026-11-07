@@ -18,11 +18,26 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const GOLDEN: [(&str, &str); 5] = [
-    ("landed_task", include_str!("../tests/fixtures/landed_task.events")),
-    ("red_then_green", include_str!("../tests/fixtures/red_then_green.events")),
-    ("skipped_exploring", include_str!("../tests/fixtures/skipped_exploring.events")),
-    ("stage6_landed_task", include_str!("../tests/fixtures/stage6_landed_task.events")),
-    ("stage6_red_then_green", include_str!("../tests/fixtures/stage6_red_then_green.events")),
+    (
+        "landed_task",
+        include_str!("../tests/fixtures/landed_task.events"),
+    ),
+    (
+        "red_then_green",
+        include_str!("../tests/fixtures/red_then_green.events"),
+    ),
+    (
+        "skipped_exploring",
+        include_str!("../tests/fixtures/skipped_exploring.events"),
+    ),
+    (
+        "stage6_landed_task",
+        include_str!("../tests/fixtures/stage6_landed_task.events"),
+    ),
+    (
+        "stage6_red_then_green",
+        include_str!("../tests/fixtures/stage6_red_then_green.events"),
+    ),
 ];
 
 pub fn run(db_copy: &Path) -> Result<String, String> {
@@ -35,10 +50,15 @@ pub fn run(db_copy: &Path) -> Result<String, String> {
 
 /// Open the copy (which migrates it to this build's schema) and check it.
 fn migrations(db: &Path) -> Result<String, String> {
-    let store = Store::open(db).map_err(|e| format!("migrations on the copy of the database: {e}"))?;
-    store.verify().map_err(|e| format!("the migrated copy is inconsistent: {e}"))?;
+    let store =
+        Store::open(db).map_err(|e| format!("migrations on the copy of the database: {e}"))?;
+    store
+        .verify()
+        .map_err(|e| format!("the migrated copy is inconsistent: {e}"))?;
     let n = store.last_seq().map_err(|e| e.to_string())?;
-    Ok(format!("migrations: the copy ({n} events) opens, migrates and verifies"))
+    Ok(format!(
+        "migrations: the copy ({n} events) opens, migrates and verifies"
+    ))
 }
 
 fn golden() -> Result<String, String> {
@@ -47,21 +67,36 @@ fn golden() -> Result<String, String> {
         let mut w = World::new();
         for line in text.lines() {
             let mut p = line.splitn(3, '\t');
-            let at: u64 = p.next().and_then(|x| x.parse().ok()).ok_or_else(|| format!("{name}: bad line"))?;
+            let at: u64 = p
+                .next()
+                .and_then(|x| x.parse().ok())
+                .ok_or_else(|| format!("{name}: bad line"))?;
             let (kind, payload) = (p.next().unwrap_or(""), p.next().unwrap_or(""));
             let kind = decode_event(kind, payload).map_err(|e| format!("{name}: {line}: {e:?}"))?;
-            w = reduce(&w, &Event { at: Timestamp(at), kind })
-                .map_err(|e| format!("{name}: an event was refused on replay: {e:?}"))?
-                .0;
+            w = reduce(
+                &w,
+                &Event {
+                    at: Timestamp(at),
+                    kind,
+                },
+            )
+            .map_err(|e| format!("{name}: an event was refused on replay: {e:?}"))?
+            .0;
             w.check_invariants().map_err(|e| format!("{name}: {e:?}"))?;
             total += 1;
         }
-        let t = w.tasks.get(&TaskId(0)).ok_or_else(|| format!("{name}: no task"))?;
+        let t = w
+            .tasks
+            .get(&TaskId(0))
+            .ok_or_else(|| format!("{name}: no task"))?;
         if t.state != State::Landed {
             return Err(format!("{name}: replays to {:?}, not landed", t.state));
         }
     }
-    Ok(format!("golden replay: {} recorded runs, {total} events, all land", GOLDEN.len()))
+    Ok(format!(
+        "golden replay: {} recorded runs, {total} events, all land",
+        GOLDEN.len()
+    ))
 }
 
 fn sh(cwd: &Path, args: &[&str]) -> Result<String, String> {
@@ -73,7 +108,9 @@ fn scripted_task() -> Result<String, String> {
     let sib = |n: &str| exe.with_file_name(n);
     for need in ["step-host", "mason-mcp", "fake-claude"] {
         if !sib(need).is_file() {
-            return Err(format!("the build has no {need} next to masond, so the scripted task cannot run"));
+            return Err(format!(
+                "the build has no {need} next to masond, so the scripted task cannot run"
+            ));
         }
     }
     let root: PathBuf = std::env::temp_dir().join(format!("mason-selftest-{}", std::process::id()));
@@ -84,11 +121,25 @@ fn scripted_task() -> Result<String, String> {
         let repo = root.join("repo");
         std::fs::create_dir_all(&origin).map_err(|e| e.to_string())?;
         sh(&origin, &["init", "-q", "--bare", "-b", "main"])?;
-        sh(&root, &["clone", "-q", &origin.display().to_string(), "repo"])?;
+        sh(
+            &root,
+            &["clone", "-q", &origin.display().to_string(), "repo"],
+        )?;
         sh(&repo, &["checkout", "-q", "-b", "main"])?;
         std::fs::write(repo.join("README"), "selftest\n").map_err(|e| e.to_string())?;
         sh(&repo, &["add", "-A"])?;
-        sh(&repo, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init"])?;
+        sh(
+            &repo,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-qm",
+                "init",
+            ],
+        )?;
         sh(&repo, &["push", "-q", "origin", "main"])?;
         sh(&repo, &["checkout", "-q", "-b", "owner-work"])?;
         let script = root.join("script.json");
@@ -120,8 +171,11 @@ fn scripted_task() -> Result<String, String> {
         cfg.sweep_interval = Duration::from_secs(3600);
         cfg.heartbeat = Duration::from_millis(100);
         cfg.hold_retry = Duration::from_millis(300);
-        let d: Arc<Daemon> = Daemon::start(cfg).map_err(|e| format!("the sandbox daemon did not start: {e}"))?;
-        let pid = d.project_id_by_name("selftest").ok_or("the sandbox project is missing")?;
+        let d: Arc<Daemon> =
+            Daemon::start(cfg).map_err(|e| format!("the sandbox daemon did not start: {e}"))?;
+        let pid = d
+            .project_id_by_name("selftest")
+            .ok_or("the sandbox project is missing")?;
         let appended = d
             .emit(EventKind::TaskFiled {
                 project: pid,
@@ -148,7 +202,9 @@ fn scripted_task() -> Result<String, String> {
             let w = d.world().map_err(|e| e.to_string())?;
             match w.tasks.get(&task).map(|t| t.state) {
                 Some(State::Landed) => break,
-                Some(s @ (State::Failed | State::Canceled)) => return Err(format!("the scripted task ended {s:?}")),
+                Some(s @ (State::Failed | State::Canceled)) => {
+                    return Err(format!("the scripted task ended {s:?}"))
+                }
                 _ => {}
             }
             if Instant::now() > end {
@@ -160,11 +216,22 @@ fn scripted_task() -> Result<String, String> {
         if landed.trim() != "hello" {
             return Err("the scripted task landed but its file is not on the remote".into());
         }
-        d.store.verify().map_err(|e| format!("the sandbox store is inconsistent: {e}"))?;
+        d.store
+            .verify()
+            .map_err(|e| format!("the sandbox store is inconsistent: {e}"))?;
         // Hosts of the sandbox end with their steps; make sure none is left.
-        for h in mason_step_host::registry::Registry::new(root.join("d/h")).scan().unwrap_or_default() {
-            let _ = nix::sys::signal::killpg(nix::unistd::Pid::from_raw(h.info.child_pid as i32), nix::sys::signal::Signal::SIGKILL);
-            let _ = nix::sys::signal::kill(nix::unistd::Pid::from_raw(h.info.host_pid as i32), nix::sys::signal::Signal::SIGKILL);
+        for h in mason_step_host::registry::Registry::new(root.join("d/h"))
+            .scan()
+            .unwrap_or_default()
+        {
+            let _ = nix::sys::signal::killpg(
+                nix::unistd::Pid::from_raw(h.info.child_pid as i32),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(h.info.host_pid as i32),
+                nix::sys::signal::Signal::SIGKILL,
+            );
         }
         Ok("sandbox: a scripted task went from filed to landed".to_string())
     })();
