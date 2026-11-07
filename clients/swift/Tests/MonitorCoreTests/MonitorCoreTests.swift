@@ -310,4 +310,61 @@ final class MonitorCoreTests: XCTestCase {
         if case .unavailable = ClientUpdate.plan(env: ["MASON_INSTALL_URL": "http://insecure"]) {} else { XCTFail("only https pages") }
         if case .unavailable(let why) = ClientUpdate.plan(env: [:]) { XCTAssertTrue(why.contains("MASON_SOURCE_DIR")) } else { XCTFail() }
     }
+
+    // ---- the pipeline editor (Part 18) ----
+
+    private func editorView() -> Mason_V1_EditorView {
+        var e = Mason_V1_EditorView()
+        e.project = "web"
+        e.lanes = [("developing", "Developing"), ("testing", "Testing")].map { c, t in .with { $0.category = c; $0.title = t } }
+        e.nodes = [
+            .with { $0.name = "develop"; $0.kind = "agent"; $0.category = "developing"; $0.isStart = true; $0.summary = "deep" },
+            .with { $0.name = "test"; $0.kind = "test"; $0.category = "testing"; $0.summary = "unit"; $0.problems = ["needs a bound"] },
+        ]
+        e.edges = [
+            .with { $0.from = "develop"; $0.to = "test"; $0.kind = "next" },
+            .with { $0.from = "test"; $0.to = "develop"; $0.kind = "on_red"; $0.bound = 2 },
+        ]
+        e.grid = .with { $0.columns = ["development", "test_step"]; $0.rows = [.with { $0.suite = "unit"; $0.level = "unit"; $0.cells = [false, true] }] }
+        e.problems = ["suite.x: odd"]
+        e.dirty = true
+        e.canUndo = true
+        e.changes = ["adds step `lint`"]
+        return e
+    }
+
+    func testTheEditorsItemsAreWhatTheViewSays() {
+        let items = Dictionary(uniqueKeysWithValues: editorView().items().map { ($0.id, $0) })
+        XCTAssertEqual(items["node:develop"]?.texts, ["develop", "agent", "developing", "deep", "start"])
+        XCTAssertEqual(items["node:test"]?.texts, ["test", "test", "testing", "unit", "needs a bound"])
+        XCTAssertEqual(items["edge:test:on_red:develop"]?.texts, ["test", "develop", "on red", "at most 2 times"])
+        XCTAssertEqual(items["edge:develop:next:test"]?.texts, ["develop", "test", "next"])
+        XCTAssertEqual(items["grid:unit"]?.texts, ["unit", "unit", "test step"])
+        XCTAssertEqual(items["problem:0"]?.texts, ["suite.x: odd"])
+        XCTAssertEqual(items["lane:testing"]?.texts, ["Testing"])
+        XCTAssertEqual(items["draft"]?.actions, ["apply", "discard", "simulate", "undo"].sorted())
+        XCTAssertEqual(items["change:0"]?.texts, ["adds step `lint`"])
+        var clean = editorView(); clean.dirty = false; clean.canUndo = false; clean.canRedo = true
+        XCTAssertEqual(clean.items().first { $0.id == "draft" }?.actions, ["redo", "simulate"])
+    }
+
+    func testEditsAreSentAsTheOperationsTheDaemonTakes() {
+        let m = MonitorModel()
+        var sent: [Mason_V1_Command] = []
+        m.sender = { sent.append($0) }
+        m.project = "web"
+        m.editorOp(["op": "move", "step": "develop", "x": 10, "y": 20])
+        m.editorCall("undo")
+        XCTAssertEqual(sent.map { $0.raw.method }, ["POST", "POST"])
+        XCTAssertEqual(sent.map { $0.raw.path }, ["/projects/web/editor/op", "/projects/web/editor/undo"])
+        let body = try! JSONSerialization.jsonObject(with: Data(sent[0].raw.json.utf8)) as! [String: Any]
+        XCTAssertEqual(body["op"] as? String, "move")
+        XCTAssertEqual(body["x"] as? Int, 10)
+        // Selecting a step re-subscribes (so the inspector arrives).
+        var subscribed = 0
+        m.subscribe = { subscribed += 1 }
+        m.selectStep("test")
+        XCTAssertEqual(m.editorStep, "test")
+        XCTAssertEqual(subscribed, 1)
+    }
 }

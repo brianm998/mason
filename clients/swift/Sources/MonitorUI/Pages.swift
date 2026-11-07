@@ -16,7 +16,7 @@ struct MainPane: View {
             case .task(let id): TaskDetailPage(model: model, id: id)
             case .landing: LandingPage(model: model)
             case .usage: UsagePage(model: model)
-            case .pipeline: PipelinePage(model: model)
+            case .pipeline: EditorPage(model: model)
             case .health: HealthPage(model: model)
             }
         }
@@ -306,33 +306,6 @@ struct UsagePage: View {
             SessionStepper(model: model)
         }
         .padding(theme.spacingLarge)
-    }
-}
-
-/// Until the graphical editor (Stage 18): the definition as it stands, its
-/// steps and any problem with it, all from the daemon.
-struct PipelinePage: View {
-    @Environment(\.theme) var theme
-    @ObservedObject var model: MonitorModel
-
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: theme.spacingLarge) {
-                Text("Pipeline").font(theme.title())
-                Text("The graphical editor arrives in a later stage. This is the definition the daemon is running.")
-                    .font(theme.body()).foregroundStyle(theme.muted)
-                if let e = model.editor {
-                    ForEach(e.problems, id: \.self) { Text($0).foregroundStyle(theme.attention).font(theme.body()) }
-                    section("Steps (\(e.project))", theme: theme) {
-                        ForEach(e.steps, id: \.name) { s in
-                            Text("\(s.name)  \(s.kind), \(s.category)\(s.next.isEmpty ? "" : "  →  \(s.next.joined(separator: ", "))")\(s.onRed.isEmpty ? "" : "  (red: \(s.onRed))")")
-                                .font(theme.mono())
-                        }
-                    }
-                    if !e.text.isEmpty { Text(e.text).font(theme.mono()).textSelection(.enabled) }
-                }
-            }.padding(theme.spacingLarge)
-        }
     }
 }
 

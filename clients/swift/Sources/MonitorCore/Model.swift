@@ -61,6 +61,8 @@ public final class MonitorModel: ObservableObject {
     /// Where the sidebar should scroll to (a tile was clicked).
     @Published public var scrollTarget: String?
     @Published public var lastResult: String?
+    /// The step selected in the pipeline editor (for its inspector).
+    @Published public private(set) var editorStep = ""
     /// Called with every command result (the tools read them; the app shows errors).
     public var onResult: ((Mason_V1_CommandResult) -> Void)?
 
@@ -191,8 +193,30 @@ public final class MonitorModel: ObservableObject {
         command { $0.pause = .with { $0.project = project; $0.mode = mode; $0.forSeconds = seconds } }
     }
     public func resume() { command { $0.resume = .with { $0.project = project } } }
-    public func raw(_ method: String, _ path: String) {
-        command { $0.raw = .with { $0.method = method; $0.path = path } }
+    public func raw(_ method: String, _ path: String, json: String = "") {
+        command { $0.raw = .with { $0.method = method; $0.path = path; $0.json = json } }
+    }
+
+    // MARK: the pipeline editor (Part 18)
+
+    /// The project the editor is about: the one picked, else the first there is.
+    public var editorProject: String { project.isEmpty ? (header?.projects.first ?? "") : project }
+
+    public func selectStep(_ name: String) {
+        editorStep = name
+        subscribe?()
+    }
+
+    /// One operation on the draft, as the daemon's editor API takes it.
+    public func editorOp(_ op: [String: Any]) {
+        guard let data = try? JSONSerialization.data(withJSONObject: op), let text = String(data: data, encoding: .utf8) else { return }
+        raw("POST", "/projects/\(editorProject)/editor/op", json: text)
+    }
+
+    /// `undo`, `redo`, `discard`, `simulate` or `apply`.
+    public func editorCall(_ what: String, _ body: [String: Any] = [:]) {
+        let data = (try? JSONSerialization.data(withJSONObject: body)) ?? Data("{}".utf8)
+        raw("POST", "/projects/\(editorProject)/editor/\(what)", json: String(data: data, encoding: .utf8) ?? "{}")
     }
 
     // MARK: updates from the daemon

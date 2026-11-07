@@ -653,30 +653,17 @@ impl<'a> Ctx<'a> {
         }
     }
 
-    pub fn editor(&self, project: &str) -> EditorView {
-        let pid = self
-            .w
-            .projects
-            .values()
-            .find(|p| project.is_empty() || p.name == project)
-            .map(|p| p.id);
+    pub fn editor(&self, project: &str, step: &str) -> EditorView {
+        let pid = self.w.projects.values().find(|p| project.is_empty() || p.name == project).map(|p| p.id);
         let Some(pid) = pid else {
             return EditorView::default();
         };
+        let m = crate::editor::model(self.d, pid, step);
+        let strs = |v: &serde_json::Value| -> Vec<String> { v.as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default() };
         let def = self.d.current_def(pid);
         EditorView {
-            project: self
-                .w
-                .projects
-                .get(&pid)
-                .map_or_else(String::new, |p| p.name.clone()),
-            text: self
-                .d
-                .store
-                .definition(&def.hash)
-                .ok()
-                .flatten()
-                .unwrap_or_default(),
+            project: m["project"].as_str().unwrap_or_default().into(),
+            text: m["text"].as_str().unwrap_or_default().into(),
             steps: def
                 .steps
                 .iter()
@@ -688,12 +675,70 @@ impl<'a> Ctx<'a> {
                     on_red: s.on_red.clone().unwrap_or_default(),
                 })
                 .collect(),
-            problems: self.d.definition_error(pid).unwrap_or_default(),
+            problems: strs(&m["problems"]),
             hash: def.hash.clone(),
+            lanes: m["lanes"].as_array().into_iter().flatten().map(|l| EditorLane { category: l["category"].as_str().unwrap_or_default().into(), title: l["title"].as_str().unwrap_or_default().into() }).collect(),
+            nodes: m["nodes"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|n| EditorNode {
+                    name: n["name"].as_str().unwrap_or_default().into(),
+                    kind: n["kind"].as_str().unwrap_or_default().into(),
+                    category: n["category"].as_str().unwrap_or_default().into(),
+                    lane: n["lane"].as_u64().unwrap_or(0) as u32,
+                    x: n["x"].as_i64().unwrap_or(0),
+                    y: n["y"].as_i64().unwrap_or(0),
+                    placed: n["placed"].as_bool().unwrap_or(false),
+                    problems: strs(&n["problems"]),
+                    summary: n["summary"].as_str().unwrap_or_default().into(),
+                    is_start: n["is_start"].as_bool().unwrap_or(false),
+                })
+                .collect(),
+            edges: m["edges"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|e| EditorEdge { from: e["from"].as_str().unwrap_or_default().into(), to: e["to"].as_str().unwrap_or_default().into(), kind: e["kind"].as_str().unwrap_or_default().into(), bound: e["bound"].as_u64().unwrap_or(0) as u32 })
+                .collect(),
+            grid: Some(TestGridView {
+                columns: strs(&m["grid"]["columns"]),
+                levels: strs(&m["grid"]["levels"]),
+                rows: m["grid"]["rows"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|r| GridRowView { suite: r["suite"].as_str().unwrap_or_default().into(), level: r["level"].as_str().unwrap_or_default().into(), cells: r["cells"].as_array().map(|c| c.iter().map(|x| x.as_bool().unwrap_or(false)).collect()).unwrap_or_default() })
+                    .collect(),
+            }),
+            inspector: if m["inspector"].is_null() {
+                None
+            } else {
+                Some(Inspector {
+                    step: m["inspector"]["step"].as_str().unwrap_or_default().into(),
+                    kind: m["inspector"]["kind"].as_str().unwrap_or_default().into(),
+                    schema: m["inspector"]["schema"].to_string(),
+                    values: m["inspector"]["values"].to_string(),
+                })
+            },
+            landing: m["landing"].to_string(),
+            palette: m["palette"].as_array().into_iter().flatten().map(|p| p.to_string()).collect(),
+            suites: strs(&m["suites"]),
+            step_names: strs(&m["steps"]),
+            dirty: m["dirty"].as_bool().unwrap_or(false),
+            can_undo: m["can_undo"].as_bool().unwrap_or(false),
+            can_redo: m["can_redo"].as_bool().unwrap_or(false),
+            diff: m["diff"].as_str().unwrap_or_default().into(),
+            changes: strs(&m["changes"]),
+            affected: strs(&m["affected"]),
+            simulation: if m["simulation"].is_null() { String::new() } else { m["simulation"].to_string() },
+            last_error: strs(&m["last_error"]),
+            selected: m["selected"].as_str().unwrap_or_default().into(),
+            protected: m["protected"].as_bool().unwrap_or(false),
         }
     }
 
-    pub fn view(&self, kind: ViewKind, project: &str, task: u64) -> Option<View> {
+    pub fn view(&self, kind: ViewKind, project: &str, task: u64, step: &str) -> Option<View> {
         use mason_protocol::view::Body;
         let body = match kind {
             ViewKind::Header => Body::Header(self.header(project)),
@@ -702,7 +747,7 @@ impl<'a> Ctx<'a> {
             ViewKind::TaskDetail => Body::TaskDetail(self.task_detail(task)?),
             ViewKind::Landing => Body::Landing(self.landing(project)),
             ViewKind::Usage => Body::Usage(self.usage()),
-            ViewKind::Editor => Body::Editor(self.editor(project)),
+            ViewKind::Editor => Body::Editor(self.editor(project, step)),
             _ => return None,
         };
         Some(View { body: Some(body) })

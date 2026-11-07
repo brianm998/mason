@@ -97,6 +97,7 @@ extension MonitorModel {
                 actions: ["increase", "decrease"]
             ))
         }
+        if page == .pipeline, let e = editor { out.append(contentsOf: e.items()) }
         if case .task = page, let d = taskDetail, d.hasRow {
             out.append(d.row.item(prefix: "detail", order: 0))
             for (i, s) in d.steps.enumerated() {
@@ -104,6 +105,40 @@ extension MonitorModel {
             }
             if d.hasCard { out.append(d.card.item(task: d.row.id)) }
         }
+        return out
+    }
+}
+
+extension Mason_V1_EditorView {
+    /// What the pipeline editor shows, as items (the same list the daemon's
+    /// `conformance::editor_items` builds from the same view).
+    public func items() -> [Item] {
+        var out: [Item] = []
+        for (i, l) in lanes.enumerated() { out.append(Item(id: "lane:\(l.category)", texts: [l.title], order: i)) }
+        for (i, n) in nodes.enumerated() {
+            var texts = [n.name, n.kind, n.category]
+            if !n.summary.isEmpty { texts.append(n.summary) }
+            if n.isStart { texts.append("start") }
+            texts.append(contentsOf: n.problems)
+            out.append(Item(id: "node:\(n.name)", texts: texts, order: i))
+        }
+        for (i, x) in edges.enumerated() {
+            var texts = [x.from, x.to, x.kind == "on_red" ? "on red" : "next"]
+            if x.bound > 0 { texts.append("at most \(x.bound) times") }
+            out.append(Item(id: "edge:\(x.from):\(x.kind):\(x.to)", texts: texts, order: i))
+        }
+        for (i, r) in grid.rows.enumerated() {
+            var texts = [r.suite, r.level]
+            for (c, on) in zip(grid.columns, r.cells) where on { texts.append(c.replacingOccurrences(of: "_", with: " ")) }
+            out.append(Item(id: "grid:\(r.suite)", texts: texts, order: i))
+        }
+        for (i, p) in problems.enumerated() { out.append(Item(id: "problem:\(i)", texts: [p], order: i)) }
+        var actions = ["simulate"]
+        if canUndo { actions.append("undo") }
+        if canRedo { actions.append("redo") }
+        if dirty { actions.append(contentsOf: ["discard", "apply"]) }
+        out.append(Item(id: "draft", texts: [dirty ? "changed" : "unchanged"], actions: actions))
+        for (i, c) in changes.enumerated() { out.append(Item(id: "change:\(i)", texts: [c], order: i)) }
         return out
     }
 }

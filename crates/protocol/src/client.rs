@@ -108,11 +108,23 @@ impl Client {
         project: &str,
         task: u64,
     ) -> Result<(), String> {
+        self.subscribe_editor(views, project, task, "")
+    }
+
+    /// Subscribe with a step selected in the editor (for its inspector).
+    pub fn subscribe_editor(
+        &mut self,
+        views: &[ViewKind],
+        project: &str,
+        task: u64,
+        editor_step: &str,
+    ) -> Result<(), String> {
         self.send(&ClientMessage {
             body: Some(client_message::Body::Subscribe(Subscribe {
                 views: views.iter().map(|v| *v as i32).collect(),
                 project: project.into(),
                 task,
+                editor_step: editor_step.into(),
             })),
         })
     }

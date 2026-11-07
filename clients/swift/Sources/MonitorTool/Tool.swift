@@ -11,6 +11,7 @@ import SwiftUI
 ///
 ///     monitor-tool conformance --port P --out DIR   dump what the client shows at every demo checkpoint
 ///     monitor-tool snapshot --port P --out DIR      render screenshots from `masond --demo-manual`
+///     monitor-tool editor --port P --project NAME [--step S] --out DIR   dump what the pipeline editor shows
 ///     monitor-tool answer --port P --task N [--option 1]   answer a task's open question as the monitor does
 ///     monitor-tool cancel --port P --task N         cancel a task as the Cancel button does
 ///     monitor-tool skip --port P --task N [--step S]  skip a test step as the Skip button does
@@ -37,6 +38,7 @@ struct Tool {
 
         switch cmd {
         case "conformance": await conformance(model, out)
+        case "editor": await editor(model, args, out)
         case "snapshot": await snapshots(model, out)
         case "answer": await answer(model, args)
         case "cancel", "skip": await act(model, cmd, args)
@@ -145,6 +147,29 @@ struct Tool {
             !(model.home?.attention.contains { $0.task.id == t } ?? true)
         }
         print("answered task #\(t) with option \(option); it is no longer waiting for the owner")
+    }
+
+    // MARK: the pipeline editor
+
+    /// What the editor shows for a project's draft, as items: the pipeline page, opened
+    /// on a project with a step selected, and its `visibleItems()` written out. (Needs a
+    /// real daemon: the demo has no repositories.)
+    @MainActor
+    static func editor(_ model: MonitorModel, _ args: [String], _ out: URL) async {
+        func opt(_ n: String) -> String? {
+            args.firstIndex(of: n).flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil }
+        }
+        guard let project = opt("--project") else { fail("--project NAME") }
+        let step = opt("--step") ?? ""
+        model.project = project
+        model.selectStep(step)
+        model.go(.pipeline)
+        await until("the editor for \(project)") { model.editor?.project == project && model.editor?.selected == step }
+        await settle(model)
+        let items = model.visibleItems().map(\.json)
+        let data = try! JSONSerialization.data(withJSONObject: items, options: [.prettyPrinted, .sortedKeys])
+        try! data.write(to: out.appendingPathComponent("checkpoint-0.json"))
+        print("the editor shows \(items.count) items")
     }
 
     // MARK: conformance

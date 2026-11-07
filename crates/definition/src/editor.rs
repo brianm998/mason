@@ -623,6 +623,12 @@ pub fn palette(caps: &Capabilities) -> Vec<Value> {
                 "type": k.name(),
                 "categories": k.categories().iter().map(|c| category_name(*c)).collect::<Vec<_>>(),
                 "available": caps.step_types.contains(k),
+                // What a new step of this type needs to be valid at once.
+                "fields": match k {
+                    StepType::Agent => json!({"agent": "fast"}),
+                    StepType::Command | StepType::Gate => json!({"command": "true"}),
+                    _ => json!({}),
+                },
                 "about": match k {
                     StepType::Agent => "A coding agent works on the task.",
                     StepType::Command => "Run a command in the task's worktree.",
@@ -670,11 +676,16 @@ pub fn step_schema(kind: StepType, def: &Definition) -> Value {
         StepType::Ci | StepType::Pr | StepType::Landing => {}
     }
     props.insert("uses".into(), json!({"type": "object", "title": "Resources", "additionalProperties": {"type": "integer", "minimum": 1}, "x-choices": def.resources.keys().collect::<Vec<_>>(), "description": "Resources the step holds while it runs, like compile = 1."}));
+    // The form shows fields in a deliberate order, not the alphabetical one a JSON object keeps.
+    let rank = |k: &str| ["category", "agent", "model", "effort", "budget", "command", "suites", "tools", "read_only", "policy", "max_rounds", "uses"].iter().position(|x| *x == k).unwrap_or(99);
+    let mut order: Vec<String> = props.keys().cloned().collect();
+    order.sort_by_key(|k| rank(k));
     json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": format!("{} step", kind.name()),
         "type": "object",
         "properties": props,
+        "x-order": order,
     })
 }
 

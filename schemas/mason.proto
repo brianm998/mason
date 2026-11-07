@@ -63,6 +63,8 @@ message Subscribe {
   string project = 2;
   // The task for TASK_DETAIL.
   uint64 task = 3;
+  // The step selected in the editor, for EDITOR's inspector (empty: none).
+  string editor_step = 4;
 }
 
 message Ping {
@@ -471,10 +473,90 @@ message StepNode {
   string on_red = 5;
 }
 
+message EditorLane {
+  string category = 1;
+  string title = 2;
+}
+
+message EditorNode {
+  string name = 1;
+  string kind = 2;
+  string category = 3;
+  uint32 lane = 4;
+  sint64 x = 5;
+  sint64 y = 6;
+  // Placed by hand (it is in the sidecar file).
+  bool placed = 7;
+  repeated string problems = 8;
+  // A short line: the agent, the suites, the command.
+  string summary = 9;
+  bool is_start = 10;
+}
+
+message EditorEdge {
+  string from = 1;
+  string to = 2;
+  // "next" (on success) or "on_red" (go back).
+  string kind = 3;
+  // For a loop back: how many times (0: not a loop).
+  uint32 bound = 4;
+}
+
+message GridRowView {
+  string suite = 1;
+  string level = 2;
+  // One per column of the grid.
+  repeated bool cells = 3;
+}
+
+// Suites as rows, the points where a level can run as columns.
+message TestGridView {
+  repeated string columns = 1;
+  repeated GridRowView rows = 2;
+  repeated string levels = 3;
+}
+
+// The form of the selected step. `schema` is a JSON Schema and `values` the values
+// it holds, both JSON text: a client builds the form from the schema alone.
+message Inspector {
+  string step = 1;
+  string kind = 2;
+  string schema = 3;
+  string values = 4;
+}
+
 message EditorView {
   string project = 1;
+  // The draft's pipeline, as TOML.
   string text = 2;
   repeated StepNode steps = 3;
+  // Problems of the draft that belong to no node.
   repeated string problems = 4;
   string hash = 5;
+  repeated EditorLane lanes = 6;
+  repeated EditorNode nodes = 7;
+  repeated EditorEdge edges = 8;
+  TestGridView grid = 9;
+  Inspector inspector = 10;
+  // The landing settings, as JSON text (mode, batch rules, tiers, red ladder, choices).
+  string landing = 11;
+  // The step types of the palette, each as JSON text.
+  repeated string palette = 12;
+  repeated string suites = 13;
+  repeated string step_names = 14;
+  bool dirty = 15;
+  bool can_undo = 16;
+  bool can_redo = 17;
+  // The draft's changes as a unified diff, and in words.
+  string diff = 18;
+  repeated string changes = 19;
+  // "2 tasks in this step will finish on the old version".
+  repeated string affected = 20;
+  // The last simulation, as JSON text.
+  string simulation = 21;
+  // Why the last edit was refused.
+  repeated string last_error = 22;
+  string selected = 23;
+  // This is MASON's own repository: its `.mason/` is protected.
+  bool protected = 24;
 }

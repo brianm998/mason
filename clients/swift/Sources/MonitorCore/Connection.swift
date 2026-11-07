@@ -95,6 +95,7 @@ public final class MonitorConnection {
         s.views = views
         s.project = model.project
         s.task = taskId
+        s.editorStep = model.editorStep
         var m = Mason_V1_ClientMessage()
         m.subscribe = s
         write(m)

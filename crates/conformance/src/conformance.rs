@@ -186,8 +186,63 @@ pub fn visible(views: &[View]) -> Vec<Item> {
                     out.push(card_item(r.id, c));
                 }
             }
+            Some(Body::Editor(e)) => out.extend(editor_items(e)),
             _ => {}
         }
+    }
+    out
+}
+
+/// What the pipeline editor shows (Part 18): the lanes, each node with its problems,
+/// each edge, each row of the test grid with the places its level runs, the problems that
+/// belong to no node, and the toolbar: what may be done to the draft now.
+pub fn editor_items(e: &mason_protocol::EditorView) -> Vec<Item> {
+    let mut out = vec![];
+    for (i, l) in e.lanes.iter().enumerate() {
+        out.push(Item::new(format!("lane:{}", l.category), vec![l.title.clone()], vec![], i));
+    }
+    for (i, n) in e.nodes.iter().enumerate() {
+        let mut texts = vec![n.name.clone(), n.kind.clone(), n.category.clone()];
+        if !n.summary.is_empty() {
+            texts.push(n.summary.clone());
+        }
+        if n.is_start {
+            texts.push("start".into());
+        }
+        texts.extend(n.problems.iter().cloned());
+        out.push(Item::new(format!("node:{}", n.name), texts, vec![], i));
+    }
+    for (i, x) in e.edges.iter().enumerate() {
+        let mut texts = vec![x.from.clone(), x.to.clone(), if x.kind == "on_red" { "on red".to_string() } else { "next".to_string() }];
+        if x.bound > 0 {
+            texts.push(format!("at most {} times", x.bound));
+        }
+        out.push(Item::new(format!("edge:{}:{}:{}", x.from, x.kind, x.to), texts, vec![], i));
+    }
+    if let Some(g) = &e.grid {
+        for (i, r) in g.rows.iter().enumerate() {
+            let mut texts = vec![r.suite.clone(), r.level.clone()];
+            texts.extend(g.columns.iter().zip(&r.cells).filter(|(_, on)| **on).map(|(c, _)| c.replace('_', " ")));
+            out.push(Item::new(format!("grid:{}", r.suite), texts, vec![], i));
+        }
+    }
+    for (i, p) in e.problems.iter().enumerate() {
+        out.push(Item::new(format!("problem:{i}"), vec![p.clone()], vec![], i));
+    }
+    let mut actions = vec!["simulate".to_string()];
+    if e.can_undo {
+        actions.push("undo".into());
+    }
+    if e.can_redo {
+        actions.push("redo".into());
+    }
+    if e.dirty {
+        actions.push("discard".into());
+        actions.push("apply".into());
+    }
+    out.push(Item::new("draft", vec![if e.dirty { "changed".to_string() } else { "unchanged".to_string() }], actions, 0));
+    for (i, c) in e.changes.iter().enumerate() {
+        out.push(Item::new(format!("change:{i}"), vec![c.clone()], vec![], i));
     }
     out
 }

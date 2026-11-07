@@ -35,6 +35,7 @@ struct Sub {
     views: Vec<ViewKind>,
     project: String,
     task: u64,
+    editor_step: String,
 }
 
 impl Default for Sub {
@@ -43,6 +44,7 @@ impl Default for Sub {
             views: vec![ViewKind::Header, ViewKind::Sidebar, ViewKind::Home],
             project: String::new(),
             task: 0,
+            editor_step: String::new(),
         }
     }
 }
@@ -85,7 +87,7 @@ fn compute(d: &Daemon, sub: &Sub) -> (u64, Vec<View>) {
     let views = sub
         .views
         .iter()
-        .filter_map(|k| ctx.view(*k, &sub.project, sub.task))
+        .filter_map(|k| ctx.view(*k, &sub.project, sub.task, &sub.editor_step))
         .collect();
     (seq, views)
 }
@@ -206,6 +208,7 @@ async fn session(d: Arc<Daemon>, mut sock: WebSocket) {
                     views: sub.views.clone(),
                     project: sub.project.clone(),
                     task: sub.task,
+                    editor_step: sub.editor_step.clone(),
                 },
             );
             let (seq, views) = d
@@ -257,6 +260,7 @@ async fn session(d: Arc<Daemon>, mut sock: WebSocket) {
                             views: s.views.iter().filter_map(|v| ViewKind::try_from(*v).ok()).collect(),
                             project: s.project,
                             task: s.task,
+                            editor_step: s.editor_step,
                         };
                         if !push_views(&d, &mut sock, &sub, enc).await { return }
                     }
@@ -297,6 +301,7 @@ async fn push_views(d: &Arc<Daemon>, sock: &mut WebSocket, sub: &Sub, e: Encodin
             views: sub.views.clone(),
             project: sub.project.clone(),
             task: sub.task,
+            editor_step: sub.editor_step.clone(),
         },
     );
     let (seq, views) = d
