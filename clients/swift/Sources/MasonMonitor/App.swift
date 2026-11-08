@@ -12,6 +12,13 @@ final class Session: ObservableObject {
     private var connection: MonitorConnection?
     private var finder: Task<Void, Never>?
 
+    init() {
+        // The alert sound the model asks for when something new needs the owner.
+        model.onAttention = {
+            if let s = NSSound(named: NSSound.Name("Glass")) { s.play() } else { NSSound.beep() }
+        }
+    }
+
     /// The update button: build the new monitor from source, launch it, close this one.
     func updateMonitor() {
         switch ClientUpdate.plan(env: ProcessInfo.processInfo.environment) {

@@ -21,6 +21,11 @@ description = "Back, forward, home; attention indicator; project filter; LLM usa
 swift = "done"
 compose = "done"
 
+[feature.attention-sound]
+description = "A sound when a task newly needs the owner (a question, an approval, a proposal, a failure); silent when muted, on first load, and when the project filter changes"
+swift = "done"
+compose = "done"
+
 [feature.count-tiles]
 description = "One fixed-size tile per state, tinted when it wants you, a dash while disconnected"
 swift = "done"
