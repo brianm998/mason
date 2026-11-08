@@ -12,7 +12,8 @@ use mason_core::introspect::{signature, Attempt};
 use rusqlite::Connection;
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().collect();
+    args.remove(0); // the program name
     if args.first().map(String::as_str) != Some("attempts") || args.len() < 2 {
         eprintln!("usage: plant attempts DB --project P --task N --step S --outcome O [--reason T] [--count K] [--retry-from R]");
         std::process::exit(2);
