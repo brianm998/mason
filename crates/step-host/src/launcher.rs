@@ -3,11 +3,14 @@
 //! Starting a host from the daemon.
 
 use crate::registry::HostInfo;
+use std::collections::HashMap;
 use std::io;
+use std::os::unix::process::ExitStatusExt;
+use std::path::Path;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -47,6 +50,24 @@ impl SpawnOptions {
     }
 }
 
+type Seen = Mutex<HashMap<PathBuf, (Option<i32>, u64)>>;
+
+fn seen() -> &'static Seen {
+    static SEEN: OnceLock<Seen> = OnceLock::new();
+    SEEN.get_or_init(Default::default)
+}
+
+/// What this process saw when the host it started in `dir` ended: the signal that
+/// ended it (None when it exited normally) and the time. None when this process
+/// did not start it or has not seen it end (for instance after a restart).
+pub fn exit_signal(dir: &Path) -> Option<(Option<i32>, u64)> {
+    seen()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(dir)
+        .copied()
+}
+
 /// Start a host and return once it is up (its record is on disk and its socket
 /// is listening). The host outlives this process.
 pub fn spawn_host(o: &SpawnOptions) -> io::Result<HostInfo> {
@@ -77,8 +98,14 @@ pub fn spawn_host(o: &SpawnOptions) -> io::Result<HostInfo> {
     let gone = Arc::new(AtomicBool::new(false));
     {
         let gone = gone.clone();
+        let dir = dir.clone();
         thread::spawn(move || {
-            let _ = child.wait();
+            if let Ok(st) = child.wait() {
+                seen()
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(dir, (st.signal(), crate::registry::now_ms()));
+            }
             gone.store(true, Ordering::SeqCst);
         });
     }
