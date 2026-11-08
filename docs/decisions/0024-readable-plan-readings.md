@@ -1,4 +1,4 @@
-# 0029: Readable plan, the choices the ticket left open
+# 0024: Readable plan, the choices the ticket left open
 
 Task #16. Each is the reading taken; change one and the others stand.
 
@@ -11,4 +11,4 @@ Task #16. Each is the reading taken; change one and the others stand.
 - **Expand rule:** steps, files and criteria are open when the plan has fewer than 10 steps, closed with their counts otherwise (`PlanText.expandedByDefault`). "Other" is always open.
 - **A daemon without `plan_view`** (an older one) shows the plan text wrapped in body font, no note.
 - **Protocol version stays 1**: additive, `TaskDetailView.plan_view = 19`.
-- **Gate files touched, for the owner's approval:** `clients/features.toml` (protected: client parity) gets `[feature.readable-plan]`; `scripts/exit/s47.sh` (protected: the exit tests) is new. No test, limit or gate is weakened.
+- **Gate files touched, for the owner's approval:** `clients/features.toml` (protected: client parity) gets `[feature.readable-plan]`; `scripts/exit/s46.sh` (protected: the exit tests) is new. No test, limit or gate is weakened.
