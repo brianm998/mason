@@ -248,6 +248,26 @@ impl Broker {
         st.ledger.set_capacity(name, units, kind);
     }
 
+    /// A device inventory reading sets how many units a device pool has. Unlike
+    /// `set_limit` it is not the owner's word: nothing is written to
+    /// limits.txt, and an owner-fixed limit wins. Lowering takes nothing from a
+    /// holder. Returns whether anything changed.
+    pub fn set_pool_units(&self, name: &str, units: u32) -> bool {
+        let mut st = lock(&self.st);
+        if st.fixed.contains(name) {
+            return false;
+        }
+        if st.ledger.capacity(name).map(|c| c.units) == Some(units) {
+            return false;
+        }
+        st.ledger.set_capacity(name, units, Kind::Pool);
+        st.pools.insert(name.to_string());
+        self.pass(&mut st);
+        drop(st);
+        self.cv.notify_all();
+        true
+    }
+
     /// Change a limit while things run. Lowering it takes nothing away: it only
     /// stops new grants until the count falls. Survives a restart.
     pub fn set_limit(&self, name: &str, units: u32) -> Result<(), String> {
@@ -733,5 +753,38 @@ mod tests {
     #[test]
     fn free_memory_reads_something_on_this_machine() {
         assert!(measure_free_memory_mb().is_some_and(|m| m > 0));
+    }
+
+    #[test]
+    fn a_device_reading_sizes_a_pool_without_becoming_the_owners_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let limits = dir.path().join("limits.kv");
+        let b = Broker::new(
+            dir.path().join("locks"),
+            limits.clone(),
+            &ResourceCfg::default(),
+            2,
+            &[],
+        )
+        .unwrap();
+        assert!(b.set_pool_units("device:ios-device", 0));
+        assert_eq!(b.limit("device:ios-device"), Some(0));
+        assert!(
+            !b.set_pool_units("device:ios-device", 0),
+            "no change, no news"
+        );
+        assert!(b.set_pool_units("device:ios-device", 2));
+        assert!(
+            b.set_pool_units("device:ios-device", 1),
+            "lowering is allowed"
+        );
+        assert!(
+            !limits.exists(),
+            "a reading is not written as the owner's limit"
+        );
+        // The owner's word wins over a reading.
+        b.set_limit("device:ios-device", 5).unwrap();
+        assert!(!b.set_pool_units("device:ios-device", 1));
+        assert_eq!(b.limit("device:ios-device"), Some(5));
     }
 }

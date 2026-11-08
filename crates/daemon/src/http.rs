@@ -2171,6 +2171,17 @@ async fn resources(Shared(d): Shared<Arc<Daemon>>) -> Res {
     Ok(Json(v))
 }
 
+/// Devices the provider lists, who holds each, and the size of each device pool.
+async fn targets(Shared(d): Shared<Arc<Daemon>>) -> Res {
+    let d2 = d.clone();
+    let v = d
+        .pool
+        .run(move || d2.targets.view(&d2))
+        .await
+        .map_err(pool_err)?;
+    Ok(Json(v))
+}
+
 async fn resource_limit(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res {
     let (name, units) = (
         b["resource"].as_str().unwrap_or_default().to_string(),
@@ -2475,6 +2486,7 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/tasks/{id}/logs", get(logs))
         .route("/tasks/{id}/progress", get(task_progress))
         .route("/resources", get(resources))
+        .route("/targets", get(targets))
         .route("/health", get(health))
         .route("/digest", get(digest))
         .route("/schedules", get(schedules_list))

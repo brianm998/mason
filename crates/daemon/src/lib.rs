@@ -38,6 +38,7 @@ pub mod selftest;
 pub mod services;
 pub mod suites;
 pub mod sweep;
+pub mod targets;
 pub mod tiermap;
 pub mod tracker;
 pub mod update;
