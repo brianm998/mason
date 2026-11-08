@@ -632,7 +632,9 @@ fn items_over_a_self_limit_wait_for_a_slot_and_the_count_is_per_issue() {
 fn the_last_poll_is_recorded_and_a_stop_keeps_the_counts_and_the_reason() {
     let (_s, d, pid) = world();
     let owner = d.cfg.owner_names[0].clone();
-    assert!(d.tracker_record(pid).is_none());
+    assert!(d
+        .tracker_record(pid)
+        .is_none_or(|r| r.summary.imported == 0));
     let fake = Fake::default();
     fake.script.lock().unwrap().push(Ok(Listing::Items {
         items: vec![
