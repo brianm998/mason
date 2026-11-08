@@ -19,11 +19,13 @@
 pub mod env;
 pub mod gates;
 pub mod glob;
+pub mod live;
 pub mod model;
 pub mod parse;
 pub mod results;
 pub mod verdict;
 
+pub use live::{Counts, LiveCount};
 pub use model::{
     Binding, EnvKind, Environment, ImpactMap, ParserKind, Selection, Signature, Suite, Testing,
     When,

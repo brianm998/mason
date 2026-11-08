@@ -105,6 +105,18 @@ impl Plugin {
         params: &Value,
         timeout: Duration,
     ) -> Result<Value, CallError> {
+        self.call_noting(method, params, timeout, &mut |_| {})
+    }
+
+    /// [`Plugin::call`], handing the params of every `step.progress` notification to
+    /// `note` as it arrives. Notifications do not extend the time allowed.
+    pub fn call_noting(
+        &mut self,
+        method: &str,
+        params: &Value,
+        timeout: Duration,
+        note: &mut dyn FnMut(&Value),
+    ) -> Result<Value, CallError> {
         let id = self.next_id;
         self.next_id += 1;
         let line = rpc::request(id, method, params);
@@ -124,6 +136,11 @@ impl Plugin {
             let left = end.saturating_duration_since(Instant::now());
             match self.lines.recv_timeout(left) {
                 Ok(Ok(l)) if l.trim().is_empty() => {}
+                Ok(Ok(l)) if rpc::read_progress_line(&l).is_some() => {
+                    if let Some(p) = rpc::read_progress_line(&l) {
+                        note(&p);
+                    }
+                }
                 Ok(Ok(l)) => match rpc::parse_response(&l) {
                     Ok(Some(r)) if r.id == Some(id) => return r.result.map_err(CallError::Rpc),
                     Ok(_) => {}
@@ -195,10 +212,19 @@ impl Drop for Plugin {
 
 /// `initialize`, checked for shape.
 pub fn initialize(p: &mut Plugin, timeout: Duration) -> Result<Initialized, String> {
+    initialize_as(p, timeout, crate::PROTOCOL)
+}
+
+/// `initialize` for the protocol version the manifest names.
+pub fn initialize_as(
+    p: &mut Plugin,
+    timeout: Duration,
+    protocol: u32,
+) -> Result<Initialized, String> {
     let v = p
         .call(
             "initialize",
-            &json!({"protocol": crate::PROTOCOL, "host": "mason"}),
+            &json!({"protocol": protocol, "host": "mason"}),
             timeout,
         )
         .map_err(|e| format!("initialize: {e}"))?;
@@ -222,13 +248,24 @@ pub fn step_run(
     r: &StepRequest,
     timeout: Duration,
 ) -> Result<StepResult, CallError> {
-    let v = p.call(
+    step_run_noting(p, r, timeout, &mut |_| {})
+}
+
+/// [`step_run`], handing each `step.progress` notification's params to `note`.
+pub fn step_run_noting(
+    p: &mut Plugin,
+    r: &StepRequest,
+    timeout: Duration,
+    note: &mut dyn FnMut(&Value),
+) -> Result<StepResult, CallError> {
+    let v = p.call_noting(
         "step.run",
         &json!({
             "step": r.step, "type": r.step_type, "config": r.config, "task": r.task,
             "title": r.title, "worktree": r.worktree, "env": r.env,
         }),
         timeout,
+        note,
     )?;
     rpc::read_step_result(&v).map_err(CallError::Closed)
 }
@@ -238,25 +275,32 @@ pub fn run_step(
     l: &Launch,
     expect_name: &str,
     r: &StepRequest,
+    protocol: u32,
     init_timeout: Duration,
     run_timeout: Duration,
+    note: &mut dyn FnMut(&Value),
 ) -> Result<StepResult, String> {
     let mut p = Plugin::spawn(l).map_err(|e| format!("cannot start the plugin: {e}"))?;
-    let init = initialize(&mut p, init_timeout)?;
+    let init = initialize_as(&mut p, init_timeout, protocol)?;
     if init.name != expect_name {
         return Err(format!(
             "the plugin says it is `{}`, but its manifest says `{expect_name}`",
             init.name
         ));
     }
-    if init.protocol != crate::PROTOCOL {
+    if init.protocol != protocol {
         return Err(format!(
-            "the plugin speaks protocol {}, not {}",
-            init.protocol,
-            crate::PROTOCOL
+            "the plugin speaks protocol {}, not {protocol}",
+            init.protocol
         ));
     }
-    let res = step_run(&mut p, r, run_timeout).map_err(|e| format!("step.run: {e}"))?;
+    // Only a protocol 2 plugin may send progress; a protocol 1 plugin's is ignored.
+    let res = step_run_noting(&mut p, r, run_timeout, &mut |v| {
+        if protocol >= 2 {
+            note(v)
+        }
+    })
+    .map_err(|e| format!("step.run: {e}"))?;
     // A plugin that will not shut down cleanly is stopped; the result stands.
     if p.shutdown(init_timeout).is_err() {
         p.kill();

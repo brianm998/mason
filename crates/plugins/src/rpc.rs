@@ -9,6 +9,9 @@
 //! * `initialize {protocol, host}` -> `{protocol, name, version, provides, config_schema}`
 //! * `step.run {step, type, config, task, title, worktree, env}` -> `{passed, summary, data?}`
 //! * `shutdown {}` -> `null`, after which the process exits.
+//!
+//! Protocol 2 adds one notification, sent by the plugin while `step.run` is open:
+//! `step.progress {done?, total?, unit?, message?}` (no `id`, no answer).
 
 use serde_json::{json, Value};
 
@@ -61,6 +64,42 @@ pub fn parse_response(line: &str) -> Result<Option<Response>, String> {
         })),
         None => Ok(None),
     }
+}
+
+/// The params of a `step.progress` notification on this line, if it is one.
+pub fn read_progress_line(line: &str) -> Option<Value> {
+    let v: Value = serde_json::from_str(line.trim()).ok()?;
+    if v.get("id").is_some() || v["method"] != "step.progress" {
+        return None;
+    }
+    Some(v.get("params").cloned().unwrap_or(Value::Null))
+}
+
+/// Whether the params of a `step.progress` are well formed: an object with at least one
+/// of `done`, `total` (whole numbers), `unit`, `message` (strings), and nothing else.
+pub fn check_progress(p: &Value) -> Result<(), String> {
+    let o = p.as_object().ok_or("`params` must be an object")?;
+    if o.is_empty() {
+        return Err("it says nothing: give `done`, `total`, `unit` or `message`".into());
+    }
+    for (k, v) in o {
+        let ok = match k.as_str() {
+            "done" | "total" => v.is_u64(),
+            "unit" | "message" => v.is_string(),
+            _ => return Err(format!("`{k}` is not a field of step.progress")),
+        };
+        if !ok {
+            return Err(format!(
+                "`{k}` must be {}",
+                if k == "done" || k == "total" {
+                    "a whole number"
+                } else {
+                    "a string"
+                }
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// What `initialize` says, checked for shape.

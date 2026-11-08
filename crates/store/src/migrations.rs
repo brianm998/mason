@@ -498,6 +498,16 @@ const STEPS: &[&str] = &[
          last_seen    INTEGER,
          revoked_at   INTEGER
      );",
+    // 20: the last green count of a suite for a base commit (s70), the expected
+    // total of a live test count. Kept apart from `evidence` (keyed by tree).
+    "CREATE TABLE suite_green (
+         project  TEXT NOT NULL,
+         suite    TEXT NOT NULL,
+         base     TEXT NOT NULL,
+         executed INTEGER NOT NULL,
+         at_ms    INTEGER NOT NULL,
+         PRIMARY KEY (project, suite, base)
+     );",
 ];
 
 pub const SCHEMA_VERSION: u32 = STEPS.len() as u32;

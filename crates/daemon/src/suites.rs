@@ -12,7 +12,9 @@
 
 use crate::daemon::{now_ms, Daemon};
 use crate::jobs::{run_shell, tail, Ctx};
+use crate::progress::FileTail;
 use crate::sched::needs_of;
+use mason_core::progress::{Change, Figure, Report, Source, SubProgress};
 use mason_core::*;
 use mason_definition::graph::Outcome;
 use mason_definition::{Definition, Step};
@@ -25,6 +27,7 @@ use mason_testing::env as lifecycle;
 use mason_testing::gates;
 use mason_testing::parse::parse;
 use mason_testing::verdict::{classify, closing, judge, Inputs};
+use mason_testing::LiveCount;
 use mason_testing::{
     Closing, RedClass, Results, Selection, Signature, Suite, SuiteOutcome, Verdict, When,
 };
@@ -153,6 +156,7 @@ fn run_hosted(
     log_dir: &Path,
     check: Check,
     run: Option<StepRunId>,
+    watch: Option<&Suite>,
 ) -> Result<Ran, String> {
     let hosts = d.cfg.hosts_dir();
     let dir = hosts.join(id);
@@ -169,6 +173,10 @@ fn run_hosted(
             linger: Duration::from_secs(600),
             heartbeat: d.cfg.heartbeat,
         };
+        // A progress file left by an earlier attempt says nothing about this one.
+        if let Some(f) = watch.and_then(|w| w.progress.as_ref()) {
+            let _ = std::fs::remove_file(cwd.join(f));
+        }
         spawn_host(&o).map_err(|e| format!("cannot start `{cmd}`: {e}"))?;
     }
     let done = Arc::new(AtomicBool::new(false));
@@ -214,8 +222,26 @@ fn run_hosted(
     let rec = match run {
         Some(run) => {
             d.progress_catch_up(run, id, &log);
+            // Live test counts, for progress only: the verdict is the full parse at the end.
+            // After a restart the log is read again from its start, so the counts are exact.
+            let mut live = watch.and_then(|w| LiveCount::new(w.parser, w));
+            let name = watch.map(|w| w.name.clone()).unwrap_or_default();
+            if let Some(l) = live.as_mut() {
+                if let Ok(old) = std::fs::read(&log) {
+                    l.feed(&old);
+                    suite_counts(d, run, &name, l);
+                }
+            }
+            let _tail = watch.and_then(|w| w.progress.as_ref()).map(|f| {
+                let (d, name) = (d.clone(), name.clone());
+                FileTail::start(cwd.join(f), move |r| suite_report(&d, run, &name, &r))
+            });
             collect_to_file_observed(&dir, &log, &exit, &mut |off, b| {
-                d.progress_observe(run, id, off, b)
+                d.progress_observe(run, id, off, b);
+                if let Some(l) = live.as_mut() {
+                    l.feed(b);
+                    suite_counts(d, run, &name, l);
+                }
             })
         }
         None => collect_to_file(&dir, &log, &exit),
@@ -239,6 +265,53 @@ fn run_hosted(
         },
         timed_out: why.load(Ordering::SeqCst) == 1,
     })
+}
+
+/// A suite's live count, as its sub-count: passed out of what is expected, with the
+/// failed and skipped in the message. A count the suite itself reports is kept.
+fn suite_counts(d: &Arc<Daemon>, run: StepRunId, name: &str, l: &LiveCount) {
+    let c = l.counts();
+    d.progress_sub(run, name, None, |s| {
+        if s.done.source != Source::Reported {
+            s.unit = "tests".into();
+            s.done = Figure::counted(c.passed);
+        }
+    });
+    let note = format!("{name}: {} failed, {} skipped", c.failed, c.skipped);
+    d.progress_report(run, |p, now| {
+        if c.failed + c.skipped == 0 {
+            return Change::None;
+        }
+        p.set_message(&note, now)
+    });
+}
+
+/// A line of a suite's own progress file.
+fn suite_report(d: &Arc<Daemon>, run: StepRunId, name: &str, r: &Report) {
+    let msg = r.message.as_ref().map(|m| format!("{name}: {m}"));
+    d.progress_sub(run, name, msg, |s| {
+        if let Some(u) = &r.unit {
+            s.unit = u.clone();
+        } else if s.unit.is_empty() {
+            s.unit = "tests".into();
+        }
+        if let Some(n) = r.done {
+            s.done = Figure::reported(n);
+        }
+        if let Some(n) = r.total {
+            s.total = Figure::reported(n);
+        }
+    });
+}
+
+/// The expected total of a suite: the last green run's count for this base, else the
+/// declared minimum, else none.
+fn expected_total(d: &Arc<Daemon>, project: &str, suite: &Suite, base: &str) -> Figure {
+    match d.store.suite_green(project, &suite.name, base) {
+        Ok(Some(n)) if n > 0 => Figure::expected(n as u64),
+        _ if suite.min_tests > 0 => Figure::minimum(suite.min_tests as u64),
+        _ => Figure::default(),
+    }
 }
 
 fn quote(s: &str) -> String {
@@ -456,6 +529,7 @@ fn baseline(
             &who.log_dir,
             who.check(&suite.name),
             who.task.map(|(_, r)| r),
+            None,
         )
         .ok()?;
         if ran.stop != Stop::No {
@@ -495,6 +569,13 @@ fn run_suite(
     let d = &who.d;
     // Identical code never tests twice.
     if let Ok(Some((executed, _, task))) = d.store.evidence(&tree.tree, &suite.name) {
+        if let Some((_, run)) = who.task {
+            d.progress_sub(run, &suite.name, None, |s| {
+                s.unit = "tests".into();
+                s.done = Figure::counted(executed as u64);
+                s.total = Figure::expected(executed as u64);
+            });
+        }
         return SuiteRun::Done {
             outcome: SuiteOutcome::Reused,
             results: None,
@@ -571,6 +652,7 @@ fn run_suite(
             &who.log_dir,
             check,
             who.task.map(|(_, r)| r),
+            Some(suite),
         ) {
             Ok(r) => r,
             Err(e) => {
@@ -608,6 +690,13 @@ fn run_suite(
         };
         let result = match &j.verdict {
             Verdict::Green => {
+                let _ = d.store.put_suite_green(
+                    &who.project,
+                    &suite.name,
+                    &tree.base,
+                    j.results.executed(),
+                    now_ms(),
+                );
                 let _ = d.store.put_evidence(
                     &tree.tree,
                     &suite.name,
@@ -799,6 +888,7 @@ fn rerun_failing(
         &who.log_dir,
         who.check(&suite.name),
         who.task.map(|(_, r)| r),
+        None,
     )
     .ok()?;
     if ran.stop != Stop::No {
@@ -855,6 +945,28 @@ pub fn run(c: &Ctx) {
     let lock = d.repo_lock(c.project_id);
 
     let sels = plan(&c.project, &c.def, &c.step, &c.branch);
+    // One sub-count per selected suite, each with the total it is expected to reach.
+    let subs: Vec<SubProgress> = sels
+        .iter()
+        .filter(|s| s.selected)
+        .map(|s| SubProgress {
+            name: s.suite.name.clone(),
+            unit: "tests".into(),
+            done: Figure::counted(0),
+            total: expected_total(d, &c.project.id, &s.suite, &base),
+        })
+        .collect();
+    d.progress_report(c.run, |p, now| {
+        // After a restart the stored record already has the finished suites' counts.
+        for s in subs {
+            if !p.subs.iter().any(|o| o.name == s.name) {
+                p.subs.push(s);
+            }
+        }
+        crate::progress::rollup(p);
+        p.updated_at_ms = now;
+        Change::Urgent
+    });
     let mut outcomes: Vec<(String, SuiteOutcome)> = vec![];
     let mut notes: Vec<String> = vec![];
     // Why, for every suite that did not simply pass: the closing note says it.
@@ -1110,6 +1222,7 @@ fn run_new_tests_at_base(c: &Ctx, who: &Who, suite: &Suite, base: &str) -> Optio
             &who.log_dir,
             who.check(&suite.name),
             who.task.map(|(_, r)| r),
+            None,
         )
         .ok()?;
         Some(judge_ran(suite, &ran, &wt).results)
