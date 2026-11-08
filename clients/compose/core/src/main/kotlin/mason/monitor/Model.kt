@@ -62,7 +62,16 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
         private set
     var muted by mutableStateOf(prefs.bool(KEY_MUTE) ?: false)
         private set
-    var project by mutableStateOf("")
+    var project: String
+        get() = projectState
+        set(v) { projectState = v; attentionSeen = null }
+    private var projectState by mutableStateOf("")
+    /** Called when something new needs the owner and the monitor is not muted: a task asked a
+     *  question, waits for approval, was proposed, or failed. The app plays its sound here. */
+    var onAttention: (() -> Unit)? = null
+    /** The tasks that needed the owner at the last update; null until the first one, so what
+     *  was already waiting when the monitor opened (or the project changed) is silent. */
+    private var attentionSeen: Set<Long>? = null
     private var overrides by mutableStateOf(mapOf<String, Boolean>())
 
     /** Where the sidebar should scroll to (a tile was clicked). */
@@ -237,9 +246,17 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
         }
     }
 
+    /** Chime once when a task that needs the owner appears that was not there before. */
+    internal fun noteAttention(s: SidebarView) {
+        val ids = s.sections.filter { it.state in WANTING }.flatMap { it.rows.map { r -> r.id } }.toSet()
+        val seen = attentionSeen
+        attentionSeen = ids
+        if (seen != null && !muted && (ids - seen).isNotEmpty()) onAttention?.invoke()
+    }
+
     fun apply(v: View) {
         v.header_?.let { header = it }
-        v.sidebar?.let { sidebar = it }
+        v.sidebar?.let { sidebar = it; noteAttention(it) }
         v.home?.let { home = it }
         v.task_detail?.let { taskDetail = it }
         v.landing?.let { landing = it }
@@ -254,6 +271,7 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
         const val PROTOCOL = 1
         const val KEY_SCALE = "textScale"
         const val KEY_MUTE = "muted"
+        private val WANTING = setOf("needs_attention", "failed", "proposed")
         const val SCALE_MIN = 0.8
         const val SCALE_MAX = 2.4
         const val SCALE_STEP = 0.1
