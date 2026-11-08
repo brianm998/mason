@@ -36,6 +36,7 @@ Status: **pre-alpha**. What each stage note says it built (generated from `docs/
 - **s44**: `per_week` in `[self]` counts agent and outside tasks only; the owner's own filings and tasks cancelled before any step started are not counted, and `mason self` shows the split.
 - **s45**: every running step keeps a live progress record in the daemon (what it counts, done, total, last output, when it last moved), fed from its step host's output as it arrives, pushed to monitors as `StepProgress` (at most once a second for output alone) and carried by the views.
 - **s52**: `max_steps` counts only agent steps of tasks whose trust is not Owner, by the same predicate as `per_week`; `mason self` shows "N of M agent steps in H h (K of yours not counted)".
+- **s53**: Edits to the scripts the daemon runs when changes land (`scripts/gen-*.sh`, today `gen-status.sh`) are held for the owner like the other gates.
 - **s55**: Fixed red CI on develop: s17.sh now expects the new hold wording and Compose Editor.kt captures maxWidth in the constraints scope.
 - **s60**: A base conflict no longer fails a task: the develop agent is told to merge and resolve it. `run_check` and landing run the test command as layered (runtime overrides included), and a develop step's tool timeout covers a whole test run. The tests that failed only on a busy machine now check what they mean.
 <!-- status:end -->
