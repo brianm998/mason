@@ -24,12 +24,12 @@ cargo build -q --workspace --bins
 bin=target/debug
 owner=${USER:-owner}
 m() { "$bin/mason" --data-dir "$root/d" --config-dir "$root/c" "$@"; }
-fail() { echo "FAILED: $*" >&2; m task list >&2 2>&1 || true; tail -20 "$root/masond.log" >&2 || true; exit 1; }
+fail() { echo "FAILED: $*" >&2; m task list >&2 2>&1 || echo "(task list failed)" >&2; tail -20 "$root/masond.log" >&2 || echo "(no daemon log)" >&2; exit 1; }
 state_of() { m task show "$1" --json 2>/dev/null | sed -n 's/^  "state": "\(.*\)",$/\1/p'; }
 wait_state() {  # TASK STATE SECONDS
   local end=$((SECONDS + $3))
   until [ "$(state_of "$1")" = "$2" ]; do
-    [ $SECONDS -lt $end ] || { m task show "$1" >&2 || true; fail "timed out waiting for task $1 to be $2"; }
+    [ $SECONDS -lt $end ] || { m task show "$1" >&2 || echo "(task show failed)" >&2; fail "timed out waiting for task $1 to be $2"; }
     sleep 0.2
   done
 }
@@ -39,7 +39,7 @@ start_daemon() {
   daemon=$!
   until m status >/dev/null 2>&1; do kill -0 "$daemon" || { cat "$root/masond.log" >&2; exit 1; }; sleep 0.1; done
 }
-stop_daemon() { kill "$daemon" 2>/dev/null || true; wait "$daemon" 2>/dev/null || true; daemon=""; }
+stop_daemon() { if [ -n "$daemon" ]; then kill "$daemon" 2>/dev/null || echo "(daemon already gone)" >&2; wait "$daemon" 2>/dev/null || echo "(daemon exited nonzero)" >&2; fi; daemon=""; }
 ci="git -c user.name=t -c user.email=t@t"
 
 echo "== setup: a bare origin, a one-agent-step pipeline, and a scripted agent that works for 4 s"
@@ -117,7 +117,7 @@ wait_state "$t1" landed 90; wait_state "$t2" landed 90
 echo "   both landed"
 
 echo "== 3. doctor lists both accounts"
-doc=$(m doctor 2>&1 || true)
+doc_rc=0; doc=$(m doctor 2>&1) || doc_rc=$?; echo "   doctor exit status $doc_rc"
 echo "$doc" | grep 'account ' | sed 's/^/   /'
 echo "$doc" | grep -q 'account a: adapter claude, billing subscription, projects p1' || fail "doctor lacks account a"
 echo "$doc" | grep -q 'account b: adapter claude, billing api, projects p2' || fail "doctor lacks account b"
@@ -142,7 +142,7 @@ start_daemon
 res=$(m resources 2>&1)
 echo "$res" | grep -q 'llm:claude' || fail "resources lacks llm:claude"
 ! echo "$res" | grep -q 'llm:a' || fail "an old account is still listed"
-doc=$(m doctor 2>&1 || true)
+doc_rc=0; doc=$(m doctor 2>&1) || doc_rc=$?; echo "   doctor exit status $doc_rc"
 echo "$doc" | grep -q 'account claude: adapter claude, billing subscription, projects p1' || fail "doctor lacks the default account"
 t=$(add p1 "default account")
 wait_state "$t" landed 90
