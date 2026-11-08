@@ -10,7 +10,10 @@
 //! The API is blocking; async callers use a bounded worker pool (Part 2).
 
 mod codec;
+pub mod devices;
+pub mod introspect;
 pub mod migrations;
+pub mod notify;
 
 use mason_core::*;
 use mason_engine::{reduce, ReduceError, World};
@@ -21,6 +24,9 @@ use std::sync::Mutex;
 use std::thread::JoinHandle;
 
 pub use codec::{decode as decode_event, encode as encode_event, state_name, CodecError};
+pub use devices::DeviceRow;
+pub use introspect::{FindingRow, ScheduleRow, TriageRow};
+pub use notify::{AnnouncementRow, DeliveryRow};
 
 #[derive(Debug)]
 pub enum StoreError {
@@ -72,6 +78,57 @@ pub struct InterventionRow {
     pub reason: String,
 }
 
+/// One window reading kept for the trend. Times are epoch seconds.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UsageReading {
+    pub account: String,
+    pub window: String,
+    pub at: u64,
+    pub utilization: Option<f64>,
+    pub resets_at: Option<u64>,
+    pub state: String,
+}
+
+/// An account held back as a whole. Times are epoch milliseconds.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AccountHold {
+    pub account: String,
+    /// limit | outage | overage | budget | manual
+    pub kind: String,
+    pub why: String,
+    pub since_ms: u64,
+    /// The provider's reset, when it gave one that could be read.
+    pub until_ms: Option<u64>,
+    /// The current backoff when there is no reset.
+    pub backoff_ms: u64,
+    /// When the next probe session may start (no reset known).
+    pub probe_ms: u64,
+    pub by: String,
+}
+
+/// The tokens and cost one step attempt reported. `None` means not reported.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct UsageRun {
+    pub attempt: String,
+    pub task: u64,
+    pub project: String,
+    pub step: String,
+    pub account: String,
+    pub model: Option<String>,
+    pub input: Option<u64>,
+    pub output: Option<u64>,
+    pub cache_read: Option<u64>,
+    pub cache_create: Option<u64>,
+    pub cost_usd: Option<f64>,
+    pub at: u64,
+}
+
+/// One reading per window per account is kept per this many seconds, unless
+/// the window's state or reset changed.
+pub const READING_GAP_SECS: u64 = 300;
+/// Readings older than this are dropped on the next write.
+pub const READING_KEEP_SECS: u64 = 8 * 86400;
+
 /// A pause in force: `project` is empty for the whole pipeline; `mode` is
 /// `all`, `claims` or `landing`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -92,6 +149,9 @@ pub struct AlertRow {
     pub text: String,
     pub since: u64,
     pub cleared_at: Option<u64>,
+    /// The owner has seen it: its noise stops, it stays visible while the condition holds.
+    pub acked_at: Option<u64>,
+    pub reminded_at: Option<u64>,
 }
 
 /// A debt: something skipped by force and not yet paid.
@@ -166,6 +226,37 @@ pub struct HoldRow {
     pub approved_at: Option<u64>,
 }
 
+/// A proposal: a task plus what the agent saw and where it was routed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProposalRow {
+    pub task: u64,
+    pub project: String,
+    /// `agent`, `outside` or `owner`.
+    pub source: String,
+    /// `normal` or `blocks`.
+    pub severity: String,
+    /// `project` or `pipeline`.
+    pub route: String,
+    /// The task whose agent filed it.
+    pub filed_by: Option<u64>,
+    pub title: String,
+    pub body: String,
+    pub evidence: String,
+    pub key: String,
+    /// `open`, `approved` or `rejected`.
+    pub status: String,
+    pub reject_reason: String,
+    /// `local`, `previewed` or `published`.
+    pub publish_state: String,
+    /// For an improvement: `write` or `fork`. Empty for the rest.
+    pub access: String,
+    pub branch: String,
+    pub pr: Option<u64>,
+    /// `open`, `merged`, `closed` or `conflict` once a pull request exists.
+    pub pr_state: String,
+    pub at: u64,
+}
+
 /// A number MASON reserved for a task: a decision record, or an exit script / stage note.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReservationRow {
@@ -198,6 +289,36 @@ pub struct OverrideRow {
     pub owner: String,
     pub created_at: u64,
     pub expires_at: u64,
+}
+
+/// One session start of a step run: what was asked for and what was launched.
+/// Empty strings mean "none" (no tier, the CLI's own default model, no effort).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LaunchRow {
+    pub run: u64,
+    pub seq: u64,
+    pub task: u64,
+    pub step: String,
+    /// `launch`, `retry` or `reattach`.
+    pub kind: String,
+    pub tier: String,
+    pub level: String,
+    /// What the mapping alone asked for.
+    pub req_model: String,
+    pub req_effort: String,
+    /// What was passed to the CLI.
+    pub model: String,
+    pub effort: String,
+    pub provider: String,
+    pub model_from: String,
+    pub effort_from: String,
+    pub retry_n: u32,
+    pub retry_max: u32,
+    pub moved_up_from: String,
+    pub overridden: bool,
+    /// The model the CLI said it used, when it said.
+    pub reported_model: String,
+    pub at_ms: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -938,7 +1059,7 @@ impl Store {
     pub fn alerts(&self, active_only: bool) -> Result<Vec<AlertRow>, StoreError> {
         self.read(move |c| {
             let mut st = c.prepare(
-                "SELECT key, kind, text, since, cleared_at FROM alerts WHERE (?1 = 0 OR cleared_at IS NULL) ORDER BY since, key",
+                "SELECT key, kind, text, since, cleared_at, acked_at, reminded_at FROM alerts WHERE (?1 = 0 OR cleared_at IS NULL) ORDER BY since, key",
             )?;
             let rows = st.query_map(params![i64::from(active_only)], |r| {
                 Ok(AlertRow {
@@ -947,6 +1068,8 @@ impl Store {
                     text: r.get(2)?,
                     since: r.get::<_, i64>(3)? as u64,
                     cleared_at: r.get::<_, Option<i64>>(4)?.map(|t| t as u64),
+                    acked_at: r.get::<_, Option<i64>>(5)?.map(|t| t as u64),
+                    reminded_at: r.get::<_, Option<i64>>(6)?.map(|t| t as u64),
                 })
             })?;
             rows.collect()
@@ -1428,6 +1551,116 @@ impl Store {
         })
     }
 
+    // ---- proposals ----
+
+    pub fn put_proposal(&self, p: &ProposalRow) -> Result<(), StoreError> {
+        let p = p.clone();
+        self.write(move |c| {
+            c.execute(
+                "INSERT OR REPLACE INTO proposals(task, project, source, severity, route, filed_by, title, body, evidence, key, status, reject_reason, publish_state, access, branch, pr, pr_state, at)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
+                params![
+                    p.task as i64, p.project, p.source, p.severity, p.route,
+                    p.filed_by.map(|x| x as i64), p.title, p.body, p.evidence, p.key, p.status,
+                    p.reject_reason, p.publish_state, p.access, p.branch,
+                    p.pr.map(|x| x as i64), p.pr_state, p.at as i64
+                ],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn proposal(&self, task: u64) -> Result<Option<ProposalRow>, StoreError> {
+        Ok(self
+            .proposals_where("WHERE task = ?1", task as i64)?
+            .into_iter()
+            .next())
+    }
+
+    /// Every proposal, oldest first.
+    pub fn proposals(&self) -> Result<Vec<ProposalRow>, StoreError> {
+        self.proposals_where("WHERE ?1 = ?1", 0)
+    }
+
+    /// The proposals filed in `project`.
+    pub fn proposals_in(&self, project: &str) -> Result<Vec<ProposalRow>, StoreError> {
+        let all = self.proposals()?;
+        Ok(all.into_iter().filter(|p| p.project == project).collect())
+    }
+
+    fn proposals_where(&self, cond: &str, arg: i64) -> Result<Vec<ProposalRow>, StoreError> {
+        let sql = format!(
+            "SELECT task, project, source, severity, route, filed_by, title, body, evidence, key, status, reject_reason, publish_state, access, branch, pr, pr_state, at FROM proposals {cond} ORDER BY task"
+        );
+        self.read(move |c| {
+            let mut st = c.prepare(&sql)?;
+            let rows = st.query_map(params![arg], |r| {
+                Ok(ProposalRow {
+                    task: r.get::<_, i64>(0)? as u64,
+                    project: r.get(1)?,
+                    source: r.get(2)?,
+                    severity: r.get(3)?,
+                    route: r.get(4)?,
+                    filed_by: r.get::<_, Option<i64>>(5)?.map(|x| x as u64),
+                    title: r.get(6)?,
+                    body: r.get(7)?,
+                    evidence: r.get(8)?,
+                    key: r.get(9)?,
+                    status: r.get(10)?,
+                    reject_reason: r.get(11)?,
+                    publish_state: r.get(12)?,
+                    access: r.get(13)?,
+                    branch: r.get(14)?,
+                    pr: r.get::<_, Option<i64>>(15)?.map(|x| x as u64),
+                    pr_state: r.get(16)?,
+                    at: r.get::<_, i64>(17)? as u64,
+                })
+            })?;
+            rows.collect()
+        })
+    }
+
+    /// How many proposals `task` has filed.
+    pub fn proposals_by_task(&self, task: u64) -> Result<u32, StoreError> {
+        self.read(move |c| {
+            c.query_row(
+                "SELECT COUNT(*) FROM proposals WHERE filed_by = ?1",
+                params![task as i64],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|n| n as u32)
+        })
+    }
+
+    /// How many agent and outside proposals `project` has had since `since_ms`.
+    pub fn proposals_since(&self, project: &str, since_ms: u64) -> Result<u32, StoreError> {
+        let p = project.to_string();
+        self.read(move |c| {
+            c.query_row(
+                "SELECT COUNT(*) FROM proposals WHERE project = ?1 AND at >= ?2 AND source != 'owner'",
+                params![p, since_ms as i64],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|n| n as u32)
+        })
+    }
+
+    /// Change what the owner may edit, or where a proposal stands. `f` sees the row.
+    pub fn update_proposal(
+        &self,
+        task: u64,
+        f: impl FnOnce(&mut ProposalRow),
+    ) -> Result<bool, StoreError> {
+        match self.proposal(task)? {
+            None => Ok(false),
+            Some(mut p) => {
+                f(&mut p);
+                self.put_proposal(&p)?;
+                Ok(true)
+            }
+        }
+    }
+
     pub fn clear_hold(&self, task: u64) -> Result<(), StoreError> {
         self.write(move |c| {
             c.execute(
@@ -1724,6 +1957,104 @@ impl Store {
         })
     }
 
+    /// Append a launch row to a run; its `seq` is assigned here and returned.
+    pub fn record_launch(&self, row: LaunchRow) -> Result<u64, StoreError> {
+        self.write(move |c| {
+            let seq: i64 = c.query_row(
+                "SELECT COALESCE(MAX(seq), 0) + 1 FROM step_launches WHERE run = ?1",
+                params![row.run as i64],
+                |r| r.get(0),
+            )?;
+            c.execute(
+                "INSERT INTO step_launches(run, seq, task, step, kind, tier, level, req_model, \
+                 req_effort, model, effort, provider, model_from, effort_from, retry_n, retry_max, \
+                 moved_up_from, overridden, reported_model, at_ms) \
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)",
+                params![
+                    row.run as i64,
+                    seq,
+                    row.task as i64,
+                    row.step,
+                    row.kind,
+                    row.tier,
+                    row.level,
+                    row.req_model,
+                    row.req_effort,
+                    row.model,
+                    row.effort,
+                    row.provider,
+                    row.model_from,
+                    row.effort_from,
+                    row.retry_n as i64,
+                    row.retry_max as i64,
+                    row.moved_up_from,
+                    row.overridden as i64,
+                    row.reported_model,
+                    row.at_ms as i64
+                ],
+            )?;
+            Ok(seq as u64)
+        })
+    }
+
+    /// The model the CLI reported for the run's latest session.
+    pub fn set_reported_model(&self, run: u64, model: &str) -> Result<(), StoreError> {
+        let model = model.to_string();
+        self.write(move |c| {
+            c.execute(
+                "UPDATE step_launches SET reported_model = ?2 WHERE run = ?1 AND seq = \
+                 (SELECT MAX(seq) FROM step_launches WHERE run = ?1)",
+                params![run as i64, model],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Every launch of one run, oldest first.
+    pub fn launches(&self, run: u64) -> Result<Vec<LaunchRow>, StoreError> {
+        self.launch_query("WHERE run = ?1 ORDER BY run, seq", run)
+    }
+
+    /// Every launch of a task, oldest run first.
+    pub fn launches_for_task(&self, task: u64) -> Result<Vec<LaunchRow>, StoreError> {
+        self.launch_query("WHERE task = ?1 ORDER BY run, seq", task)
+    }
+
+    fn launch_query(&self, tail: &'static str, key: u64) -> Result<Vec<LaunchRow>, StoreError> {
+        self.read(move |c| {
+            let mut st = c.prepare(&format!(
+                "SELECT run, seq, task, step, kind, tier, level, req_model, req_effort, model, \
+                 effort, provider, model_from, effort_from, retry_n, retry_max, moved_up_from, \
+                 overridden, reported_model, at_ms FROM step_launches {tail}"
+            ))?;
+            let rows = st.query_map(params![key as i64], |r| {
+                Ok(LaunchRow {
+                    run: r.get::<_, i64>(0)? as u64,
+                    seq: r.get::<_, i64>(1)? as u64,
+                    task: r.get::<_, i64>(2)? as u64,
+                    step: r.get(3)?,
+                    kind: r.get(4)?,
+                    tier: r.get(5)?,
+                    level: r.get(6)?,
+                    req_model: r.get(7)?,
+                    req_effort: r.get(8)?,
+                    model: r.get(9)?,
+                    effort: r.get(10)?,
+                    provider: r.get(11)?,
+                    model_from: r.get(12)?,
+                    effort_from: r.get(13)?,
+                    retry_n: r.get::<_, i64>(14)? as u32,
+                    retry_max: r.get::<_, i64>(15)? as u32,
+                    moved_up_from: r.get(16)?,
+                    overridden: r.get::<_, i64>(17)? != 0,
+                    reported_model: r.get(18)?,
+                    at_ms: r.get::<_, i64>(19)? as u64,
+                })
+            })?;
+            rows.collect()
+        })
+    }
+
     /// The longest quiet gap of this project's successful runs of a step.
     pub fn history_gaps(&self, project: &str, step: &str) -> Result<Vec<u64>, StoreError> {
         let (project, step) = (project.to_string(), step.to_string());
@@ -1749,6 +2080,231 @@ impl Store {
             )?;
             let rows = st.query_map(params![project, step], |r| {
                 Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64))
+            })?;
+            rows.collect()
+        })
+    }
+
+    /// Keep the latest usage snapshot of an account (opaque JSON).
+    pub fn put_usage_latest(&self, account: &str, at: u64, json: &str) -> Result<(), StoreError> {
+        let (a, j) = (account.to_string(), json.to_string());
+        self.write(move |c| {
+            c.execute(
+                "INSERT OR REPLACE INTO usage_latest(account, at, snapshot) VALUES (?1,?2,?3)",
+                params![a, at as i64, j],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// `(account, at, snapshot json)` for every account that has one.
+    pub fn usage_latest(&self) -> Result<Vec<(String, u64, String)>, StoreError> {
+        self.read(|c| {
+            let mut st =
+                c.prepare("SELECT account, at, snapshot FROM usage_latest ORDER BY account")?;
+            let rows = st.query_map([], |r| {
+                Ok((r.get(0)?, r.get::<_, i64>(1)? as u64, r.get(2)?))
+            })?;
+            rows.collect()
+        })
+    }
+
+    /// Keep a window reading if it is the first, 5 minutes after the last, or
+    /// its state or reset differs from the last. Rows older than 8 days go.
+    /// Returns whether it was kept.
+    pub fn record_reading(&self, r: UsageReading) -> Result<bool, StoreError> {
+        self.write(move |c| {
+            let last: Option<(i64, Option<i64>, String)> = c
+                .query_row(
+                    "SELECT at, resets_at, state FROM usage_readings \
+                     WHERE account = ?1 AND win = ?2 ORDER BY at DESC LIMIT 1",
+                    params![r.account, r.window],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()?;
+            let keep = match last {
+                None => true,
+                Some((at, resets, state)) => {
+                    r.at >= at as u64 + READING_GAP_SECS
+                        || state != r.state
+                        || resets != r.resets_at.map(|x| x as i64)
+                }
+            };
+            if keep {
+                c.execute(
+                    "INSERT INTO usage_readings(account, win, at, utilization, resets_at, state) \
+                     VALUES (?1,?2,?3,?4,?5,?6)",
+                    params![
+                        r.account,
+                        r.window,
+                        r.at as i64,
+                        r.utilization,
+                        r.resets_at.map(|x| x as i64),
+                        r.state
+                    ],
+                )?;
+            }
+            c.execute(
+                "DELETE FROM usage_readings WHERE at < ?1",
+                params![r.at.saturating_sub(READING_KEEP_SECS) as i64],
+            )?;
+            Ok(keep)
+        })
+    }
+
+    /// Readings at or after `since`, oldest first.
+    pub fn readings_since(&self, since: u64) -> Result<Vec<UsageReading>, StoreError> {
+        self.read(move |c| {
+            let mut st = c.prepare(
+                "SELECT account, win, at, utilization, resets_at, state FROM usage_readings \
+                 WHERE at >= ?1 ORDER BY at",
+            )?;
+            let rows = st.query_map(params![since as i64], |r| {
+                Ok(UsageReading {
+                    account: r.get(0)?,
+                    window: r.get(1)?,
+                    at: r.get::<_, i64>(2)? as u64,
+                    utilization: r.get(3)?,
+                    resets_at: r.get::<_, Option<i64>>(4)?.map(|x| x as u64),
+                    state: r.get(5)?,
+                })
+            })?;
+            rows.collect()
+        })
+    }
+
+    /// Hold an account (replacing any earlier hold on it).
+    pub fn put_account_hold(&self, h: AccountHold) -> Result<(), StoreError> {
+        self.write(move |c| {
+            c.execute(
+                "INSERT OR REPLACE INTO account_holds(account, kind, why, since_ms, until_ms, backoff_ms, probe_ms, by) \
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                params![
+                    h.account,
+                    h.kind,
+                    h.why,
+                    h.since_ms as i64,
+                    h.until_ms.map(|x| x as i64),
+                    h.backoff_ms as i64,
+                    h.probe_ms as i64,
+                    h.by
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Every held account.
+    pub fn account_holds(&self) -> Result<Vec<AccountHold>, StoreError> {
+        self.read(|c| {
+            let mut st = c.prepare(
+                "SELECT account, kind, why, since_ms, until_ms, backoff_ms, probe_ms, by \
+                 FROM account_holds ORDER BY account",
+            )?;
+            let rows = st.query_map([], |r| {
+                Ok(AccountHold {
+                    account: r.get(0)?,
+                    kind: r.get(1)?,
+                    why: r.get(2)?,
+                    since_ms: r.get::<_, i64>(3)? as u64,
+                    until_ms: r.get::<_, Option<i64>>(4)?.map(|x| x as u64),
+                    backoff_ms: r.get::<_, i64>(5)? as u64,
+                    probe_ms: r.get::<_, i64>(6)? as u64,
+                    by: r.get(7)?,
+                })
+            })?;
+            rows.collect()
+        })
+    }
+
+    /// Release an account. Returns whether it was held.
+    pub fn clear_account_hold(&self, account: &str) -> Result<bool, StoreError> {
+        let a = account.to_string();
+        self.write(move |c| {
+            Ok(c.execute("DELETE FROM account_holds WHERE account = ?1", params![a])? > 0)
+        })
+    }
+
+    /// Note that a window's warning was given for this reset. True the first time.
+    pub fn note_warning(
+        &self,
+        account: &str,
+        window: &str,
+        resets_at: u64,
+        now_ms: u64,
+    ) -> Result<bool, StoreError> {
+        let (a, w) = (account.to_string(), window.to_string());
+        self.write(move |c| {
+            Ok(c.execute(
+                "INSERT OR IGNORE INTO account_warnings(account, win, resets_at, at_ms) VALUES (?1,?2,?3,?4)",
+                params![a, w, resets_at as i64, now_ms as i64],
+            )? > 0)
+        })
+    }
+
+    /// The warnings given so far, as `(account, window, resets_at)`.
+    pub fn warnings(&self) -> Result<Vec<(String, String, u64)>, StoreError> {
+        self.read(|c| {
+            let mut st = c.prepare("SELECT account, win, resets_at FROM account_warnings")?;
+            let rows = st.query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? as u64))
+            })?;
+            rows.collect()
+        })
+    }
+
+    /// Store one step attempt's reported figures (one row per attempt key).
+    pub fn record_usage_run(&self, u: UsageRun) -> Result<(), StoreError> {
+        self.write(move |c| {
+            let n = |x: Option<u64>| x.map(|v| v as i64);
+            c.execute(
+                "INSERT OR REPLACE INTO usage_runs(attempt, task, project, step, account, model, \
+                 input, output, cache_read, cache_create, cost_usd, at) \
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+                params![
+                    u.attempt,
+                    u.task as i64,
+                    u.project,
+                    u.step,
+                    u.account,
+                    u.model,
+                    n(u.input),
+                    n(u.output),
+                    n(u.cache_read),
+                    n(u.cache_create),
+                    u.cost_usd,
+                    u.at as i64
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Attempts at or after `since`, oldest first.
+    pub fn usage_runs_since(&self, since: u64) -> Result<Vec<UsageRun>, StoreError> {
+        self.read(move |c| {
+            let mut st = c.prepare(
+                "SELECT attempt, task, project, step, account, model, input, output, cache_read, \
+                 cache_create, cost_usd, at FROM usage_runs WHERE at >= ?1 ORDER BY at, attempt",
+            )?;
+            let u = |r: &rusqlite::Row, i: usize| -> rusqlite::Result<Option<u64>> {
+                Ok(r.get::<_, Option<i64>>(i)?.map(|x| x as u64))
+            };
+            let rows = st.query_map(params![since as i64], |r| {
+                Ok(UsageRun {
+                    attempt: r.get(0)?,
+                    task: r.get::<_, i64>(1)? as u64,
+                    project: r.get(2)?,
+                    step: r.get(3)?,
+                    account: r.get(4)?,
+                    model: r.get(5)?,
+                    input: u(r, 6)?,
+                    output: u(r, 7)?,
+                    cache_read: u(r, 8)?,
+                    cache_create: u(r, 9)?,
+                    cost_usd: r.get(10)?,
+                    at: r.get::<_, i64>(11)? as u64,
+                })
             })?;
             rows.collect()
         })

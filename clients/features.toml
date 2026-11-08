@@ -11,6 +11,11 @@ description = "Connects over the protocol, resumes from its last sequence number
 swift = "done"
 compose = "done"
 
+[feature.reconnect-on-restart]
+description = "After a daemon restart or stall it re-reads daemon.json and retries (1, 2, 4, 8 s, then every 10), shows 'Daemon restarting, reconnecting', follows a changed pid, start time or port, and resumes from its last sequence number without a relaunch"
+swift = "done"
+compose = "done"
+
 [feature.top-bar]
 description = "Back, forward, home; attention indicator; project filter; LLM usage; add task; mute"
 swift = "done"
@@ -61,6 +66,11 @@ description = "Steps, activity, live log, plan, checks, tests, history, decision
 swift = "done"
 compose = "done"
 
+[feature.readable-plan]
+description = "A task's plan as a document: summary, numbered steps, files (copy each), acceptance criteria as a checklist, other keys; Copy plan (Markdown) and Copy JSON; no JSON on screen"
+swift = "done"
+compose = "done"
+
 [feature.task-dependencies]
 description = "Task detail says \"waiting for #N\" and \"blocks #M\", each a link to that task"
 swift = "done"
@@ -96,6 +106,26 @@ description = "Provider status, limit windows, tokens by project, task, step and
 swift = "done"
 compose = "done"
 
+[feature.model-display]
+description = "Wherever a model is shown (task row, home's active models, each run in the task detail with every launch and ladder retry, the editor's inspector for an agent step) the monitor shows the daemon's display string, such as `deep (Opus medium)`, and maps no tier itself; a step not yet started shows what it is expected to use, marked expected"
+swift = "done"
+compose = "done"
+
+[feature.usage-windows]
+description = "Each provider account's limit windows as bars with the percent used when reported (a window with no percentage shows its state and reset only), the time until each resets and the clock time, the trend, overage, why an account is blocked and until when, spend against the monthly budget for api accounts, and the age of every figure"
+swift = "done"
+compose = "done"
+
+[feature.usage-tokens]
+description = "Tokens (input, output, cache read, cache write) and cost, only as reported, for the current window and the last 7 days, by project, by model and the top tasks; a task's detail shows its own steps' tokens"
+swift = "done"
+compose = "done"
+
+[feature.usage-top-bar]
+description = "The top bar shows the most constrained window per account (\"claude 5-hour 82%, resets 1 h 10 m\"), else its sessions"
+swift = "done"
+compose = "done"
+
 [feature.pipeline-editor]
 description = "The graphical editor of the definition (Part 18): canvas with swimlanes, palette, inspector forms from JSON Schema, test grid, landing editor, simulate, diff and impact, undo and redo, apply"
 swift = "done"
@@ -103,6 +133,11 @@ compose = "done"
 
 [feature.health-page]
 description = "Digest, detector findings, runtime version, resources and who holds them"
+swift = "done"
+compose = "done"
+
+[feature.health-introspection]
+description = "The Health page also shows the detectors' and analyst's findings with the verdict on each fix (open, this fix worked, this fix didn't help), the recurring jobs and when they last ran, the digest (landed, median claim-to-land, interventions, exploring skips by route with how many came back, forced landings with reasons; tokens shown as not recorded), and whether triage is on with how many suggestions wait for review"
 swift = "done"
 compose = "done"
 
@@ -145,3 +180,63 @@ compose = "done"
 description = "The usage page lists every LLM provider account with its adapter, billing kind, sessions in use, warn level, overage setting and monthly budget"
 swift = "done"
 compose = "done"
+
+[feature.proposal-rows-and-detail]
+description = "A proposal's row says where it came from (source, severity, route); its detail shows the evidence, who filed it, and for an improvement the branch, the upstream pull request and the channel being followed; Approve and Reject are the approval box's"
+swift = "done"
+compose = "done"
+
+[feature.proposal-edit]
+description = "Edit changes only a waiting proposal's title, text and evidence (evidence still needs a file or line); offered only while the task's allowed actions include edit"
+swift = "done"
+compose = "done"
+
+[feature.improve-the-pipeline]
+description = "An 'Improve the pipeline' box in the top bar files a task on MASON's own repository; without write access the detail shows the redacted preview and sends upstream only on a second, explicit action"
+swift = "done"
+compose = "done"
+
+[feature.tracker-imports]
+description = "Tracker imports are listed apart as Proposed from the tracker, each with its issue link and (for the owner) Approve; a not-imported tile and list name the open issues a limit kept out, or whose task was cancelled, with the reason"
+swift = "done"
+compose = "done"
+
+[feature.speech-queue]
+description = "A short sound, then one sentence naming the task, what is wrong and what to do; announcements queue and never overlap; 'wants a decision' and 'broke' use different sounds; muting silences sound and speech and leaves every banner and the attention count"
+swift = "done"
+compose = "done"
+
+[feature.speech-settings]
+description = "Which conditions make noise, which sound each family uses and which voice speaks are configurable, with voices listed from the operating system"
+swift = "done"
+compose = "done"
+
+[feature.speaker-claim]
+description = "Asks the daemon whether it is the one device that speaks (a muted monitor never is) and says what the daemon queued for it, in order; the plain attention chime is used only for a daemon that sends no announcements"
+swift = "done"
+compose = "done"
+
+[feature.daemon-down-alert]
+description = "After 15 seconds of failed reconnects the monitor raises 'daemon down' itself: a banner, and a sound and sentence unless muted; clears when the connection returns"
+swift = "done"
+compose = "done"
+
+# The phone apps (iOS shares MonitorCore, Android shares the Compose core; Stage 24) are not a
+# third column: the parity gate above compares the two desktop clients and is unchanged. These
+# are the deliberate differences between a phone and its desktop client, recorded as data. The
+# gate does not read `[phone.*]` yet; teaching it to (and adding ios/android to CLIENTS) is a gate
+# change and waits for the owner.
+[phone.graph-editing]
+status = "deliberate-difference"
+description = "The pipeline editor's graph canvas"
+platform_reason = "A canvas of lanes and nodes needs a pointer and a large screen; on a phone the pipeline is read-only text and the Mac or desktop monitor edits it"
+
+[phone.log-deep-dives]
+status = "deliberate-difference"
+description = "Full step logs, search inside them and the run-by-run history"
+platform_reason = "Long logs are not readable on a phone; the task detail shows the log tail only"
+
+[phone.agent-sessions]
+status = "deliberate-difference"
+description = "Opening, attaching to and typing into an agent's session"
+platform_reason = "A session needs a keyboard and a terminal-sized view, and a phone connection that drops would leave one half-driven"

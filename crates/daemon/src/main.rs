@@ -3,7 +3,7 @@
 //! `masond`: the MASON daemon.
 //!
 //! `masond [--data-dir D] [--config-dir C] [--max-concurrent N] [--sweep-ms N]
-//!         [--port P] [--host-bin B] [--mcp-bin B] [--reload-interval-ms N] [--fetch-interval-ms N]
+//!         [--port P (0: any free port)] [--lan] [--lan-port P] [--host-bin B] [--mcp-bin B] [--reload-interval-ms N] [--fetch-interval-ms N]
 //!         [--demo | --demo-manual] [--demo-step-ms N] [--debug]`
 
 use mason_daemon::config::DaemonConfig;
@@ -65,6 +65,8 @@ fn main() {
     let managed = args.iter().any(|a| a == "--managed");
     let mut owners_set = false;
     let (mut demo, mut demo_manual, mut demo_step) = (false, false, Duration::from_millis(1500));
+    let mut cli_port: Option<u16> = None;
+    let (mut cli_lan, mut cli_lan_port) = (false, None::<u16>);
     let mut i = 0;
     while i < args.len() {
         let flag = args[i].clone();
@@ -80,7 +82,7 @@ fn main() {
                 cfg.sweep_interval =
                     Duration::from_millis(val().parse().unwrap_or_else(|_| usage()))
             }
-            "--port" => cfg.port = val().parse().unwrap_or_else(|_| usage()),
+            "--port" => cli_port = Some(val().parse().unwrap_or_else(|_| usage())),
             "--host-bin" => cfg.host_bin = val().into(),
             "--mcp-bin" => cfg.mcp_bin = val().into(),
             "--heartbeat-ms" => {
@@ -96,6 +98,17 @@ fn main() {
             "--fetch-interval-ms" => {
                 cfg.fetch_interval =
                     Duration::from_millis(val().parse().unwrap_or_else(|_| usage()))
+            }
+            "--introspect-ms" => {
+                cfg.introspect_interval =
+                    Duration::from_millis(val().parse().unwrap_or_else(|_| usage()))
+            }
+            "--analyst-ms" => {
+                cfg.analyst_interval =
+                    Duration::from_millis(val().parse().unwrap_or_else(|_| usage()))
+            }
+            "--schedule-ms" => {
+                cfg.schedule_tick = Duration::from_millis(val().parse().unwrap_or_else(|_| usage()))
             }
             "--env-retry-ms" => {
                 cfg.env_retry = Duration::from_millis(val().parse().unwrap_or_else(|_| usage()))
@@ -116,6 +129,8 @@ fn main() {
             "--demo-step-ms" => {
                 demo_step = Duration::from_millis(val().parse().unwrap_or_else(|_| usage()))
             }
+            "--lan" => cli_lan = true,
+            "--lan-port" => cli_lan_port = Some(val().parse().unwrap_or_else(|_| usage())),
             "--debug" => cfg.debug = true,
             "--managed" => {}
             "--runtime-sha" => cfg.runtime_sha = Some(val()),
@@ -125,6 +140,27 @@ fn main() {
             _ => usage(),
         }
         i += 1;
+    }
+    // The port: --port, then daemon.toml, then the fixed default (0 for a demo).
+    let file_port = match mason_daemon::config::load_daemon_port(&cfg.config_dir) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("masond: {}: {e}", cfg.config_dir.display());
+            std::process::exit(1);
+        }
+    };
+    cfg.port = mason_daemon::config::resolve_port(cli_port, file_port, demo);
+    // LAN access: daemon.toml `[lan]`, or --lan. Off by default.
+    cfg.lan = match mason_daemon::config::load_lan(&cfg.config_dir) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("masond: {}: {e}", cfg.config_dir.display());
+            std::process::exit(1);
+        }
+    };
+    cfg.lan.enabled |= cli_lan;
+    if let Some(p) = cli_lan_port {
+        cfg.lan.port = p;
     }
     // What to start again with when a new runtime takes over.
     {

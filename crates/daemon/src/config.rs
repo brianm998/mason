@@ -25,6 +25,8 @@ pub struct DaemonConfig {
     pub mcp_bin: PathBuf,
     /// 0 picks a free loopback port (written to `daemon.json`).
     pub port: u16,
+    /// LAN access (Part 16): off unless the owner turns it on.
+    pub lan: LanCfg,
     pub stall_threshold: Duration,
     /// How long a provider hold waits before the session is resumed.
     pub hold_retry: Duration,
@@ -53,6 +55,123 @@ pub struct DaemonConfig {
     /// Where the stage and exit-script numbers of ad-hoc tasks start (above the planned
     /// stages). Read from `MASON_ADHOC_EXIT_START`; default 40.
     pub adhoc_exit_start: u32,
+    /// How often the detector cycle runs (Part 14: daily).
+    pub introspect_interval: Duration,
+    /// How often the analyst agent is asked (weekly).
+    pub analyst_interval: Duration,
+    /// How often the daemon looks at what is due among the recurring jobs.
+    pub schedule_tick: Duration,
+}
+
+/// `[lan]` in `daemon.toml`. Loopback stays the default: nothing listens beyond it unless
+/// `enabled = true` (or `masond --lan`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LanCfg {
+    pub enabled: bool,
+    /// 0 asks the OS for a free port.
+    pub port: u16,
+}
+
+impl Default for LanCfg {
+    fn default() -> Self {
+        LanCfg {
+            enabled: false,
+            port: crate::lan::DEFAULT_LAN_PORT,
+        }
+    }
+}
+
+/// Read the `[lan]` table. Any bad value is an error that names the file and the setting.
+pub fn parse_lan(text: &str) -> Result<LanCfg, String> {
+    let doc: toml_edit::DocumentMut = text.parse().map_err(|e| format!("daemon.toml: {e}"))?;
+    let mut lan = LanCfg::default();
+    let Some(item) = doc.get("lan") else {
+        return Ok(lan);
+    };
+    let table = item
+        .as_table_like()
+        .ok_or("daemon.toml: `lan` must be a table: [lan]")?;
+    for (name, v) in table.iter() {
+        match name {
+            "enabled" => {
+                lan.enabled = v
+                    .as_bool()
+                    .ok_or("daemon.toml: lan.enabled must be true or false")?
+            }
+            "port" => {
+                lan.port = v
+                    .as_integer()
+                    .and_then(|n| u16::try_from(n).ok())
+                    .ok_or("daemon.toml: lan.port must be a whole number from 0 to 65535")?
+            }
+            other => return Err(format!("daemon.toml: unknown setting lan.{other}")),
+        }
+    }
+    Ok(lan)
+}
+
+pub fn load_lan(config_dir: &std::path::Path) -> Result<LanCfg, String> {
+    match std::fs::read_to_string(config_dir.join("daemon.toml")) {
+        Ok(t) => parse_lan(&t),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(LanCfg::default()),
+        Err(e) => Err(format!("daemon.toml: {e}")),
+    }
+}
+
+/// The loopback port `masond` listens on when neither `--port` nor `[daemon] port`
+/// says otherwise. Fixed, so a running monitor finds the daemon again after a
+/// restart. (7421, first proposed, is assigned in /etc/services.)
+pub const DEFAULT_PORT: u16 = 7423;
+
+/// Which port to bind: `--port`, then `[daemon] port` in `daemon.toml`, then the
+/// default. A demo keeps nothing and runs beside the real daemon, so it takes a
+/// free port (0) unless told otherwise.
+pub fn resolve_port(cli: Option<u16>, file: Option<u16>, demo: bool) -> u16 {
+    cli.or(file).unwrap_or(if demo { 0 } else { DEFAULT_PORT })
+}
+
+/// `daemon.toml` in the config directory:
+///
+/// ```toml
+/// [daemon]
+/// port = 7423   # 0 asks the OS for a free port each start
+/// ```
+pub fn parse_daemon_port(text: &str) -> Result<Option<u16>, String> {
+    let doc: toml_edit::DocumentMut = text.parse().map_err(|e| format!("daemon.toml: {e}"))?;
+    let mut port = None;
+    for (key, item) in doc.iter() {
+        if key == "lan" {
+            continue; // read by `parse_lan`
+        }
+        let table = item
+            .as_table_like()
+            .filter(|_| key == "daemon")
+            .ok_or_else(|| format!("daemon.toml: unknown setting `{key}`"))?;
+        for (name, v) in table.iter() {
+            match name {
+                "port" => {
+                    port = Some(
+                        v.as_integer()
+                            .and_then(|n| u16::try_from(n).ok())
+                            .ok_or_else(|| {
+                                "daemon.toml: daemon.port must be a whole number from 0 to 65535"
+                                    .to_string()
+                            })?,
+                    )
+                }
+                other => return Err(format!("daemon.toml: unknown setting daemon.{other}")),
+            }
+        }
+    }
+    Ok(port)
+}
+
+pub fn load_daemon_port(config_dir: &std::path::Path) -> Result<Option<u16>, String> {
+    match std::fs::read_to_string(config_dir.join("daemon.toml")) {
+        Ok(t) => parse_daemon_port(&t),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("daemon.toml: {e}")),
+    }
 }
 
 impl DaemonConfig {
@@ -72,6 +191,7 @@ impl DaemonConfig {
             host_bin,
             mcp_bin,
             port: 0,
+            lan: LanCfg::default(),
             stall_threshold: Duration::from_millis(500),
             hold_retry: Duration::from_secs(60),
             debug: false,
@@ -86,6 +206,9 @@ impl DaemonConfig {
                 .and_then(|v| v.parse().ok())
                 .filter(|n| (1..=99).contains(n))
                 .unwrap_or(crate::numbers::DEFAULT_ADHOC_START),
+            introspect_interval: Duration::from_secs(24 * 3600),
+            analyst_interval: Duration::from_secs(7 * 24 * 3600),
+            schedule_tick: Duration::from_secs(30),
             owner_names: vec![std::env::var("USER")
                 .or_else(|_| std::env::var("LOGNAME"))
                 .unwrap_or_else(|_| "owner".into())],
@@ -190,7 +313,17 @@ pub struct AgentCfg {
 
 pub fn parse_agent(id: &str, doc: &DocumentMut) -> Result<AgentCfg, String> {
     let s = |k: &str| doc.get(k).and_then(|v| v.as_str()).map(String::from);
-    let provider = match s("provider").as_deref() {
+    // `provider = "codex"`, or, when the file also holds `[provider.claude]`
+    // mapping tables (TOML cannot hold both a string and a table under one
+    // name), `[provider]` with `use = "codex"`. See `providers.rs`.
+    let chosen = s("provider").or_else(|| {
+        doc.get("provider")
+            .and_then(|v| v.as_table_like())
+            .and_then(|t| t.get("use"))
+            .and_then(|v| v.as_str())
+            .map(String::from)
+    });
+    let provider = match chosen.as_deref() {
         None | Some("claude") => Provider::Claude,
         Some("codex") => Provider::Codex,
         Some(o) => {
@@ -379,6 +512,17 @@ pub enum CiKind {
     },
 }
 
+/// What an imported issue becomes. Set only in the machine-side project config
+/// (never by an issue's own text). Decision 0046.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ImportAs {
+    /// Waits for the owner's approval before it starts.
+    #[default]
+    Proposed,
+    /// Starts at once, as before.
+    Queued,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TrackerCfg {
     pub api: String,
@@ -389,6 +533,8 @@ pub struct TrackerCfg {
     pub interval_s: u64,
     /// A reference to the webhook secret (`env:`/`file:`), when a relay delivers.
     pub webhook_secret: Option<String>,
+    /// `proposed` (default) or `queued`.
+    pub import_as: ImportAs,
 }
 
 fn parse_services(id: &str, doc: &DocumentMut) -> Result<ServicesCfg, String> {
@@ -518,6 +664,20 @@ fn parse_services(id: &str, doc: &DocumentMut) -> Result<ServicesCfg, String> {
                 "{id}: `[tracker] webhook_secret` is a reference, `env:NAME` or `file:/path`"
             ));
         }
+        let import_as = match get(t, "import_as").as_deref() {
+            None | Some("proposed") => ImportAs::Proposed,
+            Some("queued") => ImportAs::Queued,
+            Some(o) => {
+                return Err(format!(
+                    "{id}: `[tracker] import_as` is `proposed` or `queued`, not {o:?}"
+                ))
+            }
+        };
+        if t.get("import_as").is_some_and(|v| v.as_str().is_none()) {
+            return Err(format!(
+                "{id}: `[tracker] import_as` is `proposed` or `queued`"
+            ));
+        }
         out.tracker = Some(TrackerCfg {
             api: api(t),
             repo: need(t, "tracker", "repo")?,
@@ -525,6 +685,7 @@ fn parse_services(id: &str, doc: &DocumentMut) -> Result<ServicesCfg, String> {
             label: get(t, "label").unwrap_or_else(|| "mason".into()),
             interval_s: int(t, "interval_s", 60),
             webhook_secret: secret,
+            import_as,
         });
     }
     Ok(out)
@@ -598,6 +759,9 @@ pub fn parse_project(id: &str, text: &str) -> Result<ProjectCfg, String> {
         ));
     }
     let agent = parse_agent(id, &doc)?;
+    crate::proposals::parse_cfg(id, &doc)?;
+    crate::introspect::parse_cfg(id, &doc)?;
+    crate::schedule::parse(id, &doc)?;
     Ok(ProjectCfg {
         account: agent
             .account
@@ -702,6 +866,21 @@ mod tests {
         assert_eq!(p.max_test_rounds, None);
         assert_eq!(p.branch(7), "mason/web-api/t7");
         assert_eq!(p.base_ref(), "develop");
+    }
+
+    #[test]
+    fn import_as_defaults_to_proposed_and_is_validated() {
+        let base = "path=\"/r\"\nbase=\"main\"\ntest=\"t\"\n[tracker]\nkind=\"github\"\nrepo=\"o/r\"\ntoken=\"env:X\"\n";
+        let t = |extra: &str| {
+            parse_project("p", &format!("{base}{extra}"))
+                .map(|p| p.services.tracker.unwrap().import_as)
+        };
+        assert_eq!(t("").unwrap(), ImportAs::Proposed);
+        assert_eq!(t("import_as=\"queued\"\n").unwrap(), ImportAs::Queued);
+        assert_eq!(t("import_as=\"proposed\"\n").unwrap(), ImportAs::Proposed);
+        let e = t("import_as=\"now\"\n").unwrap_err();
+        assert!(e.contains("import_as"), "{e}");
+        assert!(t("import_as=3\n").unwrap_err().contains("import_as"));
     }
 
     #[test]
@@ -847,6 +1026,33 @@ mod tests {
             "[provider.a]\nadapter=\"claude\"\nbilling=\"x\"\n",
         );
         assert!(load_projects(d.path()).is_err());
+    }
+
+    #[test]
+    fn lan_is_off_by_default_and_bad_values_name_the_file() {
+        use super::{parse_lan, LanCfg};
+        assert_eq!(parse_lan("").unwrap(), LanCfg::default());
+        assert!(!LanCfg::default().enabled);
+        assert_eq!(
+            parse_lan("[daemon]\nport = 1\n").unwrap(),
+            LanCfg::default()
+        );
+        let l = parse_lan("[lan]\nenabled = true\nport = 9000\n").unwrap();
+        assert!(l.enabled && l.port == 9000);
+        for bad in [
+            "[lan]\nenabled = \"yes\"\n",
+            "[lan]\nport = 70000\n",
+            "[lan]\nhost = \"x\"\n",
+            "lan = 3\n",
+        ] {
+            let e = parse_lan(bad).unwrap_err();
+            assert!(e.starts_with("daemon.toml: "), "{e}");
+        }
+        // The port parser leaves the table alone.
+        assert_eq!(
+            super::parse_daemon_port("[lan]\nenabled = true\n").unwrap(),
+            None
+        );
     }
 
     #[test]

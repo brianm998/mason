@@ -418,6 +418,9 @@ pub fn parse_with(text: &str, plugins: Plugins<'_>) -> Result<Definition, Vec<Pr
                             Some(pt) => {
                                 for (pk, pv) in pt.iter() {
                                     match pk {
+                                        "tier" => {
+                                            p.tier = string(pv, &format!("{base}.tier"), &mut out)
+                                        }
                                         "model" => {
                                             p.model = string(pv, &format!("{base}.model"), &mut out)
                                         }
@@ -428,7 +431,7 @@ pub fn parse_with(text: &str, plugins: Plugins<'_>) -> Result<Definition, Vec<Pr
                                         other => out.push(unknown_key(
                                             &base,
                                             other,
-                                            &["model", "effort"],
+                                            &["tier", "model", "effort"],
                                         )),
                                     }
                                 }
@@ -440,7 +443,7 @@ pub fn parse_with(text: &str, plugins: Plugins<'_>) -> Result<Definition, Vec<Pr
                 }
                 None => out.push(Problem::new(
                     "agent",
-                    "must be a table of profiles, like [agent.fast]",
+                    "must be a table of profiles, like [agent.light]",
                 )),
             },
             "resource" => match v.as_table_like() {

@@ -27,7 +27,34 @@ The task shows why it waits (`mason task show N`), the alert says so, and `mason
 
 Open self-tasks, tasks filed per week, and agent steps per period (the cap on spend: token cost is not recorded yet, so steps are what is counted) each have a limit in `[self]`. Filing past a limit is refused with the number and the limit, by the command line, the API and the tracker import (an issue left unimported is looked at again later). `mason self` shows where each stands. The urgent fix task the landing freeze files is not counted: restoring the base comes first.
 
+**`max_open` counts only tasks doing or about to do work.** Running, queued-and-claimable, paused and waiting-on-owner tasks count. A task held behind unlanded blockers, and a proposed task, spend nothing and are not counted; a held task joins the count when its blockers land and is never refused then. `mason self` reads "2/3 open (4 held behind others, not counted)" (see `docs/decisions/0032-self-open-readings.md`).
+
 **The weekly cap counts only work MASON starts for itself.** `per_week` counts tasks whose trust is not the owner's: agent proposals and outside issues you labeled. Tasks you file (the command line or API as the owner, the monitor, a tracker issue by an owner name) are not counted, and neither is a task cancelled before any agent step started. `mason self` reads "N of 10 this week (M of yours not counted)", and the refusal says how many of the counted are agent or outside tasks. **Limits are for resources and for work MASON starts for itself, not for how many tasks you file.** `max_open` and `max_steps` count and refuse only tasks that are not yours, like `per_week` (decision 0026). `mason self` shows how many of yours are open ("N of yours open, not limited"). The cooldown after a rollback still stops every filing, yours included, and the holds on protected files stay. **An owner identity can therefore file any number of tasks.** What bounds your own work is the machine: at most `llm:claude` agent sessions run at once (default 10; set `[llm] claude` in `resources.toml` or `mason resources limit llm:claude N`, which survives a restart), and a local compile starts only while CPU use is below `compile_cpu_max` (default 50%, `[cpu] compile_cpu_max` in `resources.toml`); the rest wait in the queue and `mason resources` says why ("compile waiting: CPU 71% > 50%"). See `docs/decisions/0022-self-cap-readings.md` and `0026-limits-readings.md`.
+
+## Tracker imports start proposed
+
+An issue the tracker imports becomes a **proposed** task, with the issue number, title, body and link on it, and waits for you: `mason task approve N` or the monitors' Approve button. Nothing an outside signal creates starts without it; that is why. Set `import_as = "queued"` under `[tracker]` in the project file in your machine config to have every imported issue start at once, as before; an issue's own text cannot set it. Dependencies still import in order, and a proposed task whose blockers have not landed shows as proposed and held behind them.
+
+Proposed tasks spend nothing, so `max_open`, `per_week` and `max_steps` never refuse them (only the rollback cooldown does); the limits apply when you approve and the task starts. When a limit does keep a queued import out, the alert reads "5 issues not imported (#...): 10 self-tasks are open and the limit is 10", `mason task list --pending-issues` and both monitors list the issues with the reason, and it clears when they import.
+
+A task titled `... (GitHub #N)` that no issue is linked to is adopted by issue #N instead of being imported a second time. If an open issue is linked to a cancelled task, the alert says so; link a live task with `mason task relink <id> --issue N` (owner only).
+
+## The port
+
+`masond` listens on **127.0.0.1:7423** unless told otherwise, so a monitor that is open when the daemon restarts (an update, a changed limit, a crash and relaunch) finds it in the same place. It listens on loopback only; nothing beyond this machine can reach it. `daemon.json` in the data directory (`pid`, `port`, `started_ms`) is still written after the bind and is what the command line and the monitors read, so a different port works too.
+
+Change it, in order of precedence:
+- `masond --port N` (`--port 0` asks the OS for a free port every start, as the tests and `--demo` do);
+- `[daemon] port = N` in `daemon.toml` in the config directory (`~/.config/mason/daemon.toml`):
+  ```toml
+  [daemon]
+  port = 7500
+  ```
+  An invalid `daemon.toml` stops the daemon from starting and names the file.
+
+**When the port is taken** by another program, `masond` exits with status 1 and says which port, who holds it (the pid and program, when `lsof` can tell) and how to change it. It never picks another port by itself. Stop the other program, or set a different port as above. A second `masond` on the same data directory is refused before this (`a daemon is already running here (pid N)`). `mason update`'s self-test binds no port, so it never meets the live daemon's.
+
+The monitors (SwiftUI and Compose) and the command line read `daemon.json` again when a connection fails. A monitor shows "Daemon restarting, reconnecting…" and retries after 1, 2, 4 and 8 seconds, then every 10, and resumes from the last event it saw; it also notices a changed `pid` or `started_ms` while connected, and no message or reply for 15 seconds counts as a stall. The command line reads the file once more after a refused connection. See `docs/decisions/0029-fixed-port-readings.md`.
 
 ## A rollback
 
@@ -35,4 +62,4 @@ If a new build crashes three times in five minutes, the daemon rolls back (Stage
 
 ## Privacy
 
-Self-proposals stay in the local tracker. Nothing about a self-task, and nothing from another project, is published anywhere by this.
+Self-proposals stay in the local tracker. Nothing about a self-task, and nothing from another project, is published anywhere by this. Without write access (`[self] access = "fork"`), `mason proposal publish N --preview` shows the redacted text and `--confirm` sends it upstream; client code is never attached (decision 0042).

@@ -102,6 +102,33 @@ class MonitorCoreTest {
         assertEquals(Page.Task(7), m.page, "an unknown link changes nothing")
     }
 
+    @Test fun issuesTheTrackerDidNotImportAreATileAndAListWithTheirReasons() {
+        val m = model()
+        assertNull(m.visibleItems().firstOrNull { it.id == "tile:not_imported" }, "nothing to say, nothing shown")
+        val p = PendingIssue(
+            project = "mason", number = 12, title = "Add paging",
+            reason = "10 self-tasks are open and the limit is 10", url = "https://github.com/o/r/issues/12",
+        )
+        m.header = m.header!!.copy(pending_issues = listOf(p))
+        val items = m.visibleItems()
+        assertEquals(listOf("1", "not imported"), items.first { it.id == "tile:not_imported" }.texts)
+        assertEquals(
+            listOf("mason", "#12", "Add paging", "10 self-tasks are open and the limit is 10", "https://github.com/o/r/issues/12"),
+            items.first { it.id == "pending:mason:12" }.texts,
+        )
+    }
+
+    @Test fun aProposedImportShowsItsIssueAndOffersApprove() {
+        val m = model()
+        val r = row(9, "proposed", "Add paging", actions = listOf("approve", "reject", "edit"))
+            .copy(issue = 12, issue_url = "https://github.com/o/r/issues/12")
+        m.sidebar = m.sidebar!!.copy(sections = m.sidebar!!.sections + section("proposed_imports", rows = listOf(r)))
+        val item = m.visibleItems().first { it.id == "row:proposed_imports:9" }
+        assertTrue("issue #12" in item.texts)
+        assertTrue("https://github.com/o/r/issues/12" in item.texts)
+        assertEquals(listOf("approve", "edit", "reject"), item.actions.sorted())
+    }
+
     @Test fun tileLabelIsTheDaemonsLabelOrTheUnderscoreFallback() {
         val m = model()
         val c = StateCount(state = "needs_attention")
@@ -567,6 +594,167 @@ class MonitorCoreTest {
     @Test fun graphNegativeLayoutX() {
         val h = GraphLayout.horizontal(listOf(-300.0, 100.0), emptyList(), 0.0)
         assertTrue(h.left + h.dx >= 0.0)
+    }
+
+    // ---- reconnecting after a daemon restart ----
+
+    @Test fun reconnectPauseSchedule() {
+        val p = ReconnectPolicy()
+        assertEquals(listOf(1.0, 2.0, 4.0, 8.0, 10.0, 10.0, 10.0), (0 until 7).map { p.nextPauseSeconds() })
+        p.reset()
+        assertEquals(1.0, p.nextPauseSeconds())
+    }
+
+    @Test fun daemonInfoReplacesOnPortPidOrStartTime() {
+        val a = DaemonInfo(7423, 5, 100)
+        assertFalse(DaemonInfo(7423, 5, 100).replaces(a))
+        assertTrue(DaemonInfo(7424, 5, 100).replaces(a))
+        assertTrue(DaemonInfo(7423, 6, 100).replaces(a))
+        assertTrue(DaemonInfo(7423, 5, 101).replaces(a))
+    }
+
+    @Test fun discoveryReadsPidAndStartTime() {
+        val f = java.io.File.createTempFile("daemon", ".json")
+        f.writeText("""{"pid": 41, "port": 7423, "started_ms": 99}""")
+        assertEquals(DaemonInfo(7423, 41, 99), Discovery.info(f))
+        assertEquals(DaemonInfo(9), Discovery.info(listOf("--port", "9"), emptyMap()))
+    }
+
+    private class FakeSocket(val port: Int, val events: SocketEvents) : MonitorSocket {
+        val sent = java.util.concurrent.CopyOnWriteArrayList<String>()
+        @Volatile var closed = false
+        override fun send(text: String): Boolean { if (!closed) sent += text; return !closed }
+        override fun close() { if (!closed) { closed = true; events.onClosed() } }
+    }
+
+    private class Rig(val model: MonitorModel, stallAfter: Double = 15.0, var info: DaemonInfo? = DaemonInfo(7423, 1, 10)) {
+        val sockets = java.util.concurrent.CopyOnWriteArrayList<FakeSocket>()
+        val conn = MonitorConnection(
+            model, { info },
+            ConnectionTiming(pingEverySeconds = 0.05, stallAfterSeconds = stallAfter, watchEverySeconds = 0.02, pauseScale = 0.01),
+            { port, ev -> FakeSocket(port, ev).also { sockets += it } },
+        )
+    }
+
+    private fun waitFor(what: String, f: () -> Boolean) {
+        val end = System.currentTimeMillis() + 5000
+        while (!f()) {
+            if (System.currentTimeMillis() > end) fail("timed out waiting for $what")
+            Thread.sleep(10)
+        }
+    }
+
+    private val welcome = """{"welcome":{"version":"test"}}"""
+
+    @Test fun aDropThenAChangedDaemonJsonReconnectsWithoutARelaunch() {
+        val r = Rig(MonitorModel(MemoryPreferences()))
+        r.conn.start()
+        waitFor("a socket") { r.sockets.size == 1 }
+        r.sockets[0].events.onOpen()
+        r.sockets[0].events.onMessage(welcome)
+        waitFor("connected") { r.model.connected }
+        r.model.lastSeq = 7
+        r.info = DaemonInfo(9000, 2, 20)
+        r.sockets[0].close()
+        waitFor("a second socket") { r.sockets.size == 2 }
+        assertEquals(9000, r.sockets[1].port)
+        waitFor("not connected") { !r.model.connected }
+        assertTrue(r.model.reconnecting, "shown as reconnecting, not an error")
+        r.sockets[1].events.onOpen()
+        assertTrue(Regex("[lL]ast_?[sS]eq\"?:\"?7\\b").containsMatchIn(r.sockets[1].sent[0]), r.sockets[1].sent[0])
+        r.sockets[1].events.onMessage(welcome)
+        waitFor("connected again") { r.model.connected }
+        assertFalse(r.model.reconnecting)
+        r.conn.stop()
+    }
+
+    @Test fun aChangedPidWhileConnectedReconnectsFromTheLastSeq() {
+        val r = Rig(MonitorModel(MemoryPreferences()))
+        r.conn.start()
+        waitFor("a socket") { r.sockets.size == 1 }
+        r.sockets[0].events.onMessage(welcome)
+        waitFor("connected") { r.model.connected }
+        r.model.lastSeq = 12
+        r.info = DaemonInfo(7423, 2, 30)  // an update on the same port
+        waitFor("a second socket") { r.sockets.size == 2 }
+        assertTrue(r.sockets[0].closed)
+        r.sockets[1].events.onOpen()
+        assertTrue(Regex("[lL]ast_?[sS]eq\"?:\"?12\\b").containsMatchIn(r.sockets[1].sent[0]), r.sockets[1].sent[0])
+        r.conn.stop()
+    }
+
+    @Test fun aStalledDaemonShowsReconnectingNotAnError() {
+        val r = Rig(MonitorModel(MemoryPreferences()), stallAfter = 0.15)
+        r.conn.start()
+        waitFor("a socket") { r.sockets.size == 1 }
+        r.sockets[0].events.onMessage(welcome)
+        waitFor("connected") { r.model.connected }
+        waitFor("a second socket") { r.sockets.size == 2 }
+        assertTrue(r.sockets[0].closed)
+        assertTrue(r.sockets[0].sent.any { it.contains("ping") }, "it asked before giving up")
+        assertTrue(r.model.reconnecting)
+        assertNull(r.model.lastResult, "no error is shown")
+        r.conn.stop()
+    }
+
+    @Test fun noDaemonJsonYetKeepsRetrying() {
+        val r = Rig(MonitorModel(MemoryPreferences()), info = null)
+        r.conn.start()
+        waitFor("reconnecting") { r.model.reconnecting }
+        assertTrue(r.sockets.isEmpty())
+        r.info = DaemonInfo(7423, 1, 1)
+        waitFor("a socket") { r.sockets.size == 1 }
+        r.conn.stop()
+    }
+
+    // ---- readable plan ----
+
+    private fun planView(numbers: List<String> = listOf("0", "1")) = PlanView(
+        summary_paragraphs = listOf("First.", "Second `x`."),
+        steps_are_list = true,
+        steps = listOf("do a\nmore a", "do b"),
+        step_numbers = numbers,
+        files = listOf("a.rs", "b.rs"),
+        criteria = listOf("it works"),
+        other = listOf(PlanExtra(label = "Risks", value_ = "- one")),
+        raw = "{\"summary\":\"First.\"}",
+    )
+
+    @Test
+    fun planCopyAsTextKeepsTheAgentsNumbers() {
+        val t = PlanText.copyAsText(planView())
+        assertEquals(
+            "## Summary\n\nFirst.\n\nSecond `x`.\n\n## Steps\n\n0. do a\n   more a\n1. do b\n\n" +
+                "## Files (2)\n\n- `a.rs`\n- `b.rs`\n\n## Acceptance criteria (1)\n\n- [ ] it works\n\n" +
+                "## Other\n\n### Risks\n\n- one\n",
+            t,
+        )
+        assertFalse(t.contains("{"))
+    }
+
+    @Test
+    fun planCopyAsTextBulletsAndUnreadable() {
+        val v = planView(numbers = emptyList())
+        assertTrue(PlanText.copyAsText(v).contains("- do a\n  more a\n- do b"))
+        assertNull(PlanText.marker(PlanView(), 0))
+        assertEquals("•", PlanText.marker(v, 0))
+        assertEquals("not json", PlanText.copyAsText(PlanView(raw = "not json", note = "n")))
+    }
+
+    @Test
+    fun planExpandRule() {
+        assertTrue(PlanText.expandedByDefault(0))
+        assertTrue(PlanText.expandedByDefault(9))
+        assertFalse(PlanText.expandedByDefault(10))
+        assertFalse(PlanText.expandedByDefault(25))
+    }
+
+    @Test
+    fun planInlineMarkdown() {
+        assertEquals(
+            listOf(PlanText.Span("a "), PlanText.Span("b", code = true), PlanText.Span(" "), PlanText.Span("c", bold = true), PlanText.Span(" `open")),
+            PlanText.inline("a `b` **c** `open"),
+        )
     }
 
     // ---- live progress (s49) ----

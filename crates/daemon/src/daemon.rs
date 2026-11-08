@@ -56,6 +56,11 @@ pub struct Daemon {
     pub(crate) tracker: crate::tracker::Hub,
     pub update_status: Mutex<crate::update::Status>,
     pub(crate) drafts: crate::editor::Drafts,
+    /// The one probe session per held account (see `holds`).
+    pub probes: crate::holds::Probes,
+    pub(crate) intro: crate::introspect::Runtime,
+    pub(crate) notify: crate::notify::Runtime,
+    pub lan: crate::lan::LanState,
 }
 
 fn kind_name(k: &EventKind) -> String {
@@ -145,7 +150,7 @@ impl Daemon {
                 (None, None) => crate::cpu::Sampler::start(),
             };
         let accounts = if demo {
-            crate::providers::default_accounts()
+            crate::demo::accounts()
         } else {
             crate::providers::load(&cfg.config_dir)?
         };
@@ -184,20 +189,28 @@ impl Daemon {
             landing: Default::default(),
             tracker: Default::default(),
             drafts: Default::default(),
+            probes: Default::default(),
+            intro: Default::default(),
+            notify: Default::default(),
+            lan: crate::lan::LanState::new(),
             update_status: Mutex::new(crate::update::Status {
                 phase: "idle".into(),
                 ..Default::default()
             }),
             cfg,
         });
-        if !demo {
+        if demo {
+            crate::demo::seed_usage(&d);
+        } else {
             d.load_definitions();
             d.progress_cleanup();
             d.recover();
             d.spawn_progress_ticker();
             d.spawn_sweeper();
+            crate::usage::spawn_probe(&d);
             d.spawn_watcher();
             crate::tracker::spawn(&d);
+            crate::introspect::spawn(&d);
             crate::selfguard::on_start(&d);
         }
         Ok(d)
@@ -218,6 +231,11 @@ impl Daemon {
     /// Why a project's tracker poll stopped, if it did.
     pub fn tracker_stopped(&self, p: ProjectId) -> Option<String> {
         self.tracker.stopped(p)
+    }
+
+    /// Open issues the tracker has not imported (or whose task was canceled), with why.
+    pub fn tracker_pending(&self, p: ProjectId) -> Vec<crate::tracker::Waiting> {
+        self.tracker.pending(p)
     }
 
     /// Ask the project's tracker again at once.

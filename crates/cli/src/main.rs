@@ -18,6 +18,8 @@
 //! mason task open <id> [--anyway]
 //! mason pause [--project P] [--mode all|claims|landing] --for 2h | mason resume [--project P] [--mode M] | mason pause list
 //! mason alerts [--all] | mason metrics [--days N]
+//! mason health | mason digest [--days N] [--project P] | mason schedule list | run <name>
+//! mason triage list | review <id> (--agree | --disagree)
 //! mason status [--json] [--watch]
 //! mason run --needs compile[=N],... [--exclusive] [--label L] -- <cmd>...
 //! mason resources [--json] | mason resources limit <resource> <units>
@@ -46,6 +48,8 @@ mason: command-line client for the MASON pipeline
                          [--priority urgent|high|normal|low] [--proposed] [--explored]
                          [--after ID[,ID...]]   wait for those tasks to land first
   mason task list [--state S] [--json]
+  mason task list --pending-issues    open issues the tracker has not imported, with why
+  mason task relink <id> --issue N    tie a live task to issue N whose task was canceled (owner only)
   mason task show <id> [--json] [--watch]   with --watch, follow the live step progress
   mason task cancel <id> [--delete-branch]
   mason task retry <id> [--from STEP]
@@ -60,8 +64,17 @@ mason: command-line client for the MASON pipeline
   mason task open <id> [--anyway]     open an interactive agent in the task's worktree, resuming its session
   mason pause [--project P] [--mode all|claims|landing] --for 2h   hold work back (all stops at the next step)
   mason resume [--project P] [--mode M] | mason pause list
+  mason account hold <name> [--for 2h] [--reason R] | mason account release <name>
+                                      hold an LLM account by hand, or release a hold now (try again at once)
   mason alerts [--all]                what needs a look right now (and, with --all, what already cleared)
+  mason alerts ack KEY                acknowledge an alert: it stops reminding and stays listed while true
+  mason notify [status]               where each condition is routed, and what is set up (notify.toml)
+  mason notify test CHANNEL           send a test through sound, speech, push, email or webhook
   mason metrics [--days N]            interventions per landed task
+  mason health                        the detectors' findings, verdicts on fixes, recurring jobs, triage review queue
+  mason digest [--days N] [--project P]   landed, interventions, time by state, skips, forced landings (recorded data only)
+  mason schedule list | run <name>    recurring jobs (introspect, analyst:<project>, <project>/<schedule>); run one now
+  mason triage list | review <id> (--agree | --disagree)   the triage agent's sampled suggestions; it never answers
   mason task skip <id> (--suite S | --step S) [--reason R] [--deferred]
                                       skip a suite or step by force, even mid-run; records a debt
   mason debt list | run <id>          what was skipped and not yet proven; run one on the base branch
@@ -80,8 +93,19 @@ mason: command-line client for the MASON pipeline
   mason editor show|op|undo|redo|discard|simulate|apply [--project P]   the pipeline editor, without a screen
   mason definition show [--project P] | reload [--project P]
   mason extension list|show|approve [NAME] [--project P]   project extensions; approving is the owner's
+  mason lan status                    whether LAN access is on, its port and certificate fingerprint
+  mason pair [--viewer]               a one-time code (and mason://pair URL) for a phone; 120 s
+  mason devices list | revoke ID      paired devices; revoking cuts one off at once
+  mason usage [--account A] [--json]  each provider account: limit windows, overage, tokens and cost
   mason landing                       batches, phases, freezes, and the landing queue
   mason self                          MASON on its own repository: limits, and changes held for you
+  mason proposals [--open] [--json]   what agents noticed: source, severity, route, state
+  mason proposal show <id> | approve <id> | reject <id> [--reason R]
+  mason proposal edit <id> [--title T] [--body B] [--evidence E]   only while it waits for you
+  mason proposal file --task N --title T --body B --evidence E [--blocks]   as task N's agent would
+  mason proposal publish <id> --preview | --confirm   send an improvement upstream, redacted
+  mason proposal poll                 look at the upstream pull requests now
+  mason improve \"<what to improve>\" [--project P]   ask MASON to change its own code
   mason update [--channel stable|main|branch:X | --sha S] [--rollback] [--check]
   mason update status | ack           the runtimes, a rollback alert, an update in progress
   mason config show [--project P]     every step's settings and where each came from
@@ -121,6 +145,10 @@ impl Args {
         } else {
             die(&format!("{name} needs a value"))
         }
+    }
+
+    fn peek_pos(&self) -> Option<&str> {
+        self.rest.first().map(String::as_str)
     }
 
     fn pos(&mut self) -> Option<String> {
@@ -770,7 +798,15 @@ fn main() {
                             s["step"].as_str().unwrap_or("?"),
                             s["type"].as_str().unwrap_or("?")
                         );
-                        for k in ["model", "effort", "budget", "max_rounds", "command"] {
+                        for k in [
+                            "tier",
+                            "level",
+                            "model",
+                            "effort",
+                            "budget",
+                            "max_rounds",
+                            "command",
+                        ] {
                             if let Some(v) = s[k]["value"].as_str() {
                                 println!(
                                     "      {k:<11} {v}   <- {}",
@@ -903,6 +939,45 @@ fn main() {
                 );
             }
         },
+        "account" => {
+            let sub = a
+                .pos()
+                .unwrap_or_else(|| die("account hold <name> | account release <name>"));
+            let name = a.pos().unwrap_or_else(|| die("which account?"));
+            let by = std::env::var("MASON_AS")
+                .or_else(|_| std::env::var("USER"))
+                .unwrap_or_default();
+            match sub.as_str() {
+                "hold" => {
+                    let for_s = a
+                        .opt("--for")
+                        .and_then(|v| mason_definition::model::parse_duration(&v))
+                        .map(|d| d.as_secs());
+                    let reason = a.opt("--reason").unwrap_or_default();
+                    finish(&a);
+                    or_die(d.call(
+                        "POST",
+                        "/account/hold",
+                        Some(&json!({"account": name, "for_s": for_s, "reason": reason, "by": by})),
+                    ));
+                    println!("Held {name}: no new session starts on it. `mason account release {name}` lifts it.");
+                }
+                "release" => {
+                    finish(&a);
+                    let r = or_die(d.call(
+                        "POST",
+                        "/account/release",
+                        Some(&json!({"account": name, "by": by})),
+                    ));
+                    if r["released"].as_bool().unwrap_or(false) {
+                        println!("Released {name}: waiting tasks try again now.");
+                    } else {
+                        println!("{name} was not held.");
+                    }
+                }
+                other => die(&format!("unknown account command {other:?}\n\n{HELP}")),
+            }
+        }
         "resume" => {
             let project = a.opt("--project").unwrap_or_default();
             let mode = a.opt("--mode").unwrap_or_default();
@@ -914,7 +989,147 @@ fn main() {
             ));
             println!("Lifted {} pause(s)", r["lifted"]);
         }
+        "lan" => {
+            if !matches!(a.pos().as_deref(), Some("status") | None) {
+                die("usage: mason lan status");
+            }
+            finish(&a);
+            let r = or_die(d.call("GET", "/lan", None));
+            if json_out {
+                return println!("{r:#}");
+            }
+            if r["enabled"].as_bool() == Some(true) {
+                println!(
+                    "LAN access is on: port {}, fingerprint {}",
+                    r["port"],
+                    r["fingerprint"].as_str().unwrap_or("?")
+                );
+            } else {
+                println!("LAN access is off (loopback only). Turn it on with `[lan] enabled = true` in daemon.toml, or `masond --lan`.");
+            }
+        }
+        "pair" => {
+            let role = if a.flag("--viewer") {
+                "viewer"
+            } else {
+                "owner"
+            };
+            finish(&a);
+            let r = or_die(d.call("POST", "/pair/codes", Some(&json!({"role": role}))));
+            if json_out {
+                return println!("{r:#}");
+            }
+            println!(
+                "Pairing code ({role}, valid {} s, one use): {}\n{}",
+                r["expires_in_s"],
+                r["code"].as_str().unwrap_or("?"),
+                r["url"].as_str().unwrap_or("?")
+            );
+        }
+        "devices" => match a.pos().as_deref() {
+            Some("list") | None => {
+                finish(&a);
+                let r = or_die(d.call("GET", "/devices", None));
+                if json_out {
+                    return println!("{r:#}");
+                }
+                let rows = r["devices"].as_array().cloned().unwrap_or_default();
+                if rows.is_empty() {
+                    println!("No devices are paired.");
+                }
+                for x in rows {
+                    println!(
+                        "#{} {:<20} {:<7} {}",
+                        x["id"],
+                        x["name"].as_str().unwrap_or("?"),
+                        x["role"].as_str().unwrap_or("?"),
+                        if x["revoked_at"].is_null() {
+                            "paired"
+                        } else {
+                            "revoked"
+                        }
+                    );
+                }
+            }
+            Some("revoke") => {
+                let id: u64 = a
+                    .pos()
+                    .and_then(|v| v.trim_start_matches('#').parse().ok())
+                    .unwrap_or_else(|| die("usage: mason devices revoke ID"));
+                finish(&a);
+                or_die(d.call("POST", &format!("/devices/{id}/revoke"), None));
+                println!("Revoked device #{id}; its token no longer works.");
+            }
+            Some(other) => die(&format!("unknown devices command {other:?}\n\n{HELP}")),
+        },
+        "notify" => {
+            match a.pos().as_deref() {
+                Some("test") => {
+                    let Some(channel) = a.pos() else {
+                        die("mason notify test CHANNEL  (sound, speech, push, email, webhook)")
+                    };
+                    finish(&a);
+                    let r =
+                        or_die(d.call("POST", "/notify/test", Some(&json!({"channel": channel}))));
+                    if json_out {
+                        return println!("{r:#}");
+                    }
+                    println!("{r}");
+                }
+                Some("status") | None => {
+                    finish(&a);
+                    let r = or_die(d.call("GET", "/notify", None));
+                    if json_out {
+                        return println!("{r:#}");
+                    }
+                    if let Some(e) = r["error"].as_str() {
+                        println!("notify.toml has a problem (defaults are in force): {e}");
+                    }
+                    for c in r["routing"].as_array().cloned().unwrap_or_default() {
+                        let rules: Vec<String> = c["rules"]
+                            .as_array()
+                            .cloned()
+                            .unwrap_or_default()
+                            .iter()
+                            .map(|x| match x["after_s"].as_u64().unwrap_or(0) {
+                                0 => x["channel"].as_str().unwrap_or("?").to_string(),
+                                s => format!(
+                                    "{} after {} min",
+                                    x["channel"].as_str().unwrap_or("?"),
+                                    s / 60
+                                ),
+                            })
+                            .collect();
+                        println!(
+                            "{:<16} {}",
+                            c["condition"].as_str().unwrap_or("?"),
+                            rules.join(", ")
+                        );
+                    }
+                    println!(
+                    "one reminder after {} min; daemon speech {}; email {}, push {}, webhook {}",
+                    r["reminder_after_s"].as_u64().unwrap_or(0) / 60,
+                    if r["daemon_speech"].as_bool().unwrap_or(false) { "on" } else { "off" },
+                    if r["configured"]["email"].as_bool().unwrap_or(false) { "set up" } else { "not set up" },
+                    if r["configured"]["push"].as_bool().unwrap_or(false) { "set up" } else { "not set up" },
+                    if r["configured"]["webhook"].as_bool().unwrap_or(false) { "set up" } else { "not set up" },
+                );
+                }
+                Some(other) => die(&format!("unknown notify command {other:?}\n\n{HELP}")),
+            }
+        }
         "alerts" => {
+            if a.peek_pos() == Some("ack") {
+                a.pos();
+                let Some(key) = a.pos() else {
+                    die("mason alerts ack KEY")
+                };
+                finish(&a);
+                or_die(d.call("POST", "/alerts/ack", Some(&json!({"key": key}))));
+                return println!(
+                    "Acknowledged {key}: it stays listed while it is true, and stops reminding."
+                );
+            }
             let all = a.flag("--all");
             finish(&a);
             let r = or_die(d.call("GET", &format!("/alerts?all={}", u8::from(all)), None));
@@ -927,11 +1142,127 @@ fn main() {
             }
             for x in list {
                 println!(
-                    "{} {:<12} {}",
+                    "{} {:<12} {}{}  [{}]",
                     if x["cleared_at"].is_null() { "!" } else { "." },
                     x["kind"].as_str().unwrap_or("?"),
-                    x["text"].as_str().unwrap_or("")
+                    x["text"].as_str().unwrap_or(""),
+                    if x["acked_at"].is_null() {
+                        ""
+                    } else {
+                        " (acknowledged)"
+                    },
+                    x["key"].as_str().unwrap_or("")
                 );
+            }
+        }
+        "health" => {
+            finish(&a);
+            let r = or_die(d.call("GET", "/health", None));
+            if json_out {
+                return println!("{r:#}");
+            }
+            print_health(&r);
+        }
+        "digest" => {
+            let days = a.opt("--days").unwrap_or_else(|| "7".into());
+            let project = a.opt("--project");
+            finish(&a);
+            let mut path = format!("/digest?days={days}");
+            if let Some(p) = project {
+                path.push_str(&format!("&project={p}"));
+            }
+            let r = or_die(d.call("GET", &path, None));
+            if json_out {
+                return println!("{r:#}");
+            }
+            print_digest(&r);
+        }
+        "schedule" => {
+            let sub = a.pos().unwrap_or_default();
+            if std::env::var("MASON_AS").is_err() {
+                if let Ok(u) = std::env::var("USER") {
+                    std::env::set_var("MASON_AS", u);
+                }
+            }
+            match sub.as_str() {
+                "list" => {
+                    finish(&a);
+                    let r = or_die(d.call("GET", "/schedules", None));
+                    if json_out {
+                        return println!("{r:#}");
+                    }
+                    for s in r["schedules"].as_array().cloned().unwrap_or_default() {
+                        println!(
+                            "{:<28} {:<12} every {:<10} runs {:<4} {}",
+                            s["name"].as_str().unwrap_or("?"),
+                            s["kind"].as_str().unwrap_or("?"),
+                            every_text(s["every_ms"].as_u64().unwrap_or(0)),
+                            s["runs"],
+                            s["last_status"].as_str().unwrap_or("")
+                        );
+                    }
+                }
+                "run" => {
+                    let name = a
+                        .pos()
+                        .unwrap_or_else(|| die("usage: mason schedule run <name>"));
+                    finish(&a);
+                    let r = or_die(d.call("POST", "/schedules/run", Some(&json!({"name": name}))));
+                    println!("{}", r["said"].as_str().unwrap_or(""));
+                }
+                _ => die("usage: mason schedule list | run <name>"),
+            }
+        }
+        "triage" => {
+            let sub = a.pos().unwrap_or_default();
+            if std::env::var("MASON_AS").is_err() {
+                if let Ok(u) = std::env::var("USER") {
+                    std::env::set_var("MASON_AS", u);
+                }
+            }
+            match sub.as_str() {
+                "list" => {
+                    finish(&a);
+                    let r = or_die(d.call("GET", "/triage", None));
+                    if json_out {
+                        return println!("{r:#}");
+                    }
+                    let list = r["triage"].as_array().cloned().unwrap_or_default();
+                    if list.is_empty() {
+                        println!("no triage suggestions (triage is off unless a project sets [triage] enabled)");
+                    }
+                    for t in list {
+                        println!(
+                            "#{:<4} task {:<4} {:<9} {:<9} {}\n      would {}: {}",
+                            t["id"],
+                            t["task"],
+                            t["status"].as_str().unwrap_or("?"),
+                            t["verdict"].as_str().unwrap_or(""),
+                            t["question"].as_str().unwrap_or(""),
+                            t["action"].as_str().unwrap_or("?"),
+                            t["answer"].as_str().unwrap_or("")
+                        );
+                    }
+                }
+                "review" => {
+                    let id = task_id(&mut a);
+                    let agree = a.flag("--agree");
+                    let disagree = a.flag("--disagree");
+                    finish(&a);
+                    if agree == disagree {
+                        die("say --agree or --disagree");
+                    }
+                    or_die(d.call(
+                        "POST",
+                        &format!("/triage/{id}/review"),
+                        Some(&json!({"agree": agree})),
+                    ));
+                    println!(
+                        "reviewed #{id}: {}",
+                        if agree { "agree" } else { "disagree" }
+                    );
+                }
+                _ => die("usage: mason triage list | review <id> (--agree | --disagree)"),
             }
         }
         "metrics" => {
@@ -1090,6 +1421,228 @@ fn main() {
                 }
             }
         }
+        "proposals" => {
+            let open = a.flag("--open");
+            finish(&a);
+            let r = or_die(d.call(
+                "GET",
+                if open {
+                    "/proposals?open=1"
+                } else {
+                    "/proposals"
+                },
+                None,
+            ));
+            if json_out {
+                return println!("{r:#}");
+            }
+            let list = r["proposals"].as_array().cloned().unwrap_or_default();
+            if list.is_empty() {
+                println!("no proposals");
+            }
+            for p in list {
+                println!(
+                    "#{:<4} {:<9} {:<8} {:<7} {:<9} {}\n      {}",
+                    p["task"],
+                    p["state"].as_str().unwrap_or("?"),
+                    p["source"].as_str().unwrap_or("?"),
+                    p["severity"].as_str().unwrap_or("?"),
+                    p["route"].as_str().unwrap_or("?"),
+                    p["title"].as_str().unwrap_or(""),
+                    p["project"].as_str().unwrap_or("")
+                );
+            }
+        }
+        "proposal" => {
+            let sub = a.pos().unwrap_or_default();
+            if std::env::var("MASON_AS").is_err() {
+                if let Ok(u) = std::env::var("USER") {
+                    std::env::set_var("MASON_AS", u);
+                }
+            }
+            match sub.as_str() {
+                "show" => {
+                    let id = task_id(&mut a);
+                    finish(&a);
+                    let p = or_die(d.call("GET", &format!("/proposals/{id}"), None));
+                    if json_out {
+                        return println!("{p:#}");
+                    }
+                    println!(
+                        "#{id} {} ({}, {}, routed to {})",
+                        p["title"].as_str().unwrap_or(""),
+                        p["source"].as_str().unwrap_or(""),
+                        p["severity"].as_str().unwrap_or(""),
+                        p["route"].as_str().unwrap_or("")
+                    );
+                    println!(
+                        "state: {}   publish: {}",
+                        p["state"].as_str().unwrap_or(""),
+                        p["publish_state"].as_str().unwrap_or("")
+                    );
+                    println!(
+                        "\n{}\n\nEvidence:\n{}",
+                        p["body"].as_str().unwrap_or(""),
+                        p["evidence"].as_str().unwrap_or("(none)")
+                    );
+                    if !p["branch"].as_str().unwrap_or("").is_empty() {
+                        println!(
+                            "\nbranch {} ({} access){}",
+                            p["branch"].as_str().unwrap_or(""),
+                            p["access"].as_str().unwrap_or(""),
+                            p["pr"].as_u64().map_or(String::new(), |n| format!(
+                                ", upstream pull request #{n} ({})",
+                                p["pr_state"].as_str().unwrap_or("")
+                            ))
+                        );
+                    }
+                }
+                "approve" => {
+                    let id = task_id(&mut a);
+                    finish(&a);
+                    or_die(d.call(
+                        "POST",
+                        &format!("/proposals/{id}/approve"),
+                        Some(&json!({})),
+                    ));
+                    println!("Approved proposal #{id}");
+                }
+                "reject" => {
+                    let id = task_id(&mut a);
+                    let reason = a
+                        .opt("--reason")
+                        .unwrap_or_else(|| "no reason given".into());
+                    finish(&a);
+                    or_die(d.call(
+                        "POST",
+                        &format!("/proposals/{id}/reject"),
+                        Some(&json!({"reason": reason})),
+                    ));
+                    println!("Rejected proposal #{id}");
+                }
+                "edit" => {
+                    let id = task_id(&mut a);
+                    let mut body = json!({});
+                    for k in ["title", "body", "evidence"] {
+                        if let Some(v) = a.opt(&format!("--{k}")) {
+                            body[k] = json!(v);
+                        }
+                    }
+                    finish(&a);
+                    if body.as_object().is_some_and(|o| o.is_empty()) {
+                        die("change something: --title, --body or --evidence");
+                    }
+                    or_die(d.call("POST", &format!("/proposals/{id}/edit"), Some(&body)));
+                    println!("Edited proposal #{id}");
+                }
+                "file" => {
+                    let task = a.opt("--task").map(|t| {
+                        t.trim_start_matches('#')
+                            .parse::<u64>()
+                            .unwrap_or_else(|_| die("--task is a task number"))
+                    });
+                    let project = a.opt("--project");
+                    let blocks = a.flag("--blocks");
+                    let (title, body, evidence) =
+                        (a.opt("--title"), a.opt("--body"), a.opt("--evidence"));
+                    finish(&a);
+                    let r = or_die(d.call(
+                        "POST",
+                        "/proposals",
+                        Some(&json!({"task": task, "project": project, "title": title, "body": body, "evidence": evidence, "blocks_task": blocks})),
+                    ));
+                    println!(
+                        "Filed #{} in {} ({}), {}",
+                        r["task"],
+                        r["project"].as_str().unwrap_or("?"),
+                        r["route"].as_str().unwrap_or("?"),
+                        if r["proposed"].as_bool().unwrap_or(true) {
+                            "waiting for you"
+                        } else {
+                            "queued"
+                        }
+                    );
+                }
+                "publish" => {
+                    let id = task_id(&mut a);
+                    let (preview, confirm) = (a.flag("--preview"), a.flag("--confirm"));
+                    finish(&a);
+                    if preview == confirm {
+                        die("say --preview (show what would be sent) or --confirm (send it)");
+                    }
+                    let r = or_die(d.call(
+                        "POST",
+                        &format!("/proposals/{id}/publish"),
+                        Some(&json!({"confirm": confirm})),
+                    ));
+                    if json_out {
+                        return println!("{r:#}");
+                    }
+                    println!(
+                        "{}\n\n{}\n",
+                        r["title"].as_str().unwrap_or(""),
+                        r["body"].as_str().unwrap_or("")
+                    );
+                    println!(
+                        "head {} -> base {}; {} redaction(s); attachments: none",
+                        r["head"].as_str().unwrap_or(""),
+                        r["base"].as_str().unwrap_or(""),
+                        r["redactions"]
+                    );
+                    for f in r["files"].as_array().into_iter().flatten() {
+                        println!("  changes {}", f.as_str().unwrap_or(""));
+                    }
+                    if let Some(b) = r["blocked"].as_str() {
+                        println!("NOT PUBLISHABLE: {b}");
+                    } else if confirm {
+                        println!("Opened pull request #{} upstream", r["pr"]);
+                    } else {
+                        println!("Nothing has been sent. To send exactly this: mason proposal publish {id} --confirm");
+                    }
+                }
+                "poll" => {
+                    finish(&a);
+                    or_die(d.call("POST", "/proposals/poll", Some(&json!({}))));
+                    println!("Looked at the upstream pull requests");
+                }
+                _ => die(&format!("unknown proposal command {sub:?}\n\n{HELP}")),
+            }
+        }
+        "improve" => {
+            let project = a.opt("--project");
+            let text = a
+                .pos()
+                .unwrap_or_else(|| die("say what to improve: mason improve \"<text>\""));
+            finish(&a);
+            if std::env::var("MASON_AS").is_err() {
+                if let Ok(u) = std::env::var("USER") {
+                    std::env::set_var("MASON_AS", u);
+                }
+            }
+            let project = project.unwrap_or_else(|| {
+                let r = or_die(d.call("GET", "/self", None));
+                r["projects"]
+                    .as_array()
+                    .and_then(|l| l.first())
+                    .and_then(|p| p["project"].as_str())
+                    .map(String::from)
+                    .unwrap_or_else(|| die("no project is MASON's own (a project file with a [self] section makes it so)"))
+            });
+            let r = or_die(d.call(
+                "POST",
+                &format!("/projects/{project}/improve"),
+                Some(&json!({"text": text})),
+            ));
+            if json_out {
+                return println!("{r:#}");
+            }
+            println!(
+                "Filed #{} in {project}: branch {} ({} access)",
+                r["task"],
+                r["branch"].as_str().unwrap_or("?"),
+                r["access"].as_str().unwrap_or("?")
+            );
+        }
         "self" => {
             finish(&a);
             let r = or_die(d.call("GET", "/self", None));
@@ -1103,11 +1656,18 @@ fn main() {
                 );
             }
             for p in list {
+                let held = p["held"].as_u64().unwrap_or(0);
+                let held = if held > 0 {
+                    format!(" ({held} held behind others, not counted)")
+                } else {
+                    String::new()
+                };
                 println!(
-                    "{}: {}/{} open ({} of yours open, not limited), {} of {} this week ({} of yours not counted), {} of {} agent steps in {} h ({} of yours not counted){}",
+                    "{}: {}/{} open{} ({} of yours open, not limited), {} of {} this week ({} of yours not counted), {} of {} agent steps in {} h ({} of yours not counted){}",
                     p["project"].as_str().unwrap_or("?"),
                     p["open"],
                     p["max_open"],
+                    held,
                     p["yours_open"].as_u64().unwrap_or(0),
                     p["week"],
                     p["per_week"],
@@ -1133,6 +1693,40 @@ fn main() {
                     h["reasons"].as_str().unwrap_or("")
                 );
             }
+        }
+        "usage" => {
+            let account = a.opt("--account");
+            finish(&a);
+            let mut r = or_die(d.call("GET", "/usage", None));
+            if let Some(acc) = &account {
+                let keep: Vec<Value> = r["providers"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|p| p["name"].as_str() == Some(acc.as_str()))
+                    .cloned()
+                    .collect();
+                if keep.is_empty() {
+                    die(&format!("no account named {acc}"));
+                }
+                r["providers"] = Value::Array(keep);
+                r["topBar"] = Value::Array(
+                    r["topBar"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter(|l| {
+                            l.as_str()
+                                .is_some_and(|l| l.starts_with(&format!("{acc} ")))
+                        })
+                        .cloned()
+                        .collect(),
+                );
+            }
+            if json_out {
+                return println!("{r:#}");
+            }
+            print!("{}", usage_text(&r));
         }
         "landing" => {
             finish(&a);
@@ -1316,6 +1910,14 @@ fn main() {
                 "running: {} job(s) of {} allowed, {} step host(s)",
                 s["jobs"], s["max_concurrent"], s["step_hosts_running"]
             );
+            for a in s["active"].as_array().into_iter().flatten() {
+                println!(
+                    "active: #{} {} on {}",
+                    a["task"],
+                    a["step"].as_str().unwrap_or("?"),
+                    a["display"].as_str().unwrap_or("?")
+                );
+            }
             println!(
                 "projects: {}",
                 s["projects"].as_array().map_or(String::new(), |p| p
@@ -1458,7 +2060,28 @@ fn main() {
                 }
                 "list" => {
                     let state = a.opt("--state");
+                    let pending = a.flag("--pending-issues");
                     finish(&a);
+                    if pending {
+                        let r = or_die(d.call("GET", "/pending-issues", None));
+                        if json_out {
+                            return println!("{r:#}");
+                        }
+                        let list = r["pending"].as_array().cloned().unwrap_or_default();
+                        if list.is_empty() {
+                            println!("no issues waiting to be imported");
+                        }
+                        for i in list {
+                            println!(
+                                "{} #{}  {}\n    {}",
+                                i["project"].as_str().unwrap_or("?"),
+                                i["number"],
+                                i["title"].as_str().unwrap_or(""),
+                                i["reason"].as_str().unwrap_or("")
+                            );
+                        }
+                        return;
+                    }
                     let path = state.map_or("/tasks".to_string(), |s| format!("/tasks?state={s}"));
                     let r = or_die(d.call("GET", &path, None));
                     if json_out {
@@ -1494,6 +2117,22 @@ fn main() {
                     println!("  project   {}", t["project"].as_str().unwrap_or("?"));
                     println!("  state     {}", t["state"].as_str().unwrap_or("?"));
                     println!("  activity  {}", t["activity"].as_str().unwrap_or("?"));
+                    if let Some(m) = t["model"]["display"].as_str() {
+                        println!("  model     {m}");
+                        if let Some(w) = t["model"]["why"].as_str().filter(|w| !w.is_empty()) {
+                            println!("            ({w})");
+                        }
+                    }
+                    for r in t["steps"].as_array().into_iter().flatten() {
+                        for l in r["launches"].as_array().into_iter().flatten() {
+                            println!(
+                                "  run {:<4} {:<9} {}",
+                                r["run"],
+                                l["kind"].as_str().unwrap_or(""),
+                                l["display"].as_str().unwrap_or("")
+                            );
+                        }
+                    }
                     if !t["progress"]["runs"].as_array().is_none_or(Vec::is_empty) {
                         for l in progress::lines(&t["progress"]).lines() {
                             println!("  progress  {l}");
@@ -1850,6 +2489,25 @@ fn main() {
                     or_die(d.call("POST", &format!("/tasks/{id}/approve"), None));
                     println!("Approved task #{id}");
                 }
+                "relink" => {
+                    let id = task_id(&mut a);
+                    let issue: u64 = a
+                        .opt("--issue")
+                        .and_then(|v| v.trim_start_matches('#').parse().ok())
+                        .unwrap_or_else(|| die("which issue? --issue N"));
+                    finish(&a);
+                    if std::env::var("MASON_AS").is_err() {
+                        if let Ok(u) = std::env::var("USER") {
+                            std::env::set_var("MASON_AS", u);
+                        }
+                    }
+                    or_die(d.call(
+                        "POST",
+                        &format!("/tasks/{id}/relink"),
+                        Some(&json!({"issue": issue})),
+                    ));
+                    println!("Task #{id} is now linked to issue #{issue}");
+                }
                 "reject" => {
                     let id = task_id(&mut a);
                     let reason = a
@@ -1888,4 +2546,294 @@ fn main() {
         }
         other => die(&format!("unknown command {other:?}\n\n{HELP}")),
     }
+}
+
+fn every_text(ms: u64) -> String {
+    match ms {
+        m if m >= 86_400_000 && m % 86_400_000 == 0 => format!("{}d", m / 86_400_000),
+        m if m >= 3_600_000 && m % 3_600_000 == 0 => format!("{}h", m / 3_600_000),
+        m if m >= 60_000 && m % 60_000 == 0 => format!("{}m", m / 60_000),
+        m if m % 1000 == 0 => format!("{}s", m / 1000),
+        m => format!("{m}ms"),
+    }
+}
+
+fn ms_text(ms: u64) -> String {
+    match ms {
+        m if m >= 3_600_000 => format!("{:.1}h", m as f64 / 3_600_000.0),
+        m if m >= 60_000 => format!("{:.1}m", m as f64 / 60_000.0),
+        m => format!("{:.1}s", m as f64 / 1000.0),
+    }
+}
+
+fn print_health(r: &serde_json::Value) {
+    println!("Findings and what came of their fixes");
+    let list = r["findings"].as_array().cloned().unwrap_or_default();
+    if list.is_empty() {
+        println!("  none yet");
+    }
+    for f in list {
+        println!(
+            "  #{:<3} [{}] {} (proposal #{}, metric {})",
+            f["id"],
+            f["verdict"].as_str().unwrap_or("?"),
+            f["title"].as_str().unwrap_or(""),
+            f["task"],
+            f["metric"].as_str().unwrap_or("?")
+        );
+        if let Some(t) = f["text"].as_str().filter(|t| !t.is_empty()) {
+            println!("        {t}");
+        }
+    }
+    println!("Recurring jobs");
+    for s in r["schedules"].as_array().cloned().unwrap_or_default() {
+        println!(
+            "  {:<28} every {:<6} runs {:<4} {}",
+            s["name"].as_str().unwrap_or("?"),
+            every_text(s["every_ms"].as_u64().unwrap_or(0)),
+            s["runs"],
+            s["last_status"].as_str().unwrap_or("")
+        );
+    }
+    let q = r["triage"]["queue"].as_array().map_or(0, Vec::len);
+    println!(
+        "Triage: {} ({} waiting for your review, {} reviewed)",
+        if r["triage"]["enabled"].as_bool().unwrap_or(false) {
+            "on"
+        } else {
+            "off"
+        },
+        q,
+        r["triage"]["reviewed"]
+    );
+}
+
+fn print_digest(r: &serde_json::Value) {
+    let n = |k: &str| r[k].to_string();
+    println!("Landed: {}", n("landed"));
+    match r["median_claim_to_land_ms"].as_u64() {
+        Some(m) => println!(
+            "Median time from claim to land: {} ({} task(s))",
+            ms_text(m),
+            n("claim_to_land_samples")
+        ),
+        None => println!("Median time from claim to land: no landed task in the window"),
+    }
+    match r["interventions_per_landed"].as_f64() {
+        Some(v) => println!(
+            "Interventions per landed task: {v:.2} ({} interventions)",
+            n("interventions")
+        ),
+        None => println!(
+            "Interventions per landed task: n/a ({} interventions, none landed)",
+            n("interventions")
+        ),
+    }
+    println!("Tokens per landed task: not recorded");
+    for (title, key) in [
+        ("Time by state", "time_by_state_ms"),
+        ("Waiting, by reason", "wait_by_reason_ms"),
+    ] {
+        println!("{title}:");
+        if let Some(m) = r[key].as_object() {
+            for (k, v) in m {
+                println!("  {k:<20} {}", ms_text(v.as_u64().unwrap_or(0)));
+            }
+        }
+    }
+    let ex = &r["exploring"];
+    println!(
+        "Exploring skipped for {} task(s); {} came back to exploring",
+        ex["skipped"], ex["came_back"]
+    );
+    if let Some(m) = ex["by_route"].as_object() {
+        for (route, v) in m {
+            println!(
+                "  {route:<16} {} task(s), {} came back",
+                v["tasks"], v["came_back"]
+            );
+        }
+    }
+    println!("Forced landings:");
+    let forced = r["forced_landings"].as_array().cloned().unwrap_or_default();
+    if forced.is_empty() {
+        println!("  none");
+    }
+    for f in forced {
+        println!(
+            "  task #{} ({}, {}): {}",
+            f["task"],
+            f["project"].as_str().unwrap_or("?"),
+            f["kind"].as_str().unwrap_or("?"),
+            f["reason"].as_str().unwrap_or("")
+        );
+    }
+    println!("Flaky: {}", r["flaky"].as_object().map_or(0, |m| m.len()));
+    println!(
+        "Debts outstanding: {}",
+        r["debts_outstanding"].as_array().map_or(0, Vec::len)
+    );
+    println!("Fixes:");
+    let fs = r["findings"].as_array().cloned().unwrap_or_default();
+    if fs.is_empty() {
+        println!("  none");
+    }
+    for f in fs {
+        println!(
+            "  #{} {} [{}] {}",
+            f["id"],
+            f["title"].as_str().unwrap_or(""),
+            f["verdict"].as_str().unwrap_or("?"),
+            f["text"].as_str().unwrap_or("")
+        );
+    }
+}
+
+fn tokens_text(t: &Value, out: &mut String) {
+    for (title, key) in [
+        ("by project", "byProject"),
+        ("by model", "byModel"),
+        ("top tasks", "topTasks"),
+    ] {
+        let lines = t[key].as_array().cloned().unwrap_or_default();
+        if lines.is_empty() {
+            continue;
+        }
+        out.push_str(&format!("    {title}:\n"));
+        for l in lines {
+            let n = |k: &str| {
+                l[k].as_str()
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .or(l[k].as_u64())
+            };
+            let mut parts = vec![];
+            for (label, k) in [
+                ("in", "input"),
+                ("out", "output"),
+                ("cache read", "cacheRead"),
+                ("cache write", "cacheWrite"),
+            ] {
+                if let Some(v) =
+                    n(k).filter(|_| l[format!("has{}", pascal(k))].as_bool() == Some(true))
+                {
+                    parts.push(format!("{label} {}", mason_core::usage_text::count(v)));
+                }
+            }
+            if l["hasCost"].as_bool() == Some(true) {
+                parts.push(format!("${:.2}", l["costUsd"].as_f64().unwrap_or(0.0)));
+            }
+            out.push_str(&format!(
+                "      {}: {} ({})\n",
+                l["name"].as_str().unwrap_or("?"),
+                if parts.is_empty() {
+                    "nothing reported".to_string()
+                } else {
+                    parts.join(", ")
+                },
+                l["age"].as_str().unwrap_or("")
+            ));
+        }
+    }
+}
+
+fn pascal(k: &str) -> String {
+    k.split('_')
+        .map(|w| {
+            let mut c = w.chars();
+            c.next().map_or(String::new(), |f| {
+                f.to_uppercase().collect::<String>() + c.as_str()
+            })
+        })
+        .collect()
+}
+
+/// The usage view as text, from its JSON.
+fn usage_text(r: &Value) -> String {
+    let mut out = String::new();
+    for p in r["providers"].as_array().into_iter().flatten() {
+        let g = |k: &str| p[k].as_str().unwrap_or("");
+        out.push_str(&format!(
+            "{} ({}, {}): {} of {} sessions{}\n",
+            g("name"),
+            g("adapter"),
+            g("billing"),
+            p["sessionsUsed"].as_u64().unwrap_or(0),
+            p["sessionsLimit"].as_u64().unwrap_or(0),
+            if p["hasSnapshot"].as_bool() == Some(true) {
+                format!(", {}", g("age"))
+            } else {
+                ", nothing reported yet".into()
+            }
+        ));
+        for w in p["windows"].as_array().into_iter().flatten() {
+            let line = if w["reported"].as_bool() == Some(true) {
+                let pct = if w["hasPercent"].as_bool() == Some(true) {
+                    format!("{}%", w["percent"].as_f64().unwrap_or(0.0).round())
+                } else {
+                    "no percentage reported".into()
+                };
+                format!(
+                    "{pct}, {}, {}{}",
+                    w["state"].as_str().unwrap_or("ok"),
+                    w["resetsText"]
+                        .as_str()
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or("no reset reported"),
+                    w["trend"]
+                        .as_str()
+                        .filter(|s| !s.is_empty())
+                        .map_or(String::new(), |t| format!(" ({t})"))
+                )
+            } else {
+                "not reported yet".into()
+            };
+            out.push_str(&format!(
+                "  {}: {line}\n",
+                w["label"].as_str().unwrap_or("?")
+            ));
+        }
+        if let Some(s) = p["spend"]
+            .as_object()
+            .filter(|s| s["hasSpend"].as_bool() == Some(true))
+        {
+            let f = |k: &str| s[k].as_f64().unwrap_or(0.0);
+            let budget = if s["hasBudget"].as_bool() == Some(true) {
+                format!(" of ${:.2} monthly budget", f("budgetUsd"))
+            } else {
+                String::new()
+            };
+            out.push_str(&format!(
+                "  spend: ${:.2} today, ${:.2} this week, ${:.2} this month{budget} ({})\n",
+                f("todayUsd"),
+                f("weekUsd"),
+                f("monthUsd"),
+                s["age"].as_str().unwrap_or("")
+            ));
+        } else if g("billing") == "api" {
+            out.push_str("  spend: nothing reported yet\n");
+        }
+        for k in ["overageText", "blockedText"] {
+            if !g(k).is_empty() {
+                out.push_str(&format!("  {}\n", g(k)));
+            }
+        }
+        for (key, fallback) in [("tokensWindow", ""), ("tokensWeek", "")] {
+            let t = &p[key];
+            let has = ["byProject", "byModel", "topTasks"]
+                .iter()
+                .any(|k| t[*k].as_array().is_some_and(|a| !a.is_empty()));
+            if has {
+                out.push_str(&format!(
+                    "  tokens, {}:{fallback}\n",
+                    t["period"].as_str().unwrap_or("")
+                ));
+                tokens_text(t, &mut out);
+            }
+        }
+        out.push_str(&format!("  doing: {}\n", g("doing")));
+    }
+    if out.is_empty() {
+        out.push_str("no provider accounts\n");
+    }
+    out
 }

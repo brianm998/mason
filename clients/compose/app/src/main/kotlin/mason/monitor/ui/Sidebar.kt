@@ -169,13 +169,30 @@ private fun RowView(model: MonitorModel, row: TaskRow) {
                 Text(row.title, style = theme.body(), maxLines = 2, overflow = TextOverflow.Ellipsis)
             }
             Text("${row.project}, ${row.why_waiting.ifEmpty { row.activity }}", style = theme.small(), maxLines = 2, overflow = TextOverflow.Ellipsis)
+            if (row.proposal.isNotEmpty()) Text(row.proposal, style = theme.small(), modifier = Modifier.testTag("row:${row.id}:proposal"))
             Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing), verticalAlignment = Alignment.CenterVertically) {
                 Text(Format.duration(row.in_state_ms), style = theme.small(color = if (row.slow) theme.slow else theme.muted))
                 if (row.typical.isNotEmpty()) Text(row.typical, style = theme.small())
                 ProgressCells(model, row.progress, row.slow)
-                if (row.model.isNotEmpty()) Text(row.model, style = theme.small())
+                if (row.display.isNotEmpty() || row.model.isNotEmpty()) Text(row.display.ifEmpty { row.model }, style = theme.small())
             }
             row.progress.running?.let { ProgressLine(model, it) }
+        }
+        if (row.issue != 0L) {
+            val uri = androidx.compose.ui.platform.LocalUriHandler.current
+            Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing), verticalAlignment = Alignment.CenterVertically) {
+                if (row.issue_url.isNotEmpty()) {
+                    Text(
+                        "issue #${row.issue}", style = theme.small(color = theme.accent),
+                        modifier = Modifier.testTag("issue:${row.id}").clickable { runCatching { uri.openUri(row.issue_url) } },
+                    )
+                } else {
+                    Text("issue #${row.issue}", style = theme.small())
+                }
+                if (row.state == "proposed" && model.canAct && "approve" in row.allowed_actions) {
+                    Pill("Approve", prominent = true, modifier = Modifier.testTag("row:${row.id}:approve")) { model.approve(row.id) }
+                }
+            }
         }
         if (row.blockers.isNotEmpty()) {
             Row(horizontalArrangement = Arrangement.spacedBy(theme.spacingSmall)) {

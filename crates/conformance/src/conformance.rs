@@ -75,6 +75,17 @@ fn row_item(r: &TaskRow, order: usize, prefix: &str) -> Item {
     if !r.why_waiting.is_empty() {
         texts.push(r.why_waiting.clone());
     }
+    // The tier and the real model, as the daemon wrote it.
+    if !r.display.is_empty() {
+        texts.push(r.display.clone());
+    }
+    // A task the tracker imported shows its issue, and where to read it.
+    if r.issue != 0 {
+        texts.push(format!("issue #{}", r.issue));
+        if !r.issue_url.is_empty() {
+            texts.push(r.issue_url.clone());
+        }
+    }
     // The task page says what it waits for and what waits for it.
     if prefix == "detail" {
         if !r.blockers.is_empty() {
@@ -268,6 +279,32 @@ pub fn visible(views: &[View], owner: bool) -> Vec<Item> {
                         i,
                     ));
                 }
+                // Issues the tracker has not imported: a count tile and a list, only while true.
+                if !h.pending_issues.is_empty() {
+                    out.push(Item::new(
+                        "tile:not_imported",
+                        vec![h.pending_issues.len().to_string(), "not imported".into()],
+                        vec![],
+                        h.counts.len(),
+                    ));
+                    for (i, p) in h.pending_issues.iter().enumerate() {
+                        let mut texts = vec![
+                            p.project.clone(),
+                            format!("#{}", p.number),
+                            p.title.clone(),
+                            p.reason.clone(),
+                        ];
+                        if !p.url.is_empty() {
+                            texts.push(p.url.clone());
+                        }
+                        out.push(Item::new(
+                            format!("pending:{}:{}", p.project, p.number),
+                            texts,
+                            vec![],
+                            i,
+                        ));
+                    }
+                }
             }
             Some(Body::Sidebar(s)) => {
                 for (i, sec) in s.sections.iter().enumerate() {
@@ -308,7 +345,11 @@ pub fn visible(views: &[View], owner: bool) -> Vec<Item> {
                     out.push(Item::new(
                         format!("active:{}", a.task),
                         vec![
-                            a.model.clone(),
+                            if a.display.is_empty() {
+                                a.model.clone()
+                            } else {
+                                a.display.clone()
+                            },
                             a.project.clone(),
                             format!("#{}", a.task),
                             a.step.clone(),
@@ -330,12 +371,9 @@ pub fn visible(views: &[View], owner: bool) -> Vec<Item> {
                     out.extend(progress_items(r, system_now_ms()));
                 }
                 for (i, s) in t.steps.iter().enumerate() {
-                    out.push(Item::new(
-                        format!("step:{}", s.run),
-                        vec![s.name.clone(), s.outcome.clone()],
-                        vec![],
-                        i,
-                    ));
+                    let mut texts = vec![s.name.clone(), s.outcome.clone()];
+                    texts.extend(s.launches.iter().map(|l| l.display.clone()));
+                    out.push(Item::new(format!("step:{}", s.run), texts, vec![], i));
                 }
                 if let (Some(c), Some(r)) = (&t.card, &t.row) {
                     out.push(card_item(r.id, c, owner));
@@ -345,7 +383,53 @@ pub fn visible(views: &[View], owner: bool) -> Vec<Item> {
                 }
             }
             Some(Body::Editor(e)) => out.extend(editor_items(e)),
+            Some(Body::Usage(u)) => out.extend(usage_items(u)),
             _ => {}
+        }
+    }
+    out
+}
+
+/// The percentage text of a window, as both monitors word it.
+pub fn window_percent_text(w: &UsageWindow) -> String {
+    if !w.reported {
+        "not reported yet".into()
+    } else if w.has_percent {
+        format!("{}%", w.percent.round() as i64)
+    } else {
+        "no percentage reported".into()
+    }
+}
+
+/// What the LLM usage page shows (s64), as the texts that do not move with the
+/// clock: each account with its adapter, billing and sessions, and each window
+/// with its label, percentage (or that there is none) and state. The ages and
+/// countdowns change every minute and are not compared.
+pub fn usage_items(u: &UsageView) -> Vec<Item> {
+    let mut out = vec![];
+    for (i, p) in u.providers.iter().enumerate() {
+        out.push(Item::new(
+            format!("usage:{}", p.name),
+            vec![
+                p.name.clone(),
+                p.adapter.clone(),
+                p.billing.clone(),
+                format!("{} of {} sessions", p.sessions_used, p.sessions_limit),
+            ],
+            vec![],
+            i,
+        ));
+        for (j, w) in p.windows.iter().enumerate() {
+            let mut texts = vec![w.label.clone(), window_percent_text(w)];
+            if w.reported {
+                texts.push(w.state.clone());
+            }
+            out.push(Item::new(
+                format!("usage-window:{}:{}", p.name, w.id),
+                texts,
+                vec![],
+                j,
+            ));
         }
     }
     out

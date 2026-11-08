@@ -817,7 +817,7 @@ pub fn palette(caps: &Capabilities) -> Vec<Value> {
                 "available": caps.step_types.contains(k),
                 // What a new step of this type needs to be valid at once.
                 "fields": match k {
-                    StepType::Agent => json!({"agent": "fast"}),
+                    StepType::Agent => json!({"agent": "light"}),
                     StepType::Command | StepType::Gate => json!({"command": "true"}),
                     _ => json!({}),
                 },
@@ -868,6 +868,7 @@ pub fn step_schema(kind: StepType, def: &Definition) -> Value {
         .chain(
             crate::builtin::builtin_profile_names()
                 .iter()
+                .filter(|s| **s != "fast")
                 .map(|s| s.to_string()),
         )
         .collect::<BTreeSet<_>>()

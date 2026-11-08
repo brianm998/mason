@@ -68,7 +68,7 @@ struct HomePage: View {
                         if active.isEmpty { Text("Nothing is running.").font(theme.body()).foregroundStyle(theme.muted) }
                         ForEach(active, id: \.task) { a in
                             HStack(spacing: theme.spacing) {
-                                Text(a.model).font(theme.body(.semibold))
+                                Text(a.display.isEmpty ? a.model : a.display).font(theme.body(.semibold))
                                 Button("\(a.project) #\(a.task)") { model.go(.task(a.task)) }.buttonStyle(.link)
                                 Text(a.step).foregroundStyle(theme.muted)
                             }
@@ -218,10 +218,18 @@ struct TaskDetailPage: View {
 
             if d.hasCard { DecisionCardView(model: model, task: r.id, card: d.card) }
             if d.hasApproval { ApprovalView(model: model, task: r.id, approval: d.approval) }
+            if d.hasProposal { ProposalView(model: model, row: r, info: d.proposal, title: r.title) }
             if !d.failure.isEmpty {
                 Text("Failed: \(d.failure)").font(theme.body()).foregroundStyle(theme.attention)
             }
 
+            if !d.stepTokens.isEmpty {
+                section("Tokens", theme: theme) {
+                    ForEach(Array(d.stepTokens.enumerated()), id: \.offset) { _, l in
+                        Text(tokenLineText(l)).font(theme.body())
+                    }
+                }
+            }
             section("Steps", theme: theme) {
                 ForEach(d.steps, id: \.run) { s in
                     HStack(spacing: theme.spacing) {
@@ -236,6 +244,11 @@ struct TaskDetailPage: View {
                     }
                     .font(theme.body())
                     .accessibilityIdentifier("step:\(s.run)")
+                    // Every session this run started, so a retry up the ladder shows.
+                    ForEach(Array(s.launches.enumerated()), id: \.offset) { _, l in
+                        Text("\(l.kind): \(l.display)").font(theme.small()).foregroundStyle(theme.muted)
+                            .padding(.leading, theme.spacingLarge)
+                    }
                 }
             }
 
@@ -250,10 +263,8 @@ struct TaskDetailPage: View {
                     }
                 }
             }
-            if !d.plan.isEmpty {
-                section("Plan", theme: theme) {
-                    Text(d.plan).font(theme.mono()).textSelection(.enabled)
-                }
+            if !d.plan.isEmpty || d.hasPlanView {
+                section("Plan", theme: theme) { PlanSection(detail: d) }
             }
             if !d.body.isEmpty {
                 section("Task", theme: theme) { Text(d.body).font(theme.body()).textSelection(.enabled) }
@@ -335,15 +346,105 @@ struct UsagePage: View {
     @ObservedObject var model: MonitorModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: theme.spacingLarge) {
-            Text("LLM usage").font(theme.title())
-            ForEach(model.usage?.providers ?? [], id: \.name) { p in
-                Text("\(p.name) (\(p.adapter), \(p.billing)): \(p.status), \(p.sessionsUsed) of \(p.sessionsLimit) sessions in use; warn at \(Int(p.warnAt * 100))%, overage \(p.overage)" + (p.monthlyBudgetUsd > 0 ? ", budget $\(Int(p.monthlyBudgetUsd))/month" : "")).font(theme.body())
+        ScrollView {
+            VStack(alignment: .leading, spacing: theme.spacingLarge) {
+                Text("LLM usage").font(theme.title())
+                ForEach(model.usage?.providers ?? [], id: \.name) { p in
+                    UsageAccount(p: p)
+                }
+                if let n = model.usage?.note { Text(n).font(theme.body()).foregroundStyle(theme.muted) }
+                SessionStepper(model: model)
             }
-            if let n = model.usage?.note { Text(n).font(theme.body()).foregroundStyle(theme.muted) }
-            SessionStepper(model: model)
+            .padding(theme.spacingLarge)
         }
-        .padding(theme.spacingLarge)
+    }
+}
+
+/// The text of a window's percentage, worded as the conformance runner words it.
+func windowPercentText(_ w: Mason_V1_UsageWindow) -> String {
+    if !w.reported { return "not reported yet" }
+    if w.hasPercent_p { return "\(Int(w.percent.rounded()))%" }
+    return "no percentage reported"
+}
+
+func tokenLineText(_ l: Mason_V1_TokenLine) -> String {
+    var parts: [String] = []
+    if l.hasInput_p { parts.append("in \(countText(l.input))") }
+    if l.hasOutput_p { parts.append("out \(countText(l.output))") }
+    if l.hasCacheRead_p { parts.append("cache read \(countText(l.cacheRead))") }
+    if l.hasCacheWrite_p { parts.append("cache write \(countText(l.cacheWrite))") }
+    if l.hasCost_p { parts.append(String(format: "$%.2f", l.costUsd)) }
+    return "\(l.name): " + (parts.isEmpty ? "nothing reported" : parts.joined(separator: ", ")) + " (\(l.age))"
+}
+
+func countText(_ n: UInt64) -> String {
+    if n < 1000 { return String(n) }
+    if n < 1_000_000 { return String(format: "%.1fk", Double(n) / 1e3) }
+    return String(format: "%.1fM", Double(n) / 1e6)
+}
+
+/// One provider account: its slots, each window as a bar with its reset, overage and
+/// blocked text, spend for an api account, and tokens. Every figure carries its age.
+struct UsageAccount: View {
+    @Environment(\.theme) var theme
+    let p: Mason_V1_ProviderStatus
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: theme.spacingSmall) {
+            Text("\(p.name) (\(p.adapter), \(p.billing)): \(p.status), \(p.sessionsUsed) of \(p.sessionsLimit) sessions")
+                .font(theme.body(.semibold))
+                .accessibilityIdentifier("usage:\(p.name)")
+            Text("warn at \(Int(p.warnAt * 100))%, overage \(p.overage)" + (p.monthlyBudgetUsd > 0 ? ", budget $\(Int(p.monthlyBudgetUsd))/month" : ""))
+                .font(theme.small()).foregroundStyle(theme.muted)
+            Text(p.hasSnapshot_p ? p.age : "nothing reported yet").font(theme.small()).foregroundStyle(theme.muted)
+            ForEach(p.windows, id: \.id) { w in
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("\(w.label): \(windowPercentText(w))" + (w.reported ? ", \(w.state)" : ""))
+                        .font(theme.body())
+                    if w.reported && w.hasPercent_p {
+                        ProgressView(value: min(max(w.percent / 100, 0), 1))
+                            .tint(w.state == "blocked" ? theme.attention : nil)
+                    }
+                    if w.reported {
+                        Text(w.hasReset_p ? w.resetsText : "no reset time reported").font(theme.small()).foregroundStyle(theme.muted)
+                        if !w.trend.isEmpty { Text(w.trend).font(theme.small()).foregroundStyle(theme.muted) }
+                        Text(w.age).font(theme.small()).foregroundStyle(theme.muted)
+                    }
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityIdentifier("usage-window:\(p.name):\(w.id)")
+            }
+            if p.hasSpend {
+                let s = p.spend
+                if s.hasSpend_p {
+                    Text(String(format: "Spend: $%.2f today, $%.2f this week, $%.2f this month", s.todayUsd, s.weekUsd, s.monthUsd)
+                        + (s.hasBudget_p ? String(format: " of $%.2f budget", s.budgetUsd) : "") + " (\(s.age))")
+                        .font(theme.body())
+                    if s.hasBudget_p && s.budgetUsd > 0 {
+                        ProgressView(value: min(max(s.monthUsd / s.budgetUsd, 0), 1))
+                    }
+                } else {
+                    Text("Spend: nothing reported yet").font(theme.body()).foregroundStyle(theme.muted)
+                }
+            }
+            if !p.overageText.isEmpty { Text(p.overageText).font(theme.body()) }
+            if !p.blockedText.isEmpty { Text(p.blockedText).font(theme.body()).foregroundStyle(theme.attention) }
+            tokens(p.tokensWindow)
+            tokens(p.tokensWeek)
+            Text("Doing: \(p.doing)").font(theme.small()).foregroundStyle(theme.muted)
+        }
+    }
+
+    @ViewBuilder
+    func tokens(_ t: Mason_V1_UsageTokens) -> some View {
+        if !(t.byProject.isEmpty && t.byModel.isEmpty && t.topTasks.isEmpty) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Tokens, \(t.period)").font(theme.body(.semibold))
+                ForEach(Array(t.byProject.enumerated()), id: \.offset) { _, l in Text("project " + tokenLineText(l)).font(theme.small()) }
+                ForEach(Array(t.byModel.enumerated()), id: \.offset) { _, l in Text("model " + tokenLineText(l)).font(theme.small()) }
+                ForEach(Array(t.topTasks.enumerated()), id: \.offset) { _, l in Text("task " + tokenLineText(l)).font(theme.small()) }
+            }
+        }
     }
 }
 
@@ -367,6 +468,29 @@ struct HealthPage: View {
                     section("Waiting", theme: theme) {
                         if h.waiting.isEmpty { Text("Nothing is waiting.").font(theme.body()).foregroundStyle(theme.muted) }
                         ForEach(h.waiting, id: \.self) { Text($0).font(theme.body()) }
+                    }
+                }
+                if let i = model.introspection {
+                    section("Findings", theme: theme) {
+                        if i.findings.isEmpty { Text("Nothing found yet.").font(theme.body()).foregroundStyle(theme.muted) }
+                        ForEach(i.findings, id: \.id) { f in
+                            VStack(alignment: .leading) {
+                                Text("#\(f.id) [\(f.verdict)] \(f.title) (proposal #\(f.task), metric \(f.metric))").font(theme.body())
+                                if !f.text.isEmpty { Text(f.text).font(theme.body()).foregroundStyle(theme.muted) }
+                            }
+                        }
+                    }
+                    section("Recurring jobs", theme: theme) {
+                        ForEach(i.jobs, id: \.name) { j in
+                            Text("\(j.name) (\(j.kind)): \(j.runs) run(s). \(j.status)").font(theme.body())
+                        }
+                    }
+                    section("Digest (last 7 days)", theme: theme) {
+                        ForEach(i.digest, id: \.self) { Text($0).font(theme.body()) }
+                    }
+                    section("Triage", theme: theme) {
+                        Text(i.triageOn ? "On. \(i.triageWaiting) suggestion(s) wait for your review; triage never answers a question." : "Off.")
+                            .font(theme.body())
                     }
                 }
             }.padding(theme.spacingLarge)

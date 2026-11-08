@@ -130,7 +130,7 @@ m definition check "$root/def1.toml" | head -4
 m definition check "$root/def2.toml" | head -3
 
 push .mason/mason.toml "pipeline: definition one" < "$root/def1.toml"
-"$bin/masond" --data-dir "$root/d" --config-dir "$root/c" --heartbeat-ms 100 --sweep-ms 3600000 --reload-interval-ms 200 --fetch-interval-ms 300 2>>"$root/masond.log" &
+"$bin/masond" --port 0 --data-dir "$root/d" --config-dir "$root/c" --heartbeat-ms 100 --sweep-ms 3600000 --reload-interval-ms 200 --fetch-interval-ms 300 2>>"$root/masond.log" &
 daemon=$!
 until m status >/dev/null 2>&1; do kill -0 "$daemon" || { cat "$root/masond.log" >&2; exit 1; }; sleep 0.1; done
 m doctor | grep -E 'mason.toml|FAIL' || true

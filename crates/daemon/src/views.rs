@@ -83,15 +83,39 @@ pub struct Ctx<'a> {
     pub d: &'a Daemon,
     pub w: &'a World,
     pub now: u64,
+    /// Task to the tracker issue it was imported from.
+    issues: std::collections::HashMap<u64, u64>,
+}
+
+/// The public page of an issue, when the tracker is GitHub's own.
+fn issue_page(d: &Daemon, pid: ProjectId, n: u64) -> String {
+    d.project(pid)
+        .and_then(|p| p.services.tracker.as_ref())
+        .filter(|t| t.api.trim_end_matches('/') == "https://api.github.com")
+        .map_or_else(String::new, |t| {
+            format!("https://github.com/{}/issues/{n}", t.repo)
+        })
 }
 
 impl<'a> Ctx<'a> {
     pub fn new(d: &'a Daemon, w: &'a World) -> Ctx<'a> {
+        let mut issues = std::collections::HashMap::new();
+        for p in d.projects.values() {
+            for r in d.store.tracker_items(&p.id).unwrap_or_default() {
+                issues.insert(r.task, r.number);
+            }
+        }
         Ctx {
             d,
             w,
             now: now_ms(),
+            issues,
         }
+    }
+
+    /// A proposed task imported from the tracker: it has its own section.
+    fn is_import(&self, t: &Task) -> bool {
+        t.state == State::Proposed && self.issues.contains_key(&t.id.0)
     }
 
     fn project_name(&self, t: &Task) -> String {
@@ -231,6 +255,16 @@ impl<'a> Ctx<'a> {
         if let Some(w) = self.d.broker.explain_task(t.id) {
             return w;
         }
+        if t.state == State::Proposed && !t.blockers.is_empty() {
+            return format!(
+                "Proposed, held behind {}",
+                t.blockers
+                    .iter()
+                    .map(|b| format!("#{}", b.0))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
         match &t.activity {
             Activity::Waiting(WaitReason::On(w)) => w.clone(),
             Activity::Waiting(WaitReason::Slot) => "Waiting for an LLM session to be free".into(),
@@ -352,6 +386,9 @@ impl<'a> Ctx<'a> {
         } else {
             String::new()
         };
+        // What the step really launched (or, before it starts, what it is expected
+        // to use). The old `model` above stays as it was for older clients.
+        let model_use = crate::launchview::task_use(self.d, self.w, t);
         TaskRow {
             id: t.id.0,
             key: format!("#{}", t.id.0),
@@ -363,6 +400,10 @@ impl<'a> Ctx<'a> {
             enqueued_ms: t.enqueued_at.0,
             in_state_ms: in_state,
             model,
+            display: model_use
+                .as_ref()
+                .map_or_else(String::new, |m| m.display.clone()),
+            model_use,
             progress: self.progress(t),
             allowed_actions: self.allowed_actions(t),
             blockers: t.blockers.iter().map(|b| b.0).collect(),
@@ -380,7 +421,44 @@ impl<'a> Ctx<'a> {
             slow: typical.is_some_and(|(_, hi)| t.state.is_step() && in_state > hi),
             step: t.step.clone(),
             body: t.body.chars().take(2000).collect(),
+            proposal: self
+                .d
+                .store
+                .proposal(t.id.0)
+                .ok()
+                .flatten()
+                .map_or_else(String::new, |r| crate::proposals::tag(&r)),
+            issue: self.issues.get(&t.id.0).copied().unwrap_or(0),
+            issue_url: self
+                .issues
+                .get(&t.id.0)
+                .map_or_else(String::new, |n| issue_page(self.d, t.project, *n)),
         }
+    }
+
+    /// The proposal behind a task, if it is one, and where its improvement branch is.
+    fn proposal_info(&self, t: &Task) -> Option<ProposalInfo> {
+        let r = self.d.store.proposal(t.id.0).ok().flatten()?;
+        let channel = crate::improve::switched(self.d)
+            .filter(|s| s["task"].as_u64() == Some(r.task))
+            .and_then(|s| s["branch"].as_str().map(|b| format!("branch:{b}")))
+            .unwrap_or_default();
+        Some(ProposalInfo {
+            source: r.source,
+            severity: r.severity,
+            route: r.route,
+            evidence: r.evidence,
+            text: r.body,
+            filed_by: r.filed_by.unwrap_or(0),
+            status: r.status,
+            reject_reason: r.reject_reason,
+            publish_state: r.publish_state,
+            access: r.access,
+            branch: r.branch,
+            pr: r.pr.unwrap_or(0),
+            pr_state: r.pr_state,
+            channel,
+        })
     }
 
     fn matches(&self, t: &Task, project: &str) -> bool {
@@ -433,6 +511,9 @@ impl<'a> Ctx<'a> {
                 });
             }
         }
+        for (kind, text) in crate::holds::banners(self.d) {
+            banners.push(Banner { kind, text });
+        }
         HeaderView {
             attention,
             counts: ORDER
@@ -449,6 +530,25 @@ impl<'a> Ctx<'a> {
                 .collect(),
             banners,
             projects: self.w.projects.values().map(|p| p.name.clone()).collect(),
+            pending_issues: self
+                .d
+                .projects
+                .iter()
+                .filter(|(_, p)| project.is_empty() || p.id == project)
+                .flat_map(|(pid, p)| {
+                    self.d
+                        .tracker
+                        .pending(*pid)
+                        .into_iter()
+                        .map(move |w| PendingIssue {
+                            project: p.id.clone(),
+                            number: w.number,
+                            title: w.title,
+                            reason: w.reason,
+                            url: issue_page(self.d, *pid, w.number),
+                        })
+                })
+                .collect(),
             status: if attention == 0 {
                 "All quiet".into()
             } else {
@@ -457,16 +557,39 @@ impl<'a> Ctx<'a> {
                     if attention == 1 { "s" } else { "" }
                 )
             },
+            self_project: crate::proposals::self_project(self.d)
+                .map_or_else(String::new, |(_, p)| p.id.clone()),
         }
     }
 
     fn section(&self, s: State, project: &str) -> SidebarSection {
-        let mut tasks: Vec<&Task> = self
+        let tasks: Vec<&Task> = self
             .w
             .tasks
             .values()
             .filter(|t| self.in_section(t, s) && self.matches(t, project))
+            .filter(|t| !(s == State::Proposed && self.is_import(t)))
             .collect();
+        self.section_of(s, tasks)
+    }
+
+    /// Proposed tasks the tracker imported: they wait for approval like any
+    /// proposal, but come from an outside signal, so they are listed apart.
+    fn imports_section(&self, project: &str) -> SidebarSection {
+        let tasks: Vec<&Task> = self
+            .w
+            .tasks
+            .values()
+            .filter(|t| self.in_section(t, State::Proposed) && self.matches(t, project))
+            .filter(|t| self.is_import(t))
+            .collect();
+        let mut sec = self.section_of(State::Proposed, tasks);
+        sec.state = "proposed_imports".into();
+        sec.title = "Proposed from the tracker".into();
+        sec
+    }
+
+    fn section_of(&self, s: State, mut tasks: Vec<&Task>) -> SidebarSection {
         // Active states: oldest first, so anything stuck is at the top.
         // History: newest first, so what just happened is not buried.
         if is_history(s) {
@@ -484,8 +607,17 @@ impl<'a> Ctx<'a> {
     }
 
     pub fn sidebar(&self, project: &str) -> SidebarView {
-        let mut sections: Vec<SidebarSection> =
-            ORDER.iter().map(|s| self.section(*s, project)).collect();
+        let mut sections: Vec<SidebarSection> = vec![];
+        for s in ORDER {
+            sections.push(self.section(s, project));
+            // Only while there are some, so a project with no tracker sees no new section.
+            if s == State::Proposed {
+                let imports = self.imports_section(project);
+                if imports.count > 0 {
+                    sections.push(imports);
+                }
+            }
+        }
         sections.push(self.section(State::Canceled, project));
         SidebarView {
             sections,
@@ -550,6 +682,8 @@ impl<'a> Ctx<'a> {
                     let r = self.row(t);
                     ActiveModel {
                         model: r.model,
+                        display: r.display,
+                        model_use: r.model_use,
                         project: r.project,
                         task: t.id.0,
                         step: t.step.clone(),
@@ -591,6 +725,7 @@ impl<'a> Ctx<'a> {
                     |o| format!("{o:?}").to_lowercase(),
                 ),
                 started_ms: r.started_at.0,
+                launches: crate::launchview::history(self.d, r.id.0),
             })
             .collect();
         steps.sort_by_key(|s| s.run);
@@ -601,10 +736,13 @@ impl<'a> Ctx<'a> {
         };
         let plan =
             std::fs::read_to_string(self.d.cfg.task_dir(id).join("plan.json")).unwrap_or_default();
+        let plan_view = (!plan.is_empty()).then(|| crate::plan_view::parse_plan(&plan));
         Some(TaskDetailView {
+            step_tokens: crate::usage::step_tokens(self.d, id, self.now / 1000),
             row: Some(self.row(t)),
             steps,
             plan,
+            plan_view,
             card: self.card(t),
             closing: self
                 .d
@@ -649,6 +787,7 @@ impl<'a> Ctx<'a> {
                 .unwrap_or_default(),
             explore_returns: t.explore_returns,
             approval: self.approval(t),
+            proposal: self.proposal_info(t),
             numbers: self
                 .d
                 .number_lines(t)
@@ -768,28 +907,13 @@ impl<'a> Ctx<'a> {
     }
 
     pub fn usage(&self) -> UsageView {
-        UsageView {
-            providers: self
-                .d
-                .accounts
-                .iter()
-                .map(|a| {
-                    let llm = crate::sched::llm_resource(&a.name);
-                    ProviderStatus {
-                        name: a.name.clone(),
-                        status: "ok".into(),
-                        sessions_used: self.d.broker.used(&llm),
-                        sessions_limit: self.d.broker.limit(&llm).unwrap_or(0),
-                        adapter: crate::providers::adapter_name(a.adapter).into(),
-                        billing: a.billing.name().into(),
-                        warn_at: a.warn_at,
-                        overage: a.overage.name().into(),
-                        monthly_budget_usd: a.monthly_budget_usd.unwrap_or(0.0),
-                    }
-                })
-                .collect(),
-            note: "Token counts and limit windows arrive with the usage tracking stage.".into(),
-        }
+        let title = |id: u64| {
+            self.w
+                .tasks
+                .get(&TaskId(id))
+                .map_or_else(String::new, |t| t.title.clone())
+        };
+        crate::usage::view(self.d, self.now / 1000, &title)
     }
 
     pub fn editor(&self, project: &str, step: &str) -> EditorView {
@@ -891,6 +1015,25 @@ impl<'a> Ctx<'a> {
                     kind: m["inspector"]["kind"].as_str().unwrap_or_default().into(),
                     schema: m["inspector"]["schema"].to_string(),
                     values: m["inspector"]["values"].to_string(),
+                    launch: m["inspector"]["launch"]["line"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .into(),
+                    launch_from: {
+                        let l = &m["inspector"]["launch"];
+                        let from = |k: &str| l[k]["from"].as_str().unwrap_or("").to_string();
+                        if l.is_null() {
+                            String::new()
+                        } else {
+                            format!(
+                                "tier: {}; level: {}; model: {}; effort: {}",
+                                from("tier"),
+                                from("level"),
+                                from("model"),
+                                from("effort")
+                            )
+                        }
+                    },
                 })
             },
             landing: m["landing"].to_string(),
