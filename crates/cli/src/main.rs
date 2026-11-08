@@ -1109,7 +1109,7 @@ fn main() {
                     String::new()
                 };
                 println!(
-                    "{}: {}/{} open{}, {} of {} this week ({} of yours not counted), {}/{} agent steps in {} h{}",
+                    "{}: {}/{} open{}, {} of {} this week ({} of yours not counted), {} of {} agent steps in {} h ({} of yours not counted){}",
                     p["project"].as_str().unwrap_or("?"),
                     p["open"],
                     p["max_open"],
@@ -1120,6 +1120,7 @@ fn main() {
                     p["steps"],
                     p["max_steps"],
                     p["period_h"],
+                    p["yours_steps"].as_u64().unwrap_or(0),
                     p["blocked"]
                         .as_str()
                         .map_or(String::new(), |b| format!("\n  filing is blocked: {b}"))

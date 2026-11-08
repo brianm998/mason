@@ -33,6 +33,8 @@ pub enum Gate {
     Go,
     /// The task left the step while it waited.
     Gone,
+    /// The change weakens a check: back to development, with what was found.
+    SentBack { reason: String, feedback: String },
 }
 
 /// The change a task's branch makes against what it lands on.
@@ -106,9 +108,15 @@ pub fn gate(c: &Ctx) -> Gate {
         return Gate::Go;
     };
     let d = &c.d;
+    let owner_decides = cfg.holds == crate::config::Holds::Owner;
     let ch = match change_of(&c.project, &c.branch) {
         Ok(x) => x,
         Err(e) => {
+            if !owner_decides {
+                // It cannot be judged here; landing reads the change again and its tests
+                // still have to pass.
+                return Gate::Go;
+            }
             // If it cannot be read it cannot be vouched for: it waits like a flagged change.
             return wait_for_owner(
                 c,
@@ -123,7 +131,39 @@ pub fn gate(c: &Ctx) -> Gate {
         return Gate::Go;
     }
     let cmd = format!("git -C {} diff {}", c.project.path.display(), ch.range);
-    wait_for_owner(c, &found.short(&cmd), &protect::diff_hash(&ch.diff))
+    let why = found.short(&cmd);
+    let hash = protect::diff_hash(&ch.diff);
+    if owner_decides {
+        return wait_for_owner(c, &why, &hash);
+    }
+    if !found.weakening.is_empty() {
+        let list: Vec<String> = found
+            .weakening
+            .iter()
+            .map(|f| match f.line {
+                Some(l) => format!("{} at {}:{l} ({})", f.kind, f.file, f.detail),
+                None => format!("{} in {} ({})", f.kind, f.file, f.detail),
+            })
+            .collect();
+        let _ = d.store.clear_hold(c.task.0);
+        return Gate::SentBack {
+            reason: format!("the change weakens a check: {}", list.join("; ")),
+            feedback: format!(
+                "The change weakens a check, which MASON does not land: {}.\n\nRestore each check, or \
+                 reach the same goal without weakening it. If a check was wrong, replace it with one \
+                 that is at least as strict and say why in the stage note. Do not skip, loosen or \
+                 remove a test, limit or gate to make something pass.",
+                list.join("; ")
+            ),
+        };
+    }
+    // Only protected files were touched and nothing was weakened: its tests and review have
+    // passed, so it lands. The record keeps what it touched (`mason self`), as approved by
+    // the review rather than by a person.
+    if d.store.put_hold(c.task.0, &hash, &why, now_ms()).is_ok() {
+        let _ = d.store.approve_hold(c.task.0, "review", now_ms());
+    }
+    Gate::Go
 }
 
 fn wait_for_owner(c: &Ctx, why: &str, hash: &str) -> Gate {
@@ -225,6 +265,32 @@ const WEEK_MS: u64 = 7 * 24 * 3600 * 1000;
 pub struct Usage {
     pub status: Status,
     pub yours: u32,
+    /// Agent steps of owner-filed tasks in the period: shown, never counted against `max_steps`.
+    pub yours_steps: u32,
+}
+
+/// Did the owner file this task? The one definition, shared by `count` (per_week) and
+/// `count_steps` (max_steps); decision 0022 and 0030.
+pub fn is_owner_filed(t: &Task) -> bool {
+    t.trust == TrustSource::Owner
+}
+
+/// Agent steps started within `period_ms` as `(counted, yours)`: a step counts unless its
+/// task was filed by the owner.
+pub fn count_steps<'a>(
+    runs: impl Iterator<Item = (&'a Task, u64)>,
+    now: u64,
+    period_ms: u64,
+) -> (u32, u32) {
+    let (mut counted, mut yours) = (0, 0);
+    for (t, _) in runs.filter(|(_, st)| now.saturating_sub(*st) <= period_ms) {
+        if is_owner_filed(t) {
+            yours += 1;
+        } else {
+            counted += 1;
+        }
+    }
+    (counted, yours)
 }
 
 /// The week's filings as `(counted, not_counted)`. A task counts unless the owner filed it,
@@ -233,7 +299,7 @@ pub fn count<'a>(tasks: impl Iterator<Item = &'a Task>, now: u64) -> (u32, u32) 
     let (mut counted, mut yours) = (0, 0);
     for t in tasks.filter(|t| now.saturating_sub(t.enqueued_at.0) <= WEEK_MS) {
         let unstarted = t.state == State::Canceled && t.attempts.is_empty();
-        if t.trust == TrustSource::Owner || unstarted {
+        if is_owner_filed(t) || unstarted {
             yours += 1;
         } else {
             counted += 1;
@@ -244,7 +310,7 @@ pub fn count<'a>(tasks: impl Iterator<Item = &'a Task>, now: u64) -> (u32, u32) 
 
 /// `(open, held)` for tasks of one project. `open` is every task whose activity is neither
 /// idle (proposed, landed, failed, canceled) nor held (blocked by unlanded tasks); `held` is
-/// the held ones. Decision 0024.
+/// the held ones. Decision 0032.
 pub fn open_counts<'a>(tasks: impl Iterator<Item = &'a Task>) -> (u32, u32) {
     let (mut open, mut held) = (0, 0);
     for t in tasks {
@@ -263,18 +329,22 @@ pub fn status(d: &Daemon, pid: ProjectId, cfg: &SelfCfg, now: u64) -> Status {
 
 pub fn usage(d: &Daemon, pid: ProjectId, cfg: &SelfCfg, now: u64) -> Usage {
     let w = d.world().ok();
-    let (mut open, mut held, mut week, mut yours, mut steps) = (0, 0, 0, 0, 0);
+    let (mut open, mut held, mut week, mut yours, mut steps, mut yours_steps) = (0, 0, 0, 0, 0, 0);
     if let Some(w) = &w {
         (open, held) = open_counts(w.tasks.values().filter(|t| t.project == pid));
         (week, yours) = count(w.tasks.values().filter(|t| t.project == pid), now);
         let period = cfg.period_h * 3600 * 1000;
-        steps = w
-            .step_runs
-            .values()
-            .filter(|r| w.tasks.get(&r.task).is_some_and(|t| t.project == pid))
-            .filter(|r| matches!(r.step, State::Exploring | State::Developing | State::Review))
-            .filter(|r| now.saturating_sub(r.started_at.0) <= period)
-            .count() as u32;
+        (steps, yours_steps) = count_steps(
+            w.step_runs
+                .values()
+                .filter(|r| matches!(r.step, State::Exploring | State::Developing | State::Review))
+                .filter_map(|r| {
+                    let t = w.tasks.get(&r.task)?;
+                    (t.project == pid).then_some((t, r.started_at.0))
+                }),
+            now,
+            period,
+        );
     }
     let cooldown_until_ms = Runtimes::new(&d.cfg.data_dir)
         .rollback()
@@ -289,6 +359,7 @@ pub fn usage(d: &Daemon, pid: ProjectId, cfg: &SelfCfg, now: u64) -> Usage {
             cooldown_until_ms,
         },
         yours,
+        yours_steps,
     }
 }
 
@@ -344,9 +415,9 @@ pub fn check_as(s: &Status, yours: u32, cfg: &SelfCfg, trust: TrustSource) -> Re
             yours
         ));
     }
-    if s.steps >= cfg.max_steps {
+    if trust != TrustSource::Owner && s.steps >= cfg.max_steps {
         return Err(format!(
-            "self-tasks have started {} agent steps in the last {} hours and the limit is {}",
+            "self-tasks have started {} agent steps in the last {} hours and the limit is {}: only agent and outside tasks' steps count, the owner's own are not counted",
             s.steps, cfg.period_h, cfg.max_steps
         ));
     }
@@ -409,6 +480,7 @@ mod tests {
             max_steps: 40,
             period_h: 24,
             cooldown_h: 24,
+            holds: crate::config::Holds::Review,
         }
     }
 
@@ -566,6 +638,28 @@ mod tests {
     }
 
     #[test]
+    fn steps_count_only_agent_and_outside_work() {
+        let now = 10_000_000_000;
+        let o = task(TrustSource::Owner, State::Developing, true, now);
+        let a = task(TrustSource::OwnerAgent, State::Developing, true, now);
+        let x = task(TrustSource::Outside, State::Developing, true, now);
+        let period = 24 * 3600 * 1000;
+        let runs = vec![
+            (&o, now),
+            (&o, now),
+            (&a, now),
+            (&x, now),
+            (&a, now - period - 1), // outside the period
+        ];
+        assert_eq!(count_steps(runs.into_iter(), now, period), (2, 2));
+        let c = cfg();
+        let s = st(0, 0, 40, None);
+        assert!(check_as(&s, 0, &c, TrustSource::OwnerAgent).is_err());
+        assert!(check_as(&s, 0, &c, TrustSource::Outside).is_err());
+        assert!(check_as(&s, 0, &c, TrustSource::Owner).is_ok());
+    }
+
+    #[test]
     fn the_limit_refuses_at_ten_counted_but_not_the_owner() {
         let c = cfg();
         let now = 10 * WEEK_MS;
@@ -588,7 +682,10 @@ mod tests {
         assert!(check_as(&s, yours, &c, TrustSource::Owner).is_ok());
         // The other limits still stop the owner.
         assert!(check_as(&st(3, 0, 0, None), 0, &c, TrustSource::Owner).is_err());
-        assert!(check_as(&st(0, 0, 40, None), 0, &c, TrustSource::Owner).is_err());
+        // Changed by task 18 (decision 0030): the owner is no longer held to the step cap.
+        assert!(check_as(&st(0, 0, 40, None), 0, &c, TrustSource::Owner).is_ok());
+        assert!(check_as(&st(0, 0, 40, None), 0, &c, TrustSource::OwnerAgent).is_err());
+        assert!(check_as(&st(0, 0, 40, None), 0, &c, TrustSource::Outside).is_err());
         let until = now_ms() + 3_600_000;
         assert!(check_as(&st(0, 0, 0, Some(until)), 0, &c, TrustSource::Owner).is_err());
     }

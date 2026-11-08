@@ -1,4 +1,4 @@
-# 0024: Readings made while changing what counts as an open self-task (s46)
+# 0032: Readings made while changing what counts as an open self-task (s54)
 
 This changes `crates/daemon/src/selfguard.rs`, a trust file; it loosens a guard (what counts toward `max_open`) and waits for the owner's approval.
 
@@ -11,4 +11,4 @@ This changes `crates/daemon/src/selfguard.rs`, a trust file; it loosens a guard 
 - **Paused** overrides held in the derived activity, so a paused blocked task counts (as the ticket lists "paused"). A cancelled blocker never lands, so its dependents stay held and uncounted until the owner deals with them.
 - **Display.** `Status` gains `held`; `GET /self` gains `held`; `mason self` reads "2/3 open (4 held behind others, not counted)" when any are held. The refusal says what was counted and how many held were not.
 - **Tests that changed.** Three tests in `crates/daemon/tests/selfguard.rs` filed the tasks they meant to be open as *proposed*; they now file them as queued, since proposed tasks are no longer open. No assertion or limit was relaxed.
-- **Not verified.** Monitors (nothing in this repository reads `/self`); real GitHub tracker import against a chain (the s46 exit test uses `--after` through the command line); behaviour with `NotBefore` waits beyond the unit-level count.
+- **Not verified.** Monitors (nothing in this repository reads `/self`); real GitHub tracker import against a chain (the s54 exit test uses `--after` through the command line); behaviour with `NotBefore` waits beyond the unit-level count.

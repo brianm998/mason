@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Self-hosting max_open (s46) exit test: tasks held behind a blocker do not count as open.
+# Self-hosting max_open (s54) exit test: tasks held behind a blocker do not count as open.
 # A real masond on a project with [self] max_open = 3.
 #  1. A chain of five tasks filed with --after (one runnable, four held) is all accepted, and
 #     `mason self` shows 1/3 open with four held.
@@ -10,7 +10,7 @@
 #     one after another in order.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
-root=$(mktemp -d /tmp/mason-s46.XXXXXX); daemon=""
+root=$(mktemp -d /tmp/mason-s54.XXXXXX); daemon=""
 cleanup() {
   [ -n "$daemon" ] && kill -9 "$daemon" 2>/dev/null || true
   for f in "$root"/d/h/*/host.kv; do
@@ -122,4 +122,4 @@ done
 touch "$root/gate/chain 5"
 wait_for 60 "chain 5 to land" landed "$c5"
 touch "$root/gate/run 1" "$root/gate/run 2"
-echo "s46 OK"
+echo "s54 OK"
