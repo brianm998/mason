@@ -893,6 +893,7 @@ mod tests {
             dir.path().join("limits.kv"),
             &cfg,
             2,
+            crate::cpu::FakeCpu::new(0),
             &[],
         )
         .unwrap();
@@ -952,6 +953,7 @@ mod tests {
             limits.clone(),
             &ResourceCfg::default(),
             2,
+            crate::cpu::FakeCpu::new(0),
             &[],
         )
         .unwrap();
