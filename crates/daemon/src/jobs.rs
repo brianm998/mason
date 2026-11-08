@@ -1162,6 +1162,14 @@ fn agent_job(c: &Ctx) {
             d.progress_observe(run, stream, off, bytes)
         }));
     }
+    // The agent's counts, todo list and tool calls reach the live record as they happen.
+    c.d.progress_agent(c.run);
+    {
+        let (d, run) = (c.d.clone(), c.run);
+        contract.set_on_progress(Arc::new(move |r| d.progress_agent_report(run, r)));
+        let (d, run) = (c.d.clone(), c.run);
+        spec.on_agent_event = Some(Arc::new(move |ev| d.progress_agent_event(run, ev)));
+    }
     // Wired before any reattach, so a session found again sees what was already accepted.
     spec.accepted = contract.flag();
     spec.contract = Some(contract.clone());

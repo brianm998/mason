@@ -169,6 +169,7 @@ impl AgentAdapter for CodexAdapter {
             mcp: true,
             effort_levels: EFFORT_LEVELS.map(String::from).to_vec(),
             usage_reports: true,
+            plan_reports: false,
         }
     }
 
@@ -284,15 +285,18 @@ pub fn parse_line(line: &str, st: &mut ParseState) -> Vec<AgentEvent> {
                         item["server"].as_str().unwrap_or("?"),
                         item["tool"].as_str().unwrap_or("?")
                     ),
-                    summary: clip(&item["arguments"].to_string(), 200),
+                    summary: format!("Using {}", item["tool"].as_str().unwrap_or("?")),
                 }),
                 Some("command_execution") => out.push(AgentEvent::ToolCall {
                     name: "command".into(),
-                    summary: clip(item["command"].as_str().unwrap_or(""), 200),
+                    summary: clip(
+                        &format!("Running {}", item["command"].as_str().unwrap_or("")),
+                        200,
+                    ),
                 }),
                 Some("file_change") => out.push(AgentEvent::ToolCall {
                     name: "file_change".into(),
-                    summary: clip(&item["changes"].to_string(), 200),
+                    summary: "Editing files".into(),
                 }),
                 _ => {}
             }

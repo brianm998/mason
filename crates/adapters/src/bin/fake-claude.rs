@@ -14,7 +14,9 @@
 //! `{"call": {"tool": "...", "args": {...}}}`, `{"rate_limit": {...}}` (or with `"windows": {id: {utilization, resetsAt}}` for several),
 //! `{"api_retry": {"attempt": 1, "status": 529}}`, `{"sleep_ms": 100}`,
 //! `{"result": {"is_error": false, "text": "...", "api_error_status": null}}`,
-//! `{"stderr": "..."}`, `{"exit": 1}` (die with no result) and
+//! `{"todo": [{"content": "...", "status": "pending|in_progress|completed"}, ...]}` (a
+//! `TodoWrite` call), `{"tool": {"name": "Edit", "input": {...}}}` (a built-in tool call
+//! that goes nowhere), `{"stderr": "..."}`, `{"exit": 1}` (die with no result) and
 //! `{"sh": "..."}` (run a shell command in the working directory, so the
 //! "agent" can really edit and commit; the prompt is in `$FAKE_PROMPT`). In a call's arguments the string
 //! `"$HEAD"` is replaced by `git rev-parse HEAD`.
@@ -179,6 +181,20 @@ fn main() {
             out(
                 &json!({"type": "user", "session_id": sid, "message": {"role": "user", "content": [
                 {"tool_use_id": tid, "type": "tool_result", "is_error": !ok, "content": [{"type": "text", "text": text}]}]}}),
+            );
+        } else if let Some(items) = a.get("todo") {
+            calls += 1;
+            out(
+                &json!({"type": "assistant", "session_id": sid, "message": {"role": "assistant",
+                "content": [{"type": "tool_use", "id": format!("toolu_fake_{calls}"), "name": "TodoWrite",
+                "input": {"todos": items}}]}}),
+            );
+        } else if let Some(t) = a.get("tool") {
+            calls += 1;
+            out(
+                &json!({"type": "assistant", "session_id": sid, "message": {"role": "assistant",
+                "content": [{"type": "tool_use", "id": format!("toolu_fake_{calls}"),
+                "name": t["name"], "input": t["input"]}]}}),
             );
         } else if let Some(r) = a.get("rate_limit") {
             out(

@@ -301,7 +301,19 @@ impl<'a> StepRunner<'a> {
                         r.usage = Some(u);
                     }
                     Some(AgentEvent::ApiRetry { .. }) => r.api_retries += 1,
-                    Some(AgentEvent::ToolCall { name, .. }) => r.tool_calls.push(name),
+                    Some(ev @ AgentEvent::ToolCall { .. }) => {
+                        if let Some(f) = &spec.on_agent_event {
+                            f(&ev);
+                        }
+                        if let AgentEvent::ToolCall { name, .. } = ev {
+                            r.tool_calls.push(name);
+                        }
+                    }
+                    Some(ev @ AgentEvent::Plan { .. }) => {
+                        if let Some(f) = &spec.on_agent_event {
+                            f(&ev);
+                        }
+                    }
                     Some(AgentEvent::Text(_)) => {}
                     Some(AgentEvent::Finished(o)) => break o,
                     None => {

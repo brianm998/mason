@@ -35,3 +35,11 @@ Synthetic (hand-written, not captures; the field names follow the real events):
 The `apiKeySource` value on an API account and the overage field values
 (`allowed`, `out_of_credits`, `overageResetsAt`) are assumptions; only the
 `rejected` / `org_level_disabled` pair was seen.
+
+## Todo list fixture (s71)
+
+`synthetic_todo_write.jsonl` is hand-written, **not a capture** (no `claude` CLI was
+installed where it was made). It models a `TodoWrite` tool call with seven items (three
+`completed`, one `in_progress`, three `pending`; each `{content, status, activeForm}`),
+then an `Edit` and a `Bash` call. The shape follows Claude Code's documented `TodoWrite`
+input. It should be replaced by a real capture when one can be made.
