@@ -6,7 +6,7 @@
 //! what the event stream must look like in every one.
 
 use crate::contract::{ContractHandle, NoChecks};
-use crate::{AgentAdapter, AgentEvent, Outcome, SessionSpec, StepKind};
+use crate::{AgentAdapter, AgentEvent, BillingKind, Outcome, SessionSpec, StepKind};
 use std::sync::mpsc::channel;
 use std::time::Duration;
 
@@ -151,6 +151,49 @@ fn check(adapter: &dyn AgentAdapter, h: &dyn Harness, s: Scenario) -> Result<(),
             && !events.iter().any(|e| matches!(e, AgentEvent::Tokens(_)))
         {
             return Err("adapter claims usage_reports but emitted no Tokens event".into());
+        }
+    }
+    check_usage(adapter, s, &events)?;
+    Ok(())
+}
+
+/// Usage snapshots must stay within what the adapter's model says it reports:
+/// no utilization it does not get, no window it did not declare, and in the
+/// usage-limit scenario every window it promises.
+fn check_usage(
+    adapter: &dyn AgentAdapter,
+    s: Scenario,
+    events: &[AgentEvent],
+) -> Result<(), String> {
+    let model = adapter.usage_model(BillingKind::Subscription);
+    let snaps: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::Usage(u) => Some(u),
+            _ => None,
+        })
+        .collect();
+    for u in &snaps {
+        for w in &u.windows {
+            if w.utilization.is_some() && !model.utilization {
+                return Err(format!(
+                    "window {} has a utilization but the usage model does not report one",
+                    w.id
+                ));
+            }
+            if w.utilization.is_some_and(|x| !(0.0..=1.0).contains(&x)) {
+                return Err(format!("window {} utilization is outside 0..=1", w.id));
+            }
+        }
+    }
+    if s == Scenario::UsageLimit && !model.windows.is_empty() {
+        let Some(u) = snaps.last() else {
+            return Err("the usage model promises windows but no usage was emitted".into());
+        };
+        for spec in &model.windows {
+            if u.window(&spec.id).is_none() {
+                return Err(format!("the usage model promises window {}", spec.id));
+            }
         }
     }
     Ok(())
