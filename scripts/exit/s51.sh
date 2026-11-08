@@ -28,7 +28,8 @@ trap cleanup EXIT
 # Bound with SO_REUSEADDR as masond does, so a port in TIME_WAIT after a restart counts as free.
 free_port() { python3 -c 'import socket,sys; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(("127.0.0.1",int(sys.argv[1])))' "$1" 2>/dev/null; }
 if ! free_port "$DEFAULT"; then
-  who=$(lsof -nP -iTCP:$DEFAULT -sTCP:LISTEN 2>/dev/null | sed -n 2p || true)
+  who=unknown
+  if listing=$(lsof -nP -iTCP:$DEFAULT -sTCP:LISTEN 2>/dev/null); then who=$(printf '%s\n' "$listing" | sed -n 2p); fi
   echo "FAILED: port $DEFAULT, masond's default, is held by another process (${who:-unknown}); stop it and run again. This test does not pick another port." >&2
   exit 1
 fi
