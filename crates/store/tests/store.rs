@@ -657,12 +657,63 @@ fn history_keeps_final_counts_per_project_and_step() {
 }
 
 #[test]
-fn migration_14_applies_on_13_and_usage_survives_reopening() {
+fn migration_14_applies_to_an_existing_database() {
     let (_d, p) = db();
     {
         let mut c = Connection::open(&p).unwrap();
         migrations::migrate_to(&mut c, 13).unwrap();
         assert_eq!(migrations::version(&c).unwrap(), 13);
+    }
+    let s = Store::open(&p).unwrap();
+    assert!(s.launches(1).unwrap().is_empty());
+    drop(s);
+    let c = Connection::open(&p).unwrap();
+    assert_eq!(migrations::version(&c).unwrap(), migrations::SCHEMA_VERSION);
+}
+
+#[test]
+fn launches_are_kept_per_run_in_order_and_survive_reopen() {
+    use mason_store::LaunchRow;
+    let (_d, p) = db();
+    let s = Store::open(&p).unwrap();
+    let row = |run, task, kind: &str, model: &str| LaunchRow {
+        run,
+        task,
+        step: "develop".into(),
+        kind: kind.into(),
+        tier: "deep".into(),
+        level: "medium".into(),
+        model: model.into(),
+        provider: "claude".into(),
+        ..Default::default()
+    };
+    assert_eq!(s.record_launch(row(7, 1, "launch", "opus")).unwrap(), 1);
+    assert_eq!(s.record_launch(row(7, 1, "retry", "fable")).unwrap(), 2);
+    assert_eq!(s.record_launch(row(8, 2, "launch", "haiku")).unwrap(), 1);
+    s.set_reported_model(7, "claude-fable-5-1").unwrap();
+    drop(s);
+    let s = Store::open(&p).unwrap();
+    let l = s.launches(7).unwrap();
+    assert_eq!(
+        l.iter()
+            .map(|r| (r.seq, r.kind.as_str(), r.model.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(1, "launch", "opus"), (2, "retry", "fable")]
+    );
+    assert_eq!(l[0].reported_model, "");
+    assert_eq!(l[1].reported_model, "claude-fable-5-1");
+    assert_eq!(s.launches_for_task(2).unwrap().len(), 1);
+    assert_eq!(s.launches_for_task(1).unwrap().len(), 2);
+    s.verify().unwrap();
+}
+
+#[test]
+fn migration_15_applies_on_14_and_usage_survives_reopening() {
+    let (_d, p) = db();
+    {
+        let mut c = Connection::open(&p).unwrap();
+        migrations::migrate_to(&mut c, 14).unwrap();
+        assert_eq!(migrations::version(&c).unwrap(), 14);
     }
     let s = Store::open(&p).unwrap();
     s.put_usage_latest("main", 1000, "{\"a\":1}").unwrap();
@@ -674,7 +725,7 @@ fn migration_14_applies_on_13_and_usage_survives_reopening() {
     );
     drop(s);
     let c = Connection::open(&p).unwrap();
-    assert_eq!(migrations::version(&c).unwrap(), 14);
+    assert_eq!(migrations::version(&c).unwrap(), 15);
 }
 
 fn reading(at: u64, u: Option<f64>, resets: u64, state: &str) -> mason_store::UsageReading {

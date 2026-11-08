@@ -293,7 +293,34 @@ const STEPS: &[&str] = &[
      CREATE INDEX step_history_step ON step_history(project, step);",
     // 13: the longest quiet gap of each successful run, for the "no output for" threshold (s49).
     "ALTER TABLE step_history ADD COLUMN gap_ms INTEGER NOT NULL DEFAULT 0;\n     ALTER TABLE step_progress ADD COLUMN max_gap_ms INTEGER NOT NULL DEFAULT 0;",
-    // 14: LLM usage (s64). The latest snapshot per account (kept across a restart), a bounded
+    // 14: what each step run actually launched (s63): the requested tier and level, the real
+    // model and effort passed to the CLI, where each came from, and the model the CLI reported.
+    // Written by the daemon beside step_progress; not rebuilt by event replay.
+    "CREATE TABLE step_launches (
+         run             INTEGER NOT NULL,
+         seq             INTEGER NOT NULL,
+         task            INTEGER NOT NULL,
+         step            TEXT NOT NULL,
+         kind            TEXT NOT NULL,
+         tier            TEXT NOT NULL,
+         level           TEXT NOT NULL,
+         req_model       TEXT NOT NULL,
+         req_effort      TEXT NOT NULL,
+         model           TEXT NOT NULL,
+         effort          TEXT NOT NULL,
+         provider        TEXT NOT NULL,
+         model_from      TEXT NOT NULL,
+         effort_from     TEXT NOT NULL,
+         retry_n         INTEGER NOT NULL,
+         retry_max       INTEGER NOT NULL,
+         moved_up_from   TEXT NOT NULL,
+         overridden      INTEGER NOT NULL,
+         reported_model  TEXT NOT NULL,
+         at_ms           INTEGER NOT NULL,
+         PRIMARY KEY (run, seq)
+     );
+     CREATE INDEX step_launches_task ON step_launches(task);",
+    // 15: LLM usage (s64). The latest snapshot per account (kept across a restart), a bounded
     // history of window readings (the trend), and the tokens and cost of each step attempt as
     // the provider reported them (NULL: not reported, never 0).
     "CREATE TABLE usage_latest (

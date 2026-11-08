@@ -936,8 +936,21 @@ fn agent_job(c: &Ctx) {
         tracing::warn!(project = %c.project.id, "{p}");
     }
     let launched = mason_definition::tiers::launch(&c.res, &eff.mapping, &agent.ladder);
+    let rec = LaunchRec {
+        launched: &launched,
+        provider: crate::tiermap::name(agent.provider),
+        max: agent.max_retries,
+        tries: std::cell::Cell::new(0),
+        moved_from: std::cell::RefCell::new(String::new()),
+    };
     spec.model = launched.model.clone();
     spec.effort = launched.effort.clone();
+    {
+        let (d, run) = (c.d.clone(), c.run.0);
+        spec.on_model = Some(Arc::new(move |m| {
+            let _ = d.store.set_reported_model(run, m);
+        }));
+    }
     spec.env = c.project.agent_env.clone();
     spec.tool_timeout = tool_timeout_for(kind, &c.project);
     spec.deadline = Some(
@@ -960,10 +973,26 @@ fn agent_job(c: &Ctx) {
 
     let runner = StepRunner::new(adapter.as_ref(), RunnerConfig::default());
     let first = match adapter.reattach(&key, spec.clone()) {
-        Ok(Some(h)) => runner.adopt(h, spec.clone(), &contract),
-        _ => runner.run(spec.clone(), &contract),
+        Ok(Some(h)) => {
+            // The session found again keeps the model and effort it was launched
+            // with, whatever the provider file says now; one reattach row is
+            // written only when this run has no record at all.
+            let before = c.d.store.launches(c.run.0).unwrap_or_default();
+            match before.iter().rev().find(|r| r.kind != "retry") {
+                Some(r) => {
+                    spec.model = Some(r.model.clone()).filter(|m| !m.is_empty());
+                    spec.effort = Some(r.effort.clone()).filter(|m| !m.is_empty());
+                }
+                None => rec.write(c, "reattach", &spec),
+            }
+            runner.adopt(h, spec.clone(), &contract)
+        }
+        _ => {
+            rec.write(c, "launch", &spec);
+            runner.run(spec.clone(), &contract)
+        }
     };
-    let Some(mut report) = settle_holds(c, &runner, first, &spec, &contract) else {
+    let Some(mut report) = settle_holds(c, &runner, first, &spec, &contract, &rec) else {
         return;
     };
     record_usage(c, &spec, &report);
@@ -979,10 +1008,13 @@ fn agent_job(c: &Ctx) {
             break;
         };
         tries += 1;
+        *rec.moved_from.borrow_mut() = spec.model.clone().unwrap_or_default();
         spec.model = Some(next.to_string());
         spec.run_key = Some(format!("{key}u{tries}"));
+        rec.tries.set(tries);
+        rec.write(c, "retry", &spec);
         let again = runner.run(spec.clone(), &contract);
-        let Some(r) = settle_holds(c, &runner, again, &spec, &contract) else {
+        let Some(r) = settle_holds(c, &runner, again, &spec, &contract, &rec) else {
             return;
         };
         record_usage(c, &spec, &r);
@@ -990,6 +1022,51 @@ fn agent_job(c: &Ctx) {
     }
     contract.shutdown();
     finish_agent(c, report, &dir);
+}
+
+/// What the daemon writes down each time an agent step starts a session.
+struct LaunchRec<'a> {
+    launched: &'a mason_definition::tiers::Launch,
+    provider: &'static str,
+    max: u32,
+    tries: std::cell::Cell<u32>,
+    moved_from: std::cell::RefCell<String>,
+}
+
+impl LaunchRec<'_> {
+    /// Append a launch row: what was asked for, and what `spec` really passes to the CLI.
+    fn write(&self, c: &Ctx, kind: &str, spec: &SessionSpec) {
+        let l = self.launched;
+        let retried = self.tries.get() > 0;
+        let row = mason_store::LaunchRow {
+            run: c.run.0,
+            task: c.task.0,
+            step: c.step.name.clone(),
+            kind: kind.into(),
+            tier: l.tier.map(|t| t.name().to_string()).unwrap_or_default(),
+            level: l.level.name().to_string(),
+            req_model: l.mapped.model.clone().unwrap_or_default(),
+            req_effort: l.mapped.effort.clone().unwrap_or_default(),
+            model: spec.model.clone().unwrap_or_default(),
+            effort: spec.effort.clone().unwrap_or_default(),
+            provider: self.provider.into(),
+            model_from: if retried {
+                "the retry ladder".into()
+            } else {
+                l.model_from.clone()
+            },
+            effort_from: l.effort_from.clone(),
+            retry_n: self.tries.get(),
+            retry_max: self.max,
+            moved_up_from: self.moved_from.borrow().clone(),
+            overridden: l.overridden,
+            at_ms: now_ms(),
+            ..Default::default()
+        };
+        if let Err(e) = c.d.store.record_launch(row) {
+            tracing::warn!(task = c.task.0, "cannot record the launch: {e}");
+        }
+    }
 }
 
 /// Keep what the attempt reported: the provider's limits as the latest for the
@@ -1019,6 +1096,7 @@ fn settle_holds(
     mut report: StepReport,
     spec: &SessionSpec,
     contract: &ContractHandle,
+    rec: &LaunchRec,
 ) -> Option<StepReport> {
     while let StepEnd::Hold(reason) = &report.end {
         let on = match reason {
@@ -1038,6 +1116,7 @@ fn settle_holds(
         if !c.emit(EventKind::WaitEnded { task: c.task }) {
             return None;
         }
+        rec.write(c, "resume", spec);
         report = runner.resume(report, hold_note(), spec.clone(), contract);
     }
     Some(report)

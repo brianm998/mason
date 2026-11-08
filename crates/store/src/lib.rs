@@ -234,6 +234,36 @@ pub struct OverrideRow {
     pub expires_at: u64,
 }
 
+/// One session start of a step run: what was asked for and what was launched.
+/// Empty strings mean "none" (no tier, the CLI's own default model, no effort).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LaunchRow {
+    pub run: u64,
+    pub seq: u64,
+    pub task: u64,
+    pub step: String,
+    /// `launch`, `retry` or `reattach`.
+    pub kind: String,
+    pub tier: String,
+    pub level: String,
+    /// What the mapping alone asked for.
+    pub req_model: String,
+    pub req_effort: String,
+    /// What was passed to the CLI.
+    pub model: String,
+    pub effort: String,
+    pub provider: String,
+    pub model_from: String,
+    pub effort_from: String,
+    pub retry_n: u32,
+    pub retry_max: u32,
+    pub moved_up_from: String,
+    pub overridden: bool,
+    /// The model the CLI said it used, when it said.
+    pub reported_model: String,
+    pub at_ms: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Appended {
     pub seq: u64,
@@ -1755,6 +1785,104 @@ impl Store {
                 ],
             )?;
             Ok(())
+        })
+    }
+
+    /// Append a launch row to a run; its `seq` is assigned here and returned.
+    pub fn record_launch(&self, row: LaunchRow) -> Result<u64, StoreError> {
+        self.write(move |c| {
+            let seq: i64 = c.query_row(
+                "SELECT COALESCE(MAX(seq), 0) + 1 FROM step_launches WHERE run = ?1",
+                params![row.run as i64],
+                |r| r.get(0),
+            )?;
+            c.execute(
+                "INSERT INTO step_launches(run, seq, task, step, kind, tier, level, req_model, \
+                 req_effort, model, effort, provider, model_from, effort_from, retry_n, retry_max, \
+                 moved_up_from, overridden, reported_model, at_ms) \
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)",
+                params![
+                    row.run as i64,
+                    seq,
+                    row.task as i64,
+                    row.step,
+                    row.kind,
+                    row.tier,
+                    row.level,
+                    row.req_model,
+                    row.req_effort,
+                    row.model,
+                    row.effort,
+                    row.provider,
+                    row.model_from,
+                    row.effort_from,
+                    row.retry_n as i64,
+                    row.retry_max as i64,
+                    row.moved_up_from,
+                    row.overridden as i64,
+                    row.reported_model,
+                    row.at_ms as i64
+                ],
+            )?;
+            Ok(seq as u64)
+        })
+    }
+
+    /// The model the CLI reported for the run's latest session.
+    pub fn set_reported_model(&self, run: u64, model: &str) -> Result<(), StoreError> {
+        let model = model.to_string();
+        self.write(move |c| {
+            c.execute(
+                "UPDATE step_launches SET reported_model = ?2 WHERE run = ?1 AND seq = \
+                 (SELECT MAX(seq) FROM step_launches WHERE run = ?1)",
+                params![run as i64, model],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Every launch of one run, oldest first.
+    pub fn launches(&self, run: u64) -> Result<Vec<LaunchRow>, StoreError> {
+        self.launch_query("WHERE run = ?1 ORDER BY run, seq", run)
+    }
+
+    /// Every launch of a task, oldest run first.
+    pub fn launches_for_task(&self, task: u64) -> Result<Vec<LaunchRow>, StoreError> {
+        self.launch_query("WHERE task = ?1 ORDER BY run, seq", task)
+    }
+
+    fn launch_query(&self, tail: &'static str, key: u64) -> Result<Vec<LaunchRow>, StoreError> {
+        self.read(move |c| {
+            let mut st = c.prepare(&format!(
+                "SELECT run, seq, task, step, kind, tier, level, req_model, req_effort, model, \
+                 effort, provider, model_from, effort_from, retry_n, retry_max, moved_up_from, \
+                 overridden, reported_model, at_ms FROM step_launches {tail}"
+            ))?;
+            let rows = st.query_map(params![key as i64], |r| {
+                Ok(LaunchRow {
+                    run: r.get::<_, i64>(0)? as u64,
+                    seq: r.get::<_, i64>(1)? as u64,
+                    task: r.get::<_, i64>(2)? as u64,
+                    step: r.get(3)?,
+                    kind: r.get(4)?,
+                    tier: r.get(5)?,
+                    level: r.get(6)?,
+                    req_model: r.get(7)?,
+                    req_effort: r.get(8)?,
+                    model: r.get(9)?,
+                    effort: r.get(10)?,
+                    provider: r.get(11)?,
+                    model_from: r.get(12)?,
+                    effort_from: r.get(13)?,
+                    retry_n: r.get::<_, i64>(14)? as u32,
+                    retry_max: r.get::<_, i64>(15)? as u32,
+                    moved_up_from: r.get(16)?,
+                    overridden: r.get::<_, i64>(17)? != 0,
+                    reported_model: r.get(18)?,
+                    at_ms: r.get::<_, i64>(19)? as u64,
+                })
+            })?;
+            rows.collect()
         })
     }
 

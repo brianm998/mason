@@ -249,6 +249,8 @@ pub struct Launch {
     pub mapped: Entry,
     pub model_from: String,
     pub effort_from: String,
+    /// The owner (a runtime or per-task override) named the model or the effort.
+    pub overridden: bool,
 }
 
 /// Turn the requested tier and level into the real model and effort.
@@ -280,6 +282,14 @@ pub fn launch(res: &Resolved, mapping: &Mapping, ladder: &[String]) -> Launch {
     } else {
         (None, "the CLI's default".to_string())
     };
+    let by_owner = |s: &crate::layers::Source| {
+        matches!(
+            s,
+            crate::layers::Source::Runtime { .. } | crate::layers::Source::Task
+        )
+    };
+    let overridden = res.model.as_ref().is_some_and(|a| by_owner(&a.source))
+        || res.effort.as_ref().is_some_and(|a| by_owner(&a.source));
     Launch {
         model,
         effort,
@@ -288,6 +298,7 @@ pub fn launch(res: &Resolved, mapping: &Mapping, ladder: &[String]) -> Launch {
         mapped,
         model_from,
         effort_from,
+        overridden,
     }
 }
 
@@ -298,39 +309,73 @@ fn cap(s: &str) -> String {
         .unwrap_or_default()
 }
 
-/// The reverse lookup, for display: `deep (Opus medium)`.
-///
-/// `launched_model` / `launched_effort` are what was actually launched (a
-/// retry's model included); `moved_up_from` is the model the ladder moved up
-/// from, when it did. Without a tier the model stands alone.
-pub fn describe(
+/// What a display string says besides the model: the ladder, an override, and
+/// whether the step has started.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Note {
+    /// `(n, of)`: this is ladder retry `n` of at most `of`.
+    pub retry: Option<(u32, u32)>,
+    pub overridden: bool,
+    /// Not launched yet: this is what the step is expected to use.
+    pub expected: bool,
+}
+
+/// The real model and effort alone: `Opus max`, `Haiku`, `Codex default, high`.
+fn real(provider: &str, model: Option<&str>, effort: Option<&str>) -> String {
+    match (model, effort) {
+        (Some(m), Some(e)) => format!("{} {e}", cap(m)),
+        (Some(m), None) => cap(m),
+        (None, Some(e)) => format!("{} default, {e}", cap(provider)),
+        (None, None) => format!("{} default", cap(provider)),
+    }
+}
+
+/// What a step asks for and what that becomes, for the editor's inspector:
+/// `deep at high → Opus max`. Without a tier only the real model shows.
+pub fn describe_request(
     tier: Option<Tier>,
     level: Level,
-    mapped: &Entry,
-    launched_model: Option<&str>,
-    launched_effort: Option<&str>,
-    moved_up_from: Option<&str>,
+    provider: &str,
+    model: Option<&str>,
+    effort: Option<&str>,
 ) -> String {
-    let Some(tier) = tier else {
-        return match launched_model {
-            Some(m) => format!("{m} (explicit model, no tier)"),
-            None => "CLI default model (no tier)".to_string(),
-        };
-    };
-    let shown = launched_model.map_or("CLI default".to_string(), cap);
-    let mut note = String::new();
-    if let Some(from) = moved_up_from {
-        note = format!(", moved up the ladder from {}", cap(from));
-    } else if launched_model != mapped.model.as_deref() {
-        note = match &mapped.model {
-            Some(m) => format!(", replacing the mapped {}", cap(m)),
-            None => ", replacing the CLI default".to_string(),
-        };
+    let base = real(provider, model, effort);
+    match tier {
+        Some(t) => format!("{} at {} \u{2192} {base}", t.name(), level.name()),
+        None => base,
     }
-    if launched_effort.is_some() && launched_effort != mapped.effort.as_deref() {
-        note.push_str(&format!(", effort {}", launched_effort.unwrap_or_default()));
+}
+
+/// The one display string, for every client: `deep (Opus medium)`.
+///
+/// `model` / `effort` are the real ones passed to the CLI (`None` model: the
+/// CLI's own default, named for its `provider`). With no tier the model stands
+/// alone: `Opus medium`. Only the first letter of a name is capitalised; the
+/// name is otherwise as the provider writes it.
+pub fn describe(
+    tier: Option<Tier>,
+    provider: &str,
+    model: Option<&str>,
+    effort: Option<&str>,
+    note: &Note,
+) -> String {
+    let base = real(provider, model, effort);
+    let mut notes: Vec<String> = vec![];
+    if let Some((n, of)) = note.retry {
+        notes.push(format!("retry {n} of {of}"));
     }
-    format!("{} ({shown} {}{note})", tier.name(), level.name())
+    if note.overridden {
+        notes.push("override".into());
+    }
+    if note.expected {
+        notes.push("expected".into());
+    }
+    match (tier, notes.is_empty()) {
+        (Some(t), true) => format!("{} ({base})", t.name()),
+        (Some(t), false) => format!("{} ({base}, {})", t.name(), notes.join(", ")),
+        (None, true) => base,
+        (None, false) => format!("{base} ({})", notes.join(", ")),
+    }
 }
 
 #[cfg(test)]
@@ -464,38 +509,108 @@ mod tests {
     }
 
     #[test]
-    fn describe_covers_every_case() {
-        let mapped = Entry::of(Some("opus"), Some("medium"));
-        let d = |model, eff, up| describe(Some(Tier::Deep), Level::Medium, &mapped, model, eff, up);
-        assert_eq!(d(Some("opus"), Some("medium"), None), "deep (Opus medium)");
+    fn describe_covers_every_form() {
+        let n = Note::default();
+        let d = |t, p, m, e, note: &Note| describe(t, p, m, e, note);
+        let deep = Some(Tier::Deep);
         assert_eq!(
-            d(Some("haiku"), Some("medium"), None),
-            "deep (Haiku medium, replacing the mapped Opus)"
+            d(deep, "claude", Some("opus"), Some("medium"), &n),
+            "deep (Opus medium)"
         );
         assert_eq!(
-            d(Some("fable"), Some("medium"), Some("opus")),
-            "deep (Fable medium, moved up the ladder from Opus)"
+            d(Some(Tier::Light), "claude", Some("haiku"), None, &n),
+            "light (Haiku)"
         );
         assert_eq!(
-            d(Some("opus"), Some("max"), None),
-            "deep (Opus medium, effort max)"
+            d(deep, "codex", None, Some("high"), &n),
+            "deep (Codex default, high)"
         );
-        let cli = Entry::default();
+        assert_eq!(d(deep, "codex", None, None, &n), "deep (Codex default)");
+        let retry = Note {
+            retry: Some((1, 2)),
+            ..Default::default()
+        };
         assert_eq!(
-            describe(Some(Tier::Light), Level::Low, &cli, None, None, None),
-            "light (CLI default low)"
+            d(deep, "claude", Some("opus"), Some("medium"), &retry),
+            "deep (Opus medium, retry 1 of 2)"
+        );
+        let over = Note {
+            overridden: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            d(deep, "claude", Some("opus"), Some("medium"), &over),
+            "deep (Opus medium, override)"
         );
         assert_eq!(
-            describe(Some(Tier::Light), Level::Low, &cli, Some("x"), None, None),
-            "light (X low, replacing the CLI default)"
+            d(None, "claude", Some("opus"), Some("medium"), &n),
+            "Opus medium"
         );
         assert_eq!(
-            describe(None, Level::Medium, &cli, Some("opus"), None, None),
-            "opus (explicit model, no tier)"
+            d(None, "claude", Some("opus"), Some("medium"), &over),
+            "Opus medium (override)"
         );
         assert_eq!(
-            describe(None, Level::Medium, &cli, None, None, None),
-            "CLI default model (no tier)"
+            d(None, "codex", None, Some("low"), &n),
+            "Codex default, low"
         );
+        let both = Note {
+            retry: Some((2, 2)),
+            overridden: true,
+            expected: false,
+        };
+        assert_eq!(
+            d(deep, "claude", Some("fable"), None, &both),
+            "deep (Fable, retry 2 of 2, override)"
+        );
+        let exp = Note {
+            expected: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            d(deep, "claude", Some("opus"), Some("max"), &exp),
+            "deep (Opus max, expected)"
+        );
+        // Names are never translated: only the first letter is capitalised.
+        assert_eq!(
+            d(None, "claude", Some("claude-opus-4-1"), None, &n),
+            "Claude-opus-4-1"
+        );
+    }
+
+    #[test]
+    fn the_inspector_line_says_what_is_asked_and_what_it_becomes() {
+        assert_eq!(
+            describe_request(
+                Some(Tier::Deep),
+                Level::High,
+                "claude",
+                Some("opus"),
+                Some("max")
+            ),
+            "deep at high \u{2192} Opus max"
+        );
+        assert_eq!(
+            describe_request(None, Level::High, "claude", Some("opus"), None),
+            "Opus"
+        );
+    }
+
+    #[test]
+    fn launch_marks_an_owner_override_only() {
+        use crate::layers::{Attr, Source};
+        let m = Mapping::builtin("claude");
+        let mut r = resolved(Some(Tier::Deep), Level::Medium);
+        assert!(!launch(&r, &m, &[]).overridden);
+        r.model = Some(Attr {
+            value: "opus".into(),
+            source: Source::Project,
+        });
+        assert!(!launch(&r, &m, &[]).overridden);
+        r.model = Some(Attr {
+            value: "opus".into(),
+            source: Source::Task,
+        });
+        assert!(launch(&r, &m, &[]).overridden);
     }
 }

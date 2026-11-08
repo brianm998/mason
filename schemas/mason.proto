@@ -397,6 +397,40 @@ message TaskRow {
   string body = 17;
   // Tasks that wait for this one (the reverse of `blockers`).
   repeated uint64 blocks = 18;
+  // The tier and the real model in use, as one string made by the daemon:
+  // "deep (Opus medium)". Clients show it as it is and map nothing themselves.
+  string display = 19;
+  // The same, in parts.
+  ModelUse model_use = 20;
+}
+
+// What a step run launched (or, with `expected`, will launch): the tier
+// and level asked for, the real model and effort passed to the CLI, and
+// where each came from. The daemon makes `display`; every client shows it.
+message ModelUse {
+  string display = 1;
+  string tier = 2;
+  string level = 3;
+  // The real model shown: the one the CLI reported when it reported one that
+  // differs from the one asked for, else the one asked for. Empty: the CLI's default.
+  string model = 4;
+  string effort = 5;
+  string provider = 6;
+  // Where the model and the effort came from, in words.
+  string why = 7;
+  // launch, retry, resume or reattach.
+  string kind = 8;
+  uint32 retry_n = 9;
+  uint32 retry_max = 10;
+  // Not launched yet: what the step is expected to use.
+  bool expected = 11;
+  uint64 run = 12;
+  // The model passed to the CLI, and the one the CLI reported, when it did.
+  string requested_model = 13;
+  string reported_model = 14;
+  // The owner's override named the model or the effort.
+  bool overridden = 15;
+  uint64 at_ms = 16;
 }
 
 message StateCount {
@@ -479,6 +513,9 @@ message ActiveModel {
   string project = 2;
   uint64 task = 3;
   string step = 4;
+  // "deep (Opus medium)"; the old `model` stays for older clients.
+  string display = 5;
+  ModelUse model_use = 6;
 }
 
 message HomeView {
@@ -499,6 +536,8 @@ message StepLine {
   uint32 attempt = 4;
   string outcome = 5;
   uint64 started_ms = 6;
+  // Every session this run started: the first, resumes, and each ladder retry.
+  repeated ModelUse launches = 7;
 }
 
 message DebtLine {
@@ -757,6 +796,11 @@ message Inspector {
   string kind = 2;
   string schema = 3;
   string values = 4;
+  // For an agent step, what it would launch now under the current provider:
+  // "deep at high -> Opus max"; empty for any other step.
+  string launch = 5;
+  // Where each part came from, one short line.
+  string launch_from = 6;
 }
 
 message EditorView {

@@ -122,6 +122,13 @@ fn main() {
     let turn = turns.get(n).and_then(Value::as_array).unwrap_or(&empty);
 
     let sid = resume.unwrap_or_else(|| "fake-claude-session".to_string());
+    // Like the real CLI, report the model asked for (`--model`), else a stand-in.
+    let reported = args
+        .iter()
+        .position(|a| a == "--model")
+        .and_then(|i| args.get(i + 1))
+        .cloned()
+        .unwrap_or_else(|| "claude-fake".to_string());
     let mut inited = false;
     let mut finished = false;
     let mut calls = 0u32;
@@ -129,7 +136,7 @@ fn main() {
         out(
             &json!({"type": "system", "subtype": "init", "cwd": "/scratch", "session_id": sid,
                     "tools": [], "mcp_servers": [{"name": "mason", "status": "connected"}],
-                    "model": "claude-fake", "permissionMode": "dontAsk", "claude_code_version": "0.0.0-fake"}),
+                    "model": reported, "permissionMode": "dontAsk", "claude_code_version": "0.0.0-fake"}),
         );
     };
     for a in turn {

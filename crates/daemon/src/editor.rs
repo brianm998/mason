@@ -428,6 +428,7 @@ pub fn model(d: &Daemon, pid: ProjectId, selected: &str) -> Value {
             },
             "values": ed::step_values(&files.definition, selected),
             "extends": ed::step_values(&files.definition, selected).get("extends").cloned(),
+            "launch": crate::launchview::inspect(d, def, pid, selected),
         }),
         _ => Value::Null,
     };
