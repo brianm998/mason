@@ -156,7 +156,12 @@ fn a_step_waits_for_a_held_class_and_says_why_then_lands() {
         ),
         "{why}"
     );
-    // The same sentence is the task's activity, so every monitor shows it.
+    // The same sentence is the task's activity, so every monitor shows it. The broker
+    // explains the wait as soon as the request is queued; the step's job records it as
+    // the task's activity (a `WaitStarted` event) just after, so wait for that.
+    wait_for("the task's activity to say what it waits for", 20, || {
+        !matches!(task_of(&d, t).activity, Activity::Running)
+    });
     let task = task_of(&d, t);
     assert_eq!(task.state, State::Testing);
     match &task.activity {

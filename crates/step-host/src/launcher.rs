@@ -83,7 +83,9 @@ pub fn spawn_host(o: &SpawnOptions) -> io::Result<HostInfo> {
         });
     }
 
-    let deadline = Instant::now() + Duration::from_secs(10);
+    // Generous: the host starts in milliseconds on an idle machine, but on a busy
+    // one the process can wait seconds for a CPU. The loop returns as soon as it is up.
+    let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         if let Ok(info) = HostInfo::read(&dir) {
             if info.sock.exists() {
