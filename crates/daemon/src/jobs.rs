@@ -678,7 +678,11 @@ pub(crate) fn prepare(c: &Ctx) -> Result<Option<String>, String> {
     // committed. Merging the base into them fails ("your local changes would be
     // overwritten") and failed the task; leave the branch as it is, and the next
     // step folds the base in once the work is committed.
-    let dirty = git::run(&c.wt, &["status", "--porcelain"]).map_err(|e| e.to_string())?;
+    // `--no-optional-locks`: a plain `git status` refreshes the index and takes
+    // `index.lock` to do it. An agent still winding down in this worktree (its step
+    // just superseded) then fails its own `git commit` on that lock.
+    let dirty = git::run(&c.wt, &["--no-optional-locks", "status", "--porcelain"])
+        .map_err(|e| e.to_string())?;
     if !dirty.trim().is_empty() {
         tracing::info!(
             task = c.task.0,
@@ -899,7 +903,8 @@ fn change_validator(
             )),
             Ok(_) => {}
         }
-        let dirty = git::run(&wt, &["status", "--porcelain"]).unwrap_or_default();
+        let dirty =
+            git::run(&wt, &["--no-optional-locks", "status", "--porcelain"]).unwrap_or_default();
         if !dirty.trim().is_empty() {
             problems.push(format!(
                 "the tree has uncommitted changes; commit or discard them:\n{}",
