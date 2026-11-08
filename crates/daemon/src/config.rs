@@ -135,6 +135,11 @@ pub struct ProjectCfg {
     pub test_timeout: Duration,
     /// Test rounds before the task fails, if the overlay sets one (layer 3).
     pub max_test_rounds: Option<u32>,
+    /// How many times a red test command is run again before the round counts as
+    /// red (`test_reruns`, default 0). Green on a rerun is green, recorded as a
+    /// flake; red every time is red. For a suite of many tests that only some
+    /// machines' load makes fail, this judges the change instead of the machine.
+    pub test_reruns: u32,
     /// A command that reads a task body on stdin and prints `clear` or
     /// `unclear`. Optional, and only consulted when the deterministic check is
     /// unsure. Anything but `clear`, or a failure, means explore.
@@ -153,6 +158,9 @@ pub struct ProjectCfg {
     /// Present when this project is MASON's own repository (`[self]`): its changes
     /// to gates and the like stop for the owner, and its self-tasks are limited.
     pub self_cfg: Option<SelfCfg>,
+    /// The provider account this project's agent steps use (`account` in the
+    /// overlay). Filled for real by `load_projects`, which knows the accounts.
+    pub account: String,
 }
 
 /// Which agent CLI runs a project's agent steps.
@@ -169,6 +177,8 @@ pub enum Provider {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AgentCfg {
     pub provider: Provider,
+    /// `account` in the overlay: a name from providers.toml.
+    pub account: Option<String>,
     pub codex_bin: Option<PathBuf>,
     /// Models weakest to strongest. A step that ends with no result, or crashes,
     /// is tried again from a fresh session on the next model up. Empty: no change.
@@ -189,6 +199,15 @@ pub fn parse_agent(id: &str, doc: &DocumentMut) -> Result<AgentCfg, String> {
             ))
         }
     };
+    let account = match doc.get("account") {
+        None => None,
+        Some(v) => Some(
+            v.as_str()
+                .filter(|a| valid_id(a))
+                .ok_or_else(|| format!("{id}: `account` is the name of a providers.toml account"))?
+                .to_string(),
+        ),
+    };
     let ladder: Vec<String> = match doc.get("ladder") {
         None => vec![],
         Some(v) => v
@@ -205,6 +224,7 @@ pub fn parse_agent(id: &str, doc: &DocumentMut) -> Result<AgentCfg, String> {
     };
     Ok(AgentCfg {
         provider,
+        account,
         codex_bin: s("codex_bin").map(PathBuf::from),
         ladder,
         max_retries: doc
@@ -235,6 +255,21 @@ pub struct SelfCfg {
     pub period_h: u64,
     /// After a rollback, no self-task is filed for this long.
     pub cooldown_h: u64,
+    /// What a change to a protected file, or one that weakens a check, does at landing.
+    pub holds: Holds,
+}
+
+/// `[self] holds`: who judges a change to MASON's own rules.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Holds {
+    /// Nobody waits. A change that weakens a check goes back to development with what was
+    /// found; one that only touches a protected file lands once its tests and review are
+    /// green, and the record keeps what it touched. Validity is decided where the context is
+    /// (test and review), not by a person at the end.
+    #[default]
+    Review,
+    /// The task waits for the owner's approval of the diff (the Stage 17 behavior).
+    Owner,
 }
 
 fn parse_self(id: &str, doc: &DocumentMut) -> Result<Option<SelfCfg>, String> {
@@ -267,6 +302,15 @@ fn parse_self(id: &str, doc: &DocumentMut) -> Result<Option<SelfCfg>, String> {
         max_steps: int("max_steps", 40)? as u32,
         period_h: int("period_h", 24)?,
         cooldown_h: int("cooldown_h", 24)?,
+        holds: match t.get("holds").and_then(|v| v.as_str()) {
+            None | Some("review") => Holds::Review,
+            Some("owner") => Holds::Owner,
+            Some(other) => {
+                return Err(format!(
+                    "{id}: `[self] holds` must be \"review\" or \"owner\", not {other:?}"
+                ))
+            }
+        },
     }))
 }
 
@@ -513,7 +557,7 @@ impl ProjectCfg {
     }
 }
 
-fn valid_id(s: &str) -> bool {
+pub(crate) fn valid_id(s: &str) -> bool {
     !s.is_empty()
         && s.chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
@@ -553,8 +597,11 @@ pub fn parse_project(id: &str, text: &str) -> Result<ProjectCfg, String> {
             "{id}: base branch {base:?} is not a plain branch name"
         ));
     }
-    parse_agent(id, &doc)?;
+    let agent = parse_agent(id, &doc)?;
     Ok(ProjectCfg {
+        account: agent
+            .account
+            .unwrap_or_else(|| crate::providers::adapter_name(agent.provider).to_string()),
         id: id.to_string(),
         path: PathBuf::from(need("path")?),
         base,
@@ -570,6 +617,10 @@ pub fn parse_project(id: &str, text: &str) -> Result<ProjectCfg, String> {
             .get("max_test_rounds")
             .and_then(|v| v.as_integer())
             .map(|n| n.max(1) as u32),
+        test_reruns: doc
+            .get("test_reruns")
+            .and_then(|v| v.as_integer())
+            .map_or(0, |n| n.clamp(0, 3) as u32),
         clarity_classifier: s("clarity_classifier").filter(|c| !c.trim().is_empty()),
         card_rewriter: s("card_rewriter").filter(|c| !c.trim().is_empty()),
         priority_jump: doc
@@ -595,6 +646,10 @@ pub fn load_projects(config_dir: &Path) -> Result<Vec<ProjectCfg>, Vec<String>> 
         .filter(|p| p.extension().is_some_and(|e| e == "toml"))
         .collect();
     files.sort();
+    let accounts = match crate::providers::load(config_dir) {
+        Ok(a) => a,
+        Err(e) => return Err(vec![e]),
+    };
     for p in files {
         let id = p
             .file_stem()
@@ -603,7 +658,20 @@ pub fn load_projects(config_dir: &Path) -> Result<Vec<ProjectCfg>, Vec<String>> 
             .to_string();
         match std::fs::read_to_string(&p) {
             Ok(t) => match parse_project(&id, &t) {
-                Ok(c) => out.push(c),
+                Ok(mut c) => {
+                    let a = c.agent();
+                    match crate::providers::resolve_account(
+                        &accounts,
+                        a.provider,
+                        a.account.as_deref(),
+                    ) {
+                        Ok(n) => {
+                            c.account = n;
+                            out.push(c);
+                        }
+                        Err(e) => errs.push(format!("{}: {e}", c.id)),
+                    }
+                }
                 Err(e) => errs.push(e),
             },
             Err(e) => errs.push(format!("{}: {e}", p.display())),
@@ -736,5 +804,65 @@ mod tests {
             let e = parse_project(id, t).unwrap_err();
             assert!(e.contains(want), "{e:?} should contain {want:?}");
         }
+    }
+
+    fn write(dir: &Path, name: &str, text: &str) {
+        std::fs::create_dir_all(dir.join("projects")).unwrap();
+        let f = if name == "providers" {
+            dir.join("providers.toml")
+        } else {
+            dir.join("projects").join(format!("{name}.toml"))
+        };
+        std::fs::write(f, text).unwrap();
+    }
+
+    const PROJ: &str = "path=\"/r\"\nbase=\"main\"\ntest=\"t\"\n";
+
+    #[test]
+    fn accounts_resolve_at_load_and_a_missing_one_is_refused_by_name() {
+        let d = tempfile::tempdir().unwrap();
+        // No providers.toml: the one default account.
+        write(d.path(), "p", PROJ);
+        assert_eq!(load_projects(d.path()).unwrap()[0].account, "claude");
+        // A project on codex with no codex account: refused, naming the fix.
+        write(d.path(), "q", &format!("{PROJ}provider=\"codex\"\n"));
+        let e = load_projects(d.path()).unwrap_err().join("\n");
+        assert!(e.contains("q:") && e.contains("adapter = \"codex\""), "{e}");
+        write(
+            d.path(),
+            "providers",
+            "[provider.a]\nadapter=\"claude\"\nbilling=\"subscription\"\n[provider.x]\nadapter=\"codex\"\nbilling=\"api\"\n",
+        );
+        let ps = load_projects(d.path()).unwrap();
+        let of = |id: &str| ps.iter().find(|p| p.id == id).unwrap().account.clone();
+        assert_eq!((of("p"), of("q")), ("a".into(), "x".into()));
+        // Naming a missing account.
+        write(d.path(), "r", &format!("{PROJ}account=\"missing\"\n"));
+        let e = load_projects(d.path()).unwrap_err().join("\n");
+        assert!(e.contains("r:") && e.contains("\"missing\""), "{e}");
+        // A bad providers.toml fails the load.
+        write(
+            d.path(),
+            "providers",
+            "[provider.a]\nadapter=\"claude\"\nbilling=\"x\"\n",
+        );
+        assert!(load_projects(d.path()).is_err());
+    }
+
+    #[test]
+    fn llm_section_still_sets_sessions_for_an_account() {
+        let r = crate::sched::parse_resource_cfg("[llm]\nclaude = 2\n").unwrap();
+        let accts = crate::providers::default_accounts();
+        assert!(crate::providers::check_llm_conflict(&accts, &r.llm).is_ok());
+        let b = crate::sched::Broker::new(
+            tempfile::tempdir().unwrap().keep(),
+            tempfile::tempdir().unwrap().keep().join("limits.kv"),
+            &r,
+            4,
+            std::sync::Arc::new(crate::cpu::FileCpu("/nonexistent".into())),
+            &accts,
+        )
+        .unwrap();
+        assert_eq!(b.limit("llm:claude"), Some(2));
     }
 }

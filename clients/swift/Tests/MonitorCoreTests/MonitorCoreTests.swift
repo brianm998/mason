@@ -51,6 +51,49 @@ final class MonitorCoreTests: XCTestCase {
         return m
     }
 
+    // MARK: the attention sound
+
+    private func sidebarUpdate(_ sections: [SidebarSection]) -> Mason_V1_View {
+        var sb = SidebarView()
+        sb.sections = sections
+        var v = Mason_V1_View()
+        v.body = .sidebar(sb)
+        return v
+    }
+
+    func testSomethingNewNeedingYouChimesOnceAndTheFirstUpdateIsSilent() {
+        let m = MonitorModel()
+        var chimes = 0
+        m.onAttention = { chimes += 1 }
+        let waiting = section("needs_attention", rows: [row(1, state: "developing")])
+        m.apply(sidebarUpdate([waiting]))
+        XCTAssertEqual(chimes, 0, "what was already waiting when the monitor opened is silent")
+        m.apply(sidebarUpdate([waiting]))
+        XCTAssertEqual(chimes, 0, "the same task again is not new")
+        m.apply(sidebarUpdate([section("needs_attention", rows: [row(1, state: "developing"), row(2, state: "testing")])]))
+        XCTAssertEqual(chimes, 1, "a second task needs you")
+        m.apply(sidebarUpdate([section("failed", rows: [row(3, state: "failed")])]))
+        XCTAssertEqual(chimes, 2, "a failure needs you")
+        m.apply(sidebarUpdate([section("queued", rows: [row(4, state: "queued")])]))
+        XCTAssertEqual(chimes, 2, "a queued task does not")
+    }
+
+    func testMutedIsSilentAndChangingProjectDoesNotChime() {
+        let m = MonitorModel()
+        var chimes = 0
+        m.onAttention = { chimes += 1 }
+        m.apply(sidebarUpdate([section("needs_attention", rows: [])]))
+        m.muted = true
+        m.apply(sidebarUpdate([section("needs_attention", rows: [row(1, state: "developing")])]))
+        XCTAssertEqual(chimes, 0, "muted")
+        m.muted = false
+        m.apply(sidebarUpdate([section("needs_attention", rows: [row(1, state: "developing")])]))
+        XCTAssertEqual(chimes, 0, "it was seen while muted, so it is not new when unmuted")
+        m.project = "ios"
+        m.apply(sidebarUpdate([section("needs_attention", rows: [row(9, state: "developing")])]))
+        XCTAssertEqual(chimes, 0, "a different project's list is a fresh start")
+    }
+
     // MARK: navigation
 
     func testHistoryIsBrowserStyle() {
@@ -106,6 +149,15 @@ final class MonitorCoreTests: XCTestCase {
         XCTAssertEqual(item.texts.first, "–")
     }
 
+    func testTileLabelIsTheDaemonsLabelOrTheUnderscoreFallback() {
+        let m = model(connected: true)
+        var c = StateCount()
+        c.state = "needs_attention"
+        XCTAssertEqual(m.tileLabel(c), "needs attention", "an older daemon sends no label")
+        c.label = "stuck"
+        XCTAssertEqual(m.tileLabel(c), "stuck")
+    }
+
     // MARK: sidebar
 
     func testHistorySectionsStartCollapsedAndChoicesAreRemembered() {
@@ -133,6 +185,58 @@ final class MonitorCoreTests: XCTestCase {
         m.reveal(state: "failed")
         XCTAssertTrue(m.isExpanded(failed))
         XCTAssertEqual(m.scrollTarget, "failed")
+    }
+
+    func testDoubleClickOnAStateWithOneTaskExpandsScrollsAndOpensIt() {
+        let m = model()
+        m.tileClicked(state: "failed", clickCount: 1)
+        XCTAssertEqual(m.page, .home, "a single click only reveals")
+        m.tileClicked(state: "failed", clickCount: 2)
+        XCTAssertTrue(m.isExpanded(m.sidebar!.sections[1]))
+        XCTAssertEqual(m.scrollTarget, "failed")
+        XCTAssertEqual(m.page, .task(3))
+    }
+
+    func testDoubleClickWithSeveralTasksExpandsAndScrollsButKeepsThePage() {
+        let m = model()
+        m.tileClicked(state: "queued", clickCount: 2)
+        XCTAssertTrue(m.isExpanded(m.sidebar!.sections[0]))
+        XCTAssertEqual(m.scrollTarget, "queued")
+        XCTAssertEqual(m.page, .home)
+    }
+
+    func testDoubleClickOnAnEmptyStateChangesNothingBeyondTheReveal() {
+        let m = model()
+        m.sidebar!.sections.append(section("canceled", collapsed: true))
+        m.tileClicked(state: "canceled", clickCount: 2)
+        XCTAssertEqual(m.page, .home)
+    }
+
+    func testDoubleClickStillOpensTheLoneTaskWhenSearchHidesIt() {
+        let m = model()
+        m.search.text = "zzz-no-match"
+        m.tileClicked(state: "failed", clickCount: 2)
+        XCTAssertEqual(m.page, .task(3))
+        XCTAssertEqual(m.search.text, "zzz-no-match")
+    }
+
+    func testDoubleClickWhileDisconnectedDoesNothing() {
+        let m = model(connected: false)
+        m.revealAndOpenIfOne(state: "failed")
+        XCTAssertEqual(m.page, .home)
+        XCTAssertNil(m.scrollTarget)
+        XCTAssertFalse(m.isExpanded(m.sidebar!.sections[1]))
+    }
+
+    func testTooltipMentionsDoubleClickOnlyForACountOfOne() {
+        let m = model()
+        var c = StateCount(); c.state = "failed"; c.tooltip = "tip"
+        c.count = 1
+        XCTAssertEqual(m.tileTooltip(c), "tip\nDouble-click to open it")
+        c.count = 2
+        XCTAssertEqual(m.tileTooltip(c), "tip")
+        c.count = 1; m.connected = false
+        XCTAssertEqual(m.tileTooltip(c), "tip")
     }
 
     func testSearchMatchesNameTitleAndBodyEachWithItsOwnCheckbox() {
@@ -531,5 +635,106 @@ final class MonitorCoreTests: XCTestCase {
     func testGraphNegativeLayoutX() {
         let h = GraphLayout.horizontal(nodeXs: [-300, 100], backEdges: [], viewport: 0)
         XCTAssertGreaterThanOrEqual(h.left + h.dx, 0)
+    }
+
+    // MARK: live progress (s49)
+
+    func cell(unit: String = "tests", done: UInt32, total: UInt32 = 0, doneSrc: ProgressSource = .sourceReported,
+              totalSrc: ProgressSource = .sourceNone, low: UInt32 = 0) -> ProgressCell {
+        var c = ProgressCell()
+        c.step = "develop"
+        c.state = .part
+        c.run = 1
+        c.unit = unit
+        c.done = done
+        c.total = total
+        c.doneSource = doneSrc
+        c.totalSource = totalSrc
+        c.totalLow = low
+        c.staleAfterMs = 300_000
+        return c
+    }
+
+    func testCountTextFollowsTheRuleForNumbers() {
+        XCTAssertEqual(cell(done: 212, total: 340, totalSrc: .sourceReported).countText, "212 of 340 tests, 62%")
+        XCTAssertEqual(cell(unit: "lines", done: 5, total: 7, doneSrc: .sourceCounted, totalSrc: .sourceCounted).countText, "5 of 7 lines, 71%")
+        XCTAssertEqual(cell(done: 400, total: 340, totalSrc: .sourceReported).countText, "400 of 340 tests, 100%")
+        let h = cell(unit: "lines", done: 1240, total: 2400, doneSrc: .sourceCounted, totalSrc: .sourceHistory, low: 1800)
+        XCTAssertEqual(h.countText, "1,240 lines, usually 1,800 to 2,400")
+        XCTAssertNil(h.percent)
+        XCTAssertEqual(cell(unit: "tool calls", done: 37).countText, "37 tool calls")
+        XCTAssertEqual(cell(done: 3, total: 0, totalSrc: .sourceReported).countText, "3 tests")
+        XCTAssertEqual(Format.countText(unit: "", done: 0, doneSource: .sourceNone, total: 0, totalSource: .sourceNone, totalLow: 0), "")
+    }
+
+    func testCellFill() {
+        XCTAssertEqual(cell(done: 3, total: 7, totalSrc: .sourceReported).fill, .proportional(3.0 / 7.0))
+        XCTAssertEqual(cell(done: 10, total: 40, totalSrc: .sourceHistory).fill, .typical(0.25))
+        XCTAssertEqual(cell(done: 50, total: 40, totalSrc: .sourceHistory).fill, .typical(1))
+        XCTAssertEqual(cell(done: 10).fill, .outline)
+    }
+
+    func testStaleRuleAndTimeText() {
+        XCTAssertEqual(Format.timeText(now: 10_000, moved: 6_000, afterMs: 300_000), "updated 4 s ago")
+        XCTAssertEqual(Format.timeText(now: 400_000, moved: 40_000, afterMs: 300_000), "no output for 6 min")
+        XCTAssertEqual(Format.timeText(now: 300_000, moved: 40_000, afterMs: 300_000), "updated 4 min ago")
+        XCTAssertFalse(Format.isStale(now: 300_000, moved: 0, afterMs: 1))
+        XCTAssertFalse(Format.isStale(now: 1_300_000, moved: 1_000_000, afterMs: 300_000))
+        XCTAssertTrue(Format.isStale(now: 1_300_001, moved: 1_000_000, afterMs: 300_000))
+        XCTAssertEqual(Format.group(1_234_567), "1,234,567")
+    }
+
+    func testSpokenLabelHasCountAndPercentButNoClock() {
+        var c = cell(unit: "plan steps", done: 3, total: 7, totalSrc: .sourceReported)
+        c.step = "develop"
+        c.updatedAtMs = 1_000
+        XCTAssertEqual(c.spokenLabel, "develop, running, 3 of 7 plan steps, 42 percent")
+        XCTAssertEqual(cell(unit: "tool calls", done: 37).spokenLabel, "develop, running, 37 tool calls")
+        var f = c; f.state = .filled
+        XCTAssertEqual(f.spokenLabel, "develop, finished")
+    }
+
+    func testStepProgressUpdatesTheRowAndAnchorsTheClock() {
+        let m = model()
+        var d = TaskDetailView()
+        var r = row(1, state: "developing")
+        var c = cell(done: 1, total: 4, totalSrc: .sourceReported)
+        c.step = "develop"
+        r.progress = [c]
+        d.row = r
+        m.taskDetail = d
+        m.sidebar?.sections[0].rows[0].progress = [c]
+        var p = Mason_V1_StepProgress()
+        p.task = 1
+        var n = c
+        n.done = 3
+        p.progress = n
+        p.nowMs = 5_000_000
+        p.log = ["a", "b"]
+        let at = Date(timeIntervalSince1970: 1_000)
+        m.apply(progress: p, local: at)
+        XCTAssertEqual(m.taskDetail?.row.progress.first?.done, 3)
+        XCTAssertEqual(m.sidebar?.sections[0].rows[0].progress.first?.done, 3)
+        XCTAssertEqual(m.liveLog, ["a", "b"])
+        // The daemon's clock is 4,999,000 ms ahead of this device's at the anchor, and then counts up.
+        XCTAssertEqual(m.daemonNow(at), 5_000_000)
+        XCTAssertEqual(m.daemonNow(at.addingTimeInterval(7)), 5_007_000)
+        // The log keeps its last 40 lines.
+        var q = p
+        q.log = (0..<60).map { "l\($0)" }
+        m.apply(progress: q, local: at)
+        XCTAssertEqual(m.liveLog.count, 40)
+        XCTAssertEqual(m.liveLog.last, "l59")
+    }
+
+    func testProgressItemsHaveNoClockText() {
+        var c = cell(done: 212, total: 340, totalSrc: .sourceReported)
+        c.message = "running the api suite"
+        c.updatedAtMs = 1_000_000
+        let t = c.progressTexts(now: 1_004_000)
+        XCTAssertEqual(t.first, "212 of 340 tests, 62%")
+        XCTAssertFalse(t.contains { $0.contains(" ago") })
+        XCTAssertFalse(t.contains("silent"))
+        XCTAssertTrue(c.progressTexts(now: 1_400_000).contains("silent"))
     }
 }

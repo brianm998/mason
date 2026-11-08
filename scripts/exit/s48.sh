@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Limits (s46) exit test: only the machine is limited. A real masond with the scripted agent.
+# Limits (s48) exit test: only the machine is limited. A real masond with the scripted agent.
 #  1. A non-owner flood (outside issues the owner labeled, from a fake GitHub on loopback) still
 #     hits max_open: 5 issues, 3 imported, while the owner's own tasks are not counted.
 #  2. The owner files 12 tasks past max_open = 3 and all are accepted; at most the llm:claude
@@ -9,8 +9,8 @@
 #     reason "CPU 85% > 50%", `mason resources` shows the reading, and it runs when the file reads 20.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
-command -v python3 >/dev/null || { echo "s46 needs python3" >&2; exit 1; }
-root=$(mktemp -d /tmp/mason-s46.XXXXXX); daemon=""; gh=""; cc=""
+command -v python3 >/dev/null || { echo "s48 needs python3" >&2; exit 1; }
+root=$(mktemp -d /tmp/mason-s48.XXXXXX); daemon=""; gh=""; cc=""
 cleanup() {
   [ -n "$cc" ] && kill "$cc" 2>/dev/null || true
   [ -n "$daemon" ] && kill -9 "$daemon" 2>/dev/null || true
@@ -122,4 +122,4 @@ wait "$cc"; cc=""
 echo "   CPU fell to 20%: the compile ran"
 
 trap - EXIT; cleanup
-echo "s46 OK"
+echo "s48 OK"

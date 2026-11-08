@@ -27,8 +27,9 @@ struct SidebarPane: View {
             }
             .onChange(of: model.scrollTarget) { _, target in
                 guard let t = target else { return }
-                withAnimation { proxy.scrollTo(t, anchor: .top) }
                 model.scrollTarget = nil
+                // Next turn: the expanded section's rows are laid out by then.
+                DispatchQueue.main.async { withAnimation { proxy.scrollTo(t, anchor: .top) } }
             }
         }
         .frame(width: theme.sidebarWidth)
@@ -144,11 +145,12 @@ struct RowView: View {
                         if !row.typical.isEmpty {
                             Text(row.typical).font(theme.small()).foregroundStyle(theme.muted)
                         }
-                        ProgressCells(cells: row.progress, slow: row.slow)
+                        ProgressCells(model: model, cells: row.progress, slow: row.slow)
                         if !row.model.isEmpty {
                             Text(row.model).font(theme.small()).foregroundStyle(theme.muted)
                         }
                     }
+                    if let c = row.progress.running { ProgressLine(model: model, cell: c) }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())

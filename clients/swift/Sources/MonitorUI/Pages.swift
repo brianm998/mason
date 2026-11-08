@@ -91,7 +91,7 @@ struct HomePage: View {
                         ForEach(st.rows, id: \.id) { r in
                             Button { model.go(.task(r.id)) } label: {
                                 HStack(spacing: theme.spacing) {
-                                    ProgressCells(cells: r.progress, slow: r.slow)
+                                    ProgressCells(model: model, cells: r.progress, slow: r.slow)
                                     Text("\(r.project) \(r.key)").font(theme.body(.semibold))
                                     Text(r.title).font(theme.body())
                                     Text(r.whyWaiting.isEmpty ? Format.duration(ms: r.inStateMs) : "\(r.whyWaiting), \(Format.duration(ms: r.inStateMs))")
@@ -166,9 +166,10 @@ struct TaskDetailPage: View {
             }
 
             HStack(spacing: theme.spacing) {
-                ProgressCells(cells: r.progress, slow: r.slow)
+                ProgressCells(model: model, cells: r.progress, slow: r.slow)
                 if !r.typical.isEmpty { Text(r.typical).font(theme.small()).foregroundStyle(theme.muted) }
             }
+            if let c = r.progress.running { ProgressDetail(model: model, cell: c) }
 
             ActionButtons(model: model, row: r, hasApprovalView: d.hasApproval)
 
@@ -228,6 +229,10 @@ struct TaskDetailPage: View {
                         Text(s.name.isEmpty ? s.category : s.name).font(theme.body(.semibold))
                         Text("attempt \(s.attempt)").foregroundStyle(theme.muted)
                         Text(s.outcome)
+                        if let c = r.progress.first(where: { $0.step == s.name && $0.state == .part && $0.run == s.run }) {
+                            Text(c.countText).foregroundStyle(theme.muted)
+                            Text(c.timeText(now: model.daemonNow())).foregroundStyle(c.isStale(now: model.daemonNow()) ? theme.slow : theme.muted)
+                        }
                     }
                     .font(theme.body())
                     .accessibilityIdentifier("step:\(s.run)")
@@ -253,9 +258,9 @@ struct TaskDetailPage: View {
             if !d.body.isEmpty {
                 section("Task", theme: theme) { Text(d.body).font(theme.body()).textSelection(.enabled) }
             }
-            if !d.logTail.isEmpty {
+            if !model.liveLog.isEmpty {
                 section("Log", theme: theme) {
-                    Text(d.logTail)
+                    Text(model.liveLog.joined(separator: "\n"))
                         .font(theme.mono()).textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(theme.spacing)
@@ -333,7 +338,7 @@ struct UsagePage: View {
         VStack(alignment: .leading, spacing: theme.spacingLarge) {
             Text("LLM usage").font(theme.title())
             ForEach(model.usage?.providers ?? [], id: \.name) { p in
-                Text("\(p.name): \(p.status), \(p.sessionsUsed) of \(p.sessionsLimit) sessions in use").font(theme.body())
+                Text("\(p.name) (\(p.adapter), \(p.billing)): \(p.status), \(p.sessionsUsed) of \(p.sessionsLimit) sessions in use; warn at \(Int(p.warnAt * 100))%, overage \(p.overage)" + (p.monthlyBudgetUsd > 0 ? ", budget $\(Int(p.monthlyBudgetUsd))/month" : "")).font(theme.body())
             }
             if let n = model.usage?.note { Text(n).font(theme.body()).foregroundStyle(theme.muted) }
             SessionStepper(model: model)

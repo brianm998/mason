@@ -324,8 +324,13 @@ fn a_force_skip_stops_a_running_suite_keeps_green_lanes_and_records_a_debt() {
     // `slow` takes a minute while the flag file exists.
     let flag = s_counter().with_file_name("slow.flag");
     std::fs::write(&flag, "x").unwrap();
-    let slow = "#!/bin/sh\nif [ -f FLAG ]; then sleep 60; fi\necho 1..2; echo 'ok 1 - a'; echo 'ok 2 - b'\n"
-        .replace("FLAG", &flag.display().to_string());
+    // It says when it has seen the flag and is sleeping, so the test skips it mid-run
+    // (waiting for its host to appear was not enough: on a busy machine the script
+    // could start only after the flag was gone, and pass before the skip was seen).
+    let sleeping = flag.with_file_name("slow.sleeping");
+    let slow = "#!/bin/sh\nif [ -f FLAG ]; then touch SLEEPING; sleep 60; fi\necho 1..2; echo 'ok 1 - a'; echo 'ok 2 - b'\n"
+        .replace("FLAG", &flag.display().to_string())
+        .replace("SLEEPING", &sleeping.display().to_string());
     let more = "[suite.slow]\ncommand = \"sh slow.sh\"\nparser = \"tap\"\nmin_tests = 2\nlevel = \"unit\"\n";
     let definition =
         def("", "", more).replace("suites = [\"checks\"]", "suites = [\"checks\", \"slow\"]");
@@ -343,14 +348,15 @@ fn a_force_skip_stops_a_running_suite_keeps_green_lanes_and_records_a_debt() {
     );
     let d = start(&s);
     let t = file_it(&d, "Skip me");
-    // Wait for `slow` to be running (its host appears).
+    // Wait for `slow` to be running: its host is up and the script is in its sleep.
     wait_for("the slow suite to start", 60, || {
-        std::fs::read_dir(d.cfg.hosts_dir())
-            .map(|r| {
-                r.flatten()
-                    .any(|e| e.file_name().to_string_lossy().ends_with("-u-slow"))
-            })
-            .unwrap_or(false)
+        sleeping.exists()
+            && std::fs::read_dir(d.cfg.hosts_dir())
+                .map(|r| {
+                    r.flatten()
+                        .any(|e| e.file_name().to_string_lossy().ends_with("-u-slow"))
+                })
+                .unwrap_or(false)
     });
     let started = std::time::Instant::now();
     let debt = mason_daemon::suites::skip(&d, t, "suite:slow", "not worth a minute", "brian", true)

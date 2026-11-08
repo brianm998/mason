@@ -16,6 +16,7 @@ fn broker(dir: &Path, cfg: &ResourceCfg, cpu: &std::sync::Arc<FakeCpu>) -> std::
         cfg,
         10,
         cpu.clone(),
+        &mason_daemon::providers::default_accounts(),
     )
     .unwrap()
 }

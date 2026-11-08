@@ -57,8 +57,9 @@ fun SidebarPane(model: MonitorModel) {
     LaunchedEffect(target, entries.size) {
         if (target != null) {
             val i = entries.indexOfFirst { it is Entry.Header && it.section.state == target }
-            if (i >= 0) state.animateScrollToItem(i)
+            // Clear first: a cancelled animation must not leave the target set.
             model.scrollTarget = null
+            if (i >= 0) state.animateScrollToItem(i)
         }
     }
     LazyColumn(
@@ -171,9 +172,10 @@ private fun RowView(model: MonitorModel, row: TaskRow) {
             Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing), verticalAlignment = Alignment.CenterVertically) {
                 Text(Format.duration(row.in_state_ms), style = theme.small(color = if (row.slow) theme.slow else theme.muted))
                 if (row.typical.isNotEmpty()) Text(row.typical, style = theme.small())
-                ProgressCells(row.progress, row.slow)
+                ProgressCells(model, row.progress, row.slow)
                 if (row.model.isNotEmpty()) Text(row.model, style = theme.small())
             }
+            row.progress.running?.let { ProgressLine(model, it) }
         }
         if (row.blockers.isNotEmpty()) {
             Row(horizontalArrangement = Arrangement.spacedBy(theme.spacingSmall)) {

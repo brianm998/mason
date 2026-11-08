@@ -28,6 +28,17 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     var connected by mutableStateOf(false)
 
     /**
+     * The daemon's clock minus this device's, ms, as of the last message that carried the daemon's
+     * time (the welcome, each StepProgress): "updated 4 s ago" counts on the local clock, corrected by this.
+     */
+    var clockOffsetMs by mutableStateOf(0L)
+        private set
+
+    /** The open task's live log: its last 40 lines, followed from the stream. */
+    var liveLog by mutableStateOf<List<String>>(emptyList())
+        private set
+
+    /**
      * Whether the daemon took this connection's identity for the owner's (its welcome says).
      * Only then are the answer, approve and reject buttons drawn: anyone else sees the card.
      */
@@ -62,7 +73,16 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
         private set
     var muted by mutableStateOf(prefs.bool(KEY_MUTE) ?: false)
         private set
-    var project by mutableStateOf("")
+    var project: String
+        get() = projectState
+        set(v) { projectState = v; attentionSeen = null }
+    private var projectState by mutableStateOf("")
+    /** Called when something new needs the owner and the monitor is not muted: a task asked a
+     *  question, waits for approval, was proposed, or failed. The app plays its sound here. */
+    var onAttention: (() -> Unit)? = null
+    /** The tasks that needed the owner at the last update; null until the first one, so what
+     *  was already waiting when the monitor opened (or the project changed) is silent. */
+    private var attentionSeen: Set<Long>? = null
     private var overrides by mutableStateOf(mapOf<String, Boolean>())
 
     /** Where the sidebar should scroll to (a tile was clicked). */
@@ -115,6 +135,9 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
 
     // ---- counts and tiles ----
 
+    /** The tile text: the daemon's label, or (older daemon) the state with spaces. */
+    fun tileLabel(c: StateCount): String = c.label.ifEmpty { c.state.replace('_', ' ') }
+
     /** A dash while disconnected: never a stale count, never a false zero. */
     fun tileCount(c: StateCount): String = if (connected) c.count.toString() else "–"
 
@@ -138,6 +161,24 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
         setExpanded(state, true)
         scrollTarget = state
     }
+
+    /** What a tile click does: reveal on every click; the second click of a double also opens the lone task. */
+    fun tileClicked(state: String, clickCount: Int) {
+        reveal(state)
+        if (clickCount == 2) revealAndOpenIfOne(state)
+    }
+
+    /** Reveal the section and, if it holds exactly one task right now (search ignored), open it. Nothing while disconnected. */
+    fun revealAndOpenIfOne(state: String) {
+        if (!connected) return
+        reveal(state)
+        val sec = sidebar?.sections?.firstOrNull { it.state == state } ?: return
+        if (sec.rows.size == 1) go(Page.Task(sec.rows[0].id))
+    }
+
+    /** The tile's tooltip; a count of exactly one says a double-click opens it. */
+    fun tileTooltip(c: StateCount): String =
+        if (connected && c.count == 1) c.tooltip + "\nDouble-click to open it" else c.tooltip
 
     // ---- search ----
 
@@ -209,6 +250,50 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     fun editorCall(what: String, body: Map<String, Any?> = emptyMap()) =
         raw("POST", "/projects/$editorProject/editor/$what", json = EditorJson.text(body))
 
+    // ---- live progress ----
+
+    /** The daemon's time now, ms since the epoch, by this device's clock and the offset. */
+    fun daemonNow(local: Long = System.currentTimeMillis()): Long = max(0L, local + clockOffsetMs)
+
+    internal fun anchor(daemonNow: Long, local: Long = System.currentTimeMillis()) {
+        if (daemonNow > 0) clockOffsetMs = daemonNow - local
+    }
+
+    /** A step's progress arrived without a view: put it into the task page and the rows, and follow the log. */
+    fun apply(p: StepProgress, local: Long = System.currentTimeMillis()) {
+        anchor(p.now_ms, local)
+        val cell = p.progress ?: return
+        fun merged(old: List<ProgressCell>): List<ProgressCell>? {
+            val i = old.indexOfFirst { it.step == cell.step }
+            if (i < 0) return null
+            // A finished or stopped run says what it ended as on the next view; until then, no "running".
+            val c = if (cell.state != CellState.PART) cell.copy(label = "") else cell
+            return old.toMutableList().also { it[i] = c }
+        }
+        taskDetail?.let { d ->
+            val r = d.row
+            if (r != null && r.id == p.task) {
+                merged(r.progress)?.let { taskDetail = d.copy(row = r.copy(progress = it)) }
+                appendLog(p.log)
+            }
+        }
+        sidebar?.let { s ->
+            var changed = false
+            val sections = s.sections.map { sec ->
+                sec.copy(rows = sec.rows.map { row ->
+                    val cells = if (row.id == p.task) merged(row.progress) else null
+                    if (cells != null) { changed = true; row.copy(progress = cells) } else row
+                })
+            }
+            if (changed) sidebar = s.copy(sections = sections)
+        }
+    }
+
+    internal fun appendLog(lines: List<String>) {
+        if (lines.isEmpty()) return
+        liveLog = (liveLog + lines).takeLast(LOG_KEEP)
+    }
+
     // ---- updates from the daemon ----
 
     fun apply(m: ServerMessage) {
@@ -216,6 +301,7 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
             connected = true
             if (w.resume == ResumeKind.SNAPSHOT) lastSeq = 0
             daemonVersion = w.version
+            anchor(w.now_ms)
             isOwner = w.owner
             readOnlyReason = if (w.min_protocol > PROTOCOL)
                 "This monitor speaks protocol $PROTOCOL, but the daemon needs ${w.min_protocol} or newer. Update the monitor; until then it can only look."
@@ -230,6 +316,7 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
             lastSeq = max(lastSeq, u.seq)
             u.view?.let(::apply)
         }
+        m.step_progress?.let { apply(it) }
         m.result?.let { r ->
             lastResult = if (r.ok) null else r.error
             if (r.id == "health" && r.ok) health = HealthSnapshot.parse(r.json)
@@ -237,11 +324,23 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
         }
     }
 
+    /** Chime once when a task that needs the owner appears that was not there before. */
+    internal fun noteAttention(s: SidebarView) {
+        val ids = s.sections.filter { it.state in WANTING }.flatMap { it.rows.map { r -> r.id } }.toSet()
+        val seen = attentionSeen
+        attentionSeen = ids
+        if (seen != null && !muted && (ids - seen).isNotEmpty()) onAttention?.invoke()
+    }
+
     fun apply(v: View) {
         v.header_?.let { header = it }
-        v.sidebar?.let { sidebar = it }
+        v.sidebar?.let { sidebar = it; noteAttention(it) }
         v.home?.let { home = it }
-        v.task_detail?.let { taskDetail = it }
+        v.task_detail?.let { d ->
+            // A different task's page starts its log over; the same task's view carries the tail again.
+            taskDetail = d
+            liveLog = d.log_tail.split("\n").dropLastWhile { it.isEmpty() }.takeLast(LOG_KEEP)
+        }
         v.landing?.let { landing = it }
         v.usage?.let { usage = it }
         v.editor?.let { editor = it }
@@ -252,8 +351,10 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     companion object {
         /** The protocol this monitor speaks. */
         const val PROTOCOL = 1
+        const val LOG_KEEP = 40
         const val KEY_SCALE = "textScale"
         const val KEY_MUTE = "muted"
+        private val WANTING = setOf("needs_attention", "failed", "proposed")
         const val SCALE_MIN = 0.8
         const val SCALE_MAX = 2.4
         const val SCALE_STEP = 0.1

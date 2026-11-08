@@ -5,15 +5,25 @@ path = "/path/to/your/mason/checkout"
 base = "develop"
 remote = "origin"
 test = "cargo test --workspace"
+# The workspace has many tests that start real daemons; on a busy machine one of them can go
+# red for want of a CPU. Run a red once more before it counts: green the second time is a
+# recorded flake (test-r<N>.flaky in the task's directory), red twice is red (s61).
+test_reruns = 1
 
 # The presence of [self] makes this MASON's own repository. Without it the project
 # is an ordinary one, with no holds and no limits.
 [self]
 # Added to the compiled list of protected paths (a change can never remove from it).
 protect = []
+# Who judges a change to MASON's own rules. "review" (the default): nobody waits. A change
+# that weakens a check goes back to development with what was found; one that only touches a
+# protected file lands once its tests and review are green, and `mason self` records it.
+# "owner": the task waits for your approval of the diff (`mason task approve N`).
+# holds = "review"
 # Self-tasks open at once, filed per week, and agent steps per period (the cap on spend).
 max_open = 3
 per_week = 10
+# Counts only agent and outside tasks' steps; the owner's own are shown, not counted (0030).
 max_steps = 40
 period_h = 24
 # After a rollback, nothing is filed for this long (and one proposal is).

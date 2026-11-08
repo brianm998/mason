@@ -1,4 +1,4 @@
-# 0024: Readings made while limiting only the machine (s46)
+# 0026: Readings made while limiting only the machine (s48)
 
 This changes `crates/daemon/src/selfguard.rs`, `crates/daemon/src/sched.rs` and `crates/scheduler/**`, all trust files; it loosens a guard and waits for the owner. It also edits `scripts/exit/s44.sh`, a gate file, because its step 5 asserted the old `max_open` rule.
 

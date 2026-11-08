@@ -369,7 +369,7 @@ Steps remaining is the shortest graph path from the current step to `landed`, ig
 
 - A step declares everything it needs, and the set is acquired at once, which rules out deadlock from holding one resource while waiting for another.
 - A job may pass a waiter only by using resources that waiter doesn't need. A compile can pass a waiting test suite, and nothing passes a waiting exclusive job.
-- Limits are for the machine's resources and for work MASON starts for itself, never for how many tasks the owner files. Two limits are strict: concurrent LLM sessions (`llm:claude`, default 10; more wait their turn, none are refused) and local compile CPU (a compile starts only while overall CPU use, averaged over a few seconds, is below `compile_cpu_max`, default 50%; a compile that has started is never killed for it). Neither counts tasks. The system never gates on load average. An optional free-memory floor applies when starting beside other work. `max_open`, `per_week`, `max_steps` and the cooldown bound only agent proposals, self-filed fixes and outside issues (decision 0024).
+- Limits are for the machine's resources and for work MASON starts for itself, never for how many tasks the owner files. Two limits are strict: concurrent LLM sessions (`llm:claude`, default 10; more wait their turn, none are refused) and local compile CPU (a compile starts only while overall CPU use, averaged over a few seconds, is below `compile_cpu_max`, default 50%; a compile that has started is never killed for it). Neither counts tasks. The system never gates on load average. An optional free-memory floor applies when starting beside other work. `max_open`, `per_week`, `max_steps` and the cooldown bound only agent proposals, self-filed fixes and outside issues (decision 0026).
 - A task isn't claimed until an LLM slot is available, so a full pool doesn't produce worktrees with nothing happening in them.
 - Lowering the session limit never kills anything. It stops new admissions until the count falls.
 - `mason run --needs compile -- <cmd>` and an optional agent hook let your interactive sessions take the same queue, ahead of pipeline work.
@@ -759,7 +759,7 @@ Sketch with invented example data, showing content and hierarchy rather than fin
 
 - Each tile is a large count over a one-line label. A tile for a state that wants you is tinted, and the tooltip explains the state.
 - Clicking a tile expands that section in the sidebar and scrolls to it.
-- Tiles have a fixed size, so a narrow window squeezes the other text and never breaks a label.
+- Tiles are sized to their label (its width plus the standard spacing each side, never below the minimum tile width), not one fixed size. The width depends only on the label and text size, so it does not change with the count or the window. A narrow window still squeezes the other text and never a tile or label. The daemon sends the label; needs_attention reads "stuck".
 - While disconnected, tiles show a dash. They never show a stale count or a false zero.
 
 ### Sidebar
@@ -785,11 +785,14 @@ Sketch with invented example data, showing content and hierarchy rather than fin
 
 ### Progress you can trust
 
-Progress cells: filled means finished. Part filled means a real count, or typical time if no count exists. Hatched means waiting, labelled with what for. Empty means not started.
+Progress cells: filled means finished. Hatched means waiting, labelled with what for. Empty means not started. A running cell fills in proportion to a real total, fills lighter when only a typical total from past runs exists, and stays an outline when there is nothing to measure against.
 
 - Real counts come first: tests run, features done, fix round 2 of 3.
+- **The rule for numbers.** A percentage is shown only from a real total (reported by the step, or counted by the daemon), as "212 of 340 tests, 62%": rounded down, never above 100. With only a `history` total (the typical figure from this project's past successful runs), show the count and the typical range and no percentage: "1,240 lines, usually 1,800 to 2,400". With no total, show the count: "37 tool calls". A percentage is never estimated, because an estimate implies a precision the data can't back.
+- Each running step has one line: its count by that rule, its message cut to fit, and "updated 4 s ago", counting up on the monitor's own clock between pushes, corrected by the daemon's clock from the welcome. At narrow widths the message goes first.
 - Time in state is always shown. Estimates are ranges from this project's history ("usually 15 to 20 min") and appear only with enough samples.
-- No percentages, because they imply a precision the data can't back.
+- A step that has not moved for longer than its usual gap between updates (or five minutes, with too little history to say) turns the time amber and says "no output for 6 min". It is not red and it is not a failure.
+- The task page adds the step's sub-counts, the agent's todo list with each item's status, the output figures, and where each number came from ("from the agent", "counted from output", "usually, from 12 past runs").
 - Running past the typical time turns amber and never red. Slow isn't the same as broken.
 
 ### Parity between SwiftUI and Compose
