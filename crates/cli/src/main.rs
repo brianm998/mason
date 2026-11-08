@@ -1103,11 +1103,18 @@ fn main() {
                 );
             }
             for p in list {
+                let held = p["held"].as_u64().unwrap_or(0);
+                let held = if held > 0 {
+                    format!(" ({held} held behind others, not counted)")
+                } else {
+                    String::new()
+                };
                 println!(
-                    "{}: {}/{} open, {} of {} this week ({} of yours not counted), {} of {} agent steps in {} h ({} of yours not counted){}",
+                    "{}: {}/{} open{}, {} of {} this week ({} of yours not counted), {} of {} agent steps in {} h ({} of yours not counted){}",
                     p["project"].as_str().unwrap_or("?"),
                     p["open"],
                     p["max_open"],
+                    held,
                     p["week"],
                     p["per_week"],
                     p["yours_not_counted"].as_u64().unwrap_or(0),
