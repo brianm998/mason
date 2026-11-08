@@ -22,7 +22,7 @@ public enum MasonTokens {
     public static let colorDarkSlow = "#E2A93B"
     public static let colorDarkOk = "#4CC38A"
     public static let colorDarkBorder = "#2C3137"
-    public static let sizeTileWidth = 96
+    public static let sizeTileMinWidth = 64
     public static let sizeTileHeight = 64
     public static let sizeSidebarWidth = 300
     public static let sizeRowHeight = 56

@@ -102,6 +102,13 @@ class MonitorCoreTest {
         assertEquals(Page.Task(7), m.page, "an unknown link changes nothing")
     }
 
+    @Test fun tileLabelIsTheDaemonsLabelOrTheUnderscoreFallback() {
+        val m = model()
+        val c = StateCount(state = "needs_attention")
+        assertEquals("needs attention", m.tileLabel(c))
+        assertEquals("stuck", m.tileLabel(c.copy(label = "stuck")))
+    }
+
     // ---- counts while disconnected ----
 
     @Test fun tilesShowADashWhileDisconnectedNeverAStaleCountOrAFalseZero() {

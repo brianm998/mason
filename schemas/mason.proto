@@ -375,6 +375,8 @@ message StateCount {
   // A state that wants the owner is tinted.
   bool wants_you = 3;
   string tooltip = 4;
+  // The text on the tile; empty from an older daemon.
+  string label = 5;
 }
 
 message Banner {

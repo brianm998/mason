@@ -110,8 +110,8 @@ fun Cell(state: CellState, tint: Color, border: Color, modifier: Modifier = Modi
 }
 
 /**
- * A count tile: a large count over a one-line label, a fixed size so a narrow window
- * squeezes other text and never breaks a label; tinted when the state wants the owner;
+ * A count tile: a large count over a one-line label, sized to its label so a narrow window
+ * squeezes other text and never a tile or label; tinted when the state wants the owner;
  * a dash while disconnected.
  */
 @OptIn(ExperimentalFoundationApi::class)
@@ -119,7 +119,7 @@ fun Cell(state: CellState, tint: Color, border: Color, modifier: Modifier = Modi
 fun CountTile(model: MonitorModel, count: StateCount) {
     val theme = LocalTheme.current
     val wants = count.wants_you && model.connected
-    val label = count.state.replace('_', ' ')
+    val label = model.tileLabel(count)
     val shape = RoundedCornerShape(theme.radius)
     TooltipArea(tooltip = {
         Text(count.tooltip, style = theme.small(color = theme.text), modifier = Modifier.background(theme.surface).padding(theme.spacing))
@@ -128,12 +128,14 @@ fun CountTile(model: MonitorModel, count: StateCount) {
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center,
             modifier = Modifier
-                .size(theme.tileWidth, theme.tileHeight)
+                .height(theme.tileHeight)
+                .widthIn(min = theme.tileMinWidth)
                 .background(if (wants) theme.attentionTint else theme.surface, shape)
                 .border(BorderStroke(1.dp, if (wants) theme.attention else theme.border), shape)
                 .clickable { model.reveal(count.state) }
                 .testTag("tile:${count.state}")
-                .semantics { contentDescription = "${model.tileCount(count)} $label" },
+                .semantics { contentDescription = "${model.tileCount(count)} $label" }
+                .padding(horizontal = theme.spacing),
         ) {
             Text(model.tileCount(count), style = theme.count(if (wants) theme.attention else theme.text), maxLines = 1)
             Text(label, style = theme.small(), maxLines = 1, softWrap = false)

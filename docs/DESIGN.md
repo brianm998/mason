@@ -759,7 +759,7 @@ Sketch with invented example data, showing content and hierarchy rather than fin
 
 - Each tile is a large count over a one-line label. A tile for a state that wants you is tinted, and the tooltip explains the state.
 - Clicking a tile expands that section in the sidebar and scrolls to it.
-- Tiles have a fixed size, so a narrow window squeezes the other text and never breaks a label.
+- Tiles are sized to their label (its width plus the standard spacing each side, never below the minimum tile width), not one fixed size. The width depends only on the label and text size, so it does not change with the count or the window. A narrow window still squeezes the other text and never a tile or label. The daemon sends the label; needs_attention reads "stuck".
 - While disconnected, tiles show a dash. They never show a stale count or a false zero.
 
 ### Sidebar

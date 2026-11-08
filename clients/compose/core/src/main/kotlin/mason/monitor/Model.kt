@@ -124,6 +124,9 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
 
     // ---- counts and tiles ----
 
+    /** The tile text: the daemon's label, or (older daemon) the state with spaces. */
+    fun tileLabel(c: StateCount): String = c.label.ifEmpty { c.state.replace('_', ' ') }
+
     /** A dash while disconnected: never a stale count, never a false zero. */
     fun tileCount(c: StateCount): String = if (connected) c.count.toString() else "–"
 

@@ -22,7 +22,7 @@ swift = "done"
 compose = "done"
 
 [feature.count-tiles]
-description = "One fixed-size tile per state, tinted when it wants you, a dash while disconnected"
+description = "One tile per state, sized to its label, tinted when it wants you, a dash while disconnected"
 swift = "done"
 compose = "done"
 

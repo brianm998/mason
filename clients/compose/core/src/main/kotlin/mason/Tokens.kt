@@ -24,7 +24,7 @@ object MasonTokens {
     const val colorDarkSlow = "#E2A93B"
     const val colorDarkOk = "#4CC38A"
     const val colorDarkBorder = "#2C3137"
-    const val sizeTileWidth = 96
+    const val sizeTileMinWidth = 64
     const val sizeTileHeight = 64
     const val sizeSidebarWidth = 300
     const val sizeRowHeight = 56
