@@ -49,7 +49,10 @@ failures() { m task show "$1" --json | sed -n 's/^  "failures": \([0-9]*\),$/\1/
 wait_state() {  # TASK STATE SECONDS
   local end=$((SECONDS + $3))
   until [ "$(m task show "$1" --json 2>/dev/null | jq_state)" = "$2" ]; do
-    [ $SECONDS -lt $end ] || { m task show "$1" >&2 || true; fail "timed out waiting for task $1 to be $2"; }
+    if [ $SECONDS -ge $end ]; then
+      m task show "$1" >&2
+      fail "timed out waiting for task $1 to be $2"
+    fi
     sleep 0.2
   done
 }
