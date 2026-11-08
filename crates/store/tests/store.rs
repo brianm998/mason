@@ -725,7 +725,39 @@ fn migration_16_applies_on_15_and_usage_survives_reopening() {
     );
     drop(s);
     let c = Connection::open(&p).unwrap();
-    assert_eq!(migrations::version(&c).unwrap(), 16);
+    assert_eq!(migrations::version(&c).unwrap(), migrations::SCHEMA_VERSION);
+}
+
+#[test]
+fn migration_17_applies_on_16_and_holds_survive_reopening() {
+    let (_d, p) = db();
+    {
+        let mut c = Connection::open(&p).unwrap();
+        migrations::migrate_to(&mut c, 16).unwrap();
+        assert_eq!(migrations::version(&c).unwrap(), 16);
+    }
+    let s = Store::open(&p).unwrap();
+    let h = mason_store::AccountHold {
+        account: "main".into(),
+        kind: "limit".into(),
+        why: "weekly limit".into(),
+        since_ms: 5,
+        until_ms: Some(900),
+        backoff_ms: 0,
+        probe_ms: 0,
+        by: "pipeline".into(),
+    };
+    s.put_account_hold(h.clone()).unwrap();
+    assert!(s.note_warning("main", "week", 900, 6).unwrap());
+    assert!(!s.note_warning("main", "week", 900, 7).unwrap());
+    assert!(s.note_warning("main", "week", 901, 8).unwrap());
+    drop(s);
+    let s = Store::open(&p).unwrap();
+    assert_eq!(s.account_holds().unwrap(), vec![h]);
+    assert_eq!(s.warnings().unwrap().len(), 2);
+    assert!(s.clear_account_hold("main").unwrap());
+    assert!(!s.clear_account_hold("main").unwrap());
+    assert!(s.account_holds().unwrap().is_empty());
 }
 
 fn reading(at: u64, u: Option<f64>, resets: u64, state: &str) -> mason_store::UsageReading {

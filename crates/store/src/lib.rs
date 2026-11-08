@@ -83,6 +83,23 @@ pub struct UsageReading {
     pub state: String,
 }
 
+/// An account held back as a whole. Times are epoch milliseconds.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AccountHold {
+    pub account: String,
+    /// limit | outage | overage | budget | manual
+    pub kind: String,
+    pub why: String,
+    pub since_ms: u64,
+    /// The provider's reset, when it gave one that could be read.
+    pub until_ms: Option<u64>,
+    /// The current backoff when there is no reset.
+    pub backoff_ms: u64,
+    /// When the next probe session may start (no reset known).
+    pub probe_ms: u64,
+    pub by: String,
+}
+
 /// The tokens and cost one step attempt reported. `None` means not reported.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct UsageRun {
@@ -2140,6 +2157,86 @@ impl Store {
                     resets_at: r.get::<_, Option<i64>>(4)?.map(|x| x as u64),
                     state: r.get(5)?,
                 })
+            })?;
+            rows.collect()
+        })
+    }
+
+    /// Hold an account (replacing any earlier hold on it).
+    pub fn put_account_hold(&self, h: AccountHold) -> Result<(), StoreError> {
+        self.write(move |c| {
+            c.execute(
+                "INSERT OR REPLACE INTO account_holds(account, kind, why, since_ms, until_ms, backoff_ms, probe_ms, by) \
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                params![
+                    h.account,
+                    h.kind,
+                    h.why,
+                    h.since_ms as i64,
+                    h.until_ms.map(|x| x as i64),
+                    h.backoff_ms as i64,
+                    h.probe_ms as i64,
+                    h.by
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Every held account.
+    pub fn account_holds(&self) -> Result<Vec<AccountHold>, StoreError> {
+        self.read(|c| {
+            let mut st = c.prepare(
+                "SELECT account, kind, why, since_ms, until_ms, backoff_ms, probe_ms, by \
+                 FROM account_holds ORDER BY account",
+            )?;
+            let rows = st.query_map([], |r| {
+                Ok(AccountHold {
+                    account: r.get(0)?,
+                    kind: r.get(1)?,
+                    why: r.get(2)?,
+                    since_ms: r.get::<_, i64>(3)? as u64,
+                    until_ms: r.get::<_, Option<i64>>(4)?.map(|x| x as u64),
+                    backoff_ms: r.get::<_, i64>(5)? as u64,
+                    probe_ms: r.get::<_, i64>(6)? as u64,
+                    by: r.get(7)?,
+                })
+            })?;
+            rows.collect()
+        })
+    }
+
+    /// Release an account. Returns whether it was held.
+    pub fn clear_account_hold(&self, account: &str) -> Result<bool, StoreError> {
+        let a = account.to_string();
+        self.write(move |c| {
+            Ok(c.execute("DELETE FROM account_holds WHERE account = ?1", params![a])? > 0)
+        })
+    }
+
+    /// Note that a window's warning was given for this reset. True the first time.
+    pub fn note_warning(
+        &self,
+        account: &str,
+        window: &str,
+        resets_at: u64,
+        now_ms: u64,
+    ) -> Result<bool, StoreError> {
+        let (a, w) = (account.to_string(), window.to_string());
+        self.write(move |c| {
+            Ok(c.execute(
+                "INSERT OR IGNORE INTO account_warnings(account, win, resets_at, at_ms) VALUES (?1,?2,?3,?4)",
+                params![a, w, resets_at as i64, now_ms as i64],
+            )? > 0)
+        })
+    }
+
+    /// The warnings given so far, as `(account, window, resets_at)`.
+    pub fn warnings(&self) -> Result<Vec<(String, String, u64)>, StoreError> {
+        self.read(|c| {
+            let mut st = c.prepare("SELECT account, win, resets_at FROM account_warnings")?;
+            let rows = st.query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? as u64))
             })?;
             rows.collect()
         })

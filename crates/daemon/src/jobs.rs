@@ -22,8 +22,7 @@ use mason_adapters::claude::ClaudeAdapter;
 use mason_adapters::codex::CodexAdapter;
 use mason_adapters::hosted::HostLaunch;
 use mason_adapters::runner::{
-    hold_note, worth_a_stronger_model, FailReason, HoldReason, RunnerConfig, StepEnd, StepReport,
-    StepRunner,
+    hold_note, worth_a_stronger_model, FailReason, RunnerConfig, StepEnd, StepReport, StepRunner,
 };
 use mason_adapters::sandbox::{SandboxKind, SandboxPolicy};
 use mason_core::*;
@@ -221,6 +220,12 @@ fn ctx(d: &Arc<Daemon>, task: TaskId, run: StepRunId) -> Result<Ctx, String> {
 }
 
 pub fn run(d: &Arc<Daemon>, task: TaskId, step: State, run: StepRunId) {
+    run_inner(d, task, step, run);
+    // A task that was the account's probe is not any longer once its job is over.
+    crate::holds::task_done(d, task.0);
+}
+
+fn run_inner(d: &Arc<Daemon>, task: TaskId, step: State, run: StepRunId) {
     let c = match ctx(d, task, run) {
         Ok(c) => c,
         Err(why) => {
@@ -238,7 +243,12 @@ pub fn run(d: &Arc<Daemon>, task: TaskId, step: State, run: StepRunId) {
     // project. Time spent waiting is outside every timeout below: they all
     // start after this returns. An approval waits for a person, not for the
     // machine, so it takes nothing.
-    if c.step.kind != StepType::Approval {
+    if c.step.kind == StepType::Agent {
+        // A held account starts no new session; the task waits without a lease.
+        if get_lease(&c).is_err() {
+            return;
+        }
+    } else if c.step.kind != StepType::Approval {
         match acquire(&c) {
             Ok(l) => *c.lease.lock().unwrap_or_else(|e| e.into_inner()) = Some(l),
             Err(_) => return, // the task was cancelled or retried while it waited
@@ -366,6 +376,69 @@ fn wait_while_paused(c: &Ctx) -> Result<(), ()> {
         c.emit(EventKind::WaitEnded { task: c.task });
     }
     Ok(())
+}
+
+/// How often a task waiting on a held account looks again.
+const HOLD_POLL: Duration = Duration::from_millis(100);
+
+fn still_open(c: &Ctx) -> bool {
+    c.d.world()
+        .map(|w| w.open_run(c.task) == Some(c.run))
+        .unwrap_or(true)
+}
+
+/// Wait while the step's account is held (see `holds`). Says why in the task's
+/// wait, once; no lease is held and no time is charged. `Err` when the task
+/// went away meanwhile.
+fn wait_open(c: &Ctx) -> Result<(), ()> {
+    use crate::holds::Gate;
+    let mut announced = false;
+    let mut n = 0u32;
+    loop {
+        match crate::holds::gate(&c.d, &c.project.account, c.task.0) {
+            Gate::Open | Gate::Probe => break,
+            Gate::Wait(on) => {
+                if !announced {
+                    announced = true;
+                    if !c.emit(EventKind::WaitStarted { task: c.task, on }) {
+                        return Err(());
+                    }
+                }
+                std::thread::sleep(HOLD_POLL);
+                n += 1;
+                if n.is_multiple_of(5) && !still_open(c) {
+                    return Err(());
+                }
+            }
+        }
+    }
+    if announced {
+        c.emit(EventKind::WaitEnded { task: c.task });
+    }
+    Ok(())
+}
+
+/// The agent step's session slot, once its account is open. A hold that
+/// begins while the step queues for the slot sends it back to waiting.
+fn get_lease(c: &Ctx) -> Result<(), ()> {
+    loop {
+        wait_open(c)?;
+        let have = c.lease.lock().unwrap_or_else(|e| e.into_inner()).is_some();
+        if !have {
+            match acquire(c) {
+                Ok(l) => *c.lease.lock().unwrap_or_else(|e| e.into_inner()) = Some(l),
+                Err(_) => return Err(()),
+            }
+        }
+        if matches!(
+            crate::holds::gate(&c.d, &c.project.account, c.task.0),
+            crate::holds::Gate::Wait(_)
+        ) {
+            c.release_lease();
+            continue;
+        }
+        return Ok(());
+    }
 }
 
 /// Wait for this step's resources (Part 7). Says why in the task's wait, once,
@@ -1012,6 +1085,10 @@ fn agent_job(c: &Ctx) {
         spec.model = Some(next.to_string());
         spec.run_key = Some(format!("{key}u{tries}"));
         rec.tries.set(tries);
+        // Held meanwhile: wait for the account before another session starts.
+        if get_lease(c).is_err() {
+            return;
+        }
         rec.write(c, "retry", &spec);
         let again = runner.run(spec.clone(), &contract);
         let Some(r) = settle_holds(c, &runner, again, &spec, &contract, &rec) else {
@@ -1099,26 +1176,24 @@ fn settle_holds(
     rec: &LaunchRec,
 ) -> Option<StepReport> {
     while let StepEnd::Hold(reason) = &report.end {
-        let on = match reason {
-            HoldReason::UsageLimit { resets_at } => format!(
-                "usage limit (resets {})",
-                resets_at.as_deref().unwrap_or("at an unknown time")
-            ),
-            HoldReason::ProviderDown { .. } => "provider outage".to_string(),
-        };
+        let account = &c.project.account;
+        // The snapshot first: it may carry the reset the text lacks.
         if let Some(u) = &report.usage {
-            crate::usage::record_snapshot(&c.d, &c.project.account, u);
+            crate::usage::record_snapshot(&c.d, account, u);
         }
-        if !c.emit(EventKind::WaitStarted { task: c.task, on }) {
-            return None;
-        }
-        std::thread::sleep(c.d.cfg.hold_retry);
-        if !c.emit(EventKind::WaitEnded { task: c.task }) {
+        // The account is held, not just this task; if this was the probe it is
+        // refused and backs off further.
+        crate::holds::observe_end(&c.d, account, c.task.0, reason);
+        crate::holds::session_ended(&c.d, account, c.task.0, true);
+        // The session slot goes back while the account waits.
+        c.release_lease();
+        if get_lease(c).is_err() {
             return None;
         }
         rec.write(c, "resume", spec);
         report = runner.resume(report, hold_note(), spec.clone(), contract);
     }
+    crate::holds::session_ended(&c.d, &c.project.account, c.task.0, false);
     Some(report)
 }
 

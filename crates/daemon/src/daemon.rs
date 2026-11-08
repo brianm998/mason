@@ -56,6 +56,8 @@ pub struct Daemon {
     pub(crate) tracker: crate::tracker::Hub,
     pub update_status: Mutex<crate::update::Status>,
     pub(crate) drafts: crate::editor::Drafts,
+    /// The one probe session per held account (see `holds`).
+    pub probes: crate::holds::Probes,
 }
 
 fn kind_name(k: &EventKind) -> String {
@@ -175,6 +177,7 @@ impl Daemon {
             landing: Default::default(),
             tracker: Default::default(),
             drafts: Default::default(),
+            probes: Default::default(),
             update_status: Mutex::new(crate::update::Status {
                 phase: "idle".into(),
                 ..Default::default()

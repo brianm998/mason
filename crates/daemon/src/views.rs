@@ -472,6 +472,9 @@ impl<'a> Ctx<'a> {
                 });
             }
         }
+        for (kind, text) in crate::holds::banners(self.d) {
+            banners.push(Banner { kind, text });
+        }
         HeaderView {
             attention,
             counts: ORDER

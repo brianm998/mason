@@ -378,6 +378,25 @@ const STEPS: &[&str] = &[
      );
      CREATE INDEX usage_runs_at ON usage_runs(at);
      CREATE INDEX usage_runs_task ON usage_runs(task);",
+    // 17: account holds (s67). One row per held account, so a restart during a hold keeps it;
+    // and the warnings already given (one per window per reset).
+    "CREATE TABLE account_holds (
+         account    TEXT PRIMARY KEY,
+         kind       TEXT NOT NULL,
+         why        TEXT NOT NULL,
+         since_ms   INTEGER NOT NULL,
+         until_ms   INTEGER,
+         backoff_ms INTEGER NOT NULL DEFAULT 0,
+         probe_ms   INTEGER NOT NULL DEFAULT 0,
+         by         TEXT NOT NULL DEFAULT 'pipeline'
+     );
+     CREATE TABLE account_warnings (
+         account   TEXT NOT NULL,
+         win       TEXT NOT NULL,
+         resets_at INTEGER NOT NULL,
+         at_ms     INTEGER NOT NULL,
+         PRIMARY KEY (account, win, resets_at)
+     );",
 ];
 
 pub const SCHEMA_VERSION: u32 = STEPS.len() as u32;

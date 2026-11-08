@@ -153,6 +153,8 @@ pub fn record_snapshot(d: &Daemon, account: &str, s: &UsageSnapshot) {
             tracing::warn!(account, "cannot store a usage reading: {e}");
         }
     }
+    // What MASON does with it: hold on a block, warn on a window nearing its limit.
+    crate::holds::on_snapshot(d, account, &s);
 }
 
 /// Who an attempt's figures belong to.
@@ -192,6 +194,8 @@ pub fn record_tokens(d: &Daemon, who: &Attempt, t: &mason_adapters::runner::Toke
     if let Err(e) = d.store.record_usage_run(row) {
         tracing::warn!(task = who.task, "cannot store the step's tokens: {e}");
     }
+    // An api account's spend may have reached its budget.
+    crate::holds::check_budget(d, who.account);
 }
 
 // ---- the view ----
@@ -430,6 +434,7 @@ pub fn view(d: &Daemon, now: u64, title: &dyn Fn(u64) -> String) -> UsageView {
         .usage_runs_since(week_ago.min(month_start(now)))
         .unwrap_or_default();
     let readings = d.store.readings_since(week_ago).unwrap_or_default();
+    let holds = d.store.account_holds().unwrap_or_default();
     let mut providers = vec![];
     let mut top_bar = vec![];
     for a in &d.accounts {
@@ -524,8 +529,10 @@ pub fn view(d: &Daemon, now: u64, title: &dyn Fn(u64) -> String) -> UsageView {
                 age: newest.map_or(String::new(), |n| words::age(now, n)),
             }
         });
+        // A block whose reset has passed is old news, not a block.
         let blocked = snap
             .and_then(|s| s.1.blocked.as_ref())
+            .filter(|b| b.until.is_none_or(|u| u > now))
             .map(|b| blocked_text(b, &raw, now));
         // The most constrained window: the fullest, else one that is not ok, else the soonest reset.
         let worst = windows.iter().filter(|w| w.reported).max_by(|x, y| {
@@ -542,9 +549,34 @@ pub fn view(d: &Daemon, now: u64, title: &dyn Fn(u64) -> String) -> UsageView {
                 top_bar.push(format!("{} spend ${:.2} this month", a.name, s.month_usd));
             }
         }
+        let hold = holds.iter().find(|h| h.account == a.name);
+        if let Some(h) = hold {
+            top_bar.push(format!(
+                "{} {}",
+                a.name,
+                if h.kind == "outage" {
+                    "provider outage"
+                } else {
+                    "held"
+                }
+            ));
+        }
+        // A hold is a block too; an outage is told apart from a limit.
+        let blocked = match hold {
+            Some(h) => Some(match blocked {
+                Some(b) if h.kind == "limit" => b,
+                _ => crate::holds::describe(h, now * 1000),
+            }),
+            None => blocked,
+        };
+        let status = match hold {
+            Some(h) if h.kind == "outage" => "outage",
+            _ if blocked.is_some() => "blocked",
+            _ => "ok",
+        };
         providers.push(ProviderStatus {
             name: a.name.clone(),
-            status: if blocked.is_some() { "blocked" } else { "ok" }.into(),
+            status: status.into(),
             sessions_used: d.broker.used(&llm),
             sessions_limit: d.broker.limit(&llm).unwrap_or(0),
             adapter: crate::providers::adapter_name(a.adapter).into(),
@@ -554,7 +586,21 @@ pub fn view(d: &Daemon, now: u64, title: &dyn Fn(u64) -> String) -> UsageView {
             overage: a.overage.name().into(),
             monthly_budget_usd: a.monthly_budget_usd.unwrap_or(0.0),
             windows,
-            overage_text: snap.map_or(String::new(), |s| overage_text(&s.1.overage, now)),
+            overage_text: snap.map_or(String::new(), |s| {
+                let mut t = overage_text(&s.1.overage, now);
+                if matches!(s.1.overage.state, OverageState::InUse) {
+                    t += &match a.overage {
+                        crate::providers::Overage::Allow => {
+                            let cost =
+                                s.1.spend_usd
+                                    .map_or(String::new(), |c| format!(", ${c:.2} so far"));
+                            format!(" (allowed: work carries on, extra billing{cost})")
+                        }
+                        crate::providers::Overage::Hold => " (held at the plan's limit)".into(),
+                    };
+                }
+                t
+            }),
             blocked_text: blocked.unwrap_or_default(),
             has_snapshot: snap.is_some(),
             as_of: snap.map_or(0, |s| s.0),
@@ -568,7 +614,7 @@ pub fn view(d: &Daemon, now: u64, title: &dyn Fn(u64) -> String) -> UsageView {
                 tokens(&in_week, "last 7 days", now, title),
                 api,
             )),
-            doing: "nothing".into(),
+            doing: crate::holds::doing(d, &a.name),
         });
     }
     UsageView {
