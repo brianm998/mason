@@ -153,6 +153,29 @@ public final class MonitorModel: ObservableObject {
         scrollTarget = state
     }
 
+    /// What a tile click does. Every click reveals at once (never waits to tell
+    /// a single click from a double); the second click of a double also opens
+    /// the lone task.
+    public func tileClicked(state: String, clickCount: Int) {
+        reveal(state: state)
+        if clickCount == 2 { revealAndOpenIfOne(state: state) }
+    }
+
+    /// Reveal the state's section and, if it holds exactly one task right now
+    /// (rows as they are at this moment, search ignored), open that task.
+    /// Does nothing while disconnected.
+    public func revealAndOpenIfOne(state: String) {
+        guard connected else { return }
+        reveal(state: state)
+        guard let sec = sidebar?.sections.first(where: { $0.state == state }), sec.rows.count == 1 else { return }
+        go(.task(sec.rows[0].id))
+    }
+
+    /// The tile's tooltip; a count of exactly one says a double-click opens it.
+    public func tileTooltip(_ c: StateCount) -> String {
+        connected && c.count == 1 ? c.tooltip + "\nDouble-click to open it" : c.tooltip
+    }
+
     // MARK: search
 
     public func filteredRows(_ s: SidebarSection) -> [TaskRow] {

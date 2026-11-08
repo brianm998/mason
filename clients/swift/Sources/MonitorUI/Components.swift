@@ -94,8 +94,8 @@ struct CountTile: View {
         .background(RoundedRectangle(cornerRadius: theme.radius).fill(wants ? theme.attentionTint : theme.surface))
         .overlay(RoundedRectangle(cornerRadius: theme.radius).stroke(wants ? theme.attention : theme.border, lineWidth: 1))
         .contentShape(Rectangle())
-        .onTapGesture { model.reveal(state: count.state) }
-        .help(count.tooltip)
+        .onTapGesture { model.tileClicked(state: count.state, clickCount: NSApp.currentEvent?.clickCount ?? 1) }
+        .help(model.tileTooltip(count))
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(model.tileCount(count)) \(label)")
         .accessibilityIdentifier("tile:\(count.state)")

@@ -13,6 +13,10 @@ import androidx.compose.foundation.TooltipArea
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
@@ -122,7 +126,7 @@ fun CountTile(model: MonitorModel, count: StateCount) {
     val label = model.tileLabel(count)
     val shape = RoundedCornerShape(theme.radius)
     TooltipArea(tooltip = {
-        Text(count.tooltip, style = theme.small(color = theme.text), modifier = Modifier.background(theme.surface).padding(theme.spacing))
+        Text(model.tileTooltip(count), style = theme.small(color = theme.text), modifier = Modifier.background(theme.surface).padding(theme.spacing))
     }) {
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
@@ -132,7 +136,24 @@ fun CountTile(model: MonitorModel, count: StateCount) {
                 .widthIn(min = theme.tileMinWidth)
                 .background(if (wants) theme.attentionTint else theme.surface, shape)
                 .border(BorderStroke(1.dp, if (wants) theme.attention else theme.border), shape)
-                .clickable { model.reveal(count.state) }
+                .pointerInput(count.state) {
+                    // Reveal on the first release; a second press within the AWT multi-click
+                    // interval counts as a double. Nothing waits to tell them apart.
+                    val interval = (java.awt.Toolkit.getDefaultToolkit().getDesktopProperty("awt.multiClickInterval") as? Int ?: 500).toLong()
+                    var last = 0L
+                    var clicks = 0
+                    awaitEachGesture {
+                        awaitFirstDown()
+                        val now = System.currentTimeMillis()
+                        clicks = if (now - last <= interval) clicks + 1 else 1
+                        last = now
+                        val up = waitForUpOrCancellation()
+                        if (up != null) {
+                            model.tileClicked(count.state, clicks)
+                            if (clicks >= 2) clicks = 0
+                        }
+                    }
+                }
                 .testTag("tile:${count.state}")
                 .semantics { contentDescription = "${model.tileCount(count)} $label" }
                 .padding(horizontal = theme.spacing),

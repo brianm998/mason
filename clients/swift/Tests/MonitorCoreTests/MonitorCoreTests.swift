@@ -187,6 +187,58 @@ final class MonitorCoreTests: XCTestCase {
         XCTAssertEqual(m.scrollTarget, "failed")
     }
 
+    func testDoubleClickOnAStateWithOneTaskExpandsScrollsAndOpensIt() {
+        let m = model()
+        m.tileClicked(state: "failed", clickCount: 1)
+        XCTAssertEqual(m.page, .home, "a single click only reveals")
+        m.tileClicked(state: "failed", clickCount: 2)
+        XCTAssertTrue(m.isExpanded(m.sidebar!.sections[1]))
+        XCTAssertEqual(m.scrollTarget, "failed")
+        XCTAssertEqual(m.page, .task(3))
+    }
+
+    func testDoubleClickWithSeveralTasksExpandsAndScrollsButKeepsThePage() {
+        let m = model()
+        m.tileClicked(state: "queued", clickCount: 2)
+        XCTAssertTrue(m.isExpanded(m.sidebar!.sections[0]))
+        XCTAssertEqual(m.scrollTarget, "queued")
+        XCTAssertEqual(m.page, .home)
+    }
+
+    func testDoubleClickOnAnEmptyStateChangesNothingBeyondTheReveal() {
+        let m = model()
+        m.sidebar!.sections.append(section("canceled", collapsed: true))
+        m.tileClicked(state: "canceled", clickCount: 2)
+        XCTAssertEqual(m.page, .home)
+    }
+
+    func testDoubleClickStillOpensTheLoneTaskWhenSearchHidesIt() {
+        let m = model()
+        m.search.text = "zzz-no-match"
+        m.tileClicked(state: "failed", clickCount: 2)
+        XCTAssertEqual(m.page, .task(3))
+        XCTAssertEqual(m.search.text, "zzz-no-match")
+    }
+
+    func testDoubleClickWhileDisconnectedDoesNothing() {
+        let m = model(connected: false)
+        m.revealAndOpenIfOne(state: "failed")
+        XCTAssertEqual(m.page, .home)
+        XCTAssertNil(m.scrollTarget)
+        XCTAssertFalse(m.isExpanded(m.sidebar!.sections[1]))
+    }
+
+    func testTooltipMentionsDoubleClickOnlyForACountOfOne() {
+        let m = model()
+        var c = StateCount(); c.state = "failed"; c.tooltip = "tip"
+        c.count = 1
+        XCTAssertEqual(m.tileTooltip(c), "tip\nDouble-click to open it")
+        c.count = 2
+        XCTAssertEqual(m.tileTooltip(c), "tip")
+        c.count = 1; m.connected = false
+        XCTAssertEqual(m.tileTooltip(c), "tip")
+    }
+
     func testSearchMatchesNameTitleAndBodyEachWithItsOwnCheckbox() {
         let m = model()
         let rows = m.sidebar!.sections[0].rows

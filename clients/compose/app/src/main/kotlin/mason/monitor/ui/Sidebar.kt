@@ -57,8 +57,9 @@ fun SidebarPane(model: MonitorModel) {
     LaunchedEffect(target, entries.size) {
         if (target != null) {
             val i = entries.indexOfFirst { it is Entry.Header && it.section.state == target }
-            if (i >= 0) state.animateScrollToItem(i)
+            // Clear first: a cancelled animation must not leave the target set.
             model.scrollTarget = null
+            if (i >= 0) state.animateScrollToItem(i)
         }
     }
     LazyColumn(

@@ -26,6 +26,11 @@ description = "One tile per state, sized to its label, tinted when it wants you,
 swift = "done"
 compose = "done"
 
+[feature.tile-double-click]
+description = "Double-click a non-zero count tile to reveal its section and open the task when it holds exactly one; tooltip says so for a count of one"
+swift = "done"
+compose = "done"
+
 [feature.banners]
 description = "New version, provider outage, landing frozen, connection lost, paused"
 swift = "done"
