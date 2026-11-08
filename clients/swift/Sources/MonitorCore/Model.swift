@@ -72,6 +72,8 @@ public final class MonitorModel: ObservableObject {
     /// Where the sidebar should scroll to (a tile was clicked).
     @Published public var scrollTarget: String?
     @Published public var lastResult: String?
+    /// What `mason proposal publish --preview` would send, in the daemon's words, once asked for.
+    @Published public var publishPreview: PublishPreview?
     /// The step selected in the pipeline editor (for its inspector).
     @Published public private(set) var editorStep = ""
     /// Called with every command result (the tools read them; the app shows errors).
@@ -239,6 +241,9 @@ public final class MonitorModel: ObservableObject {
         if let t = firstNeedingYou { go(.task(t)) } else { goHome() }
     }
 
+    /// MASON's own repository's project name, when one is registered ("Improve the pipeline" files there).
+    public var selfProject: String { header?.selfProject ?? "" }
+
     public func addTask(project: String, title: String, body: String) {
         command { $0.addTask = .with { $0.project = project; $0.title = title; $0.body = body } }
     }
@@ -250,6 +255,27 @@ public final class MonitorModel: ObservableObject {
         command { $0.pause = .with { $0.project = project; $0.mode = mode; $0.forSeconds = seconds } }
     }
     public func resume() { command { $0.resume = .with { $0.project = project } } }
+    /// Change a proposal's title, body or evidence while it waits for the owner (nil: unchanged).
+    public func editProposal(_ task: UInt64, title: String?, body: String?, evidence: String?) {
+        var o: [String: String] = [:]
+        if let title { o["title"] = title }
+        if let body { o["body"] = body }
+        if let evidence { o["evidence"] = evidence }
+        guard let data = try? JSONSerialization.data(withJSONObject: o), let text = String(data: data, encoding: .utf8) else { return }
+        raw("POST", "/proposals/\(task)/edit", json: text)
+    }
+    /// "Improve the pipeline": ask MASON to change its own code. The daemon files it in MASON's own project.
+    public func improve(project: String, text: String) {
+        guard let data = try? JSONSerialization.data(withJSONObject: ["text": text]), let body = String(data: data, encoding: .utf8) else { return }
+        raw("POST", "/projects/\(project)/improve", json: body)
+    }
+    /// Show the redacted version that would go upstream (`confirm: false`), or send it (`true`).
+    public func publish(_ task: UInt64, confirm: Bool) {
+        var c = Mason_V1_Command()
+        c.id = "publish:\(task)"
+        c.raw = .with { $0.method = "POST"; $0.path = "/proposals/\(task)/publish"; $0.json = "{\"confirm\":\(confirm)}" }
+        send(c)
+    }
     public func raw(_ method: String, _ path: String, json: String = "") {
         command { $0.raw = .with { $0.method = method; $0.path = path; $0.json = json } }
     }
@@ -330,6 +356,7 @@ public final class MonitorModel: ObservableObject {
     }
 
     func handle(result r: Mason_V1_CommandResult) {
+        if r.id.hasPrefix("publish:"), r.ok { publishPreview = PublishPreview(json: r.json) }
         if r.id == "health", r.ok { health = HealthSnapshot(json: r.json) }
     }
 
@@ -393,5 +420,29 @@ public struct HealthSnapshot: Equatable, Sendable {
             "\($0["label"] as? String ?? "?"): \($0["explain"] as? String ?? "")"
         }
         holders = (v["holders"] as? [[String: Any]] ?? []).map { $0["label"] as? String ?? "?" }
+    }
+}
+
+/// The daemon's answer to a publish preview: the redacted text, and what it would touch.
+public struct PublishPreview: Equatable, Sendable {
+    public var title = ""
+    public var body = ""
+    public var head = ""
+    public var base = ""
+    public var files: [String] = []
+    public var redactions = 0
+    public var blocked: String?
+    public var pr: Int?
+
+    public init(json: String) {
+        guard let d = json.data(using: .utf8), let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return }
+        title = o["title"] as? String ?? ""
+        body = o["body"] as? String ?? ""
+        head = o["head"] as? String ?? ""
+        base = o["base"] as? String ?? ""
+        files = o["files"] as? [String] ?? []
+        redactions = o["redactions"] as? Int ?? 0
+        blocked = o["blocked"] as? String
+        pr = o["pr"] as? Int
     }
 }

@@ -291,6 +291,31 @@ const STEPS: &[&str] = &[
          at      INTEGER NOT NULL
      );
      CREATE INDEX step_history_step ON step_history(project, step);",
+    // 13: proposals (Part 13). A proposal is a task plus this row: what the agent saw (evidence),
+    // where it was routed, the key it was deduplicated on, and what has been done with it. An
+    // improvement the owner asked for (source 'owner') is the same row with a branch.
+    "CREATE TABLE proposals (
+         task          INTEGER PRIMARY KEY,
+         project       TEXT NOT NULL,
+         source        TEXT NOT NULL,
+         severity      TEXT NOT NULL,
+         route         TEXT NOT NULL,
+         filed_by      INTEGER,
+         title         TEXT NOT NULL,
+         body          TEXT NOT NULL,
+         evidence      TEXT NOT NULL,
+         key           TEXT NOT NULL,
+         status        TEXT NOT NULL DEFAULT 'open',
+         reject_reason TEXT NOT NULL DEFAULT '',
+         publish_state TEXT NOT NULL DEFAULT 'local',
+         access        TEXT NOT NULL DEFAULT '',
+         branch        TEXT NOT NULL DEFAULT '',
+         pr            INTEGER,
+         pr_state      TEXT NOT NULL DEFAULT '',
+         at            INTEGER NOT NULL
+     );
+     CREATE INDEX proposals_project_at ON proposals(project, at);
+     CREATE INDEX proposals_filed_by ON proposals(filed_by);",
 ];
 
 pub const SCHEMA_VERSION: u32 = STEPS.len() as u32;

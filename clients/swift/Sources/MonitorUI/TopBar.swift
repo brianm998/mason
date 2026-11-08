@@ -10,6 +10,7 @@ struct TopBar: View {
     @Environment(\.theme) var theme
     @ObservedObject var model: MonitorModel
     @State private var adding = false
+    @State private var improving = false
 
     var body: some View {
         HStack(spacing: theme.spacing) {
@@ -69,6 +70,10 @@ struct TopBar: View {
 
             Button { adding = true } label: { Image(systemName: "plus") }
                 .buttonStyle(.bordered).help("Add task").accessibilityIdentifier("add-task")
+            if !model.selfProject.isEmpty {
+                Button { improving = true } label: { Image(systemName: "wand.and.stars") }
+                    .buttonStyle(.bordered).help("Improve the pipeline").accessibilityIdentifier("improve-pipeline")
+            }
             Button { model.muted.toggle() } label: { Image(systemName: model.muted ? "speaker.slash" : "speaker.wave.2") }
                 .buttonStyle(.bordered).help(model.muted ? "Unmute" : "Mute").accessibilityIdentifier("mute")
         }
@@ -77,6 +82,7 @@ struct TopBar: View {
         .fixedSize(horizontal: false, vertical: true)
         .background(theme.surface)
         .sheet(isPresented: $adding) { AddTaskSheet(model: model, isPresented: $adding) }
+        .sheet(isPresented: $improving) { ImproveSheet(model: model, isPresented: $improving) }
     }
 }
 

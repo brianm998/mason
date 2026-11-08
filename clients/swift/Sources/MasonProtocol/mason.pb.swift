@@ -1259,6 +1259,12 @@ public nonisolated struct Mason_V1_TaskRow: @unchecked Sendable {
     set {_uniqueStorage()._blocks = newValue}
   }
 
+  /// For a proposal or an improvement: "agent · blocks · pipeline" (source, severity, route).
+  public var proposal: String {
+    get {_storage._proposal}
+    set {_uniqueStorage()._proposal = newValue}
+  }
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -1317,6 +1323,9 @@ public nonisolated struct Mason_V1_HeaderView: Sendable {
   public var projects: [String] = []
 
   public var status: String = String()
+
+  /// MASON's own repository, if one is registered: where "Improve the pipeline" files its task.
+  public var selfProject: String = String()
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -1658,11 +1667,70 @@ public nonisolated struct Mason_V1_TaskDetailView: @unchecked Sendable {
     set {_uniqueStorage()._numbers = newValue}
   }
 
+  /// Present for a proposal or an improvement the owner asked for.
+  public var proposal: Mason_V1_ProposalInfo {
+    get {_storage._proposal ?? Mason_V1_ProposalInfo()}
+    set {_uniqueStorage()._proposal = newValue}
+  }
+  /// Returns true if `proposal` has been explicitly set.
+  public var hasProposal: Bool {_storage._proposal != nil}
+  /// Clears the value of `proposal`. Subsequent reads from it will return its default value.
+  public mutating func clearProposal() {_uniqueStorage()._proposal = nil}
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
 
   fileprivate var _storage = _StorageClass.defaultInstance
+}
+
+/// What was noticed, by whom, with the proof; and for an improvement, where its branch is.
+public nonisolated struct Mason_V1_ProposalInfo: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  /// "agent", "outside" or "owner".
+  public var source: String = String()
+
+  /// "normal" or "blocks".
+  public var severity: String = String()
+
+  /// "project" or "pipeline" (MASON's own repository).
+  public var route: String = String()
+
+  /// What the agent saw: files, lines, output.
+  public var evidence: String = String()
+
+  /// The proposal's own text, without the evidence (what the edit sheet starts from).
+  public var text: String = String()
+
+  /// The task whose agent filed it; 0 if nobody's.
+  public var filedBy: UInt64 = 0
+
+  /// "open", "approved" or "rejected", and why if rejected.
+  public var status: String = String()
+
+  public var rejectReason: String = String()
+
+  /// "local", "previewed" or "published".
+  public var publishState: String = String()
+
+  /// An improvement: "write" or "fork"; the branch; the upstream pull request and its state.
+  public var access: String = String()
+
+  public var branch: String = String()
+
+  public var pr: UInt64 = 0
+
+  public var prState: String = String()
+
+  /// The update channel when the daemon follows this improvement's branch.
+  public var channel: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
 }
 
 /// One number handed to a task. A cancelled task's numbers are shown released: never reused.
@@ -4002,7 +4070,7 @@ nonisolated extension Mason_V1_ProgressCell: SwiftProtobuf.Message, SwiftProtobu
 
 nonisolated extension Mason_V1_TaskRow: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".TaskRow"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{1}key\0\u{1}title\0\u{1}project\0\u{1}state\0\u{1}activity\0\u{3}why_waiting\0\u{3}enqueued_ms\0\u{3}in_state_ms\0\u{1}model\0\u{1}progress\0\u{3}allowed_actions\0\u{1}blockers\0\u{1}typical\0\u{1}slow\0\u{1}step\0\u{1}body\0\u{1}blocks\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{1}key\0\u{1}title\0\u{1}project\0\u{1}state\0\u{1}activity\0\u{3}why_waiting\0\u{3}enqueued_ms\0\u{3}in_state_ms\0\u{1}model\0\u{1}progress\0\u{3}allowed_actions\0\u{1}blockers\0\u{1}typical\0\u{1}slow\0\u{1}step\0\u{1}body\0\u{1}blocks\0\u{1}proposal\0")
 
   fileprivate class _StorageClass {
     var _id: UInt64 = 0
@@ -4023,6 +4091,7 @@ nonisolated extension Mason_V1_TaskRow: SwiftProtobuf.Message, SwiftProtobuf._Me
     var _step: String = String()
     var _body: String = String()
     var _blocks: [UInt64] = []
+    var _proposal: String = String()
 
       // This property is used as the initial default value for new instances of the type.
       // The type itself is protecting the reference to its storage via CoW semantics.
@@ -4051,6 +4120,7 @@ nonisolated extension Mason_V1_TaskRow: SwiftProtobuf.Message, SwiftProtobuf._Me
       _step = source._step
       _body = source._body
       _blocks = source._blocks
+      _proposal = source._proposal
     }
   }
 
@@ -4087,6 +4157,7 @@ nonisolated extension Mason_V1_TaskRow: SwiftProtobuf.Message, SwiftProtobuf._Me
         case 16: try { try decoder.decodeSingularStringField(value: &_storage._step) }()
         case 17: try { try decoder.decodeSingularStringField(value: &_storage._body) }()
         case 18: try { try decoder.decodeRepeatedUInt64Field(value: &_storage._blocks) }()
+        case 19: try { try decoder.decodeSingularStringField(value: &_storage._proposal) }()
         default: break
         }
       }
@@ -4149,6 +4220,9 @@ nonisolated extension Mason_V1_TaskRow: SwiftProtobuf.Message, SwiftProtobuf._Me
       if !_storage._blocks.isEmpty {
         try visitor.visitPackedUInt64Field(value: _storage._blocks, fieldNumber: 18)
       }
+      if !_storage._proposal.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._proposal, fieldNumber: 19)
+      }
     }
     try unknownFields.traverse(visitor: &visitor)
   }
@@ -4176,6 +4250,7 @@ nonisolated extension Mason_V1_TaskRow: SwiftProtobuf.Message, SwiftProtobuf._Me
         if _storage._step != rhs_storage._step {return false}
         if _storage._body != rhs_storage._body {return false}
         if _storage._blocks != rhs_storage._blocks {return false}
+        if _storage._proposal != rhs_storage._proposal {return false}
         return true
       }
       if !storagesAreEqual {return false}
@@ -4272,7 +4347,7 @@ nonisolated extension Mason_V1_Banner: SwiftProtobuf.Message, SwiftProtobuf._Mes
 
 nonisolated extension Mason_V1_HeaderView: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".HeaderView"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}attention\0\u{1}counts\0\u{1}banners\0\u{1}projects\0\u{1}status\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}attention\0\u{1}counts\0\u{1}banners\0\u{1}projects\0\u{1}status\0\u{3}self_project\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -4285,6 +4360,7 @@ nonisolated extension Mason_V1_HeaderView: SwiftProtobuf.Message, SwiftProtobuf.
       case 3: try { try decoder.decodeRepeatedMessageField(value: &self.banners) }()
       case 4: try { try decoder.decodeRepeatedStringField(value: &self.projects) }()
       case 5: try { try decoder.decodeSingularStringField(value: &self.status) }()
+      case 6: try { try decoder.decodeSingularStringField(value: &self.selfProject) }()
       default: break
       }
     }
@@ -4306,6 +4382,9 @@ nonisolated extension Mason_V1_HeaderView: SwiftProtobuf.Message, SwiftProtobuf.
     if !self.status.isEmpty {
       try visitor.visitSingularStringField(value: self.status, fieldNumber: 5)
     }
+    if !self.selfProject.isEmpty {
+      try visitor.visitSingularStringField(value: self.selfProject, fieldNumber: 6)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -4315,6 +4394,7 @@ nonisolated extension Mason_V1_HeaderView: SwiftProtobuf.Message, SwiftProtobuf.
     if lhs.banners != rhs.banners {return false}
     if lhs.projects != rhs.projects {return false}
     if lhs.status != rhs.status {return false}
+    if lhs.selfProject != rhs.selfProject {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -4806,7 +4886,7 @@ nonisolated extension Mason_V1_DebtLine: SwiftProtobuf.Message, SwiftProtobuf._M
 
 nonisolated extension Mason_V1_TaskDetailView: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".TaskDetailView"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}row\0\u{1}steps\0\u{1}plan\0\u{1}card\0\u{1}closing\0\u{1}debts\0\u{3}log_tail\0\u{1}branch\0\u{1}worktree\0\u{1}definition\0\u{1}failure\0\u{1}body\0\u{1}route\0\u{3}started_at\0\u{3}explore_returns\0\u{2}\u{2}approval\0\u{1}numbers\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}row\0\u{1}steps\0\u{1}plan\0\u{1}card\0\u{1}closing\0\u{1}debts\0\u{3}log_tail\0\u{1}branch\0\u{1}worktree\0\u{1}definition\0\u{1}failure\0\u{1}body\0\u{1}route\0\u{3}started_at\0\u{3}explore_returns\0\u{2}\u{2}approval\0\u{1}numbers\0\u{1}proposal\0")
 
   fileprivate class _StorageClass {
     var _row: Mason_V1_TaskRow? = nil
@@ -4826,6 +4906,7 @@ nonisolated extension Mason_V1_TaskDetailView: SwiftProtobuf.Message, SwiftProto
     var _exploreReturns: UInt32 = 0
     var _approval: Mason_V1_Approval? = nil
     var _numbers: [Mason_V1_NumberLine] = []
+    var _proposal: Mason_V1_ProposalInfo? = nil
 
       // This property is used as the initial default value for new instances of the type.
       // The type itself is protecting the reference to its storage via CoW semantics.
@@ -4853,6 +4934,7 @@ nonisolated extension Mason_V1_TaskDetailView: SwiftProtobuf.Message, SwiftProto
       _exploreReturns = source._exploreReturns
       _approval = source._approval
       _numbers = source._numbers
+      _proposal = source._proposal
     }
   }
 
@@ -4888,6 +4970,7 @@ nonisolated extension Mason_V1_TaskDetailView: SwiftProtobuf.Message, SwiftProto
         case 15: try { try decoder.decodeSingularUInt32Field(value: &_storage._exploreReturns) }()
         case 17: try { try decoder.decodeSingularMessageField(value: &_storage._approval) }()
         case 18: try { try decoder.decodeRepeatedMessageField(value: &_storage._numbers) }()
+        case 19: try { try decoder.decodeSingularMessageField(value: &_storage._proposal) }()
         default: break
         }
       }
@@ -4951,6 +5034,9 @@ nonisolated extension Mason_V1_TaskDetailView: SwiftProtobuf.Message, SwiftProto
       if !_storage._numbers.isEmpty {
         try visitor.visitRepeatedMessageField(value: _storage._numbers, fieldNumber: 18)
       }
+      try { if let v = _storage._proposal {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 19)
+      } }()
     }
     try unknownFields.traverse(visitor: &visitor)
   }
@@ -4977,10 +5063,106 @@ nonisolated extension Mason_V1_TaskDetailView: SwiftProtobuf.Message, SwiftProto
         if _storage._exploreReturns != rhs_storage._exploreReturns {return false}
         if _storage._approval != rhs_storage._approval {return false}
         if _storage._numbers != rhs_storage._numbers {return false}
+        if _storage._proposal != rhs_storage._proposal {return false}
         return true
       }
       if !storagesAreEqual {return false}
     }
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Mason_V1_ProposalInfo: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ProposalInfo"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}source\0\u{1}severity\0\u{1}route\0\u{1}evidence\0\u{1}text\0\u{3}filed_by\0\u{1}status\0\u{3}reject_reason\0\u{3}publish_state\0\u{1}access\0\u{1}branch\0\u{1}pr\0\u{3}pr_state\0\u{1}channel\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.source) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.severity) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.route) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.evidence) }()
+      case 5: try { try decoder.decodeSingularStringField(value: &self.text) }()
+      case 6: try { try decoder.decodeSingularUInt64Field(value: &self.filedBy) }()
+      case 7: try { try decoder.decodeSingularStringField(value: &self.status) }()
+      case 8: try { try decoder.decodeSingularStringField(value: &self.rejectReason) }()
+      case 9: try { try decoder.decodeSingularStringField(value: &self.publishState) }()
+      case 10: try { try decoder.decodeSingularStringField(value: &self.access) }()
+      case 11: try { try decoder.decodeSingularStringField(value: &self.branch) }()
+      case 12: try { try decoder.decodeSingularUInt64Field(value: &self.pr) }()
+      case 13: try { try decoder.decodeSingularStringField(value: &self.prState) }()
+      case 14: try { try decoder.decodeSingularStringField(value: &self.channel) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.source.isEmpty {
+      try visitor.visitSingularStringField(value: self.source, fieldNumber: 1)
+    }
+    if !self.severity.isEmpty {
+      try visitor.visitSingularStringField(value: self.severity, fieldNumber: 2)
+    }
+    if !self.route.isEmpty {
+      try visitor.visitSingularStringField(value: self.route, fieldNumber: 3)
+    }
+    if !self.evidence.isEmpty {
+      try visitor.visitSingularStringField(value: self.evidence, fieldNumber: 4)
+    }
+    if !self.text.isEmpty {
+      try visitor.visitSingularStringField(value: self.text, fieldNumber: 5)
+    }
+    if self.filedBy != 0 {
+      try visitor.visitSingularUInt64Field(value: self.filedBy, fieldNumber: 6)
+    }
+    if !self.status.isEmpty {
+      try visitor.visitSingularStringField(value: self.status, fieldNumber: 7)
+    }
+    if !self.rejectReason.isEmpty {
+      try visitor.visitSingularStringField(value: self.rejectReason, fieldNumber: 8)
+    }
+    if !self.publishState.isEmpty {
+      try visitor.visitSingularStringField(value: self.publishState, fieldNumber: 9)
+    }
+    if !self.access.isEmpty {
+      try visitor.visitSingularStringField(value: self.access, fieldNumber: 10)
+    }
+    if !self.branch.isEmpty {
+      try visitor.visitSingularStringField(value: self.branch, fieldNumber: 11)
+    }
+    if self.pr != 0 {
+      try visitor.visitSingularUInt64Field(value: self.pr, fieldNumber: 12)
+    }
+    if !self.prState.isEmpty {
+      try visitor.visitSingularStringField(value: self.prState, fieldNumber: 13)
+    }
+    if !self.channel.isEmpty {
+      try visitor.visitSingularStringField(value: self.channel, fieldNumber: 14)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Mason_V1_ProposalInfo, rhs: Mason_V1_ProposalInfo) -> Bool {
+    if lhs.source != rhs.source {return false}
+    if lhs.severity != rhs.severity {return false}
+    if lhs.route != rhs.route {return false}
+    if lhs.evidence != rhs.evidence {return false}
+    if lhs.text != rhs.text {return false}
+    if lhs.filedBy != rhs.filedBy {return false}
+    if lhs.status != rhs.status {return false}
+    if lhs.rejectReason != rhs.rejectReason {return false}
+    if lhs.publishState != rhs.publishState {return false}
+    if lhs.access != rhs.access {return false}
+    if lhs.branch != rhs.branch {return false}
+    if lhs.pr != rhs.pr {return false}
+    if lhs.prState != rhs.prState {return false}
+    if lhs.channel != rhs.channel {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

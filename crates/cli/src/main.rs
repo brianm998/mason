@@ -81,6 +81,13 @@ mason: command-line client for the MASON pipeline
   mason extension list|show|approve [NAME] [--project P]   project extensions; approving is the owner's
   mason landing                       batches, phases, freezes, and the landing queue
   mason self                          MASON on its own repository: limits, and changes held for you
+  mason proposals [--open] [--json]   what agents noticed: source, severity, route, state
+  mason proposal show <id> | approve <id> | reject <id> [--reason R]
+  mason proposal edit <id> [--title T] [--body B] [--evidence E]   only while it waits for you
+  mason proposal file --task N --title T --body B --evidence E [--blocks]   as task N's agent would
+  mason proposal publish <id> --preview | --confirm   send an improvement upstream, redacted
+  mason proposal poll                 look at the upstream pull requests now
+  mason improve \"<what to improve>\" [--project P]   ask MASON to change its own code
   mason update [--channel stable|main|branch:X | --sha S] [--rollback] [--check]
   mason update status | ack           the runtimes, a rollback alert, an update in progress
   mason config show [--project P]     every step's settings and where each came from
@@ -1088,6 +1095,228 @@ fn main() {
                     }
                 }
             }
+        }
+        "proposals" => {
+            let open = a.flag("--open");
+            finish(&a);
+            let r = or_die(d.call(
+                "GET",
+                if open {
+                    "/proposals?open=1"
+                } else {
+                    "/proposals"
+                },
+                None,
+            ));
+            if json_out {
+                return println!("{r:#}");
+            }
+            let list = r["proposals"].as_array().cloned().unwrap_or_default();
+            if list.is_empty() {
+                println!("no proposals");
+            }
+            for p in list {
+                println!(
+                    "#{:<4} {:<9} {:<8} {:<7} {:<9} {}\n      {}",
+                    p["task"],
+                    p["state"].as_str().unwrap_or("?"),
+                    p["source"].as_str().unwrap_or("?"),
+                    p["severity"].as_str().unwrap_or("?"),
+                    p["route"].as_str().unwrap_or("?"),
+                    p["title"].as_str().unwrap_or(""),
+                    p["project"].as_str().unwrap_or("")
+                );
+            }
+        }
+        "proposal" => {
+            let sub = a.pos().unwrap_or_default();
+            if std::env::var("MASON_AS").is_err() {
+                if let Ok(u) = std::env::var("USER") {
+                    std::env::set_var("MASON_AS", u);
+                }
+            }
+            match sub.as_str() {
+                "show" => {
+                    let id = task_id(&mut a);
+                    finish(&a);
+                    let p = or_die(d.call("GET", &format!("/proposals/{id}"), None));
+                    if json_out {
+                        return println!("{p:#}");
+                    }
+                    println!(
+                        "#{id} {} ({}, {}, routed to {})",
+                        p["title"].as_str().unwrap_or(""),
+                        p["source"].as_str().unwrap_or(""),
+                        p["severity"].as_str().unwrap_or(""),
+                        p["route"].as_str().unwrap_or("")
+                    );
+                    println!(
+                        "state: {}   publish: {}",
+                        p["state"].as_str().unwrap_or(""),
+                        p["publish_state"].as_str().unwrap_or("")
+                    );
+                    println!(
+                        "\n{}\n\nEvidence:\n{}",
+                        p["body"].as_str().unwrap_or(""),
+                        p["evidence"].as_str().unwrap_or("(none)")
+                    );
+                    if !p["branch"].as_str().unwrap_or("").is_empty() {
+                        println!(
+                            "\nbranch {} ({} access){}",
+                            p["branch"].as_str().unwrap_or(""),
+                            p["access"].as_str().unwrap_or(""),
+                            p["pr"].as_u64().map_or(String::new(), |n| format!(
+                                ", upstream pull request #{n} ({})",
+                                p["pr_state"].as_str().unwrap_or("")
+                            ))
+                        );
+                    }
+                }
+                "approve" => {
+                    let id = task_id(&mut a);
+                    finish(&a);
+                    or_die(d.call(
+                        "POST",
+                        &format!("/proposals/{id}/approve"),
+                        Some(&json!({})),
+                    ));
+                    println!("Approved proposal #{id}");
+                }
+                "reject" => {
+                    let id = task_id(&mut a);
+                    let reason = a
+                        .opt("--reason")
+                        .unwrap_or_else(|| "no reason given".into());
+                    finish(&a);
+                    or_die(d.call(
+                        "POST",
+                        &format!("/proposals/{id}/reject"),
+                        Some(&json!({"reason": reason})),
+                    ));
+                    println!("Rejected proposal #{id}");
+                }
+                "edit" => {
+                    let id = task_id(&mut a);
+                    let mut body = json!({});
+                    for k in ["title", "body", "evidence"] {
+                        if let Some(v) = a.opt(&format!("--{k}")) {
+                            body[k] = json!(v);
+                        }
+                    }
+                    finish(&a);
+                    if body.as_object().is_some_and(|o| o.is_empty()) {
+                        die("change something: --title, --body or --evidence");
+                    }
+                    or_die(d.call("POST", &format!("/proposals/{id}/edit"), Some(&body)));
+                    println!("Edited proposal #{id}");
+                }
+                "file" => {
+                    let task = a.opt("--task").map(|t| {
+                        t.trim_start_matches('#')
+                            .parse::<u64>()
+                            .unwrap_or_else(|_| die("--task is a task number"))
+                    });
+                    let project = a.opt("--project");
+                    let blocks = a.flag("--blocks");
+                    let (title, body, evidence) =
+                        (a.opt("--title"), a.opt("--body"), a.opt("--evidence"));
+                    finish(&a);
+                    let r = or_die(d.call(
+                        "POST",
+                        "/proposals",
+                        Some(&json!({"task": task, "project": project, "title": title, "body": body, "evidence": evidence, "blocks_task": blocks})),
+                    ));
+                    println!(
+                        "Filed #{} in {} ({}), {}",
+                        r["task"],
+                        r["project"].as_str().unwrap_or("?"),
+                        r["route"].as_str().unwrap_or("?"),
+                        if r["proposed"].as_bool().unwrap_or(true) {
+                            "waiting for you"
+                        } else {
+                            "queued"
+                        }
+                    );
+                }
+                "publish" => {
+                    let id = task_id(&mut a);
+                    let (preview, confirm) = (a.flag("--preview"), a.flag("--confirm"));
+                    finish(&a);
+                    if preview == confirm {
+                        die("say --preview (show what would be sent) or --confirm (send it)");
+                    }
+                    let r = or_die(d.call(
+                        "POST",
+                        &format!("/proposals/{id}/publish"),
+                        Some(&json!({"confirm": confirm})),
+                    ));
+                    if json_out {
+                        return println!("{r:#}");
+                    }
+                    println!(
+                        "{}\n\n{}\n",
+                        r["title"].as_str().unwrap_or(""),
+                        r["body"].as_str().unwrap_or("")
+                    );
+                    println!(
+                        "head {} -> base {}; {} redaction(s); attachments: none",
+                        r["head"].as_str().unwrap_or(""),
+                        r["base"].as_str().unwrap_or(""),
+                        r["redactions"]
+                    );
+                    for f in r["files"].as_array().into_iter().flatten() {
+                        println!("  changes {}", f.as_str().unwrap_or(""));
+                    }
+                    if let Some(b) = r["blocked"].as_str() {
+                        println!("NOT PUBLISHABLE: {b}");
+                    } else if confirm {
+                        println!("Opened pull request #{} upstream", r["pr"]);
+                    } else {
+                        println!("Nothing has been sent. To send exactly this: mason proposal publish {id} --confirm");
+                    }
+                }
+                "poll" => {
+                    finish(&a);
+                    or_die(d.call("POST", "/proposals/poll", Some(&json!({}))));
+                    println!("Looked at the upstream pull requests");
+                }
+                _ => die(&format!("unknown proposal command {sub:?}\n\n{HELP}")),
+            }
+        }
+        "improve" => {
+            let project = a.opt("--project");
+            let text = a
+                .pos()
+                .unwrap_or_else(|| die("say what to improve: mason improve \"<text>\""));
+            finish(&a);
+            if std::env::var("MASON_AS").is_err() {
+                if let Ok(u) = std::env::var("USER") {
+                    std::env::set_var("MASON_AS", u);
+                }
+            }
+            let project = project.unwrap_or_else(|| {
+                let r = or_die(d.call("GET", "/self", None));
+                r["projects"]
+                    .as_array()
+                    .and_then(|l| l.first())
+                    .and_then(|p| p["project"].as_str())
+                    .map(String::from)
+                    .unwrap_or_else(|| die("no project is MASON's own (a project file with a [self] section makes it so)"))
+            });
+            let r = or_die(d.call(
+                "POST",
+                &format!("/projects/{project}/improve"),
+                Some(&json!({"text": text})),
+            ));
+            if json_out {
+                return println!("{r:#}");
+            }
+            println!(
+                "Filed #{} in {project}: branch {} ({} access)",
+                r["task"],
+                r["branch"].as_str().unwrap_or("?"),
+                r["access"].as_str().unwrap_or("?")
+            );
         }
         "self" => {
             finish(&a);

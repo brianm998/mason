@@ -140,3 +140,18 @@ compose = "done"
 description = "The usage page lists every LLM provider account with its adapter, billing kind, sessions in use, warn level, overage setting and monthly budget"
 swift = "done"
 compose = "done"
+
+[feature.proposal-rows-and-detail]
+description = "A proposal's row says where it came from (source, severity, route); its detail shows the evidence, who filed it, and for an improvement the branch, the upstream pull request and the channel being followed; Approve and Reject are the approval box's"
+swift = "done"
+compose = "done"
+
+[feature.proposal-edit]
+description = "Edit changes only a waiting proposal's title, text and evidence (evidence still needs a file or line); offered only while the task's allowed actions include edit"
+swift = "done"
+compose = "done"
+
+[feature.improve-the-pipeline]
+description = "An 'Improve the pipeline' box in the top bar files a task on MASON's own repository; without write access the detail shows the redacted preview and sends upstream only on a second, explicit action"
+swift = "done"
+compose = "done"

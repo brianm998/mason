@@ -77,6 +77,8 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     /** Where the sidebar should scroll to (a tile was clicked). */
     var scrollTarget by mutableStateOf<String?>(null)
     var lastResult by mutableStateOf<String?>(null)
+    /** What `mason proposal publish --preview` would send, once asked for. */
+    var publishPreview by mutableStateOf<PublishPreview?>(null)
 
     /** The step selected in the pipeline editor (for its inspector). */
     var editorStep by mutableStateOf("")
@@ -219,6 +221,26 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     fun pause(mode: String, seconds: Long) =
         send(Command(pause = PauseWork(project = project, mode = mode, for_seconds = seconds)))
     fun resume() = send(Command(resume = ResumeWork(project = project)))
+    /** MASON's own repository's project, when one is registered: "Improve the pipeline" files there. */
+    val selfProject: String get() = header?.self_project ?: ""
+
+    /** Change a proposal's title, body or evidence while it waits for the owner (null: unchanged). */
+    fun editProposal(task: Long, title: String?, body: String?, evidence: String?) {
+        val o = linkedMapOf<String, Any?>()
+        title?.let { o["title"] = it }
+        body?.let { o["body"] = it }
+        evidence?.let { o["evidence"] = it }
+        raw("POST", "/proposals/$task/edit", json = EditorJson.text(o))
+    }
+
+    /** "Improve the pipeline": ask MASON to change its own code. */
+    fun improve(project: String, text: String) =
+        raw("POST", "/projects/$project/improve", json = EditorJson.text(mapOf("text" to text)))
+
+    /** Show the redacted version that would go upstream (`confirm = false`), or send it. */
+    fun publish(task: Long, confirm: Boolean) =
+        raw("POST", "/proposals/$task/publish", id = "publish:$task", json = EditorJson.text(mapOf("confirm" to confirm)))
+
     fun raw(method: String, path: String, id: String = "", json: String = "") =
         send(Command(id = id, raw = Raw(method = method, path = path, json = json)))
 
@@ -263,6 +285,7 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
         m.result?.let { r ->
             lastResult = if (r.ok) null else r.error
             if (r.id == "health" && r.ok) health = HealthSnapshot.parse(r.json)
+            if (r.id.startsWith("publish:") && r.ok) publishPreview = PublishPreview.parse(r.json)
             onResult?.invoke(r)
         }
     }

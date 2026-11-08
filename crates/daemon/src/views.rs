@@ -380,7 +380,39 @@ impl<'a> Ctx<'a> {
             slow: typical.is_some_and(|(_, hi)| t.state.is_step() && in_state > hi),
             step: t.step.clone(),
             body: t.body.chars().take(2000).collect(),
+            proposal: self
+                .d
+                .store
+                .proposal(t.id.0)
+                .ok()
+                .flatten()
+                .map_or_else(String::new, |r| crate::proposals::tag(&r)),
         }
+    }
+
+    /// The proposal behind a task, if it is one, and where its improvement branch is.
+    fn proposal_info(&self, t: &Task) -> Option<ProposalInfo> {
+        let r = self.d.store.proposal(t.id.0).ok().flatten()?;
+        let channel = crate::improve::switched(self.d)
+            .filter(|s| s["task"].as_u64() == Some(r.task))
+            .and_then(|s| s["branch"].as_str().map(|b| format!("branch:{b}")))
+            .unwrap_or_default();
+        Some(ProposalInfo {
+            source: r.source,
+            severity: r.severity,
+            route: r.route,
+            evidence: r.evidence,
+            text: r.body,
+            filed_by: r.filed_by.unwrap_or(0),
+            status: r.status,
+            reject_reason: r.reject_reason,
+            publish_state: r.publish_state,
+            access: r.access,
+            branch: r.branch,
+            pr: r.pr.unwrap_or(0),
+            pr_state: r.pr_state,
+            channel,
+        })
     }
 
     fn matches(&self, t: &Task, project: &str) -> bool {
@@ -457,6 +489,8 @@ impl<'a> Ctx<'a> {
                     if attention == 1 { "s" } else { "" }
                 )
             },
+            self_project: crate::proposals::self_project(self.d)
+                .map_or_else(String::new, |(_, p)| p.id.clone()),
         }
     }
 
@@ -649,6 +683,7 @@ impl<'a> Ctx<'a> {
                 .unwrap_or_default(),
             explore_returns: t.explore_returns,
             approval: self.approval(t),
+            proposal: self.proposal_info(t),
             numbers: self
                 .d
                 .number_lines(t)

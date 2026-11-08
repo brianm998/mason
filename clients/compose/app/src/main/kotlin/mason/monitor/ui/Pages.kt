@@ -211,6 +211,7 @@ private fun TaskDetail(model: MonitorModel, d: TaskDetailView) {
     }
     d.card?.let { DecisionCardView(model, r.id, it) }
     d.approval?.let { ApprovalView(model, r.id, it) }
+    d.proposal?.let { ProposalView(model, r, it) }
     if (d.failure.isNotEmpty()) Text("Failed: ${d.failure}", style = theme.body(color = theme.attention))
     Section("Steps") {
         d.steps.forEach { s ->
