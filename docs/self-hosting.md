@@ -31,6 +31,14 @@ Open self-tasks, tasks filed per week, and agent steps per period (the cap on sp
 
 **The weekly cap counts only work MASON starts for itself.** `per_week` counts tasks whose trust is not the owner's: agent proposals and outside issues you labeled. Tasks you file (the command line or API as the owner, the monitor, a tracker issue by an owner name) are not counted, and neither is a task cancelled before any agent step started. `mason self` reads "N of 10 this week (M of yours not counted)", and the refusal says how many of the counted are agent or outside tasks. **`max_steps` counts the same way:** only steps of tasks not filed by the owner; `mason self` reads "N of 100 agent steps in 24 h (M of yours not counted)" (decision 0030). `max_open` and the cooldown apply to every filing, yours included. **An owner identity can therefore file without a weekly cap**; the guards that remain are `max_open`, the agent-filed share of `max_steps`, `per_week`, the cooldown and the holds on protected files (see `docs/decisions/0022-self-cap-readings.md`).
 
+## Tracker imports start proposed
+
+An issue the tracker imports becomes a **proposed** task, with the issue number, title, body and link on it, and waits for you: `mason task approve N` or the monitors' Approve button. Nothing an outside signal creates starts without it; that is why. Set `import_as = "queued"` under `[tracker]` in the project file in your machine config to have every imported issue start at once, as before; an issue's own text cannot set it. Dependencies still import in order, and a proposed task whose blockers have not landed shows as proposed and held behind them.
+
+Proposed tasks spend nothing, so `max_open`, `per_week` and `max_steps` never refuse them (only the rollback cooldown does); the limits apply when you approve and the task starts. When a limit does keep a queued import out, the alert reads "5 issues not imported (#...): 10 self-tasks are open and the limit is 10", `mason task list --pending-issues` and both monitors list the issues with the reason, and it clears when they import.
+
+A task titled `... (GitHub #N)` that no issue is linked to is adopted by issue #N instead of being imported a second time. If an open issue is linked to a cancelled task, the alert says so; link a live task with `mason task relink <id> --issue N` (owner only).
+
 ## The port
 
 `masond` listens on **127.0.0.1:7423** unless told otherwise, so a monitor that is open when the daemon restarts (an update, a changed limit, a crash and relaunch) finds it in the same place. It listens on loopback only; nothing beyond this machine can reach it. `daemon.json` in the data directory (`pid`, `port`, `started_ms`) is still written after the bind and is what the command line and the monitors read, so a different port works too.

@@ -157,6 +157,21 @@ struct RowView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            if row.issue != 0 {
+                HStack(spacing: theme.spacing) {
+                    if let url = URL(string: row.issueURL), !row.issueURL.isEmpty {
+                        Link("issue #\(row.issue)", destination: url).font(theme.small())
+                            .accessibilityIdentifier("issue:\(row.id)")
+                    } else {
+                        Text("issue #\(row.issue)").font(theme.small()).foregroundStyle(theme.muted)
+                    }
+                    if row.state == "proposed" && model.canAct && row.allowedActions.contains("approve") {
+                        Button { model.approve(row.id) } label: { Text("Approve").pill(prominent: true) }
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("row:\(row.id):approve")
+                    }
+                }
+            }
             if !row.blockers.isEmpty {
                 HStack(spacing: theme.spacingSmall) {
                     Text("blocked by").font(theme.small()).foregroundStyle(theme.muted)

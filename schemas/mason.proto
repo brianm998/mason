@@ -402,6 +402,10 @@ message TaskRow {
   string display = 19;
   // The same, in parts.
   ModelUse model_use = 20;
+  // The tracker issue this task was imported from (0 when it was not).
+  uint64 issue = 21;
+  // Where to read it ("" when the tracker has no public page).
+  string issue_url = 22;
 }
 
 // What a step run launched (or, with `expected`, will launch): the tier
@@ -455,6 +459,16 @@ message HeaderView {
   repeated Banner banners = 3;
   repeated string projects = 4;
   string status = 5;
+  // Open issues the tracker has not imported (or whose task was canceled), with why.
+  repeated PendingIssue pending_issues = 6;
+}
+
+message PendingIssue {
+  string project = 1;
+  uint64 number = 2;
+  string title = 3;
+  string reason = 4;
+  string url = 5;
 }
 
 message SidebarSection {

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import MonitorCore
+import MasonProtocol
 import SwiftUI
 
 /// The top bar, on every page: back, forward, home; the attention indicator
@@ -65,6 +66,7 @@ struct TopBar: View {
             // Tiles are fixed size: a narrow window squeezes the text above, not these.
             HStack(spacing: theme.spacingSmall) {
                 ForEach(model.header?.counts ?? [], id: \.state) { CountTile(model: model, count: $0) }
+                if let n = model.header?.pendingIssues.count, n > 0 { PendingTile(count: n) }
             }
 
             Button { adding = true } label: { Image(systemName: "plus") }
@@ -107,6 +109,9 @@ struct BannersView: View {
             }
             ForEach(Array((model.header?.banners ?? []).enumerated()), id: \.offset) { i, b in
                 banner(b.text, id: "banner:\(i)")
+            }
+            ForEach(model.header?.pendingIssues ?? [], id: \.number) { p in
+                PendingIssueRow(issue: p)
             }
         }
     }
@@ -153,5 +158,49 @@ struct AddTaskSheet: View {
         }
         .padding(theme.spacingLarge)
         .frame(width: 460)
+    }
+}
+
+/// How many open issues the tracker has not imported; the list is below the top bar.
+struct PendingTile: View {
+    @Environment(\.theme) var theme
+    let count: Int
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Text(String(count)).font(theme.count()).foregroundStyle(theme.attention)
+            Text("not imported").font(theme.small()).foregroundStyle(theme.muted).lineLimit(1).fixedSize()
+        }
+        .padding(.horizontal, theme.spacing)
+        .frame(minWidth: theme.tileMinWidth, minHeight: theme.tileHeight, maxHeight: theme.tileHeight)
+        .fixedSize(horizontal: true, vertical: false)
+        .background(RoundedRectangle(cornerRadius: theme.radius).fill(theme.attentionTint))
+        .overlay(RoundedRectangle(cornerRadius: theme.radius).stroke(theme.attention, lineWidth: 1))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(count) not imported")
+        .accessibilityIdentifier("tile:not_imported")
+    }
+}
+
+/// One issue the tracker did not import, with the reason.
+struct PendingIssueRow: View {
+    @Environment(\.theme) var theme
+    let issue: Mason_V1_PendingIssue
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: theme.spacing) {
+            if let url = URL(string: issue.url), !issue.url.isEmpty {
+                Link("#\(issue.number)", destination: url)
+            } else {
+                Text("#\(issue.number)")
+            }
+            Text(issue.title).lineLimit(1)
+            Text(issue.reason).foregroundStyle(theme.muted)
+            Spacer()
+        }
+        .font(theme.small())
+        .padding(.horizontal, theme.spacingLarge).padding(.vertical, theme.spacingSmall)
+        .background(theme.slow.opacity(0.12))
+        .accessibilityIdentifier("pending:\(issue.project):\(issue.number)")
     }
 }

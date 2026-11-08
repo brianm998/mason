@@ -83,15 +83,39 @@ pub struct Ctx<'a> {
     pub d: &'a Daemon,
     pub w: &'a World,
     pub now: u64,
+    /// Task to the tracker issue it was imported from.
+    issues: std::collections::HashMap<u64, u64>,
+}
+
+/// The public page of an issue, when the tracker is GitHub's own.
+fn issue_page(d: &Daemon, pid: ProjectId, n: u64) -> String {
+    d.project(pid)
+        .and_then(|p| p.services.tracker.as_ref())
+        .filter(|t| t.api.trim_end_matches('/') == "https://api.github.com")
+        .map_or_else(String::new, |t| {
+            format!("https://github.com/{}/issues/{n}", t.repo)
+        })
 }
 
 impl<'a> Ctx<'a> {
     pub fn new(d: &'a Daemon, w: &'a World) -> Ctx<'a> {
+        let mut issues = std::collections::HashMap::new();
+        for p in d.projects.values() {
+            for r in d.store.tracker_items(&p.id).unwrap_or_default() {
+                issues.insert(r.task, r.number);
+            }
+        }
         Ctx {
             d,
             w,
             now: now_ms(),
+            issues,
         }
+    }
+
+    /// A proposed task imported from the tracker: it has its own section.
+    fn is_import(&self, t: &Task) -> bool {
+        t.state == State::Proposed && self.issues.contains_key(&t.id.0)
     }
 
     fn project_name(&self, t: &Task) -> String {
@@ -230,6 +254,16 @@ impl<'a> Ctx<'a> {
     fn why_waiting(&self, t: &Task) -> String {
         if let Some(w) = self.d.broker.explain_task(t.id) {
             return w;
+        }
+        if t.state == State::Proposed && !t.blockers.is_empty() {
+            return format!(
+                "Proposed, held behind {}",
+                t.blockers
+                    .iter()
+                    .map(|b| format!("#{}", b.0))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
         }
         match &t.activity {
             Activity::Waiting(WaitReason::On(w)) => w.clone(),
@@ -387,6 +421,11 @@ impl<'a> Ctx<'a> {
             slow: typical.is_some_and(|(_, hi)| t.state.is_step() && in_state > hi),
             step: t.step.clone(),
             body: t.body.chars().take(2000).collect(),
+            issue: self.issues.get(&t.id.0).copied().unwrap_or(0),
+            issue_url: self
+                .issues
+                .get(&t.id.0)
+                .map_or_else(String::new, |n| issue_page(self.d, t.project, *n)),
         }
     }
 
@@ -456,6 +495,25 @@ impl<'a> Ctx<'a> {
                 .collect(),
             banners,
             projects: self.w.projects.values().map(|p| p.name.clone()).collect(),
+            pending_issues: self
+                .d
+                .projects
+                .iter()
+                .filter(|(_, p)| project.is_empty() || p.id == project)
+                .flat_map(|(pid, p)| {
+                    self.d
+                        .tracker
+                        .pending(*pid)
+                        .into_iter()
+                        .map(move |w| PendingIssue {
+                            project: p.id.clone(),
+                            number: w.number,
+                            title: w.title,
+                            reason: w.reason,
+                            url: issue_page(self.d, *pid, w.number),
+                        })
+                })
+                .collect(),
             status: if attention == 0 {
                 "All quiet".into()
             } else {
@@ -468,12 +526,33 @@ impl<'a> Ctx<'a> {
     }
 
     fn section(&self, s: State, project: &str) -> SidebarSection {
-        let mut tasks: Vec<&Task> = self
+        let tasks: Vec<&Task> = self
             .w
             .tasks
             .values()
             .filter(|t| self.in_section(t, s) && self.matches(t, project))
+            .filter(|t| !(s == State::Proposed && self.is_import(t)))
             .collect();
+        self.section_of(s, tasks)
+    }
+
+    /// Proposed tasks the tracker imported: they wait for approval like any
+    /// proposal, but come from an outside signal, so they are listed apart.
+    fn imports_section(&self, project: &str) -> SidebarSection {
+        let tasks: Vec<&Task> = self
+            .w
+            .tasks
+            .values()
+            .filter(|t| self.in_section(t, State::Proposed) && self.matches(t, project))
+            .filter(|t| self.is_import(t))
+            .collect();
+        let mut sec = self.section_of(State::Proposed, tasks);
+        sec.state = "proposed_imports".into();
+        sec.title = "Proposed from the tracker".into();
+        sec
+    }
+
+    fn section_of(&self, s: State, mut tasks: Vec<&Task>) -> SidebarSection {
         // Active states: oldest first, so anything stuck is at the top.
         // History: newest first, so what just happened is not buried.
         if is_history(s) {
@@ -491,8 +570,13 @@ impl<'a> Ctx<'a> {
     }
 
     pub fn sidebar(&self, project: &str) -> SidebarView {
-        let mut sections: Vec<SidebarSection> =
-            ORDER.iter().map(|s| self.section(*s, project)).collect();
+        let mut sections: Vec<SidebarSection> = vec![];
+        for s in ORDER {
+            sections.push(self.section(s, project));
+            if s == State::Proposed {
+                sections.push(self.imports_section(project));
+            }
+        }
         sections.push(self.section(State::Canceled, project));
         SidebarView {
             sections,

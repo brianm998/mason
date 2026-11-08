@@ -177,6 +177,22 @@ private fun RowView(model: MonitorModel, row: TaskRow) {
             }
             row.progress.running?.let { ProgressLine(model, it) }
         }
+        if (row.issue != 0L) {
+            val uri = androidx.compose.ui.platform.LocalUriHandler.current
+            Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing), verticalAlignment = Alignment.CenterVertically) {
+                if (row.issue_url.isNotEmpty()) {
+                    Text(
+                        "issue #${row.issue}", style = theme.small(color = theme.accent),
+                        modifier = Modifier.testTag("issue:${row.id}").clickable { runCatching { uri.openUri(row.issue_url) } },
+                    )
+                } else {
+                    Text("issue #${row.issue}", style = theme.small())
+                }
+                if (row.state == "proposed" && model.canAct && "approve" in row.allowed_actions) {
+                    Pill("Approve", prominent = true, modifier = Modifier.testTag("row:${row.id}:approve")) { model.approve(row.id) }
+                }
+            }
+        }
         if (row.blockers.isNotEmpty()) {
             Row(horizontalArrangement = Arrangement.spacedBy(theme.spacingSmall)) {
                 Text("blocked by", style = theme.small())

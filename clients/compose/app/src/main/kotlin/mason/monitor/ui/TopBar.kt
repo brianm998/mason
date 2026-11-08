@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 package mason.monitor.ui
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -12,6 +13,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import mason.monitor.MonitorModel
@@ -57,6 +60,7 @@ fun TopBar(model: MonitorModel) {
         // Tiles are fixed size: a narrow window squeezes the text above, not these.
         Row(horizontalArrangement = Arrangement.spacedBy(theme.spacingSmall)) {
             model.header?.counts?.forEach { CountTile(model, it) }
+            model.header?.pending_issues?.size?.takeIf { it > 0 }?.let { PendingTile(it) }
         }
 
         NavButton("+", "add-task", true) { adding = true }
@@ -129,6 +133,43 @@ fun BannersView(model: MonitorModel) {
             }
         }
         model.header?.banners?.forEachIndexed { i, b -> banner(b.text, "banner:$i", theme) }
+        model.header?.pending_issues?.forEach { p ->
+            val uri = androidx.compose.ui.platform.LocalUriHandler.current
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(theme.spacing),
+                modifier = Modifier.fillMaxWidth().background(theme.slow.copy(alpha = 0.12f))
+                    .padding(horizontal = theme.spacingLarge, vertical = theme.spacingSmall).testTag("pending:${p.project}:${p.number}"),
+            ) {
+                Text(
+                    "#${p.number}", style = theme.small(color = if (p.url.isNotEmpty()) theme.accent else theme.text),
+                    modifier = Modifier.clickable(enabled = p.url.isNotEmpty()) { runCatching { uri.openUri(p.url) } },
+                )
+                Text(p.title, style = theme.small(), maxLines = 1)
+                Text(p.reason, style = theme.small(color = theme.muted))
+            }
+        }
+    }
+}
+
+/** How many open issues the tracker has not imported; the list is below the top bar. */
+@Composable
+private fun PendingTile(count: Int) {
+    val theme = LocalTheme.current
+    val shape = RoundedCornerShape(theme.radius)
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+        modifier = Modifier
+            .height(theme.tileHeight)
+            .widthIn(min = theme.tileMinWidth)
+            .background(theme.attentionTint, shape)
+            .border(BorderStroke(1.dp, theme.attention), shape)
+            .testTag("tile:not_imported")
+            .semantics { contentDescription = "$count not imported" }
+            .padding(horizontal = theme.spacing),
+    ) {
+        Text(count.toString(), style = theme.count(theme.attention), maxLines = 1)
+        Text("not imported", style = theme.small(), maxLines = 1, softWrap = false)
     }
 }
 
