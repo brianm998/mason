@@ -150,6 +150,16 @@ fn task_json(d: &Daemon, w: &World, t: &Task, detail: bool) -> Value {
             |h| json!({"reasons": h.reasons, "approved_by": h.approved_by, "since": h.at}),
         );
         v["failure"] = t.failure.as_ref().map_or(Value::Null, |f| json!(f));
+        v["host_losses"] = json!(d
+            .store
+            .host_losses_for_task(t.id.0)
+            .unwrap_or_default()
+            .iter()
+            .map(|l| json!({
+                "host": l.host_id, "run": l.run, "step": l.step, "lost_at_ms": l.lost_at_ms,
+                "detail": l.detail, "rerun": l.retried,
+            }))
+            .collect::<Vec<_>>());
         v["question"] = crate::attention::card_of(d, t).map_or(Value::Null, |(c, _)| json!(c.ask));
         v["card"] = crate::attention::card_of(d, t)
             .map_or(Value::Null, |(c, h)| crate::attention::card_json(&c, &h));

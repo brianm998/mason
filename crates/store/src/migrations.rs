@@ -320,6 +320,20 @@ const STEPS: &[&str] = &[
          PRIMARY KEY (run, seq)
      );
      CREATE INDEX step_launches_task ON step_launches(task);",
+    // 15: step hosts that were lost without an exit record (s66): what was known about each,
+    // and whether the step was re-run on a fresh host. Written by the daemon; not rebuilt
+    // by event replay.
+    "CREATE TABLE step_host_losses (
+         host_id    TEXT PRIMARY KEY,
+         task       INTEGER NOT NULL,
+         run        INTEGER NOT NULL,
+         step       TEXT NOT NULL,
+         lost_at_ms INTEGER NOT NULL,
+         detail     TEXT NOT NULL,
+         retried    INTEGER NOT NULL
+     );
+     CREATE INDEX step_host_losses_task ON step_host_losses(task);
+     CREATE INDEX step_host_losses_at ON step_host_losses(lost_at_ms);",
 ];
 
 pub const SCHEMA_VERSION: u32 = STEPS.len() as u32;

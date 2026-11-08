@@ -200,6 +200,20 @@ pub struct OverrideRow {
     pub expires_at: u64,
 }
 
+/// A step host that was lost without an exit record, with what was known about it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HostLossRow {
+    pub host_id: String,
+    pub task: u64,
+    pub run: u64,
+    pub step: String,
+    pub lost_at_ms: u64,
+    /// The report text: "host pid 1234 gone at 16:16:53, killed by signal 9, ...".
+    pub detail: String,
+    /// The step was run again on a fresh host (false: this loss failed the step).
+    pub retried: bool,
+}
+
 /// One session start of a step run: what was asked for and what was launched.
 /// Empty strings mean "none" (no tier, the CLI's own default model, no effort).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1804,6 +1818,72 @@ impl Store {
                 params![run as i64, model],
             )?;
             Ok(())
+        })
+    }
+
+    /// Record a lost step host (once per host id; a repeat replaces the earlier row).
+    pub fn record_host_loss(&self, row: HostLossRow) -> Result<(), StoreError> {
+        self.write(move |c| {
+            c.execute(
+                "INSERT OR REPLACE INTO step_host_losses(host_id, task, run, step, lost_at_ms, \
+                 detail, retried) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                params![
+                    row.host_id,
+                    row.task as i64,
+                    row.run as i64,
+                    row.step,
+                    row.lost_at_ms as i64,
+                    row.detail,
+                    row.retried as i64
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Mark whether the step was re-run after this loss.
+    pub fn set_host_loss_retried(&self, host_id: &str, retried: bool) -> Result<(), StoreError> {
+        let host_id = host_id.to_string();
+        self.write(move |c| {
+            c.execute(
+                "UPDATE step_host_losses SET retried = ?2 WHERE host_id = ?1",
+                params![host_id, retried as i64],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Every lost host of a task, oldest first.
+    pub fn host_losses_for_task(&self, task: u64) -> Result<Vec<HostLossRow>, StoreError> {
+        self.loss_query("WHERE task = ?1 ORDER BY lost_at_ms, host_id", task)
+    }
+
+    /// Every lost host at or after `since_ms`, oldest first.
+    pub fn host_losses_since(&self, since_ms: u64) -> Result<Vec<HostLossRow>, StoreError> {
+        self.loss_query(
+            "WHERE lost_at_ms >= ?1 ORDER BY lost_at_ms, host_id",
+            since_ms,
+        )
+    }
+
+    fn loss_query(&self, tail: &'static str, key: u64) -> Result<Vec<HostLossRow>, StoreError> {
+        self.read(move |c| {
+            let mut st = c.prepare(&format!(
+                "SELECT host_id, task, run, step, lost_at_ms, detail, retried \
+                 FROM step_host_losses {tail}"
+            ))?;
+            let rows = st.query_map(params![key as i64], |r| {
+                Ok(HostLossRow {
+                    host_id: r.get(0)?,
+                    task: r.get::<_, i64>(1)? as u64,
+                    run: r.get::<_, i64>(2)? as u64,
+                    step: r.get(3)?,
+                    lost_at_ms: r.get::<_, i64>(4)? as u64,
+                    detail: r.get(5)?,
+                    retried: r.get::<_, i64>(6)? != 0,
+                })
+            })?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
         })
     }
 
