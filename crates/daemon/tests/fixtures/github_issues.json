@@ -1,0 +1,104 @@
+[
+ {
+  "method": "GET",
+  "url": "/issues",
+  "response": {
+   "status": 200,
+   "headers": {
+    "ETag": "\"v1\""
+   },
+   "body": [
+    {
+     "number": 21,
+     "node_id": "I_21",
+     "title": "Add paging",
+     "body": "Body of issue 21",
+     "state": "open",
+     "user": {
+      "login": "OWNER"
+     },
+     "labels": [
+      {
+       "name": "mason"
+      }
+     ]
+    },
+    {
+     "number": 22,
+     "node_id": "I_22",
+     "title": "Fix the cache",
+     "body": "Body of issue 22",
+     "state": "open",
+     "user": {
+      "login": "OWNER"
+     },
+     "labels": [
+      {
+       "name": "mason"
+      }
+     ]
+    },
+    {
+     "number": 23,
+     "node_id": "I_23",
+     "title": "Trim the logs",
+     "body": "Body of issue 23",
+     "state": "open",
+     "user": {
+      "login": "OWNER"
+     },
+     "labels": [
+      {
+       "name": "mason"
+      }
+     ]
+    },
+    {
+     "number": 24,
+     "node_id": "I_24",
+     "title": "Speed up the build",
+     "body": "Body of issue 24",
+     "state": "open",
+     "user": {
+      "login": "OWNER"
+     },
+     "labels": [
+      {
+       "name": "mason"
+      }
+     ]
+    },
+    {
+     "number": 25,
+     "node_id": "I_25",
+     "title": "Document the flags",
+     "body": "Body of issue 25",
+     "state": "open",
+     "user": {
+      "login": "OWNER"
+     },
+     "labels": [
+      {
+       "name": "mason"
+      }
+     ]
+    },
+    {
+     "number": 26,
+     "node_id": "I_26",
+     "title": "A stranger's labeled report",
+     "body": "Body of issue 26",
+     "state": "open",
+     "user": {
+      "login": "stranger"
+     },
+     "labels": [
+      {
+       "name": "mason"
+      }
+     ]
+    }
+   ]
+  }
+ }
+]

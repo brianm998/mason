@@ -626,6 +626,7 @@ dependencies = [
  "axum",
  "mason-adapter-api",
  "mason-adapters",
+ "mason-conformance",
  "mason-core",
  "mason-definition",
  "mason-engine",

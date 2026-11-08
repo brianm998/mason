@@ -404,6 +404,10 @@ message TaskRow {
   ModelUse model_use = 20;
   // For a proposal or an improvement: "agent · blocks · pipeline" (source, severity, route).
   string proposal = 21;
+  // The tracker issue this task was imported from (0 when it was not).
+  uint64 issue = 22;
+  // Where to read it ("" when the tracker has no public page).
+  string issue_url = 23;
 }
 
 // What a step run launched (or, with `expected`, will launch): the tier
@@ -459,6 +463,16 @@ message HeaderView {
   string status = 5;
   // MASON's own repository, if one is registered: where "Improve the pipeline" files its task.
   string self_project = 6;
+  // Open issues the tracker has not imported (or whose task was canceled), with why.
+  repeated PendingIssue pending_issues = 7;
+}
+
+message PendingIssue {
+  string project = 1;
+  uint64 number = 2;
+  string title = 3;
+  string reason = 4;
+  string url = 5;
 }
 
 message SidebarSection {
@@ -580,6 +594,8 @@ message TaskDetailView {
   PlanView plan_view = 19;
   // Present for a proposal or an improvement the owner asked for.
   ProposalInfo proposal = 20;
+  // Tokens and cost this task's steps reported, one line per step (s64).
+  repeated TokenLine step_tokens = 21;
 }
 
 // What was noticed, by whom, with the proof; and for an improvement, where its branch is.
@@ -694,11 +710,80 @@ message ProviderStatus {
   double warn_at = 7;            // fraction of a limit at which to warn
   string overage = 8;            // "allow" | "hold"
   double monthly_budget_usd = 9; // api accounts; 0 when none is set
+  // What the provider last said (s64). Every figure comes with its age text.
+  // The slots are sessions_used / sessions_limit above.
+  repeated UsageWindow windows = 10;
+  string overage_text = 11;   // "overage: off (why)", "in use since ...", or ""
+  string blocked_text = 12;   // "blocked: why, until ..." or ""
+  bool has_snapshot = 13;     // false: nothing reported yet
+  uint64 as_of = 14;          // epoch seconds of the snapshot
+  string age = 15;            // "as of 12 min ago", "just now"; "" without a snapshot
+  SpendView spend = 16;       // api accounts only
+  UsageTokens tokens_window = 17; // the current (shortest reported) window; empty without one
+  UsageTokens tokens_week = 18;   // the last 7 days
+  string doing = 19;          // what MASON is doing about it; "nothing" until ticket 4
+  // The same as `adapter` (5). Wire's Kotlin classes already have a member called
+  // `adapter`, so a client there cannot read a field of that name; it reads this one.
+  string adapter_name = 20;
+}
+
+// One limit window. A window reported without a percentage has
+// has_percent = false and shows its state and reset only.
+message UsageWindow {
+  string id = 1;
+  string label = 2;
+  bool reported = 3;     // false: the adapter can report it, nothing has yet
+  bool has_percent = 4;
+  double percent = 5;    // 0..100, only when has_percent
+  bool has_reset = 6;
+  uint64 resets_at = 7;  // epoch seconds
+  string resets_text = 8; // "resets in 2 h 14 m, at 15:00 UTC"
+  string state = 9;      // "ok" | "warning" | "blocked"
+  string trend = 10;     // "up 12 points over 6 h 0 m" or ""
+  string age = 11;
+  string short_text = 12; // top bar: "5-hour 82%, resets 1 h 10 m"
+}
+
+message SpendView {
+  bool has_spend = 1;     // false: no cost reported yet
+  double today_usd = 2;
+  double week_usd = 3;
+  double month_usd = 4;
+  bool has_budget = 5;
+  double budget_usd = 6;
+  string age = 7;
+}
+
+// Reported tokens and cost. A has_* flag false means not reported (never 0).
+message TokenLine {
+  string name = 1;
+  bool has_input = 2;
+  uint64 input = 3;
+  bool has_output = 4;
+  uint64 output = 5;
+  bool has_cache_read = 6;
+  uint64 cache_read = 7;
+  bool has_cache_write = 8;
+  uint64 cache_write = 9;
+  bool has_cost = 10;
+  double cost_usd = 11;
+  uint32 attempts = 12;
+  string age = 13;        // of the newest attempt counted
+  uint64 task = 14;       // top tasks only
+}
+
+message UsageTokens {
+  string period = 1;      // "current window" | "last 7 days"
+  repeated TokenLine by_project = 2;
+  repeated TokenLine by_model = 3;
+  repeated TokenLine top_tasks = 4;
 }
 
 message UsageView {
   repeated ProviderStatus providers = 1;
   string note = 2;
+  // The top-bar line: the most constrained window per account.
+  repeated string top_bar = 3;
 }
 
 message StepNode {

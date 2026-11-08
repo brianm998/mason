@@ -708,13 +708,103 @@ fn launches_are_kept_per_run_in_order_and_survive_reopen() {
 }
 
 #[test]
-fn migration_16_applies_to_a_version_15_database() {
-    use mason_core::introspect::{signature, Attempt};
+fn migration_16_applies_on_15_and_usage_survives_reopening() {
     let (_d, p) = db();
     {
         let mut c = Connection::open(&p).unwrap();
         migrations::migrate_to(&mut c, 15).unwrap();
         assert_eq!(migrations::version(&c).unwrap(), 15);
+    }
+    let s = Store::open(&p).unwrap();
+    s.put_usage_latest("main", 1000, "{\"a\":1}").unwrap();
+    drop(s);
+    let s = Store::open(&p).unwrap();
+    assert_eq!(
+        s.usage_latest().unwrap(),
+        vec![("main".to_string(), 1000, "{\"a\":1}".to_string())]
+    );
+    drop(s);
+    let c = Connection::open(&p).unwrap();
+    assert_eq!(migrations::version(&c).unwrap(), migrations::SCHEMA_VERSION);
+}
+
+fn reading(at: u64, u: Option<f64>, resets: u64, state: &str) -> mason_store::UsageReading {
+    mason_store::UsageReading {
+        account: "main".into(),
+        window: "5h".into(),
+        at,
+        utilization: u,
+        resets_at: Some(resets),
+        state: state.into(),
+    }
+}
+
+#[test]
+fn readings_are_thinned_to_one_per_five_minutes_and_pruned_after_eight_days() {
+    let (_d, p) = db();
+    let s = Store::open(&p).unwrap();
+    let t0 = 10_000_000u64;
+    assert!(s.record_reading(reading(t0, Some(0.1), 5, "ok")).unwrap());
+    // Within five minutes, same state and reset: dropped.
+    assert!(!s
+        .record_reading(reading(t0 + 60, Some(0.2), 5, "ok"))
+        .unwrap());
+    // A changed state or reset is kept at once.
+    assert!(s
+        .record_reading(reading(t0 + 70, Some(0.2), 5, "warning"))
+        .unwrap());
+    assert!(s
+        .record_reading(reading(t0 + 80, Some(0.0), 99, "warning"))
+        .unwrap());
+    // Five minutes after the last kept one.
+    assert!(s
+        .record_reading(reading(t0 + 80 + 300, Some(0.3), 99, "warning"))
+        .unwrap());
+    assert_eq!(s.readings_since(0).unwrap().len(), 4);
+    // A write more than 8 days later drops the old ones.
+    let late = t0 + 9 * 86400;
+    assert!(s.record_reading(reading(late, None, 7, "ok")).unwrap());
+    let left = s.readings_since(0).unwrap();
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0].utilization, None);
+}
+
+#[test]
+fn usage_runs_keep_only_reported_figures_and_each_attempt_apart() {
+    let (_d, p) = db();
+    let s = Store::open(&p).unwrap();
+    let run = |attempt: &str, input: Option<u64>| mason_store::UsageRun {
+        attempt: attempt.into(),
+        task: 3,
+        project: "demo".into(),
+        step: "develop".into(),
+        account: "main".into(),
+        model: Some("opus".into()),
+        input,
+        at: 50,
+        ..Default::default()
+    };
+    s.record_usage_run(run("k", Some(10))).unwrap();
+    s.record_usage_run(run("ku1", None)).unwrap();
+    let rows = s.usage_runs_since(0).unwrap();
+    assert_eq!(rows.len(), 2);
+    let ku1 = rows.iter().find(|r| r.attempt == "ku1").unwrap();
+    assert_eq!(ku1.input, None);
+    assert_eq!(ku1.cost_usd, None);
+    assert_eq!(
+        rows.iter().find(|r| r.attempt == "k").unwrap().input,
+        Some(10)
+    );
+}
+
+#[test]
+fn migration_17_applies_to_a_version_16_database() {
+    use mason_core::introspect::{signature, Attempt};
+    let (_d, p) = db();
+    {
+        let mut c = Connection::open(&p).unwrap();
+        migrations::migrate_to(&mut c, 16).unwrap();
+        assert_eq!(migrations::version(&c).unwrap(), 16);
     }
     let s = Store::open(&p).unwrap();
     assert!(s.findings().unwrap().is_empty());

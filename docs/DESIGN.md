@@ -554,6 +554,7 @@ All core work uses the plain `git` CLI, so any remote works over SSH or HTTPS, i
 - **Capabilities are declared,** and the wizard, monitor and validator only offer what's available.
 - **Conformance kits:** each trait has a test suite that any implementation, built-in or external, must pass against a recorded or fake service.
 - **Authority is split.** The tracker owns title, body, priority and closure. The pipeline's database owns state. Mirroring out is best-effort and never blocks work.
+- **A tracker import starts proposed.** An issue becomes a proposed task that waits for the owner's approval; `[tracker] import_as = "queued"`, set only in the owner's machine config, restores starting at once. An import a limit refuses is shown (alert, `mason task list --pending-issues`, the monitors), never silent; a hand-filed `(GitHub #N)` task is adopted, not duplicated (decision 0046).
 - **Credentials are references** to the OS keychain or a protected file, never values in config. Clients never see them.
 
 ### The plugin protocol

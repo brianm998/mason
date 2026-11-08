@@ -13,6 +13,7 @@ pub mod progress;
 pub mod progress_text;
 pub mod proposal;
 mod task;
+pub mod usage_text;
 
 pub use entities::*;
 pub use event::*;

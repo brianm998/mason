@@ -447,6 +447,17 @@ pub enum CiKind {
     },
 }
 
+/// What an imported issue becomes. Set only in the machine-side project config
+/// (never by an issue's own text). Decision 0046.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ImportAs {
+    /// Waits for the owner's approval before it starts.
+    #[default]
+    Proposed,
+    /// Starts at once, as before.
+    Queued,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TrackerCfg {
     pub api: String,
@@ -457,6 +468,8 @@ pub struct TrackerCfg {
     pub interval_s: u64,
     /// A reference to the webhook secret (`env:`/`file:`), when a relay delivers.
     pub webhook_secret: Option<String>,
+    /// `proposed` (default) or `queued`.
+    pub import_as: ImportAs,
 }
 
 fn parse_services(id: &str, doc: &DocumentMut) -> Result<ServicesCfg, String> {
@@ -586,6 +599,20 @@ fn parse_services(id: &str, doc: &DocumentMut) -> Result<ServicesCfg, String> {
                 "{id}: `[tracker] webhook_secret` is a reference, `env:NAME` or `file:/path`"
             ));
         }
+        let import_as = match get(t, "import_as").as_deref() {
+            None | Some("proposed") => ImportAs::Proposed,
+            Some("queued") => ImportAs::Queued,
+            Some(o) => {
+                return Err(format!(
+                    "{id}: `[tracker] import_as` is `proposed` or `queued`, not {o:?}"
+                ))
+            }
+        };
+        if t.get("import_as").is_some_and(|v| v.as_str().is_none()) {
+            return Err(format!(
+                "{id}: `[tracker] import_as` is `proposed` or `queued`"
+            ));
+        }
         out.tracker = Some(TrackerCfg {
             api: api(t),
             repo: need(t, "tracker", "repo")?,
@@ -593,6 +620,7 @@ fn parse_services(id: &str, doc: &DocumentMut) -> Result<ServicesCfg, String> {
             label: get(t, "label").unwrap_or_else(|| "mason".into()),
             interval_s: int(t, "interval_s", 60),
             webhook_secret: secret,
+            import_as,
         });
     }
     Ok(out)
@@ -773,6 +801,21 @@ mod tests {
         assert_eq!(p.max_test_rounds, None);
         assert_eq!(p.branch(7), "mason/web-api/t7");
         assert_eq!(p.base_ref(), "develop");
+    }
+
+    #[test]
+    fn import_as_defaults_to_proposed_and_is_validated() {
+        let base = "path=\"/r\"\nbase=\"main\"\ntest=\"t\"\n[tracker]\nkind=\"github\"\nrepo=\"o/r\"\ntoken=\"env:X\"\n";
+        let t = |extra: &str| {
+            parse_project("p", &format!("{base}{extra}"))
+                .map(|p| p.services.tracker.unwrap().import_as)
+        };
+        assert_eq!(t("").unwrap(), ImportAs::Proposed);
+        assert_eq!(t("import_as=\"queued\"\n").unwrap(), ImportAs::Queued);
+        assert_eq!(t("import_as=\"proposed\"\n").unwrap(), ImportAs::Proposed);
+        let e = t("import_as=\"now\"\n").unwrap_err();
+        assert!(e.contains("import_as"), "{e}");
+        assert!(t("import_as=3\n").unwrap_err().contains("import_as"));
     }
 
     #[test]

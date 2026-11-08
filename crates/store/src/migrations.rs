@@ -345,7 +345,40 @@ const STEPS: &[&str] = &[
      );
      CREATE INDEX proposals_project_at ON proposals(project, at);
      CREATE INDEX proposals_filed_by ON proposals(filed_by);",
-    // 16: introspection and recurring jobs (Part 14). `step_attempts` is one row per step
+    // 16: LLM usage (s64). The latest snapshot per account (kept across a restart), a bounded
+    // history of window readings (the trend), and the tokens and cost of each step attempt as
+    // the provider reported them (NULL: not reported, never 0).
+    "CREATE TABLE usage_latest (
+         account  TEXT PRIMARY KEY,
+         at       INTEGER NOT NULL,
+         snapshot TEXT NOT NULL
+     );
+     CREATE TABLE usage_readings (
+         account     TEXT NOT NULL,
+         win         TEXT NOT NULL,
+         at          INTEGER NOT NULL,
+         utilization REAL,
+         resets_at   INTEGER,
+         state       TEXT NOT NULL
+     );
+     CREATE INDEX usage_readings_win ON usage_readings(account, win, at);
+     CREATE TABLE usage_runs (
+         attempt      TEXT PRIMARY KEY,
+         task         INTEGER NOT NULL,
+         project      TEXT NOT NULL,
+         step         TEXT NOT NULL,
+         account      TEXT NOT NULL,
+         model        TEXT,
+         input        INTEGER,
+         output       INTEGER,
+         cache_read   INTEGER,
+         cache_create INTEGER,
+         cost_usd     REAL,
+         at           INTEGER NOT NULL
+     );
+     CREATE INDEX usage_runs_at ON usage_runs(at);
+     CREATE INDEX usage_runs_task ON usage_runs(task);",
+    // 17: introspection and recurring jobs (Part 14). `step_attempts` is one row per step
     // attempt, written when the attempt ends, with the failure signature: the history the
     // detectors read. `findings` links a detector's or the analyst's proposal to the metric it
     // expects to move, and keeps the verdict. `schedules` remembers when each recurring job last

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! The tables of migration 16: the attempt history the detectors read, the findings and their
+//! The tables of migration 17: the attempt history the detectors read, the findings and their
 //! verdicts, recurring jobs, and the triage review queue.
 
 use crate::{Store, StoreError};
