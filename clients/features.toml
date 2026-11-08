@@ -215,3 +215,23 @@ compose = "done"
 description = "After 15 seconds of failed reconnects the monitor raises 'daemon down' itself: a banner, and a sound and sentence unless muted; clears when the connection returns"
 swift = "done"
 compose = "done"
+
+# The phone apps (iOS shares MonitorCore, Android shares the Compose core; Stage 24) are not a
+# third column: the parity gate above compares the two desktop clients and is unchanged. These
+# are the deliberate differences between a phone and its desktop client, recorded as data. The
+# gate does not read `[phone.*]` yet; teaching it to (and adding ios/android to CLIENTS) is a gate
+# change and waits for the owner.
+[phone.graph-editing]
+status = "deliberate-difference"
+description = "The pipeline editor's graph canvas"
+platform_reason = "A canvas of lanes and nodes needs a pointer and a large screen; on a phone the pipeline is read-only text and the Mac or desktop monitor edits it"
+
+[phone.log-deep-dives]
+status = "deliberate-difference"
+description = "Full step logs, search inside them and the run-by-run history"
+platform_reason = "Long logs are not readable on a phone; the task detail shows the log tail only"
+
+[phone.agent-sessions]
+status = "deliberate-difference"
+description = "Opening, attaching to and typing into an agent's session"
+platform_reason = "A session needs a keyboard and a terminal-sized view, and a phone connection that drops would leave one half-driven"

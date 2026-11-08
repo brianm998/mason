@@ -5,6 +5,7 @@
 //! Nothing in this crate reads the clock, touches the filesystem or the
 //! network. Time arrives inside events as a [`Timestamp`].
 
+pub mod access;
 mod entities;
 mod event;
 mod ids;

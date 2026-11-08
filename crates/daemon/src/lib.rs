@@ -18,6 +18,7 @@ pub mod http;
 pub mod improve;
 pub mod introspect;
 pub mod jobs;
+pub mod lan;
 pub mod landing;
 pub mod launchview;
 pub mod notify;

@@ -93,6 +93,9 @@ mason: command-line client for the MASON pipeline
   mason editor show|op|undo|redo|discard|simulate|apply [--project P]   the pipeline editor, without a screen
   mason definition show [--project P] | reload [--project P]
   mason extension list|show|approve [NAME] [--project P]   project extensions; approving is the owner's
+  mason lan status                    whether LAN access is on, its port and certificate fingerprint
+  mason pair [--viewer]               a one-time code (and mason://pair URL) for a phone; 120 s
+  mason devices list | revoke ID      paired devices; revoking cuts one off at once
   mason usage [--account A] [--json]  each provider account: limit windows, overage, tokens and cost
   mason landing                       batches, phases, freezes, and the landing queue
   mason self                          MASON on its own repository: limits, and changes held for you
@@ -986,6 +989,79 @@ fn main() {
             ));
             println!("Lifted {} pause(s)", r["lifted"]);
         }
+        "lan" => {
+            if !matches!(a.pos().as_deref(), Some("status") | None) {
+                die("usage: mason lan status");
+            }
+            finish(&a);
+            let r = or_die(d.call("GET", "/lan", None));
+            if json_out {
+                return println!("{r:#}");
+            }
+            if r["enabled"].as_bool() == Some(true) {
+                println!(
+                    "LAN access is on: port {}, fingerprint {}",
+                    r["port"],
+                    r["fingerprint"].as_str().unwrap_or("?")
+                );
+            } else {
+                println!("LAN access is off (loopback only). Turn it on with `[lan] enabled = true` in daemon.toml, or `masond --lan`.");
+            }
+        }
+        "pair" => {
+            let role = if a.flag("--viewer") {
+                "viewer"
+            } else {
+                "owner"
+            };
+            finish(&a);
+            let r = or_die(d.call("POST", "/pair/codes", Some(&json!({"role": role}))));
+            if json_out {
+                return println!("{r:#}");
+            }
+            println!(
+                "Pairing code ({role}, valid {} s, one use): {}\n{}",
+                r["expires_in_s"],
+                r["code"].as_str().unwrap_or("?"),
+                r["url"].as_str().unwrap_or("?")
+            );
+        }
+        "devices" => match a.pos().as_deref() {
+            Some("list") | None => {
+                finish(&a);
+                let r = or_die(d.call("GET", "/devices", None));
+                if json_out {
+                    return println!("{r:#}");
+                }
+                let rows = r["devices"].as_array().cloned().unwrap_or_default();
+                if rows.is_empty() {
+                    println!("No devices are paired.");
+                }
+                for x in rows {
+                    println!(
+                        "#{} {:<20} {:<7} {}",
+                        x["id"],
+                        x["name"].as_str().unwrap_or("?"),
+                        x["role"].as_str().unwrap_or("?"),
+                        if x["revoked_at"].is_null() {
+                            "paired"
+                        } else {
+                            "revoked"
+                        }
+                    );
+                }
+            }
+            Some("revoke") => {
+                let id: u64 = a
+                    .pos()
+                    .and_then(|v| v.trim_start_matches('#').parse().ok())
+                    .unwrap_or_else(|| die("usage: mason devices revoke ID"));
+                finish(&a);
+                or_die(d.call("POST", &format!("/devices/{id}/revoke"), None));
+                println!("Revoked device #{id}; its token no longer works.");
+            }
+            Some(other) => die(&format!("unknown devices command {other:?}\n\n{HELP}")),
+        },
         "notify" => {
             match a.pos().as_deref() {
                 Some("test") => {

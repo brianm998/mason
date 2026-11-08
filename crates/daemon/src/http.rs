@@ -2442,6 +2442,10 @@ async fn debug_stall(
 pub fn api_router(d: Arc<Daemon>) -> Router {
     Router::new()
         .route("/status", get(status))
+        .route("/lan", get(crate::lan::status))
+        .route("/pair/codes", post(crate::lan::issue_code))
+        .route("/devices", get(crate::lan::devices))
+        .route("/devices/{id}/revoke", post(crate::lan::revoke))
         .route("/tasks", get(list_tasks).post(add_task))
         .route("/tasks/{id}", get(task_detail))
         .route("/tasks/{id}/cancel", post(cancel))
@@ -2625,11 +2629,18 @@ pub async fn serve(d: Arc<Daemon>) -> std::io::Result<()> {
         Err(e) => return Err(e),
     };
     let port = listener.local_addr()?.port();
+    let lan_port = if d.cfg.lan.enabled {
+        Some(crate::lan::start(d.clone()).await?)
+    } else {
+        None
+    };
     let tmp = info.with_extension("tmp");
-    std::fs::write(
-        &tmp,
-        json!({"pid": std::process::id(), "port": port, "started_ms": now_ms()}).to_string(),
-    )?;
+    let mut announce = json!({"pid": std::process::id(), "port": port, "started_ms": now_ms()});
+    if let (Some(p), Some(i)) = (lan_port, d.lan.info()) {
+        announce["lan_port"] = json!(p);
+        announce["lan_fingerprint"] = json!(i.fingerprint);
+    }
+    std::fs::write(&tmp, announce.to_string())?;
     std::fs::rename(&tmp, &info)?;
     tokio::spawn(crate::watchdog::run(d.clone()));
     tracing::info!(port, "masond listening on loopback");

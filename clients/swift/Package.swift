@@ -10,10 +10,12 @@ import PackageDescription
 
 let package = Package(
     name: "MasonMonitor",
-    platforms: [.macOS(.v14)],
+    platforms: [.macOS(.v14), .iOS(.v17)],
     products: [
         .executable(name: "MasonMonitor", targets: ["MasonMonitor"]),
         .executable(name: "monitor-tool", targets: ["MonitorTool"]),
+        .library(name: "MonitorPhone", targets: ["MonitorPhone"]),
+        .library(name: "MonitorCore", targets: ["MonitorCore"]),
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-protobuf.git", from: "1.28.0"),
@@ -25,6 +27,7 @@ let package = Package(
         ),
         .target(name: "MasonTokens"),
         .target(name: "MonitorCore", dependencies: ["MasonProtocol", "MasonTokens"]),
+        .target(name: "MonitorPhone", dependencies: ["MonitorCore", "MasonTokens"]),
         .target(name: "MonitorUI", dependencies: ["MonitorCore", "MasonTokens"]),
         .executableTarget(name: "MasonMonitor", dependencies: ["MonitorUI", "MonitorCore"]),
         .executableTarget(name: "MonitorTool", dependencies: ["MonitorUI", "MonitorCore"]),

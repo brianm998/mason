@@ -27,8 +27,14 @@ use tower::ServiceExt;
 /// Further behind than this and a client gets a snapshot instead of the events.
 const RESUME_LIMIT: u64 = 2000;
 
-pub async fn handler(Shared(d): Shared<Arc<Daemon>>, ws: WebSocketUpgrade) -> Response {
-    ws.on_upgrade(move |sock| session(d, sock))
+/// `peer` is set only on the LAN listener, where the token check has already run.
+pub async fn handler(
+    Shared(d): Shared<Arc<Daemon>>,
+    peer: Option<axum::Extension<crate::lan::Peer>>,
+    ws: WebSocketUpgrade,
+) -> Response {
+    let peer = peer.map(|p| p.0);
+    ws.on_upgrade(move |sock| session(d, sock, peer))
 }
 
 struct Sub {
@@ -110,7 +116,7 @@ fn records(d: &Daemon, after: u64, limit: usize) -> Vec<EventRecord> {
         .collect()
 }
 
-async fn session(d: Arc<Daemon>, mut sock: WebSocket) {
+async fn session(d: Arc<Daemon>, mut sock: WebSocket, peer: Option<crate::lan::Peer>) {
     // The first frame must be a hello, and decides the encoding.
     let first = tokio::time::timeout(Duration::from_secs(10), sock.recv()).await;
     let Ok(Some(Ok(msg))) = first else { return };
@@ -161,6 +167,7 @@ async fn session(d: Arc<Daemon>, mut sock: WebSocket) {
             version: d.cfg.runtime_sha.clone().unwrap_or_else(|| "dev".into()),
             min_protocol: mason_protocol::MIN_PROTOCOL,
             owner: false,
+            role: String::new(),
             now_ms: crate::daemon::now_ms(),
         };
         let _ = send(&mut sock, server(S::Welcome(welcome)), enc).await;
@@ -170,6 +177,7 @@ async fn session(d: Arc<Daemon>, mut sock: WebSocket) {
     // Subscribe to the bus before reading, so nothing slips between.
     let mut bus = d.bus.subscribe();
     let mut progress_bus = d.progress_bus.subscribe();
+    let mut revoked = d.lan.revoked.subscribe();
     let mut sub = Sub::default();
     if hello.commands_only {
         sub.views.clear();
@@ -198,7 +206,11 @@ async fn session(d: Arc<Daemon>, mut sock: WebSocket) {
         demo: d.demo,
         version: d.cfg.runtime_sha.clone().unwrap_or_else(|| "dev".into()),
         min_protocol: mason_protocol::MIN_PROTOCOL,
-        owner: crate::attention::is_owner(&d, &hello.actor),
+        owner: match &peer {
+            Some(p) => p.role == mason_core::access::Role::Owner,
+            None => crate::attention::is_owner(&d, &hello.actor),
+        },
+        role: peer.as_ref().map_or("", |p| p.role.as_str()).to_string(),
         now_ms: crate::daemon::now_ms(),
     };
     if !send(&mut sock, server(S::Welcome(welcome)), enc).await {
@@ -270,12 +282,24 @@ async fn session(d: Arc<Daemon>, mut sock: WebSocket) {
                         if !push_views(&d, &mut sock, &sub, enc).await { return }
                     }
                     Ok(ClientMessage { body: Some(C::Command(c)) }) => {
-                        let r = run_command(&d, c).await;
+                        let r = run_command_as(&d, c, peer.as_ref()).await;
                         if !send(&mut sock, server(S::Result(r)), enc).await { return }
                     }
                     Ok(_) => {
                         if !send(&mut sock, server(S::Error(Error { message: "unexpected message".into() })), enc).await { return }
                     }
+                }
+            }
+            gone = revoked.recv() => {
+                use tokio::sync::broadcast::error::RecvError;
+                match (gone, &peer) {
+                    (Ok(id), Some(p)) if p.device == id => {
+                        let _ = sock.send(Message::Close(None)).await;
+                        return;
+                    }
+                    // Missed some: close, and the device must prove its token again.
+                    (Err(RecvError::Lagged(_)), Some(_)) => return,
+                    _ => {}
                 }
             }
             update = progress_bus.recv() => {
@@ -508,11 +532,32 @@ fn result(
 
 /// Run a command through the same router the HTTP API uses.
 pub async fn run_command(d: &Arc<Daemon>, c: Command) -> CommandResult {
+    run_command_as(d, c, None).await
+}
+
+/// As `run_command`, for a LAN device: the actor is the token's, never the one the client
+/// names, and a viewer's token changes nothing.
+pub async fn run_command_as(
+    d: &Arc<Daemon>,
+    mut c: Command,
+    peer: Option<&crate::lan::Peer>,
+) -> CommandResult {
     let id = c.id.clone();
     let call = match call_for(&c) {
         Ok(x) => x,
         Err(e) => return result(&id, false, 400, e, String::new()),
     };
+    if let Some(p) = peer {
+        if let mason_core::access::Access::Refuse(code, why) =
+            mason_core::access::decide(p.role, call.method, &call.path)
+        {
+            return result(&id, false, u32::from(code), why, String::new());
+        }
+        c.actor = match p.role {
+            mason_core::access::Role::Owner => crate::lan::owner_identity(d),
+            mason_core::access::Role::Viewer => format!("viewer:{}", p.device),
+        };
+    }
     // A command outside the task's allowed actions is refused: the list in
     // the view is the one rule.
     if let Some((task, action)) = call.needs {

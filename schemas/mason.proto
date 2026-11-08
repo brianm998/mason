@@ -221,6 +221,9 @@ message Welcome {
   // ago" from the absolute times in progress records against this, correctly
   // even when its clock and the daemon's differ.
   uint64 now_ms = 9;
+  // "owner" or "viewer" on the LAN listener (the role of the paired device's token);
+  // empty on loopback, where the Hello.actor rule above applies. Additive (s24).
+  string role = 10;
 }
 
 // One running step's progress, pushed when it moves (at most once a second for
