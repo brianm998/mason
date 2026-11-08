@@ -2,7 +2,7 @@
 
 Part 13 left these open.
 
-- **A proposal is a task plus a side row.** The reducer and the event vocabulary do not change: a proposal is a `TaskFiled` (trust `OwnerAgent` for agents, outside for outsiders) and a `proposals` row (migration 13) holds title, body, evidence, source, severity, route, dedupe key, status and publish state. Approve, reject and edit act on the task while it is Proposed.
+- **A proposal is a task plus a side row.** The reducer and the event vocabulary do not change: a proposal is a `TaskFiled` (trust `OwnerAgent` for agents, outside for outsiders) and a `proposals` row (migration 14) holds title, body, evidence, source, severity, route, dedupe key, status and publish state. Approve, reject and edit act on the task while it is Proposed.
 - **Duplicate:** normalised titles plus body tokens, Jaccard similarity at or above 0.6, against open proposals of the same project. A rejected proposal is also a duplicate, so a refused idea is not filed again.
 - **Evidence:** at least 20 characters and a locator (a token with `/`, a file extension, or `:<line>`). Text without one is refused; edit applies the same rule.
 - **Caps:** 3 per task and 20 per day per project. Refusals go back to the agent as tool errors and file nothing.
