@@ -65,6 +65,9 @@ mason: command-line client for the MASON pipeline
   mason pause [--project P] [--mode all|claims|landing] --for 2h   hold work back (all stops at the next step)
   mason resume [--project P] [--mode M] | mason pause list
   mason alerts [--all]                what needs a look right now (and, with --all, what already cleared)
+  mason alerts ack KEY                acknowledge an alert: it stops reminding and stays listed while true
+  mason notify [status]               where each condition is routed, and what is set up (notify.toml)
+  mason notify test CHANNEL           send a test through sound, speech, push, email or webhook
   mason metrics [--days N]            interventions per landed task
   mason health                        the detectors' findings, verdicts on fixes, recurring jobs, triage review queue
   mason digest [--days N] [--project P]   landed, interventions, time by state, skips, forced landings (recorded data only)
@@ -137,6 +140,10 @@ impl Args {
         } else {
             die(&format!("{name} needs a value"))
         }
+    }
+
+    fn peek_pos(&self) -> Option<&str> {
+        self.rest.first().map(String::as_str)
     }
 
     fn pos(&mut self) -> Option<String> {
@@ -938,7 +945,74 @@ fn main() {
             ));
             println!("Lifted {} pause(s)", r["lifted"]);
         }
+        "notify" => {
+            match a.pos().as_deref() {
+                Some("test") => {
+                    let Some(channel) = a.pos() else {
+                        die("mason notify test CHANNEL  (sound, speech, push, email, webhook)")
+                    };
+                    finish(&a);
+                    let r =
+                        or_die(d.call("POST", "/notify/test", Some(&json!({"channel": channel}))));
+                    if json_out {
+                        return println!("{r:#}");
+                    }
+                    println!("{r}");
+                }
+                Some("status") | None => {
+                    finish(&a);
+                    let r = or_die(d.call("GET", "/notify", None));
+                    if json_out {
+                        return println!("{r:#}");
+                    }
+                    if let Some(e) = r["error"].as_str() {
+                        println!("notify.toml has a problem (defaults are in force): {e}");
+                    }
+                    for c in r["routing"].as_array().cloned().unwrap_or_default() {
+                        let rules: Vec<String> = c["rules"]
+                            .as_array()
+                            .cloned()
+                            .unwrap_or_default()
+                            .iter()
+                            .map(|x| match x["after_s"].as_u64().unwrap_or(0) {
+                                0 => x["channel"].as_str().unwrap_or("?").to_string(),
+                                s => format!(
+                                    "{} after {} min",
+                                    x["channel"].as_str().unwrap_or("?"),
+                                    s / 60
+                                ),
+                            })
+                            .collect();
+                        println!(
+                            "{:<16} {}",
+                            c["condition"].as_str().unwrap_or("?"),
+                            rules.join(", ")
+                        );
+                    }
+                    println!(
+                    "one reminder after {} min; daemon speech {}; email {}, push {}, webhook {}",
+                    r["reminder_after_s"].as_u64().unwrap_or(0) / 60,
+                    if r["daemon_speech"].as_bool().unwrap_or(false) { "on" } else { "off" },
+                    if r["configured"]["email"].as_bool().unwrap_or(false) { "set up" } else { "not set up" },
+                    if r["configured"]["push"].as_bool().unwrap_or(false) { "set up" } else { "not set up" },
+                    if r["configured"]["webhook"].as_bool().unwrap_or(false) { "set up" } else { "not set up" },
+                );
+                }
+                Some(other) => die(&format!("unknown notify command {other:?}\n\n{HELP}")),
+            }
+        }
         "alerts" => {
+            if a.peek_pos() == Some("ack") {
+                a.pos();
+                let Some(key) = a.pos() else {
+                    die("mason alerts ack KEY")
+                };
+                finish(&a);
+                or_die(d.call("POST", "/alerts/ack", Some(&json!({"key": key}))));
+                return println!(
+                    "Acknowledged {key}: it stays listed while it is true, and stops reminding."
+                );
+            }
             let all = a.flag("--all");
             finish(&a);
             let r = or_die(d.call("GET", &format!("/alerts?all={}", u8::from(all)), None));
@@ -951,10 +1025,16 @@ fn main() {
             }
             for x in list {
                 println!(
-                    "{} {:<12} {}",
+                    "{} {:<12} {}{}  [{}]",
                     if x["cleared_at"].is_null() { "!" } else { "." },
                     x["kind"].as_str().unwrap_or("?"),
-                    x["text"].as_str().unwrap_or("")
+                    x["text"].as_str().unwrap_or(""),
+                    if x["acked_at"].is_null() {
+                        ""
+                    } else {
+                        " (acknowledged)"
+                    },
+                    x["key"].as_str().unwrap_or("")
                 );
             }
         }

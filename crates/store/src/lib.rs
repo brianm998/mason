@@ -12,6 +12,7 @@
 mod codec;
 pub mod introspect;
 pub mod migrations;
+pub mod notify;
 
 use mason_core::*;
 use mason_engine::{reduce, ReduceError, World};
@@ -23,6 +24,7 @@ use std::thread::JoinHandle;
 
 pub use codec::{decode as decode_event, encode as encode_event, state_name, CodecError};
 pub use introspect::{FindingRow, ScheduleRow, TriageRow};
+pub use notify::{AnnouncementRow, DeliveryRow};
 
 #[derive(Debug)]
 pub enum StoreError {
@@ -128,6 +130,9 @@ pub struct AlertRow {
     pub text: String,
     pub since: u64,
     pub cleared_at: Option<u64>,
+    /// The owner has seen it: its noise stops, it stays visible while the condition holds.
+    pub acked_at: Option<u64>,
+    pub reminded_at: Option<u64>,
 }
 
 /// A debt: something skipped by force and not yet paid.
@@ -1035,7 +1040,7 @@ impl Store {
     pub fn alerts(&self, active_only: bool) -> Result<Vec<AlertRow>, StoreError> {
         self.read(move |c| {
             let mut st = c.prepare(
-                "SELECT key, kind, text, since, cleared_at FROM alerts WHERE (?1 = 0 OR cleared_at IS NULL) ORDER BY since, key",
+                "SELECT key, kind, text, since, cleared_at, acked_at, reminded_at FROM alerts WHERE (?1 = 0 OR cleared_at IS NULL) ORDER BY since, key",
             )?;
             let rows = st.query_map(params![i64::from(active_only)], |r| {
                 Ok(AlertRow {
@@ -1044,6 +1049,8 @@ impl Store {
                     text: r.get(2)?,
                     since: r.get::<_, i64>(3)? as u64,
                     cleared_at: r.get::<_, Option<i64>>(4)?.map(|t| t as u64),
+                    acked_at: r.get::<_, Option<i64>>(5)?.map(|t| t as u64),
+                    reminded_at: r.get::<_, Option<i64>>(6)?.map(|t| t as u64),
                 })
             })?;
             rows.collect()

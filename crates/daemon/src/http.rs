@@ -1909,7 +1909,94 @@ async fn alerts_list(
         .map_err(store_err)?;
     Ok(Json(json!({"alerts": rows.iter().map(|a| json!({
         "key": a.key, "kind": a.kind, "text": a.text, "since": a.since, "cleared_at": a.cleared_at,
+        "acked_at": a.acked_at, "reminded_at": a.reminded_at,
     })).collect::<Vec<_>>()})))
+}
+
+/// Acknowledge an alert (owner only): its noise stops, it stays visible while its condition holds.
+async fn ack_alert_key(d: Arc<Daemon>, key: String, who: Option<String>) -> Res {
+    let who = who
+        .filter(|w| !w.is_empty())
+        .unwrap_or_else(|| d.cfg.owner_names.first().cloned().unwrap_or_default());
+    owner_only(&d, &who, "acknowledge an alert")?;
+    let (d2, k2) = (d.clone(), key.clone());
+    let done = d
+        .pool
+        .run(move || crate::notify::ack(&d2, &k2))
+        .await
+        .map_err(pool_err)?
+        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    if !done {
+        return Err(fail(
+            StatusCode::NOT_FOUND,
+            format!("no live alert {key:?} (it may have cleared)"),
+        ));
+    }
+    let d3 = d.clone();
+    let _ = d
+        .pool
+        .spawn(move || crate::attention::intervene(&d3, "acknowledged", None, &who, &key, ""));
+    d.poke();
+    Ok(Json(json!({"acknowledged": true})))
+}
+
+async fn alert_ack(
+    Shared(d): Shared<Arc<Daemon>>,
+    Path(key): Path<String>,
+    body: Option<Json<Value>>,
+) -> Res {
+    let who = body.and_then(|b| b["as"].as_str().map(String::from));
+    ack_alert_key(d, key, who).await
+}
+
+async fn alert_ack_body(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res {
+    let key = b["key"].as_str().unwrap_or_default().to_string();
+    ack_alert_key(d, key, b["as"].as_str().map(String::from)).await
+}
+
+/// A monitor asks whether it is the one that speaks, and is given what is waiting if so.
+async fn announce_claim(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res {
+    let client = b["client"].as_str().unwrap_or_default().to_string();
+    if client.is_empty() {
+        return Err(fail(StatusCode::BAD_REQUEST, "a claim names its client"));
+    }
+    let muted = b["muted"].as_bool().unwrap_or(false);
+    let d2 = d.clone();
+    let v = d
+        .pool
+        .run(move || crate::notify::claim(&d2, &client, muted))
+        .await
+        .map_err(pool_err)?;
+    Ok(Json(v))
+}
+
+async fn notify_status(Shared(d): Shared<Arc<Daemon>>) -> Res {
+    let d2 = d.clone();
+    let v = d
+        .pool
+        .run(move || crate::notify::status(&d2))
+        .await
+        .map_err(pool_err)?;
+    Ok(Json(v))
+}
+
+async fn notify_test(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res {
+    owner_only(
+        &d,
+        b["as"]
+            .as_str()
+            .filter(|w| !w.is_empty())
+            .unwrap_or(d.cfg.owner_names.first().map_or("", String::as_str)),
+        "send a test notification",
+    )?;
+    let channel = b["channel"].as_str().unwrap_or_default().to_string();
+    let d2 = d.clone();
+    let r = d
+        .pool
+        .run(move || crate::notify::test(&d2, &channel))
+        .await
+        .map_err(pool_err)?;
+    r.map(Json).map_err(|e| fail(StatusCode::BAD_REQUEST, e))
 }
 
 async fn metrics(Shared(d): Shared<Arc<Daemon>>, Query(q): Query<HashMap<String, String>>) -> Res {
@@ -2362,6 +2449,11 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/pauses", get(pauses_list))
         .route("/usage", get(usage_status))
         .route("/alerts", get(alerts_list))
+        .route("/alerts/ack", post(alert_ack_body))
+        .route("/alerts/{key}/ack", post(alert_ack))
+        .route("/announce/claim", post(announce_claim))
+        .route("/notify", get(notify_status))
+        .route("/notify/test", post(notify_test))
         .route("/metrics", get(metrics))
         .route("/demo", get(demo_status))
         .route("/demo/next", post(demo_next))

@@ -12,6 +12,7 @@ struct TopBar: View {
     @ObservedObject var model: MonitorModel
     @State private var adding = false
     @State private var improving = false
+    @State private var voices = false
 
     var body: some View {
         HStack(spacing: theme.spacing) {
@@ -79,6 +80,9 @@ struct TopBar: View {
             }
             Button { model.muted.toggle() } label: { Image(systemName: model.muted ? "speaker.slash" : "speaker.wave.2") }
                 .buttonStyle(.bordered).help(model.muted ? "Unmute" : "Mute").accessibilityIdentifier("mute")
+            Button { voices = true } label: { Image(systemName: "waveform") }
+                .buttonStyle(.bordered).help("Sounds and voice").accessibilityIdentifier("voice-settings")
+                .popover(isPresented: $voices) { SpeechSettingsView(model: model) }
         }
         .font(theme.body())
         .padding(theme.spacing)
@@ -97,6 +101,9 @@ struct BannersView: View {
         VStack(spacing: 0) {
             if !model.connected {
                 banner(model.reconnecting ? "Daemon restarting, reconnecting…" : "Connection lost. Reconnecting…", id: "connection")
+            }
+            if model.daemonDown {
+                banner("Daemon down: MASON has lost its daemon. Check that masond is running.", id: "daemon-down")
             }
             if let why = model.readOnlyReason {
                 banner("Read-only: \(why)", id: "read-only")

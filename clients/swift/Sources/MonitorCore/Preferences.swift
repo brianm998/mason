@@ -9,6 +9,8 @@ public protocol Preferences: AnyObject {
     func setBool(_ value: Bool, for key: String)
     func double(_ key: String) -> Double?
     func setDouble(_ value: Double, for key: String)
+    func string(_ key: String) -> String?
+    func setString(_ value: String, for key: String)
 }
 
 public final class MemoryPreferences: Preferences {
@@ -18,6 +20,8 @@ public final class MemoryPreferences: Preferences {
     public func setBool(_ value: Bool, for key: String) { values[key] = value }
     public func double(_ key: String) -> Double? { values[key] as? Double }
     public func setDouble(_ value: Double, for key: String) { values[key] = value }
+    public func string(_ key: String) -> String? { values[key] as? String }
+    public func setString(_ value: String, for key: String) { values[key] = value }
 }
 
 public final class DefaultsPreferences: Preferences {
@@ -27,4 +31,6 @@ public final class DefaultsPreferences: Preferences {
     public func setBool(_ value: Bool, for key: String) { defaults.set(value, forKey: key) }
     public func double(_ key: String) -> Double? { defaults.object(forKey: key) as? Double }
     public func setDouble(_ value: Double, for key: String) { defaults.set(value, forKey: key) }
+    public func string(_ key: String) -> String? { defaults.string(forKey: key) }
+    public func setString(_ value: String, for key: String) { defaults.set(value, forKey: key) }
 }
