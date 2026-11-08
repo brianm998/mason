@@ -287,6 +287,11 @@ impl<'a> StepRunner<'a> {
             let outcome = loop {
                 match handle.next_event() {
                     Some(AgentEvent::Tokens(t)) => r.tokens.add(&t),
+                    Some(AgentEvent::Model(m)) => {
+                        if let Some(f) = &spec.on_model {
+                            f(&m);
+                        }
+                    }
                     Some(AgentEvent::RateLimit(l)) => r.rate_limits.push(l),
                     Some(AgentEvent::ApiRetry { .. }) => r.api_retries += 1,
                     Some(AgentEvent::ToolCall { name, .. }) => r.tool_calls.push(name),

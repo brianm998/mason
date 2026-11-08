@@ -540,6 +540,9 @@ pub fn parse_line(line: &str, st: &mut ParseState) -> Vec<AgentEvent> {
     match (v["type"].as_str(), v["subtype"].as_str()) {
         (Some("system"), Some("init")) => {
             st.session_id = v["session_id"].as_str().map(String::from);
+            if let Some(m) = v["model"].as_str().filter(|m| !m.is_empty()) {
+                out.push(AgentEvent::Model(m.to_string()));
+            }
         }
         (Some("system"), Some("api_retry")) => out.push(AgentEvent::ApiRetry {
             attempt: num(&v, "attempt").unwrap_or(0) as u32,

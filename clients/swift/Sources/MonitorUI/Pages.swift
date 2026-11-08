@@ -68,7 +68,7 @@ struct HomePage: View {
                         if active.isEmpty { Text("Nothing is running.").font(theme.body()).foregroundStyle(theme.muted) }
                         ForEach(active, id: \.task) { a in
                             HStack(spacing: theme.spacing) {
-                                Text(a.model).font(theme.body(.semibold))
+                                Text(a.display.isEmpty ? a.model : a.display).font(theme.body(.semibold))
                                 Button("\(a.project) #\(a.task)") { model.go(.task(a.task)) }.buttonStyle(.link)
                                 Text(a.step).foregroundStyle(theme.muted)
                             }
@@ -236,6 +236,11 @@ struct TaskDetailPage: View {
                     }
                     .font(theme.body())
                     .accessibilityIdentifier("step:\(s.run)")
+                    // Every session this run started, so a retry up the ladder shows.
+                    ForEach(Array(s.launches.enumerated()), id: \.offset) { _, l in
+                        Text("\(l.kind): \(l.display)").font(theme.small()).foregroundStyle(theme.muted)
+                            .padding(.leading, theme.spacingLarge)
+                    }
                 }
             }
 

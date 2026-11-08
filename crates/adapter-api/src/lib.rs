@@ -62,7 +62,12 @@ pub struct SessionSpec {
     /// id and the chunk's absolute offset in its journal (a journal read again is
     /// offered again from 0, so the receiver counts by stream and offset).
     pub progress: Option<ProgressSink>,
+    /// Told the model the CLI reports it really used, when the stream says.
+    pub on_model: Option<ModelSink>,
 }
+
+/// Receives the model name a session reports.
+pub type ModelSink = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
 
 /// Receives `(host id, offset, bytes)` of a step's output.
 pub type ProgressSink = std::sync::Arc<dyn Fn(&str, u64, &[u8]) + Send + Sync>;
@@ -83,6 +88,7 @@ impl SessionSpec {
             run_key: None,
             tools: None,
             progress: None,
+            on_model: None,
         }
     }
 }
@@ -137,6 +143,8 @@ pub enum AgentEvent {
     },
     /// Final figures for this invocation, as reported by the stream.
     Tokens(TokenReport),
+    /// The model the CLI says it is really using (Claude's `system/init`).
+    Model(String),
     RateLimit(RateLimitInfo),
     ApiRetry {
         attempt: u32,

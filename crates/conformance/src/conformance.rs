@@ -75,6 +75,10 @@ fn row_item(r: &TaskRow, order: usize, prefix: &str) -> Item {
     if !r.why_waiting.is_empty() {
         texts.push(r.why_waiting.clone());
     }
+    // The tier and the real model, as the daemon wrote it.
+    if !r.display.is_empty() {
+        texts.push(r.display.clone());
+    }
     // The task page says what it waits for and what waits for it.
     if prefix == "detail" {
         if !r.blockers.is_empty() {
@@ -308,7 +312,11 @@ pub fn visible(views: &[View], owner: bool) -> Vec<Item> {
                     out.push(Item::new(
                         format!("active:{}", a.task),
                         vec![
-                            a.model.clone(),
+                            if a.display.is_empty() {
+                                a.model.clone()
+                            } else {
+                                a.display.clone()
+                            },
                             a.project.clone(),
                             format!("#{}", a.task),
                             a.step.clone(),
@@ -330,12 +338,9 @@ pub fn visible(views: &[View], owner: bool) -> Vec<Item> {
                     out.extend(progress_items(r, system_now_ms()));
                 }
                 for (i, s) in t.steps.iter().enumerate() {
-                    out.push(Item::new(
-                        format!("step:{}", s.run),
-                        vec![s.name.clone(), s.outcome.clone()],
-                        vec![],
-                        i,
-                    ));
+                    let mut texts = vec![s.name.clone(), s.outcome.clone()];
+                    texts.extend(s.launches.iter().map(|l| l.display.clone()));
+                    out.push(Item::new(format!("step:{}", s.run), texts, vec![], i));
                 }
                 if let (Some(c), Some(r)) = (&t.card, &t.row) {
                     out.push(card_item(r.id, c, owner));

@@ -267,6 +267,13 @@ private struct Inspector: View {
                 Button("Remove", role: .destructive) { model.editorOp(["op": "remove_step", "name": e.selected]); model.selectStep("") }
                     .accessibilityIdentifier("remove")
             }
+            if !e.inspector.launch.isEmpty {
+                VStack(alignment: .leading) {
+                    Text("Would launch now: \(e.inspector.launch)").font(theme.body(.semibold))
+                    Text(e.inspector.launchFrom).font(theme.small()).foregroundStyle(theme.muted)
+                }
+                .accessibilityIdentifier("inspector-launch")
+            }
             SchemaForm(model: model, step: e.selected, schema: e.inspector.schema, values: e.inspector.values)
         }
     }

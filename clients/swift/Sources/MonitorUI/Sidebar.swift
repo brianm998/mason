@@ -146,8 +146,9 @@ struct RowView: View {
                             Text(row.typical).font(theme.small()).foregroundStyle(theme.muted)
                         }
                         ProgressCells(model: model, cells: row.progress, slow: row.slow)
-                        if !row.model.isEmpty {
-                            Text(row.model).font(theme.small()).foregroundStyle(theme.muted)
+                        if !row.display.isEmpty || !row.model.isEmpty {
+                            Text(row.display.isEmpty ? row.model : row.display)
+                                .font(theme.small()).foregroundStyle(theme.muted)
                         }
                     }
                     if let c = row.progress.running { ProgressLine(model: model, cell: c) }
