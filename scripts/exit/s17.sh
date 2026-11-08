@@ -15,7 +15,7 @@ cleanup() {
   [ -n "$daemon" ] && kill -9 "$daemon" 2>/dev/null || true
   for f in "$root"/d/h/*/host.kv; do
     [ -e "$f" ] || continue
-    for k in host_pid child_pid; do pid=$(sed -n "s/^$k=//p" "$f"); kill -9 "-$pid" 2>/dev/null || kill -9 "$pid" 2>/dev/null || true; done
+    hp=$(sed -n "s/^host_pid=//p" "$f"); cp=$(sed -n "s/^child_pid=//p" "$f"); if [ -n "$hp" ] && ps -o command= -p "$hp" 2>/dev/null | grep -qF "step-host --dir $(dirname "$f")"; then kill -9 "-$cp" 2>/dev/null || true; kill -9 "$hp" 2>/dev/null || true; fi  # only a live step host: a stale pid may belong to someone else now
   done
   rm -rf "$root"
 }
@@ -84,7 +84,7 @@ m task show 0 | grep 'waiting for your approval'
 m task show 1 | grep 'waiting for your approval'
 m self
 m self | grep -q 'task #0 .*WAITING FOR YOU.*crates/testing/src/verdict.rs'
-m self | grep -q 'task #1 .*WAITING FOR YOU.*removed assertion in crates/engine/tests/matrix.rs'
+m self | grep -q 'task #1 .*WAITING FOR YOU.*removed assertion at crates/engine/tests/matrix.rs'
 sleep 2
 if on_origin crates/testing/src/verdict.rs; then echo "the gate change landed without approval" >&2; exit 1; fi
 if [ "$(git -C "$root/origin.git" show main:crates/engine/tests/matrix.rs | grep -c assert_eq)" != 2 ]; then echo "the weakening landed without approval" >&2; exit 1; fi
