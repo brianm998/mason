@@ -1,4 +1,4 @@
-# 0024: Tile double-click, the choices the ticket left open
+# 0025: Tile double-click, the choices the ticket left open
 
 Task #24. Each is the reading taken; change one and the others stand.
 
