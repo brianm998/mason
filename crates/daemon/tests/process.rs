@@ -442,7 +442,8 @@ fn config_set_show_and_unset_layer_settings_with_owner_and_expiry() {
     let show = s.mason_ok(&["config", "show"]);
     assert!(
         show.contains("develop (agent)")
-            && show.contains("model       sonnet   <- built-in default"),
+            && show.contains("tier        deep   <- built-in default")
+            && show.contains("level       medium   <- built-in default"),
         "{show}"
     );
     assert!(
@@ -511,9 +512,11 @@ fn config_set_show_and_unset_layer_settings_with_owner_and_expiry() {
         );
     }
     s.mason_ok(&["config", "unset", "step.develop.model"]);
-    assert!(s
-        .mason_ok(&["config", "show"])
-        .contains("model       sonnet   <- built-in default"));
+    let show = s.mason_ok(&["config", "show"]);
+    assert!(
+        show.contains("tier        deep   <- built-in default") && !show.contains("model       "),
+        "with the override gone no real model is named; the provider's mapping decides: {show}"
+    );
     assert!(s
         .mason_ok(&["config", "list"])
         .contains("no runtime overrides"));

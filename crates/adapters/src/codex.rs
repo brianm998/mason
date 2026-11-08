@@ -24,6 +24,9 @@ use std::path::PathBuf;
 
 const PREFIXES: &[&str] = &["LC_", "OPENAI_", "CODEX_"];
 
+/// The efforts this provider's CLI accepts.
+pub const EFFORT_LEVELS: [&str; 4] = ["minimal", "low", "medium", "high"];
+
 #[derive(Clone, Debug)]
 pub struct CodexAdapter {
     /// The `codex` executable (or a scripted stand-in).
@@ -164,9 +167,7 @@ impl AgentAdapter for CodexAdapter {
         AgentCaps {
             resume: true,
             mcp: true,
-            effort_levels: ["minimal", "low", "medium", "high"]
-                .map(String::from)
-                .to_vec(),
+            effort_levels: EFFORT_LEVELS.map(String::from).to_vec(),
             usage_reports: true,
         }
     }

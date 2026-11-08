@@ -907,6 +907,8 @@ async fn project_config(Shared(d): Shared<Arc<Daemon>>, Path(name): Path<String>
                 .map(|s| match mason_definition::layers::resolve(&def, s, &overlay, &runtime, &[], now) {
                     Ok(r) => json!({
                         "step": s.name, "type": s.kind.name(),
+                        "tier": attr(r.tier.map(|a| (a.value.name().to_string(), a.source))),
+                        "level": attr(r.level.map(|a| (a.value.name().to_string(), a.source))),
                         "model": attr(r.model.map(|a| (a.value, a.source))),
                         "effort": attr(r.effort.map(|a| (a.value, a.source))),
                         "budget": attr(r.budget.map(|a| (format!("{}s", a.value.as_secs()), a.source))),

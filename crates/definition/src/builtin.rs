@@ -4,7 +4,7 @@
 //! walking skeleton ran, now as data. A project's own `.mason/mason.toml`
 //! replaces it, as a whole, for the tasks admitted after it lands.
 
-use crate::model::{AgentProfile, Definition};
+use crate::model::Definition;
 
 pub const BUILTIN: &str = r#"schema = 1
 start = "explore"
@@ -13,7 +13,7 @@ explored_entry = "develop"
 [step.explore]
 type = "agent"
 category = "exploring"
-agent = "fast"
+agent = "light"
 next = "develop"
 
 [step.develop]
@@ -41,30 +41,17 @@ pub fn builtin() -> Definition {
     crate::parse(BUILTIN).expect("the built-in definition parses")
 }
 
-/// Profiles a definition can name without declaring them.
+/// Profiles a definition can name without declaring them: the two tiers, and
+/// `fast`, another name for `light`.
 pub fn builtin_profile_names() -> &'static [&'static str] {
-    &["fast", "deep"]
-}
-
-pub fn builtin_profile(name: &str) -> Option<AgentProfile> {
-    match name {
-        "fast" => Some(AgentProfile {
-            model: Some("haiku".into()),
-            effort: None,
-        }),
-        "deep" => Some(AgentProfile {
-            model: Some("sonnet".into()),
-            effort: None,
-        }),
-        _ => None,
-    }
+    &["deep", "light", "fast"]
 }
 
 /// The profile an agent step uses when it names none.
 pub fn default_profile(category: mason_core::State) -> &'static str {
     match category {
         mason_core::State::Developing => "deep",
-        _ => "fast",
+        _ => "light",
     }
 }
 

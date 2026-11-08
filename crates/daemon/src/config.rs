@@ -239,7 +239,17 @@ pub struct AgentCfg {
 
 pub fn parse_agent(id: &str, doc: &DocumentMut) -> Result<AgentCfg, String> {
     let s = |k: &str| doc.get(k).and_then(|v| v.as_str()).map(String::from);
-    let provider = match s("provider").as_deref() {
+    // `provider = "codex"`, or, when the file also holds `[provider.claude]`
+    // mapping tables (TOML cannot hold both a string and a table under one
+    // name), `[provider]` with `use = "codex"`. See `providers.rs`.
+    let chosen = s("provider").or_else(|| {
+        doc.get("provider")
+            .and_then(|v| v.as_table_like())
+            .and_then(|t| t.get("use"))
+            .and_then(|v| v.as_str())
+            .map(String::from)
+    });
+    let provider = match chosen.as_deref() {
         None | Some("claude") => Provider::Claude,
         Some("codex") => Provider::Codex,
         Some(o) => {
