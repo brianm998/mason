@@ -31,6 +31,7 @@ extension TaskRow {
     func item(prefix: String, order: Int) -> Item {
         var texts = [key, title, project, state]
         if !whyWaiting.isEmpty { texts.append(whyWaiting) }
+        if !display.isEmpty { texts.append(display) }
         // The task page says what it waits for and what waits for it.
         if prefix == "detail" {
             if !blockers.isEmpty { texts.append("waiting for " + blockers.map { "#\($0)" }.joined(separator: ", ")) }
@@ -120,7 +121,7 @@ extension MonitorModel {
             for (i, a) in h.active.enumerated() {
                 out.append(Item(
                     id: "active:\(a.task)",
-                    texts: [a.model, a.project, "#\(a.task)", a.step],
+                    texts: [a.display.isEmpty ? a.model : a.display, a.project, "#\(a.task)", a.step],
                     order: i
                 ))
             }
@@ -135,7 +136,7 @@ extension MonitorModel {
             out.append(d.row.item(prefix: "detail", order: 0))
             out.append(contentsOf: d.row.progressItems(now: daemonNow()))
             for (i, s) in d.steps.enumerated() {
-                out.append(Item(id: "step:\(s.run)", texts: [s.name, s.outcome], order: i))
+                out.append(Item(id: "step:\(s.run)", texts: [s.name, s.outcome] + s.launches.map { $0.display }, order: i))
             }
             if d.hasCard { out.append(d.card.item(task: d.row.id, owner: canAct)) }
             if d.hasApproval { out.append(d.approval.item(task: d.row.id, owner: canAct)) }

@@ -97,7 +97,7 @@ fun HomePage(model: MonitorModel) {
                 if (active.isEmpty()) Text("Nothing is running.", style = theme.body(color = theme.muted))
                 active.forEach { a ->
                     Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing), modifier = Modifier.testTag("active:${a.task}")) {
-                        Text(a.model, style = theme.body(FontWeight.SemiBold))
+                        Text(a.display.ifEmpty { a.model }, style = theme.body(FontWeight.SemiBold))
                         Link("${a.project} #${a.task}") { model.go(Page.Task(a.task)) }
                         Text(a.step, style = theme.body(color = theme.muted))
                     }
@@ -227,6 +227,10 @@ private fun TaskDetail(model: MonitorModel, d: TaskDetailView) {
                     Text(c.countText, style = theme.body(color = theme.muted))
                     Text(c.timeText(now), style = theme.body(color = if (c.isStale(now)) theme.slow else theme.muted))
                 }
+            }
+            // Every session this run started, so a retry up the ladder shows.
+            s.launches.forEach { l ->
+                Text("${l.kind}: ${l.display}", style = theme.small(color = theme.muted), modifier = Modifier.padding(start = theme.spacingLarge))
             }
         }
     }

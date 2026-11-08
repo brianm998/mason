@@ -1,0 +1,15 @@
+# 0044: Showing the tier and the real model, the choices the ticket left open
+
+Task #31. Each is the reading taken; change one and the others stand.
+
+- **Effort in the string is the real effort.** `deep (Opus medium)` shows the effort passed to the CLI, not the requested level: a mapping with no effort gives `light (Haiku)`. The old `tiers::describe` showed the level and had no caller outside its test, so it was replaced rather than kept.
+- **Expected is written inside the brackets**: `deep (Opus medium, expected)`, like `retry 1 of 2` and `override`, so every note sits in one place. Without a tier the notes follow in brackets: `Opus medium (override)`.
+- **Capitalisation** is the first letter only, so a provider's name is never rewritten (`claude-opus-4-1` shows as `Claude-opus-4-1`). The CLI's default is `<Provider> default`.
+- **Reported model wins only when it is a different model.** The CLI reports a long name (`claude-opus-4-1-20250805`) for the alias asked for (`opus`); showing that would make every row ugly. If the reported name contains the requested one, the requested alias is shown; otherwise (a fallback, or the CLI's own default) the reported name is shown and `why` says what was asked for. Both are kept in the parts (`requested_model`, `reported_model`).
+- **Override means the owner's**: a runtime override (`mason config set`) or a per-task override of the model or effort. A project-file or overlay `model` is not an override.
+- **Where the history lives**: `StepLine.launches` (per run) rather than a separate list, so a retry sits under the run it belongs to.
+- **A reattached session keeps what it was launched with.** On reattach the recorded model and effort are reused, a restart never relaunches against the provider file as it is now, and a `reattach` row is written only when the run has no record (a run started by an older daemon). A restart that finds the session gone starts a new session and writes a new `launch` row from the mapping as it is then.
+- **Rows are written by the daemon, not by events** (like `step_progress`), so a rebuild from the event log does not lose or invent them; the cost is that they are not in the log.
+- **Retry n of m**: m is the project's `max_retries`.
+- **Usage page left unchanged.** The ticket asks for the per-model breakdown keyed by real model with the tier beside it, but `UsageView` carries only provider status and a note; the daemon keeps no tokens per project, task, step or model (the runner sums tokens per report and drops them). Building that is a store, a protocol view and two pages, and would invent figures this change cannot measure. `launch` rows now hold what such a page needs to key by (run, task, step, model, tier); the token side is a separate task. `clients/features.toml`'s `usage-page` line is left as it was.
+- **The inspector line** uses the project's current provider and the draft definition, with no per-task overrides: `deep at high → Opus max`, and a one-line source for the tier, level, model and effort.

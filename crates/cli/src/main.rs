@@ -1559,6 +1559,14 @@ fn main() {
                 "running: {} job(s) of {} allowed, {} step host(s)",
                 s["jobs"], s["max_concurrent"], s["step_hosts_running"]
             );
+            for a in s["active"].as_array().into_iter().flatten() {
+                println!(
+                    "active: #{} {} on {}",
+                    a["task"],
+                    a["step"].as_str().unwrap_or("?"),
+                    a["display"].as_str().unwrap_or("?")
+                );
+            }
             println!(
                 "projects: {}",
                 s["projects"].as_array().map_or(String::new(), |p| p
@@ -1737,6 +1745,22 @@ fn main() {
                     println!("  project   {}", t["project"].as_str().unwrap_or("?"));
                     println!("  state     {}", t["state"].as_str().unwrap_or("?"));
                     println!("  activity  {}", t["activity"].as_str().unwrap_or("?"));
+                    if let Some(m) = t["model"]["display"].as_str() {
+                        println!("  model     {m}");
+                        if let Some(w) = t["model"]["why"].as_str().filter(|w| !w.is_empty()) {
+                            println!("            ({w})");
+                        }
+                    }
+                    for r in t["steps"].as_array().into_iter().flatten() {
+                        for l in r["launches"].as_array().into_iter().flatten() {
+                            println!(
+                                "  run {:<4} {:<9} {}",
+                                r["run"],
+                                l["kind"].as_str().unwrap_or(""),
+                                l["display"].as_str().unwrap_or("")
+                            );
+                        }
+                    }
                     if !t["progress"]["runs"].as_array().is_none_or(Vec::is_empty) {
                         for l in progress::lines(&t["progress"]).lines() {
                             println!("  progress  {l}");

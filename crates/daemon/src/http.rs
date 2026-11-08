@@ -120,6 +120,9 @@ fn task_json(d: &Daemon, w: &World, t: &Task, detail: bool) -> Value {
                 "source": n.source,
             }))
             .collect::<Vec<_>>());
+        // The tier and the real model in use (or, before it starts, expected).
+        v["model"] = crate::launchview::task_use(d, w, t)
+            .map_or(Value::Null, |m| crate::launchview::json_of(&m));
         v["blocked_by"] = json!(t.blockers.iter().map(|b| b.0).collect::<Vec<_>>());
         v["blocks"] = json!(w
             .tasks
@@ -158,6 +161,7 @@ fn task_json(d: &Daemon, w: &World, t: &Task, detail: bool) -> Value {
                 "run": r.id.0, "step": state_name(r.step), "name": r.name, "attempt": r.attempt,
                 "started_at": r.started_at.0,
                 "outcome": r.outcome.map(|o| format!("{o:?}").to_lowercase()),
+                "launches": crate::launchview::history(d, r.id.0).iter().map(crate::launchview::json_of).collect::<Vec<_>>(),
             }))
             .collect::<Vec<_>>());
     }
@@ -192,6 +196,12 @@ async fn status(Shared(d): Shared<Arc<Daemon>>) -> Res {
                 "tasks": counts,
                 "jobs": d2.job_count(),
                 "max_concurrent": d2.cfg.max_concurrent,
+                "active": w.tasks.values().filter(|t| t.state.is_step()).filter_map(|t| {
+                    crate::launchview::task_use(&d2, &w, t).map(|m| json!({
+                        "task": t.id.0, "step": t.step, "display": m.display,
+                        "model": crate::launchview::json_of(&m),
+                    }))
+                }).collect::<Vec<_>>(),
                 "event_loop_stalls": stalls,
                 "worst_stall_ms": worst,
                 "bugs": d2.store.bugs().map_or(0, |b| b.len()),

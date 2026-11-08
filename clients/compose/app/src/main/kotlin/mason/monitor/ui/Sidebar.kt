@@ -174,7 +174,7 @@ private fun RowView(model: MonitorModel, row: TaskRow) {
                 Text(Format.duration(row.in_state_ms), style = theme.small(color = if (row.slow) theme.slow else theme.muted))
                 if (row.typical.isNotEmpty()) Text(row.typical, style = theme.small())
                 ProgressCells(model, row.progress, row.slow)
-                if (row.model.isNotEmpty()) Text(row.model, style = theme.small())
+                if (row.display.isNotEmpty() || row.model.isNotEmpty()) Text(row.display.ifEmpty { row.model }, style = theme.small())
             }
             row.progress.running?.let { ProgressLine(model, it) }
         }

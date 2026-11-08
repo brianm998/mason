@@ -63,7 +63,7 @@ fn a_real_explore_step_submits_a_plan_through_the_real_bridge() {
     println!("end: {:?}", r.end);
     println!("tools: {:?}", r.tool_calls);
     println!("tokens: {:?}", r.tokens);
-    println!("rate limits: {:?}", r.rate_limits);
+    println!("usage: {:?}", r.usage);
     println!("nudges {} rejections {}", r.nudges, r.rejections);
     assert!(
         matches!(&r.end, StepEnd::Accepted { tool, .. } if tool == "submit_plan"),

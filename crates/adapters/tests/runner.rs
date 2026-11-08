@@ -4,7 +4,9 @@
 
 use mason_adapter_api::conformance::valid_plan;
 use mason_adapter_api::contract::{CheckHandler, CheckRun, ContractHandle, NoChecks};
-use mason_adapter_api::{RateLimitInfo, SessionSpec, StepKind};
+use mason_adapter_api::{
+    Blocked, BlockedWhy, SessionSpec, StepKind, UsageSnapshot, Window, WindowState,
+};
 use mason_adapters::fake::{FakeAction as A, FakeAdapter};
 use mason_adapters::runner::*;
 use serde_json::json;
@@ -102,11 +104,19 @@ fn timeout_fails_the_step_and_is_not_nudged() {
 #[test]
 fn usage_limit_is_a_hold_not_a_failure_and_keeps_the_figures() {
     let a = FakeAdapter::new(vec![vec![
-        A::RateLimit(RateLimitInfo {
-            status: "rejected".into(),
-            window: Some("five_hour".into()),
-            resets_at_epoch: Some(1_800_000_000),
-            utilization: None,
+        A::Usage(UsageSnapshot {
+            windows: vec![Window {
+                id: "five_hour".into(),
+                label: "5-hour".into(),
+                resets_at: Some(1_800_000_000),
+                state: WindowState::Blocked,
+                ..Default::default()
+            }],
+            blocked: Some(Blocked {
+                why: BlockedWhy::Window("five_hour".into()),
+                until: Some(1_800_000_000),
+            }),
+            ..Default::default()
         }),
         A::UsageLimit(Some("3pm".into())),
     ]]);
@@ -118,8 +128,10 @@ fn usage_limit_is_a_hold_not_a_failure_and_keeps_the_figures() {
         })
     );
     assert_eq!(r.nudges, 0, "a hold is never nudged");
-    assert_eq!(r.rate_limits.len(), 1);
-    assert_eq!(r.rate_limits[0].utilization, None, "nothing invented");
+    let u = r.usage.expect("the snapshot is kept");
+    assert_eq!(u.windows.len(), 1);
+    assert_eq!(u.windows[0].utilization, None, "nothing invented");
+    assert!(u.observed_at.is_some(), "the runner stamps when it saw it");
 }
 
 #[test]
@@ -306,4 +318,25 @@ fn progress_and_proposals_are_collected_and_do_not_end_the_step() {
     assert!(matches!(r.end, StepEnd::Accepted { .. }));
     assert_eq!(r.progress, vec!["reading the parser"]);
     assert_eq!(r.proposals.len(), 1);
+}
+
+#[test]
+fn the_last_usage_snapshot_wins_and_is_stamped_by_the_runner() {
+    let snap = |id: &str| UsageSnapshot {
+        windows: vec![Window {
+            id: id.into(),
+            label: id.into(),
+            ..Default::default()
+        }],
+        observed_at: Some(1),
+        ..Default::default()
+    };
+    let a = FakeAdapter::new(vec![vec![
+        A::Usage(snap("first")),
+        A::Usage(snap("second")),
+    ]]);
+    let r = run(&a, StepKind::Develop);
+    let u = r.usage.unwrap();
+    assert_eq!(u.windows[0].id, "second");
+    assert_ne!(u.observed_at, Some(1), "set by the runner, not the adapter");
 }

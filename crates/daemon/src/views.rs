@@ -352,6 +352,9 @@ impl<'a> Ctx<'a> {
         } else {
             String::new()
         };
+        // What the step really launched (or, before it starts, what it is expected
+        // to use). The old `model` above stays as it was for older clients.
+        let model_use = crate::launchview::task_use(self.d, self.w, t);
         TaskRow {
             id: t.id.0,
             key: format!("#{}", t.id.0),
@@ -363,6 +366,10 @@ impl<'a> Ctx<'a> {
             enqueued_ms: t.enqueued_at.0,
             in_state_ms: in_state,
             model,
+            display: model_use
+                .as_ref()
+                .map_or_else(String::new, |m| m.display.clone()),
+            model_use,
             progress: self.progress(t),
             allowed_actions: self.allowed_actions(t),
             blockers: t.blockers.iter().map(|b| b.0).collect(),
@@ -584,6 +591,8 @@ impl<'a> Ctx<'a> {
                     let r = self.row(t);
                     ActiveModel {
                         model: r.model,
+                        display: r.display,
+                        model_use: r.model_use,
                         project: r.project,
                         task: t.id.0,
                         step: t.step.clone(),
@@ -625,6 +634,7 @@ impl<'a> Ctx<'a> {
                     |o| format!("{o:?}").to_lowercase(),
                 ),
                 started_ms: r.started_at.0,
+                launches: crate::launchview::history(self.d, r.id.0),
             })
             .collect();
         steps.sort_by_key(|s| s.run);
@@ -928,6 +938,25 @@ impl<'a> Ctx<'a> {
                     kind: m["inspector"]["kind"].as_str().unwrap_or_default().into(),
                     schema: m["inspector"]["schema"].to_string(),
                     values: m["inspector"]["values"].to_string(),
+                    launch: m["inspector"]["launch"]["line"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .into(),
+                    launch_from: {
+                        let l = &m["inspector"]["launch"];
+                        let from = |k: &str| l[k]["from"].as_str().unwrap_or("").to_string();
+                        if l.is_null() {
+                            String::new()
+                        } else {
+                            format!(
+                                "tier: {}; level: {}; model: {}; effort: {}",
+                                from("tier"),
+                                from("level"),
+                                from("model"),
+                                from("effort")
+                            )
+                        }
+                    },
                 })
             },
             landing: m["landing"].to_string(),
