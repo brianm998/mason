@@ -79,6 +79,13 @@ fn row_item(r: &TaskRow, order: usize, prefix: &str) -> Item {
     if !r.display.is_empty() {
         texts.push(r.display.clone());
     }
+    // A task the tracker imported shows its issue, and where to read it.
+    if r.issue != 0 {
+        texts.push(format!("issue #{}", r.issue));
+        if !r.issue_url.is_empty() {
+            texts.push(r.issue_url.clone());
+        }
+    }
     // The task page says what it waits for and what waits for it.
     if prefix == "detail" {
         if !r.blockers.is_empty() {
@@ -271,6 +278,32 @@ pub fn visible(views: &[View], owner: bool) -> Vec<Item> {
                         vec![],
                         i,
                     ));
+                }
+                // Issues the tracker has not imported: a count tile and a list, only while true.
+                if !h.pending_issues.is_empty() {
+                    out.push(Item::new(
+                        "tile:not_imported",
+                        vec![h.pending_issues.len().to_string(), "not imported".into()],
+                        vec![],
+                        h.counts.len(),
+                    ));
+                    for (i, p) in h.pending_issues.iter().enumerate() {
+                        let mut texts = vec![
+                            p.project.clone(),
+                            format!("#{}", p.number),
+                            p.title.clone(),
+                            p.reason.clone(),
+                        ];
+                        if !p.url.is_empty() {
+                            texts.push(p.url.clone());
+                        }
+                        out.push(Item::new(
+                            format!("pending:{}:{}", p.project, p.number),
+                            texts,
+                            vec![],
+                            i,
+                        ));
+                    }
                 }
             }
             Some(Body::Sidebar(s)) => {

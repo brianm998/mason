@@ -1387,6 +1387,18 @@ public nonisolated struct Mason_V1_TaskRow: @unchecked Sendable {
     set {_uniqueStorage()._proposal = newValue}
   }
 
+  /// The tracker issue this task was imported from (0 when it was not).
+  public var issue: UInt64 {
+    get {_storage._issue}
+    set {_uniqueStorage()._issue = newValue}
+  }
+
+  /// Where to read it ("" when the tracker has no public page).
+  public var issueURL: String {
+    get {_storage._issueURL}
+    set {_uniqueStorage()._issueURL = newValue}
+  }
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -1500,6 +1512,29 @@ public nonisolated struct Mason_V1_HeaderView: Sendable {
 
   /// MASON's own repository, if one is registered: where "Improve the pipeline" files its task.
   public var selfProject: String = String()
+
+  /// Open issues the tracker has not imported (or whose task was canceled), with why.
+  public var pendingIssues: [Mason_V1_PendingIssue] = []
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public nonisolated struct Mason_V1_PendingIssue: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var project: String = String()
+
+  public var number: UInt64 = 0
+
+  public var title: String = String()
+
+  public var reason: String = String()
+
+  public var url: String = String()
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -4741,7 +4776,7 @@ nonisolated extension Mason_V1_TodoItem: SwiftProtobuf.Message, SwiftProtobuf._M
 
 nonisolated extension Mason_V1_TaskRow: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".TaskRow"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{1}key\0\u{1}title\0\u{1}project\0\u{1}state\0\u{1}activity\0\u{3}why_waiting\0\u{3}enqueued_ms\0\u{3}in_state_ms\0\u{1}model\0\u{1}progress\0\u{3}allowed_actions\0\u{1}blockers\0\u{1}typical\0\u{1}slow\0\u{1}step\0\u{1}body\0\u{1}blocks\0\u{1}display\0\u{3}model_use\0\u{1}proposal\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{1}key\0\u{1}title\0\u{1}project\0\u{1}state\0\u{1}activity\0\u{3}why_waiting\0\u{3}enqueued_ms\0\u{3}in_state_ms\0\u{1}model\0\u{1}progress\0\u{3}allowed_actions\0\u{1}blockers\0\u{1}typical\0\u{1}slow\0\u{1}step\0\u{1}body\0\u{1}blocks\0\u{1}display\0\u{3}model_use\0\u{1}proposal\0\u{1}issue\0\u{3}issue_url\0")
 
   fileprivate class _StorageClass {
     var _id: UInt64 = 0
@@ -4765,6 +4800,8 @@ nonisolated extension Mason_V1_TaskRow: SwiftProtobuf.Message, SwiftProtobuf._Me
     var _display: String = String()
     var _modelUse: Mason_V1_ModelUse? = nil
     var _proposal: String = String()
+    var _issue: UInt64 = 0
+    var _issueURL: String = String()
 
       // This property is used as the initial default value for new instances of the type.
       // The type itself is protecting the reference to its storage via CoW semantics.
@@ -4796,6 +4833,8 @@ nonisolated extension Mason_V1_TaskRow: SwiftProtobuf.Message, SwiftProtobuf._Me
       _display = source._display
       _modelUse = source._modelUse
       _proposal = source._proposal
+      _issue = source._issue
+      _issueURL = source._issueURL
     }
   }
 
@@ -4835,6 +4874,8 @@ nonisolated extension Mason_V1_TaskRow: SwiftProtobuf.Message, SwiftProtobuf._Me
         case 19: try { try decoder.decodeSingularStringField(value: &_storage._display) }()
         case 20: try { try decoder.decodeSingularMessageField(value: &_storage._modelUse) }()
         case 21: try { try decoder.decodeSingularStringField(value: &_storage._proposal) }()
+        case 22: try { try decoder.decodeSingularUInt64Field(value: &_storage._issue) }()
+        case 23: try { try decoder.decodeSingularStringField(value: &_storage._issueURL) }()
         default: break
         }
       }
@@ -4910,6 +4951,12 @@ nonisolated extension Mason_V1_TaskRow: SwiftProtobuf.Message, SwiftProtobuf._Me
       if !_storage._proposal.isEmpty {
         try visitor.visitSingularStringField(value: _storage._proposal, fieldNumber: 21)
       }
+      if _storage._issue != 0 {
+        try visitor.visitSingularUInt64Field(value: _storage._issue, fieldNumber: 22)
+      }
+      if !_storage._issueURL.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._issueURL, fieldNumber: 23)
+      }
     }
     try unknownFields.traverse(visitor: &visitor)
   }
@@ -4940,6 +4987,8 @@ nonisolated extension Mason_V1_TaskRow: SwiftProtobuf.Message, SwiftProtobuf._Me
         if _storage._display != rhs_storage._display {return false}
         if _storage._modelUse != rhs_storage._modelUse {return false}
         if _storage._proposal != rhs_storage._proposal {return false}
+        if _storage._issue != rhs_storage._issue {return false}
+        if _storage._issueURL != rhs_storage._issueURL {return false}
         return true
       }
       if !storagesAreEqual {return false}
@@ -5141,7 +5190,7 @@ nonisolated extension Mason_V1_Banner: SwiftProtobuf.Message, SwiftProtobuf._Mes
 
 nonisolated extension Mason_V1_HeaderView: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".HeaderView"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}attention\0\u{1}counts\0\u{1}banners\0\u{1}projects\0\u{1}status\0\u{3}self_project\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}attention\0\u{1}counts\0\u{1}banners\0\u{1}projects\0\u{1}status\0\u{3}self_project\0\u{3}pending_issues\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -5155,6 +5204,7 @@ nonisolated extension Mason_V1_HeaderView: SwiftProtobuf.Message, SwiftProtobuf.
       case 4: try { try decoder.decodeRepeatedStringField(value: &self.projects) }()
       case 5: try { try decoder.decodeSingularStringField(value: &self.status) }()
       case 6: try { try decoder.decodeSingularStringField(value: &self.selfProject) }()
+      case 7: try { try decoder.decodeRepeatedMessageField(value: &self.pendingIssues) }()
       default: break
       }
     }
@@ -5179,6 +5229,9 @@ nonisolated extension Mason_V1_HeaderView: SwiftProtobuf.Message, SwiftProtobuf.
     if !self.selfProject.isEmpty {
       try visitor.visitSingularStringField(value: self.selfProject, fieldNumber: 6)
     }
+    if !self.pendingIssues.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.pendingIssues, fieldNumber: 7)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -5189,6 +5242,57 @@ nonisolated extension Mason_V1_HeaderView: SwiftProtobuf.Message, SwiftProtobuf.
     if lhs.projects != rhs.projects {return false}
     if lhs.status != rhs.status {return false}
     if lhs.selfProject != rhs.selfProject {return false}
+    if lhs.pendingIssues != rhs.pendingIssues {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Mason_V1_PendingIssue: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".PendingIssue"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}project\0\u{1}number\0\u{1}title\0\u{1}reason\0\u{1}url\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.project) }()
+      case 2: try { try decoder.decodeSingularUInt64Field(value: &self.number) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.title) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.reason) }()
+      case 5: try { try decoder.decodeSingularStringField(value: &self.url) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.project.isEmpty {
+      try visitor.visitSingularStringField(value: self.project, fieldNumber: 1)
+    }
+    if self.number != 0 {
+      try visitor.visitSingularUInt64Field(value: self.number, fieldNumber: 2)
+    }
+    if !self.title.isEmpty {
+      try visitor.visitSingularStringField(value: self.title, fieldNumber: 3)
+    }
+    if !self.reason.isEmpty {
+      try visitor.visitSingularStringField(value: self.reason, fieldNumber: 4)
+    }
+    if !self.url.isEmpty {
+      try visitor.visitSingularStringField(value: self.url, fieldNumber: 5)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Mason_V1_PendingIssue, rhs: Mason_V1_PendingIssue) -> Bool {
+    if lhs.project != rhs.project {return false}
+    if lhs.number != rhs.number {return false}
+    if lhs.title != rhs.title {return false}
+    if lhs.reason != rhs.reason {return false}
+    if lhs.url != rhs.url {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

@@ -404,6 +404,10 @@ message TaskRow {
   ModelUse model_use = 20;
   // For a proposal or an improvement: "agent · blocks · pipeline" (source, severity, route).
   string proposal = 21;
+  // The tracker issue this task was imported from (0 when it was not).
+  uint64 issue = 22;
+  // Where to read it ("" when the tracker has no public page).
+  string issue_url = 23;
 }
 
 // What a step run launched (or, with `expected`, will launch): the tier
@@ -459,6 +463,16 @@ message HeaderView {
   string status = 5;
   // MASON's own repository, if one is registered: where "Improve the pipeline" files its task.
   string self_project = 6;
+  // Open issues the tracker has not imported (or whose task was canceled), with why.
+  repeated PendingIssue pending_issues = 7;
+}
+
+message PendingIssue {
+  string project = 1;
+  uint64 number = 2;
+  string title = 3;
+  string reason = 4;
+  string url = 5;
 }
 
 message SidebarSection {

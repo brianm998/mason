@@ -32,6 +32,11 @@ extension TaskRow {
         var texts = [key, title, project, state]
         if !whyWaiting.isEmpty { texts.append(whyWaiting) }
         if !display.isEmpty { texts.append(display) }
+        // A task the tracker imported shows its issue, and where to read it.
+        if issue != 0 {
+            texts.append("issue #\(issue)")
+            if !issueURL.isEmpty { texts.append(issueURL) }
+        }
         // The task page says what it waits for and what waits for it.
         if prefix == "detail" {
             if !blockers.isEmpty { texts.append("waiting for " + blockers.map { "#\($0)" }.joined(separator: ", ")) }
@@ -93,6 +98,15 @@ extension MonitorModel {
             }
             for (i, b) in h.banners.enumerated() {
                 out.append(Item(id: "banner:\(i)", texts: [b.text], order: i))
+            }
+            // Issues the tracker has not imported: a count tile and a list, only while true.
+            if !h.pendingIssues.isEmpty {
+                out.append(Item(id: "tile:not_imported", texts: [String(h.pendingIssues.count), "not imported"], order: h.counts.count))
+                for (i, p) in h.pendingIssues.enumerated() {
+                    var texts = [p.project, "#\(p.number)", p.title, p.reason]
+                    if !p.url.isEmpty { texts.append(p.url) }
+                    out.append(Item(id: "pending:\(p.project):\(p.number)", texts: texts, order: i))
+                }
             }
         }
         if let s = sidebar {

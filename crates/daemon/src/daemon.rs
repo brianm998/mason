@@ -214,6 +214,11 @@ impl Daemon {
         self.tracker.stopped(p)
     }
 
+    /// Open issues the tracker has not imported (or whose task was canceled), with why.
+    pub fn tracker_pending(&self, p: ProjectId) -> Vec<crate::tracker::Waiting> {
+        self.tracker.pending(p)
+    }
+
     /// Ask the project's tracker again at once.
     pub fn tracker_refresh(&self, p: ProjectId) {
         self.tracker.refresh(p);

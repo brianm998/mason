@@ -185,3 +185,8 @@ compose = "done"
 description = "An 'Improve the pipeline' box in the top bar files a task on MASON's own repository; without write access the detail shows the redacted preview and sends upstream only on a second, explicit action"
 swift = "done"
 compose = "done"
+
+[feature.tracker-imports]
+description = "Tracker imports are listed apart as Proposed from the tracker, each with its issue link and (for the owner) Approve; a not-imported tile and list name the open issues a limit kept out, or whose task was cancelled, with the reason"
+swift = "done"
+compose = "done"
