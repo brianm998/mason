@@ -22,6 +22,8 @@ pub struct DaemonConfig {
     pub mcp_bin: PathBuf,
     /// 0 picks a free loopback port (written to `daemon.json`).
     pub port: u16,
+    /// LAN access (Part 16): off unless the owner turns it on.
+    pub lan: LanCfg,
     pub stall_threshold: Duration,
     /// How long a provider hold waits before the session is resumed.
     pub hold_retry: Duration,
@@ -58,6 +60,61 @@ pub struct DaemonConfig {
     pub schedule_tick: Duration,
 }
 
+/// `[lan]` in `daemon.toml`. Loopback stays the default: nothing listens beyond it unless
+/// `enabled = true` (or `masond --lan`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LanCfg {
+    pub enabled: bool,
+    /// 0 asks the OS for a free port.
+    pub port: u16,
+}
+
+impl Default for LanCfg {
+    fn default() -> Self {
+        LanCfg {
+            enabled: false,
+            port: crate::lan::DEFAULT_LAN_PORT,
+        }
+    }
+}
+
+/// Read the `[lan]` table. Any bad value is an error that names the file and the setting.
+pub fn parse_lan(text: &str) -> Result<LanCfg, String> {
+    let doc: toml_edit::DocumentMut = text.parse().map_err(|e| format!("daemon.toml: {e}"))?;
+    let mut lan = LanCfg::default();
+    let Some(item) = doc.get("lan") else {
+        return Ok(lan);
+    };
+    let table = item
+        .as_table_like()
+        .ok_or("daemon.toml: `lan` must be a table: [lan]")?;
+    for (name, v) in table.iter() {
+        match name {
+            "enabled" => {
+                lan.enabled = v
+                    .as_bool()
+                    .ok_or("daemon.toml: lan.enabled must be true or false")?
+            }
+            "port" => {
+                lan.port = v
+                    .as_integer()
+                    .and_then(|n| u16::try_from(n).ok())
+                    .ok_or("daemon.toml: lan.port must be a whole number from 0 to 65535")?
+            }
+            other => return Err(format!("daemon.toml: unknown setting lan.{other}")),
+        }
+    }
+    Ok(lan)
+}
+
+pub fn load_lan(config_dir: &std::path::Path) -> Result<LanCfg, String> {
+    match std::fs::read_to_string(config_dir.join("daemon.toml")) {
+        Ok(t) => parse_lan(&t),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(LanCfg::default()),
+        Err(e) => Err(format!("daemon.toml: {e}")),
+    }
+}
+
 /// The loopback port `masond` listens on when neither `--port` nor `[daemon] port`
 /// says otherwise. Fixed, so a running monitor finds the daemon again after a
 /// restart. (7421, first proposed, is assigned in /etc/services.)
@@ -80,6 +137,9 @@ pub fn parse_daemon_port(text: &str) -> Result<Option<u16>, String> {
     let doc: toml_edit::DocumentMut = text.parse().map_err(|e| format!("daemon.toml: {e}"))?;
     let mut port = None;
     for (key, item) in doc.iter() {
+        if key == "lan" {
+            continue; // read by `parse_lan`
+        }
         let table = item
             .as_table_like()
             .filter(|_| key == "daemon")
@@ -127,6 +187,7 @@ impl DaemonConfig {
             host_bin,
             mcp_bin,
             port: 0,
+            lan: LanCfg::default(),
             stall_threshold: Duration::from_millis(500),
             hold_retry: Duration::from_secs(60),
             debug: false,
@@ -961,6 +1022,33 @@ mod tests {
             "[provider.a]\nadapter=\"claude\"\nbilling=\"x\"\n",
         );
         assert!(load_projects(d.path()).is_err());
+    }
+
+    #[test]
+    fn lan_is_off_by_default_and_bad_values_name_the_file() {
+        use super::{parse_lan, LanCfg};
+        assert_eq!(parse_lan("").unwrap(), LanCfg::default());
+        assert!(!LanCfg::default().enabled);
+        assert_eq!(
+            parse_lan("[daemon]\nport = 1\n").unwrap(),
+            LanCfg::default()
+        );
+        let l = parse_lan("[lan]\nenabled = true\nport = 9000\n").unwrap();
+        assert!(l.enabled && l.port == 9000);
+        for bad in [
+            "[lan]\nenabled = \"yes\"\n",
+            "[lan]\nport = 70000\n",
+            "[lan]\nhost = \"x\"\n",
+            "lan = 3\n",
+        ] {
+            let e = parse_lan(bad).unwrap_err();
+            assert!(e.starts_with("daemon.toml: "), "{e}");
+        }
+        // The port parser leaves the table alone.
+        assert_eq!(
+            super::parse_daemon_port("[lan]\nenabled = true\n").unwrap(),
+            None
+        );
     }
 
     #[test]

@@ -488,6 +488,16 @@ const STEPS: &[&str] = &[
          taken_at   INTEGER,
          taken_by   TEXT
      );",
+    // 19: paired devices (s24). Only the SHA-256 of a token is kept; the token is shown once.
+    "CREATE TABLE devices (
+         id           INTEGER PRIMARY KEY AUTOINCREMENT,
+         name         TEXT NOT NULL,
+         role         TEXT NOT NULL,
+         token_sha256 TEXT NOT NULL UNIQUE,
+         created_at   INTEGER NOT NULL,
+         last_seen    INTEGER,
+         revoked_at   INTEGER
+     );",
 ];
 
 pub const SCHEMA_VERSION: u32 = STEPS.len() as u32;

@@ -60,6 +60,7 @@ pub struct Daemon {
     pub probes: crate::holds::Probes,
     pub(crate) intro: crate::introspect::Runtime,
     pub(crate) notify: crate::notify::Runtime,
+    pub lan: crate::lan::LanState,
 }
 
 fn kind_name(k: &EventKind) -> String {
@@ -182,6 +183,7 @@ impl Daemon {
             probes: Default::default(),
             intro: Default::default(),
             notify: Default::default(),
+            lan: crate::lan::LanState::new(),
             update_status: Mutex::new(crate::update::Status {
                 phase: "idle".into(),
                 ..Default::default()

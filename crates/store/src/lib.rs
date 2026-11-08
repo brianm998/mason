@@ -10,6 +10,7 @@
 //! The API is blocking; async callers use a bounded worker pool (Part 2).
 
 mod codec;
+pub mod devices;
 pub mod introspect;
 pub mod migrations;
 pub mod notify;
@@ -23,6 +24,7 @@ use std::sync::Mutex;
 use std::thread::JoinHandle;
 
 pub use codec::{decode as decode_event, encode as encode_event, state_name, CodecError};
+pub use devices::DeviceRow;
 pub use introspect::{FindingRow, ScheduleRow, TriageRow};
 pub use notify::{AnnouncementRow, DeliveryRow};
 

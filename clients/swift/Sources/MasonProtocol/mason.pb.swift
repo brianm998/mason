@@ -858,6 +858,10 @@ public nonisolated struct Mason_V1_Welcome: Sendable {
   /// even when its clock and the daemon's differ.
   public var nowMs: UInt64 = 0
 
+  /// "owner" or "viewer" on the LAN listener (the role of the paired device's token);
+  /// empty on loopback, where the Hello.actor rule above applies. Additive (s24).
+  public var role: String = String()
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -3937,7 +3941,7 @@ nonisolated extension Mason_V1_ServerMessage: SwiftProtobuf.Message, SwiftProtob
 
 nonisolated extension Mason_V1_Welcome: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".Welcome"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}protocol\0\u{1}seq\0\u{1}resume\0\u{1}daemon\0\u{1}demo\0\u{1}version\0\u{3}min_protocol\0\u{1}owner\0\u{3}now_ms\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}protocol\0\u{1}seq\0\u{1}resume\0\u{1}daemon\0\u{1}demo\0\u{1}version\0\u{3}min_protocol\0\u{1}owner\0\u{3}now_ms\0\u{1}role\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -3954,6 +3958,7 @@ nonisolated extension Mason_V1_Welcome: SwiftProtobuf.Message, SwiftProtobuf._Me
       case 7: try { try decoder.decodeSingularUInt32Field(value: &self.minProtocol) }()
       case 8: try { try decoder.decodeSingularBoolField(value: &self.owner) }()
       case 9: try { try decoder.decodeSingularUInt64Field(value: &self.nowMs) }()
+      case 10: try { try decoder.decodeSingularStringField(value: &self.role) }()
       default: break
       }
     }
@@ -3987,6 +3992,9 @@ nonisolated extension Mason_V1_Welcome: SwiftProtobuf.Message, SwiftProtobuf._Me
     if self.nowMs != 0 {
       try visitor.visitSingularUInt64Field(value: self.nowMs, fieldNumber: 9)
     }
+    if !self.role.isEmpty {
+      try visitor.visitSingularStringField(value: self.role, fieldNumber: 10)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -4000,6 +4008,7 @@ nonisolated extension Mason_V1_Welcome: SwiftProtobuf.Message, SwiftProtobuf._Me
     if lhs.minProtocol != rhs.minProtocol {return false}
     if lhs.owner != rhs.owner {return false}
     if lhs.nowMs != rhs.nowMs {return false}
+    if lhs.role != rhs.role {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

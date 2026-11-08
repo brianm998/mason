@@ -3,7 +3,7 @@
 //! `masond`: the MASON daemon.
 //!
 //! `masond [--data-dir D] [--config-dir C] [--max-concurrent N] [--sweep-ms N]
-//!         [--port P (0: any free port)] [--host-bin B] [--mcp-bin B] [--reload-interval-ms N] [--fetch-interval-ms N]
+//!         [--port P (0: any free port)] [--lan] [--lan-port P] [--host-bin B] [--mcp-bin B] [--reload-interval-ms N] [--fetch-interval-ms N]
 //!         [--demo | --demo-manual] [--demo-step-ms N] [--debug]`
 
 use mason_daemon::config::DaemonConfig;
@@ -66,6 +66,7 @@ fn main() {
     let mut owners_set = false;
     let (mut demo, mut demo_manual, mut demo_step) = (false, false, Duration::from_millis(1500));
     let mut cli_port: Option<u16> = None;
+    let (mut cli_lan, mut cli_lan_port) = (false, None::<u16>);
     let mut i = 0;
     while i < args.len() {
         let flag = args[i].clone();
@@ -128,6 +129,8 @@ fn main() {
             "--demo-step-ms" => {
                 demo_step = Duration::from_millis(val().parse().unwrap_or_else(|_| usage()))
             }
+            "--lan" => cli_lan = true,
+            "--lan-port" => cli_lan_port = Some(val().parse().unwrap_or_else(|_| usage())),
             "--debug" => cfg.debug = true,
             "--managed" => {}
             "--runtime-sha" => cfg.runtime_sha = Some(val()),
@@ -147,6 +150,18 @@ fn main() {
         }
     };
     cfg.port = mason_daemon::config::resolve_port(cli_port, file_port, demo);
+    // LAN access: daemon.toml `[lan]`, or --lan. Off by default.
+    cfg.lan = match mason_daemon::config::load_lan(&cfg.config_dir) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("masond: {}: {e}", cfg.config_dir.display());
+            std::process::exit(1);
+        }
+    };
+    cfg.lan.enabled |= cli_lan;
+    if let Some(p) = cli_lan_port {
+        cfg.lan.port = p;
+    }
     // What to start again with when a new runtime takes over.
     {
         let mut keep = vec![];
