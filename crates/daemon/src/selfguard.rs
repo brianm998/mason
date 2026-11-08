@@ -613,6 +613,7 @@ mod tests {
             priority: Priority::Normal,
             trust,
             enqueued_at: Timestamp(at),
+            state_entered_at: Timestamp(at),
             state,
             activity: Activity::Idle,
             landed: None,

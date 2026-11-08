@@ -27,7 +27,8 @@ const ORDER: [State; 10] = [
     State::Landed,
 ];
 
-/// Failed, landed and canceled sort newest first and start collapsed.
+/// Failed, landed and canceled start collapsed. (Queued is in queue order;
+/// every other section has the task that entered it last on top.)
 fn is_history(s: State) -> bool {
     matches!(s, State::Failed | State::Landed | State::Canceled)
 }
@@ -590,12 +591,24 @@ impl<'a> Ctx<'a> {
     }
 
     fn section_of(&self, s: State, mut tasks: Vec<&Task>) -> SidebarSection {
-        // Active states: oldest first, so anything stuck is at the top.
-        // History: newest first, so what just happened is not buried.
-        if is_history(s) {
-            tasks.sort_by_key(|t| (std::cmp::Reverse(t.enqueued_at), std::cmp::Reverse(t.id)));
+        // Queued is the real queue: what the daemon would admit first is on
+        // top (tasks that can go, then held/paused/not_before ones, each by
+        // `queued_rank`). Every other section has the task that entered it
+        // most recently on top.
+        if s == State::Queued {
+            tasks.sort_by_cached_key(|t| {
+                (
+                    t.activity != Activity::Waiting(WaitReason::Slot),
+                    self.d.queued_rank(t),
+                )
+            });
         } else {
-            tasks.sort_by_key(|t| (t.enqueued_at, t.id));
+            tasks.sort_by_key(|t| {
+                (
+                    std::cmp::Reverse(t.state_entered_at),
+                    std::cmp::Reverse(t.id),
+                )
+            });
         }
         SidebarSection {
             state: state_name(s).into(),

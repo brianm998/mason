@@ -47,7 +47,7 @@ swift = "done"
 compose = "done"
 
 [feature.sidebar-sort]
-description = "Active states oldest first; failed, landed and canceled newest first and collapsed"
+description = "Queued in queue order (what the daemon admits first on top); every other section newest entry first; failed, landed and canceled collapsed"
 swift = "done"
 compose = "done"
 

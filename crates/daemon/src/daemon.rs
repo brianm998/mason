@@ -562,7 +562,7 @@ impl Daemon {
 
     /// A queued task's rank, from where it would start. (The clarity check
     /// is left out: it reads git, and ranking runs on every admission.)
-    fn queued_rank(&self, t: &Task) -> mason_scheduler::Rank {
+    pub(crate) fn queued_rank(&self, t: &Task) -> mason_scheduler::Rank {
         let def = self.current_def(t.project);
         let skip = def.explored_entry.is_some() && t.explored_counts() && !t.force_explore;
         let start = def
