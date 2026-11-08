@@ -6,6 +6,18 @@ MASON can land its own changes. This page says what that means, what stops for y
 
 Copy `docs/examples/mason-self.project.toml` to `<config dir>/projects/mason.toml`, point `path` at your checkout, and start (or restart) `masond`. The `[self]` section is what makes the project MASON's own. The repository's `.mason/mason.toml` is its pipeline and `.mason/landing.toml` how it lands (a batch at a time, straight to `develop`, after `cargo test --workspace`).
 
+## Importing issues
+
+The example has **no tracker section**, so the poller never runs for the project: an issue filed on GitHub does not become a task, and nothing but a note says so. `mason doctor` prints `issues on <owner/repo> are not imported; see docs/self-hosting.md` for a project whose repository has a GitHub remote and no `[tracker]`; `mason task refresh N` says the same with the config path; the monitors' landing page has a tracker line per project (off, polling, or stopped with the reason).
+
+To turn it on, uncomment the `[tracker]` block at the end of `docs/examples/mason-self.project.toml` in your project file (`<config dir>/projects/mason.toml`), set `repo`, and restart `masond`. The token is given as a **reference**, `env:NAME` or `file:/path`, never the token itself; a literal token is refused.
+
+- **Token scope:** read access to the repository's **issues** is all that polling needs (a fine-grained token with *Issues: read*; a classic token with `public_repo`, or `repo` for a private repository). Add **write** (*Issues: read and write*) only if you want MASON to mirror comments and closes back to the issue when the task lands or fails; without it, mirroring fails quietly and the work is not held up.
+- **Outside issues need the label.** An issue by one of your owner names is imported as it is. Anyone else's is ignored until someone with triage rights puts the project's `label` (default `mason`) on it, and it is then filed with outside trust. Pull requests are never imported.
+- **First poll:** every open owner issue is imported in one batch. Items over a `[self]` limit (`max_open`, `per_week`) stay unimported and are tried again at each poll; that is intended. `mason doctor`, the landing page and an alert say how many issues wait for a slot and which.
+- **Order:** turn it on only when task dependencies are honoured (they are, since Stage 42): `Depends on #N` lines and GitHub's blocked-by links make issues meant to run in a chain run in order.
+- **When it stops:** a permanent error (a 401 or 404: a wrong token or repository) stops the poll and raises an alert with the reason. Fix it, then `mason task refresh N` on any task of the project asks once more.
+
 ## What stops for you
 
 Before a self-change may join the landing queue, the **running** daemon looks at its diff. It stops, and waits for you, if the change

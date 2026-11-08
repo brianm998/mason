@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 
 pub enum Level {
     Ok,
+    /// Worth knowing, not wrong: never counts as a failure.
+    Note,
     Warn,
     Fail,
 }
@@ -21,6 +23,12 @@ pub struct Finding {
 fn ok(t: impl Into<String>) -> Finding {
     Finding {
         level: Level::Ok,
+        text: t.into(),
+    }
+}
+fn note(t: impl Into<String>) -> Finding {
+    Finding {
+        level: Level::Note,
         text: t.into(),
     }
 }
@@ -98,6 +106,102 @@ fn longest_socket(data_dir: &Path) -> usize {
         .join("sock")
         .as_os_str()
         .len()
+}
+
+/// `owner/repo` of a GitHub remote URL (https, scp-like or ssh), if it is one.
+pub fn github_repo(url: &str) -> Option<String> {
+    let u = url.trim();
+    let rest = ["https://", "http://", "ssh://", "git://"]
+        .iter()
+        .find_map(|s| u.strip_prefix(s))
+        .map(|r| r.rsplit_once('@').map_or(r, |(_, h)| h))
+        .map(|r| r.split_once('/'))
+        .unwrap_or_else(|| {
+            // scp-like: git@github.com:owner/repo.git
+            let r = u.rsplit_once('@').map_or(u, |(_, h)| h);
+            r.split_once(':')
+        })?;
+    let (host, path) = rest;
+    let host = host.split(':').next().unwrap_or(host);
+    if !host.eq_ignore_ascii_case("github.com") && !host.eq_ignore_ascii_case("www.github.com") {
+        return None;
+    }
+    let path = path.trim_matches('/');
+    let path = path.strip_suffix(".git").unwrap_or(path);
+    let mut it = path.split('/');
+    match (it.next(), it.next(), it.next()) {
+        (Some(o), Some(r), None) if !o.is_empty() && !r.is_empty() => Some(format!("{o}/{r}")),
+        _ => None,
+    }
+}
+
+fn ago(ms: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |t| t.as_millis() as u64);
+    let s = now.saturating_sub(ms) / 1000;
+    match s {
+        0..=89 => format!("{s}s ago"),
+        90..=5399 => format!("{}m ago", s / 60),
+        _ => format!("{}h ago", s / 3600),
+    }
+}
+
+/// The tracker: absent with a GitHub remote is a note; present, what the last
+/// look found (from the running daemon, which is the only one that knows).
+fn check_tracker(p: &ProjectCfg, status: Option<&serde_json::Value>, out: &mut Vec<Finding>) {
+    let name = &p.id;
+    let Some(t) = &p.services.tracker else {
+        let remote = p.remote.as_deref().unwrap_or("origin");
+        if let Some(repo) = git::run(&p.path, &["remote", "get-url", remote])
+            .ok()
+            .and_then(|u| github_repo(&u))
+        {
+            out.push(note(format!(
+                "project {name}: issues on {repo} are not imported; see docs/self-hosting.md"
+            )));
+        }
+        return;
+    };
+    let Some(s) = status else {
+        out.push(ok(format!(
+            "project {name}: tracker {} configured; the poll state is unknown while masond is not running",
+            t.repo
+        )));
+        return;
+    };
+    let Some(v) = s["trackers"]
+        .as_array()
+        .and_then(|a| a.iter().find(|v| v["project"] == name.as_str()))
+    else {
+        out.push(warn(format!(
+            "project {name}: tracker {} is configured but masond does not report it (restart masond to read the changed config)",
+            t.repo
+        )));
+        return;
+    };
+    if v["state"] == "stopped" {
+        out.push(warn(format!(
+            "project {name}: the tracker poll for {} stopped: {}",
+            t.repo,
+            v["reason"].as_str().unwrap_or("no reason recorded")
+        )));
+        return;
+    }
+    let n = |k: &str| v[k].as_u64().unwrap_or(0);
+    let mut line = match v["last_poll_ms"].as_u64() {
+        Some(ms) => format!(
+            "project {name}: tracker {} last polled {}: {} imported, {} ignored, {} unchanged, {} waiting for a slot",
+            t.repo, ago(ms), n("imported"), n("ignored"), n("unchanged"), n("waiting_slot")
+        ),
+        None => format!("project {name}: tracker {} has not been polled yet", t.repo),
+    };
+    if let Some(e) = v["error"].as_str() {
+        line.push_str(&format!("; the last look failed: {e}"));
+        out.push(warn(line));
+    } else {
+        out.push(ok(line));
+    }
 }
 
 fn check_project(p: &ProjectCfg, out: &mut Vec<Finding>) {
@@ -401,10 +505,16 @@ pub fn run(data_dir: &Path, config_dir: &Path) -> Vec<Finding> {
             "no projects configured: add one as {}/projects/<id>.toml",
             config_dir.display()
         ))),
-        Ok(ps) => ps.iter().for_each(|p| {
-            check_project(p, &mut out);
-            check_providers(p, config_dir, &mut out);
-        }),
+        Ok(ps) => {
+            let live = crate::client::find(data_dir)
+                .ok()
+                .and_then(|d| d.call("GET", "/status", None).ok());
+            for p in &ps {
+                check_project(p, &mut out);
+                check_providers(p, config_dir, &mut out);
+                check_tracker(p, live.as_ref(), &mut out);
+            }
+        }
         Err(errs) => errs
             .into_iter()
             .for_each(|e| out.push(fail(format!("project config: {e}")))),
@@ -556,6 +666,60 @@ mod tests {
                 .any(|x| x.contains("account b: adapter codex, billing subscription, projects p")),
             "{t:?}"
         );
+    }
+
+    #[test]
+    fn github_remotes_are_recognised() {
+        for (u, want) in [
+            ("https://github.com/o/r.git", Some("o/r")),
+            ("https://tok@github.com/o/r", Some("o/r")),
+            ("git@github.com:o/r.git\n", Some("o/r")),
+            ("ssh://git@github.com/o/r.git", Some("o/r")),
+            ("git@gitlab.com:o/r.git", None),
+            ("/srv/git/o/r.git", None),
+            ("https://github.com/o", None),
+        ] {
+            assert_eq!(github_repo(u).as_deref(), want, "{u}");
+        }
+    }
+
+    #[test]
+    fn a_github_remote_without_a_tracker_is_a_note_not_a_failure() {
+        let d = repo_with(&[("README", "x")]);
+        let g = |a: &[&str]| {
+            assert!(std::process::Command::new("git")
+                .args(a)
+                .current_dir(d.path())
+                .status()
+                .unwrap()
+                .success())
+        };
+        g(&["remote", "add", "origin", "git@github.com:me/thing.git"]);
+        let mut out = vec![];
+        check_tracker(&project(d.path(), ""), None, &mut out);
+        assert_eq!(out.len(), 1);
+        assert!(matches!(out[0].level, Level::Note));
+        assert_eq!(
+            out[0].text,
+            "project p: issues on me/thing are not imported; see docs/self-hosting.md"
+        );
+        // With a tracker the note is gone and the counts come from the daemon.
+        let tr = "[tracker]\nkind = \"github\"\nrepo = \"me/thing\"\ntoken = \"env:T\"\n";
+        let st = serde_json::json!({"trackers": [{"project": "p", "state": "polling",
+            "last_poll_ms": 1, "imported": 3, "ignored": 2, "unchanged": 1, "waiting_slot": 4}]});
+        let mut out = vec![];
+        check_tracker(&project(d.path(), tr), Some(&st), &mut out);
+        assert!(
+            out[0]
+                .text
+                .contains("3 imported, 2 ignored, 1 unchanged, 4 waiting for a slot"),
+            "{}",
+            out[0].text
+        );
+        let st = serde_json::json!({"trackers": [{"project": "p", "state": "stopped", "reason": "404"}]});
+        let mut out = vec![];
+        check_tracker(&project(d.path(), tr), Some(&st), &mut out);
+        assert!(matches!(out[0].level, Level::Warn) && out[0].text.contains("stopped: 404"));
     }
 
     #[test]
