@@ -839,23 +839,16 @@ fn agent_job(c: &Ctx) {
     let adapter = adapter(c);
     let mut spec = SessionSpec::new(kind, &prompt, &c.wt);
     let agent = c.project.agent();
-    // Codex does not know the built-in profiles' Claude model names: its model
-    // is the project's `model`, else the bottom of its ladder, else the CLI's
-    // own default. For Claude, a ladder with no model set starts at its bottom.
-    spec.model = match agent.provider {
-        Provider::Codex => c
-            .project
-            .model
-            .clone()
-            .or_else(|| agent.ladder.first().cloned()),
-        Provider::Claude => c
-            .res
-            .model
-            .as_ref()
-            .map(|a| a.value.clone())
-            .or_else(|| agent.ladder.first().cloned()),
-    };
-    spec.effort = c.res.effort.as_ref().map(|a| a.value.clone());
+    // Both providers go through the mapping: the requested tier and level
+    // become the real model and effort, unless something names them outright.
+    let eff =
+        crate::providers::effective(&c.d.cfg.config_dir, agent.provider, &c.project.overlay_text);
+    for p in &eff.problems {
+        tracing::warn!(project = %c.project.id, "{p}");
+    }
+    let launched = mason_definition::tiers::launch(&c.res, &eff.mapping, &agent.ladder);
+    spec.model = launched.model.clone();
+    spec.effort = launched.effort.clone();
     spec.env = c.project.agent_env.clone();
     spec.tool_timeout = c.project.tool_timeout;
     spec.deadline = Some(

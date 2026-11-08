@@ -208,6 +208,43 @@ fn check_landing(p: &ProjectCfg, base: &str, out: &mut Vec<Finding>) {
     }
 }
 
+/// The effective tier mapping of the project's provider, entry by entry with
+/// where each came from, and anything wrong with the files behind it.
+fn check_providers(p: &ProjectCfg, config_dir: &Path, out: &mut Vec<Finding>) {
+    use mason_daemon::providers;
+    let provider = p.agent().provider;
+    let e = providers::effective(config_dir, provider, &p.overlay_text);
+    for problem in &e.problems {
+        out.push(warn(format!("project {}: {problem}", p.id)));
+    }
+    out.push(ok(format!(
+        "project {}: provider {} maps tiers and levels as follows",
+        p.id,
+        providers::name(provider)
+    )));
+    for (tier, level, entry, source) in e.mapping.rows() {
+        out.push(ok(format!(
+            "  {:<5} {:<6} -> model {:<12} effort {:<8} ({})",
+            tier.name(),
+            level.name(),
+            entry.model.as_deref().unwrap_or("CLI default"),
+            entry.effort.as_deref().unwrap_or("none"),
+            source.label()
+        )));
+    }
+    // Definition warnings, from the base branch as the daemon reads it.
+    let at = format!("{}:.mason/mason.toml", p.base_ref());
+    if let Ok(text) = git::run(&p.path, &["show", &at]) {
+        let caps =
+            mason_definition::Capabilities::now().with_efforts(providers::effort_levels(provider));
+        if let Ok(def) = mason_definition::parse(&text) {
+            for w in mason_definition::validate::warnings(&def, &caps) {
+                out.push(warn(format!("project {}: {w}", p.id)));
+            }
+        }
+    }
+}
+
 pub fn run(data_dir: &Path, config_dir: &Path) -> Vec<Finding> {
     let mut out = vec![];
     match std::process::Command::new("git").arg("--version").output() {
@@ -258,7 +295,10 @@ pub fn run(data_dir: &Path, config_dir: &Path) -> Vec<Finding> {
             "no projects configured: add one as {}/projects/<id>.toml",
             config_dir.display()
         ))),
-        Ok(ps) => ps.iter().for_each(|p| check_project(p, &mut out)),
+        Ok(ps) => ps.iter().for_each(|p| {
+            check_project(p, &mut out);
+            check_providers(p, config_dir, &mut out);
+        }),
         Err(errs) => errs
             .into_iter()
             .for_each(|e| out.push(fail(format!("project config: {e}")))),

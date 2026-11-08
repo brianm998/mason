@@ -84,6 +84,9 @@ pub fn sanitized_env_for(
     env
 }
 
+/// The efforts this provider's CLI accepts.
+pub const EFFORT_LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+
 /// Everything needed to launch the CLI, with no side effects.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AgentCommand {
@@ -267,9 +270,7 @@ impl AgentAdapter for ClaudeAdapter {
         AgentCaps {
             resume: true,
             mcp: true,
-            effort_levels: ["low", "medium", "high", "xhigh", "max"]
-                .map(String::from)
-                .to_vec(),
+            effort_levels: EFFORT_LEVELS.map(String::from).to_vec(),
             usage_reports: true,
         }
     }

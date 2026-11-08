@@ -426,7 +426,9 @@ impl Daemon {
     /// What this project's definition may use: the built-in steps plus the step types
     /// its (valid) extensions provide. Approval does not matter here, only at run time.
     pub fn caps_for(&self, p: &ProjectCfg) -> Capabilities {
-        Capabilities::now().with_plugins(self.extensions(p).types())
+        Capabilities::now()
+            .with_plugins(self.extensions(p).types())
+            .with_efforts(crate::providers::effort_levels(p.agent().provider))
     }
 }
 

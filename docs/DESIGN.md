@@ -245,7 +245,7 @@ start  = "explore"
 explored_entry = "develop"   # where explored tasks start (Part 4)
 
 [step.explore]
-type = "agent"; category = "exploring"; agent = "fast"; next = "develop"
+type = "agent"; category = "exploring"; agent = "light"; next = "develop"
 
 [step.develop]
 type = "agent"; category = "developing"; agent = "deep"; budget = "4h"
@@ -336,7 +336,7 @@ When an agent calls `run_check` for something long, the step host ends the turn 
 
 ### Models, tokens and outages
 
-- Named agent profiles (`fast`, `deep`) map to provider, model and effort per project, with a retry ladder that can move up a model.
+- Agent steps ask for a tier (`deep` or `light`; `fast` is another name for `light`) and an effort level (`low`, `medium`, `high`; default `medium`). Each provider's config says which real model and real effort that means: a built-in table, overridden entry by entry by `<config dir>/providers/<provider>.toml` and then by `[provider.<provider>]` in the project file (`mason doctor` shows the result and where each entry came from). A real `model`, or an effort that is the provider's own, is still accepted but ties the pipeline to that provider, and validation warns. The retry ladder is a list of real model names and moves up a model after no result or a crash; retries keep the mapped effort.
 - Tokens are attributed per session, step, task, project and provider. Live figures show only what the stream reports honestly. If a provider gives only a status and a reset time, the monitor shows that and doesn't invent a percentage.
 - A usage limit or outage is a provider-wide *hold*, never a failure: affected tasks wait with no time charged, you're told once, and they resume at the reset. Falling back to another provider is opt-in.
 
