@@ -93,8 +93,9 @@ private fun GraphTab(model: MonitorModel, e: EditorView) {
     val theme = LocalTheme.current
     Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(theme.spacingLarge)) {
         BoxWithConstraints(Modifier.weight(1f).fillMaxHeight().background(theme.surface)) {
+            val viewport = maxWidth.value.toDouble()
             Box(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).horizontalScroll(rememberScrollState())) {
-                Canvas(model, e, maxWidth.value.toDouble())
+                Canvas(model, e, viewport)
             }
         }
         Column(Modifier.width(340.dp).fillMaxHeight().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(theme.spacingLarge)) {
