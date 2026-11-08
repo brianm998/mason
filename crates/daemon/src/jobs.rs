@@ -43,7 +43,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// How many times a task may be sent back for a conflict with the base before
-/// it fails. These do not count against a step's `max_rounds` (s62).
+/// it fails. These do not count against a step's `max_rounds` (s69).
 pub(crate) const CONFLICT_ROUNDS: u32 = 5;
 
 /// One line per conflict send-back in the task's directory: `<run>\t<reason>`.
