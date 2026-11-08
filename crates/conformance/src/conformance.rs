@@ -529,6 +529,59 @@ pub fn editor_items(e: &mason_protocol::EditorView) -> Vec<Item> {
     out
 }
 
+/// A banner's text with the clock taken out: the time of day (`16:35`), the
+/// weekday before it, and a countdown (`(in 2 h 10 m)`). The expected views and
+/// a client's capture come from two runs of the demo, minutes apart, and a
+/// banner such as an account hold names a reset relative to when its run
+/// started. What the banner says, and which banner it is, still has to match.
+pub fn steady(text: &str) -> String {
+    const DAYS: [&str; 7] = ["Mon ", "Tue ", "Wed ", "Thu ", "Fri ", "Sat ", "Sun "];
+    let b = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < b.len() {
+        let rest = &text[i..];
+        if rest.starts_with("(in ") {
+            if let Some(end) = rest.find(')') {
+                out.push_str("(in …)");
+                i += end + 1;
+                continue;
+            }
+        }
+        // A weekday right before a time of day.
+        if let Some(d) = DAYS.iter().find(|d| rest.starts_with(**d)) {
+            if clock_len(&text[i + d.len()..]).is_some() {
+                out.push_str("DAY ");
+                i += d.len();
+                continue;
+            }
+        }
+        let after_digit = i > 0 && b[i - 1].is_ascii_digit();
+        if !after_digit {
+            if let Some(n) = clock_len(rest) {
+                out.push_str("HH:MM");
+                i += n;
+                continue;
+            }
+        }
+        let c = rest.chars().next().expect("not at the end");
+        out.push(c);
+        i += c.len_utf8();
+    }
+    out
+}
+
+/// The length of a time of day (`9:05`, `16:35`) at the start of `s`.
+fn clock_len(s: &str) -> Option<usize> {
+    let b = s.as_bytes();
+    let h = b.iter().take_while(|c| c.is_ascii_digit()).count();
+    if !(1..=2).contains(&h) || b.get(h) != Some(&b':') {
+        return None;
+    }
+    let m = b[h + 1..].iter().take_while(|c| c.is_ascii_digit()).count();
+    (m == 2).then_some(h + 3)
+}
+
 /// Compare what a client shows with what it must show. Returns the problems.
 /// A client may show more than the views require (decoration), except rows:
 /// an extra row is a task the server did not say is there.
@@ -540,8 +593,15 @@ pub fn compare(expected: &[Item], actual: &[Item]) -> Vec<String> {
             problems.push(format!("missing: {} ({})", e.id, e.texts.join(" | ")));
             continue;
         };
+        let banner = e.id.starts_with("banner:");
         for t in &e.texts {
-            if !a.texts.iter().any(|x| x.contains(t.as_str())) {
+            let shown = if banner {
+                let want = steady(t);
+                a.texts.iter().any(|x| steady(x).contains(want.as_str()))
+            } else {
+                a.texts.iter().any(|x| x.contains(t.as_str()))
+            };
+            if !shown {
                 problems.push(format!("{}: does not show {t:?}", e.id));
             }
         }
@@ -617,6 +677,39 @@ mod tests {
             actions.iter().map(|s| s.to_string()).collect(),
             order,
         )
+    }
+
+    #[test]
+    fn a_banner_is_compared_without_its_clock() {
+        let e = vec![item(
+            "banner:0",
+            &["claude-full: 5-hour limit, resets Sun 16:35 UTC (in 2 h 10 m); waiting tasks start no sessions until then"],
+            &[],
+            0,
+        )];
+        let later = vec![item(
+            "banner:0",
+            &["claude-full: 5-hour limit, resets Sun 16:37 UTC (in 2 h 9 m); waiting tasks start no sessions until then"],
+            &[],
+            0,
+        )];
+        assert!(compare(&e, &later).is_empty(), "{:?}", compare(&e, &later));
+        // What the banner says still has to match.
+        let other = vec![item(
+            "banner:0",
+            &["claude-main: 5-hour limit, resets Sun 16:37 UTC (in 2 h 9 m); waiting tasks start no sessions until then"],
+            &[],
+            0,
+        )];
+        assert_eq!(compare(&e, &other).len(), 1);
+        // Only banners: any other item still compares its text exactly.
+        let e = vec![item("tile:queued", &["resets 16:35"], &[], 0)];
+        let a = vec![item("tile:queued", &["resets 16:37"], &[], 0)];
+        assert_eq!(compare(&e, &a).len(), 1);
+        assert_eq!(
+            steady("at 9:05, 10:30x and 123:45"),
+            "at HH:MM, HH:MMx and 123:45"
+        );
     }
 
     #[test]

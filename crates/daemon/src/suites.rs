@@ -112,6 +112,11 @@ pub fn needs_for(
     {
         let mut uses = s.suite.uses.clone();
         if let Some(e) = def.testing.environment(&s.suite.env) {
+            // A device environment leases one device of its kind.
+            if let Some(kind) = crate::targets::kind_of_env(e) {
+                let u = uses.entry(kind.capability()).or_insert(0);
+                *u = (*u).max(1);
+            }
             for (k, v) in &e.uses {
                 let u = uses.entry(k.clone()).or_insert(0);
                 *u = (*u).max(*v);
@@ -146,6 +151,9 @@ struct Ran {
 
 type Check = Arc<dyn Fn() -> Stop + Send + Sync>;
 
+/// Run a suite command under a step host. If the host is lost before the command
+/// finished, run it once more on a fresh host (`<id>-host1`) and judge that run; a
+/// second loss in a row is an error naming both. A lost host is never a result.
 #[allow(clippy::too_many_arguments)]
 fn run_hosted(
     d: &Arc<Daemon>,
@@ -158,6 +166,58 @@ fn run_hosted(
     run: Option<StepRunId>,
     watch: Option<&Suite>,
 ) -> Result<Ran, String> {
+    use crate::hostloss as hl;
+    let hosts = d.cfg.hosts_dir();
+    let again_id = hl::rerun_id(id);
+    let mut first = None;
+    let mut on = id.to_string();
+    // A progress file left by an earlier attempt says nothing about this one.
+    if !hosts.join(id).join("host.kv").exists() && !hosts.join(&again_id).join("host.kv").exists() {
+        if let Some(f) = watch.and_then(|w| w.progress.as_ref()) {
+            let _ = std::fs::remove_file(cwd.join(f));
+        }
+    }
+    if hosts.join(&again_id).join("host.kv").exists() {
+        first = mason_step_host::registry::lost_report(&hosts.join(id)).ok();
+        on = again_id.clone();
+    }
+    loop {
+        match run_hosted_once(d, &on, cmd, cwd, limit, log_dir, check.clone(), run, watch) {
+            Ok(r) => return Ok(r),
+            Err(HostedErr::Other(e)) => return Err(e),
+            Err(HostedErr::Lost(rep)) if on == id => {
+                hl::record(d, run, id, &rep, true);
+                first = Some(rep);
+                on = again_id.clone();
+            }
+            Err(HostedErr::Lost(rep)) => {
+                hl::record(d, run, id, &rep, false);
+                return Err(match first {
+                    Some(f) => hl::both(&f, &rep),
+                    None => hl::lost_text(&rep),
+                });
+            }
+        }
+    }
+}
+
+enum HostedErr {
+    Lost(mason_step_host::registry::LostReport),
+    Other(String),
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_hosted_once(
+    d: &Arc<Daemon>,
+    id: &str,
+    cmd: &str,
+    cwd: &Path,
+    limit: Duration,
+    log_dir: &Path,
+    check: Check,
+    run: Option<StepRunId>,
+    watch: Option<&Suite>,
+) -> Result<Ran, HostedErr> {
     let hosts = d.cfg.hosts_dir();
     let dir = hosts.join(id);
     if !dir.join("host.kv").exists() {
@@ -173,11 +233,7 @@ fn run_hosted(
             linger: Duration::from_secs(600),
             heartbeat: d.cfg.heartbeat,
         };
-        // A progress file left by an earlier attempt says nothing about this one.
-        if let Some(f) = watch.and_then(|w| w.progress.as_ref()) {
-            let _ = std::fs::remove_file(cwd.join(f));
-        }
-        spawn_host(&o).map_err(|e| format!("cannot start `{cmd}`: {e}"))?;
+        spawn_host(&o).map_err(|e| HostedErr::Other(format!("cannot start `{cmd}`: {e}")))?;
     }
     let done = Arc::new(AtomicBool::new(false));
     let why = Arc::new(AtomicU8::new(0)); // 0 none, 1 timed out, 2 skipped, 3 gone
@@ -250,9 +306,16 @@ fn run_hosted(
     let rec = match rec {
         Ok(r) => r,
         Err(ClientError::HostLost { .. }) => {
-            return Err("the command was lost (its host died)".into())
+            return Err(match mason_step_host::registry::lost_report(&dir) {
+                Ok(rep) => HostedErr::Lost(rep),
+                Err(_) => HostedErr::Other("the command was lost (its host died)".into()),
+            })
         }
-        Err(e) => return Err(format!("cannot collect the command's result: {e}")),
+        Err(e) => {
+            return Err(HostedErr::Other(format!(
+                "cannot collect the command's result: {e}"
+            )))
+        }
     };
     Ok(Ran {
         code: rec.code,
@@ -444,23 +507,80 @@ struct Tree {
     base: String,
 }
 
-fn env_down(who: &Who, def: &Definition, suite: &Suite, cwd: &Path) {
+/// A device leased for one attempt at a suite. Dropping it frees the device.
+struct Dev {
+    id: String,
+    _lease: mason_devices::lease::DeviceLease,
+}
+
+/// A device for a gate that runs a suite outside its own attempt loop.
+/// `Err` when the suite needs a device and none is free: the gate is skipped,
+/// not failed.
+fn lease_dev(who: &Who, def: &Definition, suite: &Suite) -> Result<Option<Dev>, ()> {
+    let Some((kind, os)) = def
+        .testing
+        .environment(&suite.env)
+        .and_then(|e| crate::targets::kind_of_env(e).map(|k| (k, e.os.clone())))
+    else {
+        return Ok(None);
+    };
+    let label = format!("#{} {}", who.task.map_or(0, |t| t.0 .0), suite.name);
+    match who.d.targets.lease(kind, os.as_deref(), &label) {
+        Some(l) => Ok(Some(Dev {
+            id: l.id.clone(),
+            _lease: l,
+        })),
+        None => Err(()),
+    }
+}
+
+fn dev_id(dev: Option<&Dev>) -> Option<&str> {
+    dev.map(|x| x.id.as_str())
+}
+
+fn env_down(who: &Who, def: &Definition, suite: &Suite, cwd: &Path, dev: Option<&Dev>) {
     if let Some(e) = def.testing.environment(&suite.env) {
         for p in lifecycle::down(e) {
-            let _ = run_shell(&p.command, cwd, Duration::from_secs(300));
+            let _ = run_shell(
+                &lifecycle::with_device(&p.command, dev_id(dev)),
+                cwd,
+                Duration::from_secs(300),
+            );
+        }
+        // The provider lets the device go last, and only what it started.
+        if let Some(dev) = dev {
+            let _ = who.d.targets.provider().teardown(&dev.id);
         }
     }
-    let _ = who;
 }
 
 /// Bring the environment up and wait for it to be healthy. `Err` names what
 /// failed: the environment's fault.
-fn env_up(def: &Definition, suite: &Suite, cwd: &Path) -> Result<(), String> {
+fn env_up(
+    who: &Who,
+    def: &Definition,
+    suite: &Suite,
+    cwd: &Path,
+    dev: Option<&Dev>,
+) -> Result<(), String> {
     let Some(e) = def.testing.environment(&suite.env) else {
         return Ok(());
     };
+    let provider = who.d.targets.provider();
+    if let Some(dev) = dev {
+        provider.prepare(&dev.id).map_err(|x| {
+            format!(
+                "environment `{}`: device {} could not be readied: {x}",
+                e.name, dev.id
+            )
+        })?;
+    }
     for p in lifecycle::up(e) {
-        let (ok, out) = run_shell(&p.command, cwd, Duration::from_secs(600));
+        let (ok, out) = run_shell(
+            &lifecycle::with_device(&p.command, dev_id(dev)),
+            cwd,
+            Duration::from_secs(600),
+        );
         if !ok {
             return Err(format!(
                 "environment `{}` failed at {}: {}",
@@ -470,10 +590,30 @@ fn env_up(def: &Definition, suite: &Suite, cwd: &Path) -> Result<(), String> {
             ));
         }
     }
-    if let Some(h) = lifecycle::health(e) {
-        let end = Instant::now() + e.health_timeout;
+    let end = Instant::now() + e.health_timeout;
+    if let Some(dev) = dev {
         loop {
-            let (ok, out) = run_shell(&h.command, cwd, Duration::from_secs(30));
+            match provider.health(&dev.id) {
+                Ok(()) => break,
+                Err(x) if Instant::now() >= end => {
+                    return Err(format!(
+                        "environment `{}`: device {} was not healthy after {}s: {x}",
+                        e.name,
+                        dev.id,
+                        e.health_timeout.as_secs()
+                    ))
+                }
+                Err(_) => std::thread::sleep(Duration::from_millis(500)),
+            }
+        }
+    }
+    if let Some(h) = lifecycle::health(e) {
+        loop {
+            let (ok, out) = run_shell(
+                &lifecycle::with_device(&h.command, dev_id(dev)),
+                cwd,
+                Duration::from_secs(30),
+            );
             if ok {
                 break;
             }
@@ -500,6 +640,7 @@ fn baseline(
     suite: &Suite,
     base: &str,
     lock: &Arc<std::sync::Mutex<()>>,
+    dev: Option<&Dev>,
 ) -> Option<(Vec<String>, Vec<String>)> {
     if let Ok(Some(b)) = who.d.store.baseline(base, &suite.name) {
         return Some(b);
@@ -515,7 +656,7 @@ fn baseline(
         .ok()?;
     }
     let outcome = (|| {
-        env_up(def, suite, &wt).ok()?;
+        env_up(who, def, suite, &wt, dev).ok()?;
         if let Some(f) = &suite.results_file {
             let _ = std::fs::remove_file(wt.join(f));
         }
@@ -523,7 +664,7 @@ fn baseline(
         let ran = run_hosted(
             &who.d,
             &id,
-            &suite.command,
+            &lifecycle::with_device(&suite.command, dev_id(dev)),
             &wt,
             suite.timeout.unwrap_or(Duration::from_secs(1800)),
             &who.log_dir,
@@ -542,7 +683,7 @@ fn baseline(
             j.results.executed(),
         ))
     })();
-    env_down(who, def, suite, &wt);
+    env_down(who, def, suite, &wt, dev);
     {
         let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
         git::remove_worktree(c_repo, &wt);
@@ -630,8 +771,40 @@ fn run_suite(
                 }
             )));
         };
-        if let Err(why) = env_up(def, suite, cwd) {
-            env_down(who, def, suite, cwd);
+        // A device environment leases one particular device for this attempt.
+        let dev: Option<Dev> = match def
+            .testing
+            .environment(&suite.env)
+            .and_then(|e| crate::targets::kind_of_env(e).map(|k| (k, e.os.clone())))
+        {
+            Some((kind, os)) => {
+                let label = format!("#{} {}", who.task.map_or(0, |t| t.0 .0), suite.name);
+                match d.targets.lease(kind, os.as_deref(), &label) {
+                    Some(l) => Some(Dev {
+                        id: l.id.clone(),
+                        _lease: l,
+                    }),
+                    None => {
+                        environmental(
+                            format!(
+                                "no free {} ({}) is available right now",
+                                kind.noun(),
+                                kind.capability()
+                            ),
+                            String::new(),
+                            on_wait,
+                        );
+                        waiting = true;
+                        attempt += 1;
+                        std::thread::sleep(d.cfg.env_retry);
+                        continue;
+                    }
+                }
+            }
+            None => None,
+        };
+        if let Err(why) = env_up(who, def, suite, cwd, dev.as_ref()) {
+            env_down(who, def, suite, cwd, dev.as_ref());
             environmental(why, String::new(), on_wait);
             waiting = true;
             attempt += 1;
@@ -646,7 +819,7 @@ fn run_suite(
         let ran = match run_hosted(
             d,
             &id,
-            &suite.command,
+            &lifecycle::with_device(&suite.command, dev_id(dev.as_ref())),
             cwd,
             limit,
             &who.log_dir,
@@ -656,7 +829,7 @@ fn run_suite(
         ) {
             Ok(r) => r,
             Err(e) => {
-                env_down(who, def, suite, cwd);
+                env_down(who, def, suite, cwd, dev.as_ref());
                 return SuiteRun::Product {
                     feedback: format!("`{}` could not run: {e}", suite.name),
                 };
@@ -664,7 +837,7 @@ fn run_suite(
         };
         match ran.stop {
             Stop::Skipped => {
-                env_down(who, def, suite, cwd);
+                env_down(who, def, suite, cwd, dev.as_ref());
                 if waiting {
                     on_wait(None);
                 }
@@ -675,7 +848,7 @@ fn run_suite(
                 };
             }
             Stop::Gone => {
-                env_down(who, def, suite, cwd);
+                env_down(who, def, suite, cwd, dev.as_ref());
                 return SuiteRun::Gone;
             }
             Stop::No => {}
@@ -725,7 +898,7 @@ fn run_suite(
                     baseline_failing: None,
                     quarantined: &[],
                 }) {
-                    env_down(who, def, suite, cwd);
+                    env_down(who, def, suite, cwd, dev.as_ref());
                     environmental(format!("matches `{signature}`"), advice, on_wait);
                     waiting = true;
                     attempt += 1;
@@ -743,7 +916,7 @@ fn run_suite(
                 let rerun = if failures.is_empty() {
                     None
                 } else {
-                    rerun_failing(who, suite, cwd, failures, attempt)
+                    rerun_failing(who, suite, cwd, failures, attempt, dev.as_ref())
                 };
                 // Baseline only when something still fails after a rerun.
                 let persistent: Vec<String> = match &rerun {
@@ -757,7 +930,8 @@ fn run_suite(
                 let base = if persistent.is_empty() {
                     None
                 } else {
-                    baseline(who, c_repo, def, suite, &tree.base, repo_lock).map(|b| b.0)
+                    baseline(who, c_repo, def, suite, &tree.base, repo_lock, dev.as_ref())
+                        .map(|b| b.0)
                 };
                 let class = classify(&Inputs {
                     failing: failures,
@@ -769,7 +943,7 @@ fn run_suite(
                 });
                 match class {
                     RedClass::Environmental { signature, advice } => {
-                        env_down(who, def, suite, cwd);
+                        env_down(who, def, suite, cwd, dev.as_ref());
                         environmental(format!("matches `{signature}`"), advice, on_wait);
                         waiting = true;
                         attempt += 1;
@@ -843,7 +1017,7 @@ fn run_suite(
                 }
             }
         };
-        env_down(who, def, suite, cwd);
+        env_down(who, def, suite, cwd, dev.as_ref());
         if waiting {
             on_wait(None);
         }
@@ -859,6 +1033,7 @@ fn rerun_failing(
     cwd: &Path,
     failures: &[String],
     attempt: u32,
+    dev: Option<&Dev>,
 ) -> Option<Vec<String>> {
     let cmd = match &suite.rerun {
         Some(t) => t.replace(
@@ -871,6 +1046,7 @@ fn rerun_failing(
         ),
         None => suite.command.clone(),
     };
+    let cmd = lifecycle::with_device(&cmd, dev_id(dev));
     if let Some(f) = &suite.results_file {
         let _ = std::fs::remove_file(cwd.join(f));
     }
@@ -1146,6 +1322,13 @@ fn gates_failed(
     }
     if step.gates.iter().any(|g| g == "negative_control") {
         for (suite, head) in results {
+            let Ok(dev) = lease_dev(who, &c.def, suite) else {
+                notes.push(format!(
+                    "negative control: not run for `{}`, no free device",
+                    suite.name
+                ));
+                continue;
+            };
             let Some((_, base_names)) = baseline(
                 who,
                 &c.project.path,
@@ -1153,6 +1336,7 @@ fn gates_failed(
                 suite,
                 base,
                 &c.d.repo_lock(c.project_id),
+                dev.as_ref(),
             ) else {
                 continue;
             };
@@ -1160,7 +1344,7 @@ fn gates_failed(
             if new.is_empty() {
                 continue;
             }
-            let at_base = run_new_tests_at_base(c, who, suite, base);
+            let at_base = run_new_tests_at_base(c, who, suite, base, dev.as_ref());
             let bad = match at_base {
                 Some(r) => gates::negative_control(&new, &r),
                 None => new.clone(),
@@ -1182,7 +1366,13 @@ fn gates_failed(
 }
 
 /// Run the suite at the base with the change's test files laid over it.
-fn run_new_tests_at_base(c: &Ctx, who: &Who, suite: &Suite, base: &str) -> Option<Results> {
+fn run_new_tests_at_base(
+    c: &Ctx,
+    who: &Who,
+    suite: &Suite,
+    base: &str,
+    dev: Option<&Dev>,
+) -> Option<Results> {
     let wt = who.log_dir.join(format!("negctl-{}", suite.name));
     let lock = c.d.repo_lock(c.project_id);
     {
@@ -1209,14 +1399,14 @@ fn run_new_tests_at_base(c: &Ctx, who: &Who, suite: &Suite, base: &str) -> Optio
                 let _ = std::fs::copy(&from, &to);
             }
         }
-        env_up(&c.def, suite, &wt).ok()?;
+        env_up(who, &c.def, suite, &wt, dev).ok()?;
         if let Some(f) = &suite.results_file {
             let _ = std::fs::remove_file(wt.join(f));
         }
         let ran = run_hosted(
             &c.d,
             &format!("{}-n-{}", who.id_prefix, suite.name),
-            &suite.command,
+            &lifecycle::with_device(&suite.command, dev_id(dev)),
             &wt,
             suite.timeout.unwrap_or(Duration::from_secs(1800)),
             &who.log_dir,
@@ -1227,7 +1417,7 @@ fn run_new_tests_at_base(c: &Ctx, who: &Who, suite: &Suite, base: &str) -> Optio
         .ok()?;
         Some(judge_ran(suite, &ran, &wt).results)
     })();
-    env_down(who, &c.def, suite, &wt);
+    env_down(who, &c.def, suite, &wt, dev);
     {
         let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
         git::remove_worktree(&c.project.path, &wt);

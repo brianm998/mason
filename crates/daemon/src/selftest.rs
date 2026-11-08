@@ -233,19 +233,7 @@ fn scripted_task() -> Result<String, String> {
             .verify()
             .map_err(|e| format!("the sandbox store is inconsistent: {e}"))?;
         // Hosts of the sandbox end with their steps; make sure none is left.
-        for h in mason_step_host::registry::Registry::new(root.join("d/h"))
-            .scan()
-            .unwrap_or_default()
-        {
-            let _ = nix::sys::signal::killpg(
-                nix::unistd::Pid::from_raw(h.info.child_pid as i32),
-                nix::sys::signal::Signal::SIGKILL,
-            );
-            let _ = nix::sys::signal::kill(
-                nix::unistd::Pid::from_raw(h.info.host_pid as i32),
-                nix::sys::signal::Signal::SIGKILL,
-            );
-        }
+        mason_step_host::registry::reap_verified(&root.join("d/h"));
         Ok("sandbox: a scripted task went from filed to landed".to_string())
     })();
     let _ = std::fs::remove_dir_all(&root);

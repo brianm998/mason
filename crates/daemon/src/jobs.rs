@@ -593,8 +593,12 @@ fn acquire(c: &Ctx) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
             *have = (*have).max(v);
         }
     }
+    // Device pools are sized by what the provider lists, never by a default.
+    if needs.amounts.keys().any(|n| n.starts_with("device:")) {
+        d.targets.declare_all(d);
+    }
     for name in needs.amounts.keys() {
-        if !name.starts_with("llm:") {
+        if !name.starts_with("llm:") && !name.starts_with("device:") {
             d.broker
                 .declare(name, c.def.resources.get(name).copied().unwrap_or(1));
         }
@@ -610,6 +614,7 @@ fn acquire(c: &Ctx) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
             .unwrap_or(true)
     };
     let mut waited = false;
+    let asked = needs.clone();
     let lease = d.broker.acquire(
         c.task,
         &format!("#{}", c.task.0),
@@ -619,7 +624,7 @@ fn acquire(c: &Ctx) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
         &mut |why| {
             waited = c.emit(EventKind::WaitStarted {
                 task: c.task,
-                on: why.to_string(),
+                on: crate::targets::wait_text(d, &asked, why),
             });
         },
     )?;
@@ -685,7 +690,11 @@ pub(crate) fn prepare(c: &Ctx) -> Result<Option<String>, String> {
     // committed. Merging the base into them fails ("your local changes would be
     // overwritten") and failed the task; leave the branch as it is, and the next
     // step folds the base in once the work is committed.
-    let dirty = git::run(&c.wt, &["status", "--porcelain"]).map_err(|e| e.to_string())?;
+    // `--no-optional-locks`: a plain `git status` refreshes the index and takes
+    // `index.lock` to do it. An agent still winding down in this worktree (its step
+    // just superseded) then fails its own `git commit` on that lock.
+    let dirty = git::run(&c.wt, &["--no-optional-locks", "status", "--porcelain"])
+        .map_err(|e| e.to_string())?;
     if !dirty.trim().is_empty() {
         tracing::info!(
             task = c.task.0,
@@ -906,7 +915,8 @@ fn change_validator(
             )),
             Ok(_) => {}
         }
-        let dirty = git::run(&wt, &["status", "--porcelain"]).unwrap_or_default();
+        let dirty =
+            git::run(&wt, &["--no-optional-locks", "status", "--porcelain"]).unwrap_or_default();
         if !dirty.trim().is_empty() {
             problems.push(format!(
                 "the tree has uncommitted changes; commit or discard them:\n{}",
@@ -1542,10 +1552,76 @@ fn again(k: u32) -> String {
     }
 }
 
-/// Run the command once (the `k`th time) under its own step host, or collect
-/// the run a restarted daemon finds already started.
+/// Why one hosted run did not give a result.
+enum Unfinished {
+    /// The host was lost with no exit record: nothing was judged.
+    Lost(mason_step_host::registry::LostReport),
+    Other(String),
+}
+
+impl From<String> for Unfinished {
+    fn from(s: String) -> Self {
+        Unfinished::Other(s)
+    }
+}
+
+/// Run the command once (the `k`th time). If its host is lost before the command
+/// finished, run it once more on a fresh host (id ends `-host1`) and judge that
+/// run; a second loss in a row fails the step and names both. A restarted daemon
+/// finds the run already started, on whichever host it was.
 fn run_command_once(c: &Ctx, cmd: &str, suffix: &str, k: u32) -> Result<CommandRun, String> {
+    use crate::hostloss as hl;
     let id = format!("t{}r{}-{suffix}{}", c.task.0, c.run.0, again(k));
+    let hosts = c.d.cfg.hosts_dir();
+    let rerun = hl::rerun_id(&id);
+    let mut first = None;
+    let mut host = 0;
+    if hosts.join(&rerun).join("host.kv").exists() {
+        host = 1;
+        first = mason_step_host::registry::lost_report(&hosts.join(&id)).ok();
+    }
+    loop {
+        match run_command_on(c, cmd, suffix, k, host) {
+            Ok(r) => return Ok(r),
+            Err(Unfinished::Other(e)) => return Err(e),
+            Err(Unfinished::Lost(rep)) if host == 0 => {
+                hl::record(&c.d, Some(c.run), &c.step.name, &rep, true);
+                let note = format!(
+                    "\n== MASON: the step host was lost ({rep}); running `{}` again on a fresh host. A lost host is not a result: only the completed re-run is judged.\n",
+                    c.step.name
+                );
+                let log = c
+                    .task_dir()
+                    .join(format!("{suffix}-r{}{}.log", c.run.0, again(k)));
+                use std::io::Write as _;
+                if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&log) {
+                    let _ = f.write_all(note.as_bytes());
+                }
+                first = Some(rep);
+                host = 1;
+            }
+            Err(Unfinished::Lost(rep)) => {
+                hl::record(&c.d, Some(c.run), &c.step.name, &rep, false);
+                return Err(match first {
+                    Some(f) => hl::both(&f, &rep),
+                    None => hl::lost_text(&rep),
+                });
+            }
+        }
+    }
+}
+
+/// One run of the command on host number `host` (0 the first, 1 the fresh one),
+/// or collect the run a restarted daemon finds already started.
+fn run_command_on(
+    c: &Ctx,
+    cmd: &str,
+    suffix: &str,
+    k: u32,
+    host: u32,
+) -> Result<CommandRun, Unfinished> {
+    let hsuf = if host == 0 { "" } else { "-host1" };
+    let id = format!("t{}r{}-{suffix}{}{hsuf}", c.task.0, c.run.0, again(k));
     let hosts = c.d.cfg.hosts_dir();
     let dir = hosts.join(&id);
     let limit = c
@@ -1569,7 +1645,7 @@ fn run_command_once(c: &Ctx, cmd: &str, suffix: &str, k: u32) -> Result<CommandR
             heartbeat: c.d.cfg.heartbeat,
         };
         if let Err(e) = spawn_host(&o) {
-            return Err(format!("cannot start the command: {e}"));
+            return Err(format!("cannot start the command: {e}").into());
         }
     }
     // Stop the run if it takes too long.
@@ -1589,12 +1665,12 @@ fn run_command_once(c: &Ctx, cmd: &str, suffix: &str, k: u32) -> Result<CommandR
             }
         });
     }
-    let name = format!("{suffix}-r{}{}", c.run.0, again(k));
+    let name = format!("{suffix}-r{}{}{hsuf}", c.run.0, again(k));
     let log = c.task_dir().join(format!("{name}.log"));
     // Lines and bytes of the output, counted as they arrive. A run found again after a
     // restart first counts what its log holds beyond what the stored record had.
     // Each run of the command is its own stream, since each log starts at 0.
-    let stream = again(k);
+    let stream = format!("{}{hsuf}", again(k));
     c.d.progress_catch_up(c.run, &stream, &log);
     // What the command says about itself in `MASON_PROGRESS_FILE`, as it says it.
     let _tail = {
@@ -1613,9 +1689,12 @@ fn run_command_once(c: &Ctx, cmd: &str, suffix: &str, k: u32) -> Result<CommandR
     let rec = match result {
         Ok(r) => r,
         Err(ClientError::HostLost { .. }) => {
-            return Err("the command was lost (its host died)".into())
+            return Err(match mason_step_host::registry::lost_report(&dir) {
+                Ok(rep) => Unfinished::Lost(rep),
+                Err(_) => Unfinished::Other("the command was lost (its host died)".into()),
+            })
         }
-        Err(e) => return Err(format!("cannot collect the command's result: {e}")),
+        Err(e) => return Err(format!("cannot collect the command's result: {e}").into()),
     };
     // A script may say more than its exit status in a JSON result file.
     let script = match std::fs::read_to_string(result_file(c)) {
@@ -1625,7 +1704,8 @@ fn run_command_once(c: &Ctx, cmd: &str, suffix: &str, k: u32) -> Result<CommandR
                 return Err(format!(
                     "`{}` wrote a result file that cannot be used: {e}",
                     c.step.name
-                ))
+                )
+                .into())
             }
         },
         Err(_) => None,

@@ -5,6 +5,8 @@
 //!   step-host-ctl run ROOT ID [--linger-ms N] [--hb-ms N] -- CMD...
 //!       start a host and collect its output into ROOT/ID/received
 //!   step-host-ctl attach ROOT ID
+//!   step-host-ctl reap ROOT
+//!       kill the verified hosts under ROOT, and only those
 //!       reattach and finish collecting (resumes from the size of `received`)
 //!
 //! On completion it writes ROOT/ID/exit_status (`code=` and `signal=`).
@@ -16,9 +18,19 @@ use std::time::Duration;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.len() < 3 {
+    if args.len() < 3 && !(args.len() == 2 && args[0] == "reap") {
         eprintln!("usage: step-host-ctl run ROOT ID [opts] -- CMD... | attach ROOT ID");
         std::process::exit(2);
+    }
+    if args[0] == "reap" {
+        // Kill only the hosts under ROOT that are verifiably the recorded processes.
+        for r in mason_step_host::registry::reap_verified(&PathBuf::from(&args[1])) {
+            println!(
+                "{} host_killed={} child_group_killed={}",
+                r.id, r.host_killed, r.child_group_killed
+            );
+        }
+        return;
     }
     let root = PathBuf::from(&args[1]);
     let id = &args[2];

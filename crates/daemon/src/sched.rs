@@ -105,6 +105,13 @@ enum Meta {
         /// Seen holding its marker lock at least once.
         locked: bool,
     },
+    /// A slot of a machine class the kernel says is held, by a process the
+    /// broker has no lease for: one that took it before this daemon started
+    /// (a `mason run` that outlived the daemon's restart, say). It counts
+    /// against the class until the kernel says the slot is free.
+    Outside {
+        class: String,
+    },
 }
 
 struct State {
@@ -248,6 +255,26 @@ impl Broker {
         st.ledger.set_capacity(name, units, kind);
     }
 
+    /// A device inventory reading sets how many units a device pool has. Unlike
+    /// `set_limit` it is not the owner's word: nothing is written to
+    /// limits.txt, and an owner-fixed limit wins. Lowering takes nothing from a
+    /// holder. Returns whether anything changed.
+    pub fn set_pool_units(&self, name: &str, units: u32) -> bool {
+        let mut st = lock(&self.st);
+        if st.fixed.contains(name) {
+            return false;
+        }
+        if st.ledger.capacity(name).map(|c| c.units) == Some(units) {
+            return false;
+        }
+        st.ledger.set_capacity(name, units, Kind::Pool);
+        st.pools.insert(name.to_string());
+        self.pass(&mut st);
+        drop(st);
+        self.cv.notify_all();
+        true
+    }
+
     /// Change a limit while things run. Lowering it takes nothing away: it only
     /// stops new grants until the count falls. Survives a restart.
     pub fn set_limit(&self, name: &str, units: u32) -> Result<(), String> {
@@ -323,6 +350,7 @@ impl Broker {
                 changed = true;
             }
         }
+        changed |= self.count_outside_holders(st, now);
         let (floor, free) = (st.floor_mb, self.free_memory(st));
         let p = st.ledger.schedule(now, free, floor);
         for g in &p.grants {
@@ -333,6 +361,75 @@ impl Broker {
         if changed || !p.grants.is_empty() {
             self.cv.notify_all();
         }
+    }
+
+    /// Make the ledger count every machine slot the kernel says is held. A slot
+    /// held by a process the broker has no lease for (it took it before this
+    /// daemon started) would otherwise look free: the broker granted it, and the
+    /// grantee could not take the lock ("a slot is held by another process"),
+    /// again and again until the holder ended. Each such slot is adopted as an
+    /// outside holder, and released once the kernel says the slot is free.
+    /// Only leases holding their locks are compared with the kernel, so a grant
+    /// whose holder has not taken them yet never hides an outside holder.
+    fn count_outside_holders(&self, st: &mut State, now: u64) -> bool {
+        let snap = st.ledger.snapshot();
+        let mut changed = false;
+        for (class, cap) in snap
+            .capacity
+            .iter()
+            .filter(|(_, c)| c.kind == Kind::Machine)
+        {
+            let slots = self.locks.slots(class, cap.units);
+            let kernel = slots.iter().filter(|s| s.is_some()).count() as u32;
+            let mut outside: Vec<u64> = st
+                .meta
+                .iter()
+                .filter(|(_, m)| matches!(m, Meta::Outside { class: c } if c == class))
+                .map(|(id, _)| *id)
+                .collect();
+            outside.sort_unstable();
+            // Only leases that hold their locks: a grant that has not taken them
+            // yet is not one of the slots the kernel counts.
+            let ours: u32 = snap
+                .holders
+                .iter()
+                .filter(|h| !outside.contains(&h.id) && self.locks.alive(h.id))
+                .map(|h| {
+                    if h.needs.exclusive {
+                        cap.units
+                    } else {
+                        h.needs.amounts.get(class).copied().unwrap_or(0)
+                    }
+                })
+                .sum();
+            let want = kernel.saturating_sub(ours) as usize;
+            while outside.len() > want {
+                let id = outside.pop().expect("not empty");
+                st.ledger.release(id);
+                st.meta.remove(&id);
+                changed = true;
+            }
+            let mut labels = slots.iter().flatten().map(|h| h.label.clone());
+            while outside.len() < want {
+                let what = labels.next().unwrap_or_else(|| "unknown".into());
+                let needs = Needs {
+                    exclusive: false,
+                    amounts: BTreeMap::from([(class.clone(), 1)]),
+                };
+                let id = st
+                    .ledger
+                    .adopt(needs, &format!("{what} (held outside the queue)"), now);
+                st.meta.insert(
+                    id,
+                    Meta::Outside {
+                        class: class.clone(),
+                    },
+                );
+                outside.push(id);
+                changed = true;
+            }
+        }
+        changed
     }
 
     /// Wait for a step's resources, all at once. `alive` says whether the step
@@ -721,6 +818,57 @@ mod tests {
     }
 
     #[test]
+    fn a_slot_held_outside_the_broker_is_not_granted_again() {
+        // A `mason run` that outlived a daemon restart still holds its slot, and
+        // the new daemon has no lease for it. It used to grant that slot: the
+        // grantee could not take the lock ("a slot is held by another process")
+        // and tried again, and again, for as long as the old run lasted.
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = ResourceCfg {
+            machine: BTreeMap::from([("compile".to_string(), 2)]),
+            ..Default::default()
+        };
+        let b = Broker::new(
+            dir.path().join("locks"),
+            dir.path().join("limits.kv"),
+            &cfg,
+            2,
+            &[],
+        )
+        .unwrap();
+        let one = BTreeMap::from([("compile".to_string(), 1)]);
+        let old = Locks::new(dir.path().join("locks")).unwrap();
+        let held = old
+            .take(
+                999_999,
+                "tests 37",
+                0,
+                &Take {
+                    classes: one.clone(),
+                    exclusive: false,
+                },
+                &BTreeMap::from([("compile".to_string(), 2)]),
+            )
+            .unwrap();
+        let first = b.lease_open("first", &one);
+        assert!(matches!(b.lease_poll(first), LeaseState::Granted { .. }));
+        assert_eq!(b.used("compile"), 2, "the outside holder counts");
+        let second = b.lease_open("second", &one);
+        assert!(
+            matches!(b.lease_poll(second), LeaseState::Waiting { .. }),
+            "both slots are held: one by the first lease, one outside the broker"
+        );
+        let shown = b.snapshot().to_string();
+        assert!(
+            shown.contains("tests 37 (held outside the queue)"),
+            "{shown}"
+        );
+        // The outside holder ends: the slot is free for the next waiter.
+        drop(held);
+        assert!(matches!(b.lease_poll(second), LeaseState::Granted { .. }));
+    }
+
+    #[test]
     fn exclusive_in_uses_means_the_whole_machine() {
         let uses: BTreeMap<String, u32> =
             [("exclusive".to_string(), 1), ("compile".to_string(), 2)].into();
@@ -733,5 +881,38 @@ mod tests {
     #[test]
     fn free_memory_reads_something_on_this_machine() {
         assert!(measure_free_memory_mb().is_some_and(|m| m > 0));
+    }
+
+    #[test]
+    fn a_device_reading_sizes_a_pool_without_becoming_the_owners_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let limits = dir.path().join("limits.kv");
+        let b = Broker::new(
+            dir.path().join("locks"),
+            limits.clone(),
+            &ResourceCfg::default(),
+            2,
+            &[],
+        )
+        .unwrap();
+        assert!(b.set_pool_units("device:ios-device", 0));
+        assert_eq!(b.limit("device:ios-device"), Some(0));
+        assert!(
+            !b.set_pool_units("device:ios-device", 0),
+            "no change, no news"
+        );
+        assert!(b.set_pool_units("device:ios-device", 2));
+        assert!(
+            b.set_pool_units("device:ios-device", 1),
+            "lowering is allowed"
+        );
+        assert!(
+            !limits.exists(),
+            "a reading is not written as the owner's limit"
+        );
+        // The owner's word wins over a reading.
+        b.set_limit("device:ios-device", 5).unwrap();
+        assert!(!b.set_pool_units("device:ios-device", 1));
+        assert_eq!(b.limit("device:ios-device"), Some(5));
     }
 }

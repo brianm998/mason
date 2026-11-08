@@ -1,0 +1,24 @@
+{
+  "result": {
+    "devices": [
+      {
+        "identifier": "00000000-1111-2222-3333-444444444444",
+        "deviceProperties": {"name": "Brian's iPhone", "osVersionNumber": "17.5.1"},
+        "hardwareProperties": {"platform": "iOS", "udid": "00008110-001234567890801E"},
+        "connectionProperties": {"tunnelState": "connected", "transportType": "wired"}
+      },
+      {
+        "identifier": "00000000-1111-2222-3333-555555555555",
+        "deviceProperties": {"name": "Spare iPhone", "osVersionNumber": "16.7"},
+        "hardwareProperties": {"platform": "iOS", "udid": "00008030-00AABBCCDDEE802E"},
+        "connectionProperties": {"tunnelState": "disconnected", "transportType": "wired"}
+      },
+      {
+        "identifier": "00000000-1111-2222-3333-666666666666",
+        "deviceProperties": {"name": "Apple Watch", "osVersionNumber": "10.5"},
+        "hardwareProperties": {"platform": "watchOS", "udid": "00008000-0000000000000001"},
+        "connectionProperties": {"tunnelState": "connected"}
+      }
+    ]
+  }
+}

@@ -708,6 +708,35 @@ fn launches_are_kept_per_run_in_order_and_survive_reopen() {
 }
 
 #[test]
+fn host_losses_are_kept_per_task_and_survive_reopen() {
+    use mason_store::HostLossRow;
+    let (_d, p) = db();
+    {
+        let mut c = Connection::open(&p).unwrap();
+        migrations::migrate_to(&mut c, 19).unwrap();
+    }
+    let s = Store::open(&p).unwrap();
+    let row = |id: &str, task, at| HostLossRow {
+        host_id: id.into(),
+        task,
+        run: 3,
+        step: "test".into(),
+        lost_at_ms: at,
+        detail: "host pid 1 gone".into(),
+        retried: true,
+    };
+    s.record_host_loss(row("t1r3-test", 1, 100)).unwrap();
+    s.record_host_loss(row("t2r3-test", 2, 200)).unwrap();
+    s.set_host_loss_retried("t2r3-test", false).unwrap();
+    drop(s);
+    let s = Store::open(&p).unwrap();
+    assert_eq!(s.host_losses_for_task(1).unwrap().len(), 1);
+    assert!(!s.host_losses_for_task(2).unwrap()[0].retried);
+    assert_eq!(s.host_losses_since(150).unwrap().len(), 1);
+    assert_eq!(s.host_losses_since(0).unwrap().len(), 2);
+}
+
+#[test]
 fn migration_16_applies_on_15_and_usage_survives_reopening() {
     let (_d, p) = db();
     {

@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+[package]
+name = "mason-devices"
+description = "Device inventory, per-device leases, the fake provider and the waits for a person to plug one in"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+mason-adapter-api = { version = "0.0.0", path = "../adapter-api" }
+nix = { version = "0.31.3", features = ["fs"] }
+serde_json = "1.0.154"
+
+[dev-dependencies]
+tempfile = "3.27.0"

@@ -150,6 +150,16 @@ fn task_json(d: &Daemon, w: &World, t: &Task, detail: bool) -> Value {
             |h| json!({"reasons": h.reasons, "approved_by": h.approved_by, "since": h.at}),
         );
         v["failure"] = t.failure.as_ref().map_or(Value::Null, |f| json!(f));
+        v["host_losses"] = json!(d
+            .store
+            .host_losses_for_task(t.id.0)
+            .unwrap_or_default()
+            .iter()
+            .map(|l| json!({
+                "host": l.host_id, "run": l.run, "step": l.step, "lost_at_ms": l.lost_at_ms,
+                "detail": l.detail, "rerun": l.retried,
+            }))
+            .collect::<Vec<_>>());
         v["question"] = crate::attention::card_of(d, t).map_or(Value::Null, |(c, _)| json!(c.ask));
         v["card"] = crate::attention::card_of(d, t)
             .map_or(Value::Null, |(c, h)| crate::attention::card_json(&c, &h));
@@ -2171,6 +2181,17 @@ async fn resources(Shared(d): Shared<Arc<Daemon>>) -> Res {
     Ok(Json(v))
 }
 
+/// Devices the provider lists, who holds each, and the size of each device pool.
+async fn targets(Shared(d): Shared<Arc<Daemon>>) -> Res {
+    let d2 = d.clone();
+    let v = d
+        .pool
+        .run(move || d2.targets.view(&d2))
+        .await
+        .map_err(pool_err)?;
+    Ok(Json(v))
+}
+
 async fn resource_limit(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res {
     let (name, units) = (
         b["resource"].as_str().unwrap_or_default().to_string(),
@@ -2475,6 +2496,7 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/tasks/{id}/logs", get(logs))
         .route("/tasks/{id}/progress", get(task_progress))
         .route("/resources", get(resources))
+        .route("/targets", get(targets))
         .route("/health", get(health))
         .route("/digest", get(digest))
         .route("/schedules", get(schedules_list))

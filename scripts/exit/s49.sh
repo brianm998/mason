@@ -19,10 +19,8 @@ root=$(mktemp -d /tmp/mason-s49.XXXXXX); daemon=""; watcher=""; w2=""; w3=""
 cleanup() {
   for p in "$watcher" "$w2" "$w3"; do [ -n "$p" ] && kill "$p" 2>/dev/null || true; done
   [ -n "$daemon" ] && kill -9 "$daemon" 2>/dev/null || true
-  for f in "$root"/d/h/*/host.kv; do
-    [ -e "$f" ] || continue
-    for k in host_pid child_pid; do pid=$(sed -n "s/^$k=//p" "$f"); kill -9 "-$pid" 2>/dev/null || kill -9 "$pid" 2>/dev/null || true; done
-  done
+  # Verified before it is killed: a stale pid in a registry may belong to someone else now.
+  for hd in "$root"/d/h; do target/debug/step-host-ctl reap "$hd" >/dev/null 2>&1; done
   rm -rf "$root"
 }
 trap cleanup EXIT
@@ -35,7 +33,14 @@ start_demo() {
   daemon=$!
   until [ -s "$root/d/daemon.json" ]; do kill -0 "$daemon" || { cat "$root/masond.log" >&2; exit 1; }; sleep 0.1; done
 }
-stop_demo() { if kill -9 "$daemon" 2>/dev/null; then wait "$daemon" 2>/dev/null; fi; daemon=""; }
+# The demo is killed with SIGKILL, so `wait` reports 137 (128 + 9). Under `set -e` a bare
+# `wait` ended the whole script there, before step 1's checks ran. Only that status is accepted.
+stop_demo() {
+  if kill -9 "$daemon" 2>/dev/null; then
+    wait "$daemon" 2>/dev/null || [ "$?" -eq 137 ]
+  fi
+  daemon=""
+}
 
 echo "== 1. the demo's six cases, as the daemon's views say them"
 start_demo; "$bin/conformance" expected --port "$(port_of)" --out "$root/expected" | tail -1; stop_demo

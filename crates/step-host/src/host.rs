@@ -6,7 +6,7 @@
 //! journaling; a new controller reattaches by byte offset.
 
 use crate::protocol::{self, Frame, ProtoError, DATA_CHUNK};
-use crate::registry::{now_ms, write_kv, ExitRecord};
+use crate::registry::{now_ms, proc_start, write_kv, ExitRecord};
 use nix::sys::signal::{killpg, Signal};
 use nix::unistd::Pid;
 use std::fs::{self, File, OpenOptions};
@@ -138,6 +138,18 @@ pub fn run(cfg: HostConfig) -> io::Result<()> {
             ("id", cfg.id.clone()),
             ("host_pid", std::process::id().to_string()),
             ("child_pid", child_pid.to_string()),
+            (
+                "host_start",
+                proc_start(std::process::id()).unwrap_or_default(),
+            ),
+            (
+                "child_start",
+                if child_pid > 0 {
+                    proc_start(child_pid).unwrap_or_default()
+                } else {
+                    String::new()
+                },
+            ),
             ("sock", sock_path.display().to_string()),
             ("started_ms", now_ms().to_string()),
             ("heartbeat_ms", cfg.heartbeat.as_millis().to_string()),
