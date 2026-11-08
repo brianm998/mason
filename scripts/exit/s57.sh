@@ -123,6 +123,15 @@ phase() {  # NAME: a fresh config dir and data dir
   rm -rf "$root/d"
   cdir="$root/c-$1"; mkdir -p "$cdir/projects"
   : > "$root/masond.log"
+  cat > "$cdir/providers.toml" <<TOML
+[provider.claude]
+adapter = "claude"
+billing = "subscription"
+
+[provider.codex]
+adapter = "codex"
+billing = "subscription"
+TOML
 }
 run_task() {  # ID: add a task to the project and wait for it to land
   m task add "add hello" --project "$1" --body x >/dev/null
