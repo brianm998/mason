@@ -218,6 +218,7 @@ struct TaskDetailPage: View {
 
             if d.hasCard { DecisionCardView(model: model, task: r.id, card: d.card) }
             if d.hasApproval { ApprovalView(model: model, task: r.id, approval: d.approval) }
+            if d.hasProposal { ProposalView(model: model, row: r, info: d.proposal, title: r.title) }
             if !d.failure.isEmpty {
                 Text("Failed: \(d.failure)").font(theme.body()).foregroundStyle(theme.attention)
             }

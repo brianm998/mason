@@ -49,3 +49,31 @@ data class HealthSnapshot(
         }
     }
 }
+
+/** The daemon's answer to a publish preview: the redacted text, and what it would touch. */
+data class PublishPreview(
+    val title: String = "",
+    val body: String = "",
+    val head: String = "",
+    val base: String = "",
+    val files: List<String> = emptyList(),
+    val redactions: Int = 0,
+    val blocked: String? = null,
+    val pr: Int? = null,
+) {
+    companion object {
+        fun parse(json: String): PublishPreview {
+            val v = Codec.json(json) ?: return PublishPreview()
+            return PublishPreview(
+                title = v["title"] as? String ?: "",
+                body = v["body"] as? String ?: "",
+                head = v["head"] as? String ?: "",
+                base = v["base"] as? String ?: "",
+                files = (v["files"] as? List<*>)?.mapNotNull { it as? String } ?: emptyList(),
+                redactions = (v["redactions"] as? Number)?.toInt() ?: 0,
+                blocked = v["blocked"] as? String,
+                pr = (v["pr"] as? Number)?.toInt(),
+            )
+        }
+    }
+}

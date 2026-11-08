@@ -15,7 +15,7 @@ run() {
 }
 
 run "the words: ages, resets, trends, overage, blocked" -p mason-core usage_text
-run "the store: migration 15, thinned and pruned readings, per-attempt tokens" \
+run "the store: migration 16, thinned and pruned readings, per-attempt tokens" \
     -p mason-store --test store usage
 run "a real daemon with the fake agent: windows, restart with age, no-percentage window, api spend, token attribution, mason usage --json" \
     -p mason-daemon --test usage
@@ -47,7 +47,7 @@ else
   echo "Swift not run here"
 fi
 if [ $kt_ok = 1 ]; then
-  (cd clients/compose && gradle --no-daemon -q :app:installDist 2>&1 | grep -vE '^$' | head -5 || true)
+  (cd clients/compose && gradle --no-daemon -q :app:installDist)
   clients/compose/app/build/install/app/bin/app usage --port "$port" --out "$root/kt"
   "$bin/conformance" check --expected "$root/exp" --actual "$root/kt"
 else

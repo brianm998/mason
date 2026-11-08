@@ -169,6 +169,7 @@ private fun RowView(model: MonitorModel, row: TaskRow) {
                 Text(row.title, style = theme.body(), maxLines = 2, overflow = TextOverflow.Ellipsis)
             }
             Text("${row.project}, ${row.why_waiting.ifEmpty { row.activity }}", style = theme.small(), maxLines = 2, overflow = TextOverflow.Ellipsis)
+            if (row.proposal.isNotEmpty()) Text(row.proposal, style = theme.small(), modifier = Modifier.testTag("row:${row.id}:proposal"))
             Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing), verticalAlignment = Alignment.CenterVertically) {
                 Text(Format.duration(row.in_state_ms), style = theme.small(color = if (row.slow) theme.slow else theme.muted))
                 if (row.typical.isNotEmpty()) Text(row.typical, style = theme.small())
