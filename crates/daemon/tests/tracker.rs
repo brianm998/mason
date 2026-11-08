@@ -692,6 +692,14 @@ fn a_limit_refusal_raises_an_alert_naming_the_issues_and_clears_when_they_import
         tracker_section("queued", "")
     ));
     let mut items = recorded(&d);
+    // Issues by an owner name are never refused for a count; outside issues the owner
+    // labeled are, so make these outside ones.
+    for it in items.iter_mut() {
+        it.author = "stranger".into();
+        if !it.labels.iter().any(|l| l == "mason") {
+            it.labels.push("mason".into());
+        }
+    }
     let sum = sync_items(&d, pid, "mason", &items);
     assert_eq!((sum.imported, sum.refused), (3, 3), "{sum:?}");
     let a = not_imported(&d);
