@@ -439,6 +439,25 @@ const STEPS: &[&str] = &[
          status   TEXT NOT NULL,
          verdict  TEXT NOT NULL DEFAULT '',
          at       INTEGER NOT NULL
+      );",
+    // 18: account holds (s67). One row per held account, so a restart during a hold keeps it;
+    // and the warnings already given (one per window per reset).
+    "CREATE TABLE account_holds (
+         account    TEXT PRIMARY KEY,
+         kind       TEXT NOT NULL,
+         why        TEXT NOT NULL,
+         since_ms   INTEGER NOT NULL,
+         until_ms   INTEGER,
+         backoff_ms INTEGER NOT NULL DEFAULT 0,
+         probe_ms   INTEGER NOT NULL DEFAULT 0,
+         by         TEXT NOT NULL DEFAULT 'pipeline'
+     );
+     CREATE TABLE account_warnings (
+         account   TEXT NOT NULL,
+         win       TEXT NOT NULL,
+         resets_at INTEGER NOT NULL,
+         at_ms     INTEGER NOT NULL,
+         PRIMARY KEY (account, win, resets_at)
      );",
     // 18: notifications (Part 19). An alert can be acknowledged (which stops its noise but not
     // its visibility) and is reminded at most once. `deliveries` is every attempt to reach the

@@ -13,6 +13,7 @@ pub mod daemon;
 pub mod defs;
 pub mod demo;
 pub mod editor;
+pub mod holds;
 pub mod http;
 pub mod improve;
 pub mod introspect;

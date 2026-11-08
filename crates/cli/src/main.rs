@@ -64,6 +64,8 @@ mason: command-line client for the MASON pipeline
   mason task open <id> [--anyway]     open an interactive agent in the task's worktree, resuming its session
   mason pause [--project P] [--mode all|claims|landing] --for 2h   hold work back (all stops at the next step)
   mason resume [--project P] [--mode M] | mason pause list
+  mason account hold <name> [--for 2h] [--reason R] | mason account release <name>
+                                      hold an LLM account by hand, or release a hold now (try again at once)
   mason alerts [--all]                what needs a look right now (and, with --all, what already cleared)
   mason alerts ack KEY                acknowledge an alert: it stops reminding and stays listed while true
   mason notify [status]               where each condition is routed, and what is set up (notify.toml)
@@ -934,6 +936,45 @@ fn main() {
                 );
             }
         },
+        "account" => {
+            let sub = a
+                .pos()
+                .unwrap_or_else(|| die("account hold <name> | account release <name>"));
+            let name = a.pos().unwrap_or_else(|| die("which account?"));
+            let by = std::env::var("MASON_AS")
+                .or_else(|_| std::env::var("USER"))
+                .unwrap_or_default();
+            match sub.as_str() {
+                "hold" => {
+                    let for_s = a
+                        .opt("--for")
+                        .and_then(|v| mason_definition::model::parse_duration(&v))
+                        .map(|d| d.as_secs());
+                    let reason = a.opt("--reason").unwrap_or_default();
+                    finish(&a);
+                    or_die(d.call(
+                        "POST",
+                        "/account/hold",
+                        Some(&json!({"account": name, "for_s": for_s, "reason": reason, "by": by})),
+                    ));
+                    println!("Held {name}: no new session starts on it. `mason account release {name}` lifts it.");
+                }
+                "release" => {
+                    finish(&a);
+                    let r = or_die(d.call(
+                        "POST",
+                        "/account/release",
+                        Some(&json!({"account": name, "by": by})),
+                    ));
+                    if r["released"].as_bool().unwrap_or(false) {
+                        println!("Released {name}: waiting tasks try again now.");
+                    } else {
+                        println!("{name} was not held.");
+                    }
+                }
+                other => die(&format!("unknown account command {other:?}\n\n{HELP}")),
+            }
+        }
         "resume" => {
             let project = a.opt("--project").unwrap_or_default();
             let mode = a.opt("--mode").unwrap_or_default();

@@ -319,6 +319,8 @@ pub fn alerts_now(d: &Daemon) -> Vec<(String, String, String)> {
             format!("Paused ({}) for {scope} by {}", p.mode, p.owner),
         ));
     }
+    // A provider event is one item, whatever number of tasks wait on it.
+    out.extend(crate::holds::alerts(d));
     let owed = d.store.debts(None, true).unwrap_or_default().len();
     if owed > 0 {
         out.push((
