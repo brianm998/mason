@@ -241,6 +241,11 @@ impl Daemon {
         self.tracker.stopped(p)
     }
 
+    /// What the last look at a project's tracker found.
+    pub fn tracker_record(&self, p: ProjectId) -> Option<crate::tracker::PollRecord> {
+        self.tracker.record(p)
+    }
+
     /// Open issues the tracker has not imported (or whose task was canceled), with why.
     pub fn tracker_pending(&self, p: ProjectId) -> Vec<crate::tracker::Waiting> {
         self.tracker.pending(p)

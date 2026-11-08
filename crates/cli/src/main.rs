@@ -354,6 +354,7 @@ fn main() {
         for f in &findings {
             let mark = match f.level {
                 doctor::Level::Ok => "ok  ",
+                doctor::Level::Note => "note",
                 doctor::Level::Warn => "warn",
                 doctor::Level::Fail => {
                     bad = true;
@@ -2503,12 +2504,15 @@ fn main() {
                             "{}",
                             r["note"].as_str().unwrap_or("the project has no tracker")
                         );
+                        if let Some(c) = r["config"].as_str() {
+                            println!("config: {c}");
+                        }
                     } else if let Some(e) = r["error"].as_str() {
                         println!("the tracker did not answer: {e}");
                     } else {
                         println!(
-                            "asked the tracker: {} imported, {} updated, {} closed",
-                            r["imported"], r["updated"], r["closed"]
+                            "asked the tracker: {} imported, {} updated, {} closed, {} ignored, {} unchanged, {} waiting for a slot",
+                            r["imported"], r["updated"], r["closed"], r["ignored"], r["unchanged"], r["waiting_slot"]
                         );
                     }
                 }

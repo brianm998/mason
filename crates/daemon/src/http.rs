@@ -217,6 +217,7 @@ async fn status(Shared(d): Shared<Arc<Daemon>>) -> Res {
                 "bugs": d2.store.bugs().map_or(0, |b| b.len()),
                 "projects": d2.projects.values().map(|p| p.id.clone()).collect::<Vec<_>>(),
                 "step_hosts_running": running,
+                "trackers": d2.projects.keys().map(|pid| crate::tracker::state_json(&d2, *pid)).collect::<Vec<_>>(),
                 "definitions": d2.projects.iter().map(|(pid, p)| json!({
                     "project": p.id,
                     "hash": d2.current_def(*pid).hash,
@@ -1558,11 +1559,16 @@ async fn refresh_tracker(Shared(d): Shared<Arc<Daemon>>, Path(id): Path<u64>) ->
             let pid = t.project;
             let p = d2.project(pid).ok_or_else(|| fail(StatusCode::NOT_FOUND, "no such project"))?;
             let Some((adapter, cfg)) = crate::services::tracker(p).map_err(|e| fail(StatusCode::BAD_REQUEST, e))? else {
-                return Ok(json!({"tracker": false, "note": "the project has no tracker"}));
+                let cfg = d2.cfg.config_dir.join("projects").join(format!("{}.toml", p.id));
+                return Ok(json!({
+                    "tracker": false,
+                    "config": cfg.display().to_string(),
+                    "note": format!("{} has no tracker: nothing is imported from its issues until a [tracker] section is added to {} (see docs/self-hosting.md)", p.id, cfg.display()),
+                }));
             };
             d2.tracker.refresh(pid);
             match crate::tracker::poll_once(&d2, pid, adapter.as_ref(), &cfg) {
-                Ok(s) => Ok(json!({"tracker": true, "imported": s.imported, "updated": s.updated, "closed": s.closed, "refused": s.refused, "adopted": s.adopted})),
+                Ok(s) => Ok(json!({"tracker": true, "imported": s.imported, "updated": s.updated, "closed": s.closed, "ignored": s.ignored, "unchanged": s.unchanged, "waiting_slot": s.refused, "adopted": s.adopted})),
                 Err(e) => Ok(json!({"tracker": true, "error": e})),
             }
         })

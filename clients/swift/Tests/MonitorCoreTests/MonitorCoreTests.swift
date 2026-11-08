@@ -662,6 +662,21 @@ final class MonitorCoreTests: XCTestCase {
         XCTAssertEqual(h.left + h.dx, GraphLayout.pad)
     }
 
+    func testTheLandingViewCarriesOneTrackerLinePerProject() {
+        let m = MonitorModel()
+        var l = LandingView()
+        l.trackers = [
+            "mason: tracker off; issues are not imported, add [tracker] to /c/projects/mason.toml",
+            "web: tracker stopped: HTTP 404 (/c/projects/web.toml)",
+        ]
+        var v = Mason_V1_View()
+        v.body = .landing(l)
+        m.apply(v)
+        XCTAssertEqual(m.landing?.trackers.count, 2)
+        XCTAssertTrue(m.landing?.trackers[0].contains("tracker off") ?? false)
+        XCTAssertTrue(m.landing?.trackers[1].contains("stopped: HTTP 404") ?? false)
+    }
+
     func testGraphNegativeLayoutX() {
         let h = GraphLayout.horizontal(nodeXs: [-300, 100], backEdges: [], viewport: 0)
         XCTAssertGreaterThanOrEqual(h.left + h.dx, 0)
