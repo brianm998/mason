@@ -3,7 +3,10 @@
 use mason_step_host::client::{collect_to_file, ClientError, Event, HostClient};
 use mason_step_host::launcher::{spawn_host, SpawnOptions};
 use mason_step_host::protocol::{self, Frame};
-use mason_step_host::registry::{pid_alive, ExitRecord, HostState, Registry};
+use mason_step_host::registry::{
+    lost_report, pid_alive, proc_start, read_kv, reap_dir, reap_verified, write_kv, ExitRecord,
+    HostState, Registry,
+};
 use std::io::Write;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -198,6 +201,27 @@ fn the_registry_tells_running_exited_and_lost_apart() {
         "journal kept what was written before the death"
     );
 
+    // The report says what is known: the host is gone, its child is not, the parent
+    // saw signal 9, and the journal holds 8 bytes ending on a newline.
+    let rep = lost_report(&reg.host_dir("lost")).unwrap();
+    assert_eq!(
+        (rep.host_pid, rep.child_pid),
+        (lost.host_pid, lost.child_pid)
+    );
+    assert!(!rep.host_alive && rep.child_alive, "{rep:?}");
+    assert_eq!(rep.signal, Some(9));
+    assert_eq!((rep.journal_len, rep.ends_mid_line), (8, false));
+    assert!(rep.last_heartbeat_ms.is_some() && rep.at_ms > 0);
+    let text = rep.to_string();
+    assert!(
+        text.starts_with(&format!("host pid {} gone at ", lost.host_pid)),
+        "{text}"
+    );
+    assert!(
+        text.contains("killed by signal 9, no exit record"),
+        "{text}"
+    );
+
     // The controller can still salvage that output from disk.
     let dir = reg.host_dir("lost");
     match collect_to_file(&dir, &dir.join("rx"), &dir.join("ex")) {
@@ -206,11 +230,9 @@ fn the_registry_tells_running_exited_and_lost_apart() {
     }
     assert_eq!(std::fs::read(dir.join("rx")).unwrap(), b"partial\n");
 
-    // Cleanup of the child the killed host left behind.
-    let _ = nix::sys::signal::killpg(
-        nix::unistd::Pid::from_raw(lost.child_pid as i32),
-        nix::sys::signal::Signal::SIGKILL,
-    );
+    // Cleanup of the child the killed host left behind (verified before it is killed).
+    let r = reap_dir(&dir);
+    assert!(r.child_group_killed && !r.host_killed, "{r:?}");
     connect(&running.sock).stop(100).unwrap();
     let _ = exited;
 }
@@ -476,4 +498,108 @@ fn stdin_comes_from_a_file_and_clear_env_hides_ours() {
         "from a file\nleak=[] kept=[yes]\n"
     );
     assert_eq!(rec.code, 0);
+}
+
+fn set_kv(dir: &Path, f: impl FnOnce(&mut std::collections::HashMap<String, String>)) {
+    let mut kv = read_kv(&dir.join("host.kv")).unwrap();
+    f(&mut kv);
+    let pairs: Vec<(&str, String)> = kv.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
+    write_kv(&dir.join("host.kv"), &pairs).unwrap();
+}
+
+#[test]
+fn a_lost_report_notices_a_journal_cut_off_mid_line() {
+    let (_d, r) = root();
+    let h = spawn_host(&opts(&r, "cut", "printf abc; sleep 30")).unwrap();
+    wait_until("output", || {
+        std::fs::metadata(r.join("cut/journal")).is_ok_and(|m| m.len() == 3)
+    });
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(h.host_pid as i32),
+        nix::sys::signal::Signal::SIGKILL,
+    )
+    .unwrap();
+    wait_until("host death", || !pid_alive(h.host_pid));
+    let rep = lost_report(&r.join("cut")).unwrap();
+    assert!(rep.ends_mid_line && rep.journal_len == 3, "{rep:?}");
+    assert!(rep.to_string().contains("cut off mid-line"));
+    reap_dir(&r.join("cut"));
+}
+
+#[test]
+fn reap_leaves_a_recycled_pid_alone() {
+    let (_d, r) = root();
+    let h = spawn_host(&opts(&r, "live", "sleep 30")).unwrap();
+    let dir = r.join("live");
+    let orig = read_kv(&dir.join("host.kv")).unwrap();
+    assert!(!orig["host_start"].is_empty() && !orig["child_start"].is_empty());
+    // The pids are alive, and the host's command line names step-host and the directory,
+    // but the start strings say these are not the processes that were recorded.
+    set_kv(&dir, |kv| {
+        kv.insert("host_start".into(), "Thu Jan  1 00:00:00 1970".into());
+        kv.insert("child_start".into(), "Thu Jan  1 00:00:00 1970".into());
+    });
+    let out = reap_dir(&dir);
+    assert!(!out.host_killed && !out.child_group_killed, "{out:?}");
+    assert!(pid_alive(h.host_pid) && pid_alive(h.child_pid));
+    // Entries from an older host carry no start strings at all.
+    set_kv(&dir, |kv| {
+        kv.remove("host_start");
+        kv.remove("child_start");
+    });
+    let out = reap_dir(&dir);
+    assert!(!out.host_killed && !out.child_group_killed, "{out:?}");
+    assert!(pid_alive(h.host_pid) && pid_alive(h.child_pid));
+    // The true entry is killed.
+    set_kv(&dir, |kv| {
+        kv.extend(orig);
+    });
+    let out = reap_dir(&dir);
+    assert!(out.host_killed && out.child_group_killed, "{out:?}");
+}
+
+#[test]
+fn reap_leaves_another_process_and_protected_pids_alone() {
+    let (_d, r) = root();
+    let h = spawn_host(&opts(&r, "base", "sleep 30")).unwrap();
+    let dir = r.join("base");
+    // Another process with correct start strings: not a step host, not a group leader.
+    let mut other = Command::new("sleep").arg("30").spawn().unwrap();
+    let pid = other.id();
+    let start = proc_start(pid).unwrap();
+    set_kv(&dir, |kv| {
+        kv.insert("host_pid".into(), pid.to_string());
+        kv.insert("child_pid".into(), pid.to_string());
+        kv.insert("host_start".into(), start.clone());
+        kv.insert("child_start".into(), start.clone());
+    });
+    let out = reap_dir(&dir);
+    assert!(!out.host_killed && !out.child_group_killed, "{out:?}");
+    assert!(pid_alive(pid));
+    // Pids 0 and 1, and our own pid and group, are never signalled (we would not be here).
+    let own = std::process::id();
+    let own_start = proc_start(own).unwrap();
+    let own_pg = nix::unistd::getpgrp().as_raw() as u32;
+    for (host, child) in [(0, 0), (1, 1), (own, own), (own_pg, own_pg)] {
+        set_kv(&dir, |kv| {
+            kv.insert("host_pid".into(), host.to_string());
+            kv.insert("child_pid".into(), child.to_string());
+            kv.insert("host_start".into(), own_start.clone());
+            kv.insert("child_start".into(), own_start.clone());
+        });
+        let out = reap_dir(&dir);
+        assert!(
+            !out.host_killed && !out.child_group_killed,
+            "{host}: {out:?}"
+        );
+    }
+    let _ = other.kill();
+    let _ = other.wait();
+    // Put the real pids back and finish the host properly.
+    set_kv(&dir, |kv| {
+        kv.insert("host_pid".into(), h.host_pid.to_string());
+        kv.insert("child_pid".into(), h.child_pid.to_string());
+    });
+    connect(&h.sock).stop(100).unwrap();
+    let _ = reap_verified(&r);
 }
