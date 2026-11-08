@@ -30,7 +30,8 @@ border = "#2C3137"
 
 [size]
 # Points on macOS and iOS, dp on Android, px elsewhere.
-tile_width = 96
+# Minimum tile width; a tile is otherwise as wide as its label plus spacing each side.
+tile_min_width = 64
 tile_height = 64
 sidebar_width = 300
 row_height = 56

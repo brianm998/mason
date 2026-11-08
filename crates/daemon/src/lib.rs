@@ -22,6 +22,7 @@ pub mod pool;
 pub mod progress;
 pub mod prompts;
 pub mod protect;
+pub mod providers;
 pub mod sched;
 pub mod selfguard;
 pub mod selftest;

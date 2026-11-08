@@ -343,7 +343,13 @@ fn two_different_definitions_run_through_the_same_daemon() {
 #[test]
 fn an_invalid_definition_edit_is_refused_and_the_old_one_keeps_running() {
     let s = scratch_with(Some(DEF_SKIP), happy_script());
-    let d = s.start();
+    // This is about the explicit reload, so the watcher is kept out of the way: it
+    // fetches on its own schedule, and if it applied the new definition between the
+    // push and the explicit reload, that reload rightly said `Unchanged`.
+    let d = s.start_with(|c| {
+        c.reload_interval = Duration::from_secs(3600);
+        c.fetch_interval = Duration::from_secs(3600);
+    });
     let pid = d.project_id_by_name("scratch").unwrap();
     let good_hash = d.current_def(pid).hash.clone();
     assert!(d.definition_error(pid).is_none());
@@ -377,6 +383,10 @@ fn an_invalid_definition_edit_is_refused_and_the_old_one_keeps_running() {
     let t = flagged(&d, "Still works");
     wait_state(&d, t, State::Landed, 90);
     assert_eq!(task_of(&d, t).def, good_hash);
+    // After the `Landed` event the landing job cleans up and then reloads the
+    // definition itself (the base just moved). Let it finish, or that reload can
+    // apply the edit below first and the explicit one finds nothing to do.
+    wait_for("the landing job to finish", 60, || d.job_count() == 0);
 
     // A valid edit replaces it and clears the report.
     s.push_files(&[(".mason/mason.toml", DEF_LINT)], "a good one");

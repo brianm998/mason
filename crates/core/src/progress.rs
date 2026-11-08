@@ -77,6 +77,17 @@ pub struct SubProgress {
     pub total: Figure,
 }
 
+/// One item of an agent's todo list.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct TodoItem {
+    pub text: String,
+    /// "pending", "doing" or "done".
+    pub status: String,
+}
+
+/// The most log lines kept for one push.
+pub const LOG_KEEP: usize = 40;
+
 /// The progress of one step run.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct Progress {
@@ -91,6 +102,20 @@ pub struct Progress {
     /// The last time anything in the record moved.
     pub updated_at_ms: u64,
     pub subs: Vec<SubProgress>,
+    /// The agent's todo list, if it keeps one.
+    pub todo: Vec<TodoItem>,
+    /// With a `history` total, the low end of the typical range (`total` is the high end).
+    pub total_low: u64,
+    /// How many past runs the typical figures come from.
+    pub history_samples: u32,
+    /// The longest quiet gap between two outputs of this run so far.
+    pub max_gap_ms: u64,
+    /// The usual quiet time before this step counts as silent, from past runs (0: none known).
+    pub stale_after_ms: u64,
+    /// Whole lines seen since the last push, at most [`LOG_KEEP`] (not stored).
+    pub pending_log: Vec<String>,
+    /// The unfinished last line of each stream (not stored).
+    pub partial: std::collections::BTreeMap<String, Vec<u8>>,
     /// Per output stream (a step host's journal), how far into it the bytes are
     /// already counted. A step can have several (an agent's resumed sessions).
     pub marks: std::collections::BTreeMap<String, u64>,
@@ -131,7 +156,14 @@ impl Progress {
         let fresh = &bytes[skip.min(bytes.len())..];
         self.output.lines += fresh.iter().filter(|b| **b == b'\n').count() as u64;
         self.output.bytes += fresh.len() as u64;
+        let since = if self.output.last_output_ms > 0 {
+            self.output.last_output_ms
+        } else {
+            self.started_ms
+        };
+        self.max_gap_ms = self.max_gap_ms.max(at_ms.saturating_sub(since));
         self.output.last_output_ms = at_ms;
+        self.take_lines(stream, fresh);
         self.marks.insert(stream.to_string(), end);
         self.updated_at_ms = at_ms;
         // Without a reported figure the count of lines is the count.
@@ -140,6 +172,25 @@ impl Progress {
             self.done = Figure::counted(self.output.lines);
         }
         Change::Output
+    }
+
+    /// Cut `fresh` into whole lines: the unfinished end waits for the next bytes.
+    fn take_lines(&mut self, stream: &str, fresh: &[u8]) {
+        let buf = self.partial.entry(stream.to_string()).or_default();
+        buf.extend_from_slice(fresh);
+        while let Some(i) = buf.iter().position(|b| *b == b'\n') {
+            let line: Vec<u8> = buf.drain(..=i).collect();
+            let text = String::from_utf8_lossy(&line[..line.len() - 1])
+                .trim_end_matches('\r')
+                .to_string();
+            self.pending_log.push(text);
+        }
+        // A line that never ends is cut, not grown without limit.
+        if buf.len() > 8192 {
+            buf.clear();
+        }
+        let extra = self.pending_log.len().saturating_sub(LOG_KEEP);
+        self.pending_log.drain(..extra);
     }
 
     /// The step reports how many it has done (and in what unit, if given).
@@ -176,11 +227,28 @@ impl Progress {
     }
 
     /// Offer the typical figure as a total, if no real total is known.
-    pub fn offer_history_total(&mut self, total: Option<u64>) {
+    /// `range` is the typical `(low, high)`; `samples` is how many runs it comes from.
+    pub fn offer_history_total(&mut self, range: Option<(u64, u64)>, samples: usize) {
         if self.total.is_real() {
             return;
         }
-        self.total = total.map_or(Figure::default(), Figure::history);
+        match range {
+            Some((lo, hi)) => {
+                self.total = Figure::history(hi);
+                self.total_low = lo;
+                self.history_samples = samples as u32;
+            }
+            None => {
+                self.total = Figure::default();
+                self.total_low = 0;
+                self.history_samples = 0;
+            }
+        }
+    }
+
+    /// The whole percent done, only from a real total: rounded down, at most 100.
+    pub fn percent(&self) -> Option<u32> {
+        percent(self.done.value, self.real_total()?)
     }
 
     /// The total to show as a real one, if there is one.
@@ -207,6 +275,31 @@ pub fn middle_half(samples: &[u64]) -> Option<(u64, u64)> {
 /// half, or none under five samples.
 pub fn history_total(samples: &[u64]) -> Option<u64> {
     middle_half(samples).map(|(_, hi)| hi)
+}
+
+/// The whole percent `done` is of `total`: rounded down, at most 100, none for a total of 0.
+/// Callers pass only real totals; a typical figure never gets a percentage.
+pub fn percent(done: u64, total: u64) -> Option<u32> {
+    if total == 0 {
+        return None;
+    }
+    Some((done.min(total) as u128 * 100 / total as u128) as u32)
+}
+
+/// How long a step may be quiet before it is shown as silent, with too few past runs to say.
+pub const DEFAULT_STALE_MS: u64 = 300_000;
+/// The least quiet time ever called silent.
+pub const MIN_STALE_MS: u64 = 30_000;
+
+/// The quiet time after which a step is shown as silent: the high end of the middle half
+/// of the longest gaps in past successful runs, or [`DEFAULT_STALE_MS`] with under five.
+pub fn stale_after(gaps: &[u64]) -> u64 {
+    middle_half(gaps).map_or(DEFAULT_STALE_MS, |(_, hi)| hi.max(MIN_STALE_MS))
+}
+
+/// True when nothing has moved for longer than `after_ms`.
+pub fn is_stale(now_ms: u64, moved_ms: u64, after_ms: u64) -> bool {
+    moved_ms > 0 && now_ms.saturating_sub(moved_ms) > after_ms
 }
 
 /// How often an output-only change is sent, at most.
@@ -336,15 +429,59 @@ mod tests {
     #[test]
     fn history_total_is_never_real() {
         let mut p = Progress::new(1, "t", 0);
-        p.offer_history_total(Some(70));
+        p.offer_history_total(Some((40, 70)), 8);
         assert_eq!(p.total, Figure::history(70));
+        assert_eq!((p.total_low, p.history_samples, p.percent()), (40, 8, None));
         assert_eq!(p.real_total(), None);
         p.report_total(5, 1);
-        p.offer_history_total(Some(70));
+        p.offer_history_total(Some((40, 70)), 8);
         assert_eq!(p.total, Figure::reported(5));
         let mut q = Progress::new(2, "t", 0);
-        q.offer_history_total(None);
+        q.offer_history_total(None, 0);
         assert_eq!(q.total.source, Source::None);
+    }
+
+    #[test]
+    fn percent_is_floored_capped_and_real_only() {
+        assert_eq!(percent(212, 340), Some(62));
+        assert_eq!(percent(3, 7), Some(42));
+        assert_eq!(percent(1, 1000), Some(0));
+        assert_eq!(percent(999, 1000), Some(99));
+        assert_eq!(percent(400, 340), Some(100));
+        assert_eq!(percent(5, 0), None);
+        let mut p = Progress::new(1, "t", 0);
+        p.report_done("tests", 212, 1);
+        assert_eq!(p.percent(), None);
+        p.report_total(340, 2);
+        assert_eq!(p.percent(), Some(62));
+    }
+
+    #[test]
+    fn stale_rule() {
+        assert_eq!(stale_after(&[1, 2, 3, 4]), DEFAULT_STALE_MS);
+        assert_eq!(stale_after(&[100; 8]), MIN_STALE_MS);
+        let gaps = [
+            60_000, 90_000, 120_000, 150_000, 180_000, 240_000, 300_000, 600_000,
+        ];
+        assert_eq!(stale_after(&gaps), 300_000);
+        assert!(!is_stale(1_000_000, 1_000_000 - 300_000, 300_000));
+        assert!(is_stale(1_000_000, 1_000_000 - 300_001, 300_000));
+        assert!(!is_stale(1_000_000, 0, 300_000));
+    }
+
+    #[test]
+    fn gaps_and_log_lines() {
+        let mut p = Progress::new(1, "t", 1000);
+        p.output("", 0, b"one\ntw", 1500);
+        p.output("", 6, b"o\r\nthree\n", 4500);
+        assert_eq!(p.max_gap_ms, 3000);
+        assert_eq!(p.pending_log, vec!["one", "two", "three"]);
+        let big: Vec<u8> = (0..100)
+            .flat_map(|i| format!("l{i}\n").into_bytes())
+            .collect();
+        p.output("b", 0, &big, 4600);
+        assert_eq!(p.pending_log.len(), LOG_KEEP);
+        assert_eq!(p.pending_log.last().unwrap(), "l99");
     }
 
     #[test]

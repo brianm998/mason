@@ -176,6 +176,20 @@ fn a_step_waits_for_a_held_class_and_says_why_then_lands() {
 }
 
 #[test]
+fn a_step_is_told_what_it_holds_so_its_command_need_not_queue_for_it() {
+    // MASON_HELD names the step's `uses`: a command that would otherwise queue for
+    // `compile` itself (`mason run --needs compile`) can see it already has it.
+    let s = Scratch::new(
+        "test x$MASON_HELD = xcompile && test -f hello.txt",
+        unique_script(),
+    );
+    s.push_files(&[(".mason/mason.toml", DEF_COMPILE)], "definition");
+    let d = s.start();
+    let t = file_task(&d, "Holds the compiler");
+    wait_state(&d, t, State::Landed, 60);
+}
+
+#[test]
 fn waiting_is_outside_every_timeout() {
     let s = compile_scratch();
     // A 2 second test timeout, and a wait for the class that lasts longer.
@@ -455,4 +469,35 @@ fn releasing_several_held_tasks_at_once_never_runs_more_than_max_concurrent() {
         std::thread::sleep(Duration::from_millis(5));
     }
     assert!(peak >= 1);
+}
+
+/// s56: two accounts with a session each. A full (here: zero-session) account
+/// holds back only its own project; the other account's task goes through.
+#[test]
+fn a_full_account_does_not_block_another_accounts_task() {
+    let s = Scratch::new("test -f hello.txt", unique_script());
+    std::fs::write(
+        s.config_dir.join("providers.toml"),
+        "[provider.a]\nadapter = \"claude\"\nbilling = \"subscription\"\nsessions = 1\n\
+         [provider.b]\nadapter = \"claude\"\nbilling = \"api\"\nsessions = 1\n",
+    )
+    .unwrap();
+    s.write_project("scratch", "test -f hello.txt", "account = \"a\"");
+    s.write_project("other", "test -f hello.txt", "account = \"b\"");
+    let d = s.start();
+    assert_eq!(d.broker.limit("llm:a"), Some(1));
+    assert_eq!(d.broker.limit("llm:b"), Some(1));
+    assert_eq!(d.broker.limit("llm:claude"), None);
+    d.broker.set_limit("llm:a", 0).unwrap();
+    let held = file_in(&d, "scratch", "on the full account");
+    let free = file_in(&d, "other", "on the free account");
+    wait_state(&d, free, State::Landed, 90);
+    assert_eq!(state_of(&d, held), State::Queued);
+    let w = d.world().unwrap();
+    assert_eq!(d.llm_free(&w, "a"), 0);
+    assert_eq!(d.llm_free(&w, "b"), 1);
+    assert_eq!(d.account_of(task_of(&d, held).project), "a");
+    d.broker.set_limit("llm:a", 1).unwrap();
+    d.admit();
+    wait_state(&d, held, State::Landed, 90);
 }
