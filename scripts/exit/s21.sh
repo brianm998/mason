@@ -207,7 +207,7 @@ rej=4
 m proposal reject "$rej" --reason "not worth it"
 refused "a rejected proposal filed again" m proposal file --task 2 --title "$(m proposal show "$rej" --json | sed -n 's/^ *"title": "\(.*\)",$/\1/p')" --body "again" --evidence "app/Pay.swift:2 again and again"
 m pause --mode claims --for 2h >/dev/null
-for t in $(m task list | sed -n 's/^#\([0-9]*\) *\(queued\|exploring\|developing\|proposed\).*/\1/p'); do m task cancel "$t" >/dev/null 2>&1 || true; done
+for t in $(m task list | sed -n 's/^#\([0-9]*\) *\(queued\|exploring\|developing\|proposed\).*/\1/p'); do m task cancel "$t" >/dev/null; done
 m resume >/dev/null
 
 echo "== 2. improving MASON without write access: on its branch, through a fake host"
