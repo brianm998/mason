@@ -18,8 +18,8 @@ run() {
 }
 
 run "reset texts: epoch, clock with a zone, try again at, garbage" -p mason-core reset_text
-run "the store: migration 17, holds and warnings survive reopening" \
-    -p mason-store --test store migration_17
+run "the store: migration 18, holds and warnings survive reopening" \
+    -p mason-store --test store migration_18
 run "the hold model: backoff doubling to the cap, projection, waiting text" \
     -p mason-daemon --lib holds
 run "real daemons with the fake agent: hold until the reset (three tasks, no session until then, none fail), \
