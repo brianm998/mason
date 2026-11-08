@@ -478,8 +478,12 @@ fn acquire(c: &Ctx) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
             *have = (*have).max(v);
         }
     }
+    // Device pools are sized by what the provider lists, never by a default.
+    if needs.amounts.keys().any(|n| n.starts_with("device:")) {
+        d.targets.declare_all(d);
+    }
     for name in needs.amounts.keys() {
-        if !name.starts_with("llm:") {
+        if !name.starts_with("llm:") && !name.starts_with("device:") {
             d.broker
                 .declare(name, c.def.resources.get(name).copied().unwrap_or(1));
         }
@@ -495,6 +499,7 @@ fn acquire(c: &Ctx) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
             .unwrap_or(true)
     };
     let mut waited = false;
+    let asked = needs.clone();
     let lease = d.broker.acquire(
         c.task,
         &format!("#{}", c.task.0),
@@ -504,7 +509,7 @@ fn acquire(c: &Ctx) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
         &mut |why| {
             waited = c.emit(EventKind::WaitStarted {
                 task: c.task,
-                on: why.to_string(),
+                on: crate::targets::wait_text(d, &asked, why),
             });
         },
     )?;

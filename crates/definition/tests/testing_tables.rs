@@ -169,7 +169,7 @@ fn every_reference_must_exist_and_every_mistake_is_named() {
         ),
         (
             with("type = \"compose\"", "type = \"simulator\""),
-            "must be \"local\" or \"compose\"",
+            "must be \"local\", \"compose\", \"ios-simulator\"",
         ),
         (
             with("file = \"docker-compose.yml\"\n", ""),
@@ -213,4 +213,77 @@ fn a_step_runs_suites_or_a_command_not_both() {
     assert!(problems(&text)
         .iter()
         .any(|m| m.contains("gates judge suites")));
+}
+
+// Stage 25: the four device environment types parse, and the old refusal of
+// them ("simulators, emulators and devices arrive in a later stage") is gone.
+#[test]
+fn device_environments_parse_with_an_optional_os_prefix() {
+    let text = format!(
+        "{BASE}\n[environment.phone]\ntype = \"ios-device\"\nos = \"17\"\nsetup = \"./install.sh\"\n[environment.emu]\ntype = \"android-emulator\"\n"
+    );
+    let d = parse(&text).unwrap();
+    let phone = d.testing.environment("phone").unwrap();
+    assert_eq!(
+        phone.kind,
+        EnvKind::Device(mason_testing::DeviceType::IosDevice)
+    );
+    assert_eq!(phone.os.as_deref(), Some("17"));
+    assert_eq!(
+        d.testing.environment("emu").unwrap().kind,
+        EnvKind::Device(mason_testing::DeviceType::AndroidEmulator)
+    );
+    assert!(validate(&d, &Capabilities::now()).is_empty());
+}
+
+#[test]
+fn an_unknown_environment_type_lists_the_real_ones() {
+    let text = format!("{BASE}\n[environment.x]\ntype = \"toaster\"\n");
+    let p = problems(&text);
+    assert!(
+        p.iter()
+            .any(|m| m.contains("ios-simulator") && m.contains("android-device")),
+        "{p:?}"
+    );
+}
+
+#[test]
+fn built_in_mobile_signatures_go_only_to_projects_with_a_device_environment() {
+    let plain = parse(BASE).unwrap();
+    assert_eq!(
+        plain.testing.signatures.len(),
+        1,
+        "a project without a device environment is unchanged"
+    );
+    let text = format!("{BASE}\n[environment.phone]\ntype = \"ios-device\"\n");
+    let with_device = parse(&text).unwrap();
+    let names: Vec<&str> = with_device
+        .testing
+        .signatures
+        .iter()
+        .map(|s| s.name.as_str())
+        .collect();
+    assert!(names.contains(&"expired-certificate") && names.contains(&"device-offline-or-locked"));
+    assert_eq!(
+        names.iter().filter(|n| **n == "no-device").count(),
+        1,
+        "the project's own no-device stays the only one"
+    );
+}
+
+#[test]
+fn the_device_sample_definition_is_valid_and_gets_the_mobile_signatures() {
+    let text = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/examples/device-sample/.mason/mason.toml"
+    ))
+    .unwrap();
+    let d = parse(&text).unwrap();
+    assert!(validate(&d, &Capabilities::now()).is_empty());
+    assert_eq!(d.testing.environments.len(), 4);
+    assert!(d
+        .testing
+        .signatures
+        .iter()
+        .any(|s| s.name == "expired-certificate"));
 }
