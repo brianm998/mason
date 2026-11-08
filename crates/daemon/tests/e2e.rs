@@ -115,7 +115,7 @@ fn a_branch_that_conflicts_with_the_base_goes_to_the_agent_to_merge_and_lands() 
     let develop2 = json!([
         {"sh": "printf '%s' \"$FAKE_PROMPT\" > seen-prompt.txt; \
                 grep -q 'no longer merges cleanly' seen-prompt.txt && grep -q 'conflict.txt' seen-prompt.txt || exit 1; \
-                rm seen-prompt.txt; git merge -q origin/main; echo both > conflict.txt && echo ok > fixed.txt && \
+                rm seen-prompt.txt; git -c user.name=t -c user.email=t@t merge -q origin/main; echo both > conflict.txt && echo ok > fixed.txt && \
                 git add -A && git -c user.name=t -c user.email=t@t commit -qm 'merge the base and fix'"},
         {"call": {"tool": "submit_change", "args": {"summary": "merged", "head": "$HEAD"}}}
     ]);
@@ -278,7 +278,7 @@ fn a_conflict_with_the_base_at_the_test_step_is_not_a_red_round() {
         {"call": {"tool": "submit_change", "args": {"summary": "first try", "head": "$HEAD"}}}
     ]);
     let develop2 = json!([
-        {"sh": "git merge -q origin/main; echo both > conflict.txt && git add -A && \
+        {"sh": "git -c user.name=t -c user.email=t@t merge -q origin/main; echo both > conflict.txt && git add -A && \
                 git -c user.name=t -c user.email=t@t commit -qm 'merge the base'"},
         {"call": {"tool": "submit_change", "args": {"summary": "merged", "head": "$HEAD"}}}
     ]);
@@ -308,7 +308,7 @@ fn a_base_the_agent_never_catches_up_with_still_fails_the_task() {
         let commit = if first {
             format!("echo mine-$$ > conflict.txt && {TASK_SCRIPT_COMMIT}")
         } else {
-            "git merge -q origin/main; echo mine-$$ > conflict.txt && git add -A && \
+            "git -c user.name=t -c user.email=t@t merge -q origin/main; echo mine-$$ > conflict.txt && git add -A && \
              git -c user.name=t -c user.email=t@t commit -qm 'merge the base'"
                 .to_string()
         };

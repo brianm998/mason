@@ -22,6 +22,7 @@
 //! mason triage list | review <id> (--agree | --disagree)
 //! mason status [--json] [--watch]
 //! mason run --needs compile[=N],... [--exclusive] [--label L] -- <cmd>...
+//! mason targets list [--json]
 //! mason resources [--json] | mason resources limit <resource> <units>
 //! mason doctor
 //! ```
@@ -86,6 +87,7 @@ mason: command-line client for the MASON pipeline
   mason run --needs compile[=N],... [--exclusive] [--label L] -- <cmd>...
                                       queue for the pipeline's resources, ahead of its work
   mason resources [--json]            limits, who holds what, and every wait explained
+  mason targets list [--json]         simulators, emulators and phones, and who has each
   mason resources limit <resource> <units>   change a limit while things run (llm:claude, compile, ...)
   mason hook bash [--needs compile]   optional Claude Code PreToolUse hook: builds go through the queue
   mason definition check [FILE]       validate a definition (default .mason/mason.toml) and dry-run it
@@ -398,6 +400,52 @@ fn main() {
             die("give the command after `--`: mason run --needs compile -- cargo build")
         });
         exit(resources::run(&d, uses, label, &command).unwrap_or_else(|e| die(&e)));
+    }
+    if cmd == "targets" {
+        match a.pos().as_deref() {
+            Some("list") | None => {
+                finish(&a);
+                let r = or_die(d.call("GET", "/targets", None));
+                if json_out {
+                    return println!("{r:#}");
+                }
+                println!(
+                    "Provider: {}{}",
+                    r["provider"].as_str().unwrap_or("?"),
+                    r["error"]
+                        .as_str()
+                        .map(|e| format!(" (last read failed: {e})"))
+                        .unwrap_or_default()
+                );
+                let rows = r["devices"].as_array().cloned().unwrap_or_default();
+                if rows.is_empty() {
+                    println!("No devices are listed.");
+                }
+                for x in rows {
+                    println!(
+                        "{:<18} {:<40} {:<8} {:<12} {}",
+                        x["kind"].as_str().unwrap_or("?"),
+                        x["id"].as_str().unwrap_or("?"),
+                        x["os"].as_str().unwrap_or(""),
+                        x["state"].as_str().unwrap_or("?"),
+                        x["leased_by"]
+                            .as_str()
+                            .map(|l| format!("leased by {l}"))
+                            .unwrap_or_else(|| "free".into())
+                    );
+                }
+                for p in r["pools"].as_array().cloned().unwrap_or_default() {
+                    println!(
+                        "{:<26} {} of {} in use",
+                        p["name"].as_str().unwrap_or("?"),
+                        p["used"],
+                        p["units"]
+                    );
+                }
+            }
+            Some(other) => die(&format!("unknown targets command {other:?}\n\n{HELP}")),
+        }
+        return;
     }
     if cmd == "resources" {
         match a.pos().as_deref() {

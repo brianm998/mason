@@ -115,6 +115,85 @@ pub fn load_lan(config_dir: &std::path::Path) -> Result<LanCfg, String> {
     }
 }
 
+/// `[targets]` in `daemon.toml`: where devices come from.
+///
+/// ```toml
+/// [targets]
+/// provider = "system"   # or "fake", which reads fake_file (tests)
+/// fake_file = "/path/devices.json"
+/// fake_log = "/path/calls.log"   # optional
+/// poll_ms = 2000
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TargetsCfg {
+    pub fake: bool,
+    pub fake_file: Option<PathBuf>,
+    pub fake_log: Option<PathBuf>,
+    pub poll_ms: u64,
+}
+
+impl Default for TargetsCfg {
+    fn default() -> Self {
+        TargetsCfg {
+            fake: false,
+            fake_file: None,
+            fake_log: None,
+            poll_ms: 2000,
+        }
+    }
+}
+
+pub fn parse_targets(text: &str) -> Result<TargetsCfg, String> {
+    let doc: toml_edit::DocumentMut = text.parse().map_err(|e| format!("daemon.toml: {e}"))?;
+    let mut t = TargetsCfg::default();
+    let Some(item) = doc.get("targets") else {
+        return Ok(t);
+    };
+    let table = item
+        .as_table_like()
+        .ok_or("daemon.toml: `targets` must be a table: [targets]")?;
+    for (name, v) in table.iter() {
+        let text = |what: &str| {
+            v.as_str()
+                .map(String::from)
+                .ok_or_else(|| format!("daemon.toml: targets.{what} must be a string"))
+        };
+        match name {
+            "provider" => match text("provider")?.as_str() {
+                "system" => t.fake = false,
+                "fake" => t.fake = true,
+                other => {
+                    return Err(format!(
+                    "daemon.toml: targets.provider must be \"system\" or \"fake\", not \"{other}\""
+                ))
+                }
+            },
+            "fake_file" => t.fake_file = Some(PathBuf::from(text("fake_file")?)),
+            "fake_log" => t.fake_log = Some(PathBuf::from(text("fake_log")?)),
+            "poll_ms" => {
+                t.poll_ms = v
+                    .as_integer()
+                    .and_then(|n| u64::try_from(n).ok())
+                    .filter(|n| *n >= 50)
+                    .ok_or("daemon.toml: targets.poll_ms must be a whole number of at least 50")?
+            }
+            other => return Err(format!("daemon.toml: unknown setting targets.{other}")),
+        }
+    }
+    if t.fake && t.fake_file.is_none() {
+        return Err("daemon.toml: targets.provider = \"fake\" needs targets.fake_file".into());
+    }
+    Ok(t)
+}
+
+pub fn load_targets(config_dir: &std::path::Path) -> Result<TargetsCfg, String> {
+    match std::fs::read_to_string(config_dir.join("daemon.toml")) {
+        Ok(t) => parse_targets(&t),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(TargetsCfg::default()),
+        Err(e) => Err(format!("daemon.toml: {e}")),
+    }
+}
+
 /// The loopback port `masond` listens on when neither `--port` nor `[daemon] port`
 /// says otherwise. Fixed, so a running monitor finds the daemon again after a
 /// restart. (7421, first proposed, is assigned in /etc/services.)
@@ -137,8 +216,8 @@ pub fn parse_daemon_port(text: &str) -> Result<Option<u16>, String> {
     let doc: toml_edit::DocumentMut = text.parse().map_err(|e| format!("daemon.toml: {e}"))?;
     let mut port = None;
     for (key, item) in doc.iter() {
-        if key == "lan" {
-            continue; // read by `parse_lan`
+        if key == "lan" || key == "targets" {
+            continue; // read by `parse_lan` and `parse_targets`
         }
         let table = item
             .as_table_like()
@@ -1104,6 +1183,31 @@ mod tests {
         assert!(
             parse_project("mason", &literal).is_err(),
             "a literal token is refused"
+        );
+    }
+
+    #[test]
+    fn targets_settings_are_read_and_bad_ones_name_the_file() {
+        assert_eq!(parse_targets("").unwrap(), TargetsCfg::default());
+        let t = parse_targets(
+            "[targets]\nprovider = \"fake\"\nfake_file = \"/x/d.json\"\npoll_ms = 500\n",
+        )
+        .unwrap();
+        assert!(t.fake && t.poll_ms == 500);
+        assert_eq!(t.fake_file, Some(PathBuf::from("/x/d.json")));
+        for bad in [
+            "[targets]\nprovider = \"cloud\"\n",
+            "[targets]\nprovider = \"fake\"\n",
+            "[targets]\npoll_ms = 5\n",
+            "[targets]\nwat = 1\n",
+        ] {
+            let e = parse_targets(bad).unwrap_err();
+            assert!(e.starts_with("daemon.toml: "), "{e}");
+        }
+        // [targets] does not trip the [daemon] port reader.
+        assert_eq!(
+            parse_daemon_port("[targets]\npoll_ms = 500\n[daemon]\nport = 9\n").unwrap(),
+            Some(9)
         );
     }
 }

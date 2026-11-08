@@ -1,0 +1,67 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# The sample app's definition: one unit suite per platform, and one device suite per kind of device.
+# MASON leases a device for each device suite and sets MASON_DEVICE to its id.
+schema = 1
+start = "develop"
+
+[step.develop]
+type = "agent"
+category = "developing"
+next = "test"
+
+[step.test]
+type = "test"
+category = "testing"
+suites = ["ios-sim", "android-emu", "ios-phone", "android-phone"]
+on_red = "develop"
+max_rounds = 3
+next = "land"
+
+[step.land]
+type = "landing"
+category = "landing"
+
+[suite.ios-sim]
+command = "cd ios && xcodebuild test -scheme SampleApp -destination \"id=$MASON_DEVICE\" -resultBundlePath ../ios-sim.xcresult 2>&1"
+parser = "xctest"
+min_tests = 3
+level = "unit"
+env = "simulator"
+
+[suite.ios-phone]
+command = "cd ios && xcodebuild test -scheme SampleApp -destination \"id=$MASON_DEVICE\" -allowProvisioningUpdates 2>&1"
+parser = "xctest"
+min_tests = 3
+level = "unit"
+env = "iphone"
+
+[suite.android-emu]
+command = "cd android && ANDROID_SERIAL=\"$MASON_DEVICE\" ./gradlew --console=plain testDebugUnitTest connectedDebugAndroidTest 2>&1"
+parser = "gradle"
+min_tests = 3
+level = "unit"
+env = "emulator"
+
+[suite.android-phone]
+command = "cd android && ANDROID_SERIAL=\"$MASON_DEVICE\" ./gradlew --console=plain testDebugUnitTest connectedDebugAndroidTest 2>&1"
+parser = "gradle"
+min_tests = 3
+level = "unit"
+env = "android-phone"
+
+[environment.simulator]
+type = "ios-simulator"
+os = "17"
+
+[environment.iphone]
+type = "ios-device"
+
+[environment.emulator]
+type = "android-emulator"
+
+[environment.android-phone]
+type = "android-device"
+
+[impact]
+"ios/**" = ["ios-sim", "ios-phone"]
+"android/**" = ["android-emu", "android-phone"]

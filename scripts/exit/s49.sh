@@ -35,7 +35,14 @@ start_demo() {
   daemon=$!
   until [ -s "$root/d/daemon.json" ]; do kill -0 "$daemon" || { cat "$root/masond.log" >&2; exit 1; }; sleep 0.1; done
 }
-stop_demo() { if kill -9 "$daemon" 2>/dev/null; then wait "$daemon" 2>/dev/null; fi; daemon=""; }
+# The demo is killed with SIGKILL, so `wait` reports 137 (128 + 9). Under `set -e` a bare
+# `wait` ended the whole script there, before step 1's checks ran. Only that status is accepted.
+stop_demo() {
+  if kill -9 "$daemon" 2>/dev/null; then
+    wait "$daemon" 2>/dev/null || [ "$?" -eq 137 ]
+  fi
+  daemon=""
+}
 
 echo "== 1. the demo's six cases, as the daemon's views say them"
 start_demo; "$bin/conformance" expected --port "$(port_of)" --out "$root/expected" | tail -1; stop_demo
