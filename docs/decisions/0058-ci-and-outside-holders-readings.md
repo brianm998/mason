@@ -1,0 +1,7 @@
+# 0058: Readings made while getting CI green and counting outside holders (s72)
+
+- **Banners are compared without their clock, not given a fixed clock.** The expected views and a client's capture come from two demo runs by design (each client is checked against a fresh daemon). Pinning the demo's clock would make the demo lie about the time it shows the owner. Only banners carry a time computed from when the run started, so only banners are normalized, and only the time of day, the weekday before it and the countdown.
+- **The fix for `stop_demo` names the status it accepts.** Accepting any failure of `wait` would be the `|| true` the self-hold rule refuses. 137 is the status of the SIGKILL the function just sent, and nothing else gets through.
+- **Outside holders are counted from the kernel, compared with leases that hold their locks.** A lease the broker has just granted has not taken its locks yet. Counting it as holding would cancel an outside holder for that moment and let a second grant through, so only leases whose marker lock is held are compared with the kernel.
+- **Outside holders are adopted, not killed.** The broker cannot tell a run that outlived a restart from one the owner started by hand outside MASON. Either way it is using the slot, so it is counted until it ends.
+- **Numbers:** 72 and 0058 were reserved in the store under task 900072 before the files were written.

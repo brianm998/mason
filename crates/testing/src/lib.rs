@@ -22,11 +22,12 @@ pub mod glob;
 pub mod model;
 pub mod parse;
 pub mod results;
+pub mod signatures;
 pub mod verdict;
 
 pub use model::{
-    Binding, EnvKind, Environment, ImpactMap, ParserKind, Selection, Signature, Suite, Testing,
-    When,
+    Binding, DeviceType, EnvKind, Environment, ImpactMap, ParserKind, Selection, Signature, Suite,
+    Testing, When,
 };
 pub use results::{Case, Results, Status};
 pub use verdict::{

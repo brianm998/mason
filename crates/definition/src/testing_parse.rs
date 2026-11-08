@@ -6,7 +6,8 @@
 use crate::model::{parse_duration, Problem};
 use crate::parse::unknown_key;
 use mason_testing::{
-    Binding, EnvKind, Environment, ImpactMap, ParserKind, Signature, Suite, Testing, When,
+    Binding, DeviceType, EnvKind, Environment, ImpactMap, ParserKind, Signature, Suite, Testing,
+    When,
 };
 use std::collections::BTreeMap;
 use toml_edit::{DocumentMut, Item};
@@ -33,6 +34,7 @@ const ENV_KEYS: &[&str] = &[
     "health",
     "teardown",
     "file",
+    "os",
     "uses",
     "health_timeout",
 ];
@@ -195,10 +197,13 @@ pub fn parse(doc: &DocumentMut, out: &mut Vec<Problem>) -> Testing {
                         match s.as_str() {
                             "local" => e.kind = EnvKind::Local,
                             "compose" => e.kind = EnvKind::Compose,
-                            _ => out.push(Problem::new(
-                                &path,
-                                "must be \"local\" or \"compose\" (simulators, emulators and devices arrive in a later stage)",
-                            )),
+                            other => match DeviceType::from_name(other) {
+                                Some(t) => e.kind = EnvKind::Device(t),
+                                None => out.push(Problem::new(
+                                    &path,
+                                    "must be \"local\", \"compose\", \"ios-simulator\", \"android-emulator\", \"ios-device\" or \"android-device\"",
+                                )),
+                            },
                         }
                     }
                 }
@@ -206,6 +211,7 @@ pub fn parse(doc: &DocumentMut, out: &mut Vec<Problem>) -> Testing {
                 "health" => e.health = string(v, &path, out),
                 "teardown" => e.teardown = string(v, &path, out),
                 "file" => e.file = string(v, &path, out),
+                "os" => e.os = string(v, &path, out),
                 "uses" => e.uses = uses(v, &path, out),
                 "health_timeout" => {
                     if let Some(d) = duration(v, &path, out) {
@@ -297,6 +303,7 @@ pub fn parse(doc: &DocumentMut, out: &mut Vec<Problem>) -> Testing {
             None => out.push(Problem::new(format!("{base}.pattern"), "required")),
         }
     }
+    mason_testing::signatures::add_device_signatures(&mut t);
     t
 }
 
