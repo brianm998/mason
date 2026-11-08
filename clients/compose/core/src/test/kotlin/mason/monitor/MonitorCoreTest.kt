@@ -474,7 +474,7 @@ class MonitorCoreTest {
         assertTrue(h.left + h.dx >= 0.0)
     }
 
-    // ---- live progress (s46) ----
+    // ---- live progress (s49) ----
 
     private fun cell(
         unit: String = "tests", done: Int, total: Int = 0,

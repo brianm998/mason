@@ -1,4 +1,4 @@
-# 0024: Showing live step progress, the choices the ticket left open
+# 0027: Showing live step progress, the choices the ticket left open
 
 Task #14 (GitHub #21). Each is the reading taken; change one and the others stand.
 

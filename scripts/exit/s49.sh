@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Live step progress shown (s46) exit test.
+# Live step progress shown (s49) exit test.
 #  1. Against `masond --demo`, the daemon's own reading of each case (real count, typical total,
 #     no total, quiet, sub-counts, todo list) has the right words: a percentage only from a real
 #     total, the count and range with no percentage for a typical one, the count alone for none,
@@ -14,8 +14,8 @@
 # The pixels (cell fill, amber, the counting time) are covered by the clients' unit tests, not here.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
-command -v python3 >/dev/null || { echo "s46 needs python3 (its WebSocket client)" >&2; exit 1; }
-root=$(mktemp -d /tmp/mason-s46.XXXXXX); daemon=""; watcher=""; w2=""; w3=""
+command -v python3 >/dev/null || { echo "s49 needs python3 (its WebSocket client)" >&2; exit 1; }
+root=$(mktemp -d /tmp/mason-s49.XXXXXX); daemon=""; watcher=""; w2=""; w3=""
 cleanup() {
   for p in "$watcher" "$w2" "$w3"; do [ -n "$p" ] && kill "$p" 2>/dev/null || true; done
   [ -n "$daemon" ] && kill -9 "$daemon" 2>/dev/null || true
@@ -107,7 +107,7 @@ PY
 fi
 
 echo "== 3. a real daemon: task show --json matches the WebSocket record"
-ws=scripts/exit/fixtures/s46/wsclient.py
+ws=scripts/exit/fixtures/s49/wsclient.py
 owner=${USER:-owner}
 port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')
 m() { "$bin/mason" --data-dir "$root/d" --config-dir "$root/c" "$@"; }
@@ -199,4 +199,4 @@ n=$(grep -c '^work  ' "$root/show-watch.txt" || true)
 [ "$n" -ge 3 ] || fail "task show --watch printed $n progress lines in 6 s: $(cat "$root/show-watch.txt")"
 grep -q "^#$t2 work  " "$root/status-watch.txt" || fail "status --watch did not follow task #$t2: $(cat "$root/status-watch.txt")"
 echo "   task show --watch printed $n lines in 6 s; status --watch follows $(grep -c '^#' "$root/status-watch.txt") pushes"
-echo "s46 passed"
+echo "s49 passed"

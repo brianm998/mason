@@ -291,7 +291,7 @@ const STEPS: &[&str] = &[
          at      INTEGER NOT NULL
      );
      CREATE INDEX step_history_step ON step_history(project, step);",
-    // 13: the longest quiet gap of each successful run, for the "no output for" threshold (s46).
+    // 13: the longest quiet gap of each successful run, for the "no output for" threshold (s49).
     "ALTER TABLE step_history ADD COLUMN gap_ms INTEGER NOT NULL DEFAULT 0;\n     ALTER TABLE step_progress ADD COLUMN max_gap_ms INTEGER NOT NULL DEFAULT 0;",
 ];
 

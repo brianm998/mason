@@ -530,7 +530,7 @@ final class MonitorCoreTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(h.left + h.dx, 0)
     }
 
-    // MARK: live progress (s46)
+    // MARK: live progress (s49)
 
     func cell(unit: String = "tests", done: UInt32, total: UInt32 = 0, doneSrc: ProgressSource = .sourceReported,
               totalSrc: ProgressSource = .sourceNone, low: UInt32 = 0) -> ProgressCell {

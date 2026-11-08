@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# A minimal WebSocket client for the s46 exit test (standard library only; proto3 JSON frames).
+# A minimal WebSocket client for the s49 exit test (standard library only; proto3 JSON frames).
 #   wsclient.py watch PORT TASK SECONDS OUTFILE   record the task's StepProgress pushes as JSON lines,
 #                                                 in the fields `mason task show --json` also carries
 import base64, json, os, socket, struct, sys, time
@@ -72,14 +72,14 @@ class Ws:
 
 
 def hello(ws, task):
-    ws.send({"hello": {"protocol": 1, "lastSeq": "0", "client": "s46"}})
+    ws.send({"hello": {"protocol": 1, "lastSeq": "0", "client": "s49"}})
     ws.send({"subscribe": {"views": ["TASK_DETAIL", "HOME"], "task": str(task)}})
 
 
 
 
 def hello(ws, task):
-    ws.send({"hello": {"protocol": 1, "lastSeq": "0", "client": "s46"}})
+    ws.send({"hello": {"protocol": 1, "lastSeq": "0", "client": "s49"}})
     ws.send({"subscribe": {"views": ["TASK_DETAIL", "HOME"], "task": str(task)}})
 
 
