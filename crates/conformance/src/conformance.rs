@@ -92,6 +92,105 @@ fn row_item(r: &TaskRow, order: usize, prefix: &str) -> Item {
     )
 }
 
+fn src(s: i32) -> mason_core::progress::Source {
+    use mason_core::progress::Source;
+    match ProgressSource::try_from(s).unwrap_or(ProgressSource::SourceNone) {
+        ProgressSource::SourceNone => Source::None,
+        ProgressSource::SourceReported => Source::Reported,
+        ProgressSource::SourceCounted => Source::Counted,
+        ProgressSource::SourceHistory => Source::History,
+    }
+}
+
+/// The count of a step ("212 of 340 tests, 62%") by the rule for numbers.
+pub fn cell_count_text(c: &ProgressCell) -> String {
+    mason_core::progress_text::count_text(
+        &c.unit,
+        c.done as u64,
+        src(c.done_source),
+        c.total as u64,
+        src(c.total_source),
+        c.total_low as u64,
+    )
+}
+
+/// What a running step's progress says, without any clock text: the count, the message, where
+/// each number came from, the output figures, each sub-count, the todo list, and "silent" when
+/// the step is quiet past its usual gap (judged at `now_ms`).
+pub fn progress_texts(c: &ProgressCell, now_ms: u64) -> Vec<String> {
+    use mason_core::progress::is_stale;
+    use mason_core::progress_text::{count_text, group, source_words};
+    let mut t = vec![];
+    let count = cell_count_text(c);
+    if !count.is_empty() {
+        t.push(count);
+    }
+    if !c.message.is_empty() {
+        t.push(c.message.clone());
+    }
+    if c.done_source != 0 {
+        t.push(format!(
+            "count {}",
+            source_words(src(c.done_source), c.history_samples)
+        ));
+    }
+    if c.total_source != 0 {
+        t.push(format!(
+            "total {}",
+            source_words(src(c.total_source), c.history_samples)
+        ));
+    }
+    if c.lines > 0 || c.bytes > 0 {
+        t.push(format!(
+            "output {} lines, {} bytes",
+            group(c.lines),
+            group(c.bytes)
+        ));
+    }
+    for s in &c.subs {
+        t.push(format!(
+            "{}: {}",
+            s.name,
+            count_text(
+                &s.unit,
+                s.done as u64,
+                src(s.done_source),
+                s.total as u64,
+                src(s.total_source),
+                0
+            )
+        ));
+    }
+    for i in &c.todo {
+        t.push(format!("{}: {}", i.status, i.text));
+    }
+    if is_stale(now_ms, c.updated_at_ms, c.stale_after_ms) {
+        t.push("silent".into());
+    }
+    t
+}
+
+fn progress_items(r: &TaskRow, now_ms: u64) -> Vec<Item> {
+    r.progress
+        .iter()
+        .filter(|c| c.state == CellState::Part as i32 && c.run != 0)
+        .map(|c| {
+            Item::new(
+                format!("progress:{}:{}", r.id, c.step),
+                progress_texts(c, now_ms),
+                vec![],
+                0,
+            )
+        })
+        .collect()
+}
+
+fn system_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
+}
+
 fn card_item(task: u64, c: &DecisionCard, owner: bool) -> Item {
     let mut texts = vec![c.ask.clone(), c.why.clone()];
     for (i, o) in c.options.iter().enumerate() {
@@ -191,6 +290,7 @@ pub fn visible(views: &[View], owner: bool) -> Vec<Item> {
                     if !sec.collapsed {
                         for (j, r) in sec.rows.iter().enumerate() {
                             out.push(row_item(r, j, &format!("row:{}", sec.state)));
+                            out.extend(progress_items(r, system_now_ms()));
                         }
                     }
                 }
@@ -227,6 +327,7 @@ pub fn visible(views: &[View], owner: bool) -> Vec<Item> {
             Some(Body::TaskDetail(t)) => {
                 if let Some(r) = &t.row {
                     out.push(row_item(r, 0, "detail"));
+                    out.extend(progress_items(r, system_now_ms()));
                 }
                 for (i, s) in t.steps.iter().enumerate() {
                     out.push(Item::new(
@@ -522,5 +623,77 @@ mod tests {
         let i = item("row:x:1", &["a", "b"], &["z", "a"], 3);
         assert_eq!(Item::from_json(&i.to_json()).unwrap(), i);
         assert_eq!(i.actions, vec!["a", "z"], "actions are kept sorted");
+    }
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use super::*;
+
+    fn cell() -> ProgressCell {
+        ProgressCell {
+            step: "develop".into(),
+            state: CellState::Part as i32,
+            unit: "tests".into(),
+            done: 212,
+            total: 340,
+            done_source: ProgressSource::SourceReported as i32,
+            total_source: ProgressSource::SourceReported as i32,
+            message: "running the api suite".into(),
+            lines: 1240,
+            bytes: 61000,
+            updated_at_ms: 1_000_000,
+            run: 3,
+            stale_after_ms: 300_000,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_real_count_has_a_percentage_and_sources() {
+        let t = progress_texts(&cell(), 1_004_000);
+        assert_eq!(t[0], "212 of 340 tests, 62%");
+        assert!(t.contains(&"count from the agent".to_string()));
+        assert!(t.contains(&"output 1,240 lines, 61,000 bytes".to_string()));
+        assert!(!t.contains(&"silent".to_string()));
+        assert!(t.iter().all(|x| !x.contains(" ago")));
+    }
+
+    #[test]
+    fn a_typical_total_has_no_percentage() {
+        let mut c = cell();
+        c.done_source = ProgressSource::SourceCounted as i32;
+        c.total_source = ProgressSource::SourceHistory as i32;
+        c.unit = "lines".into();
+        c.done = 1240;
+        c.total = 2400;
+        c.total_low = 1800;
+        c.history_samples = 12;
+        let t = progress_texts(&c, 1_004_000);
+        assert_eq!(t[0], "1,240 lines, usually 1,800 to 2,400");
+        assert!(t.contains(&"total usually, from 12 past runs".to_string()));
+        assert!(t.iter().all(|x| !x.contains('%')));
+    }
+
+    #[test]
+    fn a_quiet_step_is_silent_and_a_planted_change_differs() {
+        let c = cell();
+        assert!(progress_texts(&c, 1_000_000 + 300_001).contains(&"silent".to_string()));
+        assert!(!progress_texts(&c, 1_000_000 + 300_000).contains(&"silent".to_string()));
+        let a = vec![Item::new(
+            "progress:1:develop",
+            progress_texts(&c, 1_004_000),
+            vec![],
+            0,
+        )];
+        let mut d = c.clone();
+        d.done = 213;
+        let b = vec![Item::new(
+            "progress:1:develop",
+            progress_texts(&d, 1_004_000),
+            vec![],
+            0,
+        )];
+        assert!(!compare(&a, &b).is_empty());
     }
 }
