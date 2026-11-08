@@ -63,8 +63,8 @@ final class Session: ObservableObject {
         // The daemon may not be up yet: look for it until it is.
         finder = Task { @MainActor in
             while !Task.isCancelled {
-                if let port = Discovery.port(arguments: CommandLine.arguments) {
-                    let c = MonitorConnection(model: model, port: port)
+                if Discovery.info(arguments: CommandLine.arguments) != nil {
+                    let c = MonitorConnection(model: model, discover: { Discovery.info(arguments: CommandLine.arguments) })
                     connection = c
                     c.start()
                     return

@@ -10,6 +10,7 @@ use std::time::Duration;
 
 pub struct Daemon {
     pub port: u16,
+    data_dir: std::path::PathBuf,
 }
 
 pub enum CallError {
@@ -48,6 +49,7 @@ pub fn find(data_dir: &Path) -> Result<Daemon, CallError> {
     }
     Ok(Daemon {
         port: v["port"].as_u64().unwrap_or(0) as u16,
+        data_dir: data_dir.to_path_buf(),
     })
 }
 
@@ -57,8 +59,24 @@ impl Daemon {
     /// result. Everything a monitor can do goes through here.
     pub fn call(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Value, CallError> {
         use mason_protocol::{command, Command, Encoding, Raw};
-        let mut c = mason_protocol::client::Client::connect(self.port, Encoding::Json)
-            .map_err(CallError::NotRunning)?;
+        let mut c = match mason_protocol::client::Client::connect(self.port, Encoding::Json) {
+            Ok(c) => c,
+            Err(first) => {
+                // The daemon may have restarted between reading daemon.json and
+                // connecting: read it again, once, and try the new address.
+                std::thread::sleep(Duration::from_millis(200));
+                let again = find(&self.data_dir)?;
+                mason_protocol::client::Client::connect(again.port, Encoding::Json).map_err(
+                    |second| {
+                        CallError::NotRunning(if again.port == self.port {
+                            first
+                        } else {
+                            second
+                        })
+                    },
+                )?
+            }
+        };
         c.hello(0, true).map_err(CallError::Io)?;
         let cmd = Command {
             id: String::new(),

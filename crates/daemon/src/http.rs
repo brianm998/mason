@@ -2036,11 +2036,53 @@ pub fn ensure_single(cfg: &crate::config::DaemonConfig) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Who holds a loopback port, as `pid N (command)`, if `lsof` can say.
+fn port_holder(port: u16) -> Option<String> {
+    let out = std::process::Command::new("lsof")
+        .args(["-nP", "-t", &format!("-iTCP:{port}"), "-sTCP:LISTEN"])
+        .output()
+        .ok()?;
+    let pid = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .next()?
+        .trim()
+        .to_string();
+    let comm = std::process::Command::new("ps")
+        .args(["-o", "comm=", "-p", &pid])
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|c| !c.is_empty());
+    Some(match comm {
+        Some(c) => format!("pid {pid} ({c})"),
+        None => format!("pid {pid}"),
+    })
+}
+
+/// The message when the port is held by something else: who, and how to change it.
+pub fn port_taken_message(port: u16, config_dir: &std::path::Path) -> String {
+    let owner = port_holder(port).unwrap_or_else(|| "another process".into());
+    format!(
+        "port {port} on 127.0.0.1 is taken by {owner}; masond does not pick another port. \
+         Stop that process, or choose a different port with --port N or with `[daemon] port = N` in {}",
+        config_dir.join("daemon.toml").display()
+    )
+}
+
 /// Bind loopback, announce ourselves in `daemon.json`, run the watchdog, serve.
 pub async fn serve(d: Arc<Daemon>) -> std::io::Result<()> {
     ensure_single(&d.cfg)?;
     let info = d.cfg.info_path();
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", d.cfg.port)).await?;
+    let listener = match tokio::net::TcpListener::bind(("127.0.0.1", d.cfg.port)).await {
+        Ok(l) => l,
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+            return Err(std::io::Error::new(
+                e.kind(),
+                port_taken_message(d.cfg.port, &d.cfg.config_dir),
+            ))
+        }
+        Err(e) => return Err(e),
+    };
     let port = listener.local_addr()?.port();
     let tmp = info.with_extension("tmp");
     std::fs::write(
