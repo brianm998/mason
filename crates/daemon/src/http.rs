@@ -1796,13 +1796,22 @@ pub fn render_logs(d: &Daemon, task: u64) -> String {
     hosts.sort_by(|a, b| (a.0, &a.1.info.id).cmp(&(b.0, &b.1.info.id)));
     let mut out = String::new();
     for (run, h) in hosts {
-        let kind = if h.info.id.ends_with("-test") || h.info.id.ends_with("-cmd") {
+        // `t<task>r<run>-test`, `-cmd`, and a red test run again: `-test-again<k>`.
+        let what = h.info.id.split_once('-').map_or("", |(_, w)| w);
+        let kind = if what == "test"
+            || what == "cmd"
+            || what.starts_with("test-again")
+            || what.starts_with("cmd-again")
+        {
             "test"
         } else {
             "agent"
         };
+        let again = what
+            .split_once("-again")
+            .map_or(String::new(), |(_, k)| format!(", run again ({k})"));
         out.push_str(&format!(
-            "=== step run {run} ({kind}) [{}] ===\n",
+            "=== step run {run} ({kind}{again}) [{}] ===\n",
             h.info.id
         ));
         let raw =

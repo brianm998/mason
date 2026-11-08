@@ -176,6 +176,20 @@ fn a_step_waits_for_a_held_class_and_says_why_then_lands() {
 }
 
 #[test]
+fn a_step_is_told_what_it_holds_so_its_command_need_not_queue_for_it() {
+    // MASON_HELD names the step's `uses`: a command that would otherwise queue for
+    // `compile` itself (`mason run --needs compile`) can see it already has it.
+    let s = Scratch::new(
+        "test x$MASON_HELD = xcompile && test -f hello.txt",
+        unique_script(),
+    );
+    s.push_files(&[(".mason/mason.toml", DEF_COMPILE)], "definition");
+    let d = s.start();
+    let t = file_task(&d, "Holds the compiler");
+    wait_state(&d, t, State::Landed, 60);
+}
+
+#[test]
 fn waiting_is_outside_every_timeout() {
     let s = compile_scratch();
     // A 2 second test timeout, and a wait for the class that lasts longer.

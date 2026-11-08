@@ -192,6 +192,7 @@ mod tests {
             step_timeout: Duration::from_secs(1),
             test_timeout: Duration::from_secs(1),
             max_test_rounds: None,
+            test_reruns: 0,
             clarity_classifier: None,
             priority_jump: false,
             card_rewriter: None,

@@ -266,6 +266,19 @@ pub(crate) fn step_env_pairs(c: &Ctx) -> Vec<(String, String)> {
         ("MASON_BASE".into(), c.project.base_ref()),
         ("MASON_STEP".into(), c.step.name.clone()),
         ("MASON_ATTEMPT".into(), c.attempt.to_string()),
+        // What the step already holds from the broker (its `uses`), so a command
+        // that would queue for the same class (`mason run --needs`) can tell it
+        // need not, and does not wait on itself.
+        (
+            "MASON_HELD".into(),
+            c.step
+                .uses
+                .iter()
+                .filter(|(_, n)| **n > 0)
+                .map(|(k, _)| k.as_str())
+                .collect::<Vec<_>>()
+                .join(","),
+        ),
         (
             "MASON_RESULT_FILE".into(),
             result_file(c).to_string_lossy().into_owned(),
@@ -451,7 +464,7 @@ pub(crate) fn test_command(
 /// the step can hand them to the agent (develop resolves them; the read-only
 /// steps go on with the branch as it is). Failing here instead would fail
 /// every later step the same way, so no agent could ever resolve it.
-fn prepare(c: &Ctx) -> Result<Option<String>, String> {
+pub(crate) fn prepare(c: &Ctx) -> Result<Option<String>, String> {
     let lock = c.d.repo_lock(c.project_id);
     let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
     let repo = &c.project.path;
@@ -1078,19 +1091,125 @@ fn finish_agent_inner(c: &Ctx, report: StepReport, dir: &Path) {
 
 /// A command or test step: run `command` in the worktree under a step host, so
 /// a daemon restart does not lose the run. Exit 0 is green.
+///
+/// A test step first brings the branch up to date with the base, so it tests
+/// what would land and picks up fixes that reached the base while it waited
+/// (a conflict sends it back to develop, where the agent is told to merge).
+/// A red test run is run again up to `test_reruns` times: green on a rerun is
+/// green, recorded as a flake; red every time is red.
 fn command_job(c: &Ctx) {
     let Some(cmd) = c.res.command.as_ref().map(|a| a.value.clone()) else {
         return c.fail("this step has no command: set `command` on the step, or `test` in the project's local overlay");
     };
-    if let Err(why) = prepare_worktree_only(c) {
+    let is_test = c.step.kind == StepType::Test;
+    if is_test {
+        match prepare(c) {
+            Ok(None) => {}
+            Ok(Some(files)) => {
+                let note = conflict_note(&c.project.base_ref(), &files);
+                return c.conclude(
+                    Outcome::Red,
+                    format!(
+                        "the branch conflicts with {} in: {}",
+                        c.project.base_ref(),
+                        files.replace('\n', ", ")
+                    ),
+                    Some(note),
+                );
+            }
+            Err(why) => return c.fail(why),
+        }
+    } else if let Err(why) = prepare_worktree_only(c) {
         return c.fail(why);
     }
-    let suffix = if c.step.kind == StepType::Test {
-        "test"
+    let suffix = if is_test { "test" } else { "cmd" };
+    let reruns = if is_test { c.project.test_reruns } else { 0 };
+    let mut earlier: Vec<String> = vec![];
+    for k in 0..=reruns {
+        let run = match run_command_once(c, &cmd, suffix, k) {
+            Ok(r) => r,
+            Err(why) => return c.fail(why),
+        };
+        match run.verdict {
+            RunVerdict::Green => {
+                let _ = std::fs::remove_file(c.task_dir().join("feedback.txt"));
+                if k > 0 {
+                    let note = format!(
+                        "`{}` was red, then green when run again (a flaky test, not this change):\n{}",
+                        c.step.name,
+                        earlier.join("\n")
+                    );
+                    tracing::warn!(task = c.task.0, run = c.run.0, "{note}");
+                    let _ = std::fs::write(
+                        c.task_dir().join(format!("{suffix}-r{}.flaky", c.run.0)),
+                        &note,
+                    );
+                }
+                return c.green();
+            }
+            // Red by its exit status alone: worth running again.
+            RunVerdict::Red {
+                reason,
+                feedback,
+                rerun: true,
+            } if k < reruns => {
+                earlier.push(format!("run {}: {reason}\n{feedback}", k + 1));
+                use std::io::Write as _;
+                if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&run.log) {
+                    let _ = writeln!(
+                        f,
+                        "\n== MASON: red ({reason}); running it again ({} of {reruns}) to tell a flaky test from a broken change",
+                        k + 1
+                    );
+                }
+                continue;
+            }
+            RunVerdict::Red {
+                reason, feedback, ..
+            } => {
+                let (reason, feedback) = if k > 0 {
+                    (
+                        format!("{reason} ({} runs, red every time)", k + 1),
+                        format!("{feedback}\n\nIt was red on all {} runs.", k + 1),
+                    )
+                } else {
+                    (reason, feedback)
+                };
+                return c.conclude(Outcome::Red, reason, Some(feedback));
+            }
+        }
+    }
+}
+
+enum RunVerdict {
+    Green,
+    /// `rerun`: red only by its exit status (not a timeout, a signal or a
+    /// script's own verdict), so running it again may tell a flake apart.
+    Red {
+        reason: String,
+        feedback: String,
+        rerun: bool,
+    },
+}
+
+struct CommandRun {
+    verdict: RunVerdict,
+    log: PathBuf,
+}
+
+/// The name part of the `k`th run of a step's command: "" for the first.
+fn again(k: u32) -> String {
+    if k == 0 {
+        String::new()
     } else {
-        "cmd"
-    };
-    let id = format!("t{}r{}-{suffix}", c.task.0, c.run.0);
+        format!("-again{k}")
+    }
+}
+
+/// Run the command once (the `k`th time) under its own step host, or collect
+/// the run a restarted daemon finds already started.
+fn run_command_once(c: &Ctx, cmd: &str, suffix: &str, k: u32) -> Result<CommandRun, String> {
+    let id = format!("t{}r{}-{suffix}{}", c.task.0, c.run.0, again(k));
     let hosts = c.d.cfg.hosts_dir();
     let dir = hosts.join(&id);
     let limit = c
@@ -1104,7 +1223,7 @@ fn command_job(c: &Ctx) {
             host_bin: c.d.cfg.host_bin.clone(),
             root: hosts.clone(),
             id: id.clone(),
-            cmd: vec!["sh".into(), "-c".into(), cmd],
+            cmd: vec!["sh".into(), "-c".into(), cmd.to_string()],
             cwd: Some(c.wt.clone()),
             env: step_env_pairs(c),
             clear_env: false,
@@ -1113,7 +1232,7 @@ fn command_job(c: &Ctx) {
             heartbeat: c.d.cfg.heartbeat,
         };
         if let Err(e) = spawn_host(&o) {
-            return c.fail(format!("cannot start the command: {e}"));
+            return Err(format!("cannot start the command: {e}"));
         }
     }
     // Stop the run if it takes too long.
@@ -1133,28 +1252,33 @@ fn command_job(c: &Ctx) {
             }
         });
     }
-    let log = c.task_dir().join(format!("{suffix}-r{}.log", c.run.0));
+    let name = format!("{suffix}-r{}{}", c.run.0, again(k));
+    let log = c.task_dir().join(format!("{name}.log"));
     // Lines and bytes of the output, counted as they arrive. A run found again after a
     // restart first counts what its log holds beyond what the stored record had.
-    c.d.progress_catch_up(c.run, "", &log);
+    // Each run of the command is its own stream, since each log starts at 0.
+    let stream = again(k);
+    c.d.progress_catch_up(c.run, &stream, &log);
     let result = collect_to_file_observed(
         &dir,
         &log,
-        &c.task_dir().join(format!("{suffix}-r{}.exit", c.run.0)),
-        &mut |off, b| c.d.progress_observe(c.run, "", off, b),
+        &c.task_dir().join(format!("{name}.exit")),
+        &mut |off, b| c.d.progress_observe(c.run, &stream, off, b),
     );
     done.store(true, Ordering::SeqCst);
     let rec = match result {
         Ok(r) => r,
-        Err(ClientError::HostLost { .. }) => return c.fail("the command was lost (its host died)"),
-        Err(e) => return c.fail(format!("cannot collect the command's result: {e}")),
+        Err(ClientError::HostLost { .. }) => {
+            return Err("the command was lost (its host died)".into())
+        }
+        Err(e) => return Err(format!("cannot collect the command's result: {e}")),
     };
     // A script may say more than its exit status in a JSON result file.
     let script = match std::fs::read_to_string(result_file(c)) {
         Ok(t) => match read_script_result(&t) {
             Ok(r) => Some(r),
             Err(e) => {
-                return c.fail(format!(
+                return Err(format!(
                     "`{}` wrote a result file that cannot be used: {e}",
                     c.step.name
                 ))
@@ -1165,10 +1289,7 @@ fn command_job(c: &Ctx) {
     let exited_ok = rec.code == 0 && rec.signal == 0;
     if let Some(r) = &script {
         if !r.summary.is_empty() {
-            let _ = std::fs::write(
-                c.task_dir().join(format!("{suffix}-r{}.result", c.run.0)),
-                &r.summary,
-            );
+            let _ = std::fs::write(c.task_dir().join(format!("{name}.result")), &r.summary);
         }
         if r.passed == Some(false) {
             let why = if r.summary.is_empty() {
@@ -1176,17 +1297,22 @@ fn command_job(c: &Ctx) {
             } else {
                 r.summary.clone()
             };
-            return c.conclude(
-                Outcome::Red,
-                format!("`{}` failed: {why}", c.step.name),
-                Some(format!("`{}` failed: {why}", c.step.name)),
-            );
+            return Ok(CommandRun {
+                verdict: RunVerdict::Red {
+                    reason: format!("`{}` failed: {why}", c.step.name),
+                    feedback: format!("`{}` failed: {why}", c.step.name),
+                    rerun: false,
+                },
+                log,
+            });
         }
     }
     let said_pass = script.as_ref().is_some_and(|r| r.passed == Some(true));
     if (exited_ok || said_pass) && rec.signal == 0 {
-        let _ = std::fs::remove_file(c.task_dir().join("feedback.txt"));
-        return c.green();
+        return Ok(CommandRun {
+            verdict: RunVerdict::Green,
+            log,
+        });
     }
     let output = tail(&std::fs::read_to_string(&log).unwrap_or_default(), 60);
     let how = if rec.signal != 0 {
@@ -1194,14 +1320,14 @@ fn command_job(c: &Ctx) {
     } else {
         format!("exit status {}", rec.code)
     };
-    c.conclude(
-        Outcome::Red,
-        format!("`{}` failed ({how})", c.step.name),
-        Some(format!(
-            "`{}` failed ({how}). Last output:\n{output}",
-            c.step.name
-        )),
-    );
+    Ok(CommandRun {
+        verdict: RunVerdict::Red {
+            reason: format!("`{}` failed ({how})", c.step.name),
+            feedback: format!("`{}` failed ({how}). Last output:\n{output}", c.step.name),
+            rerun: rec.signal == 0,
+        },
+        log,
+    })
 }
 
 /// An approval step waits for the owner. The run stays open, holding no slot,
