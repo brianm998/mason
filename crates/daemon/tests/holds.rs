@@ -216,9 +216,15 @@ fn an_outage_holds_and_is_told_apart_from_a_limit() {
             let a = v.providers.iter().find(|p| p.name == "claude").unwrap();
             assert_eq!(a.status, "outage");
             assert!(a.doing.contains("provider outage"), "{}", a.doing);
-            assert!(alerts(&d).iter().any(|a| a.1 == "provider_outage"));
-            assert!(alerts(&d).iter().all(|a| a.1 != "provider_limit"));
-            assert!(banners(&d).iter().any(|b| b.0 == "provider_outage"));
+            let (al, ba) = (alerts(&d), banners(&d));
+            // The hold may be released between the reads above and these;
+            // only a hold still in force must be shown.
+            if holds::hold_of(&d, "claude").is_none() {
+                return d.world().unwrap().tasks[&t].state == State::Landed;
+            }
+            assert!(al.iter().any(|a| a.1 == "provider_outage"));
+            assert!(al.iter().all(|a| a.1 != "provider_limit"));
+            assert!(ba.iter().any(|b| b.0 == "provider_outage"));
             saw = true;
         }
         d.world().unwrap().tasks[&t].state == State::Landed
