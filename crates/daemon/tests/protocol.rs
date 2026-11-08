@@ -347,6 +347,53 @@ fn every_entity_carries_its_allowed_actions_why_waiting_and_progress() {
     assert_eq!(row(4).allowed_actions, vec!["approve", "reject", "edit"]);
 }
 
+/// The task detail carries the plan parsed (`plan_view`) and as written (`plan`, for older clients).
+#[test]
+fn the_task_detail_carries_the_plan_readably_and_as_written() {
+    for (text, readable) in [
+        (
+            r#"{"summary":"S","files":["a.rs"],"approach":"0. one\n1. two","acceptance_criteria":["c"],"extra_key":"x"}"#,
+            true,
+        ),
+        ("{ not json", false),
+    ] {
+        let (d, port, dir) = demo();
+        for _ in 0..5 {
+            d.demo_next().unwrap();
+        }
+        let tdir = dir.path().join("d").join("t").join("1");
+        std::fs::create_dir_all(&tdir).unwrap();
+        std::fs::write(tdir.join("plan.json"), text).unwrap();
+        let mut c = Client::connect(port, Encoding::Json).unwrap();
+        c.hello(0, false).unwrap();
+        c.subscribe(&[ViewKind::Sidebar, ViewKind::TaskDetail], "", 1)
+            .unwrap();
+        let got = collect(&mut c, Duration::from_secs(5), |m| {
+            views_of(m)
+                .iter()
+                .any(|v| matches!(v.body, Some(Body::TaskDetail(_))))
+        });
+        let detail = views_of(&got)
+            .iter()
+            .find_map(|v| match &v.body {
+                Some(Body::TaskDetail(t)) => Some(t.clone()),
+                _ => None,
+            })
+            .expect("a task detail");
+        assert_eq!(detail.plan, text);
+        let pv = detail.plan_view.expect("a plan view");
+        assert_eq!(pv.raw, text);
+        if readable {
+            assert_eq!(pv.steps, vec!["one", "two"]);
+            assert_eq!(pv.step_numbers, vec!["0", "1"]);
+            assert_eq!(pv.other[0].label, "Extra key");
+            assert!(pv.note.is_empty());
+        } else {
+            assert!(!pv.note.is_empty() && pv.steps.is_empty());
+        }
+    }
+}
+
 #[test]
 fn the_sidebar_sorts_active_oldest_first_and_history_newest_first() {
     let (d, _port, _dir) = demo();
