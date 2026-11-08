@@ -184,9 +184,9 @@ fn self_tasks_are_limited_in_number_per_week_and_by_a_cooldown() {
     let w = self_world("max_open = 2\nper_week = 3\n");
     let pid = w.d.project_id_by_name("scratch").unwrap();
     assert!(selfguard::check_filing(&w.d, pid).is_ok());
-    // Two open tasks: the third is refused with the number and the limit.
-    file_task_as(&w.d, "one", "x", true, TrustSource::Owner, true);
-    file_task_as(&w.d, "two", "x", true, TrustSource::Owner, true);
+    // Two open tasks of MASON's own making: the third is refused with the number and the limit.
+    file_task_as(&w.d, "one", "x", true, TrustSource::OwnerAgent, true);
+    file_task_as(&w.d, "two", "x", true, TrustSource::OwnerAgent, true);
     let e = selfguard::check_filing(&w.d, pid).unwrap_err();
     assert!(
         e.contains("2 self-tasks are open") && e.contains("limit is 2"),
