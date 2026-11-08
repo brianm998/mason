@@ -607,6 +607,7 @@ dependencies = [
 name = "mason-conformance"
 version = "0.0.0"
 dependencies = [
+ "mason-core",
  "mason-plugins",
  "mason-protocol",
  "serde_json",
@@ -683,6 +684,7 @@ name = "mason-pipeline"
 version = "0.0.0"
 dependencies = [
  "mason-adapters",
+ "mason-core",
  "mason-daemon",
  "mason-definition",
  "mason-landing",

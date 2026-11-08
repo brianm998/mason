@@ -97,7 +97,7 @@ pub fn kotlin(text: &str) -> Result<String, String> {
 mod tests {
     use super::*;
 
-    const T: &str = "[color.light]\nattention_tint = \"#FDECEC\"\n[size]\ntile_width = 96\n";
+    const T: &str = "[color.light]\nattention_tint = \"#FDECEC\"\n[size]\ntile_min_width = 64\n";
 
     #[test]
     fn both_languages_get_the_same_names_and_values() {
@@ -107,12 +107,15 @@ mod tests {
             sw.contains("public static let colorLightAttentionTint = \"#FDECEC\""),
             "{sw}"
         );
-        assert!(sw.contains("public static let sizeTileWidth = 96"), "{sw}");
+        assert!(
+            sw.contains("public static let sizeTileMinWidth = 64"),
+            "{sw}"
+        );
         assert!(
             kt.contains("const val colorLightAttentionTint = \"#FDECEC\""),
             "{kt}"
         );
-        assert!(kt.contains("const val sizeTileWidth = 96"), "{kt}");
+        assert!(kt.contains("const val sizeTileMinWidth = 64"), "{kt}");
         assert!(kt.contains("package mason"));
     }
 

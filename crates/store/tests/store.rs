@@ -600,7 +600,7 @@ fn live_progress_is_kept_per_run_and_dropped_when_not_open() {
     let s = Store::open(&p).unwrap();
     let mut a = Progress::new(7, "work", 100);
     a.output("t0r7-cmd", 0, b"x\ny\n", 150);
-    a.offer_history_total(Some(9));
+    a.offer_history_total(Some((0, 9)), 0);
     a.subs.push(SubProgress {
         name: "unit".into(),
         unit: "tests".into(),
@@ -608,6 +608,9 @@ fn live_progress_is_kept_per_run_and_dropped_when_not_open() {
         total: Figure::reported(8),
     });
     s.put_progress(0, &a).unwrap();
+    // The log lines waiting to be pushed and the unfinished line are not stored.
+    a.pending_log.clear();
+    a.partial.clear();
     s.put_progress(1, &Progress::new(8, "work", 100)).unwrap();
     let rows = s.progress_rows(Some(0)).unwrap();
     assert_eq!(rows.len(), 1);
@@ -634,17 +637,21 @@ fn history_keeps_final_counts_per_project_and_step() {
     let (_d, p) = db();
     let s = Store::open(&p).unwrap();
     for (run, done) in [(1u64, 10u64), (2, 20), (3, 30)] {
-        s.record_history("web", 0, run, "work", done, done + 1, 5)
+        s.record_history("web", 0, run, "work", done, done + 1, run * 1000, 5)
             .unwrap();
     }
-    s.record_history("api", 1, 4, "work", 99, 99, 6).unwrap();
-    s.record_history("web", 0, 5, "check", 7, 7, 7).unwrap();
+    s.record_history("api", 1, 4, "work", 99, 99, 0, 6).unwrap();
+    s.record_history("web", 0, 5, "check", 7, 7, 0, 7).unwrap();
     assert_eq!(
         s.history_samples("web", "work").unwrap(),
         vec![(10, 11), (20, 21), (30, 31)]
     );
     assert_eq!(s.history_samples("api", "work").unwrap(), vec![(99, 99)]);
+    assert_eq!(
+        s.history_gaps("web", "work").unwrap(),
+        vec![1000, 2000, 3000]
+    );
     // A run recorded twice counts once.
-    s.record_history("web", 0, 1, "work", 10, 11, 9).unwrap();
+    s.record_history("web", 0, 1, "work", 10, 11, 0, 9).unwrap();
     assert_eq!(s.history_samples("web", "work").unwrap().len(), 3);
 }
