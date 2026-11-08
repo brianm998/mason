@@ -243,6 +243,9 @@ impl Ctx {
                     (_, true) => why,
                     (_, false) => format!("{reason}; {why}"),
                 };
+                // Hand the resources back before the task shows as failed, so nobody
+                // can see a failed task still holding its device.
+                self.release_lease();
                 self.emit(EventKind::StepFailed {
                     task: self.task,
                     reason,
