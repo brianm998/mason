@@ -358,9 +358,9 @@ fn wait_while_paused(c: &Ctx) -> Result<(), ()> {
 /// Wait for this step's resources (Part 7). Says why in the task's wait, once,
 /// and ends the wait when they are granted.
 fn acquire(c: &Ctx) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
-    use crate::sched::{needs_of, DEFAULT_ACCOUNT};
+    use crate::sched::needs_of;
     let d = &c.d;
-    let account = (c.step.kind == StepType::Agent).then_some(DEFAULT_ACCOUNT);
+    let account = (c.step.kind == StepType::Agent).then_some(c.project.account.as_str());
     // A definition names what it uses; a name nobody declared gets its
     // definition-given limit (or one slot).
     let mut needs = needs_of(&c.step.uses, account);

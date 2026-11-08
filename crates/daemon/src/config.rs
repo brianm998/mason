@@ -149,6 +149,9 @@ pub struct ProjectCfg {
     /// Present when this project is MASON's own repository (`[self]`): its changes
     /// to gates and the like stop for the owner, and its self-tasks are limited.
     pub self_cfg: Option<SelfCfg>,
+    /// The provider account this project's agent steps use (`account` in the
+    /// overlay). Filled for real by `load_projects`, which knows the accounts.
+    pub account: String,
 }
 
 /// Which agent CLI runs a project's agent steps.
@@ -165,6 +168,8 @@ pub enum Provider {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AgentCfg {
     pub provider: Provider,
+    /// `account` in the overlay: a name from providers.toml.
+    pub account: Option<String>,
     pub codex_bin: Option<PathBuf>,
     /// Models weakest to strongest. A step that ends with no result, or crashes,
     /// is tried again from a fresh session on the next model up. Empty: no change.
@@ -185,6 +190,15 @@ pub fn parse_agent(id: &str, doc: &DocumentMut) -> Result<AgentCfg, String> {
             ))
         }
     };
+    let account = match doc.get("account") {
+        None => None,
+        Some(v) => Some(
+            v.as_str()
+                .filter(|a| valid_id(a))
+                .ok_or_else(|| format!("{id}: `account` is the name of a providers.toml account"))?
+                .to_string(),
+        ),
+    };
     let ladder: Vec<String> = match doc.get("ladder") {
         None => vec![],
         Some(v) => v
@@ -201,6 +215,7 @@ pub fn parse_agent(id: &str, doc: &DocumentMut) -> Result<AgentCfg, String> {
     };
     Ok(AgentCfg {
         provider,
+        account,
         codex_bin: s("codex_bin").map(PathBuf::from),
         ladder,
         max_retries: doc
@@ -533,7 +548,7 @@ impl ProjectCfg {
     }
 }
 
-fn valid_id(s: &str) -> bool {
+pub(crate) fn valid_id(s: &str) -> bool {
     !s.is_empty()
         && s.chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
@@ -573,8 +588,11 @@ pub fn parse_project(id: &str, text: &str) -> Result<ProjectCfg, String> {
             "{id}: base branch {base:?} is not a plain branch name"
         ));
     }
-    parse_agent(id, &doc)?;
+    let agent = parse_agent(id, &doc)?;
     Ok(ProjectCfg {
+        account: agent
+            .account
+            .unwrap_or_else(|| crate::providers::adapter_name(agent.provider).to_string()),
         id: id.to_string(),
         path: PathBuf::from(need("path")?),
         base,
@@ -615,6 +633,10 @@ pub fn load_projects(config_dir: &Path) -> Result<Vec<ProjectCfg>, Vec<String>> 
         .filter(|p| p.extension().is_some_and(|e| e == "toml"))
         .collect();
     files.sort();
+    let accounts = match crate::providers::load(config_dir) {
+        Ok(a) => a,
+        Err(e) => return Err(vec![e]),
+    };
     for p in files {
         let id = p
             .file_stem()
@@ -623,7 +645,20 @@ pub fn load_projects(config_dir: &Path) -> Result<Vec<ProjectCfg>, Vec<String>> 
             .to_string();
         match std::fs::read_to_string(&p) {
             Ok(t) => match parse_project(&id, &t) {
-                Ok(c) => out.push(c),
+                Ok(mut c) => {
+                    let a = c.agent();
+                    match crate::providers::resolve_account(
+                        &accounts,
+                        a.provider,
+                        a.account.as_deref(),
+                    ) {
+                        Ok(n) => {
+                            c.account = n;
+                            out.push(c);
+                        }
+                        Err(e) => errs.push(format!("{}: {e}", c.id)),
+                    }
+                }
                 Err(e) => errs.push(e),
             },
             Err(e) => errs.push(format!("{}: {e}", p.display())),
@@ -756,5 +791,64 @@ mod tests {
             let e = parse_project(id, t).unwrap_err();
             assert!(e.contains(want), "{e:?} should contain {want:?}");
         }
+    }
+
+    fn write(dir: &Path, name: &str, text: &str) {
+        std::fs::create_dir_all(dir.join("projects")).unwrap();
+        let f = if name == "providers" {
+            dir.join("providers.toml")
+        } else {
+            dir.join("projects").join(format!("{name}.toml"))
+        };
+        std::fs::write(f, text).unwrap();
+    }
+
+    const PROJ: &str = "path=\"/r\"\nbase=\"main\"\ntest=\"t\"\n";
+
+    #[test]
+    fn accounts_resolve_at_load_and_a_missing_one_is_refused_by_name() {
+        let d = tempfile::tempdir().unwrap();
+        // No providers.toml: the one default account.
+        write(d.path(), "p", PROJ);
+        assert_eq!(load_projects(d.path()).unwrap()[0].account, "claude");
+        // A project on codex with no codex account: refused, naming the fix.
+        write(d.path(), "q", &format!("{PROJ}provider=\"codex\"\n"));
+        let e = load_projects(d.path()).unwrap_err().join("\n");
+        assert!(e.contains("q:") && e.contains("adapter = \"codex\""), "{e}");
+        write(
+            d.path(),
+            "providers",
+            "[provider.a]\nadapter=\"claude\"\nbilling=\"subscription\"\n[provider.x]\nadapter=\"codex\"\nbilling=\"api\"\n",
+        );
+        let ps = load_projects(d.path()).unwrap();
+        let of = |id: &str| ps.iter().find(|p| p.id == id).unwrap().account.clone();
+        assert_eq!((of("p"), of("q")), ("a".into(), "x".into()));
+        // Naming a missing account.
+        write(d.path(), "r", &format!("{PROJ}account=\"missing\"\n"));
+        let e = load_projects(d.path()).unwrap_err().join("\n");
+        assert!(e.contains("r:") && e.contains("\"missing\""), "{e}");
+        // A bad providers.toml fails the load.
+        write(
+            d.path(),
+            "providers",
+            "[provider.a]\nadapter=\"claude\"\nbilling=\"x\"\n",
+        );
+        assert!(load_projects(d.path()).is_err());
+    }
+
+    #[test]
+    fn llm_section_still_sets_sessions_for_an_account() {
+        let r = crate::sched::parse_resource_cfg("[llm]\nclaude = 2\n").unwrap();
+        let accts = crate::providers::default_accounts();
+        assert!(crate::providers::check_llm_conflict(&accts, &r.llm).is_ok());
+        let b = crate::sched::Broker::new(
+            tempfile::tempdir().unwrap().keep(),
+            tempfile::tempdir().unwrap().keep().join("limits.kv"),
+            &r,
+            4,
+            &accts,
+        )
+        .unwrap();
+        assert_eq!(b.limit("llm:claude"), Some(2));
     }
 }
