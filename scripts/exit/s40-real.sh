@@ -83,6 +83,7 @@ remote = "origin"
 test = "test -f hello.txt"
 claude_bin = "$PWD/$bin/fake-claude"
 [self]
+holds = "owner"
 max_open = 5
 [agent_env]
 FAKE_CLAUDE_SCRIPT = "$root/script.json"
