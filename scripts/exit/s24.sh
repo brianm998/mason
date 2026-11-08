@@ -33,13 +33,22 @@ start() {  # EXTRA-ARGS...
   daemon=$!
   until m status >/dev/null 2>&1; do kill -0 "$daemon" 2>/dev/null || fail "masond did not start"; sleep 0.1; done
 }
-stop() { kill "$daemon" 2>/dev/null || true; wait "$daemon" 2>/dev/null || true; daemon=""; }
+stop() {
+  [ -n "$daemon" ] || return 0
+  kill "$daemon"
+  # masond exits 143 (SIGTERM) or 0 on a clean stop; anything else is a crash.
+  local rc=0
+  wait "$daemon" || rc=$?
+  daemon=""
+  case "$rc" in 0|143) ;; *) fail "masond exited with status $rc on stop";; esac
+}
 
 echo "== 1. loopback is the default: no LAN listener, no setting changed"
 start
 grep -q lan_port "$root/d/daemon.json" && fail "daemon.json names a LAN port with LAN access off"
 [ "$(m lan status --json | python3 -c 'import json,sys;print(json.load(sys.stdin)["enabled"])')" = False ] || fail "LAN reported on by default"
-out=$(m pair 2>&1 || true); case "$out" in *"LAN access is off"*) ;; *) fail "a code was issued with LAN access off";; esac
+if out=$(m pair 2>&1); then fail "a code was issued with LAN access off: $out"; fi
+case "$out" in *"LAN access is off"*) ;; *) fail "pair failed for the wrong reason: $out";; esac
 stop
 echo "PASS: default is loopback only"
 printf '[lan]\nenabled = "yes"\n' > "$root/c/daemon.toml"
