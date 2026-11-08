@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+import MasonProtocol
 import MonitorCore
 import SwiftUI
 
@@ -51,8 +52,9 @@ struct TopBar: View {
 
             VStack(alignment: .leading, spacing: 0) {
                 ForEach(model.usage?.providers ?? [], id: \.name) { p in
-                    Text("\(p.name): \(p.sessionsUsed) of \(p.sessionsLimit) sessions")
+                    Text(topBarUsageLine(model.usage, p))
                         .font(theme.small()).foregroundStyle(theme.muted).lineLimit(1)
+                        .accessibilityIdentifier("topbar-usage:\(p.name)")
                 }
                 if let note = model.usage?.note, (model.usage?.providers.isEmpty ?? true) {
                     Text(note).font(theme.small()).foregroundStyle(theme.muted).lineLimit(1)
@@ -160,4 +162,11 @@ struct AddTaskSheet: View {
         .padding(theme.spacingLarge)
         .frame(width: 460)
     }
+}
+
+/// The top-bar line for an account: its most constrained window ("claude 5-hour 82%, resets 1 h 10 m")
+/// when it has reported one, else its sessions.
+func topBarUsageLine(_ u: Mason_V1_UsageView?, _ p: Mason_V1_ProviderStatus) -> String {
+    if let line = u?.topBar.first(where: { $0.hasPrefix("\(p.name) ") }) { return line }
+    return "\(p.name): \(p.sessionsUsed) of \(p.sessionsLimit) sessions"
 }

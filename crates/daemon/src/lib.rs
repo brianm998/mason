@@ -36,6 +36,7 @@ pub mod sweep;
 pub mod tiermap;
 pub mod tracker;
 pub mod update;
+pub mod usage;
 pub mod views;
 pub mod watchdog;
 pub mod ws;

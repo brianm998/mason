@@ -1792,6 +1792,22 @@ async fn pause_clear(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Re
     Ok(Json(json!({"lifted": n})))
 }
 
+/// The LLM usage view, as the monitors get it (proto3 JSON).
+async fn usage_status(Shared(d): Shared<Arc<Daemon>>) -> Res {
+    let d2 = d.clone();
+    let v = d
+        .pool
+        .run(move || {
+            let w = d2.world().map_err(store_err)?;
+            let u = crate::views::Ctx::new(&d2, &w).usage();
+            serde_json::to_value(&u)
+                .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        })
+        .await
+        .map_err(pool_err)??;
+    Ok(Json(v))
+}
+
 async fn pauses_list(Shared(d): Shared<Arc<Daemon>>) -> Res {
     let d2 = d.clone();
     let rows = d
@@ -2159,6 +2175,7 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/pause", post(pause_set))
         .route("/resume", post(pause_clear))
         .route("/pauses", get(pauses_list))
+        .route("/usage", get(usage_status))
         .route("/alerts", get(alerts_list))
         .route("/metrics", get(metrics))
         .route("/demo", get(demo_status))

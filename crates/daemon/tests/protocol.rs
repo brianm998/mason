@@ -741,3 +741,69 @@ fn the_demo_script_is_deterministic_and_ends() {
     // A demo daemon runs no work and touches nothing outside its data directory.
     assert_eq!(d.job_count(), 0);
 }
+
+/// s64: the demo daemon has accounts in several states, and the conformance
+/// items for the usage page come out of them.
+#[test]
+fn demo_usage_has_accounts_in_several_states() {
+    let (d, _port, _dir) = demo();
+    let w = d.world().unwrap();
+    let u = Ctx::new(&d, &w).usage();
+    let by = |n: &str| u.providers.iter().find(|p| p.name == n).unwrap();
+    // A subscription with percentages on both windows.
+    let main = by("claude");
+    assert!(main.windows.iter().all(|w| w.has_percent && w.has_reset));
+    assert!(main.overage_text.contains("out_of_credits"));
+    // Windows with no percentage.
+    assert!(by("claude-quiet")
+        .windows
+        .iter()
+        .all(|w| w.reported && !w.has_percent));
+    // Blocked, with why and until when.
+    let full = by("claude-full");
+    assert_eq!(full.status, "blocked");
+    assert!(
+        full.blocked_text
+            .starts_with("blocked: 5-hour window is full, until"),
+        "{}",
+        full.blocked_text
+    );
+    // An api account: spend against a budget, no windows.
+    let api = by("api-main");
+    assert!(api.windows.is_empty());
+    let sp = api.spend.as_ref().unwrap();
+    assert!(sp.has_spend && sp.has_budget && sp.month_usd > 3.0);
+    // Codex reports nothing, so it shows nothing.
+    let codex = by("codex");
+    assert!(!codex.has_snapshot && codex.windows.is_empty());
+    assert!(codex.tokens_week.as_ref().unwrap().by_model.is_empty());
+    // The top bar: the most constrained window per account.
+    assert!(
+        u.top_bar
+            .iter()
+            .any(|l| l.starts_with("claude 5-hour 82%, resets 1 h")),
+        "{:?}",
+        u.top_bar
+    );
+    assert!(
+        u.top_bar.iter().any(|l| l.starts_with("api-main spend $")),
+        "{:?}",
+        u.top_bar
+    );
+    // The conformance items.
+    let items = mason_conformance::conformance::usage_items(&u);
+    let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
+    for id in [
+        "usage:claude",
+        "usage-window:claude:five_hour",
+        "usage-window:claude-quiet:seven_day",
+        "usage:api-main",
+    ] {
+        assert!(ids.contains(&id), "{id} in {ids:?}");
+    }
+    let q = items
+        .iter()
+        .find(|i| i.id == "usage-window:claude-quiet:five_hour")
+        .unwrap();
+    assert!(q.texts.contains(&"no percentage reported".to_string()));
+}

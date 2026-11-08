@@ -1893,6 +1893,12 @@ public nonisolated struct Mason_V1_TaskDetailView: @unchecked Sendable {
   /// Clears the value of `proposal`. Subsequent reads from it will return its default value.
   public mutating func clearProposal() {_uniqueStorage()._proposal = nil}
 
+  /// Tokens and cost this task's steps reported, one line per step (s64).
+  public var stepTokens: [Mason_V1_TokenLine] {
+    get {_storage._stepTokens}
+    set {_uniqueStorage()._stepTokens = newValue}
+  }
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -2101,33 +2107,270 @@ public nonisolated struct Mason_V1_LandingView: Sendable {
   public init() {}
 }
 
-public nonisolated struct Mason_V1_ProviderStatus: Sendable {
+public nonisolated struct Mason_V1_ProviderStatus: @unchecked Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var name: String {
+    get {_storage._name}
+    set {_uniqueStorage()._name = newValue}
+  }
+
+  public var status: String {
+    get {_storage._status}
+    set {_uniqueStorage()._status = newValue}
+  }
+
+  public var sessionsUsed: UInt32 {
+    get {_storage._sessionsUsed}
+    set {_uniqueStorage()._sessionsUsed = newValue}
+  }
+
+  public var sessionsLimit: UInt32 {
+    get {_storage._sessionsLimit}
+    set {_uniqueStorage()._sessionsLimit = newValue}
+  }
+
+  /// The account's configuration (providers.toml).
+  public var adapter: String {
+    get {_storage._adapter}
+    set {_uniqueStorage()._adapter = newValue}
+  }
+
+  /// "subscription" | "api"
+  public var billing: String {
+    get {_storage._billing}
+    set {_uniqueStorage()._billing = newValue}
+  }
+
+  /// fraction of a limit at which to warn
+  public var warnAt: Double {
+    get {_storage._warnAt}
+    set {_uniqueStorage()._warnAt = newValue}
+  }
+
+  /// "allow" | "hold"
+  public var overage: String {
+    get {_storage._overage}
+    set {_uniqueStorage()._overage = newValue}
+  }
+
+  /// api accounts; 0 when none is set
+  public var monthlyBudgetUsd: Double {
+    get {_storage._monthlyBudgetUsd}
+    set {_uniqueStorage()._monthlyBudgetUsd = newValue}
+  }
+
+  /// What the provider last said (s64). Every figure comes with its age text.
+  /// The slots are sessions_used / sessions_limit above.
+  public var windows: [Mason_V1_UsageWindow] {
+    get {_storage._windows}
+    set {_uniqueStorage()._windows = newValue}
+  }
+
+  /// "overage: off (why)", "in use since ...", or ""
+  public var overageText: String {
+    get {_storage._overageText}
+    set {_uniqueStorage()._overageText = newValue}
+  }
+
+  /// "blocked: why, until ..." or ""
+  public var blockedText: String {
+    get {_storage._blockedText}
+    set {_uniqueStorage()._blockedText = newValue}
+  }
+
+  /// false: nothing reported yet
+  public var hasSnapshot_p: Bool {
+    get {_storage._hasSnapshot_p}
+    set {_uniqueStorage()._hasSnapshot_p = newValue}
+  }
+
+  /// epoch seconds of the snapshot
+  public var asOf: UInt64 {
+    get {_storage._asOf}
+    set {_uniqueStorage()._asOf = newValue}
+  }
+
+  /// "as of 12 min ago", "just now"; "" without a snapshot
+  public var age: String {
+    get {_storage._age}
+    set {_uniqueStorage()._age = newValue}
+  }
+
+  /// api accounts only
+  public var spend: Mason_V1_SpendView {
+    get {_storage._spend ?? Mason_V1_SpendView()}
+    set {_uniqueStorage()._spend = newValue}
+  }
+  /// Returns true if `spend` has been explicitly set.
+  public var hasSpend: Bool {_storage._spend != nil}
+  /// Clears the value of `spend`. Subsequent reads from it will return its default value.
+  public mutating func clearSpend() {_uniqueStorage()._spend = nil}
+
+  /// the current (shortest reported) window; empty without one
+  public var tokensWindow: Mason_V1_UsageTokens {
+    get {_storage._tokensWindow ?? Mason_V1_UsageTokens()}
+    set {_uniqueStorage()._tokensWindow = newValue}
+  }
+  /// Returns true if `tokensWindow` has been explicitly set.
+  public var hasTokensWindow: Bool {_storage._tokensWindow != nil}
+  /// Clears the value of `tokensWindow`. Subsequent reads from it will return its default value.
+  public mutating func clearTokensWindow() {_uniqueStorage()._tokensWindow = nil}
+
+  /// the last 7 days
+  public var tokensWeek: Mason_V1_UsageTokens {
+    get {_storage._tokensWeek ?? Mason_V1_UsageTokens()}
+    set {_uniqueStorage()._tokensWeek = newValue}
+  }
+  /// Returns true if `tokensWeek` has been explicitly set.
+  public var hasTokensWeek: Bool {_storage._tokensWeek != nil}
+  /// Clears the value of `tokensWeek`. Subsequent reads from it will return its default value.
+  public mutating func clearTokensWeek() {_uniqueStorage()._tokensWeek = nil}
+
+  /// what MASON is doing about it; "nothing" until ticket 4
+  public var doing: String {
+    get {_storage._doing}
+    set {_uniqueStorage()._doing = newValue}
+  }
+
+  /// The same as `adapter` (5). Wire's Kotlin classes already have a member called
+  /// `adapter`, so a client there cannot read a field of that name; it reads this one.
+  public var adapterName: String {
+    get {_storage._adapterName}
+    set {_uniqueStorage()._adapterName = newValue}
+  }
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _storage = _StorageClass.defaultInstance
+}
+
+/// One limit window. A window reported without a percentage has
+/// has_percent = false and shows its state and reset only.
+public nonisolated struct Mason_V1_UsageWindow: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var id: String = String()
+
+  public var label: String = String()
+
+  /// false: the adapter can report it, nothing has yet
+  public var reported: Bool = false
+
+  public var hasPercent_p: Bool = false
+
+  /// 0..100, only when has_percent
+  public var percent: Double = 0
+
+  public var hasReset_p: Bool = false
+
+  /// epoch seconds
+  public var resetsAt: UInt64 = 0
+
+  /// "resets in 2 h 14 m, at 15:00 UTC"
+  public var resetsText: String = String()
+
+  /// "ok" | "warning" | "blocked"
+  public var state: String = String()
+
+  /// "up 12 points over 6 h 0 m" or ""
+  public var trend: String = String()
+
+  public var age: String = String()
+
+  /// top bar: "5-hour 82%, resets 1 h 10 m"
+  public var shortText: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public nonisolated struct Mason_V1_SpendView: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  /// false: no cost reported yet
+  public var hasSpend_p: Bool = false
+
+  public var todayUsd: Double = 0
+
+  public var weekUsd: Double = 0
+
+  public var monthUsd: Double = 0
+
+  public var hasBudget_p: Bool = false
+
+  public var budgetUsd: Double = 0
+
+  public var age: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// Reported tokens and cost. A has_* flag false means not reported (never 0).
+public nonisolated struct Mason_V1_TokenLine: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   public var name: String = String()
 
-  public var status: String = String()
+  public var hasInput_p: Bool = false
 
-  public var sessionsUsed: UInt32 = 0
+  public var input: UInt64 = 0
 
-  public var sessionsLimit: UInt32 = 0
+  public var hasOutput_p: Bool = false
 
-  /// The account's configuration (providers.toml).
-  public var adapter: String = String()
+  public var output: UInt64 = 0
 
-  /// "subscription" | "api"
-  public var billing: String = String()
+  public var hasCacheRead_p: Bool = false
 
-  /// fraction of a limit at which to warn
-  public var warnAt: Double = 0
+  public var cacheRead: UInt64 = 0
 
-  /// "allow" | "hold"
-  public var overage: String = String()
+  public var hasCacheWrite_p: Bool = false
 
-  /// api accounts; 0 when none is set
-  public var monthlyBudgetUsd: Double = 0
+  public var cacheWrite: UInt64 = 0
+
+  public var hasCost_p: Bool = false
+
+  public var costUsd: Double = 0
+
+  public var attempts: UInt32 = 0
+
+  /// of the newest attempt counted
+  public var age: String = String()
+
+  /// top tasks only
+  public var task: UInt64 = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public nonisolated struct Mason_V1_UsageTokens: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  /// "current window" | "last 7 days"
+  public var period: String = String()
+
+  public var byProject: [Mason_V1_TokenLine] = []
+
+  public var byModel: [Mason_V1_TokenLine] = []
+
+  public var topTasks: [Mason_V1_TokenLine] = []
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -2142,6 +2385,9 @@ public nonisolated struct Mason_V1_UsageView: Sendable {
   public var providers: [Mason_V1_ProviderStatus] = []
 
   public var note: String = String()
+
+  /// The top-bar line: the most constrained window per account.
+  public var topBar: [String] = []
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -5499,7 +5745,7 @@ nonisolated extension Mason_V1_DebtLine: SwiftProtobuf.Message, SwiftProtobuf._M
 
 nonisolated extension Mason_V1_TaskDetailView: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".TaskDetailView"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}row\0\u{1}steps\0\u{1}plan\0\u{1}card\0\u{1}closing\0\u{1}debts\0\u{3}log_tail\0\u{1}branch\0\u{1}worktree\0\u{1}definition\0\u{1}failure\0\u{1}body\0\u{1}route\0\u{3}started_at\0\u{3}explore_returns\0\u{2}\u{2}approval\0\u{1}numbers\0\u{3}plan_view\0\u{1}proposal\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}row\0\u{1}steps\0\u{1}plan\0\u{1}card\0\u{1}closing\0\u{1}debts\0\u{3}log_tail\0\u{1}branch\0\u{1}worktree\0\u{1}definition\0\u{1}failure\0\u{1}body\0\u{1}route\0\u{3}started_at\0\u{3}explore_returns\0\u{2}\u{2}approval\0\u{1}numbers\0\u{3}plan_view\0\u{1}proposal\0\u{3}step_tokens\0")
 
   fileprivate class _StorageClass {
     var _row: Mason_V1_TaskRow? = nil
@@ -5521,6 +5767,7 @@ nonisolated extension Mason_V1_TaskDetailView: SwiftProtobuf.Message, SwiftProto
     var _numbers: [Mason_V1_NumberLine] = []
     var _planView: Mason_V1_PlanView? = nil
     var _proposal: Mason_V1_ProposalInfo? = nil
+    var _stepTokens: [Mason_V1_TokenLine] = []
 
       // This property is used as the initial default value for new instances of the type.
       // The type itself is protecting the reference to its storage via CoW semantics.
@@ -5550,6 +5797,7 @@ nonisolated extension Mason_V1_TaskDetailView: SwiftProtobuf.Message, SwiftProto
       _numbers = source._numbers
       _planView = source._planView
       _proposal = source._proposal
+      _stepTokens = source._stepTokens
     }
   }
 
@@ -5587,6 +5835,7 @@ nonisolated extension Mason_V1_TaskDetailView: SwiftProtobuf.Message, SwiftProto
         case 18: try { try decoder.decodeRepeatedMessageField(value: &_storage._numbers) }()
         case 19: try { try decoder.decodeSingularMessageField(value: &_storage._planView) }()
         case 20: try { try decoder.decodeSingularMessageField(value: &_storage._proposal) }()
+        case 21: try { try decoder.decodeRepeatedMessageField(value: &_storage._stepTokens) }()
         default: break
         }
       }
@@ -5656,6 +5905,9 @@ nonisolated extension Mason_V1_TaskDetailView: SwiftProtobuf.Message, SwiftProto
       try { if let v = _storage._proposal {
         try visitor.visitSingularMessageField(value: v, fieldNumber: 20)
       } }()
+      if !_storage._stepTokens.isEmpty {
+        try visitor.visitRepeatedMessageField(value: _storage._stepTokens, fieldNumber: 21)
+      }
     }
     try unknownFields.traverse(visitor: &visitor)
   }
@@ -5684,6 +5936,7 @@ nonisolated extension Mason_V1_TaskDetailView: SwiftProtobuf.Message, SwiftProto
         if _storage._numbers != rhs_storage._numbers {return false}
         if _storage._planView != rhs_storage._planView {return false}
         if _storage._proposal != rhs_storage._proposal {return false}
+        if _storage._stepTokens != rhs_storage._stepTokens {return false}
         return true
       }
       if !storagesAreEqual {return false}
@@ -6125,7 +6378,355 @@ nonisolated extension Mason_V1_LandingView: SwiftProtobuf.Message, SwiftProtobuf
 
 nonisolated extension Mason_V1_ProviderStatus: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ProviderStatus"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}name\0\u{1}status\0\u{3}sessions_used\0\u{3}sessions_limit\0\u{1}adapter\0\u{1}billing\0\u{3}warn_at\0\u{1}overage\0\u{3}monthly_budget_usd\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}name\0\u{1}status\0\u{3}sessions_used\0\u{3}sessions_limit\0\u{1}adapter\0\u{1}billing\0\u{3}warn_at\0\u{1}overage\0\u{3}monthly_budget_usd\0\u{1}windows\0\u{3}overage_text\0\u{3}blocked_text\0\u{3}has_snapshot\0\u{3}as_of\0\u{1}age\0\u{1}spend\0\u{3}tokens_window\0\u{3}tokens_week\0\u{1}doing\0\u{3}adapter_name\0")
+
+  fileprivate class _StorageClass {
+    var _name: String = String()
+    var _status: String = String()
+    var _sessionsUsed: UInt32 = 0
+    var _sessionsLimit: UInt32 = 0
+    var _adapter: String = String()
+    var _billing: String = String()
+    var _warnAt: Double = 0
+    var _overage: String = String()
+    var _monthlyBudgetUsd: Double = 0
+    var _windows: [Mason_V1_UsageWindow] = []
+    var _overageText: String = String()
+    var _blockedText: String = String()
+    var _hasSnapshot_p: Bool = false
+    var _asOf: UInt64 = 0
+    var _age: String = String()
+    var _spend: Mason_V1_SpendView? = nil
+    var _tokensWindow: Mason_V1_UsageTokens? = nil
+    var _tokensWeek: Mason_V1_UsageTokens? = nil
+    var _doing: String = String()
+    var _adapterName: String = String()
+
+      // This property is used as the initial default value for new instances of the type.
+      // The type itself is protecting the reference to its storage via CoW semantics.
+      // This will force a copy to be made of this reference when the first mutation occurs;
+      // hence, it is safe to mark this as `nonisolated(unsafe)`.
+      static nonisolated(unsafe) let defaultInstance = _StorageClass()
+
+    private init() {}
+
+    init(copying source: _StorageClass) {
+      _name = source._name
+      _status = source._status
+      _sessionsUsed = source._sessionsUsed
+      _sessionsLimit = source._sessionsLimit
+      _adapter = source._adapter
+      _billing = source._billing
+      _warnAt = source._warnAt
+      _overage = source._overage
+      _monthlyBudgetUsd = source._monthlyBudgetUsd
+      _windows = source._windows
+      _overageText = source._overageText
+      _blockedText = source._blockedText
+      _hasSnapshot_p = source._hasSnapshot_p
+      _asOf = source._asOf
+      _age = source._age
+      _spend = source._spend
+      _tokensWindow = source._tokensWindow
+      _tokensWeek = source._tokensWeek
+      _doing = source._doing
+      _adapterName = source._adapterName
+    }
+  }
+
+  fileprivate mutating func _uniqueStorage() -> _StorageClass {
+    if !isKnownUniquelyReferenced(&_storage) {
+      _storage = _StorageClass(copying: _storage)
+    }
+    return _storage
+  }
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    _ = _uniqueStorage()
+    try withExtendedLifetime(_storage) { (_storage: _StorageClass) in
+      while let fieldNumber = try decoder.nextFieldNumber() {
+        // The use of inline closures is to circumvent an issue where the compiler
+        // allocates stack space for every case branch when no optimizations are
+        // enabled. https://github.com/apple/swift-protobuf/issues/1034
+        switch fieldNumber {
+        case 1: try { try decoder.decodeSingularStringField(value: &_storage._name) }()
+        case 2: try { try decoder.decodeSingularStringField(value: &_storage._status) }()
+        case 3: try { try decoder.decodeSingularUInt32Field(value: &_storage._sessionsUsed) }()
+        case 4: try { try decoder.decodeSingularUInt32Field(value: &_storage._sessionsLimit) }()
+        case 5: try { try decoder.decodeSingularStringField(value: &_storage._adapter) }()
+        case 6: try { try decoder.decodeSingularStringField(value: &_storage._billing) }()
+        case 7: try { try decoder.decodeSingularDoubleField(value: &_storage._warnAt) }()
+        case 8: try { try decoder.decodeSingularStringField(value: &_storage._overage) }()
+        case 9: try { try decoder.decodeSingularDoubleField(value: &_storage._monthlyBudgetUsd) }()
+        case 10: try { try decoder.decodeRepeatedMessageField(value: &_storage._windows) }()
+        case 11: try { try decoder.decodeSingularStringField(value: &_storage._overageText) }()
+        case 12: try { try decoder.decodeSingularStringField(value: &_storage._blockedText) }()
+        case 13: try { try decoder.decodeSingularBoolField(value: &_storage._hasSnapshot_p) }()
+        case 14: try { try decoder.decodeSingularUInt64Field(value: &_storage._asOf) }()
+        case 15: try { try decoder.decodeSingularStringField(value: &_storage._age) }()
+        case 16: try { try decoder.decodeSingularMessageField(value: &_storage._spend) }()
+        case 17: try { try decoder.decodeSingularMessageField(value: &_storage._tokensWindow) }()
+        case 18: try { try decoder.decodeSingularMessageField(value: &_storage._tokensWeek) }()
+        case 19: try { try decoder.decodeSingularStringField(value: &_storage._doing) }()
+        case 20: try { try decoder.decodeSingularStringField(value: &_storage._adapterName) }()
+        default: break
+        }
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    try withExtendedLifetime(_storage) { (_storage: _StorageClass) in
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every if/case branch local when no optimizations
+      // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+      // https://github.com/apple/swift-protobuf/issues/1182
+      if !_storage._name.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._name, fieldNumber: 1)
+      }
+      if !_storage._status.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._status, fieldNumber: 2)
+      }
+      if _storage._sessionsUsed != 0 {
+        try visitor.visitSingularUInt32Field(value: _storage._sessionsUsed, fieldNumber: 3)
+      }
+      if _storage._sessionsLimit != 0 {
+        try visitor.visitSingularUInt32Field(value: _storage._sessionsLimit, fieldNumber: 4)
+      }
+      if !_storage._adapter.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._adapter, fieldNumber: 5)
+      }
+      if !_storage._billing.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._billing, fieldNumber: 6)
+      }
+      if _storage._warnAt.bitPattern != 0 {
+        try visitor.visitSingularDoubleField(value: _storage._warnAt, fieldNumber: 7)
+      }
+      if !_storage._overage.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._overage, fieldNumber: 8)
+      }
+      if _storage._monthlyBudgetUsd.bitPattern != 0 {
+        try visitor.visitSingularDoubleField(value: _storage._monthlyBudgetUsd, fieldNumber: 9)
+      }
+      if !_storage._windows.isEmpty {
+        try visitor.visitRepeatedMessageField(value: _storage._windows, fieldNumber: 10)
+      }
+      if !_storage._overageText.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._overageText, fieldNumber: 11)
+      }
+      if !_storage._blockedText.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._blockedText, fieldNumber: 12)
+      }
+      if _storage._hasSnapshot_p != false {
+        try visitor.visitSingularBoolField(value: _storage._hasSnapshot_p, fieldNumber: 13)
+      }
+      if _storage._asOf != 0 {
+        try visitor.visitSingularUInt64Field(value: _storage._asOf, fieldNumber: 14)
+      }
+      if !_storage._age.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._age, fieldNumber: 15)
+      }
+      try { if let v = _storage._spend {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 16)
+      } }()
+      try { if let v = _storage._tokensWindow {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 17)
+      } }()
+      try { if let v = _storage._tokensWeek {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 18)
+      } }()
+      if !_storage._doing.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._doing, fieldNumber: 19)
+      }
+      if !_storage._adapterName.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._adapterName, fieldNumber: 20)
+      }
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Mason_V1_ProviderStatus, rhs: Mason_V1_ProviderStatus) -> Bool {
+    if lhs._storage !== rhs._storage {
+      let storagesAreEqual: Bool = withExtendedLifetime((lhs._storage, rhs._storage)) { (_args: (_StorageClass, _StorageClass)) in
+        let _storage = _args.0
+        let rhs_storage = _args.1
+        if _storage._name != rhs_storage._name {return false}
+        if _storage._status != rhs_storage._status {return false}
+        if _storage._sessionsUsed != rhs_storage._sessionsUsed {return false}
+        if _storage._sessionsLimit != rhs_storage._sessionsLimit {return false}
+        if _storage._adapter != rhs_storage._adapter {return false}
+        if _storage._billing != rhs_storage._billing {return false}
+        if _storage._warnAt != rhs_storage._warnAt {return false}
+        if _storage._overage != rhs_storage._overage {return false}
+        if _storage._monthlyBudgetUsd != rhs_storage._monthlyBudgetUsd {return false}
+        if _storage._windows != rhs_storage._windows {return false}
+        if _storage._overageText != rhs_storage._overageText {return false}
+        if _storage._blockedText != rhs_storage._blockedText {return false}
+        if _storage._hasSnapshot_p != rhs_storage._hasSnapshot_p {return false}
+        if _storage._asOf != rhs_storage._asOf {return false}
+        if _storage._age != rhs_storage._age {return false}
+        if _storage._spend != rhs_storage._spend {return false}
+        if _storage._tokensWindow != rhs_storage._tokensWindow {return false}
+        if _storage._tokensWeek != rhs_storage._tokensWeek {return false}
+        if _storage._doing != rhs_storage._doing {return false}
+        if _storage._adapterName != rhs_storage._adapterName {return false}
+        return true
+      }
+      if !storagesAreEqual {return false}
+    }
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Mason_V1_UsageWindow: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".UsageWindow"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{1}label\0\u{1}reported\0\u{3}has_percent\0\u{1}percent\0\u{3}has_reset\0\u{3}resets_at\0\u{3}resets_text\0\u{1}state\0\u{1}trend\0\u{1}age\0\u{3}short_text\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.id) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.label) }()
+      case 3: try { try decoder.decodeSingularBoolField(value: &self.reported) }()
+      case 4: try { try decoder.decodeSingularBoolField(value: &self.hasPercent_p) }()
+      case 5: try { try decoder.decodeSingularDoubleField(value: &self.percent) }()
+      case 6: try { try decoder.decodeSingularBoolField(value: &self.hasReset_p) }()
+      case 7: try { try decoder.decodeSingularUInt64Field(value: &self.resetsAt) }()
+      case 8: try { try decoder.decodeSingularStringField(value: &self.resetsText) }()
+      case 9: try { try decoder.decodeSingularStringField(value: &self.state) }()
+      case 10: try { try decoder.decodeSingularStringField(value: &self.trend) }()
+      case 11: try { try decoder.decodeSingularStringField(value: &self.age) }()
+      case 12: try { try decoder.decodeSingularStringField(value: &self.shortText) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.id.isEmpty {
+      try visitor.visitSingularStringField(value: self.id, fieldNumber: 1)
+    }
+    if !self.label.isEmpty {
+      try visitor.visitSingularStringField(value: self.label, fieldNumber: 2)
+    }
+    if self.reported != false {
+      try visitor.visitSingularBoolField(value: self.reported, fieldNumber: 3)
+    }
+    if self.hasPercent_p != false {
+      try visitor.visitSingularBoolField(value: self.hasPercent_p, fieldNumber: 4)
+    }
+    if self.percent.bitPattern != 0 {
+      try visitor.visitSingularDoubleField(value: self.percent, fieldNumber: 5)
+    }
+    if self.hasReset_p != false {
+      try visitor.visitSingularBoolField(value: self.hasReset_p, fieldNumber: 6)
+    }
+    if self.resetsAt != 0 {
+      try visitor.visitSingularUInt64Field(value: self.resetsAt, fieldNumber: 7)
+    }
+    if !self.resetsText.isEmpty {
+      try visitor.visitSingularStringField(value: self.resetsText, fieldNumber: 8)
+    }
+    if !self.state.isEmpty {
+      try visitor.visitSingularStringField(value: self.state, fieldNumber: 9)
+    }
+    if !self.trend.isEmpty {
+      try visitor.visitSingularStringField(value: self.trend, fieldNumber: 10)
+    }
+    if !self.age.isEmpty {
+      try visitor.visitSingularStringField(value: self.age, fieldNumber: 11)
+    }
+    if !self.shortText.isEmpty {
+      try visitor.visitSingularStringField(value: self.shortText, fieldNumber: 12)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Mason_V1_UsageWindow, rhs: Mason_V1_UsageWindow) -> Bool {
+    if lhs.id != rhs.id {return false}
+    if lhs.label != rhs.label {return false}
+    if lhs.reported != rhs.reported {return false}
+    if lhs.hasPercent_p != rhs.hasPercent_p {return false}
+    if lhs.percent != rhs.percent {return false}
+    if lhs.hasReset_p != rhs.hasReset_p {return false}
+    if lhs.resetsAt != rhs.resetsAt {return false}
+    if lhs.resetsText != rhs.resetsText {return false}
+    if lhs.state != rhs.state {return false}
+    if lhs.trend != rhs.trend {return false}
+    if lhs.age != rhs.age {return false}
+    if lhs.shortText != rhs.shortText {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Mason_V1_SpendView: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".SpendView"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}has_spend\0\u{3}today_usd\0\u{3}week_usd\0\u{3}month_usd\0\u{3}has_budget\0\u{3}budget_usd\0\u{1}age\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularBoolField(value: &self.hasSpend_p) }()
+      case 2: try { try decoder.decodeSingularDoubleField(value: &self.todayUsd) }()
+      case 3: try { try decoder.decodeSingularDoubleField(value: &self.weekUsd) }()
+      case 4: try { try decoder.decodeSingularDoubleField(value: &self.monthUsd) }()
+      case 5: try { try decoder.decodeSingularBoolField(value: &self.hasBudget_p) }()
+      case 6: try { try decoder.decodeSingularDoubleField(value: &self.budgetUsd) }()
+      case 7: try { try decoder.decodeSingularStringField(value: &self.age) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if self.hasSpend_p != false {
+      try visitor.visitSingularBoolField(value: self.hasSpend_p, fieldNumber: 1)
+    }
+    if self.todayUsd.bitPattern != 0 {
+      try visitor.visitSingularDoubleField(value: self.todayUsd, fieldNumber: 2)
+    }
+    if self.weekUsd.bitPattern != 0 {
+      try visitor.visitSingularDoubleField(value: self.weekUsd, fieldNumber: 3)
+    }
+    if self.monthUsd.bitPattern != 0 {
+      try visitor.visitSingularDoubleField(value: self.monthUsd, fieldNumber: 4)
+    }
+    if self.hasBudget_p != false {
+      try visitor.visitSingularBoolField(value: self.hasBudget_p, fieldNumber: 5)
+    }
+    if self.budgetUsd.bitPattern != 0 {
+      try visitor.visitSingularDoubleField(value: self.budgetUsd, fieldNumber: 6)
+    }
+    if !self.age.isEmpty {
+      try visitor.visitSingularStringField(value: self.age, fieldNumber: 7)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Mason_V1_SpendView, rhs: Mason_V1_SpendView) -> Bool {
+    if lhs.hasSpend_p != rhs.hasSpend_p {return false}
+    if lhs.todayUsd != rhs.todayUsd {return false}
+    if lhs.weekUsd != rhs.weekUsd {return false}
+    if lhs.monthUsd != rhs.monthUsd {return false}
+    if lhs.hasBudget_p != rhs.hasBudget_p {return false}
+    if lhs.budgetUsd != rhs.budgetUsd {return false}
+    if lhs.age != rhs.age {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Mason_V1_TokenLine: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".TokenLine"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}name\0\u{3}has_input\0\u{1}input\0\u{3}has_output\0\u{1}output\0\u{3}has_cache_read\0\u{3}cache_read\0\u{3}has_cache_write\0\u{3}cache_write\0\u{3}has_cost\0\u{3}cost_usd\0\u{1}attempts\0\u{1}age\0\u{1}task\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -6134,14 +6735,19 @@ nonisolated extension Mason_V1_ProviderStatus: SwiftProtobuf.Message, SwiftProto
       // enabled. https://github.com/apple/swift-protobuf/issues/1034
       switch fieldNumber {
       case 1: try { try decoder.decodeSingularStringField(value: &self.name) }()
-      case 2: try { try decoder.decodeSingularStringField(value: &self.status) }()
-      case 3: try { try decoder.decodeSingularUInt32Field(value: &self.sessionsUsed) }()
-      case 4: try { try decoder.decodeSingularUInt32Field(value: &self.sessionsLimit) }()
-      case 5: try { try decoder.decodeSingularStringField(value: &self.adapter) }()
-      case 6: try { try decoder.decodeSingularStringField(value: &self.billing) }()
-      case 7: try { try decoder.decodeSingularDoubleField(value: &self.warnAt) }()
-      case 8: try { try decoder.decodeSingularStringField(value: &self.overage) }()
-      case 9: try { try decoder.decodeSingularDoubleField(value: &self.monthlyBudgetUsd) }()
+      case 2: try { try decoder.decodeSingularBoolField(value: &self.hasInput_p) }()
+      case 3: try { try decoder.decodeSingularUInt64Field(value: &self.input) }()
+      case 4: try { try decoder.decodeSingularBoolField(value: &self.hasOutput_p) }()
+      case 5: try { try decoder.decodeSingularUInt64Field(value: &self.output) }()
+      case 6: try { try decoder.decodeSingularBoolField(value: &self.hasCacheRead_p) }()
+      case 7: try { try decoder.decodeSingularUInt64Field(value: &self.cacheRead) }()
+      case 8: try { try decoder.decodeSingularBoolField(value: &self.hasCacheWrite_p) }()
+      case 9: try { try decoder.decodeSingularUInt64Field(value: &self.cacheWrite) }()
+      case 10: try { try decoder.decodeSingularBoolField(value: &self.hasCost_p) }()
+      case 11: try { try decoder.decodeSingularDoubleField(value: &self.costUsd) }()
+      case 12: try { try decoder.decodeSingularUInt32Field(value: &self.attempts) }()
+      case 13: try { try decoder.decodeSingularStringField(value: &self.age) }()
+      case 14: try { try decoder.decodeSingularUInt64Field(value: &self.task) }()
       default: break
       }
     }
@@ -6151,43 +6757,108 @@ nonisolated extension Mason_V1_ProviderStatus: SwiftProtobuf.Message, SwiftProto
     if !self.name.isEmpty {
       try visitor.visitSingularStringField(value: self.name, fieldNumber: 1)
     }
-    if !self.status.isEmpty {
-      try visitor.visitSingularStringField(value: self.status, fieldNumber: 2)
+    if self.hasInput_p != false {
+      try visitor.visitSingularBoolField(value: self.hasInput_p, fieldNumber: 2)
     }
-    if self.sessionsUsed != 0 {
-      try visitor.visitSingularUInt32Field(value: self.sessionsUsed, fieldNumber: 3)
+    if self.input != 0 {
+      try visitor.visitSingularUInt64Field(value: self.input, fieldNumber: 3)
     }
-    if self.sessionsLimit != 0 {
-      try visitor.visitSingularUInt32Field(value: self.sessionsLimit, fieldNumber: 4)
+    if self.hasOutput_p != false {
+      try visitor.visitSingularBoolField(value: self.hasOutput_p, fieldNumber: 4)
     }
-    if !self.adapter.isEmpty {
-      try visitor.visitSingularStringField(value: self.adapter, fieldNumber: 5)
+    if self.output != 0 {
+      try visitor.visitSingularUInt64Field(value: self.output, fieldNumber: 5)
     }
-    if !self.billing.isEmpty {
-      try visitor.visitSingularStringField(value: self.billing, fieldNumber: 6)
+    if self.hasCacheRead_p != false {
+      try visitor.visitSingularBoolField(value: self.hasCacheRead_p, fieldNumber: 6)
     }
-    if self.warnAt.bitPattern != 0 {
-      try visitor.visitSingularDoubleField(value: self.warnAt, fieldNumber: 7)
+    if self.cacheRead != 0 {
+      try visitor.visitSingularUInt64Field(value: self.cacheRead, fieldNumber: 7)
     }
-    if !self.overage.isEmpty {
-      try visitor.visitSingularStringField(value: self.overage, fieldNumber: 8)
+    if self.hasCacheWrite_p != false {
+      try visitor.visitSingularBoolField(value: self.hasCacheWrite_p, fieldNumber: 8)
     }
-    if self.monthlyBudgetUsd.bitPattern != 0 {
-      try visitor.visitSingularDoubleField(value: self.monthlyBudgetUsd, fieldNumber: 9)
+    if self.cacheWrite != 0 {
+      try visitor.visitSingularUInt64Field(value: self.cacheWrite, fieldNumber: 9)
+    }
+    if self.hasCost_p != false {
+      try visitor.visitSingularBoolField(value: self.hasCost_p, fieldNumber: 10)
+    }
+    if self.costUsd.bitPattern != 0 {
+      try visitor.visitSingularDoubleField(value: self.costUsd, fieldNumber: 11)
+    }
+    if self.attempts != 0 {
+      try visitor.visitSingularUInt32Field(value: self.attempts, fieldNumber: 12)
+    }
+    if !self.age.isEmpty {
+      try visitor.visitSingularStringField(value: self.age, fieldNumber: 13)
+    }
+    if self.task != 0 {
+      try visitor.visitSingularUInt64Field(value: self.task, fieldNumber: 14)
     }
     try unknownFields.traverse(visitor: &visitor)
   }
 
-  public static func ==(lhs: Mason_V1_ProviderStatus, rhs: Mason_V1_ProviderStatus) -> Bool {
+  public static func ==(lhs: Mason_V1_TokenLine, rhs: Mason_V1_TokenLine) -> Bool {
     if lhs.name != rhs.name {return false}
-    if lhs.status != rhs.status {return false}
-    if lhs.sessionsUsed != rhs.sessionsUsed {return false}
-    if lhs.sessionsLimit != rhs.sessionsLimit {return false}
-    if lhs.adapter != rhs.adapter {return false}
-    if lhs.billing != rhs.billing {return false}
-    if lhs.warnAt != rhs.warnAt {return false}
-    if lhs.overage != rhs.overage {return false}
-    if lhs.monthlyBudgetUsd != rhs.monthlyBudgetUsd {return false}
+    if lhs.hasInput_p != rhs.hasInput_p {return false}
+    if lhs.input != rhs.input {return false}
+    if lhs.hasOutput_p != rhs.hasOutput_p {return false}
+    if lhs.output != rhs.output {return false}
+    if lhs.hasCacheRead_p != rhs.hasCacheRead_p {return false}
+    if lhs.cacheRead != rhs.cacheRead {return false}
+    if lhs.hasCacheWrite_p != rhs.hasCacheWrite_p {return false}
+    if lhs.cacheWrite != rhs.cacheWrite {return false}
+    if lhs.hasCost_p != rhs.hasCost_p {return false}
+    if lhs.costUsd != rhs.costUsd {return false}
+    if lhs.attempts != rhs.attempts {return false}
+    if lhs.age != rhs.age {return false}
+    if lhs.task != rhs.task {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Mason_V1_UsageTokens: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".UsageTokens"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}period\0\u{3}by_project\0\u{3}by_model\0\u{3}top_tasks\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.period) }()
+      case 2: try { try decoder.decodeRepeatedMessageField(value: &self.byProject) }()
+      case 3: try { try decoder.decodeRepeatedMessageField(value: &self.byModel) }()
+      case 4: try { try decoder.decodeRepeatedMessageField(value: &self.topTasks) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.period.isEmpty {
+      try visitor.visitSingularStringField(value: self.period, fieldNumber: 1)
+    }
+    if !self.byProject.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.byProject, fieldNumber: 2)
+    }
+    if !self.byModel.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.byModel, fieldNumber: 3)
+    }
+    if !self.topTasks.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.topTasks, fieldNumber: 4)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Mason_V1_UsageTokens, rhs: Mason_V1_UsageTokens) -> Bool {
+    if lhs.period != rhs.period {return false}
+    if lhs.byProject != rhs.byProject {return false}
+    if lhs.byModel != rhs.byModel {return false}
+    if lhs.topTasks != rhs.topTasks {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -6195,7 +6866,7 @@ nonisolated extension Mason_V1_ProviderStatus: SwiftProtobuf.Message, SwiftProto
 
 nonisolated extension Mason_V1_UsageView: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".UsageView"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}providers\0\u{1}note\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}providers\0\u{1}note\0\u{3}top_bar\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -6205,6 +6876,7 @@ nonisolated extension Mason_V1_UsageView: SwiftProtobuf.Message, SwiftProtobuf._
       switch fieldNumber {
       case 1: try { try decoder.decodeRepeatedMessageField(value: &self.providers) }()
       case 2: try { try decoder.decodeSingularStringField(value: &self.note) }()
+      case 3: try { try decoder.decodeRepeatedStringField(value: &self.topBar) }()
       default: break
       }
     }
@@ -6217,12 +6889,16 @@ nonisolated extension Mason_V1_UsageView: SwiftProtobuf.Message, SwiftProtobuf._
     if !self.note.isEmpty {
       try visitor.visitSingularStringField(value: self.note, fieldNumber: 2)
     }
+    if !self.topBar.isEmpty {
+      try visitor.visitRepeatedStringField(value: self.topBar, fieldNumber: 3)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
   public static func ==(lhs: Mason_V1_UsageView, rhs: Mason_V1_UsageView) -> Bool {
     if lhs.providers != rhs.providers {return false}
     if lhs.note != rhs.note {return false}
+    if lhs.topBar != rhs.topBar {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
