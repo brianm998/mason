@@ -19,7 +19,7 @@ cleanup() {
   for p in "$client" "$holder"; do [ -n "$p" ] && kill "$p" 2>/dev/null || true; done
   for p in "$daemon" "$daemon2"; do [ -n "$p" ] && kill -9 "$p" 2>/dev/null || true; done
   # Verified before it is killed: a stale pid in a registry may belong to someone else now.
-  for hd in "$root"/d/h "$root"/d2/h; do target/debug/step-host-ctl reap "$hd" >/dev/null 2>&1 || true; done
+  for hd in "$root"/d/h "$root"/d2/h; do target/debug/step-host-ctl reap "$hd" >/dev/null 2>&1; done
   rm -rf "$root"
 }
 trap cleanup EXIT

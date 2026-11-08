@@ -17,7 +17,7 @@ stop_daemon() {
   if [ -n "$daemon" ]; then kill -9 "$daemon" 2>/dev/null || true; wait "$daemon" 2>/dev/null || true; fi
   daemon=""
   # Verified before it is killed: a stale pid in a registry may belong to someone else now.
-  for hd in "$root"/d/h; do target/debug/step-host-ctl reap "$hd" >/dev/null 2>&1 || true; done
+  for hd in "$root"/d/h; do target/debug/step-host-ctl reap "$hd" >/dev/null 2>&1; done
 }
 cleanup() { stop_daemon; rm -rf "$root"; }
 trap cleanup EXIT

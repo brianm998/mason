@@ -15,7 +15,7 @@ stop_daemon() {
 }
 kill_hosts() {
   # Verified before it is killed: a stale pid in a registry may belong to someone else now.
-  for hd in "$root"/d/h; do target/debug/step-host-ctl reap "$hd" >/dev/null 2>&1 || true; done
+  for hd in "$root"/d/h; do target/debug/step-host-ctl reap "$hd" >/dev/null 2>&1; done
 }
 cleanup() { stop_daemon; kill_hosts; rm -rf "$root"; }
 trap cleanup EXIT
@@ -32,7 +32,7 @@ die() { echo "$1" >&2; tail -20 "$root/masond.log" >&2; exit 1; }
 wait_state() {  # TASK STATE SECONDS
   local end=$((SECONDS + $3))
   until [ "$(m task show "$1" --json 2>/dev/null | pyget state)" = "$2" ]; do
-    [ $SECONDS -lt $end ] || { m task show "$1" >&2 || true; die "timed out waiting for task $1 to be $2"; }
+    [ $SECONDS -lt $end ] || { m task show "$1" >&2; die "timed out waiting for task $1 to be $2"; }
     sleep 0.3
   done
 }
@@ -137,7 +137,7 @@ show=$(m task show 0)
 grep -E "host lost .test. \(re-run once on a fresh host\): host pid [0-9]+ gone at [0-9:]+, killed by signal 9, no exit record" <<<"$show" \
   || { echo "$show" >&2; die "task show does not say what happened"; }
 echo "   failures: 0, one loss, one re-run"
-[ "$(m alerts | grep -c "were lost at the same time" || true)" = 0 ] || die "a single loss raised the together alert"
+[ "$(m alerts | awk '/were lost at the same time/ {n++} END {print n+0}')" = 0 ] || die "a single loss raised the together alert"
 
 echo "== 2. two hosts killed at once: one alert"
 sleep 6   # more than the 5 seconds that make losses "at the same time", so part 1 stays apart
@@ -152,7 +152,7 @@ echo "   SIGKILLed the hosts in $(basename "$d1") and $(basename "$d2")"
 wait_state 1 landed 120
 wait_state 2 landed 120
 end=$((SECONDS + 30)); n=0
-until n=$(m alerts | grep -c "were lost at the same time" || true); [ "$n" = 1 ]; do
+until n=$(m alerts | awk '/were lost at the same time/ {n++} END {print n+0}'); [ "$n" = 1 ]; do
   [ $SECONDS -lt $end ] || { m alerts >&2; die "expected one together alert, saw $n"; }
   sleep 0.3
 done

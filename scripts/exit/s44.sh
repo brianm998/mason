@@ -14,7 +14,7 @@ cleanup() {
   [ -n "$daemon" ] && kill -9 "$daemon" 2>/dev/null || true
   [ -n "$gh" ] && kill -9 "$gh" 2>/dev/null || true
   # Verified before it is killed: a stale pid in a registry may belong to someone else now.
-  for hd in "$root"/d/h; do target/debug/step-host-ctl reap "$hd" >/dev/null 2>&1 || true; done
+  for hd in "$root"/d/h; do target/debug/step-host-ctl reap "$hd" >/dev/null 2>&1; done
   rm -rf "$root"
 }
 trap cleanup EXIT
