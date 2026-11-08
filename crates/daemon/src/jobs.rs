@@ -473,6 +473,19 @@ pub(crate) fn prepare(c: &Ctx) -> Result<Option<String>, String> {
     }
     let base = c.project.base_ref();
     git::ensure_worktree(repo, &c.wt, &c.branch, &base).map_err(|e| e.to_string())?;
+    // Uncommitted changes are an agent's work in progress: a step re-entered after
+    // the daemon restarted (a self-update, say) finds its agent's edits not yet
+    // committed. Merging the base into them fails ("your local changes would be
+    // overwritten") and failed the task; leave the branch as it is, and the next
+    // step folds the base in once the work is committed.
+    let dirty = git::run(&c.wt, &["status", "--porcelain"]).map_err(|e| e.to_string())?;
+    if !dirty.trim().is_empty() {
+        tracing::info!(
+            task = c.task.0,
+            "worktree has uncommitted changes; not folding in the base now"
+        );
+        return Ok(None);
+    }
     match git::catch_up(&c.wt, &base) {
         Ok(CatchUp::Conflict(files)) => Ok(Some(files.trim().to_string())),
         Ok(_) => Ok(None),
