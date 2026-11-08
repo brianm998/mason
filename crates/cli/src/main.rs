@@ -80,6 +80,7 @@ mason: command-line client for the MASON pipeline
   mason editor show|op|undo|redo|discard|simulate|apply [--project P]   the pipeline editor, without a screen
   mason definition show [--project P] | reload [--project P]
   mason extension list|show|approve [NAME] [--project P]   project extensions; approving is the owner's
+  mason usage [--account A] [--json]  each provider account: limit windows, overage, tokens and cost
   mason landing                       batches, phases, freezes, and the landing queue
   mason self                          MASON on its own repository: limits, and changes held for you
   mason update [--channel stable|main|branch:X | --sha S] [--rollback] [--check]
@@ -1148,6 +1149,40 @@ fn main() {
                 );
             }
         }
+        "usage" => {
+            let account = a.opt("--account");
+            finish(&a);
+            let mut r = or_die(d.call("GET", "/usage", None));
+            if let Some(acc) = &account {
+                let keep: Vec<Value> = r["providers"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|p| p["name"].as_str() == Some(acc.as_str()))
+                    .cloned()
+                    .collect();
+                if keep.is_empty() {
+                    die(&format!("no account named {acc}"));
+                }
+                r["providers"] = Value::Array(keep);
+                r["topBar"] = Value::Array(
+                    r["topBar"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter(|l| {
+                            l.as_str()
+                                .is_some_and(|l| l.starts_with(&format!("{acc} ")))
+                        })
+                        .cloned()
+                        .collect(),
+                );
+            }
+            if json_out {
+                return println!("{r:#}");
+            }
+            print!("{}", usage_text(&r));
+        }
         "landing" => {
             finish(&a);
             let r = or_die(d.call("GET", "/landing", None));
@@ -1902,4 +1937,153 @@ fn main() {
         }
         other => die(&format!("unknown command {other:?}\n\n{HELP}")),
     }
+}
+
+fn tokens_text(t: &Value, out: &mut String) {
+    for (title, key) in [
+        ("by project", "byProject"),
+        ("by model", "byModel"),
+        ("top tasks", "topTasks"),
+    ] {
+        let lines = t[key].as_array().cloned().unwrap_or_default();
+        if lines.is_empty() {
+            continue;
+        }
+        out.push_str(&format!("    {title}:\n"));
+        for l in lines {
+            let n = |k: &str| {
+                l[k].as_str()
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .or(l[k].as_u64())
+            };
+            let mut parts = vec![];
+            for (label, k) in [
+                ("in", "input"),
+                ("out", "output"),
+                ("cache read", "cacheRead"),
+                ("cache write", "cacheWrite"),
+            ] {
+                if let Some(v) =
+                    n(k).filter(|_| l[format!("has{}", pascal(k))].as_bool() == Some(true))
+                {
+                    parts.push(format!("{label} {}", mason_core::usage_text::count(v)));
+                }
+            }
+            if l["hasCost"].as_bool() == Some(true) {
+                parts.push(format!("${:.2}", l["costUsd"].as_f64().unwrap_or(0.0)));
+            }
+            out.push_str(&format!(
+                "      {}: {} ({})\n",
+                l["name"].as_str().unwrap_or("?"),
+                if parts.is_empty() {
+                    "nothing reported".to_string()
+                } else {
+                    parts.join(", ")
+                },
+                l["age"].as_str().unwrap_or("")
+            ));
+        }
+    }
+}
+
+fn pascal(k: &str) -> String {
+    k.split('_')
+        .map(|w| {
+            let mut c = w.chars();
+            c.next().map_or(String::new(), |f| {
+                f.to_uppercase().collect::<String>() + c.as_str()
+            })
+        })
+        .collect()
+}
+
+/// The usage view as text, from its JSON.
+fn usage_text(r: &Value) -> String {
+    let mut out = String::new();
+    for p in r["providers"].as_array().into_iter().flatten() {
+        let g = |k: &str| p[k].as_str().unwrap_or("");
+        out.push_str(&format!(
+            "{} ({}, {}): {} of {} sessions{}\n",
+            g("name"),
+            g("adapter"),
+            g("billing"),
+            p["sessionsUsed"].as_u64().unwrap_or(0),
+            p["sessionsLimit"].as_u64().unwrap_or(0),
+            if p["hasSnapshot"].as_bool() == Some(true) {
+                format!(", {}", g("age"))
+            } else {
+                ", nothing reported yet".into()
+            }
+        ));
+        for w in p["windows"].as_array().into_iter().flatten() {
+            let line = if w["reported"].as_bool() == Some(true) {
+                let pct = if w["hasPercent"].as_bool() == Some(true) {
+                    format!("{}%", w["percent"].as_f64().unwrap_or(0.0).round())
+                } else {
+                    "no percentage reported".into()
+                };
+                format!(
+                    "{pct}, {}, {}{}",
+                    w["state"].as_str().unwrap_or("ok"),
+                    w["resetsText"]
+                        .as_str()
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or("no reset reported"),
+                    w["trend"]
+                        .as_str()
+                        .filter(|s| !s.is_empty())
+                        .map_or(String::new(), |t| format!(" ({t})"))
+                )
+            } else {
+                "not reported yet".into()
+            };
+            out.push_str(&format!(
+                "  {}: {line}\n",
+                w["label"].as_str().unwrap_or("?")
+            ));
+        }
+        if let Some(s) = p["spend"]
+            .as_object()
+            .filter(|s| s["hasSpend"].as_bool() == Some(true))
+        {
+            let f = |k: &str| s[k].as_f64().unwrap_or(0.0);
+            let budget = if s["hasBudget"].as_bool() == Some(true) {
+                format!(" of ${:.2} monthly budget", f("budgetUsd"))
+            } else {
+                String::new()
+            };
+            out.push_str(&format!(
+                "  spend: ${:.2} today, ${:.2} this week, ${:.2} this month{budget} ({})\n",
+                f("todayUsd"),
+                f("weekUsd"),
+                f("monthUsd"),
+                s["age"].as_str().unwrap_or("")
+            ));
+        } else if g("billing") == "api" {
+            out.push_str("  spend: nothing reported yet\n");
+        }
+        for k in ["overageText", "blockedText"] {
+            if !g(k).is_empty() {
+                out.push_str(&format!("  {}\n", g(k)));
+            }
+        }
+        for (key, fallback) in [("tokensWindow", ""), ("tokensWeek", "")] {
+            let t = &p[key];
+            let has = ["byProject", "byModel", "topTasks"]
+                .iter()
+                .any(|k| t[*k].as_array().is_some_and(|a| !a.is_empty()));
+            if has {
+                out.push_str(&format!(
+                    "  tokens, {}:{fallback}\n",
+                    t["period"].as_str().unwrap_or("")
+                ));
+                tokens_text(t, &mut out);
+            }
+        }
+        out.push_str(&format!("  doing: {}\n", g("doing")));
+    }
+    if out.is_empty() {
+        out.push_str("no provider accounts\n");
+    }
+    out
 }

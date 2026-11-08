@@ -87,6 +87,16 @@ fun main(argv: Array<String>) {
             File(out, "checkpoint-0.json").writeText(items.toJsonText())
             println("the monitor shows ${items.size} items")
         }
+        "usage" -> {
+            // The LLM usage page, as items (compared with `conformance usage-expected`).
+            val out = File(args.opt("--out") ?: fail("--out DIR"))
+            out.mkdirs()
+            model.go(Page.Usage)
+            settle(model)
+            val items = model.visibleItems()
+            File(out, "checkpoint-0.json").writeText(items.toJsonText())
+            println("the usage page shows ${items.size} items")
+        }
         "cancel" -> {
             val t = args.opt("--task")?.toLongOrNull() ?: fail("--task N")
             val r = call(model, Command(cancel = mason.v1.TaskRef(task = t), actor = model.identity), "cancel")

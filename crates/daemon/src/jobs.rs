@@ -966,6 +966,7 @@ fn agent_job(c: &Ctx) {
     let Some(mut report) = settle_holds(c, &runner, first, &spec, &contract) else {
         return;
     };
+    record_usage(c, &spec, &report);
 
     // The retry ladder: a step that ended with no result, or whose agent
     // crashed, is tried again from a fresh session on the next model up. Not
@@ -984,10 +985,30 @@ fn agent_job(c: &Ctx) {
         let Some(r) = settle_holds(c, &runner, again, &spec, &contract) else {
             return;
         };
+        record_usage(c, &spec, &r);
         report = r;
     }
     contract.shutdown();
     finish_agent(c, report, &dir);
+}
+
+/// Keep what the attempt reported: the provider's limits as the latest for the
+/// account, and the tokens and cost against project, task, step and model.
+fn record_usage(c: &Ctx, spec: &SessionSpec, report: &StepReport) {
+    if let Some(u) = &report.usage {
+        crate::usage::record_snapshot(&c.d, &c.project.account, u);
+    }
+    if let Some(key) = &spec.run_key {
+        let who = crate::usage::Attempt {
+            key,
+            task: c.task.0,
+            project: &c.project.id,
+            step: &c.step.name,
+            account: &c.project.account,
+            model: spec.model.as_deref(),
+        };
+        crate::usage::record_tokens(&c.d, &who, &report.tokens);
+    }
 }
 
 /// A provider hold is a wait, never a failure: show it, wait, resume. `None`
@@ -1007,6 +1028,9 @@ fn settle_holds(
             ),
             HoldReason::ProviderDown { .. } => "provider outage".to_string(),
         };
+        if let Some(u) = &report.usage {
+            crate::usage::record_snapshot(&c.d, &c.project.account, u);
+        }
         if !c.emit(EventKind::WaitStarted { task: c.task, on }) {
             return None;
         }

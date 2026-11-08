@@ -214,6 +214,9 @@ private fun TaskDetail(model: MonitorModel, d: TaskDetailView) {
     d.card?.let { DecisionCardView(model, r.id, it) }
     d.approval?.let { ApprovalView(model, r.id, it) }
     if (d.failure.isNotEmpty()) Text("Failed: ${d.failure}", style = theme.body(color = theme.attention))
+    if (d.step_tokens.isNotEmpty()) Section("Tokens") {
+        d.step_tokens.forEach { Text(tokenLineText(it), style = theme.body()) }
+    }
     Section("Steps") {
         d.steps.forEach { s ->
             Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing), modifier = Modifier.testTag("step:${s.run}")) {
@@ -296,12 +299,96 @@ fun UsagePage(model: MonitorModel) {
     val theme = LocalTheme.current
     Scrolling {
         Text("LLM usage", style = theme.title())
-        model.usage?.providers?.forEach {
-            val budget = if (it.monthly_budget_usd > 0) ", budget \$${it.monthly_budget_usd.toInt()}/month" else ""
-            Text("${it.name} (${it.adapter}, ${it.billing}): ${it.status}, ${it.sessions_used} of ${it.sessions_limit} sessions in use; warn at ${(it.warn_at * 100).toInt()}%, overage ${it.overage}$budget", style = theme.body())
-        }
+        model.usage?.providers?.forEach { UsageAccount(it) }
         model.usage?.note?.let { Text(it, style = theme.body(color = theme.muted)) }
         SessionStepper(model)
+    }
+}
+
+/** The text of a window's percentage, worded as the conformance runner words it. */
+fun windowPercentText(w: mason.v1.UsageWindow): String = when {
+    !w.reported -> "not reported yet"
+    w.has_percent -> "${Math.round(w.percent)}%"
+    else -> "no percentage reported"
+}
+
+fun countText(n: Long): String = when {
+    n < 1000 -> n.toString()
+    n < 1_000_000 -> String.format("%.1fk", n / 1e3)
+    else -> String.format("%.1fM", n / 1e6)
+}
+
+fun tokenLineText(l: mason.v1.TokenLine): String {
+    val parts = mutableListOf<String>()
+    if (l.has_input) parts += "in ${countText(l.input)}"
+    if (l.has_output) parts += "out ${countText(l.output)}"
+    if (l.has_cache_read) parts += "cache read ${countText(l.cache_read)}"
+    if (l.has_cache_write) parts += "cache write ${countText(l.cache_write)}"
+    if (l.has_cost) parts += String.format("\$%.2f", l.cost_usd)
+    return "${l.name}: " + (if (parts.isEmpty()) "nothing reported" else parts.joinToString(", ")) + " (${l.age})"
+}
+
+/**
+ * One provider account: its slots, each window as a bar with its reset, overage and blocked
+ * text, spend for an api account, and tokens. Every figure carries its age.
+ */
+@Composable
+fun UsageAccount(p: mason.v1.ProviderStatus) {
+    val theme = LocalTheme.current
+    Column(verticalArrangement = Arrangement.spacedBy(theme.spacingSmall)) {
+        val budget = if (p.monthly_budget_usd > 0) ", budget \$${p.monthly_budget_usd.toInt()}/month" else ""
+        Text(
+            "${p.name} (${p.adapter_name}, ${p.billing}): ${p.status}, ${p.sessions_used} of ${p.sessions_limit} sessions",
+            style = theme.body(),
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.testTag("usage:${p.name}"),
+        )
+        Text("warn at ${(p.warn_at * 100).toInt()}%, overage ${p.overage}$budget", style = theme.small(color = theme.muted))
+        Text(if (p.has_snapshot) p.age else "nothing reported yet", style = theme.small(color = theme.muted))
+        p.windows.forEach { w ->
+            Column(Modifier.testTag("usage-window:${p.name}:${w.id}")) {
+                Text("${w.label}: ${windowPercentText(w)}" + (if (w.reported) ", ${w.state}" else ""), style = theme.body())
+                if (w.reported && w.has_percent) {
+                    androidx.compose.material3.LinearProgressIndicator(
+                        progress = { (w.percent / 100).toFloat().coerceIn(0f, 1f) },
+                        color = if (w.state == "blocked") theme.attention else theme.accent,
+                    )
+                }
+                if (w.reported) {
+                    Text(if (w.has_reset) w.resets_text else "no reset time reported", style = theme.small(color = theme.muted))
+                    if (w.trend.isNotEmpty()) Text(w.trend, style = theme.small(color = theme.muted))
+                    Text(w.age, style = theme.small(color = theme.muted))
+                }
+            }
+        }
+        p.spend?.let { s ->
+            if (s.has_spend) {
+                Text(
+                    String.format("Spend: \$%.2f today, \$%.2f this week, \$%.2f this month", s.today_usd, s.week_usd, s.month_usd) +
+                        (if (s.has_budget) String.format(" of \$%.2f budget", s.budget_usd) else "") + " (${s.age})",
+                    style = theme.body(),
+                )
+                if (s.has_budget && s.budget_usd > 0) {
+                    androidx.compose.material3.LinearProgressIndicator(
+                        progress = { (s.month_usd / s.budget_usd).toFloat().coerceIn(0f, 1f) },
+                        color = theme.accent,
+                    )
+                }
+            } else {
+                Text("Spend: nothing reported yet", style = theme.body(color = theme.muted))
+            }
+        }
+        if (p.overage_text.isNotEmpty()) Text(p.overage_text, style = theme.body())
+        if (p.blocked_text.isNotEmpty()) Text(p.blocked_text, style = theme.body(color = theme.attention))
+        listOf(p.tokens_window, p.tokens_week).forEach { t ->
+            if (t != null && (t.by_project.isNotEmpty() || t.by_model.isNotEmpty() || t.top_tasks.isNotEmpty())) {
+                Text("Tokens, ${t.period}", style = theme.body(), fontWeight = FontWeight.SemiBold)
+                t.by_project.forEach { Text("project " + tokenLineText(it), style = theme.small()) }
+                t.by_model.forEach { Text("model " + tokenLineText(it), style = theme.small()) }
+                t.top_tasks.forEach { Text("task " + tokenLineText(it), style = theme.small()) }
+            }
+        }
+        Text("Doing: ${p.doing}", style = theme.small(color = theme.muted))
     }
 }
 

@@ -106,6 +106,21 @@ description = "Provider status, limit windows, tokens by project, task, step and
 swift = "done"
 compose = "done"
 
+[feature.usage-windows]
+description = "Each provider account's limit windows as bars with the percent used when reported (a window with no percentage shows its state and reset only), the time until each resets and the clock time, the trend, overage, why an account is blocked and until when, spend against the monthly budget for api accounts, and the age of every figure"
+swift = "done"
+compose = "done"
+
+[feature.usage-tokens]
+description = "Tokens (input, output, cache read, cache write) and cost, only as reported, for the current window and the last 7 days, by project, by model and the top tasks; a task's detail shows its own steps' tokens"
+swift = "done"
+compose = "done"
+
+[feature.usage-top-bar]
+description = "The top bar shows the most constrained window per account (\"claude 5-hour 82%, resets 1 h 10 m\"), else its sessions"
+swift = "done"
+compose = "done"
+
 [feature.pipeline-editor]
 description = "The graphical editor of the definition (Part 18): canvas with swimlanes, palette, inspector forms from JSON Schema, test grid, landing editor, simulate, diff and impact, undo and redo, apply"
 swift = "done"

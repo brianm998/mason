@@ -293,6 +293,39 @@ const STEPS: &[&str] = &[
      CREATE INDEX step_history_step ON step_history(project, step);",
     // 13: the longest quiet gap of each successful run, for the "no output for" threshold (s49).
     "ALTER TABLE step_history ADD COLUMN gap_ms INTEGER NOT NULL DEFAULT 0;\n     ALTER TABLE step_progress ADD COLUMN max_gap_ms INTEGER NOT NULL DEFAULT 0;",
+    // 14: LLM usage (s64). The latest snapshot per account (kept across a restart), a bounded
+    // history of window readings (the trend), and the tokens and cost of each step attempt as
+    // the provider reported them (NULL: not reported, never 0).
+    "CREATE TABLE usage_latest (
+         account  TEXT PRIMARY KEY,
+         at       INTEGER NOT NULL,
+         snapshot TEXT NOT NULL
+     );
+     CREATE TABLE usage_readings (
+         account     TEXT NOT NULL,
+         win         TEXT NOT NULL,
+         at          INTEGER NOT NULL,
+         utilization REAL,
+         resets_at   INTEGER,
+         state       TEXT NOT NULL
+     );
+     CREATE INDEX usage_readings_win ON usage_readings(account, win, at);
+     CREATE TABLE usage_runs (
+         attempt      TEXT PRIMARY KEY,
+         task         INTEGER NOT NULL,
+         project      TEXT NOT NULL,
+         step         TEXT NOT NULL,
+         account      TEXT NOT NULL,
+         model        TEXT,
+         input        INTEGER,
+         output       INTEGER,
+         cache_read   INTEGER,
+         cache_create INTEGER,
+         cost_usd     REAL,
+         at           INTEGER NOT NULL
+     );
+     CREATE INDEX usage_runs_at ON usage_runs(at);
+     CREATE INDEX usage_runs_task ON usage_runs(task);",
 ];
 
 pub const SCHEMA_VERSION: u32 = STEPS.len() as u32;

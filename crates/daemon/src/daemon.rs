@@ -137,7 +137,7 @@ impl Daemon {
 
         let rcfg = crate::sched::load_resource_cfg(&cfg.config_dir)?;
         let accounts = if demo {
-            crate::providers::default_accounts()
+            crate::demo::accounts()
         } else {
             crate::providers::load(&cfg.config_dir)?
         };
@@ -181,12 +181,15 @@ impl Daemon {
             }),
             cfg,
         });
-        if !demo {
+        if demo {
+            crate::demo::seed_usage(&d);
+        } else {
             d.load_definitions();
             d.progress_cleanup();
             d.recover();
             d.spawn_progress_ticker();
             d.spawn_sweeper();
+            crate::usage::spawn_probe(&d);
             d.spawn_watcher();
             crate::tracker::spawn(&d);
             crate::selfguard::on_start(&d);

@@ -180,6 +180,13 @@ pub trait AgentAdapter: Send + Sync {
     fn usage_model(&self, _billing: BillingKind) -> UsageModel {
         UsageModel::default()
     }
+    /// Read the provider's usage without starting a session, by a route the
+    /// CLI documents. Default: none (no such route was verified; decision
+    /// 0045). The daemon refreshes idle accounts only where this returns
+    /// `Some`.
+    fn probe_usage(&self, _billing: BillingKind) -> Result<Option<UsageSnapshot>, AdapterError> {
+        Ok(None)
+    }
     fn start(&self, spec: SessionSpec) -> Result<Box<dyn SessionHandle>, AdapterError>;
     /// Continue a session with a note saying what happened. The note is sent
     /// instead of replaying the original prompt.

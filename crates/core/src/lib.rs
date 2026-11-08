@@ -11,6 +11,7 @@ mod ids;
 pub mod progress;
 pub mod progress_text;
 mod task;
+pub mod usage_text;
 
 pub use entities::*;
 pub use event::*;

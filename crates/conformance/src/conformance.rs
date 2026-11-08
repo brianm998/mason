@@ -345,7 +345,53 @@ pub fn visible(views: &[View], owner: bool) -> Vec<Item> {
                 }
             }
             Some(Body::Editor(e)) => out.extend(editor_items(e)),
+            Some(Body::Usage(u)) => out.extend(usage_items(u)),
             _ => {}
+        }
+    }
+    out
+}
+
+/// The percentage text of a window, as both monitors word it.
+pub fn window_percent_text(w: &UsageWindow) -> String {
+    if !w.reported {
+        "not reported yet".into()
+    } else if w.has_percent {
+        format!("{}%", w.percent.round() as i64)
+    } else {
+        "no percentage reported".into()
+    }
+}
+
+/// What the LLM usage page shows (s64), as the texts that do not move with the
+/// clock: each account with its adapter, billing and sessions, and each window
+/// with its label, percentage (or that there is none) and state. The ages and
+/// countdowns change every minute and are not compared.
+pub fn usage_items(u: &UsageView) -> Vec<Item> {
+    let mut out = vec![];
+    for (i, p) in u.providers.iter().enumerate() {
+        out.push(Item::new(
+            format!("usage:{}", p.name),
+            vec![
+                p.name.clone(),
+                p.adapter.clone(),
+                p.billing.clone(),
+                format!("{} of {} sessions", p.sessions_used, p.sessions_limit),
+            ],
+            vec![],
+            i,
+        ));
+        for (j, w) in p.windows.iter().enumerate() {
+            let mut texts = vec![w.label.clone(), window_percent_text(w)];
+            if w.reported {
+                texts.push(w.state.clone());
+            }
+            out.push(Item::new(
+                format!("usage-window:{}:{}", p.name, w.id),
+                texts,
+                vec![],
+                j,
+            ));
         }
     }
     out

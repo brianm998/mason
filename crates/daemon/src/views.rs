@@ -603,6 +603,7 @@ impl<'a> Ctx<'a> {
             std::fs::read_to_string(self.d.cfg.task_dir(id).join("plan.json")).unwrap_or_default();
         let plan_view = (!plan.is_empty()).then(|| crate::plan_view::parse_plan(&plan));
         Some(TaskDetailView {
+            step_tokens: crate::usage::step_tokens(self.d, id, self.now / 1000),
             row: Some(self.row(t)),
             steps,
             plan,
@@ -770,28 +771,13 @@ impl<'a> Ctx<'a> {
     }
 
     pub fn usage(&self) -> UsageView {
-        UsageView {
-            providers: self
-                .d
-                .accounts
-                .iter()
-                .map(|a| {
-                    let llm = crate::sched::llm_resource(&a.name);
-                    ProviderStatus {
-                        name: a.name.clone(),
-                        status: "ok".into(),
-                        sessions_used: self.d.broker.used(&llm),
-                        sessions_limit: self.d.broker.limit(&llm).unwrap_or(0),
-                        adapter: crate::providers::adapter_name(a.adapter).into(),
-                        billing: a.billing.name().into(),
-                        warn_at: a.warn_at,
-                        overage: a.overage.name().into(),
-                        monthly_budget_usd: a.monthly_budget_usd.unwrap_or(0.0),
-                    }
-                })
-                .collect(),
-            note: "Token counts and limit windows arrive with the usage tracking stage.".into(),
-        }
+        let title = |id: u64| {
+            self.w
+                .tasks
+                .get(&TaskId(id))
+                .map_or_else(String::new, |t| t.title.clone())
+        };
+        crate::usage::view(self.d, self.now / 1000, &title)
     }
 
     pub fn editor(&self, project: &str, step: &str) -> EditorView {

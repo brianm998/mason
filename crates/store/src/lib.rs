@@ -72,6 +72,40 @@ pub struct InterventionRow {
     pub reason: String,
 }
 
+/// One window reading kept for the trend. Times are epoch seconds.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UsageReading {
+    pub account: String,
+    pub window: String,
+    pub at: u64,
+    pub utilization: Option<f64>,
+    pub resets_at: Option<u64>,
+    pub state: String,
+}
+
+/// The tokens and cost one step attempt reported. `None` means not reported.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct UsageRun {
+    pub attempt: String,
+    pub task: u64,
+    pub project: String,
+    pub step: String,
+    pub account: String,
+    pub model: Option<String>,
+    pub input: Option<u64>,
+    pub output: Option<u64>,
+    pub cache_read: Option<u64>,
+    pub cache_create: Option<u64>,
+    pub cost_usd: Option<f64>,
+    pub at: u64,
+}
+
+/// One reading per window per account is kept per this many seconds, unless
+/// the window's state or reset changed.
+pub const READING_GAP_SECS: u64 = 300;
+/// Readings older than this are dropped on the next write.
+pub const READING_KEEP_SECS: u64 = 8 * 86400;
+
 /// A pause in force: `project` is empty for the whole pipeline; `mode` is
 /// `all`, `claims` or `landing`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1749,6 +1783,151 @@ impl Store {
             )?;
             let rows = st.query_map(params![project, step], |r| {
                 Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64))
+            })?;
+            rows.collect()
+        })
+    }
+
+    /// Keep the latest usage snapshot of an account (opaque JSON).
+    pub fn put_usage_latest(&self, account: &str, at: u64, json: &str) -> Result<(), StoreError> {
+        let (a, j) = (account.to_string(), json.to_string());
+        self.write(move |c| {
+            c.execute(
+                "INSERT OR REPLACE INTO usage_latest(account, at, snapshot) VALUES (?1,?2,?3)",
+                params![a, at as i64, j],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// `(account, at, snapshot json)` for every account that has one.
+    pub fn usage_latest(&self) -> Result<Vec<(String, u64, String)>, StoreError> {
+        self.read(|c| {
+            let mut st =
+                c.prepare("SELECT account, at, snapshot FROM usage_latest ORDER BY account")?;
+            let rows = st.query_map([], |r| {
+                Ok((r.get(0)?, r.get::<_, i64>(1)? as u64, r.get(2)?))
+            })?;
+            rows.collect()
+        })
+    }
+
+    /// Keep a window reading if it is the first, 5 minutes after the last, or
+    /// its state or reset differs from the last. Rows older than 8 days go.
+    /// Returns whether it was kept.
+    pub fn record_reading(&self, r: UsageReading) -> Result<bool, StoreError> {
+        self.write(move |c| {
+            let last: Option<(i64, Option<i64>, String)> = c
+                .query_row(
+                    "SELECT at, resets_at, state FROM usage_readings \
+                     WHERE account = ?1 AND win = ?2 ORDER BY at DESC LIMIT 1",
+                    params![r.account, r.window],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()?;
+            let keep = match last {
+                None => true,
+                Some((at, resets, state)) => {
+                    r.at >= at as u64 + READING_GAP_SECS
+                        || state != r.state
+                        || resets != r.resets_at.map(|x| x as i64)
+                }
+            };
+            if keep {
+                c.execute(
+                    "INSERT INTO usage_readings(account, win, at, utilization, resets_at, state) \
+                     VALUES (?1,?2,?3,?4,?5,?6)",
+                    params![
+                        r.account,
+                        r.window,
+                        r.at as i64,
+                        r.utilization,
+                        r.resets_at.map(|x| x as i64),
+                        r.state
+                    ],
+                )?;
+            }
+            c.execute(
+                "DELETE FROM usage_readings WHERE at < ?1",
+                params![r.at.saturating_sub(READING_KEEP_SECS) as i64],
+            )?;
+            Ok(keep)
+        })
+    }
+
+    /// Readings at or after `since`, oldest first.
+    pub fn readings_since(&self, since: u64) -> Result<Vec<UsageReading>, StoreError> {
+        self.read(move |c| {
+            let mut st = c.prepare(
+                "SELECT account, win, at, utilization, resets_at, state FROM usage_readings \
+                 WHERE at >= ?1 ORDER BY at",
+            )?;
+            let rows = st.query_map(params![since as i64], |r| {
+                Ok(UsageReading {
+                    account: r.get(0)?,
+                    window: r.get(1)?,
+                    at: r.get::<_, i64>(2)? as u64,
+                    utilization: r.get(3)?,
+                    resets_at: r.get::<_, Option<i64>>(4)?.map(|x| x as u64),
+                    state: r.get(5)?,
+                })
+            })?;
+            rows.collect()
+        })
+    }
+
+    /// Store one step attempt's reported figures (one row per attempt key).
+    pub fn record_usage_run(&self, u: UsageRun) -> Result<(), StoreError> {
+        self.write(move |c| {
+            let n = |x: Option<u64>| x.map(|v| v as i64);
+            c.execute(
+                "INSERT OR REPLACE INTO usage_runs(attempt, task, project, step, account, model, \
+                 input, output, cache_read, cache_create, cost_usd, at) \
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+                params![
+                    u.attempt,
+                    u.task as i64,
+                    u.project,
+                    u.step,
+                    u.account,
+                    u.model,
+                    n(u.input),
+                    n(u.output),
+                    n(u.cache_read),
+                    n(u.cache_create),
+                    u.cost_usd,
+                    u.at as i64
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Attempts at or after `since`, oldest first.
+    pub fn usage_runs_since(&self, since: u64) -> Result<Vec<UsageRun>, StoreError> {
+        self.read(move |c| {
+            let mut st = c.prepare(
+                "SELECT attempt, task, project, step, account, model, input, output, cache_read, \
+                 cache_create, cost_usd, at FROM usage_runs WHERE at >= ?1 ORDER BY at, attempt",
+            )?;
+            let u = |r: &rusqlite::Row, i: usize| -> rusqlite::Result<Option<u64>> {
+                Ok(r.get::<_, Option<i64>>(i)?.map(|x| x as u64))
+            };
+            let rows = st.query_map(params![since as i64], |r| {
+                Ok(UsageRun {
+                    attempt: r.get(0)?,
+                    task: r.get::<_, i64>(1)? as u64,
+                    project: r.get(2)?,
+                    step: r.get(3)?,
+                    account: r.get(4)?,
+                    model: r.get(5)?,
+                    input: u(r, 6)?,
+                    output: u(r, 7)?,
+                    cache_read: u(r, 8)?,
+                    cache_create: u(r, 9)?,
+                    cost_usd: r.get(10)?,
+                    at: r.get::<_, i64>(11)? as u64,
+                })
             })?;
             rows.collect()
         })

@@ -17,6 +17,7 @@ import SwiftUI
 ///     monitor-tool reject --port P --task N [--reason WORDS]   what the Reject button sends
 ///     monitor-tool task-page --port P --task N --out DIR   screenshot of a task's page (a real daemon), and whether any JSON shows
 ///     monitor-tool dump --port P --out DIR          write what the home page shows now (a real daemon), as items
+///     monitor-tool usage --port P --out DIR         write what the LLM usage page shows (the demo daemon), as items
 ///     monitor-tool cancel --port P --task N         cancel a task as the Cancel button does
 ///     monitor-tool skip --port P --task N [--step S]  skip a test step as the Skip button does
 @main
@@ -53,6 +54,15 @@ struct Tool {
             let data = try! JSONSerialization.data(withJSONObject: items, options: [.prettyPrinted, .sortedKeys])
             try! data.write(to: out.appendingPathComponent("checkpoint-0.json"))
             print("the monitor shows \(items.count) items")
+        case "usage":
+            // The LLM usage page, as items (compared with `conformance usage-expected`).
+            model.go(.usage)
+            await until("the usage view") { model.usage != nil }
+            await settle(model)
+            let items = model.visibleItems().map(\.json)
+            let data = try! JSONSerialization.data(withJSONObject: items, options: [.prettyPrinted, .sortedKeys])
+            try! data.write(to: out.appendingPathComponent("checkpoint-0.json"))
+            print("the usage page shows \(items.count) items")
         case "cancel", "skip": await act(model, cmd, args)
         default: fail("unknown command \(cmd)")
         }
