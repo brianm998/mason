@@ -25,7 +25,7 @@ bin=target/debug
 owner=${USER:-owner}
 port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')
 m() { "$bin/mason" --data-dir "$root/d" --config-dir "$root/c" "$@"; }
-fail() { echo "FAILED: $*" >&2; m task show 0 >&2 2>&1 || true; m task list >&2 2>&1 || true; m self >&2 2>&1 || true; tail -20 "$root/masond.log" >&2 || true; exit 1; }
+fail() { echo "FAILED: $*" >&2; m task list >&2 2>&1 || true; m self >&2 2>&1 || true; tail -20 "$root/masond.log" >&2 || true; exit 1; }
 state_of() { m task show "$1" --json 2>/dev/null | sed -n 's/^  "state": "\(.*\)",$/\1/p' | tr 'A-Z' 'a-z'; }
 wait_for() {  # SECONDS DESCRIPTION COMMAND...
   local end=$((SECONDS + $1)); local what=$2; shift 2
