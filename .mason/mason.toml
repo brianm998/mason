@@ -6,6 +6,11 @@ schema = 1
 start = "explore"
 explored_entry = "develop"
 
+# Workspace builds and test runs. The owner's limit (`mason resources limit compile N`)
+# takes precedence over this count.
+[resource.compile]
+count = 2
+
 [step.explore]
 type = "agent"
 category = "exploring"
@@ -19,10 +24,13 @@ agent = "deep"
 budget = "4h"
 next = "test"
 
-# The project's `test` command (the whole workspace) runs here.
+# The project's `test` command (the whole workspace) runs here. It holds one `compile` slot
+# while it runs, so the broker queues workspace test runs (the owner sets the limit:
+# `mason resources limit compile N`), and the wait is outside the step's timeout (s61).
 [step.test]
 type = "test"
 category = "testing"
+uses = { compile = 1 }
 max_rounds = 3
 on_red = "develop"
 next = "land"
