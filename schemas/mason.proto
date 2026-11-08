@@ -704,6 +704,8 @@ message LandingView {
   repeated FreezeLine freezes = 7;
   // Milliseconds tasks waited while no batch was running.
   uint64 queue_idle_ms = 8;
+  // One line per project: tracker off, polling (with counts), or stopped (with why).
+  repeated string trackers = 9;
 }
 
 message ProviderStatus {
