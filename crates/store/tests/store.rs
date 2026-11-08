@@ -708,12 +708,12 @@ fn launches_are_kept_per_run_in_order_and_survive_reopen() {
 }
 
 #[test]
-fn migration_15_applies_on_14_and_usage_survives_reopening() {
+fn migration_16_applies_on_15_and_usage_survives_reopening() {
     let (_d, p) = db();
     {
         let mut c = Connection::open(&p).unwrap();
-        migrations::migrate_to(&mut c, 14).unwrap();
-        assert_eq!(migrations::version(&c).unwrap(), 14);
+        migrations::migrate_to(&mut c, 15).unwrap();
+        assert_eq!(migrations::version(&c).unwrap(), 15);
     }
     let s = Store::open(&p).unwrap();
     s.put_usage_latest("main", 1000, "{\"a\":1}").unwrap();
@@ -725,7 +725,7 @@ fn migration_15_applies_on_14_and_usage_survives_reopening() {
     );
     drop(s);
     let c = Connection::open(&p).unwrap();
-    assert_eq!(migrations::version(&c).unwrap(), 15);
+    assert_eq!(migrations::version(&c).unwrap(), 16);
 }
 
 fn reading(at: u64, u: Option<f64>, resets: u64, state: &str) -> mason_store::UsageReading {
