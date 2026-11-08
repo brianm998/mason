@@ -17,10 +17,8 @@ stop_daemon() {
   daemon=""
 }
 kill_hosts() {
-  for f in "$root"/d/h/*/host.kv; do
-    [ -e "$f" ] || continue
-    for k in host_pid child_pid; do pid=$(sed -n "s/^$k=//p" "$f"); kill -9 "-$pid" 2>/dev/null || kill -9 "$pid" 2>/dev/null || true; done
-  done
+  # Verified before it is killed: a stale pid in a registry may belong to someone else now.
+  for hd in "$root"/d/h; do target/debug/step-host-ctl reap "$hd" >/dev/null 2>&1 || true; done
 }
 cleanup() { stop_daemon; kill_hosts; rm -rf "$root"; }
 trap cleanup EXIT
