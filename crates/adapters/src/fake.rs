@@ -5,8 +5,8 @@
 //! tests drive, and it passes the same conformance kit as the real adapter.
 
 use mason_adapter_api::{
-    AdapterError, AgentAdapter, AgentCaps, AgentEvent, Canceller, Outcome, RateLimitInfo,
-    SessionHandle, SessionSpec, TokenReport,
+    AdapterError, AgentAdapter, AgentCaps, AgentEvent, BillingKind, Canceller, Outcome,
+    SessionHandle, SessionSpec, TokenReport, UsageModel, UsageSnapshot,
 };
 use serde_json::Value;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -23,7 +23,8 @@ pub enum FakeAction {
         tool: String,
         args: Value,
     },
-    RateLimit(RateLimitInfo),
+    /// Emit a usage snapshot.
+    Usage(UsageSnapshot),
     ApiRetry {
         attempt: u32,
     },
@@ -41,6 +42,7 @@ pub struct FakeAdapter {
     next: AtomicUsize,
     tokens: Option<TokenReport>,
     notes: Arc<Mutex<Vec<String>>>,
+    model: UsageModel,
 }
 
 impl FakeAdapter {
@@ -56,12 +58,19 @@ impl FakeAdapter {
                 cost_usd: Some(0.001),
             }),
             notes: Arc::default(),
+            model: UsageModel::default(),
         }
     }
 
     /// What each invocation reports (or `None`: the stream reports nothing).
     pub fn with_tokens(mut self, t: Option<TokenReport>) -> Self {
         self.tokens = t;
+        self
+    }
+
+    /// What this fake says it can report (the same for either billing kind).
+    pub fn with_usage_model(mut self, m: UsageModel) -> Self {
+        self.model = m;
         self
     }
 
@@ -112,8 +121,8 @@ impl FakeAdapter {
                             c.call(&tool, &args);
                         }
                     }
-                    FakeAction::RateLimit(r) => {
-                        let _ = tx.send(AgentEvent::RateLimit(r));
+                    FakeAction::Usage(u) => {
+                        let _ = tx.send(AgentEvent::Usage(u));
                     }
                     FakeAction::ApiRetry { attempt } => {
                         let _ = tx.send(AgentEvent::ApiRetry {
@@ -182,6 +191,10 @@ impl AgentAdapter for FakeAdapter {
             effort_levels: vec![],
             usage_reports: self.tokens.is_some(),
         }
+    }
+
+    fn usage_model(&self, _billing: BillingKind) -> UsageModel {
+        self.model.clone()
     }
 
     fn start(&self, spec: SessionSpec) -> Result<Box<dyn SessionHandle>, AdapterError> {

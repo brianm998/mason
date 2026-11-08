@@ -16,8 +16,8 @@ use crate::claude::{
 };
 use mason_adapter_api::contract::preamble;
 use mason_adapter_api::{
-    netguard, AdapterError, AgentAdapter, AgentCaps, AgentEvent, SessionHandle, SessionSpec,
-    TokenReport,
+    netguard, AdapterError, AgentAdapter, AgentCaps, AgentEvent, BillingKind, Blocked, BlockedWhy,
+    SessionHandle, SessionSpec, TokenReport, UsageModel, UsageSnapshot,
 };
 use serde_json::Value;
 use std::path::PathBuf;
@@ -171,6 +171,13 @@ impl AgentAdapter for CodexAdapter {
         }
     }
 
+    /// `codex exec --json` emitted no limit figures where this was written (no
+    /// CLI was installed to capture from; see docs/stages/s62.md), so no window
+    /// is promised for either billing kind.
+    fn usage_model(&self, _billing: BillingKind) -> UsageModel {
+        UsageModel::default()
+    }
+
     fn start(&self, spec: SessionSpec) -> Result<Box<dyn SessionHandle>, AdapterError> {
         let cmd = self.build_command(&spec, None)?;
         let cmd = crate::sandbox::apply(cmd, self.sandbox.as_ref())?;
@@ -231,6 +238,27 @@ fn failure(msg: &str) -> ResultInfo {
     }
 }
 
+/// A limit message is the only usage signal this CLI gives (ADR 0043): no
+/// window, no utilization, only that work was refused and the text it came with.
+fn limit_snapshot(st: &mut ParseState, msg: &str) -> Option<AgentEvent> {
+    if failure(msg).api_error_status != Some(429) {
+        return None;
+    }
+    let snap = UsageSnapshot {
+        blocked: Some(Blocked {
+            why: BlockedWhy::Unreported(clip(msg, 300)),
+            until: None,
+        }),
+        session_id: st.session_id.clone(),
+        ..Default::default()
+    };
+    if st.usage.as_ref() == Some(&snap) {
+        return None;
+    }
+    st.usage = Some(snap.clone());
+    Some(AgentEvent::Usage(snap))
+}
+
 /// Parse one `codex exec --json` line. Unknown or malformed lines yield nothing.
 pub fn parse_line(line: &str, st: &mut ParseState) -> Vec<AgentEvent> {
     let Ok(v) = serde_json::from_str::<Value>(line) else {
@@ -289,11 +317,14 @@ pub fn parse_line(line: &str, st: &mut ParseState) -> Vec<AgentEvent> {
         Some("turn.failed") => {
             let m = v["error"]["message"].as_str().unwrap_or("the turn failed");
             st.result = Some(failure(m));
+            out.extend(limit_snapshot(st, m));
         }
         // `turn.failed` follows with the same message and wins; this covers a
         // stream that ends after the bare error.
         Some("error") if st.result.is_none() => {
-            st.result = Some(failure(v["message"].as_str().unwrap_or("error")));
+            let m = v["message"].as_str().unwrap_or("error");
+            st.result = Some(failure(m));
+            out.extend(limit_snapshot(st, m));
         }
         _ => {}
     }
