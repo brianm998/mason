@@ -87,7 +87,7 @@ struct BannersView: View {
     var body: some View {
         VStack(spacing: 0) {
             if !model.connected {
-                banner("Connection lost. Reconnecting…", id: "connection")
+                banner(model.reconnecting ? "Daemon restarting, reconnecting…" : "Connection lost. Reconnecting…", id: "connection")
             }
             if let why = model.readOnlyReason {
                 banner("Read-only: \(why)", id: "read-only")

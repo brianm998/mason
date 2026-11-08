@@ -120,6 +120,9 @@ impl Daemon {
         if !problems.is_empty() {
             return Err(describe(&what, &problems));
         }
+        for w in mason_definition::validate::warnings(&def, &caps) {
+            tracing::warn!(project = %p.id, "{what}: {w}");
+        }
         self.store
             .put_definition(&def.hash, &text, now_ms())
             .map_err(|e| vec![e.to_string()])?;

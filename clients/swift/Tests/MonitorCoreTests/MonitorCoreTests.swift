@@ -649,6 +649,163 @@ final class MonitorCoreTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(h.left + h.dx, 0)
     }
 
+    // MARK: reconnecting after a daemon restart
+
+    func testReconnectPauseSchedule() {
+        var p = ReconnectPolicy()
+        XCTAssertEqual((0..<7).map { _ in p.nextPause() }, [1, 2, 4, 8, 10, 10, 10])
+        p.reset()
+        XCTAssertEqual(p.nextPause(), 1)
+    }
+
+    func testDaemonInfoReplacesOnPortPidOrStartTime() {
+        let a = DaemonInfo(port: 7423, pid: 5, startedMs: 100)
+        XCTAssertFalse(DaemonInfo(port: 7423, pid: 5, startedMs: 100).replaces(a))
+        XCTAssertTrue(DaemonInfo(port: 7424, pid: 5, startedMs: 100).replaces(a))
+        XCTAssertTrue(DaemonInfo(port: 7423, pid: 6, startedMs: 100).replaces(a))
+        XCTAssertTrue(DaemonInfo(port: 7423, pid: 5, startedMs: 101).replaces(a))
+    }
+
+    func testDiscoveryReadsPidAndStartTime() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("disc-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try Data(#"{"pid": 41, "port": 7423, "started_ms": 99}"#.utf8).write(to: dir.appendingPathComponent("daemon.json"))
+        let got = Discovery.info(arguments: ["--data-dir", dir.path], environment: [:])
+        XCTAssertEqual(got, DaemonInfo(port: 7423, pid: 41, startedMs: 99))
+        XCTAssertEqual(Discovery.info(arguments: ["--port", "9"], environment: [:]), DaemonInfo(port: 9))
+    }
+
+    @MainActor
+    final class FakeSocket: MonitorSocket {
+        var port: UInt16 = 0
+        var sent: [String] = []
+        var inbox: [String] = []
+        var waiter: CheckedContinuation<String, Error>?
+        var closed = false
+        func open(port: UInt16) { self.port = port }
+        func send(_ text: String) async throws {
+            if closed { throw URLError(.networkConnectionLost) }
+            sent.append(text)
+        }
+        func receive() async throws -> String {
+            if closed { throw URLError(.networkConnectionLost) }
+            if !inbox.isEmpty { return inbox.removeFirst() }
+            return try await withCheckedThrowingContinuation { waiter = $0 }
+        }
+        func push(_ text: String) {
+            if let w = waiter { waiter = nil; w.resume(returning: text) } else { inbox.append(text) }
+        }
+        func close() {
+            closed = true
+            waiter?.resume(throwing: URLError(.networkConnectionLost))
+            waiter = nil
+        }
+    }
+
+    func welcomeJSON() throws -> String {
+        var w = Mason_V1_Welcome()
+        w.version = "test"
+        var m = Mason_V1_ServerMessage()
+        m.welcome = w
+        return try m.jsonString()
+    }
+
+    func waitUntil(_ what: String, _ f: @escaping () -> Bool) async {
+        for _ in 0..<300 {
+            if f() { return }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTFail("timed out waiting for \(what)")
+    }
+
+    func connection(_ model: MonitorModel, info: @escaping () -> DaemonInfo?, sockets: Box<[FakeSocket]>, stallAfter: TimeInterval = 15) -> MonitorConnection {
+        var t = ConnectionTiming()
+        t.policy = ReconnectPolicy(scale: 0.01)
+        t.watchEvery = 0.02
+        t.pingEvery = 0.05
+        t.stallAfter = stallAfter
+        return MonitorConnection(model: model, discover: info, timing: t, makeSocket: {
+            let s = FakeSocket()
+            sockets.value.append(s)
+            return s
+        })
+    }
+
+    final class Box<T> { var value: T; init(_ v: T) { value = v } }
+
+    func testDropThenChangedDaemonJsonReconnectsWithoutARelaunch() async throws {
+        let model = MonitorModel()
+        let sockets = Box<[FakeSocket]>([])
+        var current = DaemonInfo(port: 7423, pid: 1, startedMs: 10)
+        let c = connection(model, info: { current }, sockets: sockets)
+        c.start()
+        await waitUntil("the first socket") { sockets.value.count == 1 }
+        sockets.value[0].push(try welcomeJSON())
+        await waitUntil("connected") { model.connected }
+        model.lastSeq = 7
+        // The daemon restarts on another port: the file changes, the socket drops.
+        current = DaemonInfo(port: 9000, pid: 2, startedMs: 20)
+        sockets.value[0].close()
+        await waitUntil("a second socket") { sockets.value.count == 2 }
+        XCTAssertFalse(model.connected)
+        XCTAssertTrue(model.reconnecting, "shown as reconnecting, not an error")
+        XCTAssertEqual(sockets.value[1].port, 9000)
+        await waitUntil("hello") { !sockets.value[1].sent.isEmpty }
+        XCTAssertTrue(sockets.value[1].sent[0].contains("\"lastSeq\":\"7\""), "resumes from the last sequence number: \(sockets.value[1].sent[0])")
+        sockets.value[1].push(try welcomeJSON())
+        await waitUntil("connected again") { model.connected }
+        XCTAssertFalse(model.reconnecting)
+        c.stop()
+    }
+
+    func testAChangedPidWhileConnectedReconnectsFromTheLastSeq() async throws {
+        let model = MonitorModel()
+        let sockets = Box<[FakeSocket]>([])
+        var current = DaemonInfo(port: 7423, pid: 1, startedMs: 10)
+        let c = connection(model, info: { current }, sockets: sockets)
+        c.start()
+        await waitUntil("the first socket") { sockets.value.count == 1 }
+        sockets.value[0].push(try welcomeJSON())
+        await waitUntil("connected") { model.connected }
+        model.lastSeq = 12
+        current = DaemonInfo(port: 7423, pid: 2, startedMs: 30)  // an update on the same port
+        await waitUntil("a second socket") { sockets.value.count == 2 }
+        XCTAssertTrue(sockets.value[0].closed)
+        await waitUntil("hello") { !sockets.value[1].sent.isEmpty }
+        XCTAssertTrue(sockets.value[1].sent[0].contains("\"lastSeq\":\"12\""))
+        c.stop()
+    }
+
+    func testAStalledDaemonShowsReconnectingNotAnError() async throws {
+        let model = MonitorModel()
+        let sockets = Box<[FakeSocket]>([])
+        let c = connection(model, info: { DaemonInfo(port: 7423, pid: 1, startedMs: 10) }, sockets: sockets, stallAfter: 0.15)
+        c.start()
+        await waitUntil("the first socket") { sockets.value.count == 1 }
+        sockets.value[0].push(try welcomeJSON())
+        await waitUntil("connected") { model.connected }
+        // Silence: not even a Pong.
+        await waitUntil("a second socket") { sockets.value.count == 2 }
+        XCTAssertTrue(sockets.value[0].closed)
+        XCTAssertTrue(sockets.value[0].sent.contains { $0.contains("ping") }, "it asked before giving up")
+        XCTAssertTrue(model.reconnecting)
+        XCTAssertNil(model.lastResult, "no error is shown")
+        c.stop()
+    }
+
+    func testNoDaemonJsonYetKeepsRetrying() async throws {
+        let model = MonitorModel()
+        let sockets = Box<[FakeSocket]>([])
+        var current: DaemonInfo? = nil
+        let c = connection(model, info: { current }, sockets: sockets)
+        c.start()
+        await waitUntil("reconnecting") { model.reconnecting }
+        XCTAssertTrue(sockets.value.isEmpty)
+        current = DaemonInfo(port: 7423, pid: 1, startedMs: 1)
+        await waitUntil("a socket") { sockets.value.count == 1 }
+        c.stop()
+    }
+
     // MARK: readable plan
 
     func planView(numbers: [String] = ["0", "1"]) -> Mason_V1_PlanView {

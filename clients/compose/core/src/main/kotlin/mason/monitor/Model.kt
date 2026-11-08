@@ -26,6 +26,8 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     var health by mutableStateOf<HealthSnapshot?>(null)
     var lastSeq by mutableStateOf(0L)
     var connected by mutableStateOf(false)
+    /** Down and being retried: the daemon is restarting or has not answered. Shown as "reconnecting", never as an error. */
+    var reconnecting by mutableStateOf(false)
 
     /**
      * The daemon's clock minus this device's, ms, as of the last message that carried the daemon's
@@ -299,6 +301,7 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     fun apply(m: ServerMessage) {
         m.welcome?.let { w ->
             connected = true
+            reconnecting = false
             if (w.resume == ResumeKind.SNAPSHOT) lastSeq = 0
             daemonVersion = w.version
             anchor(w.now_ms)
@@ -346,7 +349,7 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
         v.editor?.let { editor = it }
     }
 
-    fun disconnected() { connected = false }
+    fun disconnected() { connected = false; reconnecting = true }
 
     companion object {
         /** The protocol this monitor speaks. */

@@ -110,7 +110,7 @@ private fun ProjectFilter(model: MonitorModel) {
 fun BannersView(model: MonitorModel) {
     val theme = LocalTheme.current
     Column {
-        if (!model.connected) banner("Connection lost. Reconnecting…", "connection", theme)
+        if (!model.connected) banner(if (model.reconnecting) "Daemon restarting, reconnecting…" else "Connection lost. Reconnecting…", "connection", theme)
         model.readOnlyReason?.let { banner("Read-only: $it", "read-only", theme) }
         if (model.updateAvailable || model.updating != null) {
             Row(
