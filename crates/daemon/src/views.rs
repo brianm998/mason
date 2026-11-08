@@ -48,6 +48,15 @@ fn title_of(s: State) -> &'static str {
     }
 }
 
+/// The text on a count tile: the state name with spaces, except that
+/// needs_attention reads "stuck". The sidebar title is separate (`title_of`).
+fn tile_label_of(s: State) -> String {
+    match s {
+        State::NeedsAttention => "stuck".into(),
+        _ => state_name(s).replace('_', " "),
+    }
+}
+
 fn tooltip_of(s: State) -> &'static str {
     match s {
         State::NeedsAttention => {
@@ -435,6 +444,7 @@ impl<'a> Ctx<'a> {
                     count: count(s),
                     wants_you: wants_you(s) && count(s) > 0,
                     tooltip: tooltip_of(s).into(),
+                    label: tile_label_of(s),
                 })
                 .collect(),
             banners,
@@ -516,7 +526,13 @@ impl<'a> Ctx<'a> {
             .filter(|t| t.state == State::NeedsAttention || self.needs_approval(t))
             .collect();
         attention.sort_by_key(|t| (t.enqueued_at, t.id));
-        let llm = crate::sched::llm_resource(crate::sched::DEFAULT_ACCOUNT);
+        let (sessions_used, sessions_limit) = self.d.accounts.iter().fold((0, 0), |(u, l), a| {
+            let r = crate::sched::llm_resource(&a.name);
+            (
+                u + self.d.broker.used(&r),
+                l + self.d.broker.limit(&r).unwrap_or(0),
+            )
+        });
         HomeView {
             status: self.header(project).status,
             attention: attention
@@ -541,8 +557,8 @@ impl<'a> Ctx<'a> {
                 })
                 .filter(|a| !a.model.is_empty())
                 .collect(),
-            sessions_used: self.d.broker.used(&llm),
-            sessions_limit: self.d.broker.limit(&llm).unwrap_or(0),
+            sessions_used,
+            sessions_limit,
             stages: [
                 State::Exploring,
                 State::Developing,
@@ -752,15 +768,26 @@ impl<'a> Ctx<'a> {
     }
 
     pub fn usage(&self) -> UsageView {
-        let name = crate::sched::DEFAULT_ACCOUNT;
-        let llm = crate::sched::llm_resource(name);
         UsageView {
-            providers: vec![ProviderStatus {
-                name: name.into(),
-                status: "ok".into(),
-                sessions_used: self.d.broker.used(&llm),
-                sessions_limit: self.d.broker.limit(&llm).unwrap_or(0),
-            }],
+            providers: self
+                .d
+                .accounts
+                .iter()
+                .map(|a| {
+                    let llm = crate::sched::llm_resource(&a.name);
+                    ProviderStatus {
+                        name: a.name.clone(),
+                        status: "ok".into(),
+                        sessions_used: self.d.broker.used(&llm),
+                        sessions_limit: self.d.broker.limit(&llm).unwrap_or(0),
+                        adapter: crate::providers::adapter_name(a.adapter).into(),
+                        billing: a.billing.name().into(),
+                        warn_at: a.warn_at,
+                        overage: a.overage.name().into(),
+                        monthly_budget_usd: a.monthly_budget_usd.unwrap_or(0.0),
+                    }
+                })
+                .collect(),
             note: "Token counts and limit windows arrive with the usage tracking stage.".into(),
         }
     }
@@ -966,4 +993,18 @@ pub fn summarize(kind: &EventKind) -> (String, String, u64) {
     };
     let _ = card::ASK_MAX;
     (name, summary, task)
+}
+
+#[cfg(test)]
+mod tile_label_tests {
+    use super::*;
+
+    #[test]
+    fn needs_attention_reads_stuck_and_the_rest_keep_their_names() {
+        assert_eq!(tile_label_of(State::NeedsAttention), "stuck");
+        assert_eq!(tile_label_of(State::Queued), "queued");
+        assert_eq!(tile_label_of(State::Exploring), "exploring");
+        assert_eq!(tile_label_of(State::Landed), "landed");
+        assert_eq!(title_of(State::NeedsAttention), "Needs you");
+    }
 }

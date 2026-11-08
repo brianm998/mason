@@ -5,7 +5,7 @@
 //! ```text
 //! mason task add <title> [--project P] [--body TEXT | --body-file F | --body -] [--priority urgent|high|normal|low] [--proposed]
 //! mason task list [--state S] [--json]
-//! mason task show <id> [--json]
+//! mason task show <id> [--json] [--watch]
 //! mason task cancel <id> [--delete-branch]
 //! mason task retry <id> [--from exploring|developing|testing|review|landing]
 //! mason logs <id> [--follow]
@@ -18,7 +18,7 @@
 //! mason task open <id> [--anyway]
 //! mason pause [--project P] [--mode all|claims|landing] --for 2h | mason resume [--project P] [--mode M] | mason pause list
 //! mason alerts [--all] | mason metrics [--days N]
-//! mason status [--json]
+//! mason status [--json] [--watch]
 //! mason run --needs compile[=N],... [--exclusive] [--label L] -- <cmd>...
 //! mason resources [--json] | mason resources limit <resource> <units>
 //! mason doctor
@@ -28,6 +28,7 @@
 mod client;
 mod definition;
 mod doctor;
+mod progress;
 mod resources;
 mod testing;
 
@@ -45,7 +46,7 @@ mason: command-line client for the MASON pipeline
                          [--priority urgent|high|normal|low] [--proposed] [--explored]
                          [--after ID[,ID...]]   wait for those tasks to land first
   mason task list [--state S] [--json]
-  mason task show <id> [--json]
+  mason task show <id> [--json] [--watch]   with --watch, follow the live step progress
   mason task cancel <id> [--delete-branch]
   mason task retry <id> [--from STEP]
   mason task approve <id>             let a proposed task start, or an approval step go on
@@ -67,7 +68,7 @@ mason: command-line client for the MASON pipeline
   mason quarantine list | add <suite> <test> --owner O --days N [--reason R] | remove <suite> <test>
   mason test parse <parser> <file> [--min N]   read a results file the way a suite would, and judge it
   mason logs <id> [--follow]
-  mason status [--json]
+  mason status [--json] [--watch]     with --watch, follow every running step's progress
   mason doctor
   mason run --needs compile[=N],... [--exclusive] [--label L] -- <cmd>...
                                       queue for the pipeline's resources, ahead of its work
@@ -1288,7 +1289,13 @@ fn main() {
             Some(other) => die(&format!("unknown quarantine command {other:?}\n\n{HELP}")),
         },
         "status" => {
+            let watch = a.flag("--watch") || a.flag("-w");
             finish(&a);
+            if watch {
+                // Every running step's progress, as it is pushed.
+                or_die(progress::watch(&d, None, json_out).map_err(CallError::Io));
+                return;
+            }
             let s = or_die(d.call("GET", "/status", None));
             if json_out {
                 return println!("{s:#}");
@@ -1474,8 +1481,19 @@ fn main() {
                 }
                 "show" => {
                     let id = task_id(&mut a);
+                    let watch = a.flag("--watch") || a.flag("-w");
                     finish(&a);
                     let t = or_die(d.call("GET", &format!("/tasks/{id}"), None));
+                    if watch {
+                        // What is running now, then every push, until the task is over.
+                        if json_out {
+                            println!("{}", t["progress"]);
+                        } else {
+                            println!("{}", progress::lines(&t["progress"]));
+                        }
+                        or_die(progress::watch(&d, Some(id), json_out).map_err(CallError::Io));
+                        return;
+                    }
                     if json_out {
                         return println!("{t:#}");
                     }
@@ -1483,6 +1501,11 @@ fn main() {
                     println!("  project   {}", t["project"].as_str().unwrap_or("?"));
                     println!("  state     {}", t["state"].as_str().unwrap_or("?"));
                     println!("  activity  {}", t["activity"].as_str().unwrap_or("?"));
+                    if !t["progress"]["runs"].as_array().is_none_or(Vec::is_empty) {
+                        for l in progress::lines(&t["progress"]).lines() {
+                            println!("  progress  {l}");
+                        }
+                    }
                     let ids = |k: &str| {
                         t[k].as_array()
                             .into_iter()
@@ -1654,7 +1677,7 @@ fn main() {
                         let text = if json_out {
                             format!("{r:#}")
                         } else {
-                            progress_lines(&r)
+                            progress::lines(&r)
                         };
                         // A watch prints a line only when something moved.
                         if !watch || text != last {
@@ -1872,46 +1895,4 @@ fn main() {
         }
         other => die(&format!("unknown command {other:?}\n\n{HELP}")),
     }
-}
-
-/// One line per running step run: what it has done, of how many, and when it
-/// last moved, counted from the daemon's clock.
-fn progress_lines(r: &Value) -> String {
-    let now = r["now_ms"].as_u64().unwrap_or(0);
-    let ago = |t: u64| {
-        if t == 0 {
-            "never".to_string()
-        } else {
-            format!("{} s ago", now.saturating_sub(t) / 1000)
-        }
-    };
-    let runs = r["runs"].as_array().cloned().unwrap_or_default();
-    if runs.is_empty() {
-        return "no step is running".to_string();
-    }
-    runs.iter()
-        .map(|p| {
-            let unit = p["unit"].as_str().unwrap_or("");
-            let total = match p["total"]["source"].as_str() {
-                Some("reported" | "counted") => format!(" of {}", p["total"]["value"]),
-                Some("history") => format!(" (typically {})", p["total"]["value"]),
-                _ => String::new(),
-            };
-            let mut line = format!(
-                "{}  {}{} {unit}, {} lines, {} bytes, last output {}; updated {}",
-                p["step"].as_str().unwrap_or("?"),
-                p["done"]["value"],
-                total,
-                p["output"]["lines"],
-                p["output"]["bytes"],
-                ago(p["output"]["last_output_ms"].as_u64().unwrap_or(0)),
-                ago(p["updated_at_ms"].as_u64().unwrap_or(0)),
-            );
-            if let Some(m) = p["message"].as_str().filter(|m| !m.is_empty()) {
-                line.push_str(&format!("; {m}"));
-            }
-            line
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
 }

@@ -211,7 +211,7 @@ fn check_landing(p: &ProjectCfg, base: &str, out: &mut Vec<Finding>) {
 /// The effective tier mapping of the project's provider, entry by entry with
 /// where each came from, and anything wrong with the files behind it.
 fn check_providers(p: &ProjectCfg, config_dir: &Path, out: &mut Vec<Finding>) {
-    use mason_daemon::providers;
+    use mason_daemon::tiermap as providers;
     let provider = p.agent().provider;
     let e = providers::effective(config_dir, provider, &p.overlay_text);
     for problem in &e.problems {
@@ -242,6 +242,59 @@ fn check_providers(p: &ProjectCfg, config_dir: &Path, out: &mut Vec<Finding>) {
                 out.push(warn(format!("project {}: {w}", p.id)));
             }
         }
+    }
+}
+
+/// One line per provider account: its adapter's CLI, its billing kind and the
+/// projects that use it. Login is not probed: the adapters learn it only when
+/// a step runs (the CLI's "Not logged in" result), so it is said so, not guessed.
+fn check_accounts(
+    accounts: &[mason_daemon::providers::Account],
+    projects: &[ProjectCfg],
+    out: &mut Vec<Finding>,
+) {
+    use mason_daemon::config::Provider;
+    use mason_daemon::providers::adapter_name;
+    for a in accounts {
+        let users: Vec<&ProjectCfg> = projects.iter().filter(|p| p.account == a.name).collect();
+        let cli = adapter_name(a.adapter);
+        let set = users.iter().find_map(|p| match a.adapter {
+            Provider::Claude => p.claude_bin.clone(),
+            Provider::Codex => p.agent().codex_bin,
+        });
+        let found = match set {
+            Some(b) if b.is_file() => Ok(b),
+            Some(b) => Err(format!(
+                "{} (set for a project) does not exist",
+                b.display()
+            )),
+            None => on_path(cli).ok_or_else(|| format!("`{cli}` is not on PATH")),
+        };
+        let names = if users.is_empty() {
+            "no projects".to_string()
+        } else {
+            format!(
+                "projects {}",
+                users
+                    .iter()
+                    .map(|p| p.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+        let head = format!(
+            "account {}: adapter {cli}, billing {}, {names}",
+            a.name,
+            a.billing.name()
+        );
+        match found {
+            Ok(b) => out.push(ok(format!("{head}; CLI {}", b.display()))),
+            Err(e) => out.push(warn(format!("{head}; CLI not found: {e}"))),
+        }
+        out.push(ok(format!(
+            "account {}: login is not checked here; a step that finds the {cli} CLI logged out stops with \"Not logged in\"",
+            a.name
+        )));
     }
 }
 
@@ -290,6 +343,13 @@ pub fn run(data_dir: &Path, config_dir: &Path) -> Vec<Finding> {
         }
     }
 
+    match mason_daemon::providers::load(config_dir) {
+        Ok(accounts) => {
+            let ps = load_projects(config_dir).unwrap_or_default();
+            check_accounts(&accounts, &ps, &mut out);
+        }
+        Err(e) => out.push(fail(e)),
+    }
     match load_projects(config_dir) {
         Ok(ps) if ps.is_empty() => out.push(warn(format!(
             "no projects configured: add one as {}/projects/<id>.toml",
@@ -426,6 +486,30 @@ mod tests {
         let mut out = vec![];
         check_landing(&project(d.path(), ""), "main", &mut out);
         assert!(out.iter().all(|f| !matches!(f.level, Level::Fail)));
+    }
+
+    #[test]
+    fn doctor_lists_each_account_with_its_billing_and_projects() {
+        let d = repo_with(&[("README", "x")]);
+        let accts = mason_daemon::providers::parse_providers(
+            "[provider.a]\nadapter=\"claude\"\nbilling=\"api\"\n[provider.b]\nadapter=\"codex\"\nbilling=\"subscription\"\n",
+        )
+        .unwrap();
+        let mut p = project(d.path(), "");
+        p.account = "b".into();
+        let mut out = vec![];
+        check_accounts(&accts, &[p], &mut out);
+        let t: Vec<String> = out.iter().map(|f| f.text.clone()).collect();
+        assert!(
+            t.iter()
+                .any(|x| x.contains("account a: adapter claude, billing api, no projects")),
+            "{t:?}"
+        );
+        assert!(
+            t.iter()
+                .any(|x| x.contains("account b: adapter codex, billing subscription, projects p")),
+            "{t:?}"
+        );
     }
 
     #[test]

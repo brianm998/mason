@@ -28,6 +28,11 @@ public final class MonitorModel: ObservableObject {
     @Published public var editor: EditorView?
     @Published public var health: HealthSnapshot?
     @Published public var lastSeq: UInt64 = 0
+    /// The daemon's clock minus this device's, ms, as of the last message that carried the daemon's
+    /// time (the welcome, each StepProgress): "updated 4 s ago" counts on the local clock, corrected by this.
+    @Published public private(set) var clockOffsetMs: Int64 = 0
+    /// The open task's live log: its last 40 lines, followed from the stream.
+    @Published public private(set) var liveLog: [String] = []
     @Published public var connected = false
     /// Whether the daemon took this connection's identity for the owner's (its welcome says).
     /// Only then are the answer, approve and reject buttons drawn: anyone else sees the card.
@@ -119,6 +124,11 @@ public final class MonitorModel: ObservableObject {
 
     // MARK: counts and tiles
 
+    /// The tile text: the daemon's label, or (older daemon) the state with spaces.
+    public func tileLabel(_ c: StateCount) -> String {
+        c.label.isEmpty ? c.state.replacingOccurrences(of: "_", with: " ") : c.label
+    }
+
     /// A dash while disconnected: never a stale count, never a false zero.
     public func tileCount(_ c: StateCount) -> String {
         connected ? String(c.count) : "–"
@@ -146,6 +156,29 @@ public final class MonitorModel: ObservableObject {
     public func reveal(state: String) {
         setExpanded(state, true)
         scrollTarget = state
+    }
+
+    /// What a tile click does. Every click reveals at once (never waits to tell
+    /// a single click from a double); the second click of a double also opens
+    /// the lone task.
+    public func tileClicked(state: String, clickCount: Int) {
+        reveal(state: state)
+        if clickCount == 2 { revealAndOpenIfOne(state: state) }
+    }
+
+    /// Reveal the state's section and, if it holds exactly one task right now
+    /// (rows as they are at this moment, search ignored), open that task.
+    /// Does nothing while disconnected.
+    public func revealAndOpenIfOne(state: String) {
+        guard connected else { return }
+        reveal(state: state)
+        guard let sec = sidebar?.sections.first(where: { $0.state == state }), sec.rows.count == 1 else { return }
+        go(.task(sec.rows[0].id))
+    }
+
+    /// The tile's tooltip; a count of exactly one says a double-click opens it.
+    public func tileTooltip(_ c: StateCount) -> String {
+        connected && c.count == 1 ? c.tooltip + "\nDouble-click to open it" : c.tooltip
     }
 
     // MARK: search
@@ -248,6 +281,61 @@ public final class MonitorModel: ObservableObject {
         raw("POST", "/projects/\(editorProject)/editor/\(what)", json: String(data: data, encoding: .utf8) ?? "{}")
     }
 
+    // MARK: live progress
+
+    public static let logKeep = 40
+
+    /// The daemon's time now, ms since the epoch, by this device's clock and the offset.
+    public func daemonNow(_ local: Date = Date()) -> UInt64 {
+        let ms = Int64(local.timeIntervalSince1970 * 1000) + clockOffsetMs
+        return ms > 0 ? UInt64(ms) : 0
+    }
+
+    func anchor(daemonNow ms: UInt64, local: Date = Date()) {
+        guard ms > 0 else { return }
+        clockOffsetMs = Int64(ms) - Int64(local.timeIntervalSince1970 * 1000)
+    }
+
+    /// A step's progress arrived without a view: put it into the task page and the rows, and follow the log.
+    public func apply(progress p: Mason_V1_StepProgress, local: Date = Date()) {
+        anchor(daemonNow: p.nowMs, local: local)
+        guard p.hasProgress else { return }
+        let cell = p.progress
+        func merged(_ old: [ProgressCell]) -> [ProgressCell]? {
+            guard let i = old.firstIndex(where: { $0.step == cell.step }) else { return nil }
+            var c = cell
+            // A finished or stopped run says what it ended as on the next view; until then, no "running".
+            if c.state != .part { c.label = "" }
+            var out = old
+            out[i] = c
+            return out
+        }
+        if var d = taskDetail, d.hasRow, d.row.id == p.task {
+            if let cells = merged(d.row.progress) {
+                d.row.progress = cells
+                taskDetail = d
+            }
+            appendLog(p.log)
+        }
+        if var s = sidebar {
+            var changed = false
+            for si in s.sections.indices {
+                for ri in s.sections[si].rows.indices where s.sections[si].rows[ri].id == p.task {
+                    if let cells = merged(s.sections[si].rows[ri].progress) {
+                        s.sections[si].rows[ri].progress = cells
+                        changed = true
+                    }
+                }
+            }
+            if changed { sidebar = s }
+        }
+    }
+
+    func appendLog(_ lines: [String]) {
+        guard !lines.isEmpty else { return }
+        liveLog = Array((liveLog + lines).suffix(Self.logKeep))
+    }
+
     // MARK: updates from the daemon
 
     public func apply(_ m: Mason_V1_ServerMessage) {
@@ -256,6 +344,7 @@ public final class MonitorModel: ObservableObject {
             connected = true
             if w.resume == .snapshot { lastSeq = 0 }
             daemonVersion = w.version
+            anchor(daemonNow: w.nowMs)
             isOwner = w.owner
             readOnlyReason = w.minProtocol > Self.protocolVersion
                 ? "This monitor speaks protocol \(Self.protocolVersion), but the daemon needs \(w.minProtocol) or newer. Update the monitor; until then it can only look."
@@ -268,6 +357,8 @@ public final class MonitorModel: ObservableObject {
         case .view(let u)?:
             lastSeq = max(lastSeq, u.seq)
             apply(u.view)
+        case .stepProgress(let p)?:
+            apply(progress: p)
         case .result(let r)?:
             lastResult = r.ok ? nil : r.error
             handle(result: r)
@@ -293,7 +384,12 @@ public final class MonitorModel: ObservableObject {
             sidebar = x
             noteAttention(x)
         case .home(let x)?: home = x
-        case .taskDetail(let x)?: taskDetail = x
+        case .taskDetail(let x)?:
+            // A different task's page starts its log over; the same task's view carries the tail again.
+            taskDetail = x
+            liveLog = x.logTail.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+            if liveLog.last == "" { liveLog.removeLast() }
+            liveLog = Array(liveLog.suffix(Self.logKeep))
         case .landing(let x)?: landing = x
         case .usage(let x)?: usage = x
         case .editor(let x)?: editor = x

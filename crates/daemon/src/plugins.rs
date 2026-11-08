@@ -428,7 +428,7 @@ impl Daemon {
     pub fn caps_for(&self, p: &ProjectCfg) -> Capabilities {
         Capabilities::now()
             .with_plugins(self.extensions(p).types())
-            .with_efforts(crate::providers::effort_levels(p.agent().provider))
+            .with_efforts(crate::tiermap::effort_levels(p.agent().provider))
     }
 }
 
