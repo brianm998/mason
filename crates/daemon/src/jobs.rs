@@ -358,9 +358,9 @@ fn wait_while_paused(c: &Ctx) -> Result<(), ()> {
 /// Wait for this step's resources (Part 7). Says why in the task's wait, once,
 /// and ends the wait when they are granted.
 fn acquire(c: &Ctx) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
-    use crate::sched::{needs_of, DEFAULT_ACCOUNT};
+    use crate::sched::needs_of;
     let d = &c.d;
-    let account = (c.step.kind == StepType::Agent).then_some(DEFAULT_ACCOUNT);
+    let account = (c.step.kind == StepType::Agent).then_some(c.project.account.as_str());
     // A definition names what it uses; a name nobody declared gets its
     // definition-given limit (or one slot).
     let mut needs = needs_of(&c.step.uses, account);
@@ -409,9 +409,49 @@ fn acquire(c: &Ctx) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
     Ok(lease)
 }
 
+/// The command of the definition's test step for this project, layered exactly as
+/// a test step resolves it: the definition, the project's local overlay, the
+/// owner's runtime overrides (`mason config set`) and, for a task, its own
+/// overrides. `run_check` and landing's legacy suite use this, so they run the
+/// same command the test step runs.
+pub(crate) fn test_command(
+    d: &Daemon,
+    def: &mason_definition::Definition,
+    pid: ProjectId,
+    task: Option<TaskId>,
+) -> Option<String> {
+    let step = def.steps.iter().find(|s| s.kind == StepType::Test)?;
+    let project = d.project(pid)?;
+    let now = now_ms();
+    let runtime: Vec<RuntimeOverride> = d
+        .store
+        .overrides(&project.id, now)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|o| RuntimeOverride {
+            key: o.key,
+            value: o.value,
+            owner: o.owner,
+            expires_at: o.expires_at,
+        })
+        .collect();
+    let task_overrides = task
+        .and_then(|t| d.store.task_overrides(t.0).ok())
+        .unwrap_or_default();
+    resolve(def, step, &d.overlay(pid), &runtime, &task_overrides, now)
+        .ok()
+        .and_then(|r| r.command.map(|a| a.value))
+}
+
 /// Get the worktree ready: fetch, create it on the task's branch, and bring
 /// the branch up to date with the base. Idempotent.
-fn prepare(c: &Ctx) -> Result<(), String> {
+///
+/// A conflict with the base is not the task's failure: the merge is aborted,
+/// the branch is left as it was, and the conflicting files are returned so
+/// the step can hand them to the agent (develop resolves them; the read-only
+/// steps go on with the branch as it is). Failing here instead would fail
+/// every later step the same way, so no agent could ever resolve it.
+fn prepare(c: &Ctx) -> Result<Option<String>, String> {
     let lock = c.d.repo_lock(c.project_id);
     let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
     let repo = &c.project.path;
@@ -421,13 +461,42 @@ fn prepare(c: &Ctx) -> Result<(), String> {
     let base = c.project.base_ref();
     git::ensure_worktree(repo, &c.wt, &c.branch, &base).map_err(|e| e.to_string())?;
     match git::catch_up(&c.wt, &base) {
-        Ok(CatchUp::Conflict(files)) => Err(format!(
-            "folding in the base conflicts in: {}",
-            files.trim()
-        )),
-        Ok(_) => Ok(()),
+        Ok(CatchUp::Conflict(files)) => Ok(Some(files.trim().to_string())),
+        Ok(_) => Ok(None),
         Err(e) => Err(e.to_string()),
     }
+}
+
+/// How long one tool call of an agent step may take. A develop step's
+/// `run_check` runs the whole test command, which is only cut off at
+/// `test_timeout`; a shorter tool timeout made the agent give up on a run that
+/// was still going (and then run the tests again by hand, doubling the load).
+pub(crate) fn tool_timeout_for(kind: StepKind, project: &ProjectCfg) -> Duration {
+    match kind {
+        StepKind::Develop => project
+            .tool_timeout
+            .max(project.test_timeout + Duration::from_secs(60)),
+        _ => project.tool_timeout,
+    }
+}
+
+/// What the develop agent is told when its branch does not merge cleanly
+/// with the base.
+pub(crate) fn conflict_note(base: &str, files: &str) -> String {
+    let list: Vec<String> = files
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(|l| format!("- {l}"))
+        .collect();
+    format!(
+        "Your branch no longer merges cleanly with `{base}`. Before anything else, run \
+         `git merge {base}` in your worktree, resolve the conflicts so that both your \
+         change and the base's change are kept (read what the base changed with \
+         `git log -p HEAD..{base} -- <file>`), build, and commit the merge with \
+         `git commit -s`. The conflicting files are:\n{}",
+        list.join("\n")
+    )
 }
 
 pub(crate) fn prepare_worktree_only(c: &Ctx) -> Result<(), String> {
@@ -695,15 +764,25 @@ fn agent_job(c: &Ctx) {
             c.state
         ));
     };
-    if let Err(why) = prepare(c) {
-        return c.fail(why);
-    }
+    let conflicts = match prepare(c) {
+        Ok(conflicts) => conflicts,
+        Err(why) => return c.fail(why),
+    };
     let key = format!("t{}r{}", c.task.0, c.run.0);
     let dir = c.task_dir();
     let plan: Option<Value> = std::fs::read_to_string(dir.join("plan.json"))
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok());
-    let feedback = std::fs::read_to_string(dir.join("feedback.txt")).ok();
+    let mut feedback = std::fs::read_to_string(dir.join("feedback.txt")).ok();
+    if let Some(files) = &conflicts {
+        if kind == StepKind::Develop {
+            let note = conflict_note(&c.project.base_ref(), files);
+            feedback = Some(match feedback {
+                Some(f) if !f.trim().is_empty() => format!("{note}\n\n{f}"),
+                _ => note,
+            });
+        }
+    }
     let decisions = std::fs::read_to_string(dir.join("decisions.txt")).ok();
     let pack_name = match kind {
         StepKind::Develop => "develop",
@@ -767,25 +846,9 @@ fn agent_job(c: &Ctx) {
         None => prompt,
     };
 
-    let tests_cmd = c.d.world().ok().and_then(|_| {
-        // `run_check` runs the project's tests: the command of its test step, as layered.
-        c.def
-            .steps
-            .iter()
-            .find(|s| s.kind == StepType::Test)
-            .and_then(|s| {
-                mason_definition::layers::resolve(
-                    &c.def,
-                    s,
-                    &c.d.overlay(c.project_id),
-                    &[],
-                    &[],
-                    now_ms(),
-                )
-                .ok()
-                .and_then(|r| r.command.map(|a| a.value))
-            })
-    });
+    // `run_check` runs the project's tests: the command of its test step, layered exactly
+    // as the test step itself resolves it (runtime and task overrides included).
+    let tests_cmd = test_command(&c.d, &c.def, c.project_id, Some(c.task));
     let checks = Box::new(TestChecks {
         cmd: tests_cmd,
         wt: c.wt.clone(),
@@ -857,7 +920,7 @@ fn agent_job(c: &Ctx) {
     };
     spec.effort = c.res.effort.as_ref().map(|a| a.value.clone());
     spec.env = c.project.agent_env.clone();
-    spec.tool_timeout = c.project.tool_timeout;
+    spec.tool_timeout = tool_timeout_for(kind, &c.project);
     spec.deadline = Some(
         c.res
             .budget

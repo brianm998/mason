@@ -22,7 +22,12 @@ swift = "done"
 compose = "done"
 
 [feature.count-tiles]
-description = "One fixed-size tile per state, tinted when it wants you, a dash while disconnected"
+description = "One tile per state, sized to its label, tinted when it wants you, a dash while disconnected"
+swift = "done"
+compose = "done"
+
+[feature.tile-double-click]
+description = "Double-click a non-zero count tile to reveal its section and open the task when it holds exactly one; tooltip says so for a count of one"
 swift = "done"
 compose = "done"
 
@@ -72,7 +77,7 @@ swift = "done"
 compose = "done"
 
 [feature.progress-cells]
-description = "Filled, part, hatched and empty cells; no percentages; amber and never red when slow"
+description = "Filled, part, hatched and empty cells; a running cell fills in proportion to a real total, lighter for a typical one, outline for none; a percentage only from a real total, the count and typical range for a history total, the count alone for none; a progress line per running step with a counting time; amber and never red when slow or quiet"
 swift = "done"
 compose = "done"
 
@@ -133,5 +138,10 @@ compose = "done"
 
 [feature.reserved-numbers]
 description = "The task detail lists the stage, exit-script and decision numbers MASON reserved for the task; a cancelled task's are shown as released, never reused"
+swift = "done"
+compose = "done"
+
+[feature.provider-accounts]
+description = "The usage page lists every LLM provider account with its adapter, billing kind, sessions in use, warn level, overage setting and monthly budget"
 swift = "done"
 compose = "done"

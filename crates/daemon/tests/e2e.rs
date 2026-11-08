@@ -98,6 +98,73 @@ fn red_tests_send_the_task_back_to_development_and_then_it_lands() {
 }
 
 #[test]
+fn a_branch_that_conflicts_with_the_base_goes_to_the_agent_to_merge_and_lands() {
+    // The first develop turn commits conflict.txt, and meanwhile the base gets its own
+    // conflict.txt. Its tests are red, so it goes back to develop. Bringing the branch up
+    // to date with the base now conflicts. That used to fail every step before any agent
+    // ran; now the develop agent is told about it, merges, and the task lands.
+    let base_moves = "tmp=$(mktemp -d) && git worktree add -q --detach \"$tmp\" origin/main && \
+        (cd \"$tmp\" && echo theirs > conflict.txt && git add -A && \
+         git -c user.name=t -c user.email=t@t commit -qm 'base changes conflict.txt' && \
+         git push -q origin HEAD:main) && git worktree remove --force \"$tmp\"";
+    let develop1 = json!([
+        {"sh": base_moves},
+        {"sh": format!("echo mine > conflict.txt && {TASK_SCRIPT_COMMIT}")},
+        {"call": {"tool": "submit_change", "args": {"summary": "first try", "head": "$HEAD"}}}
+    ]);
+    let develop2 = json!([
+        {"sh": "printf '%s' \"$FAKE_PROMPT\" > seen-prompt.txt; \
+                grep -q 'no longer merges cleanly' seen-prompt.txt && grep -q 'conflict.txt' seen-prompt.txt || exit 1; \
+                rm seen-prompt.txt; git merge -q origin/main; echo both > conflict.txt && echo ok > fixed.txt && \
+                git add -A && git -c user.name=t -c user.email=t@t commit -qm 'merge the base and fix'"},
+        {"call": {"tool": "submit_change", "args": {"summary": "merged", "head": "$HEAD"}}}
+    ]);
+    let script = json!({"steps": {"explore": [explore_turn()], "develop": [develop1, develop2]}});
+    let s = Scratch::new("test -f hello.txt && test -f fixed.txt", script);
+    let d = s.start();
+    let t = file_task(&d, "Conflicts with the base");
+    wait_state(&d, t, State::Landed, 120);
+    let w = d.world().unwrap();
+    assert_eq!(w.tasks[&t].failures, 0, "a conflict is not a failure");
+    assert_eq!(w.tasks[&t].attempts[&State::Developing], 2);
+    assert_eq!(sh(&s.origin, &["show", "main:conflict.txt"]), "both");
+    assert_eq!(sh(&s.origin, &["show", "main:fixed.txt"]), "ok");
+}
+
+#[test]
+fn run_check_runs_the_test_command_the_owner_overrode_at_runtime() {
+    // The owner's `mason config set step.test.command ...` used to reach only the test
+    // step: the develop agent's run_check (and landing's legacy suite) kept running the
+    // project's own command, outside any queue the override added.
+    let develop = json!([
+        {"sh": TASK_SCRIPT_COMMIT},
+        {"call": {"tool": "run_check", "args": {"name": "tests"}}},
+        {"call": {"tool": "submit_change", "args": {"summary": "ok", "head": "$HEAD"}}}
+    ]);
+    let s = Scratch::new(
+        "echo FROM-THE-PROJECT; exit 1",
+        json!({"steps": {"explore": [explore_turn()], "develop": [develop]}}),
+    );
+    let d = s.start();
+    let now = mason_daemon::daemon::now_ms();
+    d.store
+        .add_override(
+            "scratch",
+            "step.test.command",
+            "echo FROM-THE-OVERRIDE && test -f hello.txt",
+            "owner",
+            now,
+            now + 3_600_000,
+        )
+        .unwrap();
+    let t = file_task(&d, "Overridden tests");
+    wait_state(&d, t, State::Landed, 90);
+    let logs = render_logs(&d, t.0);
+    assert!(logs.contains("FROM-THE-OVERRIDE"), "{logs}");
+    assert!(!logs.contains("FROM-THE-PROJECT"), "{logs}");
+}
+
+#[test]
 fn tests_that_never_pass_fail_the_task_after_the_round_limit() {
     let s = Scratch::new(
         "echo nope; exit 1",
@@ -264,10 +331,19 @@ fn admission_respects_the_concurrency_limit() {
         let w = d.world().unwrap();
         let llm = d.broker.used("llm:claude");
         max_llm = max_llm.max(llm);
+        // Only agent steps hold a session (as `Daemon::llm_free` counts): a task in
+        // its test or landing step holds none, by design, so counting those made
+        // this read 2 whenever the second task was claimed while the first was
+        // testing, a window that is wide only on a busy machine.
         max_unclaimed_step = max_unclaimed_step.max(
             w.tasks
                 .values()
-                .filter(|t| t.state.is_step() && !d.broker.has_lease(t.id))
+                .filter(|t| {
+                    matches!(
+                        t.state,
+                        State::Exploring | State::Developing | State::Review
+                    ) && !d.broker.has_lease(t.id)
+                })
                 .count(),
         );
         queued_while_busy |= llm == 1 && w.tasks.values().any(|t| t.state == State::Queued);

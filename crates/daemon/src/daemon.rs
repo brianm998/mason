@@ -27,6 +27,8 @@ pub struct Daemon {
     pub store: Store,
     /// By numeric id; the project's string id is `ProjectCfg::id`.
     pub projects: BTreeMap<ProjectId, ProjectCfg>,
+    /// The LLM provider accounts, in providers.toml order.
+    pub accounts: Vec<crate::providers::Account>,
     /// Blocking work for the async layer (the store, git).
     pub pool: Pool,
     pub crash: Crash,
@@ -134,11 +136,18 @@ impl Daemon {
         }
 
         let rcfg = crate::sched::load_resource_cfg(&cfg.config_dir)?;
+        let accounts = if demo {
+            crate::providers::default_accounts()
+        } else {
+            crate::providers::load(&cfg.config_dir)?
+        };
+        crate::providers::check_llm_conflict(&accounts, &rcfg.llm)?;
         let broker = crate::sched::Broker::new(
             cfg.data_dir.join("locks"),
             cfg.data_dir.join("limits.kv"),
             &rcfg,
             cfg.max_concurrent as u32,
+            &accounts,
         )?;
         let d = Arc::new(Daemon {
             store,
@@ -157,6 +166,7 @@ impl Daemon {
             sweep: Mutex::default(),
             defs: crate::defs::Defs::default(),
             broker,
+            accounts,
             bus: tokio::sync::broadcast::channel(1024).0,
             progress: Default::default(),
             progress_bus: tokio::sync::broadcast::channel(1024).0,
@@ -456,8 +466,8 @@ impl Daemon {
     /// task that was claimed but has not yet asked for its step's resources
     /// still counts as holding one, so a full pool never produces worktrees
     /// with nothing happening in them.
-    pub fn llm_free(&self, w: &mason_engine::World) -> u32 {
-        let name = crate::sched::llm_resource(crate::sched::DEFAULT_ACCOUNT);
+    pub fn llm_free(&self, w: &mason_engine::World, account: &str) -> u32 {
+        let name = crate::sched::llm_resource(account);
         // A task waiting for the owner's approval holds nothing.
         let approving = Activity::Waiting(WaitReason::On(APPROVAL_WAIT.into()));
         let unclaimed = w
@@ -467,6 +477,7 @@ impl Daemon {
                 t.state.is_step()
                     && t.activity != approving
                     && !self.broker.has_lease(t.id)
+                    && self.account_of(t.project) == account
                     && self.step_needs_session(t)
             })
             .count() as u32;
@@ -475,6 +486,12 @@ impl Daemon {
             .unwrap_or(0)
             .saturating_sub(self.broker.used(&name))
             .saturating_sub(unclaimed)
+    }
+
+    /// The provider account a project's agent steps use.
+    pub fn account_of(&self, project: ProjectId) -> &str {
+        self.project(project)
+            .map_or(crate::sched::DEFAULT_ACCOUNT, |p| p.account.as_str())
     }
 
     /// Will this task's current step want an LLM session? Only an agent step
@@ -496,14 +513,18 @@ impl Daemon {
 
     /// The queued task that goes next, if an LLM session is free for it.
     pub fn next_admission(&self, w: &mason_engine::World) -> Option<TaskId> {
-        if self.llm_free(w) == 0 {
-            return None;
-        }
+        // Accounts are separate: a full one holds back only its own projects.
+        let free: std::collections::HashMap<&str, u32> = self
+            .accounts
+            .iter()
+            .map(|a| (a.name.as_str(), self.llm_free(w, &a.name)))
+            .collect();
         w.tasks
             .values()
             .filter(|t| {
                 t.state == State::Queued && t.activity == Activity::Waiting(WaitReason::Slot)
             })
+            .filter(|t| free.get(self.account_of(t.project)).copied().unwrap_or(0) > 0)
             // A pause on claims (or on everything) holds a project's queue back.
             .filter(|t| {
                 let name = self.project(t.project).map_or("", |p| p.id.as_str());

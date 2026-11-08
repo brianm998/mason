@@ -198,6 +198,7 @@ mod tests {
             overlay_text: String::new(),
             services: Default::default(),
             self_cfg: None,
+            account: "claude".into(),
         }
     }
 

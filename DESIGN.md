@@ -785,11 +785,14 @@ Sketch with invented example data, showing content and hierarchy rather than fin
 
 ### Progress you can trust
 
-Progress cells: filled means finished. Part filled means a real count, or typical time if no count exists. Hatched means waiting, labelled with what for. Empty means not started.
+Progress cells: filled means finished. Hatched means waiting, labelled with what for. Empty means not started. A running cell fills in proportion to a real total, fills lighter when only a typical total from past runs exists, and stays an outline when there is nothing to measure against.
 
 - Real counts come first: tests run, features done, fix round 2 of 3.
+- **The rule for numbers.** A percentage is shown only from a real total (reported by the step, or counted by the daemon), as "212 of 340 tests, 62%": rounded down, never above 100. With only a `history` total (the typical figure from this project's past successful runs), show the count and the typical range and no percentage: "1,240 lines, usually 1,800 to 2,400". With no total, show the count: "37 tool calls". A percentage is never estimated, because an estimate implies a precision the data can't back.
+- Each running step has one line: its count by that rule, its message cut to fit, and "updated 4 s ago", counting up on the monitor's own clock between pushes, corrected by the daemon's clock from the welcome. At narrow widths the message goes first.
 - Time in state is always shown. Estimates are ranges from this project's history ("usually 15 to 20 min") and appear only with enough samples.
-- No percentages, because they imply a precision the data can't back.
+- A step that has not moved for longer than its usual gap between updates (or five minutes, with too little history to say) turns the time amber and says "no output for 6 min". It is not red and it is not a failure.
+- The task page adds the step's sub-counts, the agent's todo list with each item's status, the output figures, and where each number came from ("from the agent", "counted from output", "usually, from 12 past runs").
 - Running past the typical time turns amber and never red. Slow isn't the same as broken.
 
 ### Parity between SwiftUI and Compose
