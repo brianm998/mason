@@ -231,6 +231,21 @@ pub struct SelfCfg {
     pub period_h: u64,
     /// After a rollback, no self-task is filed for this long.
     pub cooldown_h: u64,
+    /// What a change to a protected file, or one that weakens a check, does at landing.
+    pub holds: Holds,
+}
+
+/// `[self] holds`: who judges a change to MASON's own rules.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Holds {
+    /// Nobody waits. A change that weakens a check goes back to development with what was
+    /// found; one that only touches a protected file lands once its tests and review are
+    /// green, and the record keeps what it touched. Validity is decided where the context is
+    /// (test and review), not by a person at the end.
+    #[default]
+    Review,
+    /// The task waits for the owner's approval of the diff (the Stage 17 behavior).
+    Owner,
 }
 
 fn parse_self(id: &str, doc: &DocumentMut) -> Result<Option<SelfCfg>, String> {
@@ -263,6 +278,15 @@ fn parse_self(id: &str, doc: &DocumentMut) -> Result<Option<SelfCfg>, String> {
         max_steps: int("max_steps", 40)? as u32,
         period_h: int("period_h", 24)?,
         cooldown_h: int("cooldown_h", 24)?,
+        holds: match t.get("holds").and_then(|v| v.as_str()) {
+            None | Some("review") => Holds::Review,
+            Some("owner") => Holds::Owner,
+            Some(other) => {
+                return Err(format!(
+                    "{id}: `[self] holds` must be \"review\" or \"owner\", not {other:?}"
+                ))
+            }
+        },
     }))
 }
 
