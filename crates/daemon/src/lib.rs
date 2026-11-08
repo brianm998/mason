@@ -13,6 +13,7 @@ pub mod daemon;
 pub mod defs;
 pub mod demo;
 pub mod editor;
+pub mod hostloss;
 pub mod http;
 pub mod jobs;
 pub mod landing;
