@@ -24,6 +24,7 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     var usage by mutableStateOf<UsageView?>(null)
     var editor by mutableStateOf<EditorView?>(null)
     var health by mutableStateOf<HealthSnapshot?>(null)
+    var introspection by mutableStateOf<IntrospectionSnapshot?>(null)
     var lastSeq by mutableStateOf(0L)
     var connected by mutableStateOf(false)
     /** Down and being retried: the daemon is restarting or has not answered. Shown as "reconnecting", never as an error. */
@@ -345,6 +346,7 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
         m.result?.let { r ->
             lastResult = if (r.ok) null else r.error
             if (r.id == "health" && r.ok) health = HealthSnapshot.parse(r.json)
+            if (r.id == "introspection" && r.ok) introspection = IntrospectionSnapshot.parse(r.json)
             if (r.id.startsWith("publish:") && r.ok) publishPreview = PublishPreview.parse(r.json)
             onResult?.invoke(r)
         }

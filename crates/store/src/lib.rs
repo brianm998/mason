@@ -10,6 +10,7 @@
 //! The API is blocking; async callers use a bounded worker pool (Part 2).
 
 mod codec;
+pub mod introspect;
 pub mod migrations;
 
 use mason_core::*;
@@ -21,6 +22,7 @@ use std::sync::Mutex;
 use std::thread::JoinHandle;
 
 pub use codec::{decode as decode_event, encode as encode_event, state_name, CodecError};
+pub use introspect::{FindingRow, ScheduleRow, TriageRow};
 
 #[derive(Debug)]
 pub enum StoreError {

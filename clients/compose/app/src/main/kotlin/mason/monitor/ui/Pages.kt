@@ -323,5 +323,22 @@ fun HealthPage(model: MonitorModel) {
                 h.waiting.forEach { Text(it, style = theme.body()) }
             }
         }
+        model.introspection?.let { i ->
+            Section("Findings") {
+                if (i.findings.isEmpty()) Text("Nothing found yet.", style = theme.body(color = theme.muted))
+                i.findings.forEach { f ->
+                    Text("#${f.id} [${f.verdict}] ${f.title} (proposal #${f.task}, metric ${f.metric})", style = theme.body())
+                    if (f.text.isNotEmpty()) Text(f.text, style = theme.body(color = theme.muted))
+                }
+            }
+            Section("Recurring jobs") { i.jobs.forEach { Text("${it.name} (${it.kind}): ${it.runs} run(s). ${it.status}", style = theme.body()) } }
+            Section("Digest (last 7 days)") { i.digest.forEach { Text(it, style = theme.body()) } }
+            Section("Triage") {
+                Text(
+                    if (i.triageOn) "On. ${i.triageWaiting} suggestion(s) wait for your review; triage never answers a question." else "Off.",
+                    style = theme.body(),
+                )
+            }
+        }
     }
 }

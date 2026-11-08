@@ -18,6 +18,8 @@
 //! mason task open <id> [--anyway]
 //! mason pause [--project P] [--mode all|claims|landing] --for 2h | mason resume [--project P] [--mode M] | mason pause list
 //! mason alerts [--all] | mason metrics [--days N]
+//! mason health | mason digest [--days N] [--project P] | mason schedule list | run <name>
+//! mason triage list | review <id> (--agree | --disagree)
 //! mason status [--json] [--watch]
 //! mason run --needs compile[=N],... [--exclusive] [--label L] -- <cmd>...
 //! mason resources [--json] | mason resources limit <resource> <units>
@@ -62,6 +64,10 @@ mason: command-line client for the MASON pipeline
   mason resume [--project P] [--mode M] | mason pause list
   mason alerts [--all]                what needs a look right now (and, with --all, what already cleared)
   mason metrics [--days N]            interventions per landed task
+  mason health                        the detectors' findings, verdicts on fixes, recurring jobs, triage review queue
+  mason digest [--days N] [--project P]   landed, interventions, time by state, skips, forced landings (recorded data only)
+  mason schedule list | run <name>    recurring jobs (introspect, analyst:<project>, <project>/<schedule>); run one now
+  mason triage list | review <id> (--agree | --disagree)   the triage agent's sampled suggestions; it never answers
   mason task skip <id> (--suite S | --step S) [--reason R] [--deferred]
                                       skip a suite or step by force, even mid-run; records a debt
   mason debt list | run <id>          what was skipped and not yet proven; run one on the base branch
@@ -947,6 +953,116 @@ fn main() {
                     x["kind"].as_str().unwrap_or("?"),
                     x["text"].as_str().unwrap_or("")
                 );
+            }
+        }
+        "health" => {
+            finish(&a);
+            let r = or_die(d.call("GET", "/health", None));
+            if json_out {
+                return println!("{r:#}");
+            }
+            print_health(&r);
+        }
+        "digest" => {
+            let days = a.opt("--days").unwrap_or_else(|| "7".into());
+            let project = a.opt("--project");
+            finish(&a);
+            let mut path = format!("/digest?days={days}");
+            if let Some(p) = project {
+                path.push_str(&format!("&project={p}"));
+            }
+            let r = or_die(d.call("GET", &path, None));
+            if json_out {
+                return println!("{r:#}");
+            }
+            print_digest(&r);
+        }
+        "schedule" => {
+            let sub = a.pos().unwrap_or_default();
+            if std::env::var("MASON_AS").is_err() {
+                if let Ok(u) = std::env::var("USER") {
+                    std::env::set_var("MASON_AS", u);
+                }
+            }
+            match sub.as_str() {
+                "list" => {
+                    finish(&a);
+                    let r = or_die(d.call("GET", "/schedules", None));
+                    if json_out {
+                        return println!("{r:#}");
+                    }
+                    for s in r["schedules"].as_array().cloned().unwrap_or_default() {
+                        println!(
+                            "{:<28} {:<12} every {:<10} runs {:<4} {}",
+                            s["name"].as_str().unwrap_or("?"),
+                            s["kind"].as_str().unwrap_or("?"),
+                            every_text(s["every_ms"].as_u64().unwrap_or(0)),
+                            s["runs"],
+                            s["last_status"].as_str().unwrap_or("")
+                        );
+                    }
+                }
+                "run" => {
+                    let name = a
+                        .pos()
+                        .unwrap_or_else(|| die("usage: mason schedule run <name>"));
+                    finish(&a);
+                    let r = or_die(d.call("POST", "/schedules/run", Some(&json!({"name": name}))));
+                    println!("{}", r["said"].as_str().unwrap_or(""));
+                }
+                _ => die("usage: mason schedule list | run <name>"),
+            }
+        }
+        "triage" => {
+            let sub = a.pos().unwrap_or_default();
+            if std::env::var("MASON_AS").is_err() {
+                if let Ok(u) = std::env::var("USER") {
+                    std::env::set_var("MASON_AS", u);
+                }
+            }
+            match sub.as_str() {
+                "list" => {
+                    finish(&a);
+                    let r = or_die(d.call("GET", "/triage", None));
+                    if json_out {
+                        return println!("{r:#}");
+                    }
+                    let list = r["triage"].as_array().cloned().unwrap_or_default();
+                    if list.is_empty() {
+                        println!("no triage suggestions (triage is off unless a project sets [triage] enabled)");
+                    }
+                    for t in list {
+                        println!(
+                            "#{:<4} task {:<4} {:<9} {:<9} {}\n      would {}: {}",
+                            t["id"],
+                            t["task"],
+                            t["status"].as_str().unwrap_or("?"),
+                            t["verdict"].as_str().unwrap_or(""),
+                            t["question"].as_str().unwrap_or(""),
+                            t["action"].as_str().unwrap_or("?"),
+                            t["answer"].as_str().unwrap_or("")
+                        );
+                    }
+                }
+                "review" => {
+                    let id = task_id(&mut a);
+                    let agree = a.flag("--agree");
+                    let disagree = a.flag("--disagree");
+                    finish(&a);
+                    if agree == disagree {
+                        die("say --agree or --disagree");
+                    }
+                    or_die(d.call(
+                        "POST",
+                        &format!("/triage/{id}/review"),
+                        Some(&json!({"agree": agree})),
+                    ));
+                    println!(
+                        "reviewed #{id}: {}",
+                        if agree { "agree" } else { "disagree" }
+                    );
+                }
+                _ => die("usage: mason triage list | review <id> (--agree | --disagree)"),
             }
         }
         "metrics" => {
@@ -2154,5 +2270,146 @@ fn main() {
             }
         }
         other => die(&format!("unknown command {other:?}\n\n{HELP}")),
+    }
+}
+
+fn every_text(ms: u64) -> String {
+    match ms {
+        m if m >= 86_400_000 && m % 86_400_000 == 0 => format!("{}d", m / 86_400_000),
+        m if m >= 3_600_000 && m % 3_600_000 == 0 => format!("{}h", m / 3_600_000),
+        m if m >= 60_000 && m % 60_000 == 0 => format!("{}m", m / 60_000),
+        m if m % 1000 == 0 => format!("{}s", m / 1000),
+        m => format!("{m}ms"),
+    }
+}
+
+fn ms_text(ms: u64) -> String {
+    match ms {
+        m if m >= 3_600_000 => format!("{:.1}h", m as f64 / 3_600_000.0),
+        m if m >= 60_000 => format!("{:.1}m", m as f64 / 60_000.0),
+        m => format!("{:.1}s", m as f64 / 1000.0),
+    }
+}
+
+fn print_health(r: &serde_json::Value) {
+    println!("Findings and what came of their fixes");
+    let list = r["findings"].as_array().cloned().unwrap_or_default();
+    if list.is_empty() {
+        println!("  none yet");
+    }
+    for f in list {
+        println!(
+            "  #{:<3} [{}] {} (proposal #{}, metric {})",
+            f["id"],
+            f["verdict"].as_str().unwrap_or("?"),
+            f["title"].as_str().unwrap_or(""),
+            f["task"],
+            f["metric"].as_str().unwrap_or("?")
+        );
+        if let Some(t) = f["text"].as_str().filter(|t| !t.is_empty()) {
+            println!("        {t}");
+        }
+    }
+    println!("Recurring jobs");
+    for s in r["schedules"].as_array().cloned().unwrap_or_default() {
+        println!(
+            "  {:<28} every {:<6} runs {:<4} {}",
+            s["name"].as_str().unwrap_or("?"),
+            every_text(s["every_ms"].as_u64().unwrap_or(0)),
+            s["runs"],
+            s["last_status"].as_str().unwrap_or("")
+        );
+    }
+    let q = r["triage"]["queue"].as_array().map_or(0, Vec::len);
+    println!(
+        "Triage: {} ({} waiting for your review, {} reviewed)",
+        if r["triage"]["enabled"].as_bool().unwrap_or(false) {
+            "on"
+        } else {
+            "off"
+        },
+        q,
+        r["triage"]["reviewed"]
+    );
+}
+
+fn print_digest(r: &serde_json::Value) {
+    let n = |k: &str| r[k].to_string();
+    println!("Landed: {}", n("landed"));
+    match r["median_claim_to_land_ms"].as_u64() {
+        Some(m) => println!(
+            "Median time from claim to land: {} ({} task(s))",
+            ms_text(m),
+            n("claim_to_land_samples")
+        ),
+        None => println!("Median time from claim to land: no landed task in the window"),
+    }
+    match r["interventions_per_landed"].as_f64() {
+        Some(v) => println!(
+            "Interventions per landed task: {v:.2} ({} interventions)",
+            n("interventions")
+        ),
+        None => println!(
+            "Interventions per landed task: n/a ({} interventions, none landed)",
+            n("interventions")
+        ),
+    }
+    println!("Tokens per landed task: not recorded");
+    for (title, key) in [
+        ("Time by state", "time_by_state_ms"),
+        ("Waiting, by reason", "wait_by_reason_ms"),
+    ] {
+        println!("{title}:");
+        if let Some(m) = r[key].as_object() {
+            for (k, v) in m {
+                println!("  {k:<20} {}", ms_text(v.as_u64().unwrap_or(0)));
+            }
+        }
+    }
+    let ex = &r["exploring"];
+    println!(
+        "Exploring skipped for {} task(s); {} came back to exploring",
+        ex["skipped"], ex["came_back"]
+    );
+    if let Some(m) = ex["by_route"].as_object() {
+        for (route, v) in m {
+            println!(
+                "  {route:<16} {} task(s), {} came back",
+                v["tasks"], v["came_back"]
+            );
+        }
+    }
+    println!("Forced landings:");
+    let forced = r["forced_landings"].as_array().cloned().unwrap_or_default();
+    if forced.is_empty() {
+        println!("  none");
+    }
+    for f in forced {
+        println!(
+            "  task #{} ({}, {}): {}",
+            f["task"],
+            f["project"].as_str().unwrap_or("?"),
+            f["kind"].as_str().unwrap_or("?"),
+            f["reason"].as_str().unwrap_or("")
+        );
+    }
+    println!("Flaky: {}", r["flaky"].as_object().map_or(0, |m| m.len()));
+    println!(
+        "Debts outstanding: {}",
+        r["debts_outstanding"].as_array().map_or(0, Vec::len)
+    );
+    println!("Fixes:");
+    let fs = r["findings"].as_array().cloned().unwrap_or_default();
+    if fs.is_empty() {
+        println!("  none");
+    }
+    for f in fs {
+        println!(
+            "  #{} {} [{}] {}",
+            f["id"],
+            f["title"].as_str().unwrap_or(""),
+            f["verdict"].as_str().unwrap_or("?"),
+            f["text"].as_str().unwrap_or("")
+        );
     }
 }

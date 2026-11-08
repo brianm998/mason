@@ -50,6 +50,12 @@ pub struct DaemonConfig {
     /// Where the stage and exit-script numbers of ad-hoc tasks start (above the planned
     /// stages). Read from `MASON_ADHOC_EXIT_START`; default 40.
     pub adhoc_exit_start: u32,
+    /// How often the detector cycle runs (Part 14: daily).
+    pub introspect_interval: Duration,
+    /// How often the analyst agent is asked (weekly).
+    pub analyst_interval: Duration,
+    /// How often the daemon looks at what is due among the recurring jobs.
+    pub schedule_tick: Duration,
 }
 
 /// The loopback port `masond` listens on when neither `--port` nor `[daemon] port`
@@ -135,6 +141,9 @@ impl DaemonConfig {
                 .and_then(|v| v.parse().ok())
                 .filter(|n| (1..=99).contains(n))
                 .unwrap_or(crate::numbers::DEFAULT_ADHOC_START),
+            introspect_interval: Duration::from_secs(24 * 3600),
+            analyst_interval: Duration::from_secs(7 * 24 * 3600),
+            schedule_tick: Duration::from_secs(30),
             owner_names: vec![std::env::var("USER")
                 .or_else(|_| std::env::var("LOGNAME"))
                 .unwrap_or_else(|_| "owner".into())],
@@ -658,6 +667,8 @@ pub fn parse_project(id: &str, text: &str) -> Result<ProjectCfg, String> {
     }
     let agent = parse_agent(id, &doc)?;
     crate::proposals::parse_cfg(id, &doc)?;
+    crate::introspect::parse_cfg(id, &doc)?;
+    crate::schedule::parse(id, &doc)?;
     Ok(ProjectCfg {
         account: agent
             .account
