@@ -260,6 +260,116 @@ fn the_test_step_folds_in_the_base_so_a_fix_that_landed_meanwhile_counts() {
     assert_eq!(sh(&s.origin, &["show", "main:hello.txt"]), "hello");
 }
 
+/// A shell step that moves the base: `conflict.txt` there becomes `theirs-<pid>`.
+const BASE_TAKES_CONFLICT_TXT: &str =
+    "tmp=$(mktemp -d) && git worktree add -q --detach \"$tmp\" origin/main && \
+    (cd \"$tmp\" && echo theirs-$$ > conflict.txt && git add -A && \
+     git -c user.name=t -c user.email=t@t commit -qm 'base changes conflict.txt' && \
+     git push -q origin HEAD:main) && git worktree remove --force \"$tmp\"";
+
+#[test]
+fn a_conflict_with_the_base_at_the_test_step_is_not_a_red_round() {
+    // The base moves while the task is in develop, and the test step's merge of it
+    // conflicts. With one test round allowed that used to fail the task, though its
+    // tests were never red: tasks #17, #23 and #40 failed this way on 2026-11-07/08.
+    let develop1 = json!([
+        {"sh": format!("echo mine > conflict.txt && {TASK_SCRIPT_COMMIT}")},
+        {"sh": BASE_TAKES_CONFLICT_TXT},
+        {"call": {"tool": "submit_change", "args": {"summary": "first try", "head": "$HEAD"}}}
+    ]);
+    let develop2 = json!([
+        {"sh": "git merge -q origin/main; echo both > conflict.txt && git add -A && \
+                git -c user.name=t -c user.email=t@t commit -qm 'merge the base'"},
+        {"call": {"tool": "submit_change", "args": {"summary": "merged", "head": "$HEAD"}}}
+    ]);
+    let s = Scratch::new(
+        "true",
+        json!({"steps": {"explore": [explore_turn()], "develop": [develop1, develop2]}}),
+    );
+    s.write_project("scratch", "test -f hello.txt", "max_test_rounds = 1");
+    let d = s.start();
+    let t = file_task(&d, "The base moved");
+    wait_state(&d, t, State::Landed, 120);
+    let w = d.world().unwrap();
+    assert_eq!(w.tasks[&t].failures, 0);
+    assert_eq!(w.tasks[&t].attempts[&State::Testing], 2);
+    assert_eq!(w.tasks[&t].attempts[&State::Developing], 2);
+    let conflicts = std::fs::read_to_string(d.task_dir(t).join("conflicts.txt")).unwrap();
+    assert_eq!(conflicts.lines().count(), 1, "{conflicts}");
+    assert!(conflicts.contains("conflict.txt"), "{conflicts}");
+    assert_eq!(sh(&s.origin, &["show", "main:conflict.txt"]), "both");
+}
+
+#[test]
+fn a_base_the_agent_never_catches_up_with_still_fails_the_task() {
+    // Every develop round merges the base and the base moves again before the
+    // test step: conflicts do not count as red rounds, but they are not endless.
+    let turn = |first: bool| {
+        let commit = if first {
+            format!("echo mine-$$ > conflict.txt && {TASK_SCRIPT_COMMIT}")
+        } else {
+            "git merge -q origin/main; echo mine-$$ > conflict.txt && git add -A && \
+             git -c user.name=t -c user.email=t@t commit -qm 'merge the base'"
+                .to_string()
+        };
+        json!([
+            {"sh": commit},
+            {"sh": BASE_TAKES_CONFLICT_TXT},
+            {"call": {"tool": "submit_change", "args": {"summary": "again", "head": "$HEAD"}}}
+        ])
+    };
+    let develop: Vec<serde_json::Value> = (0..6).map(|i| turn(i == 0)).collect();
+    let s = Scratch::new(
+        "test -f hello.txt",
+        json!({"steps": {"explore": [explore_turn()], "develop": develop}}),
+    );
+    let d = s.start();
+    let t = file_task(&d, "The base keeps moving");
+    wait_state(&d, t, State::Failed, 240);
+    let w = d.world().unwrap();
+    let failure = w.tasks[&t].failure.clone().unwrap_or_default();
+    assert!(
+        failure.contains("still conflicting with the base after 5 merges"),
+        "{failure}"
+    );
+    assert_eq!(w.tasks[&t].attempts[&State::Testing], 6);
+    let conflicts = std::fs::read_to_string(d.task_dir(t).join("conflicts.txt")).unwrap();
+    assert_eq!(conflicts.lines().count(), 5, "{conflicts}");
+    assert!(!s.origin_log().contains(&"add hello".to_string()));
+}
+
+#[test]
+fn a_retried_task_gets_its_test_rounds_again() {
+    // Red, red: the task fails after its two rounds. The owner retries it from the
+    // test step. That run used to be its third round, failing at once on one more
+    // red; now it is the first round of the retry.
+    let s = Scratch::new(
+        "true",
+        json!({"steps": {"explore": [explore_turn()],
+                         "develop": [develop_turn(), develop_turn(), develop_turn()]}}),
+    );
+    let count = s.root.path().join("runs");
+    let cmd = format!(
+        "n=$(cat {c} 2>/dev/null || echo 0); echo $((n+1)) > {c}; test -f hello.txt && [ $n -ge 3 ]",
+        c = count.display()
+    );
+    s.write_project("scratch", &cmd, "max_test_rounds = 2");
+    let d = s.start();
+    let t = file_task(&d, "Retried");
+    wait_state(&d, t, State::Failed, 120);
+    assert_eq!(std::fs::read_to_string(&count).unwrap().trim(), "2");
+    d.emit(EventKind::Retried {
+        task: t,
+        to: State::Testing,
+        step: String::new(),
+    })
+    .unwrap();
+    wait_state(&d, t, State::Landed, 120);
+    let w = d.world().unwrap();
+    assert_eq!(w.tasks[&t].attempts[&State::Testing], 4);
+    assert_eq!(std::fs::read_to_string(&count).unwrap().trim(), "4");
+}
+
 #[test]
 fn tests_that_never_pass_fail_the_task_after_the_round_limit() {
     let s = Scratch::new(

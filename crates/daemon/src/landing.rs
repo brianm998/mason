@@ -37,6 +37,9 @@ pub enum Verdict {
     Landed,
     /// Back to development, with the reason and what to tell the agent.
     SentBack { reason: String, feedback: String },
+    /// Back to development because the change conflicts with the base or with the
+    /// rest of its batch: the change is not wrong, the base moved. Not a red round.
+    Conflict { reason: String, feedback: String },
     /// Could not land and retrying will not help.
     Failed(String),
 }
@@ -614,6 +617,19 @@ struct Parked {
     task: u64,
     reason: String,
     feedback: String,
+    /// Parked for a conflict with the base or the batch, not for anything red.
+    conflict: bool,
+}
+
+impl Parked {
+    fn verdict(&self) -> Verdict {
+        let (reason, feedback) = (self.reason.clone(), self.feedback.clone());
+        if self.conflict {
+            Verdict::Conflict { reason, feedback }
+        } else {
+            Verdict::SentBack { reason, feedback }
+        }
+    }
 }
 
 impl Runner {
@@ -735,14 +751,7 @@ impl Runner {
 
         let outcome: Result<(), String> = 'outer: loop {
             for pk in parked.iter().filter(|x| delivered.insert(x.task)) {
-                deliver(
-                    d,
-                    TaskId(pk.task),
-                    Verdict::SentBack {
-                        reason: pk.reason.clone(),
-                        feedback: pk.feedback.clone(),
-                    },
-                );
+                deliver(d, TaskId(pk.task), pk.verdict());
             }
             rounds += 1;
             if rounds > limit {
@@ -776,17 +785,11 @@ impl Runner {
                         "Your change conflicts with other changes landing at the same time (batch #{batch_id}) in: {}. Bring in the latest base branch and resolve it.",
                         e.files
                     ),
+                    conflict: true,
                 });
             }
             for pk in parked.iter().filter(|x| delivered.insert(x.task)) {
-                deliver(
-                    d,
-                    TaskId(pk.task),
-                    Verdict::SentBack {
-                        reason: pk.reason.clone(),
-                        feedback: pk.feedback.clone(),
-                    },
-                );
+                deliver(d, TaskId(pk.task), pk.verdict());
             }
             active.retain(|t| asm.merged.contains(&t.id));
             if !asm.resolved.is_empty() {
@@ -948,6 +951,7 @@ impl Runner {
                             task: *t,
                             reason: why.clone(),
                             feedback: format!("{why}.\n{}", vr.notes.join("\n")),
+                            conflict: false,
                         });
                     }
                     active.clear();
@@ -1032,6 +1036,7 @@ impl Runner {
                                 task: t.id,
                                 reason: format!("batch #{batch_id}: {why}"),
                                 feedback: format!("Your change was not merged: {why}."),
+                                conflict: false,
                             });
                         }
                         break Err(why);
@@ -1110,14 +1115,7 @@ impl Runner {
                         let _ = d.store.clear_landing_flag(*id);
                         deliver(d, TaskId(*id), Verdict::Landed);
                     } else if let Some(pk) = parked.iter().find(|x| x.task == *id) {
-                        deliver(
-                            d,
-                            TaskId(*id),
-                            Verdict::SentBack {
-                                reason: pk.reason.clone(),
-                                feedback: pk.feedback.clone(),
-                            },
-                        );
+                        deliver(d, TaskId(*id), pk.verdict());
                     }
                 }
             }
@@ -1127,14 +1125,7 @@ impl Runner {
                         continue;
                     }
                     if let Some(pk) = parked.iter().find(|x| x.task == *id) {
-                        deliver(
-                            d,
-                            TaskId(*id),
-                            Verdict::SentBack {
-                                reason: pk.reason.clone(),
-                                feedback: pk.feedback.clone(),
-                            },
-                        );
+                        deliver(d, TaskId(*id), pk.verdict());
                     } else if landed.contains(id) {
                         deliver(d, TaskId(*id), Verdict::Landed);
                     } else {
@@ -1652,6 +1643,7 @@ impl Runner {
                     vr.failed.iter().cloned().collect::<Vec<_>>().join(", "),
                     vr.notes.join("\n")
                 ),
+                conflict: false,
             });
         }
         active.retain(|t| !blamed.contains(&t.id));
