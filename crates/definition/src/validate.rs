@@ -14,6 +14,7 @@
 
 use crate::builtin::builtin_profile_names;
 use crate::model::*;
+use crate::tiers::{Tier, ABSTRACT_LEVELS};
 use mason_adapter_api::contract::StepKind;
 use mason_core::State;
 use mason_plugins::PluginType;
@@ -27,6 +28,9 @@ pub struct Capabilities {
     pub conditions: bool,
     /// The step types plugins provide (Stage 19).
     pub plugins: Vec<PluginType>,
+    /// The running provider's own effort levels. `None`: the provider is not
+    /// known here, so a non-abstract effort cannot be judged.
+    pub efforts: Option<Vec<String>>,
 }
 
 impl Capabilities {
@@ -41,12 +45,19 @@ impl Capabilities {
             fan_out: false,
             conditions: false,
             plugins: vec![],
+            efforts: None,
         }
     }
 
     /// The same, plus the step types these plugins provide.
     pub fn with_plugins(mut self, plugins: Vec<PluginType>) -> Capabilities {
         self.plugins = plugins;
+        self
+    }
+
+    /// The same, knowing the running provider's own effort levels.
+    pub fn with_efforts(mut self, efforts: Vec<String>) -> Capabilities {
+        self.efforts = Some(efforts);
         self
     }
 
@@ -67,8 +78,55 @@ impl Capabilities {
             fan_out: true,
             conditions: true,
             plugins: vec![],
+            efforts: None,
         }
     }
+}
+
+/// Check an `effort` value: an abstract level, or one of the running provider's own.
+fn check_effort(path: String, value: &str, caps: &Capabilities, p: &mut Vec<Problem>) {
+    let Some(own) = &caps.efforts else { return };
+    if ABSTRACT_LEVELS.contains(&value) || own.iter().any(|e| e == value) {
+        return;
+    }
+    p.push(Problem::new(
+        path,
+        format!(
+            "`{value}` is not an effort level; use {} (the running provider also accepts {}, which ties the pipeline to it)",
+            ABSTRACT_LEVELS.join(", "),
+            own.join(", ")
+        ),
+    ));
+}
+
+/// Things that are allowed but tie a pipeline to one provider: an explicit
+/// model, or a provider-specific effort.
+pub fn warnings(def: &Definition, caps: &Capabilities) -> Vec<Problem> {
+    let mut w = vec![];
+    let own = caps.efforts.clone().unwrap_or_default();
+    let mut look = |base: String, model: &Option<String>, effort: &Option<String>| {
+        if let Some(m) = model {
+            w.push(Problem::new(
+                format!("{base}.model"),
+                format!("`{m}` is a real model name; it ties this pipeline to one provider (name a tier and let the provider's mapping choose)"),
+            ));
+        }
+        if let Some(e) = effort {
+            if !ABSTRACT_LEVELS.contains(&e.as_str()) && own.contains(e) {
+                w.push(Problem::new(
+                    format!("{base}.effort"),
+                    format!("`{e}` is this provider's own effort; it ties this pipeline to it (use low, medium or high)"),
+                ));
+            }
+        }
+    };
+    for (name, a) in &def.agents {
+        look(format!("agent.{name}"), &a.model, &a.effort);
+    }
+    for s in def.steps.iter().filter(|s| s.kind == StepType::Agent) {
+        look(format!("step.{}", s.name), &s.model, &s.effort);
+    }
+    w
 }
 
 /// Gates a test step may name.
@@ -297,6 +355,22 @@ pub fn validate(def: &Definition, caps: &Capabilities) -> Vec<Problem> {
         p.push(Problem::new("step", "a definition needs at least one step"));
     }
 
+    for (name, a) in &def.agents {
+        if let Some(t) = &a.tier {
+            if Tier::parse(t).is_none() {
+                p.push(Problem::new(
+                    format!("agent.{name}.tier"),
+                    format!(
+                        "`{t}` is not a tier; use deep or light (fast is another name for light)"
+                    ),
+                ));
+            }
+        }
+        if let Some(e) = &a.effort {
+            check_effort(format!("agent.{name}.effort"), e, caps, &mut p);
+        }
+    }
+
     validate_testing(def, &mut p);
 
     let names: BTreeSet<&str> = def.steps.iter().map(|s| s.name.as_str()).collect();
@@ -394,6 +468,9 @@ pub fn validate(def: &Definition, caps: &Capabilities) -> Vec<Problem> {
                         ),
                     ));
                 }
+            }
+            if let Some(e) = &s.effort {
+                check_effort(format!("{base}.effort"), e, caps, &mut p);
             }
             if let Some(kind) = contract_kind(s.category) {
                 if let Some(tools) = &s.tools {

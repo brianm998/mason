@@ -770,7 +770,15 @@ fn main() {
                             s["step"].as_str().unwrap_or("?"),
                             s["type"].as_str().unwrap_or("?")
                         );
-                        for k in ["model", "effort", "budget", "max_rounds", "command"] {
+                        for k in [
+                            "tier",
+                            "level",
+                            "model",
+                            "effort",
+                            "budget",
+                            "max_rounds",
+                            "command",
+                        ] {
                             if let Some(v) = s[k]["value"].as_str() {
                                 println!(
                                     "      {k:<11} {v}   <- {}",

@@ -417,6 +417,15 @@ fn is_this_host(pid: u32, dir: &Path) -> bool {
 
 impl Scratch {
     pub fn masond(&self, extra_args: &[&str], env: &[(&str, &str)]) -> Masond {
+        self.masond_with(true, extra_args, env)
+    }
+
+    /// As `masond`, but with no `--port`: what the port tests need.
+    pub fn masond_no_port(&self, extra_args: &[&str]) -> Masond {
+        self.masond_with(false, extra_args, &[])
+    }
+
+    fn masond_with(&self, free_port: bool, extra_args: &[&str], env: &[(&str, &str)]) -> Masond {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_masond"));
         let cfg = self.config();
         cmd.args(["--data-dir", &self.data_dir.display().to_string()])
@@ -431,6 +440,12 @@ impl Scratch {
                 "--sweep-ms",
                 "3600000",
             ])
+            // A free port, so parallel test daemons never collide on the default.
+            .args(if free_port {
+                vec!["--port", "0"]
+            } else {
+                vec![]
+            })
             .args(extra_args)
             .stdout(Stdio::null())
             .stderr(if std::env::var("MASON_TEST_LOG").is_ok() {

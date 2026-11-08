@@ -36,7 +36,7 @@ struct Tool {
         }
 
         let model = MonitorModel()
-        let connection = MonitorConnection(model: model, port: port)
+        let connection = MonitorConnection(model: model, discover: { Discovery.info(arguments: args) ?? DaemonInfo(port: port) })
         connection.start()
         await until("a connection") { model.connected && model.header != nil && model.sidebar != nil && model.home != nil }
 

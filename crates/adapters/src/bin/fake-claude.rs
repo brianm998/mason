@@ -85,6 +85,14 @@ fn main() {
     let _ = std::io::stdin().read_to_string(&mut prompt);
 
     let script_path = std::env::var("FAKE_CLAUDE_SCRIPT").expect("FAKE_CLAUDE_SCRIPT");
+    // The arguments it was started with, one line per start, for tests.
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(format!("{script_path}.argv"))
+    {
+        let _ = writeln!(f, "{}", args[1..].join(" "));
+    }
     let script: Value =
         serde_json::from_str(&std::fs::read_to_string(&script_path).expect("script"))
             .expect("json");

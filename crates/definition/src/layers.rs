@@ -12,8 +12,9 @@
 //! attributes of steps, never change the graph. Every resolved value remembers
 //! which layer it came from, so "why is this using opus?" has an answer.
 
-use crate::builtin::{builtin_profile, default_profile};
+use crate::builtin::default_profile;
 use crate::model::*;
+use crate::tiers::{Level, Tier};
 use std::collections::BTreeMap;
 use std::time::Duration;
 use toml_edit::DocumentMut;
@@ -72,7 +73,14 @@ pub struct RuntimeOverride {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Resolved {
+    /// The tier asked for (agent steps only).
+    pub tier: Option<Attr<Tier>>,
+    /// The level asked for: `medium` unless something says otherwise.
+    pub level: Option<Attr<Level>>,
+    /// A real model named explicitly (profile, step, overlay, override). With
+    /// none, the provider's mapping decides (see [`crate::tiers::launch`]).
     pub model: Option<Attr<String>>,
+    /// A real, provider-specific effort named explicitly. Abstract levels go to `level`.
     pub effort: Option<Attr<String>>,
     pub budget: Option<Attr<Duration>>,
     pub max_rounds: Option<Attr<u32>>,
@@ -205,6 +213,20 @@ pub fn parse_overlay(text: &str) -> Result<Overlay, Vec<Problem>> {
     }
 }
 
+/// An abstract level sets the requested level; anything else is a real effort
+/// of the running provider and replaces whatever was asked for below it.
+fn set_effort(r: &mut Resolved, value: &str, source: Source) {
+    match Level::parse(value) {
+        Some(l) => {
+            r.effort = None;
+            set(&mut r.level, l, source);
+        }
+        None => {
+            set(&mut r.effort, value.to_string(), source);
+        }
+    }
+}
+
 fn set<T>(slot: &mut Option<Attr<T>>, value: T, source: Source) {
     *slot = Some(Attr { value, source });
 }
@@ -222,29 +244,44 @@ pub fn resolve(
     let mut problems = vec![];
 
     // 1 and 2: the profile an agent step uses, then the step's own keys.
+    // A profile's or step's real model is explicit: it beats the project's
+    // `model` key (the overlay's blanket model) but not the owner's overrides.
+    let mut explicit_model = false;
     if step.kind == StepType::Agent {
         let profile = step
             .agent
             .clone()
             .unwrap_or_else(|| default_profile(step.category).to_string());
-        let (p, src) = match def.agents.get(&profile) {
-            Some(p) => (Some(p.clone()), Source::Project),
-            None => (builtin_profile(&profile), Source::Builtin),
+        let own = def.agents.get(&profile);
+        let tier = own
+            .and_then(|p| p.tier.as_deref())
+            .and_then(Tier::parse)
+            .or_else(|| Tier::parse(&profile))
+            .or_else(|| Tier::parse(default_profile(step.category)))
+            .unwrap_or(Tier::Light);
+        let src = if own.is_some() {
+            Source::Project
+        } else {
+            Source::Builtin
         };
-        if let Some(p) = p {
-            if let Some(m) = p.model {
-                set(&mut r.model, m, src.clone());
+        set(&mut r.tier, tier, src.clone());
+        set(&mut r.level, Level::Medium, Source::Builtin);
+        if let Some(p) = own {
+            if let Some(m) = &p.model {
+                set(&mut r.model, m.clone(), Source::Project);
+                explicit_model = true;
             }
-            if let Some(e) = p.effort {
-                set(&mut r.effort, e, src);
+            if let Some(e) = &p.effort {
+                set_effort(&mut r, e, Source::Project);
             }
         }
     }
     if let Some(m) = &step.model {
         set(&mut r.model, m.clone(), Source::Project);
+        explicit_model = true;
     }
     if let Some(e) = &step.effort {
-        set(&mut r.effort, e.clone(), Source::Project);
+        set_effort(&mut r, e, Source::Project);
     }
     if let Some(b) = step.budget {
         set(&mut r.budget, b, Source::Project);
@@ -258,7 +295,7 @@ pub fn resolve(
 
     // 3: the local overlay.
     if step.kind == StepType::Agent {
-        if let Some(m) = &overlay.model {
+        if let (Some(m), false) = (&overlay.model, explicit_model) {
             set(&mut r.model, m.clone(), Source::Overlay);
         }
     }
@@ -275,7 +312,7 @@ pub fn resolve(
             }
             match attr {
                 "model" => set(&mut r.model, value.to_string(), source),
-                "effort" => set(&mut r.effort, value.to_string(), source),
+                "effort" => set_effort(r, value, source),
                 "command" => set(&mut r.command, value.to_string(), source),
                 "budget" => set(
                     &mut r.budget,
@@ -348,13 +385,11 @@ mod tests {
 
         // 1: the built-in "deep" profile.
         let r = resolve(&d, dev, &none, &[], &[], 0).unwrap();
-        assert_eq!(
-            r.model,
-            Some(Attr {
-                value: "sonnet".into(),
-                source: Source::Builtin
-            })
-        );
+        assert_eq!(r.model, None, "no real model is named; the mapping decides");
+        assert_eq!(r.tier.as_ref().unwrap().value, Tier::Deep);
+        let l = crate::tiers::launch(&r, &crate::tiers::Mapping::builtin("claude"), &[]);
+        assert_eq!(l.model.as_deref(), Some("sonnet"));
+        assert_eq!(l.effort, None);
         // The definition's budget is the project's.
         assert_eq!(r.budget.as_ref().unwrap().source, Source::Project);
 
@@ -518,5 +553,72 @@ mod tests {
         )
         .unwrap();
         assert_eq!(r.max_rounds.unwrap().value, 3);
+    }
+
+    #[test]
+    fn effort_is_a_level_or_a_real_effort_and_fast_is_light() {
+        let d = crate::parse(
+            &crate::builtin::BUILTIN
+                .replace("agent = \"light\"", "agent = \"fast\"\neffort = \"high\""),
+        )
+        .unwrap();
+        let ex = d.step("explore").unwrap();
+        let r = resolve(&d, ex, &Overlay::default(), &[], &[], 0).unwrap();
+        assert_eq!(r.tier.as_ref().unwrap().value, Tier::Light);
+        assert_eq!(r.level.as_ref().unwrap().value, Level::High);
+        assert_eq!(r.effort, None);
+        // A provider's own effort is kept as a real effort and wins over the mapped one.
+        let ro = [rt("step.explore.effort", "max", "brian", 9)];
+        let r = resolve(&d, ex, &Overlay::default(), &ro, &[], 0).unwrap();
+        assert_eq!(r.effort.as_ref().unwrap().value, "max");
+        // A later abstract level replaces it.
+        let task = [("step.explore.effort".to_string(), "low".to_string())];
+        let r = resolve(&d, ex, &Overlay::default(), &ro, &task, 0).unwrap();
+        assert_eq!((r.effort, r.level.unwrap().value), (None, Level::Low));
+    }
+
+    #[test]
+    fn a_step_model_beats_the_project_model_key_and_both_beat_the_mapping() {
+        let d = crate::parse(
+            &crate::builtin::BUILTIN
+                .replace("budget = \"4h\"", "budget = \"4h\"\nmodel = \"special\""),
+        )
+        .unwrap();
+        let overlay = parse_overlay("model = \"keyed\"\n").unwrap();
+        let dev = d.step("develop").unwrap();
+        let m = crate::tiers::Mapping::builtin("claude");
+        let go = |r: &Resolved| crate::tiers::launch(r, &m, &["bottom".to_string()]).model;
+        let r = resolve(&d, dev, &overlay, &[], &[], 0).unwrap();
+        assert_eq!(go(&r).as_deref(), Some("special"), "step beats project key");
+        let ro = [rt("step.develop.model", "owner", "brian", 9)];
+        let r = resolve(&d, dev, &overlay, &ro, &[], 0).unwrap();
+        assert_eq!(
+            go(&r).as_deref(),
+            Some("owner"),
+            "runtime override beats the step"
+        );
+        let b = builtin();
+        let dev = b.step("develop").unwrap();
+        let r = resolve(&b, dev, &overlay, &[], &[], 0).unwrap();
+        assert_eq!(
+            go(&r).as_deref(),
+            Some("keyed"),
+            "project key beats the mapping"
+        );
+        let r = resolve(&b, dev, &Overlay::default(), &[], &[], 0).unwrap();
+        assert_eq!(
+            go(&r).as_deref(),
+            Some("sonnet"),
+            "mapping beats the ladder"
+        );
+        let none = crate::tiers::Mapping::default();
+        assert_eq!(
+            crate::tiers::launch(&r, &none, &["bottom".to_string()])
+                .model
+                .as_deref(),
+            Some("bottom"),
+            "the ladder's bottom when nothing maps"
+        );
+        assert_eq!(crate::tiers::launch(&r, &none, &[]).model, None);
     }
 }

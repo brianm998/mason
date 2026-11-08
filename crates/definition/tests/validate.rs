@@ -407,3 +407,54 @@ fn problems_always_say_where_and_why() {
         );
     }
 }
+
+#[test]
+fn efforts_are_levels_or_the_running_providers_own_and_anything_else_is_refused() {
+    let claude = Capabilities::everything().with_efforts(
+        ["low", "medium", "high", "xhigh", "max"]
+            .map(String::from)
+            .to_vec(),
+    );
+    let codex = Capabilities::everything().with_efforts(
+        ["minimal", "low", "medium", "high"]
+            .map(String::from)
+            .to_vec(),
+    );
+    let with = |e: &str| {
+        mason_definition::builtin::BUILTIN.replace(
+            "agent = \"light\"",
+            &format!("agent = \"light\"\neffort = \"{e}\""),
+        )
+    };
+    let text = with("high");
+    assert!(
+        text.contains("effort = \"high\""),
+        "the fixture has an agent step to put effort on"
+    );
+    assert!(problems(&text, &claude).is_empty());
+    // A provider's own level passes there, is refused under the other, and warns.
+    let max = with("max");
+    assert!(problems(&max, &claude).is_empty());
+    let p = problems(&max, &codex);
+    assert!(
+        p.iter().any(|x| x.path.ends_with(".effort")
+            && x.message.contains("low, medium, high")
+            && x.message.contains("minimal")),
+        "{p:?}"
+    );
+    let d = parse(&max).unwrap();
+    let w = mason_definition::validate::warnings(&d, &claude);
+    assert!(
+        w.iter().any(|x| x.message.contains("ties this pipeline")),
+        "{w:?}"
+    );
+    assert!(mason_definition::validate::warnings(&parse(&text).unwrap(), &claude).is_empty());
+    // With no provider known, nothing is judged.
+    assert!(problems(&with("ultra"), &Capabilities::everything()).is_empty());
+    // An explicit model is a warning, not an error.
+    let m = mason_definition::builtin::BUILTIN
+        .replace("agent = \"light\"", "agent = \"light\"\nmodel = \"opus\"");
+    assert!(problems(&m, &claude).is_empty());
+    let w = mason_definition::validate::warnings(&parse(&m).unwrap(), &claude);
+    assert!(w.iter().any(|x| x.path.ends_with(".model")), "{w:?}");
+}

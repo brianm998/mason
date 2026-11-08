@@ -49,7 +49,7 @@ fi
 
 start_demo() {
   rm -rf "$root/d"; mkdir -p "$root/d"
-  "$bin/masond" --demo-manual --data-dir "$root/d" --config-dir "$root/c" 2>>"$root/masond.log" &
+  "$bin/masond" --port 0 --demo-manual --data-dir "$root/d" --config-dir "$root/c" 2>>"$root/masond.log" &
   daemon=$!
   until [ -s "$root/d/daemon.json" ]; do kill -0 "$daemon" || { cat "$root/masond.log" >&2; exit 1; }; sleep 0.1; done
 }
@@ -189,7 +189,7 @@ level = "unit"
 TOML
 printf '#!/bin/sh\nif [ -f %s/slow.flag ]; then sleep 120; fi\necho 1..1; echo "ok 1 - slow"\n' "$root" | pusher main slow.sh "a suite"
 rm -rf "$root/d"; mkdir -p "$root/d"
-"$bin/masond" --data-dir "$root/d" --config-dir "$root/c" --heartbeat-ms 100 --sweep-ms 3600000 --max-concurrent 8 2>>"$root/masond.log" &
+"$bin/masond" --port 0 --data-dir "$root/d" --config-dir "$root/c" --heartbeat-ms 100 --sweep-ms 3600000 --max-concurrent 8 2>>"$root/masond.log" &
 daemon=$!
 until m status >/dev/null 2>&1; do kill -0 "$daemon" || { cat "$root/masond.log" >&2; exit 1; }; sleep 0.1; done
 dport=$(port)

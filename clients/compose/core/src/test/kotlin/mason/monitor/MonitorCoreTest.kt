@@ -567,6 +567,117 @@ class MonitorCoreTest {
         assertTrue(h.left + h.dx >= 0.0)
     }
 
+    // ---- reconnecting after a daemon restart ----
+
+    @Test fun reconnectPauseSchedule() {
+        val p = ReconnectPolicy()
+        assertEquals(listOf(1.0, 2.0, 4.0, 8.0, 10.0, 10.0, 10.0), (0 until 7).map { p.nextPauseSeconds() })
+        p.reset()
+        assertEquals(1.0, p.nextPauseSeconds())
+    }
+
+    @Test fun daemonInfoReplacesOnPortPidOrStartTime() {
+        val a = DaemonInfo(7423, 5, 100)
+        assertFalse(DaemonInfo(7423, 5, 100).replaces(a))
+        assertTrue(DaemonInfo(7424, 5, 100).replaces(a))
+        assertTrue(DaemonInfo(7423, 6, 100).replaces(a))
+        assertTrue(DaemonInfo(7423, 5, 101).replaces(a))
+    }
+
+    @Test fun discoveryReadsPidAndStartTime() {
+        val f = java.io.File.createTempFile("daemon", ".json")
+        f.writeText("""{"pid": 41, "port": 7423, "started_ms": 99}""")
+        assertEquals(DaemonInfo(7423, 41, 99), Discovery.info(f))
+        assertEquals(DaemonInfo(9), Discovery.info(listOf("--port", "9"), emptyMap()))
+    }
+
+    private class FakeSocket(val port: Int, val events: SocketEvents) : MonitorSocket {
+        val sent = java.util.concurrent.CopyOnWriteArrayList<String>()
+        @Volatile var closed = false
+        override fun send(text: String): Boolean { if (!closed) sent += text; return !closed }
+        override fun close() { if (!closed) { closed = true; events.onClosed() } }
+    }
+
+    private class Rig(val model: MonitorModel, stallAfter: Double = 15.0, var info: DaemonInfo? = DaemonInfo(7423, 1, 10)) {
+        val sockets = java.util.concurrent.CopyOnWriteArrayList<FakeSocket>()
+        val conn = MonitorConnection(
+            model, { info },
+            ConnectionTiming(pingEverySeconds = 0.05, stallAfterSeconds = stallAfter, watchEverySeconds = 0.02, pauseScale = 0.01),
+            { port, ev -> FakeSocket(port, ev).also { sockets += it } },
+        )
+    }
+
+    private fun waitFor(what: String, f: () -> Boolean) {
+        val end = System.currentTimeMillis() + 5000
+        while (!f()) {
+            if (System.currentTimeMillis() > end) fail("timed out waiting for $what")
+            Thread.sleep(10)
+        }
+    }
+
+    private val welcome = """{"welcome":{"version":"test"}}"""
+
+    @Test fun aDropThenAChangedDaemonJsonReconnectsWithoutARelaunch() {
+        val r = Rig(MonitorModel(MemoryPreferences()))
+        r.conn.start()
+        waitFor("a socket") { r.sockets.size == 1 }
+        r.sockets[0].events.onOpen()
+        r.sockets[0].events.onMessage(welcome)
+        waitFor("connected") { r.model.connected }
+        r.model.lastSeq = 7
+        r.info = DaemonInfo(9000, 2, 20)
+        r.sockets[0].close()
+        waitFor("a second socket") { r.sockets.size == 2 }
+        assertEquals(9000, r.sockets[1].port)
+        waitFor("not connected") { !r.model.connected }
+        assertTrue(r.model.reconnecting, "shown as reconnecting, not an error")
+        r.sockets[1].events.onOpen()
+        assertTrue(Regex("[lL]ast_?[sS]eq\"?:\"?7\\b").containsMatchIn(r.sockets[1].sent[0]), r.sockets[1].sent[0])
+        r.sockets[1].events.onMessage(welcome)
+        waitFor("connected again") { r.model.connected }
+        assertFalse(r.model.reconnecting)
+        r.conn.stop()
+    }
+
+    @Test fun aChangedPidWhileConnectedReconnectsFromTheLastSeq() {
+        val r = Rig(MonitorModel(MemoryPreferences()))
+        r.conn.start()
+        waitFor("a socket") { r.sockets.size == 1 }
+        r.sockets[0].events.onMessage(welcome)
+        waitFor("connected") { r.model.connected }
+        r.model.lastSeq = 12
+        r.info = DaemonInfo(7423, 2, 30)  // an update on the same port
+        waitFor("a second socket") { r.sockets.size == 2 }
+        assertTrue(r.sockets[0].closed)
+        r.sockets[1].events.onOpen()
+        assertTrue(Regex("[lL]ast_?[sS]eq\"?:\"?12\\b").containsMatchIn(r.sockets[1].sent[0]), r.sockets[1].sent[0])
+        r.conn.stop()
+    }
+
+    @Test fun aStalledDaemonShowsReconnectingNotAnError() {
+        val r = Rig(MonitorModel(MemoryPreferences()), stallAfter = 0.15)
+        r.conn.start()
+        waitFor("a socket") { r.sockets.size == 1 }
+        r.sockets[0].events.onMessage(welcome)
+        waitFor("connected") { r.model.connected }
+        waitFor("a second socket") { r.sockets.size == 2 }
+        assertTrue(r.sockets[0].closed)
+        assertTrue(r.sockets[0].sent.any { it.contains("ping") }, "it asked before giving up")
+        assertTrue(r.model.reconnecting)
+        assertNull(r.model.lastResult, "no error is shown")
+        r.conn.stop()
+    }
+
+    @Test fun noDaemonJsonYetKeepsRetrying() {
+        val r = Rig(MonitorModel(MemoryPreferences()), info = null)
+        r.conn.start()
+        waitFor("reconnecting") { r.model.reconnecting }
+        assertTrue(r.sockets.isEmpty())
+        r.info = DaemonInfo(7423, 1, 1)
+        waitFor("a socket") { r.sockets.size == 1 }
+        r.conn.stop()
+    }
+
     // ---- readable plan ----
 
     private fun planView(numbers: List<String> = listOf("0", "1")) = PlanView(
