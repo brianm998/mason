@@ -308,3 +308,226 @@ impl Daemon {
             });
     }
 }
+
+// ---- LLM usage (s64): accounts in several states, so the usage page and the
+// top bar can be seen and checked without a real provider. Fed straight into
+// the store; no agent runs. Times are relative to the daemon's start.
+
+/// The demo's provider accounts.
+pub fn accounts() -> Vec<crate::providers::Account> {
+    use crate::config::Provider;
+    use crate::providers::{Account, Billing, Overage};
+    let acct = |name: &str, adapter, billing, sessions, budget| Account {
+        name: name.into(),
+        adapter,
+        billing,
+        sessions: Some(sessions),
+        warn_at: crate::providers::DEFAULT_WARN_AT,
+        monthly_budget_usd: budget,
+        overage: Overage::Hold,
+    };
+    vec![
+        acct(
+            crate::sched::DEFAULT_ACCOUNT,
+            Provider::Claude,
+            Billing::Subscription,
+            3,
+            None,
+        ),
+        acct(
+            "claude-quiet",
+            Provider::Claude,
+            Billing::Subscription,
+            2,
+            None,
+        ),
+        acct(
+            "claude-full",
+            Provider::Claude,
+            Billing::Subscription,
+            2,
+            None,
+        ),
+        acct("api-main", Provider::Claude, Billing::Api, 4, Some(200.0)),
+        acct("codex", Provider::Codex, Billing::Subscription, 2, None),
+    ]
+}
+
+fn window(
+    id: &str,
+    label: &str,
+    len: u64,
+    util: Option<f64>,
+    resets: u64,
+    state: mason_adapter_api::usage::WindowState,
+) -> mason_adapter_api::Window {
+    mason_adapter_api::Window {
+        id: id.into(),
+        label: label.into(),
+        length_secs: Some(len),
+        utilization: util,
+        resets_at: Some(resets),
+        state,
+    }
+}
+
+/// Put the demo's usage into the store.
+pub fn seed_usage(d: &Daemon) {
+    use mason_adapter_api::usage::{
+        Blocked, BlockedWhy, Overage, OverageState, UsageSnapshot, WindowState,
+    };
+    let now = crate::usage::now_secs();
+    let ago = now - 12 * 60;
+    let snap = |windows, overage, blocked| UsageSnapshot {
+        windows,
+        overage: Overage {
+            state: overage,
+            resets_at: None,
+        },
+        blocked,
+        spend_usd: None,
+        observed_at: Some(ago),
+        session_id: None,
+    };
+    // A subscription with a percentage on both windows.
+    let main = snap(
+        vec![
+            window(
+                "five_hour",
+                "5-hour",
+                18000,
+                Some(0.82),
+                now + 4200,
+                WindowState::Warning,
+            ),
+            window(
+                "seven_day",
+                "Weekly",
+                7 * 86400,
+                Some(0.41),
+                now + 3 * 86400 + 4 * 3600,
+                WindowState::Ok,
+            ),
+        ],
+        OverageState::Disabled("out_of_credits".into()),
+        None,
+    );
+    // Windows reported with no percentage: state and reset only.
+    let quiet = snap(
+        vec![
+            window(
+                "five_hour",
+                "5-hour",
+                18000,
+                None,
+                now + 2400,
+                WindowState::Ok,
+            ),
+            window(
+                "seven_day",
+                "Weekly",
+                7 * 86400,
+                None,
+                now + 5 * 86400,
+                WindowState::Ok,
+            ),
+        ],
+        OverageState::NotOffered,
+        None,
+    );
+    // Full and refusing new work, with overage in use on the other window.
+    let full = snap(
+        vec![
+            window(
+                "five_hour",
+                "5-hour",
+                18000,
+                Some(1.0),
+                now + 7800,
+                WindowState::Blocked,
+            ),
+            window(
+                "seven_day",
+                "Weekly",
+                7 * 86400,
+                Some(0.93),
+                now + 86400,
+                WindowState::Warning,
+            ),
+        ],
+        OverageState::UsedUp,
+        Some(Blocked {
+            why: BlockedWhy::Window("five_hour".into()),
+            until: Some(now + 7800),
+        }),
+    );
+    for (name, s) in [
+        (crate::sched::DEFAULT_ACCOUNT, &main),
+        ("claude-quiet", &quiet),
+        ("claude-full", &full),
+    ] {
+        crate::usage::record_snapshot(d, name, s);
+        // A short history so the trend shows.
+        for (back, u) in [(6 * 3600u64, 0.3f64), (3 * 3600, 0.5)] {
+            let w = &s.windows[0];
+            let _ = d.store.record_reading(mason_store::UsageReading {
+                account: name.into(),
+                window: w.id.clone(),
+                at: now - back,
+                utilization: w.utilization.map(|_| u),
+                resets_at: w.resets_at,
+                state: "ok".into(),
+            });
+        }
+    }
+    let run = |attempt: &str,
+               task,
+               project: &str,
+               step: &str,
+               account: &str,
+               model: &str,
+               inp,
+               out,
+               cost| {
+        let _ = d.store.record_usage_run(mason_store::UsageRun {
+            attempt: attempt.into(),
+            task,
+            project: project.into(),
+            step: step.into(),
+            account: account.into(),
+            model: Some(model.into()),
+            input: Some(inp),
+            output: Some(out),
+            cache_read: Some(inp * 4),
+            cache_create: None,
+            cost_usd: cost,
+            at: now - 25 * 60,
+        });
+    };
+    let m = crate::sched::DEFAULT_ACCOUNT;
+    run("d1", 1, "web", "develop", m, "opus", 120_000, 18_000, None);
+    run("d2", 2, "web", "review", m, "sonnet", 60_000, 4_000, None);
+    run("d3", 3, "api", "develop", m, "opus", 90_000, 11_000, None);
+    run(
+        "a1",
+        4,
+        "web",
+        "develop",
+        "api-main",
+        "sonnet",
+        200_000,
+        30_000,
+        Some(3.4),
+    );
+    run(
+        "a2",
+        5,
+        "api",
+        "develop",
+        "api-main",
+        "haiku",
+        50_000,
+        5_000,
+        Some(0.2),
+    );
+}

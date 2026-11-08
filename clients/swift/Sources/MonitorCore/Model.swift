@@ -27,6 +27,7 @@ public final class MonitorModel: ObservableObject {
     @Published public var usage: UsageView?
     @Published public var editor: EditorView?
     @Published public var health: HealthSnapshot?
+    @Published public var introspection: IntrospectionSnapshot?
     @Published public var lastSeq: UInt64 = 0
     /// The daemon's clock minus this device's, ms, as of the last message that carried the daemon's
     /// time (the welcome, each StepProgress): "updated 4 s ago" counts on the local clock, corrected by this.
@@ -66,7 +67,21 @@ public final class MonitorModel: ObservableObject {
     @Published public private(set) var history = NavHistory()
     @Published public var search = SearchState()
     @Published public var textScale: Double { didSet { prefs.setDouble(textScale, for: Keys.scale) } }
-    @Published public var muted: Bool { didSet { prefs.setBool(muted, for: Keys.mute) } }
+    @Published public var muted: Bool {
+        didSet {
+            prefs.setBool(muted, for: Keys.mute)
+            // Muting silences sound and speech at once. Banners and the attention count are
+            // drawn from the views, not from here, so they stay.
+            muteBox.value = muted
+            if muted { announcer.silence() }
+        }
+    }
+    /// The queue of sounds and sentences (Part 19). The app swaps in a sink that plays them.
+    public let announcer: Announcer
+    /// The connection has been down long enough to call the daemon down: a banner, muted or not.
+    @Published public private(set) var daemonDown = false
+    /// This monitor's name when it asks to speak; one per launch.
+    public let clientId = UUID().uuidString
     @Published public var project = "" { didSet { attentionSeen = nil } }
     /// Called (on the main actor) when something new needs the owner and the monitor is not
     /// muted: a task asked a question, waits for approval, was proposed, or failed. The app
@@ -104,7 +119,28 @@ public final class MonitorModel: ObservableObject {
         prefs = preferences
         textScale = preferences.double(Keys.scale) ?? 1.0
         muted = preferences.bool(Keys.mute) ?? false
+        let box = MuteBox()
+        announcer = Announcer(sink: SilentSink(), isMuted: { box.value }, preferences: preferences)
+        muteBox = box
+        box.value = muted
     }
+
+    /// Lets the announcer read `muted` without holding the model.
+    private let muteBox: MuteBox
+
+    /// Called about once a second by the app: the lost-connection clock, and every few seconds
+    /// a claim to speak, whose answer carries what the daemon wants said.
+    public func pulse(now: Date = Date()) {
+        muteBox.value = muted
+        announcer.check(now: now)
+        if daemonDown != announcer.daemonDown { daemonDown = announcer.daemonDown }
+        if connected, now.timeIntervalSince(lastClaim) >= Self.claimEvery {
+            lastClaim = now
+            raw("POST", "/announce/claim", json: announcer.claimBody(client: clientId))
+        }
+    }
+    private var lastClaim = Date.distantPast
+    static let claimEvery: TimeInterval = 3
 
     // MARK: navigation
 
@@ -372,6 +408,7 @@ public final class MonitorModel: ObservableObject {
         case .welcome(let w)?:
             connected = true
             reconnecting = false
+            announcer.connectionRestored()
             if w.resume == .snapshot { lastSeq = 0 }
             daemonVersion = w.version
             anchor(daemonNow: w.nowMs)
@@ -403,7 +440,7 @@ public final class MonitorModel: ObservableObject {
         let wanting: Set<String> = ["needs_attention", "failed", "proposed"]
         let ids = Set(s.sections.filter { wanting.contains($0.state) }.flatMap { $0.rows.map(\.id) })
         defer { attentionSeen = ids }
-        guard let seen = attentionSeen, !muted else { return }
+        guard let seen = attentionSeen, !muted, !announcer.heardFromDaemon else { return }
         if !ids.subtracting(seen).isEmpty { onAttention?() }
     }
 
@@ -429,12 +466,15 @@ public final class MonitorModel: ObservableObject {
 
     func handle(result r: Mason_V1_CommandResult) {
         if r.id.hasPrefix("publish:"), r.ok { publishPreview = PublishPreview(json: r.json) }
+        if r.id == "announce", r.ok { announcer.handle(claim: r.json) }
         if r.id == "health", r.ok { health = HealthSnapshot(json: r.json) }
+        if r.id == "introspection", r.ok { introspection = IntrospectionSnapshot(json: r.json) }
     }
 
-    public func disconnected() {
+    public func disconnected(now: Date = Date()) {
         connected = false
         reconnecting = true
+        announcer.connectionLost(at: now)
     }
 }
 
@@ -496,6 +536,75 @@ public struct HealthSnapshot: Equatable, Sendable {
     }
 }
 
+/// The Health page's introspection half (Part 14): what the detectors and the analyst found,
+/// what came of the fixes, the recurring jobs, the triage review queue and the digest.
+public struct IntrospectionSnapshot: Equatable, Sendable {
+    public struct Finding: Equatable, Sendable {
+        public var id: Int
+        public var title: String
+        public var metric: String
+        public var task: Int
+        public var verdict: String
+        public var text: String
+    }
+    public struct Job: Equatable, Sendable {
+        public var name: String
+        public var kind: String
+        public var runs: Int
+        public var status: String
+    }
+    public var findings: [Finding] = []
+    public var jobs: [Job] = []
+    public var triageOn = false
+    public var triageWaiting = 0
+    /// Lines of the digest, each a figure computed from recorded data.
+    public var digest: [String] = []
+
+    public init(json: String) {
+        guard let d = json.data(using: .utf8),
+              let v = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return }
+        findings = (v["findings"] as? [[String: Any]] ?? []).map {
+            Finding(
+                id: $0["id"] as? Int ?? 0,
+                title: $0["title"] as? String ?? "?",
+                metric: $0["metric"] as? String ?? "?",
+                task: $0["task"] as? Int ?? 0,
+                verdict: $0["verdict"] as? String ?? "open",
+                text: $0["text"] as? String ?? ""
+            )
+        }
+        jobs = (v["schedules"] as? [[String: Any]] ?? []).map {
+            Job(
+                name: $0["name"] as? String ?? "?",
+                kind: $0["kind"] as? String ?? "?",
+                runs: $0["runs"] as? Int ?? 0,
+                status: $0["last_status"] as? String ?? ""
+            )
+        }
+        let t = v["triage"] as? [String: Any] ?? [:]
+        triageOn = t["enabled"] as? Bool ?? false
+        triageWaiting = (t["queue"] as? [Any])?.count ?? 0
+        let g = v["digest"] as? [String: Any] ?? [:]
+        digest.append("Landed: \(g["landed"] as? Int ?? 0)")
+        if let m = g["median_claim_to_land_ms"] as? Int {
+            digest.append("Median time from claim to land: \(m / 1000) s")
+        }
+        if let p = g["interventions_per_landed"] as? Double {
+            digest.append("Interventions per landed task: \(String(format: "%.2f", p))")
+        }
+        digest.append("Tokens per landed task: not recorded")
+        let ex = g["exploring"] as? [String: Any] ?? [:]
+        digest.append("Exploring skipped for \(ex["skipped"] as? Int ?? 0) task(s); \(ex["came_back"] as? Int ?? 0) came back")
+        for (route, r) in (ex["by_route"] as? [String: Any] ?? [:]).sorted(by: { $0.key < $1.key }) {
+            let r = r as? [String: Any] ?? [:]
+            digest.append("  \(route): \(r["tasks"] as? Int ?? 0) task(s), \(r["came_back"] as? Int ?? 0) came back")
+        }
+        for f in g["forced_landings"] as? [[String: Any]] ?? [] {
+            digest.append("Forced landing, task #\(f["task"] as? Int ?? 0): \(f["reason"] as? String ?? "")")
+        }
+    }
+}
+
 /// The daemon's answer to a publish preview: the redacted text, and what it would touch.
 public struct PublishPreview: Equatable, Sendable {
     public var title = ""
@@ -519,3 +628,5 @@ public struct PublishPreview: Equatable, Sendable {
         pr = o["pr"] as? Int
     }
 }
+
+final class MuteBox { var value = false }

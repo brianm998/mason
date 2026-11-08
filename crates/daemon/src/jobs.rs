@@ -22,8 +22,7 @@ use mason_adapters::claude::ClaudeAdapter;
 use mason_adapters::codex::CodexAdapter;
 use mason_adapters::hosted::HostLaunch;
 use mason_adapters::runner::{
-    hold_note, worth_a_stronger_model, FailReason, HoldReason, RunnerConfig, StepEnd, StepReport,
-    StepRunner,
+    hold_note, worth_a_stronger_model, FailReason, RunnerConfig, StepEnd, StepReport, StepRunner,
 };
 use mason_adapters::sandbox::{SandboxKind, SandboxPolicy};
 use mason_core::*;
@@ -42,6 +41,25 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+/// How many times a task may be sent back for a conflict with the base before
+/// it fails. These do not count against a step's `max_rounds` (s69).
+pub(crate) const CONFLICT_ROUNDS: u32 = 5;
+
+/// One line per conflict send-back in the task's directory: `<run>\t<reason>`.
+pub(crate) const CONFLICTS_FILE: &str = "conflicts.txt";
+
+/// The step runs recorded in a task directory's [`CONFLICTS_FILE`].
+pub(crate) fn conflict_runs(task_dir: &Path) -> Vec<u64> {
+    let mut v: Vec<u64> = std::fs::read_to_string(task_dir.join(CONFLICTS_FILE))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| l.split('\t').next()?.trim().parse().ok())
+        .collect();
+    v.sort_unstable();
+    v.dedup();
+    v
+}
 
 /// Everything a job needs to know, read once at the start.
 pub struct Ctx {
@@ -84,11 +102,114 @@ impl Ctx {
 
     /// End the step and let the graph say what follows.
     pub(crate) fn conclude(&self, outcome: Outcome, reason: String, feedback: Option<String>) {
+        let round = self.round();
+        self.conclude_round(outcome, reason, feedback, round)
+    }
+
+    /// Which round of this step this run is, as `max_rounds` counts them: its
+    /// runs since the owner last restarted the task (a retry, or explore-anyway),
+    /// leaving out the runs that ended in a conflict with the base
+    /// ([`Ctx::conflict`]). A retried task gets its rounds again, and a base that
+    /// moved is not held against the change. Falls back to the attempt number.
+    pub(crate) fn round(&self) -> u32 {
+        let Ok(w) = self.d.world() else {
+            return self.attempt;
+        };
+        let conflicts = self.conflict_runs();
+        let mut runs: Vec<&StepRun> = w
+            .step_runs
+            .values()
+            .filter(|r| r.task == self.task && r.id.0 <= self.run.0)
+            .collect();
+        runs.sort_by_key(|r| r.id.0);
+        let restart = runs
+            .iter()
+            .rev()
+            .find(|r| {
+                r.id != self.run
+                    && matches!(
+                        r.outcome,
+                        Some(StepOutcome::Failed | StepOutcome::Superseded | StepOutcome::Canceled)
+                    )
+            })
+            .map_or(0, |r| r.id.0);
+        let same = |r: &StepRun| {
+            if self.step.name.is_empty() || r.name.is_empty() {
+                r.step == self.state
+            } else {
+                r.name == self.step.name
+            }
+        };
+        let n = runs
+            .iter()
+            .filter(|r| r.id.0 > restart && same(r))
+            .filter(|r| r.id == self.run || !conflicts.contains(&r.id.0))
+            .count() as u32;
+        n.max(1)
+    }
+
+    /// The change conflicts with the base (or with the rest of its landing
+    /// batch): back to the step's `on_red`, with the note for the agent, and
+    /// not counted as a red round, since the change is not what is wrong. A
+    /// task that has conflicted [`CONFLICT_ROUNDS`] times fails, so a base the
+    /// agent cannot keep up with still ends.
+    pub(crate) fn conflict(&self, reason: String, note: String) {
+        let mut past = self.conflict_runs();
+        if !past.contains(&self.run.0) {
+            if past.len() as u32 >= CONFLICT_ROUNDS {
+                return self.fail(format!(
+                    "{reason}; still conflicting with the base after {CONFLICT_ROUNDS} merges"
+                ));
+            }
+            let line = format!("{}\t{}\n", self.run.0, reason.replace('\n', " "));
+            let path = self.task_dir().join(CONFLICTS_FILE);
+            let _ = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
+            past.push(self.run.0);
+        }
+        // Round 0 is under every limit: a conflict always goes back while there is an `on_red`.
+        self.conclude_round(Outcome::Red, reason, Some(note), 0)
+    }
+
+    /// The step runs that ended in a conflict send-back ([`Ctx::conflict`]).
+    pub(crate) fn conflict_runs(&self) -> Vec<u64> {
+        conflict_runs(&self.d.task_dir(self.task))
+    }
+
+    fn conclude_round(
+        &self,
+        outcome: Outcome,
+        reason: String,
+        feedback: Option<String>,
+        round: u32,
+    ) {
         self.d
             .crash
             .point(&format!("before_event:{:?}", self.state));
         let rounds = self.res.max_rounds.as_ref().map(|a| a.value);
-        match after(&self.def, &self.step, outcome, self.attempt, rounds) {
+        // The history the detectors read (Part 14): how this attempt ended, and why.
+        let _ = self
+            .d
+            .store
+            .record_attempt(&mason_core::introspect::Attempt {
+                task: self.task.0,
+                project: self.project.id.clone(),
+                step: self.step.name.clone(),
+                outcome: match outcome {
+                    Outcome::Green => "green",
+                    Outcome::Red => "red",
+                    Outcome::Fail => "fail",
+                }
+                .into(),
+                signature: mason_core::introspect::signature(&reason),
+                reason: reason.clone(),
+                retry_n: self.attempt,
+                at: now_ms(),
+            });
+        match after(&self.def, &self.step, outcome, round, rounds) {
             Transition::Next { step, state } => {
                 self.emit(EventKind::StepSucceeded {
                     task: self.task,
@@ -221,6 +342,12 @@ fn ctx(d: &Arc<Daemon>, task: TaskId, run: StepRunId) -> Result<Ctx, String> {
 }
 
 pub fn run(d: &Arc<Daemon>, task: TaskId, step: State, run: StepRunId) {
+    run_inner(d, task, step, run);
+    // A task that was the account's probe is not any longer once its job is over.
+    crate::holds::task_done(d, task.0);
+}
+
+fn run_inner(d: &Arc<Daemon>, task: TaskId, step: State, run: StepRunId) {
     let c = match ctx(d, task, run) {
         Ok(c) => c,
         Err(why) => {
@@ -238,7 +365,12 @@ pub fn run(d: &Arc<Daemon>, task: TaskId, step: State, run: StepRunId) {
     // project. Time spent waiting is outside every timeout below: they all
     // start after this returns. An approval waits for a person, not for the
     // machine, so it takes nothing.
-    if c.step.kind != StepType::Approval {
+    if c.step.kind == StepType::Agent {
+        // A held account starts no new session; the task waits without a lease.
+        if get_lease(&c).is_err() {
+            return;
+        }
+    } else if c.step.kind != StepType::Approval {
         match acquire(&c) {
             Ok(l) => *c.lease.lock().unwrap_or_else(|e| e.into_inner()) = Some(l),
             Err(_) => return, // the task was cancelled or retried while it waited
@@ -366,6 +498,69 @@ fn wait_while_paused(c: &Ctx) -> Result<(), ()> {
         c.emit(EventKind::WaitEnded { task: c.task });
     }
     Ok(())
+}
+
+/// How often a task waiting on a held account looks again.
+const HOLD_POLL: Duration = Duration::from_millis(100);
+
+fn still_open(c: &Ctx) -> bool {
+    c.d.world()
+        .map(|w| w.open_run(c.task) == Some(c.run))
+        .unwrap_or(true)
+}
+
+/// Wait while the step's account is held (see `holds`). Says why in the task's
+/// wait, once; no lease is held and no time is charged. `Err` when the task
+/// went away meanwhile.
+fn wait_open(c: &Ctx) -> Result<(), ()> {
+    use crate::holds::Gate;
+    let mut announced = false;
+    let mut n = 0u32;
+    loop {
+        match crate::holds::gate(&c.d, &c.project.account, c.task.0) {
+            Gate::Open | Gate::Probe => break,
+            Gate::Wait(on) => {
+                if !announced {
+                    announced = true;
+                    if !c.emit(EventKind::WaitStarted { task: c.task, on }) {
+                        return Err(());
+                    }
+                }
+                std::thread::sleep(HOLD_POLL);
+                n += 1;
+                if n.is_multiple_of(5) && !still_open(c) {
+                    return Err(());
+                }
+            }
+        }
+    }
+    if announced {
+        c.emit(EventKind::WaitEnded { task: c.task });
+    }
+    Ok(())
+}
+
+/// The agent step's session slot, once its account is open. A hold that
+/// begins while the step queues for the slot sends it back to waiting.
+fn get_lease(c: &Ctx) -> Result<(), ()> {
+    loop {
+        wait_open(c)?;
+        let have = c.lease.lock().unwrap_or_else(|e| e.into_inner()).is_some();
+        if !have {
+            match acquire(c) {
+                Ok(l) => *c.lease.lock().unwrap_or_else(|e| e.into_inner()) = Some(l),
+                Err(_) => return Err(()),
+            }
+        }
+        if matches!(
+            crate::holds::gate(&c.d, &c.project.account, c.task.0),
+            crate::holds::Gate::Wait(_)
+        ) {
+            c.release_lease();
+            continue;
+        }
+        return Ok(());
+    }
 }
 
 /// Wait for this step's resources (Part 7). Says why in the task's wait, once,
@@ -995,6 +1190,7 @@ fn agent_job(c: &Ctx) {
     let Some(mut report) = settle_holds(c, &runner, first, &spec, &contract, &rec) else {
         return;
     };
+    record_usage(c, &spec, &report);
 
     // The retry ladder: a step that ended with no result, or whose agent
     // crashed, is tried again from a fresh session on the next model up. Not
@@ -1011,11 +1207,16 @@ fn agent_job(c: &Ctx) {
         spec.model = Some(next.to_string());
         spec.run_key = Some(format!("{key}u{tries}"));
         rec.tries.set(tries);
+        // Held meanwhile: wait for the account before another session starts.
+        if get_lease(c).is_err() {
+            return;
+        }
         rec.write(c, "retry", &spec);
         let again = runner.run(spec.clone(), &contract);
         let Some(r) = settle_holds(c, &runner, again, &spec, &contract, &rec) else {
             return;
         };
+        record_usage(c, &spec, &r);
         report = r;
     }
     contract.shutdown();
@@ -1067,6 +1268,25 @@ impl LaunchRec<'_> {
     }
 }
 
+/// Keep what the attempt reported: the provider's limits as the latest for the
+/// account, and the tokens and cost against project, task, step and model.
+fn record_usage(c: &Ctx, spec: &SessionSpec, report: &StepReport) {
+    if let Some(u) = &report.usage {
+        crate::usage::record_snapshot(&c.d, &c.project.account, u);
+    }
+    if let Some(key) = &spec.run_key {
+        let who = crate::usage::Attempt {
+            key,
+            task: c.task.0,
+            project: &c.project.id,
+            step: &c.step.name,
+            account: &c.project.account,
+            model: spec.model.as_deref(),
+        };
+        crate::usage::record_tokens(&c.d, &who, &report.tokens);
+    }
+}
+
 /// A provider hold is a wait, never a failure: show it, wait, resume. `None`
 /// when the task went away while waiting.
 fn settle_holds(
@@ -1078,23 +1298,24 @@ fn settle_holds(
     rec: &LaunchRec,
 ) -> Option<StepReport> {
     while let StepEnd::Hold(reason) = &report.end {
-        let on = match reason {
-            HoldReason::UsageLimit { resets_at } => format!(
-                "usage limit (resets {})",
-                resets_at.as_deref().unwrap_or("at an unknown time")
-            ),
-            HoldReason::ProviderDown { .. } => "provider outage".to_string(),
-        };
-        if !c.emit(EventKind::WaitStarted { task: c.task, on }) {
-            return None;
+        let account = &c.project.account;
+        // The snapshot first: it may carry the reset the text lacks.
+        if let Some(u) = &report.usage {
+            crate::usage::record_snapshot(&c.d, account, u);
         }
-        std::thread::sleep(c.d.cfg.hold_retry);
-        if !c.emit(EventKind::WaitEnded { task: c.task }) {
+        // The account is held, not just this task; if this was the probe it is
+        // refused and backs off further.
+        crate::holds::observe_end(&c.d, account, c.task.0, reason);
+        crate::holds::session_ended(&c.d, account, c.task.0, true);
+        // The session slot goes back while the account waits.
+        c.release_lease();
+        if get_lease(c).is_err() {
             return None;
         }
         rec.write(c, "resume", spec);
         report = runner.resume(report, hold_note(), spec.clone(), contract);
     }
+    crate::holds::session_ended(&c.d, &c.project.account, c.task.0, false);
     Some(report)
 }
 
@@ -1104,7 +1325,21 @@ fn finish_agent(c: &Ctx, report: StepReport, dir: &Path) {
     if !report.proposals.is_empty() {
         crate::proposals::file_from_report(&c.d, c.task, c.project_id, &report.proposals, dir);
     }
+    let asked = match &report.end {
+        StepEnd::Asked { question } => Some(question.clone()),
+        _ => None,
+    };
     finish_agent_inner(c, report, dir);
+    // The analyst's findings (Part 14), read from the file it wrote in its worktree.
+    crate::introspect::ingest_analyst(&c.d, c.task, &c.project.id, &c.title, &c.wt, dir);
+    // Triage (off unless the project turns it on) only records what it would do; the
+    // question is the owner's either way.
+    if let Some(q) = asked {
+        let ask = mason_adapter_api::card::Card::from_json(&q)
+            .map(|card| card.ask)
+            .unwrap_or_else(|| q.as_str().unwrap_or_default().to_string());
+        crate::introspect::triage_question(&c.d, &c.project, c.task, &ask);
+    }
     // Asked, or the agent gave up: either way the session is free now.
     c.release_lease();
 }
@@ -1197,14 +1432,13 @@ fn command_job(c: &Ctx) {
             Ok(None) => {}
             Ok(Some(files)) => {
                 let note = conflict_note(&c.project.base_ref(), &files);
-                return c.conclude(
-                    Outcome::Red,
+                return c.conflict(
                     format!(
                         "the branch conflicts with {} in: {}",
                         c.project.base_ref(),
                         files.replace('\n', ", ")
                     ),
-                    Some(note),
+                    note,
                 );
             }
             Err(why) => return c.fail(why),
@@ -1552,6 +1786,7 @@ fn land_job(c: &Ctx) {
         crate::landing::Verdict::SentBack { reason, feedback } => {
             c.conclude(Outcome::Red, reason, Some(feedback))
         }
+        crate::landing::Verdict::Conflict { reason, feedback } => c.conflict(reason, feedback),
         crate::landing::Verdict::Failed(why) => c.fail(format!("landing failed: {why}")),
     }
 }

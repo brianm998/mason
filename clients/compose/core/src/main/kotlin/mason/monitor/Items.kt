@@ -26,6 +26,11 @@ fun TaskRow.item(prefix: String, order: Int): Item {
     val texts = mutableListOf(key, title, project, state)
     if (why_waiting.isNotEmpty()) texts += why_waiting
     if (display.isNotEmpty()) texts += display
+    // A task the tracker imported shows its issue, and where to read it.
+    if (issue != 0L) {
+        texts += "issue #$issue"
+        if (issue_url.isNotEmpty()) texts += issue_url
+    }
     // The task page says what it waits for and what waits for it.
     if (prefix == "detail") {
         if (blockers.isNotEmpty()) texts += "waiting for " + blockers.joinToString(", ") { "#$it" }
@@ -69,6 +74,15 @@ fun MonitorModel.visibleItems(): List<Item> {
         out += Item("status", listOf(if (connected) h.status else "Not connected"))
         h.counts.forEachIndexed { i, c -> out += Item("tile:${c.state}", listOf(tileCount(c), tileLabel(c)), order = i) }
         h.banners.forEachIndexed { i, b -> out += Item("banner:$i", listOf(b.text), order = i) }
+        // Issues the tracker has not imported: a count tile and a list, only while true.
+        if (h.pending_issues.isNotEmpty()) {
+            out += Item("tile:not_imported", listOf(h.pending_issues.size.toString(), "not imported"), order = h.counts.size)
+            h.pending_issues.forEachIndexed { i, p ->
+                val texts = mutableListOf(p.project, "#${p.number}", p.title, p.reason)
+                if (p.url.isNotEmpty()) texts += p.url
+                out += Item("pending:${p.project}:${p.number}", texts, order = i)
+            }
+        }
     }
     sidebar?.let { s ->
         s.sections.forEachIndexed { i, sec ->
@@ -100,6 +114,7 @@ fun MonitorModel.visibleItems(): List<Item> {
         }
         out += Item("sessions", listOf("${h.sessions_used} of ${h.sessions_limit}"), listOf("increase", "decrease"))
     }
+    if (page == Page.Usage) usage?.let { out += it.items() }
     if (page == Page.Pipeline) editor?.let { out += it.items() }
     if (page is Page.Task) taskDetail?.let { d ->
         val r = d.row
@@ -154,5 +169,28 @@ fun mason.v1.EditorView.items(): List<Item> {
     if (dirty) actions += listOf("discard", "apply")
     out += Item("draft", listOf(if (dirty) "changed" else "unchanged"), actions)
     changes.forEachIndexed { i, c -> out += Item("change:$i", listOf(c), order = i) }
+    return out
+}
+
+/**
+ * What the LLM usage page shows that does not move with the clock (the same list the daemon's
+ * `conformance::usage_items` builds from the same view).
+ */
+fun mason.v1.UsageView.items(): List<Item> {
+    val out = mutableListOf<Item>()
+    providers.forEachIndexed { i, p ->
+        val head: List<String> = listOf(p.name, p.adapter_name, p.billing, "${p.sessions_used} of ${p.sessions_limit} sessions")
+        out += Item("usage:${p.name}", head, order = i)
+        p.windows.forEachIndexed { j, w ->
+            val pct = when {
+                !w.reported -> "not reported yet"
+                w.has_percent -> "${Math.round(w.percent)}%"
+                else -> "no percentage reported"
+            }
+            val texts = mutableListOf(w.label, pct)
+            if (w.reported) texts += w.state
+            out += Item("usage-window:${p.name}:${w.id}", texts, order = j)
+        }
+    }
     return out
 }

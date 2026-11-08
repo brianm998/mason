@@ -261,6 +261,40 @@ fn main() {
             .unwrap_or_else(|e| die(&e.to_string()));
             println!("the editor shows {} items", items.len());
         }
+        "usage-expected" => {
+            // What the LLM usage page must show for the demo daemon's accounts (s64).
+            let port: u16 = opt(&mut args, "--port")
+                .and_then(|p| p.parse().ok())
+                .unwrap_or_else(|| die("--port P"));
+            let out = PathBuf::from(opt(&mut args, "--out").unwrap_or_else(|| die("--out DIR")));
+            std::fs::create_dir_all(&out).unwrap_or_else(|e| die(&e.to_string()));
+            let mut c = Client::connect(port, Encoding::Json).unwrap_or_else(|e| die(&e));
+            c.hello(0, false).unwrap_or_else(|e| die(&e));
+            c.subscribe(&[ViewKind::Usage], "", 0)
+                .unwrap_or_else(|e| die(&e));
+            let end = std::time::Instant::now() + Duration::from_secs(10);
+            let mut views = vec![];
+            while views.is_empty() && std::time::Instant::now() < end {
+                if let Ok(Some(ServerMessage {
+                    body: Some(server_message::Body::View(u)),
+                })) = c.recv(Duration::from_millis(200))
+                {
+                    if let Some(v) = u.view {
+                        views.push(v);
+                    }
+                }
+            }
+            let items: Vec<serde_json::Value> = conformance::visible(&views, true)
+                .iter()
+                .map(|i| i.to_json())
+                .collect();
+            std::fs::write(
+                out.join("checkpoint-0.json"),
+                serde_json::to_string_pretty(&items).unwrap_or_default(),
+            )
+            .unwrap_or_else(|e| die(&e.to_string()));
+            println!("the usage page shows {} items", items.len());
+        }
         "check" => {
             let expected = PathBuf::from(
                 opt(&mut args, "--expected").unwrap_or_else(|| die("--expected DIR")),

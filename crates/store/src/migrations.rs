@@ -345,7 +345,160 @@ const STEPS: &[&str] = &[
      );
      CREATE INDEX proposals_project_at ON proposals(project, at);
      CREATE INDEX proposals_filed_by ON proposals(filed_by);",
-    // 16: step hosts that were lost without an exit record (s66): what was known about each,
+    // 16: LLM usage (s64). The latest snapshot per account (kept across a restart), a bounded
+    // history of window readings (the trend), and the tokens and cost of each step attempt as
+    // the provider reported them (NULL: not reported, never 0).
+    "CREATE TABLE usage_latest (
+         account  TEXT PRIMARY KEY,
+         at       INTEGER NOT NULL,
+         snapshot TEXT NOT NULL
+     );
+     CREATE TABLE usage_readings (
+         account     TEXT NOT NULL,
+         win         TEXT NOT NULL,
+         at          INTEGER NOT NULL,
+         utilization REAL,
+         resets_at   INTEGER,
+         state       TEXT NOT NULL
+     );
+     CREATE INDEX usage_readings_win ON usage_readings(account, win, at);
+     CREATE TABLE usage_runs (
+         attempt      TEXT PRIMARY KEY,
+         task         INTEGER NOT NULL,
+         project      TEXT NOT NULL,
+         step         TEXT NOT NULL,
+         account      TEXT NOT NULL,
+         model        TEXT,
+         input        INTEGER,
+         output       INTEGER,
+         cache_read   INTEGER,
+         cache_create INTEGER,
+         cost_usd     REAL,
+         at           INTEGER NOT NULL
+     );
+     CREATE INDEX usage_runs_at ON usage_runs(at);
+     CREATE INDEX usage_runs_task ON usage_runs(task);",
+    // 17: introspection and recurring jobs (Part 14). `step_attempts` is one row per step
+    // attempt, written when the attempt ends, with the failure signature: the history the
+    // detectors read. `findings` links a detector's or the analyst's proposal to the metric it
+    // expects to move, and keeps the verdict. `schedules` remembers when each recurring job last
+    // ran and the failures its baseline has accepted. `triage_samples` is the owner's review
+    // queue for the optional triage agent.
+    "CREATE TABLE step_attempts (
+         id        INTEGER PRIMARY KEY AUTOINCREMENT,
+         task      INTEGER NOT NULL,
+         project   TEXT NOT NULL,
+         step      TEXT NOT NULL,
+         outcome   TEXT NOT NULL,
+         reason    TEXT NOT NULL,
+         signature TEXT NOT NULL,
+         retry_n   INTEGER NOT NULL,
+         at        INTEGER NOT NULL
+     );
+     CREATE INDEX step_attempts_at ON step_attempts(at);
+     CREATE INDEX step_attempts_task ON step_attempts(task);
+     CREATE TABLE findings (
+         id         INTEGER PRIMARY KEY AUTOINCREMENT,
+         rule       TEXT NOT NULL,
+         subject    TEXT NOT NULL,
+         project    TEXT NOT NULL,
+         metric     TEXT NOT NULL,
+         title      TEXT NOT NULL,
+         task       INTEGER NOT NULL,
+         before_num REAL NOT NULL,
+         before_den REAL NOT NULL,
+         before_n   INTEGER NOT NULL,
+         at         INTEGER NOT NULL,
+         verdict    TEXT NOT NULL DEFAULT '',
+         verdict_text TEXT NOT NULL DEFAULT '',
+         after_num  REAL NOT NULL DEFAULT 0,
+         after_den  REAL NOT NULL DEFAULT 0,
+         after_n    INTEGER NOT NULL DEFAULT 0,
+         landed_at  INTEGER NOT NULL DEFAULT 0,
+         closed_at  INTEGER NOT NULL DEFAULT 0
+     );
+     CREATE INDEX findings_task ON findings(task);
+     CREATE TABLE schedules (
+         name     TEXT PRIMARY KEY,
+         project  TEXT NOT NULL,
+         kind     TEXT NOT NULL,
+         every_ms INTEGER NOT NULL,
+         last_run INTEGER NOT NULL DEFAULT 0,
+         last_task INTEGER,
+         last_status TEXT NOT NULL DEFAULT '',
+         baseline TEXT,
+         runs     INTEGER NOT NULL DEFAULT 0
+     );
+     CREATE TABLE triage_samples (
+         id       INTEGER PRIMARY KEY AUTOINCREMENT,
+         task     INTEGER NOT NULL,
+         question TEXT NOT NULL,
+         action   TEXT NOT NULL,
+         answer   TEXT NOT NULL,
+         evidence TEXT NOT NULL,
+         status   TEXT NOT NULL,
+         verdict  TEXT NOT NULL DEFAULT '',
+         at       INTEGER NOT NULL
+      );",
+    // 18: account holds (s67). One row per held account, so a restart during a hold keeps it;
+    // and the warnings already given (one per window per reset).
+    "CREATE TABLE account_holds (
+         account    TEXT PRIMARY KEY,
+         kind       TEXT NOT NULL,
+         why        TEXT NOT NULL,
+         since_ms   INTEGER NOT NULL,
+         until_ms   INTEGER,
+         backoff_ms INTEGER NOT NULL DEFAULT 0,
+         probe_ms   INTEGER NOT NULL DEFAULT 0,
+         by         TEXT NOT NULL DEFAULT 'pipeline'
+     );
+     CREATE TABLE account_warnings (
+         account   TEXT NOT NULL,
+         win       TEXT NOT NULL,
+         resets_at INTEGER NOT NULL,
+         at_ms     INTEGER NOT NULL,
+         PRIMARY KEY (account, win, resets_at)
+     );",
+    // 18: notifications (Part 19). An alert can be acknowledged (which stops its noise but not
+    // its visibility) and is reminded at most once. `deliveries` is every attempt to reach the
+    // owner by a channel, so a notice is sent once and a reminder once. `announcements` is the
+    // queue of sentences for whichever device speaks; its unique key makes an announcement
+    // happen once however often the dispatcher looks.
+    "ALTER TABLE alerts ADD COLUMN acked_at INTEGER;
+     ALTER TABLE alerts ADD COLUMN reminded_at INTEGER;
+     CREATE TABLE deliveries (
+         id       INTEGER PRIMARY KEY AUTOINCREMENT,
+         alert    TEXT NOT NULL,
+         since    INTEGER NOT NULL,
+         channel  TEXT NOT NULL,
+         delivery TEXT NOT NULL,
+         ok       INTEGER NOT NULL,
+         detail   TEXT NOT NULL,
+         at       INTEGER NOT NULL
+     );
+     CREATE INDEX deliveries_alert ON deliveries(alert, since);
+     CREATE TABLE announcements (
+         id         INTEGER PRIMARY KEY AUTOINCREMENT,
+         key        TEXT NOT NULL UNIQUE,
+         kind       TEXT NOT NULL,
+         sentence   TEXT NOT NULL,
+         sound      INTEGER NOT NULL,
+         speech     INTEGER NOT NULL,
+         created_at INTEGER NOT NULL,
+         taken_at   INTEGER,
+         taken_by   TEXT
+     );",
+    // 19: paired devices (s24). Only the SHA-256 of a token is kept; the token is shown once.
+    "CREATE TABLE devices (
+         id           INTEGER PRIMARY KEY AUTOINCREMENT,
+         name         TEXT NOT NULL,
+         role         TEXT NOT NULL,
+         token_sha256 TEXT NOT NULL UNIQUE,
+         created_at   INTEGER NOT NULL,
+         last_seen    INTEGER,
+         revoked_at   INTEGER
+     );",
+    // 20: step hosts that were lost without an exit record (s66): what was known about each,
     // and whether the step was re-run on a fresh host. Written by the daemon; not rebuilt
     // by event replay.
     "CREATE TABLE step_host_losses (

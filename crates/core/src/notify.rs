@@ -1,0 +1,720 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+//! Notifications (Part 19), as decisions over values. The routing table of
+//! conditions and channels, quiet hours, the one-reminder rule, the sentence a
+//! speaker says, the sound that goes with it, and which of several monitors
+//! speaks. Nothing here reads a clock or sends anything: time and the record of
+//! what was already delivered come in as arguments.
+
+use std::collections::BTreeMap;
+
+pub const MINUTE_MS: u64 = 60_000;
+
+/// A way to reach the owner. `Monitor` is the visual alert on an open monitor
+/// and is never quiet, never muted and never escalated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Channel {
+    Monitor,
+    Sound,
+    Speech,
+    Push,
+    Email,
+    Webhook,
+}
+
+pub const CHANNELS: &[Channel] = &[
+    Channel::Monitor,
+    Channel::Sound,
+    Channel::Speech,
+    Channel::Push,
+    Channel::Email,
+    Channel::Webhook,
+];
+
+impl Channel {
+    pub fn name(self) -> &'static str {
+        match self {
+            Channel::Monitor => "monitor",
+            Channel::Sound => "sound",
+            Channel::Speech => "speech",
+            Channel::Push => "push",
+            Channel::Email => "email",
+            Channel::Webhook => "webhook",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Channel> {
+        CHANNELS.iter().copied().find(|c| c.name() == s.trim())
+    }
+    /// Channels that leave the machine.
+    pub fn remote(self) -> bool {
+        matches!(self, Channel::Push | Channel::Email | Channel::Webhook)
+    }
+    /// Channels played by a monitor (or the daemon in its place).
+    pub fn audible(self) -> bool {
+        matches!(self, Channel::Sound | Channel::Speech)
+    }
+}
+
+/// One channel for a condition and how long to wait before using it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Rule {
+    pub channel: Channel,
+    pub after_ms: u64,
+}
+
+const fn rule(channel: Channel, after_min: u64) -> Rule {
+    Rule {
+        channel,
+        after_ms: after_min * MINUTE_MS,
+    }
+}
+
+/// The conditions Part 19 names, as the alert kinds that carry them.
+pub const CONDITIONS: &[&str] = &[
+    "needs_you",
+    "failed",
+    "landing",
+    "daemon_down",
+    "credentials",
+    "provider_outage",
+    "landed",
+];
+
+/// A daily window in local minutes of the day, `start` up to but not including
+/// `end`; a window that ends before it starts runs over midnight.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QuietHours {
+    pub start: u32,
+    pub end: u32,
+}
+
+impl QuietHours {
+    pub fn contains(&self, minute_of_day: u32) -> bool {
+        let m = minute_of_day % 1440;
+        if self.start == self.end {
+            false
+        } else if self.start < self.end {
+            m >= self.start && m < self.end
+        } else {
+            m >= self.start || m < self.end
+        }
+    }
+}
+
+/// `"22:00"` to minutes of the day.
+pub fn parse_clock(s: &str) -> Option<u32> {
+    let (h, m) = s.trim().split_once(':')?;
+    let (h, m): (u32, u32) = (h.parse().ok()?, m.parse().ok()?);
+    (h < 24 && m < 60).then_some(h * 60 + m)
+}
+
+/// `"10m"`, `"1h"`, `"30s"` or bare seconds, as milliseconds.
+pub fn parse_span(s: &str) -> Option<u64> {
+    let s = s.trim();
+    let (n, unit) = match s.char_indices().find(|(_, c)| !c.is_ascii_digit()) {
+        Some((i, _)) => s.split_at(i),
+        None => (s, "s"),
+    };
+    let n: u64 = n.parse().ok()?;
+    let per = match unit.trim() {
+        "ms" => 1,
+        "s" | "" => 1000,
+        "m" | "min" => MINUTE_MS,
+        "h" => 60 * MINUTE_MS,
+        _ => return None,
+    };
+    n.checked_mul(per)
+}
+
+/// The whole table: what each condition uses, quiet hours per channel, and the
+/// single reminder's delay.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Routing {
+    pub by_kind: BTreeMap<String, Vec<Rule>>,
+    pub quiet: BTreeMap<Channel, QuietHours>,
+    /// When the one reminder is due, from the alert's start.
+    pub reminder_ms: u64,
+    /// How many times a failing delivery is tried, and the wait between tries.
+    pub max_attempts: u32,
+    pub retry_ms: u64,
+}
+
+impl Default for Routing {
+    fn default() -> Self {
+        Routing::defaults()
+    }
+}
+
+impl Routing {
+    /// Part 19's table.
+    pub fn defaults() -> Routing {
+        use Channel::*;
+        let mut by_kind = BTreeMap::new();
+        let mut put = |k: &str, r: Vec<Rule>| {
+            by_kind.insert(k.to_string(), r);
+        };
+        put(
+            "needs_you",
+            vec![
+                rule(Monitor, 0),
+                rule(Sound, 0),
+                rule(Speech, 0),
+                rule(Push, 10),
+                rule(Email, 60),
+            ],
+        );
+        let broke = vec![
+            rule(Monitor, 0),
+            rule(Sound, 0),
+            rule(Speech, 0),
+            rule(Push, 10),
+        ];
+        put("failed", broke.clone());
+        put("landing", broke); // the base branch is frozen, or a landing is stuck
+        let everything = vec![
+            rule(Monitor, 0),
+            rule(Sound, 0),
+            rule(Speech, 0),
+            rule(Push, 0),
+            rule(Email, 0),
+            rule(Webhook, 0),
+        ];
+        for k in ["daemon_down", "credentials", "provider_outage"] {
+            put(k, everything.clone());
+        }
+        put("landed", vec![rule(Monitor, 0), rule(Speech, 0)]);
+        Routing {
+            by_kind,
+            quiet: BTreeMap::new(),
+            reminder_ms: 30 * MINUTE_MS,
+            max_attempts: 3,
+            retry_ms: MINUTE_MS,
+        }
+    }
+
+    /// A condition the table does not name is shown on the monitor and nothing else.
+    pub fn rules(&self, kind: &str) -> Vec<Rule> {
+        self.by_kind
+            .get(kind)
+            .cloned()
+            .unwrap_or_else(|| vec![rule(Channel::Monitor, 0)])
+    }
+
+    /// Replace a condition's channels (the owner's choice).
+    pub fn set(&mut self, kind: &str, rules: Vec<Rule>) {
+        self.by_kind.insert(kind.to_string(), rules);
+    }
+
+    pub fn is_quiet(&self, c: Channel, minute_of_day: u32) -> bool {
+        c != Channel::Monitor
+            && self
+                .quiet
+                .get(&c)
+                .is_some_and(|q| q.contains(minute_of_day))
+    }
+}
+
+/// Initial notice, or the one reminder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Delivery {
+    Initial,
+    Reminder,
+}
+
+impl Delivery {
+    pub fn name(self) -> &'static str {
+        match self {
+            Delivery::Initial => "initial",
+            Delivery::Reminder => "reminder",
+        }
+    }
+}
+
+/// What the record says about one alert.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AlertState {
+    pub since_ms: u64,
+    pub acked: bool,
+}
+
+/// One try at delivering, from the record.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Attempt {
+    pub channel: Channel,
+    pub delivery: Delivery,
+    pub ok: bool,
+    /// The refusal will not pass by waiting: do not try again.
+    pub permanent: bool,
+    pub at_ms: u64,
+}
+
+/// What is due for a condition that is still true. Nothing for an acknowledged
+/// alert; each channel's initial notice once its delay has passed and it is not
+/// in quiet hours; and, once, a reminder on every channel that carried the
+/// initial notice, `reminder_ms` after the start. A delivery that failed is
+/// tried again after `retry_ms`, up to `max_attempts` times, and then given up
+/// on: there are no loops. A notice that was never due before the alert cleared
+/// is never sent, because a cleared alert is not asked about.
+pub fn due(
+    r: &Routing,
+    kind: &str,
+    st: AlertState,
+    done: &[Attempt],
+    now_ms: u64,
+    minute_of_day: u32,
+) -> Vec<(Channel, Delivery)> {
+    if st.acked {
+        return vec![];
+    }
+    let settled = |c: Channel, d: Delivery| -> Option<bool> {
+        // Some(true): delivered. Some(false): given up on or waiting to retry. None: not tried.
+        let tries: Vec<&Attempt> = done
+            .iter()
+            .filter(|a| a.channel == c && a.delivery == d)
+            .collect();
+        if tries.iter().any(|a| a.ok) {
+            return Some(true);
+        }
+        if tries.iter().any(|a| a.permanent) {
+            return Some(false);
+        }
+        let last = tries.iter().map(|a| a.at_ms).max()?;
+        if tries.len() as u32 >= r.max_attempts || now_ms < last + r.retry_ms {
+            return Some(false);
+        }
+        None
+    };
+    let mut out = vec![];
+    let rules = r.rules(kind);
+    for ru in &rules {
+        if ru.channel == Channel::Monitor || r.is_quiet(ru.channel, minute_of_day) {
+            continue;
+        }
+        if now_ms >= st.since_ms + ru.after_ms && settled(ru.channel, Delivery::Initial).is_none() {
+            out.push((ru.channel, Delivery::Initial));
+        }
+    }
+    if now_ms >= st.since_ms + r.reminder_ms {
+        for ru in &rules {
+            if ru.channel == Channel::Monitor || r.is_quiet(ru.channel, minute_of_day) {
+                continue;
+            }
+            // Only where the initial notice arrived, and was due before the reminder was: an
+            // escalation that only just went out is its own nudge.
+            if ru.after_ms <= r.reminder_ms
+                && settled(ru.channel, Delivery::Initial) == Some(true)
+                && settled(ru.channel, Delivery::Reminder).is_none()
+            {
+                out.push((ru.channel, Delivery::Reminder));
+            }
+        }
+    }
+    out
+}
+
+// ---- what is said ----------------------------------------------------------------------
+
+/// Which sound goes with an announcement. "Wants a decision" and "broke"
+/// differ; everything else is a quiet tick.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Sound {
+    Decision,
+    Broke,
+    Info,
+}
+
+impl Sound {
+    pub fn name(self) -> &'static str {
+        match self {
+            Sound::Decision => "decision",
+            Sound::Broke => "broke",
+            Sound::Info => "info",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Sound> {
+        [Sound::Decision, Sound::Broke, Sound::Info]
+            .into_iter()
+            .find(|k| k.name() == s)
+    }
+}
+
+pub fn sound_for(kind: &str) -> Sound {
+    match kind {
+        "needs_you" => Sound::Decision,
+        "failed" | "landing" | "daemon_down" | "credentials" | "provider_outage"
+        | "environment" | "runtime" | "definition" => Sound::Broke,
+        _ => Sound::Info,
+    }
+}
+
+fn one_line(s: &str, max: usize) -> String {
+    let s: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let s = s
+        .trim_end_matches(['.', ':', ';', ',', '?', '!'])
+        .to_string();
+    if s.chars().count() <= max {
+        s
+    } else {
+        let cut: String = s.chars().take(max).collect();
+        format!("{}…", cut.trim_end())
+    }
+}
+
+/// The one sentence: the task, what is wrong, what to do.
+/// `subject` is how the task is named ("Web API 204"); `detail` is the question
+/// or the reason.
+pub fn sentence(kind: &str, subject: &str, detail: &str, reminder: bool) -> String {
+    let subject = one_line(subject, 60);
+    let detail = one_line(detail, 100);
+    let text = match kind {
+        "needs_you" if detail.is_empty() => {
+            format!("{subject} needs a decision; open the card and answer it")
+        }
+        "needs_you" => format!("{subject} needs a decision on {detail}"),
+        "failed" if detail.is_empty() => format!("{subject} failed; open it to retry or cancel"),
+        "failed" => format!("{subject} failed because {detail}; open it to retry or cancel"),
+        "landing" => format!("{subject}: {detail}; open the landing queue to see why"),
+        "landed" => format!("{subject} landed"),
+        "daemon_down" => "MASON has lost its daemon; check that masond is running".into(),
+        "credentials" => format!("{subject}: credentials are failing; renew them"),
+        "provider_outage" => format!("{subject}: the provider is down; work resumes by itself"),
+        _ if detail.is_empty() => format!("{subject} needs a look"),
+        _ => format!("{subject}: {detail}; open it to look"),
+    };
+    let text = if reminder {
+        format!("Reminder: {text}")
+    } else {
+        text
+    };
+    format!("{}.", text.trim_end_matches('.'))
+}
+
+// ---- who speaks ------------------------------------------------------------------------
+
+/// A client that asked to speak, and when it last did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Claim {
+    pub client: String,
+    pub at_ms: u64,
+}
+
+/// How long a speaker may be silent before another takes over.
+pub const TAKEOVER_MS: u64 = 30_000;
+
+/// Which client speaks. The current speaker keeps the job while it keeps
+/// claiming; if it stops for `TAKEOVER_MS` the most recently active other
+/// client takes over. With no current speaker the owner's preferred client wins
+/// when it is active, otherwise the most recently active one. `claims` holds
+/// every unmuted client's latest claim.
+pub fn elect(
+    claims: &[Claim],
+    now_ms: u64,
+    current: Option<&str>,
+    preferred: Option<&str>,
+) -> Option<String> {
+    let fresh: Vec<&Claim> = claims
+        .iter()
+        .filter(|c| now_ms.saturating_sub(c.at_ms) < TAKEOVER_MS)
+        .collect();
+    if let Some(cur) = current {
+        if fresh.iter().any(|c| c.client == cur) {
+            return Some(cur.to_string());
+        }
+    }
+    if let Some(p) = preferred {
+        if fresh.iter().any(|c| c.client == p) {
+            return Some(p.to_string());
+        }
+    }
+    fresh
+        .iter()
+        .max_by(|a, b| a.at_ms.cmp(&b.at_ms).then_with(|| b.client.cmp(&a.client)))
+        .map(|c| c.client.clone())
+}
+
+/// Should the daemon speak itself? Only when speech is on, and no monitor,
+/// muted or not, has been heard from within the takeover time.
+pub fn daemon_should_speak(enabled: bool, last_claim_ms: Option<u64>, now_ms: u64) -> bool {
+    enabled && last_claim_ms.is_none_or(|t| now_ms.saturating_sub(t) >= TAKEOVER_MS)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn st(since: u64) -> AlertState {
+        AlertState {
+            since_ms: since,
+            acked: false,
+        }
+    }
+
+    fn attempt(c: Channel, d: Delivery, ok: bool, at: u64) -> Attempt {
+        Attempt {
+            channel: c,
+            delivery: d,
+            ok,
+            permanent: false,
+            at_ms: at,
+        }
+    }
+
+    fn channels(kind: &str) -> Vec<(Channel, u64)> {
+        Routing::defaults()
+            .rules(kind)
+            .iter()
+            .map(|r| (r.channel, r.after_ms / MINUTE_MS))
+            .collect()
+    }
+
+    #[test]
+    fn the_defaults_are_part_19s_table() {
+        use Channel::*;
+        assert_eq!(
+            channels("needs_you"),
+            vec![
+                (Monitor, 0),
+                (Sound, 0),
+                (Speech, 0),
+                (Push, 10),
+                (Email, 60)
+            ]
+        );
+        for k in ["failed", "landing"] {
+            assert_eq!(
+                channels(k),
+                vec![(Monitor, 0), (Sound, 0), (Speech, 0), (Push, 10)]
+            );
+        }
+        for k in ["daemon_down", "credentials", "provider_outage"] {
+            let c: Vec<Channel> = channels(k).into_iter().map(|x| x.0).collect();
+            assert_eq!(c, vec![Monitor, Sound, Speech, Push, Email, Webhook]);
+            assert!(channels(k).iter().all(|x| x.1 == 0));
+        }
+        assert_eq!(channels("landed"), vec![(Monitor, 0), (Speech, 0)]);
+        assert_eq!(channels("something_else"), vec![(Monitor, 0)]);
+    }
+
+    #[test]
+    fn an_alert_is_delivered_once_per_channel_and_waits_for_its_delay() {
+        let r = Routing::defaults();
+        let now = 1_000;
+        let d = due(&r, "needs_you", st(now), &[], now, 12 * 60);
+        assert_eq!(
+            d,
+            vec![
+                (Channel::Sound, Delivery::Initial),
+                (Channel::Speech, Delivery::Initial)
+            ]
+        );
+        let done = vec![
+            attempt(Channel::Sound, Delivery::Initial, true, now),
+            attempt(Channel::Speech, Delivery::Initial, true, now),
+        ];
+        assert!(due(&r, "needs_you", st(now), &done, now + 5 * MINUTE_MS, 0).is_empty());
+        // Push follows after ten minutes, email after an hour.
+        let d = due(&r, "needs_you", st(now), &done, now + 10 * MINUTE_MS, 0);
+        assert_eq!(d, vec![(Channel::Push, Delivery::Initial)]);
+    }
+
+    #[test]
+    fn one_reminder_then_silence() {
+        let r = Routing::defaults();
+        let mut done = vec![
+            attempt(Channel::Sound, Delivery::Initial, true, 0),
+            attempt(Channel::Speech, Delivery::Initial, true, 0),
+            attempt(Channel::Push, Delivery::Initial, true, 10 * MINUTE_MS),
+        ];
+        assert!(due(&r, "needs_you", st(0), &done, r.reminder_ms - 1, 0).is_empty());
+        let at = r.reminder_ms;
+        let d = due(&r, "needs_you", st(0), &done, at, 0);
+        assert_eq!(
+            d,
+            vec![
+                (Channel::Sound, Delivery::Reminder),
+                (Channel::Speech, Delivery::Reminder),
+                (Channel::Push, Delivery::Reminder)
+            ]
+        );
+        for (c, _) in &d {
+            done.push(attempt(*c, Delivery::Reminder, true, at));
+        }
+        // The hour-mark email goes once; it is not reminded, and nothing else repeats.
+        let later = due(&r, "needs_you", st(0), &done, 100 * MINUTE_MS, 0);
+        assert_eq!(later, vec![(Channel::Email, Delivery::Initial)]);
+        done.push(attempt(
+            Channel::Email,
+            Delivery::Initial,
+            true,
+            100 * MINUTE_MS,
+        ));
+        assert!(due(&r, "needs_you", st(0), &done, 100_000 * MINUTE_MS, 0).is_empty());
+    }
+
+    #[test]
+    fn acknowledging_stops_everything() {
+        let r = Routing::defaults();
+        let s = AlertState {
+            since_ms: 0,
+            acked: true,
+        };
+        assert!(due(&r, "daemon_down", s, &[], 10_000_000, 0).is_empty());
+    }
+
+    #[test]
+    fn quiet_hours_defer_but_do_not_drop_and_never_hide_the_monitor() {
+        let mut r = Routing::defaults();
+        r.quiet.insert(
+            Channel::Sound,
+            QuietHours {
+                start: 22 * 60,
+                end: 7 * 60,
+            },
+        );
+        r.quiet.insert(
+            Channel::Monitor,
+            QuietHours {
+                start: 0,
+                end: 1439,
+            },
+        );
+        assert!(!r.is_quiet(Channel::Monitor, 100));
+        let night = due(&r, "needs_you", st(0), &[], 0, 23 * 60);
+        assert_eq!(night, vec![(Channel::Speech, Delivery::Initial)]);
+        let morning = due(&r, "needs_you", st(0), &[], 8 * MINUTE_MS * 60, 8 * 60);
+        assert!(morning.contains(&(Channel::Sound, Delivery::Initial)));
+    }
+
+    #[test]
+    fn quiet_window_edges() {
+        let q = QuietHours {
+            start: 1320,
+            end: 420,
+        };
+        assert!(q.contains(1320) && q.contains(0) && q.contains(419));
+        assert!(!q.contains(420) && !q.contains(720) && !q.contains(1319));
+        let day = QuietHours {
+            start: 60,
+            end: 120,
+        };
+        assert!(day.contains(60) && !day.contains(120));
+        assert!(!QuietHours { start: 5, end: 5 }.contains(5));
+    }
+
+    #[test]
+    fn a_failing_delivery_is_retried_a_few_times_then_dropped() {
+        let r = Routing::defaults();
+        let mut done = vec![];
+        let mut sent = 0;
+        let mut now = 0;
+        while now < 100 * MINUTE_MS {
+            let d = due(&r, "daemon_down", st(0), &done, now, 0);
+            for (c, dl) in d {
+                if c == Channel::Webhook && dl == Delivery::Initial {
+                    sent += 1;
+                    done.push(attempt(c, dl, false, now));
+                } else {
+                    done.push(attempt(c, dl, true, now));
+                }
+            }
+            now += 30_000;
+        }
+        assert_eq!(sent, r.max_attempts);
+    }
+
+    #[test]
+    fn a_refusal_that_will_not_pass_is_not_tried_again() {
+        let r = Routing::defaults();
+        let mut a = attempt(Channel::Push, Delivery::Initial, false, 0);
+        a.permanent = true;
+        let d = due(&r, "daemon_down", st(0), &[a], 100 * MINUTE_MS, 0);
+        assert!(!d.contains(&(Channel::Push, Delivery::Initial)));
+    }
+
+    #[test]
+    fn spans_and_clock_times_parse() {
+        assert_eq!(parse_span("10m"), Some(600_000));
+        assert_eq!(parse_span("1h"), Some(3_600_000));
+        assert_eq!(parse_span("30"), Some(30_000));
+        assert_eq!(parse_span("2s"), Some(2000));
+        assert_eq!(parse_span("soon"), None);
+        assert_eq!(parse_clock("22:30"), Some(1350));
+        assert_eq!(parse_clock("24:00"), None);
+        assert_eq!(parse_clock("7"), None);
+    }
+
+    #[test]
+    fn decision_and_broke_sound_different() {
+        assert_ne!(sound_for("needs_you"), sound_for("failed"));
+        assert_eq!(sound_for("needs_you"), Sound::Decision);
+        assert_eq!(sound_for("failed"), Sound::Broke);
+        assert_eq!(sound_for("landed"), Sound::Info);
+    }
+
+    #[test]
+    fn the_sentence_names_the_task_the_trouble_and_the_next_step() {
+        assert_eq!(
+            sentence("needs_you", "Web API 204", "token format?", false),
+            "Web API 204 needs a decision on token format."
+        );
+        let s = sentence("failed", "Task 7", "the build is red", false);
+        assert_eq!(
+            s,
+            "Task 7 failed because the build is red; open it to retry or cancel."
+        );
+        assert_eq!(sentence("landed", "Task 7", "", false), "Task 7 landed.");
+        assert!(sentence("needs_you", "Task 7", "x", true).starts_with("Reminder: "));
+        let long = "word ".repeat(100);
+        assert!(sentence("needs_you", "T", &long, false).chars().count() < 200);
+        assert_eq!(
+            sentence("failed", "T", "a.\n\nb", false)
+                .matches('.')
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn one_client_speaks_and_another_takes_over_after_thirty_seconds() {
+        let a = |t| Claim {
+            client: "a".into(),
+            at_ms: t,
+        };
+        let b = |t| Claim {
+            client: "b".into(),
+            at_ms: t,
+        };
+        // The most recently used wins when nobody speaks yet.
+        assert_eq!(
+            elect(&[a(1000), b(2000)], 3000, None, None).as_deref(),
+            Some("b")
+        );
+        // The speaker keeps the job while it claims, even if the other is newer.
+        assert_eq!(
+            elect(&[a(1000), b(2000)], 3000, Some("a"), None).as_deref(),
+            Some("a")
+        );
+        // Silent for 30 s: the other takes over.
+        let now = 1000 + TAKEOVER_MS;
+        assert_eq!(
+            elect(&[a(1000), b(now - 1)], now, Some("a"), None).as_deref(),
+            Some("b")
+        );
+        // Preferred wins when no one has the job.
+        assert_eq!(
+            elect(&[a(1000), b(2000)], 3000, None, Some("a")).as_deref(),
+            Some("a")
+        );
+        // Nobody fresh, nobody speaks.
+        assert_eq!(elect(&[a(0)], TAKEOVER_MS + 1, Some("a"), None), None);
+        assert_eq!(elect(&[], 5, None, None), None);
+    }
+
+    #[test]
+    fn the_daemon_speaks_only_when_no_monitor_is_around() {
+        assert!(!daemon_should_speak(false, None, 100));
+        assert!(daemon_should_speak(true, None, 100));
+        assert!(!daemon_should_speak(true, Some(90_000), 100_000));
+        assert!(daemon_should_speak(true, Some(60_000), 100_000));
+    }
+}

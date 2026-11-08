@@ -343,6 +343,7 @@ impl Daemon {
                     // A pause that has run out lets claims go; alerts follow conditions.
                     d.admit();
                     crate::attention::sync_alerts(&d);
+                    crate::notify::tick(&d);
                 }
             });
     }

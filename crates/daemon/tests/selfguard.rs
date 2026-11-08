@@ -419,6 +419,51 @@ fn the_cooldown_still_stops_the_owner() {
     assert!(e.contains("cooling down after a rollback"), "{e}");
 }
 
+// ---- Stage 65: proposed filings spend nothing ------------------------------------------------
+
+#[test]
+fn proposed_filings_are_not_refused_by_the_open_week_or_step_limits() {
+    let w = self_world("max_open = 1\nper_week = 1\nmax_steps = 1\n");
+    let pid = w.d.project_id_by_name("scratch").unwrap();
+    file_task_as(&w.d, "a", "x", false, TrustSource::Owner, false);
+    // Full: a queued filing is refused, a proposed one is not.
+    assert!(selfguard::check_filing_as(&w.d, pid, TrustSource::Outside).is_err());
+    assert!(selfguard::check_filing_as(&w.d, pid, TrustSource::Owner).is_err());
+    assert!(selfguard::check_filing_proposal(&w.d, pid).is_ok());
+    for i in 0..5 {
+        file_task_as(
+            &w.d,
+            &format!("p{i}"),
+            "x",
+            false,
+            TrustSource::Outside,
+            true,
+        );
+        assert!(selfguard::check_filing_proposal(&w.d, pid).is_ok());
+    }
+    // Proposed tasks are not counted as open.
+    let u = selfguard::status(
+        &w.d,
+        pid,
+        w.d.project(pid).unwrap().self_cfg.as_ref().unwrap(),
+        mason_daemon::daemon::now_ms(),
+    );
+    assert_eq!(u.open, 1, "only the queued one is open");
+}
+
+#[test]
+fn the_cooldown_still_refuses_a_proposed_filing() {
+    let w = self_world("");
+    let pid = w.d.project_id_by_name("scratch").unwrap();
+    mason_daemon::update::Runtimes::new(&w.d.cfg.data_dir).record_rollback(
+        "aaaaaaaaaaaa",
+        "bbbbbbbbbbbb",
+        mason_daemon::daemon::now_ms(),
+    );
+    let e = selfguard::check_filing_proposal(&w.d, pid).unwrap_err();
+    assert!(e.contains("cooling down after a rollback"), "{e}");
+}
+
 // ---- Stage 41: which diff is read -----------------------------------------------------------
 
 mod scan {

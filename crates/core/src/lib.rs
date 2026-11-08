@@ -5,13 +5,18 @@
 //! Nothing in this crate reads the clock, touches the filesystem or the
 //! network. Time arrives inside events as a [`Timestamp`].
 
+pub mod access;
 mod entities;
 mod event;
 mod ids;
+pub mod introspect;
+pub mod notify;
 pub mod progress;
 pub mod progress_text;
 pub mod proposal;
+pub mod reset_text;
 mod task;
+pub mod usage_text;
 
 pub use entities::*;
 pub use event::*;

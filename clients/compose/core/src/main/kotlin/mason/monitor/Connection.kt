@@ -114,7 +114,10 @@ class MonitorConnection(
             is Page.Task -> { views += ViewKind.TASK_DETAIL; task = p.id }
             Page.Landing -> views += ViewKind.LANDING
             Page.Pipeline -> views += ViewKind.EDITOR
-            Page.Health -> model.raw("GET", "/resources", id = "health")
+            Page.Health -> {
+                model.raw("GET", "/resources", id = "health")
+                model.raw("GET", "/health", id = "introspection")
+            }
             else -> {}
         }
         write(ClientMessage(subscribe = Subscribe(views = views, project = model.project, task = task, editor_step = model.editorStep)))

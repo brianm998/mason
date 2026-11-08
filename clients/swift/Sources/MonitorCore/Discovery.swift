@@ -36,3 +36,48 @@ public enum Discovery {
         return DaemonInfo(port: port, pid: v["pid"] as? Int, startedMs: v["started_ms"] as? Int)
     }
 }
+
+/// What a `_mason._tcp` Bonjour record says (TXT: proto, fp, version; the instance is
+/// "MASON on <host>").
+public struct ServiceRecord: Equatable, Sendable {
+    public static let type = "_mason._tcp"
+    public var instance: String
+    public var proto: Int
+    public var fingerprint: String
+    public var version: String
+
+    /// nil when the record lacks a valid fingerprint or protocol: such a record is ignored.
+    public static func parse(instance: String, txt: [String: String]) -> ServiceRecord? {
+        guard let fp = txt["fp"]?.lowercased(), Pin.isFingerprint(fp),
+              let proto = txt["proto"].flatMap({ Int($0) }) else { return nil }
+        return ServiceRecord(instance: instance, proto: proto, fingerprint: fp, version: txt["version"] ?? "")
+    }
+}
+
+#if canImport(Network)
+import Network
+
+/// Looks for daemons on the local network. The app's Info.plist must declare `_mason._tcp` in
+/// NSBonjourServices and say why in NSLocalNetworkUsageDescription, or iOS shows nothing.
+public final class BonjourBrowser: @unchecked Sendable {
+    private let browser = NWBrowser(for: .bonjourWithTXTRecord(type: ServiceRecord.type, domain: nil), using: .tcp)
+    public var onChange: (([(record: ServiceRecord, endpoint: NWEndpoint)]) -> Void)?
+    public init() {}
+
+    public func start() {
+        browser.browseResultsChangedHandler = { [weak self] results, _ in
+            let found: [(record: ServiceRecord, endpoint: NWEndpoint)] = results.compactMap { r in
+                guard case let .service(name, _, _, _) = r.endpoint,
+                      case let .bonjour(txt) = r.metadata else { return nil }
+                var d: [String: String] = [:]
+                for (k, v) in txt.dictionary { d[k] = v }
+                return ServiceRecord.parse(instance: name, txt: d).map { ($0, r.endpoint) }
+            }
+            self?.onChange?(found)
+        }
+        browser.start(queue: .main)
+    }
+
+    public func stop() { browser.cancel() }
+}
+#endif

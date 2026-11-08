@@ -875,13 +875,12 @@ pub fn run(c: &Ctx) {
         Ok(None) => {}
         Ok(Some(files)) => {
             let base = c.project.base_ref();
-            return c.conclude(
-                mason_definition::graph::Outcome::Red,
+            return c.conflict(
                 format!(
                     "the branch conflicts with {base} in: {}",
                     files.replace('\n', ", ")
                 ),
-                Some(crate::jobs::conflict_note(&base, &files)),
+                crate::jobs::conflict_note(&base, &files),
             );
         }
         Err(why) => return c.fail(why),
