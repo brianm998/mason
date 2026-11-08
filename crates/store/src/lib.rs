@@ -1883,7 +1883,7 @@ impl Store {
                     retried: r.get::<_, i64>(6)? != 0,
                 })
             })?;
-            rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+            rows.collect()
         })
     }
 
