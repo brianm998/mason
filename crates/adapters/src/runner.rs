@@ -13,7 +13,7 @@
 
 use mason_adapter_api::contract::ContractHandle;
 use mason_adapter_api::{
-    AgentAdapter, AgentEvent, Outcome, RateLimitInfo, SessionSpec, StepKind, TokenReport,
+    AgentAdapter, AgentEvent, Outcome, SessionSpec, StepKind, TokenReport, UsageSnapshot,
 };
 use serde_json::Value;
 
@@ -145,7 +145,8 @@ pub struct StepReport {
     pub nudges: u32,
     pub rejections: u32,
     pub api_retries: u32,
-    pub rate_limits: Vec<RateLimitInfo>,
+    /// The latest usage snapshot the provider gave, stamped on receipt.
+    pub usage: Option<UsageSnapshot>,
     pub tool_calls: Vec<String>,
     pub progress: Vec<String>,
     pub proposals: Vec<Value>,
@@ -160,7 +161,7 @@ impl StepReport {
             nudges: 0,
             rejections: 0,
             api_retries: 0,
-            rate_limits: vec![],
+            usage: None,
             tool_calls: vec![],
             progress: vec![],
             proposals: vec![],
@@ -292,7 +293,13 @@ impl<'a> StepRunner<'a> {
                             f(&m);
                         }
                     }
-                    Some(AgentEvent::RateLimit(l)) => r.rate_limits.push(l),
+                    Some(AgentEvent::Usage(mut u)) => {
+                        u.observed_at = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .ok()
+                            .map(|d| d.as_secs());
+                        r.usage = Some(u);
+                    }
                     Some(AgentEvent::ApiRetry { .. }) => r.api_retries += 1,
                     Some(AgentEvent::ToolCall { name, .. }) => r.tool_calls.push(name),
                     Some(AgentEvent::Text(_)) => {}

@@ -9,8 +9,9 @@
 
 use mason_adapter_api::contract::preamble;
 use mason_adapter_api::{
-    netguard, AdapterError, AgentAdapter, AgentCaps, AgentEvent, Canceller, Outcome, RateLimitInfo,
-    SessionHandle, SessionSpec, TokenReport,
+    netguard, AdapterError, AgentAdapter, AgentCaps, AgentEvent, BillingKind, Blocked, BlockedWhy,
+    Canceller, Outcome, Overage, OverageState, SessionHandle, SessionSpec, TokenReport, UsageModel,
+    UsageSnapshot, Window, WindowSpec, WindowState,
 };
 use nix::sys::signal::{killpg, Signal};
 use nix::unistd::Pid;
@@ -275,6 +276,28 @@ impl AgentAdapter for ClaudeAdapter {
         }
     }
 
+    fn usage_model(&self, billing: BillingKind) -> UsageModel {
+        match billing {
+            BillingKind::Subscription => UsageModel {
+                windows: ["five_hour", "seven_day", "seven_day_opus"]
+                    .map(|id| {
+                        let (label, len) = claude_window_spec(id);
+                        WindowSpec::new(id, &label, len)
+                    })
+                    .to_vec(),
+                utilization: true,
+                overage: true,
+                spend: false,
+            },
+            BillingKind::Api => UsageModel {
+                windows: vec![],
+                utilization: false,
+                overage: false,
+                spend: true,
+            },
+        }
+    }
+
     fn start(&self, spec: SessionSpec) -> Result<Box<dyn SessionHandle>, AdapterError> {
         let cmd = self.build_command(&spec, None)?;
         self.launch(cmd, &spec)
@@ -496,8 +519,10 @@ pub struct ParseState {
     pub dialect: Dialect,
     pub session_id: Option<String>,
     pub result: Option<ResultInfo>,
-    /// Latest limit status seen, for classifying a failed result.
-    pub limit: Option<RateLimitInfo>,
+    /// The latest usage snapshot the stream gave, for classifying a failed result.
+    pub usage: Option<UsageSnapshot>,
+    /// From the stream's own `apiKeySource`: a key means pay-per-token.
+    pub billing: BillingKind,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -528,6 +553,119 @@ pub(crate) fn clip(s: &str, n: usize) -> String {
     }
 }
 
+/// The windows Claude names, with their labels and lengths.
+const CLAUDE_WINDOWS: &[(&str, &str, u64)] = &[
+    ("five_hour", "5-hour", 5 * 3600),
+    ("seven_day", "Weekly", 7 * 86400),
+];
+
+fn claude_window_spec(id: &str) -> (String, Option<u64>) {
+    match id {
+        "seven_day_opus" => ("Weekly (Opus)".into(), Some(7 * 86400)),
+        _ => CLAUDE_WINDOWS
+            .iter()
+            .find(|(i, _, _)| *i == id)
+            .map(|(_, l, n)| (l.to_string(), Some(*n)))
+            // An id not known yet passes through, labelled with itself.
+            .unwrap_or((id.to_string(), None)),
+    }
+}
+
+fn window_state(status: Option<&str>) -> WindowState {
+    match status {
+        Some("allowed") | None => WindowState::Ok,
+        Some("allowed_warning") => WindowState::Warning,
+        // `rejected`, and anything we do not know: when unsure, blocked.
+        Some(_) => WindowState::Blocked,
+    }
+}
+
+fn claude_window(id: &str, status: Option<&str>, w: &Value) -> Window {
+    let (label, length_secs) = claude_window_spec(id);
+    Window {
+        id: id.into(),
+        label,
+        length_secs,
+        // Only what the stream reported, and only a fraction.
+        utilization: w["utilization"]
+            .as_f64()
+            .filter(|u| (0.0..=1.0).contains(u)),
+        resets_at: num(w, "resetsAt"),
+        state: window_state(status.or_else(|| w["status"].as_str())),
+    }
+}
+
+/// Read one `rate_limit_info` object: every window, the overage fields, and
+/// from them whether new work is refused (ADR 0043).
+pub fn usage_from_limit_info(i: &Value) -> UsageSnapshot {
+    let top_status = i["status"].as_str();
+    let top_type = i["rateLimitType"].as_str();
+    let mut windows: Vec<Window> = i["unifiedWindows"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .map(|(id, w)| claude_window(id, None, w))
+        .collect();
+    // The window named at the top level, when `unifiedWindows` lacks it.
+    if let Some(t) = top_type {
+        if !windows.iter().any(|w| w.id == t) {
+            windows.push(claude_window(t, top_status, i));
+            if let Some(w) = windows.last_mut() {
+                w.utilization = None;
+            }
+        }
+    }
+    let using = i["isUsingOverage"].as_bool();
+    let o_status = i["overageStatus"].as_str();
+    let o_reason = i["overageDisabledReason"].as_str();
+    let state = match (using, o_status) {
+        (Some(true), Some("rejected")) => OverageState::UsedUp,
+        (Some(true), _) => OverageState::InUse,
+        (_, Some("rejected")) => match o_reason {
+            Some(r) => OverageState::Disabled(r.to_string()),
+            None => OverageState::Off,
+        },
+        (None, None) if o_reason.is_none() => OverageState::NotOffered,
+        (_, _) => OverageState::Off,
+    };
+    let overage = Overage {
+        state,
+        resets_at: num(i, "overageResetsAt"),
+    };
+    let blocked_windows: Vec<&Window> = windows
+        .iter()
+        .filter(|w| w.state == WindowState::Blocked)
+        .collect();
+    // It stays blocked until the last blocked window clears.
+    let latest = blocked_windows
+        .iter()
+        .max_by_key(|w| w.resets_at.unwrap_or(0))
+        .copied();
+    let blocked = match (&overage.state, latest) {
+        (OverageState::InUse, _) => None,
+        (OverageState::UsedUp, Some(w)) => Some(Blocked {
+            why: BlockedWhy::OverageUsedUp,
+            until: overage.resets_at.or(w.resets_at),
+        }),
+        (_, Some(w)) => Some(Blocked {
+            why: BlockedWhy::Window(w.id.clone()),
+            until: w.resets_at,
+        }),
+        // Refused at the top level with no window to name.
+        (_, None) if window_state(top_status) == WindowState::Blocked => Some(Blocked {
+            why: BlockedWhy::Unreported(format!("status {}", top_status.unwrap_or("?"))),
+            until: num(i, "resetsAt"),
+        }),
+        _ => None,
+    };
+    UsageSnapshot {
+        windows,
+        overage,
+        blocked,
+        ..Default::default()
+    }
+}
+
 /// Parse one `stream-json` line. Unknown or malformed lines yield nothing.
 pub fn parse_line(line: &str, st: &mut ParseState) -> Vec<AgentEvent> {
     if st.dialect == Dialect::Codex {
@@ -542,6 +680,9 @@ pub fn parse_line(line: &str, st: &mut ParseState) -> Vec<AgentEvent> {
             st.session_id = v["session_id"].as_str().map(String::from);
             if let Some(m) = v["model"].as_str().filter(|m| !m.is_empty()) {
                 out.push(AgentEvent::Model(m.to_string()));
+            }
+            if v["apiKeySource"].as_str().is_some_and(|k| k != "none") {
+                st.billing = BillingKind::Api;
             }
         }
         (Some("system"), Some("api_retry")) => out.push(AgentEvent::ApiRetry {
@@ -566,19 +707,13 @@ pub fn parse_line(line: &str, st: &mut ParseState) -> Vec<AgentEvent> {
             }
         }
         (Some("rate_limit_event"), _) => {
-            let i = &v["rate_limit_info"];
-            let window = i["rateLimitType"].as_str().map(String::from);
-            let utilization = window
-                .as_deref()
-                .and_then(|w| i["unifiedWindows"][w]["utilization"].as_f64());
-            let info = RateLimitInfo {
-                status: i["status"].as_str().unwrap_or("unknown").to_string(),
-                window,
-                resets_at_epoch: num(i, "resetsAt"),
-                utilization,
-            };
-            st.limit = Some(info.clone());
-            out.push(AgentEvent::RateLimit(info));
+            let mut snap = usage_from_limit_info(&v["rate_limit_info"]);
+            snap.session_id = v["session_id"]
+                .as_str()
+                .map(String::from)
+                .or_else(|| st.session_id.clone());
+            st.usage = Some(snap.clone());
+            out.push(AgentEvent::Usage(snap));
         }
         (Some("result"), _) => {
             let u = &v["usage"];
@@ -591,6 +726,33 @@ pub fn parse_line(line: &str, st: &mut ParseState) -> Vec<AgentEvent> {
             }));
             if st.session_id.is_none() {
                 st.session_id = v["session_id"].as_str().map(String::from);
+            }
+            // Spend belongs to an api account; on a plan the figure is notional.
+            let spend = (st.billing == BillingKind::Api)
+                .then(|| v["total_cost_usd"].as_f64())
+                .flatten();
+            let refused = num(&v, "api_error_status") == Some(429);
+            let mut snap = st.usage.clone().unwrap_or_default();
+            let mut changed = false;
+            if spend.is_some() {
+                snap.spend_usd = spend;
+                changed = true;
+            }
+            // A 429 no window explains is a rate limit that clears in minutes.
+            if refused
+                && snap.blocked.is_none()
+                && !snap.windows.iter().any(|w| w.state == WindowState::Blocked)
+            {
+                snap.blocked = Some(Blocked {
+                    why: BlockedWhy::RateLimit,
+                    until: None,
+                });
+                changed = true;
+            }
+            if changed {
+                snap.session_id = st.session_id.clone();
+                st.usage = Some(snap.clone());
+                out.push(AgentEvent::Usage(snap));
             }
             st.result = Some(ResultInfo {
                 is_error: v["is_error"].as_bool().unwrap_or(false),
@@ -637,7 +799,9 @@ pub fn final_outcome(
     }
     let t = r.text.to_lowercase();
     let limited = r.api_error_status == Some(429)
-        || st.limit.as_ref().is_some_and(|l| l.status == "rejected")
+        || st.usage.as_ref().is_some_and(|u| {
+            u.blocked.is_some() || u.windows.iter().any(|w| w.state == WindowState::Blocked)
+        })
         || (t.contains("limit")
             && (t.contains("usage") || t.contains("hit your") || t.contains("reached")));
     if limited {
@@ -646,9 +810,17 @@ pub fn final_outcome(
             .split_once("resets")
             .map(|(_, rest)| rest.trim().to_string())
             .or_else(|| {
-                st.limit
+                let u = st.usage.as_ref()?;
+                u.blocked
                     .as_ref()
-                    .and_then(|l| l.resets_at_epoch)
+                    .and_then(|b| b.until)
+                    .or_else(|| {
+                        u.windows
+                            .iter()
+                            .filter(|w| w.state == WindowState::Blocked)
+                            .filter_map(|w| w.resets_at)
+                            .max()
+                    })
                     .map(|e| format!("epoch {e}"))
             });
         return Outcome::UsageLimit { resets_at };
@@ -725,21 +897,26 @@ mod tests {
         assert!(ev.iter().any(
             |e| matches!(e, AgentEvent::ToolCall { name, .. } if name == "mcp__spike__run_check")
         ));
-        let rl = ev
+        let u = ev
             .iter()
             .find_map(|e| {
-                if let AgentEvent::RateLimit(r) = e {
-                    Some(r)
+                if let AgentEvent::Usage(u) = e {
+                    Some(u)
                 } else {
                     None
                 }
             })
             .unwrap();
-        assert_eq!(rl.status, "allowed");
-        assert_eq!(rl.window.as_deref(), Some("five_hour"));
-        assert!(rl.resets_at_epoch.is_some());
+        let w = u.window("five_hour").unwrap();
+        assert_eq!(w.state, WindowState::Ok, "status allowed");
+        assert_eq!(w.id, "five_hour", "the window named in the event");
+        assert!(w.resets_at.is_some());
         assert!(
-            rl.utilization.is_some(),
+            u.windows.iter().any(|x| x.id == "seven_day"),
+            "all windows kept"
+        );
+        assert!(
+            w.utilization.is_some(),
             "reported by the stream, so passed on"
         );
     }
@@ -748,7 +925,7 @@ mod tests {
     fn synthetic_usage_limit_is_a_hold_with_a_reset_time() {
         let (ev, st) = parse("synthetic_usage_limit.jsonl");
         assert!(
-            matches!(ev.iter().find(|e| matches!(e, AgentEvent::RateLimit(_))), Some(AgentEvent::RateLimit(r)) if r.status == "rejected")
+            matches!(ev.iter().find(|e| matches!(e, AgentEvent::Usage(_))), Some(AgentEvent::Usage(u)) if u.window("five_hour").is_some_and(|w| w.state == WindowState::Blocked) && u.windows[0].utilization.is_none())
         );
         assert_eq!(
             final_outcome(&st, false, Some(1), ""),
