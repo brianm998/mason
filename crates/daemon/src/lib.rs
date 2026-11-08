@@ -16,6 +16,7 @@ pub mod editor;
 pub mod http;
 pub mod jobs;
 pub mod landing;
+pub mod launchview;
 pub mod numbers;
 pub mod plan_view;
 pub mod plugins;

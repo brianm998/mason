@@ -25,6 +25,7 @@ data class Item(
 fun TaskRow.item(prefix: String, order: Int): Item {
     val texts = mutableListOf(key, title, project, state)
     if (why_waiting.isNotEmpty()) texts += why_waiting
+    if (display.isNotEmpty()) texts += display
     // The task page says what it waits for and what waits for it.
     if (prefix == "detail") {
         if (blockers.isNotEmpty()) texts += "waiting for " + blockers.joinToString(", ") { "#$it" }
@@ -95,7 +96,7 @@ fun MonitorModel.visibleItems(): List<Item> {
             if (t != null && x != null) out += x.item(t.id, canAct)
         }
         h.active.forEachIndexed { i, a ->
-            out += Item("active:${a.task}", listOf(a.model, a.project, "#${a.task}", a.step), order = i)
+            out += Item("active:${a.task}", listOf(a.display.ifEmpty { a.model }, a.project, "#${a.task}", a.step), order = i)
         }
         out += Item("sessions", listOf("${h.sessions_used} of ${h.sessions_limit}"), listOf("increase", "decrease"))
     }
@@ -105,7 +106,7 @@ fun MonitorModel.visibleItems(): List<Item> {
         if (r != null) {
             out += r.item("detail", 0)
             out += r.progressItems(daemonNow())
-            d.steps.forEachIndexed { i, s -> out += Item("step:${s.run}", listOf(s.name, s.outcome), order = i) }
+            d.steps.forEachIndexed { i, s -> out += Item("step:${s.run}", listOf(s.name, s.outcome) + s.launches.map { it.display }, order = i) }
             d.card?.let { out += it.item(r.id, canAct) }
             d.approval?.let { out += it.item(r.id, canAct) }
         }
