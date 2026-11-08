@@ -282,6 +282,10 @@ struct LandingPage: View {
                     ForEach(l.modes, id: \.self) { m in
                         Text(m).font(theme.body()).foregroundStyle(theme.muted)
                     }
+                    // One line per project: tracker off, polling with counts, or stopped with why.
+                    ForEach(l.trackers, id: \.self) { t in
+                        Text(t).font(theme.body()).foregroundStyle(t.contains("stopped") || t.contains(" off;") ? theme.attention : theme.muted)
+                    }
                     ForEach(l.freezes, id: \.project) { f in
                         Text("Frozen: \(f.project): \(f.reason)\(f.fixTask > 0 ? " (fix: task #\(f.fixTask))" : "")")
                             .font(theme.body()).foregroundStyle(theme.attention)

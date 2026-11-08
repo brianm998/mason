@@ -246,6 +246,16 @@ class MonitorCoreTest {
         assertEquals(13, m.lastSeq, "an older number never moves it back")
     }
 
+    @Test fun theLandingViewCarriesOneTrackerLinePerProject() {
+        val m = MonitorModel()
+        val lines = listOf(
+            "mason: tracker off; issues are not imported, add [tracker] to /c/projects/mason.toml",
+            "web: tracker stopped: HTTP 404 (/c/projects/web.toml)",
+        )
+        m.apply(View(landing = LandingView(trackers = lines)))
+        assertEquals(lines, m.landing?.trackers)
+    }
+
     @Test fun theProtocolsJsonMappingDecodesWhatTheDaemonSends() {
         // proto3 JSON as `masond` writes it: camelCase names, enums by name, 64-bit as strings,
         // defaults omitted, and a field this client has never heard of.

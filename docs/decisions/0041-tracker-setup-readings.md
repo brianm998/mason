@@ -1,0 +1,11 @@
+# 0041: Readings made while making the tracker easy to turn on (s61)
+
+- **A missing tracker is a note, not a failure.** Many projects have a GitHub remote and no wish to import issues. `mason doctor` gets a third level, `note`, that prints but never makes the exit code non-zero.
+- **Where the line goes on the monitors.** The task asks for "the monitors' project page". The monitors have no per-project page; the project-scoped view is the landing page (`LandingView` is built per project and for all). The line is `LandingView.trackers`, one per in-scope project, added as field 9 so older clients ignore it. A per-project tracker view would be a new view kind in both clients for one line.
+- **Doctor asks the daemon.** Poll state lives only in the running `masond`. Doctor stays file-based for everything else; when a tracker is configured it reads `/status` and says the state is unknown when no daemon answers, rather than guessing from files. `/status` carries the config path too, so both CLI and monitors name the same file (`<config dir>/projects/<id>.toml`).
+- **"Waiting for a slot" counts issues, not refusals.** The refusal happened inside a loop that repeats until a pass imports nothing, so a counter would count each item once per pass. The refused issues are kept in a map by number and counted after the loop. The alert `tracker-slots` names them and the first reason; it clears when none waits.
+- **Counts survive a quiet poll.** A conditional poll answered "not modified" looks at no issues. Replacing the record with zeros would make doctor claim nothing is imported, so only the time moves and the last full look's counts stay. A failed look likewise keeps them and adds the error.
+- **`unchanged` means an imported issue seen again with nothing to apply** (no edit, no closure). Ignored issues are counted as ignored, not unchanged.
+- **Limits are not touched.** No `[self]` limit, guard, gate or verdict changed. The one gate file edited is `clients/features.toml` (one row added).
+- **No GitHub in the test.** `fake-github` gained a `listing-status` file to answer the listing with an error code; fixtures are loopback only.
+- **Numbers.** s61 and 0041 were handed out by MASON.

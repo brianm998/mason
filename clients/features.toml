@@ -86,6 +86,11 @@ description = "Queue, batches, phases, debts and freeze status"
 swift = "done"
 compose = "done"
 
+[feature.tracker-state]
+description = "The landing page shows one tracker line per project: off (with the config path to add [tracker] to), polling with imported, ignored, unchanged and waiting-for-a-slot counts, or stopped with the reason"
+swift = "done"
+compose = "done"
+
 [feature.monitor-update]
 description = "A banner when a newer monitor exists, with a button that builds it from source and relaunches; read-only, with the reason, when the protocol is too old"
 swift = "done"

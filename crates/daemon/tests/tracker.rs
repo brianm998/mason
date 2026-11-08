@@ -154,6 +154,8 @@ fn outside_issues_are_ignored_until_the_owner_labels_them_and_stay_untrusted() {
         sync_items(&d, pid, "mason", &items[..3]),
         mason_daemon::tracker::Summary {
             ignored: 0,
+            // The three imported issues are seen again and have not changed.
+            unchanged: 3,
             ..Default::default()
         }
     );
@@ -575,4 +577,68 @@ fn a_canceled_blocker_keeps_the_dependent_held_and_raises_an_alert() {
         "{:?}",
         alerts(&d)
     );
+}
+
+#[test]
+fn items_over_a_self_limit_wait_for_a_slot_and_the_count_is_per_issue() {
+    let s = Scratch::new("true", json!({"steps": {}}));
+    s.write_project("scratch", "true", "[self]\nmax_open = 1\n");
+    let d = s.start();
+    mason_daemon::attention::pause(&d, "", "claims", "test", 3600).unwrap();
+    let pid = d.project_id_by_name("scratch").unwrap();
+    let owner = d.cfg.owner_names[0].clone();
+    let items = vec![
+        item(1, "First", &owner, &[]),
+        item(2, "Second", &owner, &[]),
+        item(3, "Third", &owner, &[]),
+        item(4, "Stranger's", "stranger", &[]),
+    ];
+    let sum = sync_items(&d, pid, "mason", &items);
+    assert_eq!(
+        (sum.imported, sum.waiting_slot, sum.ignored),
+        (1, 2, 1),
+        "{sum:?}"
+    );
+    // Looking again does not count them twice, and the first one is unchanged.
+    let sum = sync_items(&d, pid, "mason", &items);
+    assert_eq!(
+        (sum.imported, sum.waiting_slot, sum.unchanged),
+        (0, 2, 1),
+        "{sum:?}"
+    );
+    let a = alerts(&d);
+    assert!(
+        a.iter()
+            .any(|t| t.contains("2 issue(s) wait for a slot (#2, #3)")),
+        "{a:?}"
+    );
+    assert!(task_for(&d, 2).is_none() && task_for(&d, 3).is_none());
+}
+
+#[test]
+fn the_last_poll_is_recorded_and_a_stop_keeps_the_counts_and_the_reason() {
+    let (_s, d, pid) = world();
+    let owner = d.cfg.owner_names[0].clone();
+    assert!(d.tracker_record(pid).is_none());
+    let fake = Fake::default();
+    fake.script.lock().unwrap().push(Ok(Listing::Items {
+        items: vec![
+            item(1, "One", &owner, &[]),
+            item(2, "Drive-by", "stranger", &[]),
+        ],
+        etag: None,
+    }));
+    poll_once(&d, pid, &fake, &cfg()).unwrap();
+    let r = d.tracker_record(pid).unwrap();
+    assert!(r.at_ms > 0 && r.error.is_none());
+    assert_eq!((r.summary.imported, r.summary.ignored), (1, 1));
+    fake.script
+        .lock()
+        .unwrap()
+        .push(Err(ApiError::new(ErrorKind::NotFound, "HTTP 404")));
+    poll_once(&d, pid, &fake, &cfg()).unwrap_err();
+    let r = d.tracker_record(pid).unwrap();
+    assert!(r.error.unwrap().contains("404"));
+    assert_eq!(r.summary.imported, 1, "the last full look's counts stay");
+    assert!(d.tracker_stopped(pid).is_some());
 }

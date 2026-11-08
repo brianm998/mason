@@ -211,6 +211,11 @@ impl Daemon {
         self.tracker.stopped(p)
     }
 
+    /// What the last look at a project's tracker found.
+    pub fn tracker_record(&self, p: ProjectId) -> Option<crate::tracker::PollRecord> {
+        self.tracker.record(p)
+    }
+
     /// Ask the project's tracker again at once.
     pub fn tracker_refresh(&self, p: ProjectId) {
         self.tracker.refresh(p);

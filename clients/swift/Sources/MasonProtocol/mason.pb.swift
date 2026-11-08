@@ -1758,6 +1758,9 @@ public nonisolated struct Mason_V1_LandingView: Sendable {
   /// Milliseconds tasks waited while no batch was running.
   public var queueIdleMs: UInt64 = 0
 
+  /// One line per project: tracker off, polling (with counts), or stopped (with why).
+  public var trackers: [String] = []
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -5148,7 +5151,7 @@ nonisolated extension Mason_V1_FreezeLine: SwiftProtobuf.Message, SwiftProtobuf.
 
 nonisolated extension Mason_V1_LandingView: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".LandingView"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}debts\0\u{1}frozen\0\u{1}note\0\u{1}queue\0\u{1}modes\0\u{1}batches\0\u{1}freezes\0\u{3}queue_idle_ms\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}debts\0\u{1}frozen\0\u{1}note\0\u{1}queue\0\u{1}modes\0\u{1}batches\0\u{1}freezes\0\u{3}queue_idle_ms\0\u{1}trackers\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -5164,6 +5167,7 @@ nonisolated extension Mason_V1_LandingView: SwiftProtobuf.Message, SwiftProtobuf
       case 6: try { try decoder.decodeRepeatedMessageField(value: &self.batches) }()
       case 7: try { try decoder.decodeRepeatedMessageField(value: &self.freezes) }()
       case 8: try { try decoder.decodeSingularUInt64Field(value: &self.queueIdleMs) }()
+      case 9: try { try decoder.decodeRepeatedStringField(value: &self.trackers) }()
       default: break
       }
     }
@@ -5194,6 +5198,9 @@ nonisolated extension Mason_V1_LandingView: SwiftProtobuf.Message, SwiftProtobuf
     if self.queueIdleMs != 0 {
       try visitor.visitSingularUInt64Field(value: self.queueIdleMs, fieldNumber: 8)
     }
+    if !self.trackers.isEmpty {
+      try visitor.visitRepeatedStringField(value: self.trackers, fieldNumber: 9)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -5206,6 +5213,7 @@ nonisolated extension Mason_V1_LandingView: SwiftProtobuf.Message, SwiftProtobuf
     if lhs.batches != rhs.batches {return false}
     if lhs.freezes != rhs.freezes {return false}
     if lhs.queueIdleMs != rhs.queueIdleMs {return false}
+    if lhs.trackers != rhs.trackers {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

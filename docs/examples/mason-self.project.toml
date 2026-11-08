@@ -24,3 +24,17 @@ max_steps = 40
 period_h = 24
 # After a rollback, nothing is filed for this long (and one proposal is).
 cooldown_h = 24
+
+# Importing GitHub issues as tasks. Without this section the poller never runs for the project:
+# issues filed on GitHub do not become tasks, and `mason doctor` notes it. To turn it on, remove
+# the leading "# " from the lines below, set `repo`, put the token where `token` points
+# (never in this file: only a reference, `env:NAME` or `file:/path`), and restart `masond`.
+# An issue by an owner name is imported as it is; anyone else's only once it carries `label`.
+# See docs/self-hosting.md ("Importing issues").
+# [tracker]
+# kind = "github"
+# repo = "owner/name"
+# token = "env:MASON_GITHUB_TOKEN"   # or "file:/home/you/.config/mason/github-token"
+# label = "mason"                    # the label that lets an outside issue in
+# interval_s = 60                    # between polls (conditional: an unchanged list costs nothing)
+# webhook_secret = "env:MASON_WEBHOOK_SECRET"   # optional: a relay delivering webhooks refreshes at once

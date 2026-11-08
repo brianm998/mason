@@ -681,12 +681,14 @@ impl<'a> Ctx<'a> {
             })
             .collect();
         let mut modes = vec![];
+        let mut trackers = vec![];
         let mut idle = 0;
         let mut running_total = 0;
         for (pid, p) in &self.d.projects {
             if !in_scope(&p.id) {
                 continue;
             }
+            trackers.push(crate::tracker::state_line(self.d, *pid));
             idle += self.d.landing().idle_ms(*pid);
             running_total += self.d.landing().running_batches(*pid);
             modes.push(match crate::landing::load_config(self.d, *pid) {
@@ -743,6 +745,7 @@ impl<'a> Ctx<'a> {
                 .map(|t| self.row(t))
                 .collect(),
             modes,
+            trackers,
             batches: self
                 .d
                 .store

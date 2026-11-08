@@ -36,6 +36,19 @@ pub struct Hub {
     /// must not both import the same issue.
     one_at_a_time: Mutex<()>,
     cv: Condvar,
+    /// What the last look at each project's tracker found, for doctor, `/status`
+    /// and the monitors.
+    records: Mutex<HashMap<ProjectId, PollRecord>>,
+}
+
+/// The outcome of the last look at a project's tracker.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PollRecord {
+    /// Wall-clock milliseconds since the epoch.
+    pub at_ms: u64,
+    pub summary: Summary,
+    /// Why the look failed (or the poll stopped), when it did.
+    pub error: Option<String>,
 }
 
 struct Seen {
@@ -54,9 +67,43 @@ pub struct Summary {
     pub updated: usize,
     pub closed: usize,
     pub ignored: usize,
+    /// Imported issues that did not change since the last look.
+    pub unchanged: usize,
+    /// Issues that qualify but stay unimported because a `[self]` limit
+    /// (`max_open`, `per_week`) has no slot; each counts once, however many
+    /// passes looked at it.
+    pub waiting_slot: usize,
 }
 
 impl Hub {
+    pub fn record(&self, p: ProjectId) -> Option<PollRecord> {
+        self.records
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&p)
+            .cloned()
+    }
+
+    fn set_record(&self, p: ProjectId, summary: Option<Summary>, error: Option<String>) {
+        let at_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |t| t.as_millis() as u64);
+        let mut m = self.records.lock().unwrap_or_else(|e| e.into_inner());
+        // A failed look, or one that found the listing unmodified, keeps the
+        // counts of the last full one.
+        let kept = summary
+            .or_else(|| m.get(&p).map(|r| r.summary.clone()))
+            .unwrap_or_default();
+        m.insert(
+            p,
+            PollRecord {
+                at_ms,
+                summary: kept,
+                error,
+            },
+        );
+    }
+
     /// Ask now: the next look does not wait for its schedule, and a stopped
     /// poll gets one more try.
     pub fn refresh(&self, p: ProjectId) {
@@ -106,6 +153,70 @@ impl Hub {
             .unwrap_or_else(|e| e.into_inner())
             .get(&p)
             .and_then(|x| x.stopped().map(String::from))
+    }
+}
+
+/// Where a project's tracker stands, for `/status`, doctor and the monitors.
+pub fn state_json(d: &Daemon, pid: ProjectId) -> serde_json::Value {
+    use serde_json::json;
+    let Some(p) = d.project(pid) else {
+        return json!(null);
+    };
+    let config = d
+        .cfg
+        .config_dir
+        .join("projects")
+        .join(format!("{}.toml", p.id));
+    let Some(t) = &p.services.tracker else {
+        return json!({"project": p.id, "state": "off", "config": config.display().to_string()});
+    };
+    let stopped = d.tracker.stopped(pid);
+    let rec = d.tracker.record(pid);
+    json!({
+        "project": p.id,
+        "state": if stopped.is_some() { "stopped" } else { "polling" },
+        "repo": t.repo,
+        "config": config.display().to_string(),
+        "reason": stopped,
+        "last_poll_ms": rec.as_ref().map(|r| r.at_ms),
+        "error": rec.as_ref().and_then(|r| r.error.clone()),
+        "imported": rec.as_ref().map(|r| r.summary.imported),
+        "ignored": rec.as_ref().map(|r| r.summary.ignored),
+        "unchanged": rec.as_ref().map(|r| r.summary.unchanged),
+        "waiting_slot": rec.as_ref().map(|r| r.summary.waiting_slot),
+    })
+}
+
+/// One line for the monitors' project page.
+pub fn state_line(d: &Daemon, pid: ProjectId) -> String {
+    let v = state_json(d, pid);
+    let g = |k: &str| v[k].as_str().unwrap_or("").to_string();
+    let n = |k: &str| v[k].as_u64().unwrap_or(0);
+    let (id, cfg) = (g("project"), g("config"));
+    match v["state"].as_str() {
+        Some("polling") => {
+            let mut s = format!("{id}: tracker polling {}", g("repo"));
+            if v["last_poll_ms"].is_null() {
+                s.push_str(", not yet looked");
+            } else {
+                s.push_str(&format!(
+                    ": {} imported, {} ignored, {} unchanged, {} waiting for a slot",
+                    n("imported"),
+                    n("ignored"),
+                    n("unchanged"),
+                    n("waiting_slot")
+                ));
+            }
+            if let Some(e) = v["error"].as_str() {
+                s.push_str(&format!(" (last look failed: {e})"));
+            }
+            format!("{s} ({cfg})")
+        }
+        Some("stopped") => format!(
+            "{id}: tracker stopped: {} ({cfg})",
+            v["reason"].as_str().unwrap_or("no reason recorded")
+        ),
+        _ => format!("{id}: tracker off; issues are not imported, add [tracker] to {cfg}"),
     }
 }
 
@@ -178,6 +289,7 @@ pub fn poll_once(
         PollEvent::Stopped { why } => {
             let text = format!("{}: the tracker poll stopped: {why}", p.id);
             d.landing().raise(pid, key, "tracker", &text);
+            d.tracker.set_record(pid, None, Some(why));
             d.poke();
             return Err(text);
         }
@@ -191,6 +303,7 @@ pub fn poll_once(
                     p.id
                 ),
             );
+            d.tracker.set_record(pid, None, Some(why.clone()));
             return Err(why);
         }
         PollEvent::Changed | PollEvent::Quiet => d.landing().clear(pid, key),
@@ -217,6 +330,7 @@ pub fn poll_once(
             .map(|s| s.items.clone()),
         None => None,
     };
+    let looked = items.is_some();
     if let Some(items) = items {
         let native = adapter.capabilities().dependencies.then(|| {
             let mut m = NativeDeps::new();
@@ -252,6 +366,8 @@ pub fn poll_once(
             );
     }
     mirror_out(d, pid, adapter);
+    d.tracker
+        .set_record(pid, looked.then(|| summary.clone()), None);
     d.poke();
     Ok(summary)
 }
@@ -431,6 +547,9 @@ pub fn sync_with_deps(
             }
             sum.closed += 1;
         }
+        if !changed && row.open == it.open {
+            sum.unchanged += 1;
+        }
         if changed || row.open != it.open {
             row.open = it.open;
             let _ = d.store.put_tracker_item(&row);
@@ -440,6 +559,8 @@ pub fn sync_with_deps(
 
     // New issues, in dependency order: repeat until a pass imports nothing.
     let mut waiting: Vec<&Item> = vec![];
+    // Issues refused a slot by a `[self]` limit: counted once each, over all passes.
+    let mut no_slot: BTreeMap<u64, String> = BTreeMap::new();
     let mut candidates: Vec<&Item> = vec![];
     for it in items.iter().filter(|i| !i.is_pr) {
         if rows.contains_key(&it.number) {
@@ -474,7 +595,8 @@ pub fn sync_with_deps(
             } else {
                 TrustSource::Outside
             };
-            if crate::selfguard::check_filing_as(d, pid, trust).is_err() {
+            if let Err(why) = crate::selfguard::check_filing_as(d, pid, trust) {
+                no_slot.insert(it.number, why);
                 continue;
             }
             let held: Vec<(u64, TaskId)> = resolved
@@ -526,6 +648,24 @@ pub fn sync_with_deps(
         }
     }
     sum.ignored += waiting.len();
+    sum.waiting_slot = no_slot.len();
+    if no_slot.is_empty() {
+        d.landing().clear(pid, "tracker-slots");
+    } else {
+        let nums: Vec<u64> = no_slot.keys().copied().collect();
+        let why = no_slot.values().next().cloned().unwrap_or_default();
+        d.landing().raise(
+            pid,
+            "tracker-slots",
+            "tracker",
+            &format!(
+                "{}: {} issue(s) wait for a slot ({}): {why}; they are looked at again next poll",
+                p.id,
+                nums.len(),
+                ids(&nums)
+            ),
+        );
+    }
     // What is still waiting: a cycle among the waiting issues is named, and so
     // is an open blocker that will never be imported.
     let waiting_nums: BTreeSet<u64> = waiting.iter().map(|i| i.number).collect();
