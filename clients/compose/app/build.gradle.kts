@@ -28,6 +28,25 @@ tasks.register<JavaExec>("monitor") {
     jvmArgs("-Dapple.awt.application.name=MASON")
 }
 
+// `bin/mason-monitor` in the installed tree: the window, stamped with the commit it was built
+// from (`-Pmason.build=<sha>`) so that it can tell when it is out of date.
+val monitorScripts by tasks.registering(CreateStartScripts::class) {
+    applicationName = "mason-monitor"
+    mainClass.set("mason.monitor.MainKt")
+    outputDir = layout.buildDirectory.dir("monitor-scripts").get().asFile
+    classpath = tasks.named<CreateStartScripts>("startScripts").get().classpath
+    defaultJvmOpts = listOf("-Dapple.awt.application.name=MASON") +
+        (findProperty("mason.build")?.let { listOf("-Dmason.monitor.version=$it") } ?: emptyList())
+}
+
+distributions {
+    main {
+        contents {
+            from(monitorScripts) { into("bin") }
+        }
+    }
+}
+
 tasks.test {
     useJUnitPlatform()
 }
