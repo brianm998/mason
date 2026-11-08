@@ -98,6 +98,17 @@ fn main() {
                 cfg.fetch_interval =
                     Duration::from_millis(val().parse().unwrap_or_else(|_| usage()))
             }
+            "--introspect-ms" => {
+                cfg.introspect_interval =
+                    Duration::from_millis(val().parse().unwrap_or_else(|_| usage()))
+            }
+            "--analyst-ms" => {
+                cfg.analyst_interval =
+                    Duration::from_millis(val().parse().unwrap_or_else(|_| usage()))
+            }
+            "--schedule-ms" => {
+                cfg.schedule_tick = Duration::from_millis(val().parse().unwrap_or_else(|_| usage()))
+            }
             "--env-retry-ms" => {
                 cfg.env_retry = Duration::from_millis(val().parse().unwrap_or_else(|_| usage()))
             }

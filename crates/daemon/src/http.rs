@@ -1928,6 +1928,115 @@ async fn metrics(Shared(d): Shared<Arc<Daemon>>, Query(q): Query<HashMap<String,
     Ok(Json(v))
 }
 
+async fn health(Shared(d): Shared<Arc<Daemon>>) -> Res {
+    let d2 = d.clone();
+    let v = d
+        .pool
+        .run(move || crate::introspect::health(&d2))
+        .await
+        .map_err(pool_err)?;
+    Ok(Json(v))
+}
+
+async fn digest(Shared(d): Shared<Arc<Daemon>>, Query(q): Query<HashMap<String, String>>) -> Res {
+    let days: u64 = q
+        .get("days")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(7)
+        .max(1);
+    let project = q.get("project").cloned();
+    let d2 = d.clone();
+    let v = d
+        .pool
+        .run(move || {
+            let now = now_ms();
+            crate::introspect::digest(
+                &d2,
+                project.as_deref(),
+                now.saturating_sub(days * 86_400_000),
+                now,
+            )
+        })
+        .await
+        .map_err(pool_err)?;
+    Ok(Json(v))
+}
+
+async fn schedules_list(Shared(d): Shared<Arc<Daemon>>) -> Res {
+    let d2 = d.clone();
+    let v = d
+        .pool
+        .run(move || crate::introspect::health(&d2)["schedules"].clone())
+        .await
+        .map_err(pool_err)?;
+    Ok(Json(json!({"schedules": v})))
+}
+
+/// Run a recurring job now: `introspect`, `analyst:<project>` or `<project>/<schedule>`.
+async fn schedule_run(
+    Shared(d): Shared<Arc<Daemon>>,
+    headers: axum::http::HeaderMap,
+    Json(b): Json<Value>,
+) -> Res {
+    let who = who_of(&headers);
+    let name = b["name"].as_str().unwrap_or_default().to_string();
+    let d2 = d.clone();
+    let said = d
+        .pool
+        .run(move || {
+            owner_only(&d2, &who, "run a recurring job")?;
+            crate::introspect::run_now(&d2, &name).map_err(|e| fail(StatusCode::CONFLICT, e))
+        })
+        .await
+        .map_err(pool_err)??;
+    Ok(Json(json!({"said": said})))
+}
+
+async fn triage_list(Shared(d): Shared<Arc<Daemon>>) -> Res {
+    let d2 = d.clone();
+    let rows = d
+        .pool
+        .run(move || d2.store.triage().unwrap_or_default())
+        .await
+        .map_err(pool_err)?;
+    let v: Vec<Value> = rows
+        .iter()
+        .map(|t| {
+            json!({"id": t.id, "task": t.task, "question": t.question, "action": t.action,
+                        "answer": t.answer, "evidence": t.evidence, "status": t.status,
+                        "verdict": t.verdict, "at": t.at})
+        })
+        .collect();
+    Ok(Json(json!({"triage": v})))
+}
+
+async fn triage_review(
+    Shared(d): Shared<Arc<Daemon>>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<u64>,
+    Json(b): Json<Value>,
+) -> Res {
+    let who = who_of(&headers);
+    let agree = b["agree"].as_bool().unwrap_or(false);
+    let d2 = d.clone();
+    d.pool
+        .run(move || {
+            owner_only(&d2, &who, "review a triage answer")?;
+            match d2.store.review_triage(id, agree).map_err(store_err)? {
+                true => Ok(()),
+                false => Err(fail(
+                    StatusCode::CONFLICT,
+                    format!("sample {id} is not waiting for review"),
+                )),
+            }
+        })
+        .await
+        .map_err(pool_err)??;
+    Ok(Json(
+        json!({"reviewed": id, "verdict": if agree { "agree" } else { "disagree" }}),
+    ))
+}
+
 async fn resources(Shared(d): Shared<Arc<Daemon>>) -> Res {
     let d2 = d.clone();
     let v = d
@@ -2238,6 +2347,12 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/tasks/{id}/logs", get(logs))
         .route("/tasks/{id}/progress", get(task_progress))
         .route("/resources", get(resources))
+        .route("/health", get(health))
+        .route("/digest", get(digest))
+        .route("/schedules", get(schedules_list))
+        .route("/schedules/run", post(schedule_run))
+        .route("/triage", get(triage_list))
+        .route("/triage/{id}/review", post(triage_review))
         .route("/tasks/{id}/skip", post(skip_task))
         .route("/tasks/{id}/answer", post(answer_task))
         .route("/tasks/{id}/session", get(open_session))

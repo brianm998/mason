@@ -725,7 +725,7 @@ fn migration_16_applies_on_15_and_usage_survives_reopening() {
     );
     drop(s);
     let c = Connection::open(&p).unwrap();
-    assert_eq!(migrations::version(&c).unwrap(), 16);
+    assert_eq!(migrations::version(&c).unwrap(), migrations::SCHEMA_VERSION);
 }
 
 fn reading(at: u64, u: Option<f64>, resets: u64, state: &str) -> mason_store::UsageReading {
@@ -795,4 +795,156 @@ fn usage_runs_keep_only_reported_figures_and_each_attempt_apart() {
         rows.iter().find(|r| r.attempt == "k").unwrap().input,
         Some(10)
     );
+}
+
+#[test]
+fn migration_17_applies_to_a_version_16_database() {
+    use mason_core::introspect::{signature, Attempt};
+    let (_d, p) = db();
+    {
+        let mut c = Connection::open(&p).unwrap();
+        migrations::migrate_to(&mut c, 16).unwrap();
+        assert_eq!(migrations::version(&c).unwrap(), 16);
+    }
+    let s = Store::open(&p).unwrap();
+    assert!(s.findings().unwrap().is_empty());
+    assert!(s.schedules().unwrap().is_empty());
+    assert!(s.triage().unwrap().is_empty());
+    let at = |reason: &str, retry_n, at| Attempt {
+        task: 3,
+        project: "web".into(),
+        step: "develop".into(),
+        outcome: "fail".into(),
+        reason: reason.into(),
+        signature: signature(reason),
+        retry_n,
+        at,
+    };
+    s.record_attempt(&at("unknown model m-1", 1, 100)).unwrap();
+    s.record_attempt(&at("unknown model m-2", 2, 200)).unwrap();
+    let mut other = at("x", 1, 300);
+    other.project = "api".into();
+    s.record_attempt(&other).unwrap();
+    drop(s);
+    let s = Store::open(&p).unwrap();
+    // the window is half open, and the project limits it
+    assert_eq!(s.attempts_between(Some("web"), 0, 200).unwrap().len(), 1);
+    assert_eq!(s.attempts_between(Some("web"), 0, 201).unwrap().len(), 2);
+    assert_eq!(s.attempts_between(None, 0, 1000).unwrap().len(), 3);
+    let both = s.attempts_between(Some("web"), 0, 1000).unwrap();
+    assert_eq!(both[0].signature, both[1].signature);
+    assert_eq!(s.attempt_projects().unwrap(), vec!["api", "web"]);
+    s.verify().unwrap();
+    drop(s);
+    let c = Connection::open(&p).unwrap();
+    assert_eq!(migrations::version(&c).unwrap(), migrations::SCHEMA_VERSION);
+}
+
+#[test]
+fn findings_take_one_verdict_and_keep_it() {
+    use mason_store::FindingRow;
+    let (_d, p) = db();
+    let s = Store::open(&p).unwrap();
+    let id = s
+        .add_finding(&FindingRow {
+            rule: "retry_loop".into(),
+            subject: "sig".into(),
+            project: "web".into(),
+            metric: "retry_loop_rate".into(),
+            title: "t".into(),
+            task: 9,
+            before_num: 4.0,
+            before_den: 5.0,
+            before_n: 5,
+            at: 10,
+            ..Default::default()
+        })
+        .unwrap();
+    assert!(s
+        .close_finding(id, "worked", "this fix worked", (0.0, 8.0, 8), 50, 60)
+        .unwrap());
+    // a second verdict does not replace the first
+    assert!(!s
+        .close_finding(id, "didnt_help", "later", (4.0, 8.0, 8), 50, 70)
+        .unwrap());
+    let f = &s.findings().unwrap()[0];
+    assert_eq!(
+        (f.verdict.as_str(), f.after_n, f.landed_at, f.closed_at),
+        ("worked", 8, 50, 60)
+    );
+    assert_eq!((f.before_num, f.before_den), (4.0, 5.0));
+}
+
+#[test]
+fn schedules_remember_their_baseline_and_triage_waits_for_review() {
+    use mason_store::{ScheduleRow, TriageRow};
+    let (_d, p) = db();
+    let s = Store::open(&p).unwrap();
+    let mut row = ScheduleRow {
+        name: "base".into(),
+        project: "web".into(),
+        kind: "base-health".into(),
+        every_ms: 1000,
+        ..Default::default()
+    };
+    s.put_schedule(&row).unwrap();
+    assert_eq!(s.schedule("base").unwrap().unwrap().baseline, None);
+    row.baseline = Some(vec![]);
+    row.runs = 1;
+    s.put_schedule(&row).unwrap();
+    assert_eq!(s.schedule("base").unwrap().unwrap().baseline, Some(vec![]));
+    row.baseline = Some(vec!["a::b".into(), "c".into()]);
+    s.put_schedule(&row).unwrap();
+    assert_eq!(
+        s.schedule("base").unwrap().unwrap().baseline,
+        Some(vec!["a::b".to_string(), "c".to_string()])
+    );
+    assert!(s.schedule("nope").unwrap().is_none());
+
+    let id = s
+        .add_triage(&TriageRow {
+            task: 1,
+            question: "q".into(),
+            action: "answer".into(),
+            answer: "a".into(),
+            evidence: "e".into(),
+            status: "queued".into(),
+            at: 5,
+            ..Default::default()
+        })
+        .unwrap();
+    assert!(s.review_triage(id, false).unwrap());
+    assert!(!s.review_triage(id, true).unwrap(), "reviewed once");
+    let t = &s.triage().unwrap()[0];
+    assert_eq!(
+        (t.status.as_str(), t.verdict.as_str()),
+        ("reviewed", "disagree")
+    );
+}
+
+#[test]
+fn force_skips_and_expired_switches_are_read_from_what_is_recorded() {
+    let (_d, p) = db();
+    let s = Store::open(&p).unwrap();
+    s.add_debt(1, "web", "suite:slow", "late", "me", false, 100)
+        .unwrap();
+    s.add_debt(2, "web", "suite:slow", "late", "me", false, 200)
+        .unwrap();
+    s.add_debt(3, "web", "step:review", "late", "me", false, 200)
+        .unwrap();
+    s.add_debt(4, "api", "suite:slow", "late", "me", false, 200)
+        .unwrap();
+    assert_eq!(
+        s.force_skips_since("web", 150).unwrap(),
+        vec![("slow".to_string(), 1)]
+    );
+    assert_eq!(
+        s.force_skips_since("web", 0).unwrap(),
+        vec![("slow".to_string(), 2)]
+    );
+    assert_eq!(s.debts_between(0, 150).unwrap().len(), 1);
+    s.add_override("web", "step.develop.model", "sonnet", "brian", 10, 20)
+        .unwrap();
+    assert_eq!(s.expired_switches(15).unwrap().len(), 0);
+    assert_eq!(s.expired_switches(25).unwrap().len(), 1);
 }

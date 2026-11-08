@@ -378,6 +378,68 @@ const STEPS: &[&str] = &[
      );
      CREATE INDEX usage_runs_at ON usage_runs(at);
      CREATE INDEX usage_runs_task ON usage_runs(task);",
+    // 17: introspection and recurring jobs (Part 14). `step_attempts` is one row per step
+    // attempt, written when the attempt ends, with the failure signature: the history the
+    // detectors read. `findings` links a detector's or the analyst's proposal to the metric it
+    // expects to move, and keeps the verdict. `schedules` remembers when each recurring job last
+    // ran and the failures its baseline has accepted. `triage_samples` is the owner's review
+    // queue for the optional triage agent.
+    "CREATE TABLE step_attempts (
+         id        INTEGER PRIMARY KEY AUTOINCREMENT,
+         task      INTEGER NOT NULL,
+         project   TEXT NOT NULL,
+         step      TEXT NOT NULL,
+         outcome   TEXT NOT NULL,
+         reason    TEXT NOT NULL,
+         signature TEXT NOT NULL,
+         retry_n   INTEGER NOT NULL,
+         at        INTEGER NOT NULL
+     );
+     CREATE INDEX step_attempts_at ON step_attempts(at);
+     CREATE INDEX step_attempts_task ON step_attempts(task);
+     CREATE TABLE findings (
+         id         INTEGER PRIMARY KEY AUTOINCREMENT,
+         rule       TEXT NOT NULL,
+         subject    TEXT NOT NULL,
+         project    TEXT NOT NULL,
+         metric     TEXT NOT NULL,
+         title      TEXT NOT NULL,
+         task       INTEGER NOT NULL,
+         before_num REAL NOT NULL,
+         before_den REAL NOT NULL,
+         before_n   INTEGER NOT NULL,
+         at         INTEGER NOT NULL,
+         verdict    TEXT NOT NULL DEFAULT '',
+         verdict_text TEXT NOT NULL DEFAULT '',
+         after_num  REAL NOT NULL DEFAULT 0,
+         after_den  REAL NOT NULL DEFAULT 0,
+         after_n    INTEGER NOT NULL DEFAULT 0,
+         landed_at  INTEGER NOT NULL DEFAULT 0,
+         closed_at  INTEGER NOT NULL DEFAULT 0
+     );
+     CREATE INDEX findings_task ON findings(task);
+     CREATE TABLE schedules (
+         name     TEXT PRIMARY KEY,
+         project  TEXT NOT NULL,
+         kind     TEXT NOT NULL,
+         every_ms INTEGER NOT NULL,
+         last_run INTEGER NOT NULL DEFAULT 0,
+         last_task INTEGER,
+         last_status TEXT NOT NULL DEFAULT '',
+         baseline TEXT,
+         runs     INTEGER NOT NULL DEFAULT 0
+     );
+     CREATE TABLE triage_samples (
+         id       INTEGER PRIMARY KEY AUTOINCREMENT,
+         task     INTEGER NOT NULL,
+         question TEXT NOT NULL,
+         action   TEXT NOT NULL,
+         answer   TEXT NOT NULL,
+         evidence TEXT NOT NULL,
+         status   TEXT NOT NULL,
+         verdict  TEXT NOT NULL DEFAULT '',
+         at       INTEGER NOT NULL
+     );",
 ];
 
 pub const SCHEMA_VERSION: u32 = STEPS.len() as u32;
