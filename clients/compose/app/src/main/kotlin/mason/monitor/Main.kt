@@ -16,6 +16,15 @@ fun main(args: Array<String>) = application {
         MonitorModel(SystemPreferences()).also {
             // The alert sound the model asks for when something new needs the owner.
             it.onAttention = { java.awt.Toolkit.getDefaultToolkit().beep() }
+            // Sounds and sentences come from the daemon's announcements, spoken by this sink when
+            // this monitor is the one that speaks. The beep stays for a daemon that sends none.
+            it.announcer.sink = SystemSink()
+        }
+    }
+    LaunchedEffect(Unit) {
+        while (true) {
+            kotlinx.coroutines.delay(1000)
+            model.pulse()
         }
     }
     val state = rememberWindowState(width = 1360.dp, height = 860.dp)

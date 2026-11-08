@@ -195,3 +195,23 @@ compose = "done"
 description = "Tracker imports are listed apart as Proposed from the tracker, each with its issue link and (for the owner) Approve; a not-imported tile and list name the open issues a limit kept out, or whose task was cancelled, with the reason"
 swift = "done"
 compose = "done"
+
+[feature.speech-queue]
+description = "A short sound, then one sentence naming the task, what is wrong and what to do; announcements queue and never overlap; 'wants a decision' and 'broke' use different sounds; muting silences sound and speech and leaves every banner and the attention count"
+swift = "done"
+compose = "done"
+
+[feature.speech-settings]
+description = "Which conditions make noise, which sound each family uses and which voice speaks are configurable, with voices listed from the operating system"
+swift = "done"
+compose = "done"
+
+[feature.speaker-claim]
+description = "Asks the daemon whether it is the one device that speaks (a muted monitor never is) and says what the daemon queued for it, in order; the plain attention chime is used only for a daemon that sends no announcements"
+swift = "done"
+compose = "done"
+
+[feature.daemon-down-alert]
+description = "After 15 seconds of failed reconnects the monitor raises 'daemon down' itself: a banner, and a sound and sentence unless muted; clears when the connection returns"
+swift = "done"
+compose = "done"

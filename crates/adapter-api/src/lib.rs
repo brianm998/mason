@@ -12,6 +12,8 @@ pub mod contract;
 pub mod http;
 pub mod kit;
 pub mod netguard;
+pub mod notify_channels;
+pub mod notify_kit;
 pub mod service;
 pub mod usage;
 pub mod webhook;

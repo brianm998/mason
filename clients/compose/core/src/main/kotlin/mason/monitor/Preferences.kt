@@ -9,6 +9,8 @@ interface Preferences {
     fun setBool(key: String, value: Boolean)
     fun double(key: String): Double?
     fun setDouble(key: String, value: Double)
+    fun string(key: String): String?
+    fun setString(key: String, value: String)
 }
 
 class MemoryPreferences : Preferences {
@@ -17,6 +19,8 @@ class MemoryPreferences : Preferences {
     override fun setBool(key: String, value: Boolean) { values[key] = value }
     override fun double(key: String) = values[key] as? Double
     override fun setDouble(key: String, value: Double) { values[key] = value }
+    override fun string(key: String) = values[key] as? String
+    override fun setString(key: String, value: String) { values[key] = value }
 }
 
 /** The user's own preferences store (the registry on Windows, plists on macOS, files on Linux). */
@@ -26,4 +30,6 @@ class SystemPreferences(node: String = "org/mason/monitor") : Preferences {
     override fun setBool(key: String, value: Boolean) = p.put(key, value.toString())
     override fun double(key: String) = p.get(key, null)?.toDoubleOrNull()
     override fun setDouble(key: String, value: Double) = p.put(key, value.toString())
+    override fun string(key: String): String? = p.get(key, null)
+    override fun setString(key: String, value: String) = p.put(key, value)
 }

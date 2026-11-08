@@ -28,6 +28,7 @@ import mason.monitor.MonitorModel
 fun TopBar(model: MonitorModel) {
     val theme = LocalTheme.current
     var adding by remember { mutableStateOf(false) }
+    var voices by remember { mutableStateOf(false) }
     var improving by remember { mutableStateOf(false) }
     Row(
         verticalAlignment = Alignment.CenterVertically,
@@ -70,7 +71,9 @@ fun TopBar(model: MonitorModel) {
         NavButton("+", "add-task", true) { adding = true }
         if (model.selfProject.isNotEmpty()) NavButton("✨", "improve-pipeline", true) { improving = true }
         NavButton(if (model.muted) "🔇" else "🔊", "mute", true) { model.toggleMute() }
+        NavButton("〰", "voice-settings", true) { voices = true }
     }
+    if (voices) SpeechSettingsDialog(model) { voices = false }
     if (adding) AddTaskDialog(model) { adding = false }
     if (improving) ImproveDialog(model) { improving = false }
 }
@@ -120,6 +123,7 @@ private fun ProjectFilter(model: MonitorModel) {
 fun BannersView(model: MonitorModel) {
     val theme = LocalTheme.current
     Column {
+        if (model.announcer.daemonDown) banner("Daemon down: MASON has lost its daemon. Check that masond is running.", "daemon-down", theme)
         if (!model.connected) banner(if (model.reconnecting) "Daemon restarting, reconnecting…" else "Connection lost. Reconnecting…", "connection", theme)
         model.readOnlyReason?.let { banner("Read-only: $it", "read-only", theme) }
         if (model.updateAvailable || model.updating != null) {
@@ -243,4 +247,65 @@ private fun ImproveDialog(model: MonitorModel, onClose: () -> Unit) {
         },
         dismissButton = { TextButton(onClick = onClose) { Text("Cancel") } },
     )
+}
+
+private val KIND_LABELS = listOf(
+    "needs_you" to "Needs a decision", "failed" to "Task failed", "landing" to "Landing frozen",
+    "daemon_down" to "Daemon down", "credentials" to "Credentials failing",
+    "provider_outage" to "Provider outage", "landed" to "Landed",
+)
+private val SOUND_NAMES = listOf("Glass", "Basso", "Tink", "Ping", "Pop", "Submarine", "Sosumi", "Funk")
+
+/** Which conditions make noise, which sound each family uses, and which OS voice speaks (Part 19). */
+@Composable
+private fun SpeechSettingsDialog(model: MonitorModel, onClose: () -> Unit) {
+    val theme = LocalTheme.current
+    val a = model.announcer
+    val s = a.settings
+    AlertDialog(
+        onDismissRequest = onClose,
+        title = { Text("Sound and speech", style = theme.title()) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(theme.spacingSmall)) {
+                KIND_LABELS.forEach { (kind, label) ->
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(
+                            checked = kind in s.kinds,
+                            onCheckedChange = { on -> a.update(s.copy(kinds = if (on) s.kinds + kind else s.kinds - kind)) },
+                            modifier = Modifier.testTag("speech-kind:$kind"),
+                        )
+                        Text(label, style = theme.body())
+                    }
+                }
+                listOf("decision" to "Wants a decision", "broke" to "Broke", "info" to "Other").forEach { (family, label) ->
+                    Picker(label, s.sounds[family] ?: "Tink", SOUND_NAMES, "speech-sound:$family") {
+                        a.update(s.copy(sounds = s.sounds + (family to it)))
+                    }
+                }
+                Picker("Voice", s.voice.ifEmpty { "System default" }, listOf("System default") + a.availableVoices(), "speech-voice") {
+                    a.update(s.copy(voice = if (it == "System default") "" else it))
+                }
+                Text(
+                    if (a.isSpeaker) "This monitor is the one that speaks." else "Another monitor speaks, or none is needed.",
+                    style = theme.small(),
+                )
+            }
+        },
+        confirmButton = { TextButton(onClick = onClose) { Text("Done") } },
+    )
+}
+
+@Composable
+private fun Picker(label: String, current: String, options: List<String>, tag: String, onPick: (String) -> Unit) {
+    val theme = LocalTheme.current
+    var open by remember { mutableStateOf(false) }
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(theme.spacing)) {
+        Text(label, style = theme.body())
+        Box {
+            TextButton(onClick = { open = true }, modifier = Modifier.testTag(tag)) { Text(current) }
+            DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+                options.forEach { o -> DropdownMenuItem(text = { Text(o) }, onClick = { onPick(o); open = false }) }
+            }
+        }
+    }
 }

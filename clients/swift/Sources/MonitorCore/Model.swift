@@ -67,7 +67,21 @@ public final class MonitorModel: ObservableObject {
     @Published public private(set) var history = NavHistory()
     @Published public var search = SearchState()
     @Published public var textScale: Double { didSet { prefs.setDouble(textScale, for: Keys.scale) } }
-    @Published public var muted: Bool { didSet { prefs.setBool(muted, for: Keys.mute) } }
+    @Published public var muted: Bool {
+        didSet {
+            prefs.setBool(muted, for: Keys.mute)
+            // Muting silences sound and speech at once. Banners and the attention count are
+            // drawn from the views, not from here, so they stay.
+            muteBox.value = muted
+            if muted { announcer.silence() }
+        }
+    }
+    /// The queue of sounds and sentences (Part 19). The app swaps in a sink that plays them.
+    public let announcer: Announcer
+    /// The connection has been down long enough to call the daemon down: a banner, muted or not.
+    @Published public private(set) var daemonDown = false
+    /// This monitor's name when it asks to speak; one per launch.
+    public let clientId = UUID().uuidString
     @Published public var project = "" { didSet { attentionSeen = nil } }
     /// Called (on the main actor) when something new needs the owner and the monitor is not
     /// muted: a task asked a question, waits for approval, was proposed, or failed. The app
@@ -105,7 +119,28 @@ public final class MonitorModel: ObservableObject {
         prefs = preferences
         textScale = preferences.double(Keys.scale) ?? 1.0
         muted = preferences.bool(Keys.mute) ?? false
+        let box = MuteBox()
+        announcer = Announcer(sink: SilentSink(), isMuted: { box.value }, preferences: preferences)
+        muteBox = box
+        box.value = muted
     }
+
+    /// Lets the announcer read `muted` without holding the model.
+    private let muteBox: MuteBox
+
+    /// Called about once a second by the app: the lost-connection clock, and every few seconds
+    /// a claim to speak, whose answer carries what the daemon wants said.
+    public func pulse(now: Date = Date()) {
+        muteBox.value = muted
+        announcer.check(now: now)
+        if daemonDown != announcer.daemonDown { daemonDown = announcer.daemonDown }
+        if connected, now.timeIntervalSince(lastClaim) >= Self.claimEvery {
+            lastClaim = now
+            raw("POST", "/announce/claim", json: announcer.claimBody(client: clientId))
+        }
+    }
+    private var lastClaim = Date.distantPast
+    static let claimEvery: TimeInterval = 3
 
     // MARK: navigation
 
@@ -373,6 +408,7 @@ public final class MonitorModel: ObservableObject {
         case .welcome(let w)?:
             connected = true
             reconnecting = false
+            announcer.connectionRestored()
             if w.resume == .snapshot { lastSeq = 0 }
             daemonVersion = w.version
             anchor(daemonNow: w.nowMs)
@@ -404,7 +440,7 @@ public final class MonitorModel: ObservableObject {
         let wanting: Set<String> = ["needs_attention", "failed", "proposed"]
         let ids = Set(s.sections.filter { wanting.contains($0.state) }.flatMap { $0.rows.map(\.id) })
         defer { attentionSeen = ids }
-        guard let seen = attentionSeen, !muted else { return }
+        guard let seen = attentionSeen, !muted, !announcer.heardFromDaemon else { return }
         if !ids.subtracting(seen).isEmpty { onAttention?() }
     }
 
@@ -430,13 +466,15 @@ public final class MonitorModel: ObservableObject {
 
     func handle(result r: Mason_V1_CommandResult) {
         if r.id.hasPrefix("publish:"), r.ok { publishPreview = PublishPreview(json: r.json) }
+        if r.id == "announce", r.ok { announcer.handle(claim: r.json) }
         if r.id == "health", r.ok { health = HealthSnapshot(json: r.json) }
         if r.id == "introspection", r.ok { introspection = IntrospectionSnapshot(json: r.json) }
     }
 
-    public func disconnected() {
+    public func disconnected(now: Date = Date()) {
         connected = false
         reconnecting = true
+        announcer.connectionLost(at: now)
     }
 }
 
@@ -590,3 +628,5 @@ public struct PublishPreview: Equatable, Sendable {
         pr = o["pr"] as? Int
     }
 }
+
+final class MuteBox { var value = false }

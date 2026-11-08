@@ -459,6 +459,35 @@ const STEPS: &[&str] = &[
          at_ms     INTEGER NOT NULL,
          PRIMARY KEY (account, win, resets_at)
      );",
+    // 18: notifications (Part 19). An alert can be acknowledged (which stops its noise but not
+    // its visibility) and is reminded at most once. `deliveries` is every attempt to reach the
+    // owner by a channel, so a notice is sent once and a reminder once. `announcements` is the
+    // queue of sentences for whichever device speaks; its unique key makes an announcement
+    // happen once however often the dispatcher looks.
+    "ALTER TABLE alerts ADD COLUMN acked_at INTEGER;
+     ALTER TABLE alerts ADD COLUMN reminded_at INTEGER;
+     CREATE TABLE deliveries (
+         id       INTEGER PRIMARY KEY AUTOINCREMENT,
+         alert    TEXT NOT NULL,
+         since    INTEGER NOT NULL,
+         channel  TEXT NOT NULL,
+         delivery TEXT NOT NULL,
+         ok       INTEGER NOT NULL,
+         detail   TEXT NOT NULL,
+         at       INTEGER NOT NULL
+     );
+     CREATE INDEX deliveries_alert ON deliveries(alert, since);
+     CREATE TABLE announcements (
+         id         INTEGER PRIMARY KEY AUTOINCREMENT,
+         key        TEXT NOT NULL UNIQUE,
+         kind       TEXT NOT NULL,
+         sentence   TEXT NOT NULL,
+         sound      INTEGER NOT NULL,
+         speech     INTEGER NOT NULL,
+         created_at INTEGER NOT NULL,
+         taken_at   INTEGER,
+         taken_by   TEXT
+     );",
 ];
 
 pub const SCHEMA_VERSION: u32 = STEPS.len() as u32;

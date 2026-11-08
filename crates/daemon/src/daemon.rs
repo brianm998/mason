@@ -59,6 +59,7 @@ pub struct Daemon {
     /// The one probe session per held account (see `holds`).
     pub probes: crate::holds::Probes,
     pub(crate) intro: crate::introspect::Runtime,
+    pub(crate) notify: crate::notify::Runtime,
 }
 
 fn kind_name(k: &EventKind) -> String {
@@ -180,6 +181,7 @@ impl Daemon {
             drafts: Default::default(),
             probes: Default::default(),
             intro: Default::default(),
+            notify: Default::default(),
             update_status: Mutex::new(crate::update::Status {
                 phase: "idle".into(),
                 ..Default::default()
