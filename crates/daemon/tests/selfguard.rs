@@ -94,6 +94,49 @@ fn a_change_to_a_gate_waits_for_the_owner_and_only_the_owner_can_release_it() {
 }
 
 #[test]
+fn a_held_task_is_in_the_needs_you_section_and_its_tile() {
+    let w = self_world("");
+    let t = w.task(
+        "edit a verdict",
+        &[("crates/testing/src/verdict.rs", "// weaker\n")],
+    );
+    wait_for("the hold", 30, || held(&w, t));
+    let world = w.d.world().unwrap();
+    let ctx = mason_daemon::views::Ctx::new(&w.d, &world);
+    let sidebar = ctx.sidebar("");
+    let rows = |state: &str| -> Vec<u64> {
+        sidebar
+            .sections
+            .iter()
+            .find(|s| s.state == state)
+            .unwrap()
+            .rows
+            .iter()
+            .map(|r| r.id)
+            .collect()
+    };
+    assert_eq!(rows("needs_attention"), vec![t.0], "in Needs you");
+    for other in ["queued", "developing", "testing", "landing"] {
+        assert!(
+            !rows(other).contains(&t.0),
+            "and in no other section: {other}"
+        );
+    }
+    let header = ctx.header("");
+    let tile = header
+        .counts
+        .iter()
+        .find(|c| c.state == "needs_attention")
+        .unwrap();
+    assert_eq!(
+        (tile.count, tile.wants_you),
+        (1, true),
+        "the tile counts it"
+    );
+    assert_eq!(header.attention, 1);
+}
+
+#[test]
 fn weakening_outside_the_protected_files_stops_too() {
     let w = self_world("");
     // A removed assertion in a test file nobody listed.
