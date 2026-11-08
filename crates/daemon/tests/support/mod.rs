@@ -386,6 +386,10 @@ impl Scratch {
             } else {
                 Stdio::null()
             });
+        // Tests never read the machine's real load, and never run a sampler per daemon.
+        let cpu = self.root.path().join("cpu-for-masond");
+        let _ = std::fs::write(&cpu, "0\n");
+        cmd.env("MASON_CPU_FILE", &cpu);
         for (k, v) in env {
             cmd.env(k, v);
         }
