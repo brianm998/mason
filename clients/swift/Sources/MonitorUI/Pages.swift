@@ -469,6 +469,29 @@ struct HealthPage: View {
                         ForEach(h.waiting, id: \.self) { Text($0).font(theme.body()) }
                     }
                 }
+                if let i = model.introspection {
+                    section("Findings", theme: theme) {
+                        if i.findings.isEmpty { Text("Nothing found yet.").font(theme.body()).foregroundStyle(theme.muted) }
+                        ForEach(i.findings, id: \.id) { f in
+                            VStack(alignment: .leading) {
+                                Text("#\(f.id) [\(f.verdict)] \(f.title) (proposal #\(f.task), metric \(f.metric))").font(theme.body())
+                                if !f.text.isEmpty { Text(f.text).font(theme.body()).foregroundStyle(theme.muted) }
+                            }
+                        }
+                    }
+                    section("Recurring jobs", theme: theme) {
+                        ForEach(i.jobs, id: \.name) { j in
+                            Text("\(j.name) (\(j.kind)): \(j.runs) run(s). \(j.status)").font(theme.body())
+                        }
+                    }
+                    section("Digest (last 7 days)", theme: theme) {
+                        ForEach(i.digest, id: \.self) { Text($0).font(theme.body()) }
+                    }
+                    section("Triage", theme: theme) {
+                        Text(i.triageOn ? "On. \(i.triageWaiting) suggestion(s) wait for your review; triage never answers a question." : "Off.")
+                            .font(theme.body())
+                    }
+                }
             }.padding(theme.spacingLarge)
         }
     }

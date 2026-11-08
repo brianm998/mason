@@ -27,6 +27,7 @@ public final class MonitorModel: ObservableObject {
     @Published public var usage: UsageView?
     @Published public var editor: EditorView?
     @Published public var health: HealthSnapshot?
+    @Published public var introspection: IntrospectionSnapshot?
     @Published public var lastSeq: UInt64 = 0
     /// The daemon's clock minus this device's, ms, as of the last message that carried the daemon's
     /// time (the welcome, each StepProgress): "updated 4 s ago" counts on the local clock, corrected by this.
@@ -430,6 +431,7 @@ public final class MonitorModel: ObservableObject {
     func handle(result r: Mason_V1_CommandResult) {
         if r.id.hasPrefix("publish:"), r.ok { publishPreview = PublishPreview(json: r.json) }
         if r.id == "health", r.ok { health = HealthSnapshot(json: r.json) }
+        if r.id == "introspection", r.ok { introspection = IntrospectionSnapshot(json: r.json) }
     }
 
     public func disconnected() {
@@ -493,6 +495,75 @@ public struct HealthSnapshot: Equatable, Sendable {
             "\($0["label"] as? String ?? "?"): \($0["explain"] as? String ?? "")"
         }
         holders = (v["holders"] as? [[String: Any]] ?? []).map { $0["label"] as? String ?? "?" }
+    }
+}
+
+/// The Health page's introspection half (Part 14): what the detectors and the analyst found,
+/// what came of the fixes, the recurring jobs, the triage review queue and the digest.
+public struct IntrospectionSnapshot: Equatable, Sendable {
+    public struct Finding: Equatable, Sendable {
+        public var id: Int
+        public var title: String
+        public var metric: String
+        public var task: Int
+        public var verdict: String
+        public var text: String
+    }
+    public struct Job: Equatable, Sendable {
+        public var name: String
+        public var kind: String
+        public var runs: Int
+        public var status: String
+    }
+    public var findings: [Finding] = []
+    public var jobs: [Job] = []
+    public var triageOn = false
+    public var triageWaiting = 0
+    /// Lines of the digest, each a figure computed from recorded data.
+    public var digest: [String] = []
+
+    public init(json: String) {
+        guard let d = json.data(using: .utf8),
+              let v = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return }
+        findings = (v["findings"] as? [[String: Any]] ?? []).map {
+            Finding(
+                id: $0["id"] as? Int ?? 0,
+                title: $0["title"] as? String ?? "?",
+                metric: $0["metric"] as? String ?? "?",
+                task: $0["task"] as? Int ?? 0,
+                verdict: $0["verdict"] as? String ?? "open",
+                text: $0["text"] as? String ?? ""
+            )
+        }
+        jobs = (v["schedules"] as? [[String: Any]] ?? []).map {
+            Job(
+                name: $0["name"] as? String ?? "?",
+                kind: $0["kind"] as? String ?? "?",
+                runs: $0["runs"] as? Int ?? 0,
+                status: $0["last_status"] as? String ?? ""
+            )
+        }
+        let t = v["triage"] as? [String: Any] ?? [:]
+        triageOn = t["enabled"] as? Bool ?? false
+        triageWaiting = (t["queue"] as? [Any])?.count ?? 0
+        let g = v["digest"] as? [String: Any] ?? [:]
+        digest.append("Landed: \(g["landed"] as? Int ?? 0)")
+        if let m = g["median_claim_to_land_ms"] as? Int {
+            digest.append("Median time from claim to land: \(m / 1000) s")
+        }
+        if let p = g["interventions_per_landed"] as? Double {
+            digest.append("Interventions per landed task: \(String(format: "%.2f", p))")
+        }
+        digest.append("Tokens per landed task: not recorded")
+        let ex = g["exploring"] as? [String: Any] ?? [:]
+        digest.append("Exploring skipped for \(ex["skipped"] as? Int ?? 0) task(s); \(ex["came_back"] as? Int ?? 0) came back")
+        for (route, r) in (ex["by_route"] as? [String: Any] ?? [:]).sorted(by: { $0.key < $1.key }) {
+            let r = r as? [String: Any] ?? [:]
+            digest.append("  \(route): \(r["tasks"] as? Int ?? 0) task(s), \(r["came_back"] as? Int ?? 0) came back")
+        }
+        for f in g["forced_landings"] as? [[String: Any]] ?? [] {
+            digest.append("Forced landing, task #\(f["task"] as? Int ?? 0): \(f["reason"] as? String ?? "")")
+        }
     }
 }
 

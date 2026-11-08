@@ -150,6 +150,7 @@ public final class MonitorConnection {
         case .pipeline: views.append(.editor)
         case .health:
             model.raw("GET", "/resources")
+            model.raw("GET", "/health")
         default: break
         }
         var s = Mason_V1_Subscribe()
@@ -169,6 +170,7 @@ public final class MonitorConnection {
             nextId += 1
         }
         if case .raw(let r)? = c.body, r.path == "/resources" { c.id = "health" }
+        if case .raw(let r)? = c.body, r.path == "/health" { c.id = "introspection" }
         var m = Mason_V1_ClientMessage()
         m.command = c
         write(m)

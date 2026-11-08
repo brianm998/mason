@@ -136,6 +136,11 @@ description = "Digest, detector findings, runtime version, resources and who hol
 swift = "done"
 compose = "done"
 
+[feature.health-introspection]
+description = "The Health page also shows the detectors' and analyst's findings with the verdict on each fix (open, this fix worked, this fix didn't help), the recurring jobs and when they last ran, the digest (landed, median claim-to-land, interventions, exploring skips by route with how many came back, forced landings with reasons; tokens shown as not recorded), and whether triage is on with how many suggestions wait for review"
+swift = "done"
+compose = "done"
+
 [feature.deep-links]
 description = "mason://task/... opens from any notification"
 swift = "done"

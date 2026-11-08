@@ -30,6 +30,7 @@ Status: **pre-alpha**. What each stage note says it built (generated from `docs/
 - **s19**: Stage 19: Plugins and extensions
 - **s20**: Stage 20: Second adapters
 - **s21**: Agents file proposals with duplicate rejection, required evidence and per-task and per-day caps; policy decides proposed or queued, and routing sends each to the project or to MASON. The owner approves, rejects and edits in the CLI and both clients, and the "Improve the pipeline" box runs on a branch (a fork's, without write access) with a redacted, confirm-only upstream publish.
+- **s22**: MASON now notices its own problems and checks its own fixes: daily rule-based detectors file findings as proposals with evidence and a named metric, the next cycle after a fix lands reports "this fix worked" or "this fix didn't help" with before and after values, a digest and a Health page show only recorded data, recurring jobs (including base-health that files only new failures) run from the local overlay, and an optional triage records suggestions for the owner's review without ever answering.
 - **s40**: s40: Monitors answer and approve by clicking
 - **s41**: s41: The self-hold scan flags only what a task really weakens
 - **s42**: Task dependencies (s42): Task dependencies (GitHub issue #7)

@@ -87,6 +87,25 @@ impl Ctx {
             .crash
             .point(&format!("before_event:{:?}", self.state));
         let rounds = self.res.max_rounds.as_ref().map(|a| a.value);
+        // The history the detectors read (Part 14): how this attempt ended, and why.
+        let _ = self
+            .d
+            .store
+            .record_attempt(&mason_core::introspect::Attempt {
+                task: self.task.0,
+                project: self.project.id.clone(),
+                step: self.step.name.clone(),
+                outcome: match outcome {
+                    Outcome::Green => "green",
+                    Outcome::Red => "red",
+                    Outcome::Fail => "fail",
+                }
+                .into(),
+                signature: mason_core::introspect::signature(&reason),
+                reason: reason.clone(),
+                retry_n: self.attempt,
+                at: now_ms(),
+            });
         match after(&self.def, &self.step, outcome, self.attempt, rounds) {
             Transition::Next { step, state } => {
                 self.emit(EventKind::StepSucceeded {
@@ -1203,7 +1222,21 @@ fn finish_agent(c: &Ctx, report: StepReport, dir: &Path) {
     if !report.proposals.is_empty() {
         crate::proposals::file_from_report(&c.d, c.task, c.project_id, &report.proposals, dir);
     }
+    let asked = match &report.end {
+        StepEnd::Asked { question } => Some(question.clone()),
+        _ => None,
+    };
     finish_agent_inner(c, report, dir);
+    // The analyst's findings (Part 14), read from the file it wrote in its worktree.
+    crate::introspect::ingest_analyst(&c.d, c.task, &c.project.id, &c.title, &c.wt, dir);
+    // Triage (off unless the project turns it on) only records what it would do; the
+    // question is the owner's either way.
+    if let Some(q) = asked {
+        let ask = mason_adapter_api::card::Card::from_json(&q)
+            .map(|card| card.ask)
+            .unwrap_or_else(|| q.as_str().unwrap_or_default().to_string());
+        crate::introspect::triage_question(&c.d, &c.project, c.task, &ask);
+    }
     // Asked, or the agent gave up: either way the session is free now.
     c.release_lease();
 }
