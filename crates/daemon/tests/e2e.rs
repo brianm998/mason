@@ -463,6 +463,45 @@ fn admission_respects_the_concurrency_limit() {
 }
 
 #[test]
+fn a_step_entered_again_with_uncommitted_work_does_not_merge_the_base_into_it() {
+    // An agent edits README and has not committed when its step is entered again
+    // (here a retry; in life the daemon restarting for a self-update), and meanwhile
+    // the base changed README too. Merging the base into the uncommitted edit fails
+    // ("your local changes would be overwritten"), which used to fail the task. Now the
+    // step leaves the branch as it is, the agent commits, and the test step folds in
+    // the base (the two edits touch different lines).
+    let base_moves = "tmp=$(mktemp -d) && git worktree add -q --detach \"$tmp\" origin/main && \
+        (cd \"$tmp\" && printf 'scratch\\nfrom the base\\n' > README && git add -A && \
+         git -c user.name=t -c user.email=t@t commit -qm 'base edits README' && \
+         git push -q origin HEAD:main) && git worktree remove --force \"$tmp\"";
+    let develop = json!([
+        [{"sh": base_moves}, {"sh": "printf 'from the agent\\nscratch\\n' > README"}, {"say": "working"}],
+        [{"say": "still working"}],
+        [{"say": "nearly"}],
+        [{"sh": format!("git add README && {TASK_SCRIPT_COMMIT}")},
+         {"call": {"tool": "submit_change", "args": {"summary": "ok", "head": "$HEAD"}}}]
+    ]);
+    let s = Scratch::new(
+        "test -f hello.txt",
+        json!({"steps": {"explore": [explore_turn()], "develop": develop}}),
+    );
+    let d = s.start();
+    let t = file_task(&d, "Uncommitted work");
+    wait_state(&d, t, State::Failed, 60);
+    d.emit(EventKind::Retried {
+        task: t,
+        to: State::Developing,
+        step: String::new(),
+    })
+    .unwrap();
+    wait_state(&d, t, State::Landed, 90);
+    assert_eq!(
+        sh(&s.origin, &["show", "main:README"]),
+        "from the agent\nscratch\nfrom the base"
+    );
+}
+
+#[test]
 fn a_failed_task_can_be_retried_and_lands() {
     // Three silent turns fail the step (the turn and two nudges); the fourth invocation does the work.
     let develop = json!([[{"say": "done"}], [{"say": "done"}], [{"say": "done"}], [{"sh": TASK_SCRIPT_COMMIT}, {"call": {"tool": "submit_change", "args": {"summary": "ok", "head": "$HEAD"}}}]]);

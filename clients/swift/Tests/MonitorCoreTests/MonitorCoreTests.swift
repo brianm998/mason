@@ -634,6 +634,76 @@ final class MonitorCoreTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(h.left + h.dx, 0)
     }
 
+    // MARK: readable plan
+
+    func planView(numbers: [String] = ["0", "1"]) -> Mason_V1_PlanView {
+        var v = Mason_V1_PlanView()
+        v.summaryParagraphs = ["First.", "Second `x`."]
+        v.stepsAreList = true
+        v.steps = ["do a\nmore a", "do b"]
+        v.stepNumbers = numbers
+        v.files = ["a.rs", "b.rs"]
+        v.criteria = ["it works"]
+        var e = Mason_V1_PlanExtra()
+        e.label = "Risks"
+        e.value = "- one"
+        v.other = [e]
+        v.raw = "{\"summary\":\"First.\"}"
+        return v
+    }
+
+    func testPlanCopyAsTextKeepsTheAgentsNumbers() {
+        let t = PlanText.copyAsText(planView())
+        XCTAssertEqual(t, """
+        ## Summary
+
+        First.
+
+        Second `x`.
+
+        ## Steps
+
+        0. do a
+           more a
+        1. do b
+
+        ## Files (2)
+
+        - `a.rs`
+        - `b.rs`
+
+        ## Acceptance criteria (1)
+
+        - [ ] it works
+
+        ## Other
+
+        ### Risks
+
+        - one
+
+        """)
+        XCTAssertFalse(t.contains("{"))
+    }
+
+    func testPlanCopyAsTextBulletsAndUnreadable() {
+        var v = planView(numbers: [])
+        XCTAssertTrue(PlanText.copyAsText(v).contains("- do a\n  more a\n- do b"))
+        XCTAssertNil(PlanText.marker(Mason_V1_PlanView(), 0))
+        XCTAssertEqual(PlanText.marker(v, 0), "•")
+        v = Mason_V1_PlanView()
+        v.raw = "not json"
+        v.note = "n"
+        XCTAssertEqual(PlanText.copyAsText(v), "not json")
+    }
+
+    func testPlanExpandRule() {
+        XCTAssertTrue(PlanText.expandedByDefault(stepCount: 0))
+        XCTAssertTrue(PlanText.expandedByDefault(stepCount: 9))
+        XCTAssertFalse(PlanText.expandedByDefault(stepCount: 10))
+        XCTAssertFalse(PlanText.expandedByDefault(stepCount: 25))
+    }
+
     // MARK: live progress (s49)
 
     func cell(unit: String = "tests", done: UInt32, total: UInt32 = 0, doneSrc: ProgressSource = .sourceReported,

@@ -1253,7 +1253,7 @@ async fn self_status(Shared(d): Shared<Arc<Daemon>>) -> Res {
                     let s = u.status.clone();
                     json!({
                         "project": p.id,
-                        "open": s.open, "max_open": c.max_open,
+                        "open": s.open, "held": s.held, "max_open": c.max_open,
                         "week": s.week, "per_week": c.per_week, "yours_not_counted": u.yours,
                         "steps": s.steps, "yours_steps": u.yours_steps, "max_steps": c.max_steps, "period_h": c.period_h,
                         "cooldown_until_ms": s.cooldown_until_ms,
