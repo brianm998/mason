@@ -10,7 +10,10 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.TooltipArea
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -58,6 +61,7 @@ import mason.monitor.OtherKey
 import mason.monitor.otherAnswer
 import mason.monitor.otherBoxKey
 import mason.v1.Approval
+import mason.v1.ProposalInfo
 import mason.v1.DecisionCard
 import mason.v1.ProgressCell
 import mason.v1.StateCount
@@ -476,4 +480,87 @@ private fun run(model: MonitorModel, row: TaskRow, a: String) {
         "skip_test" -> model.skipTest(row.id, row.step)
         "open_session" -> copyToClipboard("mason task open ${row.id}")
     }
+}
+
+/**
+ * A proposal or an improvement: who noticed it, how bad, where it goes, the proof, and (for an
+ * improvement without write access) what would go upstream. Edit is offered only while it waits.
+ */
+@Composable
+fun ProposalView(model: MonitorModel, row: TaskRow, info: ProposalInfo) {
+    val theme = LocalTheme.current
+    var editing by remember { mutableStateOf(false) }
+    val shape = RoundedCornerShape(theme.radius)
+    Column(
+        verticalArrangement = Arrangement.spacedBy(theme.spacing),
+        modifier = Modifier.fillMaxWidth().border(BorderStroke(1.dp, theme.border), shape).padding(theme.spacingLarge).testTag("proposal:${row.id}"),
+    ) {
+        Text(
+            "${info.source} · ${info.severity} · ${if (info.route == "pipeline") "MASON's own repository" else "this project"}",
+            style = theme.body(FontWeight.SemiBold),
+            modifier = Modifier.testTag("proposal:${row.id}:tag"),
+        )
+        if (info.filed_by != 0L) Text("Filed by the agent of task #${info.filed_by}", style = theme.small())
+        if (info.evidence.isNotEmpty()) {
+            Text("Evidence", style = theme.body(FontWeight.SemiBold))
+            Text(info.evidence, style = theme.mono(), modifier = Modifier.testTag("proposal:${row.id}:evidence"))
+        }
+        if (info.status == "rejected") Text("Rejected" + (if (info.reject_reason.isEmpty()) "" else ": ${info.reject_reason}"), style = theme.body(color = theme.muted))
+        if (info.branch.isNotEmpty()) {
+            Text(
+                "Branch ${info.branch} (${info.access} access)" + (if (info.pr != 0L) ", upstream pull request #${info.pr} ${info.pr_state}" else ""),
+                style = theme.mono(color = theme.muted),
+            )
+        }
+        if (info.channel.isNotEmpty()) Text("This machine follows the channel ${info.channel}", style = theme.small(), modifier = Modifier.testTag("proposal:${row.id}:channel"))
+        if (model.canAct) {
+            Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing)) {
+                if ("edit" in row.allowed_actions) Pill("Edit", modifier = Modifier.testTag("proposal:${row.id}:edit")) { editing = true }
+                if (info.access == "fork" && info.pr == 0L) {
+                    Pill("Preview what would go upstream", modifier = Modifier.testTag("proposal:${row.id}:preview")) { model.publish(row.id, false) }
+                    if (info.publish_state == "previewed") {
+                        Pill("Send it upstream", modifier = Modifier.testTag("proposal:${row.id}:publish")) { model.publish(row.id, true) }
+                    }
+                }
+            }
+        }
+        model.publishPreview?.takeIf { info.access == "fork" }?.let { p ->
+            Column(modifier = Modifier.testTag("proposal:${row.id}:preview-text")) {
+                Text("Redacted version (${p.redactions} removed), no client code attached", style = theme.small())
+                Text(p.title, style = theme.body(FontWeight.SemiBold))
+                Text(p.body, style = theme.body())
+                p.files.forEach { Text("changes $it", style = theme.mono(color = theme.muted)) }
+                p.blocked?.let { Text("Not publishable: $it", style = theme.body(color = theme.attention)) }
+            }
+        }
+    }
+    if (editing) EditProposalDialog(model, row, info) { editing = false }
+}
+
+/** Change a waiting proposal's title, text or evidence. Nothing else about it changes. */
+@Composable
+private fun EditProposalDialog(model: MonitorModel, row: TaskRow, info: ProposalInfo, onClose: () -> Unit) {
+    val theme = LocalTheme.current
+    var title by remember { mutableStateOf(row.title) }
+    var text by remember { mutableStateOf(info.text) }
+    var evidence by remember { mutableStateOf(info.evidence) }
+    AlertDialog(
+        onDismissRequest = onClose,
+        title = { Text("Edit proposal #${row.id}", style = theme.title()) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(theme.spacing)) {
+                OutlinedTextField(title, { title = it }, label = { Text("Title") }, singleLine = true, modifier = Modifier.testTag("edit-proposal:title"))
+                OutlinedTextField(text, { text = it }, label = { Text("Text") }, minLines = 4, modifier = Modifier.testTag("edit-proposal:text"))
+                OutlinedTextField(evidence, { evidence = it }, label = { Text("Evidence (a file and line, or the output seen)") }, minLines = 3, modifier = Modifier.testTag("edit-proposal:evidence"))
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = title.isNotBlank(),
+                onClick = { model.editProposal(row.id, title, text, evidence); onClose() },
+                modifier = Modifier.testTag("edit-proposal:save"),
+            ) { Text("Save") }
+        },
+        dismissButton = { TextButton(onClick = onClose) { Text("Cancel") } },
+    )
 }

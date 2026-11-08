@@ -166,6 +166,37 @@ pub struct HoldRow {
     pub approved_at: Option<u64>,
 }
 
+/// A proposal: a task plus what the agent saw and where it was routed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProposalRow {
+    pub task: u64,
+    pub project: String,
+    /// `agent`, `outside` or `owner`.
+    pub source: String,
+    /// `normal` or `blocks`.
+    pub severity: String,
+    /// `project` or `pipeline`.
+    pub route: String,
+    /// The task whose agent filed it.
+    pub filed_by: Option<u64>,
+    pub title: String,
+    pub body: String,
+    pub evidence: String,
+    pub key: String,
+    /// `open`, `approved` or `rejected`.
+    pub status: String,
+    pub reject_reason: String,
+    /// `local`, `previewed` or `published`.
+    pub publish_state: String,
+    /// For an improvement: `write` or `fork`. Empty for the rest.
+    pub access: String,
+    pub branch: String,
+    pub pr: Option<u64>,
+    /// `open`, `merged`, `closed` or `conflict` once a pull request exists.
+    pub pr_state: String,
+    pub at: u64,
+}
+
 /// A number MASON reserved for a task: a decision record, or an exit script / stage note.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReservationRow {
@@ -1456,6 +1487,116 @@ impl Store {
             )
             .map(|n| n > 0)
         })
+    }
+
+    // ---- proposals ----
+
+    pub fn put_proposal(&self, p: &ProposalRow) -> Result<(), StoreError> {
+        let p = p.clone();
+        self.write(move |c| {
+            c.execute(
+                "INSERT OR REPLACE INTO proposals(task, project, source, severity, route, filed_by, title, body, evidence, key, status, reject_reason, publish_state, access, branch, pr, pr_state, at)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
+                params![
+                    p.task as i64, p.project, p.source, p.severity, p.route,
+                    p.filed_by.map(|x| x as i64), p.title, p.body, p.evidence, p.key, p.status,
+                    p.reject_reason, p.publish_state, p.access, p.branch,
+                    p.pr.map(|x| x as i64), p.pr_state, p.at as i64
+                ],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn proposal(&self, task: u64) -> Result<Option<ProposalRow>, StoreError> {
+        Ok(self
+            .proposals_where("WHERE task = ?1", task as i64)?
+            .into_iter()
+            .next())
+    }
+
+    /// Every proposal, oldest first.
+    pub fn proposals(&self) -> Result<Vec<ProposalRow>, StoreError> {
+        self.proposals_where("WHERE ?1 = ?1", 0)
+    }
+
+    /// The proposals filed in `project`.
+    pub fn proposals_in(&self, project: &str) -> Result<Vec<ProposalRow>, StoreError> {
+        let all = self.proposals()?;
+        Ok(all.into_iter().filter(|p| p.project == project).collect())
+    }
+
+    fn proposals_where(&self, cond: &str, arg: i64) -> Result<Vec<ProposalRow>, StoreError> {
+        let sql = format!(
+            "SELECT task, project, source, severity, route, filed_by, title, body, evidence, key, status, reject_reason, publish_state, access, branch, pr, pr_state, at FROM proposals {cond} ORDER BY task"
+        );
+        self.read(move |c| {
+            let mut st = c.prepare(&sql)?;
+            let rows = st.query_map(params![arg], |r| {
+                Ok(ProposalRow {
+                    task: r.get::<_, i64>(0)? as u64,
+                    project: r.get(1)?,
+                    source: r.get(2)?,
+                    severity: r.get(3)?,
+                    route: r.get(4)?,
+                    filed_by: r.get::<_, Option<i64>>(5)?.map(|x| x as u64),
+                    title: r.get(6)?,
+                    body: r.get(7)?,
+                    evidence: r.get(8)?,
+                    key: r.get(9)?,
+                    status: r.get(10)?,
+                    reject_reason: r.get(11)?,
+                    publish_state: r.get(12)?,
+                    access: r.get(13)?,
+                    branch: r.get(14)?,
+                    pr: r.get::<_, Option<i64>>(15)?.map(|x| x as u64),
+                    pr_state: r.get(16)?,
+                    at: r.get::<_, i64>(17)? as u64,
+                })
+            })?;
+            rows.collect()
+        })
+    }
+
+    /// How many proposals `task` has filed.
+    pub fn proposals_by_task(&self, task: u64) -> Result<u32, StoreError> {
+        self.read(move |c| {
+            c.query_row(
+                "SELECT COUNT(*) FROM proposals WHERE filed_by = ?1",
+                params![task as i64],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|n| n as u32)
+        })
+    }
+
+    /// How many agent and outside proposals `project` has had since `since_ms`.
+    pub fn proposals_since(&self, project: &str, since_ms: u64) -> Result<u32, StoreError> {
+        let p = project.to_string();
+        self.read(move |c| {
+            c.query_row(
+                "SELECT COUNT(*) FROM proposals WHERE project = ?1 AND at >= ?2 AND source != 'owner'",
+                params![p, since_ms as i64],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|n| n as u32)
+        })
+    }
+
+    /// Change what the owner may edit, or where a proposal stands. `f` sees the row.
+    pub fn update_proposal(
+        &self,
+        task: u64,
+        f: impl FnOnce(&mut ProposalRow),
+    ) -> Result<bool, StoreError> {
+        match self.proposal(task)? {
+            None => Ok(false),
+            Some(mut p) => {
+                f(&mut p);
+                self.put_proposal(&p)?;
+                Ok(true)
+            }
+        }
     }
 
     pub fn clear_hold(&self, task: u64) -> Result<(), StoreError> {
