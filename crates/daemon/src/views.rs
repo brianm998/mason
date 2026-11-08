@@ -573,8 +573,12 @@ impl<'a> Ctx<'a> {
         let mut sections: Vec<SidebarSection> = vec![];
         for s in ORDER {
             sections.push(self.section(s, project));
+            // Only while there are some, so a project with no tracker sees no new section.
             if s == State::Proposed {
-                sections.push(self.imports_section(project));
+                let imports = self.imports_section(project);
+                if imports.count > 0 {
+                    sections.push(imports);
+                }
             }
         }
         sections.push(self.section(State::Canceled, project));
