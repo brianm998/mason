@@ -1170,10 +1170,15 @@ fn land_job(c: &Ctx) {
     if let Err(why) = prepare_worktree_only(c) {
         return c.fail(why);
     }
-    // MASON's own repository: a change to its gates (or one that weakens them) waits for
-    // the owner, by the running version's rules, before it may join the queue.
-    if let crate::selfguard::Gate::Gone = crate::selfguard::gate(c) {
-        return;
+    // MASON's own repository: a change that weakens a check goes back to development, and
+    // one that touches its gates is recorded (`[self] holds = "owner"` makes either wait for
+    // the owner), by the running version's rules, before it may join the queue.
+    match crate::selfguard::gate(c) {
+        crate::selfguard::Gate::Gone => return,
+        crate::selfguard::Gate::SentBack { reason, feedback } => {
+            return c.conclude(Outcome::Red, reason, Some(feedback))
+        }
+        crate::selfguard::Gate::Go => {}
     }
     // Landing is batched per project: join the queue and wait for the verdict.
     let Some(verdict) = crate::landing::submit_and_wait(c) else {

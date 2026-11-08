@@ -26,6 +26,43 @@ class MonitorCoreTest {
         return m
     }
 
+    // ---- the attention sound ----
+
+    private fun sidebarOf(vararg s: SidebarSection) = View(sidebar = SidebarView(sections = s.toList()))
+
+    @Test fun somethingNewNeedingYouChimesOnceAndTheFirstUpdateIsSilent() {
+        val m = MonitorModel()
+        var chimes = 0
+        m.onAttention = { chimes++ }
+        val waiting = section("needs_attention", rows = listOf(row(1, "developing")))
+        m.apply(sidebarOf(waiting))
+        assertEquals(0, chimes, "what was already waiting when the monitor opened is silent")
+        m.apply(sidebarOf(waiting))
+        assertEquals(0, chimes, "the same task again is not new")
+        m.apply(sidebarOf(section("needs_attention", rows = listOf(row(1, "developing"), row(2, "testing")))))
+        assertEquals(1, chimes, "a second task needs you")
+        m.apply(sidebarOf(section("failed", rows = listOf(row(3, "failed")))))
+        assertEquals(2, chimes, "a failure needs you")
+        m.apply(sidebarOf(section("queued", rows = listOf(row(4, "queued")))))
+        assertEquals(2, chimes, "a queued task does not")
+    }
+
+    @Test fun mutedIsSilentAndChangingProjectDoesNotChime() {
+        val m = MonitorModel()
+        var chimes = 0
+        m.onAttention = { chimes++ }
+        m.apply(sidebarOf(section("needs_attention")))
+        m.toggleMute()
+        m.apply(sidebarOf(section("needs_attention", rows = listOf(row(1, "developing")))))
+        assertEquals(0, chimes, "muted")
+        m.toggleMute()
+        m.apply(sidebarOf(section("needs_attention", rows = listOf(row(1, "developing")))))
+        assertEquals(0, chimes, "it was seen while muted, so it is not new when unmuted")
+        m.project = "ios"
+        m.apply(sidebarOf(section("needs_attention", rows = listOf(row(9, "developing")))))
+        assertEquals(0, chimes, "a different project's list is a fresh start")
+    }
+
     // ---- navigation ----
 
     @Test fun historyIsBrowserStyle() {

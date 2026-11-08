@@ -50,7 +50,9 @@ fn title_of(s: State) -> &'static str {
 
 fn tooltip_of(s: State) -> &'static str {
     match s {
-        State::NeedsAttention => "A task has asked you a question and is waiting for your answer.",
+        State::NeedsAttention => {
+            "A task has asked you a question, or waits for your approval of a change."
+        }
         State::Queued => "Waiting for a free session or for its turn.",
         State::Exploring => "An agent is reading the repository to plan the work.",
         State::Developing => "An agent is making the change.",
@@ -148,6 +150,23 @@ impl<'a> Ctx<'a> {
         t.state == State::Proposed
             || t.activity == Activity::Waiting(WaitReason::On(APPROVAL_WAIT.into()))
             || self.pending_hold(t).is_some()
+    }
+
+    /// Is the task in the "Needs you" section: it asked a question, or it waits for the
+    /// owner's approval of a held change. (Proposed and failed tasks have their own
+    /// sections, which are marked as wanting you.) A held task is in a step state, so
+    /// without this it counted in the header but never showed in the section or the tile.
+    fn needs_you(&self, t: &Task) -> bool {
+        t.state == State::NeedsAttention || (t.state != State::Proposed && self.needs_approval(t))
+    }
+
+    /// Does the task belong in sidebar section `s`? Each task is in exactly one.
+    fn in_section(&self, t: &Task, s: State) -> bool {
+        if s == State::NeedsAttention {
+            self.needs_you(t)
+        } else {
+            t.state == s && !self.needs_you(t)
+        }
     }
 
     /// What the task is waiting on for approval, in full.
@@ -368,7 +387,7 @@ impl<'a> Ctx<'a> {
             .values()
             .filter(|t| self.matches(t, project))
             .collect();
-        let count = |s: State| tasks.iter().filter(|t| t.state == s).count() as u32;
+        let count = |s: State| tasks.iter().filter(|t| self.in_section(t, s)).count() as u32;
         let attention = tasks
             .iter()
             .filter(|t| {
@@ -436,7 +455,7 @@ impl<'a> Ctx<'a> {
             .w
             .tasks
             .values()
-            .filter(|t| t.state == s && self.matches(t, project))
+            .filter(|t| self.in_section(t, s) && self.matches(t, project))
             .collect();
         // Active states: oldest first, so anything stuck is at the top.
         // History: newest first, so what just happened is not buried.

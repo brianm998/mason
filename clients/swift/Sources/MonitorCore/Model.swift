@@ -59,7 +59,14 @@ public final class MonitorModel: ObservableObject {
     @Published public var search = SearchState()
     @Published public var textScale: Double { didSet { prefs.setDouble(textScale, for: Keys.scale) } }
     @Published public var muted: Bool { didSet { prefs.setBool(muted, for: Keys.mute) } }
-    @Published public var project = ""
+    @Published public var project = "" { didSet { attentionSeen = nil } }
+    /// Called (on the main actor) when something new needs the owner and the monitor is not
+    /// muted: a task asked a question, waits for approval, was proposed, or failed. The app
+    /// plays its sound here; the model only decides when.
+    public var onAttention: (() -> Void)?
+    /// The tasks that needed the owner at the last update; nil until the first one, so what
+    /// was already waiting when the monitor opened (or the project changed) is silent.
+    private var attentionSeen: Set<UInt64>?
     /// Sections the user opened or closed, remembered per device.
     @Published private var overrides: [String: Bool] = [:]
     /// Where the sidebar should scroll to (a tile was clicked).
@@ -270,10 +277,21 @@ public final class MonitorModel: ObservableObject {
         }
     }
 
+    /// Chime once when a task that needs the owner appears that was not there before.
+    func noteAttention(_ s: Mason_V1_SidebarView) {
+        let wanting: Set<String> = ["needs_attention", "failed", "proposed"]
+        let ids = Set(s.sections.filter { wanting.contains($0.state) }.flatMap { $0.rows.map(\.id) })
+        defer { attentionSeen = ids }
+        guard let seen = attentionSeen, !muted else { return }
+        if !ids.subtracting(seen).isEmpty { onAttention?() }
+    }
+
     func apply(_ v: Mason_V1_View) {
         switch v.body {
         case .header(let x)?: header = x
-        case .sidebar(let x)?: sidebar = x
+        case .sidebar(let x)?:
+            sidebar = x
+            noteAttention(x)
         case .home(let x)?: home = x
         case .taskDetail(let x)?: taskDetail = x
         case .landing(let x)?: landing = x
