@@ -581,8 +581,12 @@ fn acquire(c: &Ctx) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
             *have = (*have).max(v);
         }
     }
+    // Device pools are sized by what the provider lists, never by a default.
+    if needs.amounts.keys().any(|n| n.starts_with("device:")) {
+        d.targets.declare_all(d);
+    }
     for name in needs.amounts.keys() {
-        if !name.starts_with("llm:") {
+        if !name.starts_with("llm:") && !name.starts_with("device:") {
             d.broker
                 .declare(name, c.def.resources.get(name).copied().unwrap_or(1));
         }
@@ -598,6 +602,7 @@ fn acquire(c: &Ctx) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
             .unwrap_or(true)
     };
     let mut waited = false;
+    let asked = needs.clone();
     let lease = d.broker.acquire(
         c.task,
         &format!("#{}", c.task.0),
@@ -607,7 +612,7 @@ fn acquire(c: &Ctx) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
         &mut |why| {
             waited = c.emit(EventKind::WaitStarted {
                 task: c.task,
-                on: why.to_string(),
+                on: crate::targets::wait_text(d, &asked, why),
             });
         },
     )?;
@@ -673,7 +678,11 @@ pub(crate) fn prepare(c: &Ctx) -> Result<Option<String>, String> {
     // committed. Merging the base into them fails ("your local changes would be
     // overwritten") and failed the task; leave the branch as it is, and the next
     // step folds the base in once the work is committed.
-    let dirty = git::run(&c.wt, &["status", "--porcelain"]).map_err(|e| e.to_string())?;
+    // `--no-optional-locks`: a plain `git status` refreshes the index and takes
+    // `index.lock` to do it. An agent still winding down in this worktree (its step
+    // just superseded) then fails its own `git commit` on that lock.
+    let dirty = git::run(&c.wt, &["--no-optional-locks", "status", "--porcelain"])
+        .map_err(|e| e.to_string())?;
     if !dirty.trim().is_empty() {
         tracing::info!(
             task = c.task.0,
@@ -894,7 +903,8 @@ fn change_validator(
             )),
             Ok(_) => {}
         }
-        let dirty = git::run(&wt, &["status", "--porcelain"]).unwrap_or_default();
+        let dirty =
+            git::run(&wt, &["--no-optional-locks", "status", "--porcelain"]).unwrap_or_default();
         if !dirty.trim().is_empty() {
             problems.push(format!(
                 "the tree has uncommitted changes; commit or discard them:\n{}",

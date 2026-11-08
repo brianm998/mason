@@ -113,11 +113,45 @@ pub enum EnvKind {
     Local,
     /// A Docker Compose stack.
     Compose,
+    /// One leased simulator, emulator or phone (Stage 25).
+    Device(DeviceType),
+}
+
+/// Which sort of device an environment leases. The daemon turns this into the
+/// pool capability `device:<name>`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeviceType {
+    IosSimulator,
+    AndroidEmulator,
+    IosDevice,
+    AndroidDevice,
+}
+
+impl DeviceType {
+    pub const ALL: [DeviceType; 4] = [
+        DeviceType::IosSimulator,
+        DeviceType::AndroidEmulator,
+        DeviceType::IosDevice,
+        DeviceType::AndroidDevice,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            DeviceType::IosSimulator => "ios-simulator",
+            DeviceType::AndroidEmulator => "android-emulator",
+            DeviceType::IosDevice => "ios-device",
+            DeviceType::AndroidDevice => "android-device",
+        }
+    }
+
+    pub fn from_name(s: &str) -> Option<DeviceType> {
+        Self::ALL.into_iter().find(|t| t.name() == s)
+    }
 }
 
 /// What a suite runs against, with lease, setup, health check and teardown.
-/// Simulators, emulators and devices arrive in Stage 25; the lifecycle here is
-/// the interface they will fill in.
+/// Devices (Stage 25) lease one device per suite; the provider readies it, and
+/// the commands here run on top with `MASON_DEVICE` set.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Environment {
     pub name: String,
@@ -127,6 +161,8 @@ pub struct Environment {
     pub teardown: Option<String>,
     /// Compose file (for `Compose`).
     pub file: Option<String>,
+    /// For a device: the OS version it must start with ("17", "14").
+    pub os: Option<String>,
     /// Pool resources leased while it is up.
     pub uses: BTreeMap<String, u32>,
     pub health_timeout: Duration,
@@ -141,6 +177,7 @@ impl Environment {
             health: None,
             teardown: None,
             file: None,
+            os: None,
             uses: BTreeMap::new(),
             health_timeout: Duration::from_secs(60),
         }
