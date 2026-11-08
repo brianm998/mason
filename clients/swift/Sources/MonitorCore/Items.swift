@@ -145,6 +145,7 @@ extension MonitorModel {
                 actions: ["increase", "decrease"]
             ))
         }
+        if page == .usage, let u = usage { out.append(contentsOf: u.items()) }
         if page == .pipeline, let e = editor { out.append(contentsOf: e.items()) }
         if case .task = page, let d = taskDetail, d.hasRow {
             out.append(d.row.item(prefix: "detail", order: 0))
@@ -189,6 +190,28 @@ extension Mason_V1_EditorView {
         if dirty { actions.append(contentsOf: ["discard", "apply"]) }
         out.append(Item(id: "draft", texts: [dirty ? "changed" : "unchanged"], actions: actions))
         for (i, c) in changes.enumerated() { out.append(Item(id: "change:\(i)", texts: [c], order: i)) }
+        return out
+    }
+}
+
+extension Mason_V1_UsageView {
+    /// What the LLM usage page shows that does not move with the clock (the same list the
+    /// daemon's `conformance::usage_items` builds from the same view).
+    public func items() -> [Item] {
+        var out: [Item] = []
+        for (i, p) in providers.enumerated() {
+            out.append(Item(
+                id: "usage:\(p.name)",
+                texts: [p.name, p.adapter, p.billing, "\(p.sessionsUsed) of \(p.sessionsLimit) sessions"],
+                order: i
+            ))
+            for (j, w) in p.windows.enumerated() {
+                let pct = !w.reported ? "not reported yet" : (w.hasPercent_p ? "\(Int(w.percent.rounded()))%" : "no percentage reported")
+                var texts = [w.label, pct]
+                if w.reported { texts.append(w.state) }
+                out.append(Item(id: "usage-window:\(p.name):\(w.id)", texts: texts, order: j))
+            }
+        }
         return out
     }
 }

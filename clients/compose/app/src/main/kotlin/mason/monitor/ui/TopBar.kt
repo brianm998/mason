@@ -54,7 +54,10 @@ fun TopBar(model: MonitorModel) {
 
         Column(Modifier.weight(1f, fill = true)) {
             model.usage?.providers?.forEach { p ->
-                Text("${p.name}: ${p.sessions_used} of ${p.sessions_limit} sessions", style = theme.small(), maxLines = 1)
+                // The most constrained window ("claude 5-hour 82%, resets 1 h 10 m"), else the sessions.
+                val line = model.usage?.top_bar?.firstOrNull { it.startsWith("${p.name} ") }
+                    ?: "${p.name}: ${p.sessions_used} of ${p.sessions_limit} sessions"
+                Text(line, style = theme.small(), maxLines = 1, modifier = Modifier.testTag("topbar-usage:${p.name}"))
             }
         }
 

@@ -114,6 +114,7 @@ fun MonitorModel.visibleItems(): List<Item> {
         }
         out += Item("sessions", listOf("${h.sessions_used} of ${h.sessions_limit}"), listOf("increase", "decrease"))
     }
+    if (page == Page.Usage) usage?.let { out += it.items() }
     if (page == Page.Pipeline) editor?.let { out += it.items() }
     if (page is Page.Task) taskDetail?.let { d ->
         val r = d.row
@@ -168,5 +169,28 @@ fun mason.v1.EditorView.items(): List<Item> {
     if (dirty) actions += listOf("discard", "apply")
     out += Item("draft", listOf(if (dirty) "changed" else "unchanged"), actions)
     changes.forEachIndexed { i, c -> out += Item("change:$i", listOf(c), order = i) }
+    return out
+}
+
+/**
+ * What the LLM usage page shows that does not move with the clock (the same list the daemon's
+ * `conformance::usage_items` builds from the same view).
+ */
+fun mason.v1.UsageView.items(): List<Item> {
+    val out = mutableListOf<Item>()
+    providers.forEachIndexed { i, p ->
+        val head: List<String> = listOf(p.name, p.adapter_name, p.billing, "${p.sessions_used} of ${p.sessions_limit} sessions")
+        out += Item("usage:${p.name}", head, order = i)
+        p.windows.forEachIndexed { j, w ->
+            val pct = when {
+                !w.reported -> "not reported yet"
+                w.has_percent -> "${Math.round(w.percent)}%"
+                else -> "no percentage reported"
+            }
+            val texts = mutableListOf(w.label, pct)
+            if (w.reported) texts += w.state
+            out += Item("usage-window:${p.name}:${w.id}", texts, order = j)
+        }
+    }
     return out
 }
