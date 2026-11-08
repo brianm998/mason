@@ -24,6 +24,7 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     var usage by mutableStateOf<UsageView?>(null)
     var editor by mutableStateOf<EditorView?>(null)
     var health by mutableStateOf<HealthSnapshot?>(null)
+    var introspection by mutableStateOf<IntrospectionSnapshot?>(null)
     var lastSeq by mutableStateOf(0L)
     var connected by mutableStateOf(false)
     /** Down and being retried: the daemon is restarting or has not answered. Shown as "reconnecting", never as an error. */
@@ -90,6 +91,8 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     /** Where the sidebar should scroll to (a tile was clicked). */
     var scrollTarget by mutableStateOf<String?>(null)
     var lastResult by mutableStateOf<String?>(null)
+    /** What `mason proposal publish --preview` would send, once asked for. */
+    var publishPreview by mutableStateOf<PublishPreview?>(null)
 
     /** The step selected in the pipeline editor (for its inspector). */
     var editorStep by mutableStateOf("")
@@ -133,6 +136,27 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     fun toggleMute() {
         muted = !muted
         prefs.setBool(KEY_MUTE, muted)
+        // Muting silences sound and speech at once. Banners and the attention count are drawn
+        // from the views, not from here, so they stay.
+        if (muted) announcer.silence()
+    }
+
+    /** The queue of sounds and sentences (Part 19). The app gives it a sink that plays them. */
+    val announcer = Announcer(isMuted = { muted }, prefs = prefs)
+    /** This monitor's name when it asks to speak; one per launch. */
+    val clientId: String = java.util.UUID.randomUUID().toString()
+    private var lastClaim = 0L
+
+    /**
+     * Called about once a second by the app: the lost-connection clock, and every few seconds a
+     * claim to speak, whose answer carries what the daemon wants said.
+     */
+    fun pulse(nowMs: Long = System.currentTimeMillis()) {
+        announcer.check(nowMs)
+        if (connected && nowMs - lastClaim >= CLAIM_EVERY_MS) {
+            lastClaim = nowMs
+            raw("POST", "/announce/claim", id = "announce", json = announcer.claimBody(clientId))
+        }
     }
 
     // ---- counts and tiles ----
@@ -232,6 +256,26 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     fun pause(mode: String, seconds: Long) =
         send(Command(pause = PauseWork(project = project, mode = mode, for_seconds = seconds)))
     fun resume() = send(Command(resume = ResumeWork(project = project)))
+    /** MASON's own repository's project, when one is registered: "Improve the pipeline" files there. */
+    val selfProject: String get() = header?.self_project ?: ""
+
+    /** Change a proposal's title, body or evidence while it waits for the owner (null: unchanged). */
+    fun editProposal(task: Long, title: String?, body: String?, evidence: String?) {
+        val o = linkedMapOf<String, Any?>()
+        title?.let { o["title"] = it }
+        body?.let { o["body"] = it }
+        evidence?.let { o["evidence"] = it }
+        raw("POST", "/proposals/$task/edit", json = EditorJson.text(o))
+    }
+
+    /** "Improve the pipeline": ask MASON to change its own code. */
+    fun improve(project: String, text: String) =
+        raw("POST", "/projects/$project/improve", json = EditorJson.text(mapOf("text" to text)))
+
+    /** Show the redacted version that would go upstream (`confirm = false`), or send it. */
+    fun publish(task: Long, confirm: Boolean) =
+        raw("POST", "/proposals/$task/publish", id = "publish:$task", json = EditorJson.text(mapOf("confirm" to confirm)))
+
     fun raw(method: String, path: String, id: String = "", json: String = "") =
         send(Command(id = id, raw = Raw(method = method, path = path, json = json)))
 
@@ -302,6 +346,7 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
         m.welcome?.let { w ->
             connected = true
             reconnecting = false
+            announcer.connectionRestored()
             if (w.resume == ResumeKind.SNAPSHOT) lastSeq = 0
             daemonVersion = w.version
             anchor(w.now_ms)
@@ -322,7 +367,10 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
         m.step_progress?.let { apply(it) }
         m.result?.let { r ->
             lastResult = if (r.ok) null else r.error
+            if (r.id == "announce" && r.ok) announcer.handleClaim(r.json)
             if (r.id == "health" && r.ok) health = HealthSnapshot.parse(r.json)
+            if (r.id == "introspection" && r.ok) introspection = IntrospectionSnapshot.parse(r.json)
+            if (r.id.startsWith("publish:") && r.ok) publishPreview = PublishPreview.parse(r.json)
             onResult?.invoke(r)
         }
     }
@@ -332,7 +380,7 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
         val ids = s.sections.filter { it.state in WANTING }.flatMap { it.rows.map { r -> r.id } }.toSet()
         val seen = attentionSeen
         attentionSeen = ids
-        if (seen != null && !muted && (ids - seen).isNotEmpty()) onAttention?.invoke()
+        if (seen != null && !muted && !announcer.heardFromDaemon && (ids - seen).isNotEmpty()) onAttention?.invoke()
     }
 
     fun apply(v: View) {
@@ -349,12 +397,17 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
         v.editor?.let { editor = it }
     }
 
-    fun disconnected() { connected = false; reconnecting = true }
+    fun disconnected(nowMs: Long = System.currentTimeMillis()) {
+        connected = false
+        reconnecting = true
+        announcer.connectionLost(nowMs)
+    }
 
     companion object {
         /** The protocol this monitor speaks. */
         const val PROTOCOL = 1
         const val LOG_KEEP = 40
+        const val CLAIM_EVERY_MS = 3_000L
         const val KEY_SCALE = "textScale"
         const val KEY_MUTE = "muted"
         private val WANTING = setOf("needs_attention", "failed", "proposed")

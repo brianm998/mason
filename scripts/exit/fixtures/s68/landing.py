@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Print the tracker lines of the LANDING view a monitor receives (s62 exit test; standard library only).
+# Print the tracker lines of the LANDING view a monitor receives (s68 exit test; standard library only).
 #   landing.py PORT
 import os, sys, time
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "s45"))
@@ -8,7 +8,7 @@ from wsclient import Ws
 port = int(sys.argv[1])
 end = time.time() + 8
 ws = Ws(port)
-ws.send({"hello": {"protocol": 1, "lastSeq": "0", "client": "s62"}})
+ws.send({"hello": {"protocol": 1, "lastSeq": "0", "client": "s68"}})
 ws.send({"subscribe": {"views": ["LANDING"]}})
 while time.time() < end:
     m = ws.recv()

@@ -285,6 +285,12 @@ private fun InspectorPanel(model: MonitorModel, e: EditorView) {
     }
     Column(verticalArrangement = Arrangement.spacedBy(theme.spacing)) {
         Text("Step ${e.selected} (${ins.kind})", style = theme.title())
+        if (ins.launch.isNotEmpty()) {
+            Column(Modifier.testTag("inspector-launch")) {
+                Text("Would launch now: ${ins.launch}", style = theme.body(FontWeight.SemiBold))
+                Text(ins.launch_from, style = theme.small(color = theme.muted))
+            }
+        }
         Row(verticalAlignment = Alignment.CenterVertically) {
             CommitField("", key = e.selected, modifier = Modifier.width(200.dp)) { if (it.isNotEmpty()) model.editorOp(mapOf("op" to "rename_step", "from" to e.selected, "to" to it)) }
             Text("rename", style = theme.small(color = theme.muted))

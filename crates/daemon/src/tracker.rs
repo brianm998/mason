@@ -11,12 +11,20 @@
 //!   never tasks.
 //! - **Outside text stays untrusted**: an issue by someone else is filed with
 //!   `Outside` trust, so prompts fence it, whoever labeled it.
+//! - **Imports start proposed** (`[tracker] import_as`, default `proposed`; the
+//!   owner's machine config can say `queued`): nothing an outside signal creates
+//!   starts without the owner's approval. A proposed import is never refused by a
+//!   self-hosting limit; a queued one that a limit refuses is listed, with the
+//!   reason, in an alert and in `pending`. Decision 0046.
+//! - **Adopt, don't duplicate**: an open task titled `... (GitHub #N)` with no
+//!   task linked to issue #N is linked, not imported twice. An issue whose task
+//!   was canceled raises an alert naming `mason task relink`.
 //! - **The tracker owns title, body, priority and closure**; the database owns
 //!   state. A change there reaches the task (`TrackerEdited`); a closure
 //!   cancels it. State goes back out as a comment or a close, best effort: a
 //!   failure to mirror never blocks the work.
 
-use crate::config::TrackerCfg;
+use crate::config::{ImportAs, TrackerCfg};
 use crate::daemon::Daemon;
 use mason_adapter_api::service::*;
 use mason_core::*;
@@ -39,6 +47,8 @@ pub struct Hub {
     /// What the last look at each project's tracker found, for doctor, `/status`
     /// and the monitors.
     records: Mutex<HashMap<ProjectId, PollRecord>>,
+    /// Open issues that are not (or not rightly) tasks, with why, as of the last pass.
+    pending: Mutex<HashMap<ProjectId, Vec<Waiting>>>,
 }
 
 /// The outcome of the last look at a project's tracker.
@@ -49,6 +59,14 @@ pub struct PollRecord {
     pub summary: Summary,
     /// Why the look failed (or the poll stopped), when it did.
     pub error: Option<String>,
+}
+
+/// An issue the tracker could not import (or whose task is gone), and why.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Waiting {
+    pub number: u64,
+    pub title: String,
+    pub reason: String,
 }
 
 struct Seen {
@@ -69,10 +87,10 @@ pub struct Summary {
     pub ignored: usize,
     /// Imported issues that did not change since the last look.
     pub unchanged: usize,
-    /// Issues that qualify but stay unimported because a `[self]` limit
-    /// (`max_open`, `per_week`) has no slot; each counts once, however many
-    /// passes looked at it.
-    pub waiting_slot: usize,
+    /// Issues a limit (or the cooldown) kept from being imported.
+    pub refused: usize,
+    /// Hand-filed tasks linked to their issue instead of imported twice.
+    pub adopted: usize,
 }
 
 impl Hub {
@@ -147,6 +165,16 @@ impl Hub {
         self.cv.notify_all();
     }
 
+    /// The issues not imported as of the last pass, by number.
+    pub fn pending(&self, p: ProjectId) -> Vec<Waiting> {
+        self.pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&p)
+            .cloned()
+            .unwrap_or_default()
+    }
+
     pub fn stopped(&self, p: ProjectId) -> Option<String> {
         self.pollers
             .lock()
@@ -183,7 +211,7 @@ pub fn state_json(d: &Daemon, pid: ProjectId) -> serde_json::Value {
         "imported": rec.as_ref().map(|r| r.summary.imported),
         "ignored": rec.as_ref().map(|r| r.summary.ignored),
         "unchanged": rec.as_ref().map(|r| r.summary.unchanged),
-        "waiting_slot": rec.as_ref().map(|r| r.summary.waiting_slot),
+        "waiting_slot": rec.as_ref().map(|r| r.summary.refused),
     })
 }
 
@@ -557,10 +585,76 @@ pub fn sync_with_deps(
         rows.insert(it.number, row);
     }
 
+    let mode = p
+        .services
+        .tracker
+        .as_ref()
+        .map_or(ImportAs::default(), |t| t.import_as);
+    let mut pending: Vec<Waiting> = vec![];
+
+    // Hand-filed tasks titled `(GitHub #N)`: link them, do not import a second one.
+    if let Ok(w) = d.world() {
+        for it in items.iter().filter(|i| !i.is_pr && i.open) {
+            if rows.contains_key(&it.number) {
+                continue;
+            }
+            let by_owner = d.cfg.owner_names.iter().any(|o| same(o, &it.author));
+            let labeled = it.labels.iter().any(|l| same(l, label));
+            if !(by_owner || labeled) {
+                continue;
+            }
+            let linked: BTreeSet<u64> = rows.values().map(|r| r.task).collect();
+            let found = w
+                .tasks
+                .values()
+                .filter(|t| t.project == pid)
+                .filter(|t| !linked.contains(&t.id.0))
+                .filter(|t| !matches!(t.state, State::Landed | State::Canceled | State::Failed))
+                .find(|t| adopted_number(&t.title) == Some(it.number));
+            let Some(t) = found else { continue };
+            let row = TrackerItemRow {
+                project: p.id.clone(),
+                number: it.number,
+                task: t.id.0,
+                title: it.title.clone(),
+                body: it.body.clone(),
+                priority: it.priority.clone(),
+                open: true,
+                mirrored: String::new(),
+            };
+            let _ = d.store.put_tracker_item(&row);
+            let nums: Vec<u64> = wants(it)
+                .into_iter()
+                .filter(|n| matches!(resolve(&rows, *n), Blocked::Task(..)))
+                .collect();
+            let _ = d.store.set_tracker_deps(&p.id, it.number, &nums);
+            rows.insert(it.number, row);
+            sum.adopted += 1;
+        }
+        // An open issue tied to a canceled task: it will never run, and it is not
+        // imported again. Say so, and how to put it right.
+        for it in items.iter().filter(|i| !i.is_pr && i.open) {
+            let Some(row) = rows.get(&it.number) else {
+                continue;
+            };
+            if w.tasks
+                .get(&TaskId(row.task))
+                .is_some_and(|t| t.state == State::Canceled)
+            {
+                pending.push(Waiting {
+                    number: it.number,
+                    title: it.title.clone(),
+                    reason: format!(
+                        "linked to task #{}, which was canceled and will never run; link a live task with `mason task relink <task> --issue {}` (owner only), or close the issue",
+                        row.task, it.number
+                    ),
+                });
+            }
+        }
+    }
+
     // New issues, in dependency order: repeat until a pass imports nothing.
     let mut waiting: Vec<&Item> = vec![];
-    // Issues refused a slot by a `[self]` limit: counted once each, over all passes.
-    let mut no_slot: BTreeMap<u64, String> = BTreeMap::new();
     let mut candidates: Vec<&Item> = vec![];
     for it in items.iter().filter(|i| !i.is_pr) {
         if rows.contains_key(&it.number) {
@@ -595,8 +689,19 @@ pub fn sync_with_deps(
             } else {
                 TrustSource::Outside
             };
-            if let Err(why) = crate::selfguard::check_filing_as(d, pid, trust) {
-                no_slot.insert(it.number, why);
+            let allowed = match mode {
+                // A proposal spends nothing: only the rollback cooldown stops it.
+                ImportAs::Proposed => crate::selfguard::check_filing_proposal(d, pid),
+                ImportAs::Queued => crate::selfguard::check_filing_as(d, pid, trust),
+            };
+            if let Err(reason) = allowed {
+                if !pending.iter().any(|w| w.number == it.number) {
+                    pending.push(Waiting {
+                        number: it.number,
+                        title: it.title.clone(),
+                        reason,
+                    });
+                }
                 continue;
             }
             let held: Vec<(u64, TaskId)> = resolved
@@ -614,7 +719,7 @@ pub fn sync_with_deps(
                 // Someone else's words stay untrusted, however they got in.
                 trust,
                 explored: false,
-                proposed: false,
+                proposed: mode == ImportAs::Proposed,
                 blockers: held.iter().map(|(_, t)| *t).collect(),
                 not_before: None,
             });
@@ -639,6 +744,7 @@ pub fn sync_with_deps(
                 let nums: Vec<u64> = held.iter().map(|(n, _)| *n).collect();
                 let _ = d.store.set_tracker_deps(&p.id, it.number, &nums);
                 rows.insert(it.number, row);
+                pending.retain(|w| w.number != it.number);
                 sum.imported += 1;
                 progress = true;
             }
@@ -648,24 +754,10 @@ pub fn sync_with_deps(
         }
     }
     sum.ignored += waiting.len();
-    sum.waiting_slot = no_slot.len();
-    if no_slot.is_empty() {
-        d.landing().clear(pid, "tracker-slots");
-    } else {
-        let nums: Vec<u64> = no_slot.keys().copied().collect();
-        let why = no_slot.values().next().cloned().unwrap_or_default();
-        d.landing().raise(
-            pid,
-            "tracker-slots",
-            "tracker",
-            &format!(
-                "{}: {} issue(s) wait for a slot ({}): {why}; they are looked at again next poll",
-                p.id,
-                nums.len(),
-                ids(&nums)
-            ),
-        );
-    }
+    sum.refused = pending
+        .iter()
+        .filter(|w| !w.reason.starts_with("linked to task"))
+        .count();
     // What is still waiting: a cycle among the waiting issues is named, and so
     // is an open blocker that will never be imported.
     let waiting_nums: BTreeSet<u64> = waiting.iter().map(|i| i.number).collect();
@@ -798,6 +890,41 @@ pub fn sync_with_deps(
             }
         }
     }
+    pending.sort_by_key(|w| w.number);
+    if pending.is_empty() {
+        d.landing().clear(pid, "tracker-pending");
+    } else {
+        let mut groups: Vec<(String, Vec<u64>)> = vec![];
+        for w in &pending {
+            match groups.iter_mut().find(|(r, _)| *r == w.reason) {
+                Some((_, v)) => v.push(w.number),
+                None => groups.push((w.reason.clone(), vec![w.number])),
+            }
+        }
+        let text = groups
+            .iter()
+            .map(|(r, v)| {
+                format!(
+                    "{} issue{} not imported ({}): {r}",
+                    v.len(),
+                    if v.len() == 1 { "" } else { "s" },
+                    ids(v)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        d.landing().raise(
+            pid,
+            "tracker-pending",
+            "tracker",
+            &format!("{}: {text}", p.id),
+        );
+    }
+    d.tracker
+        .pending
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(pid, pending);
     if alerts.is_empty() {
         d.landing().clear(pid, "tracker-deps");
     } else {
@@ -810,6 +937,79 @@ pub fn sync_with_deps(
         );
     }
     sum
+}
+
+/// The issue number in a trailing `(GitHub #N)` of a title, which marks a task a
+/// person filed by hand for that issue.
+pub fn adopted_number(title: &str) -> Option<u64> {
+    let t = title.trim_end().strip_suffix(')')?;
+    let (_, n) = t.rsplit_once("(GitHub #")?;
+    if n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    n.parse().ok()
+}
+
+/// Tie a live task to an open issue, in place of the one it was tied to (owner
+/// only; the caller checks who). Refuses a task that is landed or canceled, one
+/// already linked to a different issue's row that is still live, an issue the
+/// tracker does not list as open, and an issue that already has a live task.
+pub fn relink(d: &Arc<Daemon>, pid: ProjectId, issue: u64, task: TaskId) -> Result<(), String> {
+    let p = d.project(pid).ok_or("no such project")?;
+    let w = d.world().map_err(|e| e.to_string())?;
+    let t = w.tasks.get(&task).ok_or(format!("no task #{}", task.0))?;
+    if t.project != pid {
+        return Err(format!("task #{} is not in project {}", task.0, p.id));
+    }
+    if matches!(t.state, State::Landed | State::Canceled) {
+        return Err(format!(
+            "task #{} is {} and cannot be linked to an issue",
+            task.0,
+            state_name(t.state)
+        ));
+    }
+    let rows = d.store.tracker_items(&p.id).map_err(|e| e.to_string())?;
+    let Some(row) = rows.iter().find(|r| r.number == issue) else {
+        return Err(format!(
+            "issue #{issue} is not a tracker item of {}; nothing to relink",
+            p.id
+        ));
+    };
+    if !row.open {
+        return Err(format!(
+            "issue #{issue} is closed; there is nothing to relink"
+        ));
+    }
+    if let Some(other) = w.tasks.get(&TaskId(row.task)) {
+        if other.id != task && !matches!(other.state, State::Canceled) {
+            return Err(format!(
+                "issue #{issue} is linked to task #{}, which is {}; relink only replaces a canceled task",
+                other.id.0,
+                state_name(other.state)
+            ));
+        }
+    }
+    if let Some(r) = rows.iter().find(|r| r.task == task.0 && r.number != issue) {
+        return Err(format!(
+            "task #{} is already linked to issue #{}",
+            task.0, r.number
+        ));
+    }
+    let mut row = row.clone();
+    row.task = task.0;
+    row.mirrored = String::new();
+    d.store.put_tracker_item(&row).map_err(|e| e.to_string())?;
+    // The alert and the list say it was fixed at once, not at the next poll.
+    let mut m = d.tracker.pending.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(v) = m.get_mut(&pid) {
+        v.retain(|x| x.number != issue);
+        if v.is_empty() {
+            d.landing().clear(pid, "tracker-pending");
+        }
+    }
+    drop(m);
+    d.tracker.refresh(pid);
+    Ok(())
 }
 
 /// State back out: a comment, or a close when the work landed. Best effort,
@@ -866,5 +1066,22 @@ pub fn mirror_out(d: &Arc<Daemon>, pid: ProjectId, adapter: &dyn TrackerAdapter)
                 "mirroring to the tracker failed (the work is not held up): {e}"
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::adopted_number;
+
+    #[test]
+    fn a_trailing_github_number_is_read() {
+        assert_eq!(adopted_number("Fix the thing (GitHub #12)"), Some(12));
+        assert_eq!(adopted_number("Fix the thing (GitHub #12) "), Some(12));
+        assert_eq!(adopted_number("(GitHub #3)"), Some(3));
+        assert_eq!(adopted_number("Fix (GitHub #12) later"), None);
+        assert_eq!(adopted_number("Fix (GitHub #)"), None);
+        assert_eq!(adopted_number("Fix (GitHub #1a)"), None);
+        assert_eq!(adopted_number("Fix (github #12)"), None);
+        assert_eq!(adopted_number("Fix"), None);
     }
 }

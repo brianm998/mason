@@ -1,0 +1,2 @@
+{"type":"system","subtype":"init","cwd":"/scratch","session_id":"synthetic-0001","tools":[],"mcp_servers":[],"model":"claude-haiku-5-5","permissionMode":"dontAsk","apiKeySource":"ANTHROPIC_API_KEY","claude_code_version":"2.1.317"}
+{"type":"result","subtype":"success","is_error":true,"api_error_status":429,"result":"API Error: 429 rate_limit_error","session_id":"synthetic-0001","total_cost_usd":0,"usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0},"terminal_reason":"api_error"}

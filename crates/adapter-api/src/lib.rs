@@ -12,7 +12,10 @@ pub mod contract;
 pub mod http;
 pub mod kit;
 pub mod netguard;
+pub mod notify_channels;
+pub mod notify_kit;
 pub mod service;
+pub mod usage;
 pub mod webhook;
 
 use std::path::PathBuf;
@@ -21,6 +24,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub use contract::{ContractHandle, StepKind};
+pub use usage::{
+    BillingKind, Blocked, BlockedWhy, Overage, OverageState, UsageModel, UsageSnapshot, Window,
+    WindowSpec, WindowState,
+};
 
 pub type SessionId = String;
 
@@ -62,7 +69,12 @@ pub struct SessionSpec {
     /// id and the chunk's absolute offset in its journal (a journal read again is
     /// offered again from 0, so the receiver counts by stream and offset).
     pub progress: Option<ProgressSink>,
+    /// Told the model the CLI reports it really used, when the stream says.
+    pub on_model: Option<ModelSink>,
 }
+
+/// Receives the model name a session reports.
+pub type ModelSink = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
 
 /// Receives `(host id, offset, bytes)` of a step's output.
 pub type ProgressSink = std::sync::Arc<dyn Fn(&str, u64, &[u8]) + Send + Sync>;
@@ -83,6 +95,7 @@ impl SessionSpec {
             run_key: None,
             tools: None,
             progress: None,
+            on_model: None,
         }
     }
 }
@@ -96,16 +109,6 @@ pub struct TokenReport {
     pub cache_read: Option<u64>,
     pub cache_create: Option<u64>,
     pub cost_usd: Option<f64>,
-}
-
-/// A provider's limit status. If the provider gives only a status and a reset
-/// time, that is all there is; nothing is invented.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct RateLimitInfo {
-    pub status: String,
-    pub window: Option<String>,
-    pub resets_at_epoch: Option<u64>,
-    pub utilization: Option<f64>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -137,7 +140,10 @@ pub enum AgentEvent {
     },
     /// Final figures for this invocation, as reported by the stream.
     Tokens(TokenReport),
-    RateLimit(RateLimitInfo),
+    /// The model the CLI says it is really using (Claude's `system/init`).
+    Model(String),
+    /// The provider's limits as the stream last told them.
+    Usage(UsageSnapshot),
     ApiRetry {
         attempt: u32,
         status: Option<u32>,
@@ -180,6 +186,17 @@ impl From<netguard::NetError> for AdapterError {
 pub trait AgentAdapter: Send + Sync {
     fn name(&self) -> &'static str;
     fn capabilities(&self) -> AgentCaps;
+    /// The measures this adapter can report for `billing`. Default: none.
+    fn usage_model(&self, _billing: BillingKind) -> UsageModel {
+        UsageModel::default()
+    }
+    /// Read the provider's usage without starting a session, by a route the
+    /// CLI documents. Default: none (no such route was verified; decision
+    /// 0045). The daemon refreshes idle accounts only where this returns
+    /// `Some`.
+    fn probe_usage(&self, _billing: BillingKind) -> Result<Option<UsageSnapshot>, AdapterError> {
+        Ok(None)
+    }
     fn start(&self, spec: SessionSpec) -> Result<Box<dyn SessionHandle>, AdapterError>;
     /// Continue a session with a note saying what happened. The note is sent
     /// instead of replaying the original prompt.

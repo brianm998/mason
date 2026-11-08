@@ -390,6 +390,28 @@ pub fn check_filing_as(d: &Daemon, pid: ProjectId, trust: TrustSource) -> Result
     check_as(&u.status, u.yours, cfg, trust)
 }
 
+/// A *proposed* filing (a task waiting for the owner's approval) spends nothing, so it is
+/// not held to `max_open`, `per_week` or `max_steps`; only the rollback cooldown still
+/// refuses it. Decision 0046.
+pub fn check_filing_proposal(d: &Daemon, pid: ProjectId) -> Result<(), String> {
+    let Some(p) = d.project(pid) else {
+        return Ok(());
+    };
+    let Some(cfg) = &p.self_cfg else {
+        return Ok(());
+    };
+    let s = status(d, pid, cfg, now_ms());
+    check_proposal(&s)
+}
+
+pub fn check_proposal(s: &Status) -> Result<(), String> {
+    if let Some(until) = s.cooldown_until_ms {
+        let hours = until.saturating_sub(now_ms()).div_ceil(3_600_000);
+        return Err(format!("self-tasks are cooling down after a rollback, for about {hours} more hour(s); look at the proposal it filed"));
+    }
+    Ok(())
+}
+
 pub fn check(s: &Status, cfg: &SelfCfg) -> Result<(), String> {
     check_as(s, 0, cfg, TrustSource::OwnerAgent)
 }

@@ -22,8 +22,7 @@ use mason_adapters::claude::ClaudeAdapter;
 use mason_adapters::codex::CodexAdapter;
 use mason_adapters::hosted::HostLaunch;
 use mason_adapters::runner::{
-    hold_note, worth_a_stronger_model, FailReason, HoldReason, RunnerConfig, StepEnd, StepReport,
-    StepRunner,
+    hold_note, worth_a_stronger_model, FailReason, RunnerConfig, StepEnd, StepReport, StepRunner,
 };
 use mason_adapters::sandbox::{SandboxKind, SandboxPolicy};
 use mason_core::*;
@@ -88,6 +87,25 @@ impl Ctx {
             .crash
             .point(&format!("before_event:{:?}", self.state));
         let rounds = self.res.max_rounds.as_ref().map(|a| a.value);
+        // The history the detectors read (Part 14): how this attempt ended, and why.
+        let _ = self
+            .d
+            .store
+            .record_attempt(&mason_core::introspect::Attempt {
+                task: self.task.0,
+                project: self.project.id.clone(),
+                step: self.step.name.clone(),
+                outcome: match outcome {
+                    Outcome::Green => "green",
+                    Outcome::Red => "red",
+                    Outcome::Fail => "fail",
+                }
+                .into(),
+                signature: mason_core::introspect::signature(&reason),
+                reason: reason.clone(),
+                retry_n: self.attempt,
+                at: now_ms(),
+            });
         match after(&self.def, &self.step, outcome, self.attempt, rounds) {
             Transition::Next { step, state } => {
                 self.emit(EventKind::StepSucceeded {
@@ -221,6 +239,12 @@ fn ctx(d: &Arc<Daemon>, task: TaskId, run: StepRunId) -> Result<Ctx, String> {
 }
 
 pub fn run(d: &Arc<Daemon>, task: TaskId, step: State, run: StepRunId) {
+    run_inner(d, task, step, run);
+    // A task that was the account's probe is not any longer once its job is over.
+    crate::holds::task_done(d, task.0);
+}
+
+fn run_inner(d: &Arc<Daemon>, task: TaskId, step: State, run: StepRunId) {
     let c = match ctx(d, task, run) {
         Ok(c) => c,
         Err(why) => {
@@ -238,7 +262,12 @@ pub fn run(d: &Arc<Daemon>, task: TaskId, step: State, run: StepRunId) {
     // project. Time spent waiting is outside every timeout below: they all
     // start after this returns. An approval waits for a person, not for the
     // machine, so it takes nothing.
-    if c.step.kind != StepType::Approval {
+    if c.step.kind == StepType::Agent {
+        // A held account starts no new session; the task waits without a lease.
+        if get_lease(&c).is_err() {
+            return;
+        }
+    } else if c.step.kind != StepType::Approval {
         match acquire(&c) {
             Ok(l) => *c.lease.lock().unwrap_or_else(|e| e.into_inner()) = Some(l),
             Err(_) => return, // the task was cancelled or retried while it waited
@@ -366,6 +395,69 @@ fn wait_while_paused(c: &Ctx) -> Result<(), ()> {
         c.emit(EventKind::WaitEnded { task: c.task });
     }
     Ok(())
+}
+
+/// How often a task waiting on a held account looks again.
+const HOLD_POLL: Duration = Duration::from_millis(100);
+
+fn still_open(c: &Ctx) -> bool {
+    c.d.world()
+        .map(|w| w.open_run(c.task) == Some(c.run))
+        .unwrap_or(true)
+}
+
+/// Wait while the step's account is held (see `holds`). Says why in the task's
+/// wait, once; no lease is held and no time is charged. `Err` when the task
+/// went away meanwhile.
+fn wait_open(c: &Ctx) -> Result<(), ()> {
+    use crate::holds::Gate;
+    let mut announced = false;
+    let mut n = 0u32;
+    loop {
+        match crate::holds::gate(&c.d, &c.project.account, c.task.0) {
+            Gate::Open | Gate::Probe => break,
+            Gate::Wait(on) => {
+                if !announced {
+                    announced = true;
+                    if !c.emit(EventKind::WaitStarted { task: c.task, on }) {
+                        return Err(());
+                    }
+                }
+                std::thread::sleep(HOLD_POLL);
+                n += 1;
+                if n.is_multiple_of(5) && !still_open(c) {
+                    return Err(());
+                }
+            }
+        }
+    }
+    if announced {
+        c.emit(EventKind::WaitEnded { task: c.task });
+    }
+    Ok(())
+}
+
+/// The agent step's session slot, once its account is open. A hold that
+/// begins while the step queues for the slot sends it back to waiting.
+fn get_lease(c: &Ctx) -> Result<(), ()> {
+    loop {
+        wait_open(c)?;
+        let have = c.lease.lock().unwrap_or_else(|e| e.into_inner()).is_some();
+        if !have {
+            match acquire(c) {
+                Ok(l) => *c.lease.lock().unwrap_or_else(|e| e.into_inner()) = Some(l),
+                Err(_) => return Err(()),
+            }
+        }
+        if matches!(
+            crate::holds::gate(&c.d, &c.project.account, c.task.0),
+            crate::holds::Gate::Wait(_)
+        ) {
+            c.release_lease();
+            continue;
+        }
+        return Ok(());
+    }
 }
 
 /// Wait for this step's resources (Part 7). Says why in the task's wait, once,
@@ -936,8 +1028,21 @@ fn agent_job(c: &Ctx) {
         tracing::warn!(project = %c.project.id, "{p}");
     }
     let launched = mason_definition::tiers::launch(&c.res, &eff.mapping, &agent.ladder);
+    let rec = LaunchRec {
+        launched: &launched,
+        provider: crate::tiermap::name(agent.provider),
+        max: agent.max_retries,
+        tries: std::cell::Cell::new(0),
+        moved_from: std::cell::RefCell::new(String::new()),
+    };
     spec.model = launched.model.clone();
     spec.effort = launched.effort.clone();
+    {
+        let (d, run) = (c.d.clone(), c.run.0);
+        spec.on_model = Some(Arc::new(move |m| {
+            let _ = d.store.set_reported_model(run, m);
+        }));
+    }
     spec.env = c.project.agent_env.clone();
     spec.tool_timeout = tool_timeout_for(kind, &c.project);
     spec.deadline = Some(
@@ -960,12 +1065,29 @@ fn agent_job(c: &Ctx) {
 
     let runner = StepRunner::new(adapter.as_ref(), RunnerConfig::default());
     let first = match adapter.reattach(&key, spec.clone()) {
-        Ok(Some(h)) => runner.adopt(h, spec.clone(), &contract),
-        _ => runner.run(spec.clone(), &contract),
+        Ok(Some(h)) => {
+            // The session found again keeps the model and effort it was launched
+            // with, whatever the provider file says now; one reattach row is
+            // written only when this run has no record at all.
+            let before = c.d.store.launches(c.run.0).unwrap_or_default();
+            match before.iter().rev().find(|r| r.kind != "retry") {
+                Some(r) => {
+                    spec.model = Some(r.model.clone()).filter(|m| !m.is_empty());
+                    spec.effort = Some(r.effort.clone()).filter(|m| !m.is_empty());
+                }
+                None => rec.write(c, "reattach", &spec),
+            }
+            runner.adopt(h, spec.clone(), &contract)
+        }
+        _ => {
+            rec.write(c, "launch", &spec);
+            runner.run(spec.clone(), &contract)
+        }
     };
-    let Some(mut report) = settle_holds(c, &runner, first, &spec, &contract) else {
+    let Some(mut report) = settle_holds(c, &runner, first, &spec, &contract, &rec) else {
         return;
     };
+    record_usage(c, &spec, &report);
 
     // The retry ladder: a step that ended with no result, or whose agent
     // crashed, is tried again from a fresh session on the next model up. Not
@@ -978,16 +1100,88 @@ fn agent_job(c: &Ctx) {
             break;
         };
         tries += 1;
+        *rec.moved_from.borrow_mut() = spec.model.clone().unwrap_or_default();
         spec.model = Some(next.to_string());
         spec.run_key = Some(format!("{key}u{tries}"));
+        rec.tries.set(tries);
+        // Held meanwhile: wait for the account before another session starts.
+        if get_lease(c).is_err() {
+            return;
+        }
+        rec.write(c, "retry", &spec);
         let again = runner.run(spec.clone(), &contract);
-        let Some(r) = settle_holds(c, &runner, again, &spec, &contract) else {
+        let Some(r) = settle_holds(c, &runner, again, &spec, &contract, &rec) else {
             return;
         };
+        record_usage(c, &spec, &r);
         report = r;
     }
     contract.shutdown();
     finish_agent(c, report, &dir);
+}
+
+/// What the daemon writes down each time an agent step starts a session.
+struct LaunchRec<'a> {
+    launched: &'a mason_definition::tiers::Launch,
+    provider: &'static str,
+    max: u32,
+    tries: std::cell::Cell<u32>,
+    moved_from: std::cell::RefCell<String>,
+}
+
+impl LaunchRec<'_> {
+    /// Append a launch row: what was asked for, and what `spec` really passes to the CLI.
+    fn write(&self, c: &Ctx, kind: &str, spec: &SessionSpec) {
+        let l = self.launched;
+        let retried = self.tries.get() > 0;
+        let row = mason_store::LaunchRow {
+            run: c.run.0,
+            task: c.task.0,
+            step: c.step.name.clone(),
+            kind: kind.into(),
+            tier: l.tier.map(|t| t.name().to_string()).unwrap_or_default(),
+            level: l.level.name().to_string(),
+            req_model: l.mapped.model.clone().unwrap_or_default(),
+            req_effort: l.mapped.effort.clone().unwrap_or_default(),
+            model: spec.model.clone().unwrap_or_default(),
+            effort: spec.effort.clone().unwrap_or_default(),
+            provider: self.provider.into(),
+            model_from: if retried {
+                "the retry ladder".into()
+            } else {
+                l.model_from.clone()
+            },
+            effort_from: l.effort_from.clone(),
+            retry_n: self.tries.get(),
+            retry_max: self.max,
+            moved_up_from: self.moved_from.borrow().clone(),
+            overridden: l.overridden,
+            at_ms: now_ms(),
+            ..Default::default()
+        };
+        if let Err(e) = c.d.store.record_launch(row) {
+            tracing::warn!(task = c.task.0, "cannot record the launch: {e}");
+        }
+    }
+}
+
+/// Keep what the attempt reported: the provider's limits as the latest for the
+/// account, and the tokens and cost against project, task, step and model.
+fn record_usage(c: &Ctx, spec: &SessionSpec, report: &StepReport) {
+    if let Some(u) = &report.usage {
+        crate::usage::record_snapshot(&c.d, &c.project.account, u);
+    }
+    if let Some(key) = &spec.run_key {
+        let who = crate::usage::Attempt {
+            key,
+            task: c.task.0,
+            project: &c.project.id,
+            step: &c.step.name,
+            account: &c.project.account,
+            model: spec.model.as_deref(),
+        };
+        crate::usage::record_tokens(&c.d, &who, &report.tokens);
+    }
 }
 
 /// A provider hold is a wait, never a failure: show it, wait, resume. `None`
@@ -998,29 +1192,51 @@ fn settle_holds(
     mut report: StepReport,
     spec: &SessionSpec,
     contract: &ContractHandle,
+    rec: &LaunchRec,
 ) -> Option<StepReport> {
     while let StepEnd::Hold(reason) = &report.end {
-        let on = match reason {
-            HoldReason::UsageLimit { resets_at } => format!(
-                "usage limit (resets {})",
-                resets_at.as_deref().unwrap_or("at an unknown time")
-            ),
-            HoldReason::ProviderDown { .. } => "provider outage".to_string(),
-        };
-        if !c.emit(EventKind::WaitStarted { task: c.task, on }) {
+        let account = &c.project.account;
+        // The snapshot first: it may carry the reset the text lacks.
+        if let Some(u) = &report.usage {
+            crate::usage::record_snapshot(&c.d, account, u);
+        }
+        // The account is held, not just this task; if this was the probe it is
+        // refused and backs off further.
+        crate::holds::observe_end(&c.d, account, c.task.0, reason);
+        crate::holds::session_ended(&c.d, account, c.task.0, true);
+        // The session slot goes back while the account waits.
+        c.release_lease();
+        if get_lease(c).is_err() {
             return None;
         }
-        std::thread::sleep(c.d.cfg.hold_retry);
-        if !c.emit(EventKind::WaitEnded { task: c.task }) {
-            return None;
-        }
+        rec.write(c, "resume", spec);
         report = runner.resume(report, hold_note(), spec.clone(), contract);
     }
+    crate::holds::session_ended(&c.d, &c.project.account, c.task.0, false);
     Some(report)
 }
 
 fn finish_agent(c: &Ctx, report: StepReport, dir: &Path) {
+    // What the agent noticed outside its task (Part 13): filed before the step's own result
+    // is recorded, so a proposal that blocks the task is already a task when it waits.
+    if !report.proposals.is_empty() {
+        crate::proposals::file_from_report(&c.d, c.task, c.project_id, &report.proposals, dir);
+    }
+    let asked = match &report.end {
+        StepEnd::Asked { question } => Some(question.clone()),
+        _ => None,
+    };
     finish_agent_inner(c, report, dir);
+    // The analyst's findings (Part 14), read from the file it wrote in its worktree.
+    crate::introspect::ingest_analyst(&c.d, c.task, &c.project.id, &c.title, &c.wt, dir);
+    // Triage (off unless the project turns it on) only records what it would do; the
+    // question is the owner's either way.
+    if let Some(q) = asked {
+        let ask = mason_adapter_api::card::Card::from_json(&q)
+            .map(|card| card.ask)
+            .unwrap_or_else(|| q.as_str().unwrap_or_default().to_string());
+        crate::introspect::triage_question(&c.d, &c.project, c.task, &ask);
+    }
     // Asked, or the agent gave up: either way the session is free now.
     c.release_lease();
 }
@@ -1374,6 +1590,13 @@ fn land_job(c: &Ctx) {
             return c.conclude(Outcome::Red, reason, Some(feedback))
         }
         crate::selfguard::Gate::Go => {}
+    }
+    // An improvement of MASON's own code without write access: the branch goes to the owner's
+    // fork, not to the repository (Part 13).
+    if let Ok(Some(row)) = c.d.store.proposal(c.task.0) {
+        if row.access == "fork" {
+            return crate::improve::land_on_fork(c, &row);
+        }
     }
     // Landing is batched per project: join the queue and wait for the verdict.
     let Some(verdict) = crate::landing::submit_and_wait(c) else {

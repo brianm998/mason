@@ -11,7 +11,7 @@
 //! working directory in `<script>.<kind>.<dir hash>.count`, plays turn N, so a
 //! resume plays the next turn. Actions:
 //! `{"replay": "<fixture path>"}`, `{"init": "<session id>"}`, `{"say": "..."}`,
-//! `{"call": {"tool": "...", "args": {...}}}`, `{"rate_limit": {...}}`,
+//! `{"call": {"tool": "...", "args": {...}}}`, `{"rate_limit": {...}}` (or with `"windows": {id: {utilization, resetsAt}}` for several),
 //! `{"api_retry": {"attempt": 1, "status": 529}}`, `{"sleep_ms": 100}`,
 //! `{"result": {"is_error": false, "text": "...", "api_error_status": null}}`,
 //! `{"stderr": "..."}`, `{"exit": 1}` (die with no result) and
@@ -122,6 +122,13 @@ fn main() {
     let turn = turns.get(n).and_then(Value::as_array).unwrap_or(&empty);
 
     let sid = resume.unwrap_or_else(|| "fake-claude-session".to_string());
+    // Like the real CLI, report the model asked for (`--model`), else a stand-in.
+    let reported = args
+        .iter()
+        .position(|a| a == "--model")
+        .and_then(|i| args.get(i + 1))
+        .cloned()
+        .unwrap_or_else(|| "claude-fake".to_string());
     let mut inited = false;
     let mut finished = false;
     let mut calls = 0u32;
@@ -129,7 +136,7 @@ fn main() {
         out(
             &json!({"type": "system", "subtype": "init", "cwd": "/scratch", "session_id": sid,
                     "tools": [], "mcp_servers": [{"name": "mason", "status": "connected"}],
-                    "model": "claude-fake", "permissionMode": "dontAsk", "claude_code_version": "0.0.0-fake"}),
+                    "model": reported, "permissionMode": "dontAsk", "claude_code_version": "0.0.0-fake"}),
         );
     };
     for a in turn {
@@ -177,7 +184,11 @@ fn main() {
             out(
                 &json!({"type": "rate_limit_event", "session_id": sid, "rate_limit_info": {
                 "status": r["status"], "resetsAt": r["resetsAt"], "rateLimitType": r["window"],
-                "unifiedWindows": {r["window"].as_str().unwrap_or("five_hour"): {"utilization": r["utilization"]}}}}),
+                "unifiedWindows": match r.get("windows") {
+                    // Several windows at once: {"five_hour": {"utilization": 0.8, "resetsAt": N}, ...}
+                    Some(w) => w.clone(),
+                    None => json!({r["window"].as_str().unwrap_or("five_hour"): {"utilization": r["utilization"]}}),
+                }}}),
             );
         } else if let Some(r) = a.get("api_retry") {
             out(

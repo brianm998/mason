@@ -319,6 +319,8 @@ pub fn alerts_now(d: &Daemon) -> Vec<(String, String, String)> {
             format!("Paused ({}) for {scope} by {}", p.mode, p.owner),
         ));
     }
+    // A provider event is one item, whatever number of tasks wait on it.
+    out.extend(crate::holds::alerts(d));
     let owed = d.store.debts(None, true).unwrap_or_default().len();
     if owed > 0 {
         out.push((
@@ -332,6 +334,10 @@ pub fn alerts_now(d: &Daemon) -> Vec<(String, String, String)> {
 
 /// Raise new alerts and clear the ones whose condition is gone.
 pub fn sync_alerts(d: &Daemon) -> (Vec<String>, Vec<String>) {
+    // One at a time: two callers (the watcher and a request for the list) that each work out what
+    // is true and then write it can cross, and the older answer would clear an alert the newer one
+    // had just raised, to be raised again as "new".
+    let _one = d.notify.syncing.lock().unwrap_or_else(|e| e.into_inner());
     d.store
         .sync_alerts(&alerts_now(d), now_ms())
         .unwrap_or_default()

@@ -5,7 +5,10 @@
 
 use mason_adapter_api::conformance::{run_all, valid_plan, Harness, Scenario};
 use mason_adapter_api::contract::ContractHandle;
-use mason_adapter_api::{netguard, AgentAdapter, SessionSpec, StepKind};
+use mason_adapter_api::{
+    netguard, AgentAdapter, SessionSpec, StepKind, UsageModel, UsageSnapshot, Window, WindowSpec,
+    WindowState,
+};
 use mason_adapters::claude::ClaudeAdapter;
 use mason_adapters::fake::{FakeAction, FakeAdapter};
 use mason_adapters::hosted::HostLaunch;
@@ -22,6 +25,69 @@ fn call(tool: &str, args: serde_json::Value) -> FakeAction {
     }
 }
 
+fn model(utilization: bool) -> UsageModel {
+    UsageModel {
+        windows: vec![WindowSpec::new("five_hour", "5-hour", Some(18_000))],
+        utilization,
+        overage: false,
+        spend: false,
+    }
+}
+
+fn snapshot(utilization: Option<f64>) -> UsageSnapshot {
+    UsageSnapshot {
+        windows: vec![Window {
+            id: "five_hour".into(),
+            label: "5-hour".into(),
+            utilization,
+            state: WindowState::Blocked,
+            ..Default::default()
+        }],
+        ..Default::default()
+    }
+}
+
+/// A fake that breaks one usage rule in the usage-limit scenario.
+struct Misbehaving(Vec<FakeAction>, UsageModel);
+
+impl Harness for Misbehaving {
+    fn adapter(&self, _: Scenario) -> Box<dyn AgentAdapter> {
+        let mut turn = self.0.clone();
+        turn.push(FakeAction::UsageLimit(None));
+        Box::new(FakeAdapter::new(vec![turn]).with_usage_model(self.1.clone()))
+    }
+    fn spec(&self, _: Scenario) -> SessionSpec {
+        SessionSpec::new(StepKind::Explore, "explore", std::env::temp_dir())
+    }
+}
+
+fn usage_failures(h: &Misbehaving) -> Vec<String> {
+    run_all(h)
+        .err()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|f| f.contains("UsageLimit"))
+        .collect()
+}
+
+#[test]
+fn conformance_catches_promised_windows_never_emitted() {
+    let f = usage_failures(&Misbehaving(vec![], model(true)));
+    assert!(
+        f.iter().any(|m| m.contains("no usage was emitted")),
+        "{f:?}"
+    );
+}
+
+#[test]
+fn conformance_catches_an_invented_utilization() {
+    let f = usage_failures(&Misbehaving(
+        vec![FakeAction::Usage(snapshot(Some(0.5)))],
+        model(false),
+    ));
+    assert!(f.iter().any(|m| m.contains("does not report one")), "{f:?}");
+}
+
 struct FakeHarness;
 
 impl Harness for FakeHarness {
@@ -36,14 +102,17 @@ impl Harness for FakeHarness {
             }
             Scenario::NoResult => vec![FakeAction::Say("hmm".into())],
             Scenario::Timeout | Scenario::Hang => vec![FakeAction::Sleep(Duration::from_secs(60))],
-            Scenario::UsageLimit => vec![FakeAction::UsageLimit(Some("3pm".into()))],
+            Scenario::UsageLimit => vec![
+                FakeAction::Usage(snapshot(Some(0.9))),
+                FakeAction::UsageLimit(Some("3pm".into())),
+            ],
             Scenario::ProviderDown => vec![
                 FakeAction::ApiRetry { attempt: 1 },
                 FakeAction::ProviderDown("529".into()),
             ],
             Scenario::Crash => vec![FakeAction::Crash("boom".into())],
         };
-        Box::new(FakeAdapter::new(vec![turn]))
+        Box::new(FakeAdapter::new(vec![turn]).with_usage_model(model(true)))
     }
 
     fn spec(&self, _: Scenario) -> SessionSpec {
@@ -124,7 +193,7 @@ impl Harness for ClaudeHarness {
                 {"call": {"tool": "submit_plan", "args": valid_plan()}}]),
             Scenario::NoResult => json!([{"say": "I am not sure what to do"}]),
             Scenario::Timeout | Scenario::Hang => json!([{"sleep_ms": 60000}]),
-            Scenario::UsageLimit => json!([{"replay": fixture("synthetic_usage_limit.jsonl")}]),
+            Scenario::UsageLimit => json!([{"replay": fixture("synthetic_usage_windows.jsonl")}]),
             Scenario::ProviderDown => json!([{"replay": fixture("synthetic_provider_down.jsonl")}]),
             Scenario::Crash => json!([{"stderr": "segfault"}, {"exit": 139}]),
         };

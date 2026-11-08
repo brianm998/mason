@@ -149,6 +149,36 @@ final class MonitorCoreTests: XCTestCase {
         XCTAssertEqual(item.texts.first, "–")
     }
 
+    func testIssuesTheTrackerDidNotImportAreATileAndAListWithTheirReasons() {
+        let m = model()
+        XCTAssertNil(m.visibleItems().first { $0.id == "tile:not_imported" }, "nothing to say, nothing shown")
+        var p = Mason_V1_PendingIssue()
+        p.project = "mason"
+        p.number = 12
+        p.title = "Add paging"
+        p.reason = "10 self-tasks are open and the limit is 10"
+        p.url = "https://github.com/o/r/issues/12"
+        m.header!.pendingIssues = [p]
+        let items = m.visibleItems()
+        XCTAssertEqual(items.first { $0.id == "tile:not_imported" }?.texts, ["1", "not imported"])
+        XCTAssertEqual(
+            items.first { $0.id == "pending:mason:12" }?.texts,
+            ["mason", "#12", "Add paging", "10 self-tasks are open and the limit is 10", "https://github.com/o/r/issues/12"]
+        )
+    }
+
+    func testAProposedImportShowsItsIssueAndOffersApprove() {
+        let m = model()
+        var r = row(9, state: "proposed", title: "Add paging", actions: ["approve", "reject", "edit"])
+        r.issue = 12
+        r.issueURL = "https://github.com/o/r/issues/12"
+        m.sidebar!.sections.append(section("proposed_imports", rows: [r]))
+        let item = m.visibleItems().first { $0.id == "row:proposed_imports:9" }!
+        XCTAssertTrue(item.texts.contains("issue #12"))
+        XCTAssertTrue(item.texts.contains("https://github.com/o/r/issues/12"))
+        XCTAssertEqual(item.actions, ["approve", "edit", "reject"])
+    }
+
     func testTileLabelIsTheDaemonsLabelOrTheUnderscoreFallback() {
         let m = model(connected: true)
         var c = StateCount()

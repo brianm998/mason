@@ -139,6 +139,10 @@ struct RowView: View {
                     }
                     Text("\(row.project), \(activity)")
                         .font(theme.small()).foregroundStyle(theme.muted).lineLimit(2)
+                    if !row.proposal.isEmpty {
+                        Text(row.proposal).font(theme.small()).foregroundStyle(theme.muted)
+                            .accessibilityIdentifier("row:\(row.id):proposal")
+                    }
                     HStack(spacing: theme.spacing) {
                         Text(Format.duration(ms: row.inStateMs))
                             .font(theme.small()).foregroundStyle(row.slow ? theme.slow : theme.muted)
@@ -146,8 +150,9 @@ struct RowView: View {
                             Text(row.typical).font(theme.small()).foregroundStyle(theme.muted)
                         }
                         ProgressCells(model: model, cells: row.progress, slow: row.slow)
-                        if !row.model.isEmpty {
-                            Text(row.model).font(theme.small()).foregroundStyle(theme.muted)
+                        if !row.display.isEmpty || !row.model.isEmpty {
+                            Text(row.display.isEmpty ? row.model : row.display)
+                                .font(theme.small()).foregroundStyle(theme.muted)
                         }
                     }
                     if let c = row.progress.running { ProgressLine(model: model, cell: c) }
@@ -156,6 +161,21 @@ struct RowView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            if row.issue != 0 {
+                HStack(spacing: theme.spacing) {
+                    if let url = URL(string: row.issueURL), !row.issueURL.isEmpty {
+                        Link("issue #\(row.issue)", destination: url).font(theme.small())
+                            .accessibilityIdentifier("issue:\(row.id)")
+                    } else {
+                        Text("issue #\(row.issue)").font(theme.small()).foregroundStyle(theme.muted)
+                    }
+                    if row.state == "proposed" && model.canAct && row.allowedActions.contains("approve") {
+                        Button { model.approve(row.id) } label: { Text("Approve").pill(prominent: true) }
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("row:\(row.id):approve")
+                    }
+                }
+            }
             if !row.blockers.isEmpty {
                 HStack(spacing: theme.spacingSmall) {
                     Text("blocked by").font(theme.small()).foregroundStyle(theme.muted)

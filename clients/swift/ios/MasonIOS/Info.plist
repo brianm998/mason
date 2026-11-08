@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key><string>MASON</string>
+  <key>CFBundleIdentifier</key><string>dev.mason.ios</string>
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>MASON looks for your daemon on the local network so this phone can pair with it.</string>
+  <key>NSBonjourServices</key>
+  <array><string>_mason._tcp</string></array>
+  <key>UIBackgroundModes</key>
+  <array/>
+</dict>
+</plist>

@@ -102,6 +102,33 @@ class MonitorCoreTest {
         assertEquals(Page.Task(7), m.page, "an unknown link changes nothing")
     }
 
+    @Test fun issuesTheTrackerDidNotImportAreATileAndAListWithTheirReasons() {
+        val m = model()
+        assertNull(m.visibleItems().firstOrNull { it.id == "tile:not_imported" }, "nothing to say, nothing shown")
+        val p = PendingIssue(
+            project = "mason", number = 12, title = "Add paging",
+            reason = "10 self-tasks are open and the limit is 10", url = "https://github.com/o/r/issues/12",
+        )
+        m.header = m.header!!.copy(pending_issues = listOf(p))
+        val items = m.visibleItems()
+        assertEquals(listOf("1", "not imported"), items.first { it.id == "tile:not_imported" }.texts)
+        assertEquals(
+            listOf("mason", "#12", "Add paging", "10 self-tasks are open and the limit is 10", "https://github.com/o/r/issues/12"),
+            items.first { it.id == "pending:mason:12" }.texts,
+        )
+    }
+
+    @Test fun aProposedImportShowsItsIssueAndOffersApprove() {
+        val m = model()
+        val r = row(9, "proposed", "Add paging", actions = listOf("approve", "reject", "edit"))
+            .copy(issue = 12, issue_url = "https://github.com/o/r/issues/12")
+        m.sidebar = m.sidebar!!.copy(sections = m.sidebar!!.sections + section("proposed_imports", rows = listOf(r)))
+        val item = m.visibleItems().first { it.id == "row:proposed_imports:9" }
+        assertTrue("issue #12" in item.texts)
+        assertTrue("https://github.com/o/r/issues/12" in item.texts)
+        assertEquals(listOf("approve", "edit", "reject"), item.actions.sorted())
+    }
+
     @Test fun tileLabelIsTheDaemonsLabelOrTheUnderscoreFallback() {
         val m = model()
         val c = StateCount(state = "needs_attention")

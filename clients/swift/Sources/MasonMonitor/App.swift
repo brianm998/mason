@@ -12,10 +12,17 @@ final class Session: ObservableObject {
     private var connection: MonitorConnection?
     private var finder: Task<Void, Never>?
 
+    private var pulse: Timer?
+
     init() {
-        // The alert sound the model asks for when something new needs the owner.
+        // Sounds and sentences come from the daemon's announcements, spoken by this sink when this
+        // monitor is the one that speaks. The plain chime stays for a daemon that sends none.
+        model.announcer.sink = SystemSink()
         model.onAttention = {
             if let s = NSSound(named: NSSound.Name("Glass")) { s.play() } else { NSSound.beep() }
+        }
+        pulse = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak model] _ in
+            Task { @MainActor in model?.pulse() }
         }
     }
 

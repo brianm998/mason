@@ -120,6 +120,9 @@ fn task_json(d: &Daemon, w: &World, t: &Task, detail: bool) -> Value {
                 "source": n.source,
             }))
             .collect::<Vec<_>>());
+        // The tier and the real model in use (or, before it starts, expected).
+        v["model"] = crate::launchview::task_use(d, w, t)
+            .map_or(Value::Null, |m| crate::launchview::json_of(&m));
         v["blocked_by"] = json!(t.blockers.iter().map(|b| b.0).collect::<Vec<_>>());
         v["blocks"] = json!(w
             .tasks
@@ -158,6 +161,7 @@ fn task_json(d: &Daemon, w: &World, t: &Task, detail: bool) -> Value {
                 "run": r.id.0, "step": state_name(r.step), "name": r.name, "attempt": r.attempt,
                 "started_at": r.started_at.0,
                 "outcome": r.outcome.map(|o| format!("{o:?}").to_lowercase()),
+                "launches": crate::launchview::history(d, r.id.0).iter().map(crate::launchview::json_of).collect::<Vec<_>>(),
             }))
             .collect::<Vec<_>>());
     }
@@ -192,6 +196,12 @@ async fn status(Shared(d): Shared<Arc<Daemon>>) -> Res {
                 "tasks": counts,
                 "jobs": d2.job_count(),
                 "max_concurrent": d2.cfg.max_concurrent,
+                "active": w.tasks.values().filter(|t| t.state.is_step()).filter_map(|t| {
+                    crate::launchview::task_use(&d2, &w, t).map(|m| json!({
+                        "task": t.id.0, "step": t.step, "display": m.display,
+                        "model": crate::launchview::json_of(&m),
+                    }))
+                }).collect::<Vec<_>>(),
                 "event_loop_stalls": stalls,
                 "worst_stall_ms": worst,
                 "bugs": d2.store.bugs().map_or(0, |b| b.len()),
@@ -303,8 +313,14 @@ async fn add_task(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res {
                     ),
                 ));
             };
-            crate::selfguard::check_filing_as(&d2, pid, TrustSource::Owner)
-                .map_err(|e| fail(StatusCode::TOO_MANY_REQUESTS, e))?;
+            // A proposal spends nothing, so only the cooldown refuses it (decision 0046).
+            let proposed = b["proposed"].as_bool().unwrap_or(false);
+            if proposed {
+                crate::selfguard::check_filing_proposal(&d2, pid)
+            } else {
+                crate::selfguard::check_filing_as(&d2, pid, TrustSource::Owner)
+            }
+            .map_err(|e| fail(StatusCode::TOO_MANY_REQUESTS, e))?;
             let title = b["title"].as_str().unwrap_or_default().trim().to_string();
             if title.is_empty() || title.chars().count() > 200 {
                 return Err(fail(
@@ -358,7 +374,7 @@ async fn add_task(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res {
                     priority,
                     trust: TrustSource::Owner, // filed from the owner's own CLI
                     explored,
-                    proposed: b["proposed"].as_bool().unwrap_or(false),
+                    proposed,
                     blockers: after,
                     not_before: None,
                 })
@@ -371,6 +387,193 @@ async fn add_task(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res {
                 }
             });
             Ok(json!({"task": task, "seq": appended.seq}))
+        })
+        .await
+        .map_err(pool_err)??;
+    Ok(Json(v))
+}
+
+// ---- proposals and self-improvement (Part 13) ----
+
+fn owner_only(d: &Daemon, who: &str, what: &str) -> Result<(), (StatusCode, Json<Value>)> {
+    if crate::attention::is_owner(d, who) {
+        Ok(())
+    } else {
+        Err(fail(
+            StatusCode::FORBIDDEN,
+            format!("{who:?} is not the owner's identity; only the owner can {what}"),
+        ))
+    }
+}
+
+fn code(c: u16) -> StatusCode {
+    StatusCode::from_u16(c).unwrap_or(StatusCode::BAD_REQUEST)
+}
+
+async fn proposals_list(
+    Shared(d): Shared<Arc<Daemon>>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Res {
+    let open = q.get("open").is_some_and(|v| v != "0");
+    let d2 = d.clone();
+    let v = d
+        .pool
+        .run(move || crate::proposals::list_json(&d2, open))
+        .await
+        .map_err(pool_err)?;
+    Ok(Json(json!({"proposals": v})))
+}
+
+async fn proposal_show(Shared(d): Shared<Arc<Daemon>>, Path(task): Path<u64>) -> Res {
+    let d2 = d.clone();
+    let v = d
+        .pool
+        .run(move || {
+            let w = d2.world().map_err(store_err)?;
+            match d2.store.proposal(task).map_err(store_err)? {
+                Some(r) => Ok(crate::proposals::row_json(&w, &r)),
+                None => Err(fail(
+                    StatusCode::NOT_FOUND,
+                    format!("task #{task} is not a proposal"),
+                )),
+            }
+        })
+        .await
+        .map_err(pool_err)??;
+    Ok(Json(v))
+}
+
+/// File a proposal as the agent of task `task` would: every rule applies, and a refusal is the
+/// error. (An agent's own `file_proposal` calls are filed the same way when its step ends.)
+async fn proposal_file(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res {
+    let d2 = d.clone();
+    let v = d
+        .pool
+        .run(move || {
+            let from = b["task"].as_u64().map(TaskId);
+            let w = d2.world().map_err(store_err)?;
+            let project = match from.and_then(|t| w.tasks.get(&t)) {
+                Some(t) => t.project,
+                None => b["project"]
+                    .as_str()
+                    .and_then(|n| d2.project_id_by_name(n))
+                    .ok_or_else(|| fail(StatusCode::BAD_REQUEST, "name the task the proposal comes from (`task`), or a `project`"))?,
+            };
+            let text = |k: &str| b[k].as_str().unwrap_or_default().to_string();
+            let f = crate::proposals::Filing {
+                from_task: from,
+                project,
+                title: text("title"),
+                body: text("body"),
+                evidence: text("evidence"),
+                blocks_task: b["blocks_task"].as_bool().unwrap_or(false),
+                explored: b["explored"].as_bool().unwrap_or(false),
+            };
+            match crate::proposals::file(&d2, &f) {
+                Ok(done) => Ok(json!({"task": done.task.0, "route": done.route, "proposed": done.proposed, "project": done.project})),
+                Err(why) => {
+                    crate::attention::intervene(&d2, "proposal_refused", from, "pipeline", &f.title, &why);
+                    Err(fail(StatusCode::UNPROCESSABLE_ENTITY, why))
+                }
+            }
+        })
+        .await
+        .map_err(pool_err)??;
+    Ok(Json(v))
+}
+
+async fn proposal_act(
+    Shared(d): Shared<Arc<Daemon>>,
+    headers: axum::http::HeaderMap,
+    Path((task, act)): Path<(u64, String)>,
+    body: Option<Json<Value>>,
+) -> Res {
+    let who = who_of(&headers);
+    let b = body.map_or(json!({}), |b| b.0);
+    let d2 = d.clone();
+    let v = d
+        .pool
+        .run(move || {
+            owner_only(&d2, &who, "decide on or publish a proposal")?;
+            if act != "edit" && d2.store.proposal(task).map_err(store_err)?.is_none() {
+                return Err(fail(
+                    StatusCode::NOT_FOUND,
+                    format!("task #{task} is not a proposal"),
+                ));
+            }
+            let s = |k: &str| b[k].as_str();
+            match act.as_str() {
+                "approve" | "reject" => {
+                    let w = d2.world().map_err(store_err)?;
+                    let st = w.tasks.get(&TaskId(task)).map(|t| t.state);
+                    if st != Some(State::Proposed) {
+                        return Err(fail(
+                            StatusCode::CONFLICT,
+                            format!("task #{task} is not waiting for you ({st:?})"),
+                        ));
+                    }
+                    let approve = act == "approve";
+                    let reason = s("reason").unwrap_or("no reason given").to_string();
+                    d2.emit(if approve {
+                        EventKind::Approved { task: TaskId(task) }
+                    } else {
+                        EventKind::Rejected { task: TaskId(task) }
+                    })
+                    .map_err(store_err)?;
+                    crate::proposals::note_decision(&d2, task, approve, &reason);
+                    crate::attention::intervene(
+                        &d2,
+                        &format!("proposal_{act}"),
+                        Some(TaskId(task)),
+                        &who,
+                        &reason,
+                        &reason,
+                    );
+                    Ok(json!({"ok": true}))
+                }
+                "edit" => {
+                    crate::proposals::edit(&d2, task, s("title"), s("body"), s("evidence"))
+                        .map_err(|(c, m)| fail(code(c), m))?;
+                    Ok(json!({"ok": true}))
+                }
+                "publish" => {
+                    let confirm = b["confirm"].as_bool().unwrap_or(false);
+                    crate::improve::publish(&d2, task, confirm).map_err(|(c, m)| fail(code(c), m))
+                }
+                other => Err(fail(StatusCode::NOT_FOUND, format!("no action {other:?}"))),
+            }
+        })
+        .await
+        .map_err(pool_err)??;
+    Ok(Json(v))
+}
+
+async fn proposals_poll(Shared(d): Shared<Arc<Daemon>>) -> Res {
+    let d2 = d.clone();
+    d.pool
+        .run(move || crate::improve::poll(&d2))
+        .await
+        .map_err(pool_err)?;
+    Ok(Json(json!({"ok": true})))
+}
+
+async fn improve_start(
+    Shared(d): Shared<Arc<Daemon>>,
+    headers: axum::http::HeaderMap,
+    Path(name): Path<String>,
+    Json(b): Json<Value>,
+) -> Res {
+    let who = who_of(&headers);
+    let d2 = d.clone();
+    let v = d
+        .pool
+        .run(move || {
+            owner_only(&d2, &who, "ask MASON to change itself")?;
+            let text = b["text"].as_str().unwrap_or_default();
+            let (task, branch) = crate::improve::improve(&d2, &name, text).map_err(|(c, m)| fail(code(c), m))?;
+            crate::attention::intervene(&d2, "improve", Some(task), &who, text, "");
+            let access = d2.store.proposal(task.0).ok().flatten().map(|r| r.access).unwrap_or_default();
+            Ok(json!({"task": task.0, "branch": branch, "access": access, "channel": crate::improve::switched(&d2)}))
         })
         .await
         .map_err(pool_err)??;
@@ -519,6 +722,7 @@ async fn approve(
             if t.state == State::Proposed {
                 d2.emit(EventKind::Approved { task: TaskId(id) })
                     .map_err(store_err)?;
+                crate::proposals::note_decision(&d2, id, true, "");
                 Ok(())
             } else {
                 crate::jobs::conclude_approval(
@@ -562,6 +766,7 @@ async fn reject(
             if t.state == State::Proposed {
                 d2.emit(EventKind::Rejected { task: TaskId(id) })
                     .map_err(store_err)?;
+                crate::proposals::note_decision(&d2, id, false, &reason);
                 Ok(())
             } else if d2
                 .store
@@ -1353,13 +1558,77 @@ async fn refresh_tracker(Shared(d): Shared<Arc<Daemon>>, Path(id): Path<u64>) ->
             };
             d2.tracker.refresh(pid);
             match crate::tracker::poll_once(&d2, pid, adapter.as_ref(), &cfg) {
-                Ok(s) => Ok(json!({"tracker": true, "imported": s.imported, "updated": s.updated, "closed": s.closed, "ignored": s.ignored, "unchanged": s.unchanged, "waiting_slot": s.waiting_slot})),
+                Ok(s) => Ok(json!({"tracker": true, "imported": s.imported, "updated": s.updated, "closed": s.closed, "ignored": s.ignored, "unchanged": s.unchanged, "waiting_slot": s.refused, "adopted": s.adopted})),
                 Err(e) => Ok(json!({"tracker": true, "error": e})),
             }
         })
         .await
         .map_err(pool_err)??;
     Ok(Json(v))
+}
+
+/// Open issues the tracker has not imported (or whose task was canceled), with why.
+async fn pending_issues(
+    Shared(d): Shared<Arc<Daemon>>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Res {
+    let d2 = d.clone();
+    let v = d
+        .pool
+        .run(move || {
+            let mut out = vec![];
+            for (pid, p) in &d2.projects {
+                if q.get("project").is_some_and(|n| *n != p.id) {
+                    continue;
+                }
+                for w in d2.tracker.pending(*pid) {
+                    out.push(json!({"project": p.id, "number": w.number, "title": w.title, "reason": w.reason}));
+                }
+            }
+            json!({"pending": out})
+        })
+        .await
+        .map_err(pool_err)?;
+    Ok(Json(v))
+}
+
+/// Tie a live task to an open issue whose task was canceled. Owner only.
+async fn relink_task(
+    Shared(d): Shared<Arc<Daemon>>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<u64>,
+    Json(b): Json<Value>,
+) -> Res {
+    let who = headers
+        .get("x-mason-as")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    let d2 = d.clone();
+    d.pool
+        .run(move || {
+            if !crate::attention::is_owner(&d2, &who) {
+                return Err(fail(
+                    StatusCode::FORBIDDEN,
+                    format!("{who:?} is not the owner's identity; only the owner can link a task to an issue"),
+                ));
+            }
+            let issue = b["issue"].as_u64().filter(|n| *n > 0).ok_or_else(|| {
+                fail(StatusCode::BAD_REQUEST, "issue must be an issue number")
+            })?;
+            let w = d2.world().map_err(store_err)?;
+            let t = w
+                .tasks
+                .get(&TaskId(id))
+                .ok_or_else(|| fail(StatusCode::NOT_FOUND, format!("no task #{id}")))?;
+            crate::tracker::relink(&d2, t.project, issue, TaskId(id))
+                .map_err(|e| fail(StatusCode::CONFLICT, e))?;
+            crate::attention::intervene(&d2, "relink", Some(TaskId(id)), &who, "", &format!("issue #{issue}"));
+            Ok(())
+        })
+        .await
+        .map_err(pool_err)??;
+    Ok(Json(json!({"ok": true})))
 }
 
 async fn debts_list(
@@ -1599,6 +1868,59 @@ async fn pause_clear(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Re
     Ok(Json(json!({"lifted": n})))
 }
 
+fn account_actor(d: &Daemon, b: &Value) -> String {
+    b["by"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .unwrap_or_else(|| d.cfg.owner_names.first().cloned().unwrap_or_default())
+}
+
+/// Hold an account by hand (`mason account hold`).
+async fn account_hold(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res {
+    let account = b["account"].as_str().unwrap_or_default().to_string();
+    let reason = b["reason"].as_str().unwrap_or_default().to_string();
+    let for_s = b["for_s"].as_u64();
+    let who = account_actor(&d, &b);
+    let d2 = d.clone();
+    d.pool
+        .run(move || crate::holds::hold(&d2, &account, &who, for_s, &reason))
+        .await
+        .map_err(pool_err)?
+        .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
+    Ok(Json(json!({"ok": true})))
+}
+
+/// Release a hold now: try again at once (`mason account release`).
+async fn account_release(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res {
+    let account = b["account"].as_str().unwrap_or_default().to_string();
+    let who = account_actor(&d, &b);
+    let d2 = d.clone();
+    let was = d
+        .pool
+        .run(move || crate::holds::release(&d2, &account, &who))
+        .await
+        .map_err(pool_err)?
+        .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
+    Ok(Json(json!({"released": was})))
+}
+
+/// The LLM usage view, as the monitors get it (proto3 JSON).
+async fn usage_status(Shared(d): Shared<Arc<Daemon>>) -> Res {
+    let d2 = d.clone();
+    let v = d
+        .pool
+        .run(move || {
+            let w = d2.world().map_err(store_err)?;
+            let u = crate::views::Ctx::new(&d2, &w).usage();
+            serde_json::to_value(&u)
+                .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        })
+        .await
+        .map_err(pool_err)??;
+    Ok(Json(v))
+}
+
 async fn pauses_list(Shared(d): Shared<Arc<Daemon>>) -> Res {
     let d2 = d.clone();
     let rows = d
@@ -1630,7 +1952,94 @@ async fn alerts_list(
         .map_err(store_err)?;
     Ok(Json(json!({"alerts": rows.iter().map(|a| json!({
         "key": a.key, "kind": a.kind, "text": a.text, "since": a.since, "cleared_at": a.cleared_at,
+        "acked_at": a.acked_at, "reminded_at": a.reminded_at,
     })).collect::<Vec<_>>()})))
+}
+
+/// Acknowledge an alert (owner only): its noise stops, it stays visible while its condition holds.
+async fn ack_alert_key(d: Arc<Daemon>, key: String, who: Option<String>) -> Res {
+    let who = who
+        .filter(|w| !w.is_empty())
+        .unwrap_or_else(|| d.cfg.owner_names.first().cloned().unwrap_or_default());
+    owner_only(&d, &who, "acknowledge an alert")?;
+    let (d2, k2) = (d.clone(), key.clone());
+    let done = d
+        .pool
+        .run(move || crate::notify::ack(&d2, &k2))
+        .await
+        .map_err(pool_err)?
+        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    if !done {
+        return Err(fail(
+            StatusCode::NOT_FOUND,
+            format!("no live alert {key:?} (it may have cleared)"),
+        ));
+    }
+    let d3 = d.clone();
+    let _ = d
+        .pool
+        .spawn(move || crate::attention::intervene(&d3, "acknowledged", None, &who, &key, ""));
+    d.poke();
+    Ok(Json(json!({"acknowledged": true})))
+}
+
+async fn alert_ack(
+    Shared(d): Shared<Arc<Daemon>>,
+    Path(key): Path<String>,
+    body: Option<Json<Value>>,
+) -> Res {
+    let who = body.and_then(|b| b["as"].as_str().map(String::from));
+    ack_alert_key(d, key, who).await
+}
+
+async fn alert_ack_body(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res {
+    let key = b["key"].as_str().unwrap_or_default().to_string();
+    ack_alert_key(d, key, b["as"].as_str().map(String::from)).await
+}
+
+/// A monitor asks whether it is the one that speaks, and is given what is waiting if so.
+async fn announce_claim(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res {
+    let client = b["client"].as_str().unwrap_or_default().to_string();
+    if client.is_empty() {
+        return Err(fail(StatusCode::BAD_REQUEST, "a claim names its client"));
+    }
+    let muted = b["muted"].as_bool().unwrap_or(false);
+    let d2 = d.clone();
+    let v = d
+        .pool
+        .run(move || crate::notify::claim(&d2, &client, muted))
+        .await
+        .map_err(pool_err)?;
+    Ok(Json(v))
+}
+
+async fn notify_status(Shared(d): Shared<Arc<Daemon>>) -> Res {
+    let d2 = d.clone();
+    let v = d
+        .pool
+        .run(move || crate::notify::status(&d2))
+        .await
+        .map_err(pool_err)?;
+    Ok(Json(v))
+}
+
+async fn notify_test(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res {
+    owner_only(
+        &d,
+        b["as"]
+            .as_str()
+            .filter(|w| !w.is_empty())
+            .unwrap_or(d.cfg.owner_names.first().map_or("", String::as_str)),
+        "send a test notification",
+    )?;
+    let channel = b["channel"].as_str().unwrap_or_default().to_string();
+    let d2 = d.clone();
+    let r = d
+        .pool
+        .run(move || crate::notify::test(&d2, &channel))
+        .await
+        .map_err(pool_err)?;
+    r.map(Json).map_err(|e| fail(StatusCode::BAD_REQUEST, e))
 }
 
 async fn metrics(Shared(d): Shared<Arc<Daemon>>, Query(q): Query<HashMap<String, String>>) -> Res {
@@ -1647,6 +2056,115 @@ async fn metrics(Shared(d): Shared<Arc<Daemon>>, Query(q): Query<HashMap<String,
         .await
         .map_err(pool_err)?;
     Ok(Json(v))
+}
+
+async fn health(Shared(d): Shared<Arc<Daemon>>) -> Res {
+    let d2 = d.clone();
+    let v = d
+        .pool
+        .run(move || crate::introspect::health(&d2))
+        .await
+        .map_err(pool_err)?;
+    Ok(Json(v))
+}
+
+async fn digest(Shared(d): Shared<Arc<Daemon>>, Query(q): Query<HashMap<String, String>>) -> Res {
+    let days: u64 = q
+        .get("days")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(7)
+        .max(1);
+    let project = q.get("project").cloned();
+    let d2 = d.clone();
+    let v = d
+        .pool
+        .run(move || {
+            let now = now_ms();
+            crate::introspect::digest(
+                &d2,
+                project.as_deref(),
+                now.saturating_sub(days * 86_400_000),
+                now,
+            )
+        })
+        .await
+        .map_err(pool_err)?;
+    Ok(Json(v))
+}
+
+async fn schedules_list(Shared(d): Shared<Arc<Daemon>>) -> Res {
+    let d2 = d.clone();
+    let v = d
+        .pool
+        .run(move || crate::introspect::health(&d2)["schedules"].clone())
+        .await
+        .map_err(pool_err)?;
+    Ok(Json(json!({"schedules": v})))
+}
+
+/// Run a recurring job now: `introspect`, `analyst:<project>` or `<project>/<schedule>`.
+async fn schedule_run(
+    Shared(d): Shared<Arc<Daemon>>,
+    headers: axum::http::HeaderMap,
+    Json(b): Json<Value>,
+) -> Res {
+    let who = who_of(&headers);
+    let name = b["name"].as_str().unwrap_or_default().to_string();
+    let d2 = d.clone();
+    let said = d
+        .pool
+        .run(move || {
+            owner_only(&d2, &who, "run a recurring job")?;
+            crate::introspect::run_now(&d2, &name).map_err(|e| fail(StatusCode::CONFLICT, e))
+        })
+        .await
+        .map_err(pool_err)??;
+    Ok(Json(json!({"said": said})))
+}
+
+async fn triage_list(Shared(d): Shared<Arc<Daemon>>) -> Res {
+    let d2 = d.clone();
+    let rows = d
+        .pool
+        .run(move || d2.store.triage().unwrap_or_default())
+        .await
+        .map_err(pool_err)?;
+    let v: Vec<Value> = rows
+        .iter()
+        .map(|t| {
+            json!({"id": t.id, "task": t.task, "question": t.question, "action": t.action,
+                        "answer": t.answer, "evidence": t.evidence, "status": t.status,
+                        "verdict": t.verdict, "at": t.at})
+        })
+        .collect();
+    Ok(Json(json!({"triage": v})))
+}
+
+async fn triage_review(
+    Shared(d): Shared<Arc<Daemon>>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<u64>,
+    Json(b): Json<Value>,
+) -> Res {
+    let who = who_of(&headers);
+    let agree = b["agree"].as_bool().unwrap_or(false);
+    let d2 = d.clone();
+    d.pool
+        .run(move || {
+            owner_only(&d2, &who, "review a triage answer")?;
+            match d2.store.review_triage(id, agree).map_err(store_err)? {
+                true => Ok(()),
+                false => Err(fail(
+                    StatusCode::CONFLICT,
+                    format!("sample {id} is not waiting for review"),
+                )),
+            }
+        })
+        .await
+        .map_err(pool_err)??;
+    Ok(Json(
+        json!({"reviewed": id, "verdict": if agree { "agree" } else { "disagree" }}),
+    ))
 }
 
 async fn resources(Shared(d): Shared<Arc<Daemon>>) -> Res {
@@ -1930,6 +2448,10 @@ async fn debug_stall(
 pub fn api_router(d: Arc<Daemon>) -> Router {
     Router::new()
         .route("/status", get(status))
+        .route("/lan", get(crate::lan::status))
+        .route("/pair/codes", post(crate::lan::issue_code))
+        .route("/devices", get(crate::lan::devices))
+        .route("/devices/{id}/revoke", post(crate::lan::revoke))
         .route("/tasks", get(list_tasks).post(add_task))
         .route("/tasks/{id}", get(task_detail))
         .route("/tasks/{id}/cancel", post(cancel))
@@ -1959,14 +2481,28 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/tasks/{id}/logs", get(logs))
         .route("/tasks/{id}/progress", get(task_progress))
         .route("/resources", get(resources))
+        .route("/health", get(health))
+        .route("/digest", get(digest))
+        .route("/schedules", get(schedules_list))
+        .route("/schedules/run", post(schedule_run))
+        .route("/triage", get(triage_list))
+        .route("/triage/{id}/review", post(triage_review))
         .route("/tasks/{id}/skip", post(skip_task))
         .route("/tasks/{id}/answer", post(answer_task))
         .route("/tasks/{id}/session", get(open_session))
         .route("/tasks/{id}/{kind}", post(land_override))
+        .route("/account/hold", post(account_hold))
+        .route("/account/release", post(account_release))
         .route("/pause", post(pause_set))
         .route("/resume", post(pause_clear))
         .route("/pauses", get(pauses_list))
+        .route("/usage", get(usage_status))
         .route("/alerts", get(alerts_list))
+        .route("/alerts/ack", post(alert_ack_body))
+        .route("/alerts/{key}/ack", post(alert_ack))
+        .route("/announce/claim", post(announce_claim))
+        .route("/notify", get(notify_status))
+        .route("/notify/test", post(notify_test))
         .route("/metrics", get(metrics))
         .route("/demo", get(demo_status))
         .route("/demo/next", post(demo_next))
@@ -1976,6 +2512,13 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/update", get(update_status).post(update_start))
         .route("/update/ack", post(update_ack))
         .route("/tasks/{id}/refresh", post(refresh_tracker))
+        .route("/tasks/{id}/relink", post(relink_task))
+        .route("/pending-issues", get(pending_issues))
+        .route("/proposals", get(proposals_list).post(proposal_file))
+        .route("/proposals/poll", post(proposals_poll))
+        .route("/proposals/{task}", get(proposal_show))
+        .route("/proposals/{task}/{act}", post(proposal_act))
+        .route("/projects/{name}/improve", post(improve_start))
         .route("/debts", get(debts_list))
         .route("/debts/{id}/run", post(debt_run))
         .route("/quarantine", get(quarantine_list).post(quarantine_add))
@@ -2092,11 +2635,18 @@ pub async fn serve(d: Arc<Daemon>) -> std::io::Result<()> {
         Err(e) => return Err(e),
     };
     let port = listener.local_addr()?.port();
+    let lan_port = if d.cfg.lan.enabled {
+        Some(crate::lan::start(d.clone()).await?)
+    } else {
+        None
+    };
     let tmp = info.with_extension("tmp");
-    std::fs::write(
-        &tmp,
-        json!({"pid": std::process::id(), "port": port, "started_ms": now_ms()}).to_string(),
-    )?;
+    let mut announce = json!({"pid": std::process::id(), "port": port, "started_ms": now_ms()});
+    if let (Some(p), Some(i)) = (lan_port, d.lan.info()) {
+        announce["lan_port"] = json!(p);
+        announce["lan_fingerprint"] = json!(i.fingerprint);
+    }
+    std::fs::write(&tmp, announce.to_string())?;
     std::fs::rename(&tmp, &info)?;
     tokio::spawn(crate::watchdog::run(d.clone()));
     tracing::info!(port, "masond listening on loopback");

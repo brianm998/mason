@@ -89,11 +89,23 @@ fn cfg() -> TrackerCfg {
         label: "mason".into(),
         interval_s: 30,
         webhook_secret: None,
+        import_as: mason_daemon::config::ImportAs::Proposed,
     }
 }
 
+/// The project file's tracker section; `import_as` as the owner's machine config says it.
+fn tracker_section(import_as: &str, extra: &str) -> String {
+    format!("[tracker]\nkind = \"github\"\napi = \"http://127.0.0.1:1\"\nrepo = \"o/r\"\ntoken = \"env:MASON_NO_SUCH_TOKEN\"\ninterval_s = 3600\nimport_as = \"{import_as}\"\n{extra}")
+}
+
+/// Imports are queued here: most of these tests are about what happens to a queued task.
 fn world() -> (Scratch, Arc<Daemon>, ProjectId) {
+    world_with(&tracker_section("queued", ""))
+}
+
+fn world_with(extra: &str) -> (Scratch, Arc<Daemon>, ProjectId) {
     let s = Scratch::new("true", json!({"steps": {}}));
+    s.write_project("scratch", "true", extra);
     let d = s.start();
     // Imported tasks are not claimed: nothing here is about running them.
     mason_daemon::attention::pause(&d, "", "claims", "test", 3600).unwrap();
@@ -256,7 +268,7 @@ fn state_is_mirrored_out_best_effort_and_never_blocks_work() {
 
 #[test]
 fn polling_is_conditional_a_permanent_error_stops_it_and_a_refresh_tries_once_more() {
-    let (_s, d, pid) = world();
+    let (_s, d, pid) = world_with("");
     let owner = d.cfg.owner_names[0].clone();
     let fake = Fake::default();
     fake.script.lock().unwrap().push(Ok(Listing::Items {
@@ -297,7 +309,7 @@ fn polling_is_conditional_a_permanent_error_stops_it_and_a_refresh_tries_once_mo
 
 #[test]
 fn an_outage_is_retried_with_backoff_not_stopped() {
-    let (_s, d, pid) = world();
+    let (_s, d, pid) = world_with("");
     let fake = Fake::default();
     fake.script
         .lock()
@@ -396,6 +408,8 @@ fn alerts(d: &Arc<Daemon>) -> Vec<String> {
         .into_iter()
         .filter(|(_, k, _)| k == "tracker")
         .map(|(_, _, t)| t)
+        // The poll thread knows no GitHub here; what it says is not what these tests are about.
+        .filter(|t| !t.contains("is not answering") && !t.contains("poll stopped"))
         .collect()
 }
 
@@ -581,11 +595,10 @@ fn a_canceled_blocker_keeps_the_dependent_held_and_raises_an_alert() {
 
 #[test]
 fn items_over_a_self_limit_wait_for_a_slot_and_the_count_is_per_issue() {
-    let s = Scratch::new("true", json!({"steps": {}}));
-    s.write_project("scratch", "true", "[self]\nmax_open = 1\n");
-    let d = s.start();
-    mason_daemon::attention::pause(&d, "", "claims", "test", 3600).unwrap();
-    let pid = d.project_id_by_name("scratch").unwrap();
+    let (_s, d, pid) = world_with(&format!(
+        "{}[self]\nmax_open = 1\n",
+        tracker_section("queued", "")
+    ));
     let owner = d.cfg.owner_names[0].clone();
     let items = vec![
         item(1, "First", &owner, &[]),
@@ -595,21 +608,21 @@ fn items_over_a_self_limit_wait_for_a_slot_and_the_count_is_per_issue() {
     ];
     let sum = sync_items(&d, pid, "mason", &items);
     assert_eq!(
-        (sum.imported, sum.waiting_slot, sum.ignored),
+        (sum.imported, sum.refused, sum.ignored),
         (1, 2, 1),
         "{sum:?}"
     );
     // Looking again does not count them twice, and the first one is unchanged.
     let sum = sync_items(&d, pid, "mason", &items);
     assert_eq!(
-        (sum.imported, sum.waiting_slot, sum.unchanged),
+        (sum.imported, sum.refused, sum.unchanged),
         (0, 2, 1),
         "{sum:?}"
     );
-    let a = alerts(&d);
+    let a = not_imported(&d);
     assert!(
         a.iter()
-            .any(|t| t.contains("2 issue(s) wait for a slot (#2, #3)")),
+            .any(|t| t.contains("2 issues not imported (#2, #3)")),
         "{a:?}"
     );
     assert!(task_for(&d, 2).is_none() && task_for(&d, 3).is_none());
@@ -641,4 +654,315 @@ fn the_last_poll_is_recorded_and_a_stop_keeps_the_counts_and_the_reason() {
     assert!(r.error.unwrap().contains("404"));
     assert_eq!(r.summary.imported, 1, "the last full look's counts stay");
     assert!(d.tracker_stopped(pid).is_some());
+}
+
+// ---- Stage 65: imports start proposed, refusals are visible, hand-filed tasks are adopted ----
+
+/// The open issues of a recorded GitHub listing (`tests/fixtures/github_issues.json`), as
+/// the GitHub adapter reads them. `OWNER` in the recording is this machine's owner.
+fn recorded(d: &Arc<Daemon>) -> Vec<Item> {
+    let text = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/github_issues.json"),
+    )
+    .unwrap()
+    .replace("OWNER", &d.cfg.owner_names[0]);
+    let http = Arc::new(mason_adapter_api::http::Recorded::from_json(&text).unwrap());
+    let dir = tempfile::tempdir().unwrap();
+    let tok = dir.path().join("token");
+    std::fs::write(&tok, "ghp_recorded_test_token\n").unwrap();
+    let gh = mason_adapters::github::GitHub::new(
+        http,
+        "https://api.github.com",
+        "o/r",
+        mason_adapters::github::TokenRef::File(tok),
+    );
+    match gh.list(None).unwrap() {
+        Listing::Items { items, .. } => items,
+        Listing::NotModified => panic!("a first listing is never 304"),
+    }
+}
+
+fn not_imported(d: &Arc<Daemon>) -> Vec<String> {
+    alerts(d)
+        .into_iter()
+        .filter(|t| t.contains("not imported ("))
+        .collect()
+}
+
+fn state_of(d: &Arc<Daemon>, task: TaskId) -> State {
+    d.world().unwrap().tasks.get(&task).unwrap().state
+}
+
+#[test]
+fn a_new_issue_becomes_a_proposed_task_that_waits_for_approval() {
+    let (_s, d, pid) = world_with("");
+    let items = recorded(&d);
+    let sum = sync_items(&d, pid, "mason", &items);
+    assert_eq!(sum.imported, 6, "{sum:?}");
+    let t = task_for(&d, 21).unwrap();
+    assert_eq!(t.state, State::Proposed, "nothing starts without approval");
+    assert_eq!(t.title, "Add paging");
+    assert_eq!(t.body, "Body of issue 21");
+    assert_eq!(task_for(&d, 26).unwrap().trust, TrustSource::Outside);
+    // The monitors' row carries the issue; the sidebar lists it apart.
+    let w = d.world().unwrap();
+    let ctx = mason_daemon::views::Ctx::new(&d, &w);
+    let row = ctx.row(&t);
+    assert_eq!(row.issue, 21);
+    let sb = ctx.sidebar("");
+    let ids = |s: &str| -> Vec<u64> {
+        sb.sections
+            .iter()
+            .find(|x| x.state == s)
+            .unwrap()
+            .rows
+            .iter()
+            .map(|r| r.id)
+            .collect()
+    };
+    assert!(ids("proposed_imports").contains(&t.id.0));
+    assert!(!ids("proposed").contains(&t.id.0));
+    // Approve starts it.
+    d.emit(EventKind::Approved { task: t.id }).unwrap();
+    assert_ne!(state_of(&d, t.id), State::Proposed);
+    // A second pass imports nothing more.
+    assert_eq!(sync_items(&d, pid, "mason", &items).imported, 0);
+}
+
+#[test]
+fn import_as_queued_still_queues() {
+    let (_s, d, pid) = world();
+    sync_items(&d, pid, "mason", &recorded(&d));
+    assert_eq!(task_for(&d, 22).unwrap().state, State::Queued);
+}
+
+#[test]
+fn proposed_imports_are_never_refused_by_a_limit_and_leave_no_alert() {
+    let (_s, d, pid) = world_with(&format!(
+        "{}[self]\nmax_open = 1\nper_week = 1\nmax_steps = 1\n",
+        tracker_section("proposed", "")
+    ));
+    // The owner's own queued task fills max_open.
+    file_task_as(&d, "mine", "x", false, TrustSource::Owner, false);
+    let sum = sync_items(&d, pid, "mason", &recorded(&d));
+    assert_eq!((sum.imported, sum.refused), (6, 0), "{sum:?}");
+    assert!(not_imported(&d).is_empty());
+    assert!(d.tracker_pending(pid).is_empty());
+}
+
+#[test]
+fn a_limit_refusal_raises_an_alert_naming_the_issues_and_clears_when_they_import() {
+    let (_s, d, pid) = world_with(&format!(
+        "{}[self]\nmax_open = 3\n",
+        tracker_section("queued", "")
+    ));
+    let mut items = recorded(&d);
+    let sum = sync_items(&d, pid, "mason", &items);
+    assert_eq!((sum.imported, sum.refused), (3, 3), "{sum:?}");
+    let a = not_imported(&d);
+    assert_eq!(a.len(), 1, "{a:?}");
+    assert!(
+        a[0].contains("3 issues not imported (#24, #25, #26)")
+            && a[0].contains("3 self-tasks are open and the limit is 3"),
+        "{}",
+        a[0]
+    );
+    let pending = d.tracker_pending(pid);
+    assert_eq!(
+        pending.iter().map(|w| w.number).collect::<Vec<_>>(),
+        vec![24, 25, 26]
+    );
+    assert!(pending[0].reason.contains("the limit is 3"));
+    // Close the three that were imported: their tasks stop, room opens, the rest import.
+    for it in items.iter_mut().filter(|i| i.number <= 23) {
+        it.open = false;
+    }
+    let sum = sync_items(&d, pid, "mason", &items);
+    assert_eq!(
+        (sum.closed, sum.imported, sum.refused),
+        (3, 3, 0),
+        "{sum:?}"
+    );
+    assert!(not_imported(&d).is_empty(), "{:?}", alerts(&d));
+    assert!(d.tracker_pending(pid).is_empty());
+}
+
+#[test]
+fn an_open_task_titled_with_the_issue_is_adopted_not_duplicated() {
+    let (_s, d, pid) = world_with("");
+    let mine = file_task_as(
+        &d,
+        "Add paging (GitHub #21)",
+        "hand filed",
+        false,
+        TrustSource::Owner,
+        true,
+    );
+    // A landed or canceled one is not adopted.
+    let dead = file_task_as(
+        &d,
+        "Fix the cache (GitHub #22)",
+        "x",
+        false,
+        TrustSource::Owner,
+        true,
+    );
+    d.emit(EventKind::Canceled {
+        task: dead,
+        delete_branch: false,
+    })
+    .unwrap();
+    let before = d.world().unwrap().tasks.len();
+    let sum = sync_items(&d, pid, "mason", &recorded(&d));
+    assert_eq!(sum.adopted, 1, "{sum:?}");
+    assert_eq!(
+        task_for(&d, 21).unwrap().id,
+        mine,
+        "linked to the hand-filed task"
+    );
+    assert_eq!(task_for(&d, 21).unwrap().title, "Add paging (GitHub #21)");
+    assert_ne!(
+        task_for(&d, 22).unwrap().id,
+        dead,
+        "a canceled one is imported afresh"
+    );
+    assert_eq!(
+        d.world().unwrap().tasks.len(),
+        before + 5,
+        "six issues, one adopted"
+    );
+    // And it stays one task on the next pass.
+    assert_eq!(sync_items(&d, pid, "mason", &recorded(&d)).imported, 0);
+}
+
+#[test]
+fn an_issue_linked_to_a_canceled_task_raises_the_relink_alert_and_relink_clears_it() {
+    let (_s, d, pid) = world_with("");
+    let items = recorded(&d);
+    sync_items(&d, pid, "mason", &items);
+    let t21 = task_for(&d, 21).unwrap().id;
+    d.emit(EventKind::Canceled {
+        task: t21,
+        delete_branch: false,
+    })
+    .unwrap();
+    sync_items(&d, pid, "mason", &items);
+    let a = not_imported(&d);
+    assert!(
+        a.len() == 1
+            && a[0].contains("#21")
+            && a[0].contains("canceled")
+            && a[0].contains("mason task relink <task> --issue 21"),
+        "{a:?}"
+    );
+    assert_eq!(d.tracker_pending(pid)[0].number, 21);
+    // Refusals.
+    let live = file_task_as(&d, "Add paging again", "x", false, TrustSource::Owner, true);
+    let e = mason_daemon::tracker::relink(&d, pid, 21, t21).unwrap_err();
+    assert!(e.contains("canceled"), "{e}");
+    let other = task_for(&d, 22).unwrap().id;
+    let e = mason_daemon::tracker::relink(&d, pid, 21, other).unwrap_err();
+    assert!(e.contains("already linked to issue #22"), "{e}");
+    let e = mason_daemon::tracker::relink(&d, pid, 22, live).unwrap_err();
+    assert!(e.contains("is linked to task"), "{e}");
+    let e = mason_daemon::tracker::relink(&d, pid, 99, live).unwrap_err();
+    assert!(e.contains("not a tracker item"), "{e}");
+    // Done.
+    mason_daemon::tracker::relink(&d, pid, 21, live).unwrap();
+    assert_eq!(task_for(&d, 21).unwrap().id, live);
+    assert!(not_imported(&d).is_empty(), "{:?}", alerts(&d));
+    sync_items(&d, pid, "mason", &items);
+    assert!(not_imported(&d).is_empty());
+    // A closed issue has nothing to relink.
+    let mut closed = items.clone();
+    closed.iter_mut().for_each(|i| i.open = i.number != 22);
+    sync_items(&d, pid, "mason", &closed);
+    let again = file_task_as(&d, "x", "x", false, TrustSource::Owner, true);
+    let e = mason_daemon::tracker::relink(&d, pid, 22, again).unwrap_err();
+    assert!(e.contains("closed"), "{e}");
+}
+
+#[test]
+fn relink_over_http_is_for_the_owner_only() {
+    let (_s, d, pid) = world_with("");
+    let items = recorded(&d);
+    sync_items(&d, pid, "mason", &items);
+    let t21 = task_for(&d, 21).unwrap().id;
+    d.emit(EventKind::Canceled {
+        task: t21,
+        delete_branch: false,
+    })
+    .unwrap();
+    let live = file_task_as(&d, "Add paging again", "x", false, TrustSource::Owner, true);
+    let owner = d.cfg.owner_names[0].clone();
+    let post = |who: &str| {
+        let d = d.clone();
+        let who = who.to_string();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async move {
+                use tower::ServiceExt;
+                let req = axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/tasks/{}/relink", live.0))
+                    .header("content-type", "application/json")
+                    .header("x-mason-as", who)
+                    .body(axum::body::Body::from(json!({"issue": 21}).to_string()))
+                    .unwrap();
+                mason_daemon::http::api_router(d)
+                    .oneshot(req)
+                    .await
+                    .unwrap()
+                    .status()
+                    .as_u16()
+            })
+    };
+    assert_eq!(post("stranger"), 403);
+    assert_eq!(post(""), 403);
+    assert_eq!(post(&owner), 200);
+    assert_eq!(task_for(&d, 21).unwrap().id, live);
+}
+
+#[test]
+fn closing_an_issue_cancels_its_proposed_task() {
+    let (_s, d, pid) = world_with("");
+    let mut items = recorded(&d);
+    sync_items(&d, pid, "mason", &items);
+    assert_eq!(task_for(&d, 23).unwrap().state, State::Proposed);
+    items.iter_mut().find(|i| i.number == 23).unwrap().open = false;
+    let sum = sync_items(&d, pid, "mason", &items);
+    assert_eq!(sum.closed, 1);
+    assert_eq!(task_for(&d, 23).unwrap().state, State::Canceled);
+    assert!(
+        not_imported(&d).is_empty(),
+        "a closed issue is not a relink case"
+    );
+}
+
+#[test]
+fn a_proposed_task_with_unlanded_blockers_shows_proposed_and_held() {
+    let (_s, d, pid) = world_with("");
+    let o = d.cfg.owner_names[0].clone();
+    let items = vec![
+        with_body(item(102, "Second", &o, &[]), "Depends on #101"),
+        item(101, "First", &o, &[]),
+    ];
+    sync_with_deps(&d, pid, "mason", "o/r", &items, None);
+    let (t1, t2) = (task_for(&d, 101).unwrap(), task_for(&d, 102).unwrap());
+    assert_eq!((t1.state, t2.state), (State::Proposed, State::Proposed));
+    let w = d.world().unwrap();
+    let row = mason_daemon::views::Ctx::new(&d, &w).row(&t2);
+    assert_eq!(row.state, "proposed");
+    assert_eq!(
+        row.why_waiting,
+        format!("Proposed, held behind #{}", t1.id.0)
+    );
+    let (open, held) = mason_daemon::selfguard::open_counts(w.tasks.values());
+    assert_eq!(
+        (open, held),
+        (0, 0),
+        "proposed tasks are neither open nor held"
+    );
 }
