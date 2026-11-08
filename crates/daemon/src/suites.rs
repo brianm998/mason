@@ -449,9 +449,17 @@ struct Who {
     project: String,
     log_dir: PathBuf,
     id_prefix: String,
+    /// A step run that shows this run's progress though no task owns it (a landing batch's
+    /// suites report into its first member's run).
+    sink: Option<StepRunId>,
 }
 
 impl Who {
+    /// The step run that shows this run's progress, if any.
+    fn run(&self) -> Option<StepRunId> {
+        self.task.map(|(_, r)| r).or(self.sink)
+    }
+
     fn check(&self, suite: &str) -> Check {
         let (d, task, step, suite) = (
             self.d.clone(),
@@ -669,7 +677,7 @@ fn baseline(
             suite.timeout.unwrap_or(Duration::from_secs(1800)),
             &who.log_dir,
             who.check(&suite.name),
-            who.task.map(|(_, r)| r),
+            who.run(),
             None,
         )
         .ok()?;
@@ -710,7 +718,7 @@ fn run_suite(
     let d = &who.d;
     // Identical code never tests twice.
     if let Ok(Some((executed, _, task))) = d.store.evidence(&tree.tree, &suite.name) {
-        if let Some((_, run)) = who.task {
+        if let Some(run) = who.run() {
             d.progress_sub(run, &suite.name, None, |s| {
                 s.unit = "tests".into();
                 s.done = Figure::counted(executed as u64);
@@ -824,7 +832,7 @@ fn run_suite(
             limit,
             &who.log_dir,
             check,
-            who.task.map(|(_, r)| r),
+            who.run(),
             Some(suite),
         ) {
             Ok(r) => r,
@@ -1063,7 +1071,7 @@ fn rerun_failing(
         suite.timeout.unwrap_or(Duration::from_secs(1800)),
         &who.log_dir,
         who.check(&suite.name),
-        who.task.map(|(_, r)| r),
+        who.run(),
         None,
     )
     .ok()?;
@@ -1105,6 +1113,7 @@ pub fn run(c: &Ctx) {
         project: c.project.id.clone(),
         log_dir: log_dir.clone(),
         id_prefix: format!("t{}r{}", c.task.0, c.run.0),
+        sink: None,
     };
     let head = |rev: &str| git::run(&c.wt, &["rev-parse", rev]).map(|s| s.trim().to_string());
     let (Ok(tree_hash), Ok(head_sha)) = (head("HEAD^{tree}"), head("HEAD")) else {
@@ -1411,7 +1420,7 @@ fn run_new_tests_at_base(
             suite.timeout.unwrap_or(Duration::from_secs(1800)),
             &who.log_dir,
             who.check(&suite.name),
-            who.task.map(|(_, r)| r),
+            who.run(),
             None,
         )
         .ok()?;
@@ -1522,6 +1531,7 @@ pub fn pay(d: &Arc<Daemon>, debt: u64) -> Result<String, String> {
         project: p.id.clone(),
         log_dir: dir.clone(),
         id_prefix: format!("debt{debt}"),
+        sink: None,
     };
     let tree_hash = git::run(&wt, &["rev-parse", "HEAD^{tree}"])
         .map(|s| s.trim().to_string())
@@ -1606,6 +1616,7 @@ pub fn run_over(
     base: &str,
     log_dir: &Path,
     id_prefix: &str,
+    sink: Option<StepRunId>,
 ) -> OverRun {
     let lock = d.repo_lock(d.project_id_by_name(&p.id).unwrap_or(ProjectId(0)));
     let tree_hash = git::run(wt, &["rev-parse", "HEAD^{tree}"])
@@ -1622,6 +1633,7 @@ pub fn run_over(
         project: p.id.clone(),
         log_dir: log_dir.to_path_buf(),
         id_prefix: id_prefix.to_string(),
+        sink,
     };
     let _ = std::fs::create_dir_all(log_dir);
     let mut out = OverRun {

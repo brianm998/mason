@@ -12,3 +12,7 @@
 - **After a restart the log is read again.** The live counter is rebuilt from the suite's log from offset 0, then fed what follows, so counts are exact and not doubled. Suites finished before the restart keep their stored sub-counts.
 - **Protocol 2 is negotiated by the manifest.** The host speaks the version the manifest names (1 or 2) and the plugin must answer with that number. A `step.progress` from a protocol 1 plugin is ignored at run time and fails the conformance kit. Malformed notifications are ignored at run time and flagged by the kit. Notifications do not extend the call's timeout.
 - **Approval says what it waits on.** The approval run's message is "waiting for the owner"; the monitor counts the time from the run's start. Gate steps have no job and so nothing was added.
+- **Check counts ride on `PrStatus`.** `PrStatus.counts: Option<CheckCounts>` is filled from the answer the host already gave (GitHub's check runs), so no extra request is made. A host without a list gives `None`. A trait method of its own was weighed and left out for that reason.
+- **Landing counts phases, not suites.** A batch's landing run has `unit` "phases", done of 4, and `rollup` leaves a run in that unit alone, so the suites and checks are sub-counts beside it. The suites report into the first member's run and are copied to the others every 250 ms.
+- **CI waits have no count.** No build-system adapter lists runs' jobs; they show the waiting message and its start.
+

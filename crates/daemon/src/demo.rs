@@ -162,12 +162,32 @@ fn script() -> Vec<Vec<EventKind>> {
             admit(9, "develop", State::Developing),
             admit(10, "develop", State::Developing),
         ],
+        // Six tasks in steps that are not an agent, each with the progress of its kind.
+        vec![
+            filed(1, "Tests: TAP count", false),
+            filed(1, "Script: progress file", false),
+            filed(1, "Plugin: step.progress", false),
+            filed(1, "Landing: batch phases", false),
+            filed(1, "PR: checks", false),
+            filed(1, "Approval: waiting for the owner", false),
+        ],
+        vec![
+            admit(11, "test", State::Testing),
+            admit(12, "test", State::Testing),
+            admit(13, "test", State::Testing),
+            admit(14, "land", State::Landing),
+            admit(15, "land", State::Landing),
+            admit(16, "test", State::Testing),
+        ],
     ]
 }
 
 /// The first task of the progress cases, and the checkpoint that admits them.
 const PROGRESS_TASK: u64 = 5;
 const PROGRESS_CHECKPOINT: usize = 9;
+/// The first task of the cases for steps that are not an agent, and the checkpoint that admits them.
+const STEP_TASK: u64 = 11;
+const STEP_CHECKPOINT: usize = 11;
 
 fn counted(done: u64) -> Figure {
     Figure::counted(done)
@@ -260,6 +280,70 @@ fn progress_cases(now: u64) -> Vec<Progress> {
     vec![real, hist, none, quiet, subs, todo]
 }
 
+/// One record per kind of step that is not an agent: tests counted as they run, a progress
+/// file, a plugin's `step.progress`, a landing batch's phases, a pull request's checks, and
+/// an approval waiting for the owner.
+fn step_cases(now: u64) -> Vec<Progress> {
+    let base = |i: u64, step: &str, started: u64, last: u64| {
+        let mut p = Progress::new(9100 + i, step, now - started);
+        p.output.last_output_ms = now - last;
+        p.updated_at_ms = now - last;
+        p.stale_after_ms = 300_000;
+        p
+    };
+    let sub = |name: &str, unit: &str, done: Figure, total: Figure| SubProgress {
+        name: name.into(),
+        unit: unit.into(),
+        done,
+        total,
+    };
+    // 0. A test step: passed of the last green run's count, a sub-count per suite.
+    let mut tests = base(0, "test", 90_000, 1_000);
+    tests.unit = "tests".into();
+    tests.done = counted(52);
+    tests.total = Figure::expected(70);
+    tests.message = "unit: 1 failed, 0 skipped".into();
+    tests.subs = vec![
+        sub("unit", "tests", counted(40), Figure::expected(40)),
+        sub("api", "tests", counted(12), Figure::minimum(30)),
+    ];
+    // 1. A script's own counts and message, from MASON_PROGRESS_FILE.
+    let mut script = base(1, "test", 60_000, 2_000);
+    script.unit = "files".into();
+    script.done = Figure::reported(3);
+    script.total = Figure::reported(8);
+    script.message = "stage 3: migrating".into();
+    // 2. A plugin's step.progress.
+    let mut plugin = base(2, "test", 45_000, 3_000);
+    plugin.unit = "checks".into();
+    plugin.done = Figure::reported(2);
+    plugin.total = Figure::reported(5);
+    plugin.message = "checking migrations".into();
+    // 3. A landing batch: phases done of all, the suites beside them.
+    let mut batch = base(3, "land", 120_000, 2_000);
+    batch.unit = "phases".into();
+    batch.done = counted(2);
+    batch.total = Figure::reported(4);
+    batch.message = "batch: running suites".into();
+    batch.subs = vec![sub("unit", "tests", counted(25), Figure::expected(40))];
+    // 4. A pull request's checks on the host.
+    let mut pr = base(4, "land", 300_000, 5_000);
+    pr.unit = "phases".into();
+    pr.done = counted(2);
+    pr.total = Figure::reported(4);
+    pr.message = "check running: lint".into();
+    pr.subs = vec![sub(
+        "checks",
+        "checks",
+        Figure::reported(4),
+        Figure::reported(7),
+    )];
+    // 5. An approval: no count, what it waits on.
+    let mut wait = base(5, "test", 720_000, 720_000);
+    wait.message = "waiting for the owner".into();
+    vec![tests, script, plugin, batch, pr, wait]
+}
+
 impl Daemon {
     /// Play the next step of the script. Returns the checkpoint reached, or
     /// `None` when the script is over.
@@ -280,6 +364,11 @@ impl Daemon {
                 .enumerate()
             {
                 self.progress_seed(TaskId(PROGRESS_TASK + n as u64), ProjectId(1), p);
+            }
+        }
+        if i == STEP_CHECKPOINT {
+            for (n, p) in step_cases(crate::daemon::now_ms()).into_iter().enumerate() {
+                self.progress_seed(TaskId(STEP_TASK + n as u64), ProjectId(1), p);
             }
         }
         for kind in steps[i - 1].clone() {

@@ -75,7 +75,8 @@ fn source(s: Source) -> ProgressSource {
 /// The step's own count as the sum of its sub-counts (a test step's suites): the
 /// total only when every sub-count has one.
 pub fn rollup(p: &mut Progress) {
-    if p.subs.is_empty() {
+    // A landing batch counts its own phases; its sub-counts (suites, checks) are beside them.
+    if p.subs.is_empty() || p.unit == "phases" {
         return;
     }
     let unit = p.subs[0].unit.clone();
