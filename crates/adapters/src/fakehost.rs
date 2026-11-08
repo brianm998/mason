@@ -216,7 +216,7 @@ impl GitHostAdapter for FakeHost {
         }
     }
 
-    fn open_pr(&self, base: &str, head: &str, title: &str, _body: &str) -> Result<PrRef, ApiError> {
+    fn open_pr(&self, base: &str, head: &str, title: &str, body: &str) -> Result<PrRef, ApiError> {
         self.head_sha(head)?;
         self.head_sha(base)?;
         let n = std::fs::read_dir(self.dir.join("prs")).map_or(0, |d| {
@@ -225,7 +225,7 @@ impl GitHostAdapter for FakeHost {
                 .count()
         }) as u64
             + 1;
-        self.write(n, &json!({"base": base, "head": head, "title": title, "state": "open", "approved": false, "queued": false}));
+        self.write(n, &json!({"base": base, "head": head, "title": title, "body": body, "state": "open", "approved": false, "queued": false}));
         Ok(PrRef {
             number: n,
             url: format!("fake://pr/{n}"),

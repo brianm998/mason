@@ -62,4 +62,4 @@ If a new build crashes three times in five minutes, the daemon rolls back (Stage
 
 ## Privacy
 
-Self-proposals stay in the local tracker. Nothing about a self-task, and nothing from another project, is published anywhere by this.
+Self-proposals stay in the local tracker. Nothing about a self-task, and nothing from another project, is published anywhere by this. Without write access (`[self] access = "fork"`), `mason proposal publish N --preview` shows the redacted text and `--confirm` sends it upstream; client code is never attached (decision 0042).

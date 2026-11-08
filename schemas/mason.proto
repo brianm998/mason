@@ -402,10 +402,12 @@ message TaskRow {
   string display = 19;
   // The same, in parts.
   ModelUse model_use = 20;
+  // For a proposal or an improvement: "agent · blocks · pipeline" (source, severity, route).
+  string proposal = 21;
   // The tracker issue this task was imported from (0 when it was not).
-  uint64 issue = 21;
+  uint64 issue = 22;
   // Where to read it ("" when the tracker has no public page).
-  string issue_url = 22;
+  string issue_url = 23;
 }
 
 // What a step run launched (or, with `expected`, will launch): the tier
@@ -459,8 +461,10 @@ message HeaderView {
   repeated Banner banners = 3;
   repeated string projects = 4;
   string status = 5;
+  // MASON's own repository, if one is registered: where "Improve the pipeline" files its task.
+  string self_project = 6;
   // Open issues the tracker has not imported (or whose task was canceled), with why.
-  repeated PendingIssue pending_issues = 6;
+  repeated PendingIssue pending_issues = 7;
 }
 
 message PendingIssue {
@@ -588,6 +592,36 @@ message TaskDetailView {
   repeated NumberLine numbers = 18;
   // The plan, parsed by the daemon so the clients do no JSON work. `plan` (3) stays for older clients.
   PlanView plan_view = 19;
+  // Present for a proposal or an improvement the owner asked for.
+  ProposalInfo proposal = 20;
+}
+
+// What was noticed, by whom, with the proof; and for an improvement, where its branch is.
+message ProposalInfo {
+  // "agent", "outside" or "owner".
+  string source = 1;
+  // "normal" or "blocks".
+  string severity = 2;
+  // "project" or "pipeline" (MASON's own repository).
+  string route = 3;
+  // What the agent saw: files, lines, output.
+  string evidence = 4;
+  // The proposal's own text, without the evidence (what the edit sheet starts from).
+  string text = 5;
+  // The task whose agent filed it; 0 if nobody's.
+  uint64 filed_by = 6;
+  // "open", "approved" or "rejected", and why if rejected.
+  string status = 7;
+  string reject_reason = 8;
+  // "local", "previewed" or "published".
+  string publish_state = 9;
+  // An improvement: "write" or "fork"; the branch; the upstream pull request and its state.
+  string access = 10;
+  string branch = 11;
+  uint64 pr = 12;
+  string pr_state = 13;
+  // The update channel when the daemon follows this improvement's branch.
+  string channel = 14;
 }
 
 // A task's exploration plan as readable parts.

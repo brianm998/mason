@@ -28,6 +28,7 @@ import mason.monitor.MonitorModel
 fun TopBar(model: MonitorModel) {
     val theme = LocalTheme.current
     var adding by remember { mutableStateOf(false) }
+    var improving by remember { mutableStateOf(false) }
     Row(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(theme.spacing),
@@ -64,9 +65,11 @@ fun TopBar(model: MonitorModel) {
         }
 
         NavButton("+", "add-task", true) { adding = true }
+        if (model.selfProject.isNotEmpty()) NavButton("✨", "improve-pipeline", true) { improving = true }
         NavButton(if (model.muted) "🔇" else "🔊", "mute", true) { model.toggleMute() }
     }
     if (adding) AddTaskDialog(model) { adding = false }
+    if (improving) ImproveDialog(model) { improving = false }
 }
 
 @Composable
@@ -205,6 +208,35 @@ private fun AddTaskDialog(model: MonitorModel, onClose: () -> Unit) {
         },
         confirmButton = {
             TextButton(enabled = title.isNotBlank(), onClick = { model.addTask(project, title, text); onClose() }) { Text("Add") }
+        },
+        dismissButton = { TextButton(onClick = onClose) { Text("Cancel") } },
+    )
+}
+
+/** "Improve the pipeline": type what MASON should change about itself. */
+@Composable
+private fun ImproveDialog(model: MonitorModel, onClose: () -> Unit) {
+    val theme = LocalTheme.current
+    var text by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onClose,
+        title = { Text("Improve the pipeline", style = theme.title()) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(theme.spacing)) {
+                Text(
+                    "MASON files this as a task on its own repository. Without write access the change goes to your fork; " +
+                        "nothing goes upstream until you have read the redacted version and said so.",
+                    style = theme.small(),
+                )
+                OutlinedTextField(text, { text = it }, label = { Text("What should change?" ) }, minLines = 5, modifier = Modifier.testTag("improve:text"))
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = text.isNotBlank() && model.selfProject.isNotEmpty(),
+                onClick = { model.improve(model.selfProject, text); onClose() },
+                modifier = Modifier.testTag("improve:send"),
+            ) { Text("Improve") }
         },
         dismissButton = { TextButton(onClick = onClose) { Text("Cancel") } },
     )

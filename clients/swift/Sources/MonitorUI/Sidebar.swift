@@ -139,6 +139,10 @@ struct RowView: View {
                     }
                     Text("\(row.project), \(activity)")
                         .font(theme.small()).foregroundStyle(theme.muted).lineLimit(2)
+                    if !row.proposal.isEmpty {
+                        Text(row.proposal).font(theme.small()).foregroundStyle(theme.muted)
+                            .accessibilityIdentifier("row:\(row.id):proposal")
+                    }
                     HStack(spacing: theme.spacing) {
                         Text(Format.duration(ms: row.inStateMs))
                             .font(theme.small()).foregroundStyle(row.slow ? theme.slow : theme.muted)
