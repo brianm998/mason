@@ -15,6 +15,7 @@ pub mod defs;
 pub mod demo;
 pub mod editor;
 pub mod holds;
+pub mod hostloss;
 pub mod http;
 pub mod improve;
 pub mod introspect;

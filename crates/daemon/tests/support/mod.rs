@@ -382,39 +382,13 @@ impl Drop for Masond {
 
 /// Step hosts outlive the daemon by design; tests must not leak them.
 ///
-/// Only a host that is still running, and whose process really is a step host, is
-/// killed. A registry keeps every host that ever started; the pids of the ones that
-/// have exited belong to other processes by now, and on a busy machine (ten tasks
-/// running tests at once) killing them took down other tasks' step hosts.
+/// Only a host whose pids still are the processes the registry recorded (start
+/// strings match, the command line names this host directory, the child leads its
+/// own group) is signalled; pids 0 and 1 and our own pid and group never are. A
+/// registry keeps every host that ever started, and on a busy machine (ten tasks
+/// running tests at once) killing a stale pid could take down another task's host.
 pub fn kill_hosts(data_dir: &Path) {
-    use mason_step_host::registry::HostState;
-    use nix::sys::signal::{kill, killpg, Signal};
-    use nix::unistd::Pid;
-    let reg = mason_step_host::registry::Registry::new(data_dir.join("h"));
-    for h in reg.scan().unwrap_or_default() {
-        // Alive and ours: its command line names this very host directory. (A host
-        // that has exited but lingers is killed too; one whose pid is gone is not.)
-        if matches!(h.state, HostState::Lost)
-            || !is_this_host(h.info.host_pid, &reg.host_dir(&h.info.id))
-        {
-            continue;
-        }
-        let _ = killpg(Pid::from_raw(h.info.child_pid as i32), Signal::SIGKILL);
-        let _ = kill(Pid::from_raw(h.info.host_pid as i32), Signal::SIGKILL);
-    }
-}
-
-/// Is `pid` the step host that runs in `dir`: its command line names the `step-host`
-/// binary and this directory, so a recycled pid is never mistaken for it.
-fn is_this_host(pid: u32, dir: &Path) -> bool {
-    Command::new("ps")
-        .args(["-o", "command=", "-p", &pid.to_string()])
-        .output()
-        .map(|o| {
-            let cmd = String::from_utf8_lossy(&o.stdout);
-            cmd.contains("step-host") && cmd.contains(&dir.display().to_string())
-        })
-        .unwrap_or(false)
+    mason_step_host::registry::reap_verified(&data_dir.join("h"));
 }
 
 impl Scratch {
