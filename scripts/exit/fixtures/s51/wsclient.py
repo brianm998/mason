@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# A monitor-core-style client for the s46 exit test (standard library only; proto3 JSON frames).
+# A monitor-core-style client for the s51 exit test (standard library only; proto3 JSON frames).
 #   wsclient.py monitor DATA_DIR SECONDS OUTFILE
 # Reads daemon.json for the port, connects, says hello with the last sequence number it saw, and
 # subscribes to the sidebar. When the connection fails it reads daemon.json again and retries, as the
@@ -34,7 +34,7 @@ def monitor(data_dir, seconds, out):
                 info = json.load(open(os.path.join(data_dir, "daemon.json")))
                 ws = s45.Ws(int(info["port"]))
                 connects += 1
-                ws.send({"hello": {"protocol": 1, "lastSeq": str(last_seq), "client": "s46"}})
+                ws.send({"hello": {"protocol": 1, "lastSeq": str(last_seq), "client": "s51"}})
                 ws.send({"subscribe": {"views": ["HEADER", "SIDEBAR", "HOME"]}})
                 while time.time() < end:
                     m = ws.recv()

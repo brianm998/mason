@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
-# A constant daemon port (s46) exit test: real masond processes.
+# A constant daemon port (s51) exit test: real masond processes.
 #  1. Started with no --port, masond listens on the default port (7423) and daemon.json says so;
 #     killed and started again it is the same port.
 #  2. A monitor-core-style client opened before the restart reconnects by itself and shows the same
@@ -12,9 +12,9 @@
 # (it never picks another port for the daemon under test).
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
-command -v python3 >/dev/null || { echo "s46 needs python3 (its WebSocket client)" >&2; exit 1; }
+command -v python3 >/dev/null || { echo "s51 needs python3 (its WebSocket client)" >&2; exit 1; }
 DEFAULT=7423
-root=$(mktemp -d /tmp/mason-s46.XXXXXX); daemon=""; daemon2=""; client=""; holder=""
+root=$(mktemp -d /tmp/mason-s51.XXXXXX); daemon=""; daemon2=""; client=""; holder=""
 cleanup() {
   for p in "$client" "$holder"; do [ -n "$p" ] && kill "$p" 2>/dev/null || true; done
   for p in "$daemon" "$daemon2"; do [ -n "$p" ] && kill -9 "$p" 2>/dev/null || true; done
@@ -34,7 +34,7 @@ if ! free_port "$DEFAULT"; then
 fi
 cargo build -q --workspace --bins
 bin=target/debug
-ws=scripts/exit/fixtures/s46/wsclient.py
+ws=scripts/exit/fixtures/s51/wsclient.py
 owner=${USER:-owner}
 m() { "$bin/mason" --data-dir "$root/d" --config-dir "$root/c" "$@"; }
 fail() { echo "FAILED: $*" >&2; tail -20 "$root/masond.log" >&2 || true; exit 1; }
@@ -157,4 +157,4 @@ echo "   ports $pa and $pb"
 [ "$pa" != "$pb" ] || fail "two daemons on the same port"
 "$bin/mason" --data-dir "$root/d2" --config-dir "$root/c2" status >/dev/null || fail "the second daemon does not answer"
 m status >/dev/null || fail "the first daemon does not answer"
-echo "s46: ok"
+echo "s51: ok"

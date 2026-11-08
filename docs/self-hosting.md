@@ -44,7 +44,7 @@ Change it, in order of precedence:
 
 **When the port is taken** by another program, `masond` exits with status 1 and says which port, who holds it (the pid and program, when `lsof` can tell) and how to change it. It never picks another port by itself. Stop the other program, or set a different port as above. A second `masond` on the same data directory is refused before this (`a daemon is already running here (pid N)`). `mason update`'s self-test binds no port, so it never meets the live daemon's.
 
-The monitors (SwiftUI and Compose) and the command line read `daemon.json` again when a connection fails. A monitor shows "Daemon restarting, reconnecting…" and retries after 1, 2, 4 and 8 seconds, then every 10, and resumes from the last event it saw; it also notices a changed `pid` or `started_ms` while connected, and no message or reply for 15 seconds counts as a stall. The command line reads the file once more after a refused connection. See `docs/decisions/0024-fixed-port-readings.md`.
+The monitors (SwiftUI and Compose) and the command line read `daemon.json` again when a connection fails. A monitor shows "Daemon restarting, reconnecting…" and retries after 1, 2, 4 and 8 seconds, then every 10, and resumes from the last event it saw; it also notices a changed `pid` or `started_ms` while connected, and no message or reply for 15 seconds counts as a stall. The command line reads the file once more after a refused connection. See `docs/decisions/0029-fixed-port-readings.md`.
 
 ## A rollback
 
