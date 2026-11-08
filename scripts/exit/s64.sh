@@ -15,7 +15,7 @@ run() {
 }
 
 run "the words: ages, resets, trends, overage, blocked" -p mason-core usage_text
-run "the store: migration 14, thinned and pruned readings, per-attempt tokens" \
+run "the store: migration 15, thinned and pruned readings, per-attempt tokens" \
     -p mason-store --test store usage
 run "a real daemon with the fake agent: windows, restart with age, no-percentage window, api spend, token attribution, mason usage --json" \
     -p mason-daemon --test usage
