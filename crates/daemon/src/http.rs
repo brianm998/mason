@@ -1862,6 +1862,43 @@ async fn pause_clear(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Re
     Ok(Json(json!({"lifted": n})))
 }
 
+fn account_actor(d: &Daemon, b: &Value) -> String {
+    b["by"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .unwrap_or_else(|| d.cfg.owner_names.first().cloned().unwrap_or_default())
+}
+
+/// Hold an account by hand (`mason account hold`).
+async fn account_hold(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res {
+    let account = b["account"].as_str().unwrap_or_default().to_string();
+    let reason = b["reason"].as_str().unwrap_or_default().to_string();
+    let for_s = b["for_s"].as_u64();
+    let who = account_actor(&d, &b);
+    let d2 = d.clone();
+    d.pool
+        .run(move || crate::holds::hold(&d2, &account, &who, for_s, &reason))
+        .await
+        .map_err(pool_err)?
+        .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
+    Ok(Json(json!({"ok": true})))
+}
+
+/// Release a hold now: try again at once (`mason account release`).
+async fn account_release(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res {
+    let account = b["account"].as_str().unwrap_or_default().to_string();
+    let who = account_actor(&d, &b);
+    let d2 = d.clone();
+    let was = d
+        .pool
+        .run(move || crate::holds::release(&d2, &account, &who))
+        .await
+        .map_err(pool_err)?
+        .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
+    Ok(Json(json!({"released": was})))
+}
+
 /// The LLM usage view, as the monitors get it (proto3 JSON).
 async fn usage_status(Shared(d): Shared<Arc<Daemon>>) -> Res {
     let d2 = d.clone();
@@ -2357,6 +2394,8 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/tasks/{id}/answer", post(answer_task))
         .route("/tasks/{id}/session", get(open_session))
         .route("/tasks/{id}/{kind}", post(land_override))
+        .route("/account/hold", post(account_hold))
+        .route("/account/release", post(account_release))
         .route("/pause", post(pause_set))
         .route("/resume", post(pause_clear))
         .route("/pauses", get(pauses_list))

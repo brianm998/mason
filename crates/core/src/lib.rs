@@ -12,6 +12,7 @@ pub mod introspect;
 pub mod progress;
 pub mod progress_text;
 pub mod proposal;
+pub mod reset_text;
 mod task;
 pub mod usage_text;
 
