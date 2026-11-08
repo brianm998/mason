@@ -25,13 +25,18 @@
 //! mason targets list [--json]
 //! mason resources [--json] | mason resources limit <resource> <units>
 //! mason doctor
+//! mason init [--yes] [--tracker T] [--agent A] [--sessions N] [--workflow W] [--suites accept|skip] [--base B] [--landing L] [--alerts LIST|none] [--no-prove]
+//! mason adopt | mason remove [--yes]
 //! ```
 //! Global: `--data-dir D`, `--config-dir C` (or `MASON_DATA_DIR`, `MASON_CONFIG_DIR`).
 
+mod adopt;
 mod client;
 mod definition;
 mod doctor;
+mod init;
 mod progress;
+mod remove;
 mod resources;
 mod testing;
 
@@ -83,7 +88,17 @@ mason: command-line client for the MASON pipeline
   mason test parse <parser> <file> [--min N]   read a results file the way a suite would, and judge it
   mason logs <id> [--follow]
   mason status [--json] [--watch]     with --watch, follow every running step's progress
-  mason doctor
+  mason doctor                        checks the setup, and that `mason` on PATH is this program
+  mason init [--yes] [--workflow solo-fast|reviewed-pr|batched-ci|device-mobile|human-gated]
+             [--tracker local|github] [--agent claude|codex] [--agent-bin P] [--sessions N]
+             [--suites accept|skip] [--base B] [--landing direct|direct-ci|pr|batched]
+             [--alerts sound,speech,email,push|none] [--ci-workflow yes|no] [--id ID]
+             [--no-prove] [--force]
+                                      guided setup: writes .mason/ and the Filing notes on branch
+                                      mason/setup (no push), and the project file; every question has a flag
+  mason init --prove-only             file the one harmless first task, once masond knows the project
+  mason adopt [--id ID] [--base B] [--test CMD]   register a project that already has .mason/ (never writes it)
+  mason remove [--yes] [--id ID]      delete the project file, .mason/ and the Filing notes (lists first without --yes)
   mason run --needs compile[=N],... [--exclusive] [--label L] -- <cmd>...
                                       queue for the pipeline's resources, ahead of its work
   mason resources [--json]            limits, who holds what, and every wait explained
@@ -345,6 +360,20 @@ fn main() {
         let file = a.pos().unwrap_or_else(|| die("which file?"));
         finish(&a);
         exit(testing::parse(&kind, std::path::Path::new(&file), min));
+    }
+
+    if cmd == "init" {
+        exit(init::run(
+            std::mem::take(&mut a.rest),
+            &data_dir,
+            &config_dir,
+        ));
+    }
+    if cmd == "adopt" {
+        exit(adopt::run(std::mem::take(&mut a.rest), &config_dir));
+    }
+    if cmd == "remove" {
+        exit(remove::run(std::mem::take(&mut a.rest), &config_dir));
     }
 
     if cmd == "doctor" {

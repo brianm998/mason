@@ -37,6 +37,51 @@ fn fail(t: impl Into<String>) -> Finding {
     }
 }
 
+/// Is the `mason` found first on PATH this program? Another tool's `mason` (Dart's, for one)
+/// would answer `mason task add` with something else entirely, so say which it is and how to
+/// choose. The identity is asked of the binary itself, never guessed from its path.
+pub fn check_path_command(out: &mut Vec<Finding>) {
+    let exe = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.canonicalize().ok());
+    let Some(found) = on_path("mason") else {
+        out.push(warn("`mason` is not on PATH, so typing `mason` finds nothing. Add this program's folder to PATH, or reinstall with the install script or Homebrew"));
+        return;
+    };
+    if found.canonicalize().ok() == exe {
+        out.push(ok(format!(
+            "`mason` on PATH is this program ({})",
+            found.display()
+        )));
+        return;
+    }
+    let help = std::process::Command::new(&found)
+        .arg("--help")
+        .output()
+        .ok();
+    let first = help
+        .as_ref()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .to_string()
+        })
+        .unwrap_or_default();
+    if first.starts_with("mason: command-line client for the MASON pipeline") {
+        out.push(warn(format!("another copy of mason-pipeline is first on PATH: {}. This one is {}; put the one you want first on PATH", found.display(), exe.map(|e| e.display().to_string()).unwrap_or_default())));
+    } else {
+        out.push(warn(format!(
+            "the `mason` on PATH ({}) is not mason-pipeline{}. Typing `mason` runs that one. Either put {} before it on PATH, or call this one by its full path or an alias (`alias mason-pipeline=...`); for Dart's, `dart pub global deactivate mason_cli` removes it",
+            found.display(),
+            if first.is_empty() { String::new() } else { format!(" (it says: {first:?})") },
+            exe.and_then(|e| e.parent().map(|p| p.display().to_string())).unwrap_or_default()
+        )));
+    }
+}
+
 fn on_path(name: &str) -> Option<PathBuf> {
     std::env::var_os("PATH").and_then(|p| {
         std::env::split_paths(&p)
@@ -330,6 +375,7 @@ pub fn run(data_dir: &Path, config_dir: &Path) -> Vec<Finding> {
         )));
     }
 
+    check_path_command(&mut out);
     let exe = std::env::current_exe().unwrap_or_default();
     for b in ["masond", "step-host", "mason-mcp"] {
         let p = exe.with_file_name(b);
