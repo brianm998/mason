@@ -194,18 +194,34 @@ fn scripted_task() -> Result<String, String> {
                 _ => None,
             })
             .ok_or("the task was not created")?;
-        let end = Instant::now() + Duration::from_secs(150);
+        // Generous: the scripted task takes seconds on an idle machine, but this runs
+        // before every update, on a machine that may be running many tasks' tests, and
+        // a self-test that fails for want of a CPU blocks the update.
+        let limit = Duration::from_secs(300);
+        let end = Instant::now() + limit;
         loop {
             let w = d.world().map_err(|e| e.to_string())?;
-            match w.tasks.get(&task).map(|t| t.state) {
-                Some(State::Landed) => break,
-                Some(s @ (State::Failed | State::Canceled)) => {
-                    return Err(format!("the scripted task ended {s:?}"))
+            match w.tasks.get(&task).map(|t| (t.state, t.failure.clone())) {
+                Some((State::Landed, _)) => break,
+                Some((s @ (State::Failed | State::Canceled), why)) => {
+                    return Err(match why {
+                        Some(why) if !why.is_empty() => {
+                            format!("the scripted task ended {s:?}: {why}")
+                        }
+                        _ => format!("the scripted task ended {s:?}"),
+                    })
                 }
                 _ => {}
             }
             if Instant::now() > end {
-                return Err("the scripted task did not land in 150 s".into());
+                let at = w
+                    .tasks
+                    .get(&task)
+                    .map_or("missing".to_string(), |t| format!("{:?}", t.state));
+                return Err(format!(
+                    "the scripted task did not land in {} s (it is {at})",
+                    limit.as_secs()
+                ));
             }
             std::thread::sleep(Duration::from_millis(100));
         }

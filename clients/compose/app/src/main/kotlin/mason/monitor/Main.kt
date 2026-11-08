@@ -12,7 +12,12 @@ import mason.monitor.ui.RootView
 
 /** The monitor window. Run with `./gradlew :app:monitor` (optionally `--args="--data-dir D"`). */
 fun main(args: Array<String>) = application {
-    val model = remember { MonitorModel(SystemPreferences()) }
+    val model = remember {
+        MonitorModel(SystemPreferences()).also {
+            // The alert sound the model asks for when something new needs the owner.
+            it.onAttention = { java.awt.Toolkit.getDefaultToolkit().beep() }
+        }
+    }
     val state = rememberWindowState(width = 1360.dp, height = 860.dp)
     remember { model.onUpdate = { updateMonitor(model) }; 0 }
     LaunchedEffect(Unit) {
