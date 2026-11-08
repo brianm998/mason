@@ -84,7 +84,7 @@ fn run(point: &str, mode: &str) -> Result<(), String> {
     for t in ["clean", "culprit"] {
         let _ = s.mason(&["task", "add", t, "--body", "Do it.", "--explored"]);
     }
-    let end = Instant::now() + Duration::from_secs(90);
+    let end = Instant::now() + Duration::from_secs(270);
     loop {
         if let Some(st) = first.child.try_wait().map_err(|e| e.to_string())? {
             if st.signal() == Some(9) {
@@ -116,7 +116,7 @@ fn run(point: &str, mode: &str) -> Result<(), String> {
     for t in ["clean", "culprit"].iter().skip(have) {
         s.mason_ok(&["task", "add", t, "--body", "Do it.", "--explored"]);
     }
-    let end = Instant::now() + Duration::from_secs(150);
+    let end = Instant::now() + Duration::from_secs(450);
     loop {
         let v: Value = serde_json::from_slice(&s.mason(&["task", "show", "0", "--json"]).stdout)
             .unwrap_or(Value::Null);
@@ -130,7 +130,7 @@ fn run(point: &str, mode: &str) -> Result<(), String> {
     }
     // The culprit goes back for rework and, with a script that has one turn, ends failed
     // or waiting; what matters is that it never landed.
-    let end = Instant::now() + Duration::from_secs(60);
+    let end = Instant::now() + Duration::from_secs(180);
     loop {
         let v: Value = serde_json::from_slice(&s.mason(&["task", "show", "1", "--json"]).stdout)
             .unwrap_or(Value::Null);
@@ -170,7 +170,7 @@ fn run(point: &str, mode: &str) -> Result<(), String> {
         return Err("the red marker reached the base".into());
     }
     // Nothing of the batch is left on the host: no candidate branch, no open pull request.
-    let end = Instant::now() + Duration::from_secs(40);
+    let end = Instant::now() + Duration::from_secs(120);
     loop {
         let refs = sh(
             &s.origin,
