@@ -34,7 +34,14 @@ fn failing(checks: &[Check]) -> Vec<(&'static str, String)> {
         .collect()
 }
 
-const T: Duration = Duration::from_secs(2);
+/// How long the kit waits for each answer. Generous on purpose: a copy of the plugin is
+/// started fresh by seven tests at once, and on a busy macOS machine the first exec of a
+/// new file (the system scanning it) alone takes half a second or more. A passing test
+/// never waits this long.
+const T: Duration = Duration::from_secs(10);
+
+/// For the two tests that need the kit to give up on a plugin that sleeps for 30 s.
+const SHORT: Duration = Duration::from_secs(6);
 
 #[test]
 fn the_example_plugin_passes_every_check() {
@@ -98,8 +105,8 @@ fn a_timeout_is_named_and_the_plugin_is_stopped() {
         "def run_step(params):\n    import time\n    time.sleep(30)\n",
     );
     let started = std::time::Instant::now();
-    let f = failing(&plugin_kit(t.path(), Duration::from_secs(3)));
-    assert!(started.elapsed() < Duration::from_secs(15));
+    let f = failing(&plugin_kit(t.path(), SHORT));
+    assert!(started.elapsed() < Duration::from_secs(25));
     let run = f
         .iter()
         .find(|x| x.0 == "run")
@@ -113,7 +120,7 @@ fn a_plugin_that_does_not_shut_down_is_named() {
         "            reply(id_, None)\n            return\n",
         "            reply(id_, None)\n            import time\n            time.sleep(30)\n",
     );
-    let f = failing(&plugin_kit(t.path(), Duration::from_secs(3)));
+    let f = failing(&plugin_kit(t.path(), SHORT));
     assert_eq!(
         f.iter().map(|x| x.0).collect::<Vec<_>>(),
         ["shutdown"],
