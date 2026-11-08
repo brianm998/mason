@@ -1147,6 +1147,46 @@ mod tests {
     }
 
     #[test]
+    fn the_example_project_file_has_a_tracker_block_that_parses_once_uncommented() {
+        let text = include_str!("../../../docs/examples/mason-self.project.toml");
+        let off = parse_project("mason", text).unwrap();
+        assert!(
+            off.services.tracker.is_none(),
+            "off until the owner turns it on"
+        );
+        let on: String = text
+            .lines()
+            .map(|l| match l.strip_prefix("# ") {
+                Some(r)
+                    if r.starts_with("[tracker]")
+                        || r.starts_with("kind = \"github\"")
+                        || r.starts_with("repo =")
+                        || r.starts_with("token =")
+                        || r.starts_with("label =")
+                        || r.starts_with("interval_s =")
+                        || r.starts_with("webhook_secret =") =>
+                {
+                    r.to_string()
+                }
+                _ => l.to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let t = parse_project("mason", &on)
+            .unwrap()
+            .services
+            .tracker
+            .unwrap();
+        assert_eq!((t.label.as_str(), t.interval_s), ("mason", 60));
+        assert!(t.token.starts_with("env:") && t.webhook_secret.is_some());
+        let literal = on.replace("env:MASON_GITHUB_TOKEN", "ghp_literal");
+        assert!(
+            parse_project("mason", &literal).is_err(),
+            "a literal token is refused"
+        );
+    }
+
+    #[test]
     fn targets_settings_are_read_and_bad_ones_name_the_file() {
         assert_eq!(parse_targets("").unwrap(), TargetsCfg::default());
         let t = parse_targets(
