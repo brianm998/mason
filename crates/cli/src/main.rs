@@ -2262,6 +2262,18 @@ fn main() {
                     if let Some(f) = t["failure"].as_str() {
                         println!("  failed    {f}");
                     }
+                    for l in t["host_losses"].as_array().into_iter().flatten() {
+                        println!(
+                            "  host lost `{}` ({}): {}",
+                            l["step"].as_str().unwrap_or("?"),
+                            if l["rerun"].as_bool().unwrap_or(false) {
+                                "re-run once on a fresh host"
+                            } else {
+                                "not re-run"
+                            },
+                            l["detail"].as_str().unwrap_or("")
+                        );
+                    }
                     if let Some(c) = t["closing"]["note"].as_str() {
                         println!("  tests     {c}");
                     }

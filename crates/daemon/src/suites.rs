@@ -148,6 +148,9 @@ struct Ran {
 
 type Check = Arc<dyn Fn() -> Stop + Send + Sync>;
 
+/// Run a suite command under a step host. If the host is lost before the command
+/// finished, run it once more on a fresh host (`<id>-host1`) and judge that run; a
+/// second loss in a row is an error naming both. A lost host is never a result.
 #[allow(clippy::too_many_arguments)]
 fn run_hosted(
     d: &Arc<Daemon>,
@@ -159,6 +162,51 @@ fn run_hosted(
     check: Check,
     run: Option<StepRunId>,
 ) -> Result<Ran, String> {
+    use crate::hostloss as hl;
+    let hosts = d.cfg.hosts_dir();
+    let again_id = hl::rerun_id(id);
+    let mut first = None;
+    let mut on = id.to_string();
+    if hosts.join(&again_id).join("host.kv").exists() {
+        first = mason_step_host::registry::lost_report(&hosts.join(id)).ok();
+        on = again_id.clone();
+    }
+    loop {
+        match run_hosted_once(d, &on, cmd, cwd, limit, log_dir, check.clone(), run) {
+            Ok(r) => return Ok(r),
+            Err(HostedErr::Other(e)) => return Err(e),
+            Err(HostedErr::Lost(rep)) if on == id => {
+                hl::record(d, run, id, &rep, true);
+                first = Some(rep);
+                on = again_id.clone();
+            }
+            Err(HostedErr::Lost(rep)) => {
+                hl::record(d, run, id, &rep, false);
+                return Err(match first {
+                    Some(f) => hl::both(&f, &rep),
+                    None => hl::lost_text(&rep),
+                });
+            }
+        }
+    }
+}
+
+enum HostedErr {
+    Lost(mason_step_host::registry::LostReport),
+    Other(String),
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_hosted_once(
+    d: &Arc<Daemon>,
+    id: &str,
+    cmd: &str,
+    cwd: &Path,
+    limit: Duration,
+    log_dir: &Path,
+    check: Check,
+    run: Option<StepRunId>,
+) -> Result<Ran, HostedErr> {
     let hosts = d.cfg.hosts_dir();
     let dir = hosts.join(id);
     if !dir.join("host.kv").exists() {
@@ -174,7 +222,7 @@ fn run_hosted(
             linger: Duration::from_secs(600),
             heartbeat: d.cfg.heartbeat,
         };
-        spawn_host(&o).map_err(|e| format!("cannot start `{cmd}`: {e}"))?;
+        spawn_host(&o).map_err(|e| HostedErr::Other(format!("cannot start `{cmd}`: {e}")))?;
     }
     let done = Arc::new(AtomicBool::new(false));
     let why = Arc::new(AtomicU8::new(0)); // 0 none, 1 timed out, 2 skipped, 3 gone
@@ -229,9 +277,16 @@ fn run_hosted(
     let rec = match rec {
         Ok(r) => r,
         Err(ClientError::HostLost { .. }) => {
-            return Err("the command was lost (its host died)".into())
+            return Err(match mason_step_host::registry::lost_report(&dir) {
+                Ok(rep) => HostedErr::Lost(rep),
+                Err(_) => HostedErr::Other("the command was lost (its host died)".into()),
+            })
         }
-        Err(e) => return Err(format!("cannot collect the command's result: {e}")),
+        Err(e) => {
+            return Err(HostedErr::Other(format!(
+                "cannot collect the command's result: {e}"
+            )))
+        }
     };
     Ok(Ran {
         code: rec.code,
