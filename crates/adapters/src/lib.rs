@@ -4,6 +4,7 @@
 
 pub mod claude;
 pub mod codex;
+pub mod devices;
 pub mod fake;
 pub mod fakehost;
 pub mod generic;

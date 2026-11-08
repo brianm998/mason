@@ -729,6 +729,7 @@ dependencies = [
  "mason-conformance",
  "mason-core",
  "mason-definition",
+ "mason-devices",
  "mason-engine",
  "mason-landing",
  "mason-plugins",
@@ -767,6 +768,16 @@ dependencies = [
  "proptest",
  "serde_json",
  "toml_edit",
+]
+
+[[package]]
+name = "mason-devices"
+version = "0.0.0"
+dependencies = [
+ "mason-adapter-api",
+ "nix",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
