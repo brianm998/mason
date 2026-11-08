@@ -43,6 +43,58 @@ pub struct Scratch {
     pub config_dir: PathBuf,
     pub data_dir: PathBuf,
     pub script: PathBuf,
+    /// Held for as long as this scratch world lives (declared last, so released last).
+    _slot: Slot,
+}
+
+/// How many scratch worlds (each a real daemon with step hosts, git and a scripted
+/// agent) one test binary runs at once. The test harness starts every test of a
+/// binary together, one thread per CPU, so `definitions.rs` alone ran 21 daemons at
+/// once; with several tasks' tests on the same machine their own deadlines then ran
+/// out for want of a CPU. A test waits for a slot before its world exists, so the
+/// wait never counts against its deadlines. `MASON_TEST_WORLDS` overrides the number.
+fn world_limit() -> usize {
+    std::env::var("MASON_TEST_WORLDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or_else(|| {
+            let cpus = std::thread::available_parallelism().map_or(4, |n| n.get());
+            (cpus / 4).clamp(2, 8)
+        })
+}
+
+struct Slot;
+
+static WORLDS: (std::sync::Mutex<usize>, std::sync::Condvar) =
+    (std::sync::Mutex::new(0), std::sync::Condvar::new());
+
+impl Slot {
+    fn take() -> Slot {
+        let (m, cv) = &WORLDS;
+        let limit = world_limit();
+        let mut n = m.lock().unwrap_or_else(|e| e.into_inner());
+        // A test that holds one world and makes another could wait for ever if every
+        // slot were held that way, so after a while it goes ahead regardless.
+        let end = Instant::now() + Duration::from_secs(600);
+        while *n >= limit && Instant::now() < end {
+            n = cv
+                .wait_timeout(n, Duration::from_millis(500))
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
+        *n += 1;
+        Slot
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        let (m, cv) = &WORLDS;
+        let mut n = m.lock().unwrap_or_else(|e| e.into_inner());
+        *n = n.saturating_sub(1);
+        cv.notify_one();
+    }
 }
 
 /// What the scripted agent commits. Every task's worktree also gets a file of its
@@ -59,6 +111,7 @@ pub fn sh(cwd: &Path, args: &[&str]) -> String {
 
 impl Scratch {
     pub fn new(test_cmd: &str, script: Value) -> Scratch {
+        let slot = Slot::take();
         let root = tempfile::Builder::new()
             .prefix("ms")
             .tempdir_in("/tmp")
@@ -88,6 +141,7 @@ impl Scratch {
             config_dir,
             data_dir: r.join("d"),
             script: script_path,
+            _slot: slot,
         };
         s.write_project("scratch", test_cmd, "");
         s

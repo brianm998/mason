@@ -11,7 +11,7 @@
 //! stopped, the lanes already green keep their results, and a debt is recorded.
 
 use crate::daemon::{now_ms, Daemon};
-use crate::jobs::{prepare_worktree_only, run_shell, tail, Ctx};
+use crate::jobs::{run_shell, tail, Ctx};
 use crate::sched::needs_of;
 use mason_core::*;
 use mason_definition::graph::Outcome;
@@ -815,8 +815,21 @@ fn rerun_failing(
 // ---- the step --------------------------------------------------------------
 
 pub fn run(c: &Ctx) {
-    if let Err(why) = prepare_worktree_only(c) {
-        return c.fail(why);
+    // As for a test command: test what would land, with the base folded in.
+    match crate::jobs::prepare(c) {
+        Ok(None) => {}
+        Ok(Some(files)) => {
+            let base = c.project.base_ref();
+            return c.conclude(
+                mason_definition::graph::Outcome::Red,
+                format!(
+                    "the branch conflicts with {base} in: {}",
+                    files.replace('\n', ", ")
+                ),
+                Some(crate::jobs::conflict_note(&base, &files)),
+            );
+        }
+        Err(why) => return c.fail(why),
     }
     let d = &c.d;
     let log_dir = c.task_dir().join(format!("suites-r{}", c.run.0));

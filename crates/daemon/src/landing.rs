@@ -1167,22 +1167,7 @@ impl Runner {
     }
 
     fn legacy_cmd(&self, def: &mason_definition::Definition) -> Option<String> {
-        use mason_definition::model::StepType;
-        def.steps
-            .iter()
-            .find(|s| s.kind == StepType::Test)
-            .and_then(|s| {
-                mason_definition::layers::resolve(
-                    def,
-                    s,
-                    &self.d.overlay(self.pid),
-                    &[],
-                    &[],
-                    now_ms(),
-                )
-                .ok()
-                .and_then(|r| r.command.map(|a| a.value))
-            })
+        crate::jobs::test_command(&self.d, def, self.pid, None)
     }
 
     fn verify(

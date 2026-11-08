@@ -108,6 +108,7 @@ fn task_json(d: &Daemon, w: &World, t: &Task, detail: bool) -> Value {
             v["worktree"] = json!(p.worktree(&d.cfg, t.id.0).display().to_string());
         }
         v["definition"] = json!(t.def);
+        v["progress"] = json!({"now_ms": crate::daemon::now_ms(), "runs": progress_runs(d, t.id)});
         v["numbers"] = json!(d
             .number_lines(t)
             .iter()
@@ -1250,7 +1251,7 @@ async fn self_status(Shared(d): Shared<Arc<Daemon>>) -> Res {
                     let s = u.status.clone();
                     json!({
                         "project": p.id,
-                        "open": s.open, "max_open": c.max_open,
+                        "open": s.open, "held": s.held, "max_open": c.max_open,
                         "week": s.week, "per_week": c.per_week, "yours_not_counted": u.yours,
                         "steps": s.steps, "yours_steps": u.yours_steps, "max_steps": c.max_steps, "period_h": c.period_h,
                         "cooldown_until_ms": s.cooldown_until_ms,
@@ -1796,13 +1797,22 @@ pub fn render_logs(d: &Daemon, task: u64) -> String {
     hosts.sort_by(|a, b| (a.0, &a.1.info.id).cmp(&(b.0, &b.1.info.id)));
     let mut out = String::new();
     for (run, h) in hosts {
-        let kind = if h.info.id.ends_with("-test") || h.info.id.ends_with("-cmd") {
+        // `t<task>r<run>-test`, `-cmd`, and a red test run again: `-test-again<k>`.
+        let what = h.info.id.split_once('-').map_or("", |(_, w)| w);
+        let kind = if what == "test"
+            || what == "cmd"
+            || what.starts_with("test-again")
+            || what.starts_with("cmd-again")
+        {
             "test"
         } else {
             "agent"
         };
+        let again = what
+            .split_once("-again")
+            .map_or(String::new(), |(_, k)| format!(", run again ({k})"));
         out.push_str(&format!(
-            "=== step run {run} ({kind}) [{}] ===\n",
+            "=== step run {run} ({kind}{again}) [{}] ===\n",
             h.info.id
         ));
         let raw =
@@ -1850,6 +1860,32 @@ async fn logs(
     Ok(Json(v))
 }
 
+/// The live progress records of a task's open step runs, as JSON: the same figures
+/// as the `StepProgress` a monitor is pushed.
+fn progress_runs(d: &Daemon, id: TaskId) -> Vec<Value> {
+    let fig = |f: &mason_core::progress::Figure| json!({"value": f.value, "source": format!("{:?}", f.source).to_lowercase()});
+    d.progress_of_task(id)
+        .iter()
+        .map(|p| {
+            json!({
+                "run": p.run, "step": p.step, "unit": p.unit,
+                "done": fig(&p.done), "total": fig(&p.total),
+                "total_low": p.total_low, "history_samples": p.history_samples,
+                "percent": p.percent(),
+                "stale_after_ms": p.stale_after_ms,
+                "message": p.message,
+                "output": {"lines": p.output.lines, "bytes": p.output.bytes,
+                           "last_output_ms": p.output.last_output_ms},
+                "started_ms": p.started_ms, "updated_at_ms": p.updated_at_ms,
+                "subs": p.subs.iter().map(|s| json!({
+                    "name": s.name, "unit": s.unit,
+                    "done": fig(&s.done), "total": fig(&s.total)})).collect::<Vec<_>>(),
+                "todo": p.todo.iter().map(|t| json!({"text": t.text, "status": t.status})).collect::<Vec<_>>(),
+            })
+        })
+        .collect()
+}
+
 /// The live progress records of a task's open step runs.
 async fn task_progress(Shared(d): Shared<Arc<Daemon>>, Path(id): Path<u64>) -> Res {
     let d2 = d.clone();
@@ -1860,26 +1896,7 @@ async fn task_progress(Shared(d): Shared<Arc<Daemon>>, Path(id): Path<u64>) -> R
             if !w.tasks.contains_key(&TaskId(id)) {
                 return Err(fail(StatusCode::NOT_FOUND, format!("no task #{id}")));
             }
-            let fig = |f: &mason_core::progress::Figure| {
-                json!({"value": f.value, "source": format!("{:?}", f.source).to_lowercase()})
-            };
-            let runs: Vec<Value> = d2
-                .progress_of_task(TaskId(id))
-                .iter()
-                .map(|p| {
-                    json!({
-                        "run": p.run, "step": p.step, "unit": p.unit,
-                        "done": fig(&p.done), "total": fig(&p.total),
-                        "message": p.message,
-                        "output": {"lines": p.output.lines, "bytes": p.output.bytes,
-                                   "last_output_ms": p.output.last_output_ms},
-                        "started_ms": p.started_ms, "updated_at_ms": p.updated_at_ms,
-                        "subs": p.subs.iter().map(|s| json!({
-                            "name": s.name, "unit": s.unit,
-                            "done": fig(&s.done), "total": fig(&s.total)})).collect::<Vec<_>>(),
-                    })
-                })
-                .collect();
+            let runs = progress_runs(&d2, TaskId(id));
             Ok(json!({"task": id, "now_ms": crate::daemon::now_ms(), "runs": runs}))
         })
         .await

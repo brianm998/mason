@@ -156,7 +156,12 @@ fn a_step_waits_for_a_held_class_and_says_why_then_lands() {
         ),
         "{why}"
     );
-    // The same sentence is the task's activity, so every monitor shows it.
+    // The same sentence is the task's activity, so every monitor shows it. The broker
+    // explains the wait as soon as the request is queued; the step's job records it as
+    // the task's activity (a `WaitStarted` event) just after, so wait for that.
+    wait_for("the task's activity to say what it waits for", 20, || {
+        !matches!(task_of(&d, t).activity, Activity::Running)
+    });
     let task = task_of(&d, t);
     assert_eq!(task.state, State::Testing);
     match &task.activity {
@@ -168,6 +173,20 @@ fn a_step_waits_for_a_held_class_and_says_why_then_lands() {
     wait_state(&d, t, State::Landed, 60);
     assert!(d.broker.explain_task(t).is_none());
     assert_eq!(d.broker.used("compile"), 0, "nothing leaked");
+}
+
+#[test]
+fn a_step_is_told_what_it_holds_so_its_command_need_not_queue_for_it() {
+    // MASON_HELD names the step's `uses`: a command that would otherwise queue for
+    // `compile` itself (`mason run --needs compile`) can see it already has it.
+    let s = Scratch::new(
+        "test x$MASON_HELD = xcompile && test -f hello.txt",
+        unique_script(),
+    );
+    s.push_files(&[(".mason/mason.toml", DEF_COMPILE)], "definition");
+    let d = s.start();
+    let t = file_task(&d, "Holds the compiler");
+    wait_state(&d, t, State::Landed, 60);
 }
 
 #[test]
@@ -384,4 +403,101 @@ fn two_projects_share_the_pool_and_admission_follows_the_rank() {
     let on = |branch: &str| sh(&s.origin, &["log", "--format=%s", branch]);
     assert!(on("short").contains("add hello"));
     assert!(on("main").contains("add hello"));
+}
+
+#[test]
+fn releasing_several_held_tasks_at_once_never_runs_more_than_max_concurrent() {
+    let s = Scratch::new("test -f hello.txt", unique_script());
+    s.push_files(&[(".mason/mason.toml", DEF_LONG)], "long definition");
+    let d = s.start_with(|c| c.max_concurrent = 2);
+    // The blocker is queued but cannot start (no session), so the others are held behind it.
+    d.broker.set_limit("llm:claude", 0).unwrap();
+    let blocker = file_in(&d, "scratch", "blocker");
+    let pid = d.project_id_by_name("scratch").unwrap();
+    let held: Vec<TaskId> = (0..5)
+        .map(|i| {
+            let a = d
+                .emit(EventKind::TaskFiled {
+                    project: pid,
+                    title: format!("held {i}"),
+                    body: "x".into(),
+                    priority: Priority::Normal,
+                    trust: TrustSource::Owner,
+                    explored: false,
+                    proposed: false,
+                    blockers: vec![blocker],
+                    not_before: None,
+                })
+                .unwrap();
+            a.effects
+                .iter()
+                .find_map(|e| match e {
+                    Effect::TaskCreated { task } => Some(*task),
+                    _ => None,
+                })
+                .unwrap()
+        })
+        .collect();
+    std::thread::sleep(Duration::from_millis(300));
+    for t in &held {
+        assert!(matches!(task_of(&d, *t).activity, Activity::Held(_)));
+    }
+    // Land the blocker: all five are released in the same instant.
+    d.broker.set_limit("llm:claude", 2).unwrap();
+    d.admit();
+    let started = std::time::Instant::now();
+    let mut peak = 0;
+    loop {
+        let w = d.world().unwrap();
+        let running = w
+            .step_runs
+            .values()
+            .filter(|r| {
+                r.outcome.is_none()
+                    && matches!(r.step, State::Exploring | State::Developing | State::Review)
+            })
+            .count();
+        peak = peak.max(running);
+        assert!(
+            running <= 2,
+            "{running} agent steps run at once; max_concurrent is 2"
+        );
+        if held.iter().all(|t| w.tasks[t].state == State::Landed) {
+            break;
+        }
+        assert!(started.elapsed() < Duration::from_secs(150), "timed out");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(peak >= 1);
+}
+
+/// s56: two accounts with a session each. A full (here: zero-session) account
+/// holds back only its own project; the other account's task goes through.
+#[test]
+fn a_full_account_does_not_block_another_accounts_task() {
+    let s = Scratch::new("test -f hello.txt", unique_script());
+    std::fs::write(
+        s.config_dir.join("providers.toml"),
+        "[provider.a]\nadapter = \"claude\"\nbilling = \"subscription\"\nsessions = 1\n\
+         [provider.b]\nadapter = \"claude\"\nbilling = \"api\"\nsessions = 1\n",
+    )
+    .unwrap();
+    s.write_project("scratch", "test -f hello.txt", "account = \"a\"");
+    s.write_project("other", "test -f hello.txt", "account = \"b\"");
+    let d = s.start();
+    assert_eq!(d.broker.limit("llm:a"), Some(1));
+    assert_eq!(d.broker.limit("llm:b"), Some(1));
+    assert_eq!(d.broker.limit("llm:claude"), None);
+    d.broker.set_limit("llm:a", 0).unwrap();
+    let held = file_in(&d, "scratch", "on the full account");
+    let free = file_in(&d, "other", "on the free account");
+    wait_state(&d, free, State::Landed, 90);
+    assert_eq!(state_of(&d, held), State::Queued);
+    let w = d.world().unwrap();
+    assert_eq!(d.llm_free(&w, "a"), 0);
+    assert_eq!(d.llm_free(&w, "b"), 1);
+    assert_eq!(d.account_of(task_of(&d, held).project), "a");
+    d.broker.set_limit("llm:a", 1).unwrap();
+    d.admit();
+    wait_state(&d, held, State::Landed, 90);
 }

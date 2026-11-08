@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-/// The only agent provider so far. Accounts become `llm:<account>` resources.
+/// The account of an installation with no providers.toml. Accounts become `llm:<account>` resources.
 pub const DEFAULT_ACCOUNT: &str = "claude";
 
 pub fn llm_resource(account: &str) -> String {
@@ -175,12 +175,20 @@ impl Broker {
         limits_file: PathBuf,
         cfg: &ResourceCfg,
         default_llm: u32,
+        accounts: &[crate::providers::Account],
     ) -> Result<Arc<Broker>, String> {
         let locks = Locks::new(&locks_dir).map_err(|e| format!("cannot create locks dir: {e}"))?;
         let mut ledger = Ledger::new();
         let mut fixed = HashSet::new();
         let mut pools = HashSet::new();
-        ledger.set_capacity(&llm_resource(DEFAULT_ACCOUNT), default_llm, Kind::Llm);
+        // One capacity per account; `[llm]` below sets a name as it always did.
+        for a in accounts {
+            ledger.set_capacity(
+                &llm_resource(&a.name),
+                a.sessions.unwrap_or(default_llm),
+                Kind::Llm,
+            );
+        }
         for (a, n) in &cfg.llm {
             ledger.set_capacity(&llm_resource(a), *n, Kind::Llm);
             fixed.insert(llm_resource(a));

@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import Foundation
+import MasonProtocol
+
+public typealias ProgressCell = Mason_V1_ProgressCell
+public typealias ProgressSource = Mason_V1_ProgressSource
 
 public enum Format {
     /// Time in state: "42 s", "9 min", "3h10". Always shown, never hidden.
@@ -13,5 +17,150 @@ public enum Format {
             let m = (s % 3600) / 60
             return m == 0 ? "\(s / 3600)h" : "\(s / 3600)h\(String(format: "%02d", m))"
         }
+    }
+
+    /// 1240 as "1,240" (always a comma, whatever the locale: the same text in every client).
+    public static func group(_ n: UInt64) -> String {
+        let s = String(n)
+        var out = ""
+        for (i, c) in s.enumerated() {
+            if i > 0 && (s.count - i) % 3 == 0 { out.append(",") }
+            out.append(c)
+        }
+        return out
+    }
+
+    /// The whole percent `done` is of a real `total`: rounded down, at most 100, none for 0.
+    /// Only real totals (reported or counted) are ever passed in.
+    public static func percent(done: UInt64, total: UInt64) -> Int? {
+        if total == 0 { return nil }
+        return Int(min(done, total) * 100 / total)
+    }
+
+    /// What a count and its total say, by the rule for numbers: "212 of 340 tests, 62%" for a real
+    /// total; "1,240 lines, usually 1,800 to 2,400" for a typical one (never a percentage);
+    /// "37 tool calls" for none. Empty when there is nothing to say yet.
+    public static func countText(
+        unit: String, done: UInt64, doneSource: ProgressSource,
+        total: UInt64, totalSource: ProgressSource, totalLow: UInt64
+    ) -> String {
+        let u = unit.isEmpty ? "" : " \(unit)"
+        switch totalSource {
+        case .sourceReported, .sourceCounted:
+            if total > 0 {
+                return "\(group(done)) of \(group(total))\(u), \(percent(done: done, total: total) ?? 0)%"
+            }
+        case .sourceHistory:
+            if doneSource != .sourceNone {
+                let range = totalLow > 0 && totalLow < total ? "\(group(totalLow)) to \(group(total))" : group(total)
+                return "\(group(done))\(u), usually \(range)"
+            }
+        default: break
+        }
+        return doneSource != .sourceNone ? "\(group(done))\(u)" : ""
+    }
+
+    /// Where a figure came from, in words.
+    public static func sourceWords(_ s: ProgressSource, samples: UInt32) -> String {
+        switch s {
+        case .sourceReported: return "from the agent"
+        case .sourceCounted: return "counted from output"
+        case .sourceHistory: return "usually, from \(samples) past runs"
+        default: return ""
+        }
+    }
+
+    /// Quiet past `afterMs`: nothing has moved for longer than the step's usual gap.
+    public static func isStale(now: UInt64, moved: UInt64, afterMs: UInt64) -> Bool {
+        moved > 0 && (now > moved ? now - moved : 0) > afterMs
+    }
+
+    /// "updated 4 s ago", or "no output for 6 min" when stale. Empty when nothing moved yet.
+    public static func timeText(now: UInt64, moved: UInt64, afterMs: UInt64) -> String {
+        if moved == 0 { return "" }
+        let span = duration(ms: now > moved ? now - moved : 0)
+        return isStale(now: now, moved: moved, afterMs: afterMs) ? "no output for \(span)" : "updated \(span) ago"
+    }
+}
+
+/// How a running cell is filled.
+public enum CellFill: Equatable, Sendable {
+    /// A real total: filled in proportion (0...1).
+    case proportional(Double)
+    /// Only a typical total: filled the same way, lighter.
+    case typical(Double)
+    /// Nothing to measure against: the outline alone.
+    case outline
+}
+
+extension Mason_V1_ProgressCell {
+    public var hasRealTotal: Bool {
+        (totalSource == .sourceReported || totalSource == .sourceCounted) && total > 0
+    }
+
+    /// The whole percent, only from a real total.
+    public var percent: Int? {
+        hasRealTotal ? Format.percent(done: UInt64(done), total: UInt64(total)) : nil
+    }
+
+    public var countText: String {
+        Format.countText(
+            unit: unit, done: UInt64(done), doneSource: doneSource,
+            total: UInt64(total), totalSource: totalSource, totalLow: UInt64(totalLow)
+        )
+    }
+
+    public var fill: CellFill {
+        if hasRealTotal { return .proportional(Double(min(done, total)) / Double(total)) }
+        if totalSource == .sourceHistory && total > 0 { return .typical(min(1, Double(done) / Double(total))) }
+        return .outline
+    }
+
+    public func isStale(now: UInt64) -> Bool {
+        Format.isStale(now: now, moved: updatedAtMs, afterMs: staleAfterMs)
+    }
+
+    public func timeText(now: UInt64) -> String {
+        Format.timeText(now: now, moved: updatedAtMs, afterMs: staleAfterMs)
+    }
+
+    /// The cell's accessibility label: "develop, running, 3 of 7 plan steps, 42%" spoken as
+    /// "42 percent". The ticking time is deliberately not in it.
+    public var spokenLabel: String {
+        let state: String
+        switch self.state {
+        case .filled: state = "finished"
+        case .part: state = "running"
+        case .hatched: state = "waiting"
+        default: state = "not started"
+        }
+        var s = "\(step), \(state)"
+        if self.state == .part {
+            let c = countText
+            if !c.isEmpty { s += ", " + (percent.map { c.replacingOccurrences(of: ", \($0)%", with: ", \($0) percent") } ?? c) }
+        }
+        return s
+    }
+
+    /// Everything a running step's progress says, without any clock text: what the conformance
+    /// run compares between the clients and the daemon's own reading.
+    public func progressTexts(now: UInt64) -> [String] {
+        var t: [String] = []
+        let c = countText
+        if !c.isEmpty { t.append(c) }
+        if !message.isEmpty { t.append(message) }
+        if doneSource != .sourceNone { t.append("count " + Format.sourceWords(doneSource, samples: historySamples)) }
+        if totalSource != .sourceNone { t.append("total " + Format.sourceWords(totalSource, samples: historySamples)) }
+        if lines > 0 || bytes > 0 { t.append("output \(Format.group(lines)) lines, \(Format.group(bytes)) bytes") }
+        for s in subs {
+            let text = Format.countText(
+                unit: s.unit, done: UInt64(s.done), doneSource: s.doneSource,
+                total: UInt64(s.total), totalSource: s.totalSource, totalLow: 0
+            )
+            t.append("\(s.name): \(text)")
+        }
+        for i in todo { t.append("\(i.status): \(i.text)") }
+        if isStale(now: now) { t.append("silent") }
+        return t
     }
 }

@@ -102,6 +102,13 @@ class MonitorCoreTest {
         assertEquals(Page.Task(7), m.page, "an unknown link changes nothing")
     }
 
+    @Test fun tileLabelIsTheDaemonsLabelOrTheUnderscoreFallback() {
+        val m = model()
+        val c = StateCount(state = "needs_attention")
+        assertEquals("needs attention", m.tileLabel(c))
+        assertEquals("stuck", m.tileLabel(c.copy(label = "stuck")))
+    }
+
     // ---- counts while disconnected ----
 
     @Test fun tilesShowADashWhileDisconnectedNeverAStaleCountOrAFalseZero() {
@@ -138,6 +145,55 @@ class MonitorCoreTest {
         m.reveal("failed")
         assertTrue(m.isExpanded(m.sidebar!!.sections[1]))
         assertEquals("failed", m.scrollTarget)
+    }
+
+    @Test fun doubleClickOnAStateWithOneTaskExpandsScrollsAndOpensIt() {
+        val m = model()
+        m.tileClicked("failed", 1)
+        assertEquals(Page.Home, m.page)
+        m.tileClicked("failed", 2)
+        assertTrue(m.isExpanded(m.sidebar!!.sections[1]))
+        assertEquals("failed", m.scrollTarget)
+        assertEquals(Page.Task(3), m.page)
+    }
+
+    @Test fun doubleClickWithSeveralTasksExpandsAndScrollsButKeepsThePage() {
+        val m = model()
+        m.tileClicked("queued", 2)
+        assertTrue(m.isExpanded(m.sidebar!!.sections[0]))
+        assertEquals("queued", m.scrollTarget)
+        assertEquals(Page.Home, m.page)
+    }
+
+    @Test fun doubleClickOnAnEmptyStateChangesNothingBeyondTheReveal() {
+        val m = model()
+        m.sidebar = m.sidebar!!.copy(sections = m.sidebar!!.sections + section("canceled", collapsed = true))
+        m.tileClicked("canceled", 2)
+        assertEquals(Page.Home, m.page)
+    }
+
+    @Test fun doubleClickStillOpensTheLoneTaskWhenSearchHidesIt() {
+        val m = model()
+        m.search = m.search.copy(text = "zzz-no-match")
+        m.tileClicked("failed", 2)
+        assertEquals(Page.Task(3), m.page)
+        assertEquals("zzz-no-match", m.search.text)
+    }
+
+    @Test fun doubleClickWhileDisconnectedDoesNothing() {
+        val m = model(connected = false)
+        m.revealAndOpenIfOne("failed")
+        assertEquals(Page.Home, m.page)
+        assertEquals(null, m.scrollTarget)
+        assertFalse(m.isExpanded(m.sidebar!!.sections[1]))
+    }
+
+    @Test fun tooltipMentionsDoubleClickOnlyForACountOfOne() {
+        val m = model()
+        assertEquals("tip\nDouble-click to open it", m.tileTooltip(StateCount(state = "failed", count = 1, tooltip = "tip")))
+        assertEquals("tip", m.tileTooltip(StateCount(state = "failed", count = 2, tooltip = "tip")))
+        m.connected = false
+        assertEquals("tip", m.tileTooltip(StateCount(state = "failed", count = 1, tooltip = "tip")))
     }
 
     @Test fun searchMatchesNameTitleAndBodyEachWithItsOwnCheckbox() {
@@ -620,5 +676,127 @@ class MonitorCoreTest {
         r.info = DaemonInfo(7423, 1, 1)
         waitFor("a socket") { r.sockets.size == 1 }
         r.conn.stop()
+    }
+
+    // ---- readable plan ----
+
+    private fun planView(numbers: List<String> = listOf("0", "1")) = PlanView(
+        summary_paragraphs = listOf("First.", "Second `x`."),
+        steps_are_list = true,
+        steps = listOf("do a\nmore a", "do b"),
+        step_numbers = numbers,
+        files = listOf("a.rs", "b.rs"),
+        criteria = listOf("it works"),
+        other = listOf(PlanExtra(label = "Risks", value_ = "- one")),
+        raw = "{\"summary\":\"First.\"}",
+    )
+
+    @Test
+    fun planCopyAsTextKeepsTheAgentsNumbers() {
+        val t = PlanText.copyAsText(planView())
+        assertEquals(
+            "## Summary\n\nFirst.\n\nSecond `x`.\n\n## Steps\n\n0. do a\n   more a\n1. do b\n\n" +
+                "## Files (2)\n\n- `a.rs`\n- `b.rs`\n\n## Acceptance criteria (1)\n\n- [ ] it works\n\n" +
+                "## Other\n\n### Risks\n\n- one\n",
+            t,
+        )
+        assertFalse(t.contains("{"))
+    }
+
+    @Test
+    fun planCopyAsTextBulletsAndUnreadable() {
+        val v = planView(numbers = emptyList())
+        assertTrue(PlanText.copyAsText(v).contains("- do a\n  more a\n- do b"))
+        assertNull(PlanText.marker(PlanView(), 0))
+        assertEquals("•", PlanText.marker(v, 0))
+        assertEquals("not json", PlanText.copyAsText(PlanView(raw = "not json", note = "n")))
+    }
+
+    @Test
+    fun planExpandRule() {
+        assertTrue(PlanText.expandedByDefault(0))
+        assertTrue(PlanText.expandedByDefault(9))
+        assertFalse(PlanText.expandedByDefault(10))
+        assertFalse(PlanText.expandedByDefault(25))
+    }
+
+    @Test
+    fun planInlineMarkdown() {
+        assertEquals(
+            listOf(PlanText.Span("a "), PlanText.Span("b", code = true), PlanText.Span(" "), PlanText.Span("c", bold = true), PlanText.Span(" `open")),
+            PlanText.inline("a `b` **c** `open"),
+        )
+    }
+
+    // ---- live progress (s49) ----
+
+    private fun cell(
+        unit: String = "tests", done: Int, total: Int = 0,
+        doneSrc: ProgressSource = ProgressSource.SOURCE_REPORTED, totalSrc: ProgressSource = ProgressSource.SOURCE_NONE, low: Int = 0,
+    ) = ProgressCell(step = "develop", state = CellState.PART, run = 1, unit = unit, done = done, total = total,
+        done_source = doneSrc, total_source = totalSrc, total_low = low, stale_after_ms = 300_000)
+
+    @Test fun countTextFollowsTheRuleForNumbers() {
+        assertEquals("212 of 340 tests, 62%", cell(done = 212, total = 340, totalSrc = ProgressSource.SOURCE_REPORTED).countText)
+        assertEquals("5 of 7 lines, 71%", cell(unit = "lines", done = 5, total = 7, doneSrc = ProgressSource.SOURCE_COUNTED, totalSrc = ProgressSource.SOURCE_COUNTED).countText)
+        assertEquals("400 of 340 tests, 100%", cell(done = 400, total = 340, totalSrc = ProgressSource.SOURCE_REPORTED).countText)
+        val h = cell(unit = "lines", done = 1240, total = 2400, doneSrc = ProgressSource.SOURCE_COUNTED, totalSrc = ProgressSource.SOURCE_HISTORY, low = 1800)
+        assertEquals("1,240 lines, usually 1,800 to 2,400", h.countText)
+        assertNull(h.percent)
+        assertEquals("37 tool calls", cell(unit = "tool calls", done = 37).countText)
+        assertEquals("3 tests", cell(done = 3, total = 0, totalSrc = ProgressSource.SOURCE_REPORTED).countText)
+        assertEquals("", Format.countText("", 0, ProgressSource.SOURCE_NONE, 0, ProgressSource.SOURCE_NONE, 0))
+    }
+
+    @Test fun cellFill() {
+        assertEquals(CellFill.Proportional(3f / 7f), cell(done = 3, total = 7, totalSrc = ProgressSource.SOURCE_REPORTED).fill)
+        assertEquals(CellFill.Typical(0.25f), cell(done = 10, total = 40, totalSrc = ProgressSource.SOURCE_HISTORY).fill)
+        assertEquals(CellFill.Typical(1f), cell(done = 50, total = 40, totalSrc = ProgressSource.SOURCE_HISTORY).fill)
+        assertEquals(CellFill.Outline, cell(done = 10).fill)
+    }
+
+    @Test fun staleRuleAndTimeText() {
+        assertEquals("updated 4 s ago", Format.timeText(10_000, 6_000, 300_000))
+        assertEquals("no output for 6 min", Format.timeText(400_000, 40_000, 300_000))
+        assertEquals("updated 4 min ago", Format.timeText(300_000, 40_000, 300_000))
+        assertFalse(Format.isStale(300_000, 0, 1))
+        assertFalse(Format.isStale(1_300_000, 1_000_000, 300_000))
+        assertTrue(Format.isStale(1_300_001, 1_000_000, 300_000))
+        assertEquals("1,234,567", Format.group(1_234_567))
+    }
+
+    @Test fun spokenLabelHasCountAndPercentButNoClock() {
+        val c = cell(unit = "plan steps", done = 3, total = 7, totalSrc = ProgressSource.SOURCE_REPORTED).copy(updated_at_ms = 1_000)
+        assertEquals("develop, running, 3 of 7 plan steps, 42 percent", c.spokenLabel)
+        assertEquals("develop, running, 37 tool calls", cell(unit = "tool calls", done = 37).spokenLabel)
+        assertEquals("develop, finished", c.copy(state = CellState.FILLED).spokenLabel)
+    }
+
+    @Test fun stepProgressUpdatesTheRowAndAnchorsTheClock() {
+        val m = model()
+        val c = cell(done = 1, total = 4, totalSrc = ProgressSource.SOURCE_REPORTED)
+        m.taskDetail = TaskDetailView(row = row(1, "developing").copy(progress = listOf(c)))
+        m.sidebar = m.sidebar!!.copy(sections = m.sidebar!!.sections.mapIndexed { i, sec ->
+            if (i == 0) sec.copy(rows = sec.rows.mapIndexed { j, r -> if (j == 0) r.copy(progress = listOf(c)) else r }) else sec
+        })
+        val p = StepProgress(task = 1, progress = c.copy(done = 3), now_ms = 5_000_000, log = listOf("a", "b"))
+        m.apply(p, local = 1_000_000)
+        assertEquals(3, m.taskDetail!!.row!!.progress.first().done)
+        assertEquals(3, m.sidebar!!.sections[0].rows[0].progress.first().done)
+        assertEquals(listOf("a", "b"), m.liveLog)
+        assertEquals(5_000_000, m.daemonNow(1_000_000))
+        assertEquals(5_007_000, m.daemonNow(1_007_000))
+        m.apply(p.copy(log = (0 until 60).map { "l$it" }), local = 1_000_000)
+        assertEquals(40, m.liveLog.size)
+        assertEquals("l59", m.liveLog.last())
+    }
+
+    @Test fun progressItemsHaveNoClockText() {
+        val c = cell(done = 212, total = 340, totalSrc = ProgressSource.SOURCE_REPORTED).copy(message = "running the api suite", updated_at_ms = 1_000_000)
+        val t = c.progressTexts(1_004_000)
+        assertEquals("212 of 340 tests, 62%", t.first())
+        assertTrue(t.none { it.contains(" ago") })
+        assertFalse("silent" in t)
+        assertTrue("silent" in c.progressTexts(1_400_000))
     }
 }

@@ -266,6 +266,19 @@ pub(crate) fn step_env_pairs(c: &Ctx) -> Vec<(String, String)> {
         ("MASON_BASE".into(), c.project.base_ref()),
         ("MASON_STEP".into(), c.step.name.clone()),
         ("MASON_ATTEMPT".into(), c.attempt.to_string()),
+        // What the step already holds from the broker (its `uses`), so a command
+        // that would queue for the same class (`mason run --needs`) can tell it
+        // need not, and does not wait on itself.
+        (
+            "MASON_HELD".into(),
+            c.step
+                .uses
+                .iter()
+                .filter(|(_, n)| **n > 0)
+                .map(|(k, _)| k.as_str())
+                .collect::<Vec<_>>()
+                .join(","),
+        ),
         (
             "MASON_RESULT_FILE".into(),
             result_file(c).to_string_lossy().into_owned(),
@@ -358,9 +371,9 @@ fn wait_while_paused(c: &Ctx) -> Result<(), ()> {
 /// Wait for this step's resources (Part 7). Says why in the task's wait, once,
 /// and ends the wait when they are granted.
 fn acquire(c: &Ctx) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
-    use crate::sched::{needs_of, DEFAULT_ACCOUNT};
+    use crate::sched::needs_of;
     let d = &c.d;
-    let account = (c.step.kind == StepType::Agent).then_some(DEFAULT_ACCOUNT);
+    let account = (c.step.kind == StepType::Agent).then_some(c.project.account.as_str());
     // A definition names what it uses; a name nobody declared gets its
     // definition-given limit (or one slot).
     let mut needs = needs_of(&c.step.uses, account);
@@ -409,9 +422,49 @@ fn acquire(c: &Ctx) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
     Ok(lease)
 }
 
+/// The command of the definition's test step for this project, layered exactly as
+/// a test step resolves it: the definition, the project's local overlay, the
+/// owner's runtime overrides (`mason config set`) and, for a task, its own
+/// overrides. `run_check` and landing's legacy suite use this, so they run the
+/// same command the test step runs.
+pub(crate) fn test_command(
+    d: &Daemon,
+    def: &mason_definition::Definition,
+    pid: ProjectId,
+    task: Option<TaskId>,
+) -> Option<String> {
+    let step = def.steps.iter().find(|s| s.kind == StepType::Test)?;
+    let project = d.project(pid)?;
+    let now = now_ms();
+    let runtime: Vec<RuntimeOverride> = d
+        .store
+        .overrides(&project.id, now)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|o| RuntimeOverride {
+            key: o.key,
+            value: o.value,
+            owner: o.owner,
+            expires_at: o.expires_at,
+        })
+        .collect();
+    let task_overrides = task
+        .and_then(|t| d.store.task_overrides(t.0).ok())
+        .unwrap_or_default();
+    resolve(def, step, &d.overlay(pid), &runtime, &task_overrides, now)
+        .ok()
+        .and_then(|r| r.command.map(|a| a.value))
+}
+
 /// Get the worktree ready: fetch, create it on the task's branch, and bring
 /// the branch up to date with the base. Idempotent.
-fn prepare(c: &Ctx) -> Result<(), String> {
+///
+/// A conflict with the base is not the task's failure: the merge is aborted,
+/// the branch is left as it was, and the conflicting files are returned so
+/// the step can hand them to the agent (develop resolves them; the read-only
+/// steps go on with the branch as it is). Failing here instead would fail
+/// every later step the same way, so no agent could ever resolve it.
+pub(crate) fn prepare(c: &Ctx) -> Result<Option<String>, String> {
     let lock = c.d.repo_lock(c.project_id);
     let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
     let repo = &c.project.path;
@@ -420,14 +473,56 @@ fn prepare(c: &Ctx) -> Result<(), String> {
     }
     let base = c.project.base_ref();
     git::ensure_worktree(repo, &c.wt, &c.branch, &base).map_err(|e| e.to_string())?;
+    // Uncommitted changes are an agent's work in progress: a step re-entered after
+    // the daemon restarted (a self-update, say) finds its agent's edits not yet
+    // committed. Merging the base into them fails ("your local changes would be
+    // overwritten") and failed the task; leave the branch as it is, and the next
+    // step folds the base in once the work is committed.
+    let dirty = git::run(&c.wt, &["status", "--porcelain"]).map_err(|e| e.to_string())?;
+    if !dirty.trim().is_empty() {
+        tracing::info!(
+            task = c.task.0,
+            "worktree has uncommitted changes; not folding in the base now"
+        );
+        return Ok(None);
+    }
     match git::catch_up(&c.wt, &base) {
-        Ok(CatchUp::Conflict(files)) => Err(format!(
-            "folding in the base conflicts in: {}",
-            files.trim()
-        )),
-        Ok(_) => Ok(()),
+        Ok(CatchUp::Conflict(files)) => Ok(Some(files.trim().to_string())),
+        Ok(_) => Ok(None),
         Err(e) => Err(e.to_string()),
     }
+}
+
+/// How long one tool call of an agent step may take. A develop step's
+/// `run_check` runs the whole test command, which is only cut off at
+/// `test_timeout`; a shorter tool timeout made the agent give up on a run that
+/// was still going (and then run the tests again by hand, doubling the load).
+pub(crate) fn tool_timeout_for(kind: StepKind, project: &ProjectCfg) -> Duration {
+    match kind {
+        StepKind::Develop => project
+            .tool_timeout
+            .max(project.test_timeout + Duration::from_secs(60)),
+        _ => project.tool_timeout,
+    }
+}
+
+/// What the develop agent is told when its branch does not merge cleanly
+/// with the base.
+pub(crate) fn conflict_note(base: &str, files: &str) -> String {
+    let list: Vec<String> = files
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(|l| format!("- {l}"))
+        .collect();
+    format!(
+        "Your branch no longer merges cleanly with `{base}`. Before anything else, run \
+         `git merge {base}` in your worktree, resolve the conflicts so that both your \
+         change and the base's change are kept (read what the base changed with \
+         `git log -p HEAD..{base} -- <file>`), build, and commit the merge with \
+         `git commit -s`. The conflicting files are:\n{}",
+        list.join("\n")
+    )
 }
 
 pub(crate) fn prepare_worktree_only(c: &Ctx) -> Result<(), String> {
@@ -695,15 +790,25 @@ fn agent_job(c: &Ctx) {
             c.state
         ));
     };
-    if let Err(why) = prepare(c) {
-        return c.fail(why);
-    }
+    let conflicts = match prepare(c) {
+        Ok(conflicts) => conflicts,
+        Err(why) => return c.fail(why),
+    };
     let key = format!("t{}r{}", c.task.0, c.run.0);
     let dir = c.task_dir();
     let plan: Option<Value> = std::fs::read_to_string(dir.join("plan.json"))
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok());
-    let feedback = std::fs::read_to_string(dir.join("feedback.txt")).ok();
+    let mut feedback = std::fs::read_to_string(dir.join("feedback.txt")).ok();
+    if let Some(files) = &conflicts {
+        if kind == StepKind::Develop {
+            let note = conflict_note(&c.project.base_ref(), files);
+            feedback = Some(match feedback {
+                Some(f) if !f.trim().is_empty() => format!("{note}\n\n{f}"),
+                _ => note,
+            });
+        }
+    }
     let decisions = std::fs::read_to_string(dir.join("decisions.txt")).ok();
     let pack_name = match kind {
         StepKind::Develop => "develop",
@@ -767,25 +872,9 @@ fn agent_job(c: &Ctx) {
         None => prompt,
     };
 
-    let tests_cmd = c.d.world().ok().and_then(|_| {
-        // `run_check` runs the project's tests: the command of its test step, as layered.
-        c.def
-            .steps
-            .iter()
-            .find(|s| s.kind == StepType::Test)
-            .and_then(|s| {
-                mason_definition::layers::resolve(
-                    &c.def,
-                    s,
-                    &c.d.overlay(c.project_id),
-                    &[],
-                    &[],
-                    now_ms(),
-                )
-                .ok()
-                .and_then(|r| r.command.map(|a| a.value))
-            })
-    });
+    // `run_check` runs the project's tests: the command of its test step, layered exactly
+    // as the test step itself resolves it (runtime and task overrides included).
+    let tests_cmd = test_command(&c.d, &c.def, c.project_id, Some(c.task));
     let checks = Box::new(TestChecks {
         cmd: tests_cmd,
         wt: c.wt.clone(),
@@ -857,7 +946,7 @@ fn agent_job(c: &Ctx) {
     };
     spec.effort = c.res.effort.as_ref().map(|a| a.value.clone());
     spec.env = c.project.agent_env.clone();
-    spec.tool_timeout = c.project.tool_timeout;
+    spec.tool_timeout = tool_timeout_for(kind, &c.project);
     spec.deadline = Some(
         c.res
             .budget
@@ -1015,19 +1104,125 @@ fn finish_agent_inner(c: &Ctx, report: StepReport, dir: &Path) {
 
 /// A command or test step: run `command` in the worktree under a step host, so
 /// a daemon restart does not lose the run. Exit 0 is green.
+///
+/// A test step first brings the branch up to date with the base, so it tests
+/// what would land and picks up fixes that reached the base while it waited
+/// (a conflict sends it back to develop, where the agent is told to merge).
+/// A red test run is run again up to `test_reruns` times: green on a rerun is
+/// green, recorded as a flake; red every time is red.
 fn command_job(c: &Ctx) {
     let Some(cmd) = c.res.command.as_ref().map(|a| a.value.clone()) else {
         return c.fail("this step has no command: set `command` on the step, or `test` in the project's local overlay");
     };
-    if let Err(why) = prepare_worktree_only(c) {
+    let is_test = c.step.kind == StepType::Test;
+    if is_test {
+        match prepare(c) {
+            Ok(None) => {}
+            Ok(Some(files)) => {
+                let note = conflict_note(&c.project.base_ref(), &files);
+                return c.conclude(
+                    Outcome::Red,
+                    format!(
+                        "the branch conflicts with {} in: {}",
+                        c.project.base_ref(),
+                        files.replace('\n', ", ")
+                    ),
+                    Some(note),
+                );
+            }
+            Err(why) => return c.fail(why),
+        }
+    } else if let Err(why) = prepare_worktree_only(c) {
         return c.fail(why);
     }
-    let suffix = if c.step.kind == StepType::Test {
-        "test"
+    let suffix = if is_test { "test" } else { "cmd" };
+    let reruns = if is_test { c.project.test_reruns } else { 0 };
+    let mut earlier: Vec<String> = vec![];
+    for k in 0..=reruns {
+        let run = match run_command_once(c, &cmd, suffix, k) {
+            Ok(r) => r,
+            Err(why) => return c.fail(why),
+        };
+        match run.verdict {
+            RunVerdict::Green => {
+                let _ = std::fs::remove_file(c.task_dir().join("feedback.txt"));
+                if k > 0 {
+                    let note = format!(
+                        "`{}` was red, then green when run again (a flaky test, not this change):\n{}",
+                        c.step.name,
+                        earlier.join("\n")
+                    );
+                    tracing::warn!(task = c.task.0, run = c.run.0, "{note}");
+                    let _ = std::fs::write(
+                        c.task_dir().join(format!("{suffix}-r{}.flaky", c.run.0)),
+                        &note,
+                    );
+                }
+                return c.green();
+            }
+            // Red by its exit status alone: worth running again.
+            RunVerdict::Red {
+                reason,
+                feedback,
+                rerun: true,
+            } if k < reruns => {
+                earlier.push(format!("run {}: {reason}\n{feedback}", k + 1));
+                use std::io::Write as _;
+                if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&run.log) {
+                    let _ = writeln!(
+                        f,
+                        "\n== MASON: red ({reason}); running it again ({} of {reruns}) to tell a flaky test from a broken change",
+                        k + 1
+                    );
+                }
+                continue;
+            }
+            RunVerdict::Red {
+                reason, feedback, ..
+            } => {
+                let (reason, feedback) = if k > 0 {
+                    (
+                        format!("{reason} ({} runs, red every time)", k + 1),
+                        format!("{feedback}\n\nIt was red on all {} runs.", k + 1),
+                    )
+                } else {
+                    (reason, feedback)
+                };
+                return c.conclude(Outcome::Red, reason, Some(feedback));
+            }
+        }
+    }
+}
+
+enum RunVerdict {
+    Green,
+    /// `rerun`: red only by its exit status (not a timeout, a signal or a
+    /// script's own verdict), so running it again may tell a flake apart.
+    Red {
+        reason: String,
+        feedback: String,
+        rerun: bool,
+    },
+}
+
+struct CommandRun {
+    verdict: RunVerdict,
+    log: PathBuf,
+}
+
+/// The name part of the `k`th run of a step's command: "" for the first.
+fn again(k: u32) -> String {
+    if k == 0 {
+        String::new()
     } else {
-        "cmd"
-    };
-    let id = format!("t{}r{}-{suffix}", c.task.0, c.run.0);
+        format!("-again{k}")
+    }
+}
+
+/// Run the command once (the `k`th time) under its own step host, or collect
+/// the run a restarted daemon finds already started.
+fn run_command_once(c: &Ctx, cmd: &str, suffix: &str, k: u32) -> Result<CommandRun, String> {
+    let id = format!("t{}r{}-{suffix}{}", c.task.0, c.run.0, again(k));
     let hosts = c.d.cfg.hosts_dir();
     let dir = hosts.join(&id);
     let limit = c
@@ -1041,7 +1236,7 @@ fn command_job(c: &Ctx) {
             host_bin: c.d.cfg.host_bin.clone(),
             root: hosts.clone(),
             id: id.clone(),
-            cmd: vec!["sh".into(), "-c".into(), cmd],
+            cmd: vec!["sh".into(), "-c".into(), cmd.to_string()],
             cwd: Some(c.wt.clone()),
             env: step_env_pairs(c),
             clear_env: false,
@@ -1050,7 +1245,7 @@ fn command_job(c: &Ctx) {
             heartbeat: c.d.cfg.heartbeat,
         };
         if let Err(e) = spawn_host(&o) {
-            return c.fail(format!("cannot start the command: {e}"));
+            return Err(format!("cannot start the command: {e}"));
         }
     }
     // Stop the run if it takes too long.
@@ -1070,28 +1265,33 @@ fn command_job(c: &Ctx) {
             }
         });
     }
-    let log = c.task_dir().join(format!("{suffix}-r{}.log", c.run.0));
+    let name = format!("{suffix}-r{}{}", c.run.0, again(k));
+    let log = c.task_dir().join(format!("{name}.log"));
     // Lines and bytes of the output, counted as they arrive. A run found again after a
     // restart first counts what its log holds beyond what the stored record had.
-    c.d.progress_catch_up(c.run, "", &log);
+    // Each run of the command is its own stream, since each log starts at 0.
+    let stream = again(k);
+    c.d.progress_catch_up(c.run, &stream, &log);
     let result = collect_to_file_observed(
         &dir,
         &log,
-        &c.task_dir().join(format!("{suffix}-r{}.exit", c.run.0)),
-        &mut |off, b| c.d.progress_observe(c.run, "", off, b),
+        &c.task_dir().join(format!("{name}.exit")),
+        &mut |off, b| c.d.progress_observe(c.run, &stream, off, b),
     );
     done.store(true, Ordering::SeqCst);
     let rec = match result {
         Ok(r) => r,
-        Err(ClientError::HostLost { .. }) => return c.fail("the command was lost (its host died)"),
-        Err(e) => return c.fail(format!("cannot collect the command's result: {e}")),
+        Err(ClientError::HostLost { .. }) => {
+            return Err("the command was lost (its host died)".into())
+        }
+        Err(e) => return Err(format!("cannot collect the command's result: {e}")),
     };
     // A script may say more than its exit status in a JSON result file.
     let script = match std::fs::read_to_string(result_file(c)) {
         Ok(t) => match read_script_result(&t) {
             Ok(r) => Some(r),
             Err(e) => {
-                return c.fail(format!(
+                return Err(format!(
                     "`{}` wrote a result file that cannot be used: {e}",
                     c.step.name
                 ))
@@ -1102,10 +1302,7 @@ fn command_job(c: &Ctx) {
     let exited_ok = rec.code == 0 && rec.signal == 0;
     if let Some(r) = &script {
         if !r.summary.is_empty() {
-            let _ = std::fs::write(
-                c.task_dir().join(format!("{suffix}-r{}.result", c.run.0)),
-                &r.summary,
-            );
+            let _ = std::fs::write(c.task_dir().join(format!("{name}.result")), &r.summary);
         }
         if r.passed == Some(false) {
             let why = if r.summary.is_empty() {
@@ -1113,17 +1310,22 @@ fn command_job(c: &Ctx) {
             } else {
                 r.summary.clone()
             };
-            return c.conclude(
-                Outcome::Red,
-                format!("`{}` failed: {why}", c.step.name),
-                Some(format!("`{}` failed: {why}", c.step.name)),
-            );
+            return Ok(CommandRun {
+                verdict: RunVerdict::Red {
+                    reason: format!("`{}` failed: {why}", c.step.name),
+                    feedback: format!("`{}` failed: {why}", c.step.name),
+                    rerun: false,
+                },
+                log,
+            });
         }
     }
     let said_pass = script.as_ref().is_some_and(|r| r.passed == Some(true));
     if (exited_ok || said_pass) && rec.signal == 0 {
-        let _ = std::fs::remove_file(c.task_dir().join("feedback.txt"));
-        return c.green();
+        return Ok(CommandRun {
+            verdict: RunVerdict::Green,
+            log,
+        });
     }
     let output = tail(&std::fs::read_to_string(&log).unwrap_or_default(), 60);
     let how = if rec.signal != 0 {
@@ -1131,14 +1333,14 @@ fn command_job(c: &Ctx) {
     } else {
         format!("exit status {}", rec.code)
     };
-    c.conclude(
-        Outcome::Red,
-        format!("`{}` failed ({how})", c.step.name),
-        Some(format!(
-            "`{}` failed ({how}). Last output:\n{output}",
-            c.step.name
-        )),
-    );
+    Ok(CommandRun {
+        verdict: RunVerdict::Red {
+            reason: format!("`{}` failed ({how})", c.step.name),
+            feedback: format!("`{}` failed ({how}). Last output:\n{output}", c.step.name),
+            rerun: rec.signal == 0,
+        },
+        log,
+    })
 }
 
 /// An approval step waits for the owner. The run stays open, holding no slot,

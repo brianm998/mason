@@ -23,6 +23,10 @@ pub const PROTECTED: &[(&str, &str)] = &[
     ),
     ("scripts/exit/**", "gates: the exit tests"),
     ("scripts/check-*.sh", "gates: the repository checks"),
+    (
+        "scripts/gen-*.sh",
+        "gates: scripts the daemon runs when changes land",
+    ),
     ("scripts/run-exit-scripts.sh", "gates: the exit-test runner"),
     (".github/workflows/**", "gates: CI"),
     ("deny.toml", "gates: dependency policy"),
@@ -607,6 +611,8 @@ mod tests {
             "crates/daemon/src/selfguard.rs",
             ".github/workflows/ci.yml",
             "crates/adapter-api/src/netguard.rs",
+            "scripts/gen-status.sh",
+            "scripts/gen-other.sh",
         ] {
             assert!(protected_because(p, &[]).is_some(), "{p}");
         }
@@ -615,6 +621,8 @@ mod tests {
             "crates/engine/src/reducer.rs",
             "clients/swift/Sources/MonitorUI/Pages.swift",
             "README.md",
+            "scripts/genesis.sh",
+            "scripts/gen.sh",
         ] {
             assert!(protected_because(p, &[]).is_none(), "{p}");
         }
@@ -917,6 +925,21 @@ mod tests {
         // Removals carry the first hunk.
         let f = scan_diff("--- a/src/a.rs\n+++ b/src/a.rs\n@@ -7 +6,0 @@\n-    assert!(x);\n");
         assert_eq!((f[0].kind, f[0].line), ("removed-assertion", Some(6)));
+    }
+
+    #[test]
+    fn a_generator_the_daemon_runs_is_held_whether_added_or_edited() {
+        let ch = |p: &str, added: bool| Changed {
+            path: p.into(),
+            added,
+        };
+        let d = "--- /dev/null\n+++ b/scripts/gen-x.sh\n@@ -0,0 +1 @@\n+echo ok\n";
+        let added = inspect_changed(&[ch("scripts/gen-x.sh", true)], d, &[]);
+        assert!(!added.clean());
+        assert!(added.protected[0].1.contains("runs when changes land"));
+        assert!(!inspect_changed(&[ch("scripts/gen-status.sh", false)], d, &[]).clean());
+        // A new exit script is not held by its path; the generator is not exempt.
+        assert!(inspect_changed(&[ch("scripts/exit/s99.sh", true)], d, &[]).clean());
     }
 
     #[test]
