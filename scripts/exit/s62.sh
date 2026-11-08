@@ -24,12 +24,12 @@ bin=target/debug
 fx=scripts/exit/fixtures/s62
 owner=${USER:-owner}
 m() { "$bin/mason" --data-dir "$root/d" --config-dir "$root/c" "$@"; }
-fail() { echo "FAILED: $*" >&2; m task list >&2 2>&1 || true; m alerts >&2 2>&1 || true; tail -20 "$root/masond.log" >&2 || true; exit 1; }
+fail() { echo "FAILED: $*" >&2; m task list >&2 2>&1 || echo "(task list failed)" >&2; m alerts >&2 2>&1 || echo "(alerts failed)" >&2; tail -20 "$root/masond.log" >&2 || echo "(no daemon log)" >&2; exit 1; }
 gh_set() { sed "s/OWNER/$owner/g" "$fx/issues-$1.json" > "$root/gh/issues.json.tmp"; mv "$root/gh/issues.json.tmp" "$root/gh/issues.json"; }
-tasks() { m task list --json | grep -c '"id"' || true; }
+tasks() { m task list --json | grep -c '"id"' || echo 0; }
 alerts_have() { m alerts | grep -q "$1" || { m alerts >&2; fail "no alert saying: $1"; }; }
 doctor_has() {  # PATTERN: some doctor line matches
-  m doctor >"$root/doctor.out" 2>&1 || true
+  doctor_rc=0; m doctor >"$root/doctor.out" 2>&1 || doctor_rc=$?
   grep -q "$1" "$root/doctor.out" || { cat "$root/doctor.out" >&2; fail "doctor does not say: $1"; }
 }
 landing() { python3 -I "$fx/landing.py" "$port"; }
@@ -84,7 +84,7 @@ out=$(m task add "seed" --project mason --explored 2>&1) || fail "filing the see
 seed=$(echo "$out" | sed -n 's/^Filed task #\([0-9]*\).*/\1/p')
 
 echo "== 1. no [tracker] section on a project with a GitHub remote"
-m doctor >"$root/doctor.out" 2>&1 || true
+doctor_rc=0; m doctor >"$root/doctor.out" 2>&1 || doctor_rc=$?
 grep '^note' "$root/doctor.out" | sed 's/^/   /'
 grep -q '^note  project plain: issues on acme/plain are not imported; see docs/self-hosting.md$' "$root/doctor.out" || { cat "$root/doctor.out" >&2; fail "doctor does not note that plain's issues are not imported"; }
 ! grep -q 'issues on o/r' "$root/doctor.out" || fail "doctor noted a project that has a tracker"
