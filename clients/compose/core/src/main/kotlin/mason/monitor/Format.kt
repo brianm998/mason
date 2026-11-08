@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 package mason.monitor
 
+import mason.v1.ProgressCell
+import mason.v1.ProgressSource
+
 object Format {
     /** Time in state: "42 s", "9 min", "3h10". Always shown, never hidden. */
     fun duration(ms: Long): String {
@@ -14,4 +17,132 @@ object Format {
             }
         }
     }
+
+    /** 1240 as "1,240" (always a comma, whatever the locale: the same text in every client). */
+    fun group(n: Long): String {
+        val s = n.toString()
+        val out = StringBuilder()
+        s.forEachIndexed { i, c ->
+            if (i > 0 && (s.length - i) % 3 == 0) out.append(',')
+            out.append(c)
+        }
+        return out.toString()
+    }
+
+    /** The whole percent `done` is of a real `total`: rounded down, at most 100, none for 0. */
+    fun percent(done: Long, total: Long): Int? = if (total == 0L) null else (minOf(done, total) * 100 / total).toInt()
+
+    /**
+     * What a count and its total say, by the rule for numbers: "212 of 340 tests, 62%" for a real
+     * total; "1,240 lines, usually 1,800 to 2,400" for a typical one (never a percentage); "37 tool
+     * calls" for none. Empty when there is nothing to say yet.
+     */
+    fun countText(unit: String, done: Long, doneSource: ProgressSource, total: Long, totalSource: ProgressSource, totalLow: Long): String {
+        val u = if (unit.isEmpty()) "" else " $unit"
+        when (totalSource) {
+            ProgressSource.SOURCE_REPORTED, ProgressSource.SOURCE_COUNTED ->
+                if (total > 0) return "${group(done)} of ${group(total)}$u, ${percent(done, total) ?: 0}%"
+            ProgressSource.SOURCE_HISTORY ->
+                if (doneSource != ProgressSource.SOURCE_NONE) {
+                    val range = if (totalLow in 1 until total) "${group(totalLow)} to ${group(total)}" else group(total)
+                    return "${group(done)}$u, usually $range"
+                }
+            else -> {}
+        }
+        return if (doneSource != ProgressSource.SOURCE_NONE) "${group(done)}$u" else ""
+    }
+
+    /** Where a figure came from, in words. */
+    fun sourceWords(s: ProgressSource, samples: Int): String = when (s) {
+        ProgressSource.SOURCE_REPORTED -> "from the agent"
+        ProgressSource.SOURCE_COUNTED -> "counted from output"
+        ProgressSource.SOURCE_HISTORY -> "usually, from $samples past runs"
+        else -> ""
+    }
+
+    /** Quiet past `afterMs`: nothing has moved for longer than the step's usual gap. */
+    fun isStale(now: Long, moved: Long, afterMs: Long): Boolean = moved > 0 && maxOf(now - moved, 0) > afterMs
+
+    /** "updated 4 s ago", or "no output for 6 min" when stale. Empty when nothing moved yet. */
+    fun timeText(now: Long, moved: Long, afterMs: Long): String {
+        if (moved == 0L) return ""
+        val span = duration(maxOf(now - moved, 0))
+        return if (isStale(now, moved, afterMs)) "no output for $span" else "updated $span ago"
+    }
+}
+
+/** How a running cell is filled. */
+sealed class CellFill {
+    /** A real total: filled in proportion (0..1). */
+    data class Proportional(val fraction: Float) : CellFill()
+
+    /** Only a typical total: filled the same way, lighter. */
+    data class Typical(val fraction: Float) : CellFill()
+
+    /** Nothing to measure against: the outline alone. */
+    object Outline : CellFill()
+}
+
+val ProgressCell.hasRealTotal: Boolean
+    get() = (total_source == ProgressSource.SOURCE_REPORTED || total_source == ProgressSource.SOURCE_COUNTED) && total > 0
+
+/** The whole percent, only from a real total. */
+val ProgressCell.percent: Int? get() = if (hasRealTotal) Format.percent(done.toLong(), total.toLong()) else null
+
+val ProgressCell.countText: String
+    get() = Format.countText(unit, done.toLong(), done_source, total.toLong(), total_source, total_low.toLong())
+
+val ProgressCell.fill: CellFill
+    get() = when {
+        hasRealTotal -> CellFill.Proportional(minOf(done, total).toFloat() / total)
+        total_source == ProgressSource.SOURCE_HISTORY && total > 0 -> CellFill.Typical(minOf(1f, done.toFloat() / total))
+        else -> CellFill.Outline
+    }
+
+fun ProgressCell.isStale(now: Long): Boolean = Format.isStale(now, updated_at_ms, stale_after_ms)
+
+fun ProgressCell.timeText(now: Long): String = Format.timeText(now, updated_at_ms, stale_after_ms)
+
+/** The step that is running now and has a live record. */
+val List<ProgressCell>.running: ProgressCell?
+    get() = firstOrNull { it.state == mason.v1.CellState.PART && it.run != 0L }
+
+/**
+ * The cell's accessibility label: "develop, running, 3 of 7 plan steps, 42 percent". The ticking
+ * time is deliberately not in it.
+ */
+val ProgressCell.spokenLabel: String
+    get() {
+        val word = when (state) {
+            mason.v1.CellState.FILLED -> "finished"
+            mason.v1.CellState.PART -> "running"
+            mason.v1.CellState.HATCHED -> "waiting"
+            else -> "not started"
+        }
+        var s = "$step, $word"
+        if (state == mason.v1.CellState.PART) {
+            val c = countText
+            if (c.isNotEmpty()) {
+                val p = percent
+                s += ", " + if (p != null) c.replace(", $p%", ", $p percent") else c
+            }
+        }
+        return s
+    }
+
+/** Everything a running step's progress says, without any clock text (what conformance compares). */
+fun ProgressCell.progressTexts(now: Long): List<String> {
+    val t = mutableListOf<String>()
+    val c = countText
+    if (c.isNotEmpty()) t += c
+    if (message.isNotEmpty()) t += message
+    if (done_source != ProgressSource.SOURCE_NONE) t += "count " + Format.sourceWords(done_source, history_samples)
+    if (total_source != ProgressSource.SOURCE_NONE) t += "total " + Format.sourceWords(total_source, history_samples)
+    if (lines > 0 || bytes > 0) t += "output ${Format.group(lines)} lines, ${Format.group(bytes)} bytes"
+    subs.forEach {
+        t += "${it.name}: " + Format.countText(it.unit, it.done.toLong(), it.done_source, it.total.toLong(), it.total_source, 0)
+    }
+    todo.forEach { t += "${it.status}: ${it.text}" }
+    if (isStale(now)) t += "silent"
+    return t
 }

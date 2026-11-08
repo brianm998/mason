@@ -294,6 +294,7 @@ async fn session(d: Arc<Daemon>, mut sock: WebSocket) {
                     step: u.cell.step.clone(),
                     progress: Some(u.cell),
                     now_ms: u.now_ms,
+                    log: u.log,
                 };
                 if !send(&mut sock, server(S::StepProgress(m)), enc).await { return }
             }

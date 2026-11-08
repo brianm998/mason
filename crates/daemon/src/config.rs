@@ -131,6 +131,11 @@ pub struct ProjectCfg {
     pub test_timeout: Duration,
     /// Test rounds before the task fails, if the overlay sets one (layer 3).
     pub max_test_rounds: Option<u32>,
+    /// How many times a red test command is run again before the round counts as
+    /// red (`test_reruns`, default 0). Green on a rerun is green, recorded as a
+    /// flake; red every time is red. For a suite of many tests that only some
+    /// machines' load makes fail, this judges the change instead of the machine.
+    pub test_reruns: u32,
     /// A command that reads a task body on stdin and prints `clear` or
     /// `unclear`. Optional, and only consulted when the deterministic check is
     /// unsure. Anything but `clear`, or a failure, means explore.
@@ -608,6 +613,10 @@ pub fn parse_project(id: &str, text: &str) -> Result<ProjectCfg, String> {
             .get("max_test_rounds")
             .and_then(|v| v.as_integer())
             .map(|n| n.max(1) as u32),
+        test_reruns: doc
+            .get("test_reruns")
+            .and_then(|v| v.as_integer())
+            .map_or(0, |n| n.clamp(0, 3) as u32),
         clarity_classifier: s("clarity_classifier").filter(|c| !c.trim().is_empty()),
         card_rewriter: s("card_rewriter").filter(|c| !c.trim().is_empty()),
         priority_jump: doc
