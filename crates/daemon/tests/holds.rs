@@ -214,14 +214,15 @@ fn an_outage_holds_and_is_told_apart_from_a_limit() {
             assert_eq!(h.kind, "outage");
             let v = Ctx::new(&d, &d.world().unwrap()).usage();
             let a = v.providers.iter().find(|p| p.name == "claude").unwrap();
-            assert_eq!(a.status, "outage");
-            assert!(a.doing.contains("provider outage"), "{}", a.doing);
             let (al, ba) = (alerts(&d), banners(&d));
-            // The hold may be released between the reads above and these;
-            // only a hold still in force must be shown.
+            // The hold may be released between `hold_of` above and any of these
+            // reads (a probe succeeds); only a hold still in force must be shown.
+            // CI on 2026-11-08 read `doing` as "nothing" in that gap.
             if holds::hold_of(&d, "claude").is_none() {
                 return d.world().unwrap().tasks[&t].state == State::Landed;
             }
+            assert_eq!(a.status, "outage");
+            assert!(a.doing.contains("provider outage"), "{}", a.doing);
             assert!(al.iter().any(|a| a.1 == "provider_outage"));
             assert!(al.iter().all(|a| a.1 != "provider_limit"));
             assert!(ba.iter().any(|b| b.0 == "provider_outage"));
