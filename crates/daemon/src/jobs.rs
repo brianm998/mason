@@ -42,6 +42,25 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+/// How many times a task may be sent back for a conflict with the base before
+/// it fails. These do not count against a step's `max_rounds` (s62).
+pub(crate) const CONFLICT_ROUNDS: u32 = 5;
+
+/// One line per conflict send-back in the task's directory: `<run>\t<reason>`.
+pub(crate) const CONFLICTS_FILE: &str = "conflicts.txt";
+
+/// The step runs recorded in a task directory's [`CONFLICTS_FILE`].
+pub(crate) fn conflict_runs(task_dir: &Path) -> Vec<u64> {
+    let mut v: Vec<u64> = std::fs::read_to_string(task_dir.join(CONFLICTS_FILE))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| l.split('\t').next()?.trim().parse().ok())
+        .collect();
+    v.sort_unstable();
+    v.dedup();
+    v
+}
+
 /// Everything a job needs to know, read once at the start.
 pub struct Ctx {
     pub d: Arc<Daemon>,
@@ -83,6 +102,90 @@ impl Ctx {
 
     /// End the step and let the graph say what follows.
     pub(crate) fn conclude(&self, outcome: Outcome, reason: String, feedback: Option<String>) {
+        let round = self.round();
+        self.conclude_round(outcome, reason, feedback, round)
+    }
+
+    /// Which round of this step this run is, as `max_rounds` counts them: its
+    /// runs since the owner last restarted the task (a retry, or explore-anyway),
+    /// leaving out the runs that ended in a conflict with the base
+    /// ([`Ctx::conflict`]). A retried task gets its rounds again, and a base that
+    /// moved is not held against the change. Falls back to the attempt number.
+    pub(crate) fn round(&self) -> u32 {
+        let Ok(w) = self.d.world() else {
+            return self.attempt;
+        };
+        let conflicts = self.conflict_runs();
+        let mut runs: Vec<&StepRun> = w
+            .step_runs
+            .values()
+            .filter(|r| r.task == self.task && r.id.0 <= self.run.0)
+            .collect();
+        runs.sort_by_key(|r| r.id.0);
+        let restart = runs
+            .iter()
+            .rev()
+            .find(|r| {
+                r.id != self.run
+                    && matches!(
+                        r.outcome,
+                        Some(StepOutcome::Failed | StepOutcome::Superseded | StepOutcome::Canceled)
+                    )
+            })
+            .map_or(0, |r| r.id.0);
+        let same = |r: &StepRun| {
+            if self.step.name.is_empty() || r.name.is_empty() {
+                r.step == self.state
+            } else {
+                r.name == self.step.name
+            }
+        };
+        let n = runs
+            .iter()
+            .filter(|r| r.id.0 > restart && same(r))
+            .filter(|r| r.id == self.run || !conflicts.contains(&r.id.0))
+            .count() as u32;
+        n.max(1)
+    }
+
+    /// The change conflicts with the base (or with the rest of its landing
+    /// batch): back to the step's `on_red`, with the note for the agent, and
+    /// not counted as a red round, since the change is not what is wrong. A
+    /// task that has conflicted [`CONFLICT_ROUNDS`] times fails, so a base the
+    /// agent cannot keep up with still ends.
+    pub(crate) fn conflict(&self, reason: String, note: String) {
+        let mut past = self.conflict_runs();
+        if !past.contains(&self.run.0) {
+            if past.len() as u32 >= CONFLICT_ROUNDS {
+                return self.fail(format!(
+                    "{reason}; still conflicting with the base after {CONFLICT_ROUNDS} merges"
+                ));
+            }
+            let line = format!("{}\t{}\n", self.run.0, reason.replace('\n', " "));
+            let path = self.task_dir().join(CONFLICTS_FILE);
+            let _ = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
+            past.push(self.run.0);
+        }
+        // Round 0 is under every limit: a conflict always goes back while there is an `on_red`.
+        self.conclude_round(Outcome::Red, reason, Some(note), 0)
+    }
+
+    /// The step runs that ended in a conflict send-back ([`Ctx::conflict`]).
+    pub(crate) fn conflict_runs(&self) -> Vec<u64> {
+        conflict_runs(&self.d.task_dir(self.task))
+    }
+
+    fn conclude_round(
+        &self,
+        outcome: Outcome,
+        reason: String,
+        feedback: Option<String>,
+        round: u32,
+    ) {
         self.d
             .crash
             .point(&format!("before_event:{:?}", self.state));
@@ -106,7 +209,7 @@ impl Ctx {
                 retry_n: self.attempt,
                 at: now_ms(),
             });
-        match after(&self.def, &self.step, outcome, self.attempt, rounds) {
+        match after(&self.def, &self.step, outcome, round, rounds) {
             Transition::Next { step, state } => {
                 self.emit(EventKind::StepSucceeded {
                     task: self.task,
@@ -1329,14 +1432,13 @@ fn command_job(c: &Ctx) {
             Ok(None) => {}
             Ok(Some(files)) => {
                 let note = conflict_note(&c.project.base_ref(), &files);
-                return c.conclude(
-                    Outcome::Red,
+                return c.conflict(
                     format!(
                         "the branch conflicts with {} in: {}",
                         c.project.base_ref(),
                         files.replace('\n', ", ")
                     ),
-                    Some(note),
+                    note,
                 );
             }
             Err(why) => return c.fail(why),
@@ -1614,6 +1716,7 @@ fn land_job(c: &Ctx) {
         crate::landing::Verdict::SentBack { reason, feedback } => {
             c.conclude(Outcome::Red, reason, Some(feedback))
         }
+        crate::landing::Verdict::Conflict { reason, feedback } => c.conflict(reason, feedback),
         crate::landing::Verdict::Failed(why) => c.fail(format!("landing failed: {why}")),
     }
 }
