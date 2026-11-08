@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
-# s68 exit test: a conflict with the base is not a red round, it has a limit of its
+# s69 exit test: a conflict with the base is not a red round, it has a limit of its
 # own, and a retried task gets its rounds again.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
@@ -23,4 +23,4 @@ run "a conflict goes to the agent to merge (s60)" \
 run "the test step folds in the base (s61)" \
     -p mason-daemon --test e2e the_test_step_folds_in_the_base_so_a_fix_that_landed_meanwhile_counts
 
-echo "s68 OK"
+echo "s69 OK"
