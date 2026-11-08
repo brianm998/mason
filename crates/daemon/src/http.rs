@@ -312,8 +312,14 @@ async fn add_task(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res {
                     ),
                 ));
             };
-            crate::selfguard::check_filing_as(&d2, pid, TrustSource::Owner)
-                .map_err(|e| fail(StatusCode::TOO_MANY_REQUESTS, e))?;
+            // A proposal spends nothing, so only the cooldown refuses it (decision 0046).
+            let proposed = b["proposed"].as_bool().unwrap_or(false);
+            if proposed {
+                crate::selfguard::check_filing_proposal(&d2, pid)
+            } else {
+                crate::selfguard::check_filing_as(&d2, pid, TrustSource::Owner)
+            }
+            .map_err(|e| fail(StatusCode::TOO_MANY_REQUESTS, e))?;
             let title = b["title"].as_str().unwrap_or_default().trim().to_string();
             if title.is_empty() || title.chars().count() > 200 {
                 return Err(fail(
@@ -367,7 +373,7 @@ async fn add_task(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res {
                     priority,
                     trust: TrustSource::Owner, // filed from the owner's own CLI
                     explored,
-                    proposed: b["proposed"].as_bool().unwrap_or(false),
+                    proposed,
                     blockers: after,
                     not_before: None,
                 })
@@ -1546,13 +1552,77 @@ async fn refresh_tracker(Shared(d): Shared<Arc<Daemon>>, Path(id): Path<u64>) ->
             };
             d2.tracker.refresh(pid);
             match crate::tracker::poll_once(&d2, pid, adapter.as_ref(), &cfg) {
-                Ok(s) => Ok(json!({"tracker": true, "imported": s.imported, "updated": s.updated, "closed": s.closed})),
+                Ok(s) => Ok(json!({"tracker": true, "imported": s.imported, "updated": s.updated, "closed": s.closed, "refused": s.refused, "adopted": s.adopted})),
                 Err(e) => Ok(json!({"tracker": true, "error": e})),
             }
         })
         .await
         .map_err(pool_err)??;
     Ok(Json(v))
+}
+
+/// Open issues the tracker has not imported (or whose task was canceled), with why.
+async fn pending_issues(
+    Shared(d): Shared<Arc<Daemon>>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Res {
+    let d2 = d.clone();
+    let v = d
+        .pool
+        .run(move || {
+            let mut out = vec![];
+            for (pid, p) in &d2.projects {
+                if q.get("project").is_some_and(|n| *n != p.id) {
+                    continue;
+                }
+                for w in d2.tracker.pending(*pid) {
+                    out.push(json!({"project": p.id, "number": w.number, "title": w.title, "reason": w.reason}));
+                }
+            }
+            json!({"pending": out})
+        })
+        .await
+        .map_err(pool_err)?;
+    Ok(Json(v))
+}
+
+/// Tie a live task to an open issue whose task was canceled. Owner only.
+async fn relink_task(
+    Shared(d): Shared<Arc<Daemon>>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<u64>,
+    Json(b): Json<Value>,
+) -> Res {
+    let who = headers
+        .get("x-mason-as")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    let d2 = d.clone();
+    d.pool
+        .run(move || {
+            if !crate::attention::is_owner(&d2, &who) {
+                return Err(fail(
+                    StatusCode::FORBIDDEN,
+                    format!("{who:?} is not the owner's identity; only the owner can link a task to an issue"),
+                ));
+            }
+            let issue = b["issue"].as_u64().filter(|n| *n > 0).ok_or_else(|| {
+                fail(StatusCode::BAD_REQUEST, "issue must be an issue number")
+            })?;
+            let w = d2.world().map_err(store_err)?;
+            let t = w
+                .tasks
+                .get(&TaskId(id))
+                .ok_or_else(|| fail(StatusCode::NOT_FOUND, format!("no task #{id}")))?;
+            crate::tracker::relink(&d2, t.project, issue, TaskId(id))
+                .map_err(|e| fail(StatusCode::CONFLICT, e))?;
+            crate::attention::intervene(&d2, "relink", Some(TaskId(id)), &who, "", &format!("issue #{issue}"));
+            Ok(())
+        })
+        .await
+        .map_err(pool_err)??;
+    Ok(Json(json!({"ok": true})))
 }
 
 async fn debts_list(
@@ -2225,6 +2295,8 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/update", get(update_status).post(update_start))
         .route("/update/ack", post(update_ack))
         .route("/tasks/{id}/refresh", post(refresh_tracker))
+        .route("/tasks/{id}/relink", post(relink_task))
+        .route("/pending-issues", get(pending_issues))
         .route("/proposals", get(proposals_list).post(proposal_file))
         .route("/proposals/poll", post(proposals_poll))
         .route("/proposals/{task}", get(proposal_show))

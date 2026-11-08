@@ -46,6 +46,8 @@ mason: command-line client for the MASON pipeline
                          [--priority urgent|high|normal|low] [--proposed] [--explored]
                          [--after ID[,ID...]]   wait for those tasks to land first
   mason task list [--state S] [--json]
+  mason task list --pending-issues    open issues the tracker has not imported, with why
+  mason task relink <id> --issue N    tie a live task to issue N whose task was canceled (owner only)
   mason task show <id> [--json] [--watch]   with --watch, follow the live step progress
   mason task cancel <id> [--delete-branch]
   mason task retry <id> [--from STEP]
@@ -1785,7 +1787,28 @@ fn main() {
                 }
                 "list" => {
                     let state = a.opt("--state");
+                    let pending = a.flag("--pending-issues");
                     finish(&a);
+                    if pending {
+                        let r = or_die(d.call("GET", "/pending-issues", None));
+                        if json_out {
+                            return println!("{r:#}");
+                        }
+                        let list = r["pending"].as_array().cloned().unwrap_or_default();
+                        if list.is_empty() {
+                            println!("no issues waiting to be imported");
+                        }
+                        for i in list {
+                            println!(
+                                "{} #{}  {}\n    {}",
+                                i["project"].as_str().unwrap_or("?"),
+                                i["number"],
+                                i["title"].as_str().unwrap_or(""),
+                                i["reason"].as_str().unwrap_or("")
+                            );
+                        }
+                        return;
+                    }
                     let path = state.map_or("/tasks".to_string(), |s| format!("/tasks?state={s}"));
                     let r = or_die(d.call("GET", &path, None));
                     if json_out {
@@ -2192,6 +2215,25 @@ fn main() {
                     }
                     or_die(d.call("POST", &format!("/tasks/{id}/approve"), None));
                     println!("Approved task #{id}");
+                }
+                "relink" => {
+                    let id = task_id(&mut a);
+                    let issue: u64 = a
+                        .opt("--issue")
+                        .and_then(|v| v.trim_start_matches('#').parse().ok())
+                        .unwrap_or_else(|| die("which issue? --issue N"));
+                    finish(&a);
+                    if std::env::var("MASON_AS").is_err() {
+                        if let Ok(u) = std::env::var("USER") {
+                            std::env::set_var("MASON_AS", u);
+                        }
+                    }
+                    or_die(d.call(
+                        "POST",
+                        &format!("/tasks/{id}/relink"),
+                        Some(&json!({"issue": issue})),
+                    ));
+                    println!("Task #{id} is now linked to issue #{issue}");
                 }
                 "reject" => {
                     let id = task_id(&mut a);
