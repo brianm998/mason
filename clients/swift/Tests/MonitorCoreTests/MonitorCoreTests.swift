@@ -51,6 +51,49 @@ final class MonitorCoreTests: XCTestCase {
         return m
     }
 
+    // MARK: the attention sound
+
+    private func sidebarUpdate(_ sections: [SidebarSection]) -> Mason_V1_View {
+        var sb = SidebarView()
+        sb.sections = sections
+        var v = Mason_V1_View()
+        v.body = .sidebar(sb)
+        return v
+    }
+
+    func testSomethingNewNeedingYouChimesOnceAndTheFirstUpdateIsSilent() {
+        let m = MonitorModel()
+        var chimes = 0
+        m.onAttention = { chimes += 1 }
+        let waiting = section("needs_attention", rows: [row(1, state: "developing")])
+        m.apply(sidebarUpdate([waiting]))
+        XCTAssertEqual(chimes, 0, "what was already waiting when the monitor opened is silent")
+        m.apply(sidebarUpdate([waiting]))
+        XCTAssertEqual(chimes, 0, "the same task again is not new")
+        m.apply(sidebarUpdate([section("needs_attention", rows: [row(1, state: "developing"), row(2, state: "testing")])]))
+        XCTAssertEqual(chimes, 1, "a second task needs you")
+        m.apply(sidebarUpdate([section("failed", rows: [row(3, state: "failed")])]))
+        XCTAssertEqual(chimes, 2, "a failure needs you")
+        m.apply(sidebarUpdate([section("queued", rows: [row(4, state: "queued")])]))
+        XCTAssertEqual(chimes, 2, "a queued task does not")
+    }
+
+    func testMutedIsSilentAndChangingProjectDoesNotChime() {
+        let m = MonitorModel()
+        var chimes = 0
+        m.onAttention = { chimes += 1 }
+        m.apply(sidebarUpdate([section("needs_attention", rows: [])]))
+        m.muted = true
+        m.apply(sidebarUpdate([section("needs_attention", rows: [row(1, state: "developing")])]))
+        XCTAssertEqual(chimes, 0, "muted")
+        m.muted = false
+        m.apply(sidebarUpdate([section("needs_attention", rows: [row(1, state: "developing")])]))
+        XCTAssertEqual(chimes, 0, "it was seen while muted, so it is not new when unmuted")
+        m.project = "ios"
+        m.apply(sidebarUpdate([section("needs_attention", rows: [row(9, state: "developing")])]))
+        XCTAssertEqual(chimes, 0, "a different project's list is a fresh start")
+    }
+
     // MARK: navigation
 
     func testHistoryIsBrowserStyle() {
