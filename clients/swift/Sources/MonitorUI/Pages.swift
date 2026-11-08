@@ -91,7 +91,7 @@ struct HomePage: View {
                         ForEach(st.rows, id: \.id) { r in
                             Button { model.go(.task(r.id)) } label: {
                                 HStack(spacing: theme.spacing) {
-                                    ProgressCells(cells: r.progress, slow: r.slow)
+                                    ProgressCells(model: model, cells: r.progress, slow: r.slow)
                                     Text("\(r.project) \(r.key)").font(theme.body(.semibold))
                                     Text(r.title).font(theme.body())
                                     Text(r.whyWaiting.isEmpty ? Format.duration(ms: r.inStateMs) : "\(r.whyWaiting), \(Format.duration(ms: r.inStateMs))")
@@ -166,9 +166,10 @@ struct TaskDetailPage: View {
             }
 
             HStack(spacing: theme.spacing) {
-                ProgressCells(cells: r.progress, slow: r.slow)
+                ProgressCells(model: model, cells: r.progress, slow: r.slow)
                 if !r.typical.isEmpty { Text(r.typical).font(theme.small()).foregroundStyle(theme.muted) }
             }
+            if let c = r.progress.running { ProgressDetail(model: model, cell: c) }
 
             ActionButtons(model: model, row: r, hasApprovalView: d.hasApproval)
 
@@ -229,6 +230,10 @@ struct TaskDetailPage: View {
                         Text(s.name.isEmpty ? s.category : s.name).font(theme.body(.semibold))
                         Text("attempt \(s.attempt)").foregroundStyle(theme.muted)
                         Text(s.outcome)
+                        if let c = r.progress.first(where: { $0.step == s.name && $0.state == .part && $0.run == s.run }) {
+                            Text(c.countText).foregroundStyle(theme.muted)
+                            Text(c.timeText(now: model.daemonNow())).foregroundStyle(c.isStale(now: model.daemonNow()) ? theme.slow : theme.muted)
+                        }
                     }
                     .font(theme.body())
                     .accessibilityIdentifier("step:\(s.run)")
@@ -246,17 +251,15 @@ struct TaskDetailPage: View {
                     }
                 }
             }
-            if !d.plan.isEmpty {
-                section("Plan", theme: theme) {
-                    Text(d.plan).font(theme.mono()).textSelection(.enabled)
-                }
+            if !d.plan.isEmpty || d.hasPlanView {
+                section("Plan", theme: theme) { PlanSection(detail: d) }
             }
             if !d.body.isEmpty {
                 section("Task", theme: theme) { Text(d.body).font(theme.body()).textSelection(.enabled) }
             }
-            if !d.logTail.isEmpty {
+            if !model.liveLog.isEmpty {
                 section("Log", theme: theme) {
-                    Text(d.logTail)
+                    Text(model.liveLog.joined(separator: "\n"))
                         .font(theme.mono()).textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(theme.spacing)

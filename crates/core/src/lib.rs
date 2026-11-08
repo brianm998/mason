@@ -9,6 +9,7 @@ mod entities;
 mod event;
 mod ids;
 pub mod progress;
+pub mod progress_text;
 pub mod proposal;
 mod task;
 

@@ -633,4 +633,332 @@ final class MonitorCoreTests: XCTestCase {
         let h = GraphLayout.horizontal(nodeXs: [-300, 100], backEdges: [], viewport: 0)
         XCTAssertGreaterThanOrEqual(h.left + h.dx, 0)
     }
+
+    // MARK: reconnecting after a daemon restart
+
+    func testReconnectPauseSchedule() {
+        var p = ReconnectPolicy()
+        XCTAssertEqual((0..<7).map { _ in p.nextPause() }, [1, 2, 4, 8, 10, 10, 10])
+        p.reset()
+        XCTAssertEqual(p.nextPause(), 1)
+    }
+
+    func testDaemonInfoReplacesOnPortPidOrStartTime() {
+        let a = DaemonInfo(port: 7423, pid: 5, startedMs: 100)
+        XCTAssertFalse(DaemonInfo(port: 7423, pid: 5, startedMs: 100).replaces(a))
+        XCTAssertTrue(DaemonInfo(port: 7424, pid: 5, startedMs: 100).replaces(a))
+        XCTAssertTrue(DaemonInfo(port: 7423, pid: 6, startedMs: 100).replaces(a))
+        XCTAssertTrue(DaemonInfo(port: 7423, pid: 5, startedMs: 101).replaces(a))
+    }
+
+    func testDiscoveryReadsPidAndStartTime() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("disc-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try Data(#"{"pid": 41, "port": 7423, "started_ms": 99}"#.utf8).write(to: dir.appendingPathComponent("daemon.json"))
+        let got = Discovery.info(arguments: ["--data-dir", dir.path], environment: [:])
+        XCTAssertEqual(got, DaemonInfo(port: 7423, pid: 41, startedMs: 99))
+        XCTAssertEqual(Discovery.info(arguments: ["--port", "9"], environment: [:]), DaemonInfo(port: 9))
+    }
+
+    @MainActor
+    final class FakeSocket: MonitorSocket {
+        var port: UInt16 = 0
+        var sent: [String] = []
+        var inbox: [String] = []
+        var waiter: CheckedContinuation<String, Error>?
+        var closed = false
+        func open(port: UInt16) { self.port = port }
+        func send(_ text: String) async throws {
+            if closed { throw URLError(.networkConnectionLost) }
+            sent.append(text)
+        }
+        func receive() async throws -> String {
+            if closed { throw URLError(.networkConnectionLost) }
+            if !inbox.isEmpty { return inbox.removeFirst() }
+            return try await withCheckedThrowingContinuation { waiter = $0 }
+        }
+        func push(_ text: String) {
+            if let w = waiter { waiter = nil; w.resume(returning: text) } else { inbox.append(text) }
+        }
+        func close() {
+            closed = true
+            waiter?.resume(throwing: URLError(.networkConnectionLost))
+            waiter = nil
+        }
+    }
+
+    func welcomeJSON() throws -> String {
+        var w = Mason_V1_Welcome()
+        w.version = "test"
+        var m = Mason_V1_ServerMessage()
+        m.welcome = w
+        return try m.jsonString()
+    }
+
+    func waitUntil(_ what: String, _ f: @escaping () -> Bool) async {
+        for _ in 0..<300 {
+            if f() { return }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTFail("timed out waiting for \(what)")
+    }
+
+    func connection(_ model: MonitorModel, info: @escaping () -> DaemonInfo?, sockets: Box<[FakeSocket]>, stallAfter: TimeInterval = 15) -> MonitorConnection {
+        var t = ConnectionTiming()
+        t.policy = ReconnectPolicy(scale: 0.01)
+        t.watchEvery = 0.02
+        t.pingEvery = 0.05
+        t.stallAfter = stallAfter
+        return MonitorConnection(model: model, discover: info, timing: t, makeSocket: {
+            let s = FakeSocket()
+            sockets.value.append(s)
+            return s
+        })
+    }
+
+    final class Box<T> { var value: T; init(_ v: T) { value = v } }
+
+    func testDropThenChangedDaemonJsonReconnectsWithoutARelaunch() async throws {
+        let model = MonitorModel()
+        let sockets = Box<[FakeSocket]>([])
+        var current = DaemonInfo(port: 7423, pid: 1, startedMs: 10)
+        let c = connection(model, info: { current }, sockets: sockets)
+        c.start()
+        await waitUntil("the first socket") { sockets.value.count == 1 }
+        sockets.value[0].push(try welcomeJSON())
+        await waitUntil("connected") { model.connected }
+        model.lastSeq = 7
+        // The daemon restarts on another port: the file changes, the socket drops.
+        current = DaemonInfo(port: 9000, pid: 2, startedMs: 20)
+        sockets.value[0].close()
+        await waitUntil("a second socket") { sockets.value.count == 2 }
+        XCTAssertFalse(model.connected)
+        XCTAssertTrue(model.reconnecting, "shown as reconnecting, not an error")
+        XCTAssertEqual(sockets.value[1].port, 9000)
+        await waitUntil("hello") { !sockets.value[1].sent.isEmpty }
+        XCTAssertTrue(sockets.value[1].sent[0].contains("\"lastSeq\":\"7\""), "resumes from the last sequence number: \(sockets.value[1].sent[0])")
+        sockets.value[1].push(try welcomeJSON())
+        await waitUntil("connected again") { model.connected }
+        XCTAssertFalse(model.reconnecting)
+        c.stop()
+    }
+
+    func testAChangedPidWhileConnectedReconnectsFromTheLastSeq() async throws {
+        let model = MonitorModel()
+        let sockets = Box<[FakeSocket]>([])
+        var current = DaemonInfo(port: 7423, pid: 1, startedMs: 10)
+        let c = connection(model, info: { current }, sockets: sockets)
+        c.start()
+        await waitUntil("the first socket") { sockets.value.count == 1 }
+        sockets.value[0].push(try welcomeJSON())
+        await waitUntil("connected") { model.connected }
+        model.lastSeq = 12
+        current = DaemonInfo(port: 7423, pid: 2, startedMs: 30)  // an update on the same port
+        await waitUntil("a second socket") { sockets.value.count == 2 }
+        XCTAssertTrue(sockets.value[0].closed)
+        await waitUntil("hello") { !sockets.value[1].sent.isEmpty }
+        XCTAssertTrue(sockets.value[1].sent[0].contains("\"lastSeq\":\"12\""))
+        c.stop()
+    }
+
+    func testAStalledDaemonShowsReconnectingNotAnError() async throws {
+        let model = MonitorModel()
+        let sockets = Box<[FakeSocket]>([])
+        let c = connection(model, info: { DaemonInfo(port: 7423, pid: 1, startedMs: 10) }, sockets: sockets, stallAfter: 0.15)
+        c.start()
+        await waitUntil("the first socket") { sockets.value.count == 1 }
+        sockets.value[0].push(try welcomeJSON())
+        await waitUntil("connected") { model.connected }
+        // Silence: not even a Pong.
+        await waitUntil("a second socket") { sockets.value.count == 2 }
+        XCTAssertTrue(sockets.value[0].closed)
+        XCTAssertTrue(sockets.value[0].sent.contains { $0.contains("ping") }, "it asked before giving up")
+        XCTAssertTrue(model.reconnecting)
+        XCTAssertNil(model.lastResult, "no error is shown")
+        c.stop()
+    }
+
+    func testNoDaemonJsonYetKeepsRetrying() async throws {
+        let model = MonitorModel()
+        let sockets = Box<[FakeSocket]>([])
+        var current: DaemonInfo? = nil
+        let c = connection(model, info: { current }, sockets: sockets)
+        c.start()
+        await waitUntil("reconnecting") { model.reconnecting }
+        XCTAssertTrue(sockets.value.isEmpty)
+        current = DaemonInfo(port: 7423, pid: 1, startedMs: 1)
+        await waitUntil("a socket") { sockets.value.count == 1 }
+        c.stop()
+    }
+
+    // MARK: readable plan
+
+    func planView(numbers: [String] = ["0", "1"]) -> Mason_V1_PlanView {
+        var v = Mason_V1_PlanView()
+        v.summaryParagraphs = ["First.", "Second `x`."]
+        v.stepsAreList = true
+        v.steps = ["do a\nmore a", "do b"]
+        v.stepNumbers = numbers
+        v.files = ["a.rs", "b.rs"]
+        v.criteria = ["it works"]
+        var e = Mason_V1_PlanExtra()
+        e.label = "Risks"
+        e.value = "- one"
+        v.other = [e]
+        v.raw = "{\"summary\":\"First.\"}"
+        return v
+    }
+
+    func testPlanCopyAsTextKeepsTheAgentsNumbers() {
+        let t = PlanText.copyAsText(planView())
+        XCTAssertEqual(t, """
+        ## Summary
+
+        First.
+
+        Second `x`.
+
+        ## Steps
+
+        0. do a
+           more a
+        1. do b
+
+        ## Files (2)
+
+        - `a.rs`
+        - `b.rs`
+
+        ## Acceptance criteria (1)
+
+        - [ ] it works
+
+        ## Other
+
+        ### Risks
+
+        - one
+
+        """)
+        XCTAssertFalse(t.contains("{"))
+    }
+
+    func testPlanCopyAsTextBulletsAndUnreadable() {
+        var v = planView(numbers: [])
+        XCTAssertTrue(PlanText.copyAsText(v).contains("- do a\n  more a\n- do b"))
+        XCTAssertNil(PlanText.marker(Mason_V1_PlanView(), 0))
+        XCTAssertEqual(PlanText.marker(v, 0), "•")
+        v = Mason_V1_PlanView()
+        v.raw = "not json"
+        v.note = "n"
+        XCTAssertEqual(PlanText.copyAsText(v), "not json")
+    }
+
+    func testPlanExpandRule() {
+        XCTAssertTrue(PlanText.expandedByDefault(stepCount: 0))
+        XCTAssertTrue(PlanText.expandedByDefault(stepCount: 9))
+        XCTAssertFalse(PlanText.expandedByDefault(stepCount: 10))
+        XCTAssertFalse(PlanText.expandedByDefault(stepCount: 25))
+    }
+
+    // MARK: live progress (s49)
+
+    func cell(unit: String = "tests", done: UInt32, total: UInt32 = 0, doneSrc: ProgressSource = .sourceReported,
+              totalSrc: ProgressSource = .sourceNone, low: UInt32 = 0) -> ProgressCell {
+        var c = ProgressCell()
+        c.step = "develop"
+        c.state = .part
+        c.run = 1
+        c.unit = unit
+        c.done = done
+        c.total = total
+        c.doneSource = doneSrc
+        c.totalSource = totalSrc
+        c.totalLow = low
+        c.staleAfterMs = 300_000
+        return c
+    }
+
+    func testCountTextFollowsTheRuleForNumbers() {
+        XCTAssertEqual(cell(done: 212, total: 340, totalSrc: .sourceReported).countText, "212 of 340 tests, 62%")
+        XCTAssertEqual(cell(unit: "lines", done: 5, total: 7, doneSrc: .sourceCounted, totalSrc: .sourceCounted).countText, "5 of 7 lines, 71%")
+        XCTAssertEqual(cell(done: 400, total: 340, totalSrc: .sourceReported).countText, "400 of 340 tests, 100%")
+        let h = cell(unit: "lines", done: 1240, total: 2400, doneSrc: .sourceCounted, totalSrc: .sourceHistory, low: 1800)
+        XCTAssertEqual(h.countText, "1,240 lines, usually 1,800 to 2,400")
+        XCTAssertNil(h.percent)
+        XCTAssertEqual(cell(unit: "tool calls", done: 37).countText, "37 tool calls")
+        XCTAssertEqual(cell(done: 3, total: 0, totalSrc: .sourceReported).countText, "3 tests")
+        XCTAssertEqual(Format.countText(unit: "", done: 0, doneSource: .sourceNone, total: 0, totalSource: .sourceNone, totalLow: 0), "")
+    }
+
+    func testCellFill() {
+        XCTAssertEqual(cell(done: 3, total: 7, totalSrc: .sourceReported).fill, .proportional(3.0 / 7.0))
+        XCTAssertEqual(cell(done: 10, total: 40, totalSrc: .sourceHistory).fill, .typical(0.25))
+        XCTAssertEqual(cell(done: 50, total: 40, totalSrc: .sourceHistory).fill, .typical(1))
+        XCTAssertEqual(cell(done: 10).fill, .outline)
+    }
+
+    func testStaleRuleAndTimeText() {
+        XCTAssertEqual(Format.timeText(now: 10_000, moved: 6_000, afterMs: 300_000), "updated 4 s ago")
+        XCTAssertEqual(Format.timeText(now: 400_000, moved: 40_000, afterMs: 300_000), "no output for 6 min")
+        XCTAssertEqual(Format.timeText(now: 300_000, moved: 40_000, afterMs: 300_000), "updated 4 min ago")
+        XCTAssertFalse(Format.isStale(now: 300_000, moved: 0, afterMs: 1))
+        XCTAssertFalse(Format.isStale(now: 1_300_000, moved: 1_000_000, afterMs: 300_000))
+        XCTAssertTrue(Format.isStale(now: 1_300_001, moved: 1_000_000, afterMs: 300_000))
+        XCTAssertEqual(Format.group(1_234_567), "1,234,567")
+    }
+
+    func testSpokenLabelHasCountAndPercentButNoClock() {
+        var c = cell(unit: "plan steps", done: 3, total: 7, totalSrc: .sourceReported)
+        c.step = "develop"
+        c.updatedAtMs = 1_000
+        XCTAssertEqual(c.spokenLabel, "develop, running, 3 of 7 plan steps, 42 percent")
+        XCTAssertEqual(cell(unit: "tool calls", done: 37).spokenLabel, "develop, running, 37 tool calls")
+        var f = c; f.state = .filled
+        XCTAssertEqual(f.spokenLabel, "develop, finished")
+    }
+
+    func testStepProgressUpdatesTheRowAndAnchorsTheClock() {
+        let m = model()
+        var d = TaskDetailView()
+        var r = row(1, state: "developing")
+        var c = cell(done: 1, total: 4, totalSrc: .sourceReported)
+        c.step = "develop"
+        r.progress = [c]
+        d.row = r
+        m.taskDetail = d
+        m.sidebar?.sections[0].rows[0].progress = [c]
+        var p = Mason_V1_StepProgress()
+        p.task = 1
+        var n = c
+        n.done = 3
+        p.progress = n
+        p.nowMs = 5_000_000
+        p.log = ["a", "b"]
+        let at = Date(timeIntervalSince1970: 1_000)
+        m.apply(progress: p, local: at)
+        XCTAssertEqual(m.taskDetail?.row.progress.first?.done, 3)
+        XCTAssertEqual(m.sidebar?.sections[0].rows[0].progress.first?.done, 3)
+        XCTAssertEqual(m.liveLog, ["a", "b"])
+        // The daemon's clock is 4,999,000 ms ahead of this device's at the anchor, and then counts up.
+        XCTAssertEqual(m.daemonNow(at), 5_000_000)
+        XCTAssertEqual(m.daemonNow(at.addingTimeInterval(7)), 5_007_000)
+        // The log keeps its last 40 lines.
+        var q = p
+        q.log = (0..<60).map { "l\($0)" }
+        m.apply(progress: q, local: at)
+        XCTAssertEqual(m.liveLog.count, 40)
+        XCTAssertEqual(m.liveLog.last, "l59")
+    }
+
+    func testProgressItemsHaveNoClockText() {
+        var c = cell(done: 212, total: 340, totalSrc: .sourceReported)
+        c.message = "running the api suite"
+        c.updatedAtMs = 1_000_000
+        let t = c.progressTexts(now: 1_004_000)
+        XCTAssertEqual(t.first, "212 of 340 tests, 62%")
+        XCTAssertFalse(t.contains { $0.contains(" ago") })
+        XCTAssertFalse(t.contains("silent"))
+        XCTAssertTrue(c.progressTexts(now: 1_400_000).contains("silent"))
+    }
 }

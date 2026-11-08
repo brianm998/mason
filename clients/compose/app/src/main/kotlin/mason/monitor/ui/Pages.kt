@@ -15,6 +15,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import mason.monitor.*
+import mason.v1.CellState
 import mason.v1.TaskDetailView
 
 /** The main view: exactly one of Home, a task's detail, or another page. */
@@ -114,7 +115,7 @@ fun HomePage(model: MonitorModel) {
                 st.rows.forEach { r ->
                     Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing), verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier.clickable { model.go(Page.Task(r.id)) }) {
-                        ProgressCells(r.progress, r.slow)
+                        ProgressCells(model, r.progress, r.slow)
                         Text("${r.project} ${r.key}", style = theme.body(FontWeight.SemiBold))
                         Text(r.title, style = theme.body())
                         Text(
@@ -175,9 +176,10 @@ private fun TaskDetail(model: MonitorModel, d: TaskDetailView) {
         }
     }
     Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing), verticalAlignment = Alignment.CenterVertically) {
-        ProgressCells(r.progress, r.slow)
+        ProgressCells(model, r.progress, r.slow)
         if (r.typical.isNotEmpty()) Text(r.typical, style = theme.small())
     }
+    r.progress.running?.let { ProgressDetail(model, it) }
     ActionButtons(model, r, hasApprovalView = d.approval != null)
     if (r.blockers.isNotEmpty()) {
         Row(horizontalArrangement = Arrangement.spacedBy(theme.spacingSmall), modifier = Modifier.testTag("waiting-for")) {
@@ -220,6 +222,11 @@ private fun TaskDetail(model: MonitorModel, d: TaskDetailView) {
                 Text(s.name.ifEmpty { s.category }, style = theme.body(FontWeight.SemiBold))
                 Text("attempt ${s.attempt}", style = theme.body(color = theme.muted))
                 Text(s.outcome, style = theme.body())
+                r.progress.firstOrNull { it.step == s.name && it.state == CellState.PART && it.run == s.run }?.let { c ->
+                    val now = rememberDaemonNow(model)
+                    Text(c.countText, style = theme.body(color = theme.muted))
+                    Text(c.timeText(now), style = theme.body(color = if (c.isStale(now)) theme.slow else theme.muted))
+                }
             }
         }
     }
@@ -227,11 +234,11 @@ private fun TaskDetail(model: MonitorModel, d: TaskDetailView) {
     if (d.debts.isNotEmpty()) Section("Debts") {
         d.debts.forEach { Text("#${it.id} ${it.scope}, ${it.status}${if (it.deferred) ", runs after landing" else ""}", style = theme.body()) }
     }
-    if (d.plan.isNotEmpty()) Section("Plan") { SelectionContainer { Text(d.plan, style = theme.mono()) } }
+    if (d.plan.isNotEmpty() || d.plan_view != null) Section("Plan") { PlanSection(d) }
     if (d.body.isNotEmpty()) Section("Task") { SelectionContainer { Text(d.body, style = theme.body()) } }
-    if (d.log_tail.isNotEmpty()) Section("Log") {
+    if (model.liveLog.isNotEmpty()) Section("Log") {
         SelectionContainer {
-            Text(d.log_tail, style = theme.mono(),
+            Text(model.liveLog.joinToString("\n"), style = theme.mono(),
                 modifier = Modifier.fillMaxWidth().background(theme.surface, RoundedCornerShape(theme.radius)).padding(theme.spacing))
         }
     }

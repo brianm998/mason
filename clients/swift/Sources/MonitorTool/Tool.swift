@@ -15,6 +15,7 @@ import SwiftUI
 ///     monitor-tool answer --port P --task N [--option 1 | --text WORDS] [--hash H]   answer a task's open question as the monitor does
 ///     monitor-tool approve --port P --task N [--diff HASH]   what the Approve button sends (the hold's diff hash, as shown)
 ///     monitor-tool reject --port P --task N [--reason WORDS]   what the Reject button sends
+///     monitor-tool task-page --port P --task N --out DIR   screenshot of a task's page (a real daemon), and whether any JSON shows
 ///     monitor-tool dump --port P --out DIR          write what the home page shows now (a real daemon), as items
 ///     monitor-tool cancel --port P --task N         cancel a task as the Cancel button does
 ///     monitor-tool skip --port P --task N [--step S]  skip a test step as the Skip button does
@@ -35,7 +36,7 @@ struct Tool {
         }
 
         let model = MonitorModel()
-        let connection = MonitorConnection(model: model, port: port)
+        let connection = MonitorConnection(model: model, discover: { Discovery.info(arguments: args) ?? DaemonInfo(port: port) })
         connection.start()
         await until("a connection") { model.connected && model.header != nil && model.sidebar != nil && model.home != nil }
 
@@ -43,6 +44,7 @@ struct Tool {
         case "conformance": await conformance(model, out)
         case "editor": await editor(model, args, out)
         case "snapshot": await snapshots(model, out)
+        case "task-page": await taskPage(model, args, out)
         case "answer": await answer(model, args)
         case "approve", "reject": await approval(model, cmd, args)
         case "dump":
@@ -273,6 +275,29 @@ struct Tool {
         model.goHome()
         await settle(model)
         shot(model, out, "home-larger-text", size: CGSize(width: 1440, height: 900), dark: false)
+    }
+
+    /// A task's page as the owner sees it, rendered to a PNG, plus a check that the plan parts the
+    /// page draws carry no JSON syntax (the page draws only these strings).
+    @MainActor
+    static func taskPage(_ model: MonitorModel, _ args: [String], _ out: URL) async {
+        guard let i = args.firstIndex(of: "--task"), i + 1 < args.count, let id = UInt64(args[i + 1]) else { fail("--task N") }
+        model.go(.task(id))
+        await until("task #\(id)") { model.taskDetail?.row.id == id }
+        await settle(model)
+        shot(model, out, "task-\(id)", size: CGSize(width: 1000, height: 2400), dark: false)
+        guard let d = model.taskDetail, d.hasPlanView else { print("no plan view"); return }
+        let v = d.planView
+        var drawn: [String] = v.summaryParagraphs
+        drawn.append(v.lead)
+        drawn += v.steps
+        drawn += v.files
+        drawn += v.criteria
+        for e in v.other { drawn.append(e.label); drawn.append(e.value) }
+        let bad = drawn.filter { $0.contains("{") || $0.contains("\"summary\":") || $0.contains("\\n") }
+        print("note: \(v.note.isEmpty ? "-" : v.note)")
+        print("steps: \(v.steps.count) (\(v.stepsAreList ? "numbered " + v.stepNumbers.joined(separator: ",") : "paragraphs"))  files: \(v.files.count)  criteria: \(v.criteria.count)  other: \(v.other.count)")
+        print(bad.isEmpty ? "no JSON syntax in the drawn text" : "JSON SYNTAX FOUND: \(bad)")
     }
 
     /// Render the real window content (AppKit-backed controls included) to a PNG.

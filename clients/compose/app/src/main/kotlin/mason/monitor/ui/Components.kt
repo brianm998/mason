@@ -33,7 +33,17 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import mason.monitor.CellFill
+import mason.monitor.Format
 import mason.monitor.MonitorModel
+import mason.monitor.countText
+import mason.monitor.fill
+import mason.monitor.isStale
+import mason.monitor.spokenLabel
+import mason.monitor.timeText
+import mason.v1.ProgressSource
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.text.style.TextOverflow
 import mason.v1.CellState
 import androidx.compose.foundation.focusable
 import androidx.compose.ui.focus.FocusRequester
@@ -64,33 +74,102 @@ fun copyToClipboard(s: String) {
 }
 
 /**
- * Progress cells (Part 17): filled means finished; part filled means a real count (or
- * the typical time when there is none); hatched means waiting, labelled with what for;
- * empty means not started. No percentages. A step running past its typical time turns
- * amber, never red: slow is not broken.
+ * Progress cells (Part 17): filled means finished; hatched means waiting, labelled with what for;
+ * empty means not started. A running cell with a real total (reported or counted) fills in
+ * proportion to it; with only a typical total from past runs it fills the same way, lighter; with
+ * neither it stays an outline. A percentage is never estimated. A step running past its typical
+ * time, or quiet past its usual gap, turns amber, never red: slow is not broken.
  */
 @Composable
-fun ProgressCells(cells: List<ProgressCell>, slow: Boolean = false) {
+fun ProgressCells(model: MonitorModel, cells: List<ProgressCell>, slow: Boolean = false) {
     val theme = LocalTheme.current
+    val now = rememberDaemonNow(model)
     Row(horizontalArrangement = Arrangement.spacedBy(theme.spacingSmall)) {
         cells.forEach { c ->
-            val tint = if (slow && c.state == CellState.PART) theme.slow else theme.accent
+            val part = c.state == CellState.PART
+            val tint = if ((slow || (part && c.isStale(now))) && part) theme.slow else theme.accent
             Cell(c.state, tint, theme.border, Modifier.size(theme.cell).semantics {
-                contentDescription = "${c.step}, ${describe(c.state)}"
-            })
+                contentDescription = c.spokenLabel
+            }, if (part) c.fill else CellFill.Outline)
         }
     }
 }
 
-private fun describe(s: CellState) = when (s) {
-    CellState.FILLED -> "finished"
-    CellState.PART -> "running"
-    CellState.HATCHED -> "waiting"
-    else -> "not started"
+/** The daemon's time, re-read every second: the clock the "updated N s ago" text counts on. */
+@Composable
+fun rememberDaemonNow(model: MonitorModel): Long {
+    var now by remember { mutableStateOf(model.daemonNow()) }
+    LaunchedEffect(model) {
+        while (true) {
+            kotlinx.coroutines.delay(1000)
+            now = model.daemonNow()
+        }
+    }
+    return now
+}
+
+/**
+ * One line for the running step: its count by the rule for numbers, its message cut to fit, and
+ * how long ago it last moved. The time counts up on this device's clock between pushes (corrected
+ * by the daemon's clock) and turns amber, with "no output for", past the step's usual gap. At a
+ * narrow width the message is cut first. The ticking time is cleared from the accessibility tree:
+ * it is not announced every second.
+ */
+@Composable
+fun ProgressLine(model: MonitorModel, cell: ProgressCell) {
+    val theme = LocalTheme.current
+    val now = rememberDaemonNow(model)
+    val stale = cell.isStale(now)
+    val time = cell.timeText(now)
+    Row(horizontalArrangement = Arrangement.spacedBy(theme.spacingSmall), modifier = Modifier.testTag("progress-line:${cell.step}")) {
+        val count = cell.countText
+        if (count.isNotEmpty()) Text(count, style = theme.small(color = theme.text), maxLines = 1, softWrap = false)
+        if (cell.message.isNotEmpty()) {
+            Text(cell.message, style = theme.small(color = theme.muted), maxLines = 1, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false))
+        }
+        if (time.isNotEmpty()) {
+            Text(time, style = theme.small(color = if (stale) theme.slow else theme.muted), maxLines = 1, softWrap = false,
+                modifier = Modifier.clearAndSetSemantics { })
+        }
+    }
+}
+
+/**
+ * The running step's whole record on the task page: count and time, sub-counts, message, the
+ * agent's todo list with each item's status, the output figures, and where each number came from.
+ */
+@Composable
+fun ProgressDetail(model: MonitorModel, cell: ProgressCell) {
+    val theme = LocalTheme.current
+    Column(verticalArrangement = Arrangement.spacedBy(theme.spacingSmall), modifier = Modifier.testTag("progress:${cell.step}")) {
+        ProgressLine(model, cell)
+        if (cell.message.isNotEmpty()) Text(cell.message, style = theme.body())
+        cell.subs.forEach { s ->
+            Text("${s.name}: " + Format.countText(s.unit, s.done.toLong(), s.done_source, s.total.toLong(), s.total_source, 0), style = theme.body())
+        }
+        cell.todo.forEach { t ->
+            val mark = when (t.status) { "done" -> "✓"; "doing" -> "▶"; else -> "○" }
+            Row(horizontalArrangement = Arrangement.spacedBy(theme.spacingSmall),
+                modifier = Modifier.semantics(mergeDescendants = true) { contentDescription = "${t.status}: ${t.text}" }) {
+                Text(mark, style = theme.body())
+                Text(t.text, style = theme.body(color = if (t.status == "pending") theme.muted else theme.text))
+                Text(t.status, style = theme.small(color = theme.muted))
+            }
+        }
+        if (cell.lines > 0 || cell.bytes > 0) {
+            Text("output ${Format.group(cell.lines)} lines, ${Format.group(cell.bytes)} bytes", style = theme.small(color = theme.muted))
+        }
+        val sources = listOfNotNull(
+            if (cell.done_source == ProgressSource.SOURCE_NONE) null else "count " + Format.sourceWords(cell.done_source, cell.history_samples),
+            if (cell.total_source == ProgressSource.SOURCE_NONE) null else "total " + Format.sourceWords(cell.total_source, cell.history_samples),
+        )
+        if (sources.isNotEmpty()) Text(sources.joinToString("; "), style = theme.small(color = theme.muted))
+    }
 }
 
 @Composable
-fun Cell(state: CellState, tint: Color, border: Color, modifier: Modifier = Modifier) {
+fun Cell(state: CellState, tint: Color, border: Color, modifier: Modifier = Modifier, fill: CellFill = CellFill.Outline) {
     Canvas(modifier) {
         val r = CornerRadius(2.dp.toPx())
         val stroke = Stroke(width = 1.dp.toPx())
@@ -98,8 +177,12 @@ fun Cell(state: CellState, tint: Color, border: Color, modifier: Modifier = Modi
             CellState.FILLED -> drawRoundRect(tint, cornerRadius = r)
             CellState.PART -> {
                 drawRoundRect(tint, cornerRadius = r, style = stroke)
-                clipPath(Path().apply { addRoundRect(androidx.compose.ui.geometry.RoundRect(0f, 0f, size.width, size.height, r)) }) {
-                    drawRect(tint, size = Size(size.width / 2, size.height))
+                val clip = Path().apply { addRoundRect(androidx.compose.ui.geometry.RoundRect(0f, 0f, size.width, size.height, r)) }
+                when (fill) {
+                    is CellFill.Proportional -> clipPath(clip) { drawRect(tint, size = Size(size.width * fill.fraction, size.height)) }
+                    // Lighter than a real count: this is the typical figure, not a measured one.
+                    is CellFill.Typical -> clipPath(clip) { drawRect(tint.copy(alpha = 0.4f), size = Size(size.width * fill.fraction, size.height)) }
+                    CellFill.Outline -> {}
                 }
             }
             CellState.HATCHED -> {

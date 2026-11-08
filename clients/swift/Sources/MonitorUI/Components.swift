@@ -5,39 +5,133 @@ import MasonProtocol
 import MonitorCore
 import SwiftUI
 
-/// Progress cells (Part 17): filled means finished; part filled means a real
-/// count (or the typical time when there is none); hatched means waiting,
-/// labelled with what for; empty means not started. No percentages. A step
-/// running past its typical time turns amber, never red: slow is not broken.
+/// Progress cells (Part 17): filled means finished; hatched means waiting, labelled with what
+/// for; empty means not started. A running cell with a real total (reported or counted) fills
+/// in proportion to it; with only a typical total from past runs it fills the same way, lighter;
+/// with neither it stays an outline. A percentage is never estimated. A step running past its
+/// typical time, or quiet past its usual gap, turns amber, never red: slow is not broken.
 struct ProgressCells: View {
     @Environment(\.theme) var theme
+    @ObservedObject var model: MonitorModel
     let cells: [Mason_V1_ProgressCell]
     var slow: Bool = false
 
     var body: some View {
         HStack(spacing: theme.spacingSmall) {
             ForEach(Array(cells.enumerated()), id: \.offset) { _, c in
-                Cell(state: c.state, tint: slow && c.state == .part ? theme.slow : theme.accent)
+                let quiet = c.state == .part && c.isStale(now: model.daemonNow())
+                Cell(state: c.state, fill: c.state == .part ? c.fill : .outline,
+                     tint: (slow || quiet) && c.state == .part ? theme.slow : theme.accent)
                     .frame(width: theme.cell, height: theme.cell)
-                    .help(c.label.isEmpty ? "\(c.step)" : "\(c.step): \(c.label)")
-                    .accessibilityLabel("\(c.step), \(describe(c.state))")
+                    .help(helpText(c))
+                    .accessibilityLabel(c.spokenLabel)
             }
         }
     }
 
-    private func describe(_ s: Mason_V1_CellState) -> String {
-        switch s {
-        case .filled: return "finished"
-        case .part: return "running"
-        case .hatched: return "waiting"
-        default: return "not started"
+    /// The step name and its label; a running step with a count adds it (no clock text).
+    private func helpText(_ c: Mason_V1_ProgressCell) -> String {
+        let count = c.state == .part ? c.countText : ""
+        let label = c.label.isEmpty ? "" : ": \(c.label)"
+        return count.isEmpty ? "\(c.step)\(label)" : "\(c.step)\(label), \(count)"
+    }
+}
+
+extension Array where Element == Mason_V1_ProgressCell {
+    /// The step that is running now and has a live record.
+    var running: Mason_V1_ProgressCell? { first { $0.state == .part && $0.run != 0 } }
+}
+
+/// One line for the running step: its count by the rule for numbers, its message cut to fit, and
+/// how long ago it last moved. The time counts up on this device's clock between pushes (corrected
+/// by the daemon's clock) and turns amber, with "no output for", past the step's usual gap. At a
+/// narrow width the message goes first. Only the count and message are read aloud: the ticking
+/// time is not announced every second.
+struct ProgressLine: View {
+    @Environment(\.theme) var theme
+    @ObservedObject var model: MonitorModel
+    let cell: Mason_V1_ProgressCell
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { ctx in
+            let now = model.daemonNow(ctx.date)
+            let stale = cell.isStale(now: now)
+            ViewThatFits(in: .horizontal) {
+                parts(now: now, stale: stale, message: true)
+                parts(now: now, stale: stale, message: false)
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel([cell.countText, cell.message, stale ? "no output for a while" : ""]
+                .filter { !$0.isEmpty }.joined(separator: ", "))
+            .accessibilityIdentifier("progress-line:\(cell.step)")
         }
+    }
+
+    private func parts(now: UInt64, stale: Bool, message: Bool) -> some View {
+        HStack(spacing: theme.spacingSmall) {
+            let count = cell.countText
+            if !count.isEmpty { Text(count).foregroundStyle(theme.text).lineLimit(1).fixedSize() }
+            if message && !cell.message.isEmpty {
+                Text(cell.message).foregroundStyle(theme.muted).lineLimit(1)
+            }
+            let time = cell.timeText(now: now)
+            if !time.isEmpty {
+                Text(time).foregroundStyle(stale ? theme.slow : theme.muted).lineLimit(1).fixedSize()
+            }
+        }
+        .font(theme.small())
+    }
+}
+
+/// The running step's whole record on the task page: count and time, sub-counts, message, the
+/// agent's todo list with each item's status, the output figures, and where each number came from.
+struct ProgressDetail: View {
+    @Environment(\.theme) var theme
+    @ObservedObject var model: MonitorModel
+    let cell: Mason_V1_ProgressCell
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: theme.spacingSmall) {
+            ProgressLine(model: model, cell: cell)
+            if !cell.message.isEmpty { Text(cell.message).font(theme.body()) }
+            ForEach(Array(cell.subs.enumerated()), id: \.offset) { _, s in
+                let text = Format.countText(
+                    unit: s.unit, done: UInt64(s.done), doneSource: s.doneSource,
+                    total: UInt64(s.total), totalSource: s.totalSource, totalLow: 0)
+                Text("\(s.name): \(text)").font(theme.body())
+            }
+            ForEach(Array(cell.todo.enumerated()), id: \.offset) { _, t in
+                HStack(spacing: theme.spacingSmall) {
+                    Text(t.status == "done" ? "✓" : t.status == "doing" ? "▶" : "○")
+                        .accessibilityHidden(true)
+                    Text(t.text).strikethrough(t.status == "done")
+                        .foregroundStyle(t.status == "pending" ? theme.muted : theme.text)
+                    Text(t.status).font(theme.small()).foregroundStyle(theme.muted)
+                }
+                .font(theme.body())
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("\(t.status): \(t.text)")
+            }
+            if cell.lines > 0 || cell.bytes > 0 {
+                Text("output \(Format.group(cell.lines)) lines, \(Format.group(cell.bytes)) bytes")
+                    .font(theme.small()).foregroundStyle(theme.muted)
+            }
+            let sources = [
+                cell.doneSource == .sourceNone ? "" : "count \(Format.sourceWords(cell.doneSource, samples: cell.historySamples))",
+                cell.totalSource == .sourceNone ? "" : "total \(Format.sourceWords(cell.totalSource, samples: cell.historySamples))",
+            ].filter { !$0.isEmpty }
+            if !sources.isEmpty {
+                Text(sources.joined(separator: "; ")).font(theme.small()).foregroundStyle(theme.muted)
+            }
+        }
+        .accessibilityIdentifier("progress:\(cell.step)")
     }
 }
 
 struct Cell: View {
     @Environment(\.theme) var theme
     let state: Mason_V1_CellState
+    var fill: CellFill = .outline
     let tint: Color
 
     var body: some View {
@@ -48,8 +142,18 @@ struct Cell: View {
                 shape.fill(tint)
             case .part:
                 shape.stroke(tint, lineWidth: 1)
-                GeometryReader { g in
-                    Rectangle().fill(tint).frame(width: g.size.width / 2).clipShape(shape)
+                switch fill {
+                case .proportional(let f):
+                    GeometryReader { g in
+                        Rectangle().fill(tint).frame(width: g.size.width * f).clipShape(shape)
+                    }
+                case .typical(let f):
+                    // Lighter than a real count: this is the typical figure, not a measured one.
+                    GeometryReader { g in
+                        Rectangle().fill(tint.opacity(0.4)).frame(width: g.size.width * f).clipShape(shape)
+                    }
+                case .outline:
+                    EmptyView()
                 }
             case .hatched:
                 shape.stroke(tint, lineWidth: 1)

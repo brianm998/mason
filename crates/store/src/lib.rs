@@ -1675,8 +1675,8 @@ impl Store {
             let tx = c.unchecked_transaction()?;
             tx.execute(
                 "INSERT OR REPLACE INTO step_progress(run, task, step, unit, done, done_src, total, \
-                 total_src, message, lines, bytes, marks, last_output_ms, started_ms, updated_at) \
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
+                 total_src, message, lines, bytes, marks, last_output_ms, started_ms, updated_at, max_gap_ms) \
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
                 params![
                     p.run as i64,
                     task as i64,
@@ -1692,7 +1692,8 @@ impl Store {
                     marks_text(&p.marks),
                     p.output.last_output_ms as i64,
                     p.started_ms as i64,
-                    p.updated_at_ms as i64
+                    p.updated_at_ms as i64,
+                    p.max_gap_ms as i64
                 ],
             )?;
             tx.execute(
@@ -1727,7 +1728,7 @@ impl Store {
         self.read(|c| {
             let mut st = c.prepare(
                 "SELECT task, run, step, unit, done, done_src, total, total_src, message, lines, bytes, \
-                 marks, last_output_ms, started_ms, updated_at FROM step_progress ORDER BY run",
+                 marks, last_output_ms, started_ms, updated_at, max_gap_ms FROM step_progress ORDER BY run",
             )?;
             let mut out: Vec<(u64, Progress)> = vec![];
             let rows = st.query_map([], |r| {
@@ -1756,6 +1757,8 @@ impl Store {
                         started_ms: g(13)?,
                         updated_at_ms: g(14)?,
                         subs: vec![],
+                        max_gap_ms: g(15)?,
+                        ..Progress::default()
                     },
                 ))
             })?;
@@ -1839,13 +1842,14 @@ impl Store {
         step: &str,
         done: u64,
         lines: u64,
+        gap_ms: u64,
         at_ms: u64,
     ) -> Result<(), StoreError> {
         let (project, step) = (project.to_string(), step.to_string());
         self.write(move |c| {
             c.execute(
-                "INSERT OR REPLACE INTO step_history(run, task, project, step, done, lines, at) \
-                 VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                "INSERT OR REPLACE INTO step_history(run, task, project, step, done, lines, gap_ms, at) \
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
                 params![
                     run as i64,
                     task as i64,
@@ -1853,10 +1857,23 @@ impl Store {
                     step,
                     done as i64,
                     lines as i64,
+                    gap_ms as i64,
                     at_ms as i64
                 ],
             )?;
             Ok(())
+        })
+    }
+
+    /// The longest quiet gap of this project's successful runs of a step.
+    pub fn history_gaps(&self, project: &str, step: &str) -> Result<Vec<u64>, StoreError> {
+        let (project, step) = (project.to_string(), step.to_string());
+        self.read(move |c| {
+            let mut st = c.prepare(
+                "SELECT gap_ms FROM step_history WHERE project = ?1 AND step = ?2 ORDER BY run",
+            )?;
+            let rows = st.query_map(params![project, step], |r| Ok(r.get::<_, i64>(0)? as u64))?;
+            rows.collect()
         })
     }
 

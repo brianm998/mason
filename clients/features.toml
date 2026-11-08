@@ -11,6 +11,11 @@ description = "Connects over the protocol, resumes from its last sequence number
 swift = "done"
 compose = "done"
 
+[feature.reconnect-on-restart]
+description = "After a daemon restart or stall it re-reads daemon.json and retries (1, 2, 4, 8 s, then every 10), shows 'Daemon restarting, reconnecting', follows a changed pid, start time or port, and resumes from its last sequence number without a relaunch"
+swift = "done"
+compose = "done"
+
 [feature.top-bar]
 description = "Back, forward, home; attention indicator; project filter; LLM usage; add task; mute"
 swift = "done"
@@ -61,6 +66,11 @@ description = "Steps, activity, live log, plan, checks, tests, history, decision
 swift = "done"
 compose = "done"
 
+[feature.readable-plan]
+description = "A task's plan as a document: summary, numbered steps, files (copy each), acceptance criteria as a checklist, other keys; Copy plan (Markdown) and Copy JSON; no JSON on screen"
+swift = "done"
+compose = "done"
+
 [feature.task-dependencies]
 description = "Task detail says \"waiting for #N\" and \"blocks #M\", each a link to that task"
 swift = "done"
@@ -72,7 +82,7 @@ swift = "done"
 compose = "done"
 
 [feature.progress-cells]
-description = "Filled, part, hatched and empty cells; no percentages; amber and never red when slow"
+description = "Filled, part, hatched and empty cells; a running cell fills in proportion to a real total, lighter for a typical one, outline for none; a percentage only from a real total, the count and typical range for a history total, the count alone for none; a progress line per running step with a counting time; amber and never red when slow or quiet"
 swift = "done"
 compose = "done"
 

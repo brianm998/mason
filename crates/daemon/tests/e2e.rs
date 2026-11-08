@@ -165,6 +165,102 @@ fn run_check_runs_the_test_command_the_owner_overrode_at_runtime() {
 }
 
 #[test]
+fn a_red_test_that_is_green_when_run_again_is_a_flake_not_a_red_round() {
+    // The test command fails the first time it runs and passes the second: a flaky
+    // test. With `test_reruns = 1` that is green, recorded as a flake, and the task
+    // is not sent back to develop for a change that had nothing wrong with it.
+    let s = Scratch::new("true", happy_script());
+    let count = s.root.path().join("runs");
+    let cmd = format!(
+        "n=$(cat {c} 2>/dev/null || echo 0); echo $((n+1)) > {c}; test -f hello.txt && [ $n -ge 1 ]",
+        c = count.display()
+    );
+    s.write_project("scratch", &cmd, "test_reruns = 1");
+    let d = s.start();
+    let t = file_task(&d, "Flaky once");
+    wait_state(&d, t, State::Landed, 90);
+    let w = d.world().unwrap();
+    assert_eq!(w.tasks[&t].attempts[&State::Developing], 1, "not sent back");
+    assert_eq!(w.tasks[&t].attempts[&State::Testing], 1, "one round");
+    assert_eq!(std::fs::read_to_string(&count).unwrap().trim(), "2");
+    let run = w
+        .step_runs
+        .values()
+        .find(|r| r.task == t && r.step == State::Testing)
+        .unwrap()
+        .id;
+    let flaky = std::fs::read_to_string(d.task_dir(t).join(format!("test-r{}.flaky", run.0)))
+        .expect("the flake is recorded");
+    assert!(flaky.contains("red, then green"), "{flaky}");
+    let logs = render_logs(&d, t.0);
+    assert!(logs.contains("run again (1)"), "{logs}");
+}
+
+#[test]
+fn a_test_that_is_red_every_time_is_still_red_with_reruns() {
+    let s = Scratch::new(
+        "true",
+        json!({"steps": {"explore": [explore_turn()], "develop": [develop_turn(), develop_turn()]}}),
+    );
+    let count = s.root.path().join("runs");
+    let cmd = format!(
+        "n=$(cat {c} 2>/dev/null || echo 0); echo $((n+1)) > {c}; echo nope; exit 1",
+        c = count.display()
+    );
+    s.write_project("scratch", &cmd, "max_test_rounds = 2\ntest_reruns = 1");
+    let d = s.start();
+    let t = file_task(&d, "Really broken");
+    wait_state(&d, t, State::Failed, 120);
+    let w = d.world().unwrap();
+    assert_eq!(w.tasks[&t].attempts[&State::Testing], 2);
+    assert_eq!(
+        std::fs::read_to_string(&count).unwrap().trim(),
+        "4",
+        "each of the two rounds ran it twice"
+    );
+    assert!(
+        w.tasks[&t]
+            .failure
+            .as_deref()
+            .unwrap_or("")
+            .contains("red every time"),
+        "{:?}",
+        w.tasks[&t].failure
+    );
+    assert!(
+        !s.origin_log().contains(&"add hello".to_string()),
+        "nothing red may land"
+    );
+}
+
+#[test]
+fn the_test_step_folds_in_the_base_so_a_fix_that_landed_meanwhile_counts() {
+    // The tests need base-fix.txt, which reaches the base while the task is in
+    // develop (as a fix for a broken test does). The test step folds the base in
+    // before it runs, so the task is green without another develop round.
+    let base_moves = "tmp=$(mktemp -d) && git worktree add -q --detach \"$tmp\" origin/main && \
+        (cd \"$tmp\" && echo fixed > base-fix.txt && git add -A && \
+         git -c user.name=t -c user.email=t@t commit -qm 'fix on the base' && \
+         git push -q origin HEAD:main) && git worktree remove --force \"$tmp\"";
+    let develop = json!([
+        {"sh": base_moves},
+        {"sh": TASK_SCRIPT_COMMIT},
+        {"call": {"tool": "submit_change", "args": {"summary": "ok", "head": "$HEAD"}}}
+    ]);
+    let s = Scratch::new(
+        "test -f hello.txt && test -f base-fix.txt",
+        json!({"steps": {"explore": [explore_turn()], "develop": [develop]}}),
+    );
+    let d = s.start();
+    let t = file_task(&d, "Picks up the base");
+    wait_state(&d, t, State::Landed, 90);
+    let w = d.world().unwrap();
+    assert_eq!(w.tasks[&t].attempts[&State::Developing], 1);
+    assert_eq!(w.tasks[&t].attempts[&State::Testing], 1);
+    assert_eq!(sh(&s.origin, &["show", "main:hello.txt"]), "hello");
+}
+
+#[test]
 fn tests_that_never_pass_fail_the_task_after_the_round_limit() {
     let s = Scratch::new(
         "echo nope; exit 1",
@@ -364,6 +460,45 @@ fn admission_respects_the_concurrency_limit() {
     );
     let w = d.world().unwrap();
     assert!(w.tasks[&ts[0]].landed.is_some(), "the first task lands");
+}
+
+#[test]
+fn a_step_entered_again_with_uncommitted_work_does_not_merge_the_base_into_it() {
+    // An agent edits README and has not committed when its step is entered again
+    // (here a retry; in life the daemon restarting for a self-update), and meanwhile
+    // the base changed README too. Merging the base into the uncommitted edit fails
+    // ("your local changes would be overwritten"), which used to fail the task. Now the
+    // step leaves the branch as it is, the agent commits, and the test step folds in
+    // the base (the two edits touch different lines).
+    let base_moves = "tmp=$(mktemp -d) && git worktree add -q --detach \"$tmp\" origin/main && \
+        (cd \"$tmp\" && printf 'scratch\\nfrom the base\\n' > README && git add -A && \
+         git -c user.name=t -c user.email=t@t commit -qm 'base edits README' && \
+         git push -q origin HEAD:main) && git worktree remove --force \"$tmp\"";
+    let develop = json!([
+        [{"sh": base_moves}, {"sh": "printf 'from the agent\\nscratch\\n' > README"}, {"say": "working"}],
+        [{"say": "still working"}],
+        [{"say": "nearly"}],
+        [{"sh": format!("git add README && {TASK_SCRIPT_COMMIT}")},
+         {"call": {"tool": "submit_change", "args": {"summary": "ok", "head": "$HEAD"}}}]
+    ]);
+    let s = Scratch::new(
+        "test -f hello.txt",
+        json!({"steps": {"explore": [explore_turn()], "develop": develop}}),
+    );
+    let d = s.start();
+    let t = file_task(&d, "Uncommitted work");
+    wait_state(&d, t, State::Failed, 60);
+    d.emit(EventKind::Retried {
+        task: t,
+        to: State::Developing,
+        step: String::new(),
+    })
+    .unwrap();
+    wait_state(&d, t, State::Landed, 90);
+    assert_eq!(
+        sh(&s.origin, &["show", "main:README"]),
+        "from the agent\nscratch\nfrom the base"
+    );
 }
 
 #[test]

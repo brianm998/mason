@@ -52,6 +52,59 @@ pub struct DaemonConfig {
     pub adhoc_exit_start: u32,
 }
 
+/// The loopback port `masond` listens on when neither `--port` nor `[daemon] port`
+/// says otherwise. Fixed, so a running monitor finds the daemon again after a
+/// restart. (7421, first proposed, is assigned in /etc/services.)
+pub const DEFAULT_PORT: u16 = 7423;
+
+/// Which port to bind: `--port`, then `[daemon] port` in `daemon.toml`, then the
+/// default. A demo keeps nothing and runs beside the real daemon, so it takes a
+/// free port (0) unless told otherwise.
+pub fn resolve_port(cli: Option<u16>, file: Option<u16>, demo: bool) -> u16 {
+    cli.or(file).unwrap_or(if demo { 0 } else { DEFAULT_PORT })
+}
+
+/// `daemon.toml` in the config directory:
+///
+/// ```toml
+/// [daemon]
+/// port = 7423   # 0 asks the OS for a free port each start
+/// ```
+pub fn parse_daemon_port(text: &str) -> Result<Option<u16>, String> {
+    let doc: toml_edit::DocumentMut = text.parse().map_err(|e| format!("daemon.toml: {e}"))?;
+    let mut port = None;
+    for (key, item) in doc.iter() {
+        let table = item
+            .as_table_like()
+            .filter(|_| key == "daemon")
+            .ok_or_else(|| format!("daemon.toml: unknown setting `{key}`"))?;
+        for (name, v) in table.iter() {
+            match name {
+                "port" => {
+                    port = Some(
+                        v.as_integer()
+                            .and_then(|n| u16::try_from(n).ok())
+                            .ok_or_else(|| {
+                                "daemon.toml: daemon.port must be a whole number from 0 to 65535"
+                                    .to_string()
+                            })?,
+                    )
+                }
+                other => return Err(format!("daemon.toml: unknown setting daemon.{other}")),
+            }
+        }
+    }
+    Ok(port)
+}
+
+pub fn load_daemon_port(config_dir: &std::path::Path) -> Result<Option<u16>, String> {
+    match std::fs::read_to_string(config_dir.join("daemon.toml")) {
+        Ok(t) => parse_daemon_port(&t),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("daemon.toml: {e}")),
+    }
+}
+
 impl DaemonConfig {
     pub fn new(
         data_dir: impl Into<PathBuf>,
@@ -131,6 +184,11 @@ pub struct ProjectCfg {
     pub test_timeout: Duration,
     /// Test rounds before the task fails, if the overlay sets one (layer 3).
     pub max_test_rounds: Option<u32>,
+    /// How many times a red test command is run again before the round counts as
+    /// red (`test_reruns`, default 0). Green on a rerun is green, recorded as a
+    /// flake; red every time is red. For a suite of many tests that only some
+    /// machines' load makes fail, this judges the change instead of the machine.
+    pub test_reruns: u32,
     /// A command that reads a task body on stdin and prints `clear` or
     /// `unclear`. Optional, and only consulted when the deterministic check is
     /// unsure. Anything but `clear`, or a failure, means explore.
@@ -181,7 +239,17 @@ pub struct AgentCfg {
 
 pub fn parse_agent(id: &str, doc: &DocumentMut) -> Result<AgentCfg, String> {
     let s = |k: &str| doc.get(k).and_then(|v| v.as_str()).map(String::from);
-    let provider = match s("provider").as_deref() {
+    // `provider = "codex"`, or, when the file also holds `[provider.claude]`
+    // mapping tables (TOML cannot hold both a string and a table under one
+    // name), `[provider]` with `use = "codex"`. See `providers.rs`.
+    let chosen = s("provider").or_else(|| {
+        doc.get("provider")
+            .and_then(|v| v.as_table_like())
+            .and_then(|t| t.get("use"))
+            .and_then(|v| v.as_str())
+            .map(String::from)
+    });
+    let provider = match chosen.as_deref() {
         None | Some("claude") => Provider::Claude,
         Some("codex") => Provider::Codex,
         Some(o) => {
@@ -609,6 +677,10 @@ pub fn parse_project(id: &str, text: &str) -> Result<ProjectCfg, String> {
             .get("max_test_rounds")
             .and_then(|v| v.as_integer())
             .map(|n| n.max(1) as u32),
+        test_reruns: doc
+            .get("test_reruns")
+            .and_then(|v| v.as_integer())
+            .map_or(0, |n| n.clamp(0, 3) as u32),
         clarity_classifier: s("clarity_classifier").filter(|c| !c.trim().is_empty()),
         card_rewriter: s("card_rewriter").filter(|c| !c.trim().is_empty()),
         priority_jump: doc

@@ -70,7 +70,7 @@ max_open = 5
 [agent_env]
 FAKE_CLAUDE_SCRIPT = "$root/script.json"
 TOML
-"$bin/masond" --data-dir "$root/d" --config-dir "$root/c" --heartbeat-ms 100 --sweep-ms 3600000 --max-concurrent 4 --owner "$owner" 2>>"$root/masond.log" &
+"$bin/masond" --port 0 --data-dir "$root/d" --config-dir "$root/c" --heartbeat-ms 100 --sweep-ms 3600000 --max-concurrent 4 --owner "$owner" 2>>"$root/masond.log" &
 daemon=$!
 until m status >/dev/null 2>&1; do kill -0 "$daemon" || { cat "$root/masond.log" >&2; exit 1; }; sleep 0.1; done
 
@@ -118,7 +118,7 @@ kill -9 "$daemon" 2>/dev/null || true; wait "$daemon" 2>/dev/null || true
 mkdir -p "$root/d/runtimes"
 echo "$(( $(date +%s) * 1000 )) deadbeefdeadbeef cafebabecafebabe open" > "$root/d/runtimes/rollback"
 rm -f "$root/d/daemon.json"
-"$bin/masond" --data-dir "$root/d" --config-dir "$root/c" --heartbeat-ms 100 --sweep-ms 3600000 --max-concurrent 4 --owner "$owner" 2>>"$root/masond.log" &
+"$bin/masond" --port 0 --data-dir "$root/d" --config-dir "$root/c" --heartbeat-ms 100 --sweep-ms 3600000 --max-concurrent 4 --owner "$owner" 2>>"$root/masond.log" &
 daemon=$!
 until m status >/dev/null 2>&1; do kill -0 "$daemon" || { cat "$root/masond.log" >&2; exit 1; }; sleep 0.1; done
 sleep 1

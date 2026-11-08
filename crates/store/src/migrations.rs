@@ -291,7 +291,9 @@ const STEPS: &[&str] = &[
          at      INTEGER NOT NULL
      );
      CREATE INDEX step_history_step ON step_history(project, step);",
-    // 13: proposals (Part 13). A proposal is a task plus this row: what the agent saw (evidence),
+    // 13: the longest quiet gap of each successful run, for the "no output for" threshold (s49).
+    "ALTER TABLE step_history ADD COLUMN gap_ms INTEGER NOT NULL DEFAULT 0;\n     ALTER TABLE step_progress ADD COLUMN max_gap_ms INTEGER NOT NULL DEFAULT 0;",
+    // 14: proposals (Part 13). A proposal is a task plus this row: what the agent saw (evidence),
     // where it was routed, the key it was deduplicated on, and what has been done with it. An
     // improvement the owner asked for (source 'owner') is the same row with a branch.
     "CREATE TABLE proposals (

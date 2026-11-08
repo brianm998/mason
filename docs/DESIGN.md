@@ -245,7 +245,7 @@ start  = "explore"
 explored_entry = "develop"   # where explored tasks start (Part 4)
 
 [step.explore]
-type = "agent"; category = "exploring"; agent = "fast"; next = "develop"
+type = "agent"; category = "exploring"; agent = "light"; next = "develop"
 
 [step.develop]
 type = "agent"; category = "developing"; agent = "deep"; budget = "4h"
@@ -336,7 +336,7 @@ When an agent calls `run_check` for something long, the step host ends the turn 
 
 ### Models, tokens and outages
 
-- Named agent profiles (`fast`, `deep`) map to provider, model and effort per project, with a retry ladder that can move up a model.
+- Agent steps ask for a tier (`deep` or `light`; `fast` is another name for `light`) and an effort level (`low`, `medium`, `high`; default `medium`). Each provider's config says which real model and real effort that means: a built-in table, overridden entry by entry by `<config dir>/providers/<provider>.toml` and then by `[provider.<provider>]` in the project file (`mason doctor` shows the result and where each entry came from). A real `model`, or an effort that is the provider's own, is still accepted but ties the pipeline to that provider, and validation warns. The retry ladder is a list of real model names and moves up a model after no result or a crash; retries keep the mapped effort.
 - Tokens are attributed per session, step, task, project and provider. Live figures show only what the stream reports honestly. If a provider gives only a status and a reset time, the monitor shows that and doesn't invent a percentage.
 - A usage limit or outage is a provider-wide *hold*, never a failure: affected tasks wait with no time charged, you're told once, and they resume at the reset. Falling back to another provider is opt-in.
 
@@ -785,11 +785,14 @@ Sketch with invented example data, showing content and hierarchy rather than fin
 
 ### Progress you can trust
 
-Progress cells: filled means finished. Part filled means a real count, or typical time if no count exists. Hatched means waiting, labelled with what for. Empty means not started.
+Progress cells: filled means finished. Hatched means waiting, labelled with what for. Empty means not started. A running cell fills in proportion to a real total, fills lighter when only a typical total from past runs exists, and stays an outline when there is nothing to measure against.
 
 - Real counts come first: tests run, features done, fix round 2 of 3.
+- **The rule for numbers.** A percentage is shown only from a real total (reported by the step, or counted by the daemon), as "212 of 340 tests, 62%": rounded down, never above 100. With only a `history` total (the typical figure from this project's past successful runs), show the count and the typical range and no percentage: "1,240 lines, usually 1,800 to 2,400". With no total, show the count: "37 tool calls". A percentage is never estimated, because an estimate implies a precision the data can't back.
+- Each running step has one line: its count by that rule, its message cut to fit, and "updated 4 s ago", counting up on the monitor's own clock between pushes, corrected by the daemon's clock from the welcome. At narrow widths the message goes first.
 - Time in state is always shown. Estimates are ranges from this project's history ("usually 15 to 20 min") and appear only with enough samples.
-- No percentages, because they imply a precision the data can't back.
+- A step that has not moved for longer than its usual gap between updates (or five minutes, with too little history to say) turns the time amber and says "no output for 6 min". It is not red and it is not a failure.
+- The task page adds the step's sub-counts, the agent's todo list with each item's status, the output figures, and where each number came from ("from the agent", "counted from output", "usually, from 12 past runs").
 - Running past the typical time turns amber and never red. Slow isn't the same as broken.
 
 ### Parity between SwiftUI and Compose

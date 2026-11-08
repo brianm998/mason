@@ -13,6 +13,7 @@
 
 use crate::daemon::Daemon;
 use mason_adapter_api::card::{Card, CardOption, Origin};
+use mason_core::progress::{Figure, Progress, SubProgress, TodoItem};
 use mason_core::*;
 use std::sync::Arc;
 use std::time::Duration;
@@ -144,7 +145,119 @@ fn script() -> Vec<Vec<EventKind>> {
                 }),
             },
         ],
+        // Six tasks in a running step, one for each way progress is shown.
+        vec![
+            filed(1, "Search: real count", false),
+            filed(1, "Export: typical total", false),
+            filed(1, "Webhooks: count only", false),
+            filed(1, "Queue: gone quiet", false),
+            filed(1, "Billing: sub-counts", false),
+            filed(1, "Migrate: todo list", false),
+        ],
+        vec![
+            admit(5, "develop", State::Developing),
+            admit(6, "develop", State::Developing),
+            admit(7, "develop", State::Developing),
+            admit(8, "develop", State::Developing),
+            admit(9, "develop", State::Developing),
+            admit(10, "develop", State::Developing),
+        ],
     ]
+}
+
+/// The first task of the progress cases, and the checkpoint that admits them.
+const PROGRESS_TASK: u64 = 5;
+const PROGRESS_CHECKPOINT: usize = 9;
+
+fn counted(done: u64) -> Figure {
+    Figure::counted(done)
+}
+
+/// One record per way progress is shown, for the six tasks admitted at the last checkpoint.
+/// Times are relative to now, so the clients' "updated N s ago" is a few seconds and the
+/// quiet one says 20 minutes; nothing moves them (the demo has no ticker).
+fn progress_cases(now: u64) -> Vec<Progress> {
+    let base = |i: u64, started: u64, last: u64| {
+        let mut p = Progress::new(9000 + i, "develop", now - started);
+        p.output.last_output_ms = now - last;
+        p.updated_at_ms = now - last;
+        p.stale_after_ms = 300_000;
+        p
+    };
+    // 0. A real count: reported done and total, with a message.
+    let mut real = base(0, 400_000, 4_000);
+    real.unit = "tests".into();
+    real.done = Figure::reported(212);
+    real.total = Figure::reported(340);
+    real.message = "running the api suite".into();
+    real.output.lines = 1_240;
+    real.output.bytes = 61_000;
+    // 1. Only a typical total from twelve past runs: the count and the range, no percentage.
+    let mut hist = base(1, 300_000, 2_000);
+    hist.unit = "lines".into();
+    hist.done = counted(1_240);
+    hist.total = Figure::history(2_400);
+    hist.total_low = 1_800;
+    hist.history_samples = 12;
+    hist.output.lines = 1_240;
+    hist.output.bytes = 50_000;
+    // 2. Nothing to measure against: the count alone.
+    let mut none = base(2, 200_000, 6_000);
+    none.unit = "tool calls".into();
+    none.done = Figure::reported(37);
+    none.output.lines = 90;
+    none.output.bytes = 4_000;
+    // 3. Quiet for twenty minutes: amber, "no output for".
+    let mut quiet = base(3, 1_800_000, 1_200_000);
+    quiet.unit = "lines".into();
+    quiet.done = counted(412);
+    quiet.output.lines = 412;
+    quiet.output.bytes = 20_000;
+    // 4. Sub-counts: suites, with a count of plan steps as a whole.
+    let mut subs = base(4, 500_000, 3_000);
+    subs.unit = "plan steps".into();
+    subs.done = Figure::reported(3);
+    subs.total = Figure::reported(7);
+    subs.message = "checking the ledger".into();
+    subs.output.lines = 300;
+    subs.output.bytes = 15_000;
+    subs.subs = vec![
+        SubProgress {
+            name: "unit".into(),
+            unit: "tests".into(),
+            done: Figure::reported(120),
+            total: Figure::reported(120),
+        },
+        SubProgress {
+            name: "integration".into(),
+            unit: "tests".into(),
+            done: Figure::reported(44),
+            total: Figure::reported(90),
+        },
+    ];
+    // 5. An agent's todo list.
+    let mut todo = base(5, 600_000, 5_000);
+    todo.unit = "todo items".into();
+    todo.done = Figure::reported(1);
+    todo.total = Figure::reported(3);
+    todo.message = "writing the migration".into();
+    todo.output.lines = 55;
+    todo.output.bytes = 3_000;
+    todo.todo = vec![
+        TodoItem {
+            text: "Read the schema".into(),
+            status: "done".into(),
+        },
+        TodoItem {
+            text: "Write the migration".into(),
+            status: "doing".into(),
+        },
+        TodoItem {
+            text: "Add a rollback test".into(),
+            status: "pending".into(),
+        },
+    ];
+    vec![real, hist, none, quiet, subs, todo]
 }
 
 impl Daemon {
@@ -160,6 +273,15 @@ impl Daemon {
             *pos += 1;
             *pos
         };
+        if i == PROGRESS_CHECKPOINT {
+            // Before the events, so the views they produce already carry the records.
+            for (n, p) in progress_cases(crate::daemon::now_ms())
+                .into_iter()
+                .enumerate()
+            {
+                self.progress_seed(TaskId(PROGRESS_TASK + n as u64), ProjectId(1), p);
+            }
+        }
         for kind in steps[i - 1].clone() {
             if let Err(e) = self.emit(kind) {
                 tracing::warn!(error = %e, "a demo event was refused");

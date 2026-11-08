@@ -71,7 +71,7 @@ fun main(argv: Array<String>) {
     val cmd = args.first()
     val port = Discovery.port(args) ?: fail("--port P (or --data-dir D)")
     val model = MonitorModel()
-    MonitorConnection(model, port).start()
+    MonitorConnection(model, { Discovery.info(args) ?: DaemonInfo(port) }).start()
     until("a connection") { model.connected && model.header != null && model.sidebar != null && model.home != null }
     when (cmd) {
         "conformance" -> conformance(model, File(args.opt("--out") ?: fail("--out DIR")))

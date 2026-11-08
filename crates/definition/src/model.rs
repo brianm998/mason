@@ -176,6 +176,8 @@ impl Step {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AgentProfile {
+    /// `deep` or `light` (`fast` too): which tier this profile asks for.
+    pub tier: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
 }

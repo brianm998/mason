@@ -234,6 +234,9 @@ message StepProgress {
   ProgressCell progress = 5;
   // The daemon's clock when this was sent (ms since the epoch).
   uint64 now_ms = 6;
+  // Whole output lines that arrived since the last push, oldest first (at most 40):
+  // the live log follows these instead of being read again.
+  repeated string log = 7;
 }
 
 message Snapshot {
@@ -328,6 +331,33 @@ message ProgressCell {
   uint64 updated_at_ms = 14;
   // The step run this record is of (0 when the cell has no run).
   uint64 run = 15;
+  // Additive: the counts inside a step (suites, checks, batch phases).
+  repeated ProgressSub subs = 16;
+  // The agent's todo list, in order.
+  repeated TodoItem todo = 17;
+  // With a HISTORY total: the low end of the typical range (`total` is the high end).
+  uint32 total_low = 18;
+  // How many past runs the typical figures come from.
+  uint32 history_samples = 19;
+  // The quiet time after which this step is shown as silent: from past runs, else 300 s.
+  uint64 stale_after_ms = 20;
+}
+
+// One count inside a step.
+message ProgressSub {
+  string name = 1;
+  string unit = 2;
+  uint32 done = 3;
+  uint32 total = 4;
+  ProgressSource done_source = 5;
+  ProgressSource total_source = 6;
+}
+
+// One item of an agent's todo list.
+message TodoItem {
+  string text = 1;
+  // "pending", "doing" or "done".
+  string status = 2;
 }
 
 // Where a figure came from.
@@ -507,8 +537,10 @@ message TaskDetailView {
   Approval approval = 17;
   // The numbers MASON reserved for the task's stage note, exit script and decision record.
   repeated NumberLine numbers = 18;
+  // The plan, parsed by the daemon so the clients do no JSON work. `plan` (3) stays for older clients.
+  PlanView plan_view = 19;
   // Present for a proposal or an improvement the owner asked for.
-  ProposalInfo proposal = 19;
+  ProposalInfo proposal = 20;
 }
 
 // What was noticed, by whom, with the proof; and for an improvement, where its branch is.
@@ -537,6 +569,34 @@ message ProposalInfo {
   string pr_state = 13;
   // The update channel when the daemon follows this improvement's branch.
   string channel = 14;
+}
+
+// A task's exploration plan as readable parts.
+message PlanView {
+  // The summary split on blank lines.
+  repeated string summary_paragraphs = 1;
+  // True when the approach was a numbered or bulleted list: `steps` are then list items.
+  // False: `steps` are the approach's paragraphs.
+  bool steps_are_list = 2;
+  repeated string steps = 3;
+  // Text before the first list marker of the approach.
+  string lead = 4;
+  repeated string files = 5;
+  repeated string criteria = 6;
+  repeated PlanExtra other = 7;
+  // The original JSON, for copying.
+  string raw = 8;
+  // Set when the plan could not be read as a plan: then only `raw` and this are filled.
+  string note = 9;
+  // Each step's own number as the agent wrote it ("0", "1", ...), one per step, when the approach was a
+  // numbered list. Empty for a bulleted list (show a bullet) and for paragraphs.
+  repeated string step_numbers = 10;
+}
+
+// An extra key of the plan: label and an already readable value.
+message PlanExtra {
+  string label = 1;
+  string value = 2;
 }
 
 // One number handed to a task. A cancelled task's numbers are shown released: never reused.

@@ -27,7 +27,26 @@ The task shows why it waits (`mason task show N`), the alert says so, and `mason
 
 Open self-tasks, tasks filed per week, and agent steps per period (the cap on spend: token cost is not recorded yet, so steps are what is counted) each have a limit in `[self]`. Filing past a limit is refused with the number and the limit, by the command line, the API and the tracker import (an issue left unimported is looked at again later). `mason self` shows where each stands. The urgent fix task the landing freeze files is not counted: restoring the base comes first.
 
+**`max_open` counts only tasks doing or about to do work.** Running, queued-and-claimable, paused and waiting-on-owner tasks count. A task held behind unlanded blockers, and a proposed task, spend nothing and are not counted; a held task joins the count when its blockers land and is never refused then. `mason self` reads "2/3 open (4 held behind others, not counted)" (see `docs/decisions/0032-self-open-readings.md`).
+
 **The weekly cap counts only work MASON starts for itself.** `per_week` counts tasks whose trust is not the owner's: agent proposals and outside issues you labeled. Tasks you file (the command line or API as the owner, the monitor, a tracker issue by an owner name) are not counted, and neither is a task cancelled before any agent step started. `mason self` reads "N of 10 this week (M of yours not counted)", and the refusal says how many of the counted are agent or outside tasks. **`max_steps` counts the same way:** only steps of tasks not filed by the owner; `mason self` reads "N of 100 agent steps in 24 h (M of yours not counted)" (decision 0030). `max_open` and the cooldown apply to every filing, yours included. **An owner identity can therefore file without a weekly cap**; the guards that remain are `max_open`, the agent-filed share of `max_steps`, `per_week`, the cooldown and the holds on protected files (see `docs/decisions/0022-self-cap-readings.md`).
+
+## The port
+
+`masond` listens on **127.0.0.1:7423** unless told otherwise, so a monitor that is open when the daemon restarts (an update, a changed limit, a crash and relaunch) finds it in the same place. It listens on loopback only; nothing beyond this machine can reach it. `daemon.json` in the data directory (`pid`, `port`, `started_ms`) is still written after the bind and is what the command line and the monitors read, so a different port works too.
+
+Change it, in order of precedence:
+- `masond --port N` (`--port 0` asks the OS for a free port every start, as the tests and `--demo` do);
+- `[daemon] port = N` in `daemon.toml` in the config directory (`~/.config/mason/daemon.toml`):
+  ```toml
+  [daemon]
+  port = 7500
+  ```
+  An invalid `daemon.toml` stops the daemon from starting and names the file.
+
+**When the port is taken** by another program, `masond` exits with status 1 and says which port, who holds it (the pid and program, when `lsof` can tell) and how to change it. It never picks another port by itself. Stop the other program, or set a different port as above. A second `masond` on the same data directory is refused before this (`a daemon is already running here (pid N)`). `mason update`'s self-test binds no port, so it never meets the live daemon's.
+
+The monitors (SwiftUI and Compose) and the command line read `daemon.json` again when a connection fails. A monitor shows "Daemon restarting, reconnecting…" and retries after 1, 2, 4 and 8 seconds, then every 10, and resumes from the last event it saw; it also notices a changed `pid` or `started_ms` while connected, and no message or reply for 15 seconds counts as a stall. The command line reads the file once more after a refused connection. See `docs/decisions/0029-fixed-port-readings.md`.
 
 ## A rollback
 
