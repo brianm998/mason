@@ -61,6 +61,8 @@ pub struct Daemon {
     pub(crate) intro: crate::introspect::Runtime,
     pub(crate) notify: crate::notify::Runtime,
     pub lan: crate::lan::LanState,
+    /// Simulators, emulators and phones, leased by capability (Stage 25).
+    pub targets: crate::targets::Targets,
 }
 
 fn kind_name(k: &EventKind) -> String {
@@ -154,6 +156,10 @@ impl Daemon {
             cfg.max_concurrent as u32,
             &accounts,
         )?;
+        let targets = crate::targets::Targets::new(
+            crate::config::load_targets(&cfg.config_dir)?,
+            &cfg.data_dir.join("locks"),
+        )?;
         let d = Arc::new(Daemon {
             store,
             projects,
@@ -184,6 +190,7 @@ impl Daemon {
             intro: Default::default(),
             notify: Default::default(),
             lan: crate::lan::LanState::new(),
+            targets,
             update_status: Mutex::new(crate::update::Status {
                 phase: "idle".into(),
                 ..Default::default()
@@ -194,6 +201,7 @@ impl Daemon {
             crate::demo::seed_usage(&d);
         } else {
             d.load_definitions();
+            crate::targets::spawn(&d);
             d.progress_cleanup();
             d.recover();
             d.spawn_progress_ticker();
