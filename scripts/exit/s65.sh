@@ -29,7 +29,7 @@ cargo build -q --workspace --bins
 bin=target/debug
 owner=${USER:-owner}
 m() { "$bin/mason" --data-dir "$root/d" --config-dir "$root/c" "$@"; }
-fail() { echo "FAILED: $*" >&2; m task list >&2 2>&1 || true; m alerts >&2 2>&1 || true; tail -20 "$root/masond.log" >&2 || true; exit 1; }
+fail() { echo "FAILED: $*" >&2; set +e; m task list >&2 2>&1; m alerts >&2 2>&1; tail -20 "$root/masond.log" >&2; exit 1; }
 issue() {  # NUMBER STATE
   printf ' {"number": %s, "node_id": "I_%s", "title": "Issue %s", "body": "text", "state": "%s", "user": {"login": "%s"}, "labels": []}' "$1" "$1" "$1" "$2" "$owner"
 }
@@ -41,7 +41,7 @@ gh_issues() {  # DIR then issue objects
 state_of() { m task show "$1" --json 2>/dev/null | sed -n 's/^  "state": "\(.*\)",$/\1/p'; }
 wait_state() { local end=$((SECONDS + $3)); until [ "$(state_of "$1")" = "$2" ]; do [ $SECONDS -lt $end ] || fail "timed out waiting for task $1 to be $2 (is $(state_of "$1"))"; sleep 0.2; done; }
 id_of() { m task list | grep "$1" | head -1 | sed -E 's/^#?([0-9]+).*/\1/'; }
-count_of() { m task list | grep '^#' | grep -c "$1" || true; }
+count_of() { m task list | awk -v p="$1" '/^#/ && index($0, p) { n++ } END { print n + 0 }'; }
 alerts_have() { m alerts | grep -q "$1" || { m alerts >&2; fail "no alert saying: $1"; }; }
 alerts_lack() { ! m alerts | grep -q "$1" || { m alerts >&2; fail "an alert still says: $1"; }; }
 
@@ -129,7 +129,7 @@ until m status >/dev/null 2>&1; do kill -0 "$daemon" || { cat "$root/masond.log"
 echo "== 1. the limits are full; a proposed filing and five imports are still accepted"
 m task add "seed" --project self --explored >/dev/null || fail "the seed task"
 wait_state 0 developing 60
-out=$(m task add "queued one" --project self --explored 2>&1) && fail "a queued filing was accepted at max_open" || true
+if out=$(m task add "queued one" --project self --explored 2>&1); then fail "a queued filing was accepted at max_open"; fi
 echo "$out" | grep -q 'limit is 1' || fail "the refusal does not name the limit: $out"
 out=$(m task add "a proposal" --project self --proposed 2>&1) || fail "--proposed was refused at max_open: $out"
 echo "   --proposed accepted at max_open; a queued filing is still refused"
@@ -183,9 +183,9 @@ alerts_have '#403'
 m task list --pending-issues | grep -q '#403' || fail "--pending-issues does not list 403"
 m alerts | grep 'relink' | sed 's/^/   /' | head -2
 new=$(m task add "Replacement for 403" --project self --proposed | sed -E 's/^Filed task #([0-9]+).*/\1/')
-out=$(MASON_AS=stranger m task relink "$new" --issue 403 2>&1) && fail "a non-owner relinked: $out" || true
+if out=$(MASON_AS=stranger m task relink "$new" --issue 403 2>&1); then fail "a non-owner relinked: $out"; fi
 echo "   a non-owner is refused"
-out=$(m task relink "$t403" --issue 403 2>&1) && fail "relinked to a cancelled task" || true
+if out=$(m task relink "$t403" --issue 403 2>&1); then fail "relinked to a cancelled task"; fi
 m task relink "$new" --issue 403 >/dev/null || fail "the owner's relink failed"
 refresh 0
 alerts_lack 'mason task relink'
@@ -209,7 +209,7 @@ wait_state "$s2" landed 120
 end=$((SECONDS + 120))
 until [ -n "$(id_of 'Issue 501')" ] && [ -n "$(id_of 'Issue 502')" ] && ! m alerts | grep -q 'not imported'; do
   [ $SECONDS -lt $end ] || fail "the issues were not both imported and the alert cleared"
-  m task refresh "$s2" >/dev/null || true; sleep 1
+  m task refresh "$s2" >/dev/null; sleep 1
 done
 [ "$(state_of "$(id_of 'Issue 501')")" != proposed ] || fail "a queued import was left proposed"
 echo "   both imported (queued), alert cleared"
