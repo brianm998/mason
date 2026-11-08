@@ -396,6 +396,193 @@ async fn add_task(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res {
     Ok(Json(v))
 }
 
+// ---- proposals and self-improvement (Part 13) ----
+
+fn owner_only(d: &Daemon, who: &str, what: &str) -> Result<(), (StatusCode, Json<Value>)> {
+    if crate::attention::is_owner(d, who) {
+        Ok(())
+    } else {
+        Err(fail(
+            StatusCode::FORBIDDEN,
+            format!("{who:?} is not the owner's identity; only the owner can {what}"),
+        ))
+    }
+}
+
+fn code(c: u16) -> StatusCode {
+    StatusCode::from_u16(c).unwrap_or(StatusCode::BAD_REQUEST)
+}
+
+async fn proposals_list(
+    Shared(d): Shared<Arc<Daemon>>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Res {
+    let open = q.get("open").is_some_and(|v| v != "0");
+    let d2 = d.clone();
+    let v = d
+        .pool
+        .run(move || crate::proposals::list_json(&d2, open))
+        .await
+        .map_err(pool_err)?;
+    Ok(Json(json!({"proposals": v})))
+}
+
+async fn proposal_show(Shared(d): Shared<Arc<Daemon>>, Path(task): Path<u64>) -> Res {
+    let d2 = d.clone();
+    let v = d
+        .pool
+        .run(move || {
+            let w = d2.world().map_err(store_err)?;
+            match d2.store.proposal(task).map_err(store_err)? {
+                Some(r) => Ok(crate::proposals::row_json(&w, &r)),
+                None => Err(fail(
+                    StatusCode::NOT_FOUND,
+                    format!("task #{task} is not a proposal"),
+                )),
+            }
+        })
+        .await
+        .map_err(pool_err)??;
+    Ok(Json(v))
+}
+
+/// File a proposal as the agent of task `task` would: every rule applies, and a refusal is the
+/// error. (An agent's own `file_proposal` calls are filed the same way when its step ends.)
+async fn proposal_file(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res {
+    let d2 = d.clone();
+    let v = d
+        .pool
+        .run(move || {
+            let from = b["task"].as_u64().map(TaskId);
+            let w = d2.world().map_err(store_err)?;
+            let project = match from.and_then(|t| w.tasks.get(&t)) {
+                Some(t) => t.project,
+                None => b["project"]
+                    .as_str()
+                    .and_then(|n| d2.project_id_by_name(n))
+                    .ok_or_else(|| fail(StatusCode::BAD_REQUEST, "name the task the proposal comes from (`task`), or a `project`"))?,
+            };
+            let text = |k: &str| b[k].as_str().unwrap_or_default().to_string();
+            let f = crate::proposals::Filing {
+                from_task: from,
+                project,
+                title: text("title"),
+                body: text("body"),
+                evidence: text("evidence"),
+                blocks_task: b["blocks_task"].as_bool().unwrap_or(false),
+                explored: b["explored"].as_bool().unwrap_or(false),
+            };
+            match crate::proposals::file(&d2, &f) {
+                Ok(done) => Ok(json!({"task": done.task.0, "route": done.route, "proposed": done.proposed, "project": done.project})),
+                Err(why) => {
+                    crate::attention::intervene(&d2, "proposal_refused", from, "pipeline", &f.title, &why);
+                    Err(fail(StatusCode::UNPROCESSABLE_ENTITY, why))
+                }
+            }
+        })
+        .await
+        .map_err(pool_err)??;
+    Ok(Json(v))
+}
+
+async fn proposal_act(
+    Shared(d): Shared<Arc<Daemon>>,
+    headers: axum::http::HeaderMap,
+    Path((task, act)): Path<(u64, String)>,
+    body: Option<Json<Value>>,
+) -> Res {
+    let who = who_of(&headers);
+    let b = body.map_or(json!({}), |b| b.0);
+    let d2 = d.clone();
+    let v = d
+        .pool
+        .run(move || {
+            owner_only(&d2, &who, "decide on or publish a proposal")?;
+            if act != "edit" && d2.store.proposal(task).map_err(store_err)?.is_none() {
+                return Err(fail(
+                    StatusCode::NOT_FOUND,
+                    format!("task #{task} is not a proposal"),
+                ));
+            }
+            let s = |k: &str| b[k].as_str();
+            match act.as_str() {
+                "approve" | "reject" => {
+                    let w = d2.world().map_err(store_err)?;
+                    let st = w.tasks.get(&TaskId(task)).map(|t| t.state);
+                    if st != Some(State::Proposed) {
+                        return Err(fail(
+                            StatusCode::CONFLICT,
+                            format!("task #{task} is not waiting for you ({st:?})"),
+                        ));
+                    }
+                    let approve = act == "approve";
+                    let reason = s("reason").unwrap_or("no reason given").to_string();
+                    d2.emit(if approve {
+                        EventKind::Approved { task: TaskId(task) }
+                    } else {
+                        EventKind::Rejected { task: TaskId(task) }
+                    })
+                    .map_err(store_err)?;
+                    crate::proposals::note_decision(&d2, task, approve, &reason);
+                    crate::attention::intervene(
+                        &d2,
+                        &format!("proposal_{act}"),
+                        Some(TaskId(task)),
+                        &who,
+                        &reason,
+                        &reason,
+                    );
+                    Ok(json!({"ok": true}))
+                }
+                "edit" => {
+                    crate::proposals::edit(&d2, task, s("title"), s("body"), s("evidence"))
+                        .map_err(|(c, m)| fail(code(c), m))?;
+                    Ok(json!({"ok": true}))
+                }
+                "publish" => {
+                    let confirm = b["confirm"].as_bool().unwrap_or(false);
+                    crate::improve::publish(&d2, task, confirm).map_err(|(c, m)| fail(code(c), m))
+                }
+                other => Err(fail(StatusCode::NOT_FOUND, format!("no action {other:?}"))),
+            }
+        })
+        .await
+        .map_err(pool_err)??;
+    Ok(Json(v))
+}
+
+async fn proposals_poll(Shared(d): Shared<Arc<Daemon>>) -> Res {
+    let d2 = d.clone();
+    d.pool
+        .run(move || crate::improve::poll(&d2))
+        .await
+        .map_err(pool_err)?;
+    Ok(Json(json!({"ok": true})))
+}
+
+async fn improve_start(
+    Shared(d): Shared<Arc<Daemon>>,
+    headers: axum::http::HeaderMap,
+    Path(name): Path<String>,
+    Json(b): Json<Value>,
+) -> Res {
+    let who = who_of(&headers);
+    let d2 = d.clone();
+    let v = d
+        .pool
+        .run(move || {
+            owner_only(&d2, &who, "ask MASON to change itself")?;
+            let text = b["text"].as_str().unwrap_or_default();
+            let (task, branch) = crate::improve::improve(&d2, &name, text).map_err(|(c, m)| fail(code(c), m))?;
+            crate::attention::intervene(&d2, "improve", Some(task), &who, text, "");
+            let access = d2.store.proposal(task.0).ok().flatten().map(|r| r.access).unwrap_or_default();
+            Ok(json!({"task": task.0, "branch": branch, "access": access, "channel": crate::improve::switched(&d2)}))
+        })
+        .await
+        .map_err(pool_err)??;
+    Ok(Json(v))
+}
+
 async fn task_detail(Shared(d): Shared<Arc<Daemon>>, Path(id): Path<u64>) -> Res {
     let d2 = d.clone();
     let v = d
@@ -538,6 +725,7 @@ async fn approve(
             if t.state == State::Proposed {
                 d2.emit(EventKind::Approved { task: TaskId(id) })
                     .map_err(store_err)?;
+                crate::proposals::note_decision(&d2, id, true, "");
                 Ok(())
             } else {
                 crate::jobs::conclude_approval(
@@ -581,6 +769,7 @@ async fn reject(
             if t.state == State::Proposed {
                 d2.emit(EventKind::Rejected { task: TaskId(id) })
                     .map_err(store_err)?;
+                crate::proposals::note_decision(&d2, id, false, &reason);
                 Ok(())
             } else if d2
                 .store
@@ -1990,6 +2179,11 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/update", get(update_status).post(update_start))
         .route("/update/ack", post(update_ack))
         .route("/tasks/{id}/refresh", post(refresh_tracker))
+        .route("/proposals", get(proposals_list).post(proposal_file))
+        .route("/proposals/poll", post(proposals_poll))
+        .route("/proposals/{task}", get(proposal_show))
+        .route("/proposals/{task}/{act}", post(proposal_act))
+        .route("/projects/{name}/improve", post(improve_start))
         .route("/debts", get(debts_list))
         .route("/debts/{id}/run", post(debt_run))
         .route("/quarantine", get(quarantine_list).post(quarantine_add))

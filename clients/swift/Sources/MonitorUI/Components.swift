@@ -501,3 +501,154 @@ struct ActionButtons: View {
         }
     }
 }
+
+/// A proposal or an improvement: who noticed it, how bad, where it goes, the proof, and (for an
+/// improvement without write access) what would go upstream. Edit is offered only while it waits.
+struct ProposalView: View {
+    @Environment(\.theme) var theme
+    @ObservedObject var model: MonitorModel
+    let row: TaskRow
+    let info: Mason_V1_ProposalInfo
+    let title: String
+    @State private var editing = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: theme.spacing) {
+            Text("\(info.source) · \(info.severity) · \(info.route == "pipeline" ? "MASON's own repository" : "this project")")
+                .font(theme.body(.semibold)).foregroundStyle(theme.text)
+                .accessibilityIdentifier("proposal:\(row.id):tag")
+            if info.filedBy != 0 {
+                Text("Filed by the agent of task #\(info.filedBy)").font(theme.small()).foregroundStyle(theme.muted)
+            }
+            if !info.evidence.isEmpty {
+                Text("Evidence").font(theme.body(.semibold)).foregroundStyle(theme.text)
+                Text(info.evidence).font(theme.mono()).foregroundStyle(theme.text).textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("proposal:\(row.id):evidence")
+            }
+            if info.status == "rejected" {
+                Text("Rejected\(info.rejectReason.isEmpty ? "" : ": \(info.rejectReason)")").font(theme.body()).foregroundStyle(theme.muted)
+            }
+            if !info.branch.isEmpty {
+                Text("Branch \(info.branch) (\(info.access) access)\(info.pr != 0 ? ", upstream pull request #\(info.pr) \(info.prState)" : "")")
+                    .font(theme.mono()).foregroundStyle(theme.muted).textSelection(.enabled)
+            }
+            if !info.channel.isEmpty {
+                Text("This machine follows the channel \(info.channel)").font(theme.small()).foregroundStyle(theme.muted)
+                    .accessibilityIdentifier("proposal:\(row.id):channel")
+            }
+            if model.canAct {
+                HStack(spacing: theme.spacing) {
+                    if row.allowedActions.contains("edit") {
+                        Button("Edit") { editing = true }.accessibilityIdentifier("proposal:\(row.id):edit")
+                    }
+                    if info.access == "fork" && info.pr == 0 {
+                        Button("Preview what would go upstream") { model.publish(row.id, confirm: false) }
+                            .accessibilityIdentifier("proposal:\(row.id):preview")
+                        if info.publishState == "previewed" {
+                            Button("Send it upstream") { model.publish(row.id, confirm: true) }
+                                .accessibilityIdentifier("proposal:\(row.id):publish")
+                        }
+                    }
+                }
+            }
+            if let p = model.publishPreview, info.access == "fork" {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Redacted version (\(p.redactions) removed), no client code attached").font(theme.small()).foregroundStyle(theme.muted)
+                    Text(p.title).font(theme.body(.semibold))
+                    Text(p.body).font(theme.body()).textSelection(.enabled)
+                    ForEach(p.files, id: \.self) { Text("changes \($0)").font(theme.mono()).foregroundStyle(theme.muted) }
+                    if let b = p.blocked { Text("Not publishable: \(b)").foregroundStyle(theme.attention) }
+                }
+                .accessibilityIdentifier("proposal:\(row.id):preview-text")
+            }
+        }
+        .padding(theme.spacingLarge)
+        .overlay(RoundedRectangle(cornerRadius: theme.radius).stroke(theme.border, lineWidth: 1))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("proposal:\(row.id)")
+        .sheet(isPresented: $editing) {
+            EditProposalSheet(model: model, task: row.id, title: title, text: info.text, evidence: info.evidence, isPresented: $editing)
+        }
+    }
+}
+
+/// Change a waiting proposal's title, text or evidence. Nothing else about it changes.
+struct EditProposalSheet: View {
+    @Environment(\.theme) var theme
+    @ObservedObject var model: MonitorModel
+    let task: UInt64
+    @State var title: String
+    @State var text: String
+    @State var evidence: String
+    @Binding var isPresented: Bool
+
+    init(model: MonitorModel, task: UInt64, title: String, text: String, evidence: String, isPresented: Binding<Bool>) {
+        self.model = model
+        self.task = task
+        _title = State(initialValue: title)
+        _text = State(initialValue: text)
+        _evidence = State(initialValue: evidence)
+        _isPresented = isPresented
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: theme.spacing) {
+            Text("Edit proposal #\(task)").font(theme.title())
+            TextField("Title", text: $title).textFieldStyle(.roundedBorder).accessibilityIdentifier("edit-proposal:title")
+            Text("Text").font(theme.small()).foregroundStyle(theme.muted)
+            TextEditor(text: $text).font(theme.body()).frame(minHeight: 100)
+                .overlay(RoundedRectangle(cornerRadius: theme.radius).stroke(theme.border))
+                .accessibilityIdentifier("edit-proposal:text")
+            Text("Evidence (a file and line, or the output seen)").font(theme.small()).foregroundStyle(theme.muted)
+            TextEditor(text: $evidence).font(theme.mono()).frame(minHeight: 80)
+                .overlay(RoundedRectangle(cornerRadius: theme.radius).stroke(theme.border))
+                .accessibilityIdentifier("edit-proposal:evidence")
+            HStack {
+                Spacer()
+                Button("Cancel") { isPresented = false }
+                Button("Save") {
+                    model.editProposal(task, title: title, body: text, evidence: evidence)
+                    isPresented = false
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(title.trimmingCharacters(in: .whitespaces).isEmpty)
+                .accessibilityIdentifier("edit-proposal:save")
+            }
+        }
+        .padding(theme.spacingLarge)
+        .frame(width: 520)
+    }
+}
+
+/// "Improve the pipeline": type what MASON should change about itself.
+struct ImproveSheet: View {
+    @Environment(\.theme) var theme
+    @ObservedObject var model: MonitorModel
+    @Binding var isPresented: Bool
+    @State private var text = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: theme.spacing) {
+            Text("Improve the pipeline").font(theme.title())
+            Text("MASON files this as a task on its own repository. Without write access the change goes to your fork; nothing goes upstream until you have read the redacted version and said so.")
+                .font(theme.small()).foregroundStyle(theme.muted).fixedSize(horizontal: false, vertical: true)
+            TextEditor(text: $text).font(theme.body()).frame(minHeight: 120)
+                .overlay(RoundedRectangle(cornerRadius: theme.radius).stroke(theme.border))
+                .accessibilityIdentifier("improve:text")
+            HStack {
+                Spacer()
+                Button("Cancel") { isPresented = false }
+                Button("Improve") {
+                    model.improve(project: model.selfProject, text: text)
+                    isPresented = false
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.selfProject.isEmpty)
+                .accessibilityIdentifier("improve:send")
+            }
+        }
+        .padding(theme.spacingLarge)
+        .frame(width: 480)
+    }
+}

@@ -1099,6 +1099,11 @@ fn settle_holds(
 }
 
 fn finish_agent(c: &Ctx, report: StepReport, dir: &Path) {
+    // What the agent noticed outside its task (Part 13): filed before the step's own result
+    // is recorded, so a proposal that blocks the task is already a task when it waits.
+    if !report.proposals.is_empty() {
+        crate::proposals::file_from_report(&c.d, c.task, c.project_id, &report.proposals, dir);
+    }
     finish_agent_inner(c, report, dir);
     // Asked, or the agent gave up: either way the session is free now.
     c.release_lease();
@@ -1523,6 +1528,13 @@ fn land_job(c: &Ctx) {
             return c.conclude(Outcome::Red, reason, Some(feedback))
         }
         crate::selfguard::Gate::Go => {}
+    }
+    // An improvement of MASON's own code without write access: the branch goes to the owner's
+    // fork, not to the repository (Part 13).
+    if let Ok(Some(row)) = c.d.store.proposal(c.task.0) {
+        if row.access == "fork" {
+            return crate::improve::land_on_fork(c, &row);
+        }
     }
     // Landing is batched per project: join the queue and wait for the verdict.
     let Some(verdict) = crate::landing::submit_and_wait(c) else {

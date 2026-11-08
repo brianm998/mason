@@ -657,6 +657,7 @@ pub fn parse_project(id: &str, text: &str) -> Result<ProjectCfg, String> {
         ));
     }
     let agent = parse_agent(id, &doc)?;
+    crate::proposals::parse_cfg(id, &doc)?;
     Ok(ProjectCfg {
         account: agent
             .account

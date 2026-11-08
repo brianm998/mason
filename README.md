@@ -29,6 +29,7 @@ Status: **pre-alpha**. What each stage note says it built (generated from `docs/
 - **s18**: Stage 18: Graph editor
 - **s19**: Stage 19: Plugins and extensions
 - **s20**: Stage 20: Second adapters
+- **s21**: Agents file proposals with duplicate rejection, required evidence and per-task and per-day caps; policy decides proposed or queued, and routing sends each to the project or to MASON. The owner approves, rejects and edits in the CLI and both clients, and the "Improve the pipeline" box runs on a branch (a fork's, without write access) with a redacted, confirm-only upstream publish.
 - **s40**: s40: Monitors answer and approve by clicking
 - **s41**: s41: The self-hold scan flags only what a task really weakens
 - **s42**: Task dependencies (s42): Task dependencies (GitHub issue #7)
