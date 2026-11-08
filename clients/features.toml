@@ -61,6 +61,11 @@ description = "Steps, activity, live log, plan, checks, tests, history, decision
 swift = "done"
 compose = "done"
 
+[feature.readable-plan]
+description = "A task's plan as a document: summary, numbered steps, files (copy each), acceptance criteria as a checklist, other keys; Copy plan (Markdown) and Copy JSON; no JSON on screen"
+swift = "done"
+compose = "done"
+
 [feature.task-dependencies]
 description = "Task detail says \"waiting for #N\" and \"blocks #M\", each a link to that task"
 swift = "done"

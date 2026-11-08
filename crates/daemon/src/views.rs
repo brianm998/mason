@@ -601,10 +601,12 @@ impl<'a> Ctx<'a> {
         };
         let plan =
             std::fs::read_to_string(self.d.cfg.task_dir(id).join("plan.json")).unwrap_or_default();
+        let plan_view = (!plan.is_empty()).then(|| crate::plan_view::parse_plan(&plan));
         Some(TaskDetailView {
             row: Some(self.row(t)),
             steps,
             plan,
+            plan_view,
             card: self.card(t),
             closing: self
                 .d

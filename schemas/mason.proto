@@ -533,6 +533,36 @@ message TaskDetailView {
   Approval approval = 17;
   // The numbers MASON reserved for the task's stage note, exit script and decision record.
   repeated NumberLine numbers = 18;
+  // The plan, parsed by the daemon so the clients do no JSON work. `plan` (3) stays for older clients.
+  PlanView plan_view = 19;
+}
+
+// A task's exploration plan as readable parts.
+message PlanView {
+  // The summary split on blank lines.
+  repeated string summary_paragraphs = 1;
+  // True when the approach was a numbered or bulleted list: `steps` are then list items.
+  // False: `steps` are the approach's paragraphs.
+  bool steps_are_list = 2;
+  repeated string steps = 3;
+  // Text before the first list marker of the approach.
+  string lead = 4;
+  repeated string files = 5;
+  repeated string criteria = 6;
+  repeated PlanExtra other = 7;
+  // The original JSON, for copying.
+  string raw = 8;
+  // Set when the plan could not be read as a plan: then only `raw` and this are filled.
+  string note = 9;
+  // Each step's own number as the agent wrote it ("0", "1", ...), one per step, when the approach was a
+  // numbered list. Empty for a bulleted list (show a bullet) and for paragraphs.
+  repeated string step_numbers = 10;
+}
+
+// An extra key of the plan: label and an already readable value.
+message PlanExtra {
+  string label = 1;
+  string value = 2;
 }
 
 // One number handed to a task. A cancelled task's numbers are shown released: never reused.

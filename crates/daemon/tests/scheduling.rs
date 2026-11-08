@@ -405,6 +405,72 @@ fn two_projects_share_the_pool_and_admission_follows_the_rank() {
     assert!(on("main").contains("add hello"));
 }
 
+#[test]
+fn releasing_several_held_tasks_at_once_never_runs_more_than_max_concurrent() {
+    let s = Scratch::new("test -f hello.txt", unique_script());
+    s.push_files(&[(".mason/mason.toml", DEF_LONG)], "long definition");
+    let d = s.start_with(|c| c.max_concurrent = 2);
+    // The blocker is queued but cannot start (no session), so the others are held behind it.
+    d.broker.set_limit("llm:claude", 0).unwrap();
+    let blocker = file_in(&d, "scratch", "blocker");
+    let pid = d.project_id_by_name("scratch").unwrap();
+    let held: Vec<TaskId> = (0..5)
+        .map(|i| {
+            let a = d
+                .emit(EventKind::TaskFiled {
+                    project: pid,
+                    title: format!("held {i}"),
+                    body: "x".into(),
+                    priority: Priority::Normal,
+                    trust: TrustSource::Owner,
+                    explored: false,
+                    proposed: false,
+                    blockers: vec![blocker],
+                    not_before: None,
+                })
+                .unwrap();
+            a.effects
+                .iter()
+                .find_map(|e| match e {
+                    Effect::TaskCreated { task } => Some(*task),
+                    _ => None,
+                })
+                .unwrap()
+        })
+        .collect();
+    std::thread::sleep(Duration::from_millis(300));
+    for t in &held {
+        assert!(matches!(task_of(&d, *t).activity, Activity::Held(_)));
+    }
+    // Land the blocker: all five are released in the same instant.
+    d.broker.set_limit("llm:claude", 2).unwrap();
+    d.admit();
+    let started = std::time::Instant::now();
+    let mut peak = 0;
+    loop {
+        let w = d.world().unwrap();
+        let running = w
+            .step_runs
+            .values()
+            .filter(|r| {
+                r.outcome.is_none()
+                    && matches!(r.step, State::Exploring | State::Developing | State::Review)
+            })
+            .count();
+        peak = peak.max(running);
+        assert!(
+            running <= 2,
+            "{running} agent steps run at once; max_concurrent is 2"
+        );
+        if held.iter().all(|t| w.tasks[t].state == State::Landed) {
+            break;
+        }
+        assert!(started.elapsed() < Duration::from_secs(150), "timed out");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(peak >= 1);
+}
+
 /// s56: two accounts with a session each. A full (here: zero-session) account
 /// holds back only its own project; the other account's task goes through.
 #[test]
