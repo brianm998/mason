@@ -36,6 +36,7 @@ Status: **pre-alpha**. What each stage note says it built (generated from `docs/
 - **s44**: `per_week` in `[self]` counts agent and outside tasks only; the owner's own filings and tasks cancelled before any step started are not counted, and `mason self` shows the split.
 - **s45**: every running step keeps a live progress record in the daemon (what it counts, done, total, last output, when it last moved), fed from its step host's output as it arrives, pushed to monitors as `StepProgress` (at most once a second for output alone) and carried by the views.
 - **s47**: double-clicking a non-zero count tile reveals its sidebar section and, if it holds exactly one task, opens that task. Single click is unchanged.
+- **s49**: both monitors and the CLI show each running step's live progress: a percentage only from a real count, the count and the typical range from history, the count alone otherwise, and always how long ago the step last moved, counting up on the monitor's clock between pushes and turning amber ("no output for 6 min") when it is quiet past its usual gap.
 - **s50**: The needs_attention tile reads "stuck" (label now sent by the daemon) and count tiles are sized to their label.
 - **s52**: `max_steps` counts only agent steps of tasks whose trust is not Owner, by the same predicate as `per_week`; `mason self` shows "N of M agent steps in H h (K of yours not counted)".
 - **s53**: Edits to the scripts the daemon runs when changes land (`scripts/gen-*.sh`, today `gen-status.sh`) are held for the owner like the other gates.
