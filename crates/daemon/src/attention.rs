@@ -254,6 +254,79 @@ pub fn resume(d: &Arc<Daemon>, project: &str, mode: &str) -> Result<usize, Strin
 
 // ---- alerts ----------------------------------------------------------------
 
+/// How long a lost step host keeps its alert.
+const HOST_LOSS_ALERT_MS: u64 = 3_600_000;
+/// Hosts of different tasks lost within this long of each other were lost together.
+const TOGETHER_MS: u64 = 5_000;
+
+/// Alerts for lost step hosts (oldest first in `rows`): one for each cluster of
+/// two or more tasks' hosts lost within five seconds of each other ("something
+/// killed them"), and one for a task whose host was lost again after its step
+/// was already re-run once. A single loss that the re-run answered is only in
+/// the task's history.
+pub fn host_loss_alerts(rows: &[mason_store::HostLossRow]) -> Vec<(String, String, String)> {
+    let mut rows: Vec<&mason_store::HostLossRow> = rows.iter().collect();
+    rows.sort_by(|a, b| (a.lost_at_ms, &a.host_id).cmp(&(b.lost_at_ms, &b.host_id)));
+    let mut clusters: Vec<Vec<&mason_store::HostLossRow>> = vec![];
+    for r in &rows {
+        match clusters.last_mut() {
+            Some(c)
+                if r.lost_at_ms
+                    .saturating_sub(c.last().map_or(0, |l| l.lost_at_ms))
+                    <= TOGETHER_MS =>
+            {
+                c.push(r)
+            }
+            _ => clusters.push(vec![r]),
+        }
+    }
+    let mut out = vec![];
+    let mut together = std::collections::HashSet::new();
+    for c in &clusters {
+        let mut tasks: Vec<u64> = c.iter().map(|r| r.task).collect();
+        tasks.sort_unstable();
+        tasks.dedup();
+        if tasks.len() < 2 {
+            continue;
+        }
+        together.extend(c.iter().map(|r| r.host_id.clone()));
+        let list = tasks
+            .iter()
+            .map(|t| format!("#{t}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let details = c
+            .iter()
+            .map(|r| format!("task #{} {}: {}", r.task, r.step, r.detail))
+            .collect::<Vec<_>>()
+            .join("; ");
+        out.push((
+            format!("hosts_lost_together:{}", c[0].host_id),
+            "host_lost".into(),
+            format!(
+                "{} step hosts were lost at the same time (tasks {list}): something killed them. {details}",
+                c.len()
+            ),
+        ));
+    }
+    for r in &rows {
+        let earlier = rows
+            .iter()
+            .any(|e| e.task == r.task && e.lost_at_ms < r.lost_at_ms && e.host_id != r.host_id);
+        if earlier && !together.contains(&r.host_id) {
+            out.push((
+                format!("host_lost:{}", r.host_id),
+                "host_lost".into(),
+                format!(
+                    "Task #{}: the step host of `{}` was lost again: {}",
+                    r.task, r.step, r.detail
+                ),
+            ));
+        }
+    }
+    out
+}
+
 /// The conditions that are true right now, as `(key, kind, text)`. An alert
 /// exists exactly as long as its condition does.
 pub fn alerts_now(d: &Daemon) -> Vec<(String, String, String)> {
@@ -291,6 +364,11 @@ pub fn alerts_now(d: &Daemon) -> Vec<(String, String, String)> {
         }
     }
     out.extend(d.landing().attention());
+    out.extend(host_loss_alerts(
+        &d.store
+            .host_losses_since(now_ms().saturating_sub(HOST_LOSS_ALERT_MS))
+            .unwrap_or_default(),
+    ));
     if let Some(text) = crate::update::Runtimes::new(&d.cfg.data_dir).alert() {
         out.push(("runtime".into(), "runtime".into(), text));
     }

@@ -203,3 +203,213 @@ pub fn read_journal(dir: &Path, offset: u64, max: usize) -> io::Result<Vec<u8>> 
     buf.truncate(n);
     Ok(buf)
 }
+
+// ---- Why a host was lost, and killing only what is verifiably ours ----
+
+fn ps_field(pid: u32, field: &str) -> Option<String> {
+    let out = std::process::Command::new("ps")
+        .args(["-o", &format!("{field}="), "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    let t = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if out.status.success() && !t.is_empty() {
+        Some(t)
+    } else {
+        None
+    }
+}
+
+/// The start time of a process as `ps` prints it (whole seconds). With the pid it
+/// identifies one process, even after the OS reuses the pid.
+pub fn proc_start(pid: u32) -> Option<String> {
+    ps_field(pid, "lstart")
+}
+
+/// The command line of a process, as `ps` prints it.
+pub fn proc_command(pid: u32) -> Option<String> {
+    ps_field(pid, "command")
+}
+
+/// The process group of a process.
+pub fn proc_pgid(pid: u32) -> Option<u32> {
+    ps_field(pid, "pgid")?.parse().ok()
+}
+
+/// `HH:MM:SS` local time of a time in ms since the epoch.
+pub fn clock(ms: u64) -> String {
+    let secs = ms / 1000;
+    for flag in ["-r", "-d@"] {
+        let arg = if flag == "-r" {
+            vec!["-r".to_string(), secs.to_string(), "+%H:%M:%S".to_string()]
+        } else {
+            vec![format!("-d@{secs}"), "+%H:%M:%S".to_string()]
+        };
+        if let Ok(o) = std::process::Command::new("date").args(&arg).output() {
+            let t = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if o.status.success() && t.len() == 8 {
+                return t;
+            }
+        }
+    }
+    let d = secs % 86400;
+    format!("{:02}:{:02}:{:02} UTC", d / 3600, d % 3600 / 60, d % 60)
+}
+
+/// What is known about a host that went away without an exit record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LostReport {
+    pub id: String,
+    pub host_pid: u32,
+    pub child_pid: u32,
+    /// The host process still exists (and is the one recorded).
+    pub host_alive: bool,
+    /// The child still exists (and is the one recorded).
+    pub child_alive: bool,
+    /// The signal the host's parent saw end it; None when unknown (a daemon that
+    /// did not start it, or restarted since).
+    pub signal: Option<i32>,
+    pub journal_len: u64,
+    /// The journal's last byte is not a newline: the child was cut off mid-line.
+    pub ends_mid_line: bool,
+    pub last_heartbeat_ms: Option<u64>,
+    /// When the host was seen gone (ms since the epoch).
+    pub at_ms: u64,
+}
+
+impl std::fmt::Display for LostReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "host pid {} {} at {}",
+            self.host_pid,
+            if self.host_alive {
+                "unreachable"
+            } else {
+                "gone"
+            },
+            clock(self.at_ms)
+        )?;
+        match self.signal {
+            Some(s) => write!(f, ", killed by signal {s}")?,
+            None => write!(f, ", signal unknown")?,
+        }
+        write!(f, ", no exit record")?;
+        write!(
+            f,
+            "; child pid {} {}",
+            self.child_pid,
+            if self.child_alive {
+                "still running"
+            } else {
+                "gone"
+            }
+        )?;
+        write!(f, "; journal {} bytes", self.journal_len)?;
+        if self.ends_mid_line {
+            write!(f, " (cut off mid-line)")?;
+        }
+        Ok(())
+    }
+}
+
+fn kv_matches(kv: &HashMap<String, String>, key: &str, pid: u32) -> bool {
+    match kv.get(key) {
+        Some(want) if !want.is_empty() => proc_start(pid).as_deref() == Some(want.as_str()),
+        _ => pid_alive(pid),
+    }
+}
+
+/// Read-only: gather what is known about a lost host in `dir`.
+pub fn lost_report(dir: &Path) -> io::Result<LostReport> {
+    let info = HostInfo::read(dir)?;
+    let kv = read_kv(&dir.join("host.kv")).unwrap_or_default();
+    let journal = fs::read(dir.join("journal")).unwrap_or_default();
+    let (signal, seen) =
+        crate::launcher::exit_signal(dir).map_or((None, None), |(s, at)| (s, Some(at)));
+    Ok(LostReport {
+        id: info.id.clone(),
+        host_pid: info.host_pid,
+        child_pid: info.child_pid,
+        host_alive: info.host_pid > 1 && kv_matches(&kv, "host_start", info.host_pid),
+        child_alive: info.child_pid > 1 && kv_matches(&kv, "child_start", info.child_pid),
+        signal,
+        journal_len: journal.len() as u64,
+        ends_mid_line: journal.last().is_some_and(|b| *b != b'\n'),
+        last_heartbeat_ms: fs::read_to_string(dir.join("hb"))
+            .ok()
+            .and_then(|s| s.trim().parse().ok()),
+        at_ms: seen.unwrap_or_else(now_ms),
+    })
+}
+
+/// What `reap_dir` did with one registry entry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Reaped {
+    pub id: String,
+    pub host_killed: bool,
+    pub child_group_killed: bool,
+}
+
+/// Kill the host and the child's process group recorded in `dir`, but only the
+/// ones that are verifiably still the processes the registry recorded: the start
+/// string matches, the host's command line names `step-host` and this directory,
+/// and the child leads its own process group. A pid that is 0 or 1, our own pid
+/// or our own process group is never signalled, and an entry without start
+/// strings (written by an older host) is left alone.
+pub fn reap_dir(dir: &Path) -> Reaped {
+    use nix::sys::signal::{kill, killpg, Signal};
+    use nix::unistd::{getpgrp, getpid, Pid};
+    let mut out = Reaped {
+        id: dir
+            .file_name()
+            .map_or_else(String::new, |n| n.to_string_lossy().into()),
+        host_killed: false,
+        child_group_killed: false,
+    };
+    let (Ok(info), Ok(kv)) = (HostInfo::read(dir), read_kv(&dir.join("host.kv"))) else {
+        return out;
+    };
+    let own = getpid().as_raw() as u32;
+    let own_pg = getpgrp().as_raw() as u32;
+    let start_ok = |key: &str, pid: u32| -> bool {
+        match kv.get(key) {
+            Some(want) if !want.is_empty() => proc_start(pid).as_deref() == Some(want.as_str()),
+            _ => false,
+        }
+    };
+    let child = info.child_pid;
+    if child > 1
+        && child != own
+        && child != own_pg
+        && start_ok("child_start", child)
+        && proc_pgid(child) == Some(child)
+    {
+        out.child_group_killed = killpg(Pid::from_raw(child as i32), Signal::SIGKILL).is_ok();
+    }
+    let host = info.host_pid;
+    let dir_s = dir.display().to_string();
+    if host > 1
+        && host != own
+        && host != own_pg
+        && start_ok("host_start", host)
+        && proc_command(host).is_some_and(|c| c.contains("step-host") && c.contains(&dir_s))
+    {
+        out.host_killed = kill(Pid::from_raw(host as i32), Signal::SIGKILL).is_ok();
+    }
+    out
+}
+
+/// `reap_dir` for every host under `root`.
+pub fn reap_verified(root: &Path) -> Vec<Reaped> {
+    let mut out = vec![];
+    if let Ok(entries) = fs::read_dir(root) {
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.join("host.kv").exists() {
+                out.push(reap_dir(&p));
+            }
+        }
+    }
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    out
+}
