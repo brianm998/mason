@@ -905,8 +905,13 @@ mod tests {
             })
             .unwrap();
         let w = u.window("five_hour").unwrap();
-        assert_eq!(w.state, WindowState::Ok);
+        assert_eq!(w.state, WindowState::Ok, "status allowed");
+        assert_eq!(w.id, "five_hour", "the window named in the event");
         assert!(w.resets_at.is_some());
+        assert!(
+            u.windows.iter().any(|x| x.id == "seven_day"),
+            "all windows kept"
+        );
         assert!(
             w.utilization.is_some(),
             "reported by the stream, so passed on"
