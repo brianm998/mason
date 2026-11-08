@@ -35,6 +35,7 @@ Status: **pre-alpha**. What each stage note says it built (generated from `docs/
 - **s43**: MASON reserves each task's stage note, exit script and decision numbers when it is claimed, tells the task in its prompt, sends back a task that uses another number, and builds the README status block itself.
 - **s44**: `per_week` in `[self]` counts agent and outside tasks only; the owner's own filings and tasks cancelled before any step started are not counted, and `mason self` shows the split.
 - **s45**: every running step keeps a live progress record in the daemon (what it counts, done, total, last output, when it last moved), fed from its step host's output as it arrives, pushed to monitors as `StepProgress` (at most once a second for output alone) and carried by the views.
+- **s52**: `max_steps` counts only agent steps of tasks whose trust is not Owner, by the same predicate as `per_week`; `mason self` shows "N of M agent steps in H h (K of yours not counted)".
 - **s55**: Fixed red CI on develop: s17.sh now expects the new hold wording and Compose Editor.kt captures maxWidth in the constraints scope.
 <!-- status:end -->
 
