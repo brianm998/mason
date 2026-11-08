@@ -66,6 +66,7 @@ claude_bin = "$bin/fake-claude"
 step_timeout_s = 600
 test_timeout_s = 600
 [self]
+holds = "owner"
 [agent_env]
 FAKE_CLAUDE_SCRIPT = "$root/script.json"
 TOML

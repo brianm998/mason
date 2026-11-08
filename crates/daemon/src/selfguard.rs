@@ -33,6 +33,8 @@ pub enum Gate {
     Go,
     /// The task left the step while it waited.
     Gone,
+    /// The change weakens a check: back to development, with what was found.
+    SentBack { reason: String, feedback: String },
 }
 
 /// The change a task's branch makes against what it lands on.
@@ -106,9 +108,15 @@ pub fn gate(c: &Ctx) -> Gate {
         return Gate::Go;
     };
     let d = &c.d;
+    let owner_decides = cfg.holds == crate::config::Holds::Owner;
     let ch = match change_of(&c.project, &c.branch) {
         Ok(x) => x,
         Err(e) => {
+            if !owner_decides {
+                // It cannot be judged here; landing reads the change again and its tests
+                // still have to pass.
+                return Gate::Go;
+            }
             // If it cannot be read it cannot be vouched for: it waits like a flagged change.
             return wait_for_owner(
                 c,
@@ -123,7 +131,39 @@ pub fn gate(c: &Ctx) -> Gate {
         return Gate::Go;
     }
     let cmd = format!("git -C {} diff {}", c.project.path.display(), ch.range);
-    wait_for_owner(c, &found.short(&cmd), &protect::diff_hash(&ch.diff))
+    let why = found.short(&cmd);
+    let hash = protect::diff_hash(&ch.diff);
+    if owner_decides {
+        return wait_for_owner(c, &why, &hash);
+    }
+    if !found.weakening.is_empty() {
+        let list: Vec<String> = found
+            .weakening
+            .iter()
+            .map(|f| match f.line {
+                Some(l) => format!("{} at {}:{l} ({})", f.kind, f.file, f.detail),
+                None => format!("{} in {} ({})", f.kind, f.file, f.detail),
+            })
+            .collect();
+        let _ = d.store.clear_hold(c.task.0);
+        return Gate::SentBack {
+            reason: format!("the change weakens a check: {}", list.join("; ")),
+            feedback: format!(
+                "The change weakens a check, which MASON does not land: {}.\n\nRestore each check, or \
+                 reach the same goal without weakening it. If a check was wrong, replace it with one \
+                 that is at least as strict and say why in the stage note. Do not skip, loosen or \
+                 remove a test, limit or gate to make something pass.",
+                list.join("; ")
+            ),
+        };
+    }
+    // Only protected files were touched and nothing was weakened: its tests and review have
+    // passed, so it lands. The record keeps what it touched (`mason self`), as approved by
+    // the review rather than by a person.
+    if d.store.put_hold(c.task.0, &hash, &why, now_ms()).is_ok() {
+        let _ = d.store.approve_hold(c.task.0, "review", now_ms());
+    }
+    Gate::Go
 }
 
 fn wait_for_owner(c: &Ctx, why: &str, hash: &str) -> Gate {
@@ -425,6 +465,7 @@ mod tests {
             max_steps: 40,
             period_h: 24,
             cooldown_h: 24,
+            holds: crate::config::Holds::Review,
         }
     }
 

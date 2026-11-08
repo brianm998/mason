@@ -19,6 +19,8 @@ Everything else lands freely.
 
 The list is compiled into the daemon. A change to the rules cannot take effect without passing the rules that are running, and the files that hold them are on the list. A change that adds a file claiming nothing is protected is held anyway, because the running rules do not read the candidate. You can **add** globs under `[self] protect = [...]` in your project file; no change can remove one.
 
+**By default nothing waits for a person (`[self] holds = "review"`).** Whether a change is valid is decided at test and review, where the context is, not by someone reconstructing it at the end. A change that weakens a check (a removed assertion, a raised limit, a skipped test, an `|| true` on a gate) goes back to development with the file, the line and what was found, like any red test, and fails after the step's rounds if it is not fixed. A change that only touches a protected file lands once its tests and review are green; `mason self` lists it as approved by `review`, with what it touched. Set `holds = "owner"` in `[self]` to get the Stage 17 behavior described below, where either waits for you.
+
 The task shows why it waits (`mason task show N`), the alert says so, and `mason self` lists what is held. Approve with `mason task approve N`, from your own identity: anyone else is refused and the attempt is recorded. **An approval is for that exact diff**: a different diff is held again.
 
 ## Limits

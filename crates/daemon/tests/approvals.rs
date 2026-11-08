@@ -45,7 +45,7 @@ fn serve(d: &Arc<mason_daemon::Daemon>) -> u16 {
 fn held_world() -> (W, TaskId) {
     let w = world_with(
         "mode = \"direct\"\nwindow = \"0s\"\n",
-        &|_| "[self]\n".to_string(),
+        &|_| "[self]\nholds = \"owner\"\n".to_string(),
         &[("crates/daemon/src/protect.rs", "// the rules\n")],
     );
     let t = w.task(

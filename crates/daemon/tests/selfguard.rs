@@ -14,7 +14,13 @@ use support::*;
 const MATRIX: &str = "#[test]\nfn pairs() {\n    assert_eq!(a, 1);\n    assert_eq!(b, 2);\n}\n";
 const WS: &str = "const RESUME_LIMIT: u64 = 2000;\nfn f() {}\n";
 
+/// The Stage 17 behavior: a flagged change waits for the owner.
 fn self_world(extra: &str) -> W {
+    review_world(&format!("holds = \"owner\"\n{extra}"))
+}
+
+/// The default: nobody waits; weakening goes back to development, the rest lands.
+fn review_world(extra: &str) -> W {
     let extra = extra.to_string();
     world_with(
         "mode = \"direct\"\nwindow = \"0s\"\n",
@@ -134,6 +140,50 @@ fn a_held_task_is_in_the_needs_you_section_and_its_tile() {
         "the tile counts it"
     );
     assert_eq!(header.attention, 1);
+}
+
+#[test]
+fn by_default_a_change_to_a_gate_lands_without_waiting_for_anyone() {
+    let w = review_world("");
+    let t = w.task(
+        "edit a verdict",
+        &[("crates/testing/src/verdict.rs", "// a different comment\n")],
+    );
+    wait_for("it to land", 60, || w.landed(t));
+    // The record keeps what it touched, as passed by the review, not by a person.
+    let hold = w.d.store.hold(t.0).unwrap().expect("recorded");
+    assert_eq!(hold.approved_by.as_deref(), Some("review"));
+    assert!(hold.reasons.contains("crates/testing/src/verdict.rs"));
+    // It never showed in Needs you.
+    let world = w.d.world().unwrap();
+    let ctx = mason_daemon::views::Ctx::new(&w.d, &world);
+    assert_eq!(ctx.header("").attention, 0);
+}
+
+#[test]
+fn by_default_a_change_that_weakens_a_check_goes_back_to_development_with_the_finding() {
+    let w = review_world("");
+    let t = w.task(
+        "tidy a test",
+        &[(
+            "crates/engine/tests/matrix.rs",
+            "#[test]\nfn pairs() {\n    assert_eq!(a, 1);\n}\n",
+        )],
+    );
+    wait_for("it to be sent back", 60, || w.sent_back(t).is_some());
+    let why = w.sent_back(t).unwrap();
+    assert!(
+        why.contains("weakens a check") && why.contains("crates/engine/tests/matrix.rs"),
+        "{why}"
+    );
+    assert!(!w.landed(t), "it did not land");
+    assert!(
+        w.d.store
+            .hold(t.0)
+            .unwrap()
+            .is_none_or(|h| h.approved_by.is_none()),
+        "and nobody was asked to approve it"
+    );
 }
 
 #[test]
