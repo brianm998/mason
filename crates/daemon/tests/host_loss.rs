@@ -374,6 +374,11 @@ fn a_daemon_killed_with_its_hosts_resumes_the_agent_step() {
     // The reboot: the daemon and every host go together.
     let _ = m.child.kill();
     let _ = m.child.wait();
+    // Hosts first: a live host that sees its child die writes an exit record,
+    // which is a crash of the CLI and not a lost host.
+    for e in std::fs::read_dir(&hosts).into_iter().flatten().flatten() {
+        kill_host_only(&e.path());
+    }
     kill_hosts(&s.data_dir);
     let mut m2 = s.masond(&[], &[]);
     s.wait_daemon(&mut m2);
