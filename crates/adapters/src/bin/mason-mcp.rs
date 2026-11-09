@@ -5,13 +5,19 @@
 //! Environment: `MASON_STEP_KIND` (explore|develop|review) picks the tools,
 //! `MASON_CONTRACT_SOCK` is where calls are forwarded. If the controller is
 //! briefly away (a daemon restart), calls retry for `MASON_BRIDGE_RETRY_SECS`
-//! (default 30) before failing, so the agent is not disturbed.
+//! (default 30) before failing, so the agent is not disturbed. A `run_check`
+//! whose controller goes away before answering is sent again once it is back
+//! (a check has no effect of its own): a self-update must not cost the agent its
+//! result.
 
 use mason_adapter_api::contract::{tool_spec, StepKind};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
+
+/// How long a `run_check` waits for a controller that went away mid-check.
+const CHECK_RECONNECT: Duration = Duration::from_secs(180);
 
 fn send(v: &Value) {
     let mut o = std::io::stdout().lock();
@@ -25,16 +31,21 @@ fn forward(
     args: &Value,
     retry: Duration,
 ) -> Result<(bool, String), String> {
-    let end = Instant::now() + retry;
+    let mut end = Instant::now() + retry;
     loop {
         match UnixStream::connect(sock) {
             Ok(mut s) => {
                 writeln!(s, "{}", json!({"tool": tool, "args": args}))
                     .map_err(|e| e.to_string())?;
                 let mut line = String::new();
-                BufReader::new(s)
-                    .read_line(&mut line)
-                    .map_err(|e| e.to_string())?;
+                let read = BufReader::new(s).read_line(&mut line);
+                if tool == "run_check" && (read.is_err() || line.is_empty()) {
+                    // The controller went away mid-check; wait for it to come back.
+                    end = Instant::now() + retry.max(CHECK_RECONNECT);
+                    std::thread::sleep(Duration::from_millis(200));
+                    continue;
+                }
+                read.map_err(|e| e.to_string())?;
                 let v: Value =
                     serde_json::from_str(&line).map_err(|e| format!("bad reply: {e}"))?;
                 return Ok((
