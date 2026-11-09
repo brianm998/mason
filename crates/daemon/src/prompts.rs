@@ -20,6 +20,9 @@ fn fenced(label: &str, trust: TrustSource, text: &str) -> String {
     )
 }
 
+/// One optional line in every default prompt: real counts, never guesses.
+pub const PROGRESS_LINE: &str = "Optionally call report_progress with real counts when you have them (\"3 of 7 files\", \"all 5 criteria\"); never guess a count.";
+
 pub fn explore_prompt(
     task: u64,
     title: &str,
@@ -31,7 +34,8 @@ pub fn explore_prompt(
         "You are exploring task #{task} in project {proj}.\n\n{task_text}\n\n\
          Read the repository (start with any CLAUDE.md or AGENTS.md) and work out exactly what to \
          build: which files, the approach, and checkable acceptance criteria. Do not change any \
-         files. When you know, call submit_plan.",
+         files. {progress} When you know, call submit_plan.",
+        progress = PROGRESS_LINE,
         proj = p.id,
         task_text = fenced(&format!("TASK #{task}: {title}"), trust, body),
     )
@@ -60,7 +64,8 @@ pub fn develop_prompt(
          Make the change and run the project's tests with the run_check tool (name: \"tests\"). When \
          the tests pass and everything is committed, call submit_change with the commit hash from \
          `git rev-parse HEAD`. The tree must be clean and the branch must have at least one commit \
-         beyond the base.",
+         beyond the base. {progress}",
+        progress = PROGRESS_LINE,
         proj = p.id,
         task_text = fenced(&format!("TASK #{task}: {title}"), trust, body),
     )
@@ -83,7 +88,8 @@ pub fn review_prompt(
          on; look at what it changes against the base branch (git diff {base}...HEAD) and read the code around \
          it. Do not change any files.\n\n{task_text}\n\nThe plan:\n{plan_text}\n\n\
          Check that it does what the task asks, that the acceptance criteria hold, and that it breaks nothing. \
-         Call submit_review with verdict \"approve\", or \"changes\" with at least one concrete finding.",
+         Call submit_review with verdict \"approve\", or \"changes\" with at least one concrete finding. {progress}",
+        progress = PROGRESS_LINE,
         proj = p.id,
         base = p.base_ref(),
         task_text = fenced(&format!("TASK #{task}: {title}"), trust, body),
@@ -193,6 +199,7 @@ mod tests {
             test_timeout: Duration::from_secs(1),
             max_test_rounds: None,
             test_reruns: 0,
+            task_cache: None,
             clarity_classifier: None,
             priority_jump: false,
             card_rewriter: None,

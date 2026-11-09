@@ -243,6 +243,9 @@ impl Ctx {
                     (_, true) => why,
                     (_, false) => format!("{reason}; {why}"),
                 };
+                // Hand the resources back before the task shows as failed, so nobody
+                // can see a failed task still holding its device.
+                self.release_lease();
                 self.emit(EventKind::StepFailed {
                     task: self.task,
                     reason,
@@ -1212,6 +1215,14 @@ fn agent_job(c: &Ctx) {
             )
         }));
     }
+    // The agent's counts, todo list and tool calls reach the live record as they happen.
+    c.d.progress_agent(c.run);
+    {
+        let (d, run) = (c.d.clone(), c.run);
+        contract.set_on_progress(Arc::new(move |r| d.progress_agent_report(run, r)));
+        let (d, run) = (c.d.clone(), c.run);
+        spec.on_agent_event = Some(Arc::new(move |ev| d.progress_agent_event(run, ev)));
+    }
     // Wired before any reattach, so a session found again sees what was already accepted.
     spec.accepted = contract.flag();
     spec.contract = Some(contract.clone());
@@ -1928,15 +1939,23 @@ pub fn cleanup(d: &Arc<Daemon>, task: TaskId, delete_branch: bool) {
     let Some(p) = d.project(t.project) else {
         return;
     };
-    let lock = d.repo_lock(t.project);
-    let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
-    let wt = p.worktree(&d.cfg, task.0);
-    git::remove_worktree(&p.path, &wt);
-    if delete_branch {
-        let b = p.branch(task.0);
-        if git::branch_exists(&p.path, &b) {
-            let _ = git::run(&p.path, &["branch", "-D", &b]);
+    let landed = t.state == State::Landed;
+    {
+        let lock = d.repo_lock(t.project);
+        let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let wt = p.worktree(&d.cfg, task.0);
+        git::remove_worktree(&p.path, &wt);
+        if delete_branch {
+            let b = p.branch(task.0);
+            if git::branch_exists(&p.path, &b) {
+                let _ = git::run(&p.path, &["branch", "-D", &b]);
+            }
         }
+    }
+    // The task's build directory goes only when it landed (the others can be revived), and on
+    // a thread of its own, outside the lock: deleting gigabytes takes a while (s78).
+    if landed {
+        crate::taskcache::remove_in_background(d, p, task.0);
     }
 }
 

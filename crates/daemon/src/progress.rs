@@ -30,6 +30,11 @@ pub const TICK: Duration = Duration::from_millis(250);
 /// A live record is written to the store at most this often.
 pub const PERSIST_MS: u64 = 3000;
 
+/// Where an agent step's tool-call counts are kept in `step_history`.
+fn agent_history_key(step: &str) -> String {
+    format!("{step} / tool calls")
+}
+
 /// A change of one run's record, as the sockets get it.
 #[derive(Clone, Debug)]
 pub struct Update {
@@ -509,6 +514,71 @@ impl Daemon {
         });
     }
 
+    /// The run is an agent's: mark its record and offer the typical number of
+    /// tool calls (history is kept apart, as "<step> / tool calls").
+    pub fn progress_agent(&self, run: StepRunId) {
+        let Some((project, step)) = self
+            .progress
+            .lock()
+            .get(&run.0)
+            .map(|l| (l.project, l.p.step.clone()))
+        else {
+            return;
+        };
+        let name = self
+            .project(project)
+            .map_or(String::new(), |c| c.id.clone());
+        let samples: Vec<u64> = self
+            .store
+            .history_samples(&name, &agent_history_key(&step))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(done, _)| done)
+            .collect();
+        let range = middle_half(&samples).filter(|(_, hi)| *hi > 0);
+        self.progress_report(run, |p, now| {
+            if p.agent && p.history.0.map(|(l, h, _)| (l, h)) == range {
+                return Change::None;
+            }
+            p.begin_agent(range, samples.len());
+            p.updated_at_ms = now;
+            Change::Urgent
+        });
+    }
+
+    /// The agent called `report_progress`: its counts and message go out at once.
+    pub fn progress_agent_report(
+        &self,
+        run: StepRunId,
+        r: &mason_adapter_api::contract::ProgressReport,
+    ) {
+        let message = mason_core::progress::one_line(&r.message);
+        let unit = mason_core::progress::one_line(&r.unit);
+        self.progress_report(run, |p, now| p.agent_report(&message, r.counts, &unit, now));
+    }
+
+    /// The agent made a tool call or changed its todo list.
+    pub fn progress_agent_event(&self, run: StepRunId, ev: &mason_adapter_api::AgentEvent) {
+        use mason_adapter_api::AgentEvent;
+        match ev {
+            AgentEvent::ToolCall { summary, .. } => {
+                let line = mason_core::progress::one_line(summary);
+                self.progress_report(run, |p, now| p.agent_tool(&line, now));
+            }
+            AgentEvent::Plan { items } => {
+                let todo: Vec<TodoItem> = items
+                    .iter()
+                    .map(|i| TodoItem {
+                        text: mason_core::progress::one_line(&i.text),
+                        status: i.status.as_str().to_string(),
+                    })
+                    .collect();
+                self.progress_report(run, |p, now| p.agent_plan(todo, now));
+            }
+            _ => {}
+        }
+    }
+
     /// The live record of a run, if it is in progress.
     pub fn progress_of(&self, run: u64) -> Option<Progress> {
         self.progress.lock().get(&run).map(|l| l.p.clone())
@@ -547,12 +617,17 @@ impl Daemon {
         let succeeded = outcome == Some(Some(StepOutcome::Succeeded));
         if succeeded {
             let project = self.project(l.project).map_or("", |c| c.id.as_str());
+            let (step, done) = if l.p.agent {
+                (agent_history_key(&l.p.step), l.p.tool_calls)
+            } else {
+                (l.p.step.clone(), l.p.done.value)
+            };
             let _ = self.store.record_history(
                 project,
                 l.task.0,
                 run.0,
-                &l.p.step,
-                l.p.done.value,
+                &step,
+                done,
                 l.p.output.lines,
                 l.p.max_gap_ms,
                 now,

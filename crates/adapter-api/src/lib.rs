@@ -77,7 +77,13 @@ pub struct SessionSpec {
     /// the host's id. The figures are cumulative per stream, so a journal read
     /// again from 0 rebuilds the same figure and the receiver replaces, never adds.
     pub on_tokens: Option<TokensSink>,
+    /// Told of the agent's tool calls and todo lists as they arrive, before the
+    /// turn ends (the runner calls it; it never holds a daemon type).
+    pub on_agent_event: Option<AgentEventSink>,
 }
+
+/// Receives the agent events that say what it is doing (`ToolCall`, `Plan`).
+pub type AgentEventSink = std::sync::Arc<dyn Fn(&AgentEvent) + Send + Sync>;
 
 /// Receives `(host id, cumulative figures)` while a session runs.
 pub type TokensSink = std::sync::Arc<dyn Fn(&str, &TokenReport) + Send + Sync>;
@@ -106,6 +112,7 @@ impl SessionSpec {
             progress: None,
             on_model: None,
             on_tokens: None,
+            on_agent_event: None,
         }
     }
 }
@@ -148,6 +155,10 @@ pub enum AgentEvent {
         name: String,
         summary: String,
     },
+    /// The agent's own todo list, whole, each time it changes.
+    Plan {
+        items: Vec<PlanItem>,
+    },
     /// Final figures for this invocation, as reported by the stream.
     Tokens(TokenReport),
     /// The model the CLI says it is really using (Claude's `system/init`).
@@ -163,12 +174,38 @@ pub enum AgentEvent {
     Finished(Outcome),
 }
 
+/// One item of an agent's todo list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlanItem {
+    pub text: String,
+    pub status: PlanStatus,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlanStatus {
+    Pending,
+    Doing,
+    Done,
+}
+
+impl PlanStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PlanStatus::Pending => "pending",
+            PlanStatus::Doing => "doing",
+            PlanStatus::Done => "done",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AgentCaps {
     pub resume: bool,
     pub mcp: bool,
     pub effort_levels: Vec<String>,
     pub usage_reports: bool,
+    /// The adapter emits [`AgentEvent::Plan`] when the CLI exposes a todo list.
+    pub plan_reports: bool,
 }
 
 #[derive(Debug)]

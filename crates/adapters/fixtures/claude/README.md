@@ -47,3 +47,11 @@ file itself was written by hand to that shape, not copied from the capture** (th
 capture's text, ids and per-message cache split were not kept; the split of cache figures
 between the two messages, ids, session id and text here are made up). Treat it as a
 model of the stream, like the `synthetic_*` files, not a capture.
+
+## Todo list fixture (s71)
+
+`synthetic_todo_write.jsonl` is hand-written, **not a capture** (no `claude` CLI was
+installed where it was made). It models a `TodoWrite` tool call with seven items (three
+`completed`, one `in_progress`, three `pending`; each `{content, status, activeForm}`),
+then an `Edit` and a `Bash` call. The shape follows Claude Code's documented `TodoWrite`
+input. It should be replaced by a real capture when one can be made.
