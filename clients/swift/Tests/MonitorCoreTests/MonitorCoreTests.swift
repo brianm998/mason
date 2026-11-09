@@ -1009,4 +1009,31 @@ final class MonitorCoreTests: XCTestCase {
         XCTAssertFalse(t.contains("silent"))
         XCTAssertTrue(c.progressTexts(now: 1_400_000).contains("silent"))
     }
+
+    // MARK: live tokens (s76)
+
+    func testTokensShowCompactlyAndNothingWhenNoneWereReported() {
+        var c = cell(done: 5)
+        XCTAssertEqual(c.tokensCompact, "", "no tokens: nothing shown, never zero")
+        XCTAssertFalse(c.progressTexts(now: 1_000_000).contains { $0.hasPrefix("tokens") || $0.hasPrefix("input") })
+        var t = Mason_V1_TokenLine()
+        t.hasInput_p = true; t.input = 4
+        t.hasOutput_p = true; t.output = 988
+        t.hasCacheRead_p = true; t.cacheRead = 7664
+        t.hasCacheWrite_p = true; t.cacheWrite = 4503
+        c.tokens = t
+        XCTAssertEqual(c.tokensCompact, "12.2k in, 988 out")
+        let texts = c.progressTexts(now: 1_000_000)
+        XCTAssertTrue(texts.contains("tokens 12.2k in, 988 out"))
+        XCTAssertTrue(texts.contains("cache read 7,664"))
+        XCTAssertFalse(texts.contains { $0.hasPrefix("cost") }, "cost only when reported")
+        t.hasCost_p = true; t.costUsd = 0.0123
+        c.tokens = t
+        XCTAssertTrue(c.progressTexts(now: 1_000_000).contains("cost $0.0123"))
+        XCTAssertEqual(Format.compactCount(999_949), "999.9k")
+        XCTAssertEqual(Format.compactCount(1_234_567), "1.2M")
+        var out = Mason_V1_TokenLine()
+        out.hasOutput_p = true; out.output = 5
+        XCTAssertEqual(Format.tokensCompact(out), "5 out")
+    }
 }

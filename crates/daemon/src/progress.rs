@@ -16,7 +16,9 @@ use mason_core::progress::{
     middle_half, stale_after, Change, Progress, Push, Source, SubProgress, Throttle, TodoItem,
 };
 use mason_core::*;
-use mason_protocol::{CellState, ProgressCell, ProgressSource, ProgressSub, TodoItem as PbTodo};
+use mason_protocol::{
+    CellState, ProgressCell, ProgressSource, ProgressSub, TodoItem as PbTodo, TokenLine,
+};
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
@@ -112,6 +114,19 @@ pub fn cell_of(p: &Progress, state: CellState, label: &str) -> ProgressCell {
         total_low: n(p.total_low),
         history_samples: p.history_samples,
         stale_after_ms: p.stale_after_ms,
+        tokens: p.token_total().map(|t| TokenLine {
+            has_input: t.input.is_some(),
+            input: t.input.unwrap_or(0),
+            has_output: t.output.is_some(),
+            output: t.output.unwrap_or(0),
+            has_cache_read: t.cache_read.is_some(),
+            cache_read: t.cache_read.unwrap_or(0),
+            has_cache_write: t.cache_write.is_some(),
+            cache_write: t.cache_write.unwrap_or(0),
+            has_cost: t.cost_nano_usd.is_some(),
+            cost_usd: t.cost_nano_usd.unwrap_or(0) as f64 / 1e9,
+            ..Default::default()
+        }),
     }
 }
 
@@ -221,6 +236,12 @@ impl Daemon {
         if let Some(u) = update {
             self.progress_publish(u);
         }
+    }
+
+    /// The tokens a run's LLM session (output stream `stream`) has used so far.
+    /// Cumulative per stream; pushed with the output throttle.
+    pub fn progress_tokens(&self, run: StepRunId, stream: &str, t: mason_core::progress::Tokens) {
+        self.progress_report(run, |p, now| p.report_tokens(stream, t, now));
     }
 
     /// A step run that is resumed after a restart: count what its log already

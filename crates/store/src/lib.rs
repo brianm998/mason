@@ -1781,8 +1781,8 @@ impl Store {
             let tx = c.unchecked_transaction()?;
             tx.execute(
                 "INSERT OR REPLACE INTO step_progress(run, task, step, unit, done, done_src, total, \
-                 total_src, message, lines, bytes, marks, last_output_ms, started_ms, updated_at, max_gap_ms) \
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
+                 total_src, message, lines, bytes, marks, last_output_ms, started_ms, updated_at, max_gap_ms, tokens) \
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
                 params![
                     p.run as i64,
                     task as i64,
@@ -1799,7 +1799,8 @@ impl Store {
                     p.output.last_output_ms as i64,
                     p.started_ms as i64,
                     p.updated_at_ms as i64,
-                    p.max_gap_ms as i64
+                    p.max_gap_ms as i64,
+                    tokens_text(&p.tokens)
                 ],
             )?;
             tx.execute(
@@ -1834,7 +1835,7 @@ impl Store {
         self.read(|c| {
             let mut st = c.prepare(
                 "SELECT task, run, step, unit, done, done_src, total, total_src, message, lines, bytes, \
-                 marks, last_output_ms, started_ms, updated_at, max_gap_ms FROM step_progress ORDER BY run",
+                 marks, last_output_ms, started_ms, updated_at, max_gap_ms, tokens FROM step_progress ORDER BY run",
             )?;
             let mut out: Vec<(u64, Progress)> = vec![];
             let rows = st.query_map([], |r| {
@@ -1864,6 +1865,7 @@ impl Store {
                         updated_at_ms: g(14)?,
                         subs: vec![],
                         max_gap_ms: g(15)?,
+                        tokens: tokens_of(&r.get::<_, String>(16)?),
                         ..Progress::default()
                     },
                 ))
@@ -2668,6 +2670,45 @@ fn marks_text(m: &std::collections::BTreeMap<String, u64>) -> String {
         .map(|(k, v)| format!("{k}={v}"))
         .collect::<Vec<_>>()
         .join(";")
+}
+
+fn tokens_text(m: &std::collections::BTreeMap<String, mason_core::progress::Tokens>) -> String {
+    let f = |v: Option<u64>| v.map(|n| n.to_string()).unwrap_or_default();
+    m.iter()
+        .map(|(k, t)| {
+            format!(
+                "{k}={},{},{},{},{}",
+                f(t.input),
+                f(t.output),
+                f(t.cache_read),
+                f(t.cache_write),
+                f(t.cost_nano_usd)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+fn tokens_of(t: &str) -> std::collections::BTreeMap<String, mason_core::progress::Tokens> {
+    t.split(';')
+        .filter_map(|p| {
+            let (k, v) = p.rsplit_once('=')?;
+            let f: Vec<Option<u64>> = v.split(',').map(|x| x.parse().ok()).collect();
+            if f.len() != 5 {
+                return None;
+            }
+            Some((
+                k.to_string(),
+                mason_core::progress::Tokens {
+                    input: f[0],
+                    output: f[1],
+                    cache_read: f[2],
+                    cache_write: f[3],
+                    cost_nano_usd: f[4],
+                },
+            ))
+        })
+        .collect()
 }
 
 fn marks_of(t: &str) -> std::collections::BTreeMap<String, u64> {

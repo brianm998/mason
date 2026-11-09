@@ -162,6 +162,11 @@ impl ClaudeAdapter {
             "--verbose",
             "--output-format",
             "stream-json",
+            // Each message then ends with a `message_delta` holding its true output
+            // figure; without it the stream's output count stays far too low until
+            // the final `result`. The extra `stream_event` lines are kept out of the
+            // output counts (`mason_core::progress`).
+            "--include-partial-messages",
             "--strict-mcp-config",
         ]
         .map(String::from)
@@ -406,6 +411,7 @@ pub(crate) fn launch_process(
     }
 
     let accepted = spec.accepted.clone();
+    let on_tokens = spec.on_tokens.clone();
     {
         let (sid, cancelled, timed_out, done) = (
             session_id.clone(),
@@ -417,7 +423,11 @@ pub(crate) fn launch_process(
             let mut st = ParseState::new(dialect);
             for line in BufReader::new(stdout).lines() {
                 let Ok(line) = line else { break };
-                for ev in parse_line(&line, &mut st) {
+                let evs = parse_line(&line, &mut st);
+                if let (Some(f), Some(t)) = (&on_tokens, st.take_live()) {
+                    f("", &t);
+                }
+                for ev in evs {
                     if let Some(id) = &st.session_id {
                         *sid.lock().unwrap_or_else(|e| e.into_inner()) = Some(id.clone());
                     }
@@ -523,6 +533,88 @@ pub struct ParseState {
     pub usage: Option<UsageSnapshot>,
     /// From the stream's own `apiKeySource`: a key means pay-per-token.
     pub billing: BillingKind,
+    /// Figures of the messages this invocation has finished.
+    closed: Tally,
+    /// The message in progress: `message_start`, replaced by its `message_delta`.
+    open: Option<Tally>,
+    /// The invocation's cumulative figures when they last changed, taken by
+    /// whoever reports them live ([`ParseState::take_live`]).
+    live: Option<TokenReport>,
+    last_live: Option<TokenReport>,
+}
+
+/// input, output, cache read, cache write.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Tally([u64; 4]);
+
+impl Tally {
+    fn of(u: &Value) -> Tally {
+        Tally([
+            num(u, "input_tokens").unwrap_or(0),
+            num(u, "output_tokens").unwrap_or(0),
+            num(u, "cache_read_input_tokens").unwrap_or(0),
+            num(u, "cache_creation_input_tokens").unwrap_or(0),
+        ])
+    }
+    /// `self` with the figures `u` states replacing the ones it had.
+    fn replaced_by(self, u: &Value) -> Tally {
+        let mut t = self;
+        for (i, k) in [
+            "input_tokens",
+            "output_tokens",
+            "cache_read_input_tokens",
+            "cache_creation_input_tokens",
+        ]
+        .iter()
+        .enumerate()
+        {
+            if let Some(n) = num(u, k) {
+                t.0[i] = n;
+            }
+        }
+        t
+    }
+    fn plus(self, o: Tally) -> Tally {
+        let mut t = self;
+        for i in 0..4 {
+            t.0[i] += o.0[i];
+        }
+        t
+    }
+}
+
+impl ParseState {
+    fn publish(&mut self, cost_usd: Option<f64>) {
+        let t = self.closed.plus(self.open.unwrap_or_default());
+        let r = TokenReport {
+            input: Some(t.0[0]),
+            output: Some(t.0[1]),
+            cache_read: Some(t.0[2]),
+            cache_create: Some(t.0[3]),
+            // As reported: the daemon offers it only for an api account (decision 0043).
+            cost_usd,
+        };
+        if self.last_live.as_ref() != Some(&r) {
+            self.last_live = Some(r.clone());
+            self.live = Some(r);
+        }
+    }
+
+    /// The cumulative figures if they changed since the last call.
+    pub fn take_live(&mut self) -> Option<TokenReport> {
+        self.live.take()
+    }
+
+    /// Codex: a finished turn's figures are added to the invocation's.
+    pub(crate) fn add_turn(&mut self, r: &TokenReport) {
+        self.closed = self.closed.plus(Tally([
+            r.input.unwrap_or(0),
+            r.output.unwrap_or(0),
+            r.cache_read.unwrap_or(0),
+            r.cache_create.unwrap_or(0),
+        ]));
+        self.publish(None);
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -706,6 +798,23 @@ pub fn parse_line(line: &str, st: &mut ParseState) -> Vec<AgentEvent> {
                 }
             }
         }
+        (Some("stream_event"), _) => {
+            let e = &v["event"];
+            match e["type"].as_str() {
+                Some("message_start") => {
+                    let open = st.open.take().unwrap_or_default();
+                    st.closed = st.closed.plus(open);
+                    st.open = Some(Tally::of(&e["message"]["usage"]));
+                    st.publish(None);
+                }
+                Some("message_delta") => {
+                    let cur = st.open.unwrap_or_default();
+                    st.open = Some(cur.replaced_by(&e["usage"]));
+                    st.publish(None);
+                }
+                _ => {}
+            }
+        }
         (Some("rate_limit_event"), _) => {
             let mut snap = usage_from_limit_info(&v["rate_limit_info"]);
             snap.session_id = v["session_id"]
@@ -724,6 +833,10 @@ pub fn parse_line(line: &str, st: &mut ParseState) -> Vec<AgentEvent> {
                 cache_create: num(u, "cache_creation_input_tokens"),
                 cost_usd: v["total_cost_usd"].as_f64(),
             }));
+            // The final figures replace the running tally.
+            st.closed = Tally::of(u);
+            st.open = None;
+            st.publish(v["total_cost_usd"].as_f64());
             if st.session_id.is_none() {
                 st.session_id = v["session_id"].as_str().map(String::from);
             }
@@ -889,6 +1002,79 @@ mod tests {
             "no submission"
         );
         assert_eq!(final_outcome(&st, true, Some(0), ""), Outcome::Accepted);
+    }
+
+    #[test]
+    fn partial_messages_give_live_figures_that_end_at_the_result() {
+        let mut st = ParseState::default();
+        let mut lives = vec![];
+        let mut result = None;
+        for l in fixture("real_partial_messages.jsonl").lines() {
+            for e in parse_line(l, &mut st) {
+                if let AgentEvent::Tokens(t) = e {
+                    result = Some(t);
+                }
+            }
+            if let Some(t) = st.take_live() {
+                lives.push(t);
+            }
+        }
+        let result = result.unwrap();
+        let last = lives.last().unwrap();
+        assert_eq!(
+            (last.input, last.output, last.cache_read, last.cache_create),
+            (
+                result.input,
+                result.output,
+                result.cache_read,
+                result.cache_create
+            )
+        );
+        assert_eq!(result.output, Some(988));
+        // After message 1 is over (its delta) the figure is that message's, not 16.
+        assert!(lives.iter().any(|t| t.output == Some(137)), "{lives:?}");
+        // After message 2's delta: 137 + 851, exactly the result's output.
+        assert!(lives.iter().any(|t| t.output == Some(988)));
+        // Never goes down.
+        assert!(lives.windows(2).all(|w| w[1].output >= w[0].output));
+    }
+
+    #[test]
+    fn a_repeated_assistant_event_does_not_change_the_tally() {
+        let mut st = ParseState::default();
+        let lines: Vec<String> = fixture("real_partial_messages.jsonl")
+            .lines()
+            .map(String::from)
+            .collect();
+        let before_assistant = lines
+            .iter()
+            .position(|l| l.contains("\"type\":\"assistant\""))
+            .unwrap();
+        for l in &lines[..before_assistant] {
+            parse_line(l, &mut st);
+        }
+        st.take_live();
+        for l in lines
+            .iter()
+            .filter(|l| l.contains("\"type\":\"assistant\""))
+        {
+            parse_line(l, &mut st);
+            parse_line(l, &mut st);
+        }
+        assert_eq!(st.take_live(), None, "assistant events carry no figure");
+    }
+
+    #[test]
+    fn a_plain_stream_has_a_live_figure_only_at_the_result() {
+        let mut st = ParseState::default();
+        let mut n = 0;
+        for l in fixture("real_plain.jsonl").lines() {
+            parse_line(l, &mut st);
+            if st.take_live().is_some() {
+                n += 1;
+            }
+        }
+        assert_eq!(n, 1);
     }
 
     #[test]

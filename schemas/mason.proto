@@ -344,6 +344,10 @@ message ProgressCell {
   uint32 history_samples = 19;
   // The quiet time after which this step is shown as silent: from past runs, else 300 s.
   uint64 stale_after_ms = 20;
+  // Tokens the step run's LLM sessions have used so far, summed over its resumed and
+  // retried invocations. Absent: nothing reported yet (never zero). Only `has_*` figures
+  // were reported; cost is present only for an api account.
+  TokenLine tokens = 21;
 }
 
 // One count inside a step.

@@ -68,6 +68,64 @@ pub struct Output {
     pub last_output_ms: u64,
 }
 
+/// The tokens one LLM session has used so far. A figure the stream did not report
+/// is `None`, never 0.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct Tokens {
+    pub input: Option<u64>,
+    pub output: Option<u64>,
+    pub cache_read: Option<u64>,
+    pub cache_write: Option<u64>,
+    /// Cost in billionths of a dollar (kept whole so a record compares exactly).
+    pub cost_nano_usd: Option<u64>,
+}
+
+impl Tokens {
+    /// The sum of two, a figure staying absent only if neither has it.
+    pub fn plus(&self, o: &Tokens) -> Tokens {
+        fn add(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+            match (a, b) {
+                (None, None) => None,
+                (a, b) => Some(a.unwrap_or(0) + b.unwrap_or(0)),
+            }
+        }
+        Tokens {
+            input: add(self.input, o.input),
+            output: add(self.output, o.output),
+            cache_read: add(self.cache_read, o.cache_read),
+            cache_write: add(self.cache_write, o.cache_write),
+            cost_nano_usd: add(self.cost_nano_usd, o.cost_nano_usd),
+        }
+    }
+    pub fn cost_nano(usd: f64) -> u64 {
+        (usd.max(0.0) * 1e9).round() as u64
+    }
+}
+
+/// How the start of a line decides whether it is counted: Claude Code's
+/// `--include-partial-messages` writes one `stream_event` line per delta, and those
+/// are not output the step produced.
+const SKIPPED_LINE: &[u8] = b"{\"type\":\"stream_event\"";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+enum Kind {
+    /// Not enough of the line yet to say.
+    #[default]
+    Undecided,
+    Counted,
+    Skipped,
+}
+
+/// Where one stream's scan of whole lines is.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct LineScan {
+    /// Absolute offset the scan has reached.
+    pos: u64,
+    kind: Kind,
+    /// Bytes of the unfinished line that count but wait for its kind.
+    pending: u64,
+}
+
 /// One of several counts in a step (a suite, a landing phase).
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct SubProgress {
@@ -119,6 +177,11 @@ pub struct Progress {
     /// Per output stream (a step host's journal), how far into it the bytes are
     /// already counted. A step can have several (an agent's resumed sessions).
     pub marks: std::collections::BTreeMap<String, u64>,
+    /// Per output stream, the tokens its LLM session has used (cumulative, so a
+    /// journal read again replaces and never adds). One step run's figure is their sum.
+    pub tokens: std::collections::BTreeMap<String, Tokens>,
+    /// Per output stream, the line scan (not stored).
+    pub scans: std::collections::BTreeMap<String, LineScan>,
 }
 
 /// A change of the record, and whether a monitor should hear of it at once.
@@ -145,17 +208,26 @@ impl Progress {
     /// Output observed from absolute `offset` of the stream `stream`. Only the
     /// bytes beyond what was already counted are counted, so a journal that is
     /// read again (after a restart, or from disk then live) adds nothing twice.
+    ///
+    /// Lines are judged whole: a `stream_event` line is not counted in `lines`,
+    /// `bytes`, `done` or the log, however the chunks cut it. `marks` still
+    /// advances by the real offsets. Bytes already counted are still scanned (in
+    /// order), so a line cut by the mark is judged by its start.
     pub fn output(&mut self, stream: &str, offset: u64, bytes: &[u8], at_ms: u64) -> Change {
         let end = offset + bytes.len() as u64;
         let high = self.marks.get(stream).copied().unwrap_or(0);
-        if end <= high || bytes.is_empty() {
+        if bytes.is_empty() {
             return Change::None;
         }
-        let skip = high.saturating_sub(offset) as usize;
-        // A gap (offset beyond the high water) is counted from where it starts.
-        let fresh = &bytes[skip.min(bytes.len())..];
-        self.output.lines += fresh.iter().filter(|b| **b == b'\n').count() as u64;
-        self.output.bytes += fresh.len() as u64;
+        let (lines0, bytes0) = (self.output.lines, self.output.bytes);
+        self.scan(stream, offset, bytes, high);
+        if end <= high {
+            return Change::None;
+        }
+        self.marks.insert(stream.to_string(), end);
+        if (self.output.lines, self.output.bytes) == (lines0, bytes0) {
+            return Change::None;
+        }
         let since = if self.output.last_output_ms > 0 {
             self.output.last_output_ms
         } else {
@@ -163,8 +235,6 @@ impl Progress {
         };
         self.max_gap_ms = self.max_gap_ms.max(at_ms.saturating_sub(since));
         self.output.last_output_ms = at_ms;
-        self.take_lines(stream, fresh);
-        self.marks.insert(stream.to_string(), end);
         self.updated_at_ms = at_ms;
         // Without a reported figure the count of lines is the count.
         if !matches!(self.done.source, Source::Reported) {
@@ -174,23 +244,100 @@ impl Progress {
         Change::Output
     }
 
-    /// Cut `fresh` into whole lines: the unfinished end waits for the next bytes.
-    fn take_lines(&mut self, stream: &str, fresh: &[u8]) {
-        let buf = self.partial.entry(stream.to_string()).or_default();
-        buf.extend_from_slice(fresh);
-        while let Some(i) = buf.iter().position(|b| *b == b'\n') {
-            let line: Vec<u8> = buf.drain(..=i).collect();
-            let text = String::from_utf8_lossy(&line[..line.len() - 1])
-                .trim_end_matches('\r')
-                .to_string();
-            self.pending_log.push(text);
-        }
-        // A line that never ends is cut, not grown without limit.
-        if buf.len() > 8192 {
+    /// Cut the chunk into whole lines and count those that are output.
+    fn scan(&mut self, stream: &str, offset: u64, bytes: &[u8], high: u64) {
+        let mut sc = self.scans.remove(stream).unwrap_or_default();
+        let mut buf = self.partial.remove(stream).unwrap_or_default();
+        let mut i = 0usize;
+        if offset > sc.pos {
+            // A gap: the line is judged from here, as counted.
+            sc = LineScan {
+                pos: offset,
+                kind: Kind::Counted,
+                pending: 0,
+            };
             buf.clear();
+        } else {
+            i = (sc.pos - offset) as usize;
         }
+        while i < bytes.len() {
+            let nl = bytes[i..].iter().position(|b| *b == b'\n');
+            let stop = nl.map_or(bytes.len(), |n| i + n + 1);
+            let seg = &bytes[i..stop];
+            let seg_abs = offset + i as u64;
+            sc.pending += (seg_abs + seg.len() as u64).saturating_sub(seg_abs.max(high));
+            if sc.kind != Kind::Skipped {
+                buf.extend_from_slice(seg);
+            }
+            if sc.kind == Kind::Undecided {
+                if buf.starts_with(SKIPPED_LINE) {
+                    sc.kind = Kind::Skipped;
+                    buf.clear();
+                } else if nl.is_some()
+                    || buf.len() >= SKIPPED_LINE.len()
+                    || !SKIPPED_LINE.starts_with(&buf)
+                {
+                    sc.kind = Kind::Counted;
+                }
+            }
+            match sc.kind {
+                Kind::Counted => {
+                    self.output.bytes += std::mem::take(&mut sc.pending);
+                }
+                Kind::Skipped => sc.pending = 0,
+                Kind::Undecided => {}
+            }
+            if nl.is_some() {
+                if sc.kind == Kind::Counted && seg_abs + seg.len() as u64 > high {
+                    self.output.lines += 1;
+                    let text = String::from_utf8_lossy(&buf[..buf.len() - 1])
+                        .trim_end_matches('\r')
+                        .to_string();
+                    self.pending_log.push(text);
+                }
+                buf.clear();
+                sc.kind = Kind::Undecided;
+            } else if buf.len() > 8192 {
+                // A line that never ends is cut, not grown without limit.
+                buf.clear();
+            }
+            i = stop;
+        }
+        sc.pos = sc.pos.max(offset + bytes.len() as u64);
         let extra = self.pending_log.len().saturating_sub(LOG_KEEP);
         self.pending_log.drain(..extra);
+        self.scans.insert(stream.to_string(), sc);
+        self.partial.insert(stream.to_string(), buf);
+    }
+
+    /// The tokens stream `stream`'s session has used so far (cumulative: this
+    /// replaces what the stream had). Output-only for pushing purposes.
+    ///
+    /// A stream's figures only grow, so a journal replayed after a restart, whose
+    /// tally climbs again from nothing, never shows a figure lower than the one
+    /// already known: each figure keeps the larger of the two.
+    pub fn report_tokens(&mut self, stream: &str, t: Tokens, at_ms: u64) -> Change {
+        let t = match self.tokens.get(stream) {
+            Some(old) => Tokens {
+                input: t.input.max(old.input),
+                output: t.output.max(old.output),
+                cache_read: t.cache_read.max(old.cache_read),
+                cache_write: t.cache_write.max(old.cache_write),
+                cost_nano_usd: t.cost_nano_usd.max(old.cost_nano_usd),
+            },
+            None => t,
+        };
+        if self.tokens.get(stream) == Some(&t) {
+            return Change::None;
+        }
+        self.tokens.insert(stream.to_string(), t);
+        self.updated_at_ms = at_ms;
+        Change::Output
+    }
+
+    /// The step run's tokens: the sum of its streams, none if none reported.
+    pub fn token_total(&self) -> Option<Tokens> {
+        self.tokens.values().copied().reduce(|a, b| a.plus(&b))
     }
 
     /// The step reports how many it has done (and in what unit, if given).
@@ -363,6 +510,71 @@ impl Throttle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const EV: &str = "{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\"}}\n";
+
+    /// The same stream with and without stream_event lines, cut at every byte.
+    #[test]
+    fn stream_event_lines_are_not_counted_wherever_the_chunks_end() {
+        let real = "{\"type\":\"assistant\"}\nplain\n{\"type\":\"result\"}\n";
+        let mixed = format!(
+            "{EV}{{\"type\":\"assistant\"}}\n{EV}{EV}plain\n{EV}{{\"type\":\"result\"}}\n{EV}"
+        );
+        let mut a = Progress::new(1, "develop", 0);
+        a.output("h", 0, real.as_bytes(), 1);
+        for cut in 0..=mixed.len() {
+            let mut b = Progress::new(1, "develop", 0);
+            b.output("h", 0, &mixed.as_bytes()[..cut], 1);
+            b.output("h", cut as u64, &mixed.as_bytes()[cut..], 2);
+            assert_eq!(b.output.lines, a.output.lines, "cut {cut}");
+            assert_eq!(b.output.bytes, a.output.bytes, "cut {cut}");
+            assert_eq!(b.done, a.done, "cut {cut}");
+            assert_eq!(b.pending_log, a.pending_log, "cut {cut}");
+            assert_eq!(b.marks["h"], mixed.len() as u64, "marks are real offsets");
+        }
+    }
+
+    #[test]
+    fn a_replay_from_a_mark_inside_a_line_judges_the_line_by_its_start() {
+        let mixed = format!("one\n{EV}two\n");
+        let mut p = Progress::new(1, "develop", 0);
+        // As restored after a restart: the mark sits inside the stream_event line.
+        p.marks.insert("h".into(), 8);
+        p.output.lines = 1;
+        p.output.bytes = 4;
+        p.output("h", 0, mixed.as_bytes(), 1);
+        assert_eq!((p.output.lines, p.output.bytes), (2, 8));
+        assert_eq!(p.pending_log, vec!["two"]);
+    }
+
+    #[test]
+    fn tokens_are_per_stream_and_summed_and_replaced_not_added() {
+        let mut p = Progress::new(1, "develop", 0);
+        assert_eq!(p.token_total(), None);
+        let t = |i, o| Tokens {
+            input: Some(i),
+            output: Some(o),
+            ..Default::default()
+        };
+        assert_eq!(p.report_tokens("a", t(10, 5), 1), Change::Output);
+        assert_eq!(
+            p.report_tokens("a", t(10, 5), 2),
+            Change::None,
+            "same figure"
+        );
+        p.report_tokens("a", t(10, 8), 3);
+        assert_eq!(
+            p.report_tokens("a", t(2, 1), 3),
+            Change::None,
+            "a replay climbing again"
+        );
+        p.report_tokens("b", t(1, 1), 4);
+        let sum = p.token_total().unwrap();
+        assert_eq!(
+            (sum.input, sum.output, sum.cache_read),
+            (Some(11), Some(9), None)
+        );
+    }
 
     #[test]
     fn counts_lines_and_bytes() {

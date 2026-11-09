@@ -512,6 +512,10 @@ const STEPS: &[&str] = &[
      );
      CREATE INDEX step_host_losses_task ON step_host_losses(task);
      CREATE INDEX step_host_losses_at ON step_host_losses(lost_at_ms);",
+    // 21: the tokens each running step run's LLM sessions have used (s76): one tally per
+    // output stream, as `stream=in,out,cache_read,cache_write,cost;...` (an empty field is
+    // a figure not reported). Additive; a row from before has none.
+    "ALTER TABLE step_progress ADD COLUMN tokens TEXT NOT NULL DEFAULT '';",
 ];
 
 pub const SCHEMA_VERSION: u32 = STEPS.len() as u32;
