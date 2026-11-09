@@ -149,6 +149,21 @@ fn stop_host(sock: &Path) {
     }
 }
 
+/// Append a line of non-JSON output, keeping about the last 2000 bytes once the
+/// buffer passes 4000. The cut moves forward to a character boundary: a byte
+/// offset inside a multi-byte character would panic the slice.
+pub(crate) fn push_stderr(buf: &mut String, line: &str) {
+    buf.push_str(line);
+    buf.push('\n');
+    if buf.len() > 4000 {
+        let mut cut = buf.len() - 2000;
+        while !buf.is_char_boundary(cut) {
+            cut += 1;
+        }
+        buf.drain(..cut);
+    }
+}
+
 struct Feed {
     st: ParseState,
     partial: Vec<u8>,
@@ -190,12 +205,7 @@ impl Feed {
             && serde_json::from_str::<serde_json::Value>(l).is_err()
             && !l.trim().is_empty()
         {
-            self.stderr.push_str(l);
-            self.stderr.push('\n');
-            if self.stderr.len() > 4000 {
-                let cut = self.stderr.len() - 2000;
-                self.stderr = self.stderr[cut..].to_string();
-            }
+            push_stderr(&mut self.stderr, l);
         }
         if let Some(id) = &self.st.session_id {
             *self.session_id.lock().unwrap_or_else(|e| e.into_inner()) = Some(id.clone());
@@ -405,3 +415,22 @@ impl SessionHandle for Session {
 
 #[allow(dead_code)]
 fn _assert_client_error_is_used(_: ClientError) {}
+
+#[cfg(test)]
+mod stderr_tests {
+    use super::push_stderr;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn the_cut_keeps_the_buffer_valid_and_bounded(
+            lines in proptest::collection::vec("[a-zé€😀 ]{0,300}", 1..60)
+        ) {
+            let mut buf = String::new();
+            for l in &lines {
+                push_stderr(&mut buf, l);
+                prop_assert!(buf.len() <= 4000 + 4 + 1 + 1200);
+            }
+        }
+    }
+}
