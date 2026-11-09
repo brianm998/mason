@@ -604,6 +604,22 @@ impl Daemon {
         self.rank_for(t, &def, &start)
     }
 
+    /// What a `mason run` made on behalf of `task` is ranked by: the steps
+    /// remaining from the step the task is in now, and its priority. `None`
+    /// for a task that does not exist or is finished or not running a step.
+    pub fn lease_standing(&self, task: TaskId) -> Option<crate::sched::Standing> {
+        let w = self.world().ok()?;
+        let t = w.tasks.get(&task)?;
+        if t.state.is_terminal() || !t.state.is_step() {
+            return None;
+        }
+        let def = self.current_def(t.project);
+        Some(crate::sched::Standing {
+            steps_remaining: mason_definition::graph::steps_remaining(&def, &t.step),
+            priority: t.priority as u8,
+        })
+    }
+
     /// The scheduling rank of a task about to run `step` (Part 7): not
     /// interactive, steps remaining on the shortest path to landed, tracker
     /// priority, enqueue time, task id.

@@ -2361,10 +2361,16 @@ async fn lease_open(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res
         return Err(fail(StatusCode::BAD_REQUEST, "name what it needs"));
     }
     let label = b["label"].as_str().unwrap_or("interactive").to_string();
+    // On behalf of a task: ranked as that task's pipeline work. An id that is
+    // not a live task is treated as no task at all (a person's request).
+    let task = b["task"].as_u64();
     let d2 = d.clone();
     let id = d
         .pool
-        .run(move || d2.broker.lease_open(&label, &uses))
+        .run(move || {
+            let standing = task.and_then(|t| d2.lease_standing(TaskId(t)));
+            d2.broker.lease_open_as(&label, &uses, standing)
+        })
         .await
         .map_err(pool_err)?;
     Ok(Json(json!({"id": id})))

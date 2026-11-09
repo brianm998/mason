@@ -50,12 +50,20 @@ pub fn run(
     label: Option<String>,
     cmd: &[String],
 ) -> Result<i32, String> {
-    let label = label.unwrap_or_else(|| format!("interactive `{}`", cmd.join(" ")));
+    // A run made by a task's agent (MASON_TASK is in the step environment) is
+    // that task's pipeline work; without it, it is a person's.
+    let task: Option<u64> = std::env::var("MASON_TASK")
+        .ok()
+        .and_then(|v| v.trim().parse().ok());
+    let label = label.unwrap_or_else(|| match task {
+        Some(t) => format!("task {t} `{}`", cmd.join(" ")),
+        None => format!("interactive `{}`", cmd.join(" ")),
+    });
     let opened = d
         .call(
             "POST",
             "/leases",
-            Some(&json!({"uses": uses, "label": label})),
+            Some(&json!({"uses": uses, "label": label, "task": task})),
         )
         .map_err(say)?;
     let id = opened["id"].as_u64().ok_or("the daemon sent no lease id")?;
