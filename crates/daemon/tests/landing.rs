@@ -45,6 +45,15 @@ fn a_batch_of_five_lands_three_ejects_the_conflict_and_parks_the_culprit() {
     assert_eq!(sh(&w.s.origin, &["show", "main:shared.txt"]), "from three");
     assert!(!w.on_main("red.integration"));
     // One batch, recorded with who landed and who was parked.
+    // Parked tasks go back at once, before the batch row is final: wait for the final row.
+    let want_parked = format!("{},{}", t4.0, t5.0);
+    wait_for("the batch row to be final", 30, || {
+        w.d.store
+            .batches(Some("scratch"), 10)
+            .unwrap()
+            .iter()
+            .any(|b| b.phase == "landed" && b.parked == want_parked)
+    });
     let rows = w.d.store.batches(Some("scratch"), 10).unwrap();
     let b = rows
         .iter()
