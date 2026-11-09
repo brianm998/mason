@@ -345,6 +345,9 @@ pub struct ProjectCfg {
     /// flake; red every time is red. For a suite of many tests that only some
     /// machines' load makes fail, this judges the change instead of the machine.
     pub test_reruns: u32,
+    /// Where a task's build directory is, e.g. `$HOME/.cache/mason-target/{task}` (`task_cache`,
+    /// optional). Removed when the task lands (s78). Without it nothing is removed.
+    pub task_cache: Option<String>,
     /// A command that reads a task body on stdin and prints `clear` or
     /// `unclear`. Optional, and only consulted when the deterministic check is
     /// unsure. Anything but `clear`, or a failure, means explore.
@@ -867,6 +870,13 @@ pub fn parse_project(id: &str, text: &str) -> Result<ProjectCfg, String> {
             .get("test_reruns")
             .and_then(|v| v.as_integer())
             .map_or(0, |n| n.clamp(0, 3) as u32),
+        task_cache: match s("task_cache").filter(|t| !t.trim().is_empty()) {
+            Some(t) => {
+                crate::taskcache::check_template(&t).map_err(|e| format!("{id}: {e}"))?;
+                Some(t)
+            }
+            None => None,
+        },
         clarity_classifier: s("clarity_classifier").filter(|c| !c.trim().is_empty()),
         card_rewriter: s("card_rewriter").filter(|c| !c.trim().is_empty()),
         priority_jump: doc

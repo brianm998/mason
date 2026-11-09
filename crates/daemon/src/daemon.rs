@@ -324,6 +324,15 @@ impl Daemon {
         self.jobs.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 
+    /// Is any step run of `task` being worked on?
+    pub fn has_job_for_task(&self, task: TaskId) -> bool {
+        self.jobs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .any(|t| *t == task)
+    }
+
     pub fn has_job(&self, run: StepRunId) -> bool {
         self.jobs
             .lock()
