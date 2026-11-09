@@ -933,6 +933,26 @@ class MonitorCoreTest {
         assertTrue("silent" in c.progressTexts(1_400_000))
     }
 
+    // ---- live tokens (s76) ----
+
+    @Test fun tokensShowCompactlyAndNothingWhenNoneWereReported() {
+        val c = cell(done = 5)
+        assertEquals("", c.tokensCompact)
+        assertTrue(c.progressTexts(1_000_000).none { it.startsWith("tokens") || it.startsWith("input") })
+        val t = TokenLine(has_input = true, input = 4, has_output = true, output = 988,
+            has_cache_read = true, cache_read = 7664, has_cache_write = true, cache_write = 4503)
+        val with = c.copy(tokens = t)
+        assertEquals("12.2k in, 988 out", with.tokensCompact)
+        val texts = with.progressTexts(1_000_000)
+        assertTrue("tokens 12.2k in, 988 out" in texts)
+        assertTrue("cache read 7,664" in texts)
+        assertTrue(texts.none { it.startsWith("cost") }, "cost only when reported")
+        assertTrue("cost $0.0123" in c.copy(tokens = t.copy(has_cost = true, cost_usd = 0.0123)).progressTexts(1_000_000))
+        assertEquals("999.9k", Format.compactCount(999_949))
+        assertEquals("1.2M", Format.compactCount(1_234_567))
+        assertEquals("5 out", Format.tokensCompact(TokenLine(has_output = true, output = 5)))
+    }
+
     @Test fun sidebarWidthDefaultsToTheToken() = assertEquals(300.0, MonitorModel().sidebarBase)
 
     @Test fun sidebarWidthIsClampedWhenSet() {

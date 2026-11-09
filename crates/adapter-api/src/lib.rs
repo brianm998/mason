@@ -73,6 +73,10 @@ pub struct SessionSpec {
     pub progress: Option<ProgressSink>,
     /// Told the model the CLI reports it really used, when the stream says.
     pub on_model: Option<ModelSink>,
+    /// Told the invocation's cumulative token figures each time they change, with
+    /// the host's id. The figures are cumulative per stream, so a journal read
+    /// again from 0 rebuilds the same figure and the receiver replaces, never adds.
+    pub on_tokens: Option<TokensSink>,
     /// Told of the agent's tool calls and todo lists as they arrive, before the
     /// turn ends (the runner calls it; it never holds a daemon type).
     pub on_agent_event: Option<AgentEventSink>,
@@ -80,6 +84,9 @@ pub struct SessionSpec {
 
 /// Receives the agent events that say what it is doing (`ToolCall`, `Plan`).
 pub type AgentEventSink = std::sync::Arc<dyn Fn(&AgentEvent) + Send + Sync>;
+
+/// Receives `(host id, cumulative figures)` while a session runs.
+pub type TokensSink = std::sync::Arc<dyn Fn(&str, &TokenReport) + Send + Sync>;
 
 /// Receives the model name a session reports.
 pub type ModelSink = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
@@ -104,6 +111,7 @@ impl SessionSpec {
             tools: None,
             progress: None,
             on_model: None,
+            on_tokens: None,
             on_agent_event: None,
         }
     }

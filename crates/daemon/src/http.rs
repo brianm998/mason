@@ -2554,6 +2554,11 @@ fn progress_runs(d: &Daemon, id: TaskId) -> Vec<Value> {
                     "name": s.name, "unit": s.unit,
                     "done": fig(&s.done), "total": fig(&s.total)})).collect::<Vec<_>>(),
                 "todo": p.todo.iter().map(|t| json!({"text": t.text, "status": t.status})).collect::<Vec<_>>(),
+                // The tokens the step's sessions have used so far; null until one reported.
+                "tokens": p.token_total().map(|t| json!({
+                    "input": t.input, "output": t.output,
+                    "cache_read": t.cache_read, "cache_write": t.cache_write,
+                    "cost_usd": t.cost_nano_usd.map(|n| n as f64 / 1e9)})),
             })
         })
         .collect()

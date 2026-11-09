@@ -32,6 +32,48 @@ fn out(v: &Value) {
     let _ = o.flush();
 }
 
+/// One message as the CLI writes it with `--include-partial-messages`.
+fn message(partial: bool, sid: &str, id: u32, content: Value) {
+    let k = if id <= 2 { 1 } else { 0 };
+    let usage_start = json!({"input_tokens": 2 * k, "cache_creation_input_tokens": 50 * k,
+        "cache_read_input_tokens": 1000 * k, "output_tokens": k});
+    // The real CLI writes `"type":"stream_event"` as the first key; `json!` sorts keys, so
+    // the line is put together by hand to keep it first.
+    let ev = |e: Value| {
+        let rest = json!({"session_id": sid, "event": e}).to_string();
+        let mut o = std::io::stdout().lock();
+        let _ = writeln!(o, "{{\"type\":\"stream_event\",{}", &rest[1..]);
+        let _ = o.flush();
+    };
+    if partial {
+        ev(
+            json!({"type": "message_start", "message": {"id": format!("msg_fake_{id}"),
+            "type": "message", "role": "assistant", "content": [], "usage": usage_start}}),
+        );
+        ev(
+            json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
+        );
+        for _ in 0..3 {
+            ev(
+                json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "x"}}),
+            );
+        }
+        ev(json!({"type": "content_block_stop", "index": 0}));
+    }
+    out(
+        &json!({"type": "assistant", "session_id": sid, "message": {"role": "assistant",
+        "content": content, "usage": usage_start}}),
+    );
+    if partial {
+        ev(
+            json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+            "usage": {"input_tokens": 2 * k, "cache_creation_input_tokens": 50 * k,
+            "cache_read_input_tokens": 1000 * k, "output_tokens": 25 * k}}),
+        );
+        ev(json!({"type": "message_stop"}));
+    }
+}
+
 fn head() -> String {
     let o = std::process::Command::new("git")
         .args(["rev-parse", "HEAD"])
@@ -134,6 +176,8 @@ fn main() {
     let mut inited = false;
     let mut finished = false;
     let mut calls = 0u32;
+    let partial = args.iter().any(|a| a == "--include-partial-messages");
+    let mut msgs = 0u32;
     let init = |sid: &str| {
         out(
             &json!({"type": "system", "subtype": "init", "cwd": "/scratch", "session_id": sid,
@@ -141,6 +185,9 @@ fn main() {
                     "model": reported, "permissionMode": "dontAsk", "claude_code_version": "0.0.0-fake"}),
         );
     };
+    let linger = turn
+        .iter()
+        .find_map(|a| a.get("linger_after_result_ms").and_then(Value::as_u64));
     for a in turn {
         if !inited
             && a.get("init").is_none()
@@ -164,18 +211,19 @@ fn main() {
             inited = true;
             finished = true;
         } else if let Some(t) = a.get("say").and_then(Value::as_str) {
-            out(
-                &json!({"type": "assistant", "session_id": sid, "message": {"role": "assistant",
-                "content": [{"type": "text", "text": t}]}}),
-            );
+            msgs += 1;
+            message(partial, &sid, msgs, json!([{"type": "text", "text": t}]));
         } else if let Some(c) = a.get("call") {
             calls += 1;
             let tool = c["tool"].as_str().unwrap_or_default();
             let cargs = subst(&c["args"]);
             let tid = format!("toolu_fake_{calls}");
-            out(
-                &json!({"type": "assistant", "session_id": sid, "message": {"role": "assistant",
-                "content": [{"type": "tool_use", "id": tid, "name": format!("mcp__mason__{tool}"), "input": cargs}]}}),
+            msgs += 1;
+            message(
+                partial,
+                &sid,
+                msgs,
+                json!([{"type": "tool_use", "id": tid, "name": format!("mcp__mason__{tool}"), "input": cargs}]),
             );
             let (ok, text) = call(tool, &cargs);
             out(
@@ -247,5 +295,8 @@ fn main() {
             "result": "done", "api_error_status": null, "session_id": sid, "total_cost_usd": 0.001,
             "usage": {"input_tokens": 4, "cache_creation_input_tokens": 100, "cache_read_input_tokens": 2000, "output_tokens": 50}}),
         );
+    }
+    if let Some(ms) = linger {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
     }
 }

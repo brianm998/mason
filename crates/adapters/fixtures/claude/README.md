@@ -36,6 +36,18 @@ The `apiKeySource` value on an API account and the overage field values
 (`allowed`, `out_of_credits`, `overageResetsAt`) are assumptions; only the
 `rejected` / `org_level_disabled` pair was seen.
 
+## Partial messages (s76)
+
+`real_partial_messages.jsonl` is the stream of `claude -p --verbose --output-format
+stream-json --include-partial-messages` (Claude Code 2.1.317, two API messages, a `Read`
+between). The **figures** are the ones measured on that run: `assistant` events carry
+`output_tokens` 16 and 5, the `message_delta` events 137 and 851, and the `result` is input
+4, output 988, cache read 7664, cache write 4503, which the deltas sum to exactly. **The
+file itself was written by hand to that shape, not copied from the capture** (the
+capture's text, ids and per-message cache split were not kept; the split of cache figures
+between the two messages, ids, session id and text here are made up). Treat it as a
+model of the stream, like the `synthetic_*` files, not a capture.
+
 ## Todo list fixture (s71)
 
 `synthetic_todo_write.jsonl` is hand-written, **not a capture** (no `claude` CLI was

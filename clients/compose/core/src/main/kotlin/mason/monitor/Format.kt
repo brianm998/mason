@@ -3,6 +3,7 @@ package mason.monitor
 
 import mason.v1.ProgressCell
 import mason.v1.ProgressSource
+import mason.v1.TokenLine
 
 object Format {
     /** Time in state: "42 s", "9 min", "3h10". Always shown, never hidden. */
@@ -16,6 +17,42 @@ object Format {
                 if (m == 0L) "${s / 3600}h" else "${s / 3600}h${m.toString().padStart(2, '0')}"
             }
         }
+    }
+
+    /**
+     * A token count in few characters: "988", "12.2k", "1.2M". Whole-number arithmetic, so it rounds
+     * exactly as the daemon's own reading (`mason_core::progress_text::compact`) does.
+     */
+    fun compactCount(n: Long): String {
+        if (n < 1000) return n.toString()
+        val k = (n + 50) / 100
+        if (k < 10_000) return "${k / 10}.${k % 10}k"
+        val m = (n + 50_000) / 100_000
+        return "${m / 10}.${m % 10}M"
+    }
+
+    /**
+     * "12.2k in, 988 out": "in" is input plus cache read plus cache write; a side nothing was
+     * reported for is left out. Empty when `t` is null or reports nothing.
+     */
+    fun tokensCompact(t: TokenLine?): String {
+        if (t == null) return ""
+        val parts = mutableListOf<String>()
+        if (t.has_input || t.has_cache_read || t.has_cache_write) parts += compactCount(t.input + t.cache_read + t.cache_write) + " in"
+        if (t.has_output) parts += compactCount(t.output) + " out"
+        return parts.joinToString(", ")
+    }
+
+    /** Each reported figure in full: "input 4", "output 988", "cache read 7,664", ..., "cost $0.0123". */
+    fun tokensDetail(t: TokenLine?): List<String> {
+        if (t == null) return emptyList()
+        val v = mutableListOf<String>()
+        if (t.has_input) v += "input ${group(t.input)}"
+        if (t.has_output) v += "output ${group(t.output)}"
+        if (t.has_cache_read) v += "cache read ${group(t.cache_read)}"
+        if (t.has_cache_write) v += "cache write ${group(t.cache_write)}"
+        if (t.has_cost) v += "cost $" + String.format(java.util.Locale.ROOT, "%.4f", t.cost_usd)
+        return v
     }
 
     /** 1240 as "1,240" (always a comma, whatever the locale: the same text in every client). */
@@ -89,6 +126,10 @@ val ProgressCell.hasRealTotal: Boolean
 /** The whole percent, only from a real total. */
 val ProgressCell.percent: Int? get() = if (hasRealTotal) Format.percent(done.toLong(), total.toLong()) else null
 
+/** The tokens the step's LLM sessions have used so far, "12.2k in, 988 out"; empty when none were reported. */
+val ProgressCell.tokensCompact: String
+    get() = Format.tokensCompact(tokens)
+
 val ProgressCell.countText: String
     get() = Format.countText(unit, done.toLong(), done_source, total.toLong(), total_source, total_low.toLong())
 
@@ -139,6 +180,11 @@ fun ProgressCell.progressTexts(now: Long): List<String> {
     if (done_source != ProgressSource.SOURCE_NONE) t += "count " + Format.sourceWords(done_source, history_samples)
     if (total_source != ProgressSource.SOURCE_NONE) t += "total " + Format.sourceWords(total_source, history_samples)
     if (lines > 0 || bytes > 0) t += "output ${Format.group(lines)} lines, ${Format.group(bytes)} bytes"
+    tokens?.let { k ->
+        val c = Format.tokensCompact(k)
+        if (c.isNotEmpty()) t += "tokens $c"
+        t += Format.tokensDetail(k)
+    }
     subs.forEach {
         t += "${it.name}: " + Format.countText(it.unit, it.done.toLong(), it.done_source, it.total.toLong(), it.total_source, 0)
     }

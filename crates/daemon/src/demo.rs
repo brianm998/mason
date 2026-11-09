@@ -13,7 +13,7 @@
 
 use crate::daemon::Daemon;
 use mason_adapter_api::card::{Card, CardOption, Origin};
-use mason_core::progress::{Figure, Progress, SubProgress, TodoItem};
+use mason_core::progress::{Figure, Progress, SubProgress, TodoItem, Tokens};
 use mason_core::*;
 use std::sync::Arc;
 use std::time::Duration;
@@ -212,6 +212,16 @@ fn progress_cases(now: u64) -> Vec<Progress> {
     real.message = "running the api suite".into();
     real.output.lines = 1_240;
     real.output.bytes = 61_000;
+    real.tokens.insert(
+        "demo-1".into(),
+        Tokens {
+            input: Some(4),
+            output: Some(988),
+            cache_read: Some(7_664),
+            cache_write: Some(4_503),
+            cost_nano_usd: None,
+        },
+    );
     // 1. Only a typical total from twelve past runs: the count and the range, no percentage.
     let mut hist = base(1, 300_000, 2_000);
     hist.unit = "lines".into();
@@ -221,6 +231,16 @@ fn progress_cases(now: u64) -> Vec<Progress> {
     hist.history_samples = 12;
     hist.output.lines = 1_240;
     hist.output.bytes = 50_000;
+    hist.tokens.insert(
+        "demo-1".into(),
+        Tokens {
+            input: Some(12),
+            output: Some(4_210),
+            cache_read: Some(96_300),
+            cache_write: Some(18_450),
+            cost_nano_usd: None,
+        },
+    );
     // 2. Nothing to measure against: the count alone.
     let mut none = base(2, 200_000, 6_000);
     none.unit = "tool calls".into();

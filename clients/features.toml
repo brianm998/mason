@@ -86,6 +86,11 @@ description = "Filled, part, hatched and empty cells; a running cell fills in pr
 swift = "done"
 compose = "done"
 
+[feature.live-tokens]
+description = "A running step's progress line shows the tokens its LLM session has used so far, compact as '12.2k in, 988 out' (in is input plus cache read plus cache write); the task page shows input, output, cache read and cache write, and cost when reported; nothing when none were reported; a filter or search finds it"
+swift = "done"
+compose = "done"
+
 [feature.overrides]
 description = "Cancel, retry, skip test, land now, force, pause, open session, from the allowed actions"
 swift = "done"

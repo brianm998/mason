@@ -1294,6 +1294,18 @@ public nonisolated struct Mason_V1_ProgressCell: @unchecked Sendable {
     set {_uniqueStorage()._staleAfterMs = newValue}
   }
 
+  /// Tokens the step run's LLM sessions have used so far, summed over its resumed and
+  /// retried invocations. Absent: nothing reported yet (never zero). Only `has_*` figures
+  /// were reported; cost is present only for an api account.
+  public var tokens: Mason_V1_TokenLine {
+    get {_storage._tokens ?? Mason_V1_TokenLine()}
+    set {_uniqueStorage()._tokens = newValue}
+  }
+  /// Returns true if `tokens` has been explicitly set.
+  public var hasTokens: Bool {_storage._tokens != nil}
+  /// Clears the value of `tokens`. Subsequent reads from it will return its default value.
+  public mutating func clearTokens() {_uniqueStorage()._tokens = nil}
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -4782,7 +4794,7 @@ nonisolated extension Mason_V1_View: SwiftProtobuf.Message, SwiftProtobuf._Messa
 
 nonisolated extension Mason_V1_ProgressCell: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ProgressCell"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}step\0\u{1}state\0\u{1}label\0\u{1}done\0\u{1}total\0\u{1}unit\0\u{3}done_source\0\u{3}total_source\0\u{1}message\0\u{1}lines\0\u{1}bytes\0\u{3}last_output_ms\0\u{3}started_ms\0\u{3}updated_at_ms\0\u{1}run\0\u{1}subs\0\u{1}todo\0\u{3}total_low\0\u{3}history_samples\0\u{3}stale_after_ms\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}step\0\u{1}state\0\u{1}label\0\u{1}done\0\u{1}total\0\u{1}unit\0\u{3}done_source\0\u{3}total_source\0\u{1}message\0\u{1}lines\0\u{1}bytes\0\u{3}last_output_ms\0\u{3}started_ms\0\u{3}updated_at_ms\0\u{1}run\0\u{1}subs\0\u{1}todo\0\u{3}total_low\0\u{3}history_samples\0\u{3}stale_after_ms\0\u{1}tokens\0")
 
   fileprivate class _StorageClass {
     var _step: String = String()
@@ -4805,6 +4817,7 @@ nonisolated extension Mason_V1_ProgressCell: SwiftProtobuf.Message, SwiftProtobu
     var _totalLow: UInt32 = 0
     var _historySamples: UInt32 = 0
     var _staleAfterMs: UInt64 = 0
+    var _tokens: Mason_V1_TokenLine? = nil
 
       // This property is used as the initial default value for new instances of the type.
       // The type itself is protecting the reference to its storage via CoW semantics.
@@ -4835,6 +4848,7 @@ nonisolated extension Mason_V1_ProgressCell: SwiftProtobuf.Message, SwiftProtobu
       _totalLow = source._totalLow
       _historySamples = source._historySamples
       _staleAfterMs = source._staleAfterMs
+      _tokens = source._tokens
     }
   }
 
@@ -4873,6 +4887,7 @@ nonisolated extension Mason_V1_ProgressCell: SwiftProtobuf.Message, SwiftProtobu
         case 18: try { try decoder.decodeSingularUInt32Field(value: &_storage._totalLow) }()
         case 19: try { try decoder.decodeSingularUInt32Field(value: &_storage._historySamples) }()
         case 20: try { try decoder.decodeSingularUInt64Field(value: &_storage._staleAfterMs) }()
+        case 21: try { try decoder.decodeSingularMessageField(value: &_storage._tokens) }()
         default: break
         }
       }
@@ -4881,6 +4896,10 @@ nonisolated extension Mason_V1_ProgressCell: SwiftProtobuf.Message, SwiftProtobu
 
   public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
     try withExtendedLifetime(_storage) { (_storage: _StorageClass) in
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every if/case branch local when no optimizations
+      // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+      // https://github.com/apple/swift-protobuf/issues/1182
       if !_storage._step.isEmpty {
         try visitor.visitSingularStringField(value: _storage._step, fieldNumber: 1)
       }
@@ -4941,6 +4960,9 @@ nonisolated extension Mason_V1_ProgressCell: SwiftProtobuf.Message, SwiftProtobu
       if _storage._staleAfterMs != 0 {
         try visitor.visitSingularUInt64Field(value: _storage._staleAfterMs, fieldNumber: 20)
       }
+      try { if let v = _storage._tokens {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 21)
+      } }()
     }
     try unknownFields.traverse(visitor: &visitor)
   }
@@ -4970,6 +4992,7 @@ nonisolated extension Mason_V1_ProgressCell: SwiftProtobuf.Message, SwiftProtobu
         if _storage._totalLow != rhs_storage._totalLow {return false}
         if _storage._historySamples != rhs_storage._historySamples {return false}
         if _storage._staleAfterMs != rhs_storage._staleAfterMs {return false}
+        if _storage._tokens != rhs_storage._tokens {return false}
         return true
       }
       if !storagesAreEqual {return false}

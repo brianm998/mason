@@ -304,13 +304,16 @@ pub fn parse_line(line: &str, st: &mut ParseState) -> Vec<AgentEvent> {
         Some("turn.completed") => {
             let u = &v["usage"];
             // Codex reports tokens and no cost: cost stays unreported, never zero.
-            out.push(AgentEvent::Tokens(TokenReport {
+            let report = TokenReport {
                 input: num(u, "input_tokens"),
                 output: num(u, "output_tokens"),
                 cache_read: num(u, "cached_input_tokens"),
                 cache_create: None,
                 cost_usd: None,
-            }));
+            };
+            // The live figure arrives with the turn: Codex reports nothing before.
+            st.add_turn(&report);
+            out.push(AgentEvent::Tokens(report));
             // A reconnect that worked leaves an earlier bare `error` behind: the
             // turn finishing is what counts.
             st.result = Some(ResultInfo {
@@ -354,6 +357,31 @@ mod tests {
             .flat_map(|l| crate::claude::parse_line(l, &mut st))
             .collect();
         (ev, st)
+    }
+
+    #[test]
+    fn a_codex_figure_is_live_only_at_turn_completed_and_has_no_cost() {
+        let text = std::fs::read_to_string(format!(
+            "{}/fixtures/codex/plain.jsonl",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap();
+        let mut st = ParseState::new(Dialect::Codex);
+        let mut lives = vec![];
+        for l in text.lines() {
+            let before = lives.len();
+            crate::claude::parse_line(l, &mut st);
+            if let Some(t) = st.take_live() {
+                assert!(
+                    l.contains("turn.completed"),
+                    "live before the turn ended: {l}"
+                );
+                lives.push(t);
+            }
+            assert!(lives.len() >= before);
+        }
+        assert_eq!(lives.len(), 1);
+        assert!(lives[0].output.is_some() && lives[0].cost_usd.is_none());
     }
 
     #[test]

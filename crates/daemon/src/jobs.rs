@@ -1192,6 +1192,29 @@ fn agent_job(c: &Ctx) {
             d.progress_observe(run, stream, off, bytes)
         }));
     }
+    {
+        let (d, run) = (c.d.clone(), c.run);
+        let api = c.d.accounts.iter().any(|a| {
+            a.name == c.project.account && matches!(a.billing, crate::providers::Billing::Api)
+        });
+        spec.on_tokens = Some(Arc::new(move |stream, t| {
+            d.progress_tokens(
+                run,
+                stream,
+                mason_core::progress::Tokens {
+                    input: t.input,
+                    output: t.output,
+                    cache_read: t.cache_read,
+                    cache_write: t.cache_create,
+                    // Spend belongs to an api account (decision 0043).
+                    cost_nano_usd: t
+                        .cost_usd
+                        .filter(|_| api)
+                        .map(mason_core::progress::Tokens::cost_nano),
+                },
+            )
+        }));
+    }
     // The agent's counts, todo list and tool calls reach the live record as they happen.
     c.d.progress_agent(c.run);
     {

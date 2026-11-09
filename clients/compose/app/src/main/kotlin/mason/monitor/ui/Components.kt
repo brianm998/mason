@@ -41,6 +41,7 @@ import mason.monitor.fill
 import mason.monitor.isStale
 import mason.monitor.spokenLabel
 import mason.monitor.timeText
+import mason.monitor.tokensCompact
 import mason.v1.ProgressSource
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.style.TextOverflow
@@ -124,6 +125,11 @@ fun ProgressLine(model: MonitorModel, cell: ProgressCell) {
     Row(horizontalArrangement = Arrangement.spacedBy(theme.spacingSmall), modifier = Modifier.testTag("progress-line:${cell.step}")) {
         val count = cell.countText
         if (count.isNotEmpty()) Text(count, style = theme.small(color = theme.text), maxLines = 1, softWrap = false)
+        val tokens = cell.tokensCompact
+        if (tokens.isNotEmpty()) {
+            Text(tokens, style = theme.small(color = theme.muted), maxLines = 1, softWrap = false,
+                modifier = Modifier.testTag("progress-tokens:${cell.step}"))
+        }
         if (cell.message.isNotEmpty()) {
             Text(cell.message, style = theme.small(color = theme.muted), maxLines = 1, overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f, fill = false))
@@ -159,6 +165,11 @@ fun ProgressDetail(model: MonitorModel, cell: ProgressCell) {
         }
         if (cell.lines > 0 || cell.bytes > 0) {
             Text("output ${Format.group(cell.lines)} lines, ${Format.group(cell.bytes)} bytes", style = theme.small(color = theme.muted))
+        }
+        val figures = Format.tokensDetail(cell.tokens)
+        if (figures.isNotEmpty()) {
+            Text("tokens " + figures.joinToString(", "), style = theme.small(color = theme.muted),
+                modifier = Modifier.testTag("progress-token-detail:${cell.step}"))
         }
         val sources = listOfNotNull(
             if (cell.done_source == ProgressSource.SOURCE_NONE) null else "count " + Format.sourceWords(cell.done_source, cell.history_samples),

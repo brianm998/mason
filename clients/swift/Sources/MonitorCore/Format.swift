@@ -30,6 +30,41 @@ public enum Format {
         return out
     }
 
+    /// A token count in few characters: "988", "12.2k", "1.2M". Whole-number arithmetic, so it
+    /// rounds exactly as the daemon's own reading (`mason_core::progress_text::compact`) does.
+    public static func compactCount(_ n: UInt64) -> String {
+        if n < 1000 { return String(n) }
+        let k = (n + 50) / 100
+        if k < 10_000 { return "\(k / 10).\(k % 10)k" }
+        let m = (n + 50_000) / 100_000
+        return "\(m / 10).\(m % 10)M"
+    }
+
+    /// "12.2k in, 988 out": "in" is input plus cache read plus cache write; a side nothing was
+    /// reported for is left out. Empty when `tokens` is absent or reports nothing.
+    public static func tokensCompact(_ t: Mason_V1_TokenLine?) -> String {
+        guard let t else { return "" }
+        var parts: [String] = []
+        if t.hasInput_p || t.hasCacheRead_p || t.hasCacheWrite_p {
+            parts.append("\(compactCount(t.input + t.cacheRead + t.cacheWrite)) in")
+        }
+        if t.hasOutput_p { parts.append("\(compactCount(t.output)) out") }
+        return parts.joined(separator: ", ")
+    }
+
+    /// Each reported figure in full: "input 4", "output 988", "cache read 7,664", "cache write
+    /// 4,503", and "cost $0.0123" when there is one.
+    public static func tokensDetail(_ t: Mason_V1_TokenLine?) -> [String] {
+        guard let t else { return [] }
+        var v: [String] = []
+        if t.hasInput_p { v.append("input \(group(t.input))") }
+        if t.hasOutput_p { v.append("output \(group(t.output))") }
+        if t.hasCacheRead_p { v.append("cache read \(group(t.cacheRead))") }
+        if t.hasCacheWrite_p { v.append("cache write \(group(t.cacheWrite))") }
+        if t.hasCost_p { v.append("cost $" + String(format: "%.4f", t.costUsd)) }
+        return v
+    }
+
     /// The whole percent `done` is of a real `total`: rounded down, at most 100, none for 0.
     /// Only real totals (reported or counted) are ever passed in.
     public static func percent(done: UInt64, total: UInt64) -> Int? {
@@ -124,6 +159,10 @@ extension Mason_V1_ProgressCell {
         Format.timeText(now: now, moved: updatedAtMs, afterMs: staleAfterMs)
     }
 
+    /// The tokens the step's LLM sessions have used so far, "12.2k in, 988 out"; empty when none
+    /// were reported.
+    public var tokensCompact: String { Format.tokensCompact(hasTokens ? tokens : nil) }
+
     /// The cell's accessibility label: "develop, running, 3 of 7 plan steps, 42%" spoken as
     /// "42 percent". The ticking time is deliberately not in it.
     public var spokenLabel: String {
@@ -152,6 +191,11 @@ extension Mason_V1_ProgressCell {
         if doneSource != .sourceNone { t.append("count " + Format.sourceWords(doneSource, samples: historySamples)) }
         if totalSource != .sourceNone { t.append("total " + Format.sourceWords(totalSource, samples: historySamples)) }
         if lines > 0 || bytes > 0 { t.append("output \(Format.group(lines)) lines, \(Format.group(bytes)) bytes") }
+        if hasTokens {
+            let c = tokensCompact
+            if !c.isEmpty { t.append("tokens " + c) }
+            t.append(contentsOf: Format.tokensDetail(tokens))
+        }
         for s in subs {
             let text = Format.countText(
                 unit: s.unit, done: UInt64(s.done), doneSource: s.doneSource,
