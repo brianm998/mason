@@ -113,12 +113,17 @@ fn junit(text: &str) -> Vec<Case> {
 // ---- TAP -------------------------------------------------------------------
 
 fn tap(text: &str) -> Vec<Case> {
-    let r = re(r"^(not )?ok\b\s*(\d+)?\s*-?\s*(.*)$");
-    let mut out = vec![];
-    for l in text.lines() {
-        let Some(c) = r.captures(l.trim_end()) else {
-            continue;
-        };
+    let r = tap_re();
+    text.lines().filter_map(|l| tap_line(&r, l)).collect()
+}
+
+fn tap_re() -> Regex {
+    re(r"^(not )?ok\b\s*(\d+)?\s*-?\s*(.*)$")
+}
+
+fn tap_line(r: &Regex, l: &str) -> Option<Case> {
+    {
+        let c = r.captures(l.trim_end())?;
         let desc = c.get(3).map_or("", |m| m.as_str());
         let (name, directive) = match desc.split_once(" # ") {
             Some((n, d)) => (n.trim(), d.to_lowercase()),
@@ -136,47 +141,56 @@ fn tap(text: &str) -> Vec<Case> {
         } else {
             Status::Pass
         };
-        out.push(Case { name, status });
+        Some(Case { name, status })
     }
-    out
 }
 
 // ---- xctest ----------------------------------------------------------------
 
 fn xctest(text: &str) -> Vec<Case> {
-    let r = re(r"^Test Case '(.+)' (passed|failed|skipped)\b");
-    text.lines()
-        .filter_map(|l| {
-            let c = r.captures(l.trim())?;
-            let name = c[1].to_string();
-            Some(match &c[2] {
-                "passed" => Case::pass(name),
-                "failed" => Case::fail(name, "failed"),
-                _ => Case::skip(name),
-            })
-        })
-        .collect()
+    let r = xctest_re();
+    text.lines().filter_map(|l| xctest_line(&r, l)).collect()
+}
+
+fn xctest_re() -> Regex {
+    re(r"^Test Case '(.+)' (passed|failed|skipped)\b")
+}
+
+fn xctest_line(r: &Regex, l: &str) -> Option<Case> {
+    let c = r.captures(l.trim())?;
+    let name = c[1].to_string();
+    Some(match &c[2] {
+        "passed" => Case::pass(name),
+        "failed" => Case::fail(name, "failed"),
+        _ => Case::skip(name),
+    })
 }
 
 // ---- Swift Testing ---------------------------------------------------------
 
 fn swift_testing(text: &str) -> Vec<Case> {
-    let r = re(r"^\S+\s+Test (.+?) (passed after|failed after|skipped)\b");
+    let r = swift_testing_re();
     text.lines()
-        .filter_map(|l| {
-            let l = l.trim();
-            if l.contains("Test run ") {
-                return None;
-            }
-            let c = r.captures(l)?;
-            let name = c[1].trim().to_string();
-            Some(match &c[2] {
-                "passed after" => Case::pass(name),
-                "failed after" => Case::fail(name, "failed"),
-                _ => Case::skip(name),
-            })
-        })
+        .filter_map(|l| swift_testing_line(&r, l))
         .collect()
+}
+
+fn swift_testing_re() -> Regex {
+    re(r"^\S+\s+Test (.+?) (passed after|failed after|skipped)\b")
+}
+
+fn swift_testing_line(r: &Regex, l: &str) -> Option<Case> {
+    let l = l.trim();
+    if l.contains("Test run ") {
+        return None;
+    }
+    let c = r.captures(l)?;
+    let name = c[1].trim().to_string();
+    Some(match &c[2] {
+        "passed after" => Case::pass(name),
+        "failed after" => Case::fail(name, "failed"),
+        _ => Case::skip(name),
+    })
 }
 
 // ---- cargo-nextest ---------------------------------------------------------
@@ -198,66 +212,76 @@ fn dedupe(cases: Vec<Case>) -> Vec<Case> {
 }
 
 fn nextest(text: &str) -> Vec<Case> {
-    let r = re(
+    let r = nextest_re();
+    dedupe(text.lines().filter_map(|l| nextest_line(&r, l)).collect())
+}
+
+fn nextest_re() -> Regex {
+    re(
         r"^\s*(PASS|FAIL|SKIP|TIMEOUT|LEAK|FLAKY \d+/\d+|SIG[A-Z]+|ABORT|EXEC-FAIL)\s+\[[^\]]*\]\s+(\S.*?)\s*$",
-    );
-    dedupe(
-        text.lines()
-            .filter_map(|l| {
-                let c = r.captures(l)?;
-                let name = c[2].to_string();
-                Some(match &c[1] {
-                    "PASS" | "LEAK" => Case::pass(name),
-                    s if s.starts_with("FLAKY") => Case::pass(name),
-                    "SKIP" => Case::skip(name),
-                    other => Case::fail(name, other.to_lowercase()),
-                })
-            })
-            .collect(),
     )
+}
+
+fn nextest_line(r: &Regex, l: &str) -> Option<Case> {
+    let c = r.captures(l)?;
+    let name = c[2].to_string();
+    Some(match &c[1] {
+        "PASS" | "LEAK" => Case::pass(name),
+        s if s.starts_with("FLAKY") => Case::pass(name),
+        "SKIP" => Case::skip(name),
+        other => Case::fail(name, other.to_lowercase()),
+    })
 }
 
 // ---- pytest ----------------------------------------------------------------
 
 fn pytest(text: &str) -> Vec<Case> {
-    let a = re(r"^(\S+::\S+)\s+(PASSED|FAILED|SKIPPED|ERROR|XFAIL|XPASS)\b");
-    let b =
-        re(r"^\[gw\d+\]\s+\[\s*\d+%\]\s+(PASSED|FAILED|SKIPPED|ERROR|XFAIL|XPASS)\s+(\S+::\S+)");
-    dedupe(
-        text.lines()
-            .filter_map(|l| {
-                let (name, status) = if let Some(c) = a.captures(l) {
-                    (c[1].to_string(), c[2].to_string())
-                } else if let Some(c) = b.captures(l) {
-                    (c[2].to_string(), c[1].to_string())
-                } else {
-                    return None;
-                };
-                Some(match status.as_str() {
-                    "PASSED" | "XPASS" => Case::pass(name),
-                    "SKIPPED" | "XFAIL" => Case::skip(name),
-                    other => Case::fail(name, other.to_lowercase()),
-                })
-            })
-            .collect(),
+    let r = pytest_re();
+    dedupe(text.lines().filter_map(|l| pytest_line(&r, l)).collect())
+}
+
+fn pytest_re() -> (Regex, Regex) {
+    (
+        re(r"^(\S+::\S+)\s+(PASSED|FAILED|SKIPPED|ERROR|XFAIL|XPASS)\b"),
+        re(r"^\[gw\d+\]\s+\[\s*\d+%\]\s+(PASSED|FAILED|SKIPPED|ERROR|XFAIL|XPASS)\s+(\S+::\S+)"),
     )
+}
+
+fn pytest_line(r: &(Regex, Regex), l: &str) -> Option<Case> {
+    let (a, b) = r;
+    let (name, status) = if let Some(c) = a.captures(l) {
+        (c[1].to_string(), c[2].to_string())
+    } else if let Some(c) = b.captures(l) {
+        (c[2].to_string(), c[1].to_string())
+    } else {
+        return None;
+    };
+    Some(match status.as_str() {
+        "PASSED" | "XPASS" => Case::pass(name),
+        "SKIPPED" | "XFAIL" => Case::skip(name),
+        other => Case::fail(name, other.to_lowercase()),
+    })
 }
 
 // ---- Gradle ----------------------------------------------------------------
 
 fn gradle(text: &str) -> Vec<Case> {
-    let r = re(r"^(\S.*?) > (.+?) (PASSED|FAILED|SKIPPED)\s*$");
-    text.lines()
-        .filter_map(|l| {
-            let c = r.captures(l)?;
-            let name = format!("{} > {}", &c[1], &c[2]);
-            Some(match &c[3] {
-                "PASSED" => Case::pass(name),
-                "FAILED" => Case::fail(name, "failed"),
-                _ => Case::skip(name),
-            })
-        })
-        .collect()
+    let r = gradle_re();
+    text.lines().filter_map(|l| gradle_line(&r, l)).collect()
+}
+
+fn gradle_re() -> Regex {
+    re(r"^(\S.*?) > (.+?) (PASSED|FAILED|SKIPPED)\s*$")
+}
+
+fn gradle_line(r: &Regex, l: &str) -> Option<Case> {
+    let c = r.captures(l)?;
+    let name = format!("{} > {}", &c[1], &c[2]);
+    Some(match &c[3] {
+        "PASSED" => Case::pass(name),
+        "FAILED" => Case::fail(name, "failed"),
+        _ => Case::skip(name),
+    })
 }
 
 // ---- Playwright (JSON reporter) --------------------------------------------
@@ -342,7 +366,13 @@ fn cucumber(text: &str) -> Result<Vec<Case>, String> {
 
 // ---- regex fallback --------------------------------------------------------
 
-fn regex_lines(text: &str, suite: &Suite) -> Result<Vec<Case>, String> {
+/// The compiled patterns of the regex parser.
+pub(crate) struct RegexPair {
+    pass: Option<Regex>,
+    fail: Option<Regex>,
+}
+
+fn regex_pair(suite: &Suite) -> Result<RegexPair, String> {
     let compile = |p: &Option<String>, what: &str| -> Result<Option<Regex>, String> {
         p.as_deref()
             .map(|p| Regex::new(p).map_err(|e| format!("{what}: {e}")))
@@ -353,17 +383,71 @@ fn regex_lines(text: &str, suite: &Suite) -> Result<Vec<Case>, String> {
     if pass.is_none() && fail.is_none() {
         return Err("the regex parser needs pass_regex or fail_regex".into());
     }
+    Ok(RegexPair { pass, fail })
+}
+
+fn regex_line(r: &RegexPair, l: &str) -> Option<Case> {
     let name_of = |c: &regex::Captures, l: &str| {
         c.get(1)
             .map_or_else(|| l.trim().to_string(), |m| m.as_str().to_string())
     };
-    let mut out = vec![];
-    for l in text.lines() {
-        if let Some(c) = fail.as_ref().and_then(|r| r.captures(l)) {
-            out.push(Case::fail(name_of(&c, l), "matched fail_regex"));
-        } else if let Some(c) = pass.as_ref().and_then(|r| r.captures(l)) {
-            out.push(Case::pass(name_of(&c, l)));
+    if let Some(c) = r.fail.as_ref().and_then(|r| r.captures(l)) {
+        Some(Case::fail(name_of(&c, l), "matched fail_regex"))
+    } else {
+        let c = r.pass.as_ref().and_then(|r| r.captures(l))?;
+        Some(Case::pass(name_of(&c, l)))
+    }
+}
+
+fn regex_lines(text: &str, suite: &Suite) -> Result<Vec<Case>, String> {
+    let r = regex_pair(suite)?;
+    Ok(text.lines().filter_map(|l| regex_line(&r, l)).collect())
+}
+
+// ---- one line at a time ----------------------------------------------------
+
+/// A parser that reads one line at a time, for the formats whose output is
+/// lines (not a whole document). The full [`parse`] uses the same per-line
+/// functions, so a live count cannot drift from it.
+pub(crate) enum LineParser {
+    Tap(Regex),
+    Xctest(Regex),
+    SwiftTesting(Regex),
+    Nextest(Regex),
+    Pytest((Regex, Regex)),
+    Gradle(Regex),
+    Regex(RegexPair),
+}
+
+impl LineParser {
+    /// None for the formats that are a whole document (JUnit, Playwright, Cucumber).
+    pub(crate) fn new(kind: ParserKind, suite: &Suite) -> Option<LineParser> {
+        Some(match kind {
+            ParserKind::Tap => LineParser::Tap(tap_re()),
+            ParserKind::Xctest => LineParser::Xctest(xctest_re()),
+            ParserKind::SwiftTesting => LineParser::SwiftTesting(swift_testing_re()),
+            ParserKind::Nextest => LineParser::Nextest(nextest_re()),
+            ParserKind::Pytest => LineParser::Pytest(pytest_re()),
+            ParserKind::Gradle => LineParser::Gradle(gradle_re()),
+            ParserKind::Regex => LineParser::Regex(regex_pair(suite).ok()?),
+            ParserKind::Junit | ParserKind::Playwright | ParserKind::Cucumber => return None,
+        })
+    }
+
+    /// True for the parsers where a repeated name is one test (a failure wins).
+    pub(crate) fn dedupes(&self) -> bool {
+        matches!(self, LineParser::Nextest(_) | LineParser::Pytest(_))
+    }
+
+    pub(crate) fn line(&self, l: &str) -> Option<Case> {
+        match self {
+            LineParser::Tap(r) => tap_line(r, l),
+            LineParser::Xctest(r) => xctest_line(r, l),
+            LineParser::SwiftTesting(r) => swift_testing_line(r, l),
+            LineParser::Nextest(r) => nextest_line(r, l),
+            LineParser::Pytest(r) => pytest_line(r, l),
+            LineParser::Gradle(r) => gradle_line(r, l),
+            LineParser::Regex(r) => regex_line(r, l),
         }
     }
-    Ok(out)
 }
