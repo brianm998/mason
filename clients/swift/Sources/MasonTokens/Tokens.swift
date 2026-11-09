@@ -25,6 +25,10 @@ public enum MasonTokens {
     public static let sizeTileMinWidth = 64
     public static let sizeTileHeight = 64
     public static let sizeSidebarWidth = 300
+    public static let sizeSidebarWidthMin = 220
+    public static let sizeSidebarWidthMax = 640
+    public static let sizeMainWidthMin = 360
+    public static let sizeSidebarHandle = 8
     public static let sizeRowHeight = 56
     public static let sizeSpacingSmall = 4
     public static let sizeSpacing = 8

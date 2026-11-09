@@ -4,6 +4,7 @@ package mason.monitor
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import mason.MasonTokens
 import mason.v1.*
 import kotlin.math.max
 import kotlin.math.min
@@ -137,6 +138,9 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     var search by mutableStateOf(SearchState())
     var textScale by mutableStateOf(prefs.double(KEY_SCALE) ?: 1.0)
         private set
+    /** The panel's width before text-zoom scaling; always inside the token limits. */
+    var sidebarBase by mutableStateOf(clampSidebar(prefs.double(KEY_SIDEBAR) ?: MasonTokens.sizeSidebarWidth.toDouble()))
+        private set
     var muted by mutableStateOf(prefs.bool(KEY_MUTE) ?: false)
         private set
     var project: String
@@ -232,6 +236,19 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
 
     /** The attention indicator is shown only while something needs a look. */
     val attention: Int get() = if (connected) header?.attention ?: 0 else 0
+
+    // ---- sidebar width ----
+
+    /** Sets and stores the unscaled width, clamped to the limits. */
+    fun setSidebarWidth(w: Double) {
+        val c = clampSidebar(w)
+        if (c == sidebarBase) return
+        sidebarBase = c
+        prefs.setDouble(KEY_SIDEBAR, c)
+    }
+
+    /** The stored width as drawn at this text zoom. */
+    fun panelWidth(scale: Double): Double = sidebarBase * sidebarFactor(scale)
 
     // ---- sidebar sections ----
 
@@ -483,6 +500,19 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
         const val CLAIM_EVERY_MS = 3_000L
         const val KEY_SCALE = "textScale"
         const val KEY_MUTE = "muted"
+        const val KEY_SIDEBAR = "sidebarWidth"
+        /** Text zoom stops scaling the panel here, as before. */
+        const val SIDEBAR_SCALE_CAP = 1.5
+        fun clampSidebar(w: Double): Double =
+            if (!w.isFinite()) MasonTokens.sizeSidebarWidth.toDouble()
+            else min(MasonTokens.sizeSidebarWidthMax.toDouble(), max(MasonTokens.sizeSidebarWidthMin.toDouble(), w))
+        fun sidebarFactor(scale: Double) = min(scale, SIDEBAR_SCALE_CAP)
+        /** The width to draw: the panel gives way first, so the main view keeps its minimum unless the panel is at its (scaled) floor. */
+        fun fit(desired: Double, available: Double, scale: Double): Double {
+            val floor = MasonTokens.sizeSidebarWidthMin * sidebarFactor(scale)
+            val room = available - MasonTokens.sizeMainWidthMin - MasonTokens.sizeSidebarHandle
+            return max(floor, min(desired, room))
+        }
         private val WANTING = setOf("needs_attention", "failed", "proposed")
         const val SCALE_MIN = 0.8
         const val SCALE_MAX = 2.4

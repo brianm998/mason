@@ -231,6 +231,11 @@ description = "After 15 seconds of failed reconnects the monitor raises 'daemon 
 swift = "done"
 compose = "done"
 
+[feature.sidebar-resize]
+description = "The left panel is resized by dragging its divider (220 to 640 before text zoom, the main view keeps 360, the width is remembered per device), and Home and search are pinned above the scrolling list"
+swift = "done"
+compose = "done"
+
 # The phone apps (iOS shares MonitorCore, Android shares the Compose core; Stage 24) are not a
 # third column: the parity gate above compares the two desktop clients and is unchanged. These
 # are the deliberate differences between a phone and its desktop client, recorded as data. The

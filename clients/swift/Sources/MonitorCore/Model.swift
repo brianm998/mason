@@ -2,6 +2,7 @@
 
 import Foundation
 import MasonProtocol
+import MasonTokens
 
 public typealias HeaderView = Mason_V1_HeaderView
 public typealias SidebarView = Mason_V1_SidebarView
@@ -123,6 +124,8 @@ public final class MonitorModel: ObservableObject {
     @Published public private(set) var history = NavHistory()
     @Published public var search = SearchState()
     @Published public var textScale: Double { didSet { prefs.setDouble(textScale, for: Keys.scale) } }
+    /// The panel's width before text-zoom scaling; always inside the token limits.
+    @Published public private(set) var sidebarWidth: Double
     @Published public var muted: Bool {
         didSet {
             prefs.setBool(muted, for: Keys.mute)
@@ -165,6 +168,7 @@ public final class MonitorModel: ObservableObject {
     public enum Keys {
         static let scale = "textScale"
         static let mute = "muted"
+        static let sidebarWidth = "sidebarWidth"
         static func section(_ s: String) -> String { "section.\(s).expanded" }
     }
 
@@ -175,6 +179,7 @@ public final class MonitorModel: ObservableObject {
         prefs = preferences
         textScale = preferences.double(Keys.scale) ?? 1.0
         muted = preferences.bool(Keys.mute) ?? false
+        sidebarWidth = Self.clampSidebar(preferences.double(Keys.sidebarWidth) ?? Double(MasonTokens.sizeSidebarWidth))
         let box = MuteBox()
         announcer = Announcer(sink: SilentSink(), isMuted: { box.value }, preferences: preferences)
         muteBox = box
@@ -233,6 +238,38 @@ public final class MonitorModel: ObservableObject {
 
     /// The attention indicator is shown only while something needs a look.
     public var attention: UInt32 { connected ? (header?.attention ?? 0) : 0 }
+
+    // MARK: sidebar width
+
+    /// Text zoom stops scaling the panel here, as before.
+    public static let sidebarScaleCap = 1.5
+
+    public static func clampSidebar(_ w: Double) -> Double {
+        guard w.isFinite else { return Double(MasonTokens.sizeSidebarWidth) }
+        return min(Double(MasonTokens.sizeSidebarWidthMax), max(Double(MasonTokens.sizeSidebarWidthMin), w))
+    }
+
+    /// Sets and stores the unscaled width, clamped to the limits.
+    public func setSidebarWidth(_ w: Double) {
+        let c = Self.clampSidebar(w)
+        guard c != sidebarWidth else { return }
+        sidebarWidth = c
+        prefs.setDouble(c, for: Keys.sidebarWidth)
+    }
+
+    public static func sidebarFactor(scale: Double) -> Double { min(scale, sidebarScaleCap) }
+
+    /// The stored width as drawn at this text zoom.
+    public func panelWidth(scale: Double) -> Double { sidebarWidth * Self.sidebarFactor(scale: scale) }
+
+    /// The width to draw: the panel gives way first, so the main view keeps its minimum
+    /// unless the panel is already at its (scaled) floor.
+    public static func fit(desired: Double, available: Double, scale: Double) -> Double {
+        let f = sidebarFactor(scale: scale)
+        let floor = Double(MasonTokens.sizeSidebarWidthMin) * f
+        let room = available - Double(MasonTokens.sizeMainWidthMin) - Double(MasonTokens.sizeSidebarHandle)
+        return max(floor, min(desired, room))
+    }
 
     // MARK: sidebar sections
 
