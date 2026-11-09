@@ -9,7 +9,9 @@
 //!   assertion, a raised limit, a broadened skip), the task waits for the owner,
 //!   and the approval is for that exact diff.
 //! - **Limits.** Open self-tasks (not those held behind a blocker, nor proposed ones), tasks per week and agent steps per period are
-//!   capped; filing past a cap is refused with the number and the limit.
+//!   capped for the work MASON starts for itself (agent proposals, self-filed fixes,
+//!   outside issues); filing past a cap is refused with the number and the limit.
+//!   The owner's own tasks are never counted or refused for how many there are.
 //! - **Rollback.** A rollback starts a cooldown during which no self-task may be
 //!   filed, and files one proposal (waiting for the owner) saying what failed.
 
@@ -261,10 +263,13 @@ const WEEK_MS: u64 = 7 * 24 * 3600 * 1000;
 
 /// What the week's filings come to: `status.week` counts only the work MASON started for
 /// itself; `yours` is what the owner filed, or cancelled before it spent anything.
+/// `status.open` and `status.steps` also count only that work; `yours_open` is how many
+/// of the owner's own tasks are open, shown but never limited.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Usage {
     pub status: Status,
     pub yours: u32,
+    pub yours_open: u32,
     /// Agent steps of owner-filed tasks in the period: shown, never counted against `max_steps`.
     pub yours_steps: u32,
 }
@@ -329,9 +334,23 @@ pub fn status(d: &Daemon, pid: ProjectId, cfg: &SelfCfg, now: u64) -> Status {
 
 pub fn usage(d: &Daemon, pid: ProjectId, cfg: &SelfCfg, now: u64) -> Usage {
     let w = d.world().ok();
-    let (mut open, mut held, mut week, mut yours, mut steps, mut yours_steps) = (0, 0, 0, 0, 0, 0);
+    let (mut open, mut held, mut yours_open, mut week, mut yours, mut steps, mut yours_steps) =
+        (0, 0, 0, 0, 0, 0, 0);
     if let Some(w) = &w {
-        (open, held) = open_counts(w.tasks.values().filter(|t| t.project == pid));
+        let mine = |t: &&Task| t.project == pid;
+        (open, held) = open_counts(
+            w.tasks
+                .values()
+                .filter(mine)
+                .filter(|t| t.trust != TrustSource::Owner),
+        );
+        yours_open = open_counts(
+            w.tasks
+                .values()
+                .filter(mine)
+                .filter(|t| t.trust == TrustSource::Owner),
+        )
+        .0;
         (week, yours) = count(w.tasks.values().filter(|t| t.project == pid), now);
         let period = cfg.period_h * 3600 * 1000;
         (steps, yours_steps) = count_steps(
@@ -359,6 +378,7 @@ pub fn usage(d: &Daemon, pid: ProjectId, cfg: &SelfCfg, now: u64) -> Usage {
             cooldown_until_ms,
         },
         yours,
+        yours_open,
         yours_steps,
     }
 }
@@ -376,9 +396,9 @@ pub fn check_filing(d: &Daemon, pid: ProjectId) -> Result<(), String> {
     check(&status(d, pid, cfg, now_ms()), cfg)
 }
 
-/// As `check_filing`, for a task of this trust: the owner's own filings are not held to
-/// the weekly cap (they are not MASON starting work for itself), but still to the
-/// open-task and step caps and the cooldown.
+/// As `check_filing`, for a task of this trust: the owner's own filings are held to no
+/// count at all (open, weekly or steps): those caps bound the work MASON starts for
+/// itself. Only the cooldown after a rollback still stops them.
 pub fn check_filing_as(d: &Daemon, pid: ProjectId, trust: TrustSource) -> Result<(), String> {
     let Some(p) = d.project(pid) else {
         return Ok(());
@@ -421,7 +441,7 @@ pub fn check_as(s: &Status, yours: u32, cfg: &SelfCfg, trust: TrustSource) -> Re
         let hours = until.saturating_sub(now_ms()).div_ceil(3_600_000);
         return Err(format!("self-tasks are cooling down after a rollback, for about {hours} more hour(s); look at the proposal it filed"));
     }
-    if s.open >= cfg.max_open {
+    if trust != TrustSource::Owner && s.open >= cfg.max_open {
         return Err(format!(
             "{} self-tasks are open and the limit is {}: let some land first (counted: running, queued, paused or waiting for you; {} held behind others and proposed tasks are not counted)",
             s.open, cfg.max_open, s.held
@@ -703,12 +723,13 @@ mod tests {
         );
         assert!(check_as(&s, yours, &c, TrustSource::Outside).is_err());
         assert!(check_as(&s, yours, &c, TrustSource::Owner).is_ok());
-        // The other limits still stop the owner.
-        assert!(check_as(&st(3, 0, 0, None), 0, &c, TrustSource::Owner).is_err());
-        // Changed by task 18 (decision 0030): the owner is no longer held to the step cap.
-        assert!(check_as(&st(0, 0, 40, None), 0, &c, TrustSource::Owner).is_ok());
+        // No count stops the owner; the same counts still stop everyone else.
+        assert!(check_as(&st(99, 99, 99, None), 0, &c, TrustSource::Owner).is_ok());
+        assert!(check_as(&st(3, 0, 0, None), 0, &c, TrustSource::OwnerAgent).is_err());
+        assert!(check_as(&st(3, 0, 0, None), 0, &c, TrustSource::Outside).is_err());
         assert!(check_as(&st(0, 0, 40, None), 0, &c, TrustSource::OwnerAgent).is_err());
         assert!(check_as(&st(0, 0, 40, None), 0, &c, TrustSource::Outside).is_err());
+        // A cooldown after a rollback is not a count: it stops the owner too.
         let until = now_ms() + 3_600_000;
         assert!(check_as(&st(0, 0, 0, Some(until)), 0, &c, TrustSource::Owner).is_err());
     }

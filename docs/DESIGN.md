@@ -369,7 +369,7 @@ Steps remaining is the shortest graph path from the current step to `landed`, ig
 
 - A step declares everything it needs, and the set is acquired at once, which rules out deadlock from holding one resource while waiting for another.
 - A job may pass a waiter only by using resources that waiter doesn't need. A compile can pass a waiting test suite, and nothing passes a waiting exclusive job.
-- The system counts jobs and never gates on load average. An optional free-memory floor applies when starting beside other work.
+- Limits are for the machine's resources and for work MASON starts for itself, never for how many tasks the owner files. Two limits are strict: concurrent LLM sessions (`llm:claude`, default 10; more wait their turn, none are refused) and local compile CPU (a compile starts only while overall CPU use, averaged over a few seconds, is below `compile_cpu_max`, default 50%; a compile that has started is never killed for it). Neither counts tasks. The system never gates on load average. An optional free-memory floor applies when starting beside other work. `max_open`, `per_week`, `max_steps` and the cooldown bound only agent proposals, self-filed fixes and outside issues (decision 0026).
 - A task isn't claimed until an LLM slot is available, so a full pool doesn't produce worktrees with nothing happening in them.
 - Lowering the session limit never kills anything. It stops new admissions until the count falls.
 - `mason run --needs compile -- <cmd>` and an optional agent hook let your interactive sessions take the same queue, ahead of pipeline work.

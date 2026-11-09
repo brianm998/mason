@@ -55,6 +55,12 @@ pub struct Daemon {
     pub(crate) landing: crate::landing::Landing,
     pub(crate) tracker: crate::tracker::Hub,
     pub update_status: Mutex<crate::update::Status>,
+    /// What the last look at the update channel found.
+    pub update_check: Mutex<crate::update::Check>,
+    /// One fetch into the source mirror at a time.
+    pub update_fetch: Mutex<()>,
+    /// Monitor builds, by kind.
+    pub monitor_builds: Mutex<std::collections::HashMap<String, crate::update::MonitorState>>,
     pub(crate) drafts: crate::editor::Drafts,
     /// The one probe session per held account (see `holds`).
     pub probes: crate::holds::Probes,
@@ -143,6 +149,14 @@ impl Daemon {
         }
 
         let rcfg = crate::sched::load_resource_cfg(&cfg.config_dir)?;
+        // `MASON_CPU_FILE` names a file holding the percentage: how tests and the
+        // exit scripts drive the compile gate without load.
+        let cpu: Arc<dyn crate::cpu::CpuSource> =
+            match (&cfg.cpu, std::env::var_os("MASON_CPU_FILE")) {
+                (Some(c), _) => c.clone(),
+                (None, Some(f)) => Arc::new(crate::cpu::FileCpu(f.into())),
+                (None, None) => crate::cpu::Sampler::start(),
+            };
         let accounts = if demo {
             crate::demo::accounts()
         } else {
@@ -154,6 +168,7 @@ impl Daemon {
             cfg.data_dir.join("limits.kv"),
             &rcfg,
             cfg.max_concurrent as u32,
+            cpu,
             &accounts,
         )?;
         let targets = crate::targets::Targets::new(
@@ -195,6 +210,9 @@ impl Daemon {
                 phase: "idle".into(),
                 ..Default::default()
             }),
+            update_check: Default::default(),
+            update_fetch: Mutex::new(()),
+            monitor_builds: Default::default(),
             cfg,
         });
         if demo {
@@ -202,6 +220,7 @@ impl Daemon {
         } else {
             d.load_definitions();
             crate::targets::spawn(&d);
+            crate::update::spawn_checker(&d);
             d.progress_cleanup();
             d.recover();
             d.spawn_progress_ticker();

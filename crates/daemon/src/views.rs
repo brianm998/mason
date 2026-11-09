@@ -530,6 +530,7 @@ impl<'a> Ctx<'a> {
                 })
                 .collect(),
             banners,
+            update: crate::update::info(self.d),
             projects: self.w.projects.values().map(|p| p.name.clone()).collect(),
             pending_issues: self
                 .d

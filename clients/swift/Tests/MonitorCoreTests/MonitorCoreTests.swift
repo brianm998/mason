@@ -384,6 +384,9 @@ final class MonitorCoreTests: XCTestCase {
         XCTAssertEqual(h.resources, [.init(name: "compile", kind: "machine", used: 1, limit: 2)])
         XCTAssertEqual(h.waiting, ["#4: Waiting for compile slot"])
         XCTAssertEqual(HealthSnapshot(json: "not json").resources, [])
+        let c = HealthSnapshot(json: ##"{"cpu":{"busy_pct":71,"compile_max_pct":50}}"##)
+        XCTAssertEqual(c.cpuLine, "CPU 71% busy; a compile starts below 50%.")
+        XCTAssertEqual(HealthSnapshot(json: ##"{"cpu":{"busy_pct":null,"compile_max_pct":80}}"##).cpuLine, "CPU not readable; a compile starts below 80%.")
     }
 
     // ---- versions (Part 15) ----
@@ -399,18 +402,145 @@ final class MonitorCoreTests: XCTestCase {
         return m
     }
 
-    func testAMonitorOffersToUpdateOnlyWhenBothBuildsAreRealAndDiffer() {
+    /// A header saying where the Swift monitor's build is.
+    private func update(latest: String, phase: String = "", path: String = "", error: String = "", daemon: String = "", canUpdate: Bool = false) -> Mason_V1_ServerMessage {
+        var v = Mason_V1_View()
+        v.header = .with {
+            $0.update = .with {
+                $0.daemonText = daemon
+                $0.daemonCanUpdate = canUpdate
+                $0.monitors = [
+                    .with { $0.kind = "compose"; $0.latest = "other" },
+                    .with { $0.kind = "swift"; $0.latest = latest; $0.phase = phase; $0.path = path; $0.error = error },
+                ]
+            }
+        }
+        var u = Mason_V1_ViewUpdate()
+        u.view = v
+        var m = Mason_V1_ServerMessage()
+        m.view = u
+        return m
+    }
+
+    private func owner(_ role: String = "") -> Mason_V1_ServerMessage {
+        var w = Mason_V1_Welcome()
+        w.protocol = 1
+        w.minProtocol = 1
+        w.owner = true
+        w.role = role
+        var m = Mason_V1_ServerMessage()
+        m.welcome = w
+        return m
+    }
+
+    private func result(id: String, ok: Bool, error: String = "") -> Mason_V1_ServerMessage {
+        var r = Mason_V1_CommandResult()
+        r.id = id
+        r.ok = ok
+        r.error = error
+        var m = Mason_V1_ServerMessage()
+        m.result = r
+        return m
+    }
+
+    func testAMonitorOffersToUpdateOnlyWhenItsOwnSourceMoved() {
+        let m = MonitorModel()
+        m.onInstall = { _ in }
+        m.ownVersion = "aaa111"
+        m.apply(owner())
+        m.apply(update(latest: "bbb222"))
+        XCTAssertTrue(m.updateAvailable)
+        m.apply(update(latest: "aaa111"))
+        XCTAssertFalse(m.updateAvailable, "the same build")
+        m.apply(update(latest: ""))
+        XCTAssertFalse(m.updateAvailable, "the daemon has not looked yet")
+        m.ownVersion = "dev"
+        m.apply(update(latest: "bbb222"))
+        XCTAssertFalse(m.updateAvailable, "a development monitor does not nag")
+    }
+
+    func testOnlyTheOwnersDesktopMonitorOnTheSameMachineIsOffered() {
         let m = MonitorModel()
         m.ownVersion = "aaa111"
-        m.apply(welcome(version: "bbb222"))
-        XCTAssertTrue(m.updateAvailable)
-        m.apply(welcome(version: "aaa111"))
-        XCTAssertFalse(m.updateAvailable, "the same build")
-        m.apply(welcome(version: "dev"))
-        XCTAssertFalse(m.updateAvailable, "a daemon run from a build directory has no version to compare")
-        m.ownVersion = "dev"
-        m.apply(welcome(version: "bbb222"))
-        XCTAssertFalse(m.updateAvailable, "a development monitor does not nag")
+        m.apply(owner())
+        m.apply(update(latest: "bbb222"))
+        XCTAssertFalse(m.updateAvailable, "no way to install it (a phone)")
+        m.onInstall = { _ in }
+        m.apply(owner("owner"))
+        XCTAssertFalse(m.updateAvailable, "over the LAN: the build is on another machine")
+        var w = owner()
+        w.welcome.owner = false
+        m.apply(w)
+        XCTAssertFalse(m.updateAvailable, "not the owner")
+    }
+
+    func testTheDaemonButtonIsTheOwnersAndSendsTheUpdate() {
+        let m = MonitorModel()
+        var sent: [Mason_V1_Command] = []
+        m.sender = { sent.append($0) }
+        m.apply(update(latest: "x", daemon: "masond is 3 commits behind develop", canUpdate: true))
+        XCTAssertEqual(m.daemonUpdateText, "masond is 3 commits behind develop")
+        XCTAssertFalse(m.canUpdateDaemon, "not the owner yet")
+        m.apply(owner())
+        XCTAssertTrue(m.canUpdateDaemon)
+        m.updateDaemon()
+        XCTAssertEqual(sent.last?.raw.method, "POST")
+        XCTAssertEqual(sent.last?.raw.path, "/update")
+    }
+
+    func testTheMonitorButtonFollowsTheBuildAndInstallsItOnce() {
+        let m = MonitorModel()
+        var installed: [String] = []
+        var sent: [Mason_V1_Command] = []
+        m.sender = { sent.append($0) }
+        m.onInstall = { installed.append($0) }
+        m.ownVersion = "aaa111"
+        m.apply(owner())
+        m.apply(update(latest: "bbb222", phase: "failed", error: "an earlier try"))
+        m.updateMonitor()
+        XCTAssertEqual(sent.last?.raw.path, "/update/monitor")
+        XCTAssertEqual(sent.last?.raw.json, "{\"kind\":\"swift\"}")
+        XCTAssertNotNil(m.updating)
+        m.apply(update(latest: "bbb222", phase: "failed", error: "an earlier try"))
+        XCTAssertNotNil(m.updating, "a header from before the daemon answered is not the answer")
+        XCTAssertNil(m.updateError)
+        m.apply(result(id: "update-monitor", ok: true))
+        m.apply(update(latest: "bbb222", phase: "building"))
+        XCTAssertEqual(installed, [])
+        m.apply(update(latest: "bbb222", phase: "ready", path: "/x/MASON.app"))
+        XCTAssertEqual(installed, ["/x/MASON.app"])
+        m.apply(update(latest: "bbb222", phase: "ready", path: "/x/MASON.app"))
+        XCTAssertEqual(installed, ["/x/MASON.app"], "once")
+    }
+
+    func testAMonitorBuildThatStopsSaysWhyAndCanBeTriedAgain() {
+        let m = MonitorModel()
+        m.sender = { _ in }
+        m.onInstall = { _ in }
+        m.ownVersion = "aaa111"
+        m.apply(owner())
+        m.apply(update(latest: "bbb222"))
+        m.updateMonitor()
+        m.apply(result(id: "update-monitor", ok: true))
+        m.apply(update(latest: "bbb222", phase: "failed", error: "swift build failed"))
+        XCTAssertNil(m.updating)
+        XCTAssertTrue(m.updateError?.contains("swift build failed") == true)
+        XCTAssertTrue(m.updateAvailable, "the button comes back")
+        // The daemon took over mid-build: the new one knows nothing about it.
+        m.updateMonitor()
+        m.apply(result(id: "update-monitor", ok: true))
+        m.apply(update(latest: "bbb222", phase: ""))
+        XCTAssertNil(m.updating)
+        XCTAssertTrue(m.updateError?.contains("restarted") == true)
+        // The connection went before the daemon answered.
+        m.updateMonitor()
+        XCTAssertNotNil(m.updating)
+        m.apply(owner())
+        XCTAssertNil(m.updating)
+        // The daemon refused.
+        m.updateMonitor()
+        m.apply(result(id: "update-monitor", ok: false, error: "already being built"))
+        XCTAssertEqual(m.updateError, "already being built")
     }
 
     func testAMonitorTooOldForTheProtocolIsReadOnlyAndSaysWhy() {
@@ -433,16 +563,6 @@ final class MonitorCoreTests: XCTestCase {
         XCTAssertNil(m.readOnlyReason)
         m.cancel(3)
         XCTAssertEqual(sent, 2)
-    }
-
-    func testTheUpdateButtonKnowsHowItWillGetANewerMonitor() {
-        XCTAssertEqual(ClientUpdate.plan(env: ["MASON_SOURCE_DIR": "/src"], exists: { $0 == "/src/scripts/bundle-monitor.sh" }), .buildFromSource("/src"))
-        if case .unavailable(let why) = ClientUpdate.plan(env: ["MASON_SOURCE_DIR": "/nope"], exists: { _ in false }) {
-            XCTAssertTrue(why.contains("/nope"))
-        } else { XCTFail("a checkout without the script is not a source") }
-        XCTAssertEqual(ClientUpdate.plan(env: ["MASON_INSTALL_URL": "https://example.org/mason"]), .openPage("https://example.org/mason"))
-        if case .unavailable = ClientUpdate.plan(env: ["MASON_INSTALL_URL": "http://insecure"]) {} else { XCTFail("only https pages") }
-        if case .unavailable(let why) = ClientUpdate.plan(env: [:]) { XCTAssertTrue(why.contains("MASON_SOURCE_DIR")) } else { XCTFail() }
     }
 
     // ---- the pipeline editor (Part 18) ----
