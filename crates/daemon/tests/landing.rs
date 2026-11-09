@@ -202,18 +202,7 @@ fn a_red_post_land_tier_freezes_landing_until_the_fix_lands() {
     let tmp = w.s.root.path().join("fixmk");
     let br = format!("mason/scratch/t{}", fix.0);
     sh(&w.s.repo, &["fetch", "-q", "origin"]);
-    sh(
-        &w.s.repo,
-        &[
-            "worktree",
-            "add",
-            "-q",
-            "-b",
-            &br,
-            tmp.to_str().unwrap(),
-            "origin/main",
-        ],
-    );
+    support::lw::add_worktree(&w.s.repo, &br, &tmp);
     sh(&tmp, &["rm", "-q", "red.smoke"]);
     sh(
         &tmp,
