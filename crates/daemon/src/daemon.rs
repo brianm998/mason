@@ -549,6 +549,9 @@ impl Daemon {
             self.admit_again.store(true, Ordering::SeqCst);
             return;
         }
+        // Whatever way this ends, a panic included, the next admit must be able to run.
+        let _reset = AdmitReset(&self.admitting);
+        self.crash.panic_point("admit");
         loop {
             self.admit_again.store(false, Ordering::SeqCst);
             while let Ok(w) = self.store.world() {
@@ -578,7 +581,6 @@ impl Daemon {
                 break;
             }
         }
-        self.admitting.store(false, Ordering::SeqCst);
     }
 
     /// How many LLM sessions are free to promise to a newly claimed task. A
@@ -816,14 +818,23 @@ impl Daemon {
     }
 
     fn spawn_sweeper(self: &Arc<Self>) {
-        let weak = Arc::downgrade(self);
         let every = self.cfg.sweep_interval;
-        let _ = std::thread::Builder::new()
-            .name("sweeper".into())
-            .spawn(move || loop {
-                std::thread::sleep(every);
-                let Some(d) = weak.upgrade() else { break };
-                crate::sweep::sweep_once(&d);
-            });
+        crate::bg::spawn_loop(self, "sweeper", move |weak| {
+            std::thread::sleep(every);
+            let Some(d) = weak.upgrade() else {
+                return false;
+            };
+            crate::sweep::sweep_once(&d);
+            true
+        });
+    }
+}
+
+/// Clears `admitting` on every way out of `admit`.
+struct AdmitReset<'a>(&'a AtomicBool);
+
+impl Drop for AdmitReset<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
     }
 }

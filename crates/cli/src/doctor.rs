@@ -533,8 +533,17 @@ pub fn run(data_dir: &Path, config_dir: &Path) -> Vec<Finding> {
                         s["event_loop_stalls"], s["worst_stall_ms"]
                     )));
                 }
+                if let Some(n) = s["thread_panics"]["count"].as_u64().filter(|n| *n > 0) {
+                    out.push(warn(format!(
+                        "{n} daemon thread panic(s) were caught and the thread went on; last: {}",
+                        s["thread_panics"]["last"].as_str().unwrap_or("?")
+                    )));
+                }
                 if s["bugs"].as_u64().unwrap_or(0) > 0 {
-                    out.push(warn(format!("the daemon's reconcile sweep has filed {} bug(s): it found things the event path missed", s["bugs"])));
+                    out.push(warn(format!(
+                        "the daemon has filed {} bug(s) (see `mason status`)",
+                        s["bugs"]
+                    )));
                 }
             }
             Err(e) => out.push(fail(format!("masond did not answer: {e}"))),
