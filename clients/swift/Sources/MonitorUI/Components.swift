@@ -470,7 +470,8 @@ struct ActionButtons: View {
     }
 
     func shown(_ a: String) -> Bool {
-        if a == "answer" || a == "edit" { return false }
+        // Block and unblock are drawn by BlockersView, one control per blocker.
+        if a == "answer" || a == "edit" || a == "block" || a == "unblock" { return false }
         if hasApprovalView && (a == "approve" || a == "reject") { return false }
         if !model.canAct && ["approve", "reject"].contains(a) { return false }
         return true
@@ -491,12 +492,73 @@ struct ActionButtons: View {
         case "cancel": model.cancel(row.id)
         case "retry": model.retry(row.id)
         case "approve": model.approve(row.id)
+        case "revive": model.revive(row.id)
         case "reject": model.reject(row.id)
         case "explore_anyway": model.exploreAnyway(row.id)
         case "land_now": model.landNow(row.id)
         case "force": model.force(row.id)
         case "skip_test": model.skipTest(row.id, step: row.step)
         case "open_session": copyToPasteboard("mason task open \(row.id)")
+        default: break
+        }
+    }
+}
+
+/// A held task's blockers: each with its state and where it came from ("from GitHub" or "set
+/// by you"), Release (and Revive for a canceled one, Retry for a failed one) for the owner, and
+/// an Add blocker field with a task picker. A non-owner sees the list and no controls.
+struct BlockersView: View {
+    @Environment(\.theme) var theme
+    @ObservedObject var model: MonitorModel
+    let row: TaskRow
+    @State private var pick: UInt64 = 0
+
+    var body: some View {
+        if !row.blockerLinks.isEmpty || row.allowedActions.contains("block") {
+            VStack(alignment: .leading, spacing: theme.spacingSmall) {
+                ForEach(row.blockerLinks, id: \.task) { l in
+                    HStack(spacing: theme.spacing) {
+                        Button("#\(l.task)") { model.go(.task(l.task)) }.buttonStyle(.link).font(theme.body())
+                        Text("\(l.state), \(l.origin)").font(theme.small()).foregroundStyle(theme.muted)
+                        if model.canAct {
+                            ForEach(l.actions, id: \.self) { a in
+                                Button { run(l, a) } label: { Text(label(a)).pill() }
+                                    .buttonStyle(.plain)
+                                    .accessibilityIdentifier("blocker:\(row.id):\(l.task):\(a)")
+                            }
+                        }
+                    }
+                    .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier("blocker:\(row.id):\(l.task)")
+                }
+                if model.canAct && row.allowedActions.contains("block") {
+                    HStack(spacing: theme.spacing) {
+                        Picker("Add blocker", selection: $pick) {
+                            Text("Choose a task").tag(UInt64(0))
+                            ForEach(model.blockerCandidates(for: row), id: \.id) { c in
+                                Text("\(c.key) \(c.title)").tag(c.id)
+                            }
+                        }
+                        .accessibilityIdentifier("add-blocker:\(row.id):picker")
+                        Button {
+                            if pick != 0 { model.addBlocker(row.id, after: pick); pick = 0 }
+                        } label: { Text("Add blocker").pill() }
+                            .buttonStyle(.plain)
+                            .disabled(pick == 0)
+                            .accessibilityIdentifier("add-blocker:\(row.id)")
+                    }
+                }
+            }
+        }
+    }
+
+    func label(_ a: String) -> String { a.prefix(1).uppercased() + a.dropFirst() }
+
+    func run(_ l: Mason_V1_BlockerLink, _ a: String) {
+        switch a {
+        case "release": model.release(row.id, blocker: l.task)
+        case "revive": model.revive(l.task)
+        case "retry": model.retry(l.task)
         default: break
         }
     }

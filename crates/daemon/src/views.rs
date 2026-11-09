@@ -152,8 +152,15 @@ impl<'a> Ctx<'a> {
             State::Landing => vec!["cancel", "skip_test", "land_now", "force"],
             State::NeedsAttention => vec!["answer", "cancel", "retry", "open_session"],
             State::Failed => vec!["retry", "cancel", "open_session"],
+            State::Canceled if t.cancel_keeps_branch => vec!["revive"],
             State::Canceled | State::Landed => vec![],
         };
+        if matches!(t.state, State::Proposed | State::Queued) {
+            a.push("block");
+            if !t.blockers.is_empty() {
+                a.push("unblock");
+            }
+        }
         let waiting_approval =
             t.activity == Activity::Waiting(WaitReason::On(APPROVAL_WAIT.into()));
         if (waiting_approval || self.pending_hold(t).is_some()) && !a.contains(&"approve") {
@@ -270,6 +277,9 @@ impl<'a> Ctx<'a> {
             Activity::Waiting(WaitReason::Slot) => "Waiting for an LLM session to be free".into(),
             Activity::Waiting(WaitReason::NotBefore(_)) => "Waiting for its start time".into(),
             Activity::Waiting(WaitReason::Owner) => "Waiting for your answer".into(),
+            Activity::Held(_) if crate::blockers::held_line(self.w, t).is_some() => {
+                crate::blockers::held_line(self.w, t).unwrap_or_default()
+            }
             Activity::Held(by) => format!(
                 "Held, blocked by {}",
                 by.iter()
@@ -407,6 +417,15 @@ impl<'a> Ctx<'a> {
             progress: self.progress(t),
             allowed_actions: self.allowed_actions(t),
             blockers: t.blockers.iter().map(|b| b.0).collect(),
+            blocker_links: crate::blockers::links(self.d, self.w, t)
+                .into_iter()
+                .map(|l| BlockerLink {
+                    task: l.task.0,
+                    state: state_name(l.state).to_string(),
+                    origin: l.origin.to_string(),
+                    actions: l.actions.iter().map(|s| s.to_string()).collect(),
+                })
+                .collect(),
             blocks: self
                 .w
                 .tasks
@@ -1121,6 +1140,8 @@ pub fn summarize(kind: &EventKind) -> (String, String, u64) {
         | EventKind::WaitEnded { task }
         | EventKind::TrackerEdited { task, .. }
         | EventKind::BlockerRemoved { task, .. }
+        | EventKind::BlockersChanged { task, .. }
+        | EventKind::Revived { task }
         | EventKind::BlockerAdded { task, .. } => task.0,
         _ => 0,
     };

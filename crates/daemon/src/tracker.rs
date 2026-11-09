@@ -94,6 +94,12 @@ pub struct Summary {
 }
 
 impl Hub {
+    /// Hold off a poll while the owner changes blockers, so the poll cannot read the
+    /// old overrides and put a released blocker back.
+    pub fn quiet(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.one_at_a_time.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     pub fn record(&self, p: ProjectId) -> Option<PollRecord> {
         self.records
             .lock()
@@ -796,6 +802,9 @@ pub fn sync_with_deps(
 
     // Imported issues: what the tracker now says they wait for reaches the task.
     let stored = d.store.tracker_deps(&p.id).unwrap_or_default();
+    // The owner's overrides: a release holds until GitHub's relationship for the issue
+    // changes; an addition holds always.
+    let (mut released, added) = crate::blockers::overrides(d, &p.id);
     let w = d.world().ok();
     for it in items.iter().filter(|i| !i.is_pr && i.open) {
         let Some(row) = rows.get(&it.number) else {
@@ -805,9 +814,31 @@ pub fn sync_with_deps(
         if native.is_some_and(|m| !m.contains_key(&it.number)) {
             continue;
         }
+        let want_all: BTreeSet<u64> = wants(it).into_iter().collect();
+        match d.store.tracker_relationship(&p.id, it.number) {
+            Ok(Some(old)) if old != want_all => {
+                // GitHub changed what the issue is blocked by: a release no longer stands.
+                let _ = d
+                    .store
+                    .drop_tracker_overrides(&p.id, it.number, Some("release"), None);
+                released.remove(&it.number);
+                let v: Vec<u64> = want_all.iter().copied().collect();
+                let _ = d.store.set_tracker_relationship(&p.id, it.number, &v);
+            }
+            Ok(None) => {
+                let v: Vec<u64> = want_all.iter().copied().collect();
+                let _ = d.store.set_tracker_relationship(&p.id, it.number, &v);
+            }
+            _ => {}
+        }
+        let released_here = released.get(&it.number).cloned().unwrap_or_default();
+        let added_here = added.get(&it.number).cloned().unwrap_or_default();
         let desired: BTreeSet<u64> = wants(it)
             .into_iter()
-            .filter(|n| matches!(resolve(&rows, *n), Blocked::Task(..)))
+            .filter(|n| match resolve(&rows, *n) {
+                Blocked::Task(_, t) => !released_here.contains(&t),
+                _ => false,
+            })
             .collect();
         let prev = stored.get(&it.number).cloned().unwrap_or_default();
         if desired == prev {
@@ -849,7 +880,10 @@ pub fn sync_with_deps(
         }
         for n in prev.difference(&desired) {
             let bt = rows.get(n).map(|r| TaskId(r.task));
-            if let Some(bt) = bt {
+            if bt.is_some_and(|b| added_here.contains(&b)) {
+                // The owner added this one too: GitHub dropping it does not remove it.
+                recorded.remove(n);
+            } else if let Some(bt) = bt {
                 if d.emit(EventKind::BlockerRemoved { task, blocker: bt })
                     .is_ok()
                 {
@@ -866,30 +900,8 @@ pub fn sync_with_deps(
         }
     }
 
-    // A canceled blocker never lands: the dependent stays held, and someone is told.
-    if let Ok(w) = d.world() {
-        for (n, row) in &rows {
-            let Some(t) = w.tasks.get(&TaskId(row.task)) else {
-                continue;
-            };
-            if !matches!(t.state, State::Proposed | State::Queued) {
-                continue;
-            }
-            let dead: Vec<u64> = t
-                .blockers
-                .iter()
-                .filter(|b| w.tasks.get(b).is_some_and(|x| x.state == State::Canceled))
-                .map(|b| b.0)
-                .collect();
-            if !dead.is_empty() {
-                alerts.push(format!(
-                    "task #{} (issue #{n}) is held: its blocker {} was canceled and will never land; remove the dependency to release it",
-                    t.id.0,
-                    dead.iter().map(|b| format!("task #{b}")).collect::<Vec<_>>().join(", ")
-                ));
-            }
-        }
-    }
+    // A canceled or failed blocker never lands by itself: the alert for that is made from
+    // the world (`attention::alerts_now`), so it also clears when the owner frees the task.
     pending.sort_by_key(|w| w.number);
     if pending.is_empty() {
         d.landing().clear(pid, "tracker-pending");
