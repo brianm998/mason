@@ -107,6 +107,19 @@ pub struct TodoItem {
 /// The most log lines kept for one push.
 pub const LOG_KEEP: usize = 40;
 
+/// The typical `(low, high, samples)` of past runs, kept in memory so it can be
+/// shown again whenever there is no real total. It is not stored with the row
+/// (the totals it produced are), so it never takes part in comparing two records.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Remembered(pub Option<(u64, u64, u32)>);
+
+impl PartialEq for Remembered {
+    fn eq(&self, _: &Remembered) -> bool {
+        true
+    }
+}
+impl Eq for Remembered {}
+
 /// The progress of one step run.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct Progress {
@@ -123,6 +136,18 @@ pub struct Progress {
     pub subs: Vec<SubProgress>,
     /// The agent's todo list, if it keeps one.
     pub todo: Vec<TodoItem>,
+    /// True for an agent step: its figure follows [`Progress::choose`], and
+    /// output lines never set `done`.
+    pub agent: bool,
+    /// The agent's own latest counts from `report_progress`: `(done, total, unit)`.
+    pub reported: Option<(u64, u64, String)>,
+    /// True once the agent has given a message of its own this run.
+    pub reported_message: bool,
+    /// Tool calls the agent has made this run.
+    pub tool_calls: u64,
+    /// The typical `(low, high, samples)` from past runs, kept so it can be
+    /// shown again whenever there is no real total.
+    pub history: Remembered,
     /// With a `history` total, the low end of the typical range (`total` is the high end).
     pub total_low: u64,
     /// How many past runs the typical figures come from.
@@ -185,10 +210,11 @@ impl Progress {
         self.take_lines(stream, fresh);
         self.marks.insert(stream.to_string(), end);
         self.updated_at_ms = at_ms;
-        // Without a reported figure the count of lines is the count.
+        // Without a reported figure the count of lines is the count (never
+        // for an agent: its figure is chosen by `choose`).
         // (A daemon-counted figure in another unit, like tests, is not replaced.)
         let pinned = self.done.source == Source::Counted && self.unit != "lines";
-        if !matches!(self.done.source, Source::Reported) && !pinned {
+        if !self.agent && !matches!(self.done.source, Source::Reported) && !pinned {
             self.unit = "lines".to_string();
             self.done = Figure::counted(self.output.lines);
         }
@@ -250,6 +276,7 @@ impl Progress {
     /// Offer the typical figure as a total, if no real total is known.
     /// `range` is the typical `(low, high)`; `samples` is how many runs it comes from.
     pub fn offer_history_total(&mut self, range: Option<(u64, u64)>, samples: usize) {
+        self.history = Remembered(range.map(|(lo, hi)| (lo, hi, samples as u32)));
         if self.total.is_real() {
             return;
         }
@@ -258,6 +285,135 @@ impl Progress {
                 self.total = Figure::history(hi);
                 self.total_low = lo;
                 self.history_samples = samples as u32;
+            }
+            None => {
+                self.total = Figure::default();
+                self.total_low = 0;
+                self.history_samples = 0;
+            }
+        }
+    }
+
+    /// Mark this record as an agent's, with the typical tool-call count of past runs.
+    pub fn begin_agent(&mut self, range: Option<(u64, u64)>, samples: usize) {
+        self.agent = true;
+        self.offer_history_total(range, samples);
+        self.choose();
+    }
+
+    /// The agent called `report_progress`: its message always wins, and its
+    /// counts (when given) are the figure. A changed total replaces the old.
+    pub fn agent_report(
+        &mut self,
+        message: &str,
+        counts: Option<(u64, u64)>,
+        unit: &str,
+        at_ms: u64,
+    ) -> Change {
+        let before = self.snapshot();
+        self.agent = true;
+        if let Some((d, t)) = counts {
+            let unit = if unit.trim().is_empty() {
+                "steps"
+            } else {
+                unit
+            };
+            self.reported = Some((d, t, unit.to_string()));
+        }
+        self.reported_message = true;
+        self.message = message.to_string();
+        self.choose();
+        self.moved(before, at_ms)
+    }
+
+    /// The agent's todo list changed. Its message is the item in progress,
+    /// unless the agent has given a message of its own.
+    pub fn agent_plan(&mut self, items: Vec<TodoItem>, at_ms: u64) -> Change {
+        let before = self.snapshot();
+        self.agent = true;
+        self.todo = items;
+        if !self.reported_message {
+            if let Some(t) = self.todo.iter().find(|t| t.status == "doing") {
+                self.message = t.text.clone();
+            }
+        }
+        self.choose();
+        self.moved(before, at_ms)
+    }
+
+    /// The agent made a tool call. The summary is the message only while the
+    /// agent has neither reported a message nor has an item in progress.
+    /// Only the count changes at once-or-throttled pace: this is `Output`.
+    pub fn agent_tool(&mut self, summary: &str, at_ms: u64) -> Change {
+        let before = self.snapshot();
+        self.agent = true;
+        self.tool_calls += 1;
+        let doing = self.todo.iter().any(|t| t.status == "doing");
+        if !self.reported_message && !doing {
+            self.message = summary.to_string();
+        }
+        self.choose();
+        match self.moved(before, at_ms) {
+            Change::None => Change::None,
+            _ => Change::Output,
+        }
+    }
+
+    fn snapshot(&self) -> (String, Figure, Figure, String, Vec<TodoItem>) {
+        (
+            self.unit.clone(),
+            self.done,
+            self.total,
+            self.message.clone(),
+            self.todo.clone(),
+        )
+    }
+
+    fn moved(
+        &mut self,
+        before: (String, Figure, Figure, String, Vec<TodoItem>),
+        at_ms: u64,
+    ) -> Change {
+        if before == self.snapshot() {
+            return Change::None;
+        }
+        self.updated_at_ms = at_ms;
+        Change::Urgent
+    }
+
+    /// The one rule for an agent's figure: the counts it reported, else its
+    /// todo list ("plan steps": done of all), else its tool calls, with the
+    /// typical figure from past runs as the total only when nothing real is
+    /// known. Output lines never set `done`.
+    pub fn choose(&mut self) {
+        if let Some((d, t, unit)) = self.reported.clone() {
+            self.unit = unit;
+            self.done = Figure::reported(d);
+            self.total = Figure::reported(t);
+            self.total_low = 0;
+            self.history_samples = 0;
+        } else if !self.todo.is_empty() {
+            self.unit = "plan steps".to_string();
+            let done = self.todo.iter().filter(|t| t.status == "done").count() as u64;
+            self.done = Figure::reported(done);
+            self.total = Figure::reported(self.todo.len() as u64);
+            self.total_low = 0;
+            self.history_samples = 0;
+        } else if self.tool_calls > 0 {
+            self.unit = "tool calls".to_string();
+            self.done = Figure::counted(self.tool_calls);
+            self.apply_history();
+        } else {
+            self.apply_history();
+        }
+    }
+
+    fn apply_history(&mut self) {
+        match self.history.0 {
+            Some((lo, hi, n)) => {
+                self.total = Figure::history(hi);
+                self.total_low = lo;
+                self.history_samples = n;
             }
             None => {
                 self.total = Figure::default();
@@ -276,6 +432,50 @@ impl Progress {
     pub fn real_total(&self) -> Option<u64> {
         self.total.is_real().then_some(self.total.value)
     }
+}
+
+/// The longest message line an agent's tool call may give.
+pub const LINE_MAX: usize = 120;
+
+/// One line of at most [`LINE_MAX`] characters with anything that looks like a
+/// secret taken out: a long mixed token, a `ghp_`/`sk-` token, the value of an
+/// assignment whose name says key, token, secret or password, and what follows
+/// `Bearer`. (There was no shared log redactor to reuse; this is the same word
+/// test the proposal redactor uses, applied to one line.)
+pub fn one_line(text: &str) -> String {
+    let mut out: Vec<String> = vec![];
+    let mut after_bearer = false;
+    for w in text.split_whitespace() {
+        let t = w.trim_matches(|c: char| "`'\"(),;".contains(c));
+        let secretish = t.len() >= 20
+            && t.chars()
+                .all(|c| c.is_ascii_alphanumeric() || "_-".contains(c))
+            && t.chars().any(|c| c.is_ascii_digit())
+            && t.chars().any(|c| c.is_ascii_alphabetic());
+        let named = w.split_once('=').is_some_and(|(k, v)| {
+            let k = k.to_ascii_lowercase();
+            !v.is_empty()
+                && ["key", "token", "secret", "password", "passwd"]
+                    .iter()
+                    .any(|n| k.contains(n))
+        });
+        if after_bearer || secretish || t.starts_with("ghp_") || t.starts_with("sk-") {
+            out.push("[secret]".into());
+        } else if named {
+            let k = w.split_once('=').map_or("", |(k, _)| k);
+            out.push(format!("{k}=[secret]"));
+        } else {
+            out.push(w.to_string());
+        }
+        after_bearer = w.eq_ignore_ascii_case("bearer");
+    }
+    let line = out.join(" ");
+    if line.chars().count() <= LINE_MAX {
+        return line;
+    }
+    let mut cut: String = line.chars().take(LINE_MAX - 1).collect();
+    cut.push('…');
+    cut
 }
 
 /// What one line of a progress file or one `step.progress` says. Every field is optional.
@@ -603,5 +803,108 @@ mod tests {
         assert_eq!(th.note(1500, false), Push::At(2010));
         assert_eq!(th.note(1600, true), Push::Now);
         assert!(!th.take_due(2010));
+    }
+
+    fn item(text: &str, status: &str) -> TodoItem {
+        TodoItem {
+            text: text.into(),
+            status: status.into(),
+        }
+    }
+
+    #[test]
+    fn reported_counts_beat_the_todo_list_which_beats_tool_calls() {
+        let mut p = Progress::new(1, "develop", 0);
+        p.begin_agent(Some((10, 30)), 6);
+        assert_eq!(p.total, Figure::history(30));
+        p.agent_tool("Reading a.rs", 1);
+        assert_eq!(
+            (p.unit.as_str(), p.done, p.total),
+            ("tool calls", Figure::counted(1), Figure::history(30))
+        );
+        assert_eq!(p.message, "Reading a.rs");
+        p.agent_plan(
+            vec![item("a", "done"), item("b", "doing"), item("c", "pending")],
+            2,
+        );
+        assert_eq!(p.unit, "plan steps");
+        assert_eq!(
+            (p.done, p.total),
+            (Figure::reported(1), Figure::reported(3))
+        );
+        assert_eq!(p.message, "b");
+        p.agent_tool("Running cargo test", 3);
+        assert_eq!(
+            p.message, "b",
+            "a tool summary does not replace the item in progress"
+        );
+        assert_eq!(p.tool_calls, 2);
+        p.agent_report("2 of 4 files", Some((2, 4)), "files", 4);
+        assert_eq!(
+            (p.unit.as_str(), p.done, p.total),
+            ("files", Figure::reported(2), Figure::reported(4))
+        );
+        p.agent_plan(
+            vec![item("a", "done"), item("b", "done"), item("c", "doing")],
+            5,
+        );
+        assert_eq!(
+            p.unit, "files",
+            "the plan does not displace reported counts"
+        );
+        assert_eq!(p.message, "2 of 4 files");
+        p.agent_tool("Editing x", 6);
+        assert_eq!(p.message, "2 of 4 files");
+    }
+
+    #[test]
+    fn a_changing_reported_total_keeps_the_latest() {
+        let mut p = Progress::new(1, "develop", 0);
+        assert_eq!(p.agent_report("a", Some((1, 4)), "", 1), Change::Urgent);
+        assert_eq!((p.unit.as_str(), p.total.value), ("steps", 4));
+        p.agent_report("b", Some((2, 5)), "", 2);
+        assert_eq!((p.done.value, p.total.value), (2, 5));
+        assert_eq!(p.agent_report("b", Some((2, 5)), "", 3), Change::None);
+    }
+
+    #[test]
+    fn a_silent_agent_shows_tool_calls_and_history_and_lines_never_set_done() {
+        let mut p = Progress::new(1, "develop", 0);
+        p.begin_agent(Some((8, 12)), 5);
+        p.agent_tool("Running cargo test", 1);
+        p.output(
+            "", 0, b"a
+b
+", 2,
+        );
+        assert_eq!(
+            (p.unit.as_str(), p.done),
+            ("tool calls", Figure::counted(1))
+        );
+        assert_eq!(
+            (p.total, p.total_low, p.percent()),
+            (Figure::history(12), 8, None)
+        );
+        assert_eq!(p.output.lines, 2);
+        // A real total displaces the typical one.
+        p.agent_report("x", Some((1, 2)), "files", 3);
+        assert!(p.total.is_real());
+        // Without history there is no total at all.
+        let mut q = Progress::new(2, "develop", 0);
+        q.begin_agent(None, 0);
+        q.agent_tool("Reading b", 1);
+        assert_eq!(q.total, Figure::default());
+    }
+
+    #[test]
+    fn a_tool_line_is_one_short_redacted_line() {
+        let l = one_line(
+            "Running curl -H 'Authorization: Bearer abc123' -u me\nTOKEN=hunter2 sk-abcdef ghp_xyz",
+        );
+        assert!(!l.contains('\n') && !l.contains("abc123") && !l.contains("hunter2"));
+        assert!(l.contains("TOKEN=[secret]") && !l.contains("sk-abcdef") && !l.contains("ghp_xyz"));
+        assert!(!one_line("Reading crates/daemon/src/views.rs").contains("secret"));
+        let long = one_line(&"word ".repeat(100));
+        assert_eq!(long.chars().count(), LINE_MAX);
     }
 }

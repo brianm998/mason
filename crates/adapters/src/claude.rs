@@ -10,8 +10,8 @@
 use mason_adapter_api::contract::preamble;
 use mason_adapter_api::{
     netguard, AdapterError, AgentAdapter, AgentCaps, AgentEvent, BillingKind, Blocked, BlockedWhy,
-    Canceller, Outcome, Overage, OverageState, SessionHandle, SessionSpec, TokenReport, UsageModel,
-    UsageSnapshot, Window, WindowSpec, WindowState,
+    Canceller, Outcome, Overage, OverageState, PlanItem, PlanStatus, SessionHandle, SessionSpec,
+    TokenReport, UsageModel, UsageSnapshot, Window, WindowSpec, WindowState,
 };
 use nix::sys::signal::{killpg, Signal};
 use nix::unistd::Pid;
@@ -181,9 +181,9 @@ impl ClaudeAdapter {
 
         // Built-in tools: read-only steps get no way to change the tree.
         let builtins: &[&str] = if spec.step.read_only() {
-            &["Read", "Grep", "Glob"]
+            &["Read", "Grep", "Glob", "TodoWrite"]
         } else {
-            &["Read", "Grep", "Glob", "Edit", "Write", "Bash"]
+            &["Read", "Grep", "Glob", "Edit", "Write", "Bash", "TodoWrite"]
         };
         args.extend(["--tools".into(), builtins.join(",")]);
         let mut allowed: Vec<String> = builtins.iter().map(|s| s.to_string()).collect();
@@ -273,6 +273,7 @@ impl AgentAdapter for ClaudeAdapter {
             mcp: true,
             effort_levels: EFFORT_LEVELS.map(String::from).to_vec(),
             usage_reports: true,
+            plan_reports: true,
         }
     }
 
@@ -553,6 +554,48 @@ pub(crate) fn clip(s: &str, n: usize) -> String {
     }
 }
 
+/// The todo list of a `TodoWrite` call (`{"todos": [{content, status, activeForm}]}`).
+/// None when the input is not that shape.
+fn todo_items(input: &Value) -> Option<Vec<PlanItem>> {
+    let list = input["todos"].as_array()?;
+    Some(
+        list.iter()
+            .filter_map(|t| {
+                let text = t["content"]
+                    .as_str()
+                    .or_else(|| t["activeForm"].as_str())?
+                    .to_string();
+                let status = match t["status"].as_str() {
+                    Some("completed") => PlanStatus::Done,
+                    Some("in_progress") => PlanStatus::Doing,
+                    _ => PlanStatus::Pending,
+                };
+                Some(PlanItem { text, status })
+            })
+            .collect(),
+    )
+}
+
+/// What a tool call is doing, in one line: "Editing src/lib.rs", "Running cargo test".
+/// Not redacted here; the daemon redacts what it shows.
+fn tool_summary(name: &str, input: &Value) -> String {
+    let field = |k: &str| input[k].as_str().map(str::trim).filter(|s| !s.is_empty());
+    let line = match name {
+        "Edit" | "Write" | "MultiEdit" | "NotebookEdit" => {
+            field("file_path").map(|p| format!("Editing {p}"))
+        }
+        "Bash" => field("command").map(|c| format!("Running {c}")),
+        "Read" => field("file_path").map(|p| format!("Reading {p}")),
+        "Grep" | "Glob" => field("pattern").map(|p| format!("Searching for {p}")),
+        "TodoWrite" => Some("Updating the todo list".to_string()),
+        "mcp__mason__run_check" => field("name").map(|n| format!("Running check {n}")),
+        _ => None,
+    };
+    // Anything else is named, never dumped: its arguments may hold anything.
+    let line = line.unwrap_or_else(|| format!("Using {}", name.trim_start_matches("mcp__mason__")));
+    clip(&line.split_whitespace().collect::<Vec<_>>().join(" "), 200)
+}
+
 /// The windows Claude names, with their labels and lengths.
 const CLAUDE_WINDOWS: &[(&str, &str, u64)] = &[
     ("five_hour", "5-hour", 5 * 3600),
@@ -698,10 +741,19 @@ pub fn parse_line(line: &str, st: &mut ParseState) -> Vec<AgentEvent> {
                             out.push(AgentEvent::Text(t.to_string()));
                         }
                     }
-                    Some("tool_use") => out.push(AgentEvent::ToolCall {
-                        name: block["name"].as_str().unwrap_or("?").to_string(),
-                        summary: clip(&block["input"].to_string(), 200),
-                    }),
+                    Some("tool_use") => {
+                        let name = block["name"].as_str().unwrap_or("?").to_string();
+                        let input = &block["input"];
+                        if name == "TodoWrite" {
+                            if let Some(items) = todo_items(input) {
+                                out.push(AgentEvent::Plan { items });
+                            }
+                        }
+                        out.push(AgentEvent::ToolCall {
+                            summary: tool_summary(&name, input),
+                            name,
+                        });
+                    }
                     _ => {}
                 }
             }
@@ -859,6 +911,64 @@ mod tests {
             .flat_map(|l| parse_line(l, &mut st))
             .collect();
         (ev, st)
+    }
+
+    #[test]
+    fn a_todo_write_call_gives_a_plan_and_tool_lines() {
+        // Synthetic fixture (not a capture): see fixtures/claude/README.md.
+        let (ev, _) = parse("synthetic_todo_write.jsonl");
+        let items = ev
+            .iter()
+            .find_map(|e| match e {
+                AgentEvent::Plan { items } => Some(items.clone()),
+                _ => None,
+            })
+            .expect("a Plan event");
+        let count = |s: PlanStatus| items.iter().filter(|i| i.status == s).count();
+        assert_eq!(items.len(), 7);
+        assert_eq!(
+            (
+                count(PlanStatus::Done),
+                count(PlanStatus::Doing),
+                count(PlanStatus::Pending)
+            ),
+            (3, 1, 3)
+        );
+        assert_eq!(
+            items
+                .iter()
+                .find(|i| i.status == PlanStatus::Doing)
+                .unwrap()
+                .text,
+            "Count tool calls"
+        );
+        let summaries: Vec<&str> = ev
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::ToolCall { summary, .. } => Some(summary.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            summaries,
+            [
+                "Updating the todo list",
+                "Editing crates/daemon/src/views.rs",
+                "Running cargo test"
+            ]
+        );
+    }
+
+    #[test]
+    fn todowrite_is_offered_to_every_step() {
+        let a = ClaudeAdapter::new("claude", "mason-mcp", std::env::temp_dir());
+        for kind in [StepKind::Explore, StepKind::Develop, StepKind::Review] {
+            let c = a.build_command(&spec(kind), None).unwrap();
+            let i = c.args.iter().position(|x| x == "--tools").unwrap();
+            assert!(c.args[i + 1].split(',').any(|t| t == "TodoWrite"));
+            let j = c.args.iter().position(|x| x == "--allowedTools").unwrap();
+            assert!(c.args[j + 1..].iter().any(|t| t == "TodoWrite"));
+        }
     }
 
     #[test]
@@ -1061,7 +1171,7 @@ mod tests {
         ]);
         let c = a.build_command(&spec(StepKind::Review), None).unwrap();
         let tools_at = c.args.iter().position(|x| x == "--tools").unwrap();
-        assert_eq!(c.args[tools_at + 1], "Read,Grep,Glob");
+        assert_eq!(c.args[tools_at + 1], "Read,Grep,Glob,TodoWrite");
         let joined = c.args.join(" ");
         assert!(
             joined.contains("mcp__mason__submit_review")

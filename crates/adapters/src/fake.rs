@@ -5,7 +5,7 @@
 //! tests drive, and it passes the same conformance kit as the real adapter.
 
 use mason_adapter_api::{
-    AdapterError, AgentAdapter, AgentCaps, AgentEvent, BillingKind, Canceller, Outcome,
+    AdapterError, AgentAdapter, AgentCaps, AgentEvent, BillingKind, Canceller, Outcome, PlanItem,
     SessionHandle, SessionSpec, TokenReport, UsageModel, UsageSnapshot,
 };
 use serde_json::Value;
@@ -29,6 +29,13 @@ pub enum FakeAction {
         attempt: u32,
     },
     Sleep(Duration),
+    /// Emit the agent's todo list.
+    Plan(Vec<PlanItem>),
+    /// Emit a tool call that goes nowhere (a read, an edit) with this summary.
+    Tool {
+        name: String,
+        summary: String,
+    },
     /// End the invocation with a provider usage limit.
     UsageLimit(Option<String>),
     ProviderDown(String),
@@ -121,6 +128,12 @@ impl FakeAdapter {
                             c.call(&tool, &args);
                         }
                     }
+                    FakeAction::Plan(items) => {
+                        let _ = tx.send(AgentEvent::Plan { items });
+                    }
+                    FakeAction::Tool { name, summary } => {
+                        let _ = tx.send(AgentEvent::ToolCall { name, summary });
+                    }
                     FakeAction::Usage(u) => {
                         let _ = tx.send(AgentEvent::Usage(u));
                     }
@@ -190,6 +203,11 @@ impl AgentAdapter for FakeAdapter {
             mcp: true,
             effort_levels: vec![],
             usage_reports: self.tokens.is_some(),
+            plan_reports: self
+                .turns
+                .iter()
+                .flatten()
+                .any(|a| matches!(a, FakeAction::Plan(_))),
         }
     }
 

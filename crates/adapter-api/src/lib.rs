@@ -73,7 +73,13 @@ pub struct SessionSpec {
     pub progress: Option<ProgressSink>,
     /// Told the model the CLI reports it really used, when the stream says.
     pub on_model: Option<ModelSink>,
+    /// Told of the agent's tool calls and todo lists as they arrive, before the
+    /// turn ends (the runner calls it; it never holds a daemon type).
+    pub on_agent_event: Option<AgentEventSink>,
 }
+
+/// Receives the agent events that say what it is doing (`ToolCall`, `Plan`).
+pub type AgentEventSink = std::sync::Arc<dyn Fn(&AgentEvent) + Send + Sync>;
 
 /// Receives the model name a session reports.
 pub type ModelSink = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
@@ -98,6 +104,7 @@ impl SessionSpec {
             tools: None,
             progress: None,
             on_model: None,
+            on_agent_event: None,
         }
     }
 }
@@ -140,6 +147,10 @@ pub enum AgentEvent {
         name: String,
         summary: String,
     },
+    /// The agent's own todo list, whole, each time it changes.
+    Plan {
+        items: Vec<PlanItem>,
+    },
     /// Final figures for this invocation, as reported by the stream.
     Tokens(TokenReport),
     /// The model the CLI says it is really using (Claude's `system/init`).
@@ -155,12 +166,38 @@ pub enum AgentEvent {
     Finished(Outcome),
 }
 
+/// One item of an agent's todo list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlanItem {
+    pub text: String,
+    pub status: PlanStatus,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlanStatus {
+    Pending,
+    Doing,
+    Done,
+}
+
+impl PlanStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PlanStatus::Pending => "pending",
+            PlanStatus::Doing => "doing",
+            PlanStatus::Done => "done",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AgentCaps {
     pub resume: bool,
     pub mcp: bool,
     pub effort_levels: Vec<String>,
     pub usage_reports: bool,
+    /// The adapter emits [`AgentEvent::Plan`] when the CLI exposes a todo list.
+    pub plan_reports: bool,
 }
 
 #[derive(Debug)]

@@ -243,6 +243,9 @@ impl Ctx {
                     (_, true) => why,
                     (_, false) => format!("{reason}; {why}"),
                 };
+                // Hand the resources back before the task shows as failed, so nobody
+                // can see a failed task still holding its device.
+                self.release_lease();
                 self.emit(EventKind::StepFailed {
                     task: self.task,
                     reason,
@@ -1188,6 +1191,14 @@ fn agent_job(c: &Ctx) {
         spec.progress = Some(Arc::new(move |stream, off, bytes| {
             d.progress_observe(run, stream, off, bytes)
         }));
+    }
+    // The agent's counts, todo list and tool calls reach the live record as they happen.
+    c.d.progress_agent(c.run);
+    {
+        let (d, run) = (c.d.clone(), c.run);
+        contract.set_on_progress(Arc::new(move |r| d.progress_agent_report(run, r)));
+        let (d, run) = (c.d.clone(), c.run);
+        spec.on_agent_event = Some(Arc::new(move |ev| d.progress_agent_event(run, ev)));
     }
     // Wired before any reattach, so a session found again sees what was already accepted.
     spec.accepted = contract.flag();
