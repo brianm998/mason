@@ -2482,6 +2482,7 @@ pub fn render_logs(d: &Daemon, task: u64) -> String {
             || what == "cmd"
             || what.starts_with("test-again")
             || what.starts_with("cmd-again")
+            || what.starts_with("check")
         {
             "test"
         } else {

@@ -18,6 +18,7 @@ pub mod demo;
 pub mod disk;
 pub mod editor;
 pub mod holds;
+pub mod hostedcheck;
 pub mod hostloss;
 pub mod http;
 pub mod improve;
