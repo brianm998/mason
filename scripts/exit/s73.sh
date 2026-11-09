@@ -20,7 +20,10 @@ stop_daemon() {
   if [ -n "$daemon" ]; then kill -9 "$daemon" 2>/dev/null || true; wait "$daemon" 2>/dev/null || true; fi
   daemon=""
 }
-kill_hosts() { for hd in "$root"/d/h; do target/debug/step-host-ctl reap "$hd" >/dev/null 2>&1 || true; done; }
+kill_hosts() {
+  # Verified before it is killed: a stale pid in a registry may belong to someone else now.
+  for hd in "$root"/d/h; do target/debug/step-host-ctl reap "$hd" >/dev/null 2>&1; done
+}
 cleanup() { stop_daemon; kill_hosts; rm -rf "$root"; }
 trap cleanup EXIT
 cargo build -q --workspace --bins
