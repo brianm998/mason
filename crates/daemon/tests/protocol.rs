@@ -343,8 +343,12 @@ fn every_entity_carries_its_allowed_actions_why_waiting_and_progress() {
         _ => None,
     });
     assert_eq!(detail.unwrap().row.unwrap().id, 1);
-    // A proposal offers approve, reject and edit; a finished task offers nothing.
-    assert_eq!(row(4).allowed_actions, vec!["approve", "reject", "edit"]);
+    // A proposal offers approve, reject and edit, and (s75) Add blocker, since it has not
+    // started; a finished task offers nothing.
+    assert_eq!(
+        row(4).allowed_actions,
+        vec!["approve", "reject", "edit", "block"]
+    );
 }
 
 /// The task detail carries the plan parsed (`plan_view`) and as written (`plan`, for older clients).

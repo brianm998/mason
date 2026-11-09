@@ -584,12 +584,20 @@ fn a_canceled_blocker_keeps_the_dependent_held_and_raises_an_alert() {
         task_for(&d, 2).unwrap().activity,
         Activity::Held(_)
     ));
+    // The alert is made from the world, under its own kind, and names the commands.
+    let blocked: Vec<String> = mason_daemon::attention::alerts_now(&d)
+        .into_iter()
+        .filter(|(_, k, _)| k == "blocked")
+        .map(|(_, _, t)| t)
+        .collect();
+    assert_eq!(blocked.len(), 1, "{blocked:?}");
     assert!(
-        alerts(&d)
-            .iter()
-            .any(|a| a.contains("was canceled") && a.contains("held")),
-        "{:?}",
-        alerts(&d)
+        blocked[0].contains("canceled") && blocked[0].contains("held"),
+        "{blocked:?}"
+    );
+    assert!(
+        blocked[0].contains("mason task unblock") && blocked[0].contains("mason task revive"),
+        "{blocked:?}"
     );
 }
 
@@ -971,4 +979,93 @@ fn a_proposed_task_with_unlanded_blockers_shows_proposed_and_held() {
         (0, 0),
         "proposed tasks are neither open nor held"
     );
+}
+
+fn owner(d: &Arc<Daemon>) -> String {
+    d.cfg.owner_names[0].clone()
+}
+
+#[test]
+fn a_release_is_not_undone_by_the_next_poll_and_lapses_when_github_changes_the_relationship() {
+    let (_s, d, pid) = world();
+    let o = owner(&d);
+    let items = vec![
+        item(1, "A", &o, &[]),
+        item(2, "B", &o, &[]),
+        item(3, "C", &o, &[]),
+    ];
+    let nat = native(&[(1, &[]), (2, &[]), (3, &[(1, true), (2, true)])]);
+    sync_with_deps(&d, pid, "mason", "o/r", &items, Some(&nat));
+    let (t1, t2, t3) = (
+        task_for(&d, 1).unwrap().id,
+        task_for(&d, 2).unwrap().id,
+        task_for(&d, 3).unwrap().id,
+    );
+    assert_eq!(task_for(&d, 3).unwrap().blockers.len(), 2);
+    let msg =
+        mason_daemon::blockers::release(&d, &o, t3, mason_daemon::blockers::Which::From(vec![t1]))
+            .unwrap();
+    assert!(msg.contains("still held by #"), "{msg}");
+    // Two more polls with the same recorded answer: the release stands.
+    for _ in 0..2 {
+        sync_with_deps(&d, pid, "mason", "o/r", &items, Some(&nat));
+        let b = task_for(&d, 3).unwrap().blockers;
+        assert_eq!(b.iter().copied().collect::<Vec<_>>(), vec![t2]);
+    }
+    // GitHub's relationship changes (a new blocker): the release lapses and the old one is back.
+    let nat = native(&[(1, &[]), (2, &[]), (3, &[(1, true), (2, true), (4, true)])]);
+    let mut items = items;
+    items.push(item(4, "D", &o, &[]));
+    sync_with_deps(&d, pid, "mason", "o/r", &items, Some(&nat));
+    let b = task_for(&d, 3).unwrap().blockers;
+    assert!(b.contains(&t1) && b.contains(&t2), "{b:?}");
+}
+
+#[test]
+fn an_owner_addition_survives_edits_on_github() {
+    let (_s, d, pid) = world();
+    let o = owner(&d);
+    let items = vec![
+        item(1, "A", &o, &[]),
+        item(2, "B", &o, &[]),
+        item(3, "C", &o, &[]),
+    ];
+    let nat = native(&[(1, &[]), (2, &[]), (3, &[(2, true)])]);
+    sync_with_deps(&d, pid, "mason", "o/r", &items, Some(&nat));
+    let (t1, t2, t3) = (
+        task_for(&d, 1).unwrap().id,
+        task_for(&d, 2).unwrap().id,
+        task_for(&d, 3).unwrap().id,
+    );
+    mason_daemon::blockers::block(&d, &o, t3, &[t1]).unwrap();
+    // GitHub drops its own blocker, then lists the one the owner added too and drops it again.
+    for deps in [&[][..], &[(1, true)][..], &[][..]] {
+        let nat = native(&[(1, &[]), (2, &[]), (3, deps)]);
+        sync_with_deps(&d, pid, "mason", "o/r", &items, Some(&nat));
+        let b = task_for(&d, 3).unwrap().blockers;
+        assert!(b.contains(&t1), "{deps:?}: {b:?}");
+        assert!(!b.contains(&t2), "{deps:?}: {b:?}");
+    }
+}
+
+#[test]
+fn blockers_say_where_they_came_from() {
+    let (_s, d, pid) = world();
+    let o = owner(&d);
+    let items = vec![
+        item(1, "A", &o, &[]),
+        item(2, "B", &o, &[]),
+        item(3, "C", &o, &[]),
+    ];
+    let nat = native(&[(1, &[]), (2, &[]), (3, &[(2, true)])]);
+    sync_with_deps(&d, pid, "mason", "o/r", &items, Some(&nat));
+    let (t1, t3) = (task_for(&d, 1).unwrap().id, task_for(&d, 3).unwrap().id);
+    mason_daemon::blockers::block(&d, &o, t3, &[t1]).unwrap();
+    let w = d.world().unwrap();
+    let links = mason_daemon::blockers::links(&d, &w, &w.tasks[&t3]);
+    let origin = |n: u64| {
+        let id = task_for(&d, n).unwrap().id;
+        links.iter().find(|l| l.task == id).unwrap().origin
+    };
+    assert_eq!((origin(2), origin(1)), ("from GitHub", "set by you"));
 }
