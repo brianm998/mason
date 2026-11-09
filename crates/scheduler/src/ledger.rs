@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use crate::plan::{plan, Capacity, CpuGate, Holder, Kind, Needs, Plan, Request, World};
+use crate::plan::{plan, Capacity, CpuGate, DiskGate, Holder, Kind, Needs, Plan, Request, World};
 use crate::rank::Rank;
 use std::collections::BTreeMap;
 
@@ -13,6 +13,7 @@ pub struct Ledger {
     holders: Vec<Holder>,
     waiting: Vec<Request>,
     next_id: u64,
+    disk: Option<DiskGate>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -35,6 +36,11 @@ impl Ledger {
     pub fn set_capacity(&mut self, name: &str, units: u32, kind: Kind) {
         self.capacity
             .insert(name.to_string(), Capacity { units, kind });
+    }
+
+    /// The caller's latest disk reading against its floor, used by every plan after this.
+    pub fn set_disk(&mut self, disk: Option<DiskGate>) {
+        self.disk = disk;
     }
 
     pub fn capacity(&self, name: &str) -> Option<Capacity> {
@@ -106,6 +112,7 @@ impl Ledger {
                 free_memory_mb,
                 memory_floor_mb,
                 cpu,
+                disk: self.disk,
             },
             &self.waiting,
         );
@@ -168,6 +175,7 @@ impl Ledger {
                 free_memory_mb,
                 memory_floor_mb,
                 cpu,
+                disk: self.disk,
             },
             &self.waiting,
         )
@@ -271,5 +279,73 @@ mod tests {
         l.release(test);
         l.schedule(now + 1, None, None);
         assert!(l.holds(stream[0]));
+    }
+
+    fn disk_ledger() -> Ledger {
+        let mut l = Ledger::new();
+        l.set_capacity("compile", 2, Kind::Machine);
+        l.set_capacity("llm:claude", 2, Kind::Llm);
+        l.set_capacity("simulator", 1, Kind::Pool);
+        l
+    }
+
+    fn gate(free_gb: u64) -> Option<DiskGate> {
+        Some(DiskGate {
+            free_mb: free_gb * 1024,
+            floor_mb: 20 * 1024,
+        })
+    }
+
+    #[test]
+    fn below_the_disk_floor_nothing_is_granted_and_the_wait_says_why() {
+        let mut l = disk_ledger();
+        l.set_disk(gate(12));
+        let c = l.submit(rank(1, 1, 1), Needs::of(&[("compile", 1)]), "#1", 0);
+        let a = l.submit(rank(1, 2, 2), Needs::of(&[("llm:claude", 1)]), "#2", 1);
+        let p = l.schedule(2, None, None);
+        assert!(
+            p.grants.is_empty(),
+            "nothing runs below the floor, idle or not"
+        );
+        for id in [c, a] {
+            assert_eq!(
+                explain(&p.waits[&id], 2),
+                "Waiting: disk has 12 GB free, floor 20 GB"
+            );
+        }
+    }
+
+    #[test]
+    fn at_the_disk_floor_work_is_granted() {
+        let mut l = disk_ledger();
+        l.set_disk(gate(20));
+        let c = l.submit(rank(1, 1, 1), Needs::of(&[("compile", 1)]), "#1", 0);
+        let a = l.submit(rank(1, 2, 2), Needs::of(&[("llm:claude", 1)]), "#2", 1);
+        l.schedule(2, None, None);
+        assert!(l.holds(c) && l.holds(a));
+    }
+
+    #[test]
+    fn the_disk_floor_does_not_hold_what_uses_neither_compile_nor_an_llm_session() {
+        let mut l = disk_ledger();
+        l.set_disk(gate(1));
+        let s = l.submit(rank(1, 1, 1), Needs::of(&[("simulator", 1)]), "#1", 0);
+        l.schedule(1, None, None);
+        assert!(l.holds(s));
+    }
+
+    #[test]
+    fn running_work_is_left_alone_when_the_disk_fills() {
+        let mut l = disk_ledger();
+        let c = l.submit(rank(1, 1, 1), Needs::of(&[("compile", 1)]), "#1", 0);
+        l.schedule(1, None, None);
+        l.set_disk(gate(3));
+        let n = l.submit(rank(1, 2, 2), Needs::of(&[("compile", 1)]), "#2", 2);
+        l.schedule(3, None, None);
+        assert!(l.holds(c), "the holder keeps its slot");
+        assert!(l.is_waiting(n));
+        l.set_disk(gate(30));
+        l.schedule(4, None, None);
+        assert!(l.holds(n));
     }
 }

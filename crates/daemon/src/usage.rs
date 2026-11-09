@@ -681,14 +681,14 @@ pub fn probe_once(d: &Daemon) {
 }
 
 pub fn spawn_probe(d: &Arc<Daemon>) {
-    let weak = Arc::downgrade(d);
-    let _ = std::thread::Builder::new()
-        .name("usage-probe".into())
-        .spawn(move || loop {
-            std::thread::sleep(PROBE_EVERY);
-            let Some(d) = weak.upgrade() else { break };
-            probe_once(&d);
-        });
+    crate::bg::spawn_loop(d, "usage-probe", move |weak| {
+        std::thread::sleep(PROBE_EVERY);
+        let Some(d) = weak.upgrade() else {
+            return false;
+        };
+        probe_once(&d);
+        true
+    });
 }
 
 #[cfg(test)]

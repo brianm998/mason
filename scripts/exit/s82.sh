@@ -25,7 +25,7 @@ m() { "$bin/mason" --data-dir "$root/d" --config-dir "$root/c" "$@"; }
 fail() { set +e; echo "FAILED: $*" >&2; cat "$root/suite.log" >&2; m task list >&2 2>&1; tail -20 "$root/masond.log" >&2; exit 1; }
 landed() { m task list --json | python3 -c "import json,sys; print(sum(1 for t in json.load(sys.stdin)['tasks'] if t.get('state')=='landed'))"; }
 # Runs of the suite in the integration worktree (the batch's), started and ended.
-count() { local c; c=$(grep -c "^$1 .*/d/l/" "$root/suite.log" 2>/dev/null) || true; echo "${c:-0}"; }
+count() { { grep "^$1 .*/d/l/" "$root/suite.log" 2>/dev/null; cat /dev/null; } | wc -l | tr -d ' '; }
 batch_starts() { count start; }
 batch_ends() { count end; }
 starts_ge() { [ "$(batch_starts)" -ge "$1" ]; }
@@ -117,7 +117,7 @@ echo "   worktree appeared while the re-verification was still running"
 echo "== the batch lands with both changes"
 wait_until "task one did not land" 120 landed_ge 1
 git -C "$root/origin.git" cat-file -e main:pushed.txt || fail "the pushed file is not in the base"
-n=$(git -C "$root/origin.git" ls-tree --name-only main | grep -c '^f-' || true)
+n=$(git -C "$root/origin.git" ls-tree --name-only main | grep '^f-' | wc -l | tr -d ' ')
 [ "$n" -ge 1 ] || fail "task one's change is not in the base"
 git -C "$root/origin.git" cat-file -e main:slow.unit || fail "task one's tree is not in the base"
 wait_until "task two did not land" 150 landed_ge 2

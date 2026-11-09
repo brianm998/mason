@@ -71,6 +71,9 @@ struct State {
     verdicts: HashMap<TaskId, Verdict>,
     running: HashMap<ProjectId, Vec<Running>>,
     coordinators: HashSet<ProjectId>,
+    /// Tasks in a running batch that have not been given a verdict yet: what a batch that
+    /// panics owes an answer to.
+    owed: HashSet<TaskId>,
     /// Milliseconds tasks waited with nothing running, per project.
     idle_ms: HashMap<ProjectId, u64>,
     /// Bumped by every wake, so a wake between a look and a wait is not lost.
@@ -274,22 +277,34 @@ fn check_numbers(c: &Ctx) -> Option<Verdict> {
 }
 
 fn deliver(d: &Daemon, task: TaskId, v: Verdict) {
-    d.landing.lock().verdicts.insert(task, v);
+    {
+        let mut g = d.landing.lock();
+        g.owed.remove(&task);
+        g.verdicts.insert(task, v);
+    }
     d.landing.wake();
 }
 
 // ---- the coordinator ----------------------------------------------------------------
 
 fn spawn_coordinator(d: &Arc<Daemon>, pid: ProjectId) {
-    let weak: Weak<Daemon> = Arc::downgrade(d);
     let name = d.project(pid).map_or("?".into(), |p| p.id.clone());
-    let _ = std::thread::Builder::new()
-        .name(format!("landing-{name}"))
-        .spawn(move || coordinate(weak, pid));
+    let mut first = true;
+    let mut last = Instant::now();
+    // A panic in a pass is caught by the loop and the next pass goes on; if the thread
+    // could end, `coordinators` would still name it and no coordinator would ever run
+    // again for this project.
+    crate::bg::spawn_loop(d, format!("landing-{name}"), move |weak| {
+        coordinate(weak, pid, &mut first, &mut last)
+    });
 }
 
-fn coordinate(weak: Weak<Daemon>, pid: ProjectId) {
-    if let Some(d) = weak.upgrade() {
+/// One pass of the coordinator. `false` when the daemon is gone.
+fn coordinate(weak: &Weak<Daemon>, pid: ProjectId, first: &mut bool, last: &mut Instant) -> bool {
+    let Some(d) = weak.upgrade() else {
+        return false;
+    };
+    if std::mem::take(first) {
         // Batches from a daemon that died did not finish; their tasks are back in the queue.
         if let Some(p) = d.project(pid) {
             let _ = d.store.abandon_batches(&p.id, now_ms());
@@ -297,28 +312,24 @@ fn coordinate(weak: Weak<Daemon>, pid: ProjectId) {
             remove_refs(&d, pid, None);
         }
     }
-    let mut last = Instant::now();
-    loop {
-        let Some(d) = weak.upgrade() else { return };
-        let seen = d.landing.lock().gen;
-        let (queue_len, wait) = form_and_start(&d, pid, &mut last);
-        let timeout = if queue_len == 0 {
-            Duration::from_secs(5)
-        } else {
-            wait.unwrap_or(Duration::from_secs(1))
-                .clamp(Duration::from_millis(50), Duration::from_secs(5))
-        };
-        {
-            let g = d.landing.lock();
-            if g.gen == seen {
-                let _ = d
-                    .landing
-                    .cv
-                    .wait_timeout(g, timeout)
-                    .unwrap_or_else(|e| e.into_inner());
-            }
-        }
+    d.crash.panic_point("coordinator");
+    let seen = d.landing.lock().gen;
+    let (queue_len, wait) = form_and_start(&d, pid, last);
+    let timeout = if queue_len == 0 {
+        Duration::from_secs(5)
+    } else {
+        wait.unwrap_or(Duration::from_secs(1))
+            .clamp(Duration::from_millis(50), Duration::from_secs(5))
+    };
+    let g = d.landing.lock();
+    if g.gen == seen {
+        let _ = d
+            .landing
+            .cv
+            .wait_timeout(g, timeout)
+            .unwrap_or_else(|e| e.into_inner());
     }
+    true
 }
 
 /// A dead daemon's batches left integration branches behind (and a worktree
@@ -493,6 +504,7 @@ fn start(d: &Arc<Daemon>, pid: ProjectId, members: Vec<Wait>, cfg: LandingConfig
             slot,
             footprint: fp,
         });
+        g.owed.extend(members.iter().map(|w| w.task));
         slot
     };
     let d2 = d.clone();
@@ -500,6 +512,68 @@ fn start(d: &Arc<Daemon>, pid: ProjectId, members: Vec<Wait>, cfg: LandingConfig
     let spawned = std::thread::Builder::new()
         .name(format!("batch-{slot}"))
         .spawn(move || {
+            // The slot is given back on every way out of this thread.
+            let _slot = SlotGuard {
+                d: d2.clone(),
+                pid,
+                slot,
+            };
+            let owed: Vec<TaskId> = members.iter().map(|w| w.task).collect();
+            let d3 = d2.clone();
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                run_batch(d2, pid, slot, members, cfg, kind)
+            }));
+            if let Err(p) = r {
+                // A batch that panics lands nothing and says why.
+                crate::bg::report(&d3, &format!("landing batch {slot}"), p.as_ref());
+                let open: Vec<TaskId> = {
+                    let g = d3.landing.lock();
+                    owed.into_iter().filter(|t| g.owed.contains(t)).collect()
+                };
+                for t in open {
+                    deliver(
+                        &d3,
+                        t,
+                        Verdict::Failed("internal error: the landing batch panicked".into()),
+                    );
+                }
+            }
+        });
+    if spawned.is_err() {
+        if let Some(r) = d.landing.lock().running.get_mut(&pid) {
+            r.retain(|x| x.slot != slot);
+        }
+    }
+}
+
+/// Clears a batch's slot in `running` when its thread ends, however it ends.
+struct SlotGuard {
+    d: Arc<Daemon>,
+    pid: ProjectId,
+    slot: usize,
+}
+
+impl Drop for SlotGuard {
+    fn drop(&mut self) {
+        if let Some(r) = self.d.landing.lock().running.get_mut(&self.pid) {
+            r.retain(|x| x.slot != self.slot);
+        }
+        self.d.landing.wake();
+        self.d.poke();
+    }
+}
+
+fn run_batch(
+    d2: Arc<Daemon>,
+    pid: ProjectId,
+    slot: usize,
+    members: Vec<Wait>,
+    cfg: LandingConfig,
+    kind: String,
+) {
+    {
+        {
+            d2.crash.panic_point("batch");
             let tasks: Vec<(TaskId, String)> =
                 members.iter().map(|w| (w.task, w.branch.clone())).collect();
             let member_runs: Vec<StepRunId> = members.iter().map(|w| w.run).collect();
@@ -540,15 +614,6 @@ fn start(d: &Arc<Daemon>, pid: ProjectId, members: Vec<Wait>, cfg: LandingConfig
                     }
                 }
             }
-            if let Some(r) = d2.landing.lock().running.get_mut(&pid) {
-                r.retain(|x| x.slot != slot);
-            }
-            d2.landing.wake();
-            d2.poke();
-        });
-    if spawned.is_err() {
-        if let Some(r) = d.landing.lock().running.get_mut(&pid) {
-            r.retain(|x| x.slot != slot);
         }
     }
 }

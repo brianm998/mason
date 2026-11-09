@@ -200,6 +200,7 @@ mod tests {
             max_test_rounds: None,
             test_reruns: 0,
             task_cache: None,
+            task_cache_keep_days: None,
             clarity_classifier: None,
             priority_jump: false,
             card_rewriter: None,
