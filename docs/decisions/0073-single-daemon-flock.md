@@ -1,0 +1,3 @@
+# 0073: The single-daemon guard is a file lock; refusals are logged, not counted as crashes
+
+A pid in `daemon.json` says nothing about whether that daemon is alive (pids are reused after a reboot), so the guard is an exclusive `flock` on `daemon.lock` in the data directory, which the kernel drops when the holder dies. It is close-on-exec so `exec` releases it and the new image retries for a few seconds. A start that declines to run records `refused` in `boots.log`, and `crashes_in` treats it as cancelling the preceding `start`, so repeated refusals never trigger a rollback. `update.rs` is a guard file; the change makes rollback less eager only for refusals, not for builds that die.
