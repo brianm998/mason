@@ -25,6 +25,9 @@ pub fn now_ms() -> u64 {
 pub struct Daemon {
     pub cfg: DaemonConfig,
     pub store: Store,
+    /// Millisecond time of the last store write refused for want of disk; 0 if none since.
+    store_full: AtomicU64,
+    pub disk_sizes: Arc<crate::disk::Sizes>,
     /// By numeric id; the project's string id is `ProjectCfg::id`.
     pub projects: BTreeMap<ProjectId, ProjectCfg>,
     /// The LLM provider accounts, in providers.toml order.
@@ -163,6 +166,18 @@ impl Daemon {
             crate::providers::load(&cfg.config_dir)?
         };
         crate::providers::check_llm_conflict(&accounts, &rcfg.llm)?;
+        // `MASON_DISK_FILE` names a file holding the free gigabytes: how tests and the exit
+        // scripts drive the disk floor without touching the real disk.
+        let disk: Arc<dyn crate::disk::DiskSource> =
+            match (&cfg.disk, std::env::var_os("MASON_DISK_FILE")) {
+                (Some(s), _) => s.clone(),
+                (None, Some(f)) => Arc::new(crate::disk::FileDisk(f.into())),
+                (None, None) => Arc::new(crate::disk::Statvfs),
+            };
+        let disk_every = std::env::var("MASON_DISK_EVERY_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .map_or(cfg.disk_every, Duration::from_millis);
         let broker = crate::sched::Broker::new(
             cfg.data_dir.join("locks"),
             cfg.data_dir.join("limits.kv"),
@@ -171,6 +186,23 @@ impl Daemon {
             cpu,
             &accounts,
         )?;
+        // The volumes that matter: the data directory (the store) and each project's build
+        // directories.
+        let mut disk_paths = vec![cfg.data_dir.clone()];
+        {
+            let home = std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_default();
+            for p in projects.values() {
+                if let Some(t) = &p.task_cache {
+                    let e = crate::taskcache::expand(t, 0, &home);
+                    if !e.trim().is_empty() {
+                        disk_paths.push(PathBuf::from(e));
+                    }
+                }
+            }
+        }
+        broker.set_disk(disk, disk_paths, rcfg.disk_floor_gb, disk_every);
         let targets = crate::targets::Targets::new(
             crate::config::load_targets(&cfg.config_dir)?,
             &cfg.data_dir.join("locks"),
@@ -188,6 +220,8 @@ impl Daemon {
             admit_again: AtomicBool::new(false),
             repo_locks: Mutex::default(),
             stalls: AtomicU64::new(0),
+            store_full: AtomicU64::new(0),
+            disk_sizes: Default::default(),
             worst_stall_ms: AtomicU64::new(0),
             sweep: Mutex::default(),
             defs: crate::defs::Defs::default(),
@@ -346,10 +380,19 @@ impl Daemon {
         let kind_for_release = kind.clone();
         let appended = {
             let _g = self.emit_lock.lock().unwrap_or_else(|e| e.into_inner());
-            self.store.append(Event {
+            match self.store.append(Event {
                 at: Timestamp(now_ms()),
                 kind,
-            })?
+            }) {
+                Ok(a) => {
+                    self.store_full.store(0, Ordering::SeqCst);
+                    a
+                }
+                Err(e) => {
+                    self.note_store_error(&e);
+                    return Err(e);
+                }
+            }
         };
         self.crash.point(&format!("after_append:{name}"));
         if let EventKind::Canceled { task, .. } = &kind_for_release {
@@ -360,6 +403,19 @@ impl Daemon {
         self.handle_effects(&appended.effects);
         self.admit();
         Ok(appended)
+    }
+
+    /// A store write failed. If the disk is full, say so in the alerts, not only in the log; the
+    /// alert clears when a write succeeds again.
+    fn note_store_error(&self, e: &StoreError) {
+        if crate::disk::is_disk_full(e) {
+            self.store_full.store(now_ms().max(1), Ordering::SeqCst);
+        }
+    }
+
+    /// When a store write last failed for want of disk, if none has succeeded since.
+    pub fn store_full_since(&self) -> Option<u64> {
+        Some(self.store_full.load(Ordering::SeqCst)).filter(|t| *t > 0)
     }
 
     /// Emit a job's result, but only if its step run is still the task's open
@@ -377,8 +433,12 @@ impl Daemon {
                 at: Timestamp(now_ms()),
                 kind,
             }) {
-                Ok(a) => a,
+                Ok(a) => {
+                    self.store_full.store(0, Ordering::SeqCst);
+                    a
+                }
                 Err(e) => {
+                    self.note_store_error(&e);
                     tracing::warn!(%task, error = %e, "a job's event was refused");
                     return false;
                 }

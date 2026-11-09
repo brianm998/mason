@@ -131,3 +131,81 @@ fn the_sweep_leaves_a_live_tasks_directory() {
     std::thread::sleep(std::time::Duration::from_millis(500));
     assert!(dir.exists(), "a running task's directory is not touched");
 }
+
+/// A task left running a long develop step, then canceled with its branch kept, its directory
+/// planted, and its job gone.
+fn canceled_with_a_directory(
+    s: &Scratch,
+    d: &std::sync::Arc<mason_daemon::daemon::Daemon>,
+) -> (TaskId, PathBuf) {
+    let t = file_task(d, "Long running");
+    wait_state(d, t, State::Developing, 60);
+    let p = d.project(d.world().unwrap().tasks[&t].project).unwrap();
+    wait_for("the agent to commit", 30, || {
+        mason_landing::git::commits_ahead(&s.repo, "origin/main", &p.branch(t.0)).unwrap_or(0) >= 1
+    });
+    let dir = cache_root(s).join(t.0.to_string());
+    std::fs::create_dir_all(dir.join("deep")).unwrap();
+    std::fs::write(dir.join("deep/f"), "x").unwrap();
+    d.emit(EventKind::Canceled {
+        task: t,
+        delete_branch: false,
+    })
+    .unwrap();
+    wait_for("the job to end", 30, || d.job_count() == 0);
+    (t, dir)
+}
+
+fn long_develop() -> Scratch {
+    let develop = json!([{"sh": TASK_SCRIPT_COMMIT}, {"sleep_ms": 60000}]);
+    Scratch::new(
+        "true",
+        json!({"steps": {"explore": [explore_turn(), explore_turn()], "develop": [develop.clone(), develop]}}),
+    )
+}
+
+#[test]
+fn a_canceled_tasks_directory_older_than_the_limit_goes() {
+    let s = long_develop();
+    s.write_project(
+        "scratch",
+        "true",
+        &format!("{}\ntask_cache_keep_days = 0", extra(&s)),
+    );
+    let d = s.start();
+    let (_, dir) = canceled_with_a_directory(&s, &d);
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    sweep_once(&d);
+    wait_for("the sweep to remove it", 15, || !dir.exists());
+}
+
+#[test]
+fn a_canceled_tasks_directory_younger_than_the_limit_stays() {
+    let s = long_develop();
+    s.write_project("scratch", "true", &extra(&s)); // the default: 7 days
+    let d = s.start();
+    let (_, dir) = canceled_with_a_directory(&s, &d);
+    sweep_once(&d);
+    sweep_once(&d);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert!(dir.exists());
+}
+
+#[test]
+fn a_revived_tasks_directory_is_not_touched_while_it_runs() {
+    let s = long_develop();
+    s.write_project(
+        "scratch",
+        "true",
+        &format!("{}\ntask_cache_keep_days = 0", extra(&s)),
+    );
+    let d = s.start();
+    let (t, dir) = canceled_with_a_directory(&s, &d);
+    d.emit(EventKind::Revived { task: t }).unwrap();
+    wait_state(&d, t, State::Developing, 60);
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    sweep_once(&d);
+    sweep_once(&d);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert!(dir.exists(), "a running task's directory is not touched");
+}

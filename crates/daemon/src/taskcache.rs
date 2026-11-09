@@ -176,15 +176,62 @@ pub fn remove_in_background(d: &Arc<Daemon>, p: &ProjectCfg, task: u64) {
         });
 }
 
+/// Every `task_cache` directory that exists for a task in `w`, for sizing.
+pub fn dirs(d: &Daemon, w: &mason_engine::World) -> Vec<PathBuf> {
+    w.tasks
+        .values()
+        .filter_map(|t| match target(d, d.project(t.project)?, t.id.0)? {
+            Ok(p) if std::fs::symlink_metadata(&p).is_ok() => Some(p),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Days a canceled or failed task's directory is kept after its last step, unless the project
+/// says otherwise (`task_cache_keep_days`).
+pub const DEFAULT_KEEP_DAYS: u64 = 7;
+
+/// Is a canceled or failed task's directory old enough to go? Counted from the task's last
+/// step, and never while the task has a job (a revived task is running again).
+pub fn expired(state: State, last_step_ms: u64, now_ms: u64, keep_days: u64) -> bool {
+    matches!(state, State::Canceled | State::Failed)
+        && now_ms.saturating_sub(last_step_ms) > keep_days.saturating_mul(86_400_000)
+}
+
+/// When the task last started a step (when it entered its state, if it never did).
+pub fn last_step_ms(w: &mason_engine::World, task: TaskId) -> u64 {
+    w.step_runs
+        .values()
+        .filter(|r| r.task == task)
+        .map(|r| r.started_at.0)
+        .max()
+        .unwrap_or_else(|| w.tasks.get(&task).map_or(0, |t| t.state_entered_at.0))
+}
+
 /// The sweep's part: the directories of landed tasks that are still there and that no running
-/// job uses. Returns how many removals were started.
+/// job uses, and those of canceled and failed tasks older than `task_cache_keep_days`. Returns
+/// how many removals were started.
 pub fn sweep(d: &Arc<Daemon>, w: &mason_engine::World) -> usize {
     let mut n = 0;
-    for t in w.tasks.values().filter(|t| t.state == State::Landed) {
+    let now = crate::daemon::now_ms();
+    for t in w.tasks.values() {
         let Some(p) = d.project(t.project) else {
             continue;
         };
-        if p.task_cache.is_none() || d.has_job_for_task(t.id) {
+        let go = match t.state {
+            State::Landed => true,
+            State::Canceled | State::Failed => {
+                let last = last_step_ms(w, t.id);
+                expired(
+                    t.state,
+                    last,
+                    now,
+                    p.task_cache_keep_days.unwrap_or(DEFAULT_KEEP_DAYS),
+                )
+            }
+            _ => false,
+        };
+        if !go || p.task_cache.is_none() || d.has_job_for_task(t.id) {
             continue;
         }
         if let Some(Ok(path)) = target(d, p, t.id.0) {
@@ -280,6 +327,24 @@ mod tests {
         let r = check_path(link.to_str().unwrap(), &home(), &[]);
         assert_eq!(r, Err(Refused::Symlink));
         assert!(check_path(real.to_str().unwrap(), &home(), &[]).is_ok());
+    }
+
+    #[test]
+    fn a_canceled_or_failed_directory_goes_only_after_the_keep_days() {
+        let day = 86_400_000;
+        let now = 100 * day;
+        for s in [State::Canceled, State::Failed] {
+            assert!(expired(s, now - 8 * day, now, 7), "{s:?} older than 7 days");
+            assert!(!expired(s, now - 6 * day, now, 7), "{s:?} younger");
+            assert!(
+                !expired(s, now - 7 * day, now, 7),
+                "{s:?} exactly at the limit"
+            );
+        }
+        // A task that is alive again, or landed (handled elsewhere), is never "expired".
+        for s in [State::Queued, State::Developing, State::Landed] {
+            assert!(!expired(s, 0, now, 7), "{s:?}");
+        }
     }
 
     #[test]
