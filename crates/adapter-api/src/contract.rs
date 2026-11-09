@@ -613,7 +613,12 @@ impl ContractHandle {
             }
             "run_check" => {
                 let name = args["name"].as_str().unwrap_or_default();
-                match self.0.checks.run(name) {
+                // A check can take many minutes. Nothing else the agent calls
+                // (report_progress, submit_change) waits for it.
+                drop(st);
+                let run = self.0.checks.run(name);
+                let mut st = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+                match run {
                     CheckRun::Done { passed, summary } => ToolReply {
                         ok: true,
                         text: format!(
@@ -908,6 +913,33 @@ mod tests {
         assert!(!c.flag().is_set());
         c.clear_pending();
         assert!(c.state().asked.is_none());
+    }
+
+    #[test]
+    fn other_tools_answer_while_a_check_is_running() {
+        struct Slow(Arc<AtomicBool>);
+        impl CheckHandler for Slow {
+            fn run(&self, _: &str) -> CheckRun {
+                while !self.0.load(Ordering::SeqCst) {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                CheckRun::Done {
+                    passed: true,
+                    summary: "ok".into(),
+                }
+            }
+        }
+        let go = Arc::new(AtomicBool::new(false));
+        let c = ContractHandle::new(StepKind::Develop, Box::new(Slow(go.clone())));
+        let c2 = c.clone();
+        let check = thread::spawn(move || c2.call("run_check", &json!({"name": "tests"})));
+        thread::sleep(Duration::from_millis(50));
+        // Answers while the check is still going; before, it waited for the check.
+        let r = c.call("report_progress", &json!({"message": "still here"}));
+        assert!(r.ok, "{}", r.text);
+        assert!(!check.is_finished());
+        go.store(true, Ordering::SeqCst);
+        assert!(check.join().unwrap().text.contains("PASSED"));
     }
 
     #[test]

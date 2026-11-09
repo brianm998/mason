@@ -31,6 +31,14 @@ pub fn lost_text(rep: &LostReport) -> String {
     format!("the command was lost (its host died): {rep}")
 }
 
+/// Where a retry with no step named goes when the task failed because a command
+/// step's host was lost. Nothing was judged, so the work before it stands: the
+/// step runs again, and no agent redoes a change that already passed.
+pub fn retry_step(failure: Option<&str>, step: &str) -> Option<String> {
+    let lost = failure?.contains("the command was lost");
+    (lost && !step.is_empty()).then(|| step.to_string())
+}
+
 /// Keep what is known about a lost host, for `mason task show` and the alerts.
 /// `run` is the step run it belonged to; without one (a suite run outside a task)
 /// nothing is kept.
@@ -51,4 +59,22 @@ pub fn record(d: &Daemon, run: Option<StepRunId>, step: &str, rep: &LostReport, 
     };
     tracing::warn!(task = row.task, host = %row.host_id, "step host lost: {}", row.detail);
     let _ = d.store.record_host_loss(row);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::retry_step;
+
+    #[test]
+    fn a_retry_after_a_lost_command_stays_on_its_step() {
+        let lost = Some("the command was lost (its host died)");
+        assert_eq!(retry_step(lost, "test").as_deref(), Some("test"));
+        let twice = Some("the command was lost twice in a row (...)");
+        assert_eq!(retry_step(twice, "test").as_deref(), Some("test"));
+        assert_eq!(
+            retry_step(Some("`test` failed (exit status 101)"), "test"),
+            None
+        );
+        assert_eq!(retry_step(None, "test"), None);
+    }
 }

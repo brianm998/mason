@@ -196,3 +196,35 @@ fn a_definition_can_narrow_the_tools_the_bridge_offers() {
     names.sort();
     assert_eq!(names, vec!["report_progress", "submit_change"]);
 }
+
+#[test]
+fn a_check_is_sent_again_when_the_controller_goes_away_before_answering() {
+    use std::os::unix::net::UnixListener;
+    let d = tempfile::tempdir().unwrap();
+    let path = sock(&d);
+    let listener = UnixListener::bind(&path).unwrap();
+    let server = std::thread::spawn(move || {
+        // The daemon restarts mid-check: the call is read and never answered.
+        let (first, _) = listener.accept().unwrap();
+        let mut line = String::new();
+        BufReader::new(&first).read_line(&mut line).unwrap();
+        assert!(line.contains("run_check"), "{line}");
+        drop(first);
+        // Back up: the same call arrives again, and this time it is answered.
+        let (mut again, _) = listener.accept().unwrap();
+        let mut line = String::new();
+        BufReader::new(&again).read_line(&mut line).unwrap();
+        assert!(line.contains("run_check"), "{line}");
+        writeln!(
+            again,
+            "{}",
+            json!({"ok": true, "text": "check tests: PASSED"})
+        )
+        .unwrap();
+    });
+    let mut b = Bridge::start("develop", &path, 5);
+    let (is_err, text) = b.tool("run_check", json!({"name": "tests"}));
+    assert!(!is_err, "{text}");
+    assert!(text.contains("PASSED"), "{text}");
+    server.join().unwrap();
+}

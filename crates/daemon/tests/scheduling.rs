@@ -190,6 +190,50 @@ fn a_step_is_told_what_it_holds_so_its_command_need_not_queue_for_it() {
 }
 
 #[test]
+fn run_check_queues_like_the_test_step_and_frees_the_agents_slot() {
+    // An agent waiting for its tests holds no LLM session slot, and the check waits
+    // for the test step's `compile` like the test step does.
+    let runs = tempfile::tempdir().unwrap();
+    let log = runs.path().join("held");
+    let cmd = format!("echo $MASON_HELD >> {}; test -f hello.txt", log.display());
+    let develop = serde_json::json!([
+        {"sh": TASK_SCRIPT_COMMIT},
+        {"call": {"tool": "run_check", "args": {"name": "tests"}}},
+        {"call": {"tool": "submit_change", "args": {"summary": "ok", "head": "$HEAD"}}}
+    ]);
+    let s = Scratch::new(
+        &cmd,
+        serde_json::json!({"steps": {"explore": [explore_turn()], "develop": [develop]}}),
+    );
+    s.push_files(&[(".mason/mason.toml", DEF_COMPILE)], "definition");
+    let d = s.start();
+    let (id, held) = hold(&d, "interactive", &[("compile", 1)]);
+    let t = file_task(&d, "Checks its work");
+    wait_for("the check to queue for compile", 60, || {
+        d.broker
+            .explain_task(t)
+            .is_some_and(|w| w.contains("compile"))
+    });
+    assert_eq!(state_of(&d, t), State::Developing);
+    assert_eq!(
+        d.broker.used("llm:claude"),
+        0,
+        "the agent's slot was given back"
+    );
+    assert!(!log.exists(), "the check waits for its slot");
+    drop(held);
+    d.broker.lease_close(id);
+    wait_state(&d, t, State::Landed, 90);
+    let text = std::fs::read_to_string(&log).unwrap();
+    assert_eq!(
+        text.lines().collect::<Vec<_>>(),
+        ["compile", "compile"],
+        "{text}"
+    );
+    assert_eq!(d.broker.used("compile"), 0, "nothing leaked");
+}
+
+#[test]
 fn waiting_is_outside_every_timeout() {
     let s = compile_scratch();
     // A 2 second test timeout, and a wait for the class that lasts longer.
