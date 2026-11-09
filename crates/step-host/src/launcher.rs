@@ -8,9 +8,8 @@ use std::io;
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::process::{Command, ExitStatus, Stdio};
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -68,9 +67,33 @@ pub fn exit_signal(dir: &Path) -> Option<(Option<i32>, u64)> {
         .copied()
 }
 
+fn note_exit(dir: &Path, st: ExitStatus) {
+    seen()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(dir.to_path_buf(), (st.signal(), crate::registry::now_ms()));
+}
+
+/// How long [`spawn_host`] waits for a host to come up. A host starts in
+/// milliseconds, but a launch can freeze before its first instruction for as long
+/// as the operating system cannot vet new processes: on macOS, while `syspolicyd`
+/// is down, which was seen to last 22 minutes. The launch then goes on by itself,
+/// so waiting costs a task nothing and giving up costs it an attempt.
+pub const START_LIMIT: Duration = Duration::from_secs(60 * 60);
+
+/// After this long without a host, say so once in the daemon's log.
+const SLOW_START: Duration = Duration::from_secs(60);
+
 /// Start a host and return once it is up (its record is on disk and its socket
 /// is listening). The host outlives this process.
 pub fn spawn_host(o: &SpawnOptions) -> io::Result<HostInfo> {
+    spawn_host_within(o, START_LIMIT)
+}
+
+/// [`spawn_host`] with its own limit. A host that is not up by then is killed, so
+/// that a launch reported as failed cannot come up later and run its command for a
+/// step that has already been closed.
+pub fn spawn_host_within(o: &SpawnOptions, limit: Duration) -> io::Result<HostInfo> {
     let dir = o.root.join(&o.id);
     let mut cmd = Command::new(&o.host_bin);
     cmd.arg("--dir").arg(&dir).arg("--id").arg(&o.id);
@@ -94,44 +117,57 @@ pub fn spawn_host(o: &SpawnOptions) -> io::Result<HostInfo> {
         .stderr(Stdio::null());
     let mut child = cmd.spawn()?;
 
-    // Reap the host when it eventually exits, without blocking the caller.
-    let gone = Arc::new(AtomicBool::new(false));
-    {
-        let gone = gone.clone();
-        let dir = dir.clone();
-        thread::spawn(move || {
-            if let Ok(st) = child.wait() {
-                seen()
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .insert(dir, (st.signal(), crate::registry::now_ms()));
-            }
-            gone.store(true, Ordering::SeqCst);
-        });
-    }
-
-    // Generous: the host starts in milliseconds on an idle machine, but on a busy
-    // one the process can wait seconds for a CPU. The loop returns as soon as it is up.
-    let deadline = Instant::now() + Duration::from_secs(60);
-    loop {
+    let started = Instant::now();
+    let mut warned = false;
+    let result = loop {
         if let Ok(info) = HostInfo::read(&dir) {
             if info.sock.exists() {
-                return Ok(info);
+                break Ok(info);
             }
         }
-        if gone.load(Ordering::SeqCst) {
-            // It may have written its record and finished very quickly.
-            if let Ok(info) = HostInfo::read(&dir) {
-                return Ok(info);
+        match child.try_wait() {
+            Ok(None) => {}
+            exited => {
+                if let Ok(Some(st)) = exited {
+                    note_exit(&dir, st);
+                }
+                // It may have written its record and finished very quickly.
+                return HostInfo::read(&dir)
+                    .map_err(|_| io::Error::other("step host exited before it was up"));
             }
-            return Err(io::Error::other("step host exited before it was up"));
         }
-        if Instant::now() > deadline {
-            return Err(io::Error::new(
+        let waited = started.elapsed();
+        if waited > limit {
+            // Goes through `Child`, so it cannot reach a recycled pid. A process
+            // frozen in its launch dies as soon as the launch lets go of it.
+            let _ = child.kill();
+            break Err(io::Error::new(
                 io::ErrorKind::TimedOut,
-                "step host did not start",
+                format!(
+                    "step host did not start within {}s (killed; on macOS, check that \
+                     syspolicyd is running)",
+                    limit.as_secs()
+                ),
             ));
         }
+        if waited > SLOW_START && !warned {
+            warned = true;
+            eprintln!(
+                "step host {} has not started after {}s; still waiting, up to {}s \
+                 (on macOS, check that syspolicyd is running)",
+                o.id,
+                SLOW_START.as_secs(),
+                limit.as_secs()
+            );
+        }
         thread::sleep(Duration::from_millis(5));
-    }
+    };
+
+    // Reap the host when it eventually exits, without blocking the caller.
+    thread::spawn(move || {
+        if let Ok(st) = child.wait() {
+            note_exit(&dir, st);
+        }
+    });
+    result
 }

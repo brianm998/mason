@@ -984,4 +984,58 @@ class MonitorCoreTest {
         assertEquals("failed", (m.sidebarEntries()[i] as SidebarEntry.Header).section.state)
         assertEquals(-1, m.scrollIndex("nope"))
     }
+
+    // ---- releasing and adding blockers (s75) ----
+
+    private fun heldRow() = row(11, "queued", actions = listOf("cancel", "block", "unblock")).copy(
+        blockers = listOf(8L, 9L),
+        blocker_links = listOf(
+            BlockerLink(task = 8, state = "canceled", origin = "from GitHub", actions = listOf("release", "revive")),
+            BlockerLink(task = 9, state = "failed", origin = "set by you", actions = listOf("release", "retry")),
+        ),
+    )
+
+    @Test fun aHeldTaskShowsEachBlockerWithItsOriginAndTheOwnersActions() {
+        for (owner in listOf(true, false)) {
+            val m = MonitorModel()
+            m.apply(ServerMessage(welcome = Welcome(protocol = 1, owner = owner)))
+            m.taskDetail = TaskDetailView(row = heldRow())
+            m.go(Page.Task(11))
+            val items = m.visibleItems()
+            val b8 = items.first { it.id == "blocker:11:8" }
+            val b9 = items.first { it.id == "blocker:11:9" }
+            assertEquals(listOf("#8", "canceled", "from GitHub"), b8.texts)
+            assertEquals(listOf("#9", "failed", "set by you"), b9.texts)
+            assertEquals(if (owner) listOf("release", "revive") else emptyList(), b8.actions)
+            assertEquals(if (owner) listOf("release", "retry") else emptyList(), b9.actions)
+            assertEquals(if (owner) listOf("add_blocker") else emptyList(), items.first { it.id == "add-blocker:11" }.actions)
+        }
+    }
+
+    @Test fun releaseAddBlockerAndReviveSendTheOwnersCommands() {
+        val m = MonitorModel()
+        m.identity = "brian"
+        val sent = mutableListOf<Command>()
+        m.sender = { sent += it }
+        m.release(11, 8)
+        m.addBlocker(11, 5)
+        m.revive(8)
+        assertEquals(listOf(8L), sent[0].unblock?.from)
+        assertEquals(11L, sent[0].unblock?.task)
+        assertEquals(listOf(5L), sent[1].block?.after)
+        assertEquals(8L, sent[2].revive?.task)
+        assertTrue(sent.all { it.actor == "brian" })
+    }
+
+    @Test fun theTaskPickerOffersLiveTasksThatAreNotAlreadyBlockers() {
+        val m = model()
+        m.sidebar = SidebarView(
+            sections = listOf(
+                section("queued", rows = listOf(heldRow(), row(12, "queued"), row(8, "queued"))),
+                section("failed", rows = listOf(row(13, "failed"))),
+                section("landed", rows = listOf(row(14, "landed"))),
+            ),
+        )
+        assertEquals(listOf(12L), m.blockerCandidates(heldRow()).map { it.id })
+    }
 }

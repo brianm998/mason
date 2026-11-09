@@ -1189,4 +1189,60 @@ final class MonitorCoreTests: XCTestCase {
         if case .header(let s) = m.sidebarEntries[i!] { XCTAssertEqual(s.state, "failed") } else { XCTFail() }
         XCTAssertNil(m.scrollIndex(forState: "nope"))
     }
+
+    // MARK: releasing and adding blockers (s75)
+
+    func heldRow() -> TaskRow {
+        var r = row(11, state: "queued", actions: ["cancel", "block", "unblock"])
+        r.blockers = [8, 9]
+        r.blockerLinks = [
+            .with { $0.task = 8; $0.state = "canceled"; $0.origin = "from GitHub"; $0.actions = ["release", "revive"] },
+            .with { $0.task = 9; $0.state = "failed"; $0.origin = "set by you"; $0.actions = ["release", "retry"] },
+        ]
+        return r
+    }
+
+    func testAHeldTaskShowsEachBlockerWithItsOriginAndTheOwnersActions() {
+        for owner in [true, false] {
+            let (m, _) = ownerModel(owner: owner)
+            var d = TaskDetailView()
+            d.row = heldRow()
+            m.taskDetail = d
+            m.go(.task(11))
+            let items = m.visibleItems()
+            let b8 = items.first { $0.id == "blocker:11:8" }!
+            let b9 = items.first { $0.id == "blocker:11:9" }!
+            XCTAssertEqual(b8.texts, ["#8", "canceled", "from GitHub"])
+            XCTAssertEqual(b9.texts, ["#9", "failed", "set by you"])
+            XCTAssertEqual(b8.actions, owner ? ["release", "revive"] : [])
+            XCTAssertEqual(b9.actions, owner ? ["release", "retry"] : [])
+            XCTAssertEqual(items.first { $0.id == "add-blocker:11" }!.actions, owner ? ["add_blocker"] : [])
+        }
+    }
+
+    func testReleaseAddBlockerAndReviveSendTheOwnersCommands() {
+        let (m, sent) = ownerModel()
+        m.release(11, blocker: 8)
+        m.addBlocker(11, after: 5)
+        m.revive(8)
+        guard case .unblock(let u)? = sent()[0].body else { return XCTFail() }
+        XCTAssertEqual([u.task, u.from[0]], [11, 8])
+        guard case .block(let b)? = sent()[1].body else { return XCTFail() }
+        XCTAssertEqual([b.task, b.after[0]], [11, 5])
+        guard case .revive(let r)? = sent()[2].body else { return XCTFail() }
+        XCTAssertEqual(r.task, 8)
+        XCTAssertTrue(sent().allSatisfy { $0.actor == "brian" })
+    }
+
+    func testTheTaskPickerOffersLiveTasksThatAreNotAlreadyBlockers() {
+        let m = model()
+        var sb = SidebarView()
+        sb.sections = [
+            section("queued", rows: [heldRow(), row(12, state: "queued"), row(8, state: "queued")]),
+            section("failed", rows: [row(13, state: "failed")]),
+            section("landed", rows: [row(14, state: "landed")]),
+        ]
+        m.sidebar = sb
+        XCTAssertEqual(m.blockerCandidates(for: heldRow()).map { $0.id }, [12])
+    }
 }
