@@ -147,6 +147,19 @@ impl FakeHost {
         (if ok { Checks::Green } else { Checks::Red }, failed)
     }
 
+    /// How far the checks are, for a monitor. The host here runs its checks as one command,
+    /// so the one who plays the host writes this: `prs/N.counts`
+    /// `{"done": 4, "total": 7, "running": "lint"}`. No file, no counts.
+    fn counts_of(&self, n: u64) -> Option<CheckCounts> {
+        let t = std::fs::read_to_string(self.dir.join("prs").join(format!("{n}.counts"))).ok()?;
+        let v: Value = serde_json::from_str(&t).ok()?;
+        Some(CheckCounts {
+            done: v["done"].as_u64()?,
+            total: v["total"].as_u64()?,
+            running: v["running"].as_str().map(String::from),
+        })
+    }
+
     fn do_merge(&self, n: u64, v: &mut Value) -> Result<(), ApiError> {
         let (base, head) = (
             v["base"].as_str().unwrap_or("").to_string(),
@@ -256,6 +269,7 @@ impl GitHostAdapter for FakeHost {
             failed,
             review,
             head,
+            counts: self.counts_of(n),
         })
     }
 

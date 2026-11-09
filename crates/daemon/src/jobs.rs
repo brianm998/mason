@@ -415,6 +415,10 @@ pub(crate) fn step_env_pairs(c: &Ctx) -> Vec<(String, String)> {
             "MASON_RESULT_FILE".into(),
             result_file(c).to_string_lossy().into_owned(),
         ),
+        (
+            "MASON_PROGRESS_FILE".into(),
+            progress_file(c).to_string_lossy().into_owned(),
+        ),
     ]
 }
 
@@ -431,6 +435,14 @@ pub(crate) fn step_env(c: &Ctx) -> Value {
 fn result_file(c: &Ctx) -> PathBuf {
     c.task_dir()
         .join(format!("result-{}-r{}.json", c.step.name, c.run.0))
+}
+
+/// Where a script step may append progress, one JSON object per line:
+/// `{"done": n, "total": m, "unit": "...", "message": "..."}` (every field optional).
+/// A line that is not JSON is the message.
+fn progress_file(c: &Ctx) -> PathBuf {
+    c.task_dir()
+        .join(format!("progress-{}-r{}.jsonl", c.step.name, c.run.0))
 }
 
 /// What a script step's result file says. `passed` is optional: without it the exit
@@ -1619,6 +1631,7 @@ fn run_command_on(
         .map_or(c.project.test_timeout, |a| a.value);
     if !dir.join("host.kv").exists() {
         let _ = std::fs::remove_file(result_file(c));
+        let _ = std::fs::remove_file(progress_file(c));
         let o = SpawnOptions {
             host_bin: c.d.cfg.host_bin.clone(),
             root: hosts.clone(),
@@ -1659,6 +1672,13 @@ fn run_command_on(
     // Each run of the command is its own stream, since each log starts at 0.
     let stream = format!("{}{hsuf}", again(k));
     c.d.progress_catch_up(c.run, &stream, &log);
+    // What the command says about itself in `MASON_PROGRESS_FILE`, as it says it.
+    let _tail = {
+        let (d, run) = (c.d.clone(), c.run);
+        crate::progress::FileTail::start(progress_file(c), move |r| {
+            d.progress_report(run, |p, now| p.apply_report(&r, now))
+        })
+    };
     let result = collect_to_file_observed(
         &dir,
         &log,
@@ -1750,6 +1770,8 @@ fn approval_job(c: &Ctx) {
     {
         return;
     }
+    // What the step waits on, and since when (its start), for the monitor to show.
+    c.d.progress_report(c.run, |p, now| p.set_message("waiting for the owner", now));
     loop {
         std::thread::sleep(Duration::from_millis(250));
         match c.d.world() {

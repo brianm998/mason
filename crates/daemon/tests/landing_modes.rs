@@ -199,6 +199,51 @@ fn pr_each_opens_one_pull_request_per_task_and_merges_each() {
 }
 
 #[test]
+fn a_pr_wait_shows_the_hosts_checks_and_the_batch_phases_on_each_member() {
+    let w = pr_world("pr-batch", true, false);
+    // The host says four of seven checks are done, one running; PR #1 is the batch's.
+    let prs_dir = w.s.root.path().join("host-state/prs");
+    std::fs::create_dir_all(&prs_dir).unwrap();
+    std::fs::write(
+        prs_dir.join("1.counts"),
+        r#"{"done": 4, "total": 7, "running": "lint"}"#,
+    )
+    .unwrap();
+    let a = w.task("one", &[("x/a.txt", "1")]);
+    let b = w.task("two", &[("x/b.txt", "2")]);
+    let seen = |t: TaskId| {
+        w.d.progress_of_task(t)
+            .into_iter()
+            .find(|p| p.step == "land" || p.unit == "phases")
+    };
+    wait_for("the checks to show on both members", 120, || {
+        [a, b].iter().all(|t| {
+            seen(*t).is_some_and(|p| {
+                p.subs
+                    .iter()
+                    .any(|s| s.name == "checks" && s.done.value == 4 && s.total.value == 7)
+            })
+        })
+    });
+    for t in [a, b] {
+        let p = seen(t).unwrap();
+        assert_eq!(p.unit, "phases", "{p:?}");
+        assert_eq!(p.total.value, 4, "{p:?}");
+        assert!(p.message.starts_with("batch: "), "{p:?}");
+        assert!(
+            p.subs.iter().any(|s| s.unit == "tests"),
+            "the batch's suite counts are sub-counts: {p:?}"
+        );
+    }
+    // Approve the open pull request so the batch can end.
+    let dir = w.s.root.path().join("host-state");
+    wait_for("both to land", 120, || {
+        mason_adapters::fakehost::FakeHost::approve(&dir, 1);
+        w.landed(a) && w.landed(b)
+    });
+}
+
+#[test]
 fn pr_batch_opens_one_pull_request_for_the_batch() {
     let w = pr_world("pr-batch", false, false);
     let a = w.task("one", &[("x/a.txt", "1")]);

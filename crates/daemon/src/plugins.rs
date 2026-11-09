@@ -590,7 +590,23 @@ pub fn plugin_job(c: &crate::jobs::Ctx) {
         .budget
         .as_ref()
         .map_or(Duration::from_secs(600), |a| a.value);
-    match host::run_step(&launch, &name, &request(c), Duration::from_secs(30), limit) {
+    let run = c.run;
+    let d = c.d.clone();
+    let mut note = |v: &Value| {
+        // A malformed notification is ignored at run time (the kit flags it).
+        if let Some(r) = crate::progress::parse_step_progress(v) {
+            d.progress_report(run, |p, now| p.apply_report(&r, now));
+        }
+    };
+    match host::run_step(
+        &launch,
+        &name,
+        &request(c),
+        m.protocol,
+        Duration::from_secs(30),
+        limit,
+        &mut note,
+    ) {
         Ok(r) if r.passed => {
             let _ = std::fs::remove_file(c.task_dir().join("feedback.txt"));
             let _ = std::fs::write(

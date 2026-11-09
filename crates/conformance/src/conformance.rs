@@ -137,6 +137,8 @@ fn src(s: i32) -> mason_core::progress::Source {
         ProgressSource::SourceReported => Source::Reported,
         ProgressSource::SourceCounted => Source::Counted,
         ProgressSource::SourceHistory => Source::History,
+        ProgressSource::SourceExpected => Source::Expected,
+        ProgressSource::SourceMinimum => Source::Minimum,
     }
 }
 
