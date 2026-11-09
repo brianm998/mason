@@ -314,3 +314,135 @@ fn a_checked_out_local_base_is_refused() {
     let f = b.finish(&a, &mut |_| true, &nop).unwrap().unwrap();
     assert!(matches!(f, Finish::LocalBaseCheckedOut(_)), "{f:?}");
 }
+
+/// Push a commit to the remote's main from a second clone.
+fn land_elsewhere(fx: &Fx, file: &str) {
+    let other = fx.root.join("other");
+    if !other.exists() {
+        sh(
+            &fx.root,
+            &[
+                "clone",
+                "-q",
+                fx.origin.to_str().unwrap(),
+                other.to_str().unwrap(),
+            ],
+        );
+    }
+    sh(&other, &["pull", "-q", "origin", "main"]);
+    write_commit(&other, file, "x\n");
+    sh(&other, &["push", "-q", "origin", "HEAD:main"]);
+}
+
+#[test]
+fn the_lock_is_not_held_while_reverify_runs() {
+    use std::sync::atomic::{AtomicI32, Ordering::SeqCst};
+    let fx = Fx::new();
+    let ts = [fx.branch("t1", "a.txt", "a\n")];
+    let b = fx.batch(None, true);
+    let a = b.assemble(&ts, &nop).unwrap();
+    land_elsewhere(&fx, "z.txt");
+    let held = AtomicI32::new(0);
+    let took = AtomicI32::new(0);
+    struct G<'a>(&'a AtomicI32);
+    impl Drop for G<'_> {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, SeqCst);
+        }
+    }
+    let lock = || -> mason_landing::batch::Guard<'_> {
+        held.fetch_add(1, SeqCst);
+        took.fetch_add(1, SeqCst);
+        Box::new(G(&held))
+    };
+    let mut ran = 0;
+    let f = b
+        .finish_with(
+            &a,
+            &lock,
+            &mut |_| {
+                ran += 1;
+                assert_eq!(held.load(SeqCst), 0, "the lock is held during reverify");
+                true
+            },
+            &nop,
+        )
+        .unwrap()
+        .unwrap();
+    assert!(matches!(f, Finish::Promoted { folds: 1, .. }), "{f:?}");
+    assert_eq!(ran, 1);
+    assert_eq!(
+        took.load(SeqCst),
+        2,
+        "one hold for the fold, one for the promote"
+    );
+    assert_eq!(held.load(SeqCst), 0);
+}
+
+#[test]
+fn a_base_that_moves_during_reverify_is_folded_and_verified_again() {
+    {
+        let fx = Fx::new();
+        let ts = [fx.branch("t1", "a.txt", "a\n")];
+        let b = fx.batch(None, true);
+        let a = b.assemble(&ts, &nop).unwrap();
+        land_elsewhere(&fx, "z.txt");
+        let mut verified: Vec<(String, Vec<String>)> = vec![];
+        let wt = fx.int_wt.clone();
+        let f = b
+            .finish(
+                &a,
+                &mut |m| {
+                    // The tree verified is the tree in the worktree right now.
+                    verified.push((git::rev_parse(&wt, "HEAD").unwrap(), m.to_vec()));
+                    if verified.len() == 1 {
+                        land_elsewhere(&fx, "y.txt");
+                    }
+                    true
+                },
+                &nop,
+            )
+            .unwrap()
+            .unwrap();
+        let Finish::Promoted { commit, folds } = f else {
+            panic!("{f:?}")
+        };
+        assert_eq!(folds, 2);
+        assert_eq!(verified.len(), 2, "re-verified after the second move");
+        assert_eq!(verified[1].1, ["y.txt"]);
+        // What was promoted is exactly what was last verified.
+        assert_eq!(verified[1].0, commit);
+        assert_eq!(fx.origin_main(), commit);
+        for f in ["a.txt", "z.txt", "y.txt"] {
+            sh(&fx.origin, &["cat-file", "-e", &format!("main:{f}")]);
+        }
+    }
+}
+
+#[test]
+fn a_base_that_keeps_moving_during_reverify_is_never_promoted_unverified() {
+    let fx = Fx::new();
+    let ts = [fx.branch("t1", "a.txt", "a\n")];
+    let b = fx.batch(None, true);
+    let a = b.assemble(&ts, &nop).unwrap();
+    land_elsewhere(&fx, "z0.txt");
+    let mut n = 0;
+    let f = b
+        .finish(
+            &a,
+            &mut |_| {
+                n += 1;
+                land_elsewhere(&fx, &format!("m{n}.txt"));
+                true
+            },
+            &nop,
+        )
+        .unwrap()
+        .unwrap();
+    assert!(matches!(f, Finish::BaseKeptMoving), "{f:?}");
+    let _ = sh(&fx.origin, &["rev-parse", "main"]);
+    assert!(
+        git::run(&fx.origin, &["cat-file", "-e", "main:a.txt"]).is_err(),
+        "an unverified tree reached the base"
+    );
+}
