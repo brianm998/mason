@@ -680,12 +680,12 @@ pub(crate) fn test_command(
 /// steps go on with the branch as it is). Failing here instead would fail
 /// every later step the same way, so no agent could ever resolve it.
 pub(crate) fn prepare(c: &Ctx) -> Result<Option<String>, String> {
+    // The fetch has a lock of its own: a stalled remote holds up other fetches,
+    // not the worktrees, merges and cleanup that take the repository lock.
+    c.d.fetch_remote(c.project_id)?;
     let lock = c.d.repo_lock(c.project_id);
     let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
     let repo = &c.project.path;
-    if let Some(r) = &c.project.remote {
-        git::run(repo, &["fetch", "--prune", r]).map_err(|e| e.to_string())?;
-    }
     let base = c.project.base_ref();
     git::ensure_worktree(repo, &c.wt, &c.branch, &base).map_err(|e| e.to_string())?;
     // Uncommitted changes are an agent's work in progress: a step re-entered after

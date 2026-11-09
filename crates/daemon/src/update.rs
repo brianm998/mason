@@ -368,14 +368,43 @@ pub fn check_move(
 
 // ---- building ----------------------------------------------------------------------------------------
 
+/// How long a build or check step may run: an hour. `MASON_UPDATE_SHELL_TIMEOUT_SECS`
+/// changes it.
+fn shell_deadline() -> std::time::Duration {
+    std::env::var("MASON_UPDATE_SHELL_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|s| *s > 0.0)
+        .map_or(
+            std::time::Duration::from_secs(3600),
+            std::time::Duration::from_secs_f64,
+        )
+}
+
 /// Run `cmd`, keeping everything it said in `log`. An error carries its last lines.
 fn shell(cwd: &Path, cmd: &str, log: &Path, env: &[(&str, &str)]) -> Result<(), String> {
-    let out = Command::new("sh")
-        .args(["-c", cmd])
-        .current_dir(cwd)
-        .envs(env.iter().copied())
-        .output()
-        .map_err(|e| e.to_string())?;
+    let limit = shell_deadline();
+    let out = match mason_landing::proc::output(
+        Command::new("sh")
+            .args(["-c", cmd])
+            .current_dir(cwd)
+            .envs(env.iter().copied()),
+        limit,
+    ) {
+        Ok(o) => o,
+        Err(mason_landing::proc::ProcError::Spawn(e)) => return Err(e.to_string()),
+        Err(mason_landing::proc::ProcError::TimedOut { stdout, stderr }) => {
+            let mut text = String::from_utf8_lossy(&stdout).to_string();
+            text.push_str(&String::from_utf8_lossy(&stderr));
+            let _ = std::fs::write(log, &text);
+            let tail: Vec<&str> = text.lines().rev().take(12).collect();
+            return Err(format!(
+                "`{cmd}` timed out after {}s and was killed:\n{}",
+                limit.as_secs(),
+                tail.into_iter().rev().collect::<Vec<_>>().join("\n")
+            ));
+        }
+    };
     let mut text = String::from_utf8_lossy(&out.stdout).to_string();
     text.push_str(&String::from_utf8_lossy(&out.stderr));
     let _ = std::fs::write(log, &text);

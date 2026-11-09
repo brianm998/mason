@@ -6,7 +6,7 @@
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -93,6 +93,18 @@ pub fn parse_top_cpu(text: &str) -> Option<u32> {
     Some((100.0 - idle).round().clamp(0.0, 100.0) as u32)
 }
 
+/// `top -l 2 -s 1` takes about two seconds.
+pub const TOP_DEADLINE: Duration = Duration::from_secs(10);
+
+/// A reading older than this is unknown (so no gate), not the last one for ever.
+pub const MAX_AGE: Duration = Duration::from_secs(30);
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
+}
+
 fn read_instant() -> Option<u32> {
     if let Ok(t) = std::fs::read_to_string("/proc/stat") {
         // Two readings a moment apart.
@@ -101,10 +113,11 @@ fn read_instant() -> Option<u32> {
         let b = parse_proc_stat(&std::fs::read_to_string("/proc/stat").ok()?)?;
         return pct_between(a, b);
     }
-    let out = std::process::Command::new("top")
-        .args(["-l", "2", "-n", "0", "-s", "1"])
-        .output()
-        .ok()?;
+    let out = mason_landing::proc::output(
+        std::process::Command::new("top").args(["-l", "2", "-n", "0", "-s", "1"]),
+        TOP_DEADLINE,
+    )
+    .ok()?;
     parse_top_cpu(&String::from_utf8_lossy(&out.stdout))
 }
 
@@ -113,6 +126,13 @@ fn read_instant() -> Option<u32> {
 pub struct Sampler {
     pct: Arc<AtomicU32>,
     known: Arc<AtomicBool>,
+    /// When the last reading was taken (unix ms).
+    at: Arc<AtomicU64>,
+}
+
+/// A reading is current if it was taken no more than `max_age` before `now`.
+pub fn fresh(taken_ms: u64, now_ms: u64, max_age: Duration) -> bool {
+    now_ms.saturating_sub(taken_ms) <= max_age.as_millis() as u64
 }
 
 pub const NONE: u32 = u32::MAX;
@@ -130,8 +150,9 @@ impl Sampler {
         let s = Arc::new(Sampler {
             pct: Arc::new(AtomicU32::new(NONE)),
             known: Arc::new(AtomicBool::new(false)),
+            at: Arc::new(AtomicU64::new(0)),
         });
-        let (pct, known) = (s.pct.clone(), s.known.clone());
+        let (pct, known, at) = (s.pct.clone(), s.known.clone(), s.at.clone());
         let me = Arc::downgrade(&s);
         let _ = std::thread::Builder::new()
             .name("cpu-sampler".into())
@@ -147,6 +168,7 @@ impl Sampler {
                         }
                         if let Some(a) = average(&window) {
                             pct.store(a, Ordering::SeqCst);
+                            at.store(now_ms(), Ordering::SeqCst);
                             known.store(true, Ordering::SeqCst);
                         }
                     }
@@ -160,9 +182,9 @@ impl Sampler {
 
 impl CpuSource for Sampler {
     fn busy_pct(&self) -> Option<u32> {
-        self.known
-            .load(Ordering::SeqCst)
-            .then(|| self.pct.load(Ordering::SeqCst))
+        (self.known.load(Ordering::SeqCst)
+            && fresh(self.at.load(Ordering::SeqCst), now_ms(), MAX_AGE))
+        .then(|| self.pct.load(Ordering::SeqCst))
     }
 }
 
@@ -185,6 +207,21 @@ mod tests {
         let t = "Processes: 1\nCPU usage: 50.0% user, 10.0% sys, 40.0% idle\n\nProcesses: 2\nCPU usage: 5.1% user, 10.2% sys, 84.7% idle \n";
         assert_eq!(parse_top_cpu(t), Some(15));
         assert_eq!(parse_top_cpu("no cpu line"), None);
+    }
+
+    #[test]
+    fn an_old_reading_is_unknown() {
+        let now = 1_000_000;
+        assert!(fresh(now - 29_000, now, MAX_AGE));
+        assert!(!fresh(now - 31_000, now, MAX_AGE));
+        let s = Sampler {
+            pct: Arc::new(AtomicU32::new(90)),
+            known: Arc::new(AtomicBool::new(true)),
+            at: Arc::new(AtomicU64::new(now_ms() - 60_000)),
+        };
+        assert_eq!(s.busy_pct(), None);
+        s.at.store(now_ms(), Ordering::SeqCst);
+        assert_eq!(s.busy_pct(), Some(90));
     }
 
     #[test]

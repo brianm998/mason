@@ -173,9 +173,8 @@ impl Daemon {
     /// is invalid starts on the last good one (or the built-in) and says why.
     pub(crate) fn load_definitions(&self) {
         for (pid, p) in &self.projects {
-            if let Some(r) = &p.remote {
-                let _ = git::run(&p.path, &["fetch", "--prune", r]);
-            }
+            // No network here: the port is not open yet. What is already fetched is
+            // read; the watcher's first pass fetches.
             let fallback = self
                 .store
                 .read(|c| {
@@ -204,7 +203,7 @@ impl Daemon {
                         error: None,
                     },
                 );
-            let r = self.reload_definition(*pid);
+            let r = self.reload_without_fetch(*pid);
             if let Reload::Refused(e) = r {
                 tracing::warn!(project = %p.id, problems = ?e, "the definition was refused at startup; using the last good one");
             }
@@ -224,10 +223,10 @@ impl Daemon {
     }
 
     fn fetch_project(&self, p: &ProjectCfg) {
-        if let Some(r) = &p.remote {
-            let lock = self.repo_lock(self.project_id_by_name(&p.id).unwrap_or(ProjectId(0)));
-            let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
-            let _ = git::run(&p.path, &["fetch", "--prune", r]);
+        if let Some(pid) = self.project_id_by_name(&p.id) {
+            if let Err(e) = self.fetch_remote(pid) {
+                tracing::warn!(project = %p.id, "fetching the remote failed: {e}");
+            }
         }
     }
 
@@ -331,7 +330,10 @@ impl Daemon {
         let _ = std::thread::Builder::new()
             .name("definition-watcher".into())
             .spawn(move || {
-                let mut last_fetch = std::time::Instant::now();
+                // The first pass fetches: startup does not.
+                let mut last_fetch = std::time::Instant::now()
+                    .checked_sub(fetch_every)
+                    .unwrap_or_else(std::time::Instant::now);
                 loop {
                     std::thread::sleep(every);
                     let Some(d) = weak.upgrade() else { break };
