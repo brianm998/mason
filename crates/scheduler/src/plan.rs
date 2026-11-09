@@ -87,6 +87,16 @@ pub struct World<'a> {
     pub cpu: Option<CpuGate>,
     /// How far apart compiles start. `None` means they are not paced.
     pub compile_pace: Option<CompilePace>,
+    /// Measured by the caller: free disk against its floor. `None` means no disk gate.
+    pub disk: Option<DiskGate>,
+}
+
+/// The disk floor. Below it no `compile` and no LLM session is granted, even when nothing
+/// else is running. Work already running is never revoked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DiskGate {
+    pub free_mb: u64,
+    pub floor_mb: u64,
 }
 
 /// The CPU gate on the `compile` resource. Checked only when a compile would
@@ -275,12 +285,31 @@ pub fn plan(world: &World, waiting: &[Request]) -> Plan {
             .filter(|_| compiles)
             .and_then(|p| Some(last_compile_start? + p.gap_ms))
             .filter(|until| world.now < *until);
+        let low_disk = match world.disk {
+            Some(g)
+                if g.free_mb < g.floor_mb
+                    && r.needs
+                        .amounts
+                        .keys()
+                        .any(|n| n == COMPILE || kind_of(capacity, n) == Some(Kind::Llm)) =>
+            {
+                Some(g)
+            }
+            _ => None,
+        };
         let cause = match (&fitted, &touch, low_memory) {
             (Fit::Never(c), _, _) | (Fit::Full(c), _, _) => Some(c.clone()),
             (Fit::Yes, Some(Touch::Name(n)), _) => Some(WaitCause::Behind {
                 resource: n.clone(),
             }),
             (Fit::Yes, Some(Touch::Machine), _) => Some(WaitCause::Exclusive),
+            (Fit::Yes, None, _) if low_disk.is_some() => {
+                let g = low_disk.expect("checked");
+                Some(WaitCause::Disk {
+                    free_mb: g.free_mb,
+                    floor_mb: g.floor_mb,
+                })
+            }
             (Fit::Yes, None, _) if hot.is_some() => {
                 let g = hot.expect("checked");
                 Some(WaitCause::Cpu {
@@ -336,7 +365,10 @@ fn build_wait(
             other.needs.amounts.contains_key(resource)
         }
         WaitCause::Exclusive => uses_machine(capacity, &other.needs),
-        WaitCause::Memory { .. } | WaitCause::Cpu { .. } | WaitCause::Settling { .. } => true,
+        WaitCause::Memory { .. }
+        | WaitCause::Cpu { .. }
+        | WaitCause::Settling { .. }
+        | WaitCause::Disk { .. } => true,
         _ => false,
     };
     let ahead_of_me: Vec<&&Request> = ahead.iter().filter(|o| same(o)).collect();

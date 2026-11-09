@@ -12,6 +12,8 @@ pub enum WaitCause {
     Exclusive,
     /// Starting beside other work needs more free memory than there is.
     Memory { free_mb: u64, floor_mb: u64 },
+    /// Free disk is below the floor: no compile and no LLM session starts.
+    Disk { free_mb: u64, floor_mb: u64 },
     /// A compile does not start while the machine's CPU use is at or above the limit.
     Cpu { busy_pct: u32, max_pct: u32 },
     /// Another compile started moments ago and does not show in the CPU reading
@@ -139,6 +141,11 @@ pub fn explain(w: &Wait, now_ms: u64) -> String {
         }
         WaitCause::Memory { free_mb, floor_mb } => format!(
             "Waiting for free memory: {free_mb} MB free, {floor_mb} MB needed to start beside other work"
+        ),
+        WaitCause::Disk { free_mb, floor_mb } => format!(
+            "Waiting: disk has {} GB free, floor {} GB",
+            free_mb / 1024,
+            floor_mb / 1024
         ),
         WaitCause::Cpu { busy_pct, max_pct } => {
             format!("compile waiting: CPU {busy_pct}% > {max_pct}%")

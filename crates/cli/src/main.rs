@@ -2029,7 +2029,13 @@ fn main() {
                 );
             }
             if s["bugs"].as_u64().unwrap_or(0) > 0 {
-                println!("bugs filed by the reconcile sweep: {}", s["bugs"]);
+                println!("bugs filed by the daemon: {}", s["bugs"]);
+            }
+            if let Some(n) = s["thread_panics"]["count"].as_u64().filter(|n| *n > 0) {
+                println!(
+                    "THREAD PANICS: {n} (last: {})",
+                    s["thread_panics"]["last"].as_str().unwrap_or("?")
+                );
             }
             for p in s["definitions"].as_array().into_iter().flatten() {
                 let hash = p["hash"].as_str().unwrap_or("");
