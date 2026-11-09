@@ -986,3 +986,135 @@ fn a_started_task_is_not_pulled_back_by_a_removed_blocker() {
         Err(ReduceError::Illegal { .. })
     ));
 }
+
+#[test]
+fn retry_on_a_cancelled_task_is_refused() {
+    let mut sim = Sim::new();
+    let t = sim.task_in(State::Canceled);
+    assert!(matches!(
+        sim.try_ev(E::Retried {
+            task: t,
+            to: State::Developing,
+            step: String::new()
+        }),
+        Err(ReduceError::Illegal { .. })
+    ));
+}
+
+#[test]
+fn releasing_one_of_two_blockers_keeps_the_task_held_and_all_makes_it_claimable() {
+    let mut sim = Sim::new();
+    let a = sim.file(false, false);
+    let b = sim.file(false, false);
+    let c = sim.file_with(false, false, vec![a, b], None);
+    let fx = sim.ok(E::BlockersChanged {
+        task: c,
+        released: vec![a],
+        added: vec![],
+    });
+    assert!(matches!(sim.activity(c), Activity::Held(_)));
+    assert!(!fx.contains(&Effect::WakeScheduler { task: c }));
+    let fx = sim.ok(E::BlockersChanged {
+        task: c,
+        released: vec![b],
+        added: vec![],
+    });
+    assert_eq!(sim.activity(c), Activity::Waiting(WaitReason::Slot));
+    assert!(fx.contains(&Effect::WakeScheduler { task: c }));
+}
+
+#[test]
+fn releasing_a_task_that_is_not_a_blocker_is_refused() {
+    let mut sim = Sim::new();
+    let a = sim.file(false, false);
+    let c = sim.file(false, false);
+    assert_eq!(
+        sim.try_ev(E::BlockersChanged {
+            task: c,
+            released: vec![a],
+            added: vec![]
+        }),
+        Err(ReduceError::NotABlocker(a))
+    );
+}
+
+#[test]
+fn an_added_blocker_that_closes_a_loop_is_refused_naming_the_path() {
+    let mut sim = Sim::new();
+    let a = sim.file(false, false);
+    let b = sim.file_with(false, false, vec![a], None);
+    let before = sim.w.clone();
+    assert_eq!(
+        sim.try_ev(E::BlockersChanged {
+            task: a,
+            released: vec![],
+            added: vec![b]
+        }),
+        Err(ReduceError::BlockerCycle(vec![a, b, a]))
+    );
+    assert_eq!(sim.w, before);
+}
+
+#[test]
+fn blockers_changed_past_queued_is_refused() {
+    let mut sim = Sim::new();
+    let a = sim.file(false, false);
+    let b = sim.file(false, false);
+    sim.ok(E::Admitted {
+        task: b,
+        entry: None,
+    });
+    assert!(matches!(
+        sim.try_ev(E::BlockersChanged {
+            task: b,
+            released: vec![],
+            added: vec![a]
+        }),
+        Err(ReduceError::Illegal { .. })
+    ));
+}
+
+#[test]
+fn revived_puts_a_cancelled_task_back_in_the_queue_only_if_its_branch_is_kept() {
+    let mut sim = Sim::new();
+    let t = sim.task_in(State::Canceled);
+    let fx = sim.ok(E::Revived { task: t });
+    assert_eq!(sim.state(t), State::Queued);
+    assert!(fx.contains(&Effect::CatchUpWithBase { task: t }));
+    let gone = sim.file(false, false);
+    sim.ok(E::Canceled {
+        task: gone,
+        delete_branch: true,
+    });
+    assert!(matches!(
+        sim.try_ev(E::Revived { task: gone }),
+        Err(ReduceError::Illegal { .. })
+    ));
+}
+
+#[test]
+fn replaying_blockers_changed_and_revived_gives_the_same_world() {
+    let run = || {
+        let mut sim = Sim::new();
+        let a = sim.file(false, false);
+        let b = sim.file(false, false);
+        let c = sim.file_with(false, false, vec![a], None);
+        sim.ok(E::Canceled {
+            task: a,
+            delete_branch: false,
+        });
+        sim.ok(E::BlockersChanged {
+            task: c,
+            released: vec![a],
+            added: vec![b],
+        });
+        sim.ok(E::Revived { task: a });
+        sim.w
+    };
+    let w = run();
+    assert_eq!(w, run());
+    assert_eq!(
+        w.tasks.values().filter(|t| !t.blockers.is_empty()).count(),
+        1
+    );
+}

@@ -39,6 +39,21 @@ fun TaskRow.item(prefix: String, order: Int): Item {
     return Item("$prefix:$id", texts, allowed_actions, order)
 }
 
+/**
+ * What a held task's page shows for its blockers: each with its state and where it came from,
+ * and the actions on it (the owner's alone); and the Add blocker field.
+ */
+fun TaskRow.blockerItems(owner: Boolean): List<Item> {
+    val out = mutableListOf<Item>()
+    blocker_links.forEachIndexed { i, l ->
+        out += Item("blocker:$id:${l.task}", listOf("#${l.task}", l.state, l.origin), if (owner) l.actions else emptyList(), i)
+    }
+    if ("block" in allowed_actions) {
+        out += Item("add-blocker:$id", listOf("Add blocker"), if (owner) listOf("add_blocker") else emptyList())
+    }
+    return out
+}
+
 /** One item per running step with a live record: what its progress says, with no clock text. */
 fun TaskRow.progressItems(now: Long): List<Item> =
     progress.filter { it.state == CellState.PART && it.run != 0L }
@@ -121,6 +136,7 @@ fun MonitorModel.visibleItems(): List<Item> {
         if (r != null) {
             out += r.item("detail", 0)
             out += r.progressItems(daemonNow())
+            out += r.blockerItems(canAct)
             d.steps.forEachIndexed { i, s -> out += Item("step:${s.run}", listOf(s.name, s.outcome) + s.launches.map { it.display }, order = i) }
             d.card?.let { out += it.item(r.id, canAct) }
             d.approval?.let { out += it.item(r.id, canAct) }
