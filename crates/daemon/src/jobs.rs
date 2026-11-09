@@ -42,6 +42,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+/// The resources a step holds, shared with its `run_check`, which gives them
+/// back while the tests run.
+pub type StepLease = Arc<std::sync::Mutex<Option<crate::sched::Lease>>>;
+
 /// How many times a task may be sent back for a conflict with the base before
 /// it fails. These do not count against a step's `max_rounds` (s69).
 pub(crate) const CONFLICT_ROUNDS: u32 = 5;
@@ -83,7 +87,7 @@ pub struct Ctx {
     pub res: Resolved,
     /// The step's resources, handed back the moment it reports its result
     /// (not when its thread winds down), so the next waiter starts at once.
-    pub lease: std::sync::Mutex<Option<crate::sched::Lease>>,
+    pub lease: StepLease,
 }
 
 impl Ctx {
@@ -340,7 +344,7 @@ fn ctx(d: &Arc<Daemon>, task: TaskId, run: StepRunId) -> Result<Ctx, String> {
         def,
         step,
         res,
-        lease: std::sync::Mutex::new(None),
+        lease: Arc::new(std::sync::Mutex::new(None)),
     })
 }
 
@@ -754,6 +758,16 @@ pub(crate) fn prepare_worktree_only(c: &Ctx) -> Result<(), String> {
 /// Run `sh -c cmd` in `cwd`, giving up after `timeout`. Returns whether it
 /// exited 0 and the last lines of its output.
 pub fn run_shell(cmd: &str, cwd: &Path, timeout: Duration) -> (bool, String) {
+    run_shell_env(cmd, cwd, timeout, &[])
+}
+
+/// [`run_shell`] with extra environment variables.
+fn run_shell_env(
+    cmd: &str,
+    cwd: &Path,
+    timeout: Duration,
+    env: &[(String, String)],
+) -> (bool, String) {
     let out = tempfile_path();
     let file = match std::fs::File::create(&out) {
         Ok(f) => f,
@@ -763,6 +777,7 @@ pub fn run_shell(cmd: &str, cwd: &Path, timeout: Duration) -> (bool, String) {
     let child = Command::new("sh")
         .args(["-c", cmd])
         .current_dir(cwd)
+        .envs(env.iter().map(|(k, v)| (k, v)))
         .stdin(Stdio::null())
         .stdout(file)
         .stderr(err.map_or_else(|_| Stdio::null(), Stdio::from))
@@ -877,6 +892,7 @@ struct TestChecks {
     cmd: Option<String>,
     wt: PathBuf,
     timeout: Duration,
+    slots: CheckSlots,
 }
 
 impl CheckHandler for TestChecks {
@@ -884,10 +900,123 @@ impl CheckHandler for TestChecks {
         let (true, Some(cmd)) = (name == "tests", &self.cmd) else {
             return CheckRun::Unknown;
         };
-        let (passed, out) = run_shell(cmd, &self.wt, self.timeout);
+        let Ok(test_lease) = self.slots.swap_for_test() else {
+            return CheckRun::Done {
+                passed: false,
+                summary: "The step is over; the check did not run.".into(),
+            };
+        };
+        let (passed, out) = run_shell_env(cmd, &self.wt, self.timeout, &self.slots.env());
+        drop(test_lease);
+        self.slots.take_agent_slot_back();
         CheckRun::Done {
             passed,
             summary: format!("Last output:\n{out}"),
+        }
+    }
+}
+
+/// What `run_check` holds while it runs. The agent does nothing but wait for a
+/// check, so its LLM session slot goes to a task that can use it, and the check
+/// queues for what the test step `uses`, as the test step does. The time spent
+/// in that queue is outside the check's timeout.
+struct CheckSlots {
+    d: Arc<Daemon>,
+    task: TaskId,
+    run: StepRunId,
+    def: Arc<Definition>,
+    step: String,
+    account: String,
+    agent_uses: std::collections::BTreeMap<String, u32>,
+    /// The test step's `uses`, without device pools: a check runs no suite.
+    test_uses: std::collections::BTreeMap<String, u32>,
+    lease: StepLease,
+}
+
+impl CheckSlots {
+    fn new(c: &Ctx) -> CheckSlots {
+        let test_uses = c
+            .def
+            .steps
+            .iter()
+            .find(|s| s.kind == StepType::Test)
+            .map(|s| s.uses.clone())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(k, n)| *n > 0 && !k.starts_with("device:") && !k.starts_with("llm:"))
+            .collect();
+        CheckSlots {
+            d: c.d.clone(),
+            task: c.task,
+            run: c.run,
+            def: c.def.clone(),
+            step: c.step.name.clone(),
+            account: c.project.account.clone(),
+            agent_uses: c.step.uses.clone(),
+            test_uses,
+            lease: c.lease.clone(),
+        }
+    }
+
+    /// What the check's command is told it holds, so that a command which
+    /// queues for the same class (`mason run --needs`) does not wait on itself.
+    fn env(&self) -> Vec<(String, String)> {
+        let held: Vec<&str> = self.test_uses.keys().map(String::as_str).collect();
+        vec![("MASON_HELD".to_string(), held.join(","))]
+    }
+
+    fn acquire(
+        &self,
+        needs: mason_scheduler::Needs,
+    ) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
+        let d = &self.d;
+        let t = d
+            .world()
+            .ok()
+            .and_then(|w| w.tasks.get(&self.task).cloned())
+            .ok_or(crate::sched::Cancelled)?;
+        let rank = d.rank_for(&t, &self.def, &self.step);
+        let (d2, task, run) = (d.clone(), self.task, self.run);
+        let alive = move || {
+            d2.world()
+                .map(|w| w.open_run(task) == Some(run))
+                .unwrap_or(true)
+        };
+        d.broker.acquire(
+            self.task,
+            &format!("#{}", self.task.0),
+            rank,
+            needs,
+            &alive,
+            &mut |_| {},
+        )
+    }
+
+    /// Give the agent's slot back and queue for what the tests use.
+    fn swap_for_test(&self) -> Result<Option<crate::sched::Lease>, crate::sched::Cancelled> {
+        let held = self.lease.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if held.is_some() {
+            drop(held);
+            self.d.admit();
+        }
+        if self.test_uses.is_empty() {
+            return Ok(None);
+        }
+        for name in self.test_uses.keys() {
+            self.d
+                .broker
+                .declare(name, self.def.resources.get(name).copied().unwrap_or(1));
+        }
+        self.acquire(crate::sched::needs_of(&self.test_uses, None))
+            .map(Some)
+    }
+
+    /// Queue for the agent's slot again, before the agent is told the result.
+    fn take_agent_slot_back(&self) {
+        self.d.admit();
+        let needs = crate::sched::needs_of(&self.agent_uses, Some(&self.account));
+        if let Ok(l) = self.acquire(needs) {
+            *self.lease.lock().unwrap_or_else(|e| e.into_inner()) = Some(l);
         }
     }
 }
@@ -1099,6 +1228,7 @@ fn agent_job(c: &Ctx) {
         cmd: tests_cmd,
         wt: c.wt.clone(),
         timeout: c.project.test_timeout,
+        slots: CheckSlots::new(c),
     });
     let validator = (kind == StepKind::Develop).then(|| {
         change_validator(
@@ -1184,6 +1314,11 @@ fn agent_job(c: &Ctx) {
             .as_ref()
             .map_or(c.project.step_timeout, |a| a.value),
     );
+    // A `run_check` may queue for a long time before it runs, so no tool call is
+    // cut off before the step's own deadline would have ended it.
+    if kind == StepKind::Develop {
+        spec.tool_timeout = spec.tool_timeout.max(spec.deadline.unwrap_or_default());
+    }
     spec.run_key = Some(key.clone());
     spec.tools = c.step.tools.clone();
     {
