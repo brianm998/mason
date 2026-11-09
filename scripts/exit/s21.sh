@@ -141,12 +141,13 @@ dir = "$root/host-state"
 remote = "$root/mason-origin.git"
 checks = "sh checks.sh"
 TOML
-# The update channel: a build is a copy of the binaries already built here.
+# The update channel: a build is a copy of the binaries already built here. Signed
+# for the reason given on `BUILD` in crates/daemon/tests/update.rs.
 bindir="$PWD/$bin"
 cat > "$root/c/update.toml" <<TOML
 repo = "$root/mason-origin.git"
 channel = "stable"
-build = "mkdir -p target/release; for b in masond step-host mason-mcp fake-claude mason; do cp '$bindir'/\$b target/release/\$b; done"
+build = "mkdir -p target/release; for b in masond step-host mason-mcp fake-claude mason; do cp '$bindir'/\$b target/release/\$b; ! command -v codesign >/dev/null || codesign -s - -f target/release/\$b; done"
 TOML
 "$bin/masond" --data-dir "$root/d" --config-dir "$root/c" --heartbeat-ms 100 --sweep-ms 3600000 --owner "$owner" 2>>"$root/masond.log" &
 daemon=$!
