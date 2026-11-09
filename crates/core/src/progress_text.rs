@@ -185,13 +185,19 @@ mod tests {
             "12.2k in, 988 out"
         );
         assert_eq!(
-            tokens_compact(Some(10), Some(5), None, None),
+            tokens_compact(Some(10), Some(5), Option::None, Option::None),
             "10 in, 5 out"
         );
-        assert_eq!(tokens_compact(None, Some(5), None, None), "5 out");
-        assert_eq!(tokens_compact(None, None, None, None), "");
         assert_eq!(
-            tokens_detail(Some(4), Some(988), Some(7664), None, Some(0.0123)),
+            tokens_compact(Option::None, Some(5), Option::None, Option::None),
+            "5 out"
+        );
+        assert_eq!(
+            tokens_compact(Option::None, Option::None, Option::None, Option::None),
+            ""
+        );
+        assert_eq!(
+            tokens_detail(Some(4), Some(988), Some(7664), Option::None, Some(0.0123)),
             ["input 4", "output 988", "cache read 7,664", "cost $0.0123"]
         );
     }
