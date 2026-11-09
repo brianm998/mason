@@ -1,0 +1,11 @@
+# 0069: A lost or unstartable step host resumes an agent step
+
+Task #59, stage s83. Each is the reading taken; change one and the others stand.
+
+- **Its own end, not a crash.** A host lost without an exit record, or one that never came up (`START_LIMIT`, a `--host-bin` that exits), is `Outcome::HostLost` / `FailReason::HostLost`. A crash of the agent CLI stays `Crash`. `worth_a_stronger_model` is false for the new one: a bigger model does not help a lost process, and `agent.ladder` is unchanged.
+- **Not a failure, not charged.** `agent_job` records it with `hostloss::record` (so `mason task show` and the "lost together" alert work as for commands), gets the lease again and continues: `runner.resume` with a note ("your session was interrupted ... verify the tree first") when the journal gave a session id, else a fresh `runner.run` on the next invocation of the same run key. It is not a failed attempt, a send-back or a `max_rounds` round, and does not consume a ladder retry.
+- **Twice, counted on disk.** At most two restarts per step run. The count is the lost invocations under `h/` for the run's key (and its ladder keys): a directory whose host is gone with no exit record, or an invocation whose host never came up (its `.in` file is the only trace, so `spawn` no longer reuses its number). A daemon restart finds the same directories, so it does not reset the count; `reattach` of a lost host takes the same path. The third loss fails the step; the failure text names every loss (like `hostloss::both`) and deliberately does not contain "the command was lost", which d670ec2's `retry_step` keys on.
+- **Reaping.** Before the restart the dead host's recorded process group is killed (`reap_dir`, which signals only verifiably recorded processes), so an orphaned CLI cannot work beside its replacement.
+- **Transcript gone.** A resume that ends in a crash whose text says the conversation/rollout/session was not found starts fresh once, rather than failing. The string list is a guess at the CLIs' wording (see s83 "not verified").
+- **Usage.** A fresh restart records the lost session's tokens first; a resume accumulates onto the same report, as holds do.
+- **Gates, guards, budgets, verdict logic and trust files are untouched.** 0047 said agent hosts keep the ladder; this supersedes that for host loss only.
