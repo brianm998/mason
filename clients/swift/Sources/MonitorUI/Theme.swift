@@ -45,7 +45,6 @@ public struct Theme {
     private func s(_ n: Int) -> CGFloat { CGFloat(Double(n) * scale) }
     public var tileMinWidth: CGFloat { s(MasonTokens.sizeTileMinWidth) }
     public var tileHeight: CGFloat { s(MasonTokens.sizeTileHeight) }
-    public var sidebarWidth: CGFloat { CGFloat(Double(MasonTokens.sizeSidebarWidth) * min(scale, 1.5)) }
     public var spacing: CGFloat { s(MasonTokens.sizeSpacing) }
     public var spacingSmall: CGFloat { s(MasonTokens.sizeSpacingSmall) }
     public var spacingLarge: CGFloat { s(MasonTokens.sizeSpacingLarge) }

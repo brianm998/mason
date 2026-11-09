@@ -44,7 +44,6 @@ class Theme(val dark: Boolean, val scale: Double) {
     private fun s(n: Int): Dp = (n * scale).dp
     val tileMinWidth get() = s(T.sizeTileMinWidth)
     val tileHeight get() = s(T.sizeTileHeight)
-    val sidebarWidth get() = (T.sizeSidebarWidth * minOf(scale, 1.5)).dp
     val spacing get() = s(T.sizeSpacing)
     val spacingSmall get() = s(T.sizeSpacingSmall)
     val spacingLarge get() = s(T.sizeSpacingLarge)

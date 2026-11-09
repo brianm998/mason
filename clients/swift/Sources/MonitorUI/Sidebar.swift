@@ -3,37 +3,59 @@
 import MonitorCore
 import SwiftUI
 
-/// The sidebar, on every page: a Home row, search, one collapsible section per
-/// state (the daemon's order and sorting), then the other pages.
+/// The sidebar, on every page. Pinned above the list: a Home row and search. In the
+/// scrolling part: one collapsible section per state (the daemon's order and sorting),
+/// then the other pages. `width` is the drawn width, already fitted to the window.
 struct SidebarPane: View {
     @Environment(\.theme) var theme
     @ObservedObject var model: MonitorModel
+    let width: CGFloat
 
     var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
-                    homeRow
-                    SearchBox(model: model).padding(theme.spacing)
-                    ForEach(model.sidebar?.sections ?? [], id: \.state) { sec in
-                        SectionView(model: model, section: sec).id(sec.state)
+        VStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 0) {
+                homeRow
+                SearchBox(model: model).padding(theme.spacing)
+            }
+            Divider()
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(Array(model.sidebarEntries.enumerated()), id: \.offset) { _, e in
+                            entry(e)
+                        }
                     }
-                    Divider().padding(.vertical, theme.spacing)
-                    pageLink("Landing", icon: "arrow.down.to.line", page: .landing)
-                    pageLink("LLM usage", icon: "gauge", page: .usage)
-                    pageLink("Pipeline", icon: "point.3.connected.trianglepath.dotted", page: .pipeline)
-                    pageLink("Health", icon: "heart.text.square", page: .health)
+                }
+                .onChange(of: model.scrollTarget) { _, target in
+                    guard let t = target else { return }
+                    model.scrollTarget = nil
+                    // Next turn: the expanded section's rows are laid out by then. The pinned
+                    // area is outside the ScrollView, so the top is below it.
+                    DispatchQueue.main.async { withAnimation { proxy.scrollTo(t, anchor: .top) } }
                 }
             }
-            .onChange(of: model.scrollTarget) { _, target in
-                guard let t = target else { return }
-                model.scrollTarget = nil
-                // Next turn: the expanded section's rows are laid out by then.
-                DispatchQueue.main.async { withAnimation { proxy.scrollTo(t, anchor: .top) } }
-            }
         }
-        .frame(width: theme.sidebarWidth)
+        .frame(width: width)
         .background(theme.surface.opacity(0.6))
+    }
+
+    @ViewBuilder func entry(_ e: SidebarEntry) -> some View {
+        switch e {
+        case .header(let sec): SectionHeader(model: model, section: sec).id(sec.state)
+        case .row(let r): RowView(model: model, row: r)
+        case .rule: Divider().padding(.vertical, theme.spacing)
+        case .pageLink(let title, let page):
+            pageLink(title, icon: Self.icon(page), page: page)
+        }
+    }
+
+    static func icon(_ p: Page) -> String {
+        switch p {
+        case .landing: return "arrow.down.to.line"
+        case .usage: return "gauge"
+        case .pipeline: return "point.3.connected.trianglepath.dotted"
+        default: return "heart.text.square"
+        }
     }
 
     var homeRow: some View {
@@ -88,36 +110,29 @@ struct SearchBox: View {
     }
 }
 
-struct SectionView: View {
+struct SectionHeader: View {
     @Environment(\.theme) var theme
     @ObservedObject var model: MonitorModel
     let section: SidebarSection
 
     var body: some View {
         let open = model.isExpanded(section)
-        VStack(alignment: .leading, spacing: 0) {
-            Button { model.toggle(section) } label: {
-                HStack(spacing: theme.spacingSmall) {
-                    Image(systemName: open ? "chevron.down" : "chevron.right").frame(width: theme.cell)
-                    Text(section.title).font(theme.body(.semibold))
-                    Spacer()
-                    Text(String(model.visibleCount(section)))
-                        .font(theme.body(.semibold))
-                        .foregroundStyle(section.state == "needs_attention" && section.count > 0 ? theme.attention : theme.muted)
-                }
-                .padding(.horizontal, theme.spacing).padding(.vertical, theme.spacingSmall + 2)
-                .contentShape(Rectangle())
+        Button { model.toggle(section) } label: {
+            HStack(spacing: theme.spacingSmall) {
+                Image(systemName: open ? "chevron.down" : "chevron.right").frame(width: theme.cell)
+                Text(section.title).font(theme.body(.semibold))
+                Spacer()
+                Text(String(model.visibleCount(section)))
+                    .font(theme.body(.semibold))
+                    .foregroundStyle(section.state == "needs_attention" && section.count > 0 ? theme.attention : theme.muted)
             }
-            .buttonStyle(.plain)
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel("\(section.title), \(model.visibleCount(section)), \(open ? "expanded" : "collapsed")")
-            .accessibilityIdentifier("section:\(section.state)")
-            if open {
-                ForEach(model.filteredRows(section), id: \.id) { r in
-                    RowView(model: model, row: r)
-                }
-            }
+            .padding(.horizontal, theme.spacing).padding(.vertical, theme.spacingSmall + 2)
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(section.title), \(model.visibleCount(section)), \(open ? "expanded" : "collapsed")")
+        .accessibilityIdentifier("section:\(section.state)")
     }
 }
 

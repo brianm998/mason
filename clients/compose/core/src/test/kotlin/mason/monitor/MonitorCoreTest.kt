@@ -953,6 +953,58 @@ class MonitorCoreTest {
         assertEquals("5 out", Format.tokensCompact(TokenLine(has_output = true, output = 5)))
     }
 
+    @Test fun sidebarWidthDefaultsToTheToken() = assertEquals(300.0, MonitorModel().sidebarBase)
+
+    @Test fun sidebarWidthIsClampedWhenSet() {
+        val m = MonitorModel()
+        m.setSidebarWidth(10.0); assertEquals(220.0, m.sidebarBase)
+        m.setSidebarWidth(5000.0); assertEquals(640.0, m.sidebarBase)
+        m.setSidebarWidth(410.0); assertEquals(410.0, m.sidebarBase)
+    }
+
+    @Test fun aStoredWidthIsRestoredAndClamped() {
+        val prefs = MemoryPreferences()
+        MonitorModel(prefs).setSidebarWidth(450.0)
+        assertEquals(450.0, MonitorModel(prefs).sidebarBase)
+        prefs.setDouble(MonitorModel.KEY_SIDEBAR, 9000.0)
+        assertEquals(640.0, MonitorModel(prefs).sidebarBase)
+        prefs.setDouble(MonitorModel.KEY_SIDEBAR, 1.0)
+        assertEquals(220.0, MonitorModel(prefs).sidebarBase)
+    }
+
+    @Test fun textZoomScalesTheStoredWidthUpToTheCapAndNotTheStoredValue() {
+        val m = MonitorModel()
+        m.setSidebarWidth(400.0)
+        assertEquals(400.0, m.panelWidth(1.0), 0.001)
+        assertEquals(480.0, m.panelWidth(1.2), 0.001)
+        assertEquals(600.0, m.panelWidth(2.4), 0.001)
+        assertEquals(400.0, m.sidebarBase)
+    }
+
+    @Test fun thePanelGivesWayBeforeTheMainView() {
+        assertEquals(500.0, MonitorModel.fit(500.0, 1200.0, 1.0))
+        assertEquals(800.0 - 360 - 8, MonitorModel.fit(500.0, 800.0, 1.0))
+        assertEquals(220.0, MonitorModel.fit(500.0, 400.0, 1.0))
+        assertEquals(330.0, MonitorModel.fit(300.0, 400.0, 2.0))
+    }
+
+    @Test fun homeAndSearchAreNotInTheScrollingEntries() {
+        val m = model()
+        assertEquals(listOf("sidebar:home", "search"), SIDEBAR_PINNED_IDS)
+        val es = m.sidebarEntries()
+        assertTrue(es.first() is SidebarEntry.Header)
+        assertEquals(listOf("Landing", "LLM usage", "Pipeline", "Health"), es.filterIsInstance<SidebarEntry.PageLink>().map { it.title })
+    }
+
+    @Test fun aTileTargetResolvesToASectionInTheScrollingEntries() {
+        val m = model()
+        m.reveal("failed")
+        val i = m.scrollIndex(m.scrollTarget!!)
+        assertTrue(i >= 0)
+        assertEquals("failed", (m.sidebarEntries()[i] as SidebarEntry.Header).section.state)
+        assertEquals(-1, m.scrollIndex("nope"))
+    }
+
     // ---- releasing and adding blockers (s75) ----
 
     private fun heldRow() = row(11, "queued", actions = listOf("cancel", "block", "unblock")).copy(
