@@ -422,7 +422,8 @@ fn an_improvement_with_write_access_is_an_owner_task_in_the_self_project() {
 
 // ---- without write access ------------------------------------------------------------------
 
-const BUILD: &str = "mkdir -p target/release\nfor b in masond step-host mason-mcp fake-claude; do cp \"$BINDIR/$b\" target/release/$b; done\n";
+// Signed for the reason given on `BUILD` in tests/update.rs.
+const BUILD: &str = "mkdir -p target/release\nfor b in masond step-host mason-mcp fake-claude; do cp \"$BINDIR/$b\" target/release/$b; ! command -v codesign >/dev/null || codesign -s - -f target/release/$b; done\n";
 
 fn bindir() -> PathBuf {
     let m = bin("mason-daemon", "masond");
