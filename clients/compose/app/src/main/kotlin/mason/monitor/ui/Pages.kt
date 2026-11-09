@@ -259,6 +259,10 @@ fun LandingPage(model: MonitorModel) {
         model.landing?.let { l ->
             if (l.note.isNotEmpty()) Text(l.note, style = theme.body(color = if (l.frozen) theme.attention else theme.muted))
             l.modes.forEach { Text(it, style = theme.body(color = theme.muted)) }
+            // One line per project: tracker off, polling with counts, or stopped with why.
+            l.trackers.forEach { t ->
+                Text(t, style = theme.body(color = if (t.contains("stopped") || t.contains(" off;")) theme.attention else theme.muted))
+            }
             l.freezes.forEach { f ->
                 Text(
                     "Frozen: ${f.project}: ${f.reason}${if (f.fix_task > 0) " (fix: task #${f.fix_task})" else ""}",
@@ -405,6 +409,7 @@ fun HealthPage(model: MonitorModel) {
         Text(if (model.connected) "Connected to masond. Event log at #${model.lastSeq}." else "Not connected.", style = theme.body())
         model.health?.let { h ->
             Section("Resources") { h.resources.forEach { Text("${it.name} (${it.kind}): ${it.used} of ${it.limit} in use", style = theme.body()) } }
+            Text(h.cpuLine, style = theme.body())
             Section("Waiting") {
                 if (h.waiting.isEmpty()) Text("Nothing is waiting.", style = theme.body(color = theme.muted))
                 h.waiting.forEach { Text(it, style = theme.body()) }

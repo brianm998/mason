@@ -166,6 +166,8 @@ fn outside_issues_are_ignored_until_the_owner_labels_them_and_stay_untrusted() {
         sync_items(&d, pid, "mason", &items[..3]),
         mason_daemon::tracker::Summary {
             ignored: 0,
+            // The three imported issues are seen again and have not changed.
+            unchanged: 3,
             ..Default::default()
         }
     );
@@ -591,6 +593,67 @@ fn a_canceled_blocker_keeps_the_dependent_held_and_raises_an_alert() {
     );
 }
 
+#[test]
+fn owner_issues_are_never_refused_by_a_self_limit() {
+    // Ticket 17: max_open guards work MASON starts itself, not the owner's own issues.
+    let (_s, d, pid) = world_with(&format!(
+        "{}[self]\nmax_open = 1\n",
+        tracker_section("queued", "")
+    ));
+    let owner = d.cfg.owner_names[0].clone();
+    let items = vec![
+        item(1, "First", &owner, &[]),
+        item(2, "Second", &owner, &[]),
+        item(3, "Third", &owner, &[]),
+        item(4, "Stranger's", "stranger", &[]),
+    ];
+    let sum = sync_items(&d, pid, "mason", &items);
+    assert_eq!(
+        (sum.imported, sum.refused, sum.ignored),
+        (3, 0, 1),
+        "{sum:?}"
+    );
+    let sum = sync_items(&d, pid, "mason", &items);
+    assert_eq!(
+        (sum.imported, sum.refused, sum.unchanged),
+        (0, 0, 3),
+        "{sum:?}"
+    );
+    assert!(task_for(&d, 2).is_some());
+    assert!(task_for(&d, 3).is_some());
+    assert!(not_imported(&d).is_empty(), "{:?}", not_imported(&d));
+}
+
+#[test]
+fn the_last_poll_is_recorded_and_a_stop_keeps_the_counts_and_the_reason() {
+    let (_s, d, pid) = world();
+    let owner = d.cfg.owner_names[0].clone();
+    assert!(d
+        .tracker_record(pid)
+        .is_none_or(|r| r.summary.imported == 0));
+    let fake = Fake::default();
+    fake.script.lock().unwrap().push(Ok(Listing::Items {
+        items: vec![
+            item(1, "One", &owner, &[]),
+            item(2, "Drive-by", "stranger", &[]),
+        ],
+        etag: None,
+    }));
+    poll_once(&d, pid, &fake, &cfg()).unwrap();
+    let r = d.tracker_record(pid).unwrap();
+    assert!(r.at_ms > 0 && r.error.is_none());
+    assert_eq!((r.summary.imported, r.summary.ignored), (1, 1));
+    fake.script
+        .lock()
+        .unwrap()
+        .push(Err(ApiError::new(ErrorKind::NotFound, "HTTP 404")));
+    poll_once(&d, pid, &fake, &cfg()).unwrap_err();
+    let r = d.tracker_record(pid).unwrap();
+    assert!(r.error.unwrap().contains("404"));
+    assert_eq!(r.summary.imported, 1, "the last full look's counts stay");
+    assert!(d.tracker_stopped(pid).is_some());
+}
+
 // ---- Stage 65: imports start proposed, refusals are visible, hand-filed tasks are adopted ----
 
 /// The open issues of a recorded GitHub listing (`tests/fixtures/github_issues.json`), as
@@ -692,6 +755,14 @@ fn a_limit_refusal_raises_an_alert_naming_the_issues_and_clears_when_they_import
         tracker_section("queued", "")
     ));
     let mut items = recorded(&d);
+    // Issues by an owner name are never refused for a count; outside issues the owner
+    // labeled are, so make these outside ones.
+    for it in items.iter_mut() {
+        it.author = "stranger".into();
+        if !it.labels.iter().any(|l| l == "mason") {
+            it.labels.push("mason".into());
+        }
+    }
     let sum = sync_items(&d, pid, "mason", &items);
     assert_eq!((sum.imported, sum.refused), (3, 3), "{sum:?}");
     let a = not_imported(&d);

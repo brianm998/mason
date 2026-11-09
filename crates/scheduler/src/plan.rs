@@ -82,7 +82,21 @@ pub struct World<'a> {
     /// at least this much free. Load average is never consulted.
     pub free_memory_mb: Option<u64>,
     pub memory_floor_mb: Option<u64>,
+    /// Measured by the caller: overall CPU use, and the level at or above which
+    /// no further compile is started. `None` means no CPU gate.
+    pub cpu: Option<CpuGate>,
 }
+
+/// The CPU gate on the `compile` resource. Checked only when a compile would
+/// start; one that has started is never revoked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CpuGate {
+    pub busy_pct: u32,
+    pub max_pct: u32,
+}
+
+/// The resource the CPU gate applies to.
+pub const COMPILE: &str = "compile";
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Plan {
@@ -239,12 +253,23 @@ pub fn plan(world: &World, waiting: &[Request]) -> Plan {
             (Some(free), Some(floor)) if usage.any && free < floor => Some((free, floor)),
             _ => None,
         };
+        let hot = match world.cpu {
+            Some(g) if r.needs.amounts.contains_key(COMPILE) && g.busy_pct >= g.max_pct => Some(g),
+            _ => None,
+        };
         let cause = match (&fitted, &touch, low_memory) {
             (Fit::Never(c), _, _) | (Fit::Full(c), _, _) => Some(c.clone()),
             (Fit::Yes, Some(Touch::Name(n)), _) => Some(WaitCause::Behind {
                 resource: n.clone(),
             }),
             (Fit::Yes, Some(Touch::Machine), _) => Some(WaitCause::Exclusive),
+            (Fit::Yes, None, _) if hot.is_some() => {
+                let g = hot.expect("checked");
+                Some(WaitCause::Cpu {
+                    busy_pct: g.busy_pct,
+                    max_pct: g.max_pct,
+                })
+            }
             (Fit::Yes, None, Some((free_mb, floor_mb))) => {
                 Some(WaitCause::Memory { free_mb, floor_mb })
             }
@@ -287,7 +312,7 @@ fn build_wait(
             other.needs.amounts.contains_key(resource)
         }
         WaitCause::Exclusive => uses_machine(capacity, &other.needs),
-        WaitCause::Memory { .. } => true,
+        WaitCause::Memory { .. } | WaitCause::Cpu { .. } => true,
         _ => false,
     };
     let ahead_of_me: Vec<&&Request> = ahead.iter().filter(|o| same(o)).collect();

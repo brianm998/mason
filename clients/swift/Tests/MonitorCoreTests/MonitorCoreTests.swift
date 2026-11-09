@@ -384,6 +384,9 @@ final class MonitorCoreTests: XCTestCase {
         XCTAssertEqual(h.resources, [.init(name: "compile", kind: "machine", used: 1, limit: 2)])
         XCTAssertEqual(h.waiting, ["#4: Waiting for compile slot"])
         XCTAssertEqual(HealthSnapshot(json: "not json").resources, [])
+        let c = HealthSnapshot(json: ##"{"cpu":{"busy_pct":71,"compile_max_pct":50}}"##)
+        XCTAssertEqual(c.cpuLine, "CPU 71% busy; a compile starts below 50%.")
+        XCTAssertEqual(HealthSnapshot(json: ##"{"cpu":{"busy_pct":null,"compile_max_pct":80}}"##).cpuLine, "CPU not readable; a compile starts below 80%.")
     }
 
     // ---- versions (Part 15) ----
@@ -774,6 +777,21 @@ final class MonitorCoreTests: XCTestCase {
         let h = GraphLayout.horizontal(nodeXs: [0, 2000], backEdges: [.init(fromX: 2000, toX: 0, labeled: true)], viewport: 500)
         XCTAssertEqual(h.dx, GraphLayout.pad - h.left)
         XCTAssertEqual(h.left + h.dx, GraphLayout.pad)
+    }
+
+    func testTheLandingViewCarriesOneTrackerLinePerProject() {
+        let m = MonitorModel()
+        var l = LandingView()
+        l.trackers = [
+            "mason: tracker off; issues are not imported, add [tracker] to /c/projects/mason.toml",
+            "web: tracker stopped: HTTP 404 (/c/projects/web.toml)",
+        ]
+        var v = Mason_V1_View()
+        v.body = .landing(l)
+        m.apply(v)
+        XCTAssertEqual(m.landing?.trackers.count, 2)
+        XCTAssertTrue(m.landing?.trackers[0].contains("tracker off") ?? false)
+        XCTAssertTrue(m.landing?.trackers[1].contains("stopped: HTTP 404") ?? false)
     }
 
     func testGraphNegativeLayoutX() {

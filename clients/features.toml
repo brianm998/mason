@@ -96,6 +96,11 @@ description = "Queue, batches, phases, debts and freeze status"
 swift = "done"
 compose = "done"
 
+[feature.tracker-state]
+description = "The landing page shows one tracker line per project: off (with the config path to add [tracker] to), polling with imported, ignored, unchanged and waiting-for-a-slot counts, or stopped with the reason"
+swift = "done"
+compose = "done"
+
 [feature.monitor-update]
 description = "A banner when the monitor's own source changed on the update channel, with a button that has the daemon build it and relaunches into it; read-only, with the reason, when the protocol is too old"
 swift = "done"
@@ -143,6 +148,11 @@ compose = "done"
 
 [feature.health-introspection]
 description = "The Health page also shows the detectors' and analyst's findings with the verdict on each fix (open, this fix worked, this fix didn't help), the recurring jobs and when they last ran, the digest (landed, median claim-to-land, interventions, exploring skips by route with how many came back, forced landings with reasons; tokens shown as not recorded), and whether triage is on with how many suggestions wait for review"
+swift = "done"
+compose = "done"
+
+[feature.health-limits]
+description = "Health shows the CPU reading and the compile limit next to the waits (a compile waits while CPU use is at or above it); the LLM session limit is a resource line"
 swift = "done"
 compose = "done"
 

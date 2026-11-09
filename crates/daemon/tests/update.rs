@@ -235,8 +235,9 @@ fn a_build_that_crashes_is_rolled_back_by_itself_with_an_alert() {
         assert!(tries <= 8, "no daemon came up after {tries} restarts");
         let cfg = s.config();
         let mut c = Command::new(env!("CARGO_BIN_EXE_masond"))
-            // A free port: the owner's own daemon may be on the default one.
-            .args(["--managed", "--healthy-after-ms", "1500", "--port", "0"])
+            .args(["--managed", "--healthy-after-ms", "1500"])
+            // A free port, as every other test daemon has: the default may be a real daemon's.
+            .args(["--port", "0"])
             .args([
                 "--data-dir",
                 &s.data_dir.display().to_string(),

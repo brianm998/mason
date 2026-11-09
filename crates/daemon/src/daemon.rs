@@ -149,6 +149,14 @@ impl Daemon {
         }
 
         let rcfg = crate::sched::load_resource_cfg(&cfg.config_dir)?;
+        // `MASON_CPU_FILE` names a file holding the percentage: how tests and the
+        // exit scripts drive the compile gate without load.
+        let cpu: Arc<dyn crate::cpu::CpuSource> =
+            match (&cfg.cpu, std::env::var_os("MASON_CPU_FILE")) {
+                (Some(c), _) => c.clone(),
+                (None, Some(f)) => Arc::new(crate::cpu::FileCpu(f.into())),
+                (None, None) => crate::cpu::Sampler::start(),
+            };
         let accounts = if demo {
             crate::demo::accounts()
         } else {
@@ -160,6 +168,7 @@ impl Daemon {
             cfg.data_dir.join("limits.kv"),
             &rcfg,
             cfg.max_concurrent as u32,
+            cpu,
             &accounts,
         )?;
         let targets = crate::targets::Targets::new(
@@ -240,6 +249,11 @@ impl Daemon {
     /// Why a project's tracker poll stopped, if it did.
     pub fn tracker_stopped(&self, p: ProjectId) -> Option<String> {
         self.tracker.stopped(p)
+    }
+
+    /// What the last look at a project's tracker found.
+    pub fn tracker_record(&self, p: ProjectId) -> Option<crate::tracker::PollRecord> {
+        self.tracker.record(p)
     }
 
     /// Open issues the tracker has not imported (or whose task was canceled), with why.
