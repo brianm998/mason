@@ -29,6 +29,7 @@ fn main() {
         )
         .with_writer(std::io::stderr)
         .init();
+    mason_daemon::fdlimit::raise();
     let exe = std::env::current_exe().unwrap_or_default();
     let sibling = |n: &str| exe.with_file_name(n);
     let default_data = if cfg!(target_os = "macos") {
