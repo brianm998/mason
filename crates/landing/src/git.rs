@@ -81,6 +81,35 @@ fn is_network(sub: Option<&str>) -> bool {
     matches!(sub, Some("fetch" | "push" | "clone" | "pull" | "ls-remote"))
 }
 
+static FETCH_LOCKS: std::sync::Mutex<
+    Option<std::collections::HashMap<PathBuf, std::sync::Arc<std::sync::Mutex<()>>>>,
+> = std::sync::Mutex::new(None);
+
+/// Two fetches in one repository collide on its refs, wherever they run from (a
+/// worktree shares the repository's refs): one at a time per repository. This lock
+/// is not the daemon's repository lock, so a slow fetch holds up other fetches and
+/// nothing else.
+fn fetch_lock(cwd: &Path) -> std::sync::Arc<std::sync::Mutex<()>> {
+    let common = proc::output(
+        Command::new("git")
+            .args(["rev-parse", "--git-common-dir"])
+            .current_dir(cwd),
+        default_deadline(),
+    )
+    .ok()
+    .filter(|o| o.status.success())
+    .map(|o| cwd.join(String::from_utf8_lossy(&o.stdout).trim()));
+    let key = common.unwrap_or_else(|| cwd.to_path_buf());
+    let key = std::fs::canonicalize(&key).unwrap_or(key);
+    FETCH_LOCKS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_or_insert_with(Default::default)
+        .entry(key)
+        .or_default()
+        .clone()
+}
+
 /// Run `git` in `cwd` under the default deadline (longer for a clone).
 /// Never prompts; commits and merges carry a fixed identity.
 pub fn run(cwd: &Path, args: &[&str]) -> Result<String, GitError> {
@@ -100,6 +129,10 @@ pub fn run_for(cwd: &Path, args: &[&str], limit: Duration) -> Result<String, Git
         stderr,
         timed_out,
     };
+    let lock = (subcommand(args) == Some("fetch")).then(|| fetch_lock(cwd));
+    let _held = lock
+        .as_ref()
+        .map(|l| l.lock().unwrap_or_else(|e| e.into_inner()));
     let mut cmd = Command::new("git");
     cmd.args(["-c", "user.name=MASON", "-c", "user.email=mason@localhost"])
         .args(["-c", "commit.gpgsign=false", "-c", "core.editor=true"]);
