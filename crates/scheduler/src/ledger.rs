@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use crate::plan::{plan, Capacity, CpuGate, Holder, Kind, Needs, Plan, Request, World};
+use crate::plan::{
+    plan, Capacity, CompilePace, CpuGate, Holder, Kind, Needs, Plan, Request, World, COMPILE,
+};
 use crate::rank::Rank;
 use std::collections::BTreeMap;
 
@@ -13,6 +15,8 @@ pub struct Ledger {
     holders: Vec<Holder>,
     waiting: Vec<Request>,
     next_id: u64,
+    compile_gap_ms: Option<u64>,
+    last_compile_start: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -35,6 +39,18 @@ impl Ledger {
     pub fn set_capacity(&mut self, name: &str, units: u32, kind: Kind) {
         self.capacity
             .insert(name.to_string(), Capacity { units, kind });
+    }
+
+    /// Start compiles one at a time, at least this far apart.
+    pub fn pace_compiles(&mut self, gap_ms: u64) {
+        self.compile_gap_ms = Some(gap_ms);
+    }
+
+    fn compile_pace(&self) -> Option<CompilePace> {
+        self.compile_gap_ms.map(|gap_ms| CompilePace {
+            gap_ms,
+            last_start: self.last_compile_start,
+        })
     }
 
     pub fn capacity(&self, name: &str) -> Option<Capacity> {
@@ -106,12 +122,16 @@ impl Ledger {
                 free_memory_mb,
                 memory_floor_mb,
                 cpu,
+                compile_pace: self.compile_pace(),
             },
             &self.waiting,
         );
         for id in &p.grants {
             if let Some(i) = self.waiting.iter().position(|r| r.id == *id) {
                 let r = self.waiting.remove(i);
+                if r.needs.amounts.contains_key(COMPILE) {
+                    self.last_compile_start = Some(now);
+                }
                 self.holders.push(Holder {
                     id: r.id,
                     needs: r.needs,
@@ -168,6 +188,7 @@ impl Ledger {
                 free_memory_mb,
                 memory_floor_mb,
                 cpu,
+                compile_pace: self.compile_pace(),
             },
             &self.waiting,
         )

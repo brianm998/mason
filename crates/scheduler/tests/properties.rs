@@ -335,6 +335,47 @@ fn a_compile_waits_while_cpu_is_high_even_alone_and_starts_when_it_falls() {
 }
 
 #[test]
+fn paced_compiles_start_one_per_gap_and_other_work_is_not_paced() {
+    let mut l = Ledger::new();
+    l.set_capacity("compile", 8, Kind::Machine);
+    l.set_capacity("llm:claude", 2, Kind::Llm);
+    l.pace_compiles(30_000);
+    let idle = Some(CpuGate {
+        busy_pct: 10,
+        max_pct: 50,
+    });
+    let submit = |l: &mut Ledger, name, label| {
+        l.submit(
+            Rank::new(false, 1, 2, 1, 1, false),
+            Needs::of(&[(name, 1)]),
+            label,
+            0,
+        )
+    };
+    let a = submit(&mut l, "compile", "#1");
+    let b = submit(&mut l, "compile", "#2");
+    let c = submit(&mut l, "compile", "#3");
+    let other = submit(&mut l, "llm:claude", "#4");
+
+    // An idle machine still starts only one compile; the agent is not held up.
+    let p = l.schedule_gated(1_000, None, None, idle);
+    assert_eq!(p.grants, vec![a, other]);
+    assert_eq!(
+        explain(&p.waits[&b], 1_000),
+        "compile waiting: letting the last compile show in CPU use (30 s)"
+    );
+    assert!(l.schedule_gated(30_999, None, None, idle).grants.is_empty());
+    assert_eq!(l.schedule_gated(31_000, None, None, idle).grants, vec![b]);
+    // A busy reading after the gap still holds the next one back.
+    let hot = Some(CpuGate {
+        busy_pct: 90,
+        max_pct: 50,
+    });
+    assert!(l.schedule_gated(61_000, None, None, hot).grants.is_empty());
+    assert_eq!(l.schedule_gated(61_001, None, None, idle).grants, vec![c]);
+}
+
+#[test]
 fn the_cpu_gate_leaves_other_resources_alone() {
     let mut l = Ledger::new();
     l.set_capacity("llm:claude", 2, Kind::Llm);

@@ -85,6 +85,8 @@ pub struct World<'a> {
     /// Measured by the caller: overall CPU use, and the level at or above which
     /// no further compile is started. `None` means no CPU gate.
     pub cpu: Option<CpuGate>,
+    /// How far apart compiles start. `None` means they are not paced.
+    pub compile_pace: Option<CompilePace>,
 }
 
 /// The CPU gate on the `compile` resource. Checked only when a compile would
@@ -93,6 +95,15 @@ pub struct World<'a> {
 pub struct CpuGate {
     pub busy_pct: u32,
     pub max_pct: u32,
+}
+
+/// Compiles start one at a time, with a gap between them. A CPU reading says
+/// nothing about a compile that has only just started, so without the gap every
+/// waiter would see the same idle machine and all of them would start at once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CompilePace {
+    pub gap_ms: u64,
+    pub last_start: Option<u64>,
 }
 
 /// The resource the CPU gate applies to.
@@ -245,8 +256,10 @@ pub fn plan(world: &World, waiting: &[Request]) -> Plan {
     let mut ahead: Vec<&Request> = vec![];
     // Holders as the plan goes: those granted earlier in it count as held.
     let mut holders: Vec<Holder> = world.holders.to_vec();
+    let mut last_compile_start = world.compile_pace.and_then(|p| p.last_start);
 
     for r in order {
+        let compiles = r.needs.amounts.contains_key(COMPILE);
         let touch = blocked.touches(capacity, &r.needs);
         let fitted = fit(capacity, &usage, &r.needs);
         let low_memory = match (world.free_memory_mb, world.memory_floor_mb) {
@@ -254,9 +267,14 @@ pub fn plan(world: &World, waiting: &[Request]) -> Plan {
             _ => None,
         };
         let hot = match world.cpu {
-            Some(g) if r.needs.amounts.contains_key(COMPILE) && g.busy_pct >= g.max_pct => Some(g),
+            Some(g) if compiles && g.busy_pct >= g.max_pct => Some(g),
             _ => None,
         };
+        let settling = world
+            .compile_pace
+            .filter(|_| compiles)
+            .and_then(|p| Some(last_compile_start? + p.gap_ms))
+            .filter(|until| world.now < *until);
         let cause = match (&fitted, &touch, low_memory) {
             (Fit::Never(c), _, _) | (Fit::Full(c), _, _) => Some(c.clone()),
             (Fit::Yes, Some(Touch::Name(n)), _) => Some(WaitCause::Behind {
@@ -270,6 +288,9 @@ pub fn plan(world: &World, waiting: &[Request]) -> Plan {
                     max_pct: g.max_pct,
                 })
             }
+            (Fit::Yes, None, _) if settling.is_some() => Some(WaitCause::Settling {
+                until: settling.expect("checked"),
+            }),
             (Fit::Yes, None, Some((free_mb, floor_mb))) => {
                 Some(WaitCause::Memory { free_mb, floor_mb })
             }
@@ -285,6 +306,9 @@ pub fn plan(world: &World, waiting: &[Request]) -> Plan {
                     since: world.now,
                 });
                 out.grants.push(r.id);
+                if compiles {
+                    last_compile_start = Some(world.now);
+                }
             }
             Some(cause) => {
                 let wait = build_wait(capacity, &holders, &ahead, cause.clone());
@@ -312,7 +336,7 @@ fn build_wait(
             other.needs.amounts.contains_key(resource)
         }
         WaitCause::Exclusive => uses_machine(capacity, &other.needs),
-        WaitCause::Memory { .. } | WaitCause::Cpu { .. } => true,
+        WaitCause::Memory { .. } | WaitCause::Cpu { .. } | WaitCause::Settling { .. } => true,
         _ => false,
     };
     let ahead_of_me: Vec<&&Request> = ahead.iter().filter(|o| same(o)).collect();

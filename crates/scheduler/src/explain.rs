@@ -14,6 +14,9 @@ pub enum WaitCause {
     Memory { free_mb: u64, floor_mb: u64 },
     /// A compile does not start while the machine's CPU use is at or above the limit.
     Cpu { busy_pct: u32, max_pct: u32 },
+    /// Another compile started moments ago and does not show in the CPU reading
+    /// yet. `until` is when the next one may start.
+    Settling { until: u64 },
     /// Needs more of the resource than its limit, so it cannot run until the
     /// limit is raised.
     TooBig {
@@ -140,6 +143,10 @@ pub fn explain(w: &Wait, now_ms: u64) -> String {
         WaitCause::Cpu { busy_pct, max_pct } => {
             format!("compile waiting: CPU {busy_pct}% > {max_pct}%")
         }
+        WaitCause::Settling { until } => format!(
+            "compile waiting: letting the last compile show in CPU use ({} s)",
+            until.saturating_sub(now_ms).div_ceil(1000)
+        ),
         WaitCause::TooBig {
             resource,
             need,

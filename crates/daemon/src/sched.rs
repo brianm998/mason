@@ -10,7 +10,7 @@
 use crate::cpu::CpuSource;
 use mason_core::TaskId;
 use mason_resources::{Held, Locks, Take, TakeError};
-use mason_scheduler::{explain, CpuGate, Kind, Ledger, Needs, Rank};
+use mason_scheduler::{explain, CpuGate, Kind, Ledger, Needs, Rank, COMPILE};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
@@ -31,7 +31,7 @@ pub const EXCLUSIVE: &str = "exclusive";
 /// ```toml
 /// [llm]      # sessions per provider account
 /// claude = 2
-/// [machine]  # classes held by kernel file locks
+/// [machine]  # classes held by kernel file locks; `compile` has no count unless set here
 /// compile = 4
 /// [pools]    # leased by capability: simulators, phones, staging
 /// simulator = 2
@@ -39,6 +39,7 @@ pub const EXCLUSIVE: &str = "exclusive";
 /// floor_mb = 2048
 /// [cpu]      # a compile starts only while CPU use is below this percent
 /// compile_cpu_max = 50
+/// compile_settle_s = 30  # and this long after the last compile started
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResourceCfg {
@@ -48,10 +49,16 @@ pub struct ResourceCfg {
     pub memory_floor_mb: Option<u64>,
     /// A compile starts only while overall CPU use is below this percent.
     pub compile_cpu_max: u32,
+    /// Seconds between compile starts, so each shows in the CPU reading before
+    /// the next is decided. 0 starts every waiter the reading allows at once.
+    pub compile_settle_s: u32,
 }
 
 /// The default `compile_cpu_max`: half the machine.
 pub const DEFAULT_COMPILE_CPU_MAX: u32 = 50;
+
+/// The default `compile_settle_s`: twice the time the CPU reading averages over.
+pub const DEFAULT_COMPILE_SETTLE_S: u32 = 30;
 
 impl Default for ResourceCfg {
     fn default() -> Self {
@@ -61,6 +68,7 @@ impl Default for ResourceCfg {
             pools: BTreeMap::new(),
             memory_floor_mb: None,
             compile_cpu_max: DEFAULT_COMPILE_CPU_MAX,
+            compile_settle_s: DEFAULT_COMPILE_SETTLE_S,
         }
     }
 }
@@ -90,6 +98,7 @@ pub fn parse_resource_cfg(text: &str) -> Result<ResourceCfg, String> {
                     }
                     c.compile_cpu_max = n as u32;
                 }
+                "cpu" if name == "compile_settle_s" => c.compile_settle_s = n as u32,
                 other => return Err(format!("resources.toml: unknown setting {other}.{name}")),
             }
         }
@@ -157,6 +166,8 @@ struct State {
     cpu: Arc<dyn CpuSource>,
     /// The latest reading, kept so the explanation matches the decision.
     cpu_busy: Option<u32>,
+    /// CPU use decides when compiles start, and no count of them can be set.
+    compile_by_cpu: bool,
 }
 
 pub struct Broker {
@@ -242,6 +253,17 @@ impl Broker {
             fixed.insert(p.clone());
             pools.insert(p.clone());
         }
+        // Reading the machine replaces a count of compiles. The kernel locks still
+        // need a number of slots: one per hardware thread never holds a compile
+        // back, since the CPU gate stops them long before that many run.
+        let compile_by_cpu = cpu.replaces_compile_count() && !cfg.machine.contains_key(COMPILE);
+        if compile_by_cpu {
+            let threads = std::thread::available_parallelism().map_or(8, |n| n.get());
+            ledger.set_capacity(COMPILE, threads as u32, Kind::Machine);
+            if cfg.compile_settle_s > 0 {
+                ledger.pace_compiles(u64::from(cfg.compile_settle_s) * 1000);
+            }
+        }
         let b = Broker {
             st: Mutex::new(State {
                 ledger,
@@ -255,6 +277,7 @@ impl Broker {
                 cpu_max: cfg.compile_cpu_max,
                 cpu,
                 cpu_busy: None,
+                compile_by_cpu,
             }),
             cv: Condvar::new(),
             locks,
@@ -266,6 +289,10 @@ impl Broker {
                 if let Some((name, n)) = line.split_once('\t') {
                     if let Ok(n) = n.trim().parse::<u32>() {
                         let mut st = lock(&b.st);
+                        // A count saved before CPU use decided this.
+                        if name == COMPILE && st.compile_by_cpu {
+                            continue;
+                        }
                         let kind = kind_for(&st, name);
                         st.ledger.set_capacity(name, n, kind);
                         st.fixed.insert(name.to_string());
@@ -317,6 +344,13 @@ impl Broker {
         let mut st = lock(&self.st);
         if name == EXCLUSIVE {
             return Err("`exclusive` is the whole machine and has no limit".into());
+        }
+        if name == COMPILE && st.compile_by_cpu {
+            return Err(
+                "`compile` has no count: a compile starts while CPU use is below \
+                 cpu.compile_cpu_max in resources.toml"
+                    .into(),
+            );
         }
         let kind = kind_for(&st, name);
         st.ledger.set_capacity(name, units, kind);
