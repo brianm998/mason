@@ -28,7 +28,7 @@ ws=scripts/exit/fixtures/s71/wsclient.py
 owner=${USER:-owner}
 port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')
 m() { "$bin/mason" --data-dir "$root/d" --config-dir "$root/c" "$@"; }
-fail() { echo "FAILED: $*" >&2; m task list >&2 2>&1 || true; tail -20 "$root/masond.log" >&2 || true; exit 1; }
+fail() { set +e; echo "FAILED: $*" >&2; m task list >&2 2>&1; tail -20 "$root/masond.log" >&2; exit 1; }
 wait_for() {  # SECONDS DESCRIPTION COMMAND...
   local end=$((SECONDS + $1)); local what=$2; shift 2
   until "$@" >/dev/null 2>&1; do [ $SECONDS -lt $end ] || fail "timed out waiting for: $what"; sleep 0.3; done
