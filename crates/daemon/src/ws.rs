@@ -477,6 +477,25 @@ fn call_for(c: &Command) -> Result<Call, String> {
             Some(json!({"reason": c.reason, "as": c.actor})),
             Some((t.task, "force")),
         ),
+        Cmd::Unblock(u) => post(
+            format!("/tasks/{}/unblock", u.task),
+            Some(if u.all || u.from.is_empty() {
+                json!({"all": true})
+            } else {
+                json!({"from": u.from})
+            }),
+            Some((u.task, "unblock")),
+        ),
+        Cmd::Block(b) => post(
+            format!("/tasks/{}/block", b.task),
+            Some(json!({"after": b.after})),
+            Some((b.task, "block")),
+        ),
+        Cmd::Revive(t) => post(
+            format!("/tasks/{}/revive", t.task),
+            None,
+            Some((t.task, "revive")),
+        ),
         Cmd::Pause(p) => post(
             "/pause".into(),
             Some(

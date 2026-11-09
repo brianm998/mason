@@ -512,7 +512,30 @@ const STEPS: &[&str] = &[
      );
      CREATE INDEX step_host_losses_task ON step_host_losses(task);
      CREATE INDEX step_host_losses_at ON step_host_losses(lost_at_ms);",
-    // 21: the last green count of a suite for a base commit (s70), the expected
+    // 21: owner overrides of an imported task's blockers (s75), and the relationship the
+    // tracker last reported for each issue (to tell when it changed). Written by the daemon;
+    // like tracker_deps they are not rebuilt by event replay. kind: 'release' (the owner
+    // released a blocker GitHub lists) or 'add' (the owner added a blocker GitHub does not).
+    "CREATE TABLE tracker_overrides (
+         project       TEXT NOT NULL,
+         number        INTEGER NOT NULL,
+         blocker_task  INTEGER NOT NULL,
+         kind          TEXT NOT NULL CHECK (kind IN ('release', 'add')),
+         at            INTEGER NOT NULL,
+         PRIMARY KEY (project, number, blocker_task)
+     );
+     CREATE TABLE tracker_relationship (
+         project        TEXT NOT NULL,
+         number         INTEGER NOT NULL,
+         blocker_number INTEGER NOT NULL,
+         PRIMARY KEY (project, number, blocker_number)
+     );
+     CREATE TABLE tracker_relationship_seen (
+         project TEXT NOT NULL,
+         number  INTEGER NOT NULL,
+         PRIMARY KEY (project, number)
+     );",
+    // 22: the last green count of a suite for a base commit (s70), the expected
     // total of a live test count. Kept apart from `evidence` (keyed by tree).
     "CREATE TABLE suite_green (
          project  TEXT NOT NULL,
