@@ -35,10 +35,18 @@ fn post(d: &Arc<Daemon>, who: &str, path: String, body: Value) -> (u16, Value) {
                 .header("x-mason-as", who)
                 .body(axum::body::Body::from(body.to_string()))
                 .unwrap();
-            let resp = mason_daemon::http::api_router(d).oneshot(req).await.unwrap();
+            let resp = mason_daemon::http::api_router(d)
+                .oneshot(req)
+                .await
+                .unwrap();
             let status = resp.status().as_u16();
-            let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
-            (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+            let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+                .await
+                .unwrap();
+            (
+                status,
+                serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+            )
         })
 }
 
@@ -67,7 +75,11 @@ fn file_after(d: &Arc<Daemon>, title: &str, after: Vec<TaskId>) -> TaskId {
 }
 
 fn cancel(d: &Arc<Daemon>, t: TaskId, delete_branch: bool) {
-    d.emit(EventKind::Canceled { task: t, delete_branch }).unwrap();
+    d.emit(EventKind::Canceled {
+        task: t,
+        delete_branch,
+    })
+    .unwrap();
 }
 
 fn blocked_alerts(d: &Arc<Daemon>) -> Vec<String> {
@@ -87,8 +99,14 @@ fn a_task_held_by_a_canceled_blocker_is_shown_as_held_and_the_alert_clears_on_re
     cancel(&d, x, false);
     let w = d.world().unwrap();
     let line = blockers::held_line(&w, &w.tasks[&y]).unwrap();
-    assert!(line.contains("held: blocked by #") && line.contains("(cancelled)"), "{line}");
-    assert!(line.contains("mason task unblock") && line.contains("mason task revive"), "{line}");
+    assert!(
+        line.contains("held: blocked by #") && line.contains("(cancelled)"),
+        "{line}"
+    );
+    assert!(
+        line.contains("mason task unblock") && line.contains("mason task revive"),
+        "{line}"
+    );
     let a = blocked_alerts(&d);
     assert_eq!(a.len(), 1);
     assert!(a[0].contains("mason task unblock") && a[0].contains("mason task revive"));
@@ -121,11 +139,22 @@ fn a_failed_blocker_is_retried_not_revived() {
     let owner = d.cfg.owner_names[0].clone();
     let x = file_task(&d, "x");
     let y = file_after(&d, "y", vec![x]);
-    d.emit(EventKind::Admitted { task: x, entry: None }).unwrap();
-    d.emit(EventKind::StepFailed { task: x, reason: "r".into() }).unwrap();
+    d.emit(EventKind::Admitted {
+        task: x,
+        entry: None,
+    })
+    .unwrap();
+    d.emit(EventKind::StepFailed {
+        task: x,
+        reason: "r".into(),
+    })
+    .unwrap();
     let w = d.world().unwrap();
     let line = blockers::held_line(&w, &w.tasks[&y]).unwrap();
-    assert!(line.contains("(failed)") && line.contains("mason task retry"), "{line}");
+    assert!(
+        line.contains("(failed)") && line.contains("mason task retry"),
+        "{line}"
+    );
     let links = blockers::links(&d, &w, &w.tasks[&y]);
     assert_eq!(links[0].actions, vec!["release", "retry"]);
     let e = blockers::revive(&d, &owner, x).unwrap_err();
@@ -154,9 +183,30 @@ fn only_the_owner_may_change_blockers_over_http_and_ws() {
     let c = file_after(&d, "c", vec![a]);
     cancel(&d, b, false);
     for who in ["stranger", ""] {
-        assert_eq!(post(&d, who, format!("/tasks/{}/unblock", c.0), json!({"all": true})).0, 403);
-        assert_eq!(post(&d, who, format!("/tasks/{}/block", c.0), json!({"after": [b.0]})).0, 403);
-        assert_eq!(post(&d, who, format!("/tasks/{}/revive", b.0), json!({})).0, 403);
+        assert_eq!(
+            post(
+                &d,
+                who,
+                format!("/tasks/{}/unblock", c.0),
+                json!({"all": true})
+            )
+            .0,
+            403
+        );
+        assert_eq!(
+            post(
+                &d,
+                who,
+                format!("/tasks/{}/block", c.0),
+                json!({"after": [b.0]})
+            )
+            .0,
+            403
+        );
+        assert_eq!(
+            post(&d, who, format!("/tasks/{}/revive", b.0), json!({})).0,
+            403
+        );
     }
     assert_eq!(task_of(&d, c).blockers.len(), 1);
     assert_eq!(state_of(&d, b), State::Canceled);
@@ -164,11 +214,13 @@ fn only_the_owner_may_change_blockers_over_http_and_ws() {
     let cmd = mason_protocol::Command {
         id: "1".into(),
         actor: "stranger".into(),
-        body: Some(mason_protocol::command::Body::Unblock(mason_protocol::Unblock {
-            task: c.0,
-            from: vec![],
-            all: true,
-        })),
+        body: Some(mason_protocol::command::Body::Unblock(
+            mason_protocol::Unblock {
+                task: c.0,
+                from: vec![],
+                all: true,
+            },
+        )),
         ..Default::default()
     };
     let r = tokio::runtime::Builder::new_current_thread()
@@ -188,7 +240,10 @@ fn only_the_owner_may_change_blockers_over_http_and_ws() {
     assert!(r.ok, "{}", r.error);
     assert!(task_of(&d, c).blockers.is_empty());
     // And the owner's revive works over HTTP.
-    assert_eq!(post(&d, &owner, format!("/tasks/{}/revive", b.0), json!({})).0, 200);
+    assert_eq!(
+        post(&d, &owner, format!("/tasks/{}/revive", b.0), json!({})).0,
+        200
+    );
 }
 
 #[test]
@@ -197,18 +252,47 @@ fn a_cycle_is_refused_naming_it_and_a_started_task_is_refused() {
     let owner = d.cfg.owner_names[0].clone();
     let a = file_task(&d, "a");
     let b = file_after(&d, "b", vec![a]);
-    let (code, v) = post(&d, &owner, format!("/tasks/{}/block", a.0), json!({"after": [b.0]}));
+    let (code, v) = post(
+        &d,
+        &owner,
+        format!("/tasks/{}/block", a.0),
+        json!({"after": [b.0]}),
+    );
     assert_eq!(code, 422);
     let text = v["error"].as_str().unwrap();
-    assert!(text.contains("cycle") && text.contains(&format!("#{}", a.0)) && text.contains(&format!("#{}", b.0)), "{text}");
+    assert!(
+        text.contains("cycle")
+            && text.contains(&format!("#{}", a.0))
+            && text.contains(&format!("#{}", b.0)),
+        "{text}"
+    );
     let c = file_task(&d, "c");
-    d.emit(EventKind::Admitted { task: c, entry: None }).unwrap();
-    let (code, _) = post(&d, &owner, format!("/tasks/{}/block", c.0), json!({"after": [a.0]}));
+    d.emit(EventKind::Admitted {
+        task: c,
+        entry: None,
+    })
+    .unwrap();
+    let (code, _) = post(
+        &d,
+        &owner,
+        format!("/tasks/{}/block", c.0),
+        json!({"after": [a.0]}),
+    );
     assert_eq!(code, 409);
-    let (code, _) = post(&d, &owner, format!("/tasks/{}/unblock", c.0), json!({"all": true}));
+    let (code, _) = post(
+        &d,
+        &owner,
+        format!("/tasks/{}/unblock", c.0),
+        json!({"all": true}),
+    );
     assert_eq!(code, 409);
     // Releasing something that is not a blocker is refused, and says so.
-    let (code, v) = post(&d, &owner, format!("/tasks/{}/unblock", b.0), json!({"from": [c.0]}));
+    let (code, v) = post(
+        &d,
+        &owner,
+        format!("/tasks/{}/unblock", b.0),
+        json!({"from": [c.0]}),
+    );
     assert_eq!(code, 409);
     assert!(v["error"].as_str().unwrap().contains("not a blocker"));
 }
@@ -220,13 +304,25 @@ fn block_adds_a_second_blocker_and_the_task_detail_lists_each_blocker_with_its_o
     let p1 = file_task(&d, "p1");
     let p2 = file_task(&d, "p2");
     let t = file_after(&d, "t", vec![p1]);
-    let (code, v) = post(&d, &owner, format!("/tasks/{}/block", t.0), json!({"after": [p2.0]}));
+    let (code, v) = post(
+        &d,
+        &owner,
+        format!("/tasks/{}/block", t.0),
+        json!({"after": [p2.0]}),
+    );
     assert_eq!(code, 200, "{v}");
     let w = d.world().unwrap();
     let links = blockers::links(&d, &w, &w.tasks[&t]);
     assert_eq!(links.len(), 2);
-    assert!(links.iter().all(|l| l.origin == "set by you" && l.actions.contains(&"release")));
-    let (code, _) = post(&d, &owner, format!("/tasks/{}/unblock", t.0), json!({"from": [p1.0]}));
+    assert!(links
+        .iter()
+        .all(|l| l.origin == "set by you" && l.actions.contains(&"release")));
+    let (code, _) = post(
+        &d,
+        &owner,
+        format!("/tasks/{}/unblock", t.0),
+        json!({"from": [p1.0]}),
+    );
     assert_eq!(code, 200);
     assert_eq!(task_of(&d, t).blockers.len(), 1);
 }

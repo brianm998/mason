@@ -2574,9 +2574,12 @@ fn main() {
                     let list = |v: String, flag: &str| -> Vec<u64> {
                         v.split(',')
                             .map(|x| {
-                                x.trim().trim_start_matches('#').parse::<u64>().unwrap_or_else(
-                                    |_| die(&format!("{flag} takes task ids like 3,4, not {x:?}")),
-                                )
+                                x.trim()
+                                    .trim_start_matches('#')
+                                    .parse::<u64>()
+                                    .unwrap_or_else(|_| {
+                                        die(&format!("{flag} takes task ids like 3,4, not {x:?}"))
+                                    })
                             })
                             .collect()
                     };
@@ -2595,7 +2598,9 @@ fn main() {
                             let after = a
                                 .opt("--after")
                                 .map(|v| list(v, "--after"))
-                                .unwrap_or_else(|| die("block after which tasks? --after ID[,ID...]"));
+                                .unwrap_or_else(|| {
+                                    die("block after which tasks? --after ID[,ID...]")
+                                });
                             Some(json!({"after": after}))
                         }
                         _ => None,

@@ -510,7 +510,11 @@ fn apply(w: &mut World, k: &EventKind, fx: &mut Vec<Effect>) -> Result<(), Reduc
                 if let Some(path) = would_cycle(&next, *task, *a) {
                     return Err(ReduceError::BlockerCycle(path));
                 }
-                next.tasks.get_mut(task).expect("exists").blockers.insert(*a);
+                next.tasks
+                    .get_mut(task)
+                    .expect("exists")
+                    .blockers
+                    .insert(*a);
             }
             *w = next;
         }

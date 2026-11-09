@@ -1113,5 +1113,8 @@ fn replaying_blockers_changed_and_revived_gives_the_same_world() {
     };
     let w = run();
     assert_eq!(w, run());
-    assert_eq!(w.tasks.values().filter(|t| !t.blockers.is_empty()).count(), 1);
+    assert_eq!(
+        w.tasks.values().filter(|t| !t.blockers.is_empty()).count(),
+        1
+    );
 }

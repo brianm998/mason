@@ -57,7 +57,17 @@ pub fn fix_commands(t: TaskId, dead: &[(TaskId, State)]) -> String {
 
 fn names(dead: &[(TaskId, State)]) -> String {
     dead.iter()
-        .map(|(b, s)| format!("#{} ({})", b.0, if *s == State::Canceled { "cancelled" } else { "failed" }))
+        .map(|(b, s)| {
+            format!(
+                "#{} ({})",
+                b.0,
+                if *s == State::Canceled {
+                    "cancelled"
+                } else {
+                    "failed"
+                }
+            )
+        })
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -123,7 +133,11 @@ pub fn links(d: &Daemon, w: &World, t: &Task) -> Vec<Link> {
             Link {
                 task: *b,
                 state,
-                origin: if from_github.contains(b) { "from GitHub" } else { "set by you" },
+                origin: if from_github.contains(b) {
+                    "from GitHub"
+                } else {
+                    "set by you"
+                },
                 actions,
             }
         })
@@ -132,9 +146,13 @@ pub fn links(d: &Daemon, w: &World, t: &Task) -> Vec<Link> {
 
 /// The blocker tasks GitHub's relationship put on this task.
 fn github_blockers(d: &Daemon, t: &Task) -> BTreeSet<TaskId> {
-    let Some(p) = d.project(t.project) else { return BTreeSet::new() };
+    let Some(p) = d.project(t.project) else {
+        return BTreeSet::new();
+    };
     let rows = d.store.tracker_items(&p.id).unwrap_or_default();
-    let Some(row) = rows.iter().find(|r| r.task == t.id.0) else { return BTreeSet::new() };
+    let Some(row) = rows.iter().find(|r| r.task == t.id.0) else {
+        return BTreeSet::new();
+    };
     let deps = d.store.tracker_deps(&p.id).unwrap_or_default();
     let nums = deps.get(&row.number).cloned().unwrap_or_default();
     rows.iter()
@@ -161,7 +179,10 @@ fn refuse(e: StoreError, task: TaskId) -> Refusal {
             422,
             format!(
                 "that would be a cycle: {}",
-                path.iter().map(|t| format!("#{}", t.0)).collect::<Vec<_>>().join(" -> ")
+                path.iter()
+                    .map(|t| format!("#{}", t.0))
+                    .collect::<Vec<_>>()
+                    .join(" -> ")
             ),
         ),
         StoreError::Rejected(R::NotABlocker(b)) => {
@@ -186,11 +207,17 @@ fn task_of(w: &World, id: TaskId) -> Result<&Task, Refusal> {
 
 fn describe(w: &World, t: TaskId) -> String {
     match w.tasks.get(&t) {
-        Some(x) if x.blockers.is_empty() => format!("task #{} has no blockers left and can be claimed", t.0),
+        Some(x) if x.blockers.is_empty() => {
+            format!("task #{} has no blockers left and can be claimed", t.0)
+        }
         Some(x) => format!(
             "task #{} is still held by {}",
             t.0,
-            x.blockers.iter().map(|b| format!("#{}", b.0)).collect::<Vec<_>>().join(", ")
+            x.blockers
+                .iter()
+                .map(|b| format!("#{}", b.0))
+                .collect::<Vec<_>>()
+                .join(", ")
         ),
         None => String::new(),
     }
@@ -241,24 +268,41 @@ pub fn release(d: &Arc<Daemon>, who: &str, task: TaskId, which: Which) -> Result
         let mut deps = d.store.tracker_deps(&project).unwrap_or_default();
         let mut mine = deps.remove(&number).unwrap_or_default();
         for r in &released {
-            let _ = d.store.drop_tracker_overrides(&project, number, Some("add"), Some(r.0));
+            let _ = d
+                .store
+                .drop_tracker_overrides(&project, number, Some("add"), Some(r.0));
             if let Some(n) = rows.iter().find(|x| x.task == r.0).map(|x| x.number) {
                 if mine.remove(&n) {
-                    let _ = d.store.put_tracker_override(&project, number, r.0, "release", now_ms());
+                    let _ =
+                        d.store
+                            .put_tracker_override(&project, number, r.0, "release", now_ms());
                 }
             }
         }
         let v: Vec<u64> = mine.into_iter().collect();
         let _ = d.store.set_tracker_deps(&project, number, &v);
     }
-    let ids = released.iter().map(|b| format!("#{}", b.0)).collect::<Vec<_>>().join(", ");
+    let ids = released
+        .iter()
+        .map(|b| format!("#{}", b.0))
+        .collect::<Vec<_>>()
+        .join(", ");
     intervene(d, "unblock", Some(task), who, &ids, "");
     let w = d.world().map_err(|e| (500, e.to_string()))?;
-    Ok(format!("released task #{} from {ids}; {}", task.0, describe(&w, task)))
+    Ok(format!(
+        "released task #{} from {ids}; {}",
+        task.0,
+        describe(&w, task)
+    ))
 }
 
 /// Add blockers to a task that has not started.
-pub fn block(d: &Arc<Daemon>, who: &str, task: TaskId, after: &[TaskId]) -> Result<String, Refusal> {
+pub fn block(
+    d: &Arc<Daemon>,
+    who: &str,
+    task: TaskId,
+    after: &[TaskId],
+) -> Result<String, Refusal> {
     owner_only(d, who, "add a blocker")?;
     let _quiet = d.tracker.quiet();
     let w = d.world().map_err(|e| (500, e.to_string()))?;
@@ -270,7 +314,11 @@ pub fn block(d: &Arc<Daemon>, who: &str, task: TaskId, after: &[TaskId]) -> Resu
     if after.contains(&task) {
         return Err((422, format!("that would be a cycle: #{0} -> #{0}", task.0)));
     }
-    let fresh: Vec<TaskId> = after.iter().copied().filter(|b| !t.blockers.contains(b)).collect();
+    let fresh: Vec<TaskId> = after
+        .iter()
+        .copied()
+        .filter(|b| !t.blockers.contains(b))
+        .collect();
     if fresh.is_empty() {
         return Err((409, format!("task #{} is already blocked by those", task.0)));
     }
@@ -282,13 +330,23 @@ pub fn block(d: &Arc<Daemon>, who: &str, task: TaskId, after: &[TaskId]) -> Resu
     .map_err(|e| refuse(e, task))?;
     if let Some((project, number)) = issue_of(d, t) {
         for b in &fresh {
-            let _ = d.store.put_tracker_override(&project, number, b.0, "add", now_ms());
+            let _ = d
+                .store
+                .put_tracker_override(&project, number, b.0, "add", now_ms());
         }
     }
-    let ids = fresh.iter().map(|b| format!("#{}", b.0)).collect::<Vec<_>>().join(", ");
+    let ids = fresh
+        .iter()
+        .map(|b| format!("#{}", b.0))
+        .collect::<Vec<_>>()
+        .join(", ");
     intervene(d, "block", Some(task), who, &ids, "");
     let w = d.world().map_err(|e| (500, e.to_string()))?;
-    Ok(format!("task #{} now waits for {ids}; {}", task.0, describe(&w, task)))
+    Ok(format!(
+        "task #{} now waits for {ids}; {}",
+        task.0,
+        describe(&w, task)
+    ))
 }
 
 /// Put a canceled task whose branch was kept back in the queue.
@@ -309,7 +367,13 @@ pub fn revive(d: &Arc<Daemon>, who: &str, task: TaskId) -> Result<String, Refusa
         ));
     }
     if !t.cancel_keeps_branch {
-        return Err((409, format!("task #{} was canceled with its branch deleted; there is nothing to revive", task.0)));
+        return Err((
+            409,
+            format!(
+                "task #{} was canceled with its branch deleted; there is nothing to revive",
+                task.0
+            ),
+        ));
     }
     if let Some((project, number)) = issue_of(d, t) {
         let open = d
@@ -322,9 +386,13 @@ pub fn revive(d: &Arc<Daemon>, who: &str, task: TaskId) -> Result<String, Refusa
             return Err((409, format!("issue #{number} is closed on the tracker; reopen it first, or the next poll would cancel the task again")));
         }
     }
-    d.emit(EventKind::Revived { task }).map_err(|e| refuse(e, task))?;
+    d.emit(EventKind::Revived { task })
+        .map_err(|e| refuse(e, task))?;
     intervene(d, "revive", Some(task), who, "", "");
-    Ok(format!("task #{} is queued again, with its branch and links kept", task.0))
+    Ok(format!(
+        "task #{} is queued again, with its branch and links kept",
+        task.0
+    ))
 }
 
 /// For `mason task show`, the JSON of a task's blockers.
@@ -341,11 +409,21 @@ pub fn links_json(d: &Daemon, w: &World, t: &Task) -> serde_json::Value {
 }
 
 /// The overrides for a project, keyed by issue: released tasks and added tasks.
-pub fn overrides(d: &Daemon, project: &str) -> (BTreeMap<u64, BTreeSet<TaskId>>, BTreeMap<u64, BTreeSet<TaskId>>) {
+pub fn overrides(
+    d: &Daemon,
+    project: &str,
+) -> (
+    BTreeMap<u64, BTreeSet<TaskId>>,
+    BTreeMap<u64, BTreeSet<TaskId>>,
+) {
     let mut rel: BTreeMap<u64, BTreeSet<TaskId>> = BTreeMap::new();
     let mut add: BTreeMap<u64, BTreeSet<TaskId>> = BTreeMap::new();
     for (n, b, kind) in d.store.tracker_overrides(project).unwrap_or_default() {
-        let m = if kind == "release" { &mut rel } else { &mut add };
+        let m = if kind == "release" {
+            &mut rel
+        } else {
+            &mut add
+        };
         m.entry(n).or_default().insert(TaskId(b));
     }
     (rel, add)

@@ -201,6 +201,11 @@ description = "Tracker imports are listed apart as Proposed from the tracker, ea
 swift = "done"
 compose = "done"
 
+[feature.task-release]
+description = "A held task's page lists each blocker with its state and where it came from (from GitHub, set by you); the owner gets Release on each, Revive on a canceled one, Retry on a failed one, and an Add blocker field with a task picker; a non-owner sees the list and no controls"
+swift = "done"
+compose = "done"
+
 [feature.speech-queue]
 description = "A short sound, then one sentence naming the task, what is wrong and what to do; announcements queue and never overlap; 'wants a decision' and 'broke' use different sounds; muting silences sound and speech and leaves every banner and the attention count"
 swift = "done"

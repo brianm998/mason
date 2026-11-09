@@ -998,13 +998,9 @@ fn a_release_is_not_undone_by_the_next_poll_and_lapses_when_github_changes_the_r
         task_for(&d, 3).unwrap().id,
     );
     assert_eq!(task_for(&d, 3).unwrap().blockers.len(), 2);
-    let msg = mason_daemon::blockers::release(
-        &d,
-        &o,
-        t3,
-        mason_daemon::blockers::Which::From(vec![t1]),
-    )
-    .unwrap();
+    let msg =
+        mason_daemon::blockers::release(&d, &o, t3, mason_daemon::blockers::Which::From(vec![t1]))
+            .unwrap();
     assert!(msg.contains("still held by #"), "{msg}");
     // Two more polls with the same recorded answer: the release stands.
     for _ in 0..2 {

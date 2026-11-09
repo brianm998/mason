@@ -119,7 +119,11 @@ pub fn blocker_items(r: &TaskRow, owner: bool) -> Vec<Item> {
         out.push(Item::new(
             format!("add-blocker:{}", r.id),
             vec!["Add blocker".into()],
-            if owner { vec!["add_blocker".into()] } else { vec![] },
+            if owner {
+                vec!["add_blocker".into()]
+            } else {
+                vec![]
+            },
             0,
         ));
     }

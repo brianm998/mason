@@ -1663,12 +1663,18 @@ fn blocker_ids(v: &Value, what: &str) -> Result<Vec<TaskId>, (StatusCode, Json<V
         Value::Array(a) => a
             .iter()
             .map(|x| {
-                x.as_u64()
-                    .map(TaskId)
-                    .ok_or_else(|| fail(StatusCode::BAD_REQUEST, format!("{what}: {x} is not a task id")))
+                x.as_u64().map(TaskId).ok_or_else(|| {
+                    fail(
+                        StatusCode::BAD_REQUEST,
+                        format!("{what}: {x} is not a task id"),
+                    )
+                })
             })
             .collect(),
-        _ => Err(fail(StatusCode::BAD_REQUEST, format!("{what} must be a list of task ids"))),
+        _ => Err(fail(
+            StatusCode::BAD_REQUEST,
+            format!("{what} must be a list of task ids"),
+        )),
     }
 }
 
