@@ -21,6 +21,13 @@ pub struct DaemonConfig {
     /// on tasks; `resources.toml` and `mason resources limit` override it.
     pub max_concurrent: usize,
     pub sweep_interval: Duration,
+    /// How long after a step run closes (and its hosts exited) the sweep leaves its host
+    /// directories in `h/` before moving them to `t/<task>/hosts/` (default a day;
+    /// `MASON_HOST_GRACE_MS` sets it for the exit script).
+    pub host_grace: Duration,
+    /// How many days moved host directories are kept before they are deleted (default 90;
+    /// 0 keeps them for ever). `retention_days` in `[daemon]` of `daemon.toml`.
+    pub retention_days: u64,
     /// Where CPU use is read for the compile gate. `None`: `MASON_CPU_FILE`, else the OS.
     pub cpu: Option<std::sync::Arc<dyn crate::cpu::CpuSource>>,
     /// Where free disk is read for the disk floor. `None`: `MASON_DISK_FILE`, else the OS.
@@ -222,6 +229,33 @@ pub fn resolve_port(cli: Option<u16>, file: Option<u16>, demo: bool) -> u16 {
 /// [daemon]
 /// port = 7423   # 0 asks the OS for a free port each start
 /// ```
+/// How long moved host directories are kept, in days, unless `daemon.toml` says otherwise.
+pub const DEFAULT_RETENTION_DAYS: u64 = 90;
+
+/// `retention_days` from `[daemon]` in `daemon.toml`, if set.
+pub fn parse_retention_days(text: &str) -> Result<Option<u64>, String> {
+    let doc: toml_edit::DocumentMut = text.parse().map_err(|e| format!("daemon.toml: {e}"))?;
+    match doc.get("daemon").and_then(|d| d.get("retention_days")) {
+        None => Ok(None),
+        Some(v) => v
+            .as_integer()
+            .and_then(|n| u64::try_from(n).ok())
+            .map(Some)
+            .ok_or_else(|| {
+                "daemon.toml: daemon.retention_days must be a whole number of days (0 keeps them for ever)"
+                    .to_string()
+            }),
+    }
+}
+
+pub fn load_retention_days(config_dir: &std::path::Path) -> Result<Option<u64>, String> {
+    match std::fs::read_to_string(config_dir.join("daemon.toml")) {
+        Ok(t) => parse_retention_days(&t),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("daemon.toml: {e}")),
+    }
+}
+
 pub fn parse_daemon_port(text: &str) -> Result<Option<u16>, String> {
     let doc: toml_edit::DocumentMut = text.parse().map_err(|e| format!("daemon.toml: {e}"))?;
     let mut port = None;
@@ -245,6 +279,7 @@ pub fn parse_daemon_port(text: &str) -> Result<Option<u16>, String> {
                             })?,
                     )
                 }
+                "retention_days" => {} // read by `parse_retention_days`
                 other => return Err(format!("daemon.toml: unknown setting daemon.{other}")),
             }
         }
@@ -275,6 +310,11 @@ impl DaemonConfig {
             disk: None,
             disk_every: crate::disk::DEFAULT_EVERY,
             sweep_interval: Duration::from_secs(120),
+            host_grace: std::env::var("MASON_HOST_GRACE_MS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .map_or(Duration::from_secs(24 * 3600), Duration::from_millis),
+            retention_days: DEFAULT_RETENTION_DAYS,
             heartbeat: Duration::from_secs(1),
             host_bin,
             mcp_bin,
@@ -322,6 +362,10 @@ impl DaemonConfig {
     }
     pub fn task_dir(&self, task: u64) -> PathBuf {
         self.data_dir.join("t").join(task.to_string())
+    }
+    /// Where the host directories of closed step runs of `task` are kept.
+    pub fn archived_hosts_dir(&self, task: u64) -> PathBuf {
+        self.task_dir(task).join("hosts")
     }
     pub fn agent_state_dir(&self) -> PathBuf {
         self.data_dir.join("a")

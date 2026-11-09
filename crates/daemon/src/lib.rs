@@ -19,6 +19,7 @@ pub mod disk;
 pub mod editor;
 pub mod fdlimit;
 pub mod holds;
+pub mod hostarchive;
 pub mod hostloss;
 pub mod http;
 pub mod improve;

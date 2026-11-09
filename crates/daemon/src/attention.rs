@@ -509,10 +509,7 @@ pub fn session_for(d: &Daemon, task: TaskId) -> Result<Value, String> {
     let w = d.world().map_err(|e| e.to_string())?;
     let t = w.tasks.get(&task).ok_or("no such task")?;
     let p = d.project(t.project).ok_or("no such project")?;
-    let reg = mason_step_host::registry::Registry::new(d.cfg.hosts_dir());
-    let mut hosts: Vec<_> = reg
-        .scan()
-        .unwrap_or_default()
+    let mut hosts: Vec<_> = crate::hostarchive::task_hosts(&d.cfg, task.0)
         .into_iter()
         .filter_map(|h| {
             crate::sweep::parse_host_id(&h.info.id)
