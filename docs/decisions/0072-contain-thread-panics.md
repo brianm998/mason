@@ -1,0 +1,3 @@
+# 0072: Contain panics on daemon threads
+
+Every long-lived daemon thread runs its passes under `catch_unwind` through one helper (`bg::spawn_loop`); a panic is filed as a `thread_panic` bug and the loop goes on. A landing batch that panics fails its tasks with "internal error: the landing batch panicked" and frees its slot; it lands nothing. The store writer is the exception: a panic there ends the process (exit 70) because the store cannot be left half alive, and launchd's restart plus the existing rollback rule handle a build that keeps doing it. `admit` resets its flag in a drop guard; the reader lock recovers from poisoning like every other lock. Because `crates/daemon/src/landing.rs` is a guard, the change to it waits for the owner's approval.

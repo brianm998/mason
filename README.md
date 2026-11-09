@@ -73,6 +73,9 @@ Status: **pre-alpha**. What each stage note says it built (generated from `docs/
 - **s78**: A project can name a task's build directory with `task_cache`; it is removed when the task lands (off the event loop, outside the repo lock, and only if the path passes the safety rules), and the reconcile sweep removes the ones a restart or a miss left.
 - **s79**: Both monitors let the owner drag the divider between the left panel and the main view (220 to 640 before text zoom, the main view keeps 360, remembered per device), and Home and search stay pinned above the scrolling list.
 - **s80**: The two holds tests now express the usage-limit reset relative to when the fake agent emits it, so a loaded machine can no longer make it stale.
+- **s83**: an agent step whose step host is lost mid-session, or never comes up, is recorded as a host loss and continued (resumed with a note when the journal gave a session id, otherwise started again) instead of failing the task, at most twice per step run and counted from the invocation directories so a daemon restart does not reset it; a third loss fails the step and names all three.
+- **s85**: Below a free-disk floor (`[disk] floor_gb`, default 20) nothing new compiles or opens an LLM session, `mason resources` says why, an alert names the free space and what takes room, and `task_cache` ages out cancelled and failed tasks' directories after 7 days.
+- **s86**: A panic on a background loop, a landing batch, `admit` or the store writer is now contained (loops go on and file a `thread_panic` bug, a batch fails its tasks and frees its slot, the writer ends the process so launchd restarts it), and `mason status` and `mason doctor` show it.
 - **s87**: The one-daemon-per-data-directory guard is now a kernel `flock` on `daemon.lock`, and a start that declines to run (a daemon already there, a port taken) is logged as `refused` in `boots.log` and not counted as a crash by the rollback logic.
 <!-- status:end -->
 

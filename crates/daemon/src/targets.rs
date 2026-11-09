@@ -18,7 +18,7 @@ use mason_devices::wait;
 use mason_scheduler::Needs;
 use mason_testing::EnvKind;
 use std::collections::{BTreeMap, HashSet};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// A reading that takes longer than this is abandoned and tried again next tick.
@@ -215,15 +215,15 @@ pub fn spawn(d: &Arc<Daemon>) {
     if wanted(d) {
         d.targets.refresh(d);
     }
-    let weak: Weak<Daemon> = Arc::downgrade(d);
     let every = Duration::from_millis(d.targets.cfg.poll_ms);
-    let _ = std::thread::Builder::new()
-        .name("targets".into())
-        .spawn(move || loop {
-            std::thread::sleep(every);
-            let Some(d) = weak.upgrade() else { return };
-            if wanted(&d) {
-                d.targets.refresh(&d);
-            }
-        });
+    crate::bg::spawn_loop(d, "targets", move |weak| {
+        std::thread::sleep(every);
+        let Some(d) = weak.upgrade() else {
+            return false;
+        };
+        if wanted(&d) {
+            d.targets.refresh(&d);
+        }
+        true
+    });
 }
