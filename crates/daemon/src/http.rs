@@ -2461,6 +2461,30 @@ fn render_agent(text: &str) -> String {
     out
 }
 
+/// A host's id with its journal's size and modified time: if none of these
+/// changed, `render_logs` would give the same text.
+pub type LogStamp = (String, u64, Option<std::time::SystemTime>);
+
+pub fn log_signature(d: &Daemon, task: u64) -> Vec<LogStamp> {
+    let reg = mason_step_host::registry::Registry::new(d.cfg.hosts_dir());
+    let mut v: Vec<LogStamp> = reg
+        .scan()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|h| crate::sweep::parse_host_id(&h.info.id).is_some_and(|(t, _)| t == task))
+        .map(|h| {
+            let m = std::fs::metadata(h.info.dir.join("journal")).ok();
+            (
+                h.info.id.clone(),
+                m.as_ref().map_or(0, |m| m.len()),
+                m.and_then(|m| m.modified().ok()),
+            )
+        })
+        .collect();
+    v.sort();
+    v
+}
+
 pub fn render_logs(d: &Daemon, task: u64) -> String {
     let reg = mason_step_host::registry::Registry::new(d.cfg.hosts_dir());
     let mut hosts: Vec<_> = reg

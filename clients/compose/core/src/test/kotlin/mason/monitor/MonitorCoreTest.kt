@@ -239,6 +239,18 @@ class MonitorCoreTest {
         m.search = SearchState()
         assertEquals(2, m.filteredRows(sec).size)
         assertEquals(2, m.visibleCount(sec))
+        assertEquals("2", m.countText(sec))
+    }
+
+    @Test
+    fun aCappedSectionSaysSoInItsHeaderAndSearchSaysWhereItLooked() {
+        val m = MonitorModel()
+        val rows = listOf(TaskRow(id = 9, title = "newest"), TaskRow(id = 8, title = "older"))
+        val sec = SidebarSection(state = "landed", title = "Landed", count = 2000, rows = rows)
+        assertTrue(m.isCapped(sec))
+        assertEquals("2 of 2000", m.countText(sec))
+        m.search = SearchState(text = "newest")
+        assertEquals("1 in newest 2", m.countText(sec))
     }
 
     // ---- text scale ----

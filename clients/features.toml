@@ -56,6 +56,11 @@ description = "Filters every section by name, title or body, each with its own c
 swift = "done"
 compose = "done"
 
+[feature.history-cap]
+description = "A history section holds at most the newest 500 rows the daemon sends; when the true count is more, the header reads '500 of 2000' (while searching, '3 in newest 500'), and search covers only the rows sent"
+swift = "done"
+compose = "done"
+
 [feature.home-view]
 description = "Status, attention queue, active models, session stepper, landing queue, tasks per stage"
 swift = "done"

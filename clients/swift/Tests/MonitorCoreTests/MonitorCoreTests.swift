@@ -285,6 +285,18 @@ final class MonitorCoreTests: XCTestCase {
         m.search.text = ""
         XCTAssertEqual(m.filteredRows(m.sidebar!.sections[0]).count, rows.count)
         XCTAssertEqual(m.visibleCount(m.sidebar!.sections[0]), 2)
+        XCTAssertEqual(m.countText(m.sidebar!.sections[0]), "2")
+    }
+
+    func testACappedSectionSaysSoInItsHeaderAndSearchSaysWhereItLooked() {
+        let m = MonitorModel()
+        var a = TaskRow(); a.id = 9; a.title = "newest"
+        var b = TaskRow(); b.id = 8; b.title = "older"
+        var sec = SidebarSection(); sec.state = "landed"; sec.title = "Landed"; sec.count = 2000; sec.rows = [a, b]
+        XCTAssertTrue(m.isCapped(sec))
+        XCTAssertEqual(m.countText(sec), "2 of 2000")
+        m.search.text = "newest"
+        XCTAssertEqual(m.countText(sec), "1 in newest 2")
     }
 
     // MARK: text scale

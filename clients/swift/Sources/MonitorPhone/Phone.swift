@@ -50,7 +50,7 @@ struct SidebarScreen: View {
             Button { choose(.home) } label: { Label("Home", systemImage: "house") }
                 .accessibilityIdentifier("sidebar:home")
             ForEach(model.sidebar?.sections ?? [], id: \.state) { sec in
-                Section("\(sec.title) (\(model.visibleCount(sec)))") {
+                Section("\(sec.title) (\(model.countText(sec)))") {
                     ForEach(model.filteredRows(sec), id: \.id) { r in
                         Button { choose(.task(r.id)) } label: {
                             VStack(alignment: .leading) {

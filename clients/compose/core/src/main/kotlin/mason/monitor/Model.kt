@@ -291,6 +291,16 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     fun filteredRows(s: SidebarSection): List<TaskRow> = s.rows.filter { search.matches(it) }
     fun visibleCount(s: SidebarSection): Int = if (search.isActive) filteredRows(s).size else s.count
 
+    /** The daemon sends only the newest rows of a long history section; `count` stays the true total. */
+    fun isCapped(s: SidebarSection): Boolean = s.count > s.rows.size
+
+    /** The number in a section header: "500 of 2000" when capped; while searching, "3 in newest 500". */
+    fun countText(s: SidebarSection): String = when {
+        !isCapped(s) -> visibleCount(s).toString()
+        search.isActive -> "${filteredRows(s).size} in newest ${s.rows.size}"
+        else -> "${s.rows.size} of ${s.count}"
+    }
+
     // ---- commands ----
 
     fun send(c: Command) {
