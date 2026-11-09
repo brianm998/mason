@@ -141,6 +141,17 @@ pub enum EventKind {
         task: TaskId,
         blocker: TaskId,
     },
+    /// The owner released some blockers of a proposed or queued task and/or
+    /// added others in one step. Released ids must be current blockers.
+    BlockersChanged {
+        task: TaskId,
+        released: Vec<TaskId>,
+        added: Vec<TaskId>,
+    },
+    /// The owner put a cancelled task (whose branch was kept) back in the queue.
+    Revived {
+        task: TaskId,
+    },
     /// The tracker, which owns a task's title, body and priority, said they
     /// changed (Part 11: authority is split). Applies in any live state.
     TrackerEdited {

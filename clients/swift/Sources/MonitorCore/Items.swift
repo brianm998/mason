@@ -55,6 +55,22 @@ extension TaskRow {
     }
 }
 
+extension TaskRow {
+    /// What a held task's page shows for its blockers: each with its state and where it came
+    /// from, and the actions on it (the owner's alone); and the Add blocker field.
+    func blockerItems(owner: Bool) -> [Item] {
+        var out: [Item] = []
+        for (i, l) in blockerLinks.enumerated() {
+            out.append(Item(id: "blocker:\(id):\(l.task)", texts: ["#\(l.task)", l.state, l.origin],
+                            actions: owner ? l.actions : [], order: i))
+        }
+        if allowedActions.contains("block") {
+            out.append(Item(id: "add-blocker:\(id)", texts: ["Add blocker"], actions: owner ? ["add_blocker"] : []))
+        }
+        return out
+    }
+}
+
 extension Mason_V1_DecisionCard {
     func item(task: UInt64, owner: Bool = true) -> Item {
         var texts = [ask, why]
@@ -150,6 +166,7 @@ extension MonitorModel {
         if case .task = page, let d = taskDetail, d.hasRow {
             out.append(d.row.item(prefix: "detail", order: 0))
             out.append(contentsOf: d.row.progressItems(now: daemonNow()))
+            out.append(contentsOf: d.row.blockerItems(owner: canAct))
             for (i, s) in d.steps.enumerated() {
                 out.append(Item(id: "step:\(s.run)", texts: [s.name, s.outcome] + s.launches.map { $0.display }, order: i))
             }
