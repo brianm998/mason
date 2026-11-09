@@ -713,7 +713,7 @@ impl Runner {
         loop {
             let last = stop.load(SeqCst);
             if let Some(p) = self.d.progress_of(lead.0) {
-                for run in self.member_runs.iter().skip(1) {
+                for run in self.member_runs.iter().filter(|r| **r != lead) {
                     for s in p.subs.iter().filter(|s| s.name != "checks") {
                         self.d.progress_sub(*run, &s.name, None, |x| *x = s.clone());
                     }
