@@ -99,10 +99,21 @@ fn take_when_granted(d: &Arc<Daemon>, id: u64, label: &str) -> (u64, Held) {
                 capacity,
                 locks_dir,
             } => {
-                let held = Locks::new(locks_dir)
-                    .unwrap()
-                    .take(id, label, 0, &Take { classes, exclusive }, &capacity)
-                    .unwrap();
+                // Like the real client: a slot just released may still be busy for a
+                // moment, so retry rather than fail.
+                let locks = Locks::new(locks_dir).unwrap();
+                let want = Take { classes, exclusive };
+                let held = loop {
+                    match locks.take(id, label, 0, &want, &capacity) {
+                        Ok(h) => break h,
+                        Err(mason_resources::TakeError::Busy)
+                            if std::time::Instant::now() < end =>
+                        {
+                            std::thread::sleep(Duration::from_millis(25));
+                        }
+                        Err(e) => panic!("could not take the granted resources: {e}"),
+                    }
+                };
                 // Let the daemon see the marker locked, as it will for a real caller.
                 d.broker.lease_poll(id);
                 return (id, held);
