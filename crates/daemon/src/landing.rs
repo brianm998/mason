@@ -577,6 +577,7 @@ fn run_batch(
             let tasks: Vec<(TaskId, String)> =
                 members.iter().map(|w| (w.task, w.branch.clone())).collect();
             let member_runs: Vec<StepRunId> = members.iter().map(|w| w.run).collect();
+            let member_tasks: Vec<TaskId> = members.iter().map(|w| w.task).collect();
             let fps: HashMap<u64, Footprint> = members
                 .iter()
                 .map(|w| (w.task.0, w.footprint.clone()))
@@ -594,6 +595,7 @@ fn run_batch(
                     kind,
                     fps,
                     member_runs,
+                    member_tasks,
                     runs: Default::default(),
                     batch_id: Default::default(),
                     ci,
@@ -671,6 +673,8 @@ struct Runner {
     fps: HashMap<u64, Footprint>,
     /// The landing step runs of the batch's tasks: where its progress is shown.
     member_runs: Vec<StepRunId>,
+    /// The batch's tasks, first by rank: the first ranks the batch's broker leases.
+    member_tasks: Vec<TaskId>,
     /// Makes each suite run's host id its own: a host id names one run.
     runs: std::sync::atomic::AtomicU64,
     batch_id: std::sync::atomic::AtomicU64,
@@ -1143,9 +1147,19 @@ impl Runner {
                 }
                 let outside = self.cfg.mode.uses_candidate_ref();
                 if suites.is_empty() && !outside {
-                    return legacy
-                        .as_ref()
-                        .is_none_or(|cmd| run_shell(cmd, &wt_for_cmd, p.test_timeout).0);
+                    let Some(cmd) = legacy.as_ref() else {
+                        return true;
+                    };
+                    // The re-test holds what the test step uses, as any test does; the
+                    // wait for it is outside the command's timeout.
+                    let _lease = match self.hold(&def, self.test_step_needs(&def), true) {
+                        Ok(l) => l,
+                        Err(e) => {
+                            self.fail_service(e);
+                            return false;
+                        }
+                    };
+                    return run_shell(cmd, &wt_for_cmd, p.test_timeout).0;
                 }
                 // A moved base means CI runs again on the new tip, whatever moved.
                 if !outside && !plan::needs_reverify(moved, &union_fp, &impacts) {
@@ -1198,10 +1212,14 @@ impl Runner {
                     }
                 }
             }
-            let fin = {
-                let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
-                batch.finish(&asm, &mut reverify, &point)
-            };
+            // The repository lock is held only around git (the fold and the promote);
+            // the re-verification between them runs with it released.
+            let fin = batch.finish_with(
+                &asm,
+                &|| Box::new(lock.lock().unwrap_or_else(|e| e.into_inner())),
+                &mut reverify,
+                &point,
+            );
             match fin {
                 Err(e) => break Err(format!("landing failed: {e}")),
                 Ok(Err(_red)) => continue 'outer, // red after folding: assemble on the new base, blame properly
@@ -1346,6 +1364,17 @@ impl Runner {
         let mut r = if local.is_empty() {
             green()
         } else {
+            let _lease = match self.hold(def, suites_needs(def, &local), true) {
+                Ok(l) => l,
+                Err(e) => {
+                    self.fail_service(e.clone());
+                    return crate::suites::OverRun {
+                        green: false,
+                        failed: BTreeSet::new(),
+                        notes: vec![e],
+                    };
+                }
+            };
             let n = self.runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let stop = std::sync::atomic::AtomicBool::new(false);
             std::thread::scope(|sc| {
@@ -1394,6 +1423,84 @@ impl Runner {
             }
         }
         r
+    }
+
+    /// Note why the batch cannot go on; it ends with this reason.
+    fn fail_service(&self, e: String) {
+        self.service_error
+            .lock()
+            .unwrap_or_else(|x| x.into_inner())
+            .get_or_insert(e);
+    }
+
+    /// What the definition's test step uses: the re-test of a landing holds it.
+    fn test_step_needs(&self, def: &mason_definition::Definition) -> mason_scheduler::Needs {
+        def.steps
+            .iter()
+            .find(|s| s.kind == mason_definition::StepType::Test)
+            .map_or_else(Default::default, |s| crate::sched::needs_of(&s.uses, None))
+    }
+
+    /// Take `needs` from the broker for a verification, ranked as the batch's first
+    /// task. The wait is outside every timeout (those start after it). With `watch`,
+    /// the wait ends if all the batch's tasks have left the landing step. Nothing
+    /// to hold gives `Ok(None)`.
+    fn hold(
+        &self,
+        def: &mason_definition::Definition,
+        needs: mason_scheduler::Needs,
+        watch: bool,
+    ) -> Result<Option<crate::sched::Lease>, String> {
+        if !needs.exclusive && needs.amounts.is_empty() {
+            return Ok(None);
+        }
+        let d = &self.d;
+        if needs.amounts.keys().any(|n| n.starts_with("device:")) {
+            d.targets.declare_all(d);
+        }
+        for name in needs.amounts.keys() {
+            if !name.starts_with("llm:") && !name.starts_with("device:") {
+                d.broker
+                    .declare(name, def.resources.get(name).copied().unwrap_or(1));
+            }
+        }
+        let Some(first) = self.member_tasks.first().copied() else {
+            return Ok(None);
+        };
+        let step = def
+            .steps
+            .iter()
+            .find(|s| s.kind == mason_definition::StepType::Landing)
+            .map_or_else(String::new, |s| s.name.clone());
+        let rank = match d.world().ok().and_then(|w| w.tasks.get(&first).cloned()) {
+            Some(t) => d.rank_for(&t, def, &step),
+            None => return Err("the batch's first task is gone".into()),
+        };
+        let alive = || {
+            if !watch || self.member_runs.is_empty() {
+                return true;
+            }
+            d.world().map_or(true, |w| {
+                self.member_tasks.iter().any(|t| {
+                    w.open_run(*t)
+                        .is_some_and(|r| self.member_runs.contains(&r))
+                })
+            })
+        };
+        d.broker
+            .acquire(
+                first,
+                &format!(
+                    "batch #{}",
+                    self.batch_id.load(std::sync::atomic::Ordering::SeqCst)
+                ),
+                rank,
+                needs,
+                &alive,
+                &mut |_| {},
+            )
+            .map(Some)
+            .map_err(|_| "every task of the batch left the landing step while it waited".into())
     }
 
     fn take_service_error(&self) -> Option<String> {
@@ -1852,6 +1959,16 @@ impl Runner {
                 return;
             }
         }
+        // Held like any suite run; the batch's tasks have left landing by now, so
+        // there is nothing to stop waiting for.
+        let _lease = match self.hold(def, suites_needs(def, &tier.suites), false) {
+            Ok(l) => l,
+            Err(_) => {
+                let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+                git::remove_worktree(&p.path, &wt);
+                return;
+            }
+        };
         let r = crate::suites::run_over(
             d,
             &p,
@@ -1908,4 +2025,30 @@ impl Runner {
         d.landing.wake();
         d.poke();
     }
+}
+
+/// What running these suites holds: each suite's `uses` and its environment's,
+/// the largest of each, as the test step's own acquisition computes it.
+fn suites_needs(def: &mason_definition::Definition, names: &[String]) -> mason_scheduler::Needs {
+    let mut n = mason_scheduler::Needs::default();
+    for s in names.iter().filter_map(|s| def.testing.suite(s)) {
+        let mut uses = s.uses.clone();
+        if let Some(e) = def.testing.environment(&s.env) {
+            if let Some(kind) = crate::targets::kind_of_env(e) {
+                let u = uses.entry(kind.capability()).or_insert(0);
+                *u = (*u).max(1);
+            }
+            for (k, v) in &e.uses {
+                let u = uses.entry(k.clone()).or_insert(0);
+                *u = (*u).max(*v);
+            }
+        }
+        let more = crate::sched::needs_of(&uses, None);
+        n.exclusive |= more.exclusive;
+        for (k, v) in more.amounts {
+            let have = n.amounts.entry(k).or_insert(0);
+            *have = (*have).max(v);
+        }
+    }
+    n
 }
