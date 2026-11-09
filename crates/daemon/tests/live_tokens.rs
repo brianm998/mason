@@ -160,9 +160,28 @@ fn cost_seen(account: &str, providers: &str) -> Option<bool> {
         60,
         || live_tokens(&d, t).is_some_and(|k| k.input == Some(4) && k.output == Some(50)),
     );
-    // The result follows within moments and the session lingers after it.
-    std::thread::sleep(std::time::Duration::from_secs(3));
-    let out = live_tokens(&d, t).map(|k| k.cost_nano_usd.is_some());
+    // The session writes its result and then lingers: wait until it is in a host's journal
+    // (however slow the machine is), and give the daemon a moment to read it.
+    let hosts = s.data_dir.join("h");
+    wait_for("the session's result", 60, || {
+        std::fs::read_dir(&hosts).is_ok_and(|rd| {
+            // The explore step's session wrote one too; this is the second.
+            rd.flatten()
+                .filter(|e| {
+                    std::fs::read_to_string(e.path().join("journal"))
+                        .is_ok_and(|j| j.contains("\"type\":\"result\""))
+                })
+                .count()
+                >= 2
+        })
+    });
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    let out = d
+        .progress_of_task(t)
+        .iter()
+        .find(|p| p.step == "develop")
+        .and_then(|p| p.token_total())
+        .map(|k| k.cost_nano_usd.is_some());
     wait_state(&d, t, State::Landed, 90);
     out
 }
