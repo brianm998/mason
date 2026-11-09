@@ -257,10 +257,28 @@ fn main() {
         }
         cfg.max_concurrent = 0;
     }
+    // A refusal is not a crash: say so in boots.log before exiting, so the
+    // loader does not count the start it recorded as a build that died.
+    let refuse = |cfg: &mason_daemon::config::DaemonConfig, e: &dyn std::fmt::Display| -> ! {
+        eprintln!("masond: {e}");
+        if let Some(sha) = &cfg.runtime_sha {
+            use mason_daemon::update::{Boots, Runtimes};
+            Boots::new(&Runtimes::new(&cfg.data_dir)).record(
+                mason_daemon::daemon::now_ms(),
+                sha,
+                "refused",
+            );
+        }
+        std::process::exit(1);
+    };
     if let Err(e) = http::ensure_single(&cfg) {
+        if e.kind() == std::io::ErrorKind::AlreadyExists {
+            refuse(&cfg, &e);
+        }
         eprintln!("masond: {e}");
         std::process::exit(1);
     }
+    let cfg_after = cfg.clone();
     let result = rt.block_on(async {
         // Starting the daemon touches git and the store: keep it off the loop.
         let d = tokio::task::spawn_blocking(move || {
@@ -275,10 +293,26 @@ fn main() {
         if demo && !demo_manual {
             d.spawn_demo_player(demo_step);
         }
-        http::serve(d).await.map_err(|e| e.to_string())
+        Ok::<_, String>(http::serve(d).await)
     });
-    if let Err(e) = result {
-        eprintln!("masond: {e}");
-        std::process::exit(1);
+    match result {
+        Ok(Ok(())) => {}
+        // The port is held by another program: refused, not crashed.
+        Ok(Err(e))
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::AddrInUse | std::io::ErrorKind::AlreadyExists
+            ) =>
+        {
+            refuse(&cfg_after, &e)
+        }
+        Ok(Err(e)) => {
+            eprintln!("masond: {e}");
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("masond: {e}");
+            std::process::exit(1);
+        }
     }
 }

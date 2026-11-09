@@ -2752,23 +2752,64 @@ async fn demo_next(Shared(d): Shared<Arc<Daemon>>) -> Res {
     })))
 }
 
-/// Refuse to run if another daemon is already running on this data directory.
-/// Call this *before* opening the store or resuming any work.
+/// The single-daemon lock, held for the life of the process. The file is
+/// opened close-on-exec, so an `exec` (the managed loader, `take_over`) hands
+/// it back; the new image takes it again and `ensure_single` retries briefly.
+static SINGLE_LOCK: std::sync::Mutex<Option<nix::fcntl::Flock<std::fs::File>>> =
+    std::sync::Mutex::new(None);
+
+/// Refuse to run if another daemon is already running on this data directory:
+/// a kernel `flock` on `daemon.lock`, which a dead daemon can never leave held.
+/// Call this *before* opening the store or resuming any work. A repeat call by
+/// the holder does nothing.
 pub fn ensure_single(cfg: &crate::config::DaemonConfig) -> std::io::Result<()> {
-    if let Ok(text) = std::fs::read_to_string(cfg.info_path()) {
-        if let Some(pid) = serde_json::from_str::<Value>(&text)
-            .ok()
-            .and_then(|v| v["pid"].as_u64())
-        {
-            if pid as u32 != std::process::id() && mason_step_host::registry::pid_alive(pid as u32)
-            {
-                return Err(std::io::Error::other(format!(
-                    "a daemon is already running here (pid {pid})"
-                )));
+    use nix::fcntl::{Flock, FlockArg};
+    use std::io::{Read, Seek, Write};
+    let mut held = SINGLE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if held.is_some() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(&cfg.data_dir)?;
+    let path = cfg.data_dir.join("daemon.lock");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let f = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)?;
+        match Flock::lock(f, FlockArg::LockExclusiveNonblock) {
+            Ok(mut l) => {
+                let _ = l.set_len(0);
+                let _ = l.rewind();
+                let _ = write!(&mut *l, "{}", std::process::id());
+                *held = Some(l);
+                return Ok(());
             }
+            Err((mut f, nix::errno::Errno::EWOULDBLOCK)) => {
+                if std::time::Instant::now() < deadline {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    continue;
+                }
+                let mut text = String::new();
+                let _ = f.read_to_string(&mut text);
+                let pid = text.trim().parse::<u32>().ok().or_else(|| {
+                    std::fs::read_to_string(cfg.info_path())
+                        .ok()
+                        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+                        .and_then(|v| v["pid"].as_u64())
+                        .map(|p| p as u32)
+                });
+                let who = pid.map(|p| format!(" (pid {p})")).unwrap_or_default();
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    format!("a daemon is already running here{who}"),
+                ));
+            }
+            Err((_, e)) => return Err(std::io::Error::from(e)),
         }
     }
-    Ok(())
 }
 
 /// Who holds a loopback port, as `pid N (command)`, if `lsof` can say.
