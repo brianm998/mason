@@ -188,8 +188,9 @@ fn task_json(d: &Daemon, w: &World, t: &Task, detail: bool) -> Value {
 
 async fn status(Shared(d): Shared<Arc<Daemon>>) -> Res {
     let d2 = d.clone();
+    // The view pool: `mason status` is how you find out the main pool is stuck.
     let v = d
-        .pool
+        .view_pool
         .run(move || {
             let w = d2.world().map_err(store_err)?;
             let mut counts = serde_json::Map::new();
@@ -221,6 +222,7 @@ async fn status(Shared(d): Shared<Arc<Daemon>>) -> Res {
                     }))
                 }).collect::<Vec<_>>(),
                 "event_loop_stalls": stalls,
+                "pools": {"blocking": d2.pool.stats(), "views": d2.view_pool.stats()},
                 "worst_stall_ms": worst,
                 "bugs": d2.store.bugs().map_or(0, |b| b.len()),
                 "projects": d2.projects.values().map(|p| p.id.clone()).collect::<Vec<_>>(),
@@ -2595,6 +2597,57 @@ async fn debug_stall(
     Ok(Json(json!({"blocked_ms": ms})))
 }
 
+/// Holds a project's repository lock for `ms` (debug daemons only), so a test
+/// can fill the worker pool with work that waits on it.
+async fn debug_hold_repo(
+    Shared(d): Shared<Arc<Daemon>>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Res {
+    if !d.cfg.debug {
+        return Err(fail(StatusCode::NOT_FOUND, "not found"));
+    }
+    let ms: u64 = q.get("ms").and_then(|s| s.parse().ok()).unwrap_or(5000);
+    let pid = d
+        .projects
+        .keys()
+        .next()
+        .copied()
+        .ok_or_else(|| fail(StatusCode::NOT_FOUND, "no project"))?;
+    let d2 = d.clone();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
+        let lock = d2.repo_lock(pid);
+        let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = tx.send(());
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    });
+    let _ = rx.await;
+    Ok(Json(json!({"held_ms": ms})))
+}
+
+/// Runs on the blocking pool and waits on the repository lock (debug daemons
+/// only): the shape of `reload_definition` and `jobs::cleanup`.
+async fn debug_wait_repo(Shared(d): Shared<Arc<Daemon>>) -> Res {
+    if !d.cfg.debug {
+        return Err(fail(StatusCode::NOT_FOUND, "not found"));
+    }
+    let pid = d
+        .projects
+        .keys()
+        .next()
+        .copied()
+        .ok_or_else(|| fail(StatusCode::NOT_FOUND, "no project"))?;
+    let d2 = d.clone();
+    d.pool
+        .run(move || {
+            let lock = d2.repo_lock(pid);
+            let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+        })
+        .await
+        .map_err(pool_err)?;
+    Ok(Json(json!({"waited": true})))
+}
+
 /// Every operation of the API, without the socket. The socket runs its
 /// commands through this same router, so there is one implementation of each.
 pub fn api_router(d: Arc<Daemon>) -> Router {
@@ -2685,6 +2738,8 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/leases/{id}", get(lease_poll))
         .route("/leases/{id}/release", post(lease_release))
         .route("/debug/stall", post(debug_stall))
+        .route("/debug/hold-repo", post(debug_hold_repo))
+        .route("/debug/wait-repo", post(debug_wait_repo))
         .layer(axum::middleware::from_fn_with_state(
             d.clone(),
             record_interventions,

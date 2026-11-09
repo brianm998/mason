@@ -2021,6 +2021,12 @@ fn main() {
                     .collect::<Vec<_>>()
                     .join(", "))
             );
+            for (name, p) in s["pools"].as_object().into_iter().flatten() {
+                println!(
+                    "pool {name}: {} queued of {} ({} threads)",
+                    p["queued"], p["queue_capacity"], p["threads"]
+                );
+            }
             let stalls = s["event_loop_stalls"].as_u64().unwrap_or(0);
             if stalls > 0 {
                 println!(
