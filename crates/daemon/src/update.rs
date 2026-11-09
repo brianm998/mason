@@ -50,6 +50,9 @@ impl Channel {
     }
 }
 
+/// Ten minutes: a fetch of a bare mirror is cheap, and landings are not minutes apart for long.
+pub const DEFAULT_CHECK_INTERVAL_S: u64 = 600;
+
 /// `<config dir>/update.toml`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UpdateCfg {
@@ -62,6 +65,12 @@ pub struct UpdateCfg {
     pub out_dir: String,
     /// The files to keep; the first is the daemon.
     pub bins: Vec<String>,
+    /// How often to look for a newer version, in seconds; 0 never looks.
+    pub check_interval_s: u64,
+    /// Run in a clean copy of the source to build the Swift monitor (replaces the default).
+    pub monitor_swift_build: Option<String>,
+    /// The same for the Compose monitor.
+    pub monitor_compose_build: Option<String>,
 }
 
 impl UpdateCfg {
@@ -95,6 +104,12 @@ impl UpdateCfg {
             build: s("build").unwrap_or_else(|| "cargo build --release --bins".into()),
             out_dir: s("out_dir").unwrap_or_else(|| "target/release".into()),
             bins,
+            check_interval_s: doc
+                .get("check_interval_s")
+                .and_then(|v| v.as_integer())
+                .map_or(DEFAULT_CHECK_INTERVAL_S, |n| n.max(0) as u64),
+            monitor_swift_build: s("monitor_swift_build"),
+            monitor_compose_build: s("monitor_compose_build"),
         })
     }
 
@@ -136,6 +151,10 @@ impl Runtimes {
 
     pub fn mirror(&self) -> PathBuf {
         self.root.join("source.git")
+    }
+
+    pub fn monitors(&self) -> PathBuf {
+        self.root.join("monitors")
     }
 
     fn read(&self, name: &str) -> Option<String> {
@@ -250,6 +269,11 @@ pub fn fetch_source(cfg: &UpdateCfg, rt: &Runtimes) -> Result<(), String> {
     git::run(
         &m,
         &[
+            // A connection that stalls must not hold up an update behind it.
+            "-c",
+            "http.lowSpeedLimit=1",
+            "-c",
+            "http.lowSpeedTime=60",
             "fetch",
             "-q",
             "--prune",
@@ -344,6 +368,28 @@ pub fn check_move(
 
 // ---- building ----------------------------------------------------------------------------------------
 
+/// Run `cmd`, keeping everything it said in `log`. An error carries its last lines.
+fn shell(cwd: &Path, cmd: &str, log: &Path, env: &[(&str, &str)]) -> Result<(), String> {
+    let out = Command::new("sh")
+        .args(["-c", cmd])
+        .current_dir(cwd)
+        .envs(env.iter().copied())
+        .output()
+        .map_err(|e| e.to_string())?;
+    let mut text = String::from_utf8_lossy(&out.stdout).to_string();
+    text.push_str(&String::from_utf8_lossy(&out.stderr));
+    let _ = std::fs::write(log, &text);
+    if out.status.success() {
+        Ok(())
+    } else {
+        let tail: Vec<&str> = text.lines().rev().take(12).collect();
+        Err(format!(
+            "`{cmd}` failed:\n{}",
+            tail.into_iter().rev().collect::<Vec<_>>().join("\n")
+        ))
+    }
+}
+
 /// Build `sha` into `runtimes/<sha>/`: a clean copy of the source at that
 /// commit, the configured build, the binaries copied, then the READY mark.
 /// Safe to repeat; an already complete runtime is left alone.
@@ -354,26 +400,8 @@ pub fn build(cfg: &UpdateCfg, rt: &Runtimes, sha: &str) -> Result<(), String> {
     let src = rt.root.join("src").join(sha);
     let _ = std::fs::remove_dir_all(&src);
     std::fs::create_dir_all(&src).map_err(|e| e.to_string())?;
-    let sh = |cwd: &Path, cmd: &str| -> Result<(), String> {
-        let log = rt.root.join(format!("{sha}.log"));
-        let out = Command::new("sh")
-            .args(["-c", cmd])
-            .current_dir(cwd)
-            .output()
-            .map_err(|e| e.to_string())?;
-        let mut text = String::from_utf8_lossy(&out.stdout).to_string();
-        text.push_str(&String::from_utf8_lossy(&out.stderr));
-        let _ = std::fs::write(&log, &text);
-        if out.status.success() {
-            Ok(())
-        } else {
-            let tail: Vec<&str> = text.lines().rev().take(12).collect();
-            Err(format!(
-                "`{cmd}` failed:\n{}",
-                tail.into_iter().rev().collect::<Vec<_>>().join("\n")
-            ))
-        }
-    };
+    let log = rt.root.join(format!("{sha}.log"));
+    let sh = |cwd: &Path, cmd: &str| shell(cwd, cmd, &log, &[]);
     sh(
         &rt.root,
         &format!(
@@ -587,7 +615,9 @@ fn say(d: &Daemon, phase: &str, line: &str) {
     let mut s = d.update_status.lock().unwrap_or_else(|e| e.into_inner());
     s.phase = phase.into();
     s.log.push(line.into());
+    drop(s);
     tracing::info!(phase, "{line}");
+    d.poke();
 }
 
 fn fail(d: &Daemon, why: String) -> String {
@@ -595,6 +625,8 @@ fn fail(d: &Daemon, why: String) -> String {
     s.phase = "failed".into();
     s.error = Some(why.clone());
     s.log.push(format!("failed: {why}"));
+    drop(s);
+    d.poke();
     why
 }
 
@@ -623,7 +655,7 @@ pub fn run(d: &Arc<Daemon>, req: &Request) -> Result<String, String> {
             "fetching",
             &format!("fetching the source of {}", cfg.repo),
         );
-        fetch_source(&cfg, &rt)?;
+        fetch_locked(d, &cfg, &rt)?;
         let channel = req.channel.clone().unwrap_or_else(|| cfg.channel.clone());
         let target = match &req.sha {
             Some(s) => git::rev_parse(&rt.mirror(), s)
@@ -696,6 +728,7 @@ pub fn run(d: &Arc<Daemon>, req: &Request) -> Result<String, String> {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .phase = "idle".into();
+            d.poke();
             return Ok(target);
         }
         say(
@@ -712,6 +745,434 @@ pub fn run(d: &Arc<Daemon>, req: &Request) -> Result<String, String> {
         Ok(t) => Ok(t),
         Err(e) => Err(fail(d, e)),
     }
+}
+
+/// One fetch into the mirror at a time: the periodic check and an update share it.
+fn fetch_locked(d: &Daemon, cfg: &UpdateCfg, rt: &Runtimes) -> Result<(), String> {
+    let _one = d.update_fetch.lock().unwrap_or_else(|e| e.into_inner());
+    fetch_source(cfg, rt)
+}
+
+// ---- noticing a newer version ----------------------------------------------------------------------
+
+/// The monitors the daemon can build, and the source each is made from. A commit
+/// that touches none of a monitor's paths does not make that monitor out of date.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MonitorKind {
+    pub name: &'static str,
+    paths: &'static [&'static str],
+    /// The default build, run in a clean copy of the source, with the commit in
+    /// `MASON_BUILD_SHA` and the directory to leave the result in in `MASON_MONITOR_OUT`.
+    build: &'static str,
+    /// What the build leaves in that directory: the thing a monitor launches.
+    product: &'static str,
+}
+
+pub const MONITORS: [MonitorKind; 2] = [
+    MonitorKind {
+        name: "swift",
+        // The generated Swift protocol code and tokens are checked in under clients/swift.
+        paths: &["clients/swift", "scripts/bundle-monitor.sh"],
+        build: "bash scripts/bundle-monitor.sh \"$MASON_MONITOR_OUT\"",
+        product: "MASON.app",
+    },
+    MonitorKind {
+        name: "compose",
+        // Wire generates the Kotlin protocol code from the schema at build time.
+        paths: &["clients/compose", "clients/tokens.toml", "schemas/mason.proto"],
+        build: "cd clients/compose && gradle --no-daemon -q -Pmason.build=\"$MASON_BUILD_SHA\" :app:installDist && cp -R app/build/install/app \"$MASON_MONITOR_OUT/app\"",
+        product: "app/bin/mason-monitor",
+    },
+];
+
+pub fn monitor_kind(name: &str) -> Option<MonitorKind> {
+    MONITORS.into_iter().find(|m| m.name == name)
+}
+
+/// Paths whose changes do not reach the daemon's binaries: a landing that only
+/// regenerates the README is not an update worth building.
+const NOT_THE_DAEMON: [&str; 4] = [
+    ":(exclude)docs",
+    ":(exclude)clients",
+    ":(exclude).github",
+    ":(exclude,top,glob)*.md",
+];
+
+/// What the last look at the channel found.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Check {
+    pub channel: String,
+    /// The channel's tip.
+    pub latest: String,
+    /// How many commits the daemon is behind, when `outdated`.
+    pub behind: u32,
+    /// The daemon is an ancestor of the tip, and something that goes into it changed.
+    pub outdated: bool,
+    /// `(kind, the newest commit that changed that monitor)`.
+    pub monitors: Vec<(String, String)>,
+    pub at_ms: u64,
+    /// Why the last look failed; what it found before that stands.
+    pub error: Option<String>,
+}
+
+/// Compare what runs with the channel, in the mirror. `running` is `None` for a
+/// daemon run from a build directory, which has no commit to compare and does not nag.
+/// Only a plain step forward counts: a downgrade, a sideways branch and a build that
+/// was rolled back from are for someone to ask for by name.
+pub fn assess(
+    channel: &Channel,
+    mirror: &Path,
+    running: Option<&str>,
+    bad: &[String],
+) -> Result<Check, String> {
+    let latest = resolve(channel, mirror)?;
+    let mut c = Check {
+        channel: channel.name(),
+        latest: latest.clone(),
+        ..Default::default()
+    };
+    if let Some(r) = running {
+        if check_move(mirror, Some(r), &latest, false, bad) == Ok(Move::Forward) {
+            let mut diff = vec!["diff", "--name-only", r, &latest, "--"];
+            diff.extend(NOT_THE_DAEMON);
+            c.outdated = !git::run(mirror, &diff)
+                .map_err(|e| e.to_string())?
+                .is_empty();
+            c.behind = git::commits_ahead(mirror, r, &latest).map_err(|e| e.to_string())?;
+        }
+    }
+    for m in MONITORS {
+        c.monitors
+            .push((m.name.into(), latest_of(m, mirror, &latest)?));
+    }
+    Ok(c)
+}
+
+/// The newest commit at or before `tip` that changed this monitor.
+fn latest_of(m: MonitorKind, mirror: &Path, tip: &str) -> Result<String, String> {
+    let mut args = vec!["rev-list", "-1", tip, "--"];
+    args.extend(m.paths);
+    git::run(mirror, &args).map_err(|e| e.to_string())
+}
+
+/// Look at the channel once, and tell the monitors if that changed anything.
+/// Returns how long to wait before looking again.
+pub fn check_once(d: &Arc<Daemon>) -> std::time::Duration {
+    let cfg = match UpdateCfg::load(&d.cfg.config_dir) {
+        Ok(c) => c,
+        Err(_) => {
+            set_check(d, Check::default());
+            return std::time::Duration::from_secs(DEFAULT_CHECK_INTERVAL_S);
+        }
+    };
+    if cfg.check_interval_s == 0 {
+        set_check(d, Check::default());
+        return std::time::Duration::from_secs(DEFAULT_CHECK_INTERVAL_S);
+    }
+    let rt = Runtimes::new(&d.cfg.data_dir);
+    let found = fetch_locked(d, &cfg, &rt).and_then(|()| {
+        assess(
+            &cfg.channel,
+            &rt.mirror(),
+            d.cfg.runtime_sha.as_deref(),
+            &rt.bad(),
+        )
+    });
+    let next = match found {
+        Ok(c) => Check {
+            at_ms: now_ms(),
+            ..c
+        },
+        Err(e) => {
+            tracing::warn!("could not look for a newer version: {e}");
+            Check {
+                at_ms: now_ms(),
+                error: Some(e),
+                ..d.update_check
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone()
+            }
+        }
+    };
+    set_check(d, next);
+    std::time::Duration::from_secs(cfg.check_interval_s)
+}
+
+fn set_check(d: &Daemon, new: Check) {
+    let mut c = d.update_check.lock().unwrap_or_else(|e| e.into_inner());
+    // A push only when what a monitor would show moved, not every ten minutes.
+    let same = Check {
+        at_ms: c.at_ms,
+        error: c.error.clone(),
+        ..new.clone()
+    } == *c;
+    *c = new;
+    drop(c);
+    if !same {
+        d.poke();
+    }
+}
+
+/// Look now, and every `check_interval_s` after that, for as long as the daemon lives.
+pub fn spawn_checker(d: &Arc<Daemon>) {
+    let weak = Arc::downgrade(d);
+    let _ = std::thread::Builder::new()
+        .name("update-check".into())
+        .spawn(move || loop {
+            let Some(d) = weak.upgrade() else { break };
+            let wait = check_once(&d);
+            drop(d);
+            std::thread::sleep(wait);
+        });
+}
+
+/// What the header says. Text is made here so that the two monitors say the same thing.
+pub fn info(d: &Daemon) -> Option<mason_protocol::UpdateInfo> {
+    let c = d
+        .update_check
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    if c.latest.is_empty() {
+        return None;
+    }
+    let s = d
+        .update_status
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let (daemon_text, daemon_can_update) =
+        daemon_banner(&c, d.cfg.runtime_sha.as_deref().unwrap_or_default(), &s);
+    let builds = d
+        .monitor_builds
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let monitors = c
+        .monitors
+        .iter()
+        .map(|(kind, latest)| {
+            let b = builds.get(kind).cloned().unwrap_or_default();
+            mason_protocol::MonitorBuild {
+                kind: kind.clone(),
+                latest: latest.clone(),
+                phase: b.phase,
+                error: b.error,
+                path: b.path,
+            }
+        })
+        .collect();
+    Some(mason_protocol::UpdateInfo {
+        daemon_text,
+        daemon_can_update,
+        monitors,
+    })
+}
+
+fn short(sha: &str) -> &str {
+    &sha[..sha.len().min(8)]
+}
+
+/// Pure: the sentence about the daemon, and whether the button is live.
+fn daemon_banner(c: &Check, running: &str, s: &Status) -> (String, bool) {
+    let target = s.target.as_deref().unwrap_or(&c.latest);
+    match s.phase.as_str() {
+        "fetching" => ("Updating masond: fetching the source…".into(), false),
+        "building" => (
+            format!("Updating masond: building {}…", short(target)),
+            false,
+        ),
+        "testing" => (
+            format!(
+                "Updating masond: testing {} on a copy of the database…",
+                short(target)
+            ),
+            false,
+        ),
+        "taking over" => (
+            format!("Updating masond: restarting on {}…", short(target)),
+            false,
+        ),
+        "failed" if c.outdated => {
+            let why = s
+                .error
+                .as_deref()
+                .unwrap_or("")
+                .lines()
+                .next()
+                .unwrap_or("");
+            (
+                format!("The masond update failed and the running daemon is unchanged: {why} (`mason update status` has more)"),
+                true,
+            )
+        }
+        _ if c.outdated => {
+            let (n, plural) = (c.behind, if c.behind == 1 { "" } else { "s" });
+            let channel = c.channel.strip_prefix("branch:").unwrap_or(&c.channel);
+            (
+                format!(
+                    "masond is {n} commit{plural} behind {channel} ({} → {}).",
+                    short(running),
+                    short(&c.latest)
+                ),
+                true,
+            )
+        }
+        _ => (String::new(), false),
+    }
+}
+
+// ---- building a monitor ------------------------------------------------------------------------------
+
+/// Where the build of one kind of monitor is.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MonitorState {
+    /// `""`, `building`, `ready` or `failed`.
+    pub phase: String,
+    pub error: String,
+    pub path: String,
+}
+
+/// Build the monitor at `sha` into `runtimes/monitors/<kind>-<sha>/`, in a clean
+/// copy of the source, complete or absent like a daemon runtime. Returns what to
+/// launch. Safe to repeat; a finished build is left alone.
+pub fn build_monitor(
+    cfg: &UpdateCfg,
+    rt: &Runtimes,
+    kind: MonitorKind,
+    sha: &str,
+) -> Result<PathBuf, String> {
+    let name = format!("{}-{sha}", kind.name);
+    let done = rt.monitors().join(&name);
+    if done.join("READY").is_file() {
+        return Ok(done.join(kind.product));
+    }
+    let command = match kind.name {
+        "swift" => cfg.monitor_swift_build.as_deref(),
+        _ => cfg.monitor_compose_build.as_deref(),
+    }
+    .unwrap_or(kind.build);
+    let src = rt.root.join("src").join(format!("monitor-{name}"));
+    let partial = rt.monitors().join(format!("{name}.partial"));
+    let log = rt.monitors().join(format!("{name}.log"));
+    for d in [&src, &partial] {
+        let _ = std::fs::remove_dir_all(d);
+        std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
+    }
+    shell(
+        &rt.root,
+        &format!(
+            "git --git-dir='{}' archive {sha} | tar -x -C '{}'",
+            rt.mirror().display(),
+            src.display()
+        ),
+        &log,
+        &[],
+    )?;
+    let out = partial.display().to_string();
+    let built = shell(
+        &src,
+        command,
+        &log,
+        &[("MASON_BUILD_SHA", sha), ("MASON_MONITOR_OUT", &out)],
+    );
+    let _ = std::fs::remove_dir_all(&src);
+    built?;
+    if !partial.join(kind.product).exists() {
+        return Err(format!(
+            "the monitor build did not produce {}",
+            kind.product
+        ));
+    }
+    std::fs::write(partial.join("READY"), "").map_err(|e| e.to_string())?;
+    let _ = std::fs::remove_dir_all(&done);
+    std::fs::rename(&partial, &done).map_err(|e| e.to_string())?;
+    prune_monitors(rt, kind, &name);
+    Ok(done.join(kind.product))
+}
+
+/// Keep the build just made and the newest one before it (the monitor being
+/// replaced may still be running from that one).
+fn prune_monitors(rt: &Runtimes, kind: MonitorKind, keep: &str) {
+    let Ok(entries) = std::fs::read_dir(rt.monitors()) else {
+        return;
+    };
+    let prefix = format!("{}-", kind.name);
+    let mut old: Vec<(std::time::SystemTime, PathBuf)> = entries
+        .flatten()
+        .filter(|e| {
+            let n = e.file_name().to_string_lossy().to_string();
+            n.starts_with(&prefix)
+                && n != keep
+                && e.file_type().is_ok_and(|t| t.is_dir())
+                && !n.ends_with(".partial")
+        })
+        .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
+        .collect();
+    old.sort();
+    old.pop();
+    for (_, p) in old {
+        let _ = std::fs::remove_dir_all(&p);
+        let _ = std::fs::remove_file(p.with_extension("log"));
+    }
+}
+
+fn set_monitor(d: &Daemon, kind: &str, state: MonitorState) {
+    d.monitor_builds
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(kind.into(), state);
+    d.poke();
+}
+
+/// Start building the newest version of a monitor, unless one is being built.
+/// The state says `building` before this returns; the rest happens on its own thread.
+pub fn start_monitor_build(d: &Arc<Daemon>, kind: MonitorKind) -> Result<(), String> {
+    {
+        let mut b = d.monitor_builds.lock().unwrap_or_else(|e| e.into_inner());
+        if b.get(kind.name).is_some_and(|s| s.phase == "building") {
+            return Err(format!("the {} monitor is already being built", kind.name));
+        }
+        b.insert(
+            kind.name.into(),
+            MonitorState {
+                phase: "building".into(),
+                ..Default::default()
+            },
+        );
+    }
+    d.poke();
+    let d = d.clone();
+    let _ = std::thread::Builder::new()
+        .name("monitor-build".into())
+        .spawn(move || {
+            let go = || -> Result<PathBuf, String> {
+                let cfg = UpdateCfg::load(&d.cfg.config_dir)?;
+                let rt = Runtimes::new(&d.cfg.data_dir);
+                fetch_locked(&d, &cfg, &rt)?;
+                let tip = resolve(&cfg.channel, &rt.mirror())?;
+                let sha = latest_of(kind, &rt.mirror(), &tip)?;
+                build_monitor(&cfg, &rt, kind, &sha)
+            };
+            let state = match go() {
+                Ok(p) => MonitorState {
+                    phase: "ready".into(),
+                    path: p.display().to_string(),
+                    ..Default::default()
+                },
+                Err(e) => {
+                    tracing::warn!(kind = kind.name, "monitor build failed: {e}");
+                    MonitorState {
+                        phase: "failed".into(),
+                        error: e.lines().next().unwrap_or_default().to_string(),
+                        ..Default::default()
+                    }
+                }
+            };
+            set_monitor(&d, kind.name, state);
+        });
+    Ok(())
 }
 
 /// Replace this process with the new runtime, keeping its pid. The step hosts
@@ -1011,6 +1472,205 @@ mod tests {
             check_move(&m, None, &s[0], false, &[]).unwrap(),
             Move::Forward
         );
+    }
+
+    /// One more commit on main, changing `files`.
+    fn commit(repo: &Path, files: &[&str]) -> String {
+        for f in files {
+            let p = repo.join(f);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, format!("{f} {:?}", std::time::SystemTime::now())).unwrap();
+        }
+        sh(repo, &["add", "-A"]);
+        sh(
+            repo,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-qm",
+                "more",
+            ],
+        );
+        sh(repo, &["rev-parse", "HEAD"])
+    }
+
+    #[test]
+    fn a_daemon_is_out_of_date_only_when_a_step_forward_changes_what_goes_into_it() {
+        let (d, rt, cfg, s) = source();
+        let repo = d.path().join("src");
+        let m = rt.mirror();
+        let main = Channel::Main;
+        // At the tip, and from a build directory: nothing to say.
+        assert!(!assess(&main, &m, Some(&s[2]), &[]).unwrap().outdated);
+        assert!(!assess(&main, &m, None, &[]).unwrap().outdated);
+
+        // One commit forward: behind by one.
+        let code = commit(&repo, &["crates/daemon/x.rs"]);
+        fetch_source(&cfg, &rt).unwrap();
+        let c = assess(&main, &m, Some(&s[2]), &[]).unwrap();
+        assert_eq!(
+            (c.outdated, c.behind, c.latest.as_str()),
+            (true, 1, code.as_str())
+        );
+
+        // Commits that cannot change the daemon do not count on their own.
+        let tip = commit(
+            &repo,
+            &["README.md", "docs/stages/s1.md", "clients/swift/App.swift"],
+        );
+        fetch_source(&cfg, &rt).unwrap();
+        let c = assess(&main, &m, Some(&code), &[]).unwrap();
+        assert_eq!(c.latest, tip);
+        assert!(!c.outdated, "docs and clients only: {c:?}");
+        // But they are counted once the daemon is behind for a real reason.
+        assert_eq!(assess(&main, &m, Some(&s[2]), &[]).unwrap().behind, 2);
+
+        // A nested markdown file outside docs is still source.
+        let nested = commit(&repo, &["prompts/develop.md"]);
+        fetch_source(&cfg, &rt).unwrap();
+        assert!(assess(&main, &m, Some(&tip), &[]).unwrap().outdated);
+
+        // Ahead of the channel, on another branch, or moving to a bad build: no offer.
+        assert!(
+            !assess(&Channel::Branch("side".into()), &m, Some(&s[2]), &[])
+                .unwrap()
+                .outdated
+        );
+        assert!(
+            !assess(
+                &Channel::Main,
+                &m,
+                Some(&tip),
+                std::slice::from_ref(&nested)
+            )
+            .unwrap()
+            .outdated
+        );
+    }
+
+    #[test]
+    fn a_monitor_is_out_of_date_only_when_its_own_source_changed() {
+        let (d, rt, cfg, s) = source();
+        let repo = d.path().join("src");
+        let latest = |c: &Check, k: &str| {
+            c.monitors
+                .iter()
+                .find(|(n, _)| n == k)
+                .map(|(_, l)| l.clone())
+                .unwrap()
+        };
+        let swift = commit(&repo, &["clients/swift/App.swift"]);
+        let compose = commit(&repo, &["clients/compose/Main.kt"]);
+        let schema = commit(&repo, &["schemas/mason.proto"]);
+        let _unrelated = commit(&repo, &["crates/daemon/x.rs", "README.md"]);
+        fetch_source(&cfg, &rt).unwrap();
+        let c = assess(&Channel::Main, &rt.mirror(), Some(&s[0]), &[]).unwrap();
+        assert_eq!(latest(&c, "swift"), swift, "generated Swift is checked in");
+        assert_eq!(
+            latest(&c, "compose"),
+            schema,
+            "Wire reads the schema at build time"
+        );
+        assert_ne!(compose, schema);
+    }
+
+    fn check(outdated: bool) -> Check {
+        Check {
+            channel: "branch:develop".into(),
+            latest: "bbbbbbbbbbbb".into(),
+            behind: 3,
+            outdated,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_banner_says_where_an_update_is_and_when_the_button_is_live() {
+        let idle = Status {
+            phase: "idle".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            daemon_banner(&check(true), "aaaaaaaaaaaa", &idle),
+            (
+                "masond is 3 commits behind develop (aaaaaaaa → bbbbbbbb).".to_string(),
+                true
+            )
+        );
+        assert_eq!(
+            daemon_banner(&check(false), "a", &idle),
+            (String::new(), false)
+        );
+        for phase in ["fetching", "building", "testing", "taking over"] {
+            let s = Status {
+                phase: phase.into(),
+                ..Default::default()
+            };
+            let (text, live) = daemon_banner(&check(true), "a", &s);
+            assert!(
+                text.starts_with("Updating masond") && !live,
+                "{phase}: {text}"
+            );
+        }
+        let failed = Status {
+            phase: "failed".into(),
+            error: Some("`cargo build` failed:\nlots\nof lines".into()),
+            ..Default::default()
+        };
+        let (text, live) = daemon_banner(&check(true), "a", &failed);
+        assert!(
+            text.contains("`cargo build` failed:") && !text.contains("lots") && live,
+            "{text}"
+        );
+        assert_eq!(
+            daemon_banner(&check(false), "a", &failed),
+            (String::new(), false)
+        );
+    }
+
+    #[test]
+    fn a_monitor_build_is_complete_or_absent_and_gets_its_commit() {
+        let (_d, rt, mut cfg, s) = source();
+        let kind = monitor_kind("swift").unwrap();
+        cfg.monitor_swift_build =
+            Some("mkdir \"$MASON_MONITOR_OUT/MASON.app\" && echo \"$MASON_BUILD_SHA\" > \"$MASON_MONITOR_OUT/MASON.app/stamp\"".into());
+        let app = build_monitor(&cfg, &rt, kind, &s[0]).unwrap();
+        assert!(app.ends_with("MASON.app"));
+        assert_eq!(
+            std::fs::read_to_string(app.join("stamp")).unwrap().trim(),
+            s[0]
+        );
+        assert!(!rt
+            .root
+            .join("src")
+            .join(format!("monitor-swift-{}", s[0]))
+            .exists());
+        // A finished build is not repeated.
+        cfg.monitor_swift_build = Some("exit 1".into());
+        assert_eq!(build_monitor(&cfg, &rt, kind, &s[0]).unwrap(), app);
+        // A failing build, or one that makes nothing, leaves nothing that looks complete.
+        let e = build_monitor(&cfg, &rt, kind, &s[1]).unwrap_err();
+        assert!(e.contains("failed"), "{e}");
+        cfg.monitor_swift_build = Some("true".into());
+        let e = build_monitor(&cfg, &rt, kind, &s[1]).unwrap_err();
+        assert!(e.contains("did not produce"), "{e}");
+        assert!(!rt.monitors().join(format!("swift-{}", s[1])).exists());
+    }
+
+    #[test]
+    fn old_monitor_builds_are_removed_but_the_one_before_stays() {
+        let (_d, rt, mut cfg, s) = source();
+        let kind = monitor_kind("swift").unwrap();
+        cfg.monitor_swift_build = Some("mkdir \"$MASON_MONITOR_OUT/MASON.app\"".into());
+        for sha in &s[..3] {
+            build_monitor(&cfg, &rt, kind, sha).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let there = |sha: &str| rt.monitors().join(format!("swift-{sha}")).exists();
+        assert!(!there(&s[0]) && there(&s[1]) && there(&s[2]));
     }
 
     #[test]

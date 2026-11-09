@@ -28,7 +28,7 @@ fun main(args: Array<String>) = application {
         }
     }
     val state = rememberWindowState(width = 1360.dp, height = 860.dp)
-    remember { model.onUpdate = { updateMonitor(model) }; 0 }
+    remember { model.onInstall = { installMonitor(model, it) }; 0 }
     LaunchedEffect(Unit) {
         // The daemon may not be up yet: look for it until it is.
         while (true) {
@@ -68,32 +68,10 @@ internal fun shortcut(model: MonitorModel, e: KeyEvent): Boolean {
     }
 }
 
-/**
- * The update button: build the new monitor from the source checkout, launch it, close
- * this one. (Fetching a signed build is not built yet; with no checkout the plan says so.)
- */
-fun updateMonitor(model: MonitorModel) {
-    when (val plan = ClientUpdate.plan(System.getenv())) {
-        is UpdatePlan.Unavailable -> model.updating = plan.why
-        is UpdatePlan.OpenPage -> runCatching { java.awt.Desktop.getDesktop().browse(java.net.URI(plan.url)) }
-        is UpdatePlan.BuildFromSource -> {
-            model.updating = "Building the new monitor…"
-            Thread {
-                val dir = java.io.File(plan.dir, "clients/compose")
-                val built = ProcessBuilder("gradle", "--no-daemon", "-q", ":app:installDist")
-                    .directory(dir).redirectErrorStream(true).redirectOutput(ProcessBuilder.Redirect.DISCARD)
-                    .start().waitFor() == 0
-                if (!built) {
-                    model.updating = "The build of the new monitor failed; this one keeps running."
-                    return@Thread
-                }
-                model.updating = "Starting the new monitor…"
-                val started = runCatching {
-                    ProcessBuilder(java.io.File(dir, "app/build/install/app/bin/app").path)
-                        .redirectErrorStream(true).redirectOutput(ProcessBuilder.Redirect.DISCARD).start()
-                }.isSuccess
-                if (started) kotlin.system.exitProcess(0) else model.updating = "The new monitor would not start; this one keeps running."
-            }.start()
-        }
-    }
+/** The daemon has built a new monitor at [path]: start it and close this one. */
+fun installMonitor(model: MonitorModel, path: String) {
+    val started = runCatching {
+        ProcessBuilder(path).redirectErrorStream(true).redirectOutput(ProcessBuilder.Redirect.DISCARD).start()
+    }.isSuccess
+    if (started) kotlin.system.exitProcess(0) else model.monitorUpdateFailed("The new monitor would not start; this one keeps running.")
 }

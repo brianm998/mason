@@ -53,14 +53,70 @@ public final class MonitorModel: ObservableObject {
     /// Set when the daemon needs a newer protocol than this monitor speaks: nothing
     /// can be sent, and this says why.
     @Published public var readOnlyReason: String?
-    /// What the update is doing (or why it cannot), while the user has asked for one.
+    /// What this monitor's update is doing, while the user has asked for one.
     @Published public var updating: String?
-    /// Run when the user presses the update button (the app does the work).
-    public var onUpdate: (() -> Void)?
+    /// Why the last update of this monitor did not happen.
+    @Published public var updateError: String?
+    /// Puts the finished build (a path on this machine) in place, launches it and quits.
+    /// Only the desktop app sets this; a phone has no way to replace itself.
+    public var onInstall: ((String) -> Void)?
+    /// The daemon said this monitor's build is on its way.
+    private var monitorAsked = false
+    /// The connection is to a daemon on this machine, so a path it gives is one we can open.
+    @Published public private(set) var localDaemon = true
+    public static let monitorKind = "swift"
 
-    /// Is there a newer monitor? Only when both builds are real versions and differ.
+    var updateInfo: Mason_V1_UpdateInfo? { header?.hasUpdate == true ? header?.update : nil }
+    var monitorBuild: Mason_V1_MonitorBuild? { updateInfo?.monitors.first { $0.kind == Self.monitorKind } }
+
+    /// Has this monitor's own source changed on the update channel? Never for a build
+    /// nobody stamped, so development builds do not nag.
     public var updateAvailable: Bool {
-        !daemonVersion.isEmpty && daemonVersion != "dev" && ownVersion != "dev" && daemonVersion != ownVersion
+        guard canAct, localDaemon, onInstall != nil, ownVersion != "dev", let b = monitorBuild else { return false }
+        return !b.latest.isEmpty && b.latest != ownVersion
+    }
+    /// The commit a monitor update would go to.
+    public var latestMonitor: String { monitorBuild?.latest ?? "" }
+
+    /// What to say about the daemon's own version; empty when there is nothing to say.
+    public var daemonUpdateText: String { updateInfo?.daemonText ?? "" }
+    public var canUpdateDaemon: Bool { canAct && updateInfo?.daemonCanUpdate == true }
+
+    /// The owner's button: the daemon builds its newest version, proves it and takes over.
+    public func updateDaemon() { raw("POST", "/update", json: "{}") }
+
+    /// The owner's button: the daemon builds the newest monitor; `noteMonitorBuild` takes it from there.
+    public func updateMonitor() {
+        updateError = nil
+        updating = "Building the new monitor…"
+        var c = Mason_V1_Command()
+        c.id = "update-monitor"
+        c.raw = .with { $0.method = "POST"; $0.path = "/update/monitor"; $0.json = "{\"kind\":\"\(Self.monitorKind)\"}" }
+        send(c)
+    }
+
+    /// The update of this monitor stopped; this one keeps running.
+    public func monitorUpdateFailed(_ why: String) {
+        monitorAsked = false
+        updating = nil
+        updateError = why
+    }
+
+    /// Follow the build the owner asked for, from each new header.
+    private func noteMonitorBuild() {
+        guard monitorAsked else { return }
+        switch monitorBuild?.phase {
+        case "building":
+            break
+        case "ready":
+            monitorAsked = false
+            updating = "Starting the new monitor…"
+            onInstall?(monitorBuild?.path ?? "")
+        case "failed":
+            monitorUpdateFailed("The new monitor did not build: \(monitorBuild?.error ?? "")")
+        default:
+            monitorUpdateFailed("The daemon restarted during the build. Press Update to start it again.")
+        }
     }
 
     // The user's.
@@ -434,6 +490,9 @@ public final class MonitorModel: ObservableObject {
             announcer.connectionRestored()
             if w.resume == .snapshot { lastSeq = 0 }
             daemonVersion = w.version
+            localDaemon = w.role.isEmpty
+            // A build asked for on the connection that just went has no answer coming.
+            if !monitorAsked { updating = nil }
             anchor(daemonNow: w.nowMs)
             isOwner = w.owner
             readOnlyReason = w.minProtocol > Self.protocolVersion
@@ -469,7 +528,9 @@ public final class MonitorModel: ObservableObject {
 
     func apply(_ v: Mason_V1_View) {
         switch v.body {
-        case .header(let x)?: header = x
+        case .header(let x)?:
+            header = x
+            noteMonitorBuild()
         case .sidebar(let x)?:
             sidebar = x
             noteAttention(x)
@@ -490,6 +551,9 @@ public final class MonitorModel: ObservableObject {
     func handle(result r: Mason_V1_CommandResult) {
         if r.id.hasPrefix("publish:"), r.ok { publishPreview = PublishPreview(json: r.json) }
         if r.id == "announce", r.ok { announcer.handle(claim: r.json) }
+        if r.id == "update-monitor" {
+            if r.ok { monitorAsked = true } else { monitorUpdateFailed(r.error) }
+        }
         if r.id == "health", r.ok { health = HealthSnapshot(json: r.json) }
         if r.id == "introspection", r.ok { introspection = IntrospectionSnapshot(json: r.json) }
     }
@@ -540,6 +604,16 @@ public struct HealthSnapshot: Equatable, Sendable {
     public var resources: [Resource] = []
     public var waiting: [String] = []
     public var holders: [String] = []
+    /// Overall CPU use now, if the daemon could read it.
+    public var cpuBusy: Int? = nil
+    /// A compile starts only while CPU use is below this percent.
+    public var compileCpuMax: Int = 50
+
+    /// The CPU line of the Health page.
+    public var cpuLine: String {
+        guard let b = cpuBusy else { return "CPU not readable; a compile starts below \(compileCpuMax)%." }
+        return "CPU \(b)% busy; a compile starts below \(compileCpuMax)%."
+    }
 
     public init(json: String) {
         guard let data = json.data(using: .utf8),
@@ -556,6 +630,10 @@ public struct HealthSnapshot: Equatable, Sendable {
             "\($0["label"] as? String ?? "?"): \($0["explain"] as? String ?? "")"
         }
         holders = (v["holders"] as? [[String: Any]] ?? []).map { $0["label"] as? String ?? "?" }
+        if let c = v["cpu"] as? [String: Any] {
+            cpuBusy = c["busy_pct"] as? Int
+            compileCpuMax = c["compile_max_pct"] as? Int ?? 50
+        }
     }
 }
 

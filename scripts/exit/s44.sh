@@ -6,7 +6,7 @@
 #  2. `mason task add` as the owner is accepted past the cap; `mason self` shows the split.
 #  3. An issue by an owner name is imported past the cap.
 #  4. Cancelling a task before any step started frees a slot: the 4th outside issue comes in.
-#  5. max_open still refuses the owner.
+#  5. max_open no longer refuses the owner (s48): only work MASON starts for itself is counted.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 root=$(mktemp -d /tmp/mason-s44.XXXXXX); daemon=""; gh=""
@@ -127,11 +127,10 @@ refresh
 self_line | grep -q '3 of 3 this week (4 of yours not counted)' || fail "the cancelled task was not moved out of the count"
 self_line | sed 's/^/   /'
 
-echo "== 5. max_open still refuses the owner"
-m task add "fills max_open" --project self --explored >/dev/null || fail "the last open slot was refused"
-if m task add "one too many" --project self --explored >"$root/refused" 2>&1; then fail "filing past max_open was accepted"; fi
-grep -q 'self-tasks are open and the limit is 7' "$root/refused" || fail "wrong refusal: $(cat "$root/refused")"
-echo "   refused: $(tail -1 "$root/refused")"
+echo "== 5. max_open does not refuse the owner (s48)"
+for n in 1 2 3 4; do m task add "owner task $n" --project self --explored >/dev/null || fail "the owner's task $n was refused"; done
+m self | grep -q 'yours open, not limited' || fail "mason self does not show the owner's open tasks as not limited"
+echo "   $(m self | grep '^self:')"
 
 trap - EXIT; cleanup
 echo "s44 OK"

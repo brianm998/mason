@@ -3,7 +3,7 @@
 //! The ordering rule, the passing rule, and "no deadlock, no lost lease",
 //! checked over random workloads by simulating the whole run.
 
-use mason_scheduler::{explain, Kind, Ledger, Needs, Rank, WaitCause};
+use mason_scheduler::{explain, CpuGate, Kind, Ledger, Needs, Rank, WaitCause};
 use proptest::prelude::*;
 use std::collections::BTreeMap;
 
@@ -305,4 +305,74 @@ fn a_request_bigger_than_its_limit_does_not_hold_up_the_others() {
     l.release(ok);
     l.set_capacity("compile", 3, Kind::Machine);
     assert_eq!(l.schedule(1, None, None).grants, vec![big]);
+}
+
+#[test]
+fn a_compile_waits_while_cpu_is_high_even_alone_and_starts_when_it_falls() {
+    let mut l = Ledger::new();
+    l.set_capacity("compile", 4, Kind::Machine);
+    let gate = |busy_pct| {
+        Some(CpuGate {
+            busy_pct,
+            max_pct: 50,
+        })
+    };
+    let a = l.submit(
+        Rank::new(false, 1, 2, 1, 1, false),
+        Needs::of(&[("compile", 1)]),
+        "#1",
+        0,
+    );
+    let p = l.schedule_gated(0, None, None, gate(71));
+    assert!(p.grants.is_empty());
+    assert_eq!(explain(&p.waits[&a], 0), "compile waiting: CPU 71% > 50%");
+    // At the limit still waits; below it starts on the first pass.
+    assert!(l.schedule_gated(1, None, None, gate(50)).grants.is_empty());
+    assert_eq!(l.schedule_gated(2, None, None, gate(49)).grants, vec![a]);
+    // A compile that has started is never revoked when load rises.
+    let p = l.schedule_gated(3, None, None, gate(99));
+    assert!(l.holds(a) && p.grants.is_empty());
+}
+
+#[test]
+fn the_cpu_gate_leaves_other_resources_alone() {
+    let mut l = Ledger::new();
+    l.set_capacity("llm:claude", 2, Kind::Llm);
+    l.set_capacity("compile", 1, Kind::Machine);
+    let hot = Some(CpuGate {
+        busy_pct: 100,
+        max_pct: 50,
+    });
+    let a = l.submit(
+        Rank::new(false, 1, 2, 1, 1, false),
+        Needs::of(&[("llm:claude", 1)]),
+        "#1",
+        0,
+    );
+    assert_eq!(l.schedule_gated(0, None, None, hot).grants, vec![a]);
+}
+
+#[test]
+fn llm_sessions_beyond_the_limit_wait_and_none_are_refused() {
+    let mut l = Ledger::new();
+    l.set_capacity("llm:claude", 10, Kind::Llm);
+    let ids: Vec<u64> = (1..=25)
+        .map(|i| {
+            l.submit(
+                Rank::new(false, 1, 2, i, i, false),
+                Needs::of(&[("llm:claude", 1)]),
+                &format!("#{i}"),
+                0,
+            )
+        })
+        .collect();
+    let p = l.schedule(0, None, None);
+    assert_eq!(p.grants.len(), 10);
+    assert_eq!(p.waits.len(), 15);
+    assert!(p
+        .waits
+        .values()
+        .all(|w| matches!(w.cause, WaitCause::Full { .. })));
+    l.release(ids[0]);
+    assert_eq!(l.schedule(1, None, None).grants, vec![ids[10]]);
 }
