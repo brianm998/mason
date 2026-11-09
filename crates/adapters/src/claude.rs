@@ -10,8 +10,8 @@
 use mason_adapter_api::contract::preamble;
 use mason_adapter_api::{
     netguard, AdapterError, AgentAdapter, AgentCaps, AgentEvent, BillingKind, Blocked, BlockedWhy,
-    Canceller, Outcome, Overage, OverageState, SessionHandle, SessionSpec, TokenReport, UsageModel,
-    UsageSnapshot, Window, WindowSpec, WindowState,
+    Canceller, Outcome, Overage, OverageState, PlanItem, PlanStatus, SessionHandle, SessionSpec,
+    TokenReport, UsageModel, UsageSnapshot, Window, WindowSpec, WindowState,
 };
 use nix::sys::signal::{killpg, Signal};
 use nix::unistd::Pid;
@@ -168,6 +168,11 @@ impl ClaudeAdapter {
             "--verbose",
             "--output-format",
             "stream-json",
+            // Each message then ends with a `message_delta` holding its true output
+            // figure; without it the stream's output count stays far too low until
+            // the final `result`. The extra `stream_event` lines are kept out of the
+            // output counts (`mason_core::progress`).
+            "--include-partial-messages",
             "--strict-mcp-config",
         ]
         .map(String::from)
@@ -187,9 +192,9 @@ impl ClaudeAdapter {
 
         // Built-in tools: read-only steps get no way to change the tree.
         let builtins: &[&str] = if spec.step.read_only() {
-            &["Read", "Grep", "Glob"]
+            &["Read", "Grep", "Glob", "TodoWrite"]
         } else {
-            &["Read", "Grep", "Glob", "Edit", "Write", "Bash"]
+            &["Read", "Grep", "Glob", "Edit", "Write", "Bash", "TodoWrite"]
         };
         args.extend(["--tools".into(), builtins.join(",")]);
         let mut allowed: Vec<String> = builtins.iter().map(|s| s.to_string()).collect();
@@ -279,6 +284,7 @@ impl AgentAdapter for ClaudeAdapter {
             mcp: true,
             effort_levels: EFFORT_LEVELS.map(String::from).to_vec(),
             usage_reports: true,
+            plan_reports: true,
         }
     }
 
@@ -412,6 +418,7 @@ pub(crate) fn launch_process(
     }
 
     let accepted = spec.accepted.clone();
+    let on_tokens = spec.on_tokens.clone();
     {
         let (sid, cancelled, timed_out, done) = (
             session_id.clone(),
@@ -423,7 +430,11 @@ pub(crate) fn launch_process(
             let mut st = ParseState::new(dialect);
             for line in BufReader::new(stdout).lines() {
                 let Ok(line) = line else { break };
-                for ev in parse_line(&line, &mut st) {
+                let evs = parse_line(&line, &mut st);
+                if let (Some(f), Some(t)) = (&on_tokens, st.take_live()) {
+                    f("", &t);
+                }
+                for ev in evs {
                     if let Some(id) = &st.session_id {
                         *sid.lock().unwrap_or_else(|e| e.into_inner()) = Some(id.clone());
                     }
@@ -529,6 +540,88 @@ pub struct ParseState {
     pub usage: Option<UsageSnapshot>,
     /// From the stream's own `apiKeySource`: a key means pay-per-token.
     pub billing: BillingKind,
+    /// Figures of the messages this invocation has finished.
+    closed: Tally,
+    /// The message in progress: `message_start`, replaced by its `message_delta`.
+    open: Option<Tally>,
+    /// The invocation's cumulative figures when they last changed, taken by
+    /// whoever reports them live ([`ParseState::take_live`]).
+    live: Option<TokenReport>,
+    last_live: Option<TokenReport>,
+}
+
+/// input, output, cache read, cache write.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Tally([u64; 4]);
+
+impl Tally {
+    fn of(u: &Value) -> Tally {
+        Tally([
+            num(u, "input_tokens").unwrap_or(0),
+            num(u, "output_tokens").unwrap_or(0),
+            num(u, "cache_read_input_tokens").unwrap_or(0),
+            num(u, "cache_creation_input_tokens").unwrap_or(0),
+        ])
+    }
+    /// `self` with the figures `u` states replacing the ones it had.
+    fn replaced_by(self, u: &Value) -> Tally {
+        let mut t = self;
+        for (i, k) in [
+            "input_tokens",
+            "output_tokens",
+            "cache_read_input_tokens",
+            "cache_creation_input_tokens",
+        ]
+        .iter()
+        .enumerate()
+        {
+            if let Some(n) = num(u, k) {
+                t.0[i] = n;
+            }
+        }
+        t
+    }
+    fn plus(self, o: Tally) -> Tally {
+        let mut t = self;
+        for i in 0..4 {
+            t.0[i] += o.0[i];
+        }
+        t
+    }
+}
+
+impl ParseState {
+    fn publish(&mut self, cost_usd: Option<f64>) {
+        let t = self.closed.plus(self.open.unwrap_or_default());
+        let r = TokenReport {
+            input: Some(t.0[0]),
+            output: Some(t.0[1]),
+            cache_read: Some(t.0[2]),
+            cache_create: Some(t.0[3]),
+            // As reported: the daemon offers it only for an api account (decision 0043).
+            cost_usd,
+        };
+        if self.last_live.as_ref() != Some(&r) {
+            self.last_live = Some(r.clone());
+            self.live = Some(r);
+        }
+    }
+
+    /// The cumulative figures if they changed since the last call.
+    pub fn take_live(&mut self) -> Option<TokenReport> {
+        self.live.take()
+    }
+
+    /// Codex: a finished turn's figures are added to the invocation's.
+    pub(crate) fn add_turn(&mut self, r: &TokenReport) {
+        self.closed = self.closed.plus(Tally([
+            r.input.unwrap_or(0),
+            r.output.unwrap_or(0),
+            r.cache_read.unwrap_or(0),
+            r.cache_create.unwrap_or(0),
+        ]));
+        self.publish(None);
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -557,6 +650,48 @@ pub(crate) fn clip(s: &str, n: usize) -> String {
     } else {
         format!("{}…", s.chars().take(n).collect::<String>())
     }
+}
+
+/// The todo list of a `TodoWrite` call (`{"todos": [{content, status, activeForm}]}`).
+/// None when the input is not that shape.
+fn todo_items(input: &Value) -> Option<Vec<PlanItem>> {
+    let list = input["todos"].as_array()?;
+    Some(
+        list.iter()
+            .filter_map(|t| {
+                let text = t["content"]
+                    .as_str()
+                    .or_else(|| t["activeForm"].as_str())?
+                    .to_string();
+                let status = match t["status"].as_str() {
+                    Some("completed") => PlanStatus::Done,
+                    Some("in_progress") => PlanStatus::Doing,
+                    _ => PlanStatus::Pending,
+                };
+                Some(PlanItem { text, status })
+            })
+            .collect(),
+    )
+}
+
+/// What a tool call is doing, in one line: "Editing src/lib.rs", "Running cargo test".
+/// Not redacted here; the daemon redacts what it shows.
+fn tool_summary(name: &str, input: &Value) -> String {
+    let field = |k: &str| input[k].as_str().map(str::trim).filter(|s| !s.is_empty());
+    let line = match name {
+        "Edit" | "Write" | "MultiEdit" | "NotebookEdit" => {
+            field("file_path").map(|p| format!("Editing {p}"))
+        }
+        "Bash" => field("command").map(|c| format!("Running {c}")),
+        "Read" => field("file_path").map(|p| format!("Reading {p}")),
+        "Grep" | "Glob" => field("pattern").map(|p| format!("Searching for {p}")),
+        "TodoWrite" => Some("Updating the todo list".to_string()),
+        "mcp__mason__run_check" => field("name").map(|n| format!("Running check {n}")),
+        _ => None,
+    };
+    // Anything else is named, never dumped: its arguments may hold anything.
+    let line = line.unwrap_or_else(|| format!("Using {}", name.trim_start_matches("mcp__mason__")));
+    clip(&line.split_whitespace().collect::<Vec<_>>().join(" "), 200)
 }
 
 /// The windows Claude names, with their labels and lengths.
@@ -704,12 +839,38 @@ pub fn parse_line(line: &str, st: &mut ParseState) -> Vec<AgentEvent> {
                             out.push(AgentEvent::Text(t.to_string()));
                         }
                     }
-                    Some("tool_use") => out.push(AgentEvent::ToolCall {
-                        name: block["name"].as_str().unwrap_or("?").to_string(),
-                        summary: clip(&block["input"].to_string(), 200),
-                    }),
+                    Some("tool_use") => {
+                        let name = block["name"].as_str().unwrap_or("?").to_string();
+                        let input = &block["input"];
+                        if name == "TodoWrite" {
+                            if let Some(items) = todo_items(input) {
+                                out.push(AgentEvent::Plan { items });
+                            }
+                        }
+                        out.push(AgentEvent::ToolCall {
+                            summary: tool_summary(&name, input),
+                            name,
+                        });
+                    }
                     _ => {}
                 }
+            }
+        }
+        (Some("stream_event"), _) => {
+            let e = &v["event"];
+            match e["type"].as_str() {
+                Some("message_start") => {
+                    let open = st.open.take().unwrap_or_default();
+                    st.closed = st.closed.plus(open);
+                    st.open = Some(Tally::of(&e["message"]["usage"]));
+                    st.publish(None);
+                }
+                Some("message_delta") => {
+                    let cur = st.open.unwrap_or_default();
+                    st.open = Some(cur.replaced_by(&e["usage"]));
+                    st.publish(None);
+                }
+                _ => {}
             }
         }
         (Some("rate_limit_event"), _) => {
@@ -730,6 +891,10 @@ pub fn parse_line(line: &str, st: &mut ParseState) -> Vec<AgentEvent> {
                 cache_create: num(u, "cache_creation_input_tokens"),
                 cost_usd: v["total_cost_usd"].as_f64(),
             }));
+            // The final figures replace the running tally.
+            st.closed = Tally::of(u);
+            st.open = None;
+            st.publish(v["total_cost_usd"].as_f64());
             if st.session_id.is_none() {
                 st.session_id = v["session_id"].as_str().map(String::from);
             }
@@ -868,6 +1033,64 @@ mod tests {
     }
 
     #[test]
+    fn a_todo_write_call_gives_a_plan_and_tool_lines() {
+        // Synthetic fixture (not a capture): see fixtures/claude/README.md.
+        let (ev, _) = parse("synthetic_todo_write.jsonl");
+        let items = ev
+            .iter()
+            .find_map(|e| match e {
+                AgentEvent::Plan { items } => Some(items.clone()),
+                _ => None,
+            })
+            .expect("a Plan event");
+        let count = |s: PlanStatus| items.iter().filter(|i| i.status == s).count();
+        assert_eq!(items.len(), 7);
+        assert_eq!(
+            (
+                count(PlanStatus::Done),
+                count(PlanStatus::Doing),
+                count(PlanStatus::Pending)
+            ),
+            (3, 1, 3)
+        );
+        assert_eq!(
+            items
+                .iter()
+                .find(|i| i.status == PlanStatus::Doing)
+                .unwrap()
+                .text,
+            "Count tool calls"
+        );
+        let summaries: Vec<&str> = ev
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::ToolCall { summary, .. } => Some(summary.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            summaries,
+            [
+                "Updating the todo list",
+                "Editing crates/daemon/src/views.rs",
+                "Running cargo test"
+            ]
+        );
+    }
+
+    #[test]
+    fn todowrite_is_offered_to_every_step() {
+        let a = ClaudeAdapter::new("claude", "mason-mcp", std::env::temp_dir());
+        for kind in [StepKind::Explore, StepKind::Develop, StepKind::Review] {
+            let c = a.build_command(&spec(kind), None).unwrap();
+            let i = c.args.iter().position(|x| x == "--tools").unwrap();
+            assert!(c.args[i + 1].split(',').any(|t| t == "TodoWrite"));
+            let j = c.args.iter().position(|x| x == "--allowedTools").unwrap();
+            assert!(c.args[j + 1..].iter().any(|t| t == "TodoWrite"));
+        }
+    }
+
+    #[test]
     fn real_plain_run_parses() {
         let (ev, st) = parse("real_plain.jsonl");
         assert!(st.session_id.is_some());
@@ -895,6 +1118,79 @@ mod tests {
             "no submission"
         );
         assert_eq!(final_outcome(&st, true, Some(0), ""), Outcome::Accepted);
+    }
+
+    #[test]
+    fn partial_messages_give_live_figures_that_end_at_the_result() {
+        let mut st = ParseState::default();
+        let mut lives = vec![];
+        let mut result = None;
+        for l in fixture("real_partial_messages.jsonl").lines() {
+            for e in parse_line(l, &mut st) {
+                if let AgentEvent::Tokens(t) = e {
+                    result = Some(t);
+                }
+            }
+            if let Some(t) = st.take_live() {
+                lives.push(t);
+            }
+        }
+        let result = result.unwrap();
+        let last = lives.last().unwrap();
+        assert_eq!(
+            (last.input, last.output, last.cache_read, last.cache_create),
+            (
+                result.input,
+                result.output,
+                result.cache_read,
+                result.cache_create
+            )
+        );
+        assert_eq!(result.output, Some(988));
+        // After message 1 is over (its delta) the figure is that message's, not 16.
+        assert!(lives.iter().any(|t| t.output == Some(137)), "{lives:?}");
+        // After message 2's delta: 137 + 851, exactly the result's output.
+        assert!(lives.iter().any(|t| t.output == Some(988)));
+        // Never goes down.
+        assert!(lives.windows(2).all(|w| w[1].output >= w[0].output));
+    }
+
+    #[test]
+    fn a_repeated_assistant_event_does_not_change_the_tally() {
+        let mut st = ParseState::default();
+        let lines: Vec<String> = fixture("real_partial_messages.jsonl")
+            .lines()
+            .map(String::from)
+            .collect();
+        let before_assistant = lines
+            .iter()
+            .position(|l| l.contains("\"type\":\"assistant\""))
+            .unwrap();
+        for l in &lines[..before_assistant] {
+            parse_line(l, &mut st);
+        }
+        st.take_live();
+        for l in lines
+            .iter()
+            .filter(|l| l.contains("\"type\":\"assistant\""))
+        {
+            parse_line(l, &mut st);
+            parse_line(l, &mut st);
+        }
+        assert_eq!(st.take_live(), None, "assistant events carry no figure");
+    }
+
+    #[test]
+    fn a_plain_stream_has_a_live_figure_only_at_the_result() {
+        let mut st = ParseState::default();
+        let mut n = 0;
+        for l in fixture("real_plain.jsonl").lines() {
+            parse_line(l, &mut st);
+            if st.take_live().is_some() {
+                n += 1;
+            }
+        }
+        assert_eq!(n, 1);
     }
 
     #[test]
@@ -1068,7 +1364,7 @@ mod tests {
         ]);
         let c = a.build_command(&spec(StepKind::Review), None).unwrap();
         let tools_at = c.args.iter().position(|x| x == "--tools").unwrap();
-        assert_eq!(c.args[tools_at + 1], "Read,Grep,Glob");
+        assert_eq!(c.args[tools_at + 1], "Read,Grep,Glob,TodoWrite");
         let joined = c.args.join(" ");
         assert!(
             joined.contains("mcp__mason__submit_review")

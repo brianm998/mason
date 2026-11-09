@@ -535,6 +535,20 @@ const STEPS: &[&str] = &[
          number  INTEGER NOT NULL,
          PRIMARY KEY (project, number)
      );",
+    // 22: the last green count of a suite for a base commit (s70), the expected
+    // total of a live test count. Kept apart from `evidence` (keyed by tree).
+    "CREATE TABLE suite_green (
+         project  TEXT NOT NULL,
+         suite    TEXT NOT NULL,
+         base     TEXT NOT NULL,
+         executed INTEGER NOT NULL,
+         at_ms    INTEGER NOT NULL,
+         PRIMARY KEY (project, suite, base)
+     );",
+    // 23: the tokens each running step run's LLM sessions have used (s76): one tally per
+    // output stream, as `stream=in,out,cache_read,cache_write,cost;...` (an empty field is
+    // a figure not reported). Additive; a row from before has none.
+    "ALTER TABLE step_progress ADD COLUMN tokens TEXT NOT NULL DEFAULT '';",
 ];
 
 pub const SCHEMA_VERSION: u32 = STEPS.len() as u32;

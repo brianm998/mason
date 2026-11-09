@@ -22,5 +22,7 @@ pub mod schema;
 
 pub use manifest::{Manifest, PluginType};
 
-/// The protocol version this build speaks.
-pub const PROTOCOL: u32 = 1;
+/// The newest protocol version this build speaks (2 adds `step.progress`).
+pub const PROTOCOL: u32 = 2;
+/// Every version this build accepts in a manifest. The host speaks the manifest's.
+pub const SUPPORTED: [u32; 2] = [1, 2];

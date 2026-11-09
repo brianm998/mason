@@ -99,10 +99,21 @@ fn take_when_granted(d: &Arc<Daemon>, id: u64, label: &str) -> (u64, Held) {
                 capacity,
                 locks_dir,
             } => {
-                let held = Locks::new(locks_dir)
-                    .unwrap()
-                    .take(id, label, 0, &Take { classes, exclusive }, &capacity)
-                    .unwrap();
+                // Like the real client: a slot just released may still be busy for a
+                // moment, so retry rather than fail.
+                let locks = Locks::new(locks_dir).unwrap();
+                let want = Take { classes, exclusive };
+                let held = loop {
+                    match locks.take(id, label, 0, &want, &capacity) {
+                        Ok(h) => break h,
+                        Err(mason_resources::TakeError::Busy)
+                            if std::time::Instant::now() < end =>
+                        {
+                            std::thread::sleep(Duration::from_millis(25));
+                        }
+                        Err(e) => panic!("could not take the granted resources: {e}"),
+                    }
+                };
                 // Let the daemon see the marker locked, as it will for a real caller.
                 d.broker.lease_poll(id);
                 return (id, held);
@@ -284,6 +295,99 @@ fn an_interactive_caller_goes_ahead_of_pipeline_work() {
     drop(held_i);
     d.broker.lease_close(i);
     wait_state(&d, t, State::Landed, 60);
+}
+
+/// A `mason run` made on behalf of a task from `develop` (3 steps from landing
+/// in this definition's builtin shape is more than a task in `test`).
+fn linked(d: &Arc<Daemon>, label: &str, steps: u32) -> u64 {
+    let map = [("compile".to_string(), 1)].into();
+    d.broker.lease_open_as(
+        label,
+        &map,
+        Some(mason_daemon::sched::Standing {
+            steps_remaining: steps,
+            priority: 1,
+        }),
+    )
+}
+
+fn queue_test_step_behind_a_holder() -> (Scratch, Arc<Daemon>, u64, Held, TaskId) {
+    let s = compile_scratch();
+    let d = s.start();
+    let (a, held) = hold(&d, "first", &[("compile", 1)]);
+    let t = file_task(&d, "Pipeline work");
+    wait_explained(&d, t);
+    (s, d, a, held, t)
+}
+
+fn wait_until_task_holds(d: &Arc<Daemon>, t: TaskId) {
+    wait_for("the test step to be granted", 30, || {
+        d.broker.has_lease(t) && d.broker.explain_task(t).is_none()
+    });
+}
+
+#[test]
+fn a_test_step_outranks_a_task_linked_run_from_a_task_with_more_steps_left() {
+    let (_s, d, a, held, t) = queue_test_step_behind_a_holder();
+    let l = linked(&d, "task 99 `cargo test`", 9);
+    let why = wait_explained(&d, t);
+    assert!(why.contains("1st in line"), "{why}");
+    assert!(!why.contains("behind"), "{why}");
+    match d.broker.lease_poll(l) {
+        LeaseState::Waiting { explain } => {
+            assert!(!explain.contains("(interactive)"), "{explain}");
+        }
+        _ => panic!("should be waiting"),
+    }
+    drop(held);
+    d.broker.lease_close(a);
+    wait_until_task_holds(&d, t);
+    assert!(matches!(d.broker.lease_poll(l), LeaseState::Waiting { .. }));
+    d.broker.lease_close(l);
+    wait_state(&d, t, State::Landed, 60);
+}
+
+#[test]
+fn a_run_with_no_task_still_outranks_all_pipeline_work_and_task_linked_runs() {
+    let (_s, d, a, held, t) = queue_test_step_behind_a_holder();
+    let l = linked(&d, "task 99 `cargo test`", 9);
+    let map = [("compile".to_string(), 1)].into();
+    let person = d.broker.lease_open("interactive `make`", &map);
+    drop(held);
+    d.broker.lease_close(a);
+    let (_, held_p) = take_when_granted(&d, person, "interactive `make`");
+    assert!(
+        d.broker.explain_task(t).is_some(),
+        "the test step still waits"
+    );
+    assert!(matches!(d.broker.lease_poll(l), LeaseState::Waiting { .. }));
+    drop(held_p);
+    d.broker.lease_close(person);
+    d.broker.lease_close(l);
+    wait_state(&d, t, State::Landed, 60);
+}
+
+#[test]
+fn a_stream_of_task_linked_requests_cannot_hold_a_waiting_test_step_back() {
+    let (_s, d, a, held, t) = queue_test_step_behind_a_holder();
+    let stream: Vec<u64> = (0..6)
+        .map(|i| linked(&d, &format!("task 99 `cargo test` #{i}"), 9))
+        .collect();
+    drop(held);
+    d.broker.lease_close(a);
+    wait_until_task_holds(&d, t);
+    for id in &stream {
+        assert!(matches!(
+            d.broker.lease_poll(*id),
+            LeaseState::Waiting { .. }
+        ));
+    }
+    // New runs keep arriving while the step runs; it still finishes first.
+    let more = linked(&d, "task 99 `cargo test` late", 9);
+    wait_state(&d, t, State::Landed, 60);
+    for id in stream.into_iter().chain([more]) {
+        d.broker.lease_close(id);
+    }
 }
 
 #[test]

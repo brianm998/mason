@@ -23,6 +23,65 @@ pub fn group(n: u64) -> String {
     out
 }
 
+/// A token count in few characters: "988", "12.2k", "1.2M". Whole-number arithmetic, so the
+/// monitors' rewrites round the same way.
+pub fn compact(n: u64) -> String {
+    if n < 1000 {
+        return n.to_string();
+    }
+    let k = (n + 50) / 100; // tenths of a thousand, rounded half up
+    if k < 10_000 {
+        return format!("{}.{}k", k / 10, k % 10);
+    }
+    let m = (n + 50_000) / 100_000; // tenths of a million
+    format!("{}.{}M", m / 10, m % 10)
+}
+
+/// The compact line for a running step's tokens: "12.2k in, 988 out", where "in" is input
+/// plus cache read plus cache write. A side nothing was reported for is left out.
+pub fn tokens_compact(
+    input: Option<u64>,
+    output: Option<u64>,
+    cache_read: Option<u64>,
+    cache_write: Option<u64>,
+) -> String {
+    let mut parts = vec![];
+    if input.is_some() || cache_read.is_some() || cache_write.is_some() {
+        let total = input.unwrap_or(0) + cache_read.unwrap_or(0) + cache_write.unwrap_or(0);
+        parts.push(format!("{} in", compact(total)));
+    }
+    if let Some(o) = output {
+        parts.push(format!("{} out", compact(o)));
+    }
+    parts.join(", ")
+}
+
+/// Each reported figure in full, for the task page: "input 4", "output 988",
+/// "cache read 7,664", "cache write 4,503", and "cost $0.0123" when there is one.
+pub fn tokens_detail(
+    input: Option<u64>,
+    output: Option<u64>,
+    cache_read: Option<u64>,
+    cache_write: Option<u64>,
+    cost_usd: Option<f64>,
+) -> Vec<String> {
+    let mut v = vec![];
+    for (name, n) in [
+        ("input", input),
+        ("output", output),
+        ("cache read", cache_read),
+        ("cache write", cache_write),
+    ] {
+        if let Some(n) = n {
+            v.push(format!("{name} {}", group(n)));
+        }
+    }
+    if let Some(c) = cost_usd {
+        v.push(format!("cost ${c:.4}"));
+    }
+    v
+}
+
 /// A time span: "42 s", "9 min", "3h10". Always shown, never hidden.
 pub fn duration(ms: u64) -> String {
     let s = ms / 1000;
@@ -57,7 +116,7 @@ pub fn count_text(
         format!(" {unit}")
     };
     match total_source {
-        Source::Reported | Source::Counted if total > 0 => {
+        Source::Reported | Source::Counted | Source::Expected | Source::Minimum if total > 0 => {
             let pct = percent(done, total).unwrap_or(0);
             format!("{} of {}{unit_sp}, {pct}%", group(done), group(total))
         }
@@ -81,6 +140,8 @@ pub fn source_words(source: Source, samples: u32) -> String {
         Source::Reported => "from the agent".into(),
         Source::Counted => "counted from output".into(),
         Source::History => format!("usually, from {samples} past runs"),
+        Source::Expected => "the last green run's count".into(),
+        Source::Minimum => "the suite's minimum".into(),
     }
 }
 
@@ -112,6 +173,36 @@ pub fn time_text(now_ms: u64, moved_ms: u64, stale_after_ms: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn token_figures_are_compact_and_the_in_side_sums() {
+        assert_eq!(compact(988), "988");
+        assert_eq!(compact(1000), "1.0k");
+        assert_eq!(compact(12_167), "12.2k");
+        assert_eq!(compact(999_949), "999.9k");
+        assert_eq!(compact(999_950), "1.0M");
+        assert_eq!(compact(1_234_567), "1.2M");
+        assert_eq!(
+            tokens_compact(Some(4), Some(988), Some(7664), Some(4503)),
+            "12.2k in, 988 out"
+        );
+        assert_eq!(
+            tokens_compact(Some(10), Some(5), Option::None, Option::None),
+            "10 in, 5 out"
+        );
+        assert_eq!(
+            tokens_compact(Option::None, Some(5), Option::None, Option::None),
+            "5 out"
+        );
+        assert_eq!(
+            tokens_compact(Option::None, Option::None, Option::None, Option::None),
+            ""
+        );
+        assert_eq!(
+            tokens_detail(Some(4), Some(988), Some(7664), Option::None, Some(0.0123)),
+            ["input 4", "output 988", "cache read 7,664", "cost $0.0123"]
+        );
+    }
     use Source::*;
 
     #[test]

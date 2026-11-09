@@ -607,10 +607,22 @@ fn live_progress_is_kept_per_run_and_dropped_when_not_open() {
         done: Figure::reported(3),
         total: Figure::reported(8),
     });
+    a.report_tokens(
+        "t0r7-agent-1",
+        mason_core::progress::Tokens {
+            input: Some(4),
+            output: Some(988),
+            cache_read: Some(7664),
+            cache_write: None,
+            cost_nano_usd: Some(12_300_000),
+        },
+        160,
+    );
     s.put_progress(0, &a).unwrap();
-    // The log lines waiting to be pushed and the unfinished line are not stored.
+    // The log lines waiting to be pushed, the unfinished line and the line scan are not stored.
     a.pending_log.clear();
     a.partial.clear();
+    a.scans.clear();
     s.put_progress(1, &Progress::new(8, "work", 100)).unwrap();
     let rows = s.progress_rows(Some(0)).unwrap();
     assert_eq!(rows.len(), 1);

@@ -61,7 +61,7 @@ struct ProgressLine: View {
                 parts(now: now, stale: stale, message: false)
             }
             .accessibilityElement(children: .ignore)
-            .accessibilityLabel([cell.countText, cell.message, stale ? "no output for a while" : ""]
+            .accessibilityLabel([cell.countText, cell.tokensCompact, cell.message, stale ? "no output for a while" : ""]
                 .filter { !$0.isEmpty }.joined(separator: ", "))
             .accessibilityIdentifier("progress-line:\(cell.step)")
         }
@@ -71,6 +71,11 @@ struct ProgressLine: View {
         HStack(spacing: theme.spacingSmall) {
             let count = cell.countText
             if !count.isEmpty { Text(count).foregroundStyle(theme.text).lineLimit(1).fixedSize() }
+            let tokens = cell.tokensCompact
+            if !tokens.isEmpty {
+                Text(tokens).foregroundStyle(theme.muted).lineLimit(1).fixedSize()
+                    .accessibilityIdentifier("progress-tokens:\(cell.step)")
+            }
             if message && !cell.message.isEmpty {
                 Text(cell.message).foregroundStyle(theme.muted).lineLimit(1)
             }
@@ -115,6 +120,14 @@ struct ProgressDetail: View {
             if cell.lines > 0 || cell.bytes > 0 {
                 Text("output \(Format.group(cell.lines)) lines, \(Format.group(cell.bytes)) bytes")
                     .font(theme.small()).foregroundStyle(theme.muted)
+            }
+            if cell.hasTokens {
+                let figures = Format.tokensDetail(cell.tokens)
+                if !figures.isEmpty {
+                    Text("tokens " + figures.joined(separator: ", "))
+                        .font(theme.small()).foregroundStyle(theme.muted)
+                        .accessibilityIdentifier("progress-token-detail:\(cell.step)")
+                }
             }
             let sources = [
                 cell.doneSource == .sourceNone ? "" : "count \(Format.sourceWords(cell.doneSource, samples: cell.historySamples))",

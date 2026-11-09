@@ -26,10 +26,12 @@ fn now() -> u64 {
         .as_secs()
 }
 
-fn limit_turn(reset: u64) -> Value {
+/// The reset is `resets_in` seconds after the fake agent emits the event, never an
+/// absolute time fixed at test start (the daemon drops resets already past).
+fn limit_turn(resets_in: u64) -> Value {
     json!([
-        {"rate_limit": {"status": "rejected", "window": "five_hour", "resetsAt": reset,
-            "windows": {"five_hour": {"utilization": 1.0, "resetsAt": reset, "status": "rejected"}}}},
+        {"rate_limit": {"status": "rejected", "window": "five_hour", "resets_in": resets_in,
+            "windows": {"five_hour": {"utilization": 1.0, "status": "rejected"}}}},
         {"result": {"is_error": true, "text": "You've hit your limit", "api_error_status": 429}}
     ])
 }
@@ -95,10 +97,10 @@ fn full_window(reset: u64) -> Window {
 
 #[test]
 fn a_limit_with_a_reset_holds_the_account_until_the_reset() {
-    let reset = now() + 14;
+    let t0 = now();
     let s = Scratch::new(
         "test -f hello.txt",
-        script(vec![limit_turn(reset), develop_turn()]),
+        script(vec![limit_turn(14), develop_turn()]),
     );
     let d = s.start();
     let tasks: Vec<TaskId> = (1..=3)
@@ -109,7 +111,8 @@ fn a_limit_with_a_reset_holds_the_account_until_the_reset() {
     });
     let h = holds::hold_of(&d, "claude").unwrap();
     assert_eq!(h.kind, "limit");
-    assert_eq!(h.until_ms, Some(reset * 1000));
+    let reset = h.until_ms.expect("a reset") / 1000;
+    assert!((t0 + 14..=now() + 14).contains(&reset), "{reset} vs {t0}");
     // The daemon runs two tasks at once: two wait on the account, the third is queued.
     wait_for("the running tasks to wait on the account", 12, || {
         let w = d.world().unwrap();
@@ -442,10 +445,10 @@ fn usage_of(s: &Scratch, account: &str) -> Value {
 
 #[test]
 fn a_real_daemon_keeps_a_hold_across_a_kill_and_the_cli_holds_and_releases() {
-    let reset = now() + 25;
+    let t0 = now();
     let s = Scratch::new(
         "test -f hello.txt",
-        script(vec![limit_turn(reset), develop_turn()]),
+        script(vec![limit_turn(25), develop_turn()]),
     );
     let mut m = s.masond(&[], &[]);
     s.wait_daemon(&mut m);
@@ -473,7 +476,8 @@ fn a_real_daemon_keeps_a_hold_across_a_kill_and_the_cli_holds_and_releases() {
         .sum();
     drop(store);
     assert_eq!(held.len(), 1, "the hold is in the store");
-    assert_eq!(held[0].until_ms, Some(reset * 1000));
+    let reset = held[0].until_ms.expect("a reset") / 1000;
+    assert!((t0 + 25..=now() + 25).contains(&reset), "{reset} vs {t0}");
 
     let mut m2 = s.masond(&[], &[]);
     s.wait_daemon(&mut m2);

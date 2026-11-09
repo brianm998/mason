@@ -2363,10 +2363,16 @@ async fn lease_open(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res
         return Err(fail(StatusCode::BAD_REQUEST, "name what it needs"));
     }
     let label = b["label"].as_str().unwrap_or("interactive").to_string();
+    // On behalf of a task: ranked as that task's pipeline work. An id that is
+    // not a live task is treated as no task at all (a person's request).
+    let task = b["task"].as_u64();
     let d2 = d.clone();
     let id = d
         .pool
-        .run(move || d2.broker.lease_open(&label, &uses))
+        .run(move || {
+            let standing = task.and_then(|t| d2.lease_standing(TaskId(t)));
+            d2.broker.lease_open_as(&label, &uses, standing)
+        })
         .await
         .map_err(pool_err)?;
     Ok(Json(json!({"id": id})))
@@ -2550,6 +2556,11 @@ fn progress_runs(d: &Daemon, id: TaskId) -> Vec<Value> {
                     "name": s.name, "unit": s.unit,
                     "done": fig(&s.done), "total": fig(&s.total)})).collect::<Vec<_>>(),
                 "todo": p.todo.iter().map(|t| json!({"text": t.text, "status": t.status})).collect::<Vec<_>>(),
+                // The tokens the step's sessions have used so far; null until one reported.
+                "tokens": p.token_total().map(|t| json!({
+                    "input": t.input, "output": t.output,
+                    "cache_read": t.cache_read, "cache_write": t.cache_write,
+                    "cost_usd": t.cost_nano_usd.map(|n| n as f64 / 1e9)})),
             })
         })
         .collect()

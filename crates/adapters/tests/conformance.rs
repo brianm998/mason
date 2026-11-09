@@ -3,11 +3,11 @@
 //! Both adapters through the same conformance kit: the scripted fake, and the
 //! Claude adapter driving a stand-in CLI that speaks the real stream format.
 
-use mason_adapter_api::conformance::{run_all, valid_plan, Harness, Scenario};
+use mason_adapter_api::conformance::{progress_calls, run_all, valid_plan, Harness, Scenario};
 use mason_adapter_api::contract::ContractHandle;
 use mason_adapter_api::{
-    netguard, AgentAdapter, SessionSpec, StepKind, UsageModel, UsageSnapshot, Window, WindowSpec,
-    WindowState,
+    netguard, AgentAdapter, PlanItem, PlanStatus, SessionSpec, StepKind, UsageModel, UsageSnapshot,
+    Window, WindowSpec, WindowState,
 };
 use mason_adapters::claude::ClaudeAdapter;
 use mason_adapters::fake::{FakeAction, FakeAdapter};
@@ -111,6 +111,27 @@ impl Harness for FakeHarness {
                 FakeAction::ProviderDown("529".into()),
             ],
             Scenario::Crash => vec![FakeAction::Crash("boom".into())],
+            Scenario::Plan => vec![
+                FakeAction::Plan(vec![
+                    PlanItem {
+                        text: "read".into(),
+                        status: PlanStatus::Done,
+                    },
+                    PlanItem {
+                        text: "write".into(),
+                        status: PlanStatus::Doing,
+                    },
+                ]),
+                call("submit_plan", valid_plan()),
+            ],
+            Scenario::Progress => {
+                let [a, b] = progress_calls();
+                vec![
+                    call("report_progress", a),
+                    call("report_progress", b),
+                    call("submit_plan", valid_plan()),
+                ]
+            }
         };
         Box::new(FakeAdapter::new(vec![turn]).with_usage_model(model(true)))
     }
@@ -196,6 +217,17 @@ impl Harness for ClaudeHarness {
             Scenario::UsageLimit => json!([{"replay": fixture("synthetic_usage_windows.jsonl")}]),
             Scenario::ProviderDown => json!([{"replay": fixture("synthetic_provider_down.jsonl")}]),
             Scenario::Crash => json!([{"stderr": "segfault"}, {"exit": 139}]),
+            Scenario::Plan => json!([
+                {"todo": [{"content": "read", "status": "completed"},
+                          {"content": "write", "status": "in_progress"}]},
+                {"call": {"tool": "submit_plan", "args": valid_plan()}}]),
+            Scenario::Progress => {
+                let [a, b] = progress_calls();
+                json!([
+                    {"call": {"tool": "report_progress", "args": a}},
+                    {"call": {"tool": "report_progress", "args": b}},
+                    {"call": {"tool": "submit_plan", "args": valid_plan()}}])
+            }
         };
         let n = self.n.load(Ordering::SeqCst);
         let script = self.dir.path().join(format!("script{n}.json"));

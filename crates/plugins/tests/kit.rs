@@ -57,10 +57,57 @@ fn the_example_plugin_passes_every_check() {
             "initialize",
             "schema matches",
             "run",
+            "progress",
             "refuses bad config",
             "shutdown"
         ]
     );
+    let progress = checks.iter().find(|c| c.name == "progress").unwrap();
+    assert!(progress.detail.contains("well-formed"), "{progress:?}");
+}
+
+#[test]
+fn a_malformed_step_progress_is_named() {
+    let t = broken(
+        "progress(message=f\"checking {config['directory']}\")",
+        "progress(done=\"0\", message=\"x\")",
+    );
+    let f = failing(&plugin_kit(t.path(), T));
+    assert_eq!(
+        f.iter().map(|x| x.0).collect::<Vec<_>>(),
+        ["progress"],
+        "{f:?}"
+    );
+    assert!(f[0].1.contains("done"), "{f:?}");
+}
+
+#[test]
+fn a_protocol_1_plugin_runs_and_must_not_send_progress() {
+    // Declared protocol 1 on both sides, the example is a version 1 plugin that still sends
+    // step.progress: the host ignores it, and the kit says it needs protocol 2.
+    let t = broken("\"protocol\": 2,", "\"protocol\": 1,");
+    let m = t.path().join("manifest.toml");
+    let text = std::fs::read_to_string(&m).unwrap();
+    std::fs::write(&m, text.replace("protocol = 2", "protocol = 1")).unwrap();
+    let f = failing(&plugin_kit(t.path(), T));
+    assert_eq!(
+        f.iter().map(|x| x.0).collect::<Vec<_>>(),
+        ["progress"],
+        "{f:?}"
+    );
+    assert!(f[0].1.contains("protocol 2"), "{f:?}");
+    // Without the notifications it passes, as every version 1 plugin did.
+    let quiet = broken(
+        "def progress(**fields):",
+        "def progress(**fields):\n    return",
+    );
+    let m = quiet.path().join("manifest.toml");
+    let text = std::fs::read_to_string(&m).unwrap();
+    std::fs::write(&m, text.replace("protocol = 2", "protocol = 1")).unwrap();
+    let c = quiet.path().join("check.py");
+    let text = std::fs::read_to_string(&c).unwrap();
+    std::fs::write(&c, text.replace("\"protocol\": 2,", "\"protocol\": 1,")).unwrap();
+    assert_eq!(failing(&plugin_kit(quiet.path(), T)), vec![]);
 }
 
 #[test]

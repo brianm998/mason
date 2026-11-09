@@ -5,7 +5,7 @@
 //! host, and picked up again after the controller is gone. Nothing here is the
 //! real Codex (see docs/stages/s20.md).
 
-use mason_adapter_api::conformance::{run_all, valid_plan, Harness, Scenario};
+use mason_adapter_api::conformance::{progress_calls, run_all, valid_plan, Harness, Scenario};
 use mason_adapter_api::contract::{ContractHandle, NoChecks};
 use mason_adapter_api::{netguard, AgentAdapter, AgentEvent, Outcome, SessionSpec, StepKind};
 use mason_adapters::codex::CodexAdapter;
@@ -76,6 +76,16 @@ impl Harness for CodexHarness {
             Scenario::UsageLimit => json!([{"replay": fixture("usage_limit.jsonl")}]),
             Scenario::ProviderDown => json!([{"replay": fixture("provider_down.jsonl")}]),
             Scenario::Crash => json!([{"stderr": "segfault"}, {"exit": 139}]),
+            // Codex declares no plan_reports (no capture of its plan updates), so
+            // the Plan scenario only needs a normal accepted run.
+            Scenario::Plan => json!([{"call": {"tool": "submit_plan", "args": valid_plan()}}]),
+            Scenario::Progress => {
+                let [a, b] = progress_calls();
+                json!([
+                    {"call": {"tool": "report_progress", "args": a}},
+                    {"call": {"tool": "report_progress", "args": b}},
+                    {"call": {"tool": "submit_plan", "args": valid_plan()}}])
+            }
         };
         let n = self.n.load(Ordering::SeqCst);
         let script = self.dir.path().join(format!("script{n}.json"));

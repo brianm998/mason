@@ -16,7 +16,9 @@ use mason_core::progress::{
     middle_half, stale_after, Change, Progress, Push, Source, SubProgress, Throttle, TodoItem,
 };
 use mason_core::*;
-use mason_protocol::{CellState, ProgressCell, ProgressSource, ProgressSub, TodoItem as PbTodo};
+use mason_protocol::{
+    CellState, ProgressCell, ProgressSource, ProgressSub, TodoItem as PbTodo, TokenLine,
+};
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
@@ -27,6 +29,11 @@ use std::time::Duration;
 pub const TICK: Duration = Duration::from_millis(250);
 /// A live record is written to the store at most this often.
 pub const PERSIST_MS: u64 = 3000;
+
+/// Where an agent step's tool-call counts are kept in `step_history`.
+fn agent_history_key(step: &str) -> String {
+    format!("{step} / tool calls")
+}
 
 /// A change of one run's record, as the sockets get it.
 #[derive(Clone, Debug)]
@@ -67,6 +74,145 @@ fn source(s: Source) -> ProgressSource {
         Source::Reported => ProgressSource::SourceReported,
         Source::Counted => ProgressSource::SourceCounted,
         Source::History => ProgressSource::SourceHistory,
+        Source::Expected => ProgressSource::SourceExpected,
+        Source::Minimum => ProgressSource::SourceMinimum,
+    }
+}
+
+/// The step's own count as the sum of its sub-counts (a test step's suites): the
+/// total only when every sub-count has one.
+pub fn rollup(p: &mut Progress) {
+    // A landing batch counts its own phases; its sub-counts (suites, checks) are beside them.
+    if p.subs.is_empty() || p.unit == "phases" {
+        return;
+    }
+    let unit = p.subs[0].unit.clone();
+    p.unit = unit;
+    p.done = mason_core::progress::Figure::counted(p.subs.iter().map(|s| s.done.value).sum());
+    if p.subs.iter().all(|s| s.total.is_real()) {
+        let source = if p.subs.iter().any(|s| s.total.source == Source::Minimum) {
+            Source::Minimum
+        } else if p.subs.iter().any(|s| s.total.source == Source::Reported) {
+            Source::Reported
+        } else {
+            Source::Expected
+        };
+        p.total = mason_core::progress::Figure {
+            value: p.subs.iter().map(|s| s.total.value).sum(),
+            source,
+        };
+    } else {
+        p.total = mason_core::progress::Figure::default();
+    }
+}
+
+/// What one line of a progress file or `step.progress` says: a JSON object with any of
+/// `done`, `total`, `unit`, `message`; any other non-blank line is the message. None
+/// for a blank line.
+pub fn parse_report_line(line: &str) -> Option<mason_core::progress::Report> {
+    let t = line.trim();
+    if t.is_empty() {
+        return None;
+    }
+    if t.starts_with('{') {
+        if let Some(r) = serde_json::from_str::<serde_json::Value>(t)
+            .ok()
+            .and_then(|v| report_of(&v))
+        {
+            return Some(r);
+        }
+    }
+    Some(mason_core::progress::Report {
+        message: Some(t.to_string()),
+        ..Default::default()
+    })
+}
+
+/// The params of a `step.progress` notification, or None when malformed or empty.
+pub fn parse_step_progress(v: &serde_json::Value) -> Option<mason_core::progress::Report> {
+    let r = report_of(v)?;
+    (r.done.is_some() || r.total.is_some() || r.unit.is_some() || r.message.is_some()).then_some(r)
+}
+
+fn report_of(v: &serde_json::Value) -> Option<mason_core::progress::Report> {
+    let o = v.as_object()?;
+    let num = |k: &str| match o.get(k) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(x) => x.as_u64().map(Some).ok_or(()),
+    };
+    let text = |k: &str| match o.get(k) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(x) => x.as_str().map(|s| Some(s.to_string())).ok_or(()),
+    };
+    Some(mason_core::progress::Report {
+        done: num("done").ok()?,
+        total: num("total").ok()?,
+        unit: text("unit").ok()?,
+        message: text("message").ok()?,
+    })
+}
+
+/// Follows a progress file while a step runs: every whole line appended is applied
+/// by `apply`. Stops (after one last read) when dropped.
+pub struct FileTail {
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl FileTail {
+    pub fn start(
+        path: std::path::PathBuf,
+        apply: impl Fn(mason_core::progress::Report) + Send + 'static,
+    ) -> FileTail {
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = stop.clone();
+        let thread = std::thread::spawn(move || {
+            let mut off = 0u64;
+            let mut tail: Vec<u8> = vec![];
+            loop {
+                let last = flag.load(std::sync::atomic::Ordering::SeqCst);
+                if let Ok(mut f) = std::fs::File::open(&path) {
+                    if f.metadata().map_or(0, |m| m.len()) < off {
+                        off = 0; // truncated: start again
+                        tail.clear();
+                    }
+                    if f.seek(SeekFrom::Start(off)).is_ok() {
+                        let mut buf = vec![];
+                        if let Ok(n) = f.read_to_end(&mut buf) {
+                            off += n as u64;
+                            tail.extend_from_slice(&buf);
+                        }
+                    }
+                }
+                while let Some(i) = tail.iter().position(|b| *b == b'\n') {
+                    let line: Vec<u8> = tail.drain(..=i).collect();
+                    if let Some(r) = parse_report_line(&String::from_utf8_lossy(&line)) {
+                        apply(r);
+                    }
+                }
+                if last {
+                    // An unfinished last line counts once the writer is done.
+                    if let Some(r) = parse_report_line(&String::from_utf8_lossy(&tail)) {
+                        apply(r);
+                    }
+                    return;
+                }
+                std::thread::sleep(TICK);
+            }
+        });
+        FileTail {
+            stop,
+            thread: Some(thread),
+        }
+    }
+}
+
+impl Drop for FileTail {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
     }
 }
 
@@ -112,6 +258,19 @@ pub fn cell_of(p: &Progress, state: CellState, label: &str) -> ProgressCell {
         total_low: n(p.total_low),
         history_samples: p.history_samples,
         stale_after_ms: p.stale_after_ms,
+        tokens: p.token_total().map(|t| TokenLine {
+            has_input: t.input.is_some(),
+            input: t.input.unwrap_or(0),
+            has_output: t.output.is_some(),
+            output: t.output.unwrap_or(0),
+            has_cache_read: t.cache_read.is_some(),
+            cache_read: t.cache_read.unwrap_or(0),
+            has_cache_write: t.cache_write.is_some(),
+            cache_write: t.cache_write.unwrap_or(0),
+            has_cost: t.cost_nano_usd.is_some(),
+            cost_usd: t.cost_nano_usd.unwrap_or(0) as f64 / 1e9,
+            ..Default::default()
+        }),
     }
 }
 
@@ -223,6 +382,12 @@ impl Daemon {
         }
     }
 
+    /// The tokens a run's LLM session (output stream `stream`) has used so far.
+    /// Cumulative per stream; pushed with the output throttle.
+    pub fn progress_tokens(&self, run: StepRunId, stream: &str, t: mason_core::progress::Tokens) {
+        self.progress_report(run, |p, now| p.report_tokens(stream, t, now));
+    }
+
     /// A step run that is resumed after a restart: count what its log already
     /// holds beyond what the stored record had counted.
     pub fn progress_catch_up(&self, run: StepRunId, stream: &str, log: &Path) {
@@ -290,6 +455,53 @@ impl Daemon {
         });
     }
 
+    /// Change one named sub-count of a run (created if missing), then bring the step's own
+    /// figures up to the sum of its sub-counts. A count that only moved is output-grade;
+    /// a changed total or message is sent at once.
+    pub fn progress_sub(
+        &self,
+        run: StepRunId,
+        name: &str,
+        message: Option<String>,
+        f: impl FnOnce(&mut SubProgress),
+    ) {
+        self.progress_report(run, |p, now| {
+            let i = match p.subs.iter().position(|s| s.name == name) {
+                Some(i) => i,
+                None => {
+                    p.subs.push(SubProgress {
+                        name: name.to_string(),
+                        ..SubProgress::default()
+                    });
+                    p.subs.len() - 1
+                }
+            };
+            let before = p.clone();
+            f(&mut p.subs[i]);
+            rollup(p);
+            let mut change = if p.subs != before.subs {
+                if p.subs[i].total != before.subs.get(i).map(|s| s.total).unwrap_or_default()
+                    || before.subs.get(i).is_none()
+                {
+                    Change::Urgent
+                } else {
+                    Change::Output
+                }
+            } else {
+                Change::None
+            };
+            if let Some(m) = message {
+                if p.set_message(&m, now) == Change::Urgent {
+                    change = Change::Urgent;
+                }
+            }
+            if change != Change::None {
+                p.updated_at_ms = now;
+            }
+            change
+        });
+    }
+
     /// Replace the agent's todo list of a run.
     pub fn progress_todo(&self, run: StepRunId, todo: Vec<TodoItem>) {
         self.progress_report(run, |p, now| {
@@ -300,6 +512,71 @@ impl Daemon {
             p.updated_at_ms = now;
             Change::Urgent
         });
+    }
+
+    /// The run is an agent's: mark its record and offer the typical number of
+    /// tool calls (history is kept apart, as "<step> / tool calls").
+    pub fn progress_agent(&self, run: StepRunId) {
+        let Some((project, step)) = self
+            .progress
+            .lock()
+            .get(&run.0)
+            .map(|l| (l.project, l.p.step.clone()))
+        else {
+            return;
+        };
+        let name = self
+            .project(project)
+            .map_or(String::new(), |c| c.id.clone());
+        let samples: Vec<u64> = self
+            .store
+            .history_samples(&name, &agent_history_key(&step))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(done, _)| done)
+            .collect();
+        let range = middle_half(&samples).filter(|(_, hi)| *hi > 0);
+        self.progress_report(run, |p, now| {
+            if p.agent && p.history.0.map(|(l, h, _)| (l, h)) == range {
+                return Change::None;
+            }
+            p.begin_agent(range, samples.len());
+            p.updated_at_ms = now;
+            Change::Urgent
+        });
+    }
+
+    /// The agent called `report_progress`: its counts and message go out at once.
+    pub fn progress_agent_report(
+        &self,
+        run: StepRunId,
+        r: &mason_adapter_api::contract::ProgressReport,
+    ) {
+        let message = mason_core::progress::one_line(&r.message);
+        let unit = mason_core::progress::one_line(&r.unit);
+        self.progress_report(run, |p, now| p.agent_report(&message, r.counts, &unit, now));
+    }
+
+    /// The agent made a tool call or changed its todo list.
+    pub fn progress_agent_event(&self, run: StepRunId, ev: &mason_adapter_api::AgentEvent) {
+        use mason_adapter_api::AgentEvent;
+        match ev {
+            AgentEvent::ToolCall { summary, .. } => {
+                let line = mason_core::progress::one_line(summary);
+                self.progress_report(run, |p, now| p.agent_tool(&line, now));
+            }
+            AgentEvent::Plan { items } => {
+                let todo: Vec<TodoItem> = items
+                    .iter()
+                    .map(|i| TodoItem {
+                        text: mason_core::progress::one_line(&i.text),
+                        status: i.status.as_str().to_string(),
+                    })
+                    .collect();
+                self.progress_report(run, |p, now| p.agent_plan(todo, now));
+            }
+            _ => {}
+        }
     }
 
     /// The live record of a run, if it is in progress.
@@ -340,12 +617,17 @@ impl Daemon {
         let succeeded = outcome == Some(Some(StepOutcome::Succeeded));
         if succeeded {
             let project = self.project(l.project).map_or("", |c| c.id.as_str());
+            let (step, done) = if l.p.agent {
+                (agent_history_key(&l.p.step), l.p.tool_calls)
+            } else {
+                (l.p.step.clone(), l.p.done.value)
+            };
             let _ = self.store.record_history(
                 project,
                 l.task.0,
                 run.0,
-                &l.p.step,
-                l.p.done.value,
+                &step,
+                done,
                 l.p.output.lines,
                 l.p.max_gap_ms,
                 now,

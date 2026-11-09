@@ -28,10 +28,16 @@ pub enum Scenario {
     Crash,
     /// The agent runs until cancelled.
     Hang,
+    /// The agent keeps a todo list, then submits a valid plan. An adapter that
+    /// declares `plan_reports` must emit [`AgentEvent::Plan`].
+    Plan,
+    /// The agent calls `report_progress` with 1 of 4, then 2 of 5, then submits
+    /// a valid plan. The counts must reach the contract unchanged.
+    Progress,
 }
 
 impl Scenario {
-    pub const ALL: [Scenario; 8] = [
+    pub const ALL: [Scenario; 10] = [
         Scenario::Accepted,
         Scenario::RejectedThenFixed,
         Scenario::NoResult,
@@ -40,6 +46,8 @@ impl Scenario {
         Scenario::ProviderDown,
         Scenario::Crash,
         Scenario::Hang,
+        Scenario::Plan,
+        Scenario::Progress,
     ];
 }
 
@@ -59,6 +67,14 @@ pub fn valid_plan() -> serde_json::Value {
         "summary": "Add the thing", "files": ["src/lib.rs"], "approach": "Write it",
         "acceptance_criteria": ["it works"]
     })
+}
+
+/// The two `report_progress` calls the Progress scenario scripts, for harnesses.
+pub fn progress_calls() -> [serde_json::Value; 2] {
+    [
+        serde_json::json!({"message": "reading", "done": 1, "total": 4}),
+        serde_json::json!({"message": "found more", "done": 2, "total": 5}),
+    ]
 }
 
 fn collect(
@@ -137,6 +153,7 @@ fn check(adapter: &dyn AgentAdapter, h: &dyn Harness, s: Scenario) -> Result<(),
         Scenario::ProviderDown => matches!(outcome, Outcome::ProviderDown { .. }),
         Scenario::Crash => matches!(outcome, Outcome::Crash { .. }),
         Scenario::Hang => matches!(outcome, Outcome::NoResult | Outcome::Crash { .. }),
+        Scenario::Plan | Scenario::Progress => matches!(outcome, Outcome::Accepted) && accepted,
     };
     if !ok {
         return Err(format!(
@@ -154,6 +171,24 @@ fn check(adapter: &dyn AgentAdapter, h: &dyn Harness, s: Scenario) -> Result<(),
         }
     }
     check_usage(adapter, s, &events)?;
+    if s == Scenario::Plan && adapter.capabilities().plan_reports {
+        let plans = events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::Plan { items } if !items.is_empty()))
+            .count();
+        if plans == 0 {
+            return Err("adapter declares plan_reports but emitted no Plan event".into());
+        }
+    }
+    if s == Scenario::Progress {
+        let got: Vec<Option<(u64, u64)>> =
+            contract.state().reports.iter().map(|r| r.counts).collect();
+        if got != [Some((1, 4)), Some((2, 5))] {
+            return Err(format!(
+                "report_progress counts must pass through unchanged: expected 1 of 4 then 2 of 5, got {got:?}"
+            ));
+        }
+    }
     Ok(())
 }
 

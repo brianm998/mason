@@ -244,6 +244,15 @@ pub enum Review {
     ChangesRequested,
 }
 
+/// How far a host's checks are: `done` of `total` finished, and the name of one that is
+/// running. Given only by a host that says (`HostCaps::checks`) and has them listed.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CheckCounts {
+    pub done: u64,
+    pub total: u64,
+    pub running: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PrStatus {
     pub state: PrState,
@@ -253,6 +262,8 @@ pub struct PrStatus {
     pub review: Review,
     /// The head commit the status is about.
     pub head: String,
+    /// Checks finished out of checks listed, when the host lists them.
+    pub counts: Option<CheckCounts>,
 }
 
 pub trait GitHostAdapter: Send + Sync {

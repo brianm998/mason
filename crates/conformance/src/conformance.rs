@@ -137,6 +137,8 @@ fn src(s: i32) -> mason_core::progress::Source {
         ProgressSource::SourceReported => Source::Reported,
         ProgressSource::SourceCounted => Source::Counted,
         ProgressSource::SourceHistory => Source::History,
+        ProgressSource::SourceExpected => Source::Expected,
+        ProgressSource::SourceMinimum => Source::Minimum,
     }
 }
 
@@ -183,6 +185,26 @@ pub fn progress_texts(c: &ProgressCell, now_ms: u64) -> Vec<String> {
             "output {} lines, {} bytes",
             group(c.lines),
             group(c.bytes)
+        ));
+    }
+    if let Some(k) = &c.tokens {
+        let o = |has: bool, v: u64| has.then_some(v);
+        let (i, out, cr, cw) = (
+            o(k.has_input, k.input),
+            o(k.has_output, k.output),
+            o(k.has_cache_read, k.cache_read),
+            o(k.has_cache_write, k.cache_write),
+        );
+        let compact = mason_core::progress_text::tokens_compact(i, out, cr, cw);
+        if !compact.is_empty() {
+            t.push(format!("tokens {compact}"));
+        }
+        t.extend(mason_core::progress_text::tokens_detail(
+            i,
+            out,
+            cr,
+            cw,
+            k.has_cost.then_some(k.cost_usd),
         ));
     }
     for s in &c.subs {

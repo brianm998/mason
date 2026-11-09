@@ -177,7 +177,8 @@ pub fn tool_spec(tool: &str) -> Option<(String, Value)> {
             json!({
                 "message": {"type": "string", "description": "Up to 300 characters"},
                 "done": {"type": "integer"},
-                "total": {"type": "integer"}
+                "total": {"type": "integer"},
+                "unit": {"type": "string", "description": "What is counted, up to 20 characters (default \"steps\"), such as \"files\" or \"criteria\""}
             }),
             &["message"],
         ),
@@ -303,6 +304,12 @@ pub fn validate(tool: &str, a: &Value) -> Result<(), Vec<String>> {
         }
         "report_progress" => {
             text(a, "message", 300, &mut p);
+            if let Some(u) = a.get("unit") {
+                match u.as_str() {
+                    Some(u) if !u.trim().is_empty() && u.chars().count() <= 20 => {}
+                    _ => p.push("unit must be 1 to 20 characters".into()),
+                }
+            }
             let (d, t) = (
                 a.get("done").and_then(Value::as_u64),
                 a.get("total").and_then(Value::as_u64),
@@ -364,11 +371,26 @@ impl CheckHandler for NoChecks {
     }
 }
 
+/// One accepted `report_progress` call.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProgressReport {
+    pub message: String,
+    /// `(done, total)`, passed through as the agent gave them.
+    pub counts: Option<(u64, u64)>,
+    /// What is counted; "steps" when the agent did not say.
+    pub unit: String,
+}
+
+/// Called with each accepted `report_progress`, as it is made.
+pub type OnProgress = Arc<dyn Fn(&ProgressReport) + Send + Sync>;
+
 #[derive(Clone, Debug, Default)]
 pub struct ContractState {
     /// The accepted terminal submission: tool name and its arguments.
     pub accepted: Option<(String, Value)>,
     pub progress: Vec<String>,
+    /// Every accepted `report_progress`, in order, with its counts.
+    pub reports: Vec<ProgressReport>,
     pub proposals: Vec<Value>,
     pub asked: Option<Value>,
     pub suspended_check: Option<String>,
@@ -391,6 +413,7 @@ pub type AskRewriter = Box<dyn Fn(&Value, &[String]) -> Option<Value> + Send + S
 struct Inner {
     ask_rewriter: Mutex<Option<AskRewriter>>,
     on_accept: Mutex<Option<OnAccept>>,
+    on_progress: Mutex<Option<OnProgress>>,
     allowed: Mutex<Option<Vec<String>>>,
     validator: Option<Validator>,
     step: StepKind,
@@ -419,6 +442,7 @@ impl ContractHandle {
         ContractHandle(Arc::new(Inner {
             ask_rewriter: Mutex::new(None),
             on_accept: Mutex::new(None),
+            on_progress: Mutex::new(None),
             allowed: Mutex::new(None),
             validator,
             step,
@@ -452,6 +476,12 @@ impl ContractHandle {
     /// Run `f` for each accepted terminal submission, before replying to the agent.
     pub fn set_on_accept(&self, f: OnAccept) {
         *self.0.on_accept.lock().unwrap_or_else(|e| e.into_inner()) = Some(f);
+    }
+
+    /// Run `f` for each accepted `report_progress`, as it is made (after the
+    /// contract's lock is released, so `f` may take its own locks).
+    pub fn set_on_progress(&self, f: OnProgress) {
+        *self.0.on_progress.lock().unwrap_or_else(|e| e.into_inner()) = Some(f);
     }
 
     /// Re-establish a submission accepted before the controller restarted.
@@ -640,8 +670,27 @@ impl ContractHandle {
                 }
             }
             "report_progress" => {
-                st.progress
-                    .push(args["message"].as_str().unwrap_or_default().to_string());
+                let message = args["message"].as_str().unwrap_or_default().to_string();
+                let report = ProgressReport {
+                    message: message.clone(),
+                    counts: match (args["done"].as_u64(), args["total"].as_u64()) {
+                        (Some(d), Some(t)) => Some((d, t)),
+                        _ => None,
+                    },
+                    unit: args["unit"].as_str().unwrap_or("steps").trim().to_string(),
+                };
+                st.progress.push(message);
+                st.reports.push(report.clone());
+                drop(st);
+                let hook = self
+                    .0
+                    .on_progress
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
+                if let Some(h) = hook {
+                    h(&report);
+                }
                 ToolReply {
                     ok: true,
                     text: "accepted".into(),
@@ -871,6 +920,52 @@ mod tests {
     }
 
     #[test]
+    fn progress_counts_reach_the_hook_in_order_as_they_are_made() {
+        let c = ContractHandle::new(StepKind::Develop, Box::new(NoChecks));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let s2 = seen.clone();
+        c.set_on_progress(Arc::new(move |r| s2.lock().unwrap().push(r.clone())));
+        assert!(
+            c.call(
+                "report_progress",
+                &json!({"message": "a", "done": 1, "total": 4, "unit": "files"})
+            )
+            .ok
+        );
+        assert!(
+            c.call(
+                "report_progress",
+                &json!({"message": "b", "done": 2, "total": 5})
+            )
+            .ok
+        );
+        assert!(
+            !c.call(
+                "report_progress",
+                &json!({"message": "c", "done": 6, "total": 5})
+            )
+            .ok
+        );
+        assert!(
+            !c.call(
+                "report_progress",
+                &json!({"message": "c", "unit": "x".repeat(21)})
+            )
+            .ok
+        );
+        let got = seen.lock().unwrap().clone();
+        assert_eq!(got.len(), 2);
+        assert_eq!(
+            (got[0].counts, got[0].unit.as_str()),
+            (Some((1, 4)), "files")
+        );
+        assert_eq!(
+            (got[1].counts, got[1].unit.as_str()),
+            (Some((2, 5)), "steps")
+        );
+    }
+
+    #[test]
     fn non_terminal_tools_record_and_do_not_end_the_step() {
         let c = ContractHandle::new(StepKind::Develop, Box::new(NoChecks));
         assert!(
@@ -910,6 +1005,8 @@ mod tests {
             (s.progress.len(), s.proposals.len(), s.asked.is_some()),
             (1, 1, true)
         );
+        assert_eq!(s.reports[0].counts, Some((1, 4)));
+        assert_eq!(s.reports[0].unit, "steps");
         assert!(!c.flag().is_set());
         c.clear_pending();
         assert!(c.state().asked.is_none());

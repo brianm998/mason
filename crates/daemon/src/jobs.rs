@@ -247,6 +247,9 @@ impl Ctx {
                     (_, true) => why,
                     (_, false) => format!("{reason}; {why}"),
                 };
+                // Hand the resources back before the task shows as failed, so nobody
+                // can see a failed task still holding its device.
+                self.release_lease();
                 self.emit(EventKind::StepFailed {
                     task: self.task,
                     reason,
@@ -419,6 +422,10 @@ pub(crate) fn step_env_pairs(c: &Ctx) -> Vec<(String, String)> {
             "MASON_RESULT_FILE".into(),
             result_file(c).to_string_lossy().into_owned(),
         ),
+        (
+            "MASON_PROGRESS_FILE".into(),
+            progress_file(c).to_string_lossy().into_owned(),
+        ),
     ]
 }
 
@@ -435,6 +442,14 @@ pub(crate) fn step_env(c: &Ctx) -> Value {
 fn result_file(c: &Ctx) -> PathBuf {
     c.task_dir()
         .join(format!("result-{}-r{}.json", c.step.name, c.run.0))
+}
+
+/// Where a script step may append progress, one JSON object per line:
+/// `{"done": n, "total": m, "unit": "...", "message": "..."}` (every field optional).
+/// A line that is not JSON is the message.
+fn progress_file(c: &Ctx) -> PathBuf {
+    c.task_dir()
+        .join(format!("progress-{}-r{}.jsonl", c.step.name, c.run.0))
 }
 
 /// What a script step's result file says. `passed` is optional: without it the exit
@@ -1287,6 +1302,11 @@ fn agent_job(c: &Ctx) {
         }));
     }
     spec.env = c.project.agent_env.clone();
+    // Whoever the agent runs `mason run` for: it ranks the request as this
+    // task's pipeline work. Set last so a project's agent_env cannot name
+    // another task.
+    spec.env.retain(|(k, _)| k != "MASON_TASK");
+    spec.env.push(("MASON_TASK".into(), c.task.0.to_string()));
     spec.tool_timeout = tool_timeout_for(kind, &c.project);
     spec.deadline = Some(
         c.res
@@ -1306,6 +1326,37 @@ fn agent_job(c: &Ctx) {
         spec.progress = Some(Arc::new(move |stream, off, bytes| {
             d.progress_observe(run, stream, off, bytes)
         }));
+    }
+    {
+        let (d, run) = (c.d.clone(), c.run);
+        let api = c.d.accounts.iter().any(|a| {
+            a.name == c.project.account && matches!(a.billing, crate::providers::Billing::Api)
+        });
+        spec.on_tokens = Some(Arc::new(move |stream, t| {
+            d.progress_tokens(
+                run,
+                stream,
+                mason_core::progress::Tokens {
+                    input: t.input,
+                    output: t.output,
+                    cache_read: t.cache_read,
+                    cache_write: t.cache_create,
+                    // Spend belongs to an api account (decision 0043).
+                    cost_nano_usd: t
+                        .cost_usd
+                        .filter(|_| api)
+                        .map(mason_core::progress::Tokens::cost_nano),
+                },
+            )
+        }));
+    }
+    // The agent's counts, todo list and tool calls reach the live record as they happen.
+    c.d.progress_agent(c.run);
+    {
+        let (d, run) = (c.d.clone(), c.run);
+        contract.set_on_progress(Arc::new(move |r| d.progress_agent_report(run, r)));
+        let (d, run) = (c.d.clone(), c.run);
+        spec.on_agent_event = Some(Arc::new(move |ev| d.progress_agent_event(run, ev)));
     }
     // Wired before any reattach, so a session found again sees what was already accepted.
     spec.accepted = contract.flag();
@@ -1754,6 +1805,7 @@ fn run_command_on(
         .map_or(c.project.test_timeout, |a| a.value);
     if !dir.join("host.kv").exists() {
         let _ = std::fs::remove_file(result_file(c));
+        let _ = std::fs::remove_file(progress_file(c));
         let o = SpawnOptions {
             host_bin: c.d.cfg.host_bin.clone(),
             root: hosts.clone(),
@@ -1794,6 +1846,13 @@ fn run_command_on(
     // Each run of the command is its own stream, since each log starts at 0.
     let stream = format!("{}{hsuf}", again(k));
     c.d.progress_catch_up(c.run, &stream, &log);
+    // What the command says about itself in `MASON_PROGRESS_FILE`, as it says it.
+    let _tail = {
+        let (d, run) = (c.d.clone(), c.run);
+        crate::progress::FileTail::start(progress_file(c), move |r| {
+            d.progress_report(run, |p, now| p.apply_report(&r, now))
+        })
+    };
     let result = collect_to_file_observed(
         &dir,
         &log,
@@ -1885,6 +1944,8 @@ fn approval_job(c: &Ctx) {
     {
         return;
     }
+    // What the step waits on, and since when (its start), for the monitor to show.
+    c.d.progress_report(c.run, |p, now| p.set_message("waiting for the owner", now));
     loop {
         std::thread::sleep(Duration::from_millis(250));
         match c.d.world() {
@@ -2013,15 +2074,23 @@ pub fn cleanup(d: &Arc<Daemon>, task: TaskId, delete_branch: bool) {
     let Some(p) = d.project(t.project) else {
         return;
     };
-    let lock = d.repo_lock(t.project);
-    let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
-    let wt = p.worktree(&d.cfg, task.0);
-    git::remove_worktree(&p.path, &wt);
-    if delete_branch {
-        let b = p.branch(task.0);
-        if git::branch_exists(&p.path, &b) {
-            let _ = git::run(&p.path, &["branch", "-D", &b]);
+    let landed = t.state == State::Landed;
+    {
+        let lock = d.repo_lock(t.project);
+        let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let wt = p.worktree(&d.cfg, task.0);
+        git::remove_worktree(&p.path, &wt);
+        if delete_branch {
+            let b = p.branch(task.0);
+            if git::branch_exists(&p.path, &b) {
+                let _ = git::run(&p.path, &["branch", "-D", &b]);
+            }
         }
+    }
+    // The task's build directory goes only when it landed (the others can be revived), and on
+    // a thread of its own, outside the lock: deleting gigabytes takes a while (s78).
+    if landed {
+        crate::taskcache::remove_in_background(d, p, task.0);
     }
 }
 

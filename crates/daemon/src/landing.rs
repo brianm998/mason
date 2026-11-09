@@ -17,8 +17,9 @@
 use crate::daemon::{now_ms, Daemon};
 use crate::jobs::{run_shell, Ctx};
 use mason_adapter_api::service::{
-    Checks, CiState, GitHostAdapter, Observed, PollEvent, Poller, PrState, Review,
+    CheckCounts, Checks, CiState, GitHostAdapter, Observed, PollEvent, Poller, PrState, Review,
 };
+use mason_core::progress::{Change, Figure};
 use mason_core::*;
 use mason_landing::batch::{Assembled, Batch, BatchTask, Finish};
 use mason_landing::config::{self, LandingConfig, Rung};
@@ -44,9 +45,14 @@ pub enum Verdict {
     Failed(String),
 }
 
+/// The batch's phases: forming, integrating, running suites, landing.
+const PHASES: u64 = 4;
+
 #[derive(Clone, Debug)]
 struct Wait {
     task: TaskId,
+    /// The landing step run this task waits in (its progress record).
+    run: StepRunId,
     branch: String,
     rank: u64,
     ready_at: u64,
@@ -196,6 +202,7 @@ pub fn submit_and_wait(c: &Ctx) -> Option<Verdict> {
         .unwrap_or(Priority::Normal);
     let wait = Wait {
         task: c.task,
+        run: c.run,
         branch: c.branch.clone(),
         rank: rank_of(priority, c.task),
         ready_at: d.started.elapsed().as_secs(),
@@ -495,6 +502,7 @@ fn start(d: &Arc<Daemon>, pid: ProjectId, members: Vec<Wait>, cfg: LandingConfig
         .spawn(move || {
             let tasks: Vec<(TaskId, String)> =
                 members.iter().map(|w| (w.task, w.branch.clone())).collect();
+            let member_runs: Vec<StepRunId> = members.iter().map(|w| w.run).collect();
             let fps: HashMap<u64, Footprint> = members
                 .iter()
                 .map(|w| (w.task.0, w.footprint.clone()))
@@ -511,6 +519,7 @@ fn start(d: &Arc<Daemon>, pid: ProjectId, members: Vec<Wait>, cfg: LandingConfig
                     slot,
                     kind,
                     fps,
+                    member_runs,
                     runs: Default::default(),
                     batch_id: Default::default(),
                     ci,
@@ -595,6 +604,8 @@ struct Runner {
     /// `batch`, `now` or `force`.
     kind: String,
     fps: HashMap<u64, Footprint>,
+    /// The landing step runs of the batch's tasks: where its progress is shown.
+    member_runs: Vec<StepRunId>,
     /// Makes each suite run's host id its own: a host id names one run.
     runs: std::sync::atomic::AtomicU64,
     batch_id: std::sync::atomic::AtomicU64,
@@ -644,6 +655,77 @@ impl Runner {
             .join(format!("{}-b{}", self.project().id, self.slot))
     }
 
+    /// The batch's phases, for each member's landing run: `done` of [`PHASES`] with the
+    /// name of the one it is in. (Suite counts and check counts are sub-counts.)
+    fn phase(&self, done: u64, name: &str) {
+        let msg = format!("batch: {name}");
+        for run in &self.member_runs {
+            self.d.progress_report(*run, |p, now| {
+                let before = (p.done, p.total, p.unit.clone());
+                p.unit = "phases".into();
+                p.done = Figure::counted(done);
+                p.total = Figure::reported(PHASES);
+                let mut c = if before == (p.done, p.total, p.unit.clone()) {
+                    Change::None
+                } else {
+                    Change::Urgent
+                };
+                if p.set_message(&msg, now) == Change::Urgent {
+                    c = Change::Urgent;
+                }
+                if c != Change::None {
+                    p.updated_at_ms = now;
+                }
+                c
+            });
+        }
+    }
+
+    /// What the batch is waiting on, as each member's message.
+    fn say(&self, msg: &str) {
+        for run in &self.member_runs {
+            self.d
+                .progress_report(*run, |p, now| p.set_message(msg, now));
+        }
+    }
+
+    /// The host's checks, finished out of listed, as a sub-count of each member.
+    fn checks(&self, c: &CheckCounts) {
+        let msg = c.running.as_ref().map(|r| format!("check running: {r}"));
+        for run in &self.member_runs {
+            self.d.progress_sub(*run, "checks", msg.clone(), |s| {
+                s.unit = "checks".into();
+                s.done = Figure::reported(c.done);
+                s.total = Figure::reported(c.total);
+            });
+        }
+    }
+
+    /// The run that shows the batch's suites (the first member's); the others are mirrored.
+    fn sink(&self) -> Option<StepRunId> {
+        self.member_runs.first().copied()
+    }
+
+    /// Copy the suite sub-counts of the sink run to the other members until `stop`.
+    fn mirror(&self, stop: &std::sync::atomic::AtomicBool) {
+        use std::sync::atomic::Ordering::SeqCst;
+        let Some(lead) = self.sink() else { return };
+        loop {
+            let last = stop.load(SeqCst);
+            if let Some(p) = self.d.progress_of(lead.0) {
+                for run in self.member_runs.iter().filter(|r| **r != lead) {
+                    for s in p.subs.iter().filter(|s| s.name != "checks") {
+                        self.d.progress_sub(*run, &s.name, None, |x| *x = s.clone());
+                    }
+                }
+            }
+            if last {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+    }
+
     fn point(&self, p: &str) {
         let c = &self.d.crash;
         c.point(p);
@@ -679,6 +761,13 @@ impl Runner {
             .map(|x| x.task.to_string())
             .collect::<Vec<_>>()
             .join(",");
+        match phase {
+            "merged" => self.phase(1, "integrating"),
+            "verifying" => self.phase(2, "running suites"),
+            "promoting" => self.phase(3, "landing"),
+            "landed" => self.phase(PHASES, "landed"),
+            _ => {}
+        }
         let _ = self
             .d
             .store
@@ -704,6 +793,7 @@ impl Runner {
         self.batch_id
             .store(batch_id, std::sync::atomic::Ordering::SeqCst);
         self.point("batch_formed");
+        self.phase(0, "forming");
         let def = d.current_def(self.pid);
         let remote = if self.cfg.mode.local_only() {
             None
@@ -1192,16 +1282,23 @@ impl Runner {
             green()
         } else {
             let n = self.runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            crate::suites::run_over(
-                &self.d,
-                self.project(),
-                def,
-                &local,
-                wt,
-                base,
-                log_dir,
-                &format!("{prefix}-{n}"),
-            )
+            let stop = std::sync::atomic::AtomicBool::new(false);
+            std::thread::scope(|sc| {
+                sc.spawn(|| self.mirror(&stop));
+                let r = crate::suites::run_over(
+                    &self.d,
+                    self.project(),
+                    def,
+                    &local,
+                    wt,
+                    base,
+                    log_dir,
+                    &format!("{prefix}-{n}"),
+                    self.sink(),
+                );
+                stop.store(true, std::sync::atomic::Ordering::SeqCst);
+                r
+            })
         };
         if !r.green {
             return r;
@@ -1358,6 +1455,7 @@ impl Runner {
         let name = format!("mason/ci/{}-b{batch}-{}", self.project().id, self.next_n());
         let (sha, ref_id) = self.push_candidate(wt, "ci", &name)?;
         let started = Instant::now();
+        self.say(&format!("waiting for CI on {name}"));
         let r = (|| {
             let run = self.ask("CI trigger", started, cfg.timeout_s, cfg.poll_s, || {
                 ci.trigger(&name, &sha).map(Some)
@@ -1427,8 +1525,15 @@ impl Runner {
             let _ = host.close_pr(old.number);
             self.drop_candidate(&old.branch, old.ref_id);
         }
+        self.say(&format!(
+            "waiting for the pull request's checks (#{})",
+            pr.number
+        ));
         let st = self.ask("the pull request's checks", started, timeout, poll, || {
             let st = host.pr_status(pr.number)?;
+            if let Some(c) = &st.counts {
+                self.checks(c);
+            }
             Ok(match (st.state, st.checks) {
                 (PrState::Closed, _) => Some(st),
                 (_, Checks::Pending) => None,
@@ -1691,6 +1796,7 @@ impl Runner {
             commit,
             log_dir,
             &format!("b{batch_id}-post"),
+            None,
         );
         {
             let _g = lock.lock().unwrap_or_else(|e| e.into_inner());

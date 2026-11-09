@@ -1127,6 +1127,96 @@ final class MonitorCoreTests: XCTestCase {
         XCTAssertTrue(c.progressTexts(now: 1_400_000).contains("silent"))
     }
 
+    // MARK: live tokens (s76)
+
+    func testTokensShowCompactlyAndNothingWhenNoneWereReported() {
+        var c = cell(done: 5)
+        XCTAssertEqual(c.tokensCompact, "", "no tokens: nothing shown, never zero")
+        XCTAssertFalse(c.progressTexts(now: 1_000_000).contains { $0.hasPrefix("tokens") || $0.hasPrefix("input") })
+        var t = Mason_V1_TokenLine()
+        t.hasInput_p = true; t.input = 4
+        t.hasOutput_p = true; t.output = 988
+        t.hasCacheRead_p = true; t.cacheRead = 7664
+        t.hasCacheWrite_p = true; t.cacheWrite = 4503
+        c.tokens = t
+        XCTAssertEqual(c.tokensCompact, "12.2k in, 988 out")
+        let texts = c.progressTexts(now: 1_000_000)
+        XCTAssertTrue(texts.contains("tokens 12.2k in, 988 out"))
+        XCTAssertTrue(texts.contains("cache read 7,664"))
+        XCTAssertFalse(texts.contains { $0.hasPrefix("cost") }, "cost only when reported")
+        t.hasCost_p = true; t.costUsd = 0.0123
+        c.tokens = t
+        XCTAssertTrue(c.progressTexts(now: 1_000_000).contains("cost $0.0123"))
+        XCTAssertEqual(Format.compactCount(999_949), "999.9k")
+        XCTAssertEqual(Format.compactCount(1_234_567), "1.2M")
+        var out = Mason_V1_TokenLine()
+        out.hasOutput_p = true; out.output = 5
+        XCTAssertEqual(Format.tokensCompact(out), "5 out")
+    }
+
+    // MARK: sidebar width and pinned area
+
+    func testSidebarWidthDefaultsToTheToken() {
+        XCTAssertEqual(MonitorModel().sidebarWidth, 300)
+    }
+
+    func testSidebarWidthIsClampedWhenSet() {
+        let m = MonitorModel()
+        m.setSidebarWidth(10)
+        XCTAssertEqual(m.sidebarWidth, 220)
+        m.setSidebarWidth(5000)
+        XCTAssertEqual(m.sidebarWidth, 640)
+        m.setSidebarWidth(410)
+        XCTAssertEqual(m.sidebarWidth, 410)
+    }
+
+    func testAStoredWidthIsRestoredAndClamped() {
+        let prefs = MemoryPreferences()
+        let a = MonitorModel(preferences: prefs)
+        a.setSidebarWidth(450)
+        XCTAssertEqual(MonitorModel(preferences: prefs).sidebarWidth, 450)
+        prefs.setDouble(9000, for: "sidebarWidth")
+        XCTAssertEqual(MonitorModel(preferences: prefs).sidebarWidth, 640)
+        prefs.setDouble(1, for: "sidebarWidth")
+        XCTAssertEqual(MonitorModel(preferences: prefs).sidebarWidth, 220)
+    }
+
+    func testTextZoomScalesTheStoredWidthUpToTheCapAndNotTheStoredValue() {
+        let m = MonitorModel()
+        m.setSidebarWidth(400)
+        XCTAssertEqual(m.panelWidth(scale: 1.0), 400)
+        XCTAssertEqual(m.panelWidth(scale: 1.2), 480, accuracy: 0.001)
+        XCTAssertEqual(m.panelWidth(scale: 2.4), 600, accuracy: 0.001)
+        XCTAssertEqual(m.sidebarWidth, 400)
+    }
+
+    func testThePanelGivesWayBeforeTheMainView() {
+        XCTAssertEqual(MonitorModel.fit(desired: 500, available: 1200, scale: 1), 500)
+        XCTAssertEqual(MonitorModel.fit(desired: 500, available: 800, scale: 1), 800 - 360 - 8)
+        XCTAssertEqual(MonitorModel.fit(desired: 500, available: 400, scale: 1), 220, "the floor wins")
+        XCTAssertEqual(MonitorModel.fit(desired: 300, available: 400, scale: 2), 330, "the floor scales with zoom")
+    }
+
+    func testHomeAndSearchAreNotInTheScrollingEntries() {
+        let m = model()
+        XCTAssertEqual(MonitorModel.sidebarPinnedIds, ["sidebar:home", "search"])
+        let es = m.sidebarEntries
+        XCTAssertGreaterThan(es.count, 4)
+        if case .header = es.first! {} else { XCTFail("sections come first") }
+        let links = es.compactMap { e -> String? in if case .pageLink(let t, _) = e { return t } else { return nil } }
+        XCTAssertEqual(links, ["Landing", "LLM usage", "Pipeline", "Health"])
+        XCTAssertEqual(es.suffix(4).count, 4)
+    }
+
+    func testATileTargetResolvesToASectionInTheScrollingEntries() {
+        let m = model()
+        m.reveal(state: "failed")
+        let i = m.scrollIndex(forState: m.scrollTarget!)
+        XCTAssertNotNil(i)
+        if case .header(let s) = m.sidebarEntries[i!] { XCTAssertEqual(s.state, "failed") } else { XCTFail() }
+        XCTAssertNil(m.scrollIndex(forState: "nope"))
+    }
+
     // MARK: releasing and adding blockers (s75)
 
     func heldRow() -> TaskRow {

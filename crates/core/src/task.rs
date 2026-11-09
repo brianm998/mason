@@ -153,6 +153,9 @@ pub struct Task {
     pub priority: Priority,
     pub trust: TrustSource,
     pub enqueued_at: Timestamp,
+    /// When the task entered its present state (set at filing and on every
+    /// state change; a retry within the same state does not move it).
+    pub state_entered_at: Timestamp,
     pub state: State,
     pub activity: Activity,
     pub landed: Option<LandedOutcome>,

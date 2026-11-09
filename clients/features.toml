@@ -47,7 +47,7 @@ swift = "done"
 compose = "done"
 
 [feature.sidebar-sort]
-description = "Active states oldest first; failed, landed and canceled newest first and collapsed"
+description = "Queued in queue order (what the daemon admits first on top); every other section newest entry first; failed, landed and canceled collapsed"
 swift = "done"
 compose = "done"
 
@@ -83,6 +83,11 @@ compose = "done"
 
 [feature.progress-cells]
 description = "Filled, part, hatched and empty cells; a running cell fills in proportion to a real total, lighter for a typical one, outline for none; a percentage only from a real total, the count and typical range for a history total, the count alone for none; a progress line per running step with a counting time; amber and never red when slow or quiet"
+swift = "done"
+compose = "done"
+
+[feature.live-tokens]
+description = "A running step's progress line shows the tokens its LLM session has used so far, compact as '12.2k in, 988 out' (in is input plus cache read plus cache write); the task page shows input, output, cache read and cache write, and cost when reported; nothing when none were reported; a filter or search finds it"
 swift = "done"
 compose = "done"
 
@@ -233,6 +238,11 @@ compose = "done"
 
 [feature.daemon-down-alert]
 description = "After 15 seconds of failed reconnects the monitor raises 'daemon down' itself: a banner, and a sound and sentence unless muted; clears when the connection returns"
+swift = "done"
+compose = "done"
+
+[feature.sidebar-resize]
+description = "The left panel is resized by dragging its divider (220 to 640 before text zoom, the main view keeps 360, the width is remembered per device), and Home and search are pinned above the scrolling list"
 swift = "done"
 compose = "done"
 

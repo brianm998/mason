@@ -135,17 +135,7 @@ fn local_only_ci_red_parks_the_culprit_and_a_moved_local_base_is_folded_in() {
     wait_for("CI to start", 60, || triggers(&log) >= 1);
     // The owner commits to the local base while CI runs.
     let tmp = w.s.root.path().join("owner-wt");
-    sh(
-        &w.s.repo,
-        &[
-            "worktree",
-            "add",
-            "-q",
-            "--detach",
-            tmp.to_str().unwrap(),
-            "main",
-        ],
-    );
+    owner_worktree(&w.s.repo, &tmp);
     std::fs::write(tmp.join("owner.txt"), "o").unwrap();
     sh(&tmp, &["add", "-A"]);
     sh(
@@ -205,6 +195,51 @@ fn pr_each_opens_one_pull_request_per_task_and_merges_each() {
     assert!(w.on_main("x/a.txt") && w.on_main("x/b.txt"));
     wait_for("the branches to be deleted", 30, || {
         remote_branches(&w.s).is_empty()
+    });
+}
+
+#[test]
+fn a_pr_wait_shows_the_hosts_checks_and_the_batch_phases_on_each_member() {
+    let w = pr_world("pr-batch", true, false);
+    // The host says four of seven checks are done, one running; PR #1 is the batch's.
+    let prs_dir = w.s.root.path().join("host-state/prs");
+    std::fs::create_dir_all(&prs_dir).unwrap();
+    std::fs::write(
+        prs_dir.join("1.counts"),
+        r#"{"done": 4, "total": 7, "running": "lint"}"#,
+    )
+    .unwrap();
+    let a = w.task("one", &[("x/a.txt", "1")]);
+    let b = w.task("two", &[("x/b.txt", "2")]);
+    let seen = |t: TaskId| {
+        w.d.progress_of_task(t)
+            .into_iter()
+            .find(|p| p.step == "land" || p.unit == "phases")
+    };
+    wait_for("the checks to show on both members", 120, || {
+        [a, b].iter().all(|t| {
+            seen(*t).is_some_and(|p| {
+                p.subs
+                    .iter()
+                    .any(|s| s.name == "checks" && s.done.value == 4 && s.total.value == 7)
+            })
+        })
+    });
+    for t in [a, b] {
+        let p = seen(t).unwrap();
+        assert_eq!(p.unit, "phases", "{p:?}");
+        assert_eq!(p.total.value, 4, "{p:?}");
+        assert!(p.message.starts_with("batch: "), "{p:?}");
+        assert!(
+            p.subs.iter().any(|s| s.unit == "tests"),
+            "the batch's suite counts are sub-counts: {p:?}"
+        );
+    }
+    // Approve the open pull request so the batch can end.
+    let dir = w.s.root.path().join("host-state");
+    wait_for("both to land", 120, || {
+        mason_adapters::fakehost::FakeHost::approve(&dir, 1);
+        w.landed(a) && w.landed(b)
     });
 }
 
@@ -327,17 +362,7 @@ fn plain_local_only_lands_on_the_local_base_and_leaves_the_push_to_the_owner() {
     assert!(git::run(&w.s.repo, &["cat-file", "-e", "main:red.alpha"]).is_err());
     // The owner commits to the local base; the next landing folds it in.
     let tmp = w.s.root.path().join("owner-wt");
-    sh(
-        &w.s.repo,
-        &[
-            "worktree",
-            "add",
-            "-q",
-            "--detach",
-            tmp.to_str().unwrap(),
-            "main",
-        ],
-    );
+    owner_worktree(&w.s.repo, &tmp);
     std::fs::write(tmp.join("owner.txt"), "o").unwrap();
     sh(&tmp, &["add", "-A"]);
     sh(
@@ -362,4 +387,30 @@ fn plain_local_only_lands_on_the_local_base_and_leaves_the_push_to_the_owner() {
     wait_for("the next to land on top", 120, || w.landed(next));
     assert_eq!(sh(&w.s.repo, &["show", "main:owner.txt"]), "o");
     assert_eq!(sh(&w.s.repo, &["show", "main:x/later.txt"]), "1");
+}
+
+/// The owner's worktree on `main`. The daemon prunes stale worktree records while it cleans up
+/// a landed task, and git's own `worktree add` can lose that race ("could not open
+/// .../locked"), so a failed add is retried; it leaves nothing behind when it fails.
+fn owner_worktree(repo: &std::path::Path, tmp: &std::path::Path) {
+    let mut last = String::new();
+    for _ in 0..10 {
+        match git::run(
+            repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                tmp.to_str().unwrap(),
+                "main",
+            ],
+        ) {
+            Ok(_) => return,
+            Err(e) => last = e.to_string(),
+        }
+        let _ = git::run(repo, &["worktree", "prune"]);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    panic!("owner worktree: {last}");
 }

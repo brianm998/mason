@@ -265,4 +265,32 @@ mod tests {
         let mut l = Ledger::new();
         assert!(!l.release(7));
     }
+
+    #[test]
+    fn a_stream_of_task_linked_requests_never_holds_back_a_waiting_test_step() {
+        let mut l = Ledger::new();
+        l.set_capacity("compile", 1, Kind::Machine);
+        let held = l.submit(rank(1, 1, 1), Needs::of(&[("compile", 1)]), "#0", 0);
+        l.schedule(0, None, None);
+        // The test step (2 steps from landing) waits from the start.
+        let test = l.submit(rank(2, 1, 2), Needs::of(&[("compile", 1)]), "#1 test", 1);
+        // An agent still developing (3 steps) keeps queueing runs, each later
+        // than the last, one after another as each is served.
+        let mut stream = vec![];
+        let mut now = 2;
+        for n in 0..5 {
+            let r = Rank::new(false, 3, 1, now, 100 + n, false);
+            stream.push(l.submit(r, Needs::of(&[("compile", 1)]), "task 9 `cargo test`", now));
+            now += 1;
+        }
+        l.release(held);
+        l.schedule(now, None, None);
+        assert!(l.holds(test), "the test step is next, not one of the runs");
+        assert!(stream.iter().all(|id| l.is_waiting(*id)));
+        // Even a request that arrives right now does not pass it, and the
+        // earlier runs are not starved by the later ones either.
+        l.release(test);
+        l.schedule(now + 1, None, None);
+        assert!(l.holds(stream[0]));
+    }
 }

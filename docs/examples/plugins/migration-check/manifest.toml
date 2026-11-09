@@ -4,7 +4,7 @@
 #   mason extension approve migration-check
 name = "migration-check"
 version = "1.0.0"
-protocol = 1
+protocol = 2   # 2: may send step.progress while it runs
 description = "Every .sql file in a directory must contain a marker line, like `-- reversible`."
 provides = ["step-type:migration-check"]
 run = "./check.py"

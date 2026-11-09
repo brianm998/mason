@@ -94,6 +94,7 @@ struct Feed {
     tx: Sender<AgentEvent>,
     session_id: Arc<Mutex<Option<String>>>,
     progress: Option<mason_adapter_api::ProgressSink>,
+    on_tokens: Option<mason_adapter_api::TokensSink>,
     stream: String,
 }
 
@@ -136,6 +137,9 @@ impl Feed {
         }
         if let Some(id) = &self.st.session_id {
             *self.session_id.lock().unwrap_or_else(|e| e.into_inner()) = Some(id.clone());
+        }
+        if let (Some(f), Some(t)) = (&self.on_tokens, self.st.take_live()) {
+            f(&self.stream, &t);
         }
         for e in evs {
             let _ = self.tx.send(e);
@@ -181,6 +185,7 @@ pub fn attach_as(
     let accepted = spec.accepted.clone();
     {
         let progress = spec.progress.clone();
+        let on_tokens = spec.on_tokens.clone();
         let (sid, cancelled, timed_out, done) = (
             session_id.clone(),
             cancelled.clone(),
@@ -195,6 +200,7 @@ pub fn attach_as(
                 tx: tx.clone(),
                 session_id: sid,
                 progress,
+                on_tokens,
                 stream: dir
                     .file_name()
                     .map_or(String::new(), |n| n.to_string_lossy().into_owned()),
