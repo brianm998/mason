@@ -66,9 +66,32 @@ pub fn world_with(
     extra: &dyn Fn(&Scratch) -> String,
     files: &[(&str, &str)],
 ) -> W {
+    world_full(landing_toml, extra, files, "true", false)
+}
+
+/// Like `world_with`, with the project's test command, and with a `test` step in
+/// the definition (`uses = { compile = 1 }`) when `test_step`: landing's re-test
+/// then runs that command.
+pub fn world_full(
+    landing_toml: &str,
+    extra: &dyn Fn(&Scratch) -> String,
+    files: &[(&str, &str)],
+    test_cmd: &str,
+    test_step: bool,
+) -> W {
     let s = Scratch::new("true", json!({"steps": {}}));
-    s.write_project("scratch", "true", &extra(&s));
-    let definition = def();
+    s.write_project("scratch", test_cmd, &extra(&s));
+    let mut definition = def();
+    if test_step {
+        definition = definition.replacen(
+            "category = \"developing\"\nnext = \"land\"",
+            "category = \"developing\"\nnext = \"test\"",
+            1,
+        );
+        definition.push_str(
+            "\n[step.test]\ntype = \"test\"\ncategory = \"testing\"\nuses = { compile = 1 }\nnext = \"land\"\non_red = \"develop\"\nmax_rounds = 3\n\n[resource.compile]\ncount = 1\n",
+        );
+    }
     let mut all: Vec<(&str, &str)> = vec![
         (".mason/mason.toml", &definition),
         (".mason/landing.toml", landing_toml),

@@ -278,3 +278,81 @@ fn landing_with_no_config_is_the_old_direct_landing() {
     assert!(w.on_main("x/p.txt"));
     let _ = Instant::now();
 }
+
+#[test]
+fn a_red_reverification_after_the_base_moved_ends_and_does_not_hang() {
+    // The batch is green on its own tree; while it verifies, the base gains a file that
+    // turns `integration` red. The re-verification then has a named test red on both
+    // runs with no baseline stored, which used to take the repository lock a second time
+    // from the landing thread, holding it, and hang. It must end: here, sent back.
+    let w = world(
+        "window = \"1s\"\n[[tier]]\nname = \"batch\"\nsuites = [\"integration\"]\n",
+        &[],
+    );
+    let t = w.task("slowly", &[("x/slow.integration", "1")]);
+    wait_for("the batch to verify", 60, || {
+        w.d.store
+            .batches(Some("scratch"), 10)
+            .unwrap()
+            .iter()
+            .any(|b| b.phase == "verifying")
+    });
+    w.s.push_files(&[("red.integration", "boom")], "turn integration red");
+    wait_for("the landing to end instead of hanging", 120, || {
+        w.sent_back(t).is_some() || w.landed(t)
+    });
+    assert!(!w.on_main("x/slow.integration"), "a red tree was promoted");
+    // The repository lock is free: another step can take it.
+    let pid = w.d.project_id_by_name("scratch").unwrap();
+    let lock = w.d.repo_lock(pid);
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        drop(lock.lock().unwrap_or_else(|e| e.into_inner()));
+        let _ = tx.send(());
+    });
+    rx.recv_timeout(Duration::from_secs(10))
+        .expect("the repository lock is still held");
+    w.d.store.verify().unwrap();
+}
+
+#[test]
+fn the_retest_after_a_moved_base_holds_a_compile_lease_and_not_the_repository_lock() {
+    // `scripts/gen-status.sh` runs after the batch is assembled; here it announces
+    // itself and waits, which is the time to move the base in.
+    let started;
+    {
+        let probe = tempfile::tempdir().unwrap();
+        started = probe.path().join("started");
+        std::mem::forget(probe);
+    }
+    let gen = format!("touch {}\nsleep 2\n", started.display());
+    let w = world_full(
+        "window = \"1s\"\n",
+        &|_| String::new(),
+        &[("scripts/gen-status.sh", &gen)],
+        "sleep 5",
+        true,
+    );
+    let t = w.task("moves", &[("x/m.txt", "1")]);
+    wait_for("the batch to be assembled", 90, || started.exists());
+    w.s.push_files(&[("other.txt", "o")], "the base moves");
+    let pid = w.d.project_id_by_name("scratch").unwrap();
+    let lock = w.d.repo_lock(pid);
+    let mut seen = false;
+    let mut free_meanwhile = false;
+    wait_for("the re-test to hold a compile lease", 60, || {
+        if w.d.broker.used("compile") >= 1 {
+            seen = true;
+            // While it runs, the repository lock is free.
+            free_meanwhile = lock.try_lock().is_ok();
+            true
+        } else {
+            false
+        }
+    });
+    assert!(seen);
+    assert!(free_meanwhile, "the re-test ran under the repository lock");
+    wait_for("the batch to land", 90, || w.landed(t));
+    assert!(w.on_main("x/m.txt") && w.on_main("other.txt"));
+    assert_eq!(w.d.broker.used("compile"), 0, "the lease was released");
+}

@@ -75,6 +75,12 @@ pub fn sanitized_env_for(
         "MCP_TOOL_TIMEOUT",
         spec.tool_timeout.as_millis().to_string(),
     );
+    // The CLI also aborts a tool that is silent for 30 minutes, whatever the
+    // timeout above says, and the check it gave up on goes on running.
+    set(
+        "CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT",
+        spec.tool_timeout.as_millis().to_string(),
+    );
     set("MASON_STEP_KIND", spec.step.name().into());
     if let Some(s) = contract_sock {
         set("MASON_CONTRACT_SOCK", s.display().to_string());
@@ -1344,6 +1350,7 @@ mod tests {
             Some("600000"),
             "explicit, not inherited and not the default"
         );
+        assert_eq!(get("CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT"), Some("600000"));
         assert_eq!(get("EXTRA"), Some("1"));
         assert_eq!(get("MASON_STEP_KIND"), Some("develop"));
         assert_eq!(env.iter().filter(|(k, _)| k == "GIT_ASKPASS").count(), 1);
