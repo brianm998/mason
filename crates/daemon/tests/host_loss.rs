@@ -216,3 +216,210 @@ fn hosts_of_different_tasks_lost_together_raise_one_alert() {
     assert_eq!(c.len(), 1);
     assert!(c[0].2.starts_with("3 step hosts were lost"), "{}", c[0].2);
 }
+
+// ---- agent steps (s83): a lost host is continued, never failed ----
+
+/// Kills the host of each agent session whose journal says `marker`, up to `limit`
+/// times. An agent host is `t<task>r<run>-<n>` (a test step's has a name after the dash).
+fn agent_watcher(
+    hosts: PathBuf,
+    marker: &'static str,
+    limit: usize,
+    stop: Arc<AtomicBool>,
+    kills: Arc<AtomicUsize>,
+) {
+    std::thread::spawn(move || {
+        let mut done: Vec<String> = vec![];
+        while !stop.load(Ordering::SeqCst) && kills.load(Ordering::SeqCst) < limit {
+            for e in std::fs::read_dir(&hosts).into_iter().flatten().flatten() {
+                let id = e.file_name().to_string_lossy().to_string();
+                let agent = id
+                    .rsplit_once('-')
+                    .is_some_and(|(_, n)| n.parse::<u32>().is_ok());
+                if !agent || !e.path().is_dir() || done.contains(&id) {
+                    continue;
+                }
+                let journal = std::fs::read_to_string(e.path().join("journal")).unwrap_or_default();
+                if journal.contains(marker) && kill_host_only(&e.path()) {
+                    done.push(id);
+                    kills.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    });
+}
+
+/// A develop turn that works until its host is killed.
+fn hang_turn() -> Value {
+    serde_json::json!([{"say": "interrupt-me"}, {"sh": "sleep 120"}])
+}
+
+fn agent_world(develop: Vec<Value>) -> Scratch {
+    let script = serde_json::json!({"steps": {"explore": [explore_turn()], "develop": develop}});
+    Scratch::new("true", script)
+}
+
+fn losses_of(j: &Value) -> usize {
+    j["host_losses"].as_array().map_or(0, Vec::len)
+}
+
+#[test]
+fn a_killed_agent_host_is_resumed_and_the_task_lands() {
+    let s = agent_world(vec![hang_turn(), develop_turn()]);
+    let mut m = s.masond(&[], &[]);
+    s.wait_daemon(&mut m);
+    let (stop, kills) = (
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicUsize::new(0)),
+    );
+    agent_watcher(
+        s.data_dir.join("h"),
+        "interrupt-me",
+        1,
+        stop.clone(),
+        kills.clone(),
+    );
+    s.mason_ok(&[
+        "task",
+        "add",
+        "Add a hello file",
+        "--body",
+        "Create hello.txt.",
+    ]);
+    s.wait_task(0, "landed", 120);
+    stop.store(true, Ordering::SeqCst);
+    assert_eq!(kills.load(Ordering::SeqCst), 1);
+    let j = s.task_json(0);
+    assert_eq!(
+        j["failures"], 0,
+        "a lost host is not a failed attempt: {j:#}"
+    );
+    assert!(j["failure"].is_null(), "{j:#}");
+    assert_eq!(losses_of(&j), 1, "{j:#}");
+    assert_eq!(j["host_losses"][0]["step"], "develop");
+    let show = s.mason_ok(&["task", "show", "0"]);
+    assert!(
+        show.contains("host lost `develop`") && show.contains("killed by signal 9"),
+        "{show}"
+    );
+    // The second session continued the first: it was resumed, with the note.
+    let argv = std::fs::read_to_string(format!("{}.argv", s.script.display())).unwrap();
+    assert!(
+        argv.lines()
+            .any(|l| l.contains("--resume fake-claude-session")),
+        "{argv}"
+    );
+    let alerts = s.mason_ok(&["alerts"]);
+    assert!(!alerts.contains("failed"), "{alerts}");
+    drop(m);
+}
+
+#[test]
+fn three_agent_losses_in_a_row_fail_the_step_and_name_them() {
+    let s = agent_world(vec![hang_turn(), hang_turn(), hang_turn(), develop_turn()]);
+    let mut m = s.masond(&[], &[]);
+    s.wait_daemon(&mut m);
+    let (stop, kills) = (
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicUsize::new(0)),
+    );
+    agent_watcher(
+        s.data_dir.join("h"),
+        "interrupt-me",
+        3,
+        stop.clone(),
+        kills.clone(),
+    );
+    s.mason_ok(&[
+        "task",
+        "add",
+        "Add a hello file",
+        "--body",
+        "Create hello.txt.",
+    ]);
+    s.wait_task(0, "failed", 120);
+    stop.store(true, Ordering::SeqCst);
+    let j = s.task_json(0);
+    let failure = j["failure"].as_str().unwrap();
+    assert!(failure.contains("lost 3 times"), "{failure}");
+    assert_eq!(failure.matches("host pid").count(), 3, "{failure}");
+    assert_eq!(losses_of(&j), 3, "{j:#}");
+    drop(m);
+}
+
+#[test]
+fn a_daemon_killed_with_its_hosts_resumes_the_agent_step() {
+    let s = agent_world(vec![hang_turn(), develop_turn()]);
+    let mut m = s.masond(&[], &[]);
+    s.wait_daemon(&mut m);
+    s.mason_ok(&[
+        "task",
+        "add",
+        "Add a hello file",
+        "--body",
+        "Create hello.txt.",
+    ]);
+    let hosts = s.data_dir.join("h");
+    support::wait_for("the develop session to be working", 60, || {
+        std::fs::read_dir(&hosts)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|e| {
+                std::fs::read_to_string(e.path().join("journal"))
+                    .is_ok_and(|j| j.contains("interrupt-me"))
+            })
+    });
+    // The reboot: the daemon and every host go together.
+    let _ = m.child.kill();
+    let _ = m.child.wait();
+    kill_hosts(&s.data_dir);
+    let mut m2 = s.masond(&[], &[]);
+    s.wait_daemon(&mut m2);
+    s.wait_task(0, "landed", 120);
+    let j = s.task_json(0);
+    assert_eq!(j["failures"], 0, "{j:#}");
+    assert_eq!(losses_of(&j), 1, "{j:#}");
+    drop(m2);
+}
+
+#[test]
+fn a_host_that_cannot_start_ends_the_same_way() {
+    let s = agent_world(vec![develop_turn()]);
+    // A host binary that exits at once: no host ever comes up.
+    let d = s.start_with(|c| c.host_bin = PathBuf::from("/usr/bin/true"));
+    let t = file_task(&d, "Add a hello file");
+    wait_state(&d, t, mason_core::State::Failed, 60);
+    let task = task_of(&d, t);
+    let failure = task.failure.unwrap_or_default();
+    assert!(
+        failure.contains("lost 3 times") && failure.contains("never came up"),
+        "{failure}"
+    );
+    let rows = d.store.host_losses_since(0).unwrap();
+    assert_eq!(rows.len(), 3, "{rows:?}");
+    assert_eq!(rows.iter().filter(|r| r.retried).count(), 2);
+}
+
+#[test]
+fn an_agent_cli_that_crashes_by_itself_is_not_resumed_by_this_path() {
+    let s = agent_world(vec![serde_json::json!([{"exit": 1}]), develop_turn()]);
+    let mut m = s.masond(&[], &[]);
+    s.wait_daemon(&mut m);
+    s.mason_ok(&[
+        "task",
+        "add",
+        "Add a hello file",
+        "--body",
+        "Create hello.txt.",
+    ]);
+    s.wait_task(0, "failed", 120);
+    let j = s.task_json(0);
+    assert!(
+        j["failure"].as_str().unwrap().contains("the agent failed"),
+        "{j:#}"
+    );
+    assert_eq!(losses_of(&j), 0, "{j:#}");
+    drop(m);
+}
