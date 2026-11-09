@@ -135,17 +135,7 @@ fn local_only_ci_red_parks_the_culprit_and_a_moved_local_base_is_folded_in() {
     wait_for("CI to start", 60, || triggers(&log) >= 1);
     // The owner commits to the local base while CI runs.
     let tmp = w.s.root.path().join("owner-wt");
-    sh(
-        &w.s.repo,
-        &[
-            "worktree",
-            "add",
-            "-q",
-            "--detach",
-            tmp.to_str().unwrap(),
-            "main",
-        ],
-    );
+    owner_worktree(&w.s.repo, &tmp);
     std::fs::write(tmp.join("owner.txt"), "o").unwrap();
     sh(&tmp, &["add", "-A"]);
     sh(
@@ -372,17 +362,7 @@ fn plain_local_only_lands_on_the_local_base_and_leaves_the_push_to_the_owner() {
     assert!(git::run(&w.s.repo, &["cat-file", "-e", "main:red.alpha"]).is_err());
     // The owner commits to the local base; the next landing folds it in.
     let tmp = w.s.root.path().join("owner-wt");
-    sh(
-        &w.s.repo,
-        &[
-            "worktree",
-            "add",
-            "-q",
-            "--detach",
-            tmp.to_str().unwrap(),
-            "main",
-        ],
-    );
+    owner_worktree(&w.s.repo, &tmp);
     std::fs::write(tmp.join("owner.txt"), "o").unwrap();
     sh(&tmp, &["add", "-A"]);
     sh(
@@ -407,4 +387,30 @@ fn plain_local_only_lands_on_the_local_base_and_leaves_the_push_to_the_owner() {
     wait_for("the next to land on top", 120, || w.landed(next));
     assert_eq!(sh(&w.s.repo, &["show", "main:owner.txt"]), "o");
     assert_eq!(sh(&w.s.repo, &["show", "main:x/later.txt"]), "1");
+}
+
+/// The owner's worktree on `main`. The daemon prunes stale worktree records while it cleans up
+/// a landed task, and git's own `worktree add` can lose that race ("could not open
+/// .../locked"), so a failed add is retried; it leaves nothing behind when it fails.
+fn owner_worktree(repo: &std::path::Path, tmp: &std::path::Path) {
+    let mut last = String::new();
+    for _ in 0..10 {
+        match git::run(
+            repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                tmp.to_str().unwrap(),
+                "main",
+            ],
+        ) {
+            Ok(_) => return,
+            Err(e) => last = e.to_string(),
+        }
+        let _ = git::run(repo, &["worktree", "prune"]);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    panic!("owner worktree: {last}");
 }

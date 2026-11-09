@@ -199,6 +199,7 @@ mod tests {
             test_timeout: Duration::from_secs(1),
             max_test_rounds: None,
             test_reruns: 0,
+            task_cache: None,
             clarity_classifier: None,
             priority_jump: false,
             card_rewriter: None,

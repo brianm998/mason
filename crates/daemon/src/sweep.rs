@@ -121,6 +121,10 @@ pub fn sweep_once(d: &Arc<Daemon>) -> Vec<String> {
         }
     }
 
+    // 4b. A landed task's build directory that is still there (a restart, or a miss). Removing
+    // it is housekeeping, not a missed event, so it files nothing.
+    crate::taskcache::sweep(d, &w);
+
     // 5. Projections that no longer match the log (every tenth pass; it replays everything).
     if st.passes.is_multiple_of(10) {
         if let Err(e) = d.store.verify() {

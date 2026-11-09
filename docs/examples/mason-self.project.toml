@@ -9,6 +9,14 @@ test = "cargo test --workspace"
 # red for want of a CPU. Run a red once more before it counts: green the second time is a
 # recorded flake (test-r<N>.flaky in the task's directory), red twice is red (s61).
 test_reruns = 1
+# Where a task's build directory is, if the test command puts it outside the worktree. It must
+# contain `{task}`. When the task lands the directory is removed (a canceled or failed task keeps
+# its, like its worktree), and the reconcile sweep removes those of landed tasks that were missed.
+# Refused, with a log line: an empty or relative path, one with `..`, the home directory or a
+# parent of it, the project, a worktree or a parent of one, or a symlink. Without this line
+# nothing is removed. Match your test command, e.g.
+#   test = "CARGO_TARGET_DIR=$HOME/.cache/mason-target/$(basename \"$PWD\") cargo test --workspace"
+task_cache = "$HOME/.cache/mason-target/{task}"
 
 # The presence of [self] makes this MASON's own repository. Without it the project
 # is an ordinary one, with no holds and no limits.
