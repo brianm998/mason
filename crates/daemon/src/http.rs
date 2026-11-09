@@ -1470,7 +1470,7 @@ async fn self_status(Shared(d): Shared<Arc<Daemon>>) -> Res {
                     json!({
                         "project": p.id,
                         "open": s.open, "held": s.held, "max_open": c.max_open,
-                        "week": s.week, "per_week": c.per_week, "yours_not_counted": u.yours,
+                        "week": s.week, "per_week": c.per_week, "yours_not_counted": u.yours, "yours_open": u.yours_open,
                         "steps": s.steps, "yours_steps": u.yours_steps, "max_steps": c.max_steps, "period_h": c.period_h,
                         "cooldown_until_ms": s.cooldown_until_ms,
                         "blocked": crate::selfguard::check_as(&s, u.yours, c, TrustSource::Owner).err(),

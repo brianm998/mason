@@ -468,6 +468,7 @@ struct HealthPage: View {
                             Text("\(r.name) (\(r.kind)): \(r.used) of \(r.limit) in use").font(theme.body())
                         }
                     }
+                    Text(h.cpuLine).font(theme.body())
                     section("Waiting", theme: theme) {
                         if h.waiting.isEmpty { Text("Nothing is waiting.").font(theme.body()).foregroundStyle(theme.muted) }
                         ForEach(h.waiting, id: \.self) { Text($0).font(theme.body()) }

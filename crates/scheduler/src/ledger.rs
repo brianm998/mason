@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use crate::plan::{plan, Capacity, Holder, Kind, Needs, Plan, Request, World};
+use crate::plan::{plan, Capacity, CpuGate, Holder, Kind, Needs, Plan, Request, World};
 use crate::rank::Rank;
 use std::collections::BTreeMap;
 
@@ -87,6 +87,17 @@ impl Ledger {
         free_memory_mb: Option<u64>,
         memory_floor_mb: Option<u64>,
     ) -> Plan {
+        self.schedule_gated(now, free_memory_mb, memory_floor_mb, None)
+    }
+
+    /// As `schedule`, with the CPU gate on `compile`.
+    pub fn schedule_gated(
+        &mut self,
+        now: u64,
+        free_memory_mb: Option<u64>,
+        memory_floor_mb: Option<u64>,
+        cpu: Option<CpuGate>,
+    ) -> Plan {
         let p = plan(
             &World {
                 now,
@@ -94,6 +105,7 @@ impl Ledger {
                 holders: &self.holders,
                 free_memory_mb,
                 memory_floor_mb,
+                cpu,
             },
             &self.waiting,
         );
@@ -138,6 +150,16 @@ impl Ledger {
         free_memory_mb: Option<u64>,
         memory_floor_mb: Option<u64>,
     ) -> Plan {
+        self.waits_gated(now, free_memory_mb, memory_floor_mb, None)
+    }
+
+    pub fn waits_gated(
+        &self,
+        now: u64,
+        free_memory_mb: Option<u64>,
+        memory_floor_mb: Option<u64>,
+        cpu: Option<CpuGate>,
+    ) -> Plan {
         plan(
             &World {
                 now,
@@ -145,6 +167,7 @@ impl Ledger {
                 holders: &self.holders,
                 free_memory_mb,
                 memory_floor_mb,
+                cpu,
             },
             &self.waiting,
         )

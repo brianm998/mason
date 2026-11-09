@@ -1712,11 +1712,12 @@ fn main() {
                     String::new()
                 };
                 println!(
-                    "{}: {}/{} open{}, {} of {} this week ({} of yours not counted), {} of {} agent steps in {} h ({} of yours not counted){}",
+                    "{}: {}/{} open{} ({} of yours open, not limited), {} of {} this week ({} of yours not counted), {} of {} agent steps in {} h ({} of yours not counted){}",
                     p["project"].as_str().unwrap_or("?"),
                     p["open"],
                     p["max_open"],
                     held,
+                    p["yours_open"].as_u64().unwrap_or(0),
                     p["week"],
                     p["per_week"],
                     p["yours_not_counted"].as_u64().unwrap_or(0),

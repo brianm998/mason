@@ -517,6 +517,16 @@ public struct HealthSnapshot: Equatable, Sendable {
     public var resources: [Resource] = []
     public var waiting: [String] = []
     public var holders: [String] = []
+    /// Overall CPU use now, if the daemon could read it.
+    public var cpuBusy: Int? = nil
+    /// A compile starts only while CPU use is below this percent.
+    public var compileCpuMax: Int = 50
+
+    /// The CPU line of the Health page.
+    public var cpuLine: String {
+        guard let b = cpuBusy else { return "CPU not readable; a compile starts below \(compileCpuMax)%." }
+        return "CPU \(b)% busy; a compile starts below \(compileCpuMax)%."
+    }
 
     public init(json: String) {
         guard let data = json.data(using: .utf8),
@@ -533,6 +543,10 @@ public struct HealthSnapshot: Equatable, Sendable {
             "\($0["label"] as? String ?? "?"): \($0["explain"] as? String ?? "")"
         }
         holders = (v["holders"] as? [[String: Any]] ?? []).map { $0["label"] as? String ?? "?" }
+        if let c = v["cpu"] as? [String: Any] {
+            cpuBusy = c["busy_pct"] as? Int
+            compileCpuMax = c["compile_max_pct"] as? Int ?? 50
+        }
     }
 }
 

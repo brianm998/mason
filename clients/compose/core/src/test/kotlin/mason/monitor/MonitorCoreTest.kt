@@ -355,6 +355,8 @@ class MonitorCoreTest {
         assertEquals(listOf(HealthSnapshot.Resource("compile", "machine", 1, 2)), h.resources)
         assertEquals(listOf("#4: Waiting for compile slot"), h.waiting)
         assertEquals(emptyList(), HealthSnapshot.parse("not json").resources)
+        assertEquals("CPU 71% busy; a compile starts below 50%.", HealthSnapshot.parse("""{"cpu":{"busy_pct":71,"compile_max_pct":50}}""").cpuLine)
+        assertEquals("CPU not readable; a compile starts below 80%.", HealthSnapshot.parse("""{"cpu":{"busy_pct":null,"compile_max_pct":80}}""").cpuLine)
     }
 
     // ---- versions (Part 15) ----
