@@ -487,7 +487,7 @@ pub struct Boots {
 pub struct Boot {
     pub at_ms: u64,
     pub sha: String,
-    /// `start` or `healthy`.
+    /// `start`, `healthy` or `refused` (a start that declined to run: not a crash).
     pub event: String,
 }
 
@@ -542,6 +542,11 @@ pub fn crashes_in(log: &[Boot], sha: &str, now_ms: u64, window_ms: u64) -> usize
         match b.event.as_str() {
             "start" => open.push(b.at_ms),
             "healthy" => open.clear(),
+            // The start declined to run (a daemon already there, a port taken):
+            // it cancels the start the loader recorded just before it.
+            "refused" => {
+                open.pop();
+            }
             _ => {}
         }
     }
@@ -1252,6 +1257,39 @@ mod tests {
                 .contains("plain file names")
         );
         assert!(UpdateCfg::parse("repo = \"x\"\nchannel = \"nope\"").is_err());
+    }
+
+    #[test]
+    fn refused_starts_are_not_crashes() {
+        let m = 60_000;
+        let mut log = vec![];
+        for i in 0..3 {
+            log.push(boot(i * m, "new", "start"));
+            log.push(boot(i * m + 1, "new", "refused"));
+        }
+        assert_eq!(crashes_in(&log, "new", 3 * m, CRASH_WINDOW_MS), 0);
+        assert_eq!(
+            decide("new", Some("old"), &log, 3 * m),
+            Decision::Run("new".into())
+        );
+        // Real crashes still count, refusals among them do not.
+        let log = vec![
+            boot(0, "new", "start"),
+            boot(m, "new", "start"),
+            boot(m + 1, "new", "refused"),
+            boot(2 * m, "new", "start"),
+            boot(3 * m, "new", "start"),
+        ];
+        assert_eq!(crashes_in(&log, "new", 4 * m, CRASH_WINDOW_MS), 3);
+        let log = vec![
+            boot(0, "new", "start"),
+            boot(m, "new", "start"),
+            boot(2 * m, "new", "start"),
+        ];
+        assert!(matches!(
+            decide("new", Some("old"), &log, 3 * m),
+            Decision::RollBack { .. }
+        ));
     }
 
     #[test]
