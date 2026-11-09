@@ -47,7 +47,7 @@ swift = "done"
 compose = "done"
 
 [feature.sidebar-sort]
-description = "Active states oldest first; failed, landed and canceled newest first and collapsed"
+description = "Queued in queue order (what the daemon admits first on top); every other section newest entry first; failed, landed and canceled collapsed"
 swift = "done"
 compose = "done"
 
@@ -107,7 +107,12 @@ swift = "done"
 compose = "done"
 
 [feature.monitor-update]
-description = "A banner when a newer monitor exists, with a button that builds it from source and relaunches; read-only, with the reason, when the protocol is too old"
+description = "A banner when the monitor's own source changed on the update channel, with a button that has the daemon build it and relaunches into it; read-only, with the reason, when the protocol is too old"
+swift = "done"
+compose = "done"
+
+[feature.daemon-update]
+description = "A banner when masond is behind its update channel, with an owner's button that updates it and says how far along it is"
 swift = "done"
 compose = "done"
 
@@ -208,6 +213,11 @@ compose = "done"
 
 [feature.tracker-imports]
 description = "Tracker imports are listed apart as Proposed from the tracker, each with its issue link and (for the owner) Approve; a not-imported tile and list name the open issues a limit kept out, or whose task was cancelled, with the reason"
+swift = "done"
+compose = "done"
+
+[feature.task-release]
+description = "A held task's page lists each blocker with its state and where it came from (from GitHub, set by you); the owner gets Release on each, Revive on a canceled one, Retry on a failed one, and an Add blocker field with a task picker; a non-owner sees the list and no controls"
 swift = "done"
 compose = "done"
 

@@ -27,7 +27,8 @@ const ORDER: [State; 10] = [
     State::Landed,
 ];
 
-/// Failed, landed and canceled sort newest first and start collapsed.
+/// Failed, landed and canceled start collapsed. (Queued is in queue order;
+/// every other section has the task that entered it last on top.)
 fn is_history(s: State) -> bool {
     matches!(s, State::Failed | State::Landed | State::Canceled)
 }
@@ -152,8 +153,15 @@ impl<'a> Ctx<'a> {
             State::Landing => vec!["cancel", "skip_test", "land_now", "force"],
             State::NeedsAttention => vec!["answer", "cancel", "retry", "open_session"],
             State::Failed => vec!["retry", "cancel", "open_session"],
+            State::Canceled if t.cancel_keeps_branch => vec!["revive"],
             State::Canceled | State::Landed => vec![],
         };
+        if matches!(t.state, State::Proposed | State::Queued) {
+            a.push("block");
+            if !t.blockers.is_empty() {
+                a.push("unblock");
+            }
+        }
         let waiting_approval =
             t.activity == Activity::Waiting(WaitReason::On(APPROVAL_WAIT.into()));
         if (waiting_approval || self.pending_hold(t).is_some()) && !a.contains(&"approve") {
@@ -270,6 +278,9 @@ impl<'a> Ctx<'a> {
             Activity::Waiting(WaitReason::Slot) => "Waiting for an LLM session to be free".into(),
             Activity::Waiting(WaitReason::NotBefore(_)) => "Waiting for its start time".into(),
             Activity::Waiting(WaitReason::Owner) => "Waiting for your answer".into(),
+            Activity::Held(_) if crate::blockers::held_line(self.w, t).is_some() => {
+                crate::blockers::held_line(self.w, t).unwrap_or_default()
+            }
             Activity::Held(by) => format!(
                 "Held, blocked by {}",
                 by.iter()
@@ -407,6 +418,15 @@ impl<'a> Ctx<'a> {
             progress: self.progress(t),
             allowed_actions: self.allowed_actions(t),
             blockers: t.blockers.iter().map(|b| b.0).collect(),
+            blocker_links: crate::blockers::links(self.d, self.w, t)
+                .into_iter()
+                .map(|l| BlockerLink {
+                    task: l.task.0,
+                    state: state_name(l.state).to_string(),
+                    origin: l.origin.to_string(),
+                    actions: l.actions.iter().map(|s| s.to_string()).collect(),
+                })
+                .collect(),
             blocks: self
                 .w
                 .tasks
@@ -529,6 +549,7 @@ impl<'a> Ctx<'a> {
                 })
                 .collect(),
             banners,
+            update: crate::update::info(self.d),
             projects: self.w.projects.values().map(|p| p.name.clone()).collect(),
             pending_issues: self
                 .d
@@ -590,12 +611,24 @@ impl<'a> Ctx<'a> {
     }
 
     fn section_of(&self, s: State, mut tasks: Vec<&Task>) -> SidebarSection {
-        // Active states: oldest first, so anything stuck is at the top.
-        // History: newest first, so what just happened is not buried.
-        if is_history(s) {
-            tasks.sort_by_key(|t| (std::cmp::Reverse(t.enqueued_at), std::cmp::Reverse(t.id)));
+        // Queued is the real queue: what the daemon would admit first is on
+        // top (tasks that can go, then held/paused/not_before ones, each by
+        // `queued_rank`). Every other section has the task that entered it
+        // most recently on top.
+        if s == State::Queued {
+            tasks.sort_by_cached_key(|t| {
+                (
+                    t.activity != Activity::Waiting(WaitReason::Slot),
+                    self.d.queued_rank(t),
+                )
+            });
         } else {
-            tasks.sort_by_key(|t| (t.enqueued_at, t.id));
+            tasks.sort_by_key(|t| {
+                (
+                    std::cmp::Reverse(t.state_entered_at),
+                    std::cmp::Reverse(t.id),
+                )
+            });
         }
         SidebarSection {
             state: state_name(s).into(),
@@ -1120,6 +1153,8 @@ pub fn summarize(kind: &EventKind) -> (String, String, u64) {
         | EventKind::WaitEnded { task }
         | EventKind::TrackerEdited { task, .. }
         | EventKind::BlockerRemoved { task, .. }
+        | EventKind::BlockersChanged { task, .. }
+        | EventKind::Revived { task }
         | EventKind::BlockerAdded { task, .. } => task.0,
         _ => 0,
     };

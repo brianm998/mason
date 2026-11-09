@@ -120,27 +120,32 @@ private fun ProjectFilter(model: MonitorModel) {
 }
 
 @Composable
+private fun updateRow(text: String, button: String?, id: String, theme: Theme, action: () -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth().background(theme.slow.copy(alpha = 0.18f))
+            .padding(horizontal = theme.spacingLarge, vertical = theme.spacing).testTag("$id-banner"),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(text, style = theme.body(FontWeight.Medium), modifier = Modifier.weight(1f))
+        if (button != null) Button(onClick = action, modifier = Modifier.testTag(id)) { Text(button) }
+    }
+}
+
+@Composable
 fun BannersView(model: MonitorModel) {
     val theme = LocalTheme.current
     Column {
         if (model.announcer.daemonDown) banner("Daemon down: MASON has lost its daemon. Check that masond is running.", "daemon-down", theme)
         if (!model.connected) banner(if (model.reconnecting) "Daemon restarting, reconnecting…" else "Connection lost. Reconnecting…", "connection", theme)
         model.readOnlyReason?.let { banner("Read-only: $it", "read-only", theme) }
-        if (model.updateAvailable || model.updating != null) {
-            Row(
-                modifier = Modifier.fillMaxWidth().background(theme.slow.copy(alpha = 0.18f))
-                    .padding(horizontal = theme.spacingLarge, vertical = theme.spacing).testTag("monitor-update-banner"),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    model.updating ?: "A newer monitor is available (${model.daemonVersion.take(8)}).",
-                    style = theme.body(FontWeight.Medium),
-                    modifier = Modifier.weight(1f),
-                )
-                if (model.updating == null) {
-                    Button(onClick = { model.onUpdate?.invoke() }, modifier = Modifier.testTag("monitor-update")) { Text("Update") }
-                }
-            }
+        if (model.daemonUpdateText.isNotEmpty()) {
+            updateRow(model.daemonUpdateText, if (model.canUpdateDaemon) "Update masond" else null, "daemon-update", theme) { model.updateDaemon() }
+        }
+        val monitorText = model.updating
+            ?: model.updateError
+            ?: if (model.updateAvailable) "A newer monitor is available (${model.latestMonitor.take(8)})." else null
+        if (monitorText != null) {
+            updateRow(monitorText, if (model.updateAvailable && model.updating == null) "Update monitor" else null, "monitor-update", theme) { model.updateMonitor() }
         }
         model.header?.banners?.forEachIndexed { i, b -> banner(b.text, "banner:$i", theme) }
         model.header?.pending_issues?.forEach { p ->

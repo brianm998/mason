@@ -22,6 +22,8 @@ pub enum ReduceError {
     /// Adding the blocker would close a loop; the path starts and ends at the task.
     BlockerCycle(Vec<TaskId>),
     NoSuchWait,
+    /// A release names a task that is not one of the task's blockers.
+    NotABlocker(TaskId),
 }
 
 fn name(k: &EventKind) -> &'static str {
@@ -48,6 +50,8 @@ fn name(k: &EventKind) -> &'static str {
         WaitEnded { .. } => "WaitEnded",
         BlockerAdded { .. } => "BlockerAdded",
         BlockerRemoved { .. } => "BlockerRemoved",
+        BlockersChanged { .. } => "BlockersChanged",
+        Revived { .. } => "Revived",
         TrackerEdited { .. } => "TrackerEdited",
         Tick => "Tick",
     }
@@ -65,7 +69,16 @@ pub fn reduce(world: &World, event: &Event) -> Result<(World, Vec<Effect>), Redu
         .values()
         .map(|t| (t.id, t.activity.clone()))
         .collect();
+    let state_before: BTreeMap<TaskId, State> = w.tasks.values().map(|t| (t.id, t.state)).collect();
     apply(&mut w, &event.kind, &mut fx)?;
+    // The only writer of `state_entered_at`: any task whose state differs from
+    // before (or is new) entered its present state now.
+    let now = w.now;
+    for t in w.tasks.values_mut() {
+        if state_before.get(&t.id) != Some(&t.state) {
+            t.state_entered_at = now;
+        }
+    }
     for task in w.refresh(&before) {
         fx.push(Effect::WakeScheduler { task });
     }
@@ -173,6 +186,7 @@ fn apply(w: &mut World, k: &EventKind, fx: &mut Vec<Effect>) -> Result<(), Reduc
                 priority: *priority,
                 trust: *trust,
                 enqueued_at: w.now,
+                state_entered_at: w.now,
                 state: if *proposed { S::Proposed } else { S::Queued },
                 activity: Activity::Idle, // recomputed by refresh
                 landed: None,
@@ -479,6 +493,51 @@ fn apply(w: &mut World, k: &EventKind, fx: &mut Vec<Effect>) -> Result<(), Reduc
                 .expect("exists")
                 .blockers
                 .remove(blocker);
+        }
+        E::BlockersChanged {
+            task,
+            released,
+            added,
+        } => {
+            let from = get(w, *task)?.state;
+            if !matches!(from, S::Proposed | S::Queued) {
+                return Err(illegal(from, k));
+            }
+            for r in released {
+                if !get(w, *task)?.blockers.contains(r) {
+                    return Err(ReduceError::NotABlocker(*r));
+                }
+            }
+            for a in added {
+                get(w, *a)?;
+            }
+            // Work on a copy so a refusal part-way leaves the world untouched.
+            let mut next = w.clone();
+            for r in released {
+                next.tasks.get_mut(task).expect("exists").blockers.remove(r);
+            }
+            for a in added {
+                if let Some(path) = would_cycle(&next, *task, *a) {
+                    return Err(ReduceError::BlockerCycle(path));
+                }
+                next.tasks
+                    .get_mut(task)
+                    .expect("exists")
+                    .blockers
+                    .insert(*a);
+            }
+            *w = next;
+        }
+        E::Revived { task } => {
+            let t = get(w, *task)?;
+            if t.state != S::Canceled || !t.cancel_keeps_branch {
+                return Err(illegal(t.state, k));
+            }
+            let t = w.tasks.get_mut(task).expect("exists");
+            t.state = S::Queued;
+            t.decision = None;
+            t.failure = None;
+            fx.push(Effect::CatchUpWithBase { task: *task });
         }
         E::TrackerEdited {
             task,

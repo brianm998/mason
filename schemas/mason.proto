@@ -95,6 +95,11 @@ message Command {
     SetLimit set_limit = 14;
     // Approve a held self-change: the exact diff the owner was shown.
     ApproveHold approve_hold = 15;
+    // Release a held task from some or all of its blockers, add blockers, or put
+    // a canceled task whose branch was kept back in the queue. Owner only.
+    Unblock unblock = 16;
+    Block block = 17;
+    TaskRef revive = 18;
     Raw raw = 30;
   }
   // Who is acting and, optionally, why (recorded with overrides).
@@ -104,6 +109,18 @@ message Command {
 
 message TaskRef {
   uint64 task = 1;
+}
+
+message Unblock {
+  uint64 task = 1;
+  // The blockers to release; empty with `all` released every one.
+  repeated uint64 from = 2;
+  bool all = 3;
+}
+
+message Block {
+  uint64 task = 1;
+  repeated uint64 after = 2;
 }
 
 message AddTask {
@@ -376,6 +393,10 @@ enum ProgressSource {
   SOURCE_COUNTED = 2;
   // The typical figure from this project's past successful runs.
   SOURCE_HISTORY = 3;
+  // The count the suite is expected to reach: the last green run's (s70).
+  SOURCE_EXPECTED = 4;
+  // The suite's declared minimum number of tests (s70).
+  SOURCE_MINIMUM = 5;
 }
 
 // A task as every view shows it. `allowed_actions` is the one list of what
@@ -415,6 +436,16 @@ message TaskRow {
   uint64 issue = 22;
   // Where to read it ("" when the tracker has no public page).
   string issue_url = 23;
+  // Each blocker with its state, where it came from ("from GitHub" or "set by you")
+  // and what the owner can do about it ("release", "revive", "retry"). Additive.
+  repeated BlockerLink blocker_links = 24;
+}
+
+message BlockerLink {
+  uint64 task = 1;
+  string state = 2;
+  string origin = 3;
+  repeated string actions = 4;
 }
 
 // What a step run launched (or, with `expected`, will launch): the tier
@@ -472,6 +503,32 @@ message HeaderView {
   string self_project = 6;
   // Open issues the tracker has not imported (or whose task was canceled), with why.
   repeated PendingIssue pending_issues = 7;
+  // Whether MASON itself is behind its update channel, and any update under way
+  // (additive). Absent when the daemon has no update.toml.
+  UpdateInfo update = 8;
+}
+
+// What the daemon found the last time it looked at its update channel.
+message UpdateInfo {
+  // The sentence about the daemon to show; empty when there is nothing to say.
+  string daemon_text = 1;
+  // The owner can press "Update masond" now.
+  bool daemon_can_update = 2;
+  // One per kind of desktop monitor the daemon can build.
+  repeated MonitorBuild monitors = 3;
+}
+
+message MonitorBuild {
+  // "swift" or "compose".
+  string kind = 1;
+  // The newest commit on the channel that changed this monitor. A monitor is
+  // stamped with this commit when it is built, so a different stamp means it is behind.
+  string latest = 2;
+  // "" (nothing asked for), "building", "ready" or "failed".
+  string phase = 3;
+  string error = 4;
+  // When ready: the finished build, on the daemon's own disk.
+  string path = 5;
 }
 
 message PendingIssue {
@@ -491,9 +548,9 @@ message SidebarSection {
   repeated TaskRow rows = 5;
 }
 
-// Tasks per state, already sorted: active states oldest first (time since
-// enqueue, so anything stuck is at the top); failed, landed and canceled
-// newest first.
+// Tasks per state, already sorted: queued in queue order (the task the daemon
+// admits next on top); every other state with the task that entered it most
+// recently on top.
 message SidebarView {
   repeated SidebarSection sections = 1;
   repeated string pages = 2;

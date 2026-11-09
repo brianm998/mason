@@ -343,8 +343,12 @@ fn every_entity_carries_its_allowed_actions_why_waiting_and_progress() {
         _ => None,
     });
     assert_eq!(detail.unwrap().row.unwrap().id, 1);
-    // A proposal offers approve, reject and edit; a finished task offers nothing.
-    assert_eq!(row(4).allowed_actions, vec!["approve", "reject", "edit"]);
+    // A proposal offers approve, reject and edit, and (s75) Add blocker, since it has not
+    // started; a finished task offers nothing.
+    assert_eq!(
+        row(4).allowed_actions,
+        vec!["approve", "reject", "edit", "block"]
+    );
 }
 
 /// The task detail carries the plan parsed (`plan_view`) and as written (`plan`, for older clients).
@@ -395,7 +399,7 @@ fn the_task_detail_carries_the_plan_readably_and_as_written() {
 }
 
 #[test]
-fn the_sidebar_sorts_active_oldest_first_and_history_newest_first() {
+fn the_sidebar_is_in_queue_order_and_the_rest_newest_entry_first() {
     let (d, _port, _dir) = demo();
     // Register a project and file six tasks a few milliseconds apart.
     d.emit(EventKind::ProjectRegistered {
@@ -483,6 +487,97 @@ fn the_sidebar_sorts_active_oldest_first_and_history_newest_first() {
         collapsed,
         ["failed", "landed", "canceled"],
         "history starts collapsed"
+    );
+
+    // --- Queued is the real queue; every other section is newest entry first.
+    let filing_with = |n: u64, priority: Priority, blockers: Vec<TaskId>| EventKind::TaskFiled {
+        project: ProjectId(1),
+        title: format!("task {n}"),
+        body: String::new(),
+        priority,
+        trust: TrustSource::Owner,
+        explored: false,
+        proposed: false,
+        blockers,
+        not_before: None,
+    };
+    let view = |d: &Daemon| {
+        let w = d.world().unwrap();
+        let sb = Ctx::new(d, &w).sidebar("");
+        move |state: &str| -> Vec<u64> {
+            sb.sections
+                .iter()
+                .find(|s| s.state == state)
+                .unwrap()
+                .rows
+                .iter()
+                .map(|r| r.id)
+                .collect()
+        }
+    };
+    // 6: urgent, filed last, can go. 7: urgent but blocked by 3.
+    d.emit(filing_with(6, Priority::Urgent, vec![])).unwrap();
+    std::thread::sleep(Duration::from_millis(5));
+    d.emit(filing_with(7, Priority::Urgent, vec![TaskId(3)]))
+        .unwrap();
+    let q = view(&d)("queued");
+    assert_eq!(
+        q,
+        vec![6, 3, 4, 5, 7],
+        "urgent filed last goes first; equals by filing; a blocked task is below all that can go"
+    );
+    // Repeatedly taking the top row matches repeated next_admission, when the demo has a free session.
+    {
+        let w = d.world().unwrap();
+        if let Some(next) = d.next_admission(&w) {
+            assert_eq!(next.0, q[0], "the top row is what the daemon admits");
+        }
+    }
+    // 8 and 9 are admitted; 9 moves into Developing first, then 8: 8 is on top.
+    d.emit(filing_with(8, Priority::Normal, vec![])).unwrap();
+    d.emit(filing_with(9, Priority::Normal, vec![])).unwrap();
+    for t in [8, 9] {
+        d.emit(entry(t)).unwrap();
+    }
+    for t in [9, 8] {
+        d.emit(EventKind::StepSucceeded {
+            task: TaskId(t),
+            next: None,
+        })
+        .unwrap();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        view(&d)("developing"),
+        vec![8, 9],
+        "the one that entered Developing last is on top, whatever was filed first"
+    );
+    // 9 goes on to testing and is sent back: it tops Developing again.
+    for k in [
+        EventKind::StepSucceeded {
+            task: TaskId(9),
+            next: None,
+        },
+        EventKind::SentBack {
+            task: TaskId(9),
+            reason: "red".into(),
+            to_step: String::new(),
+        },
+    ] {
+        std::thread::sleep(Duration::from_millis(5));
+        d.emit(k).unwrap();
+    }
+    assert_eq!(view(&d)("developing"), vec![9, 8], "sent back: top");
+    // Failed orders by when the task failed, not when it was filed: 9 fails last.
+    d.emit(EventKind::StepFailed {
+        task: TaskId(9),
+        reason: "x".into(),
+    })
+    .unwrap();
+    assert_eq!(
+        view(&d)("failed"),
+        vec![9, 2, 1, 0],
+        "failed: by entry, not filing"
     );
 }
 

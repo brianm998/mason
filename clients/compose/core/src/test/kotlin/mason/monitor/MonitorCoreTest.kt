@@ -364,18 +364,122 @@ class MonitorCoreTest {
     private fun welcome(version: String = "dev", minProtocol: Int = 1) =
         ServerMessage(welcome = Welcome(protocol = 1, resume = ResumeKind.UP_TO_DATE, version = version, min_protocol = minProtocol))
 
-    @Test fun aMonitorOffersToUpdateOnlyWhenBothBuildsAreRealAndDiffer() {
+    private fun owner(role: String = "", owner: Boolean = true) =
+        ServerMessage(welcome = Welcome(protocol = 1, resume = ResumeKind.UP_TO_DATE, min_protocol = 1, owner = owner, role = role))
+
+    private fun update(latest: String, phase: String = "", path: String = "", error: String = "", daemon: String = "", canUpdate: Boolean = false) =
+        ServerMessage(
+            view = ViewUpdate(
+                view = View(
+                    header_ = HeaderView(
+                        update = UpdateInfo(
+                            daemon_text = daemon,
+                            daemon_can_update = canUpdate,
+                            monitors = listOf(
+                                MonitorBuild(kind = "swift", latest = "other"),
+                                MonitorBuild(kind = "compose", latest = latest, phase = phase, path = path, error = error),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+    private fun result(id: String, ok: Boolean, error: String = "") =
+        ServerMessage(result = CommandResult(id = id, ok = ok, error = error))
+
+    @Test fun aMonitorOffersToUpdateOnlyWhenItsOwnSourceMoved() {
         val m = MonitorModel()
+        m.onInstall = {}
         m.ownVersion = "aaa111"
-        m.apply(welcome("bbb222"))
+        m.apply(owner())
+        m.apply(update("bbb222"))
         assertTrue(m.updateAvailable)
-        m.apply(welcome("aaa111"))
+        m.apply(update("aaa111"))
         assertFalse(m.updateAvailable)
-        m.apply(welcome("dev"))
+        m.apply(update(""))
         assertFalse(m.updateAvailable)
         m.ownVersion = "dev"
-        m.apply(welcome("bbb222"))
+        m.apply(update("bbb222"))
         assertFalse(m.updateAvailable)
+    }
+
+    @Test fun onlyTheOwnersDesktopMonitorOnTheSameMachineIsOffered() {
+        val m = MonitorModel()
+        m.ownVersion = "aaa111"
+        m.apply(owner())
+        m.apply(update("bbb222"))
+        assertFalse(m.updateAvailable)
+        m.onInstall = {}
+        m.apply(owner(role = "owner"))
+        assertFalse(m.updateAvailable)
+        m.apply(owner(owner = false))
+        assertFalse(m.updateAvailable)
+    }
+
+    @Test fun theDaemonButtonIsTheOwnersAndSendsTheUpdate() {
+        val m = MonitorModel()
+        val sent = mutableListOf<Command>()
+        m.sender = { sent.add(it) }
+        m.apply(update("x", daemon = "masond is 3 commits behind develop", canUpdate = true))
+        assertEquals("masond is 3 commits behind develop", m.daemonUpdateText)
+        assertFalse(m.canUpdateDaemon)
+        m.apply(owner())
+        assertTrue(m.canUpdateDaemon)
+        m.updateDaemon()
+        assertEquals("POST", sent.last().raw?.method)
+        assertEquals("/update", sent.last().raw?.path)
+    }
+
+    @Test fun theMonitorButtonFollowsTheBuildAndInstallsItOnce() {
+        val m = MonitorModel()
+        val installed = mutableListOf<String>()
+        val sent = mutableListOf<Command>()
+        m.sender = { sent.add(it) }
+        m.onInstall = { installed.add(it) }
+        m.ownVersion = "aaa111"
+        m.apply(owner())
+        m.apply(update("bbb222", phase = "failed", error = "an earlier try"))
+        m.updateMonitor()
+        assertEquals("/update/monitor", sent.last().raw?.path)
+        assertEquals("{\"kind\":\"compose\"}", sent.last().raw?.json)
+        m.apply(update("bbb222", phase = "failed", error = "an earlier try"))
+        assertTrue(m.updating != null)
+        assertNull(m.updateError)
+        m.apply(result("update-monitor", true))
+        m.apply(update("bbb222", phase = "building"))
+        assertEquals(emptyList(), installed)
+        m.apply(update("bbb222", phase = "ready", path = "/x/bin/mason-monitor"))
+        assertEquals(listOf("/x/bin/mason-monitor"), installed)
+        m.apply(update("bbb222", phase = "ready", path = "/x/bin/mason-monitor"))
+        assertEquals(listOf("/x/bin/mason-monitor"), installed)
+    }
+
+    @Test fun aMonitorBuildThatStopsSaysWhyAndCanBeTriedAgain() {
+        val m = MonitorModel()
+        m.sender = {}
+        m.onInstall = {}
+        m.ownVersion = "aaa111"
+        m.apply(owner())
+        m.apply(update("bbb222"))
+        m.updateMonitor()
+        m.apply(result("update-monitor", true))
+        m.apply(update("bbb222", phase = "failed", error = "gradle failed"))
+        assertNull(m.updating)
+        assertTrue(m.updateError!!.contains("gradle failed"))
+        assertTrue(m.updateAvailable)
+        m.updateMonitor()
+        m.apply(result("update-monitor", true))
+        m.apply(update("bbb222"))
+        assertNull(m.updating)
+        assertTrue(m.updateError!!.contains("restarted"))
+        m.updateMonitor()
+        assertTrue(m.updating != null)
+        m.apply(owner())
+        assertNull(m.updating)
+        m.updateMonitor()
+        m.apply(result("update-monitor", false, "already being built"))
+        assertEquals("already being built", m.updateError)
     }
 
     @Test fun aMonitorTooOldForTheProtocolIsReadOnlyAndSaysWhy() {
@@ -396,16 +500,6 @@ class MonitorCoreTest {
         assertNull(m.readOnlyReason)
         m.cancel(3)
         assertEquals(2, sent)
-    }
-
-    @Test fun theUpdateButtonKnowsHowItWillGetANewerMonitor() {
-        assertEquals(UpdatePlan.BuildFromSource("/src"), ClientUpdate.plan(mapOf("MASON_SOURCE_DIR" to "/src")) { it == "/src/clients/compose/settings.gradle.kts" })
-        val bad = ClientUpdate.plan(mapOf("MASON_SOURCE_DIR" to "/nope")) { false }
-        assertTrue(bad is UpdatePlan.Unavailable && bad.why.contains("/nope"))
-        assertEquals(UpdatePlan.OpenPage("https://example.org/mason"), ClientUpdate.plan(mapOf("MASON_INSTALL_URL" to "https://example.org/mason")))
-        assertTrue(ClientUpdate.plan(mapOf("MASON_INSTALL_URL" to "http://insecure")) is UpdatePlan.Unavailable)
-        val none = ClientUpdate.plan(emptyMap())
-        assertTrue(none is UpdatePlan.Unavailable && none.why.contains("MASON_SOURCE_DIR"))
     }
 
     // ---- the pipeline editor (Part 18) ----
@@ -857,5 +951,59 @@ class MonitorCoreTest {
         assertEquals("999.9k", Format.compactCount(999_949))
         assertEquals("1.2M", Format.compactCount(1_234_567))
         assertEquals("5 out", Format.tokensCompact(TokenLine(has_output = true, output = 5)))
+    }
+
+    // ---- releasing and adding blockers (s75) ----
+
+    private fun heldRow() = row(11, "queued", actions = listOf("cancel", "block", "unblock")).copy(
+        blockers = listOf(8L, 9L),
+        blocker_links = listOf(
+            BlockerLink(task = 8, state = "canceled", origin = "from GitHub", actions = listOf("release", "revive")),
+            BlockerLink(task = 9, state = "failed", origin = "set by you", actions = listOf("release", "retry")),
+        ),
+    )
+
+    @Test fun aHeldTaskShowsEachBlockerWithItsOriginAndTheOwnersActions() {
+        for (owner in listOf(true, false)) {
+            val m = MonitorModel()
+            m.apply(ServerMessage(welcome = Welcome(protocol = 1, owner = owner)))
+            m.taskDetail = TaskDetailView(row = heldRow())
+            m.go(Page.Task(11))
+            val items = m.visibleItems()
+            val b8 = items.first { it.id == "blocker:11:8" }
+            val b9 = items.first { it.id == "blocker:11:9" }
+            assertEquals(listOf("#8", "canceled", "from GitHub"), b8.texts)
+            assertEquals(listOf("#9", "failed", "set by you"), b9.texts)
+            assertEquals(if (owner) listOf("release", "revive") else emptyList(), b8.actions)
+            assertEquals(if (owner) listOf("release", "retry") else emptyList(), b9.actions)
+            assertEquals(if (owner) listOf("add_blocker") else emptyList(), items.first { it.id == "add-blocker:11" }.actions)
+        }
+    }
+
+    @Test fun releaseAddBlockerAndReviveSendTheOwnersCommands() {
+        val m = MonitorModel()
+        m.identity = "brian"
+        val sent = mutableListOf<Command>()
+        m.sender = { sent += it }
+        m.release(11, 8)
+        m.addBlocker(11, 5)
+        m.revive(8)
+        assertEquals(listOf(8L), sent[0].unblock?.from)
+        assertEquals(11L, sent[0].unblock?.task)
+        assertEquals(listOf(5L), sent[1].block?.after)
+        assertEquals(8L, sent[2].revive?.task)
+        assertTrue(sent.all { it.actor == "brian" })
+    }
+
+    @Test fun theTaskPickerOffersLiveTasksThatAreNotAlreadyBlockers() {
+        val m = model()
+        m.sidebar = SidebarView(
+            sections = listOf(
+                section("queued", rows = listOf(heldRow(), row(12, "queued"), row(8, "queued"))),
+                section("failed", rows = listOf(row(13, "failed"))),
+                section("landed", rows = listOf(row(14, "landed"))),
+            ),
+        )
+        assertEquals(listOf(12L), m.blockerCandidates(heldRow()).map { it.id })
     }
 }

@@ -1021,3 +1021,35 @@ fn force_skips_and_expired_switches_are_read_from_what_is_recorded() {
     assert_eq!(s.expired_switches(15).unwrap().len(), 0);
     assert_eq!(s.expired_switches(25).unwrap().len(), 1);
 }
+
+#[test]
+fn tracker_overrides_and_the_relationship_are_kept_and_dropped() {
+    let (_d, p) = db();
+    let s = Store::open(&p).unwrap();
+    assert_eq!(s.tracker_relationship("p", 7).unwrap(), None);
+    s.set_tracker_relationship("p", 7, &[]).unwrap();
+    assert_eq!(
+        s.tracker_relationship("p", 7).unwrap(),
+        Some(Default::default())
+    );
+    s.set_tracker_relationship("p", 7, &[3, 4]).unwrap();
+    assert_eq!(
+        s.tracker_relationship("p", 7)
+            .unwrap()
+            .unwrap()
+            .into_iter()
+            .collect::<Vec<_>>(),
+        vec![3, 4]
+    );
+    s.put_tracker_override("p", 7, 30, "release", 1).unwrap();
+    s.put_tracker_override("p", 7, 90, "add", 2).unwrap();
+    assert_eq!(s.tracker_overrides("p").unwrap().len(), 2);
+    s.drop_tracker_overrides("p", 7, Some("release"), None)
+        .unwrap();
+    assert_eq!(
+        s.tracker_overrides("p").unwrap(),
+        vec![(7, 90, "add".to_string())]
+    );
+    s.drop_tracker_overrides("p", 7, None, Some(90)).unwrap();
+    assert!(s.tracker_overrides("p").unwrap().is_empty());
+}

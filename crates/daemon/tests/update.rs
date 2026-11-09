@@ -418,3 +418,107 @@ fn the_self_test_runs_on_a_copy_and_a_bad_database_fails_it() {
     assert!(String::from_utf8_lossy(&bad.stderr).contains("self-test FAILED"));
     kill_hosts(&s.data_dir);
 }
+
+/// One more commit on the source's main, changing `file`.
+fn advance(s: &Scratch, file: &str) -> String {
+    let repo = s.root.path().join("source");
+    let p = repo.join(file);
+    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+    std::fs::write(&p, format!("{file} changed")).unwrap();
+    sh(&repo, &["add", "-A"]);
+    sh(
+        &repo,
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-qm",
+            "advance",
+        ],
+    );
+    sh(&repo, &["rev-parse", "HEAD"])
+}
+
+fn append_config(s: &Scratch, more: &str) {
+    let p = s.config_dir.join("update.toml");
+    let t = std::fs::read_to_string(&p).unwrap();
+    std::fs::write(&p, format!("{t}{more}\n")).unwrap();
+}
+
+/// Ask for a monitor build as a monitor would; the HTTP status comes back.
+fn post_monitor(s: &Scratch, kind: &str) -> String {
+    let t = std::fs::read_to_string(s.data_dir.join("daemon.json")).unwrap();
+    let port = serde_json::from_str::<Value>(&t).unwrap()["port"]
+        .as_u64()
+        .unwrap();
+    let out = Command::new("curl")
+        .args(["-s", "-o", "/dev/null", "-w", "%{http_code}", "-X", "POST"])
+        .args(["-H", "content-type: application/json"])
+        .args(["-d", &format!("{{\"kind\":\"{kind}\"}}")])
+        .arg(format!("http://127.0.0.1:{port}/update/monitor"))
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).to_string()
+}
+
+#[test]
+fn the_daemon_notices_it_is_behind_and_builds_a_monitor_when_asked() {
+    let s = Scratch::new("true", json!({"steps": {}}));
+    let src = source(&s, &[&[("a", "1")], &[("b", "2")]]);
+    append_config(
+        &s,
+        "check_interval_s = 1\nmonitor_swift_build = \"mkdir \\\"$MASON_MONITOR_OUT/MASON.app\\\" && echo \\\"$MASON_BUILD_SHA\\\" > \\\"$MASON_MONITOR_OUT/MASON.app/stamp\\\"\"",
+    );
+    let _m = start(&s);
+    s.mason_ok(&["update"]);
+    let first = wait_status(&s, "running the tip", 60, |v| {
+        v["running"] == src.shas[1].as_str()
+    });
+    assert_eq!(first["outdated"], false);
+
+    // A docs-only landing is not a reason to rebuild the daemon.
+    let docs = advance(&s, "docs/note.md");
+    wait_status(&s, "seeing the docs commit", 30, |v| {
+        v["latest"] == docs.as_str()
+    });
+    assert_eq!(status(&s)["outdated"], false);
+
+    // Code is. The check needs no asking.
+    let code = advance(&s, "crates/x.rs");
+    let v = wait_status(&s, "noticing it is behind", 30, |v| v["outdated"] == true);
+    assert_eq!(
+        (v["latest"].as_str(), v["behind"].as_u64()),
+        (Some(code.as_str()), Some(2))
+    );
+
+    // A monitor build is asked for by kind and ends up in its own directory.
+    let swift = advance(&s, "clients/swift/App.swift");
+    assert_eq!(post_monitor(&s, "nope"), "400");
+    assert_eq!(post_monitor(&s, "swift"), "200");
+    let app = s
+        .data_dir
+        .join("runtimes/monitors")
+        .join(format!("swift-{swift}/MASON.app"));
+    let end = Instant::now() + Duration::from_secs(30);
+    while !app.join("stamp").exists() {
+        assert!(Instant::now() < end, "the monitor was not built");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(
+        std::fs::read_to_string(app.join("stamp")).unwrap().trim(),
+        swift
+    );
+}
+
+#[test]
+fn a_daemon_with_no_update_toml_says_nothing() {
+    let s = Scratch::new("true", json!({"steps": {}}));
+    let _m = start(&s);
+    let v = status(&s);
+    assert_eq!(
+        (v["outdated"].as_bool(), v["latest"].as_str()),
+        (Some(false), Some(""))
+    );
+}

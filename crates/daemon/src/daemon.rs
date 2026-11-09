@@ -55,6 +55,12 @@ pub struct Daemon {
     pub(crate) landing: crate::landing::Landing,
     pub(crate) tracker: crate::tracker::Hub,
     pub update_status: Mutex<crate::update::Status>,
+    /// What the last look at the update channel found.
+    pub update_check: Mutex<crate::update::Check>,
+    /// One fetch into the source mirror at a time.
+    pub update_fetch: Mutex<()>,
+    /// Monitor builds, by kind.
+    pub monitor_builds: Mutex<std::collections::HashMap<String, crate::update::MonitorState>>,
     pub(crate) drafts: crate::editor::Drafts,
     /// The one probe session per held account (see `holds`).
     pub probes: crate::holds::Probes,
@@ -204,6 +210,9 @@ impl Daemon {
                 phase: "idle".into(),
                 ..Default::default()
             }),
+            update_check: Default::default(),
+            update_fetch: Mutex::new(()),
+            monitor_builds: Default::default(),
             cfg,
         });
         if demo {
@@ -211,6 +220,7 @@ impl Daemon {
         } else {
             d.load_definitions();
             crate::targets::spawn(&d);
+            crate::update::spawn_checker(&d);
             d.progress_cleanup();
             d.recover();
             d.spawn_progress_ticker();
@@ -576,7 +586,7 @@ impl Daemon {
 
     /// A queued task's rank, from where it would start. (The clarity check
     /// is left out: it reads git, and ranking runs on every admission.)
-    fn queued_rank(&self, t: &Task) -> mason_scheduler::Rank {
+    pub(crate) fn queued_rank(&self, t: &Task) -> mason_scheduler::Rank {
         let def = self.current_def(t.project);
         let skip = def.explored_entry.is_some() && t.explored_counts() && !t.force_explore;
         let start = def

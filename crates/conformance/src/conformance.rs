@@ -103,6 +103,33 @@ fn row_item(r: &TaskRow, order: usize, prefix: &str) -> Item {
     )
 }
 
+/// What a held task's page shows for its blockers: each one with its state and where it came
+/// from, and the actions on it (the owner's alone); and the Add blocker field.
+pub fn blocker_items(r: &TaskRow, owner: bool) -> Vec<Item> {
+    let mut out = vec![];
+    for (i, l) in r.blocker_links.iter().enumerate() {
+        out.push(Item::new(
+            format!("blocker:{}:{}", r.id, l.task),
+            vec![format!("#{}", l.task), l.state.clone(), l.origin.clone()],
+            if owner { l.actions.clone() } else { vec![] },
+            i,
+        ));
+    }
+    if r.allowed_actions.iter().any(|a| a == "block") {
+        out.push(Item::new(
+            format!("add-blocker:{}", r.id),
+            vec!["Add blocker".into()],
+            if owner {
+                vec!["add_blocker".into()]
+            } else {
+                vec![]
+            },
+            0,
+        ));
+    }
+    out
+}
+
 fn src(s: i32) -> mason_core::progress::Source {
     use mason_core::progress::Source;
     match ProgressSource::try_from(s).unwrap_or(ProgressSource::SourceNone) {
@@ -110,6 +137,8 @@ fn src(s: i32) -> mason_core::progress::Source {
         ProgressSource::SourceReported => Source::Reported,
         ProgressSource::SourceCounted => Source::Counted,
         ProgressSource::SourceHistory => Source::History,
+        ProgressSource::SourceExpected => Source::Expected,
+        ProgressSource::SourceMinimum => Source::Minimum,
     }
 }
 
@@ -389,6 +418,7 @@ pub fn visible(views: &[View], owner: bool) -> Vec<Item> {
                 if let Some(r) = &t.row {
                     out.push(row_item(r, 0, "detail"));
                     out.extend(progress_items(r, system_now_ms()));
+                    out.extend(blocker_items(r, owner));
                 }
                 for (i, s) in t.steps.iter().enumerate() {
                     let mut texts = vec![s.name.clone(), s.outcome.clone()];

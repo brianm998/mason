@@ -50,7 +50,7 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
 
     // About versions (Part 15).
     /** This monitor's own build: a commit, or "dev" for a build nobody versioned. */
-    var ownVersion: String = System.getenv("MASON_MONITOR_VERSION") ?: "dev"
+    var ownVersion: String = System.getenv("MASON_MONITOR_VERSION") ?: System.getProperty("mason.monitor.version") ?: "dev"
 
     /** The daemon's build, from its welcome. */
     var daemonVersion by mutableStateOf("")
@@ -58,15 +58,78 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     /** Set when the daemon needs a newer protocol than this monitor speaks: nothing can be sent. */
     var readOnlyReason by mutableStateOf<String?>(null)
 
-    /** What the update is doing (or why it cannot), once the user has asked for one. */
+    /** What this monitor's update is doing, while the user has asked for one. */
     var updating by mutableStateOf<String?>(null)
 
-    /** Run when the user presses the update button (the app does the work). */
-    var onUpdate: (() -> Unit)? = null
+    /** Why the last update of this monitor did not happen. */
+    var updateError by mutableStateOf<String?>(null)
 
-    /** Is there a newer monitor? Only when both builds are real versions and differ. */
+    /**
+     * Starts the finished build (a path on this machine) and quits. Only the desktop app
+     * sets this; a phone has no way to replace itself.
+     */
+    var onInstall: ((String) -> Unit)? = null
+
+    /** The daemon said this monitor's build is on its way. */
+    private var monitorAsked = false
+
+    /** The connection is to a daemon on this machine, so a path it gives is one we can open. */
+    var localDaemon by mutableStateOf(true)
+        private set
+
+    private val updateInfo: UpdateInfo? get() = header?.update
+    private val monitorBuild: MonitorBuild? get() = updateInfo?.monitors?.firstOrNull { it.kind == MONITOR_KIND }
+
+    /**
+     * Has this monitor's own source changed on the update channel? Never for a build
+     * nobody stamped, so development builds do not nag.
+     */
     val updateAvailable: Boolean
-        get() = daemonVersion.isNotEmpty() && daemonVersion != "dev" && ownVersion != "dev" && daemonVersion != ownVersion
+        get() {
+            if (!canAct || !localDaemon || onInstall == null || ownVersion == "dev") return false
+            val latest = monitorBuild?.latest ?: return false
+            return latest.isNotEmpty() && latest != ownVersion
+        }
+
+    /** The commit a monitor update would go to. */
+    val latestMonitor: String get() = monitorBuild?.latest ?: ""
+
+    /** What to say about the daemon's own version; empty when there is nothing to say. */
+    val daemonUpdateText: String get() = updateInfo?.daemon_text ?: ""
+    val canUpdateDaemon: Boolean get() = canAct && updateInfo?.daemon_can_update == true
+
+    /** The owner's button: the daemon builds its newest version, proves it and takes over. */
+    fun updateDaemon() = raw("POST", "/update", json = "{}")
+
+    /** The owner's button: the daemon builds the newest monitor; [noteMonitorBuild] takes it from there. */
+    fun updateMonitor() {
+        updateError = null
+        updating = "Building the new monitor…"
+        raw("POST", "/update/monitor", id = "update-monitor", json = "{\"kind\":\"$MONITOR_KIND\"}")
+    }
+
+    /** The update of this monitor stopped; this one keeps running. */
+    fun monitorUpdateFailed(why: String) {
+        monitorAsked = false
+        updating = null
+        updateError = why
+    }
+
+    /** Follow the build the owner asked for, from each new header. */
+    private fun noteMonitorBuild() {
+        if (!monitorAsked) return
+        val b = monitorBuild
+        when (b?.phase) {
+            "building" -> {}
+            "ready" -> {
+                monitorAsked = false
+                updating = "Starting the new monitor…"
+                onInstall?.invoke(b.path)
+            }
+            "failed" -> monitorUpdateFailed("The new monitor did not build: ${b.error}")
+            else -> monitorUpdateFailed("The daemon restarted during the build. Press Update to start it again.")
+        }
+    }
 
     // The user's.
     var history by mutableStateOf(NavHistory())
@@ -224,6 +287,22 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     fun cancel(task: Long) = send(Command(cancel = TaskRef(task = task)))
     fun retry(task: Long, from: String = "") = send(Command(retry = Retry(task = task, from = from)))
     fun approve(task: Long) = send(Command(approve = TaskRef(task = task)))
+    /**
+     * The tasks the Add blocker picker offers for [row]: any task in the sidebar that is not itself,
+     * not already a blocker, and could still land (not landed, canceled or failed).
+     */
+    fun blockerCandidates(row: TaskRow): List<TaskRow> =
+        (sidebar?.sections ?: emptyList()).flatMap { it.rows }
+            .filter { it.id != row.id && it.id !in row.blockers && it.state !in setOf("landed", "canceled", "failed") }
+            .distinctBy { it.id }
+            .sortedBy { it.id }
+
+    /** Release a task from one blocker (owner only; the daemon refuses anyone else). */
+    fun release(task: Long, blocker: Long) = send(Command(unblock = Unblock(task = task, from = listOf(blocker))))
+    /** Make a task wait for another one as well (owner only). */
+    fun addBlocker(task: Long, after: Long) = send(Command(block = Block(task = task, after = listOf(after))))
+    /** Put a canceled task whose branch was kept back in the queue (owner only). */
+    fun revive(task: Long) = send(Command(revive = TaskRef(task = task)))
     /** Approve a held self-change: the exact diff the owner was shown. */
     fun approveHold(task: Long, diffHash: String) =
         send(Command(approve_hold = ApproveHold(task = task, diff_hash = diffHash)))
@@ -349,6 +428,9 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
             announcer.connectionRestored()
             if (w.resume == ResumeKind.SNAPSHOT) lastSeq = 0
             daemonVersion = w.version
+            localDaemon = w.role.isEmpty()
+            // A build asked for on the connection that just went has no answer coming.
+            if (!monitorAsked) updating = null
             anchor(w.now_ms)
             isOwner = w.owner
             readOnlyReason = if (w.min_protocol > PROTOCOL)
@@ -368,6 +450,9 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
         m.result?.let { r ->
             lastResult = if (r.ok) null else r.error
             if (r.id == "announce" && r.ok) announcer.handleClaim(r.json)
+            if (r.id == "update-monitor") {
+                if (r.ok) monitorAsked = true else monitorUpdateFailed(r.error)
+            }
             if (r.id == "health" && r.ok) health = HealthSnapshot.parse(r.json)
             if (r.id == "introspection" && r.ok) introspection = IntrospectionSnapshot.parse(r.json)
             if (r.id.startsWith("publish:") && r.ok) publishPreview = PublishPreview.parse(r.json)
@@ -384,7 +469,10 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     }
 
     fun apply(v: View) {
-        v.header_?.let { header = it }
+        v.header_?.let {
+            header = it
+            noteMonitorBuild()
+        }
         v.sidebar?.let { sidebar = it; noteAttention(it) }
         v.home?.let { home = it }
         v.task_detail?.let { d ->
@@ -406,6 +494,7 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     companion object {
         /** The protocol this monitor speaks. */
         const val PROTOCOL = 1
+        const val MONITOR_KIND = "compose"
         const val LOG_KEEP = 40
         const val CLAIM_EVERY_MS = 3_000L
         const val KEY_SCALE = "textScale"

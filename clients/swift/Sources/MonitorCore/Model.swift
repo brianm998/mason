@@ -53,14 +53,70 @@ public final class MonitorModel: ObservableObject {
     /// Set when the daemon needs a newer protocol than this monitor speaks: nothing
     /// can be sent, and this says why.
     @Published public var readOnlyReason: String?
-    /// What the update is doing (or why it cannot), while the user has asked for one.
+    /// What this monitor's update is doing, while the user has asked for one.
     @Published public var updating: String?
-    /// Run when the user presses the update button (the app does the work).
-    public var onUpdate: (() -> Void)?
+    /// Why the last update of this monitor did not happen.
+    @Published public var updateError: String?
+    /// Puts the finished build (a path on this machine) in place, launches it and quits.
+    /// Only the desktop app sets this; a phone has no way to replace itself.
+    public var onInstall: ((String) -> Void)?
+    /// The daemon said this monitor's build is on its way.
+    private var monitorAsked = false
+    /// The connection is to a daemon on this machine, so a path it gives is one we can open.
+    @Published public private(set) var localDaemon = true
+    public static let monitorKind = "swift"
 
-    /// Is there a newer monitor? Only when both builds are real versions and differ.
+    var updateInfo: Mason_V1_UpdateInfo? { header?.hasUpdate == true ? header?.update : nil }
+    var monitorBuild: Mason_V1_MonitorBuild? { updateInfo?.monitors.first { $0.kind == Self.monitorKind } }
+
+    /// Has this monitor's own source changed on the update channel? Never for a build
+    /// nobody stamped, so development builds do not nag.
     public var updateAvailable: Bool {
-        !daemonVersion.isEmpty && daemonVersion != "dev" && ownVersion != "dev" && daemonVersion != ownVersion
+        guard canAct, localDaemon, onInstall != nil, ownVersion != "dev", let b = monitorBuild else { return false }
+        return !b.latest.isEmpty && b.latest != ownVersion
+    }
+    /// The commit a monitor update would go to.
+    public var latestMonitor: String { monitorBuild?.latest ?? "" }
+
+    /// What to say about the daemon's own version; empty when there is nothing to say.
+    public var daemonUpdateText: String { updateInfo?.daemonText ?? "" }
+    public var canUpdateDaemon: Bool { canAct && updateInfo?.daemonCanUpdate == true }
+
+    /// The owner's button: the daemon builds its newest version, proves it and takes over.
+    public func updateDaemon() { raw("POST", "/update", json: "{}") }
+
+    /// The owner's button: the daemon builds the newest monitor; `noteMonitorBuild` takes it from there.
+    public func updateMonitor() {
+        updateError = nil
+        updating = "Building the new monitor…"
+        var c = Mason_V1_Command()
+        c.id = "update-monitor"
+        c.raw = .with { $0.method = "POST"; $0.path = "/update/monitor"; $0.json = "{\"kind\":\"\(Self.monitorKind)\"}" }
+        send(c)
+    }
+
+    /// The update of this monitor stopped; this one keeps running.
+    public func monitorUpdateFailed(_ why: String) {
+        monitorAsked = false
+        updating = nil
+        updateError = why
+    }
+
+    /// Follow the build the owner asked for, from each new header.
+    private func noteMonitorBuild() {
+        guard monitorAsked else { return }
+        switch monitorBuild?.phase {
+        case "building":
+            break
+        case "ready":
+            monitorAsked = false
+            updating = "Starting the new monitor…"
+            onInstall?(monitorBuild?.path ?? "")
+        case "failed":
+            monitorUpdateFailed("The new monitor did not build: \(monitorBuild?.error ?? "")")
+        default:
+            monitorUpdateFailed("The daemon restarted during the build. Press Update to start it again.")
+        }
     }
 
     // The user's.
@@ -257,6 +313,29 @@ public final class MonitorModel: ObservableObject {
     public func cancel(_ task: UInt64) { command { $0.cancel = .with { $0.task = task } } }
     public func retry(_ task: UInt64, from: String = "") { command { $0.retry = .with { $0.task = task; $0.from = from } } }
     public func approve(_ task: UInt64) { command { $0.approve = .with { $0.task = task } } }
+    /// The tasks the Add blocker picker offers for `row`: any task in the sidebar that is not
+    /// itself, not already a blocker, and could still land (not landed, canceled or failed).
+    public func blockerCandidates(for row: TaskRow) -> [TaskRow] {
+        var seen = Set<UInt64>()
+        var out: [TaskRow] = []
+        for s in sidebar?.sections ?? [] {
+            for r in s.rows where r.id != row.id && !row.blockers.contains(r.id)
+                && !["landed", "canceled", "failed"].contains(r.state) && seen.insert(r.id).inserted {
+                out.append(r)
+            }
+        }
+        return out.sorted { $0.id < $1.id }
+    }
+    /// Release a task from one blocker (owner only; the daemon refuses anyone else).
+    public func release(_ task: UInt64, blocker: UInt64) {
+        command { $0.unblock = .with { $0.task = task; $0.from = [blocker] } }
+    }
+    /// Make a task wait for another one as well (owner only).
+    public func addBlocker(_ task: UInt64, after: UInt64) {
+        command { $0.block = .with { $0.task = task; $0.after = [after] } }
+    }
+    /// Put a canceled task whose branch was kept back in the queue (owner only).
+    public func revive(_ task: UInt64) { command { $0.revive = .with { $0.task = task } } }
     public func reject(_ task: UInt64, reason: String = "") { command { $0.reject = .with { $0.task = task; $0.reason = reason } } }
     public func exploreAnyway(_ task: UInt64) { command { $0.exploreAnyway = .with { $0.task = task } } }
     public func landNow(_ task: UInt64) { command { $0.landNow = .with { $0.task = task } } }
@@ -411,6 +490,9 @@ public final class MonitorModel: ObservableObject {
             announcer.connectionRestored()
             if w.resume == .snapshot { lastSeq = 0 }
             daemonVersion = w.version
+            localDaemon = w.role.isEmpty
+            // A build asked for on the connection that just went has no answer coming.
+            if !monitorAsked { updating = nil }
             anchor(daemonNow: w.nowMs)
             isOwner = w.owner
             readOnlyReason = w.minProtocol > Self.protocolVersion
@@ -446,7 +528,9 @@ public final class MonitorModel: ObservableObject {
 
     func apply(_ v: Mason_V1_View) {
         switch v.body {
-        case .header(let x)?: header = x
+        case .header(let x)?:
+            header = x
+            noteMonitorBuild()
         case .sidebar(let x)?:
             sidebar = x
             noteAttention(x)
@@ -467,6 +551,9 @@ public final class MonitorModel: ObservableObject {
     func handle(result r: Mason_V1_CommandResult) {
         if r.id.hasPrefix("publish:"), r.ok { publishPreview = PublishPreview(json: r.json) }
         if r.id == "announce", r.ok { announcer.handle(claim: r.json) }
+        if r.id == "update-monitor" {
+            if r.ok { monitorAsked = true } else { monitorUpdateFailed(r.error) }
+        }
         if r.id == "health", r.ok { health = HealthSnapshot(json: r.json) }
         if r.id == "introspection", r.ok { introspection = IntrospectionSnapshot(json: r.json) }
     }

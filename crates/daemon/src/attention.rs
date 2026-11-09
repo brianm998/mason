@@ -353,6 +353,11 @@ pub fn alerts_now(d: &Daemon) -> Vec<(String, String, String)> {
             )),
             _ => {}
         }
+        if let Some(text) = crate::blockers::alert_text(&w, t) {
+            // One per task, from the world as it is: it clears when the task is released
+            // or the blocker is revived or retried.
+            out.push((format!("held-blocker:{}", t.id.0), "blocked".into(), text));
+        }
         if let Activity::Waiting(WaitReason::On(why)) = &t.activity {
             if why.starts_with("environment problem") {
                 out.push((

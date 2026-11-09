@@ -3,6 +3,7 @@
 """An example MASON process plugin: JSON-RPC 2.0 over stdio, one object per line.
 
 Methods: initialize, step.run, shutdown. Anything written to stderr is the run log.
+Protocol 2: while step.run is open the plugin may send step.progress notifications.
 """
 import json
 import os
@@ -20,6 +21,12 @@ def reply(id_, result=None, error=None):
     else:
         msg["result"] = result
     sys.stdout.write(json.dumps(msg) + "\n")
+    sys.stdout.flush()
+
+
+def progress(**fields):
+    """A step.progress notification (protocol 2): no id, no answer."""
+    sys.stdout.write(json.dumps({"jsonrpc": "2.0", "method": "step.progress", "params": fields}) + "\n")
     sys.stdout.flush()
 
 
@@ -51,13 +58,17 @@ def run_step(params):
         with open(config["log"], "a", encoding="utf-8") as log:
             log.write(f"task {params.get('task')} step {params.get('step')}\n")
     print(f"checking {folder}", file=sys.stderr)
+    progress(message=f"checking {config['directory']}")
     if not os.path.isdir(folder):
         return {"passed": True, "summary": f"no {config['directory']} directory; nothing to check"}, None
     missing = []
     count = 0
+    files = sorted(n for n in os.listdir(folder) if n.endswith(".sql"))
+    progress(done=0, total=len(files), unit="migrations", message=f"checking {len(files)} migrations")
     for name in sorted(os.listdir(folder)):
         if name.endswith(".sql"):
             count += 1
+            progress(done=count - 1, total=len(files), unit="migrations", message=name)
             with open(os.path.join(folder, name), encoding="utf-8") as f:
                 if required not in f.read():
                     missing.append(name)
@@ -74,7 +85,7 @@ def main():
         method, id_ = req.get("method"), req.get("id")
         if method == "initialize":
             reply(id_, {
-                "protocol": 1,
+                "protocol": 2,
                 "name": "migration-check",
                 "version": "1.0.0",
                 "provides": ["step-type:migration-check"],

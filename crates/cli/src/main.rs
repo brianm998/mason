@@ -25,13 +25,18 @@
 //! mason targets list [--json]
 //! mason resources [--json] | mason resources limit <resource> <units>
 //! mason doctor
+//! mason init [--yes] [--tracker T] [--agent A] [--sessions N] [--workflow W] [--suites accept|skip] [--base B] [--landing L] [--alerts LIST|none] [--no-prove]
+//! mason adopt | mason remove [--yes]
 //! ```
 //! Global: `--data-dir D`, `--config-dir C` (or `MASON_DATA_DIR`, `MASON_CONFIG_DIR`).
 
+mod adopt;
 mod client;
 mod definition;
 mod doctor;
+mod init;
 mod progress;
+mod remove;
 mod resources;
 mod testing;
 
@@ -51,6 +56,9 @@ mason: command-line client for the MASON pipeline
   mason task list [--state S] [--json]
   mason task list --pending-issues    open issues the tracker has not imported, with why
   mason task relink <id> --issue N    tie a live task to issue N whose task was canceled (owner only)
+  mason task unblock <id> [--from ID[,ID...] | --all]   release a queued task from some or all of its blockers (owner only)
+  mason task block <id> --after ID[,ID...]   add blockers to a task that has not started (owner only)
+  mason task revive <id>              put a canceled task whose branch was kept back in the queue (owner only)
   mason task show <id> [--json] [--watch]   with --watch, follow the live step progress
   mason task cancel <id> [--delete-branch]
   mason task retry <id> [--from STEP]
@@ -83,7 +91,17 @@ mason: command-line client for the MASON pipeline
   mason test parse <parser> <file> [--min N]   read a results file the way a suite would, and judge it
   mason logs <id> [--follow]
   mason status [--json] [--watch]     with --watch, follow every running step's progress
-  mason doctor
+  mason doctor                        checks the setup, and that `mason` on PATH is this program
+  mason init [--yes] [--workflow solo-fast|reviewed-pr|batched-ci|device-mobile|human-gated]
+             [--tracker local|github] [--agent claude|codex] [--agent-bin P] [--sessions N]
+             [--suites accept|skip] [--base B] [--landing direct|direct-ci|pr|batched]
+             [--alerts sound,speech,email,push|none] [--ci-workflow yes|no] [--id ID]
+             [--no-prove] [--force]
+                                      guided setup: writes .mason/ and the Filing notes on branch
+                                      mason/setup (no push), and the project file; every question has a flag
+  mason init --prove-only             file the one harmless first task, once masond knows the project
+  mason adopt [--id ID] [--base B] [--test CMD]   register a project that already has .mason/ (never writes it)
+  mason remove [--yes] [--id ID]      delete the project file, .mason/ and the Filing notes (lists first without --yes)
   mason run --needs compile[=N],... [--exclusive] [--label L] -- <cmd>...
                                       queue for the pipeline's resources, ahead of its work
   mason resources [--json]            limits, who holds what, and every wait explained
@@ -345,6 +363,20 @@ fn main() {
         let file = a.pos().unwrap_or_else(|| die("which file?"));
         finish(&a);
         exit(testing::parse(&kind, std::path::Path::new(&file), min));
+    }
+
+    if cmd == "init" {
+        exit(init::run(
+            std::mem::take(&mut a.rest),
+            &data_dir,
+            &config_dir,
+        ));
+    }
+    if cmd == "adopt" {
+        exit(adopt::run(std::mem::take(&mut a.rest), &config_dir));
+    }
+    if cmd == "remove" {
+        exit(remove::run(std::mem::take(&mut a.rest), &config_dir));
     }
 
     if cmd == "doctor" {
@@ -1376,6 +1408,20 @@ fn main() {
                         "channel   {}",
                         r["channel"].as_str().unwrap_or("(no update.toml)")
                     );
+                    if r["checked_at_ms"].as_u64().unwrap_or(0) > 0 {
+                        println!(
+                            "latest    {}{}",
+                            r["latest"].as_str().unwrap_or("-"),
+                            if r["outdated"].as_bool().unwrap_or(false) {
+                                format!("  (masond is {} commit(s) behind)", r["behind"])
+                            } else {
+                                String::new()
+                            }
+                        );
+                    }
+                    if let Some(e) = r["check_error"].as_str() {
+                        println!("check     could not look for a newer version: {e}");
+                    }
                     if let Some(b) = r["bad"].as_array().filter(|b| !b.is_empty()) {
                         println!(
                             "bad       {}",
@@ -2196,8 +2242,22 @@ fn main() {
                             .collect::<Vec<_>>()
                             .join(", ")
                     };
+                    if let Some(l) = t["held_line"].as_str() {
+                        println!("  {l}");
+                    }
+                    if let Some(r) = t["revive"].as_str() {
+                        println!("  revive    {r}");
+                    }
                     if !ids("blocked_by").is_empty() {
                         println!("  blocked by {}", ids("blocked_by"));
+                        for l in t["held_by"].as_array().into_iter().flatten() {
+                            println!(
+                                "    #{} {} ({})",
+                                l["task"],
+                                l["state"].as_str().unwrap_or("?"),
+                                l["origin"].as_str().unwrap_or("?")
+                            );
+                        }
                     }
                     if !ids("blocks").is_empty() {
                         println!("  blocks    {}", ids("blocks"));
@@ -2552,6 +2612,52 @@ fn main() {
                     }
                     or_die(d.call("POST", &format!("/tasks/{id}/approve"), None));
                     println!("Approved task #{id}");
+                }
+                "unblock" | "block" | "revive" => {
+                    let id = task_id(&mut a);
+                    let list = |v: String, flag: &str| -> Vec<u64> {
+                        v.split(',')
+                            .map(|x| {
+                                x.trim()
+                                    .trim_start_matches('#')
+                                    .parse::<u64>()
+                                    .unwrap_or_else(|_| {
+                                        die(&format!("{flag} takes task ids like 3,4, not {x:?}"))
+                                    })
+                            })
+                            .collect()
+                    };
+                    let body = match sub.as_str() {
+                        "unblock" => {
+                            let from = a.opt("--from").map(|v| list(v, "--from"));
+                            let all = a.flag("--all");
+                            match (from, all) {
+                                (Some(_), true) => die("use --from or --all, not both"),
+                                (Some(f), false) => Some(json!({"from": f})),
+                                (None, true) => Some(json!({"all": true})),
+                                (None, false) => die("which blockers? --from ID[,ID...] or --all"),
+                            }
+                        }
+                        "block" => {
+                            let after = a
+                                .opt("--after")
+                                .map(|v| list(v, "--after"))
+                                .unwrap_or_else(|| {
+                                    die("block after which tasks? --after ID[,ID...]")
+                                });
+                            Some(json!({"after": after}))
+                        }
+                        _ => None,
+                    };
+                    finish(&a);
+                    // The owner's identity, as `approve` takes it: this user's, unless MASON_AS says otherwise.
+                    if std::env::var("MASON_AS").is_err() {
+                        if let Ok(u) = std::env::var("USER") {
+                            std::env::set_var("MASON_AS", u);
+                        }
+                    }
+                    let r = or_die(d.call("POST", &format!("/tasks/{id}/{sub}"), body.as_ref()));
+                    println!("{}", r["message"].as_str().unwrap_or("done"));
                 }
                 "relink" => {
                     let id = task_id(&mut a);

@@ -1135,6 +1135,45 @@ impl Store {
         })
     }
 
+    /// A suite went green for this base: its test count is the next run's expected total.
+    pub fn put_suite_green(
+        &self,
+        project: &str,
+        suite: &str,
+        base: &str,
+        executed: usize,
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
+        let (p, s, b) = (project.to_string(), suite.to_string(), base.to_string());
+        self.write(move |c| {
+            c.execute(
+                "INSERT OR REPLACE INTO suite_green(project, suite, base, executed, at_ms) VALUES (?1,?2,?3,?4,?5)",
+                params![p, s, b, executed as i64, now_ms as i64],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// The test count of the last green run of this suite: on this base if it has one, else
+    /// the most recent on any base (the base moves with every landing, a suite's size hardly does).
+    pub fn suite_green(
+        &self,
+        project: &str,
+        suite: &str,
+        base: &str,
+    ) -> Result<Option<usize>, StoreError> {
+        let (p, s, b) = (project.to_string(), suite.to_string(), base.to_string());
+        self.read(move |c| {
+            c.query_row(
+                "SELECT executed FROM suite_green WHERE project = ?1 AND suite = ?2
+                 ORDER BY (base = ?3) DESC, at_ms DESC LIMIT 1",
+                params![p, s, b],
+                |r| Ok(r.get::<_, i64>(0)? as usize),
+            )
+            .optional()
+        })
+    }
+
     /// What fails at a base commit, cached so it is only worked out once.
     pub fn put_baseline(
         &self,
@@ -1464,6 +1503,119 @@ impl Store {
                     params![p, number as i64, *b as i64],
                 )?;
             }
+            Ok(())
+        })
+    }
+
+    /// Owner overrides of imported tasks' blockers: `(issue number, blocker task, kind)`.
+    pub fn tracker_overrides(&self, project: &str) -> Result<Vec<(u64, u64, String)>, StoreError> {
+        let p = project.to_string();
+        self.read(move |c| {
+            let mut st = c.prepare(
+                "SELECT number, blocker_task, kind FROM tracker_overrides WHERE project = ?1 ORDER BY number, blocker_task",
+            )?;
+            let rows = st.query_map(params![p], |r| {
+                Ok((
+                    r.get::<_, i64>(0)? as u64,
+                    r.get::<_, i64>(1)? as u64,
+                    r.get::<_, String>(2)?,
+                ))
+            })?;
+            rows.collect()
+        })
+    }
+
+    /// Record (or replace) an owner override of one blocker of an issue's task.
+    pub fn put_tracker_override(
+        &self,
+        project: &str,
+        number: u64,
+        blocker_task: u64,
+        kind: &str,
+        at: u64,
+    ) -> Result<(), StoreError> {
+        let (p, k) = (project.to_string(), kind.to_string());
+        self.write(move |c| {
+            c.execute(
+                "INSERT OR REPLACE INTO tracker_overrides(project, number, blocker_task, kind, at) VALUES (?1,?2,?3,?4,?5)",
+                params![p, number as i64, blocker_task as i64, k, at as i64],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// Drop the overrides of an issue: of one kind, or of the one blocker task when given.
+    pub fn drop_tracker_overrides(
+        &self,
+        project: &str,
+        number: u64,
+        kind: Option<&str>,
+        blocker_task: Option<u64>,
+    ) -> Result<(), StoreError> {
+        let p = project.to_string();
+        let k = kind.map(String::from);
+        self.write(move |c| {
+            c.execute(
+                "DELETE FROM tracker_overrides WHERE project = ?1 AND number = ?2
+                 AND (?3 IS NULL OR kind = ?3) AND (?4 IS NULL OR blocker_task = ?4)",
+                params![p, number as i64, k, blocker_task.map(|b| b as i64)],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// What the tracker last said each issue is blocked by (every blocker it named, imported
+    /// or not), and so which issues have been looked at. `None` for an issue not yet seen.
+    pub fn tracker_relationship(
+        &self,
+        project: &str,
+        number: u64,
+    ) -> Result<Option<std::collections::BTreeSet<u64>>, StoreError> {
+        let p = project.to_string();
+        self.read(move |c| {
+            let seen: i64 = c.query_row(
+                "SELECT COUNT(*) FROM tracker_relationship_seen WHERE project = ?1 AND number = ?2",
+                params![p, number as i64],
+                |r| r.get(0),
+            )?;
+            if seen == 0 {
+                return Ok(None);
+            }
+            let mut st = c.prepare(
+                "SELECT blocker_number FROM tracker_relationship WHERE project = ?1 AND number = ?2",
+            )?;
+            let rows = st.query_map(params![p, number as i64], |r| Ok(r.get::<_, i64>(0)? as u64))?;
+            let mut s = std::collections::BTreeSet::new();
+            for r in rows {
+                s.insert(r?);
+            }
+            Ok(Some(s))
+        })
+    }
+
+    pub fn set_tracker_relationship(
+        &self,
+        project: &str,
+        number: u64,
+        blockers: &[u64],
+    ) -> Result<(), StoreError> {
+        let p = project.to_string();
+        let bs = blockers.to_vec();
+        self.write(move |c| {
+            c.execute(
+                "DELETE FROM tracker_relationship WHERE project = ?1 AND number = ?2",
+                params![p, number as i64],
+            )?;
+            for b in &bs {
+                c.execute(
+                    "INSERT OR IGNORE INTO tracker_relationship(project, number, blocker_number) VALUES (?1,?2,?3)",
+                    params![p, number as i64, *b as i64],
+                )?;
+            }
+            c.execute(
+                "INSERT OR IGNORE INTO tracker_relationship_seen(project, number) VALUES (?1,?2)",
+                params![p, number as i64],
+            )?;
             Ok(())
         })
     }
@@ -2652,6 +2804,8 @@ fn src_code(s: mason_core::progress::Source) -> i64 {
         Reported => 1,
         Counted => 2,
         History => 3,
+        Expected => 4,
+        Minimum => 5,
     }
 }
 
@@ -2661,6 +2815,8 @@ fn src_of(n: i64) -> mason_core::progress::Source {
         1 => Reported,
         2 => Counted,
         3 => History,
+        4 => Expected,
+        5 => Minimum,
         _ => None,
     }
 }

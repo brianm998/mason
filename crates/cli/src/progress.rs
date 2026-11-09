@@ -16,6 +16,8 @@ fn source_of(v: &Value) -> Source {
         Some("reported") => Source::Reported,
         Some("counted") => Source::Counted,
         Some("history") => Source::History,
+        Some("expected") => Source::Expected,
+        Some("minimum") => Source::Minimum,
         _ => Source::None,
     }
 }
@@ -102,6 +104,8 @@ fn source_json(s: i32) -> &'static str {
         ProgressSource::SourceReported => "reported",
         ProgressSource::SourceCounted => "counted",
         ProgressSource::SourceHistory => "history",
+        ProgressSource::SourceExpected => "expected",
+        ProgressSource::SourceMinimum => "minimum",
     }
 }
 
