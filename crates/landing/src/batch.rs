@@ -248,46 +248,83 @@ impl Batch<'_> {
         self.changed(&a.base_tip, &a.head)
     }
 
-    /// Promote the verified batch under the caller's lock. If the base moved
-    /// since assembly, fold it in and call `reverify(moved_paths)`; if that
-    /// says the suites must run again and they fail, return `Err(false)`.
-    /// `Ok(true)` verdict means landed. `point` marks the crash boundaries.
+    /// Promote the verified batch with no lock to take (a single caller owns the
+    /// repository). See [`Batch::finish_with`].
     pub fn finish(
         &self,
         a: &Assembled,
         reverify: &mut dyn FnMut(&[String]) -> bool,
         point: &dyn Fn(&str),
     ) -> Result<Result<Finish, RedAfterFold>, GitError> {
+        self.finish_with(a, &|| Box::new(()), reverify, point)
+    }
+
+    /// Promote the verified batch. The caller's lock is taken only around git: once
+    /// for the fold (fetch, compare, catch up, regenerate the status block) and once
+    /// for the promote (fetch, compare, push). If the base moved since assembly, it
+    /// is folded in and `reverify(moved_paths)` runs between the two with the lock
+    /// released; if it says the tree is red, return `Err(RedAfterFold)`. A tree is
+    /// promoted only when the base, fetched under the lock, is still the one the
+    /// tree was last verified on; if it moved during the re-verification the loop
+    /// folds and re-verifies again, up to `max_fold`. `Ok(Ok(..))` means landed.
+    /// `point` marks the crash boundaries.
+    pub fn finish_with<'l>(
+        &self,
+        a: &Assembled,
+        lock: &dyn Fn() -> Guard<'l>,
+        reverify: &mut dyn FnMut(&[String]) -> bool,
+        point: &dyn Fn(&str),
+    ) -> Result<Result<Finish, RedAfterFold>, GitError> {
         let base_ref = self.base_ref();
         let wt = self.int_wt;
+        // The base tip the tree in the worktree has been verified on (or built on).
         let mut seen = a.base_tip.clone();
         let mut folds = 0;
         loop {
-            self.fetch()?;
-            let tip = git::rev_parse(self.repo, &base_ref)?;
-            if tip != seen {
-                // The base moved while the batch was verified: fold it in.
-                self.drop_status_commit();
-                match git::catch_up(wt, &base_ref)? {
-                    CatchUp::Conflict(files) => return Ok(Ok(Finish::Conflict(files))),
-                    CatchUp::UpToDate | CatchUp::Merged => {
-                        self.regenerate_status();
+            // -- fold, under the lock
+            let moved = {
+                let _g = lock();
+                self.fetch()?;
+                let tip = git::rev_parse(self.repo, &base_ref)?;
+                if tip != seen {
+                    // The base moved while the batch was verified: fold it in.
+                    self.drop_status_commit();
+                    match git::catch_up(wt, &base_ref)? {
+                        CatchUp::Conflict(files) => return Ok(Ok(Finish::Conflict(files))),
+                        CatchUp::UpToDate | CatchUp::Merged => {
+                            self.regenerate_status();
+                        }
                     }
+                    folds += 1;
+                    if folds > self.max_fold {
+                        return Ok(Ok(Finish::BaseKeptMoving));
+                    }
+                    let moved = self.changed(&seen, &tip);
+                    seen = tip;
+                    Some(moved)
+                } else {
+                    None
                 }
-                folds += 1;
-                if folds > self.max_fold {
-                    return Ok(Ok(Finish::BaseKeptMoving));
-                }
-                let moved = self.changed(&seen, &tip);
-                seen = tip;
+            };
+            // -- re-verify, lock released: the worktree belongs to this batch's slot
+            if let Some(moved) = moved {
                 if !reverify(&moved) {
                     return Ok(Err(RedAfterFold));
                 }
             }
+            // -- promote, under the lock
+            let _g = lock();
+            self.fetch()?;
+            let tip = git::rev_parse(self.repo, &base_ref)?;
             let commit = git::rev_parse(wt, "HEAD")?;
             if git::is_ancestor(wt, &commit, &base_ref) {
                 // Already promoted (a repeat after a crash).
                 return Ok(Ok(Finish::Promoted { commit, folds }));
+            }
+            if tip != seen {
+                // The base moved during the re-verification: this tree was not
+                // verified on it. Fold again.
+                continue;
             }
             point("batch_before_promote");
             match promote(self.repo, wt, self.remote, self.base, &base_ref, &commit) {
@@ -312,6 +349,11 @@ impl Batch<'_> {
         }
     }
 }
+
+/// What a caller's lock hands back: dropping it releases the lock.
+pub trait Held {}
+impl<T> Held for T {}
+pub type Guard<'a> = Box<dyn Held + 'a>;
 
 /// Re-verification after folding in a moved base came out red.
 #[derive(Debug, PartialEq, Eq)]
