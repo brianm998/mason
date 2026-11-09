@@ -137,7 +137,8 @@ alerts_have "mason task revive $p2"
 m task revive "$p2" | grep -q "queued again" || fail "revive did not say what changed"
 [ "$(state_of "$p2")" != canceled ] || fail "P2 is still cancelled after revive"
 alerts_lack "Task #$t is held"
-m task cancel "$p2" >/dev/null || true
+m task cancel "$p2" >/dev/null
+wait_state "$p2" canceled 30
 echo "   second blocker added, one released, cycle refused naming it, cancelled blocker revived"
 
 echo "== 3. a tracker-imported task: the release survives two polls and lapses when GitHub changes"
