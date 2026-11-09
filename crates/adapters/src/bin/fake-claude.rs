@@ -11,7 +11,7 @@
 //! working directory in `<script>.<kind>.<dir hash>.count`, plays turn N, so a
 //! resume plays the next turn. Actions:
 //! `{"replay": "<fixture path>"}`, `{"init": "<session id>"}`, `{"say": "..."}`,
-//! `{"call": {"tool": "...", "args": {...}}}`, `{"rate_limit": {...}}` (or with `"windows": {id: {utilization, resetsAt}}` for several),
+//! `{"call": {"tool": "...", "args": {...}}}`, `{"rate_limit": {...}}` (`"resets_in": N` sets every resetsAt to N seconds after emission; or with `"windows": {id: {utilization, resetsAt}}` for several),
 //! `{"api_retry": {"attempt": 1, "status": 529}}`, `{"sleep_ms": 100}`,
 //! `{"result": {"is_error": false, "text": "...", "api_error_status": null}}`,
 //! `{"todo": [{"content": "...", "status": "pending|in_progress|completed"}, ...]}` (a
@@ -245,14 +245,28 @@ fn main() {
                 "name": t["name"], "input": t["input"]}]}}),
             );
         } else if let Some(r) = a.get("rate_limit") {
+            // `resets_in` (seconds) is relative to the moment of emission, so a loaded
+            // machine cannot make the reset stale before the daemon reads it.
+            let at = r.get("resets_in").and_then(Value::as_u64).map(|n| {
+                n + std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0)
+            });
+            let mut windows = match r.get("windows") {
+                // Several windows at once: {"five_hour": {"utilization": 0.8, "resetsAt": N}, ...}
+                Some(w) => w.clone(),
+                None => json!({r["window"].as_str().unwrap_or("five_hour"): {"utilization": r["utilization"]}}),
+            };
+            if let (Some(at), Some(m)) = (at, windows.as_object_mut()) {
+                for w in m.values_mut() {
+                    w["resetsAt"] = json!(at);
+                }
+            }
             out(
                 &json!({"type": "rate_limit_event", "session_id": sid, "rate_limit_info": {
-                "status": r["status"], "resetsAt": r["resetsAt"], "rateLimitType": r["window"],
-                "unifiedWindows": match r.get("windows") {
-                    // Several windows at once: {"five_hour": {"utilization": 0.8, "resetsAt": N}, ...}
-                    Some(w) => w.clone(),
-                    None => json!({r["window"].as_str().unwrap_or("five_hour"): {"utilization": r["utilization"]}}),
-                }}}),
+                "status": r["status"], "resetsAt": at.map(|a| json!(a)).unwrap_or_else(|| r["resetsAt"].clone()),
+                "rateLimitType": r["window"], "unifiedWindows": windows}}),
             );
         } else if let Some(r) = a.get("api_retry") {
             out(
