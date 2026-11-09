@@ -17,6 +17,7 @@ pub mod defs;
 pub mod demo;
 pub mod disk;
 pub mod editor;
+pub mod fdlimit;
 pub mod holds;
 pub mod hostloss;
 pub mod http;
