@@ -451,7 +451,8 @@ fun ActionButtons(model: MonitorModel, row: TaskRow, hasApprovalView: Boolean = 
         // Approve and Reject have their own view wherever there is one; a non-owner sees no
         // buttons at all for what only the owner may do.
         row.allowed_actions.filter {
-            it != "answer" && it != "edit" &&
+            // Block and unblock are drawn by BlockersView, one control per blocker.
+            it != "answer" && it != "edit" && it != "block" && it != "unblock" &&
                 !(hasApprovalView && (it == "approve" || it == "reject")) &&
                 !(!model.canAct && (it == "approve" || it == "reject"))
         }.forEach { a ->
@@ -473,12 +474,70 @@ private fun run(model: MonitorModel, row: TaskRow, a: String) {
         "cancel" -> model.cancel(row.id)
         "retry" -> model.retry(row.id)
         "approve" -> model.approve(row.id)
+        "revive" -> model.revive(row.id)
         "reject" -> model.reject(row.id)
         "explore_anyway" -> model.exploreAnyway(row.id)
         "land_now" -> model.landNow(row.id)
         "force" -> model.force(row.id)
         "skip_test" -> model.skipTest(row.id, row.step)
         "open_session" -> copyToClipboard("mason task open ${row.id}")
+    }
+}
+
+/**
+ * A held task's blockers: each with its state and where it came from ("from GitHub" or "set by
+ * you"), Release (and Revive for a canceled one, Retry for a failed one) for the owner, and an
+ * Add blocker field with a task picker. A non-owner sees the list and no controls.
+ */
+@Composable
+fun BlockersView(model: MonitorModel, row: TaskRow) {
+    val theme = LocalTheme.current
+    val canAdd = model.canAct && "block" in row.allowed_actions
+    if (row.blocker_links.isEmpty() && !canAdd) return
+    var open by remember { mutableStateOf(false) }
+    var picked by remember { mutableStateOf<Long?>(null) }
+    val candidates = model.blockerCandidates(row)
+    Column(verticalArrangement = Arrangement.spacedBy(theme.spacingSmall)) {
+        row.blocker_links.forEach { l ->
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(theme.spacing),
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.testTag("blocker:${row.id}:${l.task}"),
+            ) {
+                Text("#${l.task}", style = theme.body(color = theme.accent), modifier = Modifier.clickable { model.go(mason.monitor.Page.Task(l.task)) })
+                Text("${l.state}, ${l.origin}", style = theme.small())
+                if (model.canAct) l.actions.forEach { a ->
+                    Pill(a.replaceFirstChar { it.uppercase() }, modifier = Modifier.testTag("blocker:${row.id}:${l.task}:$a")) {
+                        when (a) {
+                            "release" -> model.release(row.id, l.task)
+                            "revive" -> model.revive(l.task)
+                            "retry" -> model.retry(l.task)
+                        }
+                    }
+                }
+            }
+        }
+        if (canAdd) {
+            Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing), verticalAlignment = Alignment.CenterVertically) {
+                Box {
+                    Pill(
+                        candidates.firstOrNull { it.id == picked }?.let { "${it.key} ${it.title}" } ?: "Choose a task",
+                        modifier = Modifier.testTag("add-blocker:${row.id}:picker"),
+                    ) { open = true }
+                    androidx.compose.material3.DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+                        candidates.forEach { c ->
+                            androidx.compose.material3.DropdownMenuItem(
+                                text = { Text("${c.key} ${c.title}") },
+                                onClick = { picked = c.id; open = false },
+                            )
+                        }
+                    }
+                }
+                Pill("Add blocker", prominent = picked != null, modifier = Modifier.testTag("add-blocker:${row.id}")) {
+                    picked?.let { model.addBlocker(row.id, it); picked = null }
+                }
+            }
+        }
     }
 }
 

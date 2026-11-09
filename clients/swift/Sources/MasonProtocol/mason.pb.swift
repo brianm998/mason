@@ -498,6 +498,32 @@ public nonisolated struct Mason_V1_Command: Sendable {
     set {body = .approveHold(newValue)}
   }
 
+  /// Release a held task from some or all of its blockers, add blockers, or put
+  /// a canceled task whose branch was kept back in the queue. Owner only.
+  public var unblock: Mason_V1_Unblock {
+    get {
+      if case .unblock(let v)? = body {return v}
+      return Mason_V1_Unblock()
+    }
+    set {body = .unblock(newValue)}
+  }
+
+  public var block: Mason_V1_Block {
+    get {
+      if case .block(let v)? = body {return v}
+      return Mason_V1_Block()
+    }
+    set {body = .block(newValue)}
+  }
+
+  public var revive: Mason_V1_TaskRef {
+    get {
+      if case .revive(let v)? = body {return v}
+      return Mason_V1_TaskRef()
+    }
+    set {body = .revive(newValue)}
+  }
+
   public var raw: Mason_V1_Raw {
     get {
       if case .raw(let v)? = body {return v}
@@ -529,6 +555,11 @@ public nonisolated struct Mason_V1_Command: Sendable {
     case setLimit(Mason_V1_SetLimit)
     /// Approve a held self-change: the exact diff the owner was shown.
     case approveHold(Mason_V1_ApproveHold)
+    /// Release a held task from some or all of its blockers, add blockers, or put
+    /// a canceled task whose branch was kept back in the queue. Owner only.
+    case unblock(Mason_V1_Unblock)
+    case block(Mason_V1_Block)
+    case revive(Mason_V1_TaskRef)
     case raw(Mason_V1_Raw)
 
   }
@@ -542,6 +573,37 @@ public nonisolated struct Mason_V1_TaskRef: Sendable {
   // methods supported on all messages.
 
   public var task: UInt64 = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public nonisolated struct Mason_V1_Unblock: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var task: UInt64 = 0
+
+  /// The blockers to release; empty with `all` released every one.
+  public var from: [UInt64] = []
+
+  public var all: Bool = false
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public nonisolated struct Mason_V1_Block: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var task: UInt64 = 0
+
+  public var after: [UInt64] = []
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -1403,11 +1465,36 @@ public nonisolated struct Mason_V1_TaskRow: @unchecked Sendable {
     set {_uniqueStorage()._issueURL = newValue}
   }
 
+  /// Each blocker with its state, where it came from ("from GitHub" or "set by you")
+  /// and what the owner can do about it ("release", "revive", "retry"). Additive.
+  public var blockerLinks: [Mason_V1_BlockerLink] {
+    get {_storage._blockerLinks}
+    set {_uniqueStorage()._blockerLinks = newValue}
+  }
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
 
   fileprivate var _storage = _StorageClass.defaultInstance
+}
+
+public nonisolated struct Mason_V1_BlockerLink: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var task: UInt64 = 0
+
+  public var state: String = String()
+
+  public var origin: String = String()
+
+  public var actions: [String] = []
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
 }
 
 /// What a step run launched (or, with `expected`, will launch): the tier
@@ -3020,7 +3107,7 @@ nonisolated extension Mason_V1_Ping: SwiftProtobuf.Message, SwiftProtobuf._Messa
 
 nonisolated extension Mason_V1_Command: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".Command"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{3}add_task\0\u{1}cancel\0\u{1}retry\0\u{1}approve\0\u{1}reject\0\u{3}explore_anyway\0\u{1}answer\0\u{1}skip\0\u{3}land_now\0\u{1}force\0\u{1}pause\0\u{1}resume\0\u{3}set_limit\0\u{3}approve_hold\0\u{2}\u{f}raw\0\u{2}\u{a}actor\0\u{1}reason\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{3}add_task\0\u{1}cancel\0\u{1}retry\0\u{1}approve\0\u{1}reject\0\u{3}explore_anyway\0\u{1}answer\0\u{1}skip\0\u{3}land_now\0\u{1}force\0\u{1}pause\0\u{1}resume\0\u{3}set_limit\0\u{3}approve_hold\0\u{1}unblock\0\u{1}block\0\u{1}revive\0\u{2}\u{c}raw\0\u{2}\u{a}actor\0\u{1}reason\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -3211,6 +3298,45 @@ nonisolated extension Mason_V1_Command: SwiftProtobuf.Message, SwiftProtobuf._Me
           self.body = .approveHold(v)
         }
       }()
+      case 16: try {
+        var v: Mason_V1_Unblock?
+        var hadOneofValue = false
+        if let current = self.body {
+          hadOneofValue = true
+          if case .unblock(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.body = .unblock(v)
+        }
+      }()
+      case 17: try {
+        var v: Mason_V1_Block?
+        var hadOneofValue = false
+        if let current = self.body {
+          hadOneofValue = true
+          if case .block(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.body = .block(v)
+        }
+      }()
+      case 18: try {
+        var v: Mason_V1_TaskRef?
+        var hadOneofValue = false
+        if let current = self.body {
+          hadOneofValue = true
+          if case .revive(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.body = .revive(v)
+        }
+      }()
       case 30: try {
         var v: Mason_V1_Raw?
         var hadOneofValue = false
@@ -3296,6 +3422,18 @@ nonisolated extension Mason_V1_Command: SwiftProtobuf.Message, SwiftProtobuf._Me
       guard case .approveHold(let v)? = self.body else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 15)
     }()
+    case .unblock?: try {
+      guard case .unblock(let v)? = self.body else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 16)
+    }()
+    case .block?: try {
+      guard case .block(let v)? = self.body else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 17)
+    }()
+    case .revive?: try {
+      guard case .revive(let v)? = self.body else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 18)
+    }()
     case .raw?: try {
       guard case .raw(let v)? = self.body else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 30)
@@ -3346,6 +3484,81 @@ nonisolated extension Mason_V1_TaskRef: SwiftProtobuf.Message, SwiftProtobuf._Me
 
   public static func ==(lhs: Mason_V1_TaskRef, rhs: Mason_V1_TaskRef) -> Bool {
     if lhs.task != rhs.task {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Mason_V1_Unblock: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".Unblock"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}task\0\u{1}from\0\u{1}all\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularUInt64Field(value: &self.task) }()
+      case 2: try { try decoder.decodeRepeatedUInt64Field(value: &self.from) }()
+      case 3: try { try decoder.decodeSingularBoolField(value: &self.all) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if self.task != 0 {
+      try visitor.visitSingularUInt64Field(value: self.task, fieldNumber: 1)
+    }
+    if !self.from.isEmpty {
+      try visitor.visitPackedUInt64Field(value: self.from, fieldNumber: 2)
+    }
+    if self.all != false {
+      try visitor.visitSingularBoolField(value: self.all, fieldNumber: 3)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Mason_V1_Unblock, rhs: Mason_V1_Unblock) -> Bool {
+    if lhs.task != rhs.task {return false}
+    if lhs.from != rhs.from {return false}
+    if lhs.all != rhs.all {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Mason_V1_Block: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".Block"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}task\0\u{1}after\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularUInt64Field(value: &self.task) }()
+      case 2: try { try decoder.decodeRepeatedUInt64Field(value: &self.after) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if self.task != 0 {
+      try visitor.visitSingularUInt64Field(value: self.task, fieldNumber: 1)
+    }
+    if !self.after.isEmpty {
+      try visitor.visitPackedUInt64Field(value: self.after, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Mason_V1_Block, rhs: Mason_V1_Block) -> Bool {
+    if lhs.task != rhs.task {return false}
+    if lhs.after != rhs.after {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -4788,7 +5001,7 @@ nonisolated extension Mason_V1_TodoItem: SwiftProtobuf.Message, SwiftProtobuf._M
 
 nonisolated extension Mason_V1_TaskRow: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".TaskRow"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{1}key\0\u{1}title\0\u{1}project\0\u{1}state\0\u{1}activity\0\u{3}why_waiting\0\u{3}enqueued_ms\0\u{3}in_state_ms\0\u{1}model\0\u{1}progress\0\u{3}allowed_actions\0\u{1}blockers\0\u{1}typical\0\u{1}slow\0\u{1}step\0\u{1}body\0\u{1}blocks\0\u{1}display\0\u{3}model_use\0\u{1}proposal\0\u{1}issue\0\u{3}issue_url\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{1}key\0\u{1}title\0\u{1}project\0\u{1}state\0\u{1}activity\0\u{3}why_waiting\0\u{3}enqueued_ms\0\u{3}in_state_ms\0\u{1}model\0\u{1}progress\0\u{3}allowed_actions\0\u{1}blockers\0\u{1}typical\0\u{1}slow\0\u{1}step\0\u{1}body\0\u{1}blocks\0\u{1}display\0\u{3}model_use\0\u{1}proposal\0\u{1}issue\0\u{3}issue_url\0\u{3}blocker_links\0")
 
   fileprivate class _StorageClass {
     var _id: UInt64 = 0
@@ -4814,6 +5027,7 @@ nonisolated extension Mason_V1_TaskRow: SwiftProtobuf.Message, SwiftProtobuf._Me
     var _proposal: String = String()
     var _issue: UInt64 = 0
     var _issueURL: String = String()
+    var _blockerLinks: [Mason_V1_BlockerLink] = []
 
       // This property is used as the initial default value for new instances of the type.
       // The type itself is protecting the reference to its storage via CoW semantics.
@@ -4847,6 +5061,7 @@ nonisolated extension Mason_V1_TaskRow: SwiftProtobuf.Message, SwiftProtobuf._Me
       _proposal = source._proposal
       _issue = source._issue
       _issueURL = source._issueURL
+      _blockerLinks = source._blockerLinks
     }
   }
 
@@ -4888,6 +5103,7 @@ nonisolated extension Mason_V1_TaskRow: SwiftProtobuf.Message, SwiftProtobuf._Me
         case 21: try { try decoder.decodeSingularStringField(value: &_storage._proposal) }()
         case 22: try { try decoder.decodeSingularUInt64Field(value: &_storage._issue) }()
         case 23: try { try decoder.decodeSingularStringField(value: &_storage._issueURL) }()
+        case 24: try { try decoder.decodeRepeatedMessageField(value: &_storage._blockerLinks) }()
         default: break
         }
       }
@@ -4969,6 +5185,9 @@ nonisolated extension Mason_V1_TaskRow: SwiftProtobuf.Message, SwiftProtobuf._Me
       if !_storage._issueURL.isEmpty {
         try visitor.visitSingularStringField(value: _storage._issueURL, fieldNumber: 23)
       }
+      if !_storage._blockerLinks.isEmpty {
+        try visitor.visitRepeatedMessageField(value: _storage._blockerLinks, fieldNumber: 24)
+      }
     }
     try unknownFields.traverse(visitor: &visitor)
   }
@@ -5001,10 +5220,56 @@ nonisolated extension Mason_V1_TaskRow: SwiftProtobuf.Message, SwiftProtobuf._Me
         if _storage._proposal != rhs_storage._proposal {return false}
         if _storage._issue != rhs_storage._issue {return false}
         if _storage._issueURL != rhs_storage._issueURL {return false}
+        if _storage._blockerLinks != rhs_storage._blockerLinks {return false}
         return true
       }
       if !storagesAreEqual {return false}
     }
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Mason_V1_BlockerLink: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".BlockerLink"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}task\0\u{1}state\0\u{1}origin\0\u{1}actions\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularUInt64Field(value: &self.task) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.state) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.origin) }()
+      case 4: try { try decoder.decodeRepeatedStringField(value: &self.actions) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if self.task != 0 {
+      try visitor.visitSingularUInt64Field(value: self.task, fieldNumber: 1)
+    }
+    if !self.state.isEmpty {
+      try visitor.visitSingularStringField(value: self.state, fieldNumber: 2)
+    }
+    if !self.origin.isEmpty {
+      try visitor.visitSingularStringField(value: self.origin, fieldNumber: 3)
+    }
+    if !self.actions.isEmpty {
+      try visitor.visitRepeatedStringField(value: self.actions, fieldNumber: 4)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Mason_V1_BlockerLink, rhs: Mason_V1_BlockerLink) -> Bool {
+    if lhs.task != rhs.task {return false}
+    if lhs.state != rhs.state {return false}
+    if lhs.origin != rhs.origin {return false}
+    if lhs.actions != rhs.actions {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

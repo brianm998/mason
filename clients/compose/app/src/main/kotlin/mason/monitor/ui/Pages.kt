@@ -189,6 +189,7 @@ private fun TaskDetail(model: MonitorModel, d: TaskDetailView) {
             }
         }
     }
+    BlockersView(model, r)
     if (r.blocks.isNotEmpty()) {
         Row(horizontalArrangement = Arrangement.spacedBy(theme.spacingSmall), modifier = Modifier.testTag("blocks")) {
             Text("blocks", style = theme.body(color = theme.muted))

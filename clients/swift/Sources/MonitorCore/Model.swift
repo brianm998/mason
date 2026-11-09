@@ -257,6 +257,29 @@ public final class MonitorModel: ObservableObject {
     public func cancel(_ task: UInt64) { command { $0.cancel = .with { $0.task = task } } }
     public func retry(_ task: UInt64, from: String = "") { command { $0.retry = .with { $0.task = task; $0.from = from } } }
     public func approve(_ task: UInt64) { command { $0.approve = .with { $0.task = task } } }
+    /// The tasks the Add blocker picker offers for `row`: any task in the sidebar that is not
+    /// itself, not already a blocker, and could still land (not landed, canceled or failed).
+    public func blockerCandidates(for row: TaskRow) -> [TaskRow] {
+        var seen = Set<UInt64>()
+        var out: [TaskRow] = []
+        for s in sidebar?.sections ?? [] {
+            for r in s.rows where r.id != row.id && !row.blockers.contains(r.id)
+                && !["landed", "canceled", "failed"].contains(r.state) && seen.insert(r.id).inserted {
+                out.append(r)
+            }
+        }
+        return out.sorted { $0.id < $1.id }
+    }
+    /// Release a task from one blocker (owner only; the daemon refuses anyone else).
+    public func release(_ task: UInt64, blocker: UInt64) {
+        command { $0.unblock = .with { $0.task = task; $0.from = [blocker] } }
+    }
+    /// Make a task wait for another one as well (owner only).
+    public func addBlocker(_ task: UInt64, after: UInt64) {
+        command { $0.block = .with { $0.task = task; $0.after = [after] } }
+    }
+    /// Put a canceled task whose branch was kept back in the queue (owner only).
+    public func revive(_ task: UInt64) { command { $0.revive = .with { $0.task = task } } }
     public func reject(_ task: UInt64, reason: String = "") { command { $0.reject = .with { $0.task = task; $0.reason = reason } } }
     public func exploreAnyway(_ task: UInt64) { command { $0.exploreAnyway = .with { $0.task = task } } }
     public func landNow(_ task: UInt64) { command { $0.landNow = .with { $0.task = task } } }
