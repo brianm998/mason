@@ -185,6 +185,7 @@ struct TaskDetailPage: View {
                 .accessibilityLabel("waiting for \(r.blockers.map { "#\($0)" }.joined(separator: ", "))")
                 .accessibilityIdentifier("waiting-for")
             }
+            BlockersView(model: model, row: r)
             if !r.blocks.isEmpty {
                 HStack(spacing: theme.spacingSmall) {
                     Text("blocks").font(theme.body()).foregroundStyle(theme.muted)

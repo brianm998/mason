@@ -287,6 +287,22 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     fun cancel(task: Long) = send(Command(cancel = TaskRef(task = task)))
     fun retry(task: Long, from: String = "") = send(Command(retry = Retry(task = task, from = from)))
     fun approve(task: Long) = send(Command(approve = TaskRef(task = task)))
+    /**
+     * The tasks the Add blocker picker offers for [row]: any task in the sidebar that is not itself,
+     * not already a blocker, and could still land (not landed, canceled or failed).
+     */
+    fun blockerCandidates(row: TaskRow): List<TaskRow> =
+        (sidebar?.sections ?: emptyList()).flatMap { it.rows }
+            .filter { it.id != row.id && it.id !in row.blockers && it.state !in setOf("landed", "canceled", "failed") }
+            .distinctBy { it.id }
+            .sortedBy { it.id }
+
+    /** Release a task from one blocker (owner only; the daemon refuses anyone else). */
+    fun release(task: Long, blocker: Long) = send(Command(unblock = Unblock(task = task, from = listOf(blocker))))
+    /** Make a task wait for another one as well (owner only). */
+    fun addBlocker(task: Long, after: Long) = send(Command(block = Block(task = task, after = listOf(after))))
+    /** Put a canceled task whose branch was kept back in the queue (owner only). */
+    fun revive(task: Long) = send(Command(revive = TaskRef(task = task)))
     /** Approve a held self-change: the exact diff the owner was shown. */
     fun approveHold(task: Long, diffHash: String) =
         send(Command(approve_hold = ApproveHold(task = task, diff_hash = diffHash)))
