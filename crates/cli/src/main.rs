@@ -2473,16 +2473,15 @@ fn main() {
                 }
                 "retry" => {
                     let id = task_id(&mut a);
-                    let from = a.opt("--from").unwrap_or_else(|| "developing".into());
+                    let from = a.opt("--from");
                     finish(&a);
-                    let r = or_die(d.call(
-                        "POST",
-                        &format!("/tasks/{id}/retry"),
-                        Some(&json!({"to": from})),
-                    ));
+                    // Without --from the daemon picks: the step a lost host
+                    // interrupted, otherwise developing.
+                    let body = from.as_ref().map_or(json!({}), |f| json!({"to": f}));
+                    let r = or_die(d.call("POST", &format!("/tasks/{id}/retry"), Some(&body)));
                     println!(
                         "Retrying task #{id} from {}",
-                        r["to"].as_str().unwrap_or(&from)
+                        r["to"].as_str().unwrap_or("developing")
                     );
                 }
                 "skip" => {

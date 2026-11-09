@@ -2,7 +2,7 @@
 
 //! Overall CPU use, for the `compile` gate. The scheduler is pure and is only
 //! handed a number; reading the OS happens here. The reading is an average over
-//! a few seconds, so one spike does not hold a compile back.
+//! about 15 seconds, so one spike does not hold a compile back.
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -15,15 +15,26 @@ use std::time::Duration;
 pub trait CpuSource: Send + Sync + std::fmt::Debug {
     /// Overall CPU use, 0..=100, or `None` if it cannot be read (no gate then).
     fn busy_pct(&self) -> Option<u32>;
+
+    /// Whether this reading alone decides when compiles start, with no count of
+    /// them to set. True of the machine's own reading; a test source keeps the
+    /// counts its test declared unless it asks otherwise.
+    fn replaces_compile_count(&self) -> bool {
+        false
+    }
 }
 
 /// A fixed, settable value.
 #[derive(Debug)]
-pub struct FakeCpu(AtomicU32);
+pub struct FakeCpu(AtomicU32, bool);
 
 impl FakeCpu {
     pub fn new(pct: u32) -> Arc<FakeCpu> {
-        Arc::new(FakeCpu(AtomicU32::new(pct)))
+        Arc::new(FakeCpu(AtomicU32::new(pct), false))
+    }
+    /// Behaves as the machine's own reading does: no count of compiles.
+    pub fn replacing_compile_count(pct: u32) -> Arc<FakeCpu> {
+        Arc::new(FakeCpu(AtomicU32::new(pct), true))
     }
     pub fn set(&self, pct: u32) {
         self.0.store(pct, Ordering::SeqCst);
@@ -33,6 +44,9 @@ impl FakeCpu {
 impl CpuSource for FakeCpu {
     fn busy_pct(&self) -> Option<u32> {
         Some(self.0.load(Ordering::SeqCst))
+    }
+    fn replaces_compile_count(&self) -> bool {
+        self.1
     }
 }
 
@@ -108,7 +122,8 @@ fn read_instant() -> Option<u32> {
     parse_top_cpu(&String::from_utf8_lossy(&out.stdout))
 }
 
-/// Averages instantaneous readings taken once a second over the last `window`.
+/// Averages the last three readings, taken every five seconds: `top` is a
+/// process to start, so it is not run any more often than the gate needs.
 #[derive(Debug)]
 pub struct Sampler {
     pct: Arc<AtomicU32>,
@@ -151,7 +166,7 @@ impl Sampler {
                         }
                     }
                     let spent = started.elapsed();
-                    std::thread::sleep(Duration::from_secs(1).saturating_sub(spent));
+                    std::thread::sleep(Duration::from_secs(5).saturating_sub(spent));
                 }
             });
         s
@@ -163,6 +178,9 @@ impl CpuSource for Sampler {
         self.known
             .load(Ordering::SeqCst)
             .then(|| self.pct.load(Ordering::SeqCst))
+    }
+    fn replaces_compile_count(&self) -> bool {
+        true
     }
 }
 
