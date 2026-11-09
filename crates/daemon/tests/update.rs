@@ -236,7 +236,7 @@ fn a_build_that_crashes_is_rolled_back_by_itself_with_an_alert() {
         let cfg = s.config();
         let mut c = Command::new(env!("CARGO_BIN_EXE_masond"))
             .args(["--managed", "--healthy-after-ms", "1500"])
-            // A free port, as the first daemon had: the default may be taken by a real masond.
+            // A free port, as every other test daemon has: the default may be a real daemon's.
             .args(["--port", "0"])
             .args([
                 "--data-dir",

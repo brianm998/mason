@@ -11,6 +11,9 @@
 //!   at `GET /repos/o/r/issues/N/dependencies/blocked_by`. Editing it does not
 //!   change the listing's ETag (a dependency edit may not touch it on GitHub).
 //!
+//! - `listing-status`: when present, an HTTP status code (e.g. `404`) the issue listing
+//!   answers with instead of the issues, to show a stopped poll.
+//!
 //! A comment is appended to `comments.log`; closing an issue (`PATCH`) marks it
 //! closed in `issues.json`. Every request is appended to `requests.log`.
 
@@ -94,6 +97,17 @@ fn serve(dir: &Path, stream: std::net::TcpStream) {
     let issues_path = dir.join("issues.json");
     match (method.as_str(), segs.as_slice()) {
         ("GET", ["repos", _, _, "issues"]) => {
+            if let Some(code) = std::fs::read_to_string(dir.join("listing-status"))
+                .ok()
+                .and_then(|t| t.trim().parse::<u16>().ok())
+            {
+                let status = match code {
+                    404 => "404 Not Found".to_string(),
+                    401 => "401 Unauthorized".to_string(),
+                    c => format!("{c} Error"),
+                };
+                return reply(&mut out, &status, &[], "{\"message\":\"recorded error\"}");
+            }
             let text = std::fs::read_to_string(&issues_path).unwrap_or_else(|_| "[]".into());
             let etag = hash(&text);
             if inm.as_deref() == Some(etag.as_str()) {
