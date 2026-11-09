@@ -81,3 +81,55 @@ fn the_compile_cpu_limit_comes_from_the_config() {
     let id = b.lease_open("cc", &compile());
     assert!(matches!(b.lease_poll(id), LeaseState::Granted { .. }));
 }
+
+#[test]
+fn with_the_machines_own_reading_a_saved_compile_count_is_ignored() {
+    let dir = scratch("nocount");
+    std::fs::write(dir.join("limits.kv"), "compile\t2\nllm:claude\t4\n").unwrap();
+    let cfg = mason_daemon::sched::parse_resource_cfg("[cpu]\ncompile_settle_s = 0\n").unwrap();
+    let b = broker(&dir, &cfg, &FakeCpu::replacing_compile_count(10));
+    b.declare("compile", 2);
+    let threads = std::thread::available_parallelism().unwrap().get() as u32;
+    assert_eq!(b.limit("compile"), Some(threads));
+    assert_eq!(b.limit("llm:claude"), Some(4), "other saved limits stay");
+    for i in 0..threads {
+        let id = b.lease_open(&format!("cc{i}"), &compile());
+        assert!(matches!(b.lease_poll(id), LeaseState::Granted { .. }));
+    }
+    let err = b.set_limit("compile", 2).unwrap_err();
+    assert!(err.contains("compile_cpu_max"), "{err}");
+}
+
+#[test]
+fn compiles_start_one_at_a_time_on_an_idle_machine() {
+    let dir = scratch("settle");
+    let b = broker(
+        &dir,
+        &ResourceCfg::default(),
+        &FakeCpu::replacing_compile_count(0),
+    );
+    let first = b.lease_open("cc1", &compile());
+    let second = b.lease_open("cc2", &compile());
+    assert!(matches!(b.lease_poll(first), LeaseState::Granted { .. }));
+    match b.lease_poll(second) {
+        LeaseState::Waiting { explain } => assert!(
+            explain.starts_with("compile waiting: letting the last compile show in CPU use"),
+            "{explain}"
+        ),
+        other => panic!("should wait: {other:?}"),
+    }
+}
+
+#[test]
+fn an_owners_compile_count_in_the_config_is_kept_and_not_paced() {
+    let dir = scratch("owned");
+    let cfg = mason_daemon::sched::parse_resource_cfg("[machine]\ncompile = 3\n").unwrap();
+    let b = broker(&dir, &cfg, &FakeCpu::replacing_compile_count(0));
+    assert_eq!(b.limit("compile"), Some(3));
+    let first = b.lease_open("cc1", &compile());
+    let second = b.lease_open("cc2", &compile());
+    assert!(matches!(b.lease_poll(first), LeaseState::Granted { .. }));
+    assert!(matches!(b.lease_poll(second), LeaseState::Granted { .. }));
+    b.set_limit("compile", 2).unwrap();
+    assert_eq!(b.limit("compile"), Some(2));
+}

@@ -64,7 +64,11 @@ pub fn develop_prompt(
          Make the change and run the project's tests with the run_check tool (name: \"tests\"). When \
          the tests pass and everything is committed, call submit_change with the commit hash from \
          `git rev-parse HEAD`. The tree must be clean and the branch must have at least one commit \
-         beyond the base. {progress}",
+         beyond the base. {progress}\n\n\
+         run_check queues for the machine, so it can take a long time to answer; that is normal. Wait \
+         for its answer. Do not run the whole workspace's tests yourself, in the background or \
+         again while one is going, and do not sleep or poll for it: it takes a slot other tasks \
+         are waiting for. While you iterate, run only the tests your change touches.",
         progress = PROGRESS_LINE,
         proj = p.id,
         task_text = fenced(&format!("TASK #{task}: {title}"), trust, body),
