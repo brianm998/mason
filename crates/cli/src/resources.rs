@@ -164,6 +164,12 @@ pub fn show(d: &Daemon, json_out: bool) -> Result<(), String> {
             }
         }
     }
+    if let Some(max) = v["cpu"]["compile_max_pct"].as_u64() {
+        match v["cpu"]["busy_pct"].as_u64() {
+            Some(b) => println!("  cpu {b}% busy, a compile starts below {max}%"),
+            None => println!("  cpu not readable, a compile starts below {max}% (no gate now)"),
+        }
+    }
     if let Some(f) = v["memory"]["floor_mb"].as_u64() {
         println!("  memory floor {f} MB ({} MB free)", v["memory"]["free_mb"]);
     }

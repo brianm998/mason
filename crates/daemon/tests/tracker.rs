@@ -594,7 +594,8 @@ fn a_canceled_blocker_keeps_the_dependent_held_and_raises_an_alert() {
 }
 
 #[test]
-fn items_over_a_self_limit_wait_for_a_slot_and_the_count_is_per_issue() {
+fn owner_issues_are_never_refused_by_a_self_limit() {
+    // Ticket 17: max_open guards work MASON starts itself, not the owner's own issues.
     let (_s, d, pid) = world_with(&format!(
         "{}[self]\nmax_open = 1\n",
         tracker_section("queued", "")
@@ -609,23 +610,18 @@ fn items_over_a_self_limit_wait_for_a_slot_and_the_count_is_per_issue() {
     let sum = sync_items(&d, pid, "mason", &items);
     assert_eq!(
         (sum.imported, sum.refused, sum.ignored),
-        (1, 2, 1),
+        (3, 0, 1),
         "{sum:?}"
     );
-    // Looking again does not count them twice, and the first one is unchanged.
     let sum = sync_items(&d, pid, "mason", &items);
     assert_eq!(
         (sum.imported, sum.refused, sum.unchanged),
-        (0, 2, 1),
+        (0, 0, 3),
         "{sum:?}"
     );
-    let a = not_imported(&d);
-    assert!(
-        a.iter()
-            .any(|t| t.contains("2 issues not imported (#2, #3)")),
-        "{a:?}"
-    );
-    assert!(task_for(&d, 2).is_none() && task_for(&d, 3).is_none());
+    assert!(task_for(&d, 2).is_some());
+    assert!(task_for(&d, 3).is_some());
+    assert!(not_imported(&d).is_empty(), "{:?}", not_imported(&d));
 }
 
 #[test]
@@ -759,6 +755,14 @@ fn a_limit_refusal_raises_an_alert_naming_the_issues_and_clears_when_they_import
         tracker_section("queued", "")
     ));
     let mut items = recorded(&d);
+    // Issues by an owner name are never refused for a count; outside issues the owner
+    // labeled are, so make these outside ones.
+    for it in items.iter_mut() {
+        it.author = "stranger".into();
+        if !it.labels.iter().any(|l| l == "mason") {
+            it.labels.push("mason".into());
+        }
+    }
     let sum = sync_items(&d, pid, "mason", &items);
     assert_eq!((sum.imported, sum.refused), (3, 3), "{sum:?}");
     let a = not_imported(&d);
