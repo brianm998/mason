@@ -18,6 +18,10 @@ final class Session: ObservableObject {
         // Sounds and sentences come from the daemon's announcements, spoken by this sink when this
         // monitor is the one that speaks. The plain chime stays for a daemon that sends none.
         model.announcer.sink = SystemSink()
+        // The commit stamped on this build by scripts/bundle-monitor.sh.
+        if model.ownVersion == "dev", let build = Bundle.main.object(forInfoDictionaryKey: "MasonBuild") as? String, !build.isEmpty {
+            model.ownVersion = build
+        }
         model.onAttention = {
             if let s = NSSound(named: NSSound.Name("Glass")) { s.play() } else { NSSound.beep() }
         }
@@ -26,46 +30,47 @@ final class Session: ObservableObject {
         }
     }
 
-    /// The update button: build the new monitor from source, launch it, close this one.
-    func updateMonitor() {
-        switch ClientUpdate.plan(env: ProcessInfo.processInfo.environment) {
-        case .unavailable(let why):
-            model.updating = why
-        case .openPage(let url):
-            if let u = URL(string: url) { NSWorkspace.shared.open(u) }
-        case .buildFromSource(let dir):
-            model.updating = "Building the new monitor…"
-            let out = NSTemporaryDirectory() + "mason-monitor-update-\(ProcessInfo.processInfo.processIdentifier)"
-            Task.detached {
-                let p = Process()
-                p.executableURL = URL(fileURLWithPath: "/bin/sh")
-                p.arguments = ["-c", "cd '\(dir)' && scripts/bundle-monitor.sh '\(out)'"]
-                p.standardOutput = FileHandle.nullDevice
-                p.standardError = FileHandle.nullDevice
-                try? p.run()
-                p.waitUntilExit()
-                await MainActor.run {
-                    guard p.terminationStatus == 0 else {
-                        self.model.updating = "The build of the new monitor failed; this one keeps running."
-                        return
-                    }
-                    self.model.updating = "Starting the new monitor…"
-                    NSWorkspace.shared.openApplication(
-                        at: URL(fileURLWithPath: out + "/MASON.app"),
-                        configuration: NSWorkspace.OpenConfiguration()
-                    ) { _, error in
-                        DispatchQueue.main.async {
-                            if error == nil { NSApp.terminate(nil) }
-                            else { self.model.updating = "The new monitor would not start; this one keeps running." }
-                        }
+    /// The daemon has built a new monitor at `path`: put it where this one is, so
+    /// that the Dock and `mason://` links get it too, start it, and close this one.
+    func install(_ path: String) {
+        let built = URL(fileURLWithPath: path)
+        let own = Bundle.main.bundleURL
+        Task.detached {
+            let target = (try? Self.replace(own, with: built)) ?? built
+            await MainActor.run {
+                let launch = NSWorkspace.OpenConfiguration()
+                // This one is still running from the same place: without this, the system just brings it forward.
+                launch.createsNewApplicationInstance = true
+                NSWorkspace.shared.openApplication(at: target, configuration: launch) { _, error in
+                    DispatchQueue.main.async {
+                        if error == nil { NSApp.terminate(nil) }
+                        else { self.model.monitorUpdateFailed("The new monitor would not start; this one keeps running.") }
                     }
                 }
             }
         }
     }
 
+    /// Swap the build into this app's place and return it. Throws, leaving the app as it
+    /// was, if there is no such place: not run from a bundle, already in the daemon's
+    /// builds, or somewhere that cannot be written.
+    nonisolated static func replace(_ own: URL, with built: URL) throws -> URL {
+        func home(_ u: URL) -> URL { u.deletingLastPathComponent().deletingLastPathComponent().standardizedFileURL }
+        guard own.pathExtension == "app", home(own) != home(built) else { throw CocoaError(.fileWriteNoPermission) }
+        let fm = FileManager.default
+        let copy = own.deletingLastPathComponent().appendingPathComponent(".MASON-update-\(getpid()).app")
+        try? fm.removeItem(at: copy)
+        try fm.copyItem(at: built, to: copy)
+        do {
+            return try fm.replaceItemAt(own, withItemAt: copy) ?? own
+        } catch {
+            try? fm.removeItem(at: copy)
+            throw error
+        }
+    }
+
     func start() {
-        model.onUpdate = { [weak self] in self?.updateMonitor() }
+        model.onInstall = { [weak self] in self?.install($0) }
         guard connection == nil, finder == nil else { return }
         // The daemon may not be up yet: look for it until it is.
         finder = Task { @MainActor in
