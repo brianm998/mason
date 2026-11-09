@@ -1012,7 +1012,8 @@ fn force_skips_and_expired_switches_are_read_from_what_is_recorded() {
 
 #[test]
 fn tracker_overrides_and_the_relationship_are_kept_and_dropped() {
-    let s = Store::open_in_memory().unwrap();
+    let (_d, p) = db();
+    let s = Store::open(&p).unwrap();
     assert_eq!(s.tracker_relationship("p", 7).unwrap(), None);
     s.set_tracker_relationship("p", 7, &[]).unwrap();
     assert_eq!(s.tracker_relationship("p", 7).unwrap(), Some(Default::default()));
