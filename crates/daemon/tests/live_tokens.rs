@@ -134,11 +134,12 @@ fn stream_event_lines_do_not_change_the_output_counts() {
     wait_state(&d, t, State::Landed, 90);
 }
 
-/// A develop turn that keeps the session open for a while after it submits, so the
+/// A develop turn that keeps the session open for a while after its result, so the
 /// `result` (the only event carrying a cost) is seen while the step still runs.
 fn lingering_develop() -> serde_json::Value {
     let mut turn: Vec<serde_json::Value> = develop_turn().as_array().unwrap().to_vec();
-    turn.push(json!({"sleep_ms": 6000}));
+    turn.insert(0, json!({"say": "one"}));
+    turn.push(json!({"linger_after_result_ms": 8000}));
     json!({"steps": {"explore": [explore_turn()], "develop": [turn]}})
 }
 
@@ -154,20 +155,14 @@ fn cost_seen(account: &str, providers: &str) -> Option<bool> {
     }
     let d = s.start();
     let t = file_task(&d, "Cost");
-    let mut out = None;
     wait_for(
-        "the result's figures in the running step's cell",
+        "both messages' figures in the running step's cell",
         60,
-        || {
-            if let Some(k) =
-                live_tokens(&d, t).filter(|k| k.input == Some(4) && k.output == Some(50))
-            {
-                out = Some(k.cost_nano_usd.is_some());
-                return true;
-            }
-            false
-        },
+        || live_tokens(&d, t).is_some_and(|k| k.input == Some(4) && k.output == Some(50)),
     );
+    // The result follows within moments and the session lingers after it.
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    let out = live_tokens(&d, t).map(|k| k.cost_nano_usd.is_some());
     wait_state(&d, t, State::Landed, 90);
     out
 }

@@ -183,6 +183,9 @@ fn main() {
                     "model": reported, "permissionMode": "dontAsk", "claude_code_version": "0.0.0-fake"}),
         );
     };
+    let linger = turn
+        .iter()
+        .find_map(|a| a.get("linger_after_result_ms").and_then(Value::as_u64));
     for a in turn {
         if !inited
             && a.get("init").is_none()
@@ -276,5 +279,8 @@ fn main() {
             "result": "done", "api_error_status": null, "session_id": sid, "total_cost_usd": 0.001,
             "usage": {"input_tokens": 4, "cache_creation_input_tokens": 100, "cache_read_input_tokens": 2000, "output_tokens": 50}}),
         );
+    }
+    if let Some(ms) = linger {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
     }
 }
