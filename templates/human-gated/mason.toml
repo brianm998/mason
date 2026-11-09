@@ -1,0 +1,46 @@
+# SPDX-License-Identifier: MIT
+# Human-gated: you approve the plan before developing and the change before landing.
+# Tasks that arrive already explored start at develop, since their plan is yours.
+# File tasks with `mason task add --proposed` so they also wait before they start.
+schema = 1
+start = "explore"
+explored_entry = "develop"
+
+[step.explore]
+type = "agent"
+category = "exploring"
+agent = "light"
+next = "plan-ok"
+
+[step.plan-ok]
+type = "approval"
+category = "exploring"
+next = "develop"
+
+[step.develop]
+type = "agent"
+category = "developing"
+agent = "deep"
+budget = "4h"
+next = "test"
+
+[step.test]
+type = "test"
+category = "testing"
+# suites: mason init fills this in
+max_rounds = 3
+on_red = "develop"
+next = "change-ok"
+
+[step.change-ok]
+type = "approval"
+category = "landing"
+max_rounds = 2
+on_red = "develop"
+next = "land"
+
+[step.land]
+type = "landing"
+category = "landing"
+max_rounds = 3
+on_red = "develop"
