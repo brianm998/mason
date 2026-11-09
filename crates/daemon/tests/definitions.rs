@@ -441,7 +441,12 @@ fn a_task_stays_pinned_to_the_definition_it_started_under() {
         Some(DEF_LINT),
         json!({"steps": {"develop": [develop, develop_turn()]}}),
     );
-    let d = s.start();
+    // The watcher's first pass fetches; keep it away so the explicit reload below is
+    // the one that applies the change.
+    let d = s.start_with(|c| {
+        c.reload_interval = Duration::from_secs(3600);
+        c.fetch_interval = Duration::from_secs(3600);
+    });
     let pid = d.project_id_by_name("scratch").unwrap();
     let old = flagged(&d, "Started under the lint graph");
     wait_state(&d, old, State::Developing, 60);
