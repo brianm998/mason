@@ -186,7 +186,7 @@ impl Scratch {
         let _ = git::run_for(
             &self.repo,
             &["fetch", "-q", "--prune", "origin"],
-            Duration::from_secs(5),
+            Duration::from_secs(120),
         );
     }
 
