@@ -900,6 +900,33 @@ impl RepoLock {
         }
     }
 
+    /// Take the lock only if it is free right now, labelled like `lock`.
+    #[track_caller]
+    pub fn try_lock(&self) -> std::sync::TryLockResult<RepoGuard<'_>> {
+        use std::sync::TryLockError;
+        let loc = std::panic::Location::caller();
+        let label = format!(
+            "{}:{}",
+            loc.file().rsplit('/').next().unwrap_or(loc.file()),
+            loc.line()
+        );
+        let (g, poisoned) = match self.m.try_lock() {
+            Ok(g) => (g, false),
+            Err(TryLockError::Poisoned(e)) => (e.into_inner(), true),
+            Err(TryLockError::WouldBlock) => return Err(TryLockError::WouldBlock),
+        };
+        *self.who.lock().unwrap_or_else(|e| e.into_inner()) = Some((label, now_ms()));
+        let guard = RepoGuard {
+            _g: g,
+            who: &self.who,
+        };
+        if poisoned {
+            Err(TryLockError::Poisoned(std::sync::PoisonError::new(guard)))
+        } else {
+            Ok(guard)
+        }
+    }
+
     pub fn holder(&self) -> Option<(String, u64)> {
         self.who.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
