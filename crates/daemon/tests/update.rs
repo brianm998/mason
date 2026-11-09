@@ -12,8 +12,15 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use support::*;
 
+// The copies are signed because macOS's syspolicyd adds a signature to an unsigned
+// binary as it scans it, and segfaults if the file is deleted meanwhile. These
+// live in a scratch directory that goes when the test ends, and while syspolicyd
+// is down every new process on the machine waits for it.
 const BUILD: &str = r#"mkdir -p target/release
-for b in masond step-host mason-mcp fake-claude; do cp "$BINDIR/$b" target/release/$b; done
+for b in masond step-host mason-mcp fake-claude; do
+  cp "$BINDIR/$b" target/release/$b
+  ! command -v codesign >/dev/null || codesign -s - -f target/release/$b
+done
 if [ -f crash ]; then
   printf '#!/bin/sh\n[ "$1" = selftest ] && exec "%s/masond" "$@"\nexit 1\n' "$BINDIR" > target/release/masond
   chmod +x target/release/masond
