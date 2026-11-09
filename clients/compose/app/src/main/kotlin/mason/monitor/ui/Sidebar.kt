@@ -18,62 +18,47 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import mason.monitor.*
 import mason.v1.SidebarSection
 import mason.v1.TaskRow
 
-private sealed class Entry {
-    data object HomeRow : Entry()
-    data object Search : Entry()
-    data class Header(val section: SidebarSection) : Entry()
-    data class Row(val row: TaskRow) : Entry()
-    data object Rule : Entry()
-    data class PageLink(val title: String, val page: Page) : Entry()
-}
-
 /**
- * The sidebar, on every page: a Home row, search, one collapsible section per state (the
- * daemon's order and sorting), then the other pages.
+ * The sidebar, on every page. Pinned above the list: a Home row and search. In the scrolling
+ * part: one collapsible section per state (the daemon's order and sorting), then the other
+ * pages. [width] is the drawn width, already fitted to the window.
  */
 @Composable
-fun SidebarPane(model: MonitorModel) {
+fun SidebarPane(model: MonitorModel, width: Dp) {
     val theme = LocalTheme.current
-    val entries = buildList {
-        add(Entry.HomeRow); add(Entry.Search)
-        model.sidebar?.sections?.forEach { sec ->
-            add(Entry.Header(sec))
-            if (model.isExpanded(sec)) model.filteredRows(sec).forEach { add(Entry.Row(it)) }
-        }
-        add(Entry.Rule)
-        add(Entry.PageLink("Landing", Page.Landing))
-        add(Entry.PageLink("LLM usage", Page.Usage))
-        add(Entry.PageLink("Pipeline", Page.Pipeline))
-        add(Entry.PageLink("Health", Page.Health))
-    }
+    val entries = model.sidebarEntries()
     val state = rememberLazyListState()
-    // A tile was clicked: scroll to its section.
+    // A tile was clicked: scroll to its section. The pinned area is outside the list, so
+    // index 0 of the list is just below it.
     val target = model.scrollTarget
     LaunchedEffect(target, entries.size) {
         if (target != null) {
-            val i = entries.indexOfFirst { it is Entry.Header && it.section.state == target }
+            val i = entries.indexOfFirst { it is SidebarEntry.Header && it.section.state == target }
             // Clear first: a cancelled animation must not leave the target set.
             model.scrollTarget = null
             if (i >= 0) state.animateScrollToItem(i)
         }
     }
-    LazyColumn(
-        state = state,
-        modifier = Modifier.width(theme.sidebarWidth).fillMaxHeight().background(theme.surface.copy(alpha = 0.6f)),
-    ) {
-        items(entries) { e ->
-            when (e) {
-                Entry.HomeRow -> NavRow("⌂  Home", "sidebar:home", model.page == Page.Home, bold = true) { model.goHome() }
-                Entry.Search -> SearchBox(model)
-                is Entry.Header -> SectionHeader(model, e.section)
-                is Entry.Row -> RowView(model, e.row)
-                Entry.Rule -> HorizontalDivider(Modifier.padding(vertical = theme.spacing), color = theme.border)
-                is Entry.PageLink -> NavRow(e.title, "sidebar:${e.title.lowercase().replace(' ', '-')}", model.page == e.page) { model.go(e.page) }
+    Column(Modifier.width(width).fillMaxHeight().background(theme.surface.copy(alpha = 0.6f))) {
+        Column {
+            NavRow("⌂  Home", "sidebar:home", model.page == Page.Home, bold = true) { model.goHome() }
+            SearchBox(model)
+        }
+        HorizontalDivider(color = theme.border)
+        LazyColumn(state = state, modifier = Modifier.fillMaxWidth().weight(1f)) {
+            items(entries) { e ->
+                when (e) {
+                    is SidebarEntry.Header -> SectionHeader(model, e.section)
+                    is SidebarEntry.Row -> RowView(model, e.row)
+                    SidebarEntry.Rule -> HorizontalDivider(Modifier.padding(vertical = theme.spacing), color = theme.border)
+                    is SidebarEntry.PageLink -> NavRow(e.title, "sidebar:${e.title.lowercase().replace(' ', '-')}", model.page == e.page) { model.go(e.page) }
+                }
             }
         }
     }
