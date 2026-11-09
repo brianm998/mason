@@ -330,7 +330,7 @@ impl Daemon {
             .collect();
         let range = middle_half(&samples).filter(|(_, hi)| *hi > 0);
         self.progress_report(run, |p, now| {
-            if p.agent && p.history.map(|(l, h, _)| (l, h)) == range {
+            if p.agent && p.history.0.map(|(l, h, _)| (l, h)) == range {
                 return Change::None;
             }
             p.begin_agent(range, samples.len());

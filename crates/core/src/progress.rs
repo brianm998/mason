@@ -88,6 +88,19 @@ pub struct TodoItem {
 /// The most log lines kept for one push.
 pub const LOG_KEEP: usize = 40;
 
+/// The typical `(low, high, samples)` of past runs, kept in memory so it can be
+/// shown again whenever there is no real total. It is not stored with the row
+/// (the totals it produced are), so it never takes part in comparing two records.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Remembered(pub Option<(u64, u64, u32)>);
+
+impl PartialEq for Remembered {
+    fn eq(&self, _: &Remembered) -> bool {
+        true
+    }
+}
+impl Eq for Remembered {}
+
 /// The progress of one step run.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct Progress {
@@ -115,7 +128,7 @@ pub struct Progress {
     pub tool_calls: u64,
     /// The typical `(low, high, samples)` from past runs, kept so it can be
     /// shown again whenever there is no real total.
-    pub history: Option<(u64, u64, u32)>,
+    pub history: Remembered,
     /// With a `history` total, the low end of the typical range (`total` is the high end).
     pub total_low: u64,
     /// How many past runs the typical figures come from.
@@ -242,7 +255,7 @@ impl Progress {
     /// Offer the typical figure as a total, if no real total is known.
     /// `range` is the typical `(low, high)`; `samples` is how many runs it comes from.
     pub fn offer_history_total(&mut self, range: Option<(u64, u64)>, samples: usize) {
-        self.history = range.map(|(lo, hi)| (lo, hi, samples as u32));
+        self.history = Remembered(range.map(|(lo, hi)| (lo, hi, samples as u32)));
         if self.total.is_real() {
             return;
         }
@@ -375,7 +388,7 @@ impl Progress {
     }
 
     fn apply_history(&mut self) {
-        match self.history {
+        match self.history.0 {
             Some((lo, hi, n)) => {
                 self.total = Figure::history(hi);
                 self.total_low = lo;
