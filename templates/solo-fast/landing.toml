@@ -1,0 +1,4 @@
+# SPDX-License-Identifier: MIT
+# direct: tests pass, then the base branch moves forward. `mason init --landing` can change it
+# (`direct-ci` waits for CI on a candidate branch first).
+mode = "direct"
