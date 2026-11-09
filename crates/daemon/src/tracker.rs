@@ -30,7 +30,7 @@ use mason_adapter_api::service::*;
 use mason_core::*;
 use mason_store::{state_name, TrackerItemRow};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::{Arc, Condvar, Mutex, Weak};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 #[derive(Default)]
@@ -259,27 +259,27 @@ pub fn spawn(d: &Arc<Daemon>) {
     if !d.projects.values().any(|p| p.services.tracker.is_some()) {
         return;
     }
-    let weak: Weak<Daemon> = Arc::downgrade(d);
-    let _ = std::thread::Builder::new()
-        .name("tracker".into())
-        .spawn(move || loop {
-            let Some(d) = weak.upgrade() else { return };
-            for (pid, p) in &d.projects {
-                let Ok(Some((adapter, cfg))) = crate::services::tracker(p) else {
-                    continue;
-                };
-                let due = {
-                    let mut m = d.tracker.pollers.lock().unwrap_or_else(|e| e.into_inner());
-                    let poller = m.entry(*pid).or_insert_with(|| Poller::new(cfg.interval_s));
-                    poller.due(d.started.elapsed().as_secs())
-                };
-                if due {
-                    let _ = poll_once(&d, *pid, adapter.as_ref(), &cfg);
-                }
+    crate::bg::spawn_loop(d, "tracker", move |weak| {
+        let Some(d) = weak.upgrade() else {
+            return false;
+        };
+        for (pid, p) in &d.projects {
+            let Ok(Some((adapter, cfg))) = crate::services::tracker(p) else {
+                continue;
+            };
+            let due = {
+                let mut m = d.tracker.pollers.lock().unwrap_or_else(|e| e.into_inner());
+                let poller = m.entry(*pid).or_insert_with(|| Poller::new(cfg.interval_s));
+                poller.due(d.started.elapsed().as_secs())
+            };
+            if due {
+                let _ = poll_once(&d, *pid, adapter.as_ref(), &cfg);
             }
-            let g = d.tracker.pollers.lock().unwrap_or_else(|e| e.into_inner());
-            let _ = d.tracker.cv.wait_timeout(g, Duration::from_millis(500));
-        });
+        }
+        let g = d.tracker.pollers.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = d.tracker.cv.wait_timeout(g, Duration::from_millis(500));
+        true
+    });
 }
 
 /// One look at the tracker: conditional, classified, and applied.

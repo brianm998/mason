@@ -132,7 +132,7 @@ fn start(s: &Scratch) -> Masond {
 
 #[test]
 fn an_update_while_an_agent_session_runs_does_not_interrupt_it() {
-    let s = Scratch::new("test -f hello.txt", slow_script(50_000));
+    let s = Scratch::new("test -f hello.txt", slow_script(90_000));
     let src = source(&s, &[&[]]);
     let mut m = start(&s);
     s.mason_ok(&[

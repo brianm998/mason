@@ -44,6 +44,68 @@ fn invocations(root: &Path, key: &str) -> Vec<(u32, String)> {
     v
 }
 
+/// The number the next invocation of `key` takes. A host that never came up
+/// leaves no directory but its input file, and that still counts: its number is
+/// not used again, so every attempt stays on record.
+fn next_invocation(root: &Path, key: &str) -> u32 {
+    let from_dirs = invocations(root, key).last().map_or(0, |(n, _)| *n);
+    let prefix = format!("{key}-");
+    let from_inputs = std::fs::read_dir(root)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            name.strip_prefix(&prefix)?
+                .strip_suffix(".in")?
+                .parse::<u32>()
+                .ok()
+        })
+        .max()
+        .unwrap_or(0);
+    from_dirs.max(from_inputs) + 1
+}
+
+/// How the invocations of one step run, under every key it used (`key`, and
+/// `keyu1`, … after the retry ladder), ended: the ids of those whose host was
+/// lost or never came up, oldest first. A directory is a record that survives a
+/// daemon restart, so this is how losses are counted across one.
+pub fn lost_invocations(root: &Path, key: &str) -> Vec<String> {
+    let mut out: Vec<(u32, u32, String)> = vec![];
+    for e in std::fs::read_dir(root).into_iter().flatten().flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        let Some(id) = name.strip_suffix(".in") else {
+            continue;
+        };
+        let Some(rest) = id.strip_prefix(key) else {
+            continue;
+        };
+        // `-N`, or `uK-N` for a ladder retry: nothing else belongs to this run.
+        let (k, tail) = match rest.strip_prefix('u') {
+            Some(r) => {
+                let digits = r.len() - r.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+                match r[..digits].parse::<u32>() {
+                    Ok(k) => (k, &r[digits..]),
+                    Err(_) => continue,
+                }
+            }
+            None => (0, rest),
+        };
+        let Some(n) = tail.strip_prefix('-').and_then(|n| n.parse::<u32>().ok()) else {
+            continue;
+        };
+        let gone = match status_of(&root.join(id)) {
+            Ok(s) => s.state == HostState::Lost,
+            Err(_) => true,
+        };
+        if gone {
+            out.push((k, n, id.to_string()));
+        }
+    }
+    out.sort();
+    out.into_iter().map(|(_, _, id)| id).collect()
+}
+
 pub fn latest_invocation(root: &Path, key: &str) -> Option<String> {
     invocations(root, key).pop().map(|(_, id)| id)
 }
@@ -58,7 +120,7 @@ pub fn spawn(
     cwd: &Path,
     stdin: &str,
 ) -> Result<String, AdapterError> {
-    let n = invocations(&h.root, key).last().map_or(1, |(n, _)| n + 1);
+    let n = next_invocation(&h.root, key);
     let id = format!("{key}-{n}");
     std::fs::create_dir_all(&h.root).map_err(AdapterError::Spawn)?;
     let input = h.root.join(format!("{id}.in"));
@@ -77,7 +139,7 @@ pub fn spawn(
         linger: h.linger,
         heartbeat: h.heartbeat,
     };
-    spawn_host(&opts).map_err(AdapterError::Spawn)?;
+    spawn_host(&opts).map_err(AdapterError::HostStart)?;
     Ok(id)
 }
 
@@ -221,7 +283,7 @@ pub fn attach_as(
                         (rec.signal == 0).then_some(rec.code),
                         &feed.stderr,
                     ),
-                    None => Outcome::Crash {
+                    None => Outcome::HostLost {
                         detail: "the step host was lost before the agent finished".into(),
                     },
                 }

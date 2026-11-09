@@ -7,6 +7,7 @@
 //! events. Nothing blocks the async event loop.
 
 pub mod attention;
+pub mod bg;
 pub mod blockers;
 pub mod config;
 pub mod cpu;
@@ -14,6 +15,7 @@ pub mod crash;
 pub mod daemon;
 pub mod defs;
 pub mod demo;
+pub mod disk;
 pub mod editor;
 pub mod holds;
 pub mod hostloss;
