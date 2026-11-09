@@ -1135,6 +1135,45 @@ impl Store {
         })
     }
 
+    /// A suite went green for this base: its test count is the next run's expected total.
+    pub fn put_suite_green(
+        &self,
+        project: &str,
+        suite: &str,
+        base: &str,
+        executed: usize,
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
+        let (p, s, b) = (project.to_string(), suite.to_string(), base.to_string());
+        self.write(move |c| {
+            c.execute(
+                "INSERT OR REPLACE INTO suite_green(project, suite, base, executed, at_ms) VALUES (?1,?2,?3,?4,?5)",
+                params![p, s, b, executed as i64, now_ms as i64],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// The test count of the last green run of this suite: on this base if it has one, else
+    /// the most recent on any base (the base moves with every landing, a suite's size hardly does).
+    pub fn suite_green(
+        &self,
+        project: &str,
+        suite: &str,
+        base: &str,
+    ) -> Result<Option<usize>, StoreError> {
+        let (p, s, b) = (project.to_string(), suite.to_string(), base.to_string());
+        self.read(move |c| {
+            c.query_row(
+                "SELECT executed FROM suite_green WHERE project = ?1 AND suite = ?2
+                 ORDER BY (base = ?3) DESC, at_ms DESC LIMIT 1",
+                params![p, s, b],
+                |r| Ok(r.get::<_, i64>(0)? as usize),
+            )
+            .optional()
+        })
+    }
+
     /// What fails at a base commit, cached so it is only worked out once.
     pub fn put_baseline(
         &self,
@@ -2763,6 +2802,8 @@ fn src_code(s: mason_core::progress::Source) -> i64 {
         Reported => 1,
         Counted => 2,
         History => 3,
+        Expected => 4,
+        Minimum => 5,
     }
 }
 
@@ -2772,6 +2813,8 @@ fn src_of(n: i64) -> mason_core::progress::Source {
         1 => Reported,
         2 => Counted,
         3 => History,
+        4 => Expected,
+        5 => Minimum,
         _ => None,
     }
 }

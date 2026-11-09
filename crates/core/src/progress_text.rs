@@ -57,7 +57,7 @@ pub fn count_text(
         format!(" {unit}")
     };
     match total_source {
-        Source::Reported | Source::Counted if total > 0 => {
+        Source::Reported | Source::Counted | Source::Expected | Source::Minimum if total > 0 => {
             let pct = percent(done, total).unwrap_or(0);
             format!("{} of {}{unit_sp}, {pct}%", group(done), group(total))
         }
@@ -81,6 +81,8 @@ pub fn source_words(source: Source, samples: u32) -> String {
         Source::Reported => "from the agent".into(),
         Source::Counted => "counted from output".into(),
         Source::History => format!("usually, from {samples} past runs"),
+        Source::Expected => "the last green run's count".into(),
+        Source::Minimum => "the suite's minimum".into(),
     }
 }
 

@@ -207,11 +207,10 @@ pub fn parse_manifest(text: &str) -> Result<Manifest, Vec<String>> {
         bad.push("`run` is required: the program to start, like \"./check.py\"".into());
     }
     match doc.get("protocol") {
-        None => bad.push("`protocol` is required (this version speaks protocol 1)".into()),
-        Some(_) if m.protocol != 0 && m.protocol != crate::PROTOCOL => bad.push(format!(
-            "protocol {} is not supported; this version speaks protocol {}",
-            m.protocol,
-            crate::PROTOCOL
+        None => bad.push("`protocol` is required (this version speaks protocols 1 and 2)".into()),
+        Some(_) if m.protocol != 0 && !crate::SUPPORTED.contains(&m.protocol) => bad.push(format!(
+            "protocol {} is not supported; this version speaks protocols 1 and 2",
+            m.protocol
         )),
         _ => {}
     }
@@ -249,10 +248,10 @@ categories = ["testing"]
 
     #[test]
     fn every_mistake_is_reported() {
-        let e = parse_manifest("nme = 1\nprotocol = 2\nprovides = []\n").unwrap_err();
+        let e = parse_manifest("nme = 1\nprotocol = 3\nprovides = []\n").unwrap_err();
         let has = |f: &str| e.iter().any(|x| x.contains(f));
         assert!(has("unknown key `nme`"), "{e:?}");
-        assert!(has("protocol 2 is not supported"), "{e:?}");
+        assert!(has("protocol 3 is not supported"), "{e:?}");
         assert!(has("`name` is required"), "{e:?}");
         assert!(has("`run` is required"), "{e:?}");
         let e = parse_manifest("{{").unwrap_err();
