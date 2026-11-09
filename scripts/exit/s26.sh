@@ -168,7 +168,12 @@ SH
     [ "$state" != failed ] || { m task show "$id" >&2; fail "the task failed ($t, $lang)"; }
     [ $SECONDS -lt $end ] || { m task show "$id" >&2; fail "timed out; task is $state ($t, $lang)"; }
     # The human-gated workflow waits for the owner twice: approve, as the owner would.
-    [ "$t" != human-gated ] || m task approve "$id" >/dev/null 2>&1 || true
+    if [ "$t" = human-gated ]; then
+      # Approval is refused until the task reaches the gate; that refusal is expected, any other is not.
+      if ! out=$(m task approve "$id" 2>&1); then
+        case "$out" in *"not waiting for approval"*|*"is not in a step"*) ;; *) echo "$out" >&2; fail "approve failed unexpectedly ($t, $lang)";; esac
+      fi
+    fi
     sleep 0.5
   done
   git -C "$p/origin.git" show main:MASON-WORKS.md | grep -qx 'MASON landed this task.' || fail "the landed change is not on origin/main ($t, $lang)"
@@ -183,7 +188,6 @@ SH
     [ ! -e "$p/repo/.mason" ] && [ ! -e "$p/c/projects/sample.toml" ] || fail "remove left .mason/ or the project file"
     [ ! -e "$p/repo/AGENTS.md" ] || fail "remove left the Filing notes"
     grep -q 'tracker tasks' "$p/rm.txt" || fail "remove did not say it leaves tracker tasks"
-    [ -f "$p/d/daemon.json" ] || true
   fi
 }
 

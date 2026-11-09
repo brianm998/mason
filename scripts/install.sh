@@ -62,11 +62,11 @@ fetch() {  # URL DEST
 }
 
 # Is the `mason` that would run first this program? Asked of the binary, not guessed from its name.
-identity_of() { "$1" --help 2>/dev/null | sed -n 1p || true; }
+identity_of() { local out; if out=$("$1" --help 2>/dev/null); then printf '%s\n' "$out" | sed -n 1p; else echo "unknown"; fi; }
 
 report_clash() {  # DEST_BIN_DIR
   local dest=$1 first found
-  found=$(command -v mason 2>/dev/null || true)
+  if found=$(command -v mason 2>/dev/null); then :; else found=""; fi
   if [ -z "$found" ]; then
     say "\`mason\` is not on your PATH yet. Add this to your shell profile:  export PATH=\"$dest:\$PATH\""
     return 0
