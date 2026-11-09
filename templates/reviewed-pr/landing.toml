@@ -1,0 +1,4 @@
+# SPDX-License-Identifier: MIT
+# One pull request per task. Needs a git host in the project's overlay (`[host]`); `mason doctor`
+# says what is missing.
+mode = "pr-each"
