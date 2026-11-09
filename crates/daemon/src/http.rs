@@ -2595,6 +2595,32 @@ async fn debug_stall(
     Ok(Json(json!({"blocked_ms": ms})))
 }
 
+/// Holds a project's repository lock for `ms` milliseconds, to show that alerts go on while git
+/// work is stuck. Returns at once; a thread holds the lock.
+async fn debug_hold_repo_lock(
+    Shared(d): Shared<Arc<Daemon>>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Res {
+    if !d.cfg.debug {
+        return Err(fail(StatusCode::NOT_FOUND, "not found"));
+    }
+    let ms: u64 = q.get("ms").and_then(|s| s.parse().ok()).unwrap_or(10_000);
+    let pid = q
+        .get("project")
+        .and_then(|n| d.project_id_by_name(n))
+        .or_else(|| d.projects.keys().next().copied())
+        .ok_or_else(|| fail(StatusCode::NOT_FOUND, "no project"))?;
+    let lock = d.repo_lock(pid);
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = tx.send(());
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    });
+    let _ = rx.recv_timeout(std::time::Duration::from_millis(100));
+    Ok(Json(json!({"holding_ms": ms})))
+}
+
 /// Every operation of the API, without the socket. The socket runs its
 /// commands through this same router, so there is one implementation of each.
 pub fn api_router(d: Arc<Daemon>) -> Router {
@@ -2685,6 +2711,7 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/leases/{id}", get(lease_poll))
         .route("/leases/{id}/release", post(lease_release))
         .route("/debug/stall", post(debug_stall))
+        .route("/debug/hold-repo-lock", post(debug_hold_repo_lock))
         .layer(axum::middleware::from_fn_with_state(
             d.clone(),
             record_interventions,

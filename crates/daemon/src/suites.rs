@@ -647,7 +647,7 @@ fn baseline(
     def: &Definition,
     suite: &Suite,
     base: &str,
-    lock: &Arc<std::sync::Mutex<()>>,
+    lock: &crate::daemon::RepoLock,
     dev: Option<&Dev>,
 ) -> Option<(Vec<String>, Vec<String>)> {
     if let Ok(Some(b)) = who.d.store.baseline(base, &suite.name) {
@@ -708,7 +708,7 @@ fn baseline(
 fn run_suite(
     who: &Who,
     c_repo: &Path,
-    repo_lock: &Arc<std::sync::Mutex<()>>,
+    repo_lock: &crate::daemon::RepoLock,
     def: &Definition,
     suite: &Suite,
     cwd: &Path,

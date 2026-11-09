@@ -324,6 +324,9 @@ impl Daemon {
         }
     }
 
+    /// Two threads. Definitions: the watch, the fetch and admission, all of which may wait on git
+    /// or the repository lock. Attention: alerts and notifications, which wait on neither, so a
+    /// stuck git never silences them.
     pub(crate) fn spawn_watcher(self: &Arc<Self>) {
         let weak = Arc::downgrade(self);
         let every = self.cfg.reload_interval;
@@ -340,11 +343,21 @@ impl Daemon {
                         last_fetch = std::time::Instant::now();
                     }
                     d.watch_definitions(fetch);
-                    // A pause that has run out lets claims go; alerts follow conditions.
+                    // A pause that has run out lets claims go.
                     d.admit();
-                    crate::attention::sync_alerts(&d);
-                    crate::notify::tick(&d);
+                    d.defs_pass_ended_ms
+                        .store(crate::daemon::now_ms(), std::sync::atomic::Ordering::SeqCst);
                 }
+            });
+        let weak = Arc::downgrade(self);
+        let every = self.cfg.attention_interval;
+        let _ = std::thread::Builder::new()
+            .name("attention".into())
+            .spawn(move || loop {
+                std::thread::sleep(every);
+                let Some(d) = weak.upgrade() else { break };
+                crate::attention::sync_alerts(&d);
+                crate::notify::tick(&d);
             });
     }
 

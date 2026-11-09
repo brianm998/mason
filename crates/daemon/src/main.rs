@@ -99,6 +99,13 @@ fn main() {
                 cfg.fetch_interval =
                     Duration::from_millis(val().parse().unwrap_or_else(|_| usage()))
             }
+            "--attention-ms" => {
+                cfg.attention_interval =
+                    Duration::from_millis(val().parse().unwrap_or_else(|_| usage()))
+            }
+            "--stuck-after-ms" => {
+                cfg.stuck_after = Duration::from_millis(val().parse().unwrap_or_else(|_| usage()))
+            }
             "--introspect-ms" => {
                 cfg.introspect_interval =
                     Duration::from_millis(val().parse().unwrap_or_else(|_| usage()))
