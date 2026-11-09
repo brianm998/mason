@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use mason_step_host::client::{collect_to_file, ClientError, Event, HostClient};
-use mason_step_host::launcher::{spawn_host, SpawnOptions};
+use mason_step_host::launcher::{
+    exit_signal, spawn_host, spawn_host_within, SpawnOptions, START_LIMIT,
+};
 use mason_step_host::protocol::{self, Frame};
 use mason_step_host::registry::{
     lost_report, pid_alive, proc_start, read_kv, reap_dir, reap_verified, write_kv, ExitRecord,
-    HostState, Registry,
+    HostInfo, HostState, Registry,
 };
 use std::io::Write;
 use std::os::unix::net::UnixStream;
@@ -602,4 +604,65 @@ fn reap_leaves_another_process_and_protected_pids_alone() {
     });
     connect(&h.sock).stop(100).unwrap();
     let _ = reap_verified(&r);
+}
+
+/// A stand-in for the host binary whose launch freezes for `secs` before the real
+/// host starts, and leaves `marker` behind if it gets that far.
+fn freezing_host(dir: &Path, secs: u32, marker: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let stub = dir.join("frozen-host");
+    let body = format!(
+        "#!/bin/sh\nsleep {secs}\ntouch '{}'\nexec '{HOST}' \"$@\"\n",
+        marker.display()
+    );
+    std::fs::write(&stub, body).unwrap();
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+    stub
+}
+
+/// `spawn_host_within`, retrying while another test's fork still holds the stub
+/// open for writing (ETXTBSY).
+fn launch(o: &SpawnOptions, limit: Duration) -> std::io::Result<HostInfo> {
+    loop {
+        match spawn_host_within(o, limit) {
+            Err(e) if e.raw_os_error() == Some(26) => std::thread::sleep(Duration::from_millis(20)),
+            other => return other,
+        }
+    }
+}
+
+#[test]
+fn the_start_limit_outlasts_the_longest_launch_freeze_seen() {
+    assert!(START_LIMIT > Duration::from_secs(22 * 60));
+}
+
+#[test]
+fn a_launch_that_freezes_is_waited_for() {
+    let (d, r) = root();
+    let mut o = opts(&r, "a", "echo up");
+    o.host_bin = freezing_host(d.path(), 1, &d.path().join("reached"));
+    let info = launch(&o, Duration::from_secs(60)).unwrap();
+    let (bytes, rec, _) = drain(&mut connect(&info.sock), 0);
+    assert_eq!(bytes, b"up\n");
+    assert_eq!(rec.code, 0);
+    connect(&info.sock).stop(100).unwrap();
+}
+
+#[test]
+fn a_launch_given_up_on_cannot_come_up_later() {
+    let (d, r) = root();
+    let marker = d.path().join("reached");
+    let mut o = opts(&r, "a", "echo ran");
+    o.host_bin = freezing_host(d.path(), 2, &marker);
+    let e = launch(&o, Duration::from_millis(200)).unwrap_err();
+    assert_eq!(e.kind(), std::io::ErrorKind::TimedOut, "{e}");
+    assert!(e.to_string().contains("did not start"), "{e}");
+
+    // Past the moment the frozen launch would have gone on by itself.
+    std::thread::sleep(Duration::from_secs(3));
+    let dir = r.join("a");
+    assert!(!marker.exists(), "the launch went on after it was given up");
+    assert!(!dir.exists(), "a host came up after it was given up");
+    let (signal, _) = exit_signal(&dir).expect("the killed launch was reaped");
+    assert_eq!(signal, Some(9));
 }
