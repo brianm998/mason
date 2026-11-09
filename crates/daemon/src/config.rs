@@ -10,6 +10,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use toml_edit::DocumentMut;
 
+/// Default of the `llm:claude` limit: agent sessions at once (ticket 17).
+pub const DEFAULT_LLM_SESSIONS: usize = 10;
+
 #[derive(Clone, Debug)]
 pub struct DaemonConfig {
     pub data_dir: PathBuf,
@@ -263,7 +266,7 @@ impl DaemonConfig {
         DaemonConfig {
             data_dir: data_dir.into(),
             config_dir: config_dir.into(),
-            max_concurrent: 10,
+            max_concurrent: DEFAULT_LLM_SESSIONS,
             cpu: None,
             sweep_interval: Duration::from_secs(120),
             heartbeat: Duration::from_secs(1),

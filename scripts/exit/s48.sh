@@ -26,9 +26,10 @@ cargo build -q --workspace --bins
 bin=target/debug
 owner=${USER:-owner}
 m() { "$bin/mason" --data-dir "$root/d" --config-dir "$root/c" "$@"; }
-fail() { echo "FAILED: $*" >&2; m task list >&2 2>&1 || true; m resources >&2 2>&1 || true; tail -20 "$root/masond.log" >&2 || true; exit 1; }
-tasks() { m task list --json | grep -c '"id"' || true; }
-landed() { m task list --json | grep -c '"state": "landed"' || true; }
+fail() { set +e; echo "FAILED: $*" >&2; m task list >&2 2>&1; m resources >&2 2>&1; tail -20 "$root/masond.log" >&2; exit 1; }
+count_json() { python3 -c "import json,sys; print(sum(1 for t in json.load(sys.stdin)['tasks'] if sys.argv[1] in ('', t.get('state'))))" "$1"; }
+tasks() { m task list --json | count_json ""; }
+landed() { m task list --json | count_json landed; }
 llm_used() { m resources --json | python3 -c "import json,sys; r=[x for x in json.load(sys.stdin)['resources'] if x['name']=='llm:claude']; print(r[0]['used'] if r else 0)"; }
 issue() {  # NUMBER AUTHOR LABEL-JSON
   printf ' {"number": %s, "node_id": "I_%s", "title": "Issue %s", "body": "text", "state": "open", "user": {"login": "%s"}, "labels": %s}' "$1" "$1" "$1" "$2" "$3"
@@ -72,10 +73,11 @@ api = "http://127.0.0.1:$port"
 repo = "o/r"
 token = "env:FAKE_GITHUB_TOKEN"
 interval_s = 300
+import_as = "queued"
 TOML
 export FAKE_GITHUB_TOKEN=recorded-test-token
 echo 5 > "$root/cpu"
-MASON_CPU_FILE="$root/cpu" "$bin/masond" --data-dir "$root/d" --config-dir "$root/c" --heartbeat-ms 100 --sweep-ms 3600000 --max-concurrent 4 --owner "$owner" 2>>"$root/masond.log" &
+MASON_CPU_FILE="$root/cpu" "$bin/masond" --port 0 --data-dir "$root/d" --config-dir "$root/c" --heartbeat-ms 100 --sweep-ms 3600000 --max-concurrent 4 --owner "$owner" 2>>"$root/masond.log" &
 daemon=$!
 until m status >/dev/null 2>&1; do kill -0 "$daemon" || { cat "$root/masond.log" >&2; exit 1; }; sleep 0.1; done
 m pause --mode claims --for 1h >/dev/null
@@ -88,7 +90,7 @@ done
 echo "   12 owner tasks filed, all accepted (max_open is 3)"
 printf '[%s,%s,%s,%s,%s]\n' "$(issue 201 stranger "$M")" "$(issue 202 stranger "$M")" "$(issue 203 stranger "$M")" "$(issue 204 stranger "$M")" "$(issue 205 stranger "$M")" > "$root/gh/issues.json"
 m task refresh 0 >/dev/null; sleep 1
-[ "$(tasks)" = 15 ] || fail "expected 12 owner tasks and 3 imported outside issues, got $(tasks)"
+[ "$(tasks)" = 15 ] || fail "expected 12 owner tasks and 3 imported outside issues, got $(tasks): $(m self)"
 m self | grep '^mason:' | sed 's/^/   /'
 m self | grep -q '3/3 open (12 of yours open, not limited)' || fail "mason self does not show 3/3 open and 12 of yours"
 for id in 12 13 14; do m task cancel "$id" >/dev/null || fail "cancel $id"; done

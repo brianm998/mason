@@ -619,7 +619,9 @@ fn owner_issues_are_never_refused_by_a_self_limit() {
         (0, 0, 3),
         "{sum:?}"
     );
-    assert!(task_for(&d, 2).is_some() && task_for(&d, 3).is_some());
+    assert!(task_for(&d, 2).is_some());
+    assert!(task_for(&d, 3).is_some());
+    assert!(not_imported(&d).is_empty(), "{:?}", not_imported(&d));
 }
 
 #[test]

@@ -724,10 +724,10 @@ mod tests {
         assert!(check_as(&s, yours, &c, TrustSource::Owner).is_ok());
         // No count stops the owner; the same counts still stop everyone else.
         assert!(check_as(&st(99, 99, 99, None), 0, &c, TrustSource::Owner).is_ok());
-        for trust in [TrustSource::OwnerAgent, TrustSource::Outside] {
-            assert!(check_as(&st(3, 0, 0, None), 0, &c, trust).is_err());
-            assert!(check_as(&st(0, 0, 40, None), 0, &c, trust).is_err());
-        }
+        assert!(check_as(&st(3, 0, 0, None), 0, &c, TrustSource::OwnerAgent).is_err());
+        assert!(check_as(&st(3, 0, 0, None), 0, &c, TrustSource::Outside).is_err());
+        assert!(check_as(&st(0, 0, 40, None), 0, &c, TrustSource::OwnerAgent).is_err());
+        assert!(check_as(&st(0, 0, 40, None), 0, &c, TrustSource::Outside).is_err());
         // A cooldown after a rollback is not a count: it stops the owner too.
         let until = now_ms() + 3_600_000;
         assert!(check_as(&st(0, 0, 0, Some(until)), 0, &c, TrustSource::Owner).is_err());
