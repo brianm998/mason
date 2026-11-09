@@ -168,15 +168,15 @@ pub struct Runtime {
 /// Start the thread that runs the detector cycle, the analyst and the recurring jobs when
 /// they are due. Nothing runs at start-up: a job seen for the first time waits one interval.
 pub fn spawn(d: &Arc<Daemon>) {
-    let weak = Arc::downgrade(d);
     let every = d.cfg.schedule_tick;
-    let _ = std::thread::Builder::new()
-        .name("introspect".into())
-        .spawn(move || loop {
-            std::thread::sleep(every);
-            let Some(d) = weak.upgrade() else { break };
-            tick(&d);
-        });
+    crate::bg::spawn_loop(d, "introspect", move |weak| {
+        std::thread::sleep(every);
+        let Some(d) = weak.upgrade() else {
+            return false;
+        };
+        tick(&d);
+        true
+    });
 }
 
 fn ensure_row(

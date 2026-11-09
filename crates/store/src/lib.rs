@@ -630,7 +630,29 @@ fn rebuild(conn: &mut Connection) -> Result<World, StoreError> {
     Ok(world)
 }
 
-fn writer_loop(mut conn: Connection, mut world: World, rx: std::sync::mpsc::Receiver<Cmd>) {
+/// The writer thread. A panic here must never leave the store half alive (every append and
+/// every `world()` would fail for the life of the process while the daemon still answers),
+/// so it ends the process: launchd restarts it, recovery runs, and a build that keeps doing
+/// this is rolled back by the existing rule.
+fn writer_loop(conn: Connection, world: World, rx: std::sync::mpsc::Receiver<Cmd>) {
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| writer_run(conn, world, rx)));
+    if let Err(e) = r {
+        let what = e
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| e.downcast_ref::<String>().cloned())
+            .unwrap_or_default();
+        eprintln!(
+            "FATAL: the store writer thread panicked ({what}); exiting so the daemon is restarted"
+        );
+        std::process::exit(WRITER_PANIC_EXIT);
+    }
+}
+
+/// The exit status when the writer thread panics (EX_SOFTWARE).
+pub const WRITER_PANIC_EXIT: i32 = 70;
+
+fn writer_run(mut conn: Connection, mut world: World, rx: std::sync::mpsc::Receiver<Cmd>) {
     while let Ok(cmd) = rx.recv() {
         match cmd {
             Cmd::Shutdown => break,
@@ -733,12 +755,12 @@ impl Store {
     /// Events with `seq > after`, oldest first. A client resumes from the
     /// last sequence number it saw.
     pub fn read_since(&self, after: u64, limit: usize) -> Result<Vec<StoredEvent>, StoreError> {
-        let conn = self.reader.lock().expect("reader lock");
+        let conn = self.reader.lock().unwrap_or_else(|e| e.into_inner());
         read_events(&conn, after, limit)
     }
 
     pub fn last_seq(&self) -> Result<u64, StoreError> {
-        let conn = self.reader.lock().expect("reader lock");
+        let conn = self.reader.lock().unwrap_or_else(|e| e.into_inner());
         last_seq(&conn)
     }
 
@@ -782,7 +804,7 @@ impl Store {
         &self,
         f: impl FnOnce(&Connection) -> rusqlite::Result<T>,
     ) -> Result<T, StoreError> {
-        let conn = self.reader.lock().expect("reader lock");
+        let conn = self.reader.lock().unwrap_or_else(|e| e.into_inner());
         f(&conn).map_err(StoreError::from)
     }
 
@@ -2736,7 +2758,7 @@ impl Store {
 
     /// Bugs filed so far: `(at_ms, kind, detail)`, oldest first.
     pub fn bugs(&self) -> Result<Vec<(u64, String, String)>, StoreError> {
-        let conn = self.reader.lock().expect("reader lock");
+        let conn = self.reader.lock().unwrap_or_else(|e| e.into_inner());
         let mut st = conn.prepare("SELECT at, kind, detail FROM bugs ORDER BY id")?;
         let rows = st.query_map([], |r| {
             Ok((r.get::<_, i64>(0)? as u64, r.get(1)?, r.get(2)?))
@@ -2747,7 +2769,7 @@ impl Store {
 
     /// The projection tables as sorted text lines, for tests and diagnostics.
     pub fn projection_dump(&self) -> Result<Vec<String>, StoreError> {
-        let conn = self.reader.lock().expect("reader lock");
+        let conn = self.reader.lock().unwrap_or_else(|e| e.into_inner());
         dump_db(&conn)
     }
 
@@ -2763,7 +2785,7 @@ impl Store {
     }
 
     pub fn verify(&self) -> Result<(), StoreError> {
-        let conn = self.reader.lock().expect("reader lock");
+        let conn = self.reader.lock().unwrap_or_else(|e| e.into_inner());
         let n: i64 = conn.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))?;
         let last = last_seq(&conn)?;
         if n as u64 != last {

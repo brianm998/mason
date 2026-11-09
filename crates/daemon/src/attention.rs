@@ -327,6 +327,46 @@ pub fn host_loss_alerts(rows: &[mason_store::HostLossRow]) -> Vec<(String, Strin
     out
 }
 
+/// How old a measurement of the directories may be before it is made again.
+const DISK_SIZES_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Free disk is below the floor, or a store write was just refused for want of it. Names the
+/// free space, the floor and what MASON knows takes room. Exists only while it is true.
+fn disk_alert(d: &Daemon, w: &mason_engine::World) -> Option<(String, String, String)> {
+    let low = d.broker.disk_low();
+    let full = d.store_full_since();
+    if low.is_none() && full.is_none() {
+        return None;
+    }
+    let mut text = match low {
+        Some(g) => format!(
+            "Disk nearly full: {} GB free, floor {} GB; no new compile or agent session starts until there is room",
+            crate::disk::gb(g.free_mb),
+            crate::disk::gb(g.floor_mb)
+        ),
+        None => "Disk full: MASON could not write to its store".to_string(),
+    };
+    if low.is_some() && full.is_some() {
+        text.push_str("; a write to the store was refused");
+    }
+    let sizes = d.disk_sizes.get(
+        vec![
+            ("task_cache".into(), crate::taskcache::dirs(d, w)),
+            ("worktrees".into(), vec![d.cfg.worktrees_dir()]),
+        ],
+        DISK_SIZES_MAX_AGE,
+    );
+    let known: Vec<String> = sizes
+        .iter()
+        .filter(|(_, b)| **b > 0)
+        .map(|(n, b)| format!("{n} {:.1} GB", *b as f64 / 1e9))
+        .collect();
+    if !known.is_empty() {
+        text.push_str(&format!(". MASON knows of: {}", known.join(", ")));
+    }
+    Some(("disk".into(), "disk".into(), text))
+}
+
 /// The conditions that are true right now, as `(key, kind, text)`. An alert
 /// exists exactly as long as its condition does.
 pub fn alerts_now(d: &Daemon) -> Vec<(String, String, String)> {
@@ -369,6 +409,7 @@ pub fn alerts_now(d: &Daemon) -> Vec<(String, String, String)> {
         }
     }
     out.extend(d.landing().attention());
+    out.extend(disk_alert(d, &w));
     out.extend(host_loss_alerts(
         &d.store
             .host_losses_since(now_ms().saturating_sub(HOST_LOSS_ALERT_MS))

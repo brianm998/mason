@@ -342,7 +342,7 @@ pub fn sound_for(kind: &str) -> Sound {
     match kind {
         "needs_you" => Sound::Decision,
         "failed" | "landing" | "daemon_down" | "credentials" | "provider_outage"
-        | "environment" | "runtime" | "definition" | "git_stuck" => Sound::Broke,
+        | "environment" | "runtime" | "definition" | "disk" | "git_stuck" => Sound::Broke,
         _ => Sound::Info,
     }
 }

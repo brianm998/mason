@@ -23,6 +23,10 @@ pub struct DaemonConfig {
     pub sweep_interval: Duration,
     /// Where CPU use is read for the compile gate. `None`: `MASON_CPU_FILE`, else the OS.
     pub cpu: Option<std::sync::Arc<dyn crate::cpu::CpuSource>>,
+    /// Where free disk is read for the disk floor. `None`: `MASON_DISK_FILE`, else the OS.
+    pub disk: Option<std::sync::Arc<dyn crate::disk::DiskSource>>,
+    /// How often the volume is read (`MASON_DISK_EVERY_MS` sets it for the exit script).
+    pub disk_every: Duration,
     pub heartbeat: Duration,
     pub host_bin: PathBuf,
     pub mcp_bin: PathBuf,
@@ -275,6 +279,8 @@ impl DaemonConfig {
             config_dir: config_dir.into(),
             max_concurrent: DEFAULT_LLM_SESSIONS,
             cpu: None,
+            disk: None,
+            disk_every: crate::disk::DEFAULT_EVERY,
             sweep_interval: Duration::from_secs(120),
             heartbeat: Duration::from_secs(1),
             host_bin,
@@ -358,6 +364,9 @@ pub struct ProjectCfg {
     /// Where a task's build directory is, e.g. `$HOME/.cache/mason-target/{task}` (`task_cache`,
     /// optional). Removed when the task lands (s78). Without it nothing is removed.
     pub task_cache: Option<String>,
+    /// Days a canceled or failed task's `task_cache` directory is kept after its last step
+    /// (`task_cache_keep_days`; default 7).
+    pub task_cache_keep_days: Option<u64>,
     /// A command that reads a task body on stdin and prints `clear` or
     /// `unclear`. Optional, and only consulted when the deterministic check is
     /// unsure. Anything but `clear`, or a failure, means explore.
@@ -880,6 +889,10 @@ pub fn parse_project(id: &str, text: &str) -> Result<ProjectCfg, String> {
             .get("test_reruns")
             .and_then(|v| v.as_integer())
             .map_or(0, |n| n.clamp(0, 3) as u32),
+        task_cache_keep_days: doc
+            .get("task_cache_keep_days")
+            .and_then(|v| v.as_integer())
+            .map(|n| n.max(0) as u64),
         task_cache: match s("task_cache").filter(|t| !t.trim().is_empty()) {
             Some(t) => {
                 crate::taskcache::check_template(&t).map_err(|e| format!("{id}: {e}"))?;

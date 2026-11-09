@@ -328,37 +328,35 @@ impl Daemon {
     /// or the repository lock. Attention: alerts and notifications, which wait on neither, so a
     /// stuck git never silences them.
     pub(crate) fn spawn_watcher(self: &Arc<Self>) {
-        let weak = Arc::downgrade(self);
         let every = self.cfg.reload_interval;
         let fetch_every = self.cfg.fetch_interval;
-        let _ = std::thread::Builder::new()
-            .name("definition-watcher".into())
-            .spawn(move || {
-                let mut last_fetch = std::time::Instant::now();
-                loop {
-                    std::thread::sleep(every);
-                    let Some(d) = weak.upgrade() else { break };
-                    let fetch = last_fetch.elapsed() >= fetch_every;
-                    if fetch {
-                        last_fetch = std::time::Instant::now();
-                    }
-                    d.watch_definitions(fetch);
-                    // A pause that has run out lets claims go.
-                    d.admit();
-                    d.defs_pass_ended_ms
-                        .store(crate::daemon::now_ms(), std::sync::atomic::Ordering::SeqCst);
-                }
-            });
-        let weak = Arc::downgrade(self);
+        let mut last_fetch = std::time::Instant::now();
+        crate::bg::spawn_loop(self, "definition-watcher", move |weak| {
+            std::thread::sleep(every);
+            let Some(d) = weak.upgrade() else {
+                return false;
+            };
+            let fetch = last_fetch.elapsed() >= fetch_every;
+            if fetch {
+                last_fetch = std::time::Instant::now();
+            }
+            d.watch_definitions(fetch);
+            // A pause that has run out lets claims go.
+            d.admit();
+            d.defs_pass_ended_ms
+                .store(crate::daemon::now_ms(), std::sync::atomic::Ordering::SeqCst);
+            true
+        });
         let every = self.cfg.attention_interval;
-        let _ = std::thread::Builder::new()
-            .name("attention".into())
-            .spawn(move || loop {
-                std::thread::sleep(every);
-                let Some(d) = weak.upgrade() else { break };
-                crate::attention::sync_alerts(&d);
-                crate::notify::tick(&d);
-            });
+        crate::bg::spawn_loop(self, "attention", move |weak| {
+            std::thread::sleep(every);
+            let Some(d) = weak.upgrade() else {
+                return false;
+            };
+            crate::attention::sync_alerts(&d);
+            crate::notify::tick(&d);
+            true
+        });
     }
 
     pub fn current_def(&self, pid: ProjectId) -> Arc<Definition> {
