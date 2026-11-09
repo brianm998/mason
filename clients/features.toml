@@ -146,6 +146,11 @@ description = "The Health page also shows the detectors' and analyst's findings 
 swift = "done"
 compose = "done"
 
+[feature.health-limits]
+description = "Health shows the CPU reading and the compile limit next to the waits (a compile waits while CPU use is at or above it); the LLM session limit is a resource line"
+swift = "done"
+compose = "done"
+
 [feature.deep-links]
 description = "mason://task/... opens from any notification"
 swift = "done"

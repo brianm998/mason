@@ -7,9 +7,10 @@
 //! (`mason run --needs`) queue here ahead of pipeline work, and every wait can
 //! say why.
 
+use crate::cpu::CpuSource;
 use mason_core::TaskId;
 use mason_resources::{Held, Locks, Take, TakeError};
-use mason_scheduler::{explain, Kind, Ledger, Needs, Rank};
+use mason_scheduler::{explain, CpuGate, Kind, Ledger, Needs, Rank};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
@@ -36,13 +37,32 @@ pub const EXCLUSIVE: &str = "exclusive";
 /// simulator = 2
 /// [memory]
 /// floor_mb = 2048
+/// [cpu]      # a compile starts only while CPU use is below this percent
+/// compile_cpu_max = 50
 /// ```
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResourceCfg {
     pub llm: BTreeMap<String, u32>,
     pub machine: BTreeMap<String, u32>,
     pub pools: BTreeMap<String, u32>,
     pub memory_floor_mb: Option<u64>,
+    /// A compile starts only while overall CPU use is below this percent.
+    pub compile_cpu_max: u32,
+}
+
+/// The default `compile_cpu_max`: half the machine.
+pub const DEFAULT_COMPILE_CPU_MAX: u32 = 50;
+
+impl Default for ResourceCfg {
+    fn default() -> Self {
+        ResourceCfg {
+            llm: BTreeMap::new(),
+            machine: BTreeMap::new(),
+            pools: BTreeMap::new(),
+            memory_floor_mb: None,
+            compile_cpu_max: DEFAULT_COMPILE_CPU_MAX,
+        }
+    }
 }
 
 pub fn parse_resource_cfg(text: &str) -> Result<ResourceCfg, String> {
@@ -62,6 +82,14 @@ pub fn parse_resource_cfg(text: &str) -> Result<ResourceCfg, String> {
                 "machine" => drop(c.machine.insert(name.to_string(), n as u32)),
                 "pools" => drop(c.pools.insert(name.to_string(), n as u32)),
                 "memory" if name == "floor_mb" => c.memory_floor_mb = Some(n as u64),
+                "cpu" if name == "compile_cpu_max" => {
+                    if !(1..=100).contains(&n) {
+                        return Err(
+                            "resources.toml: cpu.compile_cpu_max must be from 1 to 100".into()
+                        );
+                    }
+                    c.compile_cpu_max = n as u32;
+                }
                 other => return Err(format!("resources.toml: unknown setting {other}.{name}")),
             }
         }
@@ -125,6 +153,10 @@ struct State {
     floor_mb: Option<u64>,
     mem: Option<(Instant, Option<u64>)>,
     rank_seq: u64,
+    cpu_max: u32,
+    cpu: Arc<dyn CpuSource>,
+    /// The latest reading, kept so the explanation matches the decision.
+    cpu_busy: Option<u32>,
 }
 
 pub struct Broker {
@@ -182,6 +214,7 @@ impl Broker {
         limits_file: PathBuf,
         cfg: &ResourceCfg,
         default_llm: u32,
+        cpu: Arc<dyn CpuSource>,
         accounts: &[crate::providers::Account],
     ) -> Result<Arc<Broker>, String> {
         let locks = Locks::new(&locks_dir).map_err(|e| format!("cannot create locks dir: {e}"))?;
@@ -219,6 +252,9 @@ impl Broker {
                 floor_mb: cfg.memory_floor_mb,
                 mem: None,
                 rank_seq: 0,
+                cpu_max: cfg.compile_cpu_max,
+                cpu,
+                cpu_busy: None,
             }),
             cv: Condvar::new(),
             locks,
@@ -302,6 +338,15 @@ impl Broker {
         Ok(())
     }
 
+    /// Read the CPU source afresh and keep the reading.
+    fn cpu_gate(&self, st: &mut State) -> Option<CpuGate> {
+        st.cpu_busy = st.cpu.busy_pct();
+        st.cpu_busy.map(|busy_pct| CpuGate {
+            busy_pct,
+            max_pct: st.cpu_max,
+        })
+    }
+
     fn free_memory(&self, st: &mut State) -> Option<u64> {
         st.floor_mb?;
         if let Some((at, v)) = st.mem {
@@ -352,7 +397,8 @@ impl Broker {
         }
         changed |= self.count_outside_holders(st, now);
         let (floor, free) = (st.floor_mb, self.free_memory(st));
-        let p = st.ledger.schedule(now, free, floor);
+        let gate = self.cpu_gate(st);
+        let p = st.ledger.schedule_gated(now, free, floor, gate);
         for g in &p.grants {
             if let Some(Meta::External { granted_at, .. }) = st.meta.get_mut(g) {
                 *granted_at = Some(Instant::now());
@@ -468,7 +514,8 @@ impl Broker {
             if !announced {
                 let (floor, free) = (st.floor_mb, self.free_memory(&mut st));
                 let now = crate::daemon::now_ms();
-                let waits = st.ledger.waits(now, free, floor);
+                let gate = self.cpu_gate(&mut st);
+                let waits = st.ledger.waits_gated(now, free, floor, gate);
                 let text = waits
                     .waits
                     .get(&id)
@@ -584,7 +631,8 @@ impl Broker {
         }
         let (floor, free) = (st.floor_mb, self.free_memory(&mut st));
         let now = crate::daemon::now_ms();
-        let waits = st.ledger.waits(now, free, floor);
+        let gate = self.cpu_gate(&mut st);
+        let waits = st.ledger.waits_gated(now, free, floor, gate);
         waits.waits.get(&id).map(|w| explain(w, now))
     }
 
@@ -657,7 +705,8 @@ impl Broker {
         }
         let (floor, free) = (st.floor_mb, self.free_memory(&mut st));
         let now = crate::daemon::now_ms();
-        let waits = st.ledger.waits(now, free, floor);
+        let gate = self.cpu_gate(&mut st);
+        let waits = st.ledger.waits_gated(now, free, floor, gate);
         LeaseState::Waiting {
             explain: waits
                 .waits
@@ -684,7 +733,8 @@ impl Broker {
         self.pass(&mut st);
         let (floor, free) = (st.floor_mb, self.free_memory(&mut st));
         let now = crate::daemon::now_ms();
-        let waits = st.ledger.waits(now, free, floor);
+        let gate = self.cpu_gate(&mut st);
+        let waits = st.ledger.waits_gated(now, free, floor, gate);
         let snap = st.ledger.snapshot();
         let kind = |k: Kind| match k {
             Kind::Llm => "llm",
@@ -748,6 +798,7 @@ impl Broker {
             "holders": holders,
             "waiting": waiting,
             "memory": { "floor_mb": st.floor_mb, "free_mb": free },
+            "cpu": { "busy_pct": st.cpu_busy, "compile_max_pct": st.cpu_max },
             "now_ms": now,
         })
     }
@@ -811,6 +862,15 @@ mod tests {
         assert_eq!(c.machine["compile"], 4);
         assert_eq!(c.pools["simulator"], 1);
         assert_eq!(c.memory_floor_mb, Some(512));
+        assert_eq!(c.compile_cpu_max, 50);
+        assert_eq!(
+            parse_resource_cfg("[cpu]\ncompile_cpu_max = 80\n")
+                .unwrap()
+                .compile_cpu_max,
+            80
+        );
+        assert!(parse_resource_cfg("[cpu]\ncompile_cpu_max = 0\n").is_err());
+        assert!(parse_resource_cfg("[cpu]\ncompile_cpu_max = 101\n").is_err());
         assert!(parse_resource_cfg("[machine]\ncompile = -1\n").is_err());
         assert!(parse_resource_cfg("[machine]\ncompile = \"x\"\n").is_err());
         assert!(parse_resource_cfg("[wat]\nx = 1\n").is_err());
@@ -833,6 +893,7 @@ mod tests {
             dir.path().join("limits.kv"),
             &cfg,
             2,
+            crate::cpu::FakeCpu::new(0),
             &[],
         )
         .unwrap();
@@ -892,6 +953,7 @@ mod tests {
             limits.clone(),
             &ResourceCfg::default(),
             2,
+            crate::cpu::FakeCpu::new(0),
             &[],
         )
         .unwrap();
