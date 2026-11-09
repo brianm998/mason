@@ -256,7 +256,9 @@ fn main() {
             let mut windows = match r.get("windows") {
                 // Several windows at once: {"five_hour": {"utilization": 0.8, "resetsAt": N}, ...}
                 Some(w) => w.clone(),
-                None => json!({r["window"].as_str().unwrap_or("five_hour"): {"utilization": r["utilization"]}}),
+                None => {
+                    json!({r["window"].as_str().unwrap_or("five_hour"): {"utilization": r["utilization"]}})
+                }
             };
             if let (Some(at), Some(m)) = (at, windows.as_object_mut()) {
                 for w in m.values_mut() {

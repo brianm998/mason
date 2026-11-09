@@ -682,13 +682,13 @@ impl Daemon {
     }
 
     pub(crate) fn spawn_progress_ticker(self: &Arc<Self>) {
-        let weak = Arc::downgrade(self);
-        let _ = std::thread::Builder::new()
-            .name("progress-ticker".into())
-            .spawn(move || loop {
-                std::thread::sleep(TICK);
-                let Some(d) = weak.upgrade() else { break };
-                d.progress_tick();
-            });
+        crate::bg::spawn_loop(self, "progress-ticker", move |weak| {
+            std::thread::sleep(TICK);
+            let Some(d) = weak.upgrade() else {
+                return false;
+            };
+            d.progress_tick();
+            true
+        });
     }
 }
