@@ -149,6 +149,7 @@ impl GitHostAdapter for GitHub {
             &self.url(&format!("/commits/{head}/check-runs")),
         ))?;
         let (checks, failed) = fold_checks(&runs["check_runs"]);
+        let counts = count_checks(&runs["check_runs"]);
         let reviews = self.json(Request::get(&self.url(&format!("/pulls/{number}/reviews"))))?;
         let review = fold_reviews(
             &reviews,
@@ -161,6 +162,7 @@ impl GitHostAdapter for GitHub {
             failed,
             review,
             head,
+            counts,
         })
     }
 
@@ -208,6 +210,24 @@ impl GitHostAdapter for GitHub {
         )
         .map(|_| ())
     }
+}
+
+/// Check runs finished out of check runs listed, and the name of one still running.
+fn count_checks(runs: &Value) -> Option<CheckCounts> {
+    let list = runs.as_array()?;
+    if list.is_empty() {
+        return None;
+    }
+    let running = list
+        .iter()
+        .find(|r| r["status"] == "in_progress")
+        .or_else(|| list.iter().find(|r| r["status"] != "completed"))
+        .and_then(|r| r["name"].as_str().map(String::from));
+    Some(CheckCounts {
+        done: list.iter().filter(|r| r["status"] == "completed").count() as u64,
+        total: list.len() as u64,
+        running,
+    })
 }
 
 /// All check runs of a commit: any red is red; anything unfinished is pending.

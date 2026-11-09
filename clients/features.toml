@@ -47,7 +47,7 @@ swift = "done"
 compose = "done"
 
 [feature.sidebar-sort]
-description = "Active states oldest first; failed, landed and canceled newest first and collapsed"
+description = "Queued in queue order (what the daemon admits first on top); every other section newest entry first; failed, landed and canceled collapsed"
 swift = "done"
 compose = "done"
 
@@ -233,6 +233,11 @@ compose = "done"
 
 [feature.daemon-down-alert]
 description = "After 15 seconds of failed reconnects the monitor raises 'daemon down' itself: a banner, and a sound and sentence unless muted; clears when the connection returns"
+swift = "done"
+compose = "done"
+
+[feature.sidebar-resize]
+description = "The left panel is resized by dragging its divider (220 to 640 before text zoom, the main view keeps 360, the width is remembered per device), and Home and search are pinned above the scrolling list"
 swift = "done"
 compose = "done"
 

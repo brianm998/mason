@@ -115,6 +115,7 @@ pub fn plugin_kit(dir: &Path, timeout: Duration) -> Vec<Check> {
                 "initialize",
                 "schema matches",
                 "run",
+                "progress",
                 "refuses bad config",
                 "shutdown",
             ] {
@@ -125,7 +126,7 @@ pub fn plugin_kit(dir: &Path, timeout: Duration) -> Vec<Check> {
     };
 
     // initialize
-    let init = match host::initialize(&mut p, timeout) {
+    let init = match host::initialize_as(&mut p, timeout, m.protocol) {
         Ok(i) => {
             let mut wrong = vec![];
             if i.name != m.name {
@@ -134,11 +135,10 @@ pub fn plugin_kit(dir: &Path, timeout: Duration) -> Vec<Check> {
                     i.name, m.name
                 ));
             }
-            if i.protocol != crate::PROTOCOL {
+            if i.protocol != m.protocol {
                 wrong.push(format!(
-                    "protocol {} is not {}",
-                    i.protocol,
-                    crate::PROTOCOL
+                    "protocol {} is not the manifest's {}",
+                    i.protocol, m.protocol
                 ));
             }
             let (mut a, mut b) = (i.provides.clone(), m.provides());
@@ -164,7 +164,13 @@ pub fn plugin_kit(dir: &Path, timeout: Duration) -> Vec<Check> {
         }
     };
     let Some(init) = init else {
-        for n in ["schema matches", "run", "refuses bad config", "shutdown"] {
+        for n in [
+            "schema matches",
+            "run",
+            "progress",
+            "refuses bad config",
+            "shutdown",
+        ] {
             out.push(blocked(n, "initialize failed"));
         }
         return out;
@@ -195,7 +201,11 @@ pub fn plugin_kit(dir: &Path, timeout: Duration) -> Vec<Check> {
     };
     let good = schema::sample_config(&declared);
     let mut alive = true;
-    match host::step_run(&mut p, &req(good.clone()), timeout) {
+    let mut notes: Vec<Value> = vec![];
+    let ran = host::step_run_noting(&mut p, &req(good.clone()), timeout, &mut |v| {
+        notes.push(v.clone())
+    });
+    match ran {
         Ok(r) => out.push(pass("run", format!("passed={} {}", r.passed, r.summary))),
         Err(e) => {
             if matches!(e, CallError::Timeout(_) | CallError::Closed(_)) {
@@ -206,6 +216,41 @@ pub fn plugin_kit(dir: &Path, timeout: Duration) -> Vec<Check> {
                 format!("step.run with settings {good} failed: {e}"),
             ));
         }
+    }
+
+    // progress: a plugin that sends step.progress sends well-formed ones, and only on protocol 2
+    if alive {
+        let bad: Vec<String> = notes
+            .iter()
+            .filter_map(|n| {
+                crate::rpc::check_progress(n)
+                    .err()
+                    .map(|e| format!("{n}: {e}"))
+            })
+            .collect();
+        if notes.is_empty() {
+            out.push(pass("progress", "sends none (optional)"));
+        } else if m.protocol < 2 {
+            out.push(fail(
+                "progress",
+                "step.progress needs protocol 2; the manifest says protocol 1",
+            ));
+        } else if bad.is_empty() {
+            out.push(pass(
+                "progress",
+                format!("{} well-formed step.progress", notes.len()),
+            ));
+        } else {
+            out.push(fail(
+                "progress",
+                format!("malformed step.progress: {}", bad.join("; ")),
+            ));
+        }
+    } else {
+        out.push(blocked(
+            "progress",
+            "the plugin stopped answering during run",
+        ));
     }
 
     // refuses bad config

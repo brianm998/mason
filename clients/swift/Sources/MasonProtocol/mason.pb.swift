@@ -204,6 +204,12 @@ public nonisolated enum Mason_V1_ProgressSource: SwiftProtobuf.Enum, Swift.CaseI
 
   /// The typical figure from this project's past successful runs.
   case sourceHistory // = 3
+
+  /// The count the suite is expected to reach: the last green run's (s70).
+  case sourceExpected // = 4
+
+  /// The suite's declared minimum number of tests (s70).
+  case sourceMinimum // = 5
   case UNRECOGNIZED(Int)
 
   public init() {
@@ -216,6 +222,8 @@ public nonisolated enum Mason_V1_ProgressSource: SwiftProtobuf.Enum, Swift.CaseI
     case 1: self = .sourceReported
     case 2: self = .sourceCounted
     case 3: self = .sourceHistory
+    case 4: self = .sourceExpected
+    case 5: self = .sourceMinimum
     default: self = .UNRECOGNIZED(rawValue)
     }
   }
@@ -226,6 +234,8 @@ public nonisolated enum Mason_V1_ProgressSource: SwiftProtobuf.Enum, Swift.CaseI
     case .sourceReported: return 1
     case .sourceCounted: return 2
     case .sourceHistory: return 3
+    case .sourceExpected: return 4
+    case .sourceMinimum: return 5
     case .UNRECOGNIZED(let i): return i
     }
   }
@@ -236,6 +246,8 @@ public nonisolated enum Mason_V1_ProgressSource: SwiftProtobuf.Enum, Swift.CaseI
     .sourceReported,
     .sourceCounted,
     .sourceHistory,
+    .sourceExpected,
+    .sourceMinimum,
   ]
 
 }
@@ -1711,9 +1723,9 @@ public nonisolated struct Mason_V1_SidebarSection: Sendable {
   public init() {}
 }
 
-/// Tasks per state, already sorted: active states oldest first (time since
-/// enqueue, so anything stuck is at the top); failed, landed and canceled
-/// newest first.
+/// Tasks per state, already sorted: queued in queue order (the task the daemon
+/// admits next on top); every other state with the task that entered it most
+/// recently on top.
 public nonisolated struct Mason_V1_SidebarView: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -2894,7 +2906,7 @@ nonisolated extension Mason_V1_CellState: SwiftProtobuf._ProtoNameProviding {
 }
 
 nonisolated extension Mason_V1_ProgressSource: SwiftProtobuf._ProtoNameProviding {
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0SOURCE_NONE\0\u{1}SOURCE_REPORTED\0\u{1}SOURCE_COUNTED\0\u{1}SOURCE_HISTORY\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0SOURCE_NONE\0\u{1}SOURCE_REPORTED\0\u{1}SOURCE_COUNTED\0\u{1}SOURCE_HISTORY\0\u{1}SOURCE_EXPECTED\0\u{1}SOURCE_MINIMUM\0")
 }
 
 nonisolated extension Mason_V1_Version: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {

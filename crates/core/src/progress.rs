@@ -21,6 +21,10 @@ pub enum Source {
     Counted,
     /// The typical figure from this project's past successful runs.
     History,
+    /// The last green run's count for this suite and base (a real total).
+    Expected,
+    /// The suite's declared minimum number of tests (a real total).
+    Minimum,
 }
 
 /// A number and where it came from.
@@ -53,9 +57,24 @@ impl Figure {
     pub fn is_some(&self) -> bool {
         self.source != Source::None
     }
-    /// True for a real total (reported or counted), not a typical one.
+    pub fn expected(value: u64) -> Figure {
+        Figure {
+            value,
+            source: Source::Expected,
+        }
+    }
+    pub fn minimum(value: u64) -> Figure {
+        Figure {
+            value,
+            source: Source::Minimum,
+        }
+    }
+    /// True for a real total (reported, counted, expected or a minimum), not a typical one.
     pub fn is_real(&self) -> bool {
-        matches!(self.source, Source::Reported | Source::Counted)
+        matches!(
+            self.source,
+            Source::Reported | Source::Counted | Source::Expected | Source::Minimum
+        )
     }
 }
 
@@ -193,7 +212,9 @@ impl Progress {
         self.updated_at_ms = at_ms;
         // Without a reported figure the count of lines is the count (never
         // for an agent: its figure is chosen by `choose`).
-        if !self.agent && !matches!(self.done.source, Source::Reported) {
+        // (A daemon-counted figure in another unit, like tests, is not replaced.)
+        let pinned = self.done.source == Source::Counted && self.unit != "lines";
+        if !self.agent && !matches!(self.done.source, Source::Reported) && !pinned {
             self.unit = "lines".to_string();
             self.done = Figure::counted(self.output.lines);
         }
@@ -457,6 +478,49 @@ pub fn one_line(text: &str) -> String {
     cut
 }
 
+/// What one line of a progress file or one `step.progress` says. Every field is optional.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct Report {
+    pub done: Option<u64>,
+    pub total: Option<u64>,
+    pub unit: Option<String>,
+    pub message: Option<String>,
+}
+
+impl Progress {
+    /// Apply a report: done and total are the step's own figures; a count alone
+    /// is output-grade, a total or message is urgent.
+    pub fn apply_report(&mut self, r: &Report, at_ms: u64) -> Change {
+        let mut change = Change::None;
+        if let Some(u) = r.unit.as_deref().filter(|u| !u.is_empty()) {
+            if self.unit != u {
+                self.unit = u.to_string();
+                self.updated_at_ms = at_ms;
+                change = Change::Urgent;
+            }
+        }
+        if let Some(d) = r.done {
+            let unit = self.unit.clone();
+            let c = self.report_done(&unit, d, at_ms);
+            if c != Change::None && change == Change::None {
+                change = Change::Output;
+            }
+        }
+        for c in [
+            r.total.map(|t| self.report_total(t, at_ms)),
+            r.message.as_deref().map(|m| self.set_message(m, at_ms)),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if c == Change::Urgent {
+                change = Change::Urgent;
+            }
+        }
+        change
+    }
+}
+
 /// The samples needed before a typical figure is offered.
 pub const MIN_SAMPLES: usize = 5;
 
@@ -563,6 +627,28 @@ impl Throttle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn apply_report_grades_changes() {
+        let mut p = Progress::new(1, "t", 0);
+        let c = p.apply_report(
+            &Report {
+                done: Some(2),
+                ..Report::default()
+            },
+            5,
+        );
+        assert_eq!(c, Change::Output);
+        let c = p.apply_report(
+            &Report {
+                total: Some(9),
+                ..Report::default()
+            },
+            6,
+        );
+        assert_eq!(c, Change::Urgent);
+        assert_eq!(p.total, Figure::reported(9));
+    }
 
     #[test]
     fn counts_lines_and_bytes() {

@@ -27,6 +27,10 @@ object MasonTokens {
     const val sizeTileMinWidth = 64
     const val sizeTileHeight = 64
     const val sizeSidebarWidth = 300
+    const val sizeSidebarWidthMin = 220
+    const val sizeSidebarWidthMax = 640
+    const val sizeMainWidthMin = 360
+    const val sizeSidebarHandle = 8
     const val sizeRowHeight = 56
     const val sizeSpacingSmall = 4
     const val sizeSpacing = 8

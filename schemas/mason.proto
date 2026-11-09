@@ -389,6 +389,10 @@ enum ProgressSource {
   SOURCE_COUNTED = 2;
   // The typical figure from this project's past successful runs.
   SOURCE_HISTORY = 3;
+  // The count the suite is expected to reach: the last green run's (s70).
+  SOURCE_EXPECTED = 4;
+  // The suite's declared minimum number of tests (s70).
+  SOURCE_MINIMUM = 5;
 }
 
 // A task as every view shows it. `allowed_actions` is the one list of what
@@ -540,9 +544,9 @@ message SidebarSection {
   repeated TaskRow rows = 5;
 }
 
-// Tasks per state, already sorted: active states oldest first (time since
-// enqueue, so anything stuck is at the top); failed, landed and canceled
-// newest first.
+// Tasks per state, already sorted: queued in queue order (the task the daemon
+// admits next on top); every other state with the task that entered it most
+// recently on top.
 message SidebarView {
   repeated SidebarSection sections = 1;
   repeated string pages = 2;
