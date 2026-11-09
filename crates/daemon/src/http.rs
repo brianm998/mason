@@ -1371,7 +1371,10 @@ async fn update_status(Shared(d): Shared<Arc<Daemon>>) -> Res {
         .run(move || {
             let rt = crate::update::Runtimes::new(&d2.cfg.data_dir);
             let s = d2.update_status.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            let c = d2.update_check.lock().unwrap_or_else(|e| e.into_inner()).clone();
             json!({
+                "latest": c.latest, "behind": c.behind, "outdated": c.outdated,
+                "checked_at_ms": c.at_ms, "check_error": c.error,
                 "running": d2.cfg.runtime_sha,
                 "current": rt.current(),
                 "previous": rt.previous(),
@@ -1388,6 +1391,18 @@ async fn update_status(Shared(d): Shared<Arc<Daemon>>) -> Res {
 
 /// Start an update: it builds, proves itself and takes over in the background.
 /// `{"channel": .., "sha": .., "rollback": bool, "check": bool}`.
+async fn monitor_update_start(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res {
+    let kind =
+        crate::update::monitor_kind(b["kind"].as_str().unwrap_or_default()).ok_or_else(|| {
+            fail(
+                StatusCode::BAD_REQUEST,
+                "a monitor kind is `swift` or `compose`",
+            )
+        })?;
+    crate::update::start_monitor_build(&d, kind).map_err(|e| fail(StatusCode::CONFLICT, e))?;
+    Ok(Json(json!({"started": true})))
+}
+
 async fn update_start(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res {
     let channel = match b["channel"].as_str() {
         Some(c) => {
@@ -2533,6 +2548,7 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/hooks/github", post(github_hook))
         .route("/update", get(update_status).post(update_start))
         .route("/update/ack", post(update_ack))
+        .route("/update/monitor", post(monitor_update_start))
         .route("/tasks/{id}/refresh", post(refresh_tracker))
         .route("/tasks/{id}/relink", post(relink_task))
         .route("/pending-issues", get(pending_issues))

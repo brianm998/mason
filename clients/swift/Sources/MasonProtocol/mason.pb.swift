@@ -1532,6 +1532,64 @@ public nonisolated struct Mason_V1_HeaderView: Sendable {
   /// Open issues the tracker has not imported (or whose task was canceled), with why.
   public var pendingIssues: [Mason_V1_PendingIssue] = []
 
+  /// Whether MASON itself is behind its update channel, and any update under way
+  /// (additive). Absent when the daemon has no update.toml.
+  public var update: Mason_V1_UpdateInfo {
+    get {_update ?? Mason_V1_UpdateInfo()}
+    set {_update = newValue}
+  }
+  /// Returns true if `update` has been explicitly set.
+  public var hasUpdate: Bool {self._update != nil}
+  /// Clears the value of `update`. Subsequent reads from it will return its default value.
+  public mutating func clearUpdate() {self._update = nil}
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _update: Mason_V1_UpdateInfo? = nil
+}
+
+/// What the daemon found the last time it looked at its update channel.
+public nonisolated struct Mason_V1_UpdateInfo: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  /// The sentence about the daemon to show; empty when there is nothing to say.
+  public var daemonText: String = String()
+
+  /// The owner can press "Update masond" now.
+  public var daemonCanUpdate: Bool = false
+
+  /// One per kind of desktop monitor the daemon can build.
+  public var monitors: [Mason_V1_MonitorBuild] = []
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public nonisolated struct Mason_V1_MonitorBuild: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  /// "swift" or "compose".
+  public var kind: String = String()
+
+  /// The newest commit on the channel that changed this monitor. A monitor is
+  /// stamped with this commit when it is built, so a different stamp means it is behind.
+  public var latest: String = String()
+
+  /// "" (nothing asked for), "building", "ready" or "failed".
+  public var phase: String = String()
+
+  public var error: String = String()
+
+  /// When ready: the finished build, on the daemon's own disk.
+  public var path: String = String()
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -5214,7 +5272,7 @@ nonisolated extension Mason_V1_Banner: SwiftProtobuf.Message, SwiftProtobuf._Mes
 
 nonisolated extension Mason_V1_HeaderView: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".HeaderView"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}attention\0\u{1}counts\0\u{1}banners\0\u{1}projects\0\u{1}status\0\u{3}self_project\0\u{3}pending_issues\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}attention\0\u{1}counts\0\u{1}banners\0\u{1}projects\0\u{1}status\0\u{3}self_project\0\u{3}pending_issues\0\u{1}update\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -5229,12 +5287,17 @@ nonisolated extension Mason_V1_HeaderView: SwiftProtobuf.Message, SwiftProtobuf.
       case 5: try { try decoder.decodeSingularStringField(value: &self.status) }()
       case 6: try { try decoder.decodeSingularStringField(value: &self.selfProject) }()
       case 7: try { try decoder.decodeRepeatedMessageField(value: &self.pendingIssues) }()
+      case 8: try { try decoder.decodeSingularMessageField(value: &self._update) }()
       default: break
       }
     }
   }
 
   public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
     if self.attention != 0 {
       try visitor.visitSingularUInt32Field(value: self.attention, fieldNumber: 1)
     }
@@ -5256,6 +5319,9 @@ nonisolated extension Mason_V1_HeaderView: SwiftProtobuf.Message, SwiftProtobuf.
     if !self.pendingIssues.isEmpty {
       try visitor.visitRepeatedMessageField(value: self.pendingIssues, fieldNumber: 7)
     }
+    try { if let v = self._update {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 8)
+    } }()
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -5267,6 +5333,97 @@ nonisolated extension Mason_V1_HeaderView: SwiftProtobuf.Message, SwiftProtobuf.
     if lhs.status != rhs.status {return false}
     if lhs.selfProject != rhs.selfProject {return false}
     if lhs.pendingIssues != rhs.pendingIssues {return false}
+    if lhs._update != rhs._update {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Mason_V1_UpdateInfo: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".UpdateInfo"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}daemon_text\0\u{3}daemon_can_update\0\u{1}monitors\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.daemonText) }()
+      case 2: try { try decoder.decodeSingularBoolField(value: &self.daemonCanUpdate) }()
+      case 3: try { try decoder.decodeRepeatedMessageField(value: &self.monitors) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.daemonText.isEmpty {
+      try visitor.visitSingularStringField(value: self.daemonText, fieldNumber: 1)
+    }
+    if self.daemonCanUpdate != false {
+      try visitor.visitSingularBoolField(value: self.daemonCanUpdate, fieldNumber: 2)
+    }
+    if !self.monitors.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.monitors, fieldNumber: 3)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Mason_V1_UpdateInfo, rhs: Mason_V1_UpdateInfo) -> Bool {
+    if lhs.daemonText != rhs.daemonText {return false}
+    if lhs.daemonCanUpdate != rhs.daemonCanUpdate {return false}
+    if lhs.monitors != rhs.monitors {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Mason_V1_MonitorBuild: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".MonitorBuild"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}kind\0\u{1}latest\0\u{1}phase\0\u{1}error\0\u{1}path\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.kind) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.latest) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.phase) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.error) }()
+      case 5: try { try decoder.decodeSingularStringField(value: &self.path) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.kind.isEmpty {
+      try visitor.visitSingularStringField(value: self.kind, fieldNumber: 1)
+    }
+    if !self.latest.isEmpty {
+      try visitor.visitSingularStringField(value: self.latest, fieldNumber: 2)
+    }
+    if !self.phase.isEmpty {
+      try visitor.visitSingularStringField(value: self.phase, fieldNumber: 3)
+    }
+    if !self.error.isEmpty {
+      try visitor.visitSingularStringField(value: self.error, fieldNumber: 4)
+    }
+    if !self.path.isEmpty {
+      try visitor.visitSingularStringField(value: self.path, fieldNumber: 5)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Mason_V1_MonitorBuild, rhs: Mason_V1_MonitorBuild) -> Bool {
+    if lhs.kind != rhs.kind {return false}
+    if lhs.latest != rhs.latest {return false}
+    if lhs.phase != rhs.phase {return false}
+    if lhs.error != rhs.error {return false}
+    if lhs.path != rhs.path {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

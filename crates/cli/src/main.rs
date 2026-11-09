@@ -1376,6 +1376,20 @@ fn main() {
                         "channel   {}",
                         r["channel"].as_str().unwrap_or("(no update.toml)")
                     );
+                    if r["checked_at_ms"].as_u64().unwrap_or(0) > 0 {
+                        println!(
+                            "latest    {}{}",
+                            r["latest"].as_str().unwrap_or("-"),
+                            if r["outdated"].as_bool().unwrap_or(false) {
+                                format!("  (masond is {} commit(s) behind)", r["behind"])
+                            } else {
+                                String::new()
+                            }
+                        );
+                    }
+                    if let Some(e) = r["check_error"].as_str() {
+                        println!("check     could not look for a newer version: {e}");
+                    }
                     if let Some(b) = r["bad"].as_array().filter(|b| !b.is_empty()) {
                         println!(
                             "bad       {}",
