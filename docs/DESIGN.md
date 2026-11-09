@@ -766,7 +766,7 @@ Sketch with invented example data, showing content and hierarchy rather than fin
 ### Sidebar
 
 - **Sections** run needs you first, then lifecycle order: queued, exploring, developing, testing, review, landing, then proposed, failed, landed and canceled. Each header shows the state and its count, and collapses with one click. Collapse choices are remembered per device.
-- **Sorting by age:** age is time since the task was enqueued. Active states put the oldest first, so anything stuck is at the top. Failed, landed and canceled put the newest first and start collapsed, so old history doesn't bury what just happened.
+- **Sorting:** each section is sorted by what it is for. Queued is the real queue, the order the daemon would admit in (`queued_rank`: fewest steps remaining, then tracker priority, then enqueue time), with tasks that can go first and tasks that are held, paused or waiting on `not_before` after them. Every other section puts the task that entered it most recently on top (`state_entered_at`, not filing time). Failed, landed and canceled start collapsed.
 - **Each row** shows the key and title, then the project, the current activity, time in state, progress cells, and the model when one is running. A blocker's key is a link.
 - **Search** filters every section by name, title or body, each with its own checkbox.
 - **A proposal** is a row in the proposed section, and its detail view offers approve, reject and edit with the evidence.

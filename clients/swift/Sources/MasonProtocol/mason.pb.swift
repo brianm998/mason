@@ -1723,9 +1723,9 @@ public nonisolated struct Mason_V1_SidebarSection: Sendable {
   public init() {}
 }
 
-/// Tasks per state, already sorted: active states oldest first (time since
-/// enqueue, so anything stuck is at the top); failed, landed and canceled
-/// newest first.
+/// Tasks per state, already sorted: queued in queue order (the task the daemon
+/// admits next on top); every other state with the task that entered it most
+/// recently on top.
 public nonisolated struct Mason_V1_SidebarView: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for

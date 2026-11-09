@@ -544,9 +544,9 @@ message SidebarSection {
   repeated TaskRow rows = 5;
 }
 
-// Tasks per state, already sorted: active states oldest first (time since
-// enqueue, so anything stuck is at the top); failed, landed and canceled
-// newest first.
+// Tasks per state, already sorted: queued in queue order (the task the daemon
+// admits next on top); every other state with the task that entered it most
+// recently on top.
 message SidebarView {
   repeated SidebarSection sections = 1;
   repeated string pages = 2;

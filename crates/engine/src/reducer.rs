@@ -69,7 +69,16 @@ pub fn reduce(world: &World, event: &Event) -> Result<(World, Vec<Effect>), Redu
         .values()
         .map(|t| (t.id, t.activity.clone()))
         .collect();
+    let state_before: BTreeMap<TaskId, State> = w.tasks.values().map(|t| (t.id, t.state)).collect();
     apply(&mut w, &event.kind, &mut fx)?;
+    // The only writer of `state_entered_at`: any task whose state differs from
+    // before (or is new) entered its present state now.
+    let now = w.now;
+    for t in w.tasks.values_mut() {
+        if state_before.get(&t.id) != Some(&t.state) {
+            t.state_entered_at = now;
+        }
+    }
     for task in w.refresh(&before) {
         fx.push(Effect::WakeScheduler { task });
     }
@@ -177,6 +186,7 @@ fn apply(w: &mut World, k: &EventKind, fx: &mut Vec<Effect>) -> Result<(), Reduc
                 priority: *priority,
                 trust: *trust,
                 enqueued_at: w.now,
+                state_entered_at: w.now,
                 state: if *proposed { S::Proposed } else { S::Queued },
                 activity: Activity::Idle, // recomputed by refresh
                 landed: None,
