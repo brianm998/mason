@@ -167,7 +167,11 @@ fn an_update_while_an_agent_session_runs_does_not_interrupt_it() {
         "the agent's host is the same process"
     );
     // The task carries on and lands, once, with one attempt at developing.
+<<<<<<< HEAD
     let end = Instant::now() + Duration::from_secs(300);
+=======
+    let end = Instant::now() + Duration::from_secs(240);
+>>>>>>> origin/develop
     loop {
         let t = s.task_json(0);
         if t["state"] == "landed" {

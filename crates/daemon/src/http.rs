@@ -663,10 +663,12 @@ async fn retry(
                     .filter(|_| !t.def.is_empty())
                     .unwrap_or_else(|| d2.current_def(t.project));
                 // `to` is a step in the task's definition, or a category (the first step in it).
-                let name = want.unwrap_or_else(|| {
-                    def.first_in(State::Developing)
-                        .map_or("develop".into(), |s| s.name.clone())
-                });
+                let name = want
+                    .or_else(|| crate::hostloss::retry_step(t.failure.as_deref(), &t.step))
+                    .unwrap_or_else(|| {
+                        def.first_in(State::Developing)
+                            .map_or("develop".into(), |s| s.name.clone())
+                    });
                 let found = match def.step(&name) {
                     Some(s) => Some((s.category, s.name.clone())),
                     None => parse_state(&name)
