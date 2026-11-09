@@ -355,6 +355,8 @@ class MonitorCoreTest {
         assertEquals(listOf(HealthSnapshot.Resource("compile", "machine", 1, 2)), h.resources)
         assertEquals(listOf("#4: Waiting for compile slot"), h.waiting)
         assertEquals(emptyList(), HealthSnapshot.parse("not json").resources)
+        assertEquals("CPU 71% busy; a compile starts below 50%.", HealthSnapshot.parse("""{"cpu":{"busy_pct":71,"compile_max_pct":50}}""").cpuLine)
+        assertEquals("CPU not readable; a compile starts below 80%.", HealthSnapshot.parse("""{"cpu":{"busy_pct":null,"compile_max_pct":80}}""").cpuLine)
     }
 
     // ---- versions (Part 15) ----
@@ -362,18 +364,122 @@ class MonitorCoreTest {
     private fun welcome(version: String = "dev", minProtocol: Int = 1) =
         ServerMessage(welcome = Welcome(protocol = 1, resume = ResumeKind.UP_TO_DATE, version = version, min_protocol = minProtocol))
 
-    @Test fun aMonitorOffersToUpdateOnlyWhenBothBuildsAreRealAndDiffer() {
+    private fun owner(role: String = "", owner: Boolean = true) =
+        ServerMessage(welcome = Welcome(protocol = 1, resume = ResumeKind.UP_TO_DATE, min_protocol = 1, owner = owner, role = role))
+
+    private fun update(latest: String, phase: String = "", path: String = "", error: String = "", daemon: String = "", canUpdate: Boolean = false) =
+        ServerMessage(
+            view = ViewUpdate(
+                view = View(
+                    header_ = HeaderView(
+                        update = UpdateInfo(
+                            daemon_text = daemon,
+                            daemon_can_update = canUpdate,
+                            monitors = listOf(
+                                MonitorBuild(kind = "swift", latest = "other"),
+                                MonitorBuild(kind = "compose", latest = latest, phase = phase, path = path, error = error),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+    private fun result(id: String, ok: Boolean, error: String = "") =
+        ServerMessage(result = CommandResult(id = id, ok = ok, error = error))
+
+    @Test fun aMonitorOffersToUpdateOnlyWhenItsOwnSourceMoved() {
         val m = MonitorModel()
+        m.onInstall = {}
         m.ownVersion = "aaa111"
-        m.apply(welcome("bbb222"))
+        m.apply(owner())
+        m.apply(update("bbb222"))
         assertTrue(m.updateAvailable)
-        m.apply(welcome("aaa111"))
+        m.apply(update("aaa111"))
         assertFalse(m.updateAvailable)
-        m.apply(welcome("dev"))
+        m.apply(update(""))
         assertFalse(m.updateAvailable)
         m.ownVersion = "dev"
-        m.apply(welcome("bbb222"))
+        m.apply(update("bbb222"))
         assertFalse(m.updateAvailable)
+    }
+
+    @Test fun onlyTheOwnersDesktopMonitorOnTheSameMachineIsOffered() {
+        val m = MonitorModel()
+        m.ownVersion = "aaa111"
+        m.apply(owner())
+        m.apply(update("bbb222"))
+        assertFalse(m.updateAvailable)
+        m.onInstall = {}
+        m.apply(owner(role = "owner"))
+        assertFalse(m.updateAvailable)
+        m.apply(owner(owner = false))
+        assertFalse(m.updateAvailable)
+    }
+
+    @Test fun theDaemonButtonIsTheOwnersAndSendsTheUpdate() {
+        val m = MonitorModel()
+        val sent = mutableListOf<Command>()
+        m.sender = { sent.add(it) }
+        m.apply(update("x", daemon = "masond is 3 commits behind develop", canUpdate = true))
+        assertEquals("masond is 3 commits behind develop", m.daemonUpdateText)
+        assertFalse(m.canUpdateDaemon)
+        m.apply(owner())
+        assertTrue(m.canUpdateDaemon)
+        m.updateDaemon()
+        assertEquals("POST", sent.last().raw?.method)
+        assertEquals("/update", sent.last().raw?.path)
+    }
+
+    @Test fun theMonitorButtonFollowsTheBuildAndInstallsItOnce() {
+        val m = MonitorModel()
+        val installed = mutableListOf<String>()
+        val sent = mutableListOf<Command>()
+        m.sender = { sent.add(it) }
+        m.onInstall = { installed.add(it) }
+        m.ownVersion = "aaa111"
+        m.apply(owner())
+        m.apply(update("bbb222", phase = "failed", error = "an earlier try"))
+        m.updateMonitor()
+        assertEquals("/update/monitor", sent.last().raw?.path)
+        assertEquals("{\"kind\":\"compose\"}", sent.last().raw?.json)
+        m.apply(update("bbb222", phase = "failed", error = "an earlier try"))
+        assertTrue(m.updating != null)
+        assertNull(m.updateError)
+        m.apply(result("update-monitor", true))
+        m.apply(update("bbb222", phase = "building"))
+        assertEquals(emptyList(), installed)
+        m.apply(update("bbb222", phase = "ready", path = "/x/bin/mason-monitor"))
+        assertEquals(listOf("/x/bin/mason-monitor"), installed)
+        m.apply(update("bbb222", phase = "ready", path = "/x/bin/mason-monitor"))
+        assertEquals(listOf("/x/bin/mason-monitor"), installed)
+    }
+
+    @Test fun aMonitorBuildThatStopsSaysWhyAndCanBeTriedAgain() {
+        val m = MonitorModel()
+        m.sender = {}
+        m.onInstall = {}
+        m.ownVersion = "aaa111"
+        m.apply(owner())
+        m.apply(update("bbb222"))
+        m.updateMonitor()
+        m.apply(result("update-monitor", true))
+        m.apply(update("bbb222", phase = "failed", error = "gradle failed"))
+        assertNull(m.updating)
+        assertTrue(m.updateError!!.contains("gradle failed"))
+        assertTrue(m.updateAvailable)
+        m.updateMonitor()
+        m.apply(result("update-monitor", true))
+        m.apply(update("bbb222"))
+        assertNull(m.updating)
+        assertTrue(m.updateError!!.contains("restarted"))
+        m.updateMonitor()
+        assertTrue(m.updating != null)
+        m.apply(owner())
+        assertNull(m.updating)
+        m.updateMonitor()
+        m.apply(result("update-monitor", false, "already being built"))
+        assertEquals("already being built", m.updateError)
     }
 
     @Test fun aMonitorTooOldForTheProtocolIsReadOnlyAndSaysWhy() {
@@ -394,16 +500,6 @@ class MonitorCoreTest {
         assertNull(m.readOnlyReason)
         m.cancel(3)
         assertEquals(2, sent)
-    }
-
-    @Test fun theUpdateButtonKnowsHowItWillGetANewerMonitor() {
-        assertEquals(UpdatePlan.BuildFromSource("/src"), ClientUpdate.plan(mapOf("MASON_SOURCE_DIR" to "/src")) { it == "/src/clients/compose/settings.gradle.kts" })
-        val bad = ClientUpdate.plan(mapOf("MASON_SOURCE_DIR" to "/nope")) { false }
-        assertTrue(bad is UpdatePlan.Unavailable && bad.why.contains("/nope"))
-        assertEquals(UpdatePlan.OpenPage("https://example.org/mason"), ClientUpdate.plan(mapOf("MASON_INSTALL_URL" to "https://example.org/mason")))
-        assertTrue(ClientUpdate.plan(mapOf("MASON_INSTALL_URL" to "http://insecure")) is UpdatePlan.Unavailable)
-        val none = ClientUpdate.plan(emptyMap())
-        assertTrue(none is UpdatePlan.Unavailable && none.why.contains("MASON_SOURCE_DIR"))
     }
 
     // ---- the pipeline editor (Part 18) ----

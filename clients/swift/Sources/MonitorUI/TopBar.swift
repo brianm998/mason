@@ -108,18 +108,15 @@ struct BannersView: View {
             if let why = model.readOnlyReason {
                 banner("Read-only: \(why)", id: "read-only")
             }
-            if model.updateAvailable || model.updating != nil {
-                HStack(spacing: theme.spacing) {
-                    Text(model.updating ?? "A newer monitor is available (\(String(model.daemonVersion.prefix(8)))).")
-                        .font(theme.body(.medium))
-                    Spacer()
-                    if model.updating == nil {
-                        Button("Update") { model.onUpdate?() }.accessibilityIdentifier("monitor-update")
-                    }
+            if !model.daemonUpdateText.isEmpty {
+                updateRow(model.daemonUpdateText, button: model.canUpdateDaemon ? "Update masond" : nil, id: "daemon-update") {
+                    model.updateDaemon()
                 }
-                .padding(.horizontal, theme.spacingLarge).padding(.vertical, theme.spacing)
-                .background(theme.slow.opacity(0.18))
-                .accessibilityIdentifier("monitor-update-banner")
+            }
+            if let text = monitorUpdateText {
+                updateRow(text, button: model.updateAvailable && model.updating == nil ? "Update monitor" : nil, id: "monitor-update") {
+                    model.updateMonitor()
+                }
             }
             ForEach(Array((model.header?.banners ?? []).enumerated()), id: \.offset) { i, b in
                 banner(b.text, id: "banner:\(i)")
@@ -128,6 +125,24 @@ struct BannersView: View {
                 PendingIssueRow(issue: p)
             }
         }
+    }
+
+    /// What to say about this monitor's own version, if anything.
+    var monitorUpdateText: String? {
+        if let doing = model.updating { return doing }
+        guard model.updateAvailable else { return model.updateError }
+        return model.updateError ?? "A newer monitor is available (\(String(model.latestMonitor.prefix(8))))."
+    }
+
+    func updateRow(_ text: String, button: String?, id: String, action: @escaping () -> Void) -> some View {
+        HStack(spacing: theme.spacing) {
+            Text(text).font(theme.body(.medium))
+            Spacer()
+            if let button { Button(button, action: action).accessibilityIdentifier(id) }
+        }
+        .padding(.horizontal, theme.spacingLarge).padding(.vertical, theme.spacing)
+        .background(theme.slow.opacity(0.18))
+        .accessibilityIdentifier(id + "-banner")
     }
 
     func banner(_ text: String, id: String) -> some View {

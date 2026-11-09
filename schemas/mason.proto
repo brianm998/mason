@@ -468,6 +468,32 @@ message HeaderView {
   string self_project = 6;
   // Open issues the tracker has not imported (or whose task was canceled), with why.
   repeated PendingIssue pending_issues = 7;
+  // Whether MASON itself is behind its update channel, and any update under way
+  // (additive). Absent when the daemon has no update.toml.
+  UpdateInfo update = 8;
+}
+
+// What the daemon found the last time it looked at its update channel.
+message UpdateInfo {
+  // The sentence about the daemon to show; empty when there is nothing to say.
+  string daemon_text = 1;
+  // The owner can press "Update masond" now.
+  bool daemon_can_update = 2;
+  // One per kind of desktop monitor the daemon can build.
+  repeated MonitorBuild monitors = 3;
+}
+
+message MonitorBuild {
+  // "swift" or "compose".
+  string kind = 1;
+  // The newest commit on the channel that changed this monitor. A monitor is
+  // stamped with this commit when it is built, so a different stamp means it is behind.
+  string latest = 2;
+  // "" (nothing asked for), "building", "ready" or "failed".
+  string phase = 3;
+  string error = 4;
+  // When ready: the finished build, on the daemon's own disk.
+  string path = 5;
 }
 
 message PendingIssue {
