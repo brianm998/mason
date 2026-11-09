@@ -188,6 +188,14 @@ impl Drop for Lease {
     }
 }
 
+/// Where a task stands in the pipeline, for ranking a `mason run` made on its
+/// behalf.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Standing {
+    pub steps_remaining: u32,
+    pub priority: u8,
+}
+
 /// What an interactive caller sees of its request.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LeaseState {
@@ -640,10 +648,37 @@ impl Broker {
 
     /// Queue an interactive request. It outranks pipeline work.
     pub fn lease_open(&self, label: &str, uses: &BTreeMap<String, u32>) -> u64 {
+        self.lease_open_as(label, uses, None)
+    }
+
+    /// Queue a request from `mason run`. With no `standing` it is a person's
+    /// and outranks pipeline work. With one, it was made on behalf of a task
+    /// and is ranked as that task's pipeline work: the task's steps remaining
+    /// and priority, but *this request's* arrival time and sequence number
+    /// (never the task's own enqueue time, so a caller cannot borrow an old
+    /// task's place in line) and never the project's priority jump. A standing
+    /// can therefore only lower a request from the interactive rank, never
+    /// raise it above what omitting the task would give.
+    pub fn lease_open_as(
+        &self,
+        label: &str,
+        uses: &BTreeMap<String, u32>,
+        standing: Option<Standing>,
+    ) -> u64 {
         let mut st = lock(&self.st);
         let now = crate::daemon::now_ms();
         st.rank_seq += 1;
-        let rank = Rank::new(true, 0, 0, now, st.rank_seq, false);
+        let rank = match standing {
+            None => Rank::new(true, 0, 0, now, st.rank_seq, false),
+            Some(s) => Rank::new(
+                false,
+                s.steps_remaining,
+                s.priority,
+                now,
+                st.rank_seq,
+                false,
+            ),
+        };
         let needs = needs_of(uses, None);
         for r in needs.amounts.keys() {
             if !st.ledger.declared(r) {

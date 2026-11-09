@@ -81,4 +81,15 @@ mod tests {
         // Only priority 0 jumps.
         assert!(Rank::new(false, 5, 1, 1, 1, true) > normal_near);
     }
+
+    #[test]
+    fn a_task_linked_run_ranks_as_pipeline_work_and_a_person_still_goes_first() {
+        let person = Rank::new(true, 0, 0, 50, 9, false);
+        let test_step = Rank::new(false, 2, 1, 10, 1, false); // task in `test`
+        let linked_from_develop = Rank::new(false, 3, 1, 99, 2, false);
+        assert!(person < test_step);
+        assert!(test_step < linked_from_develop);
+        assert!(!linked_from_develop.interactive());
+        assert_eq!(linked_from_develop.steps(), 3);
+    }
 }

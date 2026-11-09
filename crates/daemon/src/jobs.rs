@@ -1157,6 +1157,11 @@ fn agent_job(c: &Ctx) {
         }));
     }
     spec.env = c.project.agent_env.clone();
+    // Whoever the agent runs `mason run` for: it ranks the request as this
+    // task's pipeline work. Set last so a project's agent_env cannot name
+    // another task.
+    spec.env.retain(|(k, _)| k != "MASON_TASK");
+    spec.env.push(("MASON_TASK".into(), c.task.0.to_string()));
     spec.tool_timeout = tool_timeout_for(kind, &c.project);
     spec.deadline = Some(
         c.res
