@@ -124,6 +124,14 @@ fn task_json(d: &Daemon, w: &World, t: &Task, detail: bool) -> Value {
         v["model"] = crate::launchview::task_use(d, w, t)
             .map_or(Value::Null, |m| crate::launchview::json_of(&m));
         v["blocked_by"] = json!(t.blockers.iter().map(|b| b.0).collect::<Vec<_>>());
+        v["held_by"] = crate::blockers::links_json(d, w, t);
+        v["held_line"] = crate::blockers::held_line(w, t).map_or(Value::Null, |s| json!(s));
+        if t.state == State::Canceled && t.cancel_keeps_branch {
+            v["revive"] = json!(format!(
+                "`mason task revive {}` puts it back in the queue with its branch and links; `retry` does not revive a canceled task",
+                t.id.0
+            ));
+        }
         v["blocks"] = json!(w
             .tasks
             .values()
@@ -1641,6 +1649,97 @@ async fn relink_task(
     Ok(Json(json!({"ok": true})))
 }
 
+fn who_header(headers: &axum::http::HeaderMap) -> String {
+    headers
+        .get("x-mason-as")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn blocker_ids(v: &Value, what: &str) -> Result<Vec<TaskId>, (StatusCode, Json<Value>)> {
+    match v {
+        Value::Null => Ok(vec![]),
+        Value::Array(a) => a
+            .iter()
+            .map(|x| {
+                x.as_u64()
+                    .map(TaskId)
+                    .ok_or_else(|| fail(StatusCode::BAD_REQUEST, format!("{what}: {x} is not a task id")))
+            })
+            .collect(),
+        _ => Err(fail(StatusCode::BAD_REQUEST, format!("{what} must be a list of task ids"))),
+    }
+}
+
+fn refusal(r: crate::attention::Refusal) -> (StatusCode, Json<Value>) {
+    fail(
+        StatusCode::from_u16(r.0).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+        r.1,
+    )
+}
+
+/// Release a task from some or all of its blockers. Owner only.
+async fn unblock_task(
+    Shared(d): Shared<Arc<Daemon>>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<u64>,
+    body: Option<Json<Value>>,
+) -> Res {
+    let who = who_header(&headers);
+    let b = body.map_or(Value::Null, |j| j.0);
+    let from = blocker_ids(&b["from"], "from")?;
+    let which = if b["all"].as_bool().unwrap_or(false) || from.is_empty() {
+        crate::blockers::Which::All
+    } else {
+        crate::blockers::Which::From(from)
+    };
+    let d2 = d.clone();
+    let msg = d
+        .pool
+        .run(move || crate::blockers::release(&d2, &who, TaskId(id), which))
+        .await
+        .map_err(pool_err)?
+        .map_err(refusal)?;
+    Ok(Json(json!({"ok": true, "message": msg})))
+}
+
+/// Add blockers to a task that has not started. Owner only.
+async fn block_task(
+    Shared(d): Shared<Arc<Daemon>>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<u64>,
+    Json(b): Json<Value>,
+) -> Res {
+    let who = who_header(&headers);
+    let after = blocker_ids(&b["after"], "after")?;
+    let d2 = d.clone();
+    let msg = d
+        .pool
+        .run(move || crate::blockers::block(&d2, &who, TaskId(id), &after))
+        .await
+        .map_err(pool_err)?
+        .map_err(refusal)?;
+    Ok(Json(json!({"ok": true, "message": msg})))
+}
+
+/// Put a canceled task whose branch was kept back in the queue. Owner only.
+async fn revive_task(
+    Shared(d): Shared<Arc<Daemon>>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<u64>,
+) -> Res {
+    let who = who_header(&headers);
+    let d2 = d.clone();
+    let msg = d
+        .pool
+        .run(move || crate::blockers::revive(&d2, &who, TaskId(id)))
+        .await
+        .map_err(pool_err)?
+        .map_err(refusal)?;
+    Ok(Json(json!({"ok": true, "message": msg})))
+}
+
 async fn debts_list(
     Shared(d): Shared<Arc<Daemon>>,
     Query(q): Query<HashMap<String, String>>,
@@ -2535,6 +2634,9 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/update/ack", post(update_ack))
         .route("/tasks/{id}/refresh", post(refresh_tracker))
         .route("/tasks/{id}/relink", post(relink_task))
+        .route("/tasks/{id}/unblock", post(unblock_task))
+        .route("/tasks/{id}/block", post(block_task))
+        .route("/tasks/{id}/revive", post(revive_task))
         .route("/pending-issues", get(pending_issues))
         .route("/proposals", get(proposals_list).post(proposal_file))
         .route("/proposals/poll", post(proposals_poll))

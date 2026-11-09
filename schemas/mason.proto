@@ -95,6 +95,11 @@ message Command {
     SetLimit set_limit = 14;
     // Approve a held self-change: the exact diff the owner was shown.
     ApproveHold approve_hold = 15;
+    // Release a held task from some or all of its blockers, add blockers, or put
+    // a canceled task whose branch was kept back in the queue. Owner only.
+    Unblock unblock = 16;
+    Block block = 17;
+    TaskRef revive = 18;
     Raw raw = 30;
   }
   // Who is acting and, optionally, why (recorded with overrides).
@@ -104,6 +109,18 @@ message Command {
 
 message TaskRef {
   uint64 task = 1;
+}
+
+message Unblock {
+  uint64 task = 1;
+  // The blockers to release; empty with `all` released every one.
+  repeated uint64 from = 2;
+  bool all = 3;
+}
+
+message Block {
+  uint64 task = 1;
+  repeated uint64 after = 2;
 }
 
 message AddTask {
@@ -411,6 +428,16 @@ message TaskRow {
   uint64 issue = 22;
   // Where to read it ("" when the tracker has no public page).
   string issue_url = 23;
+  // Each blocker with its state, where it came from ("from GitHub" or "set by you")
+  // and what the owner can do about it ("release", "revive", "retry"). Additive.
+  repeated BlockerLink blocker_links = 24;
+}
+
+message BlockerLink {
+  uint64 task = 1;
+  string state = 2;
+  string origin = 3;
+  repeated string actions = 4;
 }
 
 // What a step run launched (or, with `expected`, will launch): the tier
