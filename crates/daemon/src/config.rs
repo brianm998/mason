@@ -10,13 +10,19 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use toml_edit::DocumentMut;
 
+/// Default of the `llm:claude` limit: agent sessions at once (ticket 17).
+pub const DEFAULT_LLM_SESSIONS: usize = 10;
+
 #[derive(Clone, Debug)]
 pub struct DaemonConfig {
     pub data_dir: PathBuf,
     pub config_dir: PathBuf,
-    /// Tasks in a step at once. Admission waits when this many are running.
+    /// Agent sessions at once: the default of the `llm:claude` limit. It is not a cap
+    /// on tasks; `resources.toml` and `mason resources limit` override it.
     pub max_concurrent: usize,
     pub sweep_interval: Duration,
+    /// Where CPU use is read for the compile gate. `None`: `MASON_CPU_FILE`, else the OS.
+    pub cpu: Option<std::sync::Arc<dyn crate::cpu::CpuSource>>,
     pub heartbeat: Duration,
     pub host_bin: PathBuf,
     pub mcp_bin: PathBuf,
@@ -260,7 +266,8 @@ impl DaemonConfig {
         DaemonConfig {
             data_dir: data_dir.into(),
             config_dir: config_dir.into(),
-            max_concurrent: 2,
+            max_concurrent: DEFAULT_LLM_SESSIONS,
+            cpu: None,
             sweep_interval: Duration::from_secs(120),
             heartbeat: Duration::from_secs(1),
             host_bin,
@@ -1140,10 +1147,51 @@ mod tests {
             tempfile::tempdir().unwrap().keep().join("limits.kv"),
             &r,
             4,
+            std::sync::Arc::new(crate::cpu::FileCpu("/nonexistent".into())),
             &accts,
         )
         .unwrap();
         assert_eq!(b.limit("llm:claude"), Some(2));
+    }
+
+    #[test]
+    fn the_example_project_file_has_a_tracker_block_that_parses_once_uncommented() {
+        let text = include_str!("../../../docs/examples/mason-self.project.toml");
+        let off = parse_project("mason", text).unwrap();
+        assert!(
+            off.services.tracker.is_none(),
+            "off until the owner turns it on"
+        );
+        let on: String = text
+            .lines()
+            .map(|l| match l.strip_prefix("# ") {
+                Some(r)
+                    if r.starts_with("[tracker]")
+                        || r.starts_with("kind = \"github\"")
+                        || r.starts_with("repo =")
+                        || r.starts_with("token =")
+                        || r.starts_with("label =")
+                        || r.starts_with("interval_s =")
+                        || r.starts_with("webhook_secret =") =>
+                {
+                    r.to_string()
+                }
+                _ => l.to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let t = parse_project("mason", &on)
+            .unwrap()
+            .services
+            .tracker
+            .unwrap();
+        assert_eq!((t.label.as_str(), t.interval_s), ("mason", 60));
+        assert!(t.token.starts_with("env:") && t.webhook_secret.is_some());
+        let literal = on.replace("env:MASON_GITHUB_TOKEN", "ghp_literal");
+        assert!(
+            parse_project("mason", &literal).is_err(),
+            "a literal token is refused"
+        );
     }
 
     #[test]
