@@ -1053,3 +1053,38 @@ fn tracker_overrides_and_the_relationship_are_kept_and_dropped() {
     s.drop_tracker_overrides("p", 7, None, Some(90)).unwrap();
     assert!(s.tracker_overrides("p").unwrap().is_empty());
 }
+
+#[test]
+fn a_poisoned_reader_lock_does_not_poison_later_reads() {
+    let (_d, p) = db();
+    let s = Store::open(&p).unwrap();
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = s.read(|_| -> rusqlite::Result<()> { panic!("injected panic while reading") });
+    }));
+    assert!(r.is_err());
+    assert!(s.last_seq().is_ok(), "reads still work");
+    assert!(s.bugs().is_ok());
+}
+
+/// Re-run this binary with `MASON_TEST_WRITER_PANIC=<db>`: the child panics on the writer
+/// thread and must leave with status 70, not live on with a dead writer.
+#[test]
+fn a_panic_on_the_writer_thread_exits_the_process() {
+    if let Ok(path) = std::env::var("MASON_TEST_WRITER_PANIC") {
+        let s = Store::open(&path).unwrap();
+        let _ = s.write(|_| -> rusqlite::Result<()> { panic!("injected writer panic") });
+        std::thread::sleep(std::time::Duration::from_secs(20));
+        std::process::exit(0); // not reached: the writer's panic ends the process first
+    }
+    let (_d, p) = db();
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "a_panic_on_the_writer_thread_exits_the_process",
+            "--exact",
+            "--nocapture",
+        ])
+        .env("MASON_TEST_WRITER_PANIC", &p)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(mason_store::WRITER_PANIC_EXIT));
+}

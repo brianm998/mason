@@ -223,6 +223,10 @@ async fn status(Shared(d): Shared<Arc<Daemon>>) -> Res {
                 "event_loop_stalls": stalls,
                 "worst_stall_ms": worst,
                 "bugs": d2.store.bugs().map_or(0, |b| b.len()),
+                "thread_panics": d2.store.bugs().map_or(json!(0), |b| {
+                    let p: Vec<_> = b.iter().filter(|x| x.1 == "thread_panic").collect();
+                    json!({"count": p.len(), "last": p.last().map(|x| x.2.clone())})
+                }),
                 "projects": d2.projects.values().map(|p| p.id.clone()).collect::<Vec<_>>(),
                 "step_hosts_running": running,
                 "trackers": d2.projects.keys().map(|pid| crate::tracker::state_json(&d2, *pid)).collect::<Vec<_>>(),
