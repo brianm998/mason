@@ -8,9 +8,10 @@
 //! say why.
 
 use crate::cpu::CpuSource;
+use crate::disk::DiskSource;
 use mason_core::TaskId;
 use mason_resources::{Held, Locks, Take, TakeError};
-use mason_scheduler::{explain, CpuGate, Kind, Ledger, Needs, Rank};
+use mason_scheduler::{explain, CpuGate, DiskGate, Kind, Ledger, Needs, Rank};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
@@ -39,6 +40,8 @@ pub const EXCLUSIVE: &str = "exclusive";
 /// floor_mb = 2048
 /// [cpu]      # a compile starts only while CPU use is below this percent
 /// compile_cpu_max = 50
+/// [disk]     # below this much free disk, no compile and no LLM session starts
+/// floor_gb = 20
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResourceCfg {
@@ -48,6 +51,8 @@ pub struct ResourceCfg {
     pub memory_floor_mb: Option<u64>,
     /// A compile starts only while overall CPU use is below this percent.
     pub compile_cpu_max: u32,
+    /// Free space, in GB, below which nothing new starts (0: no floor).
+    pub disk_floor_gb: u64,
 }
 
 /// The default `compile_cpu_max`: half the machine.
@@ -61,6 +66,7 @@ impl Default for ResourceCfg {
             pools: BTreeMap::new(),
             memory_floor_mb: None,
             compile_cpu_max: DEFAULT_COMPILE_CPU_MAX,
+            disk_floor_gb: crate::disk::DEFAULT_FLOOR_GB,
         }
     }
 }
@@ -90,6 +96,7 @@ pub fn parse_resource_cfg(text: &str) -> Result<ResourceCfg, String> {
                     }
                     c.compile_cpu_max = n as u32;
                 }
+                "disk" if name == "floor_gb" => c.disk_floor_gb = n as u64,
                 other => return Err(format!("resources.toml: unknown setting {other}.{name}")),
             }
         }
@@ -157,6 +164,17 @@ struct State {
     cpu: Arc<dyn CpuSource>,
     /// The latest reading, kept so the explanation matches the decision.
     cpu_busy: Option<u32>,
+    disk: Option<DiskCfg>,
+    /// The latest reading: when, and the gate if the source could be read.
+    disk_read: Option<(Instant, Option<DiskGate>)>,
+}
+
+struct DiskCfg {
+    source: Arc<dyn DiskSource>,
+    /// The data directory and each project's `task_cache` directory.
+    paths: Vec<PathBuf>,
+    floor_mb: u64,
+    every: Duration,
 }
 
 pub struct Broker {
@@ -263,6 +281,8 @@ impl Broker {
                 cpu_max: cfg.compile_cpu_max,
                 cpu,
                 cpu_busy: None,
+                disk: None,
+                disk_read: None,
             }),
             cv: Condvar::new(),
             locks,
@@ -346,6 +366,52 @@ impl Broker {
         Ok(())
     }
 
+    /// Turn the disk floor on: free space is read from `source` on the volume of each of
+    /// `paths`, at most every `every`. Without this there is no disk gate.
+    pub fn set_disk(
+        &self,
+        source: Arc<dyn DiskSource>,
+        paths: Vec<PathBuf>,
+        floor_gb: u64,
+        every: Duration,
+    ) {
+        let mut st = lock(&self.st);
+        st.disk = Some(DiskCfg {
+            source,
+            paths,
+            floor_mb: floor_gb * 1024,
+            every,
+        });
+        st.disk_read = None;
+        self.pass(&mut st);
+        drop(st);
+        self.cv.notify_all();
+    }
+
+    /// The disk reading, at most once per `every`, handed to the ledger so the plan sees it.
+    fn refresh_disk(&self, st: &mut State) -> Option<DiskGate> {
+        let cfg = st.disk.as_ref()?;
+        if let Some((at, g)) = st.disk_read {
+            if at.elapsed() < cfg.every {
+                return g;
+            }
+        }
+        let g = crate::disk::least_free_mb(&*cfg.source, &cfg.paths).map(|free_mb| DiskGate {
+            free_mb,
+            floor_mb: cfg.floor_mb,
+        });
+        st.disk_read = Some((Instant::now(), g));
+        st.ledger.set_disk(g);
+        g
+    }
+
+    /// The disk gate if free space is below the floor right now.
+    pub fn disk_low(&self) -> Option<DiskGate> {
+        let mut st = lock(&self.st);
+        self.refresh_disk(&mut st)
+            .filter(|g| g.free_mb < g.floor_mb)
+    }
+
     /// Read the CPU source afresh and keep the reading.
     fn cpu_gate(&self, st: &mut State) -> Option<CpuGate> {
         st.cpu_busy = st.cpu.busy_pct();
@@ -372,6 +438,7 @@ impl Broker {
     /// waiter starts at once.
     fn pass(&self, st: &mut State) {
         let now = crate::daemon::now_ms();
+        self.refresh_disk(st);
         let mut changed = false;
         let ids: Vec<u64> = st.meta.keys().copied().collect();
         for id in ids {
@@ -637,6 +704,7 @@ impl Broker {
         if !st.ledger.is_waiting(id) {
             return None;
         }
+        self.refresh_disk(&mut st);
         let (floor, free) = (st.floor_mb, self.free_memory(&mut st));
         let now = crate::daemon::now_ms();
         let gate = self.cpu_gate(&mut st);

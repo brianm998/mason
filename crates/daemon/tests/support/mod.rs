@@ -175,6 +175,8 @@ impl Scratch {
         c.hold_retry = Duration::from_millis(300);
         // Tests never read the machine's real load.
         c.cpu = Some(mason_daemon::cpu::FakeCpu::new(0));
+        // Nor the real disk: a full volume must not hold up the suite.
+        c.disk = Some(mason_daemon::disk::FakeDisk::new_gb(1000));
         c
     }
 
@@ -445,6 +447,9 @@ impl Scratch {
         let cpu = self.root.path().join("cpu-for-masond");
         let _ = std::fs::write(&cpu, "0\n");
         cmd.env("MASON_CPU_FILE", &cpu);
+        let disk = self.root.path().join("disk-for-masond");
+        let _ = std::fs::write(&disk, "1000\n");
+        cmd.env("MASON_DISK_FILE", &disk);
         for (k, v) in env {
             cmd.env(k, v);
         }

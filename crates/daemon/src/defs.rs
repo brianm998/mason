@@ -324,30 +324,28 @@ impl Daemon {
     }
 
     pub(crate) fn spawn_watcher(self: &Arc<Self>) {
-        let weak = Arc::downgrade(self);
         let every = self.cfg.reload_interval;
         let fetch_every = self.cfg.fetch_interval;
-        let _ = std::thread::Builder::new()
-            .name("definition-watcher".into())
-            .spawn(move || {
-                // The first pass fetches: startup does not.
-                let mut last_fetch = std::time::Instant::now()
-                    .checked_sub(fetch_every)
-                    .unwrap_or_else(std::time::Instant::now);
-                loop {
-                    std::thread::sleep(every);
-                    let Some(d) = weak.upgrade() else { break };
-                    let fetch = last_fetch.elapsed() >= fetch_every;
-                    if fetch {
-                        last_fetch = std::time::Instant::now();
-                    }
-                    d.watch_definitions(fetch);
-                    // A pause that has run out lets claims go; alerts follow conditions.
-                    d.admit();
-                    crate::attention::sync_alerts(&d);
-                    crate::notify::tick(&d);
-                }
-            });
+        // The first pass fetches: startup does not.
+        let mut last_fetch = std::time::Instant::now()
+            .checked_sub(fetch_every)
+            .unwrap_or_else(std::time::Instant::now);
+        crate::bg::spawn_loop(self, "definition-watcher", move |weak| {
+            std::thread::sleep(every);
+            let Some(d) = weak.upgrade() else {
+                return false;
+            };
+            let fetch = last_fetch.elapsed() >= fetch_every;
+            if fetch {
+                last_fetch = std::time::Instant::now();
+            }
+            d.watch_definitions(fetch);
+            // A pause that has run out lets claims go; alerts follow conditions.
+            d.admit();
+            crate::attention::sync_alerts(&d);
+            crate::notify::tick(&d);
+            true
+        });
     }
 
     pub fn current_def(&self, pid: ProjectId) -> Arc<Definition> {

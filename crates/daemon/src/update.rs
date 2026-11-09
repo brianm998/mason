@@ -950,15 +950,15 @@ fn set_check(d: &Daemon, new: Check) {
 
 /// Look now, and every `check_interval_s` after that, for as long as the daemon lives.
 pub fn spawn_checker(d: &Arc<Daemon>) {
-    let weak = Arc::downgrade(d);
-    let _ = std::thread::Builder::new()
-        .name("update-check".into())
-        .spawn(move || loop {
-            let Some(d) = weak.upgrade() else { break };
-            let wait = check_once(&d);
-            drop(d);
-            std::thread::sleep(wait);
-        });
+    crate::bg::spawn_loop(d, "update-check", move |weak| {
+        let Some(d) = weak.upgrade() else {
+            return false;
+        };
+        let wait = check_once(&d);
+        drop(d);
+        std::thread::sleep(wait);
+        true
+    });
 }
 
 /// What the header says. Text is made here so that the two monitors say the same thing.
