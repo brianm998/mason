@@ -1383,7 +1383,7 @@ fn agent_job(c: &Ctx) {
             runner.run(spec.clone(), &contract)
         }
     };
-    let Some(mut report) = settle_holds(c, &runner, first, &spec, &contract, &rec) else {
+    let Some(mut report) = settle_all(c, &runner, first, &spec, &contract, &rec) else {
         return;
     };
     record_usage(c, &spec, &report);
@@ -1409,7 +1409,7 @@ fn agent_job(c: &Ctx) {
         }
         rec.write(c, "retry", &spec);
         let again = runner.run(spec.clone(), &contract);
-        let Some(r) = settle_holds(c, &runner, again, &spec, &contract, &rec) else {
+        let Some(r) = settle_all(c, &runner, again, &spec, &contract, &rec) else {
             return;
         };
         record_usage(c, &spec, &r);
@@ -1515,6 +1515,99 @@ fn settle_holds(
     Some(report)
 }
 
+/// Does this crash say the session's transcript is gone, so it cannot be resumed?
+fn transcript_gone(detail: &str) -> bool {
+    let d = detail.to_lowercase();
+    [
+        "no conversation found",
+        "no rollout found",
+        "session not found",
+        "could not find session",
+    ]
+    .iter()
+    .any(|m| d.contains(m))
+}
+
+/// Holds, then lost hosts, until the step has an end that is neither. A lost host
+/// (or one that never came up) is not a failure: it is recorded, the lease taken
+/// again, and the step continued, with `resume` and a note when the journal gave a
+/// session id and from the start when not. At most [`hl::MAX_AGENT_RESTARTS`] times
+/// per step run, counted from the invocation directories so a daemon restart does
+/// not reset it; one more loss ends the step, naming them all. A resume whose
+/// transcript is gone starts fresh, once. `None` when the task went away meanwhile.
+fn settle_all(
+    c: &Ctx,
+    runner: &StepRunner,
+    first: StepReport,
+    spec: &SessionSpec,
+    contract: &ContractHandle,
+    rec: &LaunchRec,
+) -> Option<StepReport> {
+    use crate::hostloss as hl;
+    let root = c.d.cfg.hosts_dir();
+    let base = format!("t{}r{}", c.task.0, c.run.0);
+    let describe = |id: &str| -> (String, u64) {
+        match mason_step_host::registry::lost_report(&root.join(id)) {
+            Ok(r) => (r.to_string(), if r.at_ms > 0 { r.at_ms } else { now_ms() }),
+            Err(_) => (format!("host {id} never came up"), now_ms()),
+        }
+    };
+    let mut report = settle_holds(c, runner, first, spec, contract, rec)?;
+    let mut resumed = false;
+    let mut fresh_after_gone = false;
+    loop {
+        let fresh = match &report.end {
+            StepEnd::Failed(FailReason::HostLost { detail }) => {
+                let lost = mason_adapters::hosted::lost_invocations(&root, &base);
+                let newest = lost.last().cloned().unwrap_or_else(|| base.clone());
+                let (text, at) = describe(&newest);
+                let text = if lost.is_empty() {
+                    detail.clone()
+                } else {
+                    text
+                };
+                let restart = lost.len() <= hl::MAX_AGENT_RESTARTS;
+                hl::record_as(&c.d, Some(c.run), &c.step.name, &newest, at, text, restart);
+                if !restart {
+                    let all: Vec<String> = lost.iter().map(|id| describe(id).0).collect();
+                    report.end = StepEnd::Failed(FailReason::HostLost {
+                        detail: hl::agent_lost(&all),
+                    });
+                    return Some(report);
+                }
+                // Only what is verifiably the recorded process: the CLI the dead
+                // host left running must not work beside its replacement.
+                mason_step_host::registry::reap_dir(&root.join(&newest));
+                c.release_lease();
+                if get_lease(c).is_err() {
+                    return None;
+                }
+                report.session_id.is_none()
+            }
+            StepEnd::Failed(FailReason::Crash { detail })
+                if resumed && !fresh_after_gone && transcript_gone(detail) =>
+            {
+                fresh_after_gone = true;
+                true
+            }
+            _ => return Some(report),
+        };
+        if fresh {
+            // What the lost session used is kept; the new one starts its own totals.
+            record_usage(c, spec, &report);
+            rec.write(c, "launch", spec);
+            contract.clear_pending();
+            report = runner.run(spec.clone(), contract);
+            resumed = false;
+        } else {
+            rec.write(c, "resume", spec);
+            report = runner.resume(report, hl::interrupted_note(), spec.clone(), contract);
+            resumed = true;
+        }
+        report = settle_holds(c, runner, report, spec, contract, rec)?;
+    }
+}
+
 fn finish_agent(c: &Ctx, report: StepReport, dir: &Path) {
     // What the agent noticed outside its task (Part 13): filed before the step's own result
     // is recorded, so a proposal that blocks the task is already a task when it waits.
@@ -1603,6 +1696,8 @@ fn finish_agent_inner(c: &Ctx, report: StepReport, dir: &Path) {
                 FailReason::NoResult { nudges } => format!("the agent ended its turn {} times without submitting", nudges + 1),
                 FailReason::Timeout => "the step ran out of time".to_string(),
                 FailReason::Crash { detail } => format!("the agent failed: {detail}"),
+                // Restarted until it could not be (see `settle_all`); the text names the losses.
+                FailReason::HostLost { detail } => detail,
             };
             c.fail(reason);
         }

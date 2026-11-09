@@ -37,9 +37,31 @@ pub enum HoldReason {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum FailReason {
-    NoResult { nudges: u32 },
+    NoResult {
+        nudges: u32,
+    },
     Timeout,
-    Crash { detail: String },
+    Crash {
+        detail: String,
+    },
+    /// The step host is gone or never came up: the agent CLI did not crash and
+    /// nothing was judged. The daemon starts the step again; it is not a verdict.
+    HostLost {
+        detail: String,
+    },
+}
+
+/// What a failed launch or resume ends as: a host that did not come up is a lost
+/// host, anything else (the CLI would not start) is a crash.
+fn fail_reason_of(e: mason_adapter_api::AdapterError) -> FailReason {
+    match e {
+        mason_adapter_api::AdapterError::HostStart(io) => FailReason::HostLost {
+            detail: format!("the step host did not start: {io}"),
+        },
+        other => FailReason::Crash {
+            detail: other.to_string(),
+        },
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -66,7 +88,8 @@ pub enum StepEnd {
 }
 
 /// Would a stronger model help? Yes after an agent that ended its turns with no
-/// result or crashed; no after a timeout (more model is not more time), a hold
+/// result or crashed; no after a lost host (a bigger model is the wrong answer to
+/// a lost process), a timeout (more model is not more time), a hold
 /// (a wait), a question (the owner's turn) or anything that succeeded.
 pub fn worth_a_stronger_model(end: &StepEnd) -> bool {
     matches!(
@@ -89,6 +112,7 @@ mod ladder_tests {
         )));
         for end in [
             StepEnd::Failed(FailReason::Timeout),
+            StepEnd::Failed(FailReason::HostLost { detail: "x".into() }),
             StepEnd::Hold(HoldReason::UsageLimit { resets_at: None }),
             StepEnd::Hold(HoldReason::ProviderDown { detail: "d".into() }),
             StepEnd::Asked {
@@ -218,12 +242,7 @@ impl<'a> StepRunner<'a> {
         let report = StepReport::empty();
         match self.adapter.start(spec.clone()) {
             Ok(h) => self.drive(report, h, spec, contract),
-            Err(e) => self.fail(
-                report,
-                FailReason::Crash {
-                    detail: e.to_string(),
-                },
-            ),
+            Err(e) => self.fail(report, fail_reason_of(e)),
         }
     }
 
@@ -262,12 +281,7 @@ impl<'a> StepRunner<'a> {
         };
         match self.adapter.resume(&id, note, spec.clone()) {
             Ok(h) => self.drive(prior, h, spec, contract),
-            Err(e) => self.fail(
-                prior,
-                FailReason::Crash {
-                    detail: e.to_string(),
-                },
-            ),
+            Err(e) => self.fail(prior, fail_reason_of(e)),
         }
     }
 
@@ -371,14 +385,7 @@ impl<'a> StepRunner<'a> {
                         .resume(&id, nudge_note(spec.step, r.nudges), spec.clone())
                     {
                         Ok(h) => handle = h,
-                        Err(e) => {
-                            return self.fail(
-                                r,
-                                FailReason::Crash {
-                                    detail: e.to_string(),
-                                },
-                            )
-                        }
+                        Err(e) => return self.fail(r, fail_reason_of(e)),
                     }
                 }
                 Outcome::Timeout => return self.fail(r, FailReason::Timeout),
@@ -391,6 +398,9 @@ impl<'a> StepRunner<'a> {
                     return r;
                 }
                 Outcome::Crash { detail } => return self.fail(r, FailReason::Crash { detail }),
+                Outcome::HostLost { detail } => {
+                    return self.fail(r, FailReason::HostLost { detail })
+                }
             }
         }
     }
