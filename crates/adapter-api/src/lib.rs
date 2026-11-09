@@ -146,6 +146,11 @@ pub enum Outcome {
     Crash {
         detail: String,
     },
+    /// The step host is gone, or never came up. Nothing was judged: the agent CLI
+    /// did not crash, its process was lost with the host. Not a failure of the step.
+    HostLost {
+        detail: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -213,6 +218,9 @@ pub enum AdapterError {
     /// Refused by the test-mode guard.
     Net(netguard::NetError),
     Spawn(std::io::Error),
+    /// The step host that was to run the CLI did not come up (it timed out, or
+    /// exited at once). The CLI itself never ran.
+    HostStart(std::io::Error),
     Other(String),
 }
 
