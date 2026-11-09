@@ -1120,6 +1120,8 @@ pub fn summarize(kind: &EventKind) -> (String, String, u64) {
         | EventKind::WaitEnded { task }
         | EventKind::TrackerEdited { task, .. }
         | EventKind::BlockerRemoved { task, .. }
+        | EventKind::BlockersChanged { task, .. }
+        | EventKind::Revived { task }
         | EventKind::BlockerAdded { task, .. } => task.0,
         _ => 0,
     };

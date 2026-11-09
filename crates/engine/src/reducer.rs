@@ -22,6 +22,8 @@ pub enum ReduceError {
     /// Adding the blocker would close a loop; the path starts and ends at the task.
     BlockerCycle(Vec<TaskId>),
     NoSuchWait,
+    /// A release names a task that is not one of the task's blockers.
+    NotABlocker(TaskId),
 }
 
 fn name(k: &EventKind) -> &'static str {
@@ -48,6 +50,8 @@ fn name(k: &EventKind) -> &'static str {
         WaitEnded { .. } => "WaitEnded",
         BlockerAdded { .. } => "BlockerAdded",
         BlockerRemoved { .. } => "BlockerRemoved",
+        BlockersChanged { .. } => "BlockersChanged",
+        Revived { .. } => "Revived",
         TrackerEdited { .. } => "TrackerEdited",
         Tick => "Tick",
     }
@@ -479,6 +483,47 @@ fn apply(w: &mut World, k: &EventKind, fx: &mut Vec<Effect>) -> Result<(), Reduc
                 .expect("exists")
                 .blockers
                 .remove(blocker);
+        }
+        E::BlockersChanged {
+            task,
+            released,
+            added,
+        } => {
+            let from = get(w, *task)?.state;
+            if !matches!(from, S::Proposed | S::Queued) {
+                return Err(illegal(from, k));
+            }
+            for r in released {
+                if !get(w, *task)?.blockers.contains(r) {
+                    return Err(ReduceError::NotABlocker(*r));
+                }
+            }
+            for a in added {
+                get(w, *a)?;
+            }
+            // Work on a copy so a refusal part-way leaves the world untouched.
+            let mut next = w.clone();
+            for r in released {
+                next.tasks.get_mut(task).expect("exists").blockers.remove(r);
+            }
+            for a in added {
+                if let Some(path) = would_cycle(&next, *task, *a) {
+                    return Err(ReduceError::BlockerCycle(path));
+                }
+                next.tasks.get_mut(task).expect("exists").blockers.insert(*a);
+            }
+            *w = next;
+        }
+        E::Revived { task } => {
+            let t = get(w, *task)?;
+            if t.state != S::Canceled || !t.cancel_keeps_branch {
+                return Err(illegal(t.state, k));
+            }
+            let t = w.tasks.get_mut(task).expect("exists");
+            t.state = S::Queued;
+            t.decision = None;
+            t.failure = None;
+            fx.push(Effect::CatchUpWithBase { task: *task });
         }
         E::TrackerEdited {
             task,
