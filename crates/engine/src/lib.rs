@@ -8,5 +8,5 @@
 mod reducer;
 mod world;
 
-pub use reducer::{reduce, ReduceError};
-pub use world::World;
+pub use reducer::{reduce, reduce_in_place, ReduceError, Touched};
+pub use world::{world_clones, World};

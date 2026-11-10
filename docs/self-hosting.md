@@ -68,6 +68,21 @@ Change it, in order of precedence:
 
 The monitors (SwiftUI and Compose) and the command line read `daemon.json` again when a connection fails. A monitor shows "Daemon restarting, reconnecting…" and retries after 1, 2, 4 and 8 seconds, then every 10, and resumes from the last event it saw; it also notices a changed `pid` or `started_ms` while connected, and no message or reply for 15 seconds counts as a stall. The command line reads the file once more after a refused connection. See `docs/decisions/0029-fixed-port-readings.md`.
 
+## The watchdog
+
+An open monitor is the only thing inside MASON that can say the daemon is down, and nothing inside the daemon can say it when it is dead or wedged (launchd restarts a dead `masond`, not a hung one). `scripts/mason-watchdog.sh` runs outside it, once a minute, using only `/bin/bash`, `/usr/bin/curl` and `/usr/bin/say`, so it still runs while `syspolicyd` is down.
+
+Each run reads the port from `daemon.json` and asks `GET /status` with a 20-second limit (`/status` goes through the worker pool and the store's writer, so a wedged daemon does not answer). Two failures in a row is **down**: it speaks with `say` and sends through `[ntfy]` in `notify.toml` if there is one, repeats every 30 minutes while down, and says once when the daemon is back. A changed `pid`, or `uptime_s` under 60, on three runs in a row is **crash-looping**, said the same way. Where `say` is absent (Linux) the speech is skipped. State is kept in `mason-watchdog.state` beside the data directory.
+
+To install on macOS (edit the script path first):
+
+```
+cp docs/examples/com.example.mason-watchdog.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.example.mason-watchdog.plist
+```
+
+To remove: `launchctl bootout gui/$(id -u)/com.example.mason-watchdog`. `mason doctor` notes when no agent running the watchdog is installed. The script reads `MASON_DATA_DIR`, `MASON_CONFIG_DIR` and a few `MASON_WATCHDOG_*` variables (listed at the top of the script) for a non-default setup.
+
 ## A rollback
 
 If a new build crashes three times in five minutes, the daemon rolls back (Stage 16). That also starts a **cooldown** (`cooldown_h`, default 24) during which no self-task may be filed, and files **one proposal**, waiting for you, with what is known about the failure.

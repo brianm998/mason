@@ -41,7 +41,9 @@ pub struct Daemon {
     emit_lock: Mutex<()>,
     admitting: AtomicBool,
     admit_again: AtomicBool,
-    repo_locks: Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>,
+    repo_locks: Mutex<HashMap<PathBuf, RepoLock>>,
+    /// When the definitions thread last finished a pass (ms; the start time before the first).
+    pub(crate) defs_pass_ended_ms: AtomicU64,
     stalls: AtomicU64,
     worst_stall_ms: AtomicU64,
     pub(crate) sweep: Mutex<crate::sweep::SweepState>,
@@ -219,6 +221,7 @@ impl Daemon {
             admitting: AtomicBool::new(false),
             admit_again: AtomicBool::new(false),
             repo_locks: Mutex::default(),
+            defs_pass_ended_ms: AtomicU64::new(now_ms()),
             stalls: AtomicU64::new(0),
             store_full: AtomicU64::new(0),
             disk_sizes: Default::default(),
@@ -305,7 +308,7 @@ impl Daemon {
         &self.landing
     }
 
-    pub fn world(&self) -> Result<mason_engine::World, StoreError> {
+    pub fn world(&self) -> Result<std::sync::Arc<mason_engine::World>, StoreError> {
         self.store.world()
     }
 
@@ -323,7 +326,7 @@ impl Daemon {
     /// Serializes git work that touches a repository's shared state. The lock
     /// belongs to the *repository*, not the project: two projects may live in one
     /// repository (a branch each), and two `git fetch`es there collide on its refs.
-    pub fn repo_lock(&self, p: ProjectId) -> Arc<Mutex<()>> {
+    pub fn repo_lock(&self, p: ProjectId) -> RepoLock {
         let key = self.project(p).map_or_else(PathBuf::new, |c| {
             std::fs::canonicalize(&c.path).unwrap_or_else(|_| c.path.clone())
         });
@@ -333,6 +336,19 @@ impl Daemon {
             .entry(key)
             .or_default()
             .clone()
+    }
+
+    /// Who holds a repository lock now and since when (label, ms). Never takes a repository lock
+    /// itself, so the attention thread may call it while git is stuck.
+    pub fn repo_lock_holders(&self) -> Vec<(String, u64)> {
+        let locks: Vec<RepoLock> = self
+            .repo_locks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .cloned()
+            .collect();
+        locks.iter().filter_map(RepoLock::holder).collect()
     }
 
     pub fn record_bug(&self, kind: &str, detail: &str) {
@@ -837,5 +853,82 @@ struct AdmitReset<'a>(&'a AtomicBool);
 impl Drop for AdmitReset<'_> {
     fn drop(&mut self) {
         self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+/// A repository's lock that remembers who holds it: the place in the code that took it and when.
+/// Only for saying what git work is stuck on; it adds no way to take the lock out of turn.
+#[derive(Clone, Default)]
+pub struct RepoLock {
+    m: Arc<Mutex<()>>,
+    who: Arc<Mutex<Option<(String, u64)>>>,
+}
+
+pub struct RepoGuard<'a> {
+    _g: std::sync::MutexGuard<'a, ()>,
+    who: &'a Mutex<Option<(String, u64)>>,
+}
+
+impl Drop for RepoGuard<'_> {
+    fn drop(&mut self) {
+        *self.who.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+}
+
+impl RepoLock {
+    /// Take the lock, labelled with the caller's file and line.
+    #[track_caller]
+    pub fn lock(&self) -> std::sync::LockResult<RepoGuard<'_>> {
+        let loc = std::panic::Location::caller();
+        let label = format!(
+            "{}:{}",
+            loc.file().rsplit('/').next().unwrap_or(loc.file()),
+            loc.line()
+        );
+        let (g, poisoned) = match self.m.lock() {
+            Ok(g) => (g, false),
+            Err(e) => (e.into_inner(), true),
+        };
+        *self.who.lock().unwrap_or_else(|e| e.into_inner()) = Some((label, now_ms()));
+        let guard = RepoGuard {
+            _g: g,
+            who: &self.who,
+        };
+        if poisoned {
+            Err(std::sync::PoisonError::new(guard))
+        } else {
+            Ok(guard)
+        }
+    }
+
+    /// Take the lock only if it is free right now, labelled like `lock`.
+    #[track_caller]
+    pub fn try_lock(&self) -> std::sync::TryLockResult<RepoGuard<'_>> {
+        use std::sync::TryLockError;
+        let loc = std::panic::Location::caller();
+        let label = format!(
+            "{}:{}",
+            loc.file().rsplit('/').next().unwrap_or(loc.file()),
+            loc.line()
+        );
+        let (g, poisoned) = match self.m.try_lock() {
+            Ok(g) => (g, false),
+            Err(TryLockError::Poisoned(e)) => (e.into_inner(), true),
+            Err(TryLockError::WouldBlock) => return Err(TryLockError::WouldBlock),
+        };
+        *self.who.lock().unwrap_or_else(|e| e.into_inner()) = Some((label, now_ms()));
+        let guard = RepoGuard {
+            _g: g,
+            who: &self.who,
+        };
+        if poisoned {
+            Err(TryLockError::Poisoned(std::sync::PoisonError::new(guard)))
+        } else {
+            Ok(guard)
+        }
+    }
+
+    pub fn holder(&self) -> Option<(String, u64)> {
+        self.who.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 }

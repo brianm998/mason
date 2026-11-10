@@ -138,19 +138,19 @@ fn wait_explained(d: &Arc<Daemon>, t: TaskId) -> String {
             .collect();
         format!("task {t}: {:?}\nevents:\n{}", task_of(d, t), evs.join("\n"))
     };
-    let start = std::time::Instant::now();
-    wait_for("the task to be waiting with a reason", 100, || {
-        if start.elapsed() > Duration::from_secs(90) {
+    // One deadline, generous for a loaded machine: the scripted develop step can be slow
+    // to queue the task, and that is not the daemon misbehaving.
+    let end = std::time::Instant::now() + Duration::from_secs(90);
+    loop {
+        if let Some(s) = d.broker.explain_task(t) {
+            text = s;
+            break;
+        }
+        if std::time::Instant::now() >= end {
             panic!("never waited. {}", dump(d));
         }
-        match d.broker.explain_task(t) {
-            Some(s) => {
-                text = s;
-                true
-            }
-            None => false,
-        }
-    });
+        std::thread::sleep(Duration::from_millis(50));
+    }
     text
 }
 
