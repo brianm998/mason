@@ -288,12 +288,17 @@ fn with_no_monitor_open_and_speech_on_the_daemon_speaks_in_order_through_its_com
         )
         .unwrap();
     notify::tick(&d);
+    // The speech runs off the tick's thread: wait for it.
+    wait_for("both sentences", 10, || {
+        std::fs::read_to_string(&out).is_ok_and(|t| t.lines().count() >= 2)
+    });
     let said = std::fs::read_to_string(&out).unwrap();
     assert_eq!(
         said.lines().collect::<Vec<_>>(),
         vec!["Task 1 failed.", "Task 2 needs a decision."]
     );
     notify::tick(&d);
+    std::thread::sleep(Duration::from_millis(300));
     assert_eq!(
         std::fs::read_to_string(&out).unwrap().lines().count(),
         2,
@@ -325,4 +330,132 @@ fn with_speech_off_the_daemon_stays_silent() {
         .unwrap();
     notify::tick(&d);
     assert!(!out.exists());
+}
+
+#[test]
+fn a_speech_command_that_hangs_is_killed_and_does_not_delay_the_tick() {
+    let s = world();
+    let d = s.start_with(|c| {
+        c.owner_names = vec!["brian".into()];
+        c.reload_interval = Duration::from_secs(3600);
+        c.speech_timeout = Duration::from_millis(500);
+    });
+    let started = s.root.path().join("started.txt");
+    notify_toml(
+        &s,
+        &format!(
+            "[speech]\ndaemon = true\ncommand = [\"sh\", \"-c\", \"echo \\\"$0\\\" >> {}; sleep 600\"]\n",
+            started.display()
+        ),
+    );
+    let now = mason_daemon::daemon::now_ms();
+    for (k, t) in [("a", "One."), ("b", "Two.")] {
+        d.store
+            .enqueue_announcement(k, "failed", t, true, true, now)
+            .unwrap();
+    }
+    let t0 = std::time::Instant::now();
+    notify::tick(&d);
+    assert!(
+        t0.elapsed() < Duration::from_millis(400),
+        "the tick did not wait for the speech: {:?}",
+        t0.elapsed()
+    );
+    // Both sentences are tried, each cut off at the limit.
+    wait_for("the second sentence", 10, || {
+        std::fs::read_to_string(&started).is_ok_and(|t| t.lines().count() >= 2)
+    });
+}
+
+fn stuck_world() -> (Scratch, Arc<Daemon>) {
+    let s = world();
+    let d = s.start_with(|c| {
+        c.owner_names = vec!["brian".into()];
+        c.reload_interval = Duration::from_millis(100);
+        c.fetch_interval = Duration::from_millis(100);
+        c.attention_interval = Duration::from_millis(100);
+        c.stuck_after = Duration::from_secs(2);
+    });
+    (s, d)
+}
+
+#[test]
+fn alerts_and_notifications_keep_working_while_the_repository_lock_is_held() {
+    let (url, got) = receiver();
+    let (s, d) = stuck_world();
+    notify_toml(
+        &s,
+        &format!("[routing.paused]\nwebhook = \"0\"\n[routing.git_stuck]\nwebhook = \"0\"\n[webhook]\nurl = \"{url}\"\n"),
+    );
+    let pid = *d.projects.keys().next().unwrap();
+    let lock = d.repo_lock(pid);
+    let guard = lock.lock().unwrap();
+    // Fetches have a lock of their own; hold it too, so the definitions thread blocks in its fetch.
+    let fetch = d.fetch_lock(pid);
+    let fetch_guard = fetch.lock().unwrap();
+    // The definitions thread now blocks in its fetch. A pause is a condition that appears
+    // meanwhile; the attention thread must raise it and deliver it.
+    pause(&d);
+    wait_for("the pause alert", 10, || {
+        d.store
+            .alerts(true)
+            .unwrap()
+            .iter()
+            .any(|a| a.key.starts_with("paused"))
+    });
+    wait_for("a notification", 10, || !got.lock().unwrap().is_empty());
+    wait_for("the stuck alert", 15, || {
+        d.store
+            .alerts(true)
+            .unwrap()
+            .iter()
+            .any(|a| a.key == "git-stuck")
+    });
+    let a = d
+        .store
+        .alerts(true)
+        .unwrap()
+        .into_iter()
+        .find(|a| a.key == "git-stuck")
+        .unwrap();
+    assert!(a.text.contains("stuck"), "{}", a.text);
+    assert!(a.text.contains("notify.rs"), "names the holder: {}", a.text);
+    drop(guard);
+    drop(fetch_guard);
+    wait_for("the stuck alert to clear", 15, || {
+        !d.store
+            .alerts(true)
+            .unwrap()
+            .iter()
+            .any(|a| a.key == "git-stuck")
+    });
+}
+
+#[test]
+fn a_disk_below_the_floor_is_announced_with_sound_and_speech_once() {
+    let s = world();
+    let d = s.start_with(|c| {
+        c.owner_names = vec!["brian".into()];
+        c.reload_interval = Duration::from_secs(3600);
+        c.disk = Some(mason_daemon::disk::FakeDisk::new_gb(5));
+        c.disk_every = Duration::from_millis(50);
+    });
+    wait_for("the disk alert", 30, || {
+        attention::sync_alerts(&d);
+        d.store
+            .alerts(true)
+            .unwrap()
+            .iter()
+            .any(|a| a.kind == "disk")
+    });
+    for _ in 0..3 {
+        notify::tick(&d);
+    }
+    let got = notify::claim(&d, "monitor", false);
+    let list = got["announcements"].as_array().unwrap();
+    let disk: Vec<_> = list.iter().filter(|a| a["kind"] == "disk").collect();
+    assert_eq!(disk.len(), 1, "{got}");
+    assert_eq!(disk[0]["sound"], true);
+    assert_eq!(disk[0]["speech"], true);
+    assert_eq!(disk[0]["sound_name"], "broke");
 }

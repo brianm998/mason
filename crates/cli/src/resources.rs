@@ -227,19 +227,26 @@ const WRAPPED: &[&str] = &[
 /// stdin and, for a build or test command, answers with the same command run
 /// under `mason run --needs compile`. It asks rather than allows, so the owner
 /// still sees what will run. Anything else is left alone (no output).
-pub fn hook_bash(input: &str, needs: &str) -> Option<Value> {
+pub fn hook_bash(input: &str, needs: &str, mason: &str) -> Option<Value> {
     let v: Value = serde_json::from_str(input).ok()?;
     if v["tool_name"].as_str() != Some("Bash") {
         return None;
     }
     let command = v["tool_input"]["command"].as_str()?;
-    let first = command.split_whitespace().next()?;
-    if !WRAPPED.contains(&first) || command.trim_start().starts_with("mason ") {
+    if command.trim_start().starts_with("mason ") || !runs_wrapped(command) {
         return None;
     }
     let mut input = v["tool_input"].clone();
     input["command"] = json!(format!(
-        "mason run --needs {needs} -- bash -c {}",
+        "{} run --needs {needs} -- bash -c {}",
+        if mason
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "/._-".contains(c))
+        {
+            mason.to_string()
+        } else {
+            shell_quote(mason)
+        },
         shell_quote(command)
     ));
     Some(json!({"hookSpecificOutput": {
@@ -248,6 +255,19 @@ pub fn hook_bash(input: &str, needs: &str) -> Option<Value> {
         "permissionDecisionReason": "MASON: run through the shared build queue",
         "updatedInput": input,
     }}))
+}
+
+/// Whether any part of a compound command (`cd x && cargo test`, `a; b`,
+/// `FOO=1 cargo build`) starts with a wrapped tool. Looking only at the first
+/// word let `cd dir && cargo test --workspace` straight past the queue.
+fn runs_wrapped(command: &str) -> bool {
+    command
+        .split(['&', '|', ';', '\n', '(', ')', '{', '}'])
+        .any(|part| {
+            part.split_whitespace()
+                .find(|w| !w.contains('=') || w.starts_with('='))
+                .is_some_and(|w| WRAPPED.contains(&w))
+        })
 }
 
 fn shell_quote(s: &str) -> String {
@@ -272,7 +292,7 @@ mod tests {
     fn the_hook_wraps_builds_and_leaves_everything_else() {
         let input =
             |c: &str| json!({"tool_name": "Bash", "tool_input": {"command": c}}).to_string();
-        let out = hook_bash(&input("cargo test -p x"), "compile").unwrap();
+        let out = hook_bash(&input("cargo test -p x"), "compile", "mason").unwrap();
         let cmd = out["hookSpecificOutput"]["updatedInput"]["command"]
             .as_str()
             .unwrap();
@@ -281,22 +301,40 @@ mod tests {
             "mason run --needs compile -- bash -c 'cargo test -p x'"
         );
         assert_eq!(out["hookSpecificOutput"]["permissionDecision"], "ask");
-        let quoted = hook_bash(&input("make it's"), "compile").unwrap();
+        let quoted = hook_bash(&input("make it's"), "compile", "mason").unwrap();
         assert!(quoted["hookSpecificOutput"]["updatedInput"]["command"]
             .as_str()
             .unwrap()
             .ends_with("'make it'\\''s'"));
-        assert!(hook_bash(&input("ls"), "compile").is_none());
+        assert!(hook_bash(&input("ls"), "compile", "mason").is_none());
+        // Anywhere in a compound command, and by the CLI's own path.
+        for c in [
+            "cd crates && cargo test --workspace",
+            "FOO=1 cargo test",
+            "ls; cargo build",
+            "(cd x && cargo test)",
+            "true | make",
+        ] {
+            assert!(hook_bash(&input(c), "compile", "mason").is_some(), "{c}");
+        }
+        let abs = hook_bash(&input("cargo test"), "compile", "/a b/mason").unwrap();
+        assert!(abs["hookSpecificOutput"]["updatedInput"]["command"]
+            .as_str()
+            .unwrap()
+            .starts_with("'/a b/mason' run --needs compile -- bash -c"));
+        assert!(hook_bash(&input("echo cargo"), "compile", "mason").is_none());
         assert!(hook_bash(
             &input("mason run --needs compile -- cargo build"),
-            "compile"
+            "compile",
+            "mason"
         )
         .is_none());
         assert!(hook_bash(
             &json!({"tool_name": "Read", "tool_input": {}}).to_string(),
-            "compile"
+            "compile",
+            "mason"
         )
         .is_none());
-        assert!(hook_bash("not json", "compile").is_none());
+        assert!(hook_bash("not json", "compile", "mason").is_none());
     }
 }

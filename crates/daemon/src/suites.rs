@@ -238,9 +238,9 @@ fn run_hosted_once(
     let done = Arc::new(AtomicBool::new(false));
     let why = Arc::new(AtomicU8::new(0)); // 0 none, 1 timed out, 2 skipped, 3 gone
     {
-        let (done, why, sock) = (done.clone(), why.clone(), dir.join("sock"));
+        let (done, why, sock, hdir) = (done.clone(), why.clone(), dir.join("sock"), dir.clone());
         std::thread::spawn(move || {
-            let end = Instant::now() + limit;
+            let end = Instant::now() + mason_step_host::registry::remaining_limit(limit, &hdir);
             loop {
                 if done.load(Ordering::SeqCst) {
                     return;
@@ -647,7 +647,7 @@ fn baseline(
     def: &Definition,
     suite: &Suite,
     base: &str,
-    lock: &Arc<std::sync::Mutex<()>>,
+    lock: &crate::daemon::RepoLock,
     dev: Option<&Dev>,
 ) -> Option<(Vec<String>, Vec<String>)> {
     if let Ok(Some(b)) = who.d.store.baseline(base, &suite.name) {
@@ -708,7 +708,7 @@ fn baseline(
 fn run_suite(
     who: &Who,
     c_repo: &Path,
-    repo_lock: &Arc<std::sync::Mutex<()>>,
+    repo_lock: &crate::daemon::RepoLock,
     def: &Definition,
     suite: &Suite,
     cwd: &Path,
