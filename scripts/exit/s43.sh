@@ -234,10 +234,10 @@ m task cancel $y >/dev/null
 
 echo "== 6. filing says so when the range of ad-hoc numbers is used up"
 stop_daemon
-MASON_ADHOC_EXIT_START=99 start_daemon
+MASON_ADHOC_EXIT_START=999 start_daemon
 z=$(add "takes the last number" "z")
 end=$((SECONDS + 30)); until [ -n "$(num $z exit)" ]; do [ $SECONDS -lt $end ] || fail "no number for the task"; sleep 0.2; done
-[ "$(num $z exit)" = 99 ] || fail "expected s99, got $(num $z exit)"
+[ "$(num $z exit)" = 999 ] || fail "expected s999, got $(num $z exit)"
 if m task add "one too many" --project web --body "w" >"$root/refused" 2>&1; then fail "filing was accepted with the range used up"; fi
 grep -q "used up" "$root/refused" || fail "the refusal does not say the range is used up: $(cat "$root/refused")"
 echo "   refused: $(tail -1 "$root/refused")"
