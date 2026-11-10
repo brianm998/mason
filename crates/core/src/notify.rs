@@ -170,6 +170,7 @@ impl Routing {
             rule(Push, 10),
         ];
         put("failed", broke.clone());
+        put("numbers", broke.clone()); // the stage and exit-script numbers are nearly used up
         put("landing", broke); // the base branch is frozen, or a landing is stuck
         let everything = vec![
             rule(Monitor, 0),
@@ -342,7 +343,7 @@ pub fn sound_for(kind: &str) -> Sound {
     match kind {
         "needs_you" => Sound::Decision,
         "failed" | "landing" | "daemon_down" | "credentials" | "provider_outage"
-        | "environment" | "runtime" | "definition" | "disk" => Sound::Broke,
+        | "environment" | "runtime" | "definition" | "disk" | "numbers" => Sound::Broke,
         _ => Sound::Info,
     }
 }
