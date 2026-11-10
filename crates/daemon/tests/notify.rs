@@ -399,6 +399,9 @@ fn alerts_and_notifications_keep_working_while_the_repository_lock_is_held() {
     let pid = *d.projects.keys().next().unwrap();
     let lock = d.repo_lock(pid);
     let guard = lock.lock().unwrap();
+    // Fetches have a lock of their own; hold it too, so the definitions thread blocks in its fetch.
+    let fetch = d.fetch_lock(pid);
+    let fetch_guard = fetch.lock().unwrap();
     // The definitions thread now blocks in its fetch. A pause is a condition that appears
     // meanwhile; the attention thread must raise it and deliver it.
     pause(&d);
@@ -427,6 +430,7 @@ fn alerts_and_notifications_keep_working_while_the_repository_lock_is_held() {
     assert!(a.text.contains("stuck"), "{}", a.text);
     assert!(a.text.contains("notify.rs"), "names the holder: {}", a.text);
     drop(guard);
+    drop(fetch_guard);
     wait_for("the stuck alert to clear", 15, || {
         !d.store
             .alerts(true)
