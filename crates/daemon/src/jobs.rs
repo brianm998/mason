@@ -1920,9 +1920,9 @@ fn run_command_on(
     // Stop the run if it takes too long.
     let done = Arc::new(AtomicBool::new(false));
     {
-        let (done, sock) = (done.clone(), dir.join("sock"));
+        let (done, sock, hdir) = (done.clone(), dir.join("sock"), dir.clone());
         std::thread::spawn(move || {
-            let end = Instant::now() + limit;
+            let end = Instant::now() + mason_step_host::registry::remaining_limit(limit, &hdir);
             while Instant::now() < end {
                 if done.load(Ordering::SeqCst) {
                     return;
