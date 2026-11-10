@@ -431,6 +431,7 @@ pub fn alerts_now(d: &Daemon) -> Vec<(String, String, String)> {
             ));
         }
     }
+    out.extend(fetch_alerts(d));
     out.extend(git_stuck_alert(d));
     out.extend(stalled_alert(d, &w));
     for p in d.store.pauses(now_ms()).unwrap_or_default() {
@@ -456,6 +457,34 @@ pub fn alerts_now(d: &Daemon) -> Vec<(String, String, String)> {
         ));
     }
     out
+}
+
+/// `fetch:<project>`: the project's fetches have been failing for `fetch_alert_after`. Reads only the
+/// failure record; touches no git.
+fn fetch_alerts(d: &Daemon) -> Vec<(String, String, String)> {
+    let now = now_ms();
+    let limit = d.cfg.fetch_alert_after.as_millis() as u64;
+    d.fetch_failing()
+        .into_iter()
+        .filter_map(|(pid, since, err)| {
+            let age = now.saturating_sub(since);
+            if age < limit {
+                return None;
+            }
+            let p = d.projects.get(&pid)?;
+            let first = err.lines().find(|l| !l.trim().is_empty()).unwrap_or("no error text");
+            Some((
+                format!("fetch:{}", p.id),
+                "tracker".into(),
+                format!(
+                    "{}: git fetch has been failing for {}: {first}. Tasks are working from the base as it was {} ago",
+                    p.id,
+                    span_text(age),
+                    span_text(age)
+                ),
+            ))
+        })
+        .collect()
 }
 
 /// The definitions thread (watch, fetch, admit) has not finished a pass for too long: git or the
