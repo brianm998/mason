@@ -10,7 +10,11 @@ stop_daemon() {
   if [ -n "$daemon" ]; then kill -9 "$daemon" 2>/dev/null || true; wait "$daemon" 2>/dev/null || true; fi
   daemon=""
 }
-kill_hosts() { for hd in "$root"/d/h; do target/debug/step-host-ctl reap "$hd" >/dev/null 2>&1 || true; done; }
+kill_hosts() {
+  if [ -d "$root/d/h" ]; then
+    target/debug/step-host-ctl reap "$root/d/h" >/dev/null 2>&1 || echo "note: host reap reported an error" >&2
+  fi
+}
 cleanup() { stop_daemon; kill_hosts; rm -rf "$root"; }
 trap cleanup EXIT
 cargo build -q --workspace --bins
@@ -102,7 +106,10 @@ m task add "first" --project p --body x >/dev/null
 seen=""
 end=$((SECONDS + 60))
 until [ -n "$seen" ]; do
-  seen=$(m alerts 2>/dev/null | grep -F 'agent in `develop` has been silent for' || true)
+  alerts_out=$(m alerts 2>/dev/null) || alerts_out=""
+  if grep -qF 'agent in `develop` has been silent for' <<<"$alerts_out"; then
+    seen=$(grep -F 'agent in `develop` has been silent for' <<<"$alerts_out")
+  fi
   [ $SECONDS -lt $end ] || die "no silence alert appeared"
   sleep 0.3
 done
