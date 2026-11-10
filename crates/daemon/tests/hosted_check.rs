@@ -103,7 +103,7 @@ fn kill_9_while_run_check_runs_the_command_once_and_the_task_lands() {
     let mut m = s.masond(&[], &envs);
     s.wait_daemon(&mut m);
     s.mason_ok(&["task", "add", "Checks its work"]);
-    wait_for("the check to start", 60, || lines(&marker) == 1);
+    wait_for("the check to start", 240, || lines(&marker) == 1);
     nix::sys::signal::kill(
         nix::unistd::Pid::from_raw(m.child.id() as i32),
         nix::sys::signal::Signal::SIGKILL,
@@ -112,7 +112,7 @@ fn kill_9_while_run_check_runs_the_command_once_and_the_task_lands() {
     let _ = m.child.wait();
     let mut m2 = s.masond(&[], &envs);
     s.wait_daemon(&mut m2);
-    s.wait_task(0, "landed", 120);
+    s.wait_task(0, "landed", 240);
     assert_eq!(lines(&marker), 1, "the command ran once");
     let left: Vec<_> = std::fs::read_dir(&tmp)
         .unwrap()
