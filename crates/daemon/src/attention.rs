@@ -367,6 +367,31 @@ fn disk_alert(d: &Daemon, w: &mason_engine::World) -> Option<(String, String, St
     Some(("disk".into(), "disk".into(), text))
 }
 
+/// Waits that are not moving, or never can: one per resource and cause.
+fn wait_alerts(d: &Daemon) -> Vec<(String, String, String)> {
+    let long =
+        crate::notify::load(d).map_or(crate::notify::DEFAULT_LONG_WAIT_MS, |s| s.long_wait_ms);
+    d.broker
+        .wait_alerts(long)
+        .into_iter()
+        .map(|a| {
+            if a.never {
+                (
+                    format!("never-fits:{}", a.resource),
+                    "never_fits".into(),
+                    a.text,
+                )
+            } else {
+                (
+                    format!("long-wait:{}", a.resource),
+                    "long_wait".into(),
+                    a.text,
+                )
+            }
+        })
+        .collect()
+}
+
 /// The conditions that are true right now, as `(key, kind, text)`. An alert
 /// exists exactly as long as its condition does.
 pub fn alerts_now(d: &Daemon) -> Vec<(String, String, String)> {
@@ -409,6 +434,7 @@ pub fn alerts_now(d: &Daemon) -> Vec<(String, String, String)> {
         }
     }
     out.extend(d.landing().attention());
+    out.extend(wait_alerts(d));
     out.extend(disk_alert(d, &w));
     out.extend(host_loss_alerts(
         &d.store
