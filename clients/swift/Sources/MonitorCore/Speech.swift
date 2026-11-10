@@ -26,7 +26,8 @@ public struct Announcement: Equatable, Sendable {
     public var family: String {
         switch kind {
         case "needs_you": return "decision"
-        case "failed", "landing", "daemon_down", "credentials", "provider_outage", "environment", "runtime", "definition":
+        case "failed", "landing", "daemon_down", "credentials", "provider_outage", "environment", "runtime", "definition",
+             "disk", "blocked", "host_lost", "tracker", "provider_limit", "provider_overage", "provider_budget":
             return "broke"
         default: return "info"
         }
@@ -54,9 +55,14 @@ public struct SpeechSettings: Equatable, Sendable {
     /// An OS voice name; empty for the system default.
     public var voice: String
 
+    /// Kinds added after the first release. A saved list gains them once (see `Announcer.load`).
+    public static let addedKinds: Set<String> = [
+        "disk", "environment", "blocked", "host_lost", "runtime", "definition", "tracker", "provider_limit", "provider_overage", "provider_budget",
+    ]
+
     public static let defaultKinds: Set<String> = [
         "needs_you", "failed", "landing", "daemon_down", "credentials", "provider_outage", "landed",
-    ]
+    ].union(addedKinds)
 
     public init(kinds: Set<String> = SpeechSettings.defaultKinds, sounds: [String: String]? = nil, voice: String = "") {
         self.kinds = kinds
@@ -201,12 +207,21 @@ public final class Announcer {
     // MARK: settings
 
     static let kindsKey = "speech.kinds"
+    /// Set once a saved list has been given `addedKinds`; after that an untick sticks.
+    static let kindsMigratedKey = "speech.kinds.added"
     static let voiceKey = "speech.voice"
     static func soundKey(_ f: String) -> String { "speech.sound.\(f)" }
 
     static func load(_ p: Preferences) -> SpeechSettings {
         var s = SpeechSettings()
-        if let k = p.string(kindsKey) { s.kinds = Set(k.split(separator: ",").map(String.init)) }
+        if let k = p.string(kindsKey) {
+            s.kinds = Set(k.split(separator: ",").map(String.init))
+            if p.string(kindsMigratedKey) == nil {
+                s.kinds.formUnion(SpeechSettings.addedKinds)
+                p.setString(s.kinds.sorted().joined(separator: ","), for: kindsKey)
+            }
+        }
+        p.setString("1", for: kindsMigratedKey)
         s.voice = p.string(voiceKey) ?? ""
         for f in ["decision", "broke", "info"] {
             if let n = p.string(soundKey(f)) { s.sounds[f] = n }

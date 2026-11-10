@@ -92,10 +92,18 @@ fn daemon_pid(s: &Scratch) -> u64 {
         .unwrap()
 }
 
-fn slow_script(ms: u64) -> Value {
+/// An agent that commits, then stays mid-session until `gate/release` exists (or
+/// the gate directory is gone, so a failed test leaves nothing spinning). It ends
+/// when the test says so, never because time ran out: a fixed sleep let a slow
+/// self-test outlast the agent, and the host then exited normally, code 0.
+fn gated_script(gate: &Path) -> Value {
+    let wait = format!(
+        "while [ -d '{0}' ] && [ ! -e '{0}/release' ]; do sleep 0.2; done",
+        gate.display()
+    );
     json!({"steps": {"explore": [explore_turn()], "develop": [[
         {"sh": TASK_SCRIPT_COMMIT},
-        {"sleep_ms": ms},
+        {"sh": wait},
         {"call": {"tool": "submit_change", "args": {"summary": "done after a wait", "head": "$HEAD"}}}
     ]]}})
 }
@@ -103,11 +111,58 @@ fn slow_script(ms: u64) -> Value {
 fn running_hosts(s: &Scratch) -> Vec<(String, u32)> {
     mason_step_host::registry::Registry::new(s.data_dir.join("h"))
         .scan()
-        .unwrap_or_default()
+        .expect("the host registry can be scanned")
         .into_iter()
         .filter(|h| h.state == mason_step_host::registry::HostState::Running)
         .map(|h| (h.info.id.clone(), h.info.host_pid))
         .collect()
+}
+
+/// What became of every host under the data directory: state, pids and whether
+/// they are alive, the exit record, heartbeat age, journal tail, and the tail of
+/// the daemon's log when `MASON_TEST_LOG` names a file. For a failure message.
+fn host_report(s: &Scratch) -> String {
+    use mason_step_host::registry::{pid_alive, Registry};
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64);
+    let reg = Registry::new(s.data_dir.join("h"));
+    let mut out = String::new();
+    match reg.scan() {
+        Err(e) => out += &format!("registry scan failed: {e}\n"),
+        Ok(hosts) => {
+            for h in hosts {
+                let dir = reg.host_dir(&h.info.id);
+                out += &format!(
+                    "host {} state={:?}\n  host_pid={} alive={} child_pid={} alive={}\n  exit.kv: {}\n  heartbeat age: {:?} ms, journal {} bytes\n",
+                    h.info.id,
+                    h.state,
+                    h.info.host_pid,
+                    pid_alive(h.info.host_pid),
+                    h.info.child_pid,
+                    pid_alive(h.info.child_pid),
+                    std::fs::read_to_string(dir.join("exit.kv"))
+                        .map_or_else(|e| format!("({e})"), |t| t.replace('\n', " ")),
+                    h.last_heartbeat_ms.map(|t| now.saturating_sub(t)),
+                    h.journal_len,
+                );
+                if let Ok(j) = std::fs::read(dir.join("journal")) {
+                    let tail = &j[j.len().saturating_sub(400)..];
+                    out += &format!("  journal tail: {:?}\n", String::from_utf8_lossy(tail));
+                }
+            }
+        }
+    }
+    if let Ok(p) = std::env::var("MASON_TEST_LOG") {
+        if let Ok(t) = std::fs::read_to_string(&p) {
+            let lines: Vec<&str> = t.lines().collect();
+            out += &format!(
+                "daemon log tail ({p}):\n{}\n",
+                lines[lines.len().saturating_sub(60)..].join("\n")
+            );
+        }
+    }
+    out
 }
 
 fn wait_status(s: &Scratch, what: &str, secs: u64, f: impl Fn(&Value) -> bool) -> Value {
@@ -132,7 +187,11 @@ fn start(s: &Scratch) -> Masond {
 
 #[test]
 fn an_update_while_an_agent_session_runs_does_not_interrupt_it() {
-    let s = Scratch::new("test -f hello.txt", slow_script(90_000));
+    let gate = tempfile::Builder::new()
+        .prefix("msgate")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let s = Scratch::new("test -f hello.txt", gated_script(gate.path()));
     let src = source(&s, &[&[]]);
     let mut m = start(&s);
     s.mason_ok(&[
@@ -161,11 +220,15 @@ fn an_update_while_an_agent_session_runs_does_not_interrupt_it() {
     assert_eq!(v["current"], src.shas[0].as_str());
     // Same process (exec keeps the pid) and the very same step host: the session was not touched.
     assert_eq!(daemon_pid(&s), pid_before, "exec keeps the pid");
+    let after = running_hosts(&s).first().cloned();
     assert_eq!(
-        running_hosts(&s).first().cloned(),
+        after,
         Some(host_before.clone()),
-        "the agent's host is the same process"
+        "the agent's host is not the same running process after the update\n{}",
+        host_report(&s)
     );
+    // Only now may the agent finish.
+    std::fs::write(gate.path().join("release"), "").unwrap();
     // The task carries on and lands, once, with one attempt at developing.
     let end = Instant::now() + Duration::from_secs(240);
     loop {

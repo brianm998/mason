@@ -24,7 +24,8 @@ data class Announcement(
     val family: String
         get() = when (kind) {
             "needs_you" -> "decision"
-            "failed", "landing", "daemon_down", "credentials", "provider_outage", "environment", "runtime", "definition" -> "broke"
+            "failed", "landing", "daemon_down", "credentials", "provider_outage", "environment", "runtime", "definition",
+            "disk", "blocked", "host_lost", "tracker", "provider_limit", "provider_overage", "provider_budget" -> "broke"
             else -> "info"
         }
 }
@@ -62,7 +63,9 @@ data class SpeechSettings(
     fun sound(a: Announcement): String = sounds[a.family] ?: "Tink"
 
     companion object {
-        val DEFAULT_KINDS = setOf("needs_you", "failed", "landing", "daemon_down", "credentials", "provider_outage", "landed")
+        /** Kinds added after the first release. A saved list gains them once (see Announcer.load). */
+        val ADDED_KINDS = setOf("disk", "environment", "blocked", "host_lost", "runtime", "definition", "tracker", "provider_limit", "provider_overage", "provider_budget")
+        val DEFAULT_KINDS = setOf("needs_you", "failed", "landing", "daemon_down", "credentials", "provider_outage", "landed") + ADDED_KINDS
     }
 }
 
@@ -203,7 +206,13 @@ class Announcer(
 
     private fun load(p: Preferences): SpeechSettings {
         val d = SpeechSettings()
-        val kinds = p.string("speech.kinds")?.split(",")?.filter { it.isNotEmpty() }?.toSet() ?: d.kinds
+        var kinds = p.string("speech.kinds")?.split(",")?.filter { it.isNotEmpty() }?.toSet() ?: d.kinds
+        // A saved list gains the added kinds once; an untick afterwards sticks.
+        if (p.string("speech.kinds") != null && p.string("speech.kinds.added") == null) {
+            kinds = kinds + SpeechSettings.ADDED_KINDS
+            p.setString("speech.kinds", kinds.sorted().joinToString(","))
+        }
+        p.setString("speech.kinds.added", "1")
         val sounds = d.sounds.mapValues { (f, v) -> p.string("speech.sound.$f") ?: v }
         return SpeechSettings(kinds, sounds, p.string("speech.voice") ?: "")
     }
