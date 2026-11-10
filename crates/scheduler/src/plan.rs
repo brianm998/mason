@@ -89,6 +89,19 @@ pub struct World<'a> {
     pub compile_pace: Option<CompilePace>,
     /// Measured by the caller: free disk against its floor. `None` means no disk gate.
     pub disk: Option<DiskGate>,
+    /// Measured by the caller: how slowly the build disk has been answering.
+    /// `None` means no stall gate.
+    pub stall: Option<StallGate>,
+}
+
+/// The build disk has stopped answering promptly. A stall shows up as *less* CPU
+/// use (everything is blocked on the disk), so the CPU gate would let more
+/// compiles in at the worst moment. Only a reason to wait while a compile is
+/// running, so a stall that is not ours can never hold the queue for good.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StallGate {
+    pub slow_ms: u64,
+    pub max_ms: u64,
 }
 
 /// The disk floor. Below it no `compile` and no LLM session is granted, even when nothing
@@ -280,6 +293,11 @@ pub fn plan(world: &World, waiting: &[Request]) -> Plan {
             Some(g) if compiles && g.busy_pct >= g.max_pct => Some(g),
             _ => None,
         };
+        let compile_running = usage.used.get(COMPILE).is_some_and(|n| *n > 0);
+        let stalled = match world.stall {
+            Some(g) if compiles && compile_running && g.slow_ms >= g.max_ms => Some(g),
+            _ => None,
+        };
         let settling = world
             .compile_pace
             .filter(|_| compiles)
@@ -315,6 +333,13 @@ pub fn plan(world: &World, waiting: &[Request]) -> Plan {
                 Some(WaitCause::Cpu {
                     busy_pct: g.busy_pct,
                     max_pct: g.max_pct,
+                })
+            }
+            (Fit::Yes, None, _) if stalled.is_some() => {
+                let g = stalled.expect("checked");
+                Some(WaitCause::DiskStall {
+                    slow_ms: g.slow_ms,
+                    max_ms: g.max_ms,
                 })
             }
             (Fit::Yes, None, _) if settling.is_some() => Some(WaitCause::Settling {
@@ -368,6 +393,7 @@ fn build_wait(
         WaitCause::Memory { .. }
         | WaitCause::Cpu { .. }
         | WaitCause::Settling { .. }
+        | WaitCause::DiskStall { .. }
         | WaitCause::Disk { .. } => true,
         _ => false,
     };
