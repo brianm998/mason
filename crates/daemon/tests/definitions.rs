@@ -232,7 +232,7 @@ fn explore_anyway_before_a_task_starts_and_after_it_skipped_exploring() {
     // After a skip: a long-running develop, interrupted by "Explore anyway".
     let develop = json!([
         [{"sh": UNIQUE_COMMIT}, {"sleep_ms": 60000}],
-        [{"call": {"tool": "submit_change", "args": {"summary": "done", "head": "$HEAD"}}}]
+        [{"sh": UNIQUE_COMMIT}, {"call": {"tool": "submit_change", "args": {"summary": "done", "head": "$HEAD"}}}]
     ]);
     let s2 = scratch_with(
         Some(DEF_SKIP),
