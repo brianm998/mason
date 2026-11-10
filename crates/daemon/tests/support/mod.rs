@@ -329,7 +329,12 @@ pub fn steps_run(d: &Arc<Daemon>, t: TaskId) -> Vec<String> {
         .collect()
 }
 
+/// Every wait gets at least this long: a step host can take over a minute to
+/// launch on a busy or syspolicyd-stalled Mac, and that is not a test failure.
+const MIN_WAIT_SECS: u64 = 240;
+
 pub fn wait_for(what: &str, secs: u64, mut f: impl FnMut() -> bool) {
+    let secs = secs.max(MIN_WAIT_SECS);
     let end = Instant::now() + Duration::from_secs(secs);
     while !f() {
         assert!(
