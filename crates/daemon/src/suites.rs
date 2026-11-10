@@ -238,9 +238,9 @@ fn run_hosted_once(
     let done = Arc::new(AtomicBool::new(false));
     let why = Arc::new(AtomicU8::new(0)); // 0 none, 1 timed out, 2 skipped, 3 gone
     {
-        let (done, why, sock) = (done.clone(), why.clone(), dir.join("sock"));
+        let (done, why, sock, hdir) = (done.clone(), why.clone(), dir.join("sock"), dir.clone());
         std::thread::spawn(move || {
-            let end = Instant::now() + limit;
+            let end = Instant::now() + mason_step_host::registry::remaining_limit(limit, &hdir);
             loop {
                 if done.load(Ordering::SeqCst) {
                     return;
