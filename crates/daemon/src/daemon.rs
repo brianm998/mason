@@ -205,6 +205,15 @@ impl Daemon {
                 }
             }
         }
+        // A daemon whose CPU reading is injected is a test's: like the sampler, the
+        // disk probe would add one set of threads per daemon, to no use.
+        let measures_machine = cfg.cpu.is_none() && std::env::var_os("MASON_CPU_FILE").is_none();
+        if rcfg.disk_stall_ms > 0 && measures_machine {
+            broker.set_stall(
+                crate::stall::Prober::start(disk_paths.clone()),
+                rcfg.disk_stall_ms,
+            );
+        }
         broker.set_disk(disk, disk_paths, rcfg.disk_floor_gb, disk_every);
         let targets = crate::targets::Targets::new(
             crate::config::load_targets(&cfg.config_dir)?,
