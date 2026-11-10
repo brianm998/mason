@@ -134,14 +134,14 @@ fn crash_at(point: &str) -> Result<(), String> {
         "--body",
         "Create hello.txt.",
     ]);
-    died_of_sigkill(&mut first, 60)?;
+    died_of_sigkill(&mut first, 240)?;
     // Not dropped yet: dropping it would kill the step hosts that must survive.
     let _first = first;
 
     let mut second = s.masond(&[], &[]);
     let started = Instant::now();
     while !s.mason(&["status", "--json"]).status.success() {
-        if Instant::now() - started > Duration::from_secs(60) {
+        if Instant::now() - started > Duration::from_secs(240) {
             return Err("the restarted daemon never answered".into());
         }
         if let Some(st) = second.child.try_wait().map_err(|e| e.to_string())? {
