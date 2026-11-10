@@ -426,10 +426,15 @@ impl Scratch {
             })
             .args(extra_args)
             .stdout(Stdio::null())
-            .stderr(if std::env::var("MASON_TEST_LOG").is_ok() {
-                Stdio::inherit()
-            } else {
-                Stdio::null()
+            .stderr(match std::env::var("MASON_TEST_LOG") {
+                // A path: append the daemon's log there (failures then quote its tail).
+                Ok(p) if p.starts_with('/') => std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(p)
+                    .map_or(Stdio::null(), Stdio::from),
+                Ok(_) => Stdio::inherit(),
+                Err(_) => Stdio::null(),
             });
         // Tests never read the machine's real load, and never run a sampler per daemon.
         let cpu = self.root.path().join("cpu-for-masond");

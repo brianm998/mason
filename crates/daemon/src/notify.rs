@@ -29,6 +29,8 @@ pub struct Runtime {
     last_claim: Mutex<Option<u64>>,
     landed_seen: Mutex<Option<BTreeSet<u64>>>,
     ticking: Mutex<()>,
+    /// The speech thread is at work; the next tick leaves the announcements for it.
+    speaking: Arc<std::sync::atomic::AtomicBool>,
     /// Held while the alert table is brought up to date.
     pub(crate) syncing: Mutex<()>,
 }
@@ -559,6 +561,7 @@ fn announce_landed(d: &Daemon, s: &Settings, now: u64) {
 /// With speech on and no monitor around, say what is waiting, one at a time, with the
 /// configured command.
 fn daemon_speech(d: &Daemon, s: &Settings, now: u64) {
+    use std::sync::atomic::Ordering;
     let last = *d
         .notify
         .last_claim
@@ -567,15 +570,69 @@ fn daemon_speech(d: &Daemon, s: &Settings, now: u64) {
     if s.speech_command.is_empty() || !n::daemon_should_speak(s.daemon_speech, last, now) {
         return;
     }
+    // Still saying the last batch: leave the rest queued rather than wait for it.
+    if d.notify.speaking.swap(true, Ordering::SeqCst) {
+        return;
+    }
     let rows = d
         .store
         .take_announcements("daemon", now.saturating_sub(s.stale_ms), 20, now)
         .unwrap_or_default();
-    for r in rows.iter().filter(|r| r.speech) {
-        let (prog, args) = s.speech_command.split_first().expect("checked non-empty");
-        let status = Command::new(prog).args(args).arg(&r.sentence).status();
-        if let Err(e) = status {
+    let lines: Vec<String> = rows
+        .into_iter()
+        .filter(|r| r.speech)
+        .map(|r| r.sentence)
+        .collect();
+    if lines.is_empty() {
+        d.notify.speaking.store(false, Ordering::SeqCst);
+        return;
+    }
+    let command = s.speech_command.clone();
+    let limit = d.cfg.speech_timeout;
+    let flag = d.notify.speaking.clone();
+    let spawned = std::thread::Builder::new().name("speech".into()).spawn({
+        let flag = flag.clone();
+        move || {
+            for line in &lines {
+                say(&command, line, limit);
+            }
+            flag.store(false, Ordering::SeqCst);
+        }
+    });
+    if spawned.is_err() {
+        flag.store(false, Ordering::SeqCst);
+    }
+}
+
+/// One sentence through the speech command; a command that outlives `limit` is killed.
+fn say(command: &[String], sentence: &str, limit: std::time::Duration) {
+    let Some((prog, args)) = command.split_first() else {
+        return;
+    };
+    let mut child = match Command::new(prog).args(args).arg(sentence).spawn() {
+        Ok(c) => c,
+        Err(e) => {
             tracing::warn!("daemon speech: cannot run {prog}: {e}");
+            return;
+        }
+    };
+    let end = std::time::Instant::now() + limit;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) if std::time::Instant::now() < end => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                tracing::warn!("daemon speech: {prog} did not finish in {limit:?}; killed it");
+                return;
+            }
+            Err(e) => {
+                tracing::warn!("daemon speech: {prog}: {e}");
+                return;
+            }
         }
     }
 }

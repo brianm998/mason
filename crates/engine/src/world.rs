@@ -3,8 +3,34 @@
 use mason_core::*;
 use std::collections::{BTreeMap, BTreeSet};
 
+static CLONES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// How many times a `World` has been deep-copied in this process. For tests that
+/// prove replay and snapshots do not copy.
+pub fn world_clones() -> usize {
+    CLONES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+impl Clone for World {
+    fn clone(&self) -> Self {
+        CLONES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        World {
+            now: self.now,
+            projects: self.projects.clone(),
+            tasks: self.tasks.clone(),
+            step_runs: self.step_runs.clone(),
+            decisions: self.decisions.clone(),
+            waits: self.waits.clone(),
+            open_runs: self.open_runs.clone(),
+            next_task: self.next_task,
+            next_run: self.next_run,
+            next_decision: self.next_decision,
+        }
+    }
+}
+
 /// Everything the reducer knows. Deterministic collections only.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq, Eq)]
 pub struct World {
     pub now: Timestamp,
     pub projects: BTreeMap<ProjectId, Project>,
@@ -12,6 +38,8 @@ pub struct World {
     pub step_runs: BTreeMap<StepRunId, StepRun>,
     pub decisions: BTreeMap<DecisionId, Decision>,
     pub waits: BTreeMap<TaskId, Wait>,
+    /// Task to its open step run, kept by `enter` and `leave`.
+    pub(crate) open_runs: BTreeMap<TaskId, StepRunId>,
     pub(crate) next_task: u64,
     pub(crate) next_run: u64,
     pub(crate) next_decision: u64,
@@ -41,42 +69,59 @@ impl World {
         }
     }
 
-    /// Release landed blockers and recompute every activity. Returns the
-    /// queued tasks that just became claimable.
-    pub(crate) fn refresh(&mut self, before: &BTreeMap<TaskId, Activity>) -> Vec<TaskId> {
-        let landed: BTreeSet<TaskId> = self
-            .tasks
-            .values()
-            .filter(|t| t.landed.is_some())
-            .map(|t| t.id)
-            .collect();
-        let ids: Vec<TaskId> = self.tasks.keys().copied().collect();
+    /// Release landed blockers and recompute every activity, changing only the
+    /// tasks that differ (no task is copied). Returns the queued tasks that just
+    /// became claimable, and every task it changed.
+    pub(crate) fn refresh(&mut self, changed: &mut Vec<TaskId>) -> Vec<TaskId> {
+        let mut updates: Vec<(TaskId, Option<BTreeSet<TaskId>>, Activity)> = vec![];
+        for t in self.tasks.values() {
+            let released = if t
+                .blockers
+                .iter()
+                .any(|b| self.tasks.get(b).is_some_and(|x| x.landed.is_some()))
+            {
+                let mut kept = t.blockers.clone();
+                kept.retain(|b| self.tasks.get(b).is_none_or(|x| x.landed.is_none()));
+                Some(kept)
+            } else {
+                None
+            };
+            let act = match &released {
+                Some(kept) => {
+                    let mut c = t.clone();
+                    c.blockers = kept.clone();
+                    self.derive_activity(&c)
+                }
+                None => self.derive_activity(t),
+            };
+            if released.is_some() || act != t.activity {
+                updates.push((t.id, released, act));
+            }
+        }
         let mut woken = vec![];
-        for id in ids {
-            let mut t = self.tasks.remove(&id).expect("id from keys");
-            t.blockers.retain(|b| !landed.contains(b));
-            let act = self.derive_activity(&t);
+        for (id, released, act) in updates {
+            let t = self.tasks.get_mut(&id).expect("id from tasks");
+            if let Some(kept) = released {
+                t.blockers = kept;
+            }
             if t.state == State::Queued
                 && act == Activity::Waiting(WaitReason::Slot)
-                && before.get(&id) != Some(&act)
+                && t.activity != act
             {
                 woken.push(id);
             }
             t.activity = act;
-            self.tasks.insert(id, t);
+            changed.push(id);
         }
         woken
     }
 
     pub fn open_run(&self, task: TaskId) -> Option<StepRunId> {
-        self.step_runs
-            .values()
-            .find(|r| r.task == task && r.outcome.is_none())
-            .map(|r| r.id)
+        self.open_runs.get(&task).copied()
     }
 
     pub(crate) fn leave(&mut self, task: TaskId, outcome: StepOutcome) -> bool {
-        match self.open_run(task) {
+        match self.open_runs.remove(&task) {
             Some(id) => {
                 self.step_runs.get_mut(&id).expect("open run").outcome = Some(outcome);
                 true
@@ -104,6 +149,7 @@ impl World {
         }
         t.state = step;
         t.step = name.to_string();
+        self.open_runs.insert(task, run);
         self.step_runs.insert(
             run,
             StepRun {
@@ -134,6 +180,16 @@ impl World {
 
     /// Structural invariants that must hold after every event.
     pub fn check_invariants(&self) -> Result<(), String> {
+        let mut scanned: BTreeMap<TaskId, StepRunId> = BTreeMap::new();
+        for r in self.step_runs.values().filter(|r| r.outcome.is_none()) {
+            scanned.entry(r.task).or_insert(r.id);
+        }
+        if scanned != self.open_runs {
+            return Err(format!(
+                "open-run index {:?} differs from the step runs {:?}",
+                self.open_runs, scanned
+            ));
+        }
         for t in self.tasks.values() {
             let id = t.id;
             if t.activity != self.derive_activity(t) {
