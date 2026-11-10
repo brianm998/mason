@@ -15,7 +15,7 @@ block() {
   echo "$begin"
   echo "Status: **pre-alpha**. What each stage note says it built (generated from \`docs/stages\` by \`scripts/gen-status.sh\` when a change lands; do not edit between the markers):"
   echo
-  for f in docs/stages/s[0-9][0-9].md; do
+  for f in docs/stages/s[0-9][0-9].md docs/stages/s[0-9][0-9][0-9].md; do
     [ -f "$f" ] || continue
     n=$(basename "$f" .md)
     sum=$(sed -n 's/^Summary:[[:space:]]*//p' "$f" | head -1)
