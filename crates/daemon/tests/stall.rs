@@ -54,3 +54,45 @@ fn off_by_default_threshold_is_thirty_minutes_and_zero_disables() {
     std::thread::sleep(Duration::from_secs(2));
     assert!(stalled(&d).is_none());
 }
+
+/// s118: a stall that lasts is reminded more than once, and acknowledging stops it.
+#[test]
+fn a_lasting_stall_hands_a_claiming_client_repeats_until_acknowledged() {
+    let s = Scratch::new("true", happy_script());
+    std::fs::write(
+        s.config_dir.join("notify.toml"),
+        "[stall]\nafter = \"1s\"\n[reminder]\nafter = \"1s\"\nrepeat = \"1s\"\n",
+    )
+    .unwrap();
+    let disk = FakeDisk::new_gb(12);
+    let d = s.start_with(|c| {
+        c.disk = Some(disk.clone());
+        c.disk_every = Duration::from_millis(50);
+    });
+    file_task(&d, "Waits for room");
+    wait_for("the stall alert", 30, || stalled(&d).is_some());
+
+    let poll = |keys: &mut Vec<String>| {
+        mason_daemon::attention::sync_alerts(&d);
+        mason_daemon::notify::tick(&d);
+        let got = mason_daemon::notify::claim(&d, "m1", false);
+        for a in got["announcements"].as_array().unwrap() {
+            keys.push(a["key"].as_str().unwrap().to_string());
+        }
+    };
+    let mut keys: Vec<String> = vec![];
+    wait_for("a reminder and a repeat", 30, || {
+        poll(&mut keys);
+        std::thread::sleep(Duration::from_millis(100));
+        keys.iter().filter(|k| k.contains(":reminder")).count() >= 2
+    });
+    let distinct: std::collections::BTreeSet<_> = keys.iter().collect();
+    assert_eq!(distinct.len(), keys.len(), "each announcement once: {keys:?}");
+
+    assert!(mason_daemon::notify::ack(&d, "stalled").unwrap());
+    poll(&mut keys); // anything already queued is taken here
+    let before = keys.len();
+    std::thread::sleep(Duration::from_millis(3500));
+    poll(&mut keys);
+    assert_eq!(keys.len(), before, "acknowledged: no more repeats: {keys:?}");
+}

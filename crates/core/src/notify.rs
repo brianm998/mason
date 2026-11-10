@@ -122,6 +122,11 @@ pub const ALERT_KINDS: &[&str] = &[
 /// check still owed). Every other kind in `ALERT_KINDS` has a route that makes noise.
 pub const MONITOR_ONLY: &[&str] = &["paused", "debt", "provider_hold"];
 
+/// Kinds that mean the whole pipeline has stopped: their reminder repeats every
+/// `Routing::repeat_ms` until the alert is acknowledged or clears. Every other kind is
+/// reminded once.
+pub const REPEATING: &[&str] = &["stalled", "disk"];
+
 /// A daily window in local minutes of the day, `start` up to but not including
 /// `end`; a window that ends before it starts runs over midnight.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -176,6 +181,8 @@ pub struct Routing {
     pub quiet: BTreeMap<Channel, QuietHours>,
     /// When the one reminder is due, from the alert's start.
     pub reminder_ms: u64,
+    /// How often the reminder of a `REPEATING` kind is repeated after the first; `0` is never.
+    pub repeat_ms: u64,
     /// How many times a failing delivery is tried, and the wait between tries.
     pub max_attempts: u32,
     pub retry_ms: u64,
@@ -246,6 +253,7 @@ impl Routing {
             by_kind,
             quiet: BTreeMap::new(),
             reminder_ms: 30 * MINUTE_MS,
+            repeat_ms: 120 * MINUTE_MS,
             max_attempts: 3,
             retry_ms: MINUTE_MS,
         }
@@ -262,6 +270,16 @@ impl Routing {
     /// Replace a condition's channels (the owner's choice).
     pub fn set(&mut self, kind: &str, rules: Vec<Rule>) {
         self.by_kind.insert(kind.to_string(), rules);
+    }
+
+    /// Which reminder round `now` is in for an alert that began at `since_ms`: 0 is the first
+    /// reminder; later rounds exist only for `REPEATING` kinds with a non-zero `repeat_ms`.
+    pub fn reminder_round(&self, kind: &str, since_ms: u64, now_ms: u64) -> u64 {
+        if self.repeat_ms == 0 || !REPEATING.contains(&kind) {
+            return 0;
+        }
+        let first = since_ms.saturating_add(self.reminder_ms);
+        now_ms.saturating_sub(first) / self.repeat_ms
     }
 
     pub fn is_quiet(&self, c: Channel, minute_of_day: u32) -> bool {
@@ -310,7 +328,8 @@ pub struct Attempt {
 /// What is due for a condition that is still true. Nothing for an acknowledged
 /// alert; each channel's initial notice once its delay has passed and it is not
 /// in quiet hours; and, once, a reminder on every channel that carried the
-/// initial notice, `reminder_ms` after the start. A delivery that failed is
+/// initial notice, `reminder_ms` after the start (and again every `repeat_ms` for the kinds in
+/// `REPEATING`, only where the initial notice arrived). A delivery that failed is
 /// tried again after `retry_ms`, up to `max_attempts` times, and then given up
 /// on: there are no loops. A notice that was never due before the alert cleared
 /// is never sent, because a cleared alert is not asked about.
@@ -325,11 +344,19 @@ pub fn due(
     if st.acked {
         return vec![];
     }
+    let round = r.reminder_round(kind, st.since_ms, now_ms);
+    // Attempts at or after this time belong to the current reminder round (all of them in round 0).
+    let round_start = if round == 0 {
+        0
+    } else {
+        st.since_ms + r.reminder_ms + round * r.repeat_ms
+    };
     let settled = |c: Channel, d: Delivery| -> Option<bool> {
         // Some(true): delivered. Some(false): given up on or waiting to retry. None: not tried.
+        let from = if d == Delivery::Reminder { round_start } else { 0 };
         let tries: Vec<&Attempt> = done
             .iter()
-            .filter(|a| a.channel == c && a.delivery == d)
+            .filter(|a| a.channel == c && a.delivery == d && a.at_ms >= from)
             .collect();
         if tries.iter().any(|a| a.ok) {
             return Some(true);
@@ -674,6 +701,85 @@ mod tests {
             100 * MINUTE_MS,
         ));
         assert!(due(&r, "needs_you", st(0), &done, 100_000 * MINUTE_MS, 0).is_empty());
+    }
+
+    fn heard(kind: &str, r: &Routing, done: &mut Vec<Attempt>, at: u64) -> Vec<(Channel, Delivery)> {
+        let d = due(r, kind, st(0), done, at, 0);
+        for (c, dl) in &d {
+            done.push(attempt(*c, *dl, true, at));
+        }
+        d
+    }
+
+    #[test]
+    fn stalled_repeats_at_each_interval_and_failed_does_not() {
+        let r = Routing::defaults();
+        assert_eq!(r.repeat_ms, 120 * MINUTE_MS);
+        for kind in ["stalled", "disk"] {
+            let mut done = vec![];
+            let first = heard(kind, &r, &mut done, 0);
+            assert!(first.iter().all(|x| x.1 == Delivery::Initial) && !first.is_empty());
+            heard(kind, &r, &mut done, 10 * MINUTE_MS); // the push escalation
+            let at = r.reminder_ms;
+            let rem = heard(kind, &r, &mut done, at);
+            assert!(!rem.is_empty() && rem.iter().all(|x| x.1 == Delivery::Reminder), "{kind}");
+            // Nothing between rounds.
+            assert!(due(&r, kind, st(0), &done, at + r.repeat_ms - 1, 0).is_empty());
+            for k in 1..4u64 {
+                let t = at + k * r.repeat_ms;
+                let again = heard(kind, &r, &mut done, t);
+                assert_eq!(again.len(), rem.len(), "{kind} round {k}");
+                assert!(heard(kind, &r, &mut done, t + 1).is_empty());
+            }
+        }
+        let mut done = vec![];
+        heard("failed", &r, &mut done, 0);
+        assert!(!heard("failed", &r, &mut done, r.reminder_ms).is_empty());
+        assert!(due(&r, "failed", st(0), &done, r.reminder_ms + 5 * r.repeat_ms, 0).is_empty());
+    }
+
+    #[test]
+    fn a_repeat_goes_only_where_the_first_notice_arrived() {
+        let r = Routing::defaults();
+        let done = vec![attempt(Channel::Sound, Delivery::Initial, true, 0)];
+        let d = due(&r, "stalled", st(0), &done, r.reminder_ms + r.repeat_ms, 0);
+        assert!(d.contains(&(Channel::Sound, Delivery::Reminder)));
+        assert!(d.iter().all(|x| x.1 == Delivery::Initial || x.0 == Channel::Sound));
+    }
+
+    #[test]
+    fn repeats_stop_when_acknowledged_and_wait_out_quiet_hours() {
+        let mut r = Routing::defaults();
+        let mut done = vec![];
+        heard("stalled", &r, &mut done, 0);
+        heard("stalled", &r, &mut done, r.reminder_ms);
+        let t = r.reminder_ms + r.repeat_ms;
+        let acked = AlertState {
+            since_ms: 0,
+            acked: true,
+        };
+        assert!(due(&r, "stalled", acked, &done, t, 0).is_empty());
+        r.quiet.insert(
+            Channel::Sound,
+            QuietHours {
+                start: 22 * 60,
+                end: 7 * 60,
+            },
+        );
+        let d = due(&r, "stalled", st(0), &done, t, 23 * 60);
+        assert!(d.iter().all(|x| x.0 != Channel::Sound));
+        let d = due(&r, "stalled", st(0), &done, t, 12 * 60);
+        assert!(d.contains(&(Channel::Sound, Delivery::Reminder)));
+    }
+
+    #[test]
+    fn repeat_zero_is_one_reminder_then_silence() {
+        let mut r = Routing::defaults();
+        r.repeat_ms = 0;
+        let mut done = vec![];
+        heard("stalled", &r, &mut done, 0);
+        assert!(!heard("stalled", &r, &mut done, r.reminder_ms).is_empty());
+        assert!(due(&r, "stalled", st(0), &done, 100_000 * MINUTE_MS, 0).is_empty());
     }
 
     #[test]

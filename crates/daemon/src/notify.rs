@@ -166,6 +166,9 @@ pub fn parse(src: &str) -> Result<Settings, String> {
                 if let Some(v) = t.get("after") {
                     s.routing.reminder_ms = span(v, "reminder.after")?;
                 }
+                if let Some(v) = t.get("repeat") {
+                    s.routing.repeat_ms = span(v, "reminder.repeat")?;
+                }
                 if let Some(v) = t.get("retry") {
                     s.routing.retry_ms = span(v, "reminder.retry")?;
                 }
@@ -347,7 +350,7 @@ fn attempts(rows: &[DeliveryRow]) -> Vec<Attempt> {
         .filter_map(|r| {
             Some(Attempt {
                 channel: Channel::parse(&r.channel)?,
-                delivery: if r.delivery == "reminder" {
+                delivery: if r.delivery.starts_with("reminder") {
                     Delivery::Reminder
                 } else {
                     Delivery::Initial
@@ -379,7 +382,7 @@ fn record_played(d: &Daemon, rows: &[AnnouncementRow], speech_only: bool, now: u
         let Some((key, since, delivery, flags)) = parse_alert_key(&r.key) else {
             continue;
         };
-        let dl = if delivery == "reminder" {
+        let dl = if delivery.starts_with("reminder") {
             Delivery::Reminder
         } else {
             Delivery::Initial
@@ -471,6 +474,12 @@ pub fn tick_at(d: &Arc<Daemon>, now: u64) {
                 continue;
             }
             let reminder = delivery == Delivery::Reminder;
+            // A repeat is its own announcement: the round number keeps it from being taken for
+            // the one already played. Round 0 keeps the plain name.
+            let label = match n::Routing::reminder_round(&settings.routing, &a.kind, a.since, now) {
+                k if reminder && k > 0 => format!("reminder{k}"),
+                _ => delivery.name().to_string(),
+            };
             let line = n::sentence(&a.kind, &subject, &detail, reminder);
             let (sound, speech) = (
                 these.contains(&Channel::Sound),
@@ -481,7 +490,7 @@ pub fn tick_at(d: &Arc<Daemon>, now: u64) {
                     "alert:{}:{}:{}:{}{}",
                     a.key,
                     a.since,
-                    delivery.name(),
+                    label,
                     u8::from(sound),
                     u8::from(speech)
                 );
@@ -850,6 +859,8 @@ pub fn status(d: &Daemon) -> Value {
         "error": err,
         "routing": n::CONDITIONS.iter().map(|k| json!({"condition": k, "rules": rules(k)})).collect::<Vec<_>>(),
         "reminder_after_s": s.routing.reminder_ms / 1000,
+        "reminder_repeat_s": s.routing.repeat_ms / 1000,
+        "repeating": n::REPEATING,
         "daemon_speech": s.daemon_speech && !s.speech_command.is_empty(),
         "configured": {"email": s.email.is_some(), "push": s.ntfy.is_some(), "webhook": s.webhook.is_some()},
         "speaker": *d.notify.speaker.lock().unwrap_or_else(|e| e.into_inner()),
@@ -892,6 +903,7 @@ sound = "22:00-07:00"
 push = "23:30-06:00"
 [reminder]
 after = "45m"
+repeat = "3h"
 [speech]
 daemon = true
 command = ["say", "-v", "Samantha"]
@@ -919,6 +931,9 @@ password = "pw"
         assert!(r.iter().all(|x| x.channel != Channel::Speech));
         assert!(s.routing.is_quiet(Channel::Sound, 23 * 60));
         assert_eq!(s.routing.reminder_ms, 45 * n::MINUTE_MS);
+        assert_eq!(s.routing.repeat_ms, 180 * n::MINUTE_MS);
+        assert_eq!(parse("[reminder]\nrepeat = 0\n").unwrap().routing.repeat_ms, 0);
+        assert_eq!(parse("").unwrap().routing.repeat_ms, 120 * n::MINUTE_MS);
         assert_eq!(s.speech_command, vec!["say", "-v", "Samantha"]);
         assert_eq!(s.ntfy.unwrap().0, "https://ntfy.sh");
         let e = s.email.unwrap();
