@@ -11,7 +11,7 @@ cd "$(git rev-parse --show-toplevel)"
 root=$(mktemp -d /tmp/mason-s88.XXXXXX); daemon=""
 cleanup() {
   [ -n "$daemon" ] && kill -9 "$daemon" 2>/dev/null || true
-  for hd in "$root"/d/h; do target/debug/step-host-ctl reap "$hd" >/dev/null 2>&1 || true; done
+  for hd in "$root"/d/h; do target/debug/step-host-ctl reap "$hd" >/dev/null 2>&1; done
   rm -rf "$root"
 }
 trap cleanup EXIT
@@ -19,7 +19,12 @@ cargo build -q --workspace --bins
 bin=target/debug
 owner=${USER:-owner}
 m() { "$bin/mason" --data-dir "$root/d" --config-dir "$root/c" "$@"; }
-fail() { echo "FAIL: $*" >&2; m alerts >&2 || true; tail -20 "$root/masond.log" >&2 || true; exit 1; }
+fail() {
+  echo "FAIL: $*" >&2
+  if ! m alerts >&2; then echo "(mason alerts failed too)" >&2; fi
+  tail -20 "$root/masond.log" >&2
+  exit 1
+}
 wait_for() {  # SECONDS WHAT CMD...
   local end=$((SECONDS + $1)) what=$2; shift 2
   until "$@" >/dev/null 2>&1; do [ $SECONDS -lt $end ] || fail "timed out waiting for $what"; sleep 0.3; done

@@ -78,7 +78,47 @@ pub const CONDITIONS: &[&str] = &[
     "credentials",
     "provider_outage",
     "landed",
+    "disk",
+    "environment",
+    "blocked",
+    "host_lost",
+    "runtime",
+    "definition",
+    "tracker",
+    "provider_limit",
+    "provider_overage",
+    "provider_budget",
 ];
+
+/// Every alert kind the daemon raises. Add a new kind here when it is raised, and give it a route
+/// in `Routing::defaults` or name it in `MONITOR_ONLY`: a test fails until one of the two is done.
+pub const ALERT_KINDS: &[&str] = &[
+    "needs_you",
+    "failed",
+    "landing",
+    "landed",
+    "daemon_down",
+    "credentials",
+    "provider_outage",
+    "provider_limit",
+    "provider_overage",
+    "provider_budget",
+    "provider_hold",
+    "disk",
+    "environment",
+    "blocked",
+    "host_lost",
+    "runtime",
+    "definition",
+    "tracker",
+    "paused",
+    "debt",
+];
+
+/// Kinds that are deliberately shown on the monitor and nothing else: the owner did these
+/// themselves (`paused`, `provider_hold` set by hand) or they stop nothing (`debt`: a skipped
+/// check still owed). Every other kind in `ALERT_KINDS` has a route that makes noise.
+pub const MONITOR_ONLY: &[&str] = &["paused", "debt", "provider_hold"];
 
 /// A daily window in local minutes of the day, `start` up to but not including
 /// `end`; a window that ends before it starts runs over midnight.
@@ -170,7 +210,24 @@ impl Routing {
             rule(Push, 10),
         ];
         put("failed", broke.clone());
+        // Conditions that stop work, or the pipeline: the same as `failed`.
+        for k in [
+            "disk",
+            "environment",
+            "blocked",
+            "host_lost",
+            "runtime",
+            "definition",
+            "tracker",
+            "provider_limit",
+            "provider_overage",
+            "provider_budget",
+        ] {
+            put(k, broke.clone());
+        }
         put("landing", broke); // the base branch is frozen, or a landing is stuck
+                               // `paused`, `debt` and `provider_hold` (see `MONITOR_ONLY`) are left unrouted on purpose:
+                               // the owner did them, or they stop nothing. `rules` gives them the monitor alone.
         let everything = vec![
             rule(Monitor, 0),
             rule(Sound, 0),
@@ -342,7 +399,10 @@ pub fn sound_for(kind: &str) -> Sound {
     match kind {
         "needs_you" => Sound::Decision,
         "failed" | "landing" | "daemon_down" | "credentials" | "provider_outage"
-        | "environment" | "runtime" | "definition" | "disk" | "git_stuck" => Sound::Broke,
+        | "environment" | "runtime" | "definition" | "disk" | "blocked" | "host_lost"
+        | "tracker" | "provider_limit" | "provider_overage" | "provider_budget" | "git_stuck" => {
+            Sound::Broke
+        }
         _ => Sound::Info,
     }
 }
@@ -457,6 +517,52 @@ mod tests {
             permanent: false,
             at_ms: at,
         }
+    }
+
+    #[test]
+    fn every_raised_kind_is_routed_or_named_monitor_only() {
+        let r = Routing::defaults();
+        for k in ALERT_KINDS {
+            let routed = r.by_kind.contains_key(*k);
+            let mon = MONITOR_ONLY.contains(k);
+            assert!(routed != mon, "{k} must be routed xor named monitor-only");
+            if mon {
+                assert_eq!(r.rules(k), vec![rule(Channel::Monitor, 0)], "{k}");
+                assert!(!CONDITIONS.contains(k), "{k}");
+            } else {
+                assert!(CONDITIONS.contains(k), "{k} missing from CONDITIONS");
+            }
+        }
+        for k in CONDITIONS {
+            assert!(ALERT_KINDS.contains(k), "{k} not in ALERT_KINDS");
+        }
+    }
+
+    #[test]
+    fn disk_makes_sound_and_speech_at_once_and_pushes_after_ten_minutes() {
+        assert_eq!(
+            channels("disk"),
+            vec![
+                (Channel::Monitor, 0),
+                (Channel::Sound, 0),
+                (Channel::Speech, 0),
+                (Channel::Push, 10)
+            ]
+        );
+        assert_eq!(sound_for("disk"), Sound::Broke);
+        let r = Routing::defaults();
+        let now = 5_000_000;
+        let s = st(now);
+        let first = due(&r, "disk", s, &[], now, 0);
+        assert_eq!(
+            first,
+            vec![
+                (Channel::Sound, Delivery::Initial),
+                (Channel::Speech, Delivery::Initial)
+            ]
+        );
+        let later = due(&r, "disk", s, &[], now + 10 * MINUTE_MS, 0);
+        assert!(later.contains(&(Channel::Push, Delivery::Initial)));
     }
 
     fn channels(kind: &str) -> Vec<(Channel, u64)> {
