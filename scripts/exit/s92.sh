@@ -8,7 +8,7 @@ cd "$(git rev-parse --show-toplevel)"
 root=$(mktemp -d /tmp/mason-s92.XXXXXX); daemon=""
 cleanup() {
   [ -n "$daemon" ] && kill -9 "$daemon" 2>/dev/null || true
-  target/debug/step-host-ctl reap "$root/d/h" >/dev/null 2>&1 || true
+  for hd in "$root"/d/h; do target/debug/step-host-ctl reap "$hd" >/dev/null 2>&1; done
   rm -rf "$root"
 }
 trap cleanup EXIT
