@@ -99,11 +99,13 @@ impl Scan {
 }
 
 fn blob(repo: &Path, object: &str) -> Option<Vec<u8>> {
-    let out = Command::new("git")
-        .args(["cat-file", "blob", object])
-        .current_dir(repo)
-        .output()
-        .ok()?;
+    let out = mason_landing::proc::output(
+        Command::new("git")
+            .args(["cat-file", "blob", object])
+            .current_dir(repo),
+        mason_landing::git::default_deadline(),
+    )
+    .ok()?;
     out.status.success().then_some(out.stdout)
 }
 
@@ -113,19 +115,20 @@ pub fn scan_commit(repo: &Path, commit: &str) -> Scan {
         commit: commit.to_string(),
         extensions: vec![],
     };
-    let Ok(out) = Command::new("git")
-        .args([
-            "ls-tree",
-            "-r",
-            "-z",
-            "--full-tree",
-            commit,
-            "--",
-            &format!("{DIR}/"),
-        ])
-        .current_dir(repo)
-        .output()
-    else {
+    let Ok(out) = mason_landing::proc::output(
+        Command::new("git")
+            .args([
+                "ls-tree",
+                "-r",
+                "-z",
+                "--full-tree",
+                commit,
+                "--",
+                &format!("{DIR}/"),
+            ])
+            .current_dir(repo),
+        mason_landing::git::default_deadline(),
+    ) else {
         return scan;
     };
     if !out.status.success() {
