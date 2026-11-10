@@ -570,11 +570,7 @@ pub fn tick_at(d: &Arc<Daemon>, now: u64) {
             Settings::default()
         }
     };
-<<<<<<< HEAD
-    let now = now_ms();
     flush_sent(d);
-=======
->>>>>>> origin/develop
     prune(d, now);
     let minute = if settings.routing.quiet.is_empty() {
         0
@@ -631,26 +627,14 @@ pub fn tick_at(d: &Arc<Daemon>, now: u64) {
                     u8::from(sound),
                     u8::from(speech)
                 );
-<<<<<<< HEAD
-                // The queue lives in the store. If it cannot be written nothing is recorded as
-                // said, and the same line is queued, once, when writes work again.
-                let queued = !refused(d)
-                    && d.store
-                        .enqueue_announcement(&key, &a.kind, &line, sound, speech, now)
-                        .is_ok();
-                if queued {
-                    for (c, on) in [(Channel::Sound, sound), (Channel::Speech, speech)] {
-                        if on {
-                            record(d, &a.key, a.since, c, delivery, Ok(()), now);
-                        }
-                    }
-                }
-=======
                 // Queuing is not delivery: it is recorded when a monitor or the daemon plays it.
-                let _ = d
-                    .store
-                    .enqueue_announcement(&key, &a.kind, &line, sound, speech, now);
->>>>>>> origin/develop
+                // While the store refuses writes nothing is queued; the same line is queued,
+                // once, when writes work again.
+                if !refused(d) {
+                    let _ = d
+                        .store
+                        .enqueue_announcement(&key, &a.kind, &line, sound, speech, now);
+                }
             }
             for c in these.into_iter().filter(|c| c.remote()) {
                 let m = Message {

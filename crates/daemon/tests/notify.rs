@@ -469,7 +469,6 @@ fn a_disk_below_the_floor_is_announced_with_sound_and_speech_once() {
     assert_eq!(disk[0]["sound_name"], "broke");
 }
 
-<<<<<<< HEAD
 #[test]
 fn the_disk_alert_survives_a_store_that_refuses_writes_and_is_delivered_once() {
     let (url, got) = receiver();
@@ -517,7 +516,8 @@ fn the_disk_alert_survives_a_store_that_refuses_writes_and_is_delivered_once() {
     assert_eq!(got.lock().unwrap().len(), 1, "nothing announced twice");
     assert_eq!(notify::unrecorded_deliveries(&d), 0);
     assert_eq!(d.store.deliveries_for("disk", since).unwrap().len(), 1);
-=======
+}
+
 // ---- delivery is a monitor playing it -------------------------------------------------
 
 const HOUR: u64 = 3_600_000;
@@ -599,5 +599,4 @@ fn a_muted_claim_gets_nothing_and_records_nothing() {
     let m = notify::claim_at(&d, "quiet", true, since + 3 * HOUR);
     assert_eq!(count(&m), 0);
     assert!(played(&d).is_empty());
->>>>>>> origin/develop
 }
