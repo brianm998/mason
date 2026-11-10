@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- The watchdog outside masond: runs scripts/mason-watchdog.sh once a minute and says when the
+     daemon is down, hung or crash-looping. Edit the two paths (the script and the log), and the
+     Label if you like; docs/self-hosting.md ("The watchdog") has the install commands. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.example.mason-watchdog</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/path/to/mason/scripts/mason-watchdog.sh</string>
+  </array>
+  <key>StartInterval</key><integer>60</integer>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>/tmp/mason-watchdog.log</string>
+  <key>StandardErrorPath</key><string>/tmp/mason-watchdog.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/usr/bin:/bin</string>
+  </dict>
+</dict>
+</plist>

@@ -90,6 +90,35 @@ pub fn check_path_command(out: &mut Vec<Finding>) {
     }
 }
 
+/// Is some launchd agent (or systemd user unit) running `mason-watchdog.sh`? Only a note when
+/// not: the watchdog is optional, but it is the one thing that can say the daemon is dead.
+pub fn check_watchdog(dirs: &[PathBuf], out: &mut Vec<Finding>) {
+    let found = dirs.iter().any(|d| {
+        std::fs::read_dir(d)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|e| {
+                std::fs::read_to_string(e.path()).is_ok_and(|t| t.contains("mason-watchdog.sh"))
+            })
+    });
+    if found {
+        out.push(ok("the watchdog (mason-watchdog.sh) is installed"));
+    } else {
+        out.push(note("the watchdog is not installed: if masond dies or hangs with no monitor open, nobody is told. See \"The watchdog\" in docs/self-hosting.md"));
+    }
+}
+
+fn watchdog_dirs() -> Vec<PathBuf> {
+    let Some(h) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return vec![];
+    };
+    vec![
+        h.join("Library/LaunchAgents"),
+        h.join(".config/systemd/user"),
+    ]
+}
+
 fn on_path(name: &str) -> Option<PathBuf> {
     std::env::var_os("PATH").and_then(|p| {
         std::env::split_paths(&p)
@@ -480,6 +509,7 @@ pub fn run(data_dir: &Path, config_dir: &Path) -> Vec<Finding> {
     }
 
     check_path_command(&mut out);
+    check_watchdog(&watchdog_dirs(), &mut out);
     let exe = std::env::current_exe().unwrap_or_default();
     for b in ["masond", "step-host", "mason-mcp"] {
         let p = exe.with_file_name(b);
@@ -675,6 +705,22 @@ mod tests {
                 .any(|x| x.contains("account b: adapter codex, billing subscription, projects p")),
             "{t:?}"
         );
+    }
+
+    #[test]
+    fn the_watchdog_is_noted_when_not_installed() {
+        let d = tempfile::tempdir().unwrap();
+        let mut out = vec![];
+        check_watchdog(&[d.path().to_path_buf()], &mut out);
+        assert!(matches!(out[0].level, Level::Note), "{}", out[0].text);
+        std::fs::write(
+            d.path().join("w.plist"),
+            "<string>/x/scripts/mason-watchdog.sh</string>",
+        )
+        .unwrap();
+        let mut out = vec![];
+        check_watchdog(&[d.path().to_path_buf()], &mut out);
+        assert!(matches!(out[0].level, Level::Ok));
     }
 
     #[test]
