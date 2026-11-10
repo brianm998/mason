@@ -111,6 +111,27 @@ final class SpeechTests: XCTestCase {
         XCTAssertTrue(sink.log.isEmpty)
     }
 
+    func testTheDefaultsSpeakDisk() {
+        let sink = FakeSink()
+        let a = announcer(sink)
+        a.enqueue(ann("1", "disk", "Disk nearly full."))
+        XCTAssertEqual(sink.log, ["sound:Basso"])
+    }
+
+    func testASavedListGainsTheNewKindsOnceAndALaterUntickStays() {
+        let prefs = MemoryPreferences()
+        prefs.setString("failed,landed,needs_you", for: "speech.kinds")
+        let sink = FakeSink()
+        let a = Announcer(sink: sink, preferences: prefs)
+        XCTAssertTrue(a.settings.kinds.contains("disk"))
+        XCTAssertTrue(a.settings.kinds.contains("provider_budget"))
+        XCTAssertFalse(a.settings.kinds.contains("credentials"), "only the new kinds are added")
+        a.settings.kinds.remove("disk")
+        let again = Announcer(sink: sink, preferences: prefs)
+        XCTAssertFalse(again.settings.kinds.contains("disk"))
+        XCTAssertTrue(again.settings.kinds.contains("tracker"))
+    }
+
     func testVoiceAndSoundsAreConfigurableAndRemembered() {
         let prefs = MemoryPreferences()
         let sink = FakeSink()

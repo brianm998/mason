@@ -346,7 +346,12 @@ fn main() {
         }
         let mut input = String::new();
         let _ = std::io::stdin().read_to_string(&mut input);
-        if let Some(out) = resources::hook_bash(&input, &needs) {
+        // The rewritten command runs in a shell that may not have `mason` on its PATH.
+        let mason = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.to_str().map(String::from))
+            .unwrap_or_else(|| "mason".into());
+        if let Some(out) = resources::hook_bash(&input, &needs, &mason) {
             println!("{out}");
         }
         return;
