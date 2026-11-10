@@ -471,6 +471,7 @@ pub fn alerts_now(d: &Daemon) -> Vec<(String, String, String)> {
             ));
         }
     }
+    out.extend(git_stuck_alert(d));
     for p in d.store.pauses(now_ms()).unwrap_or_default() {
         let scope = if p.project.is_empty() {
             "everything"
@@ -494,6 +495,41 @@ pub fn alerts_now(d: &Daemon) -> Vec<(String, String, String)> {
         ));
     }
     out
+}
+
+/// The definitions thread (watch, fetch, admit) has not finished a pass for too long: git or the
+/// repository lock is stuck. Reads an atomic and the lock labels; never waits on git or a repository
+/// lock itself.
+fn git_stuck_alert(d: &Daemon) -> Option<(String, String, String)> {
+    let now = now_ms();
+    let ended = d
+        .defs_pass_ended_ms
+        .load(std::sync::atomic::Ordering::SeqCst);
+    let limit = (d.cfg.stuck_after + d.cfg.reload_interval).as_millis() as u64;
+    let age = now.saturating_sub(ended);
+    if age <= limit {
+        return None;
+    }
+    let mut text = format!(
+        "Git work is stuck: the last pass over the repositories ended {} ago",
+        span_text(age)
+    );
+    if let Some((label, since)) = d.repo_lock_holders().into_iter().min_by_key(|h| h.1) {
+        text.push_str(&format!(
+            "; the repository lock has been held by {label} for {}",
+            span_text(now.saturating_sub(since))
+        ));
+    }
+    Some(("git-stuck".into(), "git_stuck".into(), text))
+}
+
+fn span_text(ms: u64) -> String {
+    let s = ms / 1000;
+    if s >= 120 {
+        format!("{} minutes", s / 60)
+    } else {
+        format!("{s} seconds")
+    }
 }
 
 /// Raise new alerts and clear the ones whose condition is gone.

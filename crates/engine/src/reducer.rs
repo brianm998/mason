@@ -57,32 +57,96 @@ fn name(k: &EventKind) -> &'static str {
     }
 }
 
+/// What one event changed, so a store can write just those rows.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Touched {
+    pub projects: Vec<ProjectId>,
+    pub tasks: Vec<TaskId>,
+    pub decisions: Vec<DecisionId>,
+}
+
 /// The pure transition function. On error the input world is untouched.
 pub fn reduce(world: &World, event: &Event) -> Result<(World, Vec<Effect>), ReduceError> {
     let mut w = world.clone();
+    let (fx, _) = reduce_in_place(&mut w, event)?;
+    Ok((w, fx))
+}
+
+/// The same transition applied to `w` itself, with no copy. On error `w` is
+/// exactly as it was: every refusal happens before any change.
+pub fn reduce_in_place(
+    w: &mut World,
+    event: &Event,
+) -> Result<(Vec<Effect>, Touched), ReduceError> {
     let mut fx = Vec::new();
+    let old_now = w.now;
     if event.at > w.now {
         w.now = event.at;
     }
-    let before: BTreeMap<TaskId, Activity> = w
-        .tasks
-        .values()
-        .map(|t| (t.id, t.activity.clone()))
-        .collect();
-    let state_before: BTreeMap<TaskId, State> = w.tasks.values().map(|t| (t.id, t.state)).collect();
-    apply(&mut w, &event.kind, &mut fx)?;
-    // The only writer of `state_entered_at`: any task whose state differs from
-    // before (or is new) entered its present state now.
+    let mut touched = Touched::default();
+    let subject = match &event.kind {
+        EventKind::TaskFiled { .. } => Some(TaskId(w.next_task)),
+        k => task_of(k),
+    };
+    match &event.kind {
+        EventKind::ProjectRegistered { project, .. } => touched.projects.push(*project),
+        EventKind::QuestionAsked { .. } => touched.decisions.push(DecisionId(w.next_decision)),
+        EventKind::Answered { decision, .. } => touched.decisions.push(*decision),
+        _ => {}
+    }
+    let state_before = subject.and_then(|id| w.tasks.get(&id).map(|t| t.state));
+    if let Err(e) = apply(w, &event.kind, &mut fx) {
+        w.now = old_now;
+        return Err(e);
+    }
+    // The only writer of `state_entered_at`: a task whose state differs from
+    // before (or is new) entered its present state now. Only the event's own
+    // task can change state.
     let now = w.now;
-    for t in w.tasks.values_mut() {
-        if state_before.get(&t.id) != Some(&t.state) {
-            t.state_entered_at = now;
+    if let Some(id) = subject {
+        if let Some(t) = w.tasks.get_mut(&id) {
+            if state_before != Some(t.state) {
+                t.state_entered_at = now;
+            }
+            touched.tasks.push(id);
         }
     }
-    for task in w.refresh(&before) {
+    for task in w.refresh(&mut touched.tasks) {
         fx.push(Effect::WakeScheduler { task });
     }
-    Ok((w, fx))
+    touched.tasks.sort();
+    touched.tasks.dedup();
+    Ok((fx, touched))
+}
+
+/// The task an event is about, if it names one.
+fn task_of(k: &EventKind) -> Option<TaskId> {
+    use EventKind::*;
+    match k {
+        ProjectRegistered { .. } | TaskFiled { .. } | Tick => None,
+        Approved { task }
+        | Rejected { task }
+        | Admitted { task, .. }
+        | StepSucceeded { task, .. }
+        | SentBack { task, .. }
+        | ExplorationRequested { task, .. }
+        | QuestionAsked { task, .. }
+        | Answered { task, .. }
+        | StepFailed { task, .. }
+        | Retried { task, .. }
+        | ExploreAnyway { task, .. }
+        | Canceled { task, .. }
+        | ClosedNoChange { task, .. }
+        | Paused { task }
+        | Resumed { task }
+        | WaitStarted { task, .. }
+        | WaitEnded { task }
+        | BlockerAdded { task, .. }
+        | BlockerRemoved { task, .. }
+        | BlockersChanged { task, .. }
+        | Revived { task }
+        | TrackerEdited { task, .. } => Some(*task),
+    }
 }
 
 /// How far along the graph a category is. A step may be followed by one in the
@@ -511,22 +575,18 @@ fn apply(w: &mut World, k: &EventKind, fx: &mut Vec<Effect>) -> Result<(), Reduc
             for a in added {
                 get(w, *a)?;
             }
-            // Work on a copy so a refusal part-way leaves the world untouched.
-            let mut next = w.clone();
+            // Change in place, and put the blockers back if a cycle refuses part-way.
+            let saved = get(w, *task)?.blockers.clone();
             for r in released {
-                next.tasks.get_mut(task).expect("exists").blockers.remove(r);
+                w.tasks.get_mut(task).expect("exists").blockers.remove(r);
             }
             for a in added {
-                if let Some(path) = would_cycle(&next, *task, *a) {
+                if let Some(path) = would_cycle(w, *task, *a) {
+                    w.tasks.get_mut(task).expect("exists").blockers = saved;
                     return Err(ReduceError::BlockerCycle(path));
                 }
-                next.tasks
-                    .get_mut(task)
-                    .expect("exists")
-                    .blockers
-                    .insert(*a);
+                w.tasks.get_mut(task).expect("exists").blockers.insert(*a);
             }
-            *w = next;
         }
         E::Revived { task } => {
             let t = get(w, *task)?;
