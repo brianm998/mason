@@ -689,6 +689,7 @@ pub fn session_for(d: &Daemon, task: TaskId) -> Result<Value, String> {
                 .filter(|_| {
                     !h.info.id.ends_with("-test")
                         && !h.info.id.ends_with("-cmd")
+                        && !h.info.id.contains("-check")
                         && !h.info.id.contains("-u-")
                         && !h.info.id.contains("-r-")
                         && !h.info.id.contains("-b-")
