@@ -18,7 +18,12 @@ cargo build -q --workspace --bins
 bin=target/debug
 owner=${USER:-owner}
 m() { "$bin/mason" --data-dir "$root/d" --config-dir "$root/c" "$@"; }
-fail() { echo "FAILED: $*" >&2; m alerts >&2 2>&1 || true; tail -20 "$root/masond.log" >&2 || true; exit 1; }
+fail() {
+  echo "FAILED: $*" >&2
+  if m alerts >&2 2>&1; then :; else echo "(mason alerts failed)" >&2; fi
+  if [ -f "$root/masond.log" ]; then tail -20 "$root/masond.log" >&2; fi
+  exit 1
+}
 add() { m task add "$1" --project web --body "${2:-do it}" | sed -n 's/^Filed task #\([0-9]*\) .*/\1/p'; }
 num() { m task show "$1" | sed -n "s/^  number    $2 \([0-9]*\):.*/\1/p"; }
 start_daemon() {
@@ -26,7 +31,11 @@ start_daemon() {
   daemon=$!
   until m status >/dev/null 2>&1; do kill -0 "$daemon" || { cat "$root/masond.log" >&2; exit 1; }; sleep 0.1; done
 }
-stop_daemon() { kill "$daemon" 2>/dev/null || true; wait "$daemon" 2>/dev/null || true; daemon=""; }
+stop_daemon() {
+  if kill -0 "$daemon" 2>/dev/null; then kill "$daemon"; fi
+  if wait "$daemon" 2>/dev/null; then :; else echo "daemon exited nonzero after SIGTERM" >&2; fi
+  daemon=""
+}
 ci="git -c user.name=t -c user.email=t@t"
 
 echo "== setup: a bare origin and a scripted agent"
