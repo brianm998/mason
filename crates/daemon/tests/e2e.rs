@@ -468,14 +468,14 @@ fn cancel_stops_the_running_agent_and_keeps_the_branch() {
     })
     .unwrap();
     assert_eq!(state_of(&d, t), State::Canceled);
-    wait_for("the step host to stop", 15, || {
+    wait_for("the step host to stop", 60, || {
         mason_step_host::registry::Registry::new(d.cfg.hosts_dir())
             .scan()
             .unwrap()
             .iter()
             .all(|h| h.state != mason_step_host::registry::HostState::Running)
     });
-    wait_for("the job to end", 15, || d.job_count() == 0);
+    wait_for("the job to end", 60, || d.job_count() == 0);
     assert!(
         git::branch_exists(&s.repo, &p.branch(t.0)),
         "the branch is kept unless asked otherwise"

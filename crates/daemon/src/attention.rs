@@ -432,6 +432,7 @@ pub fn alerts_now(d: &Daemon) -> Vec<(String, String, String)> {
         }
     }
     out.extend(git_stuck_alert(d));
+    out.extend(stalled_alert(d, &w));
     for p in d.store.pauses(now_ms()).unwrap_or_default() {
         let scope = if p.project.is_empty() {
             "everything"
@@ -481,6 +482,138 @@ fn git_stuck_alert(d: &Daemon) -> Option<(String, String, String)> {
         ));
     }
     Some(("git-stuck".into(), "git_stuck".into(), text))
+}
+
+/// The pipeline as a whole has stopped getting anywhere.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Stall {
+    /// How long nothing has moved: no event appended and no step output.
+    pub quiet_ms: u64,
+    /// The tasks that are outstanding and could be moving.
+    pub tasks: Vec<TaskId>,
+}
+
+/// Is this task work the pipeline owes, as opposed to something waiting on a person, a blocker, a
+/// pause or a clock?
+fn outstanding(t: &Task, now_ms: u64) -> bool {
+    if matches!(
+        t.state,
+        State::Proposed | State::NeedsAttention | State::Failed
+    ) || t.state.is_terminal()
+    {
+        return false;
+    }
+    match &t.activity {
+        Activity::Idle | Activity::Held(_) | Activity::Paused => false,
+        Activity::Waiting(WaitReason::Owner) => false,
+        Activity::Waiting(WaitReason::NotBefore(at)) => at.0 <= now_ms,
+        Activity::Waiting(_) | Activity::Running => true,
+    }
+}
+
+/// Decide whether the pipeline is stalled: some task is outstanding, and neither an event
+/// (`last_event_ms`, 0 if there is none) nor any running step's output (`outputs`) is newer than
+/// `stall_after_ms` ago. `stall_after_ms == 0` is off. Pure: the clock is an argument.
+pub fn stall_check(
+    tasks: &[&Task],
+    last_event_ms: u64,
+    outputs: &[u64],
+    now_ms: u64,
+    stall_after_ms: u64,
+) -> Option<Stall> {
+    if stall_after_ms == 0 || last_event_ms == 0 {
+        return None;
+    }
+    let owed: Vec<TaskId> = tasks
+        .iter()
+        .filter(|t| outstanding(t, now_ms))
+        .map(|t| t.id)
+        .collect();
+    if owed.is_empty() {
+        return None;
+    }
+    let last = outputs.iter().copied().fold(last_event_ms, u64::max);
+    let quiet_ms = now_ms.saturating_sub(last);
+    (quiet_ms >= stall_after_ms).then_some(Stall {
+        quiet_ms,
+        tasks: owed,
+    })
+}
+
+/// The words for a stall: how long, how many tasks, and the reasons already known.
+pub fn stall_text(s: &Stall, reasons: &[String]) -> String {
+    let n = s.tasks.len();
+    let mut text = format!(
+        "The pipeline has stopped moving: no event or step output for {}, with {n} task{} unfinished",
+        span_text(s.quiet_ms),
+        if n == 1 { "" } else { "s" }
+    );
+    if reasons.is_empty() {
+        text.push_str(". Nothing known explains it; look at what is running");
+    } else {
+        text.push_str(&format!(". Likely: {}", reasons.join("; ")));
+    }
+    text
+}
+
+/// `stalled`: raised from the event log's last timestamp, the live progress records, the task
+/// list and the scheduler's own answers. It touches no git and no repository lock.
+fn stalled_alert(d: &Daemon, w: &mason_engine::World) -> Option<(String, String, String)> {
+    let after = crate::notify::load(d).unwrap_or_default().stall_ms;
+    if after == 0 {
+        return None;
+    }
+    let last = d.store.last_seq().ok().filter(|s| *s > 0)?;
+    let last_event = d
+        .store
+        .read_since(last - 1, 1)
+        .ok()?
+        .into_iter()
+        .next()?
+        .event
+        .at
+        .0;
+    let tasks: Vec<&Task> = w.tasks.values().collect();
+    let stall = stall_check(
+        &tasks,
+        last_event,
+        &d.progress_last_outputs(),
+        now_ms(),
+        after,
+    )?;
+    let mut reasons: Vec<String> = vec![];
+    if let Some((_, _, text)) = disk_alert(d, w) {
+        reasons.push(text);
+    }
+    let now = now_ms();
+    for h in d.store.account_holds().unwrap_or_default() {
+        if h.until_ms.is_some_and(|u| u <= now) {
+            continue;
+        }
+        reasons.push(format!(
+            "{}: {}",
+            h.account,
+            crate::holds::describe(&h, now)
+        ));
+    }
+    let snap = d.broker.snapshot();
+    let mut waits: Vec<String> = snap["waiting"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x["explain"].as_str())
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default();
+    waits.sort();
+    waits.dedup();
+    reasons.extend(waits.into_iter().take(3));
+    Some((
+        "stalled".into(),
+        "stalled".into(),
+        stall_text(&stall, &reasons),
+    ))
 }
 
 fn span_text(ms: u64) -> String {
@@ -578,4 +711,120 @@ pub fn session_for(d: &Daemon, task: TaskId) -> Result<Value, String> {
         "idle": !running,
         "claude": p.claude_bin.as_ref().map(|b| b.display().to_string()),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    fn task(id: u64, state: State, activity: Activity) -> Task {
+        Task {
+            id: TaskId(id),
+            project: ProjectId(1),
+            title: String::new(),
+            body: String::new(),
+            priority: Priority::Normal,
+            trust: TrustSource::Owner,
+            enqueued_at: Timestamp(0),
+            state_entered_at: Timestamp(0),
+            state,
+            activity,
+            landed: None,
+            explored: false,
+            blockers: BTreeSet::new(),
+            not_before: None,
+            paused: false,
+            failures: 0,
+            attempts: BTreeMap::new(),
+            decision: None,
+            cancel_keeps_branch: false,
+            failure: None,
+            def: String::new(),
+            step: String::new(),
+            step_attempts: BTreeMap::new(),
+            route: None,
+            explore_returns: 0,
+            approved: false,
+            force_explore: false,
+        }
+    }
+
+    const MIN: u64 = 60_000;
+    const NOW: u64 = 100 * MIN;
+
+    fn check(tasks: &[Task], last_event: u64, outputs: &[u64], after: u64) -> Option<Stall> {
+        let refs: Vec<&Task> = tasks.iter().collect();
+        stall_check(&refs, last_event, outputs, NOW, after)
+    }
+
+    #[test]
+    fn quiet_with_work_outstanding_is_a_stall() {
+        let t = [
+            task(1, State::Developing, Activity::Running),
+            task(2, State::Queued, Activity::Waiting(WaitReason::Slot)),
+        ];
+        let s = check(&t, NOW - 40 * MIN, &[], 30 * MIN).unwrap();
+        assert_eq!(s.quiet_ms, 40 * MIN);
+        assert_eq!(s.tasks, vec![TaskId(1), TaskId(2)]);
+        let text = stall_text(&s, &["disk has 12 GB free".into()]);
+        assert!(
+            text.contains("40 minutes") && text.contains("2 tasks"),
+            "{text}"
+        );
+        assert!(text.contains("disk has 12 GB free"), "{text}");
+    }
+
+    #[test]
+    fn recent_event_or_off_is_no_stall() {
+        let t = [task(1, State::Developing, Activity::Running)];
+        assert!(check(&t, NOW - 29 * MIN, &[], 30 * MIN).is_none());
+        assert!(check(&t, NOW - 29 * MIN, &[], 0).is_none());
+        assert!(check(&t, NOW - 90 * MIN, &[], 0).is_none());
+        assert!(
+            check(&t, 0, &[], 30 * MIN).is_none(),
+            "no log, nothing to compare"
+        );
+    }
+
+    #[test]
+    fn output_still_arriving_is_no_stall() {
+        let t = [task(1, State::Developing, Activity::Running)];
+        assert!(check(&t, NOW - 90 * MIN, &[NOW - 90 * MIN, NOW - MIN], 30 * MIN).is_none());
+        assert!(check(&t, NOW - 90 * MIN, &[NOW - 80 * MIN], 30 * MIN).is_some());
+    }
+
+    #[test]
+    fn only_tasks_waiting_on_someone_else_is_no_stall() {
+        let t = [
+            task(
+                1,
+                State::NeedsAttention,
+                Activity::Waiting(WaitReason::Owner),
+            ),
+            task(
+                2,
+                State::Queued,
+                Activity::Held(BTreeSet::from([TaskId(1)])),
+            ),
+            task(3, State::Proposed, Activity::Idle),
+            task(4, State::Queued, Activity::Paused),
+            task(5, State::Failed, Activity::Idle),
+            task(6, State::Landed, Activity::Idle),
+            task(
+                7,
+                State::Queued,
+                Activity::Waiting(WaitReason::NotBefore(Timestamp(NOW + MIN))),
+            ),
+        ];
+        assert!(check(&t, NOW - 90 * MIN, &[], 30 * MIN).is_none());
+        let mut more = t.to_vec();
+        more.push(task(
+            8,
+            State::Testing,
+            Activity::Waiting(WaitReason::On("compile slot".into())),
+        ));
+        let s = check(&more, NOW - 90 * MIN, &[], 30 * MIN).unwrap();
+        assert_eq!(s.tasks, vec![TaskId(8)]);
+    }
 }
