@@ -495,11 +495,7 @@ fn a_real_daemon_keeps_a_hold_across_a_kill_and_the_cli_holds_and_releases() {
     assert_eq!(during, before, "no session starts during the hold");
     s.wait_task(0, "landed", 120);
     s.wait_task(1, "landed", 120);
-    // The hold is cleared by the scheduler's next pass, which on a busy machine can
-    // come a moment after the last task lands.
-    wait_for("the hold to clear", 90, || {
-        usage_of(&s, "claude")["status"] == "ok"
-    });
+    assert_eq!(usage_of(&s, "claude")["status"], "ok");
 
     // By hand, from the CLI.
     s.mason_ok(&["account", "hold", "claude", "--reason", "testing"]);
