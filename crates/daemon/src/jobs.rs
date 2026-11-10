@@ -802,7 +802,7 @@ fn run_shell_env(
             Err(_) => break false,
         }
     };
-    let text = std::fs::read_to_string(&out).unwrap_or_default();
+    let text = read_tail_lossy(&out).unwrap_or_default();
     let _ = std::fs::remove_file(&out);
     (ok, tail(&text, 40))
 }
@@ -814,6 +814,36 @@ fn tempfile_path() -> PathBuf {
         std::process::id(),
         N.fetch_add(1, Ordering::SeqCst)
     ))
+}
+
+/// Read a text file, replacing bytes that are not valid UTF-8 with U+FFFD.
+/// A missing or unreadable file is an error, as with `read_to_string`.
+pub fn read_lossy(path: &Path) -> std::io::Result<String> {
+    Ok(String::from_utf8_lossy(&std::fs::read(path)?).into_owned())
+}
+
+/// How much of the end of a log `read_tail_lossy` looks at.
+pub const TAIL_WINDOW: u64 = 1 << 20;
+
+/// The last `TAIL_WINDOW` bytes of a text file, read lossily. When the file is
+/// longer, the partial first line is dropped.
+pub fn read_tail_lossy(path: &Path) -> std::io::Result<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path)?;
+    let len = f.metadata()?.len();
+    let cut = len > TAIL_WINDOW;
+    if cut {
+        f.seek(SeekFrom::Start(len - TAIL_WINDOW))?;
+    }
+    let mut buf = Vec::new();
+    f.take(TAIL_WINDOW).read_to_end(&mut buf)?;
+    let text = String::from_utf8_lossy(&buf);
+    if cut {
+        if let Some(i) = text.find('\n') {
+            return Ok(text[i + 1..].to_string());
+        }
+    }
+    Ok(text.into_owned())
 }
 
 pub fn tail(text: &str, lines: usize) -> String {
@@ -2008,7 +2038,7 @@ fn run_command_on(
             log,
         });
     }
-    let output = tail(&std::fs::read_to_string(&log).unwrap_or_default(), 60);
+    let output = tail(&read_tail_lossy(&log).unwrap_or_default(), 60);
     let how = if rec.signal != 0 {
         format!("killed by signal {}", rec.signal)
     } else {
@@ -2193,6 +2223,34 @@ pub fn cleanup(d: &Arc<Daemon>, task: TaskId, delete_branch: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn run_shell_returns_the_tail_of_output_with_a_bad_byte() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ok, out) = run_shell(
+            "printf 'first\\n\\377bad\\nlast line\\n'; exit 1",
+            dir.path(),
+            Duration::from_secs(20),
+        );
+        assert!(!ok);
+        assert!(
+            out.contains("last line") && out.contains("first"),
+            "{out:?}"
+        );
+    }
+
+    #[test]
+    fn the_tail_reader_keeps_only_the_last_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("big");
+        let mut data = b"head\n".to_vec();
+        data.extend(std::iter::repeat_n(b'x', 2 << 20));
+        data.extend(b"\n\xffend\n");
+        std::fs::write(&p, &data).unwrap();
+        let t = read_tail_lossy(&p).unwrap();
+        assert!(t.len() as u64 <= TAIL_WINDOW && t.ends_with("end\n") && !t.starts_with("head"));
+        assert!(read_lossy(&p).unwrap().starts_with("head"));
+    }
 
     #[test]
     fn a_script_steps_result_file_sets_passed_and_summary() {

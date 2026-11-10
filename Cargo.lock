@@ -697,6 +697,7 @@ dependencies = [
  "mason-adapter-api",
  "mason-step-host",
  "nix",
+ "proptest",
  "serde_json",
  "tempfile",
 ]
