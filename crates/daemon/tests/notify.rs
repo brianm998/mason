@@ -114,6 +114,15 @@ fn one_alert_one_delivery_one_reminder_and_silence_after_it_clears() {
     let v: Value = serde_json::from_str(&body).unwrap();
     assert_eq!(v["reminder"], false);
 
+    // A monitor plays the first announcement; only then is the sound and speech delivered, and
+    // only then does a reminder follow.
+    assert_eq!(
+        notify::claim(&d, "mon", false)["announcements"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
     std::thread::sleep(Duration::from_millis(1300));
     for _ in 0..3 {
         notify::tick(&d);
@@ -454,4 +463,87 @@ fn a_disk_below_the_floor_is_announced_with_sound_and_speech_once() {
     assert_eq!(disk[0]["sound"], true);
     assert_eq!(disk[0]["speech"], true);
     assert_eq!(disk[0]["sound_name"], "broke");
+}
+
+// ---- delivery is a monitor playing it -------------------------------------------------
+
+const HOUR: u64 = 3_600_000;
+
+fn audible_pause(s: &Scratch) -> Arc<Daemon> {
+    let d = start(s);
+    notify_toml(s, "[routing.paused]\nsound = \"0\"\nspeech = \"0\"\n");
+    pause(&d);
+    d
+}
+
+fn played(d: &Daemon) -> Vec<(String, String, bool)> {
+    let a = d.store.alerts(true).unwrap().remove(0);
+    d.store
+        .deliveries_for(&a.key, a.since)
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.channel == "sound" || r.channel == "speech")
+        .map(|r| (r.channel, r.delivery, r.ok))
+        .collect()
+}
+
+fn count(v: &Value) -> usize {
+    v["announcements"].as_array().unwrap().len()
+}
+
+#[test]
+fn an_alert_raised_with_no_monitor_records_no_delivery() {
+    let s = world();
+    let d = audible_pause(&s);
+    let since = d.store.alerts(true).unwrap()[0].since;
+    notify::tick_at(&d, since + 1000);
+    assert_eq!(announcements(&d), 1, "queued");
+    assert!(played(&d).is_empty(), "queued is not delivered");
+}
+
+#[test]
+fn a_claim_long_afterwards_gets_one_announcement_and_records_it() {
+    let s = world();
+    let d = audible_pause(&s);
+    let since = d.store.alerts(true).unwrap()[0].since;
+    notify::tick_at(&d, since + 1000);
+    let late = since + 3 * HOUR;
+    let first = notify::claim_at(&d, "mon", false, late);
+    assert_eq!(count(&first), 1, "{first}");
+    let got = played(&d);
+    assert!(
+        got.contains(&("sound".into(), "initial".into(), true))
+            && got.contains(&("speech".into(), "initial".into(), true)),
+        "{got:?}"
+    );
+    assert_eq!(count(&notify::claim_at(&d, "mon", false, late + 1000)), 0);
+    notify::tick_at(&d, late + 2000);
+    assert_eq!(count(&notify::claim_at(&d, "mon", false, late + 3000)), 0);
+    let status = notify::status(&d);
+    assert!(status["last_played"].as_u64().is_some());
+}
+
+#[test]
+fn an_alert_that_cleared_first_gets_nothing() {
+    let s = world();
+    let d = audible_pause(&s);
+    let since = d.store.alerts(true).unwrap()[0].since;
+    notify::tick_at(&d, since + 1000);
+    attention::resume(&d, "", "all").unwrap();
+    attention::sync_alerts(&d);
+    assert_eq!(
+        count(&notify::claim_at(&d, "mon", false, since + 3 * HOUR)),
+        0
+    );
+}
+
+#[test]
+fn a_muted_claim_gets_nothing_and_records_nothing() {
+    let s = world();
+    let d = audible_pause(&s);
+    let since = d.store.alerts(true).unwrap()[0].since;
+    notify::tick_at(&d, since + 1000);
+    let m = notify::claim_at(&d, "quiet", true, since + 3 * HOUR);
+    assert_eq!(count(&m), 0);
+    assert!(played(&d).is_empty());
 }

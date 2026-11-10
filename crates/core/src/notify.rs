@@ -520,6 +520,23 @@ mod tests {
     }
 
     #[test]
+    fn an_initial_notice_that_expired_unheard_is_not_delivered() {
+        let r = Routing::defaults();
+        // Queued and dropped: nothing was recorded, so the sound is still due, and no reminder
+        // for a channel that never carried the initial notice, however late it is.
+        let late = 2 * 60 * MINUTE_MS;
+        let got = due(&r, "failed", st(0), &[], late, 0);
+        assert!(got.contains(&(Channel::Sound, Delivery::Initial)));
+        assert!(got.contains(&(Channel::Speech, Delivery::Initial)));
+        assert!(!got.iter().any(|x| x.1 == Delivery::Reminder));
+        // Heard later: only then does the reminder follow.
+        let heard = [attempt(Channel::Sound, Delivery::Initial, true, late)];
+        let got = due(&r, "failed", st(0), &heard, late, 0);
+        assert!(got.contains(&(Channel::Sound, Delivery::Reminder)));
+        assert!(!got.contains(&(Channel::Speech, Delivery::Reminder)));
+    }
+
+    #[test]
     fn every_raised_kind_is_routed_or_named_monitor_only() {
         let r = Routing::defaults();
         for k in ALERT_KINDS {
