@@ -11,7 +11,7 @@ use crate::cpu::CpuSource;
 use crate::disk::DiskSource;
 use mason_core::TaskId;
 use mason_resources::{Held, Locks, Take, TakeError};
-use mason_scheduler::{explain, CpuGate, DiskGate, Kind, Ledger, Needs, Rank, COMPILE};
+use mason_scheduler::{explain, CpuGate, DiskGate, Kind, Ledger, Needs, Rank, WaitCause, COMPILE};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
@@ -444,6 +444,22 @@ impl Broker {
         let mut st = lock(&self.st);
         self.refresh_disk(&mut st)
             .filter(|g| g.free_mb < g.floor_mb)
+    }
+
+    /// How many requests the disk gate is holding right now (zero while disk is fine).
+    pub fn disk_held(&self) -> usize {
+        let mut st = lock(&self.st);
+        if self.refresh_disk(&mut st).is_none() {
+            return 0;
+        }
+        let (floor, free) = (st.floor_mb, self.free_memory(&mut st));
+        let gate = self.cpu_gate(&mut st);
+        st.ledger
+            .waits_gated(crate::daemon::now_ms(), free, floor, gate)
+            .waits
+            .values()
+            .filter(|w| matches!(w.cause, WaitCause::Disk { .. }))
+            .count()
     }
 
     /// Read the CPU source afresh and keep the reading.

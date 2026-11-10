@@ -349,6 +349,13 @@ fn disk_alert(d: &Daemon, w: &mason_engine::World) -> Option<(String, String, St
     if low.is_some() && full.is_some() {
         text.push_str("; a write to the store was refused");
     }
+    let held = d.broker.disk_held();
+    if held > 0 {
+        text.push_str(&format!(
+            "; {held} task{} waiting",
+            if held == 1 { "" } else { "s" }
+        ));
+    }
     let sizes = d.disk_sizes.get(
         vec![
             ("task_cache".into(), crate::taskcache::dirs(d, w)),

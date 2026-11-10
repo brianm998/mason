@@ -1993,6 +1993,15 @@ fn main() {
                 .filter(|(_, n)| n.as_u64().unwrap_or(0) > 0)
                 .map(|(k, n)| format!("{n} {k}"))
                 .collect();
+            if let Some(st) = s["stuck"].as_object() {
+                let n = st["tasks_waiting"].as_u64().unwrap_or(0);
+                println!(
+                    "STUCK: no new compile or agent session can start: disk has {} GB free, floor {} GB; {n} task{} waiting",
+                    st["free_mb"].as_u64().unwrap_or(0) / 1024,
+                    st["floor_mb"].as_u64().unwrap_or(0) / 1024,
+                    if n == 1 { "" } else { "s" }
+                );
+            }
             println!(
                 "tasks: {}",
                 if counts.is_empty() {
