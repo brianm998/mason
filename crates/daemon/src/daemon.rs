@@ -41,6 +41,7 @@ pub struct Daemon {
     emit_lock: Mutex<()>,
     admitting: AtomicBool,
     admit_again: AtomicBool,
+    fetch_locks: Mutex<HashMap<PathBuf, Arc<Mutex<Option<std::time::Instant>>>>>,
     repo_locks: Mutex<HashMap<PathBuf, RepoLock>>,
     /// When the definitions thread last finished a pass (ms; the start time before the first).
     pub(crate) defs_pass_ended_ms: AtomicU64,
@@ -230,6 +231,7 @@ impl Daemon {
             admitting: AtomicBool::new(false),
             admit_again: AtomicBool::new(false),
             repo_locks: Mutex::default(),
+            fetch_locks: Mutex::default(),
             defs_pass_ended_ms: AtomicU64::new(now_ms()),
             stalls: AtomicU64::new(0),
             store_full: AtomicU64::new(0),
@@ -345,6 +347,44 @@ impl Daemon {
             .entry(key)
             .or_default()
             .clone()
+    }
+
+    /// The per-repository fetch lock (see [`Self::fetch_remote`]).
+    pub fn fetch_lock(&self, p: ProjectId) -> Arc<Mutex<Option<std::time::Instant>>> {
+        let key = self.project(p).map_or_else(PathBuf::new, |c| {
+            std::fs::canonicalize(&c.path).unwrap_or_else(|_| c.path.clone())
+        });
+        self.fetch_locks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(key)
+            .or_default()
+            .clone()
+    }
+
+    /// `git fetch --prune` for a project's remote, under a lock of its own: two
+    /// fetches in one repository must not collide on its refs, but a slow one must
+    /// not hold up `worktree add`, `merge` or cleanup, which take [`Self::repo_lock`].
+    /// A fetch that *started* while this call was waiting saw everything this call
+    /// could have wanted, so it is not repeated.
+    pub fn fetch_remote(&self, p: ProjectId) -> Result<(), String> {
+        let Some(c) = self.project(p) else {
+            return Ok(());
+        };
+        let Some(remote) = c.remote.clone() else {
+            return Ok(());
+        };
+        let lock = self.fetch_lock(p);
+        let asked = std::time::Instant::now();
+        let mut last_ok = lock.lock().unwrap_or_else(|e| e.into_inner());
+        if last_ok.is_some_and(|started| started > asked) {
+            return Ok(());
+        }
+        let started = std::time::Instant::now();
+        mason_landing::git::run(&c.path, &["fetch", "--prune", &remote])
+            .map_err(|e| e.to_string())?;
+        *last_ok = Some(started);
+        Ok(())
     }
 
     /// Who holds a repository lock now and since when (label, ms). Never takes a repository lock

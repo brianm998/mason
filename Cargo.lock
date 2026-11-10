@@ -792,6 +792,7 @@ dependencies = [
 name = "mason-landing"
 version = "0.0.0"
 dependencies = [
+ "nix",
  "proptest",
  "serde_json",
  "tempfile",
