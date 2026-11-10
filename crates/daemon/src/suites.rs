@@ -320,7 +320,7 @@ fn run_hosted_once(
     Ok(Ran {
         code: rec.code,
         signal: rec.signal,
-        output: std::fs::read_to_string(&log).unwrap_or_default(),
+        output: crate::jobs::read_lossy(&log).unwrap_or_default(),
         stop: match why.load(Ordering::SeqCst) {
             2 => Stop::Skipped,
             3 => Stop::Gone,
@@ -390,7 +390,7 @@ struct Judged {
 
 fn judge_ran(suite: &Suite, ran: &Ran, cwd: &Path) -> Judged {
     let text = match &suite.results_file {
-        Some(f) => match std::fs::read_to_string(cwd.join(f)) {
+        Some(f) => match crate::jobs::read_lossy(&cwd.join(f)) {
             Ok(t) => t,
             Err(e) => {
                 return Judged {
@@ -1675,4 +1675,45 @@ pub fn run_over(
         }
     }
     out
+}
+
+#[cfg(test)]
+mod lossy_tests {
+    use super::*;
+    use mason_testing::ParserKind;
+
+    fn ran_from(bytes: &[u8], code: i32) -> (Ran, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("log");
+        std::fs::write(&log, bytes).unwrap();
+        let ran = Ran {
+            code,
+            signal: 0,
+            output: crate::jobs::read_lossy(&log).unwrap_or_default(),
+            stop: Stop::No,
+            timed_out: false,
+        };
+        (ran, dir)
+    }
+
+    #[test]
+    fn a_stray_byte_does_not_hide_the_test_lines() {
+        let suite = Suite::new("t", "x", ParserKind::Tap);
+        let (ran, dir) = ran_from(b"junk \xff here\nok 1 - a\nok 2 - b\n", 0);
+        assert!(ran.output.contains("ok 1 - a"));
+        let j = judge_ran(&suite, &ran, dir.path());
+        assert!(matches!(j.verdict, Verdict::Green), "{:?}", j.verdict);
+    }
+
+    #[test]
+    fn a_stray_byte_does_not_turn_a_failure_green() {
+        let suite = Suite::new("t", "x", ParserKind::Tap);
+        let (ran, dir) = ran_from(b"\xff\nok 1 - a\nnot ok 2 - b\n", 1);
+        let j = judge_ran(&suite, &ran, dir.path());
+        assert!(matches!(j.verdict, Verdict::Red { .. }));
+        // Test lines hidden behind the byte do not make a pass either.
+        let (ran, dir) = ran_from(b"\xff\nnothing here\n", 0);
+        let j = judge_ran(&suite, &ran, dir.path());
+        assert!(!matches!(j.verdict, Verdict::Green));
+    }
 }
