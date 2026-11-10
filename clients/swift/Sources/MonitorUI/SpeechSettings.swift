@@ -12,6 +12,7 @@ struct SpeechSettingsView: View {
         ("needs_you", "Needs a decision"), ("failed", "Task failed"), ("landing", "Landing frozen"),
         ("daemon_down", "Daemon down"), ("credentials", "Credentials failing"),
         ("provider_outage", "Provider outage"), ("landed", "Landed"),
+        ("disk", "Disk nearly full"), ("environment", "Environment problem"), ("blocked", "Task blocked"), ("host_lost", "Host lost"), ("runtime", "Runtime update failed"), ("definition", "Definition refused"), ("tracker", "Tracker problem"), ("provider_limit", "Provider limit"), ("provider_overage", "Provider overage"), ("provider_budget", "Provider budget"),
     ]
     static let sounds = ["Glass", "Basso", "Tink", "Ping", "Pop", "Submarine", "Sosumi", "Funk"]
 
