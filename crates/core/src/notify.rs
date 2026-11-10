@@ -400,7 +400,9 @@ pub fn sound_for(kind: &str) -> Sound {
         "needs_you" => Sound::Decision,
         "failed" | "landing" | "daemon_down" | "credentials" | "provider_outage"
         | "environment" | "runtime" | "definition" | "disk" | "blocked" | "host_lost"
-        | "tracker" | "provider_limit" | "provider_overage" | "provider_budget" => Sound::Broke,
+        | "tracker" | "provider_limit" | "provider_overage" | "provider_budget" | "git_stuck" => {
+            Sound::Broke
+        }
         _ => Sound::Info,
     }
 }

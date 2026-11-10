@@ -4,10 +4,24 @@
 
 use mason_plugins::kit::{plugin_kit, Check};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 fn example() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/examples/plugins/migration-check")
+}
+
+/// Run `script` once, untimed, with stdin/stdout/stderr null, and ignore the result.
+/// The first exec of a newly written file can take 10+ s on macOS (syspolicyd scanning);
+/// pay that here, not inside a kit call's timer. Every example script reads stdin to
+/// EOF and exits at once.
+fn prime(script: &Path) {
+    let _ = Command::new(script)
+        .current_dir(script.parent().unwrap())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
 }
 
 /// A copy of the example with `check.py` changed by replacing `from` with `to`.
@@ -23,6 +37,7 @@ fn broken(from: &str, to: &str) -> tempfile::TempDir {
         "the example no longer contains {from:?}"
     );
     std::fs::write(&p, text.replace(from, to)).unwrap();
+    prime(&p);
     t
 }
 
@@ -35,8 +50,8 @@ fn failing(checks: &[Check]) -> Vec<(&'static str, String)> {
 }
 
 /// How long the kit waits for each answer. Generous on purpose: a copy of the plugin is
-/// started fresh by seven tests at once, and on a busy macOS machine the first exec of a
-/// new file (the system scanning it) alone takes half a second or more. A passing test
+/// started fresh by seven tests at once. The first exec of a new file (which can be very
+/// slow on macOS) is paid by `prime`, so `T` only covers the call itself. A passing test
 /// never waits this long.
 const T: Duration = Duration::from_secs(10);
 
@@ -45,6 +60,7 @@ const SHORT: Duration = Duration::from_secs(6);
 
 #[test]
 fn the_example_plugin_passes_every_check() {
+    prime(&example().join("check.py"));
     let checks = plugin_kit(&example(), T);
     assert_eq!(failing(&checks), vec![], "{checks:?}");
     let names: Vec<&str> = checks.iter().map(|c| c.name).collect();
