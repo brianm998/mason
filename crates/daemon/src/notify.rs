@@ -55,6 +55,9 @@ pub struct Settings {
     pub preferred: Option<String>,
     /// Announcements older than this are dropped rather than spoken late.
     pub stale_ms: u64,
+    /// How long the whole pipeline may go without an event or output before `stalled` is raised
+    /// (`[stall] after`); 0 turns it off.
+    pub stall_ms: u64,
     pub email: Option<EmailCfg>,
     pub ntfy: Option<(String, String, Option<String>)>,
     pub webhook: Option<(String, Option<String>)>,
@@ -68,6 +71,7 @@ impl Default for Settings {
             speech_command: vec![],
             preferred: None,
             stale_ms: 10 * n::MINUTE_MS,
+            stall_ms: 30 * n::MINUTE_MS,
             email: None,
             ntfy: None,
             webhook: None,
@@ -189,6 +193,11 @@ pub fn parse(src: &str) -> Result<Settings, String> {
                 s.preferred = text(t, "preferred_client");
                 if let Some(v) = t.get("stale") {
                     s.stale_ms = span(v, "speech.stale")?;
+                }
+            }
+            "stall" => {
+                if let Some(v) = t.get("after") {
+                    s.stall_ms = span(v, "stall.after")?;
                 }
             }
             "email" => {
@@ -744,6 +753,14 @@ mod tests {
         let s = parse("").unwrap();
         assert_eq!(s.routing, Routing::defaults());
         assert!(!s.daemon_speech);
+    }
+
+    #[test]
+    fn stall_after_defaults_to_thirty_minutes_and_zero_is_off() {
+        assert_eq!(parse("").unwrap().stall_ms, 30 * n::MINUTE_MS);
+        assert_eq!(parse("[stall]\nafter = \"2s\"\n").unwrap().stall_ms, 2000);
+        assert_eq!(parse("[stall]\nafter = \"0\"\n").unwrap().stall_ms, 0);
+        assert_eq!(parse("[stall]\nafter = 0\n").unwrap().stall_ms, 0);
     }
 
     #[test]
