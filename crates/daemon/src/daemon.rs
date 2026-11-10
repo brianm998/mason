@@ -531,6 +531,7 @@ impl Daemon {
             if s.info.id.starts_with(prefix)
                 && s.state == mason_step_host::registry::HostState::Running
             {
+                tracing::warn!(host = %s.info.id, prefix, "stopping a step host");
                 if let Ok(mut c) = mason_step_host::client::HostClient::connect(
                     &s.info.sock,
                     mason_step_host::protocol::PREVIOUS,
