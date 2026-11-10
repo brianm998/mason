@@ -1223,6 +1223,9 @@ fn main() {
                 return println!("{r:#}");
             }
             let list = r["alerts"].as_array().cloned().unwrap_or_default();
+            if let Some(note) = r["note"].as_str() {
+                println!("note: {note}");
+            }
             if list.is_empty() {
                 println!("nothing needs a look");
             }

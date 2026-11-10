@@ -1059,7 +1059,20 @@ impl Store {
         now: &[(String, String, String)],
         now_ms: u64,
     ) -> Result<(Vec<String>, Vec<String>), StoreError> {
+        self.sync_alerts_since(now, now_ms, &[])
+    }
+
+    /// As `sync_alerts`, but an alert raised here starts at the time given for its key in
+    /// `since` (one the daemon already held in memory while the store refused writes), so what
+    /// was already announced under that time stays the same alert.
+    pub fn sync_alerts_since(
+        &self,
+        now: &[(String, String, String)],
+        now_ms: u64,
+        since: &[(String, u64)],
+    ) -> Result<(Vec<String>, Vec<String>), StoreError> {
         let now = now.to_vec();
+        let since = since.to_vec();
         self.write(move |c| {
             let mut raised = vec![];
             let mut cleared = vec![];
@@ -1074,7 +1087,15 @@ impl Store {
                 } else {
                     c.execute(
                         "INSERT OR REPLACE INTO alerts(key, kind, text, since, cleared_at) VALUES (?1,?2,?3,?4,NULL)",
-                        params![key, kind, text, now_ms as i64],
+                        params![
+                            key,
+                            kind,
+                            text,
+                            since
+                                .iter()
+                                .find(|(k, _)| k == key)
+                                .map_or(now_ms, |(_, t)| *t) as i64
+                        ],
                     )?;
                     raised.push(key.clone());
                 }
