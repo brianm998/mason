@@ -32,6 +32,14 @@ pub struct AnnouncementRow {
     pub taken_by: Option<String>,
 }
 
+impl AnnouncementRow {
+    /// A monitor or the daemon took it and played it. An expired row was dropped unheard, and a
+    /// waiting one has not been played yet.
+    pub fn played(&self) -> bool {
+        self.taken_at.is_some() && self.taken_by.as_deref().is_some_and(|b| b != "expired")
+    }
+}
+
 impl Store {
     /// Acknowledge an alert that is still true. False when there is no such live alert.
     pub fn ack_alert(&self, key: &str, now: u64) -> Result<bool, StoreError> {
@@ -75,6 +83,27 @@ impl Store {
                 "SELECT alert, since, channel, delivery, ok, detail, at FROM deliveries WHERE alert = ?1 AND since = ?2 ORDER BY id",
             )?;
             let rows = st.query_map(params![alert, since as i64], |r| {
+                Ok(DeliveryRow {
+                    alert: r.get(0)?,
+                    since: r.get::<_, i64>(1)? as u64,
+                    channel: r.get(2)?,
+                    delivery: r.get(3)?,
+                    ok: r.get::<_, i64>(4)? != 0,
+                    detail: r.get(5)?,
+                    at: r.get::<_, i64>(6)? as u64,
+                })
+            })?;
+            rows.collect()
+        })
+    }
+
+    /// The latest sound and speech deliveries, newest first, across all alerts.
+    pub fn recent_audible_deliveries(&self, limit: usize) -> Result<Vec<DeliveryRow>, StoreError> {
+        self.read(move |c| {
+            let mut st = c.prepare(
+                "SELECT alert, since, channel, delivery, ok, detail, at FROM deliveries WHERE channel IN ('sound','speech') ORDER BY id DESC LIMIT ?1",
+            )?;
+            let rows = st.query_map(params![limit as i64], |r| {
                 Ok(DeliveryRow {
                     alert: r.get(0)?,
                     since: r.get::<_, i64>(1)? as u64,
@@ -143,6 +172,18 @@ impl Store {
                 params![id as i64, now as i64],
             )?;
             Ok(())
+        })
+    }
+
+    /// When an announcement was last taken by something that plays it (not dropped unheard).
+    pub fn last_played(&self) -> Result<Option<u64>, StoreError> {
+        self.read(|c| {
+            let t: Option<i64> = c.query_row(
+                "SELECT MAX(taken_at) FROM announcements WHERE taken_at IS NOT NULL AND taken_by <> 'expired'",
+                [],
+                |r| r.get(0),
+            )?;
+            Ok(t.map(|t| t as u64))
         })
     }
 
@@ -226,6 +267,26 @@ mod tests {
             vec!["k2"]
         );
         assert!(s.take_announcements("a", 0, 10, 500).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_taken_row_and_an_expired_row_read_differently() {
+        let (_dir, s) = store();
+        s.enqueue_announcement("old", "failed", "old.", true, true, 100)
+            .unwrap();
+        s.enqueue_announcement("new", "failed", "new.", true, true, 300)
+            .unwrap();
+        s.enqueue_announcement("wait", "failed", "wait.", true, true, 900)
+            .unwrap();
+        assert_eq!(s.last_played().unwrap(), None);
+        s.take_announcements("a", 200, 1, 400).unwrap();
+        let all = s.announcements(10).unwrap();
+        let by = |k: &str| all.iter().find(|r| r.key == k).unwrap().clone();
+        assert!(!by("old").played(), "expired unheard");
+        assert_eq!(by("old").taken_by.as_deref(), Some("expired"));
+        assert!(by("new").played());
+        assert!(!by("wait").played(), "still waiting");
+        assert_eq!(s.last_played().unwrap(), Some(400));
     }
 
     #[test]
