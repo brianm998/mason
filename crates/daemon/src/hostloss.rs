@@ -41,7 +41,7 @@ pub const MAX_AGENT_RESTARTS: usize = 2;
 /// What failed an agent step that lost its host more often than it may be restarted.
 pub fn agent_lost(reports: &[String]) -> String {
     format!(
-        "the step was interrupted {} times, by a lost host or by going silent (an agent step is restarted at most {} times): {}",
+        "the step host was lost {} times (an agent step is restarted at most {} times after a lost host): {}",
         reports.len(),
         MAX_AGENT_RESTARTS,
         reports

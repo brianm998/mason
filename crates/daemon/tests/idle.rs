@@ -133,7 +133,7 @@ fn a_third_stall_fails_the_step_and_says_so() {
     wait_state(&d, t, State::Failed, 120);
     let w = d.world().unwrap();
     let why = w.tasks[&t].failure.clone().unwrap_or_default();
-    assert!(why.contains("3 times") && why.contains("silen"), "{why}");
+    assert!(why.contains("3 times") && why.contains("silence"), "{why}");
 }
 
 #[test]
