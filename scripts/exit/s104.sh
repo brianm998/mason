@@ -9,7 +9,14 @@ trap 'rm -rf "$root"' EXIT
 cargo build -q --workspace --bins
 bin=$PWD/target/debug
 d=$root/d; c=$root/c; mkdir -p "$c" "$d"
-doctor() { "$bin/mason" --data-dir "$d" --config-dir "$c" doctor 2>&1 || true; }
+# doctor exits 1 when any check fails (this sandbox may lack claude, say); that is a verdict, not a
+# crash. Any other status (a panic, a usage error) fails the script.
+doctor() {
+  local out rc=0
+  out=$("$bin/mason" --data-dir "$d" --config-dir "$c" doctor 2>&1) || rc=$?
+  if [ "$rc" -gt 1 ]; then echo "$out" >&2; echo "doctor exited $rc" >&2; return 99; fi
+  printf '%s\n' "$out"
+}
 
 echo "== no notify.toml"
 out=$(doctor)
