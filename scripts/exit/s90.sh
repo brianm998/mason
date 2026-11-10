@@ -7,10 +7,12 @@
 #   showing the pools' queue depth.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
-root=$(mktemp -d /tmp/mason-s90.XXXXXX); daemon=""
+root=$(mktemp -d /tmp/mason-s90.XXXXXX); daemon=""; waiters=()
 cleanup() {
   [ -n "$daemon" ] && kill -9 "$daemon" 2>/dev/null || true
-  jobs -p | xargs kill 2>/dev/null || true
+  for p in ${waiters[@]+"${waiters[@]}"}; do
+    if kill -0 "$p" 2>/dev/null; then kill "$p"; fi
+  done
   rm -rf "$root"
 }
 trap cleanup EXIT
@@ -49,6 +51,7 @@ echo "== fill the blocking pool with work waiting on the repository lock"
 curl -fsS -X POST "$url/debug/hold-repo?ms=20000" >/dev/null
 for _ in $(seq 1 90); do
   curl -s -m 25 -X POST "$url/debug/wait-repo" >/dev/null 2>&1 &
+  waiters+=($!)
 done
 full=""
 for _ in $(seq 1 50); do
