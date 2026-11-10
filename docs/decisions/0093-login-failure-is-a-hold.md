@@ -1,0 +1,3 @@
+# 0093: A login failure is a provider hold, kind `credentials`
+
+An expired login fails every task identically and only the owner can renew it, so failing tasks (and climbing the model ladder) is wrong. It is a new `Outcome::NotLoggedIn` and a hold of kind `credentials`, held and probed like an outage (no reset time, doubling backoff to 30 minutes) so a renewed login is noticed without a restart; `mason account release` clears it. The alert kind is the existing `credentials`. A 401 or 403 status counts as a login failure whatever the text says. The variant lives in `adapter-api/src/lib.rs`, outside the guarded `contract.rs`.

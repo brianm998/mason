@@ -143,6 +143,11 @@ pub enum Outcome {
     ProviderDown {
         detail: String,
     },
+    /// The agent CLI cannot authenticate (not logged in, a bad key). A provider
+    /// hold like a limit, never a failure of the task: the owner logs in again.
+    NotLoggedIn {
+        detail: String,
+    },
     Crash {
         detail: String,
     },

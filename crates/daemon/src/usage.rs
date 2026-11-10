@@ -556,6 +556,8 @@ pub fn view(d: &Daemon, now: u64, title: &dyn Fn(u64) -> String) -> UsageView {
                 a.name,
                 if h.kind == "outage" {
                     "provider outage"
+                } else if h.kind == "credentials" {
+                    "not logged in"
                 } else {
                     "held"
                 }
