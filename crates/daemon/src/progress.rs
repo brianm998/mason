@@ -584,6 +584,21 @@ impl Daemon {
         self.progress.lock().get(&run).map(|l| l.p.clone())
     }
 
+    /// When each running step last produced output (or, if it has not yet, when it started).
+    pub fn progress_last_outputs(&self) -> Vec<u64> {
+        self.progress
+            .lock()
+            .values()
+            .map(|l| {
+                if l.p.output.last_output_ms > 0 {
+                    l.p.output.last_output_ms
+                } else {
+                    l.p.started_ms
+                }
+            })
+            .collect()
+    }
+
     /// The live records of a task's runs.
     pub fn progress_of_task(&self, task: TaskId) -> Vec<Progress> {
         let mut v: Vec<Progress> = self

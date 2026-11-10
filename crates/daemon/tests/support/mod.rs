@@ -180,12 +180,31 @@ impl Scratch {
         c
     }
 
+    /// What a daemon that ran before would already have fetched: startup reads the
+    /// remote-tracking refs as they are and does no network (the watcher fetches).
+    pub fn prefetch(&self) {
+        // Only a remote on this disk: a test that points origin at a network
+        // address (a silent listener) means to leave it unanswered.
+        let url = git::run(&self.repo, &["config", "remote.origin.url"])
+            .map(|o| o.trim().to_string())
+            .unwrap_or_default();
+        if !url.starts_with('/') {
+            return;
+        }
+        let _ = git::run_for(
+            &self.repo,
+            &["fetch", "-q", "--prune", "origin"],
+            Duration::from_secs(120),
+        );
+    }
+
     pub fn start(&self) -> Arc<Daemon> {
-        Daemon::start(self.config()).expect("daemon starts")
+        self.start_with(|_| {})
     }
 
     /// Start a daemon after letting `f` adjust its configuration.
     pub fn start_with(&self, f: impl FnOnce(&mut DaemonConfig)) -> Arc<Daemon> {
+        self.prefetch();
         let mut c = self.config();
         f(&mut c);
         Daemon::start(c).expect("daemon starts")
@@ -409,6 +428,7 @@ impl Scratch {
     }
 
     fn masond_with(&self, free_port: bool, extra_args: &[&str], env: &[(&str, &str)]) -> Masond {
+        self.prefetch();
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_masond"));
         let cfg = self.config();
         cmd.args(["--data-dir", &self.data_dir.display().to_string()])

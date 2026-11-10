@@ -562,11 +562,11 @@ pub fn apply(
         ),
         None => (p.remote.clone(), false),
     };
+    if remote.is_some() {
+        let _ = d.fetch_remote(pid);
+    }
     let lock = d.repo_lock(pid);
     let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(r) = &remote {
-        let _ = git::run(&p.path, &["fetch", "--prune", r]);
-    }
     // The base must still hold what the draft was made from.
     let now = base_files(d, &p, pid);
     if now.landing != base.landing
