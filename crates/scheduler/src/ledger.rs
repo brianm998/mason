@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use crate::plan::{
-    plan, Capacity, CompilePace, CpuGate, DiskGate, Holder, Kind, Needs, Plan, Request, World,
-    COMPILE,
+    plan, Capacity, CompilePace, CpuGate, DiskGate, Holder, Kind, Needs, Plan, Request, StallGate,
+    World, COMPILE,
 };
 use crate::rank::Rank;
 use std::collections::BTreeMap;
@@ -19,6 +19,7 @@ pub struct Ledger {
     compile_gap_ms: Option<u64>,
     last_compile_start: Option<u64>,
     disk: Option<DiskGate>,
+    stall: Option<StallGate>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -58,6 +59,11 @@ impl Ledger {
     /// The caller's latest disk reading against its floor, used by every plan after this.
     pub fn set_disk(&mut self, disk: Option<DiskGate>) {
         self.disk = disk;
+    }
+
+    /// The caller's latest reading of how slowly the build disk answers.
+    pub fn set_stall(&mut self, stall: Option<StallGate>) {
+        self.stall = stall;
     }
 
     pub fn capacity(&self, name: &str) -> Option<Capacity> {
@@ -131,6 +137,7 @@ impl Ledger {
                 cpu,
                 compile_pace: self.compile_pace(),
                 disk: self.disk,
+                stall: self.stall,
             },
             &self.waiting,
         );
@@ -198,6 +205,7 @@ impl Ledger {
                 cpu,
                 compile_pace: self.compile_pace(),
                 disk: self.disk,
+                stall: self.stall,
             },
             &self.waiting,
         )
