@@ -90,6 +90,33 @@ static FETCH_LOCKS: std::sync::Mutex<
 /// is not the daemon's repository lock, so a slow fetch holds up other fetches and
 /// nothing else.
 fn fetch_lock(cwd: &Path) -> std::sync::Arc<std::sync::Mutex<()>> {
+    // The repository a directory belongs to does not change: ask git once.
+    type Keys = std::collections::HashMap<PathBuf, PathBuf>;
+    static KEYS: std::sync::Mutex<Option<Keys>> = std::sync::Mutex::new(None);
+    let known = KEYS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_or_insert_with(Default::default)
+        .get(cwd)
+        .cloned();
+    let key = known.unwrap_or_else(|| {
+        let k = fetch_key(cwd);
+        KEYS.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_or_insert_with(Default::default)
+            .insert(cwd.to_path_buf(), k.clone());
+        k
+    });
+    FETCH_LOCKS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_or_insert_with(Default::default)
+        .entry(key)
+        .or_default()
+        .clone()
+}
+
+fn fetch_key(cwd: &Path) -> PathBuf {
     let common = proc::output(
         Command::new("git")
             .args(["rev-parse", "--git-common-dir"])
@@ -100,14 +127,7 @@ fn fetch_lock(cwd: &Path) -> std::sync::Arc<std::sync::Mutex<()>> {
     .filter(|o| o.status.success())
     .map(|o| cwd.join(String::from_utf8_lossy(&o.stdout).trim()));
     let key = common.unwrap_or_else(|| cwd.to_path_buf());
-    let key = std::fs::canonicalize(&key).unwrap_or(key);
-    FETCH_LOCKS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get_or_insert_with(Default::default)
-        .entry(key)
-        .or_default()
-        .clone()
+    std::fs::canonicalize(&key).unwrap_or(key)
 }
 
 /// Run `git` in `cwd` under the default deadline (longer for a clone).
