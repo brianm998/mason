@@ -1,0 +1,5 @@
+# 0101: Alert when nothing at all has moved
+
+A 75-minute silence on 2026-11-09 raised nothing because every alert names a known cause. `stalled` names none: it is true while a task is outstanding and the event log and every running step's output are both older than `[stall] after` (default 30m, `0` off). Tasks waiting on the owner, held, proposed, paused, failed, or waiting for a future `not_before` are not outstanding, so a pipeline that is only waiting on the owner is not stalled. A step that is still printing keeps it quiet even when events are silent. The reasons in the text are only what is already known (disk gate, account holds, scheduler wait explanations).
+
+Routed to all channels at once like `daemon_down`, since it means nothing is working. `crates/daemon/src/attention.rs` is a trust file: this adds one alert and changes nothing about who may answer. `crates/core/src/notify.rs` gets the route and the "broke" sound. No gate, guard, budget or verdict changed. The reminder behaviour is left to the follow-up ticket.

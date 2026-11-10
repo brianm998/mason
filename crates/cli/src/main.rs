@@ -1192,6 +1192,10 @@ fn main() {
                             rules.join(", ")
                         );
                     }
+                    match r["last_played"].as_u64() {
+                        Some(t) => println!("last announcement played at {t} (ms since the epoch)"),
+                        None => println!("no announcement has been played yet"),
+                    }
                     println!(
                     "one reminder after {} min; daemon speech {}; email {}, push {}, webhook {}",
                     r["reminder_after_s"].as_u64().unwrap_or(0) / 60,
