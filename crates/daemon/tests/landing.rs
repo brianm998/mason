@@ -194,6 +194,14 @@ fn a_red_post_land_tier_freezes_landing_until_the_fix_lands() {
     let wd = w.d.world().unwrap();
     assert_eq!(wd.tasks[&fix].priority, Priority::Urgent);
     assert!(wd.tasks[&fix].title.contains("smoke"));
+    let frozen_alert = || {
+        mason_daemon::attention::alerts_now(&w.d)
+            .into_iter()
+            .find(|(k, kind, _)| k == "frozen:scratch" && kind == "landing")
+            .map(|(_, _, t)| t)
+    };
+    let text = frozen_alert().expect("the freeze raises an alert");
+    assert!(text.contains(&format!("Fix task #{}", fix.0)), "{text}");
     // Frozen: an ordinary task waits.
     let other = w.task("ordinary", &[("x/o.txt", "1")]);
     std::thread::sleep(Duration::from_secs(3));
@@ -248,6 +256,7 @@ fn a_red_post_land_tier_freezes_landing_until_the_fix_lands() {
     wait_for("the freeze to lift", 60, || {
         w.d.store.freezes().unwrap().is_empty()
     });
+    assert!(frozen_alert().is_none(), "the alert clears with the freeze");
     wait_for("the ordinary task to land", 90, || w.landed(other));
 }
 
