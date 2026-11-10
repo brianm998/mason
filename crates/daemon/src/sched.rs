@@ -9,10 +9,11 @@
 
 use crate::cpu::CpuSource;
 use crate::disk::DiskSource;
+use crate::stall::StallSource;
 use mason_core::TaskId;
 use mason_resources::{Held, Locks, Take, TakeError};
 use mason_scheduler::{
-    explain, since, CpuGate, DiskGate, Kind, Ledger, Needs, Rank, WaitCause, COMPILE,
+    explain, since, CpuGate, DiskGate, Kind, Ledger, Needs, Rank, StallGate, WaitCause, COMPILE,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -43,8 +44,10 @@ pub const EXCLUSIVE: &str = "exclusive";
 /// [cpu]      # a compile starts only while CPU use is below this percent
 /// compile_cpu_max = 50
 /// compile_settle_s = 30  # and this long after the last compile started
+/// compile_jobs = 3       # and never more than this many at once (0: no count)
 /// [disk]     # below this much free disk, no compile and no LLM session starts
 /// floor_gb = 20
+/// stall_ms = 2000        # no further compile while the build disk is this slow (0: off)
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResourceCfg {
@@ -57,8 +60,14 @@ pub struct ResourceCfg {
     /// Seconds between compile starts, so each shows in the CPU reading before
     /// the next is decided. 0 starts every waiter the reading allows at once.
     pub compile_settle_s: u32,
+    /// The most compiles at once when no `[machine] compile` is set (0: no
+    /// count). A test run is a compile that then spends most of its time on
+    /// disk and process launches, which CPU use does not show.
+    pub compile_jobs: u32,
     /// Free space, in GB, below which nothing new starts (0: no floor).
     pub disk_floor_gb: u64,
+    /// How slow an answer from the build disk, in ms, holds further compiles (0: never).
+    pub disk_stall_ms: u64,
 }
 
 /// The default `compile_cpu_max`: half the machine.
@@ -66,6 +75,13 @@ pub const DEFAULT_COMPILE_CPU_MAX: u32 = 50;
 
 /// The default `compile_settle_s`: twice the time the CPU reading averages over.
 pub const DEFAULT_COMPILE_SETTLE_S: u32 = 30;
+
+/// The default `compile_jobs`.
+pub const DEFAULT_COMPILE_JOBS: u32 = 3;
+
+/// The default `disk_stall_ms`. Healthy disks answered in under 250 ms even with
+/// the machine loaded; the stalls this exists for lasted 20 seconds and more.
+pub const DEFAULT_DISK_STALL_MS: u64 = 2000;
 
 impl Default for ResourceCfg {
     fn default() -> Self {
@@ -76,7 +92,9 @@ impl Default for ResourceCfg {
             memory_floor_mb: None,
             compile_cpu_max: DEFAULT_COMPILE_CPU_MAX,
             compile_settle_s: DEFAULT_COMPILE_SETTLE_S,
+            compile_jobs: DEFAULT_COMPILE_JOBS,
             disk_floor_gb: crate::disk::DEFAULT_FLOOR_GB,
+            disk_stall_ms: DEFAULT_DISK_STALL_MS,
         }
     }
 }
@@ -107,7 +125,9 @@ pub fn parse_resource_cfg(text: &str) -> Result<ResourceCfg, String> {
                     c.compile_cpu_max = n as u32;
                 }
                 "cpu" if name == "compile_settle_s" => c.compile_settle_s = n as u32,
+                "cpu" if name == "compile_jobs" => c.compile_jobs = n as u32,
                 "disk" if name == "floor_gb" => c.disk_floor_gb = n as u64,
+                "disk" if name == "stall_ms" => c.disk_stall_ms = n as u64,
                 other => return Err(format!("resources.toml: unknown setting {other}.{name}")),
             }
         }
@@ -182,6 +202,8 @@ struct State {
     disk_read: Option<(Instant, Option<DiskGate>)>,
     /// Grants waiting on a kernel lock that something outside the broker holds, by lease.
     kernel_waits: HashMap<u64, KernelWait>,
+    /// The build disk's responsiveness and the limit on it. `None`: no stall gate.
+    stall: Option<(Arc<dyn StallSource>, u64)>,
 }
 
 struct KernelWait {
@@ -307,13 +329,18 @@ impl Broker {
             fixed.insert(p.clone());
             pools.insert(p.clone());
         }
-        // Reading the machine replaces a count of compiles. The kernel locks still
-        // need a number of slots: one per hardware thread never holds a compile
-        // back, since the CPU gate stops them long before that many run.
+        // Reading the machine replaces a count set per project or saved live, but
+        // CPU use alone lets too many in: a test run is mostly disk and process
+        // launches, and everything blocked on a stalled disk reads as idle. So
+        // `compile_jobs` caps them. 0 is one slot per hardware thread, which never
+        // holds a compile back, since the CPU gate stops them long before that.
         let compile_by_cpu = cpu.replaces_compile_count() && !cfg.machine.contains_key(COMPILE);
         if compile_by_cpu {
-            let threads = std::thread::available_parallelism().map_or(8, |n| n.get());
-            ledger.set_capacity(COMPILE, threads as u32, Kind::Machine);
+            let units = match cfg.compile_jobs {
+                0 => std::thread::available_parallelism().map_or(8, |n| n.get()) as u32,
+                n => n,
+            };
+            ledger.set_capacity(COMPILE, units, Kind::Machine);
             if cfg.compile_settle_s > 0 {
                 ledger.pace_compiles(u64::from(cfg.compile_settle_s) * 1000);
             }
@@ -335,6 +362,7 @@ impl Broker {
                 disk: None,
                 disk_read: None,
                 kernel_waits: HashMap::new(),
+                stall: None,
             }),
             cv: Condvar::new(),
             locks,
@@ -405,8 +433,8 @@ impl Broker {
         }
         if name == COMPILE && st.compile_by_cpu {
             return Err(
-                "`compile` has no count: a compile starts while CPU use is below \
-                 cpu.compile_cpu_max in resources.toml"
+                "`compile` has no live count: at most cpu.compile_jobs run at once, each \
+                 starting while CPU use is below cpu.compile_cpu_max in resources.toml"
                     .into(),
             );
         }
@@ -476,8 +504,25 @@ impl Broker {
             .filter(|g| g.free_mb < g.floor_mb)
     }
 
-    /// Read the CPU source afresh and keep the reading.
+    /// Turn the stall gate on: no further compile while `source` reads at or above `max_ms`.
+    pub fn set_stall(&self, source: Arc<dyn StallSource>, max_ms: u64) {
+        let mut st = lock(&self.st);
+        st.stall = Some((source, max_ms));
+        self.pass(&mut st);
+        drop(st);
+        self.cv.notify_all();
+    }
+
+    /// Read the CPU and stall sources afresh. Every plan is made right after
+    /// this, so the ledger's stall reading is always current.
     fn cpu_gate(&self, st: &mut State) -> Option<CpuGate> {
+        let stall = st.stall.as_ref().and_then(|(source, max_ms)| {
+            source.slow_ms().map(|slow_ms| StallGate {
+                slow_ms,
+                max_ms: *max_ms,
+            })
+        });
+        st.ledger.set_stall(stall);
         st.cpu_busy = st.cpu.busy_pct();
         st.cpu_busy.map(|busy_pct| CpuGate {
             busy_pct,
