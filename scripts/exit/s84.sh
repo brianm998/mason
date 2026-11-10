@@ -14,7 +14,7 @@ stop_daemon() {
 }
 cleanup() {
   stop_daemon
-  target/debug/step-host-ctl reap "$root/d/h" >/dev/null 2>&1 || true
+  for hd in "$root"/d/h; do target/debug/step-host-ctl reap "$hd" >/dev/null 2>&1; done
   rm -rf "$root"
 }
 trap cleanup EXIT
