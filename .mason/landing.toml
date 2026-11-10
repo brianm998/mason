@@ -3,6 +3,10 @@
 # after the tests. Changes to gates wait for the owner before they get this far
 # (see docs/self-hosting.md).
 mode     = "direct"
-window   = "10m"
+# The window is short because MASON's own landing has no landing suites: a batch
+# shares no verification, so a longer wait saves nothing (it was a median 10 min
+# per task for 1.4 tasks per batch). 30s still lets tasks that finish together
+# share a batch.
+window   = "30s"
 max_size = 3
 parallel = 1
