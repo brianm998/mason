@@ -15,9 +15,7 @@ use support::*;
 #[test]
 fn a_batch_of_five_lands_three_ejects_the_conflict_and_parks_the_culprit() {
     let w = world(
-        // The batch is full at five, so it forms at once; the window only has to
-        // outlast the slowest creation of five tasks on a loaded machine.
-        "window = \"300s\"\nmax_size = 5\n[[tier]]\nname = \"batch\"\nsuites = [\"integration\"]\n",
+        "window = \"30s\"\nmax_size = 5\n[[tier]]\nname = \"batch\"\nsuites = [\"integration\"]\n",
         &[],
     );
     let t1 = w.task("one", &[("x/one.txt", "1")]);
