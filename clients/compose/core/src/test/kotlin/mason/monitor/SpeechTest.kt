@@ -92,6 +92,27 @@ class SpeechTest {
         assertTrue(sink.log.isEmpty())
     }
 
+    @Test fun theDefaultsSpeakDisk() {
+        val sink = FakeSink()
+        val a = announcer(sink)
+        a.enqueue(ann("1", "disk", "Disk nearly full."))
+        assertEquals(listOf("sound:Basso"), sink.log.take(1))
+    }
+
+    @Test fun aSavedListGainsTheNewKindsOnceAndALaterUntickStays() {
+        val prefs = MemoryPreferences()
+        prefs.setString("speech.kinds", "failed,landed,needs_you")
+        val sink = FakeSink()
+        val a = Announcer(sink, { false }, prefs)
+        assertTrue("disk" in a.settings.kinds)
+        assertTrue("provider_budget" in a.settings.kinds)
+        assertTrue("credentials" !in a.settings.kinds)
+        a.update(a.settings.copy(kinds = a.settings.kinds - "disk"))
+        val again = Announcer(sink, { false }, prefs)
+        assertTrue("disk" !in again.settings.kinds)
+        assertTrue("tracker" in again.settings.kinds)
+    }
+
     @Test fun voiceAndSoundsAreConfigurableAndRemembered() {
         val prefs = MemoryPreferences()
         val sink = FakeSink()
