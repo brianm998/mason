@@ -230,7 +230,7 @@ fn an_update_while_an_agent_session_runs_does_not_interrupt_it() {
     // Only now may the agent finish.
     std::fs::write(gate.path().join("release"), "").unwrap();
     // The task carries on and lands, once, with one attempt at developing.
-    let end = Instant::now() + Duration::from_secs(300);
+    let end = Instant::now() + Duration::from_secs(240);
     loop {
         let t = s.task_json(0);
         if t["state"] == "landed" {
