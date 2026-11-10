@@ -2,7 +2,7 @@
 
 use mason_step_host::client::{collect_to_file, ClientError, Event, HostClient};
 use mason_step_host::launcher::{
-    exit_signal, spawn_host, spawn_host_within, SpawnOptions, START_LIMIT,
+    exit_signal, launching, spawn_host, spawn_host_within, SpawnOptions, START_LIMIT,
 };
 use mason_step_host::protocol::{self, Frame};
 use mason_step_host::registry::{
@@ -665,4 +665,43 @@ fn a_launch_given_up_on_cannot_come_up_later() {
     assert!(!dir.exists(), "a host came up after it was given up");
     let (signal, _) = exit_signal(&dir).expect("the killed launch was reaped");
     assert_eq!(signal, Some(9));
+}
+
+/// A `--host-bin` that sleeps before it becomes the real host.
+fn slow_host(dir: &Path, secs: u32) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let p = dir.join("slow-host");
+    std::fs::write(
+        &p,
+        format!("#!/bin/sh\nsleep {secs}\nexec \"{HOST}\" \"$@\"\n"),
+    )
+    .unwrap();
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    p
+}
+
+#[test]
+fn a_launch_is_listed_while_it_waits_and_gone_after_success() {
+    let (d, r) = root();
+    let mut o = opts(&r, "t7r1-listed", "sleep 5");
+    o.host_bin = slow_host(d.path(), 1);
+    let h = std::thread::spawn(move || spawn_host(&o).map(|_| ()));
+    wait_until("the launch is listed", || {
+        launching().iter().any(|l| l.id == "t7r1-listed")
+    });
+    h.join().unwrap().unwrap();
+    assert!(launching().iter().all(|l| l.id != "t7r1-listed"));
+}
+
+#[test]
+fn a_launch_is_gone_after_a_timeout() {
+    let (d, r) = root();
+    let mut o = opts(&r, "t7r1-timeout", "sleep 5");
+    o.host_bin = slow_host(d.path(), 30);
+    let h = std::thread::spawn(move || spawn_host_within(&o, Duration::from_millis(600)));
+    wait_until("the launch is listed", || {
+        launching().iter().any(|l| l.id == "t7r1-timeout")
+    });
+    assert!(h.join().unwrap().is_err());
+    assert!(launching().iter().all(|l| l.id != "t7r1-timeout"));
 }
