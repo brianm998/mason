@@ -354,6 +354,16 @@ fn subject_and_detail(d: &Daemon, key: &str, kind: &str, text: &str) -> (String,
             return (subject, detail);
         }
     }
+    if kind == "disk" {
+        // The spoken line says how many tasks the full disk is holding, not the whole alert.
+        let n = d.broker.disk_held();
+        let detail = match n {
+            0 => String::new(),
+            1 => "1 task waiting".into(),
+            n => format!("{n} tasks waiting"),
+        };
+        return ("MASON".into(), detail);
+    }
     ("MASON".into(), text.to_string())
 }
 

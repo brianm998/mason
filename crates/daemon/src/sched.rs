@@ -504,6 +504,22 @@ impl Broker {
             .filter(|g| g.free_mb < g.floor_mb)
     }
 
+    /// How many requests the disk gate is holding right now (zero while disk is fine).
+    pub fn disk_held(&self) -> usize {
+        let mut st = lock(&self.st);
+        if self.refresh_disk(&mut st).is_none() {
+            return 0;
+        }
+        let (floor, free) = (st.floor_mb, self.free_memory(&mut st));
+        let gate = self.cpu_gate(&mut st);
+        st.ledger
+            .waits_gated(crate::daemon::now_ms(), free, floor, gate)
+            .waits
+            .values()
+            .filter(|w| matches!(w.cause, WaitCause::Disk { .. }))
+            .count()
+    }
+
     /// Turn the stall gate on: no further compile while `source` reads at or above `max_ms`.
     pub fn set_stall(&self, source: Arc<dyn StallSource>, max_ms: u64) {
         let mut st = lock(&self.st);
