@@ -88,6 +88,7 @@ pub const CONDITIONS: &[&str] = &[
     "provider_limit",
     "provider_overage",
     "provider_budget",
+    "stalled",
 ];
 
 /// Every alert kind the daemon raises. Add a new kind here when it is raised, and give it a route
@@ -113,6 +114,7 @@ pub const ALERT_KINDS: &[&str] = &[
     "tracker",
     "paused",
     "debt",
+    "stalled",
 ];
 
 /// Kinds that are deliberately shown on the monitor and nothing else: the owner did these
@@ -236,7 +238,7 @@ impl Routing {
             rule(Email, 0),
             rule(Webhook, 0),
         ];
-        for k in ["daemon_down", "credentials", "provider_outage"] {
+        for k in ["daemon_down", "credentials", "provider_outage", "stalled"] {
             put(k, everything.clone());
         }
         put("landed", vec![rule(Monitor, 0), rule(Speech, 0)]);
@@ -398,7 +400,7 @@ impl Sound {
 pub fn sound_for(kind: &str) -> Sound {
     match kind {
         "needs_you" => Sound::Decision,
-        "failed" | "landing" | "daemon_down" | "credentials" | "provider_outage"
+        "failed" | "landing" | "daemon_down" | "credentials" | "provider_outage" | "stalled"
         | "environment" | "runtime" | "definition" | "disk" | "blocked" | "host_lost"
         | "tracker" | "provider_limit" | "provider_overage" | "provider_budget" | "git_stuck" => {
             Sound::Broke
@@ -609,7 +611,7 @@ mod tests {
                 vec![(Monitor, 0), (Sound, 0), (Speech, 0), (Push, 10)]
             );
         }
-        for k in ["daemon_down", "credentials", "provider_outage"] {
+        for k in ["daemon_down", "credentials", "provider_outage", "stalled"] {
             let c: Vec<Channel> = channels(k).into_iter().map(|x| x.0).collect();
             assert_eq!(c, vec![Monitor, Sound, Speech, Push, Email, Webhook]);
             assert!(channels(k).iter().all(|x| x.1 == 0));
