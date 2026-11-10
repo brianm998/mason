@@ -210,9 +210,6 @@ impl Routing {
             rule(Push, 10),
         ];
         put("failed", broke.clone());
-<<<<<<< HEAD
-        put("numbers", broke.clone()); // the stage and exit-script numbers are nearly used up
-=======
         // Conditions that stop work, or the pipeline: the same as `failed`.
         for k in [
             "disk",
@@ -225,10 +222,10 @@ impl Routing {
             "provider_limit",
             "provider_overage",
             "provider_budget",
+            "numbers", // the stage and exit-script numbers are nearly used up
         ] {
             put(k, broke.clone());
         }
->>>>>>> origin/develop
         put("landing", broke); // the base branch is frozen, or a landing is stuck
                                // `paused`, `debt` and `provider_hold` (see `MONITOR_ONLY`) are left unrouted on purpose:
                                // the owner did them, or they stop nothing. `rules` gives them the monitor alone.
@@ -403,14 +400,9 @@ pub fn sound_for(kind: &str) -> Sound {
     match kind {
         "needs_you" => Sound::Decision,
         "failed" | "landing" | "daemon_down" | "credentials" | "provider_outage"
-<<<<<<< HEAD
-        | "environment" | "runtime" | "definition" | "disk" | "numbers" => Sound::Broke,
-=======
         | "environment" | "runtime" | "definition" | "disk" | "blocked" | "host_lost"
-        | "tracker" | "provider_limit" | "provider_overage" | "provider_budget" | "git_stuck" => {
-            Sound::Broke
-        }
->>>>>>> origin/develop
+        | "tracker" | "provider_limit" | "provider_overage" | "provider_budget" | "git_stuck"
+        | "numbers" => Sound::Broke,
         _ => Sound::Info,
     }
 }
