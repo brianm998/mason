@@ -103,7 +103,17 @@ fn kill_9_while_run_check_runs_the_command_once_and_the_task_lands() {
     let mut m = s.masond(&[], &envs);
     s.wait_daemon(&mut m);
     s.mason_ok(&["task", "add", "Checks its work"]);
-    wait_for("the check to start", 240, || lines(&marker) == 1);
+    let end = Instant::now() + Duration::from_secs(240);
+    while lines(&marker) == 0 {
+        if Instant::now() > end {
+            let st = s.mason(&["task", "show", "0", "--json"]);
+            panic!(
+                "the check did not start in 240s\n{}",
+                String::from_utf8_lossy(&st.stdout)
+            );
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
     nix::sys::signal::kill(
         nix::unistd::Pid::from_raw(m.child.id() as i32),
         nix::sys::signal::Signal::SIGKILL,
