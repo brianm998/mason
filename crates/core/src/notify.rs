@@ -436,6 +436,8 @@ pub fn sentence(kind: &str, subject: &str, detail: &str, reminder: bool) -> Stri
         "failed" if detail.is_empty() => format!("{subject} failed; open it to retry or cancel"),
         "failed" => format!("{subject} failed because {detail}; open it to retry or cancel"),
         "landing" => format!("{subject}: {detail}; open the landing queue to see why"),
+        "disk" if detail.is_empty() => "MASON is stopped: disk is nearly full".into(),
+        "disk" => format!("MASON is stopped: disk is nearly full, {detail}"),
         "landed" => format!("{subject} landed"),
         "daemon_down" => "MASON has lost its daemon; check that masond is running".into(),
         "credentials" => format!("{subject}: credentials are failing; renew them"),
@@ -841,5 +843,20 @@ mod tests {
         assert!(daemon_should_speak(true, None, 100));
         assert!(!daemon_should_speak(true, Some(90_000), 100_000));
         assert!(daemon_should_speak(true, Some(60_000), 100_000));
+    }
+
+    #[test]
+    fn a_full_disk_is_a_condition_that_makes_a_sound_and_speaks() {
+        assert!(CONDITIONS.contains(&"disk"));
+        let channels: Vec<Channel> = Routing::defaults()
+            .rules("disk")
+            .iter()
+            .map(|r| r.channel)
+            .collect();
+        assert!(channels.contains(&Channel::Sound) && channels.contains(&Channel::Speech));
+        assert_eq!(
+            sentence("disk", "MASON", "9 tasks waiting", false),
+            "MASON is stopped: disk is nearly full, 9 tasks waiting."
+        );
     }
 }

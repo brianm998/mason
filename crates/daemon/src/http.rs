@@ -227,6 +227,12 @@ async fn status(Shared(d): Shared<Arc<Daemon>>) -> Res {
                     let p: Vec<_> = b.iter().filter(|x| x.1 == "thread_panic").collect();
                     json!({"count": p.len(), "last": p.last().map(|x| x.2.clone())})
                 }),
+                "stuck": d2.broker.disk_low().map(|g| json!({
+                    "cause": "disk",
+                    "free_mb": g.free_mb,
+                    "floor_mb": g.floor_mb,
+                    "tasks_waiting": d2.broker.disk_held(),
+                })),
                 "projects": d2.projects.values().map(|p| p.id.clone()).collect::<Vec<_>>(),
                 "step_hosts_running": running,
                 "trackers": d2.projects.keys().map(|pid| crate::tracker::state_json(&d2, *pid)).collect::<Vec<_>>(),
