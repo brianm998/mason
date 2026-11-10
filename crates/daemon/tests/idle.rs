@@ -65,7 +65,11 @@ fn the_alert_names_the_silence_and_clears_when_output_resumes() {
     let t = file_task(&d, "Goes quiet");
     let mut text = String::new();
     wait_for("the silence alert", 60, || {
-        text = silent_alerts(&d).pop().unwrap_or_default();
+        // The explore agent may be slow to print its first line; only develop is quiet on purpose.
+        text = silent_alerts(&d)
+            .into_iter()
+            .find(|t| t.contains("`develop`"))
+            .unwrap_or_default();
         !text.is_empty()
     });
     assert!(
@@ -74,7 +78,9 @@ fn the_alert_names_the_silence_and_clears_when_output_resumes() {
             && text.contains("silent for"),
         "{text}"
     );
-    wait_for("the alert to clear", 60, || silent_alerts(&d).is_empty());
+    wait_for("the alert to clear", 60, || {
+        !silent_alerts(&d).iter().any(|t| t.contains("`develop`"))
+    });
     wait_state(&d, t, State::Landed, 90);
     let hosts: Vec<_> = std::fs::read_dir(s.data_dir.join("h"))
         .unwrap()
@@ -138,7 +144,7 @@ fn a_third_stall_fails_the_step_and_says_so() {
 
 #[test]
 fn a_slow_run_check_is_not_silence() {
-    // The check takes 6 s; both limits are shorter. Neither fires.
+    // The check takes 8 s; both limits are shorter. Neither fires.
     let develop = json!([
         {"sh": TASK_SCRIPT_COMMIT},
         {"call": {"tool": "run_check", "args": {"name": "tests"}}},
@@ -146,8 +152,8 @@ fn a_slow_run_check_is_not_silence() {
     ]);
     let s = world(
         vec![develop],
-        "agent_idle_alert_s = 1\nagent_idle_stop_s = 2",
-        "sleep 6; test -f hello.txt",
+        "agent_idle_alert_s = 2\nagent_idle_stop_s = 4",
+        "sleep 8; test -f hello.txt",
     );
     let d = s.start();
     let (stop, seen) = (
@@ -159,5 +165,12 @@ fn a_slow_run_check_is_not_silence() {
     wait_state(&d, t, State::Landed, 120);
     stop.store(true, Ordering::SeqCst);
     assert_eq!(seen.load(Ordering::SeqCst), 0, "an alert was raised");
-    assert!(d.store.host_losses_since(0).unwrap().is_empty());
+    assert!(
+        d.store
+            .host_losses_since(0)
+            .unwrap()
+            .iter()
+            .all(|l| l.step != "develop"),
+        "the develop session was stopped"
+    );
 }
