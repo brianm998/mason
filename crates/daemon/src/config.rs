@@ -292,7 +292,7 @@ impl DaemonConfig {
             adhoc_exit_start: std::env::var("MASON_ADHOC_EXIT_START")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .filter(|n| (1..=99).contains(n))
+                .filter(|n| (1..=crate::numbers::EXIT_CEILING).contains(n))
                 .unwrap_or(crate::numbers::DEFAULT_ADHOC_START),
             introspect_interval: Duration::from_secs(24 * 3600),
             analyst_interval: Duration::from_secs(7 * 24 * 3600),
