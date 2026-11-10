@@ -312,7 +312,7 @@ impl Daemon {
         &self.landing
     }
 
-    pub fn world(&self) -> Result<mason_engine::World, StoreError> {
+    pub fn world(&self) -> Result<std::sync::Arc<mason_engine::World>, StoreError> {
         self.store.world()
     }
 
