@@ -3,7 +3,7 @@
 //! The ordering rule, the passing rule, and "no deadlock, no lost lease",
 //! checked over random workloads by simulating the whole run.
 
-use mason_scheduler::{explain, CpuGate, Kind, Ledger, Needs, Rank, WaitCause};
+use mason_scheduler::{explain, CpuGate, Kind, Ledger, Needs, Rank, StallGate, WaitCause};
 use proptest::prelude::*;
 use std::collections::BTreeMap;
 
@@ -391,6 +391,37 @@ fn the_cpu_gate_leaves_other_resources_alone() {
         0,
     );
     assert_eq!(l.schedule_gated(0, None, None, hot).grants, vec![a]);
+}
+
+#[test]
+fn a_disk_stall_holds_only_a_further_compile() {
+    let mut l = Ledger::new();
+    l.set_capacity("llm:claude", 2, Kind::Llm);
+    l.set_capacity("compile", 4, Kind::Machine);
+    l.set_stall(Some(StallGate {
+        slow_ms: 30_000,
+        max_ms: 2_000,
+    }));
+    let compile = |n: u64| Rank::new(false, 1, 2, n, n, false);
+    let first = l.submit(compile(1), Needs::of(&[("compile", 1)]), "#1", 0);
+    assert_eq!(
+        l.schedule(0, None, None).grants,
+        vec![first],
+        "the first compile starts: nothing of ours can be causing the stall"
+    );
+    let second = l.submit(compile(2), Needs::of(&[("compile", 1)]), "#2", 1);
+    let agent = l.submit(compile(3), Needs::of(&[("llm:claude", 1)]), "#3", 1);
+    let p = l.schedule(1, None, None);
+    assert_eq!(p.grants, vec![agent], "agents are not held by a stall");
+    assert!(matches!(
+        p.waits[&second].cause,
+        WaitCause::DiskStall { .. }
+    ));
+    l.set_stall(Some(StallGate {
+        slow_ms: 3,
+        max_ms: 2_000,
+    }));
+    assert_eq!(l.schedule(2, None, None).grants, vec![second]);
 }
 
 #[test]
