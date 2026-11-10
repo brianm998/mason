@@ -62,3 +62,11 @@ Where the plan or design left room, Stage 8 chose the following. Any can be over
   on macOS. It is read at most once a second, and only when a floor is configured.
   The floor applies only when something else is already running, so it can never
   stop an idle machine from starting work.
+
+**Update (2026-11-09): the hook is on for this repository, and sees compound commands.**
+Too many interactive `cargo test --workspace` runs were going at once because the hook
+was optional, not installed, and looked only at the first word, so `cd x && cargo test`
+passed it. `.claude/settings.json` now registers `mason hook bash`; it wraps a build or
+test command found anywhere in a compound command, and the rewritten command names the
+CLI by its own path so it works where `mason` is not on `PATH`. The wrapped run takes a
+`compile` slot, so it waits for CPU below `compile_cpu_max` (default 50%) like any other.
