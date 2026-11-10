@@ -13,4 +13,5 @@ pub mod direct;
 pub mod edit;
 pub mod git;
 pub mod plan;
+pub mod proc;
 pub mod promote;
