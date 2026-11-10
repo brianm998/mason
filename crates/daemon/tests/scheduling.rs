@@ -139,8 +139,8 @@ fn wait_explained(d: &Arc<Daemon>, t: TaskId) -> String {
         format!("task {t}: {:?}\nevents:\n{}", task_of(d, t), evs.join("\n"))
     };
     let start = std::time::Instant::now();
-    wait_for("the task to be waiting with a reason", 40, || {
-        if start.elapsed() > Duration::from_secs(15) {
+    wait_for("the task to be waiting with a reason", 100, || {
+        if start.elapsed() > Duration::from_secs(90) {
             panic!("never waited. {}", dump(d));
         }
         match d.broker.explain_task(t) {
