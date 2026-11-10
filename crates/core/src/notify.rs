@@ -371,6 +371,10 @@ pub fn sentence(kind: &str, subject: &str, detail: &str, reminder: bool) -> Stri
             format!("{subject} needs a decision; open the card and answer it")
         }
         "needs_you" => format!("{subject} needs a decision on {detail}"),
+        "approval" => format!("{subject} is waiting for your approval; approve or reject it"),
+        "proposal" => {
+            format!("{subject} is proposed and waiting for your approval; approve or reject it")
+        }
         "failed" if detail.is_empty() => format!("{subject} failed; open it to retry or cancel"),
         "failed" => format!("{subject} failed because {detail}; open it to retry or cancel"),
         "landing" => format!("{subject}: {detail}; open the landing queue to see why"),
@@ -649,6 +653,18 @@ mod tests {
         assert_eq!(sound_for("needs_you"), Sound::Decision);
         assert_eq!(sound_for("failed"), Sound::Broke);
         assert_eq!(sound_for("landed"), Sound::Info);
+    }
+
+    #[test]
+    fn an_approval_is_worded_as_waiting_for_approval_not_for_an_answer() {
+        assert_eq!(
+            sentence("approval", "Web API 204", "", false),
+            "Web API 204 is waiting for your approval; approve or reject it."
+        );
+        assert_eq!(
+            sentence("proposal", "Web API 204", "", true),
+            "Reminder: Web API 204 is proposed and waiting for your approval; approve or reject it."
+        );
     }
 
     #[test]

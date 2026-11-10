@@ -795,3 +795,67 @@ fn two_tasks_one_strictly_after_the_other_both_land() {
         "{log:?}"
     );
 }
+
+fn alert_keys(d: &std::sync::Arc<mason_daemon::Daemon>) -> Vec<String> {
+    mason_daemon::attention::sync_alerts(d);
+    d.store
+        .alerts(true)
+        .unwrap()
+        .into_iter()
+        .filter(|a| a.kind == "needs_you")
+        .map(|a| a.key)
+        .collect()
+}
+
+fn spoken(d: &std::sync::Arc<mason_daemon::Daemon>, key: &str) -> String {
+    mason_daemon::notify::tick(d);
+    d.store
+        .pending_announcements(200)
+        .unwrap()
+        .into_iter()
+        .find(|p| p.key.starts_with(&format!("alert:{key}:")))
+        .unwrap_or_else(|| panic!("nothing was to be said for {key}"))
+        .sentence
+}
+
+#[test]
+fn an_approval_step_raises_an_alert_that_clears_when_approved() {
+    let s = scratch_with(Some(DEF_APPROVAL), happy_script());
+    let d = s.start();
+    let t = flagged(&d, "Needs sign-off");
+    wait_for("the approval wait", 60, || {
+        task_of(&d, t).activity == Activity::Waiting(WaitReason::On(APPROVAL_WAIT.into()))
+    });
+    let key = format!("approval:{}", t.0);
+    assert!(alert_keys(&d).contains(&key));
+    let line = spoken(&d, &key);
+    assert!(line.contains("waiting for your approval"), "{line}");
+    assert!(!line.contains("decision"), "{line}");
+    mason_daemon::jobs::conclude_approval(&d, t, mason_definition::graph::Outcome::Green, "")
+        .unwrap();
+    wait_state(&d, t, State::Landed, 90);
+    assert!(!alert_keys(&d).contains(&key));
+}
+
+#[test]
+fn a_proposed_task_raises_an_alert_that_clears_on_approve_and_on_reject() {
+    let s = scratch_with(Some(DEF_SKIP), happy_script());
+    let d = s.start();
+    let file =
+        |title: &str| file_task_as(&d, title, "Do the thing.", true, TrustSource::Owner, true);
+    let (a, b) = (file("Proposed A"), file("Proposed B"));
+    let keys = alert_keys(&d);
+    for t in [a, b] {
+        assert!(keys.contains(&format!("proposed:{}", t.0)), "{keys:?}");
+    }
+    let line = spoken(&d, &format!("proposed:{}", a.0));
+    assert!(
+        line.contains("proposed and waiting for your approval"),
+        "{line}"
+    );
+    d.emit(EventKind::Approved { task: a }).unwrap();
+    d.emit(EventKind::Rejected { task: b }).unwrap();
+    let keys = alert_keys(&d);
+    assert!(!keys.contains(&format!("proposed:{}", a.0)), "{keys:?}");
+    assert!(!keys.contains(&format!("proposed:{}", b.0)), "{keys:?}");
+}
