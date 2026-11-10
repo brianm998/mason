@@ -16,9 +16,10 @@ use mason_landing::git;
 use mason_store::ReservationRow;
 use std::path::Path;
 
-/// Exit scripts and stage notes have two digits: `scripts/run-exit-scripts.sh` only runs
-/// `s[0-9][0-9].sh`. Widening that glob is a gate change, so the counter stops here.
-pub const EXIT_CEILING: u32 = 99;
+/// Exit scripts and stage notes have two or three digits: `scripts/run-exit-scripts.sh` runs
+/// `s[0-9][0-9].sh` and `s[0-9][0-9][0-9].sh`. Widening those globs is a gate change, so the
+/// counter stops here.
+pub const EXIT_CEILING: u32 = 999;
 /// Decisions have four digits.
 pub const DECISION_CEILING: u32 = 9999;
 /// Where ad-hoc tasks start, above the planned stages (setting `adhoc_exit_start`).
@@ -30,7 +31,7 @@ pub const KIND_EXIT: &str = "exit";
 /// A numbered file MASON hands out names for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Numbered {
-    /// A stage note or an exit script: they share one two-digit number.
+    /// A stage note or an exit script: they share one number of two or three digits.
     Stage(u32),
     Decision(u32),
 }
@@ -40,9 +41,10 @@ pub fn parse_path(path: &str) -> Option<Numbered> {
     let digits = |s: &str, n: usize| -> Option<u32> {
         (s.len() == n && s.bytes().all(|b| b.is_ascii_digit())).then(|| s.parse().ok())?
     };
+    let stage = |s: &str| digits(s, 2).or_else(|| digits(s, 3)).map(Numbered::Stage);
     if let Some(f) = path.strip_prefix("docs/stages/") {
         let stem = f.strip_suffix(".md")?;
-        return digits(stem.strip_prefix('s')?, 2).map(Numbered::Stage);
+        return stage(stem.strip_prefix('s')?);
     }
     if let Some(f) = path.strip_prefix("docs/decisions/") {
         if f.contains('/') || !f.ends_with(".md") {
@@ -57,7 +59,7 @@ pub fn parse_path(path: &str) -> Option<Numbered> {
             .strip_suffix("-real")
             .or_else(|| stem.strip_suffix("-manual"))
             .unwrap_or(stem);
-        return digits(stem.strip_prefix('s')?, 2).map(Numbered::Stage);
+        return stage(stem.strip_prefix('s')?);
     }
     None
 }
@@ -421,7 +423,16 @@ mod tests {
         );
         assert_eq!(parse_path("docs/stages/s12-screenshots/a.png"), None);
         assert_eq!(parse_path("scripts/exit/fixtures/s42/x.json"), None);
-        assert_eq!(parse_path("docs/stages/s123.md"), None);
+        assert_eq!(
+            parse_path("docs/stages/s123.md"),
+            Some(Numbered::Stage(123))
+        );
+        assert_eq!(
+            parse_path("scripts/exit/s100-real.sh"),
+            Some(Numbered::Stage(100))
+        );
+        assert_eq!(parse_path("docs/stages/s1234.md"), None);
+        assert_eq!(parse_path("docs/stages/s7.md"), None);
         assert_eq!(parse_path("docs/decisions/17-x.md"), None);
         assert_eq!(
             highest([
