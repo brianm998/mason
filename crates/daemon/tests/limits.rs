@@ -6,6 +6,7 @@
 
 use mason_daemon::cpu::FakeCpu;
 use mason_daemon::sched::{Broker, LeaseState, ResourceCfg};
+use mason_daemon::stall::FakeStall;
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -86,7 +87,9 @@ fn the_compile_cpu_limit_comes_from_the_config() {
 fn with_the_machines_own_reading_a_saved_compile_count_is_ignored() {
     let dir = scratch("nocount");
     std::fs::write(dir.join("limits.kv"), "compile\t2\nllm:claude\t4\n").unwrap();
-    let cfg = mason_daemon::sched::parse_resource_cfg("[cpu]\ncompile_settle_s = 0\n").unwrap();
+    let cfg =
+        mason_daemon::sched::parse_resource_cfg("[cpu]\ncompile_settle_s = 0\ncompile_jobs = 0\n")
+            .unwrap();
     let b = broker(&dir, &cfg, &FakeCpu::replacing_compile_count(10));
     b.declare("compile", 2);
     let threads = std::thread::available_parallelism().unwrap().get() as u32;
@@ -98,6 +101,58 @@ fn with_the_machines_own_reading_a_saved_compile_count_is_ignored() {
     }
     let err = b.set_limit("compile", 2).unwrap_err();
     assert!(err.contains("compile_cpu_max"), "{err}");
+}
+
+#[test]
+fn compiles_are_capped_by_default_however_idle_the_cpu_reads() {
+    let dir = scratch("cap");
+    let cfg = mason_daemon::sched::parse_resource_cfg("[cpu]\ncompile_settle_s = 0\n").unwrap();
+    let b = broker(&dir, &cfg, &FakeCpu::replacing_compile_count(0));
+    assert_eq!(b.limit("compile"), Some(3));
+    let ids: Vec<u64> = (0..4)
+        .map(|i| b.lease_open(&format!("cc{i}"), &compile()))
+        .collect();
+    for id in &ids[..3] {
+        assert!(matches!(b.lease_poll(*id), LeaseState::Granted { .. }));
+    }
+    assert!(matches!(b.lease_poll(ids[3]), LeaseState::Waiting { .. }));
+    b.lease_close(ids[0]);
+    assert!(matches!(b.lease_poll(ids[3]), LeaseState::Granted { .. }));
+}
+
+#[test]
+fn the_compile_cap_comes_from_the_config() {
+    let dir = scratch("capcfg");
+    let cfg = mason_daemon::sched::parse_resource_cfg("[cpu]\ncompile_jobs = 5\n").unwrap();
+    let b = broker(&dir, &cfg, &FakeCpu::replacing_compile_count(0));
+    assert_eq!(b.limit("compile"), Some(5));
+}
+
+#[test]
+fn a_stalled_disk_holds_further_compiles_but_never_the_first() {
+    let dir = scratch("stall");
+    let cfg = mason_daemon::sched::parse_resource_cfg("[cpu]\ncompile_settle_s = 0\n").unwrap();
+    let b = broker(&dir, &cfg, &FakeCpu::replacing_compile_count(0));
+    let stall = FakeStall::new(21_000);
+    b.set_stall(stall.clone(), 2_000);
+    let first = b.lease_open("cc1", &compile());
+    assert!(
+        matches!(b.lease_poll(first), LeaseState::Granted { .. }),
+        "with no compile running a stall is not ours to wait out"
+    );
+    let second = b.lease_open("cc2", &compile());
+    match b.lease_poll(second) {
+        LeaseState::Waiting { explain } => assert_eq!(
+            explain,
+            "compile waiting: the build disk took 21.0 s to answer (limit 2.0 s)"
+        ),
+        other => panic!("should wait: {other:?}"),
+    }
+    stall.set(5);
+    assert!(matches!(b.lease_poll(second), LeaseState::Granted { .. }));
+    // Started: a stall does not take it back.
+    stall.set(60_000);
+    assert!(matches!(b.lease_poll(first), LeaseState::Granted { .. }));
 }
 
 #[test]

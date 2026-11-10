@@ -19,6 +19,8 @@ pub enum WaitCause {
     /// Another compile started moments ago and does not show in the CPU reading
     /// yet. `until` is when the next one may start.
     Settling { until: u64 },
+    /// The build disk has been answering slowly and a compile is already running.
+    DiskStall { slow_ms: u64, max_ms: u64 },
     /// Needs more of the resource than its limit, so it cannot run until the
     /// limit is raised.
     TooBig {
@@ -150,6 +152,11 @@ pub fn explain(w: &Wait, now_ms: u64) -> String {
         WaitCause::Cpu { busy_pct, max_pct } => {
             format!("compile waiting: CPU {busy_pct}% > {max_pct}%")
         }
+        WaitCause::DiskStall { slow_ms, max_ms } => format!(
+            "compile waiting: the build disk took {:.1} s to answer (limit {:.1} s)",
+            *slow_ms as f64 / 1000.0,
+            *max_ms as f64 / 1000.0
+        ),
         WaitCause::Settling { until } => format!(
             "compile waiting: letting the last compile show in CPU use ({} s)",
             until.saturating_sub(now_ms).div_ceil(1000)
