@@ -1577,6 +1577,7 @@ fn settle_all(
                 }
                 // Only what is verifiably the recorded process: the CLI the dead
                 // host left running must not work beside its replacement.
+                tracing::warn!(host = %newest, "reaping a lost host before its replacement");
                 mason_step_host::registry::reap_dir(&root.join(&newest));
                 c.release_lease();
                 if get_lease(c).is_err() {
@@ -1920,9 +1921,9 @@ fn run_command_on(
     // Stop the run if it takes too long.
     let done = Arc::new(AtomicBool::new(false));
     {
-        let (done, sock) = (done.clone(), dir.join("sock"));
+        let (done, sock, hdir) = (done.clone(), dir.join("sock"), dir.clone());
         std::thread::spawn(move || {
-            let end = Instant::now() + limit;
+            let end = Instant::now() + mason_step_host::registry::remaining_limit(limit, &hdir);
             while Instant::now() < end {
                 if done.load(Ordering::SeqCst) {
                     return;
