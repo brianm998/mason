@@ -237,7 +237,10 @@ pub fn hook_bash(input: &str, needs: &str, mason: &str) -> Option<Value> {
     let mut input = v["tool_input"].clone();
     input["command"] = json!(format!(
         "{} run --needs {needs} -- bash -c {}",
-        if mason.chars().all(|c| c.is_ascii_alphanumeric() || "/._-".contains(c)) {
+        if mason
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "/._-".contains(c))
+        {
             mason.to_string()
         } else {
             shell_quote(mason)
