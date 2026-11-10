@@ -75,6 +75,23 @@ impl HostInfo {
     }
 }
 
+/// What is left of `limit` for a host that started at `started_ms`, given the time `now`.
+pub fn remaining_at(limit: std::time::Duration, started_ms: u64, now: u64) -> std::time::Duration {
+    limit.saturating_sub(std::time::Duration::from_millis(
+        now.saturating_sub(started_ms),
+    ))
+}
+
+/// What is left of `limit` for the host in `dir`, counted from when that host started
+/// (`started_ms` in its `host.kv`), so a restarted daemon does not begin the count again.
+/// A host whose record cannot be read gets the whole limit.
+pub fn remaining_limit(limit: std::time::Duration, dir: &Path) -> std::time::Duration {
+    match HostInfo::read(dir) {
+        Ok(i) => remaining_at(limit, i.started_ms, now_ms()),
+        Err(_) => limit,
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExitRecord {
     /// -1 when killed by a signal.
@@ -412,4 +429,17 @@ pub fn reap_verified(root: &Path) -> Vec<Reaped> {
     }
     out.sort_by(|a, b| a.id.cmp(&b.id));
     out
+}
+
+#[cfg(test)]
+mod limit_tests {
+    use super::remaining_at;
+    use std::time::Duration as D;
+    #[test]
+    fn remaining_limit_counts_from_host_start() {
+        assert_eq!(remaining_at(D::from_secs(3), 1000, 1000), D::from_secs(3));
+        assert_eq!(remaining_at(D::from_secs(3), 1000, 3000), D::from_secs(1));
+        assert_eq!(remaining_at(D::from_secs(3), 1000, 9000), D::ZERO);
+        assert_eq!(remaining_at(D::from_secs(3), 5000, 1000), D::from_secs(3));
+    }
 }
