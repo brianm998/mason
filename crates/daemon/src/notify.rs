@@ -202,11 +202,6 @@ pub fn parse(src: &str) -> Result<Settings, String> {
                     s.stale_ms = span(v, "speech.stale")?;
                 }
             }
-            "stall" => {
-                if let Some(v) = t.get("after") {
-                    s.stall_ms = span(v, "stall.after")?;
-                }
-            }
             "email" => {
                 let need = |k: &str| text(t, k).ok_or_else(|| format!("email: `{k}` is required"));
                 let to: Vec<String> = match t.get("to") {
@@ -258,6 +253,7 @@ pub fn parse(src: &str) -> Result<Settings, String> {
             "stall" => {
                 for (k, v) in t.iter() {
                     match k {
+                        "after" => s.stall_ms = span(v, "stall.after")?,
                         "long_wait" => {
                             s.long_wait_ms = if v.as_integer() == Some(0) {
                                 0

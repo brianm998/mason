@@ -222,7 +222,7 @@ impl Ledger {
                 }
                 WaitCause::Exclusive => ("exclusive".into(), false, self.last_any_grant.as_ref()),
                 WaitCause::Memory { .. } => ("memory".into(), false, self.last_any_grant.as_ref()),
-                WaitCause::Disk { .. } => continue,
+                WaitCause::Disk { .. } | WaitCause::DiskStall { .. } => continue,
             };
             let idle_ms = now.saturating_sub(last.copied().unwrap_or(0).max(r.since));
             if !never && (long_after_ms == 0 || idle_ms < long_after_ms) {
