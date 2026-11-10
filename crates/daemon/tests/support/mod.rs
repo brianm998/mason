@@ -183,6 +183,14 @@ impl Scratch {
     /// What a daemon that ran before would already have fetched: startup reads the
     /// remote-tracking refs as they are and does no network (the watcher fetches).
     pub fn prefetch(&self) {
+        // Only a remote on this disk: a test that points origin at a network
+        // address (a silent listener) means to leave it unanswered.
+        let url = git::run(&self.repo, &["config", "remote.origin.url"])
+            .map(|o| o.trim().to_string())
+            .unwrap_or_default();
+        if !url.starts_with('/') {
+            return;
+        }
         let _ = git::run_for(
             &self.repo,
             &["fetch", "-q", "--prune", "origin"],
