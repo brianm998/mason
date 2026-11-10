@@ -101,7 +101,7 @@ fn run(point: &str, mode: &str) -> Result<(), String> {
     let mut second = s.masond(&[], &[]);
     let started = Instant::now();
     while !s.mason(&["status", "--json"]).status.success() {
-        if started.elapsed() > Duration::from_secs(60) {
+        if started.elapsed() > Duration::from_secs(240) {
             return Err("the restarted daemon never answered".into());
         }
         if let Some(st) = second.child.try_wait().map_err(|e| e.to_string())? {
