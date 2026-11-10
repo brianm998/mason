@@ -116,18 +116,7 @@ impl W {
         let tmp = self.s.root.path().join(format!("mk{}", t.0));
         // The remote's main may have moved: start from it.
         sh(&self.s.repo, &["fetch", "-q", "origin"]);
-        sh(
-            &self.s.repo,
-            &[
-                "worktree",
-                "add",
-                "-q",
-                "-b",
-                &br,
-                tmp.to_str().unwrap(),
-                "origin/main",
-            ],
-        );
+        add_worktree(&self.s.repo, &br, &tmp);
         for (p, body) in files {
             let f = tmp.join(p);
             std::fs::create_dir_all(f.parent().unwrap()).unwrap();
@@ -225,4 +214,30 @@ pub fn host_section(s: &Scratch, approval: bool, queue: bool) -> String {
         s.root.path().join("host-state").display(),
         s.origin.display()
     )
+}
+
+/// `git worktree add`, tried again when it loses a race with the daemon's own
+/// `git worktree prune` (which can remove the half-made entry).
+pub fn add_worktree(repo: &std::path::Path, branch: &str, dir: &std::path::Path) {
+    let mut last = String::new();
+    for _ in 0..8 {
+        let _ = mason_landing::git::run(repo, &["branch", "-D", branch]);
+        match mason_landing::git::run(
+            repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                branch,
+                dir.to_str().unwrap(),
+                "origin/main",
+            ],
+        ) {
+            Ok(_) => return,
+            Err(e) => last = e.to_string(),
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    panic!("git worktree add kept failing: {last}");
 }

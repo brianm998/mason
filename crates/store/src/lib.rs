@@ -16,10 +16,11 @@ pub mod migrations;
 pub mod notify;
 
 use mason_core::*;
-use mason_engine::{reduce, ReduceError, World};
+use mason_engine::{reduce_in_place, ReduceError, Touched, World};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Sender};
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread::JoinHandle;
 
@@ -343,8 +344,8 @@ pub struct Appended {
 
 enum Cmd {
     Append(Event, Sender<Result<Appended, StoreError>>),
-    World(Sender<World>),
-    Rebuild(Sender<Result<World, StoreError>>),
+    World(Sender<Arc<World>>),
+    Rebuild(Sender<Result<Arc<World>, StoreError>>),
     Bug(u64, String, String, Sender<Result<(), StoreError>>),
     /// Run a write on the writer thread, so there is still only one writer.
     Write(Box<dyn FnOnce(&Connection) + Send>),
@@ -414,12 +415,11 @@ fn replay(conn: &Connection) -> Result<World, StoreError> {
         };
         after = last.seq;
         for se in batch {
-            world = reduce(&world, &se.event)
-                .map_err(|e| StoreError::Corrupt {
-                    seq: se.seq,
-                    why: format!("{e:?}"),
-                })?
-                .0;
+            // In place: an error here is fatal, so there is nothing to roll back.
+            reduce_in_place(&mut world, &se.event).map_err(|e| StoreError::Corrupt {
+                seq: se.seq,
+                why: format!("{e:?}"),
+            })?;
         }
     }
 }
@@ -574,27 +574,29 @@ fn write_decision(conn: &Connection, d: &Decision) -> rusqlite::Result<()> {
     Ok(())
 }
 
-/// Write only the rows that differ between `old` and `new`.
-fn project_diff(conn: &Connection, old: &World, new: &World) -> rusqlite::Result<()> {
-    for p in new
-        .projects
-        .values()
-        .filter(|p| old.projects.get(&p.id) != Some(p))
-    {
+/// Write every projection row for `w`.
+fn write_all(conn: &Connection, w: &World) -> rusqlite::Result<()> {
+    for p in w.projects.values() {
         write_project(conn, p)?;
     }
-    for t in new
-        .tasks
-        .values()
-        .filter(|t| old.tasks.get(&t.id) != Some(t))
-    {
+    for t in w.tasks.values() {
         write_task(conn, t)?;
     }
-    for d in new
-        .decisions
-        .values()
-        .filter(|d| old.decisions.get(&d.id) != Some(d))
-    {
+    for d in w.decisions.values() {
+        write_decision(conn, d)?;
+    }
+    Ok(())
+}
+
+/// Write the rows an event touched, as they now are in `w`.
+fn write_touched(conn: &Connection, w: &World, t: &Touched) -> rusqlite::Result<()> {
+    for p in t.projects.iter().filter_map(|id| w.projects.get(id)) {
+        write_project(conn, p)?;
+    }
+    for x in t.tasks.iter().filter_map(|id| w.tasks.get(id)) {
+        write_task(conn, x)?;
+    }
+    for d in t.decisions.iter().filter_map(|id| w.decisions.get(id)) {
         write_decision(conn, d)?;
     }
     Ok(())
@@ -620,21 +622,21 @@ fn projected_seq(conn: &Connection) -> Result<u64, StoreError> {
 }
 
 /// Drop and rewrite every projection from the log, in one transaction.
-fn rebuild(conn: &mut Connection) -> Result<World, StoreError> {
+fn rebuild(conn: &mut Connection) -> Result<Arc<World>, StoreError> {
     let tx = conn.transaction()?;
     let world = replay(&tx)?;
     tx.execute_batch("DELETE FROM decisions; DELETE FROM tasks; DELETE FROM projects;")?;
-    project_diff(&tx, &World::new(), &world)?;
+    write_all(&tx, &world)?;
     set_projected(&tx, last_seq(&tx)?)?;
     tx.commit()?;
-    Ok(world)
+    Ok(Arc::new(world))
 }
 
 /// The writer thread. A panic here must never leave the store half alive (every append and
 /// every `world()` would fail for the life of the process while the daemon still answers),
 /// so it ends the process: launchd restarts it, recovery runs, and a build that keeps doing
 /// this is rolled back by the existing rule.
-fn writer_loop(conn: Connection, world: World, rx: std::sync::mpsc::Receiver<Cmd>) {
+fn writer_loop(conn: Connection, world: Arc<World>, rx: std::sync::mpsc::Receiver<Cmd>) {
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| writer_run(conn, world, rx)));
     if let Err(e) = r {
         let what = e
@@ -652,17 +654,17 @@ fn writer_loop(conn: Connection, world: World, rx: std::sync::mpsc::Receiver<Cmd
 /// The exit status when the writer thread panics (EX_SOFTWARE).
 pub const WRITER_PANIC_EXIT: i32 = 70;
 
-fn writer_run(mut conn: Connection, mut world: World, rx: std::sync::mpsc::Receiver<Cmd>) {
+fn writer_run(mut conn: Connection, mut world: Arc<World>, rx: std::sync::mpsc::Receiver<Cmd>) {
     while let Ok(cmd) = rx.recv() {
         match cmd {
             Cmd::Shutdown => break,
             Cmd::World(reply) => {
-                let _ = reply.send(world.clone());
+                let _ = reply.send(Arc::clone(&world));
             }
             Cmd::Rebuild(reply) => {
                 let r = rebuild(&mut conn);
                 if let Ok(w) = &r {
-                    world = w.clone();
+                    world = Arc::clone(w);
                 }
                 let _ = reply.send(r);
             }
@@ -677,25 +679,42 @@ fn writer_run(mut conn: Connection, mut world: World, rx: std::sync::mpsc::Recei
                     .map_err(StoreError::from);
                 let _ = reply.send(r);
             }
-            Cmd::Append(ev, reply) => match append_one(&mut conn, &world, &ev) {
-                Ok((next, appended)) => {
-                    world = next;
-                    let _ = reply.send(Ok(appended));
-                }
-                Err(e) => {
-                    let _ = reply.send(Err(e));
-                }
-            },
+            Cmd::Append(ev, reply) => {
+                let _ = reply.send(append_one(&mut conn, &mut world, &ev));
+            }
         }
     }
 }
 
+/// Apply `ev` to the writer's world in place (`Arc::make_mut` copies only when a reader
+/// still holds a snapshot) and persist it. A refused event changes nothing. If the
+/// transaction fails after the world changed, the world is rebuilt from the log, which
+/// is rare and correct; a failure of that too ends the process (see `writer_loop`).
+///
+/// Chosen over cheap-to-clone `Task`/`StepRun` because it removes the copy altogether
+/// instead of making it cheaper: an append costs the touched rows, not a walk of every task.
 fn append_one(
+    conn: &mut Connection,
+    world: &mut Arc<World>,
+    ev: &Event,
+) -> Result<Appended, StoreError> {
+    let (effects, touched) =
+        reduce_in_place(Arc::make_mut(world), ev).map_err(StoreError::Rejected)?;
+    match persist(conn, world, ev, &touched) {
+        Ok(seq) => Ok(Appended { seq, effects }),
+        Err(e) => {
+            *world = Arc::new(replay(conn).expect("replay after a failed append"));
+            Err(e)
+        }
+    }
+}
+
+fn persist(
     conn: &mut Connection,
     world: &World,
     ev: &Event,
-) -> Result<(World, Appended), StoreError> {
-    let (next, effects) = reduce(world, ev).map_err(StoreError::Rejected)?;
+    touched: &Touched,
+) -> Result<u64, StoreError> {
     let (kind, payload) = codec::encode(&ev.kind);
     let tx = conn.transaction()?;
     tx.execute(
@@ -703,10 +722,10 @@ fn append_one(
         params![ev.at.0 as i64, kind, payload],
     )?;
     let seq = tx.last_insert_rowid() as u64;
-    project_diff(&tx, world, &next)?;
+    write_touched(&tx, world, touched)?;
     set_projected(&tx, seq)?;
     tx.commit()?;
-    Ok((next, Appended { seq, effects }))
+    Ok(seq)
 }
 
 impl Store {
@@ -718,7 +737,7 @@ impl Store {
         let world = if projected_seq(&conn)? != last_seq(&conn)? {
             rebuild(&mut conn)?
         } else {
-            replay(&conn)?
+            Arc::new(replay(&conn)?)
         };
         let reader = Connection::open_with_flags(
             &path,
@@ -765,7 +784,7 @@ impl Store {
     }
 
     /// The current in-memory world, as the writer sees it.
-    pub fn world(&self) -> Result<World, StoreError> {
+    pub fn world(&self) -> Result<Arc<World>, StoreError> {
         let (rtx, rrx) = channel();
         self.tx
             .send(Cmd::World(rtx))
@@ -774,7 +793,7 @@ impl Store {
     }
 
     /// Rebuild every projection from the log.
-    pub fn rebuild_projections(&self) -> Result<World, StoreError> {
+    pub fn rebuild_projections(&self) -> Result<Arc<World>, StoreError> {
         let (rtx, rrx) = channel();
         self.tx
             .send(Cmd::Rebuild(rtx))
@@ -2797,7 +2816,13 @@ impl Store {
     }
 
     pub fn verify(&self) -> Result<(), StoreError> {
-        let conn = self.reader.lock().unwrap_or_else(|e| e.into_inner());
+        // Its own connection: the replay can take seconds, and must not hold the shared
+        // reader's mutex while every other read in the daemon waits.
+        let conn = Connection::open_with_flags(
+            &self.path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        conn.pragma_update(None, "busy_timeout", 5000)?;
         let n: i64 = conn.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))?;
         let last = last_seq(&conn)?;
         if n as u64 != last {
