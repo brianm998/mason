@@ -62,12 +62,9 @@ fn masond_opens_its_port_before_any_network_and_a_stalled_fetch_blocks_nothing_e
         t.elapsed()
     );
 
-    // The stalled fetch ends at its deadline and the task says why.
-    wait_for("the stuck task to fail", 40, || {
-        s.task_json(1)["state"] == "failed"
-    });
-    let shown = s.task_json(1).to_string();
-    assert!(shown.contains("timed out"), "{shown}");
+    // The stalled fetch ends at its deadline. That decides nothing: the task goes on from the
+    // last-known base instead of failing, and reaches development.
+    s.wait_task(1, "developing", 60);
 }
 
 #[test]
