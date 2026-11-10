@@ -368,7 +368,7 @@ async fn add_task(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res {
                         StatusCode::CONFLICT,
                         format!(
                             "the range of stage and exit-script numbers for ad-hoc tasks (from {} to {}) is used up; \
-                             widening the two-digit `s[0-9][0-9].sh` glob is a gate change that waits for the owner",
+                             widening the `s[0-9][0-9][0-9].sh` glob is a gate change that waits for the owner",
                             d2.cfg.adhoc_exit_start,
                             crate::numbers::EXIT_CEILING
                         ),
