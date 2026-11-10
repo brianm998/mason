@@ -93,7 +93,7 @@ toml_value() { # section key -> value of `key = "value"` in [section] of notify.
 announce() { # title body
   local title=$1 body=$2
   if [ -x "$say_cmd" ]; then
-    "$say_cmd" "$body" >/dev/null 2>&1 || true
+    "$say_cmd" "$body" >/dev/null 2>&1 || echo "mason-watchdog: say failed" >&2
   fi
   local topic server token tv
   topic=$(toml_value ntfy topic)
@@ -110,7 +110,7 @@ announce() { # title body
   fi
   local args=(-sS -m 20 -X POST -H "Title: $title" -H "Priority: high" -H "Tags: warning" --data-binary "$body")
   [ -n "$token" ] && args+=(-H "Authorization: Bearer $token")
-  "$curl_cmd" "${args[@]}" "${server%/}/${topic#/}" >/dev/null 2>&1 || true
+  "$curl_cmd" "${args[@]}" "${server%/}/${topic#/}" >/dev/null 2>&1 || echo "mason-watchdog: ntfy send failed" >&2
 }
 
 # ---- ask the daemon -----------------------------------------------------------------------

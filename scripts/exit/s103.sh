@@ -27,7 +27,7 @@ minute=0
 # Simulated minutes, except while a real daemon is up: its uptime follows the real clock.
 run() { minute=$((minute + 1)); MASON_WATCHDOG_NOW=$((2000000 + minute * 60)) bash scripts/mason-watchdog.sh; }
 runreal() { env -u MASON_WATCHDOG_NOW bash scripts/mason-watchdog.sh; }
-count() { grep -c "$1" "$root/said" || true; }
+count() { awk -v p="$1" 'index($0, p) { n++ } END { print n + 0 }' "$root/said"; }
 start() {
   rm -f "$d/daemon.json"
   "$bin/masond" "${args[@]}" 2>"$root/masond.log" & dpid=$!; pids+=($dpid)
