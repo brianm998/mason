@@ -48,7 +48,7 @@ echo "== a snapshot before the load"
 grep -q 'views=[1-9]' "$root/before"
 
 echo "== fill the blocking pool with work waiting on the repository lock"
-curl -fsS -X POST "$url/debug/hold-repo?ms=20000" >/dev/null
+curl -fsS -X POST "$url/debug/hold-repo-lock?ms=20000" >/dev/null
 for _ in $(seq 1 90); do
   curl -s -m 25 -X POST "$url/debug/wait-repo" >/dev/null 2>&1 &
   waiters+=($!)

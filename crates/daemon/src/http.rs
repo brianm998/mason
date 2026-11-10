@@ -2603,32 +2603,30 @@ async fn debug_stall(
     Ok(Json(json!({"blocked_ms": ms})))
 }
 
-/// Holds a project's repository lock for `ms` (debug daemons only), so a test
-/// can fill the worker pool with work that waits on it.
-async fn debug_hold_repo(
+/// Holds a project's repository lock for `ms` milliseconds, to show that alerts go on while git
+/// work is stuck. Returns at once; a thread holds the lock.
+async fn debug_hold_repo_lock(
     Shared(d): Shared<Arc<Daemon>>,
     Query(q): Query<HashMap<String, String>>,
 ) -> Res {
     if !d.cfg.debug {
         return Err(fail(StatusCode::NOT_FOUND, "not found"));
     }
-    let ms: u64 = q.get("ms").and_then(|s| s.parse().ok()).unwrap_or(5000);
-    let pid = d
-        .projects
-        .keys()
-        .next()
-        .copied()
+    let ms: u64 = q.get("ms").and_then(|s| s.parse().ok()).unwrap_or(10_000);
+    let pid = q
+        .get("project")
+        .and_then(|n| d.project_id_by_name(n))
+        .or_else(|| d.projects.keys().next().copied())
         .ok_or_else(|| fail(StatusCode::NOT_FOUND, "no project"))?;
-    let d2 = d.clone();
-    let (tx, rx) = tokio::sync::oneshot::channel();
+    let lock = d.repo_lock(pid);
+    let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let lock = d2.repo_lock(pid);
         let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
         let _ = tx.send(());
         std::thread::sleep(std::time::Duration::from_millis(ms));
     });
-    let _ = rx.await;
-    Ok(Json(json!({"held_ms": ms})))
+    let _ = rx.recv_timeout(std::time::Duration::from_millis(100));
+    Ok(Json(json!({"holding_ms": ms})))
 }
 
 /// Runs on the blocking pool and waits on the repository lock (debug daemons
@@ -2744,7 +2742,7 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/leases/{id}", get(lease_poll))
         .route("/leases/{id}/release", post(lease_release))
         .route("/debug/stall", post(debug_stall))
-        .route("/debug/hold-repo", post(debug_hold_repo))
+        .route("/debug/hold-repo-lock", post(debug_hold_repo_lock))
         .route("/debug/wait-repo", post(debug_wait_repo))
         .layer(axum::middleware::from_fn_with_state(
             d.clone(),
