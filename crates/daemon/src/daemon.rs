@@ -22,6 +22,14 @@ pub fn now_ms() -> u64 {
         .map_or(0, |d| d.as_millis() as u64)
 }
 
+/// An agent past its silence alert limit.
+#[derive(Clone, Debug)]
+pub struct SilentAgent {
+    pub task: u64,
+    pub step: String,
+    pub silent_ms: u64,
+}
+
 pub struct Daemon {
     pub cfg: DaemonConfig,
     pub store: Store,
@@ -43,6 +51,8 @@ pub struct Daemon {
     admit_again: AtomicBool,
     repo_locks: Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>,
     stalls: AtomicU64,
+    /// Agents that are silent past their alert limit: run -> (task, step, silent since, ms).
+    pub(crate) silent: Mutex<HashMap<u64, SilentAgent>>,
     worst_stall_ms: AtomicU64,
     pub(crate) sweep: Mutex<crate::sweep::SweepState>,
     pub(crate) defs: crate::defs::Defs,
@@ -220,6 +230,7 @@ impl Daemon {
             admit_again: AtomicBool::new(false),
             repo_locks: Mutex::default(),
             stalls: AtomicU64::new(0),
+            silent: Mutex::default(),
             store_full: AtomicU64::new(0),
             disk_sizes: Default::default(),
             worst_stall_ms: AtomicU64::new(0),

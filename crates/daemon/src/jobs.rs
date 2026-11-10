@@ -1321,6 +1321,31 @@ fn agent_job(c: &Ctx) {
     }
     spec.run_key = Some(key.clone());
     spec.tools = c.step.tools.clone();
+    spec.idle = Some(mason_adapter_api::IdlePolicy {
+        alert_after: c.project.agent_idle_alert,
+        stop_after: c.project.agent_idle_stop,
+        report: {
+            let (d, run, task, step) = (c.d.clone(), c.run.0, c.task.0, c.step.name.clone());
+            Arc::new(move |ms| {
+                let mut m = d.silent.lock().unwrap_or_else(|e| e.into_inner());
+                match ms {
+                    Some(silent_ms) => {
+                        m.insert(
+                            run,
+                            crate::daemon::SilentAgent {
+                                task,
+                                step: step.clone(),
+                                silent_ms,
+                            },
+                        );
+                    }
+                    None => {
+                        m.remove(&run);
+                    }
+                }
+            })
+        },
+    });
     {
         let (d, run) = (c.d.clone(), c.run);
         spec.progress = Some(Arc::new(move |stream, off, bytes| {
@@ -1547,6 +1572,9 @@ fn settle_all(
     let root = c.d.cfg.hosts_dir();
     let base = format!("t{}r{}", c.task.0, c.run.0);
     let describe = |id: &str| -> (String, u64) {
+        if let Some(note) = mason_adapters::hosted::silent_stop(&root.join(id)) {
+            return (note, now_ms());
+        }
         match mason_step_host::registry::lost_report(&root.join(id)) {
             Ok(r) => (r.to_string(), if r.at_ms > 0 { r.at_ms } else { now_ms() }),
             Err(_) => (format!("host {id} never came up"), now_ms()),
@@ -1555,6 +1583,7 @@ fn settle_all(
     let mut report = settle_holds(c, runner, first, spec, contract, rec)?;
     let mut resumed = false;
     let mut fresh_after_gone = false;
+    let mut silent = false;
     loop {
         let fresh = match &report.end {
             StepEnd::Failed(FailReason::HostLost { detail }) => {
@@ -1578,6 +1607,7 @@ fn settle_all(
                 // Only what is verifiably the recorded process: the CLI the dead
                 // host left running must not work beside its replacement.
                 mason_step_host::registry::reap_dir(&root.join(&newest));
+                silent = mason_adapters::hosted::silent_stop(&root.join(&newest)).is_some();
                 c.release_lease();
                 if get_lease(c).is_err() {
                     return None;
@@ -1601,7 +1631,12 @@ fn settle_all(
             resumed = false;
         } else {
             rec.write(c, "resume", spec);
-            report = runner.resume(report, hl::interrupted_note(), spec.clone(), contract);
+            let note = if std::mem::take(&mut silent) {
+                hl::silent_note()
+            } else {
+                hl::interrupted_note()
+            };
+            report = runner.resume(report, note, spec.clone(), contract);
             resumed = true;
         }
         report = settle_holds(c, runner, report, spec, contract, rec)?;

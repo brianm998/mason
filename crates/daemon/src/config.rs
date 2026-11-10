@@ -343,6 +343,11 @@ pub struct ProjectCfg {
     pub agent_env: Vec<(String, String)>,
     pub tool_timeout: Duration,
     pub step_timeout: Duration,
+    /// An agent that has been silent this long raises an alert (`agent_idle_alert_s`,
+    /// default 2700); zero is off.
+    pub agent_idle_alert: Duration,
+    /// ... and this long is stopped and continued (`agent_idle_stop_s`, default 5400); zero is off.
+    pub agent_idle_stop: Duration,
     pub test_timeout: Duration,
     /// Test rounds before the task fails, if the overlay sets one (layer 3).
     pub max_test_rounds: Option<u32>,
@@ -870,6 +875,16 @@ pub fn parse_project(id: &str, text: &str) -> Result<ProjectCfg, String> {
         agent_env,
         tool_timeout: Duration::from_secs(secs("tool_timeout_s", 600)),
         step_timeout: Duration::from_secs(secs("step_timeout_s", 4 * 3600)),
+        agent_idle_alert: Duration::from_secs(
+            doc.get("agent_idle_alert_s")
+                .and_then(|v| v.as_integer())
+                .map_or(2700, |n| n.max(0) as u64),
+        ),
+        agent_idle_stop: Duration::from_secs(
+            doc.get("agent_idle_stop_s")
+                .and_then(|v| v.as_integer())
+                .map_or(5400, |n| n.max(0) as u64),
+        ),
         test_timeout: Duration::from_secs(secs("test_timeout_s", 1800)),
         max_test_rounds: doc
             .get("max_test_rounds")

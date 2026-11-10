@@ -367,6 +367,23 @@ fn disk_alert(d: &Daemon, w: &mason_engine::World) -> Option<(String, String, St
     Some(("disk".into(), "disk".into(), text))
 }
 
+/// An agent that has been silent past its alert limit, one per running step. Exists
+/// until output resumes, the step is stopped for it, or the step ends.
+fn silent_alerts(d: &Daemon) -> Vec<(String, String, String)> {
+    let silent = d.silent.lock().unwrap_or_else(|e| e.into_inner());
+    let mut v: Vec<_> = silent.iter().collect();
+    v.sort_by_key(|(run, _)| **run);
+    v.into_iter()
+        .map(|(run, a)| {
+            (
+                format!("silent:{run}"),
+                "host_lost".to_string(),
+                crate::hostloss::silent_alert(a.task, &a.step, a.silent_ms),
+            )
+        })
+        .collect()
+}
+
 /// The conditions that are true right now, as `(key, kind, text)`. An alert
 /// exists exactly as long as its condition does.
 pub fn alerts_now(d: &Daemon) -> Vec<(String, String, String)> {
@@ -408,6 +425,7 @@ pub fn alerts_now(d: &Daemon) -> Vec<(String, String, String)> {
             }
         }
     }
+    out.extend(silent_alerts(d));
     out.extend(d.landing().attention());
     out.extend(disk_alert(d, &w));
     out.extend(host_loss_alerts(

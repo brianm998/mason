@@ -41,7 +41,7 @@ pub const MAX_AGENT_RESTARTS: usize = 2;
 /// What failed an agent step that lost its host more often than it may be restarted.
 pub fn agent_lost(reports: &[String]) -> String {
     format!(
-        "the step host was lost {} times (an agent step is restarted at most {} times after a lost host): {}",
+        "the step was interrupted {} times, by a lost host or by going silent (an agent step is restarted at most {} times): {}",
         reports.len(),
         MAX_AGENT_RESTARTS,
         reports
@@ -59,6 +59,23 @@ pub fn interrupted_note() -> String {
      Nothing you committed is gone, but work in progress may be. Verify the current state of the tree \
      first (look at the files and run git status and git log), then continue and finish the step."
         .into()
+}
+
+/// What an agent is told when its session was stopped for going silent.
+pub fn silent_note() -> String {
+    "Your session was stopped because it went silent: nothing was heard from it for a long time. \
+     Nothing you committed is gone, but work in progress may be. Verify the current state of the tree \
+     first (look at the files and run git status and git log), then continue and finish the step. \
+     If a command hung, do not run it again the same way."
+        .into()
+}
+
+/// The alert for an agent that has gone quiet.
+pub fn silent_alert(task: u64, step: &str, silent_ms: u64) -> String {
+    format!(
+        "Task #{task}: the agent in `{step}` has been silent for {} (no output, no tool call running)",
+        mason_core::progress_text::duration(silent_ms)
+    )
 }
 
 /// What failed a step whose only host was lost and not re-run.
