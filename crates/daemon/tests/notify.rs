@@ -326,3 +326,56 @@ fn with_speech_off_the_daemon_stays_silent() {
     notify::tick(&d);
     assert!(!out.exists());
 }
+
+fn reaches(s: &Scratch, d: &Arc<Daemon>, toml: Option<&str>) -> (bool, bool) {
+    if let Some(t) = toml {
+        notify_toml(s, t);
+    }
+    (
+        notify::status(d)["reaches_without_monitor"]
+            .as_bool()
+            .unwrap(),
+        notify::claim(d, "m", true)["reaches_without_monitor"]
+            .as_bool()
+            .unwrap(),
+    )
+}
+
+#[test]
+fn reaches_without_monitor_for_each_configuration() {
+    let s = world();
+    let d = start(&s);
+    assert_eq!(reaches(&s, &d, None), (false, false), "no notify.toml");
+    for (toml, want) in [
+        ("[speech]\ndaemon = true\n", false),
+        ("[speech]\ndaemon = false\ncommand = [\"say\"]\n", false),
+        ("[speech]\ndaemon = true\ncommand = [\"say\"]\n", true),
+        ("[ntfy]\ntopic = \"t\"\n", true),
+        ("[webhook]\nurl = \"http://127.0.0.1:1/h\"\n", true),
+        (
+            "[email]\nserver = \"smtp://x\"\nfrom = \"a@b\"\nto = [\"c@d\"]\n",
+            true,
+        ),
+    ] {
+        assert_eq!(reaches(&s, &d, Some(toml)), (want, want), "{toml}");
+    }
+}
+
+#[test]
+fn a_routed_channel_that_is_not_set_up_is_not_a_failed_delivery() {
+    let s = world();
+    let d = start(&s);
+    notify_toml(&s, "[routing.paused]\nsound = \"0\"\npush = \"0\"\n");
+    pause(&d);
+    notify::tick(&d);
+    let alerts = d.store.alerts(false).unwrap();
+    assert!(!alerts.is_empty());
+    for a in alerts {
+        assert!(d
+            .store
+            .deliveries_for(&a.key, a.since)
+            .unwrap()
+            .iter()
+            .all(|r| r.channel != "push"));
+    }
+}

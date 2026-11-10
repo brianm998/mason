@@ -7,6 +7,7 @@ use mason_daemon::config::{load_projects, ProjectCfg};
 use mason_landing::git;
 use std::path::{Path, PathBuf};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Level {
     Ok,
     /// Worth knowing, not wrong: never counts as a failure.
@@ -447,6 +448,24 @@ fn check_accounts(
     }
 }
 
+/// Warn when no channel reaches the owner with no monitor open.
+pub fn check_notify(config_dir: &Path, out: &mut Vec<Finding>) {
+    let settings = match std::fs::read_to_string(config_dir.join("notify.toml")) {
+        Ok(t) => mason_daemon::notify::parse(&t),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Default::default()),
+        Err(e) => Err(format!("notify.toml: {e}")),
+    };
+    match settings {
+        Ok(s) if s.reaches_without_monitor() => out.push(ok("an alert can reach you with no monitor open")),
+        Ok(_) => out.push(warn(format!(
+            "{} Add to {}/notify.toml:\n    [speech]\n    daemon = true\n    command = [\"say\"]\n  or, for a phone:\n    [ntfy]\n    topic = \"<a topic only you know>\"",
+            mason_daemon::notify::NO_REACH_LINE,
+            config_dir.display()
+        ))),
+        Err(e) => out.push(fail(e)),
+    }
+}
+
 pub fn run(data_dir: &Path, config_dir: &Path) -> Vec<Finding> {
     let mut out = vec![];
     match std::process::Command::new("git").arg("--version").output() {
@@ -519,6 +538,8 @@ pub fn run(data_dir: &Path, config_dir: &Path) -> Vec<Finding> {
             .into_iter()
             .for_each(|e| out.push(fail(format!("project config: {e}")))),
     }
+
+    check_notify(config_dir, &mut out);
 
     match crate::client::find(data_dir) {
         Ok(d) => match d.call("GET", "/status", None) {
@@ -675,6 +696,44 @@ mod tests {
                 .any(|x| x.contains("account b: adapter codex, billing subscription, projects p")),
             "{t:?}"
         );
+    }
+
+    fn notify_findings(toml: Option<&str>) -> Vec<Finding> {
+        let dir = tempfile::tempdir().unwrap();
+        if let Some(t) = toml {
+            std::fs::write(dir.path().join("notify.toml"), t).unwrap();
+        }
+        let mut out = vec![];
+        check_notify(dir.path(), &mut out);
+        out
+    }
+
+    #[test]
+    fn doctor_warns_when_no_channel_works_with_no_monitor_open() {
+        let out = notify_findings(None);
+        let w = out
+            .iter()
+            .find(|f| f.level == Level::Warn)
+            .expect("a warning");
+        assert!(w.text.contains("daemon = true") && w.text.contains("command = [\"say\"]"));
+        assert!(w.text.contains("[ntfy]") && w.text.contains("topic"));
+        let speech_off = notify_findings(Some("[speech]\ndaemon = true\n"));
+        assert!(speech_off.iter().any(|f| f.level == Level::Warn));
+    }
+
+    #[test]
+    fn doctor_is_quiet_with_push_or_daemon_speech() {
+        for t in [
+            "[ntfy]\ntopic = \"t\"\n",
+            "[speech]\ndaemon = true\ncommand = [\"say\"]\n",
+        ] {
+            assert!(
+                notify_findings(Some(t))
+                    .iter()
+                    .all(|f| f.level != Level::Warn),
+                "{t}"
+            );
+        }
     }
 
     #[test]

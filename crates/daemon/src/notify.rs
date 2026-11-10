@@ -73,6 +73,20 @@ impl Default for Settings {
     }
 }
 
+impl Settings {
+    /// Whether an alert can reach the owner with no monitor open: push, email or a webhook is
+    /// set up, or the daemon speaks with a command to speak with.
+    pub fn reaches_without_monitor(&self) -> bool {
+        self.ntfy.is_some()
+            || self.email.is_some()
+            || self.webhook.is_some()
+            || (self.daemon_speech && !self.speech_command.is_empty())
+    }
+}
+
+/// The one sentence that says what an owner with no working channel has.
+pub const NO_REACH_LINE: &str = "No notification channel works with no monitor open: alerts are seen only in a monitor that is open.";
+
 fn text(t: &dyn toml_edit::TableLike, k: &str) -> Option<String> {
     t.get(k).and_then(|v| v.as_str()).map(String::from)
 }
@@ -453,13 +467,12 @@ pub fn tick(d: &Arc<Daemon>) {
                     reminder,
                     at_ms: a.since,
                 };
-                let r = match notifier(&settings, c) {
-                    Some(nt) => nt.send(&m),
-                    None => Err(SendError::Permanent(format!(
-                        "{} is not configured in notify.toml",
-                        c.name()
-                    ))),
+                // A routed channel that is not set up is not a failed delivery on every alert:
+                // `mason doctor`, `mason notify status` and the monitors say so once.
+                let Some(nt) = notifier(&settings, c) else {
+                    continue;
                 };
+                let r = nt.send(&m);
                 record(d, &a.key, a.since, c, delivery, r, now);
             }
             if reminder {
@@ -610,6 +623,7 @@ pub fn claim(d: &Daemon, client: &str, muted: bool) -> Value {
         vec![]
     };
     json!({
+        "reaches_without_monitor": settings.reaches_without_monitor(),
         "speaker": me,
         "speaker_id": *speaker,
         "announcements": rows.iter().map(announcement_json).collect::<Vec<_>>(),
@@ -672,6 +686,7 @@ pub fn status(d: &Daemon) -> Value {
         "routing": n::CONDITIONS.iter().map(|k| json!({"condition": k, "rules": rules(k)})).collect::<Vec<_>>(),
         "reminder_after_s": s.routing.reminder_ms / 1000,
         "daemon_speech": s.daemon_speech && !s.speech_command.is_empty(),
+        "reaches_without_monitor": s.reaches_without_monitor(),
         "configured": {"email": s.email.is_some(), "push": s.ntfy.is_some(), "webhook": s.webhook.is_some()},
         "speaker": *d.notify.speaker.lock().unwrap_or_else(|e| e.into_inner()),
         "recent": d.store.announcements(10).unwrap_or_default().iter().map(announcement_json).collect::<Vec<_>>(),

@@ -128,6 +128,17 @@ class SpeechTest {
         assertEquals(3, sink.log.size)
     }
 
+    @Test fun theNoChannelLineAppearsOnlyWhenTheDaemonSaysNoChannelWorks() {
+        val a = announcer(FakeSink())
+        assertNull(a.noChannelLine)
+        a.handleClaim("""{"speaker":false,"reaches_without_monitor":true,"announcements":[]}""")
+        assertNull(a.noChannelLine)
+        a.handleClaim("""{"speaker":false,"reaches_without_monitor":false,"announcements":[]}""")
+        assertNotNull(a.noChannelLine)
+        a.handleClaim("""{"speaker":false,"announcements":[]}""")
+        assertNull(a.noChannelLine)
+    }
+
     @Test fun onlyTheSpeakerQueuesWhatTheDaemonSends() {
         val sink = FakeSink()
         val a = announcer(sink)
