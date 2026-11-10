@@ -326,3 +326,32 @@ fn with_speech_off_the_daemon_stays_silent() {
     notify::tick(&d);
     assert!(!out.exists());
 }
+
+#[test]
+fn a_disk_below_the_floor_is_announced_with_sound_and_speech_once() {
+    let s = world();
+    let d = s.start_with(|c| {
+        c.owner_names = vec!["brian".into()];
+        c.reload_interval = Duration::from_secs(3600);
+        c.disk = Some(mason_daemon::disk::FakeDisk::new_gb(5));
+        c.disk_every = Duration::from_millis(50);
+    });
+    wait_for("the disk alert", 30, || {
+        attention::sync_alerts(&d);
+        d.store
+            .alerts(true)
+            .unwrap()
+            .iter()
+            .any(|a| a.kind == "disk")
+    });
+    for _ in 0..3 {
+        notify::tick(&d);
+    }
+    let got = notify::claim(&d, "monitor", false);
+    let list = got["announcements"].as_array().unwrap();
+    let disk: Vec<_> = list.iter().filter(|a| a["kind"] == "disk").collect();
+    assert_eq!(disk.len(), 1, "{got}");
+    assert_eq!(disk[0]["sound"], true);
+    assert_eq!(disk[0]["speech"], true);
+    assert_eq!(disk[0]["sound_name"], "broke");
+}
