@@ -10,7 +10,7 @@ cd "$(git rev-parse --show-toplevel)"
 cpu=$(mktemp); echo 0 > "$cpu"; export MASON_CPU_FILE="$cpu"
 trap 'rm -f "$cpu"' EXIT
 fail=0
-for s in scripts/exit/s[0-9][0-9].sh; do
+for s in scripts/exit/s[0-9][0-9].sh scripts/exit/s[0-9][0-9][0-9].sh; do
   [ -e "$s" ] || continue
   echo "== $s"
   bash "$s" || { echo "FAILED: $s" >&2; fail=1; }
