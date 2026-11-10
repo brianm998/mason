@@ -1606,6 +1606,7 @@ fn settle_all(
                 }
                 // Only what is verifiably the recorded process: the CLI the dead
                 // host left running must not work beside its replacement.
+                tracing::warn!(host = %newest, "reaping a lost host before its replacement");
                 mason_step_host::registry::reap_dir(&root.join(&newest));
                 silent = mason_adapters::hosted::silent_stop(&root.join(&newest)).is_some();
                 c.release_lease();
