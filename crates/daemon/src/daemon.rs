@@ -44,6 +44,9 @@ pub struct Daemon {
     repo_locks: Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>,
     stalls: AtomicU64,
     worst_stall_ms: AtomicU64,
+    /// When the last stall of alert size ended (ms since epoch; 0: none) and how long it was.
+    last_big_stall_at: AtomicU64,
+    last_big_stall_ms: AtomicU64,
     pub(crate) sweep: Mutex<crate::sweep::SweepState>,
     pub(crate) defs: crate::defs::Defs,
     pub broker: Arc<crate::sched::Broker>,
@@ -223,6 +226,8 @@ impl Daemon {
             store_full: AtomicU64::new(0),
             disk_sizes: Default::default(),
             worst_stall_ms: AtomicU64::new(0),
+            last_big_stall_at: AtomicU64::new(0),
+            last_big_stall_ms: AtomicU64::new(0),
             sweep: Mutex::default(),
             defs: crate::defs::Defs::default(),
             broker,
@@ -345,6 +350,17 @@ impl Daemon {
         self.worst_stall_ms
             .fetch_max(late.as_millis() as u64, Ordering::SeqCst);
         tracing::warn!(late_ms = late.as_millis() as u64, "the event loop stalled");
+        if late.as_millis() as u64 >= crate::attention::STALL_ALERT_MS {
+            self.last_big_stall_ms
+                .store(late.as_millis() as u64, Ordering::SeqCst);
+            self.last_big_stall_at.store(now_ms(), Ordering::SeqCst);
+        }
+    }
+
+    /// `(when, how long in ms)` of the latest stall long enough to alert on, if any.
+    pub fn last_big_stall(&self) -> Option<(u64, u64)> {
+        let at = self.last_big_stall_at.load(Ordering::SeqCst);
+        (at > 0).then(|| (at, self.last_big_stall_ms.load(Ordering::SeqCst)))
     }
 
     pub fn stall_stats(&self) -> (u64, u64) {

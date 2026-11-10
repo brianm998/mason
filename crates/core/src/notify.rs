@@ -170,6 +170,7 @@ impl Routing {
             rule(Push, 10),
         ];
         put("failed", broke.clone());
+        put("daemon_bug", broke.clone());
         put("landing", broke); // the base branch is frozen, or a landing is stuck
         let everything = vec![
             rule(Monitor, 0),
@@ -341,7 +342,7 @@ impl Sound {
 pub fn sound_for(kind: &str) -> Sound {
     match kind {
         "needs_you" => Sound::Decision,
-        "failed" | "landing" | "daemon_down" | "credentials" | "provider_outage"
+        "failed" | "daemon_bug" | "landing" | "daemon_down" | "credentials" | "provider_outage"
         | "environment" | "runtime" | "definition" | "disk" => Sound::Broke,
         _ => Sound::Info,
     }

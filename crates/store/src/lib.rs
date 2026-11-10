@@ -2767,6 +2767,18 @@ impl Store {
             .map_err(StoreError::from)
     }
 
+    /// Bugs filed at or after `since_ms`: `(at_ms, kind, detail)`, oldest first.
+    pub fn bugs_since(&self, since_ms: u64) -> Result<Vec<(u64, String, String)>, StoreError> {
+        let conn = self.reader.lock().unwrap_or_else(|e| e.into_inner());
+        let mut st =
+            conn.prepare("SELECT at, kind, detail FROM bugs WHERE at >= ?1 ORDER BY id")?;
+        let rows = st.query_map(params![since_ms as i64], |r| {
+            Ok((r.get::<_, i64>(0)? as u64, r.get(1)?, r.get(2)?))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
     /// The projection tables as sorted text lines, for tests and diagnostics.
     pub fn projection_dump(&self) -> Result<Vec<String>, StoreError> {
         let conn = self.reader.lock().unwrap_or_else(|e| e.into_inner());
