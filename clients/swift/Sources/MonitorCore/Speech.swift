@@ -26,7 +26,7 @@ public struct Announcement: Equatable, Sendable {
     public var family: String {
         switch kind {
         case "needs_you": return "decision"
-        case "failed", "landing", "daemon_down", "credentials", "provider_outage", "environment", "runtime", "definition",
+        case "failed", "landing", "daemon_down", "credentials", "provider_outage", "stalled", "environment", "runtime", "definition",
              "disk", "blocked", "host_lost", "tracker", "provider_limit", "provider_overage", "provider_budget":
             return "broke"
         default: return "info"
@@ -61,7 +61,7 @@ public struct SpeechSettings: Equatable, Sendable {
     ]
 
     public static let defaultKinds: Set<String> = [
-        "needs_you", "failed", "landing", "daemon_down", "credentials", "provider_outage", "landed",
+        "needs_you", "failed", "landing", "daemon_down", "credentials", "provider_outage", "stalled", "landed",
     ].union(addedKinds)
 
     public init(kinds: Set<String> = SpeechSettings.defaultKinds, sounds: [String: String]? = nil, voice: String = "") {

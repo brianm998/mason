@@ -24,7 +24,7 @@ data class Announcement(
     val family: String
         get() = when (kind) {
             "needs_you" -> "decision"
-            "failed", "landing", "daemon_down", "credentials", "provider_outage", "environment", "runtime", "definition",
+            "failed", "landing", "daemon_down", "credentials", "provider_outage", "stalled", "environment", "runtime", "definition",
             "disk", "blocked", "host_lost", "tracker", "provider_limit", "provider_overage", "provider_budget" -> "broke"
             else -> "info"
         }
@@ -65,7 +65,7 @@ data class SpeechSettings(
     companion object {
         /** Kinds added after the first release. A saved list gains them once (see Announcer.load). */
         val ADDED_KINDS = setOf("disk", "environment", "blocked", "host_lost", "runtime", "definition", "tracker", "provider_limit", "provider_overage", "provider_budget")
-        val DEFAULT_KINDS = setOf("needs_you", "failed", "landing", "daemon_down", "credentials", "provider_outage", "landed") + ADDED_KINDS
+        val DEFAULT_KINDS = setOf("needs_you", "failed", "landing", "daemon_down", "credentials", "provider_outage", "stalled", "landed") + ADDED_KINDS
     }
 }
 

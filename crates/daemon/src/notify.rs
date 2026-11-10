@@ -55,6 +55,9 @@ pub struct Settings {
     pub preferred: Option<String>,
     /// Announcements older than this are dropped rather than spoken late.
     pub stale_ms: u64,
+    /// How long the whole pipeline may go without an event or output before `stalled` is raised
+    /// (`[stall] after`); 0 turns it off.
+    pub stall_ms: u64,
     pub email: Option<EmailCfg>,
     pub ntfy: Option<(String, String, Option<String>)>,
     pub webhook: Option<(String, Option<String>)>,
@@ -68,6 +71,7 @@ impl Default for Settings {
             speech_command: vec![],
             preferred: None,
             stale_ms: 10 * n::MINUTE_MS,
+            stall_ms: 30 * n::MINUTE_MS,
             email: None,
             ntfy: None,
             webhook: None,
@@ -203,6 +207,11 @@ pub fn parse(src: &str) -> Result<Settings, String> {
                 s.preferred = text(t, "preferred_client");
                 if let Some(v) = t.get("stale") {
                     s.stale_ms = span(v, "speech.stale")?;
+                }
+            }
+            "stall" => {
+                if let Some(v) = t.get("after") {
+                    s.stall_ms = span(v, "stall.after")?;
                 }
             }
             "email" => {
@@ -365,6 +374,46 @@ fn attempts(rows: &[DeliveryRow]) -> Vec<Attempt> {
         .collect()
 }
 
+/// `alert:<key>:<since>:<delivery>:<flags>` (the key itself may hold colons) as
+/// (key, since, delivery, flags); flags are two digits, sound then speech.
+fn parse_alert_key(k: &str) -> Option<(String, u64, String, String)> {
+    k.strip_prefix("alert:")?;
+    let mut parts = k.rsplitn(4, ':');
+    let flags = parts.next()?;
+    let delivery = parts.next()?;
+    let since = parts.next()?.parse().ok()?;
+    let rest = parts.next()?.strip_prefix("alert:").unwrap_or_default();
+    Some((rest.to_string(), since, delivery.into(), flags.into()))
+}
+
+/// Playing is delivery: record the sound and speech an alert's announcement carried, now that
+/// something has taken it. `speech_only` is for the daemon, which has no way to play a sound.
+fn record_played(d: &Daemon, rows: &[AnnouncementRow], speech_only: bool, now: u64) {
+    for r in rows {
+        let Some((key, since, delivery, flags)) = parse_alert_key(&r.key) else {
+            continue;
+        };
+        let dl = if delivery == "reminder" {
+            Delivery::Reminder
+        } else {
+            Delivery::Initial
+        };
+        let f = flags.as_bytes();
+        for (c, on) in [
+            (Channel::Sound, f.first() == Some(&b'1') && !speech_only),
+            (Channel::Speech, f.get(1) == Some(&b'1')),
+        ] {
+            if on {
+                record(d, &key, since, c, dl, Ok(()), now);
+                if delivery == "catchup" {
+                    // One announcement stood for the whole history of the alert.
+                    record(d, &key, since, c, Delivery::Reminder, Ok(()), now);
+                }
+            }
+        }
+    }
+}
+
 /// An announcement about an alert is dropped if, before anyone heard it, the alert cleared or was
 /// acknowledged: nobody wants to be told about something that has already gone.
 fn prune(d: &Daemon, now: u64) {
@@ -374,12 +423,7 @@ fn prune(d: &Daemon, now: u64) {
     }
     let live: Vec<_> = d.store.alerts(true).unwrap_or_default();
     for p in pending.iter().filter(|p| p.key.starts_with("alert:")) {
-        // alert:<key>:<since>:<delivery>:<flags>, where the key itself may hold colons.
-        let mut parts = p.key.rsplitn(4, ':');
-        let (_flags, _delivery, since) = (parts.next(), parts.next(), parts.next());
-        let rest = parts.next().unwrap_or_default();
-        let key = rest.strip_prefix("alert:").unwrap_or(rest);
-        let since: u64 = since.and_then(|s| s.parse().ok()).unwrap_or(0);
+        let (key, since, _, _) = parse_alert_key(&p.key).unwrap_or_default();
         let wanted = live
             .iter()
             .any(|a| a.key == key && a.since == since && a.acked_at.is_none());
@@ -392,6 +436,11 @@ fn prune(d: &Daemon, now: u64) {
 /// One pass over the live alerts: send what is due, queue what is to be said, speak for the
 /// daemon if no monitor is around. Run after `sync_alerts`, so it sees what is true now.
 pub fn tick(d: &Arc<Daemon>) {
+    tick_at(d, now_ms());
+}
+
+/// `tick` at a given time in milliseconds (tests drive the clock through this).
+pub fn tick_at(d: &Arc<Daemon>, now: u64) {
     let Ok(_one_at_a_time) = d.notify.ticking.try_lock() else {
         return;
     };
@@ -402,7 +451,6 @@ pub fn tick(d: &Arc<Daemon>) {
             Settings::default()
         }
     };
-    let now = now_ms();
     prune(d, now);
     let minute = if settings.routing.quiet.is_empty() {
         0
@@ -451,14 +499,10 @@ pub fn tick(d: &Arc<Daemon>) {
                     u8::from(sound),
                     u8::from(speech)
                 );
+                // Queuing is not delivery: it is recorded when a monitor or the daemon plays it.
                 let _ = d
                     .store
                     .enqueue_announcement(&key, &a.kind, &line, sound, speech, now);
-                for (c, on) in [(Channel::Sound, sound), (Channel::Speech, speech)] {
-                    if on {
-                        record(d, &a.key, a.since, c, delivery, Ok(()), now);
-                    }
-                }
             }
             for c in these.into_iter().filter(|c| c.remote()) {
                 let m = Message {
@@ -484,6 +528,66 @@ pub fn tick(d: &Arc<Daemon>) {
     }
     announce_landed(d, &settings, now);
     daemon_speech(d, &settings, now);
+}
+
+/// A monitor has claimed. An alert that is live, unacknowledged and never heard (its
+/// announcement expired, or none was ever taken) gets one announcement now, however old it is:
+/// the key makes it once per alert. Returns nothing; the announcement is taken by the caller.
+fn catch_up(d: &Daemon, settings: &Settings, now: u64) {
+    let stale_before = now.saturating_sub(settings.stale_ms);
+    let pending = d.store.pending_announcements(200).unwrap_or_default();
+    let minute = if settings.routing.quiet.is_empty() {
+        0
+    } else {
+        minute_of_day()
+    };
+    for a in d.store.alerts(true).unwrap_or_default() {
+        if a.acked_at.is_some() {
+            continue;
+        }
+        let rows = d.store.deliveries_for(&a.key, a.since).unwrap_or_default();
+        let heard = rows
+            .iter()
+            .any(|r| r.ok && matches!(r.channel.as_str(), "sound" | "speech"));
+        if heard {
+            continue;
+        }
+        // A fresh announcement for this run is already waiting: it will be handed out as is.
+        let prefix = format!("alert:{}:{}:", a.key, a.since);
+        if pending
+            .iter()
+            .any(|p| p.key.starts_with(&prefix) && p.created_at >= stale_before)
+        {
+            continue;
+        }
+        let audible = |c: Channel| {
+            settings.routing.rules(&a.kind).iter().any(|r| {
+                r.channel == c
+                    && now >= a.since + r.after_ms
+                    && !settings.routing.is_quiet(c, minute)
+            })
+        };
+        let (sound, speech) = (audible(Channel::Sound), audible(Channel::Speech));
+        if !(sound || speech) {
+            continue;
+        }
+        let reminder = now >= a.since + settings.routing.reminder_ms;
+        let (subject, detail) = subject_and_detail(d, &a.key, &a.kind, &a.text);
+        let line = n::sentence(&a.kind, &subject, &detail, reminder);
+        let key = format!(
+            "alert:{}:{}:catchup:{}{}",
+            a.key,
+            a.since,
+            u8::from(sound),
+            u8::from(speech)
+        );
+        let _ = d
+            .store
+            .enqueue_announcement(&key, &a.kind, &line, sound, speech, now);
+        if reminder {
+            let _ = d.store.mark_reminded(&a.key, now);
+        }
+    }
 }
 
 fn record(
@@ -577,6 +681,16 @@ fn daemon_speech(d: &Daemon, s: &Settings, now: u64) {
         .store
         .take_announcements("daemon", now.saturating_sub(s.stale_ms), 20, now)
         .unwrap_or_default();
+    record_played(
+        d,
+        &rows
+            .iter()
+            .filter(|r| r.speech)
+            .cloned()
+            .collect::<Vec<_>>(),
+        true,
+        now,
+    );
     let lines: Vec<String> = rows
         .into_iter()
         .filter(|r| r.speech)
@@ -643,6 +757,8 @@ fn announcement_json(r: &AnnouncementRow) -> Value {
         "id": r.id, "key": r.key, "kind": r.kind, "sentence": r.sentence,
         "sound": r.sound, "speech": r.speech,
         "sound_name": n::sound_for(&r.kind).name(),
+        "created_at": r.created_at, "taken_at": r.taken_at, "taken_by": r.taken_by,
+        "played": r.played(),
     })
 }
 
@@ -650,7 +766,11 @@ fn announcement_json(r: &AnnouncementRow) -> Value {
 /// order; if not, nothing, and the announcements wait for the one that is. A muted monitor is
 /// counted as present (the daemon stays quiet too) but never speaks.
 pub fn claim(d: &Daemon, client: &str, muted: bool) -> Value {
-    let now = now_ms();
+    claim_at(d, client, muted, now_ms())
+}
+
+/// `claim` at a given time in milliseconds (tests drive the clock through this).
+pub fn claim_at(d: &Daemon, client: &str, muted: bool, now: u64) -> Value {
     let settings = load(d).unwrap_or_default();
     *d.notify
         .last_claim
@@ -673,12 +793,14 @@ pub fn claim(d: &Daemon, client: &str, muted: bool) -> Value {
     );
     let me = !muted && speaker.as_deref() == Some(client);
     let rows = if me {
+        catch_up(d, &settings, now);
         d.store
             .take_announcements(client, now.saturating_sub(settings.stale_ms), 20, now)
             .unwrap_or_default()
     } else {
         vec![]
     };
+    record_played(d, &rows, false, now);
     json!({
         "reaches_without_monitor": settings.reaches_without_monitor(),
         "speaker": me,
@@ -746,6 +868,10 @@ pub fn status(d: &Daemon) -> Value {
         "reaches_without_monitor": s.reaches_without_monitor(),
         "configured": {"email": s.email.is_some(), "push": s.ntfy.is_some(), "webhook": s.webhook.is_some()},
         "speaker": *d.notify.speaker.lock().unwrap_or_else(|e| e.into_inner()),
+        "last_played": d.store.last_played().unwrap_or_default(),
+        "deliveries": d.store.recent_audible_deliveries(20).unwrap_or_default().iter().map(|r| json!({
+            "alert": r.alert, "since": r.since, "channel": r.channel, "delivery": r.delivery, "ok": r.ok, "at": r.at,
+        })).collect::<Vec<_>>(),
         "recent": d.store.announcements(10).unwrap_or_default().iter().map(announcement_json).collect::<Vec<_>>(),
     })
 }
@@ -759,6 +885,14 @@ mod tests {
         let s = parse("").unwrap();
         assert_eq!(s.routing, Routing::defaults());
         assert!(!s.daemon_speech);
+    }
+
+    #[test]
+    fn stall_after_defaults_to_thirty_minutes_and_zero_is_off() {
+        assert_eq!(parse("").unwrap().stall_ms, 30 * n::MINUTE_MS);
+        assert_eq!(parse("[stall]\nafter = \"2s\"\n").unwrap().stall_ms, 2000);
+        assert_eq!(parse("[stall]\nafter = \"0\"\n").unwrap().stall_ms, 0);
+        assert_eq!(parse("[stall]\nafter = 0\n").unwrap().stall_ms, 0);
     }
 
     #[test]
