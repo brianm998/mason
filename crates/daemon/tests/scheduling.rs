@@ -274,10 +274,10 @@ fn an_interactive_caller_goes_ahead_of_pipeline_work() {
     // An interactive request arrives after the task started waiting.
     let map = [("compile".to_string(), 1)].into();
     let i = d.broker.lease_open("interactive `make`", &map);
-    // The task now sees it is behind the interactive caller.
+    // The task now sees it is second in line, without naming the caller.
     let why = wait_explained(&d, t);
     assert!(
-        why.contains("2nd in line, behind interactive `make` (interactive)"),
+        why.contains("2nd in line") && !why.contains("behind"),
         "{why}"
     );
     drop(held);

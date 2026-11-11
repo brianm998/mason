@@ -12,7 +12,9 @@
 //! minutes. Reset texts that name a zone we cannot resolve count as no reset
 //! (decision 0049).
 //!
-//! Kinds: `limit` (a usage limit), `outage` (the provider is down), `overage`
+//! Kinds: `limit` (a usage limit), `outage` (the provider is down), `credentials`
+//! (the agent cannot authenticate; probed like an outage, raises the `credentials`
+//! alert, and `mason account release` clears it at once), `overage`
 //! (the plan's own limit is reached while extra billing would carry on and the
 //! owner chose `hold`), `budget` (an api account reached `monthly_budget_usd`)
 //! and `manual` (the owner held it). `budget` and `manual` end only when the
@@ -146,6 +148,7 @@ pub fn projection(points: &[(u64, f64)], resets_at: u64, now: u64) -> Option<Str
 fn label_of(kind: &str) -> &'static str {
     match kind {
         "outage" => "provider outage",
+        "credentials" => "not logged in",
         "overage" => "plan limit reached (extra billing held)",
         "budget" => "monthly budget reached",
         "manual" => "held by the owner",
@@ -177,7 +180,13 @@ pub fn describe(h: &AccountHold, now_ms: u64) -> String {
         }
         None => {
             let next = h.probe_ms.saturating_sub(now_ms) / 1000;
-            if h.kind == "outage" {
+            if h.kind == "credentials" {
+                format!(
+                    "{why}; log in again (`claude /login`) or `mason account release {}`, next check in {}",
+                    h.account,
+                    words::span(next)
+                )
+            } else if h.kind == "outage" {
                 format!("{why}, trying again in {}", words::span(next))
             } else {
                 format!(
@@ -197,6 +206,7 @@ pub fn waiting_text(h: &AccountHold, now_ms: u64) -> String {
 fn alert_kind(kind: &str) -> &'static str {
     match kind {
         "outage" => "provider_outage",
+        "credentials" => "credentials",
         "overage" => "provider_overage",
         "budget" => "provider_budget",
         "manual" => "provider_hold",
@@ -326,6 +336,17 @@ pub fn observe_end(d: &Daemon, account: &str, task: u64, reason: &HoldReason) {
                 account,
                 "outage",
                 "provider outage",
+                None,
+                prober,
+                "pipeline",
+            );
+        }
+        HoldReason::NotLoggedIn { .. } => {
+            put(
+                d,
+                account,
+                "credentials",
+                "the agent is not logged in",
                 None,
                 prober,
                 "pipeline",

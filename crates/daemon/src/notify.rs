@@ -12,7 +12,7 @@ use mason_core::notify::{
     self as n, AlertState, Attempt, Channel, Claim, Delivery, QuietHours, Routing, Rule,
 };
 use mason_core::{State, TaskId};
-use mason_store::{AnnouncementRow, DeliveryRow};
+use mason_store::{AlertRow, AnnouncementRow, DeliveryRow};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use std::process::Command;
@@ -33,6 +33,139 @@ pub struct Runtime {
     speaking: Arc<std::sync::atomic::AtomicBool>,
     /// Held while the alert table is brought up to date.
     pub(crate) syncing: Mutex<()>,
+    /// Test and exit-script switch (`POST /debug/store-writes`): the alert and delivery writes
+    /// behave as if the store refused them, as a full disk does.
+    refuse_writes: std::sync::atomic::AtomicBool,
+    /// What the store could not take, kept here until it can.
+    mem: Mutex<Mem>,
+}
+
+/// The alerts and deliveries held in memory while the store cannot be written.
+#[derive(Default)]
+struct Mem {
+    /// The last write of the alert table failed. `alerts` is then the whole live list.
+    degraded: bool,
+    alerts: Vec<AlertRow>,
+    /// Deliveries made but not recorded.
+    sent: Vec<DeliveryRow>,
+}
+
+impl Runtime {
+    fn mem(&self) -> std::sync::MutexGuard<'_, Mem> {
+        self.mem.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+/// Make the alert and delivery writes fail (or work again). For tests and `--debug`.
+pub fn refuse_writes(d: &Daemon, on: bool) {
+    d.notify
+        .refuse_writes
+        .store(on, std::sync::atomic::Ordering::SeqCst);
+}
+
+fn refused(d: &Daemon) -> bool {
+    d.notify
+        .refuse_writes
+        .load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// True while the alert table could not be written and the list is being served from memory.
+pub fn store_unwritable(d: &Daemon) -> bool {
+    d.notify.mem().degraded
+}
+
+/// The note shown beside the list while it is served from memory.
+pub const UNWRITABLE_NOTE: &str = "MASON cannot write to its store (the disk may be full): this list is held in memory and will be saved when writes work again";
+
+/// Deliveries made and not yet recorded in the store.
+pub fn unrecorded_deliveries(d: &Daemon) -> usize {
+    d.notify.mem().sent.len()
+}
+
+/// Write the alert table, or, if that fails, keep `now` in memory. Returns (raised, cleared).
+pub(crate) fn sync_table(
+    d: &Daemon,
+    now: &[(String, String, String)],
+) -> (Vec<String>, Vec<String>) {
+    let at = now_ms();
+    let held: Vec<(String, u64)> = d
+        .notify
+        .mem()
+        .alerts
+        .iter()
+        .map(|a| (a.key.clone(), a.since))
+        .collect();
+    let r = if refused(d) {
+        Err(mason_store::StoreError::WriterGone)
+    } else {
+        d.store.sync_alerts_since(now, at, &held)
+    };
+    let mut m = d.notify.mem();
+    match r {
+        Ok(v) => {
+            m.degraded = false;
+            m.alerts.clear();
+            v
+        }
+        Err(e) => {
+            if !m.degraded {
+                tracing::warn!("cannot write the alert table: {e}; serving alerts from memory");
+            }
+            let table = d.store.alerts(true).unwrap_or_default();
+            let old = std::mem::take(&mut m.alerts);
+            m.alerts = now
+                .iter()
+                .map(|(key, kind, text)| {
+                    let prior = old
+                        .iter()
+                        .chain(table.iter())
+                        .find(|a| a.key == *key)
+                        .cloned();
+                    AlertRow {
+                        key: key.clone(),
+                        kind: kind.clone(),
+                        text: text.clone(),
+                        since: prior.as_ref().map_or(at, |a| a.since),
+                        cleared_at: None,
+                        acked_at: prior.as_ref().and_then(|a| a.acked_at),
+                        reminded_at: prior.as_ref().and_then(|a| a.reminded_at),
+                    }
+                })
+                .collect();
+            m.degraded = true;
+            (vec![], vec![])
+        }
+    }
+}
+
+/// The alerts to show and act on: the table, and while it cannot be written, what is true now
+/// from memory in place of its live rows. Cleared rows come from the table only.
+pub fn live_alerts(
+    d: &Daemon,
+    active_only: bool,
+) -> Result<Vec<AlertRow>, mason_store::StoreError> {
+    let mut rows = d.store.alerts(active_only)?;
+    let m = d.notify.mem();
+    if m.degraded {
+        rows.retain(|r| r.cleared_at.is_some());
+        rows.extend(m.alerts.iter().cloned());
+        rows.sort_by(|a, b| (a.since, &a.key).cmp(&(b.since, &b.key)));
+    }
+    Ok(rows)
+}
+
+/// Put deliveries held in memory into the store, if it will take them.
+fn flush_sent(d: &Daemon) {
+    if refused(d) {
+        return;
+    }
+    let mut m = d.notify.mem();
+    let held = std::mem::take(&mut m.sent);
+    for row in held {
+        if d.store.add_delivery(&row).is_err() {
+            m.sent.push(row);
+        }
+    }
 }
 
 // ---- settings --------------------------------------------------------------------------
@@ -451,7 +584,7 @@ fn prune(d: &Daemon, now: u64) {
     if pending.iter().all(|p| !p.key.starts_with("alert:")) {
         return;
     }
-    let live: Vec<_> = d.store.alerts(true).unwrap_or_default();
+    let live: Vec<_> = live_alerts(d, true).unwrap_or_default();
     for p in pending.iter().filter(|p| p.key.starts_with("alert:")) {
         let (key, since, _, _) = parse_alert_key(&p.key).unwrap_or_default();
         let wanted = live
@@ -481,18 +614,27 @@ pub fn tick_at(d: &Arc<Daemon>, now: u64) {
             Settings::default()
         }
     };
+    flush_sent(d);
     prune(d, now);
     let minute = if settings.routing.quiet.is_empty() {
         0
     } else {
         minute_of_day()
     };
-    for a in d.store.alerts(true).unwrap_or_default() {
+    for a in live_alerts(d, true).unwrap_or_default() {
         let st = AlertState {
             since_ms: a.since,
             acked: a.acked_at.is_some(),
         };
-        let rows = d.store.deliveries_for(&a.key, a.since).unwrap_or_default();
+        let mut rows = d.store.deliveries_for(&a.key, a.since).unwrap_or_default();
+        rows.extend(
+            d.notify
+                .mem()
+                .sent
+                .iter()
+                .filter(|r| r.alert == a.key && r.since == a.since)
+                .cloned(),
+        );
         let todo = n::due(
             &settings.routing,
             &a.kind,
@@ -536,9 +678,13 @@ pub fn tick_at(d: &Arc<Daemon>, now: u64) {
                     u8::from(speech)
                 );
                 // Queuing is not delivery: it is recorded when a monitor or the daemon plays it.
-                let _ = d
-                    .store
-                    .enqueue_announcement(&key, &a.kind, &line, sound, speech, now);
+                // While the store refuses writes nothing is queued; the same line is queued,
+                // once, when writes work again.
+                if !refused(d) {
+                    let _ = d
+                        .store
+                        .enqueue_announcement(&key, &a.kind, &line, sound, speech, now);
+                }
             }
             for c in these.into_iter().filter(|c| c.remote()) {
                 let m = Message {
@@ -643,7 +789,7 @@ fn record(
     if !ok {
         tracing::warn!(alert = key, channel = c.name(), "delivery failed: {detail}");
     }
-    let _ = d.store.add_delivery(&DeliveryRow {
+    let row = DeliveryRow {
         alert: key.into(),
         since,
         channel: c.name().into(),
@@ -651,7 +797,11 @@ fn record(
         ok,
         detail,
         at: now,
-    });
+    };
+    // Not recorded means it would be sent again next pass: keep it here until it can be.
+    if refused(d) || d.store.add_delivery(&row).is_err() {
+        d.notify.mem().sent.push(row);
+    }
 }
 
 /// "Landed" is an event, not a condition that holds: a short spoken line, once per task, and

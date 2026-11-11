@@ -1389,7 +1389,8 @@ public nonisolated struct Mason_V1_TaskRow: @unchecked Sendable {
     set {_uniqueStorage()._activity = newValue}
   }
 
-  /// Why it is waiting, in the form "Waiting for compile slot: 2nd in line, ...".
+  /// Why it is waiting, in the form "Waiting for compile slot: 2nd in line, held by #91 for 4 min".
+  /// Who is ahead in line is not named; `mason resources` lists them.
   public var whyWaiting: String {
     get {_storage._whyWaiting}
     set {_uniqueStorage()._whyWaiting = newValue}
