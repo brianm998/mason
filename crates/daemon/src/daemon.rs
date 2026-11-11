@@ -304,6 +304,7 @@ impl Daemon {
             d.recover();
             d.spawn_progress_ticker();
             d.spawn_sweeper();
+            d.spawn_compile_watch();
             crate::usage::spawn_probe(&d);
             d.spawn_watcher();
             crate::tracker::spawn(&d);
@@ -990,6 +991,32 @@ impl Daemon {
 
     pub fn task_dir(&self, task: TaskId) -> PathBuf {
         self.cfg.task_dir(task.0)
+    }
+
+    /// Wake the sockets when the compile queue changes: who holds a slot, who
+    /// waits and why. Interactive callers and gate readings change it without an
+    /// event, and the monitor's home page shows it.
+    fn spawn_compile_watch(self: &Arc<Self>) {
+        let mut last = String::new();
+        crate::bg::spawn_loop(self, "compile-watch", move |weak| {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            let Some(d) = weak.upgrade() else {
+                return false;
+            };
+            let c = d.broker.compilation();
+            let mut now = format!("{} {}", c.limit, c.used);
+            for h in &c.running {
+                now.push_str(&format!("|{}", h.label));
+            }
+            for w in &c.pending {
+                now.push_str(&format!("|{}:{}", w.label, w.cause));
+            }
+            if now != last {
+                last = now;
+                d.poke();
+            }
+            true
+        });
     }
 
     fn spawn_sweeper(self: &Arc<Self>) {

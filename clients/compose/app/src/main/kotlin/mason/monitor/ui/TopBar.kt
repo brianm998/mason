@@ -12,7 +12,6 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -194,7 +193,7 @@ private fun PendingTile(count: Int) {
 @Composable
 private fun BannerImage(id: String?, theme: Theme) {
     val bmp = remember(id) { id?.let { Mascot.bannerIcon(it) } } ?: return
-    val size = with(LocalDensity.current) { theme.mascotBannerIcon.toDp() }
+    val size = theme.mascotBannerIcon
     Image(bmp, contentDescription = null, modifier = Modifier.padding(end = theme.spacing).size(size))
 }
 
