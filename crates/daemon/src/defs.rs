@@ -102,7 +102,12 @@ impl Daemon {
         // swap its pipeline: report it and let the one in force stay.
         let sha = match git::run(
             &p.path,
-            &["rev-parse", "--verify", "--quiet", &format!("{base_ref}^{{commit}}")],
+            &[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("{base_ref}^{{commit}}"),
+            ],
         ) {
             Ok(s) => Some(s.trim().to_string()),
             Err(e) if e.code == Some(1) && !e.timed_out => None,
@@ -110,11 +115,8 @@ impl Daemon {
         };
         let (text, origin) = match &sha {
             Some(sha) => {
-                let listed = git::run(
-                    &p.path,
-                    &["ls-tree", sha, "--", ".mason/mason.toml"],
-                )
-                .map_err(|e| vec![format!("cannot read {path}: {e}")])?;
+                let listed = git::run(&p.path, &["ls-tree", sha, "--", ".mason/mason.toml"])
+                    .map_err(|e| vec![format!("cannot read {path}: {e}")])?;
                 if listed.trim().is_empty() {
                     (BUILTIN.to_string(), Origin::Builtin)
                 } else {

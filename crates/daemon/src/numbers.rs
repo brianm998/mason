@@ -291,7 +291,11 @@ pub fn base_paths(p: &ProjectCfg) -> Result<Vec<String>, git::GitError> {
 }
 
 /// Files a branch adds against its base (since the merge base).
-pub fn added_files(repo: &Path, base_ref: &str, branch: &str) -> Result<Vec<String>, git::GitError> {
+pub fn added_files(
+    repo: &Path,
+    base_ref: &str,
+    branch: &str,
+) -> Result<Vec<String>, git::GitError> {
     git::run(
         repo,
         &[
@@ -359,7 +363,8 @@ impl Daemon {
         let need_exit = stage.is_none() && !have.iter().any(|r| r.kind == KIND_EXIT);
         let need_dec = !have.iter().any(|r| r.kind == KIND_DECISION);
         if need_exit || need_dec {
-            let paths = base_paths(p).map_err(|e| format!("cannot read the base's numbers: {e}"))?;
+            let paths =
+                base_paths(p).map_err(|e| format!("cannot read the base's numbers: {e}"))?;
             let (base_exit, base_dec) = highest(paths.iter().map(String::as_str));
             if need_dec {
                 self.store
