@@ -404,9 +404,10 @@ pub(crate) fn launch_process(
     // Deadline watchdog: kill the whole process group when time is up.
     if let Some(d) = spec.deadline {
         let (timed_out, done) = (timed_out.clone(), done.clone());
+        let extra = spec.deadline_extra.clone();
         thread::spawn(move || {
             let end = Instant::now() + d;
-            while Instant::now() < end {
+            while Instant::now() < end + extra.get() {
                 if done.load(Ordering::SeqCst) {
                     return;
                 }
@@ -936,6 +937,26 @@ pub fn parse_line(line: &str, st: &mut ParseState) -> Vec<AgentEvent> {
     out
 }
 
+/// The wording an agent CLI uses when it cannot authenticate, lowercased. The one
+/// place these patterns live; each has a fixture in `fixtures/claude`.
+pub const AUTH_FAILURE_WORDS: [&str; 5] = [
+    "not logged in",
+    "invalid api key",
+    "please run /login",
+    "authentication_error",
+    "invalid x-api-key",
+];
+
+/// Does this say the CLI cannot authenticate? A 401 or 403 status, or the wording
+/// in the result text (or on stderr when there is no result).
+pub fn is_auth_failure(status: Option<u32>, text: &str) -> bool {
+    if matches!(status, Some(401) | Some(403)) {
+        return true;
+    }
+    let t = text.to_lowercase();
+    AUTH_FAILURE_WORDS.iter().any(|w| t.contains(w))
+}
+
 /// Decide how an invocation ended, from its stream and exit.
 pub fn decide(st: &ParseState, accepted: bool, exit_code: Option<i32>, stderr: &str) -> Outcome {
     final_outcome(st, accepted, exit_code, stderr)
@@ -959,6 +980,11 @@ pub fn final_outcome(
                 clip(stderr, 500)
             ),
         };
+        if is_auth_failure(None, stderr) {
+            return Outcome::NotLoggedIn {
+                detail: clip(stderr, 300),
+            };
+        }
         return Outcome::Crash { detail };
     };
     if !r.is_error {
@@ -969,6 +995,11 @@ pub fn final_outcome(
         };
     }
     let t = r.text.to_lowercase();
+    if is_auth_failure(r.api_error_status, &r.text) {
+        return Outcome::NotLoggedIn {
+            detail: clip(&r.text, 300),
+        };
+    }
     let limited = r.api_error_status == Some(429)
         || st.usage.as_ref().is_some_and(|u| {
             u.blocked.is_some() || u.windows.iter().any(|w| w.state == WindowState::Blocked)
@@ -1252,12 +1283,54 @@ mod tests {
     }
 
     #[test]
-    fn a_logged_out_cli_is_a_crash_not_a_hold() {
-        let (_, st) = parse("synthetic_not_logged_in.jsonl");
-        match final_outcome(&st, false, Some(1), "") {
-            Outcome::Crash { detail } => assert!(detail.contains("Not logged in")),
-            o => panic!("{o:?}"),
+    fn a_logged_out_cli_is_a_credentials_hold_not_a_crash() {
+        // Was pinned as a crash (task #95): a crash fails the task, but an expired
+        // login fails every task the same way and only the owner can fix it, so
+        // it is a hold with the `credentials` alert.
+        for f in [
+            "synthetic_not_logged_in.jsonl",
+            "synthetic_auth_401.jsonl",
+            "synthetic_auth_403.jsonl",
+            "synthetic_invalid_api_key.jsonl",
+            "synthetic_authentication_error.jsonl",
+        ] {
+            let (_, st) = parse(f);
+            match final_outcome(&st, false, Some(1), "") {
+                Outcome::NotLoggedIn { detail } => assert!(!detail.is_empty(), "{f}"),
+                o => panic!("{f}: {o:?}"),
+            }
         }
+    }
+
+    #[test]
+    fn the_same_wording_on_stderr_with_no_result_is_not_logged_in() {
+        let st = ParseState::default();
+        for e in [
+            "Error: Not logged in \u{b7} Please run /login",
+            "Invalid API key",
+            "authentication_error: bad token",
+        ] {
+            assert!(
+                matches!(
+                    final_outcome(&st, false, Some(1), e),
+                    Outcome::NotLoggedIn { .. }
+                ),
+                "{e}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_plain_error_result_stays_a_crash() {
+        let mut st = ParseState::default();
+        parse_line(
+            r#"{"type":"result","is_error":true,"api_error_status":400,"result":"bad request"}"#,
+            &mut st,
+        );
+        assert!(matches!(
+            final_outcome(&st, false, Some(1), ""),
+            Outcome::Crash { .. }
+        ));
     }
 
     #[test]

@@ -55,3 +55,9 @@ installed where it was made). It models a `TodoWrite` tool call with seven items
 `completed`, one `in_progress`, three `pending`; each `{content, status, activeForm}`),
 then an `Edit` and a `Bash` call. The shape follows Claude Code's documented `TodoWrite`
 input. It should be replaced by a real capture when one can be made.
+
+The login failures (`synthetic_not_logged_in.jsonl`, `synthetic_auth_401.jsonl`,
+`synthetic_auth_403.jsonl`, `synthetic_invalid_api_key.jsonl`,
+`synthetic_authentication_error.jsonl`) are each one recogniser in
+`claude::is_auth_failure`: a 401/403 status, or one of `AUTH_FAILURE_WORDS`. All but
+the first are synthetic, written from the wording in the task, not captured.

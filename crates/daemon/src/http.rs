@@ -1605,7 +1605,16 @@ async fn refresh_tracker(Shared(d): Shared<Arc<Daemon>>, Path(id): Path<u64>) ->
             };
             d2.tracker.refresh(pid);
             match crate::tracker::poll_once(&d2, pid, adapter.as_ref(), &cfg) {
-                Ok(s) => Ok(json!({"tracker": true, "imported": s.imported, "updated": s.updated, "closed": s.closed, "ignored": s.ignored, "unchanged": s.unchanged, "waiting_slot": s.refused, "adopted": s.adopted})),
+                // A look that found nothing new (the background poll it woke may just have
+                // fetched the listing) says how things stand, not zeros.
+                Ok(s) => {
+                    let s = if s == crate::tracker::Summary::default() {
+                        d2.tracker.standing(pid).unwrap_or(s)
+                    } else {
+                        s
+                    };
+                    Ok(json!({"tracker": true, "imported": s.imported, "updated": s.updated, "closed": s.closed, "ignored": s.ignored, "unchanged": s.unchanged, "waiting_slot": s.refused, "adopted": s.adopted}))
+                }
                 Err(e) => Ok(json!({"tracker": true, "error": e})),
             }
         })
@@ -2089,15 +2098,21 @@ async fn alerts_list(
         .pool
         .run(move || {
             crate::attention::sync_alerts(&d2);
-            d2.store.alerts(!all)
+            crate::notify::live_alerts(&d2, !all)
         })
         .await
         .map_err(pool_err)?
         .map_err(store_err)?;
-    Ok(Json(json!({"alerts": rows.iter().map(|a| json!({
+    let unwritable = crate::notify::store_unwritable(&d);
+    let mut out = json!({"alerts": rows.iter().map(|a| json!({
         "key": a.key, "kind": a.kind, "text": a.text, "since": a.since, "cleared_at": a.cleared_at,
         "acked_at": a.acked_at, "reminded_at": a.reminded_at,
-    })).collect::<Vec<_>>()})))
+    })).collect::<Vec<_>>()});
+    if unwritable {
+        out["store_writable"] = json!(false);
+        out["note"] = json!(crate::notify::UNWRITABLE_NOTE);
+    }
+    Ok(Json(out))
 }
 
 /// Acknowledge an alert (owner only): its noise stops, it stays visible while its condition holds.
@@ -2612,6 +2627,20 @@ async fn debug_stall(
     Ok(Json(json!({"blocked_ms": ms})))
 }
 
+/// Makes the alert and delivery writes fail, or work again (`?refuse=1` / `?refuse=0`), to show
+/// the alerts surviving a store that cannot be written.
+async fn debug_store_writes(
+    Shared(d): Shared<Arc<Daemon>>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Res {
+    if !d.cfg.debug {
+        return Err(fail(StatusCode::NOT_FOUND, "not found"));
+    }
+    let on = q.get("refuse").is_none_or(|v| v != "0");
+    crate::notify::refuse_writes(&d, on);
+    Ok(Json(json!({"refuse": on})))
+}
+
 /// Holds a project's repository lock for `ms` milliseconds, to show that alerts go on while git
 /// work is stuck. With `fetch=1` it holds the project's fetch lock too, as a hung fetch would
 /// (since s81 the fetch has a lock of its own, so the repository lock alone stalls no fetch).
@@ -2757,6 +2786,7 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/leases/{id}", get(lease_poll))
         .route("/leases/{id}/release", post(lease_release))
         .route("/debug/stall", post(debug_stall))
+        .route("/debug/store-writes", post(debug_store_writes))
         .route("/debug/hold-repo-lock", post(debug_hold_repo_lock))
         .route("/debug/wait-repo", post(debug_wait_repo))
         .layer(axum::middleware::from_fn_with_state(

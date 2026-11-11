@@ -256,9 +256,10 @@ pub fn attach_as(
     if let Some(d) = spec.deadline {
         let (sock, timed_out, done) = (sock.clone(), timed_out.clone(), done.clone());
         let dir0 = dir.clone();
+        let extra = spec.deadline_extra.clone();
         thread::spawn(move || {
             let end = Instant::now() + mason_step_host::registry::remaining_limit(d, &dir0);
-            while Instant::now() < end {
+            while Instant::now() < end + extra.get() {
                 if done.load(Ordering::SeqCst) {
                     return;
                 }
