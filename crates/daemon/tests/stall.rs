@@ -77,7 +77,11 @@ fn a_lasting_stall_hands_a_claiming_client_repeats_until_acknowledged() {
         mason_daemon::notify::tick(&d);
         let got = mason_daemon::notify::claim(&d, "m1", false);
         for a in got["announcements"].as_array().unwrap() {
-            keys.push(a["key"].as_str().unwrap().to_string());
+            // The disk alert (also repeating) is raised alongside; this test follows `stalled`.
+            let k = a["key"].as_str().unwrap();
+            if k.starts_with("alert:stalled:") {
+                keys.push(k.to_string());
+            }
         }
     };
     let mut keys: Vec<String> = vec![];
