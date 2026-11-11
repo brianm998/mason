@@ -22,6 +22,14 @@ pub fn now_ms() -> u64 {
         .map_or(0, |d| d.as_millis() as u64)
 }
 
+/// An agent past its silence alert limit.
+#[derive(Clone, Debug)]
+pub struct SilentAgent {
+    pub task: u64,
+    pub step: String,
+    pub silent_ms: u64,
+}
+
 pub struct Daemon {
     pub cfg: DaemonConfig,
     pub store: Store,
@@ -49,6 +57,8 @@ pub struct Daemon {
     /// When the definitions thread last finished a pass (ms; the start time before the first).
     pub(crate) defs_pass_ended_ms: AtomicU64,
     stalls: AtomicU64,
+    /// Agents that are silent past their alert limit: run -> (task, step, silent since, ms).
+    pub(crate) silent: Mutex<HashMap<u64, SilentAgent>>,
     worst_stall_ms: AtomicU64,
     pub(crate) sweep: Mutex<crate::sweep::SweepState>,
     pub(crate) defs: crate::defs::Defs,
@@ -238,6 +248,7 @@ impl Daemon {
             fetch_locks: Mutex::default(),
             defs_pass_ended_ms: AtomicU64::new(now_ms()),
             stalls: AtomicU64::new(0),
+            silent: Mutex::default(),
             store_full: AtomicU64::new(0),
             disk_sizes: Default::default(),
             worst_stall_ms: AtomicU64::new(0),
@@ -531,16 +542,53 @@ impl Daemon {
                 } => self.start_job(*task, *step, *run),
                 Effect::StopStepHost { task } => self.stop_hosts(&format!("t{}r", task.0)),
                 Effect::DeleteBranch { task } => {
+                    // On a thread of its own, not the bounded pool: a full queue there
+                    // dropped this silently and the branch stayed for good. It first waits
+                    // for the task's job to wind down (the step host was just told to
+                    // stop), so the job cannot race the removal, then checks the branch
+                    // really went.
                     let d = self.clone();
                     let task = *task;
-                    let _ = self
-                        .pool
-                        .spawn(move || crate::jobs::cleanup(&d, task, true));
+                    let _ = std::thread::Builder::new()
+                        .name(format!("delete-branch-t{}", task.0))
+                        .spawn(move || d.delete_branch_after_job(task));
                 }
                 // Leases and the scheduler arrive in Stage 8; the rest need no work.
                 _ => {}
             }
         }
+    }
+
+    /// Remove a canceled task's worktree and branch once its job has ended (or after a
+    /// minute, whichever is first), and again while the branch is still there.
+    fn delete_branch_after_job(self: &Arc<Self>, task: TaskId) {
+        let end = Instant::now() + Duration::from_secs(60);
+        while self.has_job_for_task(task) && Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        for attempt in 0..5 {
+            crate::jobs::cleanup(self, task, true);
+            if !self.task_branch_exists(task) {
+                return;
+            }
+            tracing::warn!(
+                task = task.0,
+                attempt,
+                "the branch is still there; retrying"
+            );
+            std::thread::sleep(Duration::from_secs(1 << attempt));
+        }
+    }
+
+    fn task_branch_exists(&self, task: TaskId) -> bool {
+        let Ok(w) = self.world() else { return false };
+        let Some(t) = w.tasks.get(&task) else {
+            return false;
+        };
+        let Some(p) = self.project(t.project) else {
+            return false;
+        };
+        mason_landing::git::branch_exists(&p.path, &p.branch(task.0))
     }
 
     pub fn start_job(self: &Arc<Self>, task: TaskId, step: State, run: StepRunId) {

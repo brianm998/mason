@@ -13,7 +13,7 @@ use crate::stall::StallSource;
 use mason_core::TaskId;
 use mason_resources::{Held, Locks, Take, TakeError};
 use mason_scheduler::{
-    explain, CpuGate, DiskGate, Kind, Ledger, Needs, Rank, StallGate, WaitCause, COMPILE,
+    explain, since, CpuGate, DiskGate, Kind, Ledger, Needs, Rank, StallGate, WaitCause, COMPILE,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -200,9 +200,33 @@ struct State {
     disk: Option<DiskCfg>,
     /// The latest reading: when, and the gate if the source could be read.
     disk_read: Option<(Instant, Option<DiskGate>)>,
+    /// Grants waiting on a kernel lock that something outside the broker holds, by lease.
+    kernel_waits: HashMap<u64, KernelWait>,
     /// The build disk's responsiveness and the limit on it. `None`: no stall gate.
     stall: Option<(Arc<dyn StallSource>, u64)>,
 }
+
+struct KernelWait {
+    /// What it waits for: the machine classes, or "the whole machine".
+    resource: String,
+    since_ms: u64,
+    text: String,
+}
+
+/// A wait the owner should be told about, worked out from the broker as it is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WaitAlert {
+    pub resource: String,
+    /// The request can never fit; the alert is `never-fits:<resource>`. Otherwise
+    /// it is `long-wait:<resource>`.
+    pub never: bool,
+    pub waiting: usize,
+    pub idle_ms: u64,
+    pub text: String,
+}
+
+/// After this long on a kernel lock the task's wait says what it waits for.
+const KERNEL_WAIT_SAYS_AFTER: Duration = Duration::from_secs(60);
 
 struct DiskCfg {
     source: Arc<dyn DiskSource>,
@@ -217,6 +241,8 @@ pub struct Broker {
     cv: Condvar,
     locks: Locks,
     limits_file: PathBuf,
+    /// How long a grant waits for its kernel locks before the task's wait says so.
+    kernel_says_after: Mutex<Duration>,
 }
 
 /// What a granted resource set looks like to the holder. Dropping it releases
@@ -335,11 +361,13 @@ impl Broker {
                 compile_by_cpu,
                 disk: None,
                 disk_read: None,
+                kernel_waits: HashMap::new(),
                 stall: None,
             }),
             cv: Condvar::new(),
             locks,
             limits_file,
+            kernel_says_after: Mutex::new(KERNEL_WAIT_SAYS_AFTER),
         };
         // Limits changed live survive a restart.
         if let Ok(text) = std::fs::read_to_string(&b.limits_file) {
@@ -735,6 +763,14 @@ impl Broker {
                     .collect::<BTreeMap<_, _>>(),
             )
         };
+        let began = Instant::now();
+        let began_ms = crate::daemon::now_ms();
+        let says_after = *self
+            .kernel_says_after
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut said = false;
+        let mut last_io: Option<String> = None;
         let held = loop {
             match self
                 .locks
@@ -743,21 +779,168 @@ impl Broker {
                 Ok(h) => break h,
                 Err(TakeError::Busy) => {}
                 Err(TakeError::Io(e)) => {
-                    tracing::warn!(error = %e, "taking resource locks failed; retrying")
+                    // Once per distinct error, not every 25 ms.
+                    let m = e.to_string();
+                    if last_io.as_deref() != Some(m.as_str()) {
+                        tracing::warn!(error = %m, "taking resource locks failed; retrying");
+                        last_io = Some(m);
+                    }
                 }
+            }
+            if !said && began.elapsed() >= says_after {
+                said = true;
+                let (resource, text) = self.kernel_wait_text(&take, &caps, last_io.as_deref());
+                lock(&self.st).kernel_waits.insert(
+                    id,
+                    KernelWait {
+                        resource,
+                        since_ms: began_ms,
+                        text: text.clone(),
+                    },
+                );
+                on_wait(&text);
             }
             std::thread::sleep(Duration::from_millis(25));
             if !alive() {
+                lock(&self.st).kernel_waits.remove(&id);
                 self.release(id, Some(task));
                 return Err(Cancelled);
             }
         };
+        lock(&self.st).kernel_waits.remove(&id);
         Ok(Lease {
             b: self.clone(),
             id,
             task: Some(task),
             held: Some(held),
         })
+    }
+
+    /// What a grant that cannot take its kernel locks is waiting for, and a name for it.
+    fn kernel_wait_text(
+        &self,
+        take: &Take,
+        caps: &BTreeMap<String, u32>,
+        io_error: Option<&str>,
+    ) -> (String, String) {
+        let names: Vec<&str> = take.classes.keys().map(String::as_str).collect();
+        let resource = if take.exclusive || names.is_empty() {
+            "the whole machine".to_string()
+        } else {
+            names.join(", ")
+        };
+        let mut labels: Vec<String> = take
+            .classes
+            .keys()
+            .flat_map(|c| self.locks.slots(c, caps.get(c).copied().unwrap_or(0)))
+            .flatten()
+            .map(|h| h.label)
+            .collect();
+        labels.sort();
+        labels.dedup();
+        let mut text = format!(
+            "Granted, but waiting for the kernel lock on {resource}, which something outside the queue holds"
+        );
+        if !labels.is_empty() {
+            text.push_str(&format!(" ({})", labels.join(", ")));
+        }
+        if let Some(e) = io_error {
+            text.push_str(&format!("; taking it also failed: {e}"));
+        }
+        (resource, text)
+    }
+
+    /// Waits to tell the owner about: requests that can never fit (always), and waits on a
+    /// resource that has granted nothing for `long_after_ms` (0: none of these), including
+    /// grants stuck on a kernel lock. One per resource and cause. This only observes.
+    pub fn wait_alerts(&self, long_after_ms: u64) -> Vec<WaitAlert> {
+        let mut st = lock(&self.st);
+        self.refresh_disk(&mut st);
+        let (floor, free) = (st.floor_mb, self.free_memory(&mut st));
+        let now = crate::daemon::now_ms();
+        let gate = self.cpu_gate(&mut st);
+        let mut out: Vec<WaitAlert> = st
+            .ledger
+            .stalls(now, free, floor, gate, long_after_ms)
+            .into_iter()
+            .map(|s| {
+                let text = match &s.cause {
+                    WaitCause::TooBig {
+                        resource,
+                        need,
+                        limit,
+                    } => format!(
+                        "{} needs {need} of {resource} but its limit is {limit}, so it can never run. \
+                         Raise it: mason resources limit {resource} {need}",
+                        s.label
+                    ),
+                    WaitCause::Unknown { resource } => format!(
+                        "{} needs `{resource}`, which nothing declares, so it can never run. \
+                         Declare it with: mason resources limit {resource} <units>",
+                        s.label
+                    ),
+                    _ => format!(
+                        "{} waiting on {}, nothing granted on it for {}: {}",
+                        s.waiting,
+                        s.resource,
+                        since(now, now.saturating_sub(s.idle_ms)),
+                        s.text
+                    ),
+                };
+                let text = if s.never && s.waiting > 1 {
+                    format!("{text} (and {} more)", s.waiting - 1)
+                } else {
+                    text
+                };
+                WaitAlert {
+                    resource: s.resource,
+                    never: s.never,
+                    waiting: s.waiting,
+                    idle_ms: s.idle_ms,
+                    text,
+                }
+            })
+            .collect();
+        if long_after_ms > 0 {
+            let mut kernel: BTreeMap<String, WaitAlert> = BTreeMap::new();
+            for k in st.kernel_waits.values() {
+                let idle_ms = now.saturating_sub(k.since_ms);
+                if idle_ms < long_after_ms {
+                    continue;
+                }
+                let e = kernel.entry(k.resource.clone()).or_insert(WaitAlert {
+                    resource: format!("kernel-lock:{}", k.resource),
+                    never: false,
+                    waiting: 0,
+                    idle_ms: 0,
+                    text: String::new(),
+                });
+                e.waiting += 1;
+                e.idle_ms = e.idle_ms.max(idle_ms);
+                if e.text.is_empty() {
+                    e.text = k.text.clone();
+                }
+            }
+            for mut e in kernel.into_values() {
+                e.text = format!(
+                    "{} waiting on {}, for {}: {}",
+                    e.waiting,
+                    e.resource,
+                    since(now, now.saturating_sub(e.idle_ms)),
+                    e.text
+                );
+                out.push(e);
+            }
+        }
+        out
+    }
+
+    /// Test seam: how long a grant waits for kernel locks before it says so.
+    pub fn set_kernel_says_after(&self, after: Duration) {
+        *self
+            .kernel_says_after
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = after;
     }
 
     fn release(&self, id: u64, task: Option<TaskId>) {
@@ -1176,5 +1359,109 @@ mod tests {
         b.set_limit("device:ios-device", 5).unwrap();
         assert!(!b.set_pool_units("device:ios-device", 1));
         assert_eq!(b.limit("device:ios-device"), Some(5));
+    }
+
+    #[test]
+    fn a_kernel_lock_held_from_outside_makes_the_wait_say_so_and_count_as_long() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = ResourceCfg {
+            machine: BTreeMap::from([("compile".to_string(), 2)]),
+            ..Default::default()
+        };
+        let b = Broker::new(
+            dir.path().join("locks"),
+            dir.path().join("limits.kv"),
+            &cfg,
+            2,
+            crate::cpu::FakeCpu::new(0),
+            &[],
+        )
+        .unwrap();
+        // The threshold is injected; the real one is a minute.
+        b.set_kernel_says_after(Duration::ZERO);
+        // Something outside the broker holds the whole machine, which the ledger cannot see.
+        let outside = Locks::new(dir.path().join("locks")).unwrap();
+        let held = outside
+            .take(
+                999_999,
+                "someone's exclusive run",
+                0,
+                &Take {
+                    classes: BTreeMap::new(),
+                    exclusive: true,
+                },
+                &BTreeMap::from([("compile".to_string(), 2)]),
+            )
+            .unwrap();
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        let b2 = b.clone();
+        let t = std::thread::spawn(move || {
+            let rank = Rank::new(false, 1, 2, 1, 1, false);
+            let cancelled = std::sync::atomic::AtomicBool::new(false);
+            let still_wanted = || !cancelled.load(std::sync::atomic::Ordering::SeqCst);
+            let lease = b2.acquire(
+                TaskId(7),
+                "#7",
+                rank,
+                Needs::of(&[("compile", 1)]),
+                &still_wanted,
+                &mut |why| {
+                    let _ = tx.send(why.to_string());
+                },
+            );
+            lease.is_ok()
+        });
+        // The queue's own wait (if any) comes first; the kernel one is the one that says so.
+        let said = loop {
+            let m = rx.recv_timeout(Duration::from_secs(30)).expect("it said");
+            if m.contains("kernel lock") {
+                break m;
+            }
+        };
+        assert!(said.contains("compile"), "{said}");
+        // It counts as a long wait once it has gone on for the limit.
+        let mut alerts = vec![];
+        for _ in 0..400 {
+            alerts = b.wait_alerts(1);
+            if !alerts.is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(alerts.len(), 1, "{alerts:?}");
+        assert!(alerts[0].resource.starts_with("kernel-lock:"));
+        assert!(alerts[0].text.contains("kernel lock"), "{:?}", alerts[0]);
+        assert!(b.wait_alerts(0).is_empty(), "0 turns it off");
+        drop(held);
+        assert!(
+            t.join().unwrap(),
+            "it gets the lock once the outside holder ends"
+        );
+        assert!(b.wait_alerts(1).is_empty());
+    }
+
+    #[test]
+    fn a_limit_of_zero_alerts_at_once_with_the_fix() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = Broker::new(
+            dir.path().join("locks"),
+            dir.path().join("limits.kv"),
+            &ResourceCfg::default(),
+            2,
+            crate::cpu::FakeCpu::new(0),
+            &[],
+        )
+        .unwrap();
+        b.set_limit("widget", 0).unwrap();
+        let id = b.lease_open("run", &BTreeMap::from([("widget".to_string(), 1)]));
+        assert!(matches!(b.lease_poll(id), LeaseState::Waiting { .. }));
+        let a = b.wait_alerts(0);
+        assert_eq!(a.len(), 1, "{a:?}");
+        assert!(a[0].never && a[0].resource == "widget");
+        assert!(
+            a[0].text.contains("mason resources limit widget 1"),
+            "{}",
+            a[0].text
+        );
     }
 }

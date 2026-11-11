@@ -275,3 +275,13 @@ compose = "done"
 description = "Each banner under the top bar starts with a decorative 20 pt mascot icon (scaled with the text zoom) chosen only by its kind: connection, daemon-down, read-only and monitor-update by their own ids; paused, definition, landing_frozen and the provider_* kinds from Banner.kind; an unknown kind or the two provider notes show text alone. The daemon now emits a landing_frozen banner while landing is frozen"
 swift = "done"
 compose = "done"
+
+[feature.mascot-state-icons]
+description = "Each ticket state as a mascot icon: a 20 pt overlay on the count tile top-left corner (not part of its layout, so tile width is unchanged), the needs_attention icon in the top bar and on decision cards, after the sidebar section chevron, at the end of the sidebar row time and cells line, and on Home stage headings; phone: 20 pt in tiles and headers, 24 pt on rows"
+swift = "done"
+compose = "done"
+
+[feature.app-icon]
+description = "The mascot app icon: MASON.app has an .icns (Finder, Dock), the unbundled monitor sets the Dock icon, the Compose window has it; the iOS icon file sits beside its Info.plist for when a project exists"
+swift = "done"
+compose = "done"

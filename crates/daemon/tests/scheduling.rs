@@ -127,7 +127,6 @@ fn take_when_granted(d: &Arc<Daemon>, id: u64, label: &str) -> (u64, Held) {
 }
 
 fn wait_explained(d: &Arc<Daemon>, t: TaskId) -> String {
-    let mut text = String::new();
     let dump = |d: &Arc<Daemon>| {
         let evs: Vec<String> = d
             .store
@@ -143,15 +142,13 @@ fn wait_explained(d: &Arc<Daemon>, t: TaskId) -> String {
     let end = std::time::Instant::now() + Duration::from_secs(90);
     loop {
         if let Some(s) = d.broker.explain_task(t) {
-            text = s;
-            break;
+            return s;
         }
         if std::time::Instant::now() >= end {
             panic!("never waited. {}", dump(d));
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    text
 }
 
 #[test]
