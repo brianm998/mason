@@ -61,7 +61,13 @@ pub struct Settings {
     pub email: Option<EmailCfg>,
     pub ntfy: Option<(String, String, Option<String>)>,
     pub webhook: Option<(String, Option<String>)>,
+    /// `[stall] long_wait`: a wait is long when its resource has granted nothing for this
+    /// long. 0 turns the alert off.
+    pub long_wait_ms: u64,
 }
+
+/// The default `[stall] long_wait`.
+pub const DEFAULT_LONG_WAIT_MS: u64 = 60 * n::MINUTE_MS;
 
 impl Default for Settings {
     fn default() -> Self {
@@ -75,6 +81,7 @@ impl Default for Settings {
             email: None,
             ntfy: None,
             webhook: None,
+            long_wait_ms: DEFAULT_LONG_WAIT_MS,
         }
     }
 }
@@ -209,11 +216,6 @@ pub fn parse(src: &str) -> Result<Settings, String> {
                     s.stale_ms = span(v, "speech.stale")?;
                 }
             }
-            "stall" => {
-                if let Some(v) = t.get("after") {
-                    s.stall_ms = span(v, "stall.after")?;
-                }
-            }
             "email" => {
                 let need = |k: &str| text(t, k).ok_or_else(|| format!("email: `{k}` is required"));
                 let to: Vec<String> = match t.get("to") {
@@ -261,6 +263,21 @@ pub fn parse(src: &str) -> Result<Settings, String> {
                     text(t, "url").ok_or("webhook: `url` is required")?,
                     secret(t, "secret")?,
                 ));
+            }
+            "stall" => {
+                for (k, v) in t.iter() {
+                    match k {
+                        "after" => s.stall_ms = span(v, "stall.after")?,
+                        "long_wait" => {
+                            s.long_wait_ms = if v.as_integer() == Some(0) {
+                                0
+                            } else {
+                                span(v, "stall.long_wait")?
+                            }
+                        }
+                        other => return Err(format!("notify.toml: unknown setting stall.{other}")),
+                    }
+                }
             }
             other => return Err(format!("notify.toml: unknown section `{other}`")),
         }
@@ -949,6 +966,19 @@ password = "pw"
         let e = s.email.unwrap();
         assert_eq!(e.url, "smtp://mail.example.test:587");
         assert!(e.require_tls);
+    }
+
+    #[test]
+    fn the_long_wait_setting_defaults_to_an_hour_and_zero_turns_it_off() {
+        assert_eq!(parse("").unwrap().long_wait_ms, 60 * n::MINUTE_MS);
+        assert_eq!(
+            parse("[stall]\nlong_wait = \"15m\"\n")
+                .unwrap()
+                .long_wait_ms,
+            15 * n::MINUTE_MS
+        );
+        assert_eq!(parse("[stall]\nlong_wait = 0\n").unwrap().long_wait_ms, 0);
+        assert!(parse("[stall]\nother = 1\n").is_err());
     }
 
     #[test]
