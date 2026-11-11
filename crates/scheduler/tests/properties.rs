@@ -454,3 +454,57 @@ fn llm_sessions_beyond_the_limit_wait_and_none_are_refused() {
     l.release(ids[0]);
     assert_eq!(l.schedule(1, None, None).grants, vec![ids[10]]);
 }
+
+#[test]
+fn a_landing_is_not_held_by_the_cpu_or_the_pacing_but_is_by_the_count_and_a_stall() {
+    let mut l = Ledger::new();
+    l.set_capacity("compile", 2, Kind::Machine);
+    l.pace_compiles(30_000);
+    let hot = Some(CpuGate {
+        busy_pct: 90,
+        max_pct: 50,
+    });
+    let first = l.submit(
+        Rank::new(false, 3, 2, 1, 1, false),
+        Needs::of(&[("compile", 1)]),
+        "#1",
+        0,
+    );
+    assert_eq!(l.schedule_gated(0, None, None, hot).grants, vec![first]);
+    let other = l.submit(
+        Rank::new(false, 2, 2, 2, 2, false),
+        Needs::of(&[("compile", 1)]),
+        "#2",
+        1,
+    );
+    let land = l.submit(
+        Rank::new(false, 1, 2, 3, 3, false).landing(),
+        Needs::of(&[("compile", 1)]),
+        "batch 1",
+        1,
+    );
+    // Hot and inside the gap: the landing starts, the other compile waits.
+    let p = l.schedule_gated(1_000, None, None, hot);
+    assert_eq!(p.grants, vec![land]);
+    assert!(matches!(p.waits[&other].cause, WaitCause::Full { .. }));
+    // A landing still needs a free slot.
+    l.release(land);
+    l.set_capacity("compile", 1, Kind::Machine);
+    let land2 = l.submit(
+        Rank::new(false, 1, 2, 4, 4, false).landing(),
+        Needs::of(&[("compile", 1)]),
+        "batch 2",
+        2,
+    );
+    let p = l.schedule_gated(2_000, None, None, hot);
+    assert!(p.grants.is_empty());
+    assert!(matches!(p.waits[&land2].cause, WaitCause::Full { .. }));
+    // And a stalled build disk holds it beside a running compile.
+    l.set_capacity("compile", 4, Kind::Machine);
+    l.set_stall(Some(StallGate {
+        slow_ms: 30_000,
+        max_ms: 2_000,
+    }));
+    let p = l.schedule_gated(3_000, None, None, None);
+    assert!(matches!(p.waits[&land2].cause, WaitCause::DiskStall { .. }));
+}

@@ -22,6 +22,7 @@ pub mod holds;
 pub mod hostedcheck;
 pub mod hostloss;
 pub mod http;
+pub mod hung;
 pub mod improve;
 pub mod introspect;
 pub mod jobs;

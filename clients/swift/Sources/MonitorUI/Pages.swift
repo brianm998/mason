@@ -219,6 +219,9 @@ struct CompilationSection: View {
                     who(r.label, task: r.task)
                     if r.interactive { Text("interactive").foregroundStyle(theme.muted) }
                     Text("for \(age(r.sinceMs))").foregroundStyle(theme.muted)
+                    if r.idleMs >= 60_000 {
+                        Text("no CPU for \(Format.duration(ms: r.idleMs))").foregroundStyle(theme.slow)
+                    }
                 }
                 .font(theme.body())
                 .accessibilityIdentifier("compile:running:\(i)")
@@ -232,13 +235,18 @@ struct CompilationSection: View {
                     Text("\(w.position).").foregroundStyle(theme.muted)
                     who(w.label, task: w.task)
                     Text(w.reason)
-                    Text(w.interactive ? "interactive, \(age(w.sinceMs))" : "\(w.stepsRemaining) steps from landing, \(age(w.sinceMs))")
+                    Text(w.interactive ? "interactive, \(age(w.sinceMs))" : w.landing ? "landing, \(age(w.sinceMs))" : "\(w.stepsRemaining) steps from landing, \(age(w.sinceMs))")
                         .font(theme.small()).foregroundStyle(theme.muted)
                 }
                 .font(theme.body())
                 .accessibilityIdentifier("compile:pending:\(w.position)")
             }
 
+            ForEach(Array(c.notes.enumerated()), id: \.offset) { i, n in
+                Text(n).font(theme.small()).foregroundStyle(theme.attention)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("compile:note:\(i)")
+            }
             Text(c.rules).font(theme.small()).foregroundStyle(theme.muted)
                 .fixedSize(horizontal: false, vertical: true)
         }

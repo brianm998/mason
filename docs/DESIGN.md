@@ -354,7 +354,7 @@ rank = (interactive caller first,
         task id)
 ```
 
-Steps remaining is the shortest graph path from the current step to `landed`, ignoring loops, which makes tasks comparable across projects with different graphs. A project can opt in to letting top-priority tasks jump the progress rule. It's off by default, matching your answer.
+Steps remaining is the shortest graph path from the current step to `landed`, ignoring loops, which makes tasks comparable across projects with different graphs. A project can opt in to letting top-priority tasks jump the progress rule. It's off by default, matching your answer. A landing's verification ranks ahead of all other pipeline work (a band of its own) and is not held by the CPU gate or the pacing of compiles. The machine can instead order by priority first (`[order] priority_first` in `resources.toml`), as the Preffect pipeline does.
 
 ### Resources
 

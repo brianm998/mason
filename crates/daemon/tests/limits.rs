@@ -229,3 +229,66 @@ fn an_owners_compile_count_in_the_config_is_kept_and_not_paced() {
     b.set_limit("compile", 2).unwrap();
     assert_eq!(b.limit("compile"), Some(2));
 }
+
+#[test]
+fn priority_first_orders_urgent_tasks_ahead_of_tasks_nearer_landing() {
+    use mason_daemon::sched::Standing;
+    let dir = scratch("order");
+    let text = "[cpu]\ncompile_settle_s = 0\ncompile_jobs = 1\n[order]\npriority_first = true\n";
+    let cfg = mason_daemon::sched::parse_resource_cfg(text).unwrap();
+    assert!(cfg.priority_first);
+    let b = broker(&dir, &cfg, &FakeCpu::replacing_compile_count(0));
+    let held = b.lease_open("cc", &compile());
+    assert!(matches!(b.lease_poll(held), LeaseState::Granted { .. }));
+    let as_task = |steps, priority| {
+        Some(Standing {
+            steps_remaining: steps,
+            priority,
+        })
+    };
+    b.lease_open_as("near, P2", &compile(), as_task(2, 2));
+    b.lease_open_as("far, P0", &compile(), as_task(4, 0));
+    let c = b.compilation();
+    let order: Vec<&str> = c.pending.iter().map(|w| w.label.as_str()).collect();
+    assert_eq!(order, ["far, P0", "near, P2"]);
+    assert!(c.rules.contains("the most urgent task"), "{}", c.rules);
+    assert!(
+        mason_daemon::sched::parse_resource_cfg("[order]\npriority_first = 1\n").is_err(),
+        "a bool, not a number"
+    );
+}
+
+#[test]
+fn by_default_progress_orders_waiters_and_notes_show_newest_first() {
+    use mason_daemon::sched::Standing;
+    let dir = scratch("progress");
+    let cfg =
+        mason_daemon::sched::parse_resource_cfg("[cpu]\ncompile_settle_s = 0\ncompile_jobs = 1\n")
+            .unwrap();
+    let b = broker(&dir, &cfg, &FakeCpu::replacing_compile_count(0));
+    let held = b.lease_open("cc", &compile());
+    assert!(matches!(b.lease_poll(held), LeaseState::Granted { .. }));
+    let as_task = |steps, priority| {
+        Some(Standing {
+            steps_remaining: steps,
+            priority,
+        })
+    };
+    b.lease_open_as("near, P2", &compile(), as_task(2, 2));
+    b.lease_open_as("far, P0", &compile(), as_task(4, 0));
+    let c = b.compilation();
+    let order: Vec<&str> = c.pending.iter().map(|w| w.label.as_str()).collect();
+    assert_eq!(order, ["near, P2", "far, P0"]);
+    assert!(c.pending.iter().all(|w| !w.landing));
+    let holders = b.compile_holders();
+    assert_eq!(holders.len(), 1);
+    assert!(holders[0].interactive && holders[0].task.is_none());
+    let now = 10 * 60_000;
+    for i in 0..7 {
+        b.note(now, format!("note {i}"));
+    }
+    let c = b.compilation();
+    assert_eq!(c.notes.len(), 5, "the last five");
+    assert!(c.notes[0].ends_with("note 6"), "{}", c.notes[0]);
+    assert!(c.rules.contains("is stopped"), "{}", c.rules);
+}

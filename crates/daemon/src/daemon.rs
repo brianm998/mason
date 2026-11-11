@@ -876,14 +876,22 @@ impl Daemon {
         step: &str,
     ) -> mason_scheduler::Rank {
         let jump = self.project(t.project).is_some_and(|p| p.priority_jump);
-        mason_scheduler::Rank::new(
+        let rank = mason_scheduler::Rank::new(
             false,
             mason_definition::graph::steps_remaining(def, step),
             t.priority as u8,
             t.enqueued_at.0,
             t.id.0,
             jump,
-        )
+        );
+        let landing = def
+            .step(step)
+            .is_some_and(|s| s.kind == mason_definition::StepType::Landing);
+        if landing {
+            rank.landing()
+        } else {
+            rank
+        }
     }
 
     /// Where a task starts and why, from the definition in force now (Part 4,
@@ -1006,16 +1014,24 @@ impl Daemon {
     /// event, and the monitor's home page shows it.
     fn spawn_compile_watch(self: &Arc<Self>) {
         let mut last = String::new();
+        let mut tracker = crate::hung::Tracker::default();
+        let mut read_at: Option<std::time::Instant> = None;
         crate::bg::spawn_loop(self, "compile-watch", move |weak| {
             std::thread::sleep(std::time::Duration::from_secs(2));
             let Some(d) = weak.upgrade() else {
                 return false;
             };
+            // Holders that stopped making progress, every so often.
+            if read_at.is_none_or(|t| t.elapsed() >= crate::hung::EVERY) {
+                read_at = Some(std::time::Instant::now());
+                crate::hung::check(&d, &mut tracker, now_ms());
+            }
             let c = d.broker.compilation();
             let mut now = format!("{} {}", c.limit, c.used);
             for h in &c.running {
-                now.push_str(&format!("|{}", h.label));
+                now.push_str(&format!("|{}:{}", h.label, h.idle_ms / 60_000));
             }
+            now.push_str(&format!("|{}", c.notes.len()));
             for w in &c.pending {
                 now.push_str(&format!("|{}:{}", w.label, w.cause));
             }

@@ -37,6 +37,10 @@ pub struct Take {
 pub struct HolderInfo {
     pub label: String,
     pub since_ms: u64,
+    /// The process that took the slot, and its lease (0 when an older holder
+    /// did not record them).
+    pub pid: u32,
+    pub lease: u64,
 }
 
 #[derive(Debug)]
@@ -178,7 +182,10 @@ impl Locks {
             None => return Err(TakeError::Busy),
         }
         for p in &paths {
-            let _ = std::fs::write(p.with_extension("holder"), format!("{label}\t{since_ms}\n"));
+            let _ = std::fs::write(
+                p.with_extension("holder"),
+                format!("{label}\t{since_ms}\t{}\t{lease}\n", std::process::id()),
+            );
         }
         Ok(Held {
             _locks: locks,
@@ -221,15 +228,23 @@ impl Locks {
                         std::fs::read_to_string(p.with_extension("holder"))
                             .ok()
                             .and_then(|t| {
-                                let (l, s) = t.trim_end().split_once('\t')?;
+                                let mut f = t.trim_end().split('\t');
+                                let label = f.next()?.to_string();
+                                let since_ms = f.next()?.parse().ok()?;
+                                let pid = f.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+                                let lease = f.next().and_then(|v| v.parse().ok()).unwrap_or(0);
                                 Some(HolderInfo {
-                                    label: l.to_string(),
-                                    since_ms: s.parse().ok()?,
+                                    label,
+                                    since_ms,
+                                    pid,
+                                    lease,
                                 })
                             })
                             .unwrap_or(HolderInfo {
                                 label: "unknown".into(),
                                 since_ms: 0,
+                                pid: 0,
+                                lease: 0,
                             }),
                     ),
                 }

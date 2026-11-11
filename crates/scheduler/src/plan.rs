@@ -295,8 +295,11 @@ pub fn plan(world: &World, waiting: &[Request]) -> Plan {
         // is the whole machine's, so other work (another pipeline's builds, an
         // editor indexing) would otherwise hold every compile back with none of
         // ours running, which is the queue waiting on an idle `compile`.
+        // A landing is not held by the CPU or the pacing either: its verification
+        // unblocks every task in the batch. The disk, memory and the count still hold it.
+        let gated = compiles && !r.rank.is_landing();
         let hot = match world.cpu {
-            Some(g) if compiles && compile_running && g.busy_pct >= g.max_pct => Some(g),
+            Some(g) if gated && compile_running && g.busy_pct >= g.max_pct => Some(g),
             _ => None,
         };
         let stalled = match world.stall {
@@ -305,7 +308,7 @@ pub fn plan(world: &World, waiting: &[Request]) -> Plan {
         };
         let settling = world
             .compile_pace
-            .filter(|_| compiles)
+            .filter(|_| gated)
             .and_then(|p| Some(last_compile_start? + p.gap_ms))
             .filter(|until| world.now < *until);
         let low_disk = match world.disk {

@@ -45,9 +45,12 @@ pub const EXCLUSIVE: &str = "exclusive";
 /// compile_cpu_max = 50
 /// compile_settle_s = 30  # and this long after the last compile started
 /// compile_jobs = 3       # and never more than this many at once (0: no count)
+/// compile_idle_kill_s = 1800  # stop a task's compile that used no CPU this long (0: never)
 /// [disk]     # below this much free disk, no compile and no LLM session starts
 /// floor_gb = 20
 /// stall_ms = 2000        # no further compile while the build disk is this slow (0: off)
+/// [order]    # who goes first when work waits for a resource
+/// priority_first = false # true: tracker priority before steps remaining
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResourceCfg {
@@ -64,10 +67,16 @@ pub struct ResourceCfg {
     /// count). A test run is a compile that then spends most of its time on
     /// disk and process launches, which CPU use does not show.
     pub compile_jobs: u32,
+    /// Seconds a task's command may hold a compile slot using almost no CPU
+    /// before it is stopped (0: never; it still shows as idle).
+    pub compile_idle_kill_s: u32,
     /// Free space, in GB, below which nothing new starts (0: no floor).
     pub disk_floor_gb: u64,
     /// How slow an answer from the build disk, in ms, holds further compiles (0: never).
     pub disk_stall_ms: u64,
+    /// Order waiting work by tracker priority before steps remaining. It applies to
+    /// every project at once, since one queue serves them all.
+    pub priority_first: bool,
 }
 
 /// The default `compile_cpu_max`: half the machine.
@@ -75,6 +84,10 @@ pub const DEFAULT_COMPILE_CPU_MAX: u32 = 50;
 
 /// The default `compile_settle_s`: twice the time the CPU reading averages over.
 pub const DEFAULT_COMPILE_SETTLE_S: u32 = 30;
+
+/// The default `compile_idle_kill_s`: half an hour without CPU is a hang, not a
+/// slow test (the slowest of MASON's own tests waits seconds, not minutes).
+pub const DEFAULT_COMPILE_IDLE_KILL_S: u32 = 1800;
 
 /// The default `compile_jobs`.
 pub const DEFAULT_COMPILE_JOBS: u32 = 3;
@@ -93,8 +106,10 @@ impl Default for ResourceCfg {
             compile_cpu_max: DEFAULT_COMPILE_CPU_MAX,
             compile_settle_s: DEFAULT_COMPILE_SETTLE_S,
             compile_jobs: DEFAULT_COMPILE_JOBS,
+            compile_idle_kill_s: DEFAULT_COMPILE_IDLE_KILL_S,
             disk_floor_gb: crate::disk::DEFAULT_FLOOR_GB,
             disk_stall_ms: DEFAULT_DISK_STALL_MS,
+            priority_first: false,
         }
     }
 }
@@ -107,6 +122,12 @@ pub fn parse_resource_cfg(text: &str) -> Result<ResourceCfg, String> {
             .as_table_like()
             .ok_or_else(|| format!("resources.toml: `{key}` must be a table"))?;
         for (name, v) in table.iter() {
+            if key == "order" && name == "priority_first" {
+                c.priority_first = v.as_bool().ok_or_else(|| {
+                    "resources.toml: order.priority_first must be true or false".to_string()
+                })?;
+                continue;
+            }
             let n = v
                 .as_integer()
                 .filter(|n| *n >= 0)
@@ -126,6 +147,7 @@ pub fn parse_resource_cfg(text: &str) -> Result<ResourceCfg, String> {
                 }
                 "cpu" if name == "compile_settle_s" => c.compile_settle_s = n as u32,
                 "cpu" if name == "compile_jobs" => c.compile_jobs = n as u32,
+                "cpu" if name == "compile_idle_kill_s" => c.compile_idle_kill_s = n as u32,
                 "disk" if name == "floor_gb" => c.disk_floor_gb = n as u64,
                 "disk" if name == "stall_ms" => c.disk_stall_ms = n as u64,
                 other => return Err(format!("resources.toml: unknown setting {other}.{name}")),
@@ -197,6 +219,13 @@ struct State {
     cpu_busy: Option<u32>,
     /// Seconds between compile starts, for the report (0: not paced).
     compile_settle_s: u32,
+    /// Tracker priority before steps remaining (`[order] priority_first`).
+    priority_first: bool,
+    /// How long each compile holder has used almost no CPU, by lease (from `hung`).
+    idle: HashMap<u64, u64>,
+    compile_idle_kill_s: u32,
+    /// What was done about the queue lately: (when, text), newest last.
+    notes: Vec<(u64, String)>,
     disk: Option<DiskCfg>,
     /// The latest reading: when, and the gate if the source could be read.
     disk_read: Option<(Instant, Option<DiskGate>)>,
@@ -243,6 +272,17 @@ pub struct Broker {
     limits_file: PathBuf,
     /// How long a grant waits for its kernel locks before the task's wait says so.
     kernel_says_after: Mutex<Duration>,
+}
+
+/// One holder of `compile`, for the idle check.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompileHolderInfo {
+    pub lease: u64,
+    pub label: String,
+    pub task: Option<u64>,
+    pub interactive: bool,
+    /// The process that took the kernel slot (0: unknown).
+    pub pid: u32,
 }
 
 /// What a granted resource set looks like to the holder. Dropping it releases
@@ -359,6 +399,10 @@ impl Broker {
                 cpu_max: cfg.compile_cpu_max,
                 cpu,
                 cpu_busy: None,
+                priority_first: cfg.priority_first,
+                idle: HashMap::new(),
+                compile_idle_kill_s: cfg.compile_idle_kill_s,
+                notes: vec![],
                 compile_settle_s: if compile_by_cpu {
                     cfg.compile_settle_s
                 } else {
@@ -692,6 +736,7 @@ impl Broker {
     ) -> Result<Lease, Cancelled> {
         let id = {
             let mut st = lock(&self.st);
+            let rank = order(&st, rank);
             let id = st
                 .ledger
                 .submit(rank, needs.clone(), label, crate::daemon::now_ms());
@@ -1017,13 +1062,16 @@ impl Broker {
         st.rank_seq += 1;
         let rank = match standing {
             None => Rank::new(true, 0, 0, now, st.rank_seq, false),
-            Some(s) => Rank::new(
-                false,
-                s.steps_remaining,
-                s.priority,
-                now,
-                st.rank_seq,
-                false,
+            Some(s) => order(
+                &st,
+                Rank::new(
+                    false,
+                    s.steps_remaining,
+                    s.priority,
+                    now,
+                    st.rank_seq,
+                    false,
+                ),
             ),
         };
         let needs = needs_of(uses, None);
@@ -1108,6 +1156,56 @@ impl Broker {
         had
     }
 
+    /// Everything holding `compile` now, for the idle check: the lease, the task it
+    /// is for, whether it is a person's command, and the process that took the slot.
+    pub fn compile_holders(&self) -> Vec<CompileHolderInfo> {
+        let st = lock(&self.st);
+        let snap = st.ledger.snapshot();
+        let task_of: HashMap<u64, u64> = st.by_task.iter().map(|(t, id)| (*id, t.0)).collect();
+        let cap = snap.capacity.get(COMPILE).map_or(0, |c| c.units);
+        let pid_of: HashMap<u64, u32> = self
+            .locks
+            .slots(COMPILE, cap)
+            .into_iter()
+            .flatten()
+            .filter(|h| h.lease > 0)
+            .map(|h| (h.lease, h.pid))
+            .collect();
+        snap.holders
+            .iter()
+            .filter(|h| h.needs.exclusive || h.needs.amounts.contains_key(COMPILE))
+            .map(|h| CompileHolderInfo {
+                lease: h.id,
+                label: h.label.clone(),
+                task: task_of.get(&h.id).copied(),
+                interactive: matches!(st.meta.get(&h.id), Some(Meta::External { .. })),
+                pid: pid_of.get(&h.id).copied().unwrap_or(0),
+            })
+            .collect()
+    }
+
+    /// The idle check's latest reading, by lease.
+    pub fn set_idle(&self, idle: HashMap<u64, u64>) {
+        lock(&self.st).idle = idle;
+    }
+
+    pub fn compile_idle_kill_s(&self) -> u32 {
+        lock(&self.st).compile_idle_kill_s
+    }
+
+    /// Something done about the queue, for the home page: the last five of the
+    /// last day are kept.
+    pub fn note(&self, now: u64, text: String) {
+        let mut st = lock(&self.st);
+        st.notes.push((now, text));
+        st.notes
+            .retain(|(at, _)| now.saturating_sub(*at) < 24 * 3600 * 1000);
+        let n = st.notes.len();
+        if n > 5 {
+            st.notes.drain(..n - 5);
+        }
+    }
+
     /// The `compile` resource for the monitor's home page: who holds it, who
     /// waits and why (in line order), the limit, and the gates on it.
     pub fn compilation(&self) -> mason_protocol::Compilation {
@@ -1131,6 +1229,7 @@ impl Broker {
                 task: task_of.get(&h.id).copied().unwrap_or(0),
                 since_ms: h.since,
                 interactive: matches!(st.meta.get(&h.id), Some(Meta::External { .. })),
+                idle_ms: st.idle.get(&h.id).copied().unwrap_or(0),
             })
             .collect();
         let pending = snap
@@ -1156,6 +1255,7 @@ impl Broker {
                     } else {
                         r.rank.steps()
                     },
+                    landing: r.rank.is_landing(),
                 }
             })
             .collect();
@@ -1171,10 +1271,21 @@ impl Broker {
         if st.stall.is_some() {
             rules.push_str(", and not while the build disk is slow");
         }
-        rules.push_str(
-            ". Line order: a person's command first, then the task fewest steps from \
-             landing, then priority, then the oldest request.",
-        );
+        if st.compile_idle_kill_s > 0 {
+            rules.push_str(&format!(
+                ". A task's command that uses no CPU for {} while holding a slot is stopped",
+                since(st.compile_idle_kill_s as u64 * 1000, 0)
+            ));
+        }
+        rules.push_str(if st.priority_first {
+            ". A landing starts whatever the CPU reads. Line order: a person's command \
+             first, then a landing, then the most urgent task, then the one fewest steps \
+             from landing, then the oldest."
+        } else {
+            ". A landing starts whatever the CPU reads. Line order: a person's command \
+             first, then a landing, then the task fewest steps from landing, then \
+             priority, then the oldest."
+        });
         Compilation {
             limit,
             used: snap.used.get(COMPILE).copied().unwrap_or(0),
@@ -1184,6 +1295,12 @@ impl Broker {
             cpu_max_pct: st.cpu_max,
             settle_s: settle,
             rules,
+            notes: st
+                .notes
+                .iter()
+                .rev()
+                .map(|(at, t)| format!("{} ago: {t}", since(now, *at)))
+                .collect(),
         }
     }
 
@@ -1310,6 +1427,15 @@ fn compile_reason(w: &mason_scheduler::Wait, now: u64, limit: u32) -> (&'static 
         ),
         WaitCause::TooBig { .. } => ("too-big", explain(w, now)),
         WaitCause::Unknown { .. } => ("unknown", explain(w, now)),
+    }
+}
+
+/// The machine's ordering rule applied to a pipeline rank.
+fn order(st: &State, rank: Rank) -> Rank {
+    if st.priority_first {
+        rank.priority_first()
+    } else {
+        rank
     }
 }
 

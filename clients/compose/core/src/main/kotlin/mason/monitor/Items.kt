@@ -132,11 +132,15 @@ fun MonitorModel.visibleItems(): List<Item> {
             out += Item("compile", listOf("${c.used} of ${c.limit}", c.cpuLine), listOf("increase", "decrease"))
             val now = daemonNow()
             c.running.forEachIndexed { i, r ->
-                out += Item("compile:running:$i", listOf(r.label, Format.duration(maxOf(0L, now - r.since_ms))), order = i)
+                val texts = mutableListOf(r.label, Format.duration(maxOf(0L, now - r.since_ms)))
+                if (r.idle_ms >= 60_000) texts += "no CPU for ${Format.duration(r.idle_ms)}"
+                out += Item("compile:running:$i", texts, order = i)
             }
             c.pending.forEachIndexed { i, w ->
-                out += Item("compile:pending:${w.position}", listOf(w.label, w.reason), order = i)
+                val texts = if (w.landing) listOf(w.label, w.reason, "landing") else listOf(w.label, w.reason)
+                out += Item("compile:pending:${w.position}", texts, order = i)
             }
+            c.notes.forEachIndexed { i, n -> out += Item("compile:note:$i", listOf(n), order = i) }
         }
     }
     if (page == Page.Usage) usage?.let { out += it.items() }

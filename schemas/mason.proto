@@ -621,6 +621,9 @@ message CompileHolder {
   uint64 task = 2;
   uint64 since_ms = 3;
   bool interactive = 4;
+  // How long its processes have used almost no CPU (0: busy, or not read yet).
+  // A task's command idle past `[cpu] compile_idle_kill_s` is stopped.
+  uint64 idle_ms = 5;
 }
 
 // A request waiting for a `compile` slot, in line order.
@@ -638,6 +641,8 @@ message CompileWaiter {
   bool interactive = 7;
   // Steps from landing, which orders pipeline work; 0 for an interactive caller.
   uint32 steps_remaining = 8;
+  // A landing's verification: first among pipeline work, and not held by the CPU.
+  bool landing = 9;
 }
 
 message Compilation {
@@ -655,6 +660,9 @@ message Compilation {
   uint32 settle_s = 7;
   // The rules, in one line, for the section's footnote.
   string rules = 8;
+  // What the daemon did about the queue lately, newest first ("Stopped #95's
+  // command ...: it used no CPU for 30 min while holding a compile slot").
+  repeated string notes = 9;
 }
 
 message StepLine {

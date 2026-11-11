@@ -200,6 +200,7 @@ fun CompilationSection(model: MonitorModel, c: Compilation) {
                 who(r.label, r.task)
                 if (r.interactive) Text("interactive", style = theme.body(color = theme.muted))
                 Text("for ${age(r.since_ms)}", style = theme.body(color = theme.muted))
+                if (r.idle_ms >= 60_000) Text("no CPU for ${Format.duration(r.idle_ms)}", style = theme.body(color = theme.slow))
             }
         }
         if (c.pending.isNotEmpty()) Text("Waiting, in line order", style = theme.body(FontWeight.SemiBold))
@@ -210,10 +211,17 @@ fun CompilationSection(model: MonitorModel, c: Compilation) {
                 who(w.label, w.task)
                 Text(w.reason, style = theme.body())
                 Text(
-                    if (w.interactive) "interactive, ${age(w.since_ms)}" else "${w.steps_remaining} steps from landing, ${age(w.since_ms)}",
+                    when {
+                        w.interactive -> "interactive, ${age(w.since_ms)}"
+                        w.landing -> "landing, ${age(w.since_ms)}"
+                        else -> "${w.steps_remaining} steps from landing, ${age(w.since_ms)}"
+                    },
                     style = theme.small(color = theme.muted),
                 )
             }
+        }
+        c.notes.forEachIndexed { i, n ->
+            Text(n, style = theme.small(color = theme.attention), modifier = Modifier.testTag("compile:note:$i"))
         }
         Text(c.rules, style = theme.small(color = theme.muted))
     }

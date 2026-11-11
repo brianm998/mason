@@ -168,10 +168,15 @@ extension MonitorModel {
                     actions: ["increase", "decrease"]
                 ))
                 for (i, r) in c.running.enumerated() {
-                    out.append(Item(id: "compile:running:\(i)", texts: [r.label, Format.duration(ms: daemonNow() > r.sinceMs ? daemonNow() - r.sinceMs : 0)], order: i))
+                    var texts = [r.label, Format.duration(ms: daemonNow() > r.sinceMs ? daemonNow() - r.sinceMs : 0)]
+                    if r.idleMs >= 60_000 { texts.append("no CPU for \(Format.duration(ms: r.idleMs))") }
+                    out.append(Item(id: "compile:running:\(i)", texts: texts, order: i))
                 }
                 for (i, w) in c.pending.enumerated() {
-                    out.append(Item(id: "compile:pending:\(w.position)", texts: [w.label, w.reason], order: i))
+                    out.append(Item(id: "compile:pending:\(w.position)", texts: w.landing ? [w.label, w.reason, "landing"] : [w.label, w.reason], order: i))
+                }
+                for (i, n) in c.notes.enumerated() {
+                    out.append(Item(id: "compile:note:\(i)", texts: [n], order: i))
                 }
             }
         }

@@ -62,7 +62,7 @@ swift = "done"
 compose = "done"
 
 [feature.home-compilation]
-description = "Home's Compilation section: what holds a compile slot, what waits for one and why, in line order, the CPU reading, and a stepper for how many compiles may run at once"
+description = "Home's Compilation section: what holds a compile slot (and how long it has used no CPU), what waits for one and why, in line order (a landing marked), the CPU reading, what the daemon stopped lately, and a stepper for how many compiles may run at once"
 swift = "done"
 compose = "done"
 
