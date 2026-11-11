@@ -21,7 +21,7 @@ state_of() { m task show "$1" --json 2>/dev/null | sed -n 's/^  "state": "\(.*\)
 wait_state() {  # wait_state TASK STATE SECONDS
   local end=$((SECONDS + $3))
   until [ "$(state_of "$1")" = "$2" ]; do
-    [ $SECONDS -lt $end ] || { echo "timed out waiting for task $1 to be $2 (is $(state_of "$1"))" >&2; tail -30 "$root/masond.log" >&2; exit 1; }
+    [ $SECONDS -lt $end ] || { echo "timed out waiting for task $1 to be $2 (is $(state_of "$1"))" >&2; m task show "$1" >&2; tail -30 "$root/masond.log" >&2; exit 1; }
     sleep 0.2
   done
 }
@@ -68,7 +68,7 @@ t=$(m task add "Add a hello file" --body "Create hello.txt containing hello." | 
 wait_state "$t" landing 120
 echo "the task's steps ran from the last-known base and it waits to land"
 sleep 3
-[ "$(state_of "$t")" = landing ] || { echo "the task left landing while the remote was away: $(state_of "$t")" >&2; exit 1; }
+[ "$(state_of "$t")" = landing ] || { echo "the task left landing while the remote was away: $(state_of "$t")" >&2; m task show "$t" >&2; tail -30 "$root/masond.log" >&2; exit 1; }
 
 mv "$root/origin.gone" "$root/origin.git"
 echo "the remote is back"
