@@ -15,7 +15,7 @@ kill_hosts() {
     target/debug/step-host-ctl reap "$root/d/h" >/dev/null 2>&1 || echo "note: host reap reported an error" >&2
   fi
 }
-cleanup() { stop_daemon; kill_hosts; rm -rf "$root"; }
+cleanup() { stop_daemon; kill_hosts; rm -rf "$root" 2>/dev/null || { sleep 1; rm -rf "$root"; }; }
 trap cleanup EXIT
 cargo build -q --workspace --bins
 bin=target/debug

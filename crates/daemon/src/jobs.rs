@@ -1027,6 +1027,8 @@ struct TestChecks {
     wt: PathBuf,
     timeout: Duration,
     slots: CheckSlots,
+    /// The step's deadline grows by the time the agent spent queued for a check.
+    extra: mason_adapter_api::DeadlineExtra,
     id_prefix: String,
     log_dir: PathBuf,
 }
@@ -1035,12 +1037,6 @@ impl CheckHandler for TestChecks {
     fn run(&self, name: &str) -> CheckRun {
         let (true, Some(cmd)) = (name == "tests", &self.cmd) else {
             return CheckRun::Unknown;
-        };
-        let Ok(test_lease) = self.slots.swap_for_test() else {
-            return CheckRun::Done {
-                passed: false,
-                summary: "The step is over; the check did not run.".into(),
-            };
         };
         // Under a step host, so that a restarted daemon finds the run again.
         let spec = crate::hostedcheck::CheckSpec {
@@ -1051,6 +1047,19 @@ impl CheckHandler for TestChecks {
             env: self.slots.env(),
             limit: self.timeout,
             tree: crate::hostedcheck::tree_key(&self.wt),
+        };
+        // The same call sent again after a restart attaches to the run already
+        // going (or takes its result) at once: it starts nothing, so it does not
+        // queue behind other work for a slot the run it joins already took.
+        let queue = !crate::hostedcheck::pending(&self.slots.d, &spec);
+        let queued = Instant::now();
+        let swapped = self.slots.swap_for_test(queue);
+        self.extra.add(queued.elapsed());
+        let Ok(test_lease) = swapped else {
+            return CheckRun::Done {
+                passed: false,
+                summary: "The step is over; the check did not run.".into(),
+            };
         };
         let res = crate::hostedcheck::run(&self.slots.d, &spec);
         drop(test_lease);
@@ -1090,16 +1099,17 @@ struct CheckSlots {
     agent_uses: std::collections::BTreeMap<String, u32>,
     /// The test step's `uses`, without device pools: a check runs no suite.
     test_uses: std::collections::BTreeMap<String, u32>,
+    /// The test step's name: a check queues as the test step's work, which it
+    /// is, not as the develop step's. Ranked as develop it came after every test
+    /// and landing of every other task, and waited hours for a slot.
+    test_step: Option<String>,
     lease: StepLease,
 }
 
 impl CheckSlots {
     fn new(c: &Ctx) -> CheckSlots {
-        let test_uses = c
-            .def
-            .steps
-            .iter()
-            .find(|s| s.kind == StepType::Test)
+        let test = c.def.steps.iter().find(|s| s.kind == StepType::Test);
+        let test_uses = test
             .map(|s| s.uses.clone())
             .unwrap_or_default()
             .into_iter()
@@ -1114,6 +1124,7 @@ impl CheckSlots {
             account: c.project.account.clone(),
             agent_uses: c.step.uses.clone(),
             test_uses,
+            test_step: test.map(|s| s.name.clone()),
             lease: c.lease.clone(),
         }
     }
@@ -1128,6 +1139,7 @@ impl CheckSlots {
     fn acquire(
         &self,
         needs: mason_scheduler::Needs,
+        as_step: &str,
     ) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
         let d = &self.d;
         let t = d
@@ -1135,31 +1147,51 @@ impl CheckSlots {
             .ok()
             .and_then(|w| w.tasks.get(&self.task).cloned())
             .ok_or(crate::sched::Cancelled)?;
-        let rank = d.rank_for(&t, &self.def, &self.step);
+        let rank = d.rank_for(&t, &self.def, as_step);
         let (d2, task, run) = (d.clone(), self.task, self.run);
         let alive = move || {
             d2.world()
                 .map(|w| w.open_run(task) == Some(run))
                 .unwrap_or(true)
         };
-        d.broker.acquire(
+        // The wait shows on the task, as a step's does: a check that queued
+        // used to leave the task reading "running" for hours.
+        let asked = needs.clone();
+        let mut waited = false;
+        let lease = d.broker.acquire(
             self.task,
             &format!("#{}", self.task.0),
             rank,
             needs,
             &alive,
-            &mut |_| {},
-        )
+            &mut |why| {
+                waited = d.emit_for_run(
+                    task,
+                    run,
+                    EventKind::WaitStarted {
+                        task,
+                        on: crate::targets::wait_text(d, &asked, why),
+                    },
+                );
+            },
+        );
+        if waited {
+            d.emit_for_run(task, run, EventKind::WaitEnded { task });
+        }
+        lease
     }
 
-    /// Give the agent's slot back and queue for what the tests use.
-    fn swap_for_test(&self) -> Result<Option<crate::sched::Lease>, crate::sched::Cancelled> {
+    /// Give the agent's slot back and, if `queue`, queue for what the tests use.
+    fn swap_for_test(
+        &self,
+        queue: bool,
+    ) -> Result<Option<crate::sched::Lease>, crate::sched::Cancelled> {
         let held = self.lease.lock().unwrap_or_else(|e| e.into_inner()).take();
         if held.is_some() {
             drop(held);
             self.d.admit();
         }
-        if self.test_uses.is_empty() {
+        if !queue || self.test_uses.is_empty() {
             return Ok(None);
         }
         for name in self.test_uses.keys() {
@@ -1167,7 +1199,8 @@ impl CheckSlots {
                 .broker
                 .declare(name, self.def.resources.get(name).copied().unwrap_or(1));
         }
-        self.acquire(crate::sched::needs_of(&self.test_uses, None))
+        let as_step = self.test_step.as_deref().unwrap_or(&self.step);
+        self.acquire(crate::sched::needs_of(&self.test_uses, None), as_step)
             .map(Some)
     }
 
@@ -1175,7 +1208,7 @@ impl CheckSlots {
     fn take_agent_slot_back(&self) {
         self.d.admit();
         let needs = crate::sched::needs_of(&self.agent_uses, Some(&self.account));
-        if let Ok(l) = self.acquire(needs) {
+        if let Ok(l) = self.acquire(needs, &self.step) {
             *self.lease.lock().unwrap_or_else(|e| e.into_inner()) = Some(l);
         }
     }
@@ -1391,11 +1424,13 @@ fn agent_job(c: &Ctx) {
     // `run_check` runs the project's tests: the command of its test step, layered exactly
     // as the test step itself resolves it (runtime and task overrides included).
     let tests_cmd = test_command(&c.d, &c.def, c.project_id, Some(c.task));
+    let deadline_extra = mason_adapter_api::DeadlineExtra::default();
     let checks = Box::new(TestChecks {
         cmd: tests_cmd,
         wt: c.wt.clone(),
         timeout: c.project.test_timeout,
         slots: CheckSlots::new(c),
+        extra: deadline_extra.clone(),
         id_prefix: format!("t{}r{}-check", c.task.0, c.run.0),
         log_dir: c.task_dir(),
     });
@@ -1446,6 +1481,7 @@ fn agent_job(c: &Ctx) {
 
     let adapter = adapter(c);
     let mut spec = SessionSpec::new(kind, &prompt, &c.wt);
+    spec.deadline_extra = deadline_extra;
     let agent = c.project.agent();
     // Both providers go through the mapping: the requested tier and level
     // become the real model and effort, unless something names them outright.

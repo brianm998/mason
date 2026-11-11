@@ -349,6 +349,9 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
         val name = usage?.providers?.firstOrNull()?.name ?: "claude"
         send(Command(set_limit = SetLimit(resource = "llm:$name", units = units)))
     }
+    /** How many compiles may run at once (the daemon refuses 0). */
+    fun setCompileLimit(units: Int) =
+        send(Command(set_limit = SetLimit(resource = "compile", units = maxOf(1, units))))
     fun pause(mode: String, seconds: Long) =
         send(Command(pause = PauseWork(project = project, mode = mode, for_seconds = seconds)))
     fun resume() = send(Command(resume = ResumeWork(project = project)))

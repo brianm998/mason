@@ -1230,6 +1230,9 @@ fn main() {
                 return println!("{r:#}");
             }
             let list = r["alerts"].as_array().cloned().unwrap_or_default();
+            if let Some(note) = r["note"].as_str() {
+                println!("note: {note}");
+            }
             if list.is_empty() {
                 println!("nothing needs a look");
             }
@@ -1476,6 +1479,12 @@ fn main() {
                     or_die(d.call("POST", "/update", Some(&body)));
                     // Follow it until it finishes, or the daemon is replaced.
                     let (mut shown, mut seen_down) = (0usize, false);
+                    // The daemon logs "taking over" just before it execs, and its log does not
+                    // survive the exec: a poll may never see that line.
+                    let mut said_takeover = false;
+                    // The runtime running when the update began; another one at the end took over.
+                    // (`None` until the first answer; an inner `None` is a build directory.)
+                    let mut first_running: Option<Option<String>> = None;
                     let mut target: Option<String> = None;
                     let patience: u64 = std::env::var("MASON_UPDATE_WAIT_S")
                         .ok()
@@ -1497,8 +1506,22 @@ fn main() {
                             continue;
                         };
                         down_since = None;
-                        for l in r["log"].as_array().into_iter().flatten().skip(shown) {
-                            println!("  {}", l.as_str().unwrap_or(""));
+                        if first_running.is_none() {
+                            first_running = Some(r["running"].as_str().map(str::to_string));
+                        }
+                        let log: Vec<&str> = r["log"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|l| l.as_str())
+                            .collect();
+                        // A daemon that took over starts a new log.
+                        if log.len() < shown {
+                            shown = 0;
+                        }
+                        for l in log.iter().skip(shown) {
+                            println!("  {l}");
+                            said_takeover |= l.starts_with("taking over");
                             shown += 1;
                         }
                         if let Some(t) = r["target"].as_str() {
@@ -1517,13 +1540,18 @@ fn main() {
                             && (check
                                 || (target.is_some() && r["running"].as_str() == target.as_deref()))
                         {
-                            println!(
-                                "running {}",
-                                r["running"].as_str().unwrap_or("(a build directory)")
-                            );
+                            let running = r["running"].as_str().unwrap_or("(a build directory)");
+                            let changed = first_running
+                                .as_ref()
+                                .is_some_and(|f| f.as_deref() != r["running"].as_str());
+                            if !check && !said_takeover && (changed || seen_down) {
+                                println!(
+                                    "  taking over: {running} took over; step hosts keep running"
+                                );
+                            }
+                            println!("running {running}");
                             break;
                         }
-                        let _ = seen_down;
                     }
                 }
             }

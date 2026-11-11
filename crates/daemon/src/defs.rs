@@ -354,8 +354,13 @@ impl Daemon {
         let mut last_fetch = std::time::Instant::now()
             .checked_sub(fetch_every)
             .unwrap_or_else(std::time::Instant::now);
+        // The first pass runs at once: until it has fetched, a project's own definition may
+        // not be known yet, and admission waits for it (see `admit`).
+        let mut first = true;
         crate::bg::spawn_loop(self, "definition-watcher", move |weak| {
-            std::thread::sleep(every);
+            if !std::mem::take(&mut first) {
+                std::thread::sleep(every);
+            }
             let Some(d) = weak.upgrade() else {
                 return false;
             };
@@ -364,6 +369,8 @@ impl Daemon {
                 last_fetch = std::time::Instant::now();
             }
             d.watch_definitions(fetch);
+            d.defs_ready
+                .store(true, std::sync::atomic::Ordering::SeqCst);
             // A pause that has run out lets claims go.
             d.admit();
             d.defs_pass_ended_ms

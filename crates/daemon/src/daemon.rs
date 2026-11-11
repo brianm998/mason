@@ -30,6 +30,9 @@ pub struct SilentAgent {
     pub silent_ms: u64,
 }
 
+/// How long admission waits for the first definitions pass before going ahead without it.
+const DEFS_FIRST_PASS_WAIT: Duration = Duration::from_secs(30);
+
 pub struct Daemon {
     pub cfg: DaemonConfig,
     pub store: Store,
@@ -58,6 +61,10 @@ pub struct Daemon {
     repo_locks: Mutex<HashMap<PathBuf, RepoLock>>,
     /// When the definitions thread last finished a pass (ms; the start time before the first).
     pub(crate) defs_pass_ended_ms: AtomicU64,
+    /// The definitions thread has finished its first pass, which fetches. Until then a
+    /// project's own definition may be unknown (startup reads only what was already fetched),
+    /// so nothing new is admitted under the built-in one by mistake.
+    pub(crate) defs_ready: AtomicBool,
     stalls: AtomicU64,
     /// Agents that are silent past their alert limit: run -> (task, step, silent since, ms).
     pub(crate) silent: Mutex<HashMap<u64, SilentAgent>>,
@@ -66,6 +73,8 @@ pub struct Daemon {
     last_big_stall_at: AtomicU64,
     last_big_stall_ms: AtomicU64,
     pub(crate) sweep: Mutex<crate::sweep::SweepState>,
+    /// Step hosts this daemon has asked to stop, so the sweep does not call a stop in flight an orphan.
+    pub stop_log: Mutex<crate::sweep::StopLog>,
     pub(crate) defs: crate::defs::Defs,
     pub broker: Arc<crate::sched::Broker>,
     /// Appended event sequence numbers, for the clients' sockets.
@@ -253,6 +262,7 @@ impl Daemon {
             fetch_locks: Mutex::default(),
             fetch_failures: Mutex::default(),
             defs_pass_ended_ms: AtomicU64::new(now_ms()),
+            defs_ready: AtomicBool::new(false),
             stalls: AtomicU64::new(0),
             silent: Mutex::default(),
             store_full: AtomicU64::new(0),
@@ -261,6 +271,7 @@ impl Daemon {
             last_big_stall_at: AtomicU64::new(0),
             last_big_stall_ms: AtomicU64::new(0),
             sweep: Mutex::default(),
+            stop_log: Mutex::default(),
             defs: crate::defs::Defs::default(),
             broker,
             accounts,
@@ -296,6 +307,7 @@ impl Daemon {
             d.recover();
             d.spawn_progress_ticker();
             d.spawn_sweeper();
+            d.spawn_compile_watch();
             crate::usage::spawn_probe(&d);
             d.spawn_watcher();
             crate::tracker::spawn(&d);
@@ -688,6 +700,10 @@ impl Daemon {
                 && s.state == mason_step_host::registry::HostState::Running
             {
                 tracing::warn!(host = %s.info.id, prefix, "stopping a step host");
+                self.stop_log
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .record(&s.info.id, Instant::now());
                 if let Ok(mut c) = mason_step_host::client::HostClient::connect(
                     &s.info.sock,
                     mason_step_host::protocol::PREVIOUS,
@@ -700,10 +716,24 @@ impl Daemon {
         }
     }
 
+    /// Admission waits for the first definitions pass (which admits when it ends), unless that
+    /// takes too long: a remote that does not answer must not hold up all work.
+    pub(crate) fn admission_held(&self) -> bool {
+        !self.defs_ready.load(Ordering::SeqCst) && self.started.elapsed() < DEFS_FIRST_PASS_WAIT
+    }
+
+    /// The first definitions pass is over (or took too long), so admission is open.
+    pub fn ready_to_admit(&self) -> bool {
+        !self.admission_held()
+    }
+
     /// Start queued tasks while an LLM session is free for them, best rank
     /// first across every project (Part 7).
     pub fn admit(self: &Arc<Self>) {
         if self.demo {
+            return;
+        }
+        if self.admission_held() {
             return;
         }
         if self.admitting.swap(true, Ordering::SeqCst) {
@@ -976,6 +1006,32 @@ impl Daemon {
 
     pub fn task_dir(&self, task: TaskId) -> PathBuf {
         self.cfg.task_dir(task.0)
+    }
+
+    /// Wake the sockets when the compile queue changes: who holds a slot, who
+    /// waits and why. Interactive callers and gate readings change it without an
+    /// event, and the monitor's home page shows it.
+    fn spawn_compile_watch(self: &Arc<Self>) {
+        let mut last = String::new();
+        crate::bg::spawn_loop(self, "compile-watch", move |weak| {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            let Some(d) = weak.upgrade() else {
+                return false;
+            };
+            let c = d.broker.compilation();
+            let mut now = format!("{} {}", c.limit, c.used);
+            for h in &c.running {
+                now.push_str(&format!("|{}", h.label));
+            }
+            for w in &c.pending {
+                now.push_str(&format!("|{}:{}", w.label, w.cause));
+            }
+            if now != last {
+                last = now;
+                d.poke();
+            }
+            true
+        });
     }
 
     fn spawn_sweeper(self: &Arc<Self>) {

@@ -65,7 +65,7 @@ final class MonitorCoreTests: XCTestCase {
         hv.stages = [section("queued", rows: [row(1, state: "queued")])]
         m.home = hv
         XCTAssertEqual(m.homeMascot, MascotChoice(id: "all_clear", large: false))
-        var a = ActiveModel(); a.task = 1
+        var a = Mason_V1_ActiveModel(); a.task = 1
         hv.active = [a]
         m.home = hv
         XCTAssertEqual(m.homeMascot.id, "developing")
@@ -385,6 +385,10 @@ final class MonitorCoreTests: XCTestCase {
             XCTAssertEqual(s.task, 5)
             if case .step(let n)? = s.scope { XCTAssertEqual(n, "test") } else { XCTFail() }
         } else { XCTFail() }
+        m.setCompileLimit(5)
+        m.setCompileLimit(0)
+        if case .setLimit(let l)? = sent[4].body { XCTAssertEqual(l.resource, "compile"); XCTAssertEqual(l.units, 5) } else { XCTFail() }
+        if case .setLimit(let l)? = sent[5].body { XCTAssertEqual(l.units, 1, "the stepper never asks for zero compiles") } else { XCTFail() }
     }
 
     // MARK: what the client shows (the conformance items)

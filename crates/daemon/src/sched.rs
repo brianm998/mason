@@ -195,8 +195,8 @@ struct State {
     cpu: Arc<dyn CpuSource>,
     /// The latest reading, kept so the explanation matches the decision.
     cpu_busy: Option<u32>,
-    /// CPU use decides when compiles start, and no count of them can be set.
-    compile_by_cpu: bool,
+    /// Seconds between compile starts, for the report (0: not paced).
+    compile_settle_s: u32,
     disk: Option<DiskCfg>,
     /// The latest reading: when, and the gate if the source could be read.
     disk_read: Option<(Instant, Option<DiskGate>)>,
@@ -329,11 +329,12 @@ impl Broker {
             fixed.insert(p.clone());
             pools.insert(p.clone());
         }
-        // Reading the machine replaces a count set per project or saved live, but
-        // CPU use alone lets too many in: a test run is mostly disk and process
-        // launches, and everything blocked on a stalled disk reads as idle. So
-        // `compile_jobs` caps them. 0 is one slot per hardware thread, which never
-        // holds a compile back, since the CPU gate stops them long before that.
+        // Reading the machine replaces a count set per project, but CPU use alone
+        // lets too many in: a test run is mostly disk and process launches, and
+        // everything blocked on a stalled disk reads as idle. So `compile_jobs`
+        // caps them, until the owner sets a count live (limits.kv, read below).
+        // 0 is one slot per hardware thread, which never holds a compile back,
+        // since the CPU gate stops them long before that.
         let compile_by_cpu = cpu.replaces_compile_count() && !cfg.machine.contains_key(COMPILE);
         if compile_by_cpu {
             let units = match cfg.compile_jobs {
@@ -358,7 +359,11 @@ impl Broker {
                 cpu_max: cfg.compile_cpu_max,
                 cpu,
                 cpu_busy: None,
-                compile_by_cpu,
+                compile_settle_s: if compile_by_cpu {
+                    cfg.compile_settle_s
+                } else {
+                    0
+                },
                 disk: None,
                 disk_read: None,
                 kernel_waits: HashMap::new(),
@@ -375,10 +380,8 @@ impl Broker {
                 if let Some((name, n)) = line.split_once('\t') {
                     if let Ok(n) = n.trim().parse::<u32>() {
                         let mut st = lock(&b.st);
-                        // A count saved before CPU use decided this.
-                        if name == COMPILE && st.compile_by_cpu {
-                            continue;
-                        }
+                        // A saved `compile` count is the owner's word and replaces
+                        // cpu.compile_jobs; the CPU and disk gates still apply.
                         let kind = kind_for(&st, name);
                         st.ledger.set_capacity(name, n, kind);
                         st.fixed.insert(name.to_string());
@@ -431,12 +434,8 @@ impl Broker {
         if name == EXCLUSIVE {
             return Err("`exclusive` is the whole machine and has no limit".into());
         }
-        if name == COMPILE && st.compile_by_cpu {
-            return Err(
-                "`compile` has no live count: at most cpu.compile_jobs run at once, each \
-                 starting while CPU use is below cpu.compile_cpu_max in resources.toml"
-                    .into(),
-            );
+        if name == COMPILE && units == 0 {
+            return Err("`compile` needs at least 1: 0 would stop every build and test".into());
         }
         let kind = kind_for(&st, name);
         st.ledger.set_capacity(name, units, kind);
@@ -1109,6 +1108,85 @@ impl Broker {
         had
     }
 
+    /// The `compile` resource for the monitor's home page: who holds it, who
+    /// waits and why (in line order), the limit, and the gates on it.
+    pub fn compilation(&self) -> mason_protocol::Compilation {
+        use mason_protocol::{Compilation, CompileHolder, CompileWaiter};
+        let mut st = lock(&self.st);
+        self.pass(&mut st);
+        let (floor, free) = (st.floor_mb, self.free_memory(&mut st));
+        let now = crate::daemon::now_ms();
+        let gate = self.cpu_gate(&mut st);
+        let waits = st.ledger.waits_gated(now, free, floor, gate);
+        let snap = st.ledger.snapshot();
+        let task_of: HashMap<u64, u64> = st.by_task.iter().map(|(t, id)| (*id, t.0)).collect();
+        let compiles = |n: &Needs| n.exclusive || n.amounts.contains_key(COMPILE);
+        let limit = snap.capacity.get(COMPILE).map_or(0, |c| c.units);
+        let running = snap
+            .holders
+            .iter()
+            .filter(|h| compiles(&h.needs))
+            .map(|h| CompileHolder {
+                label: h.label.clone(),
+                task: task_of.get(&h.id).copied().unwrap_or(0),
+                since_ms: h.since,
+                interactive: matches!(st.meta.get(&h.id), Some(Meta::External { .. })),
+            })
+            .collect();
+        let pending = snap
+            .waiting
+            .iter()
+            .filter(|r| compiles(&r.needs))
+            .enumerate()
+            .map(|(i, r)| {
+                let (cause, reason) = match waits.waits.get(&r.id) {
+                    Some(w) => compile_reason(w, now, limit),
+                    None => ("", "starting".to_string()),
+                };
+                CompileWaiter {
+                    label: r.label.clone(),
+                    task: task_of.get(&r.id).copied().unwrap_or(0),
+                    since_ms: r.since,
+                    position: i as u32 + 1,
+                    reason,
+                    cause: cause.into(),
+                    interactive: r.rank.interactive(),
+                    steps_remaining: if r.rank.interactive() {
+                        0
+                    } else {
+                        r.rank.steps()
+                    },
+                }
+            })
+            .collect();
+        let settle = st.compile_settle_s;
+        let mut rules = format!(
+            "At most {limit} at once. The first compile always starts; another starts only \
+             while CPU use is below {}%",
+            st.cpu_max
+        );
+        if settle > 0 {
+            rules.push_str(&format!(", {settle} s after the last one started"));
+        }
+        if st.stall.is_some() {
+            rules.push_str(", and not while the build disk is slow");
+        }
+        rules.push_str(
+            ". Line order: a person's command first, then the task fewest steps from \
+             landing, then priority, then the oldest request.",
+        );
+        Compilation {
+            limit,
+            used: snap.used.get(COMPILE).copied().unwrap_or(0),
+            running,
+            pending,
+            cpu_busy_pct: st.cpu_busy.map_or(-1, |b| b as i32),
+            cpu_max_pct: st.cpu_max,
+            settle_s: settle,
+            rules,
+        }
+    }
+
     /// Everything, for `mason resources` and the monitors.
     pub fn snapshot(&self) -> serde_json::Value {
         use serde_json::json;
@@ -1184,6 +1262,54 @@ impl Broker {
             "cpu": { "busy_pct": st.cpu_busy, "compile_max_pct": st.cpu_max },
             "now_ms": now,
         })
+    }
+}
+
+/// Why a compile waits, as a code and a short phrase for the home page.
+fn compile_reason(w: &mason_scheduler::Wait, now: u64, limit: u32) -> (&'static str, String) {
+    match &w.cause {
+        WaitCause::Full { .. } => ("full", format!("every slot is held ({limit} of {limit})")),
+        WaitCause::Behind { .. } => (
+            "behind",
+            match w.behind.first() {
+                Some(a) => format!("behind {} in line", a.label),
+                None => "behind an earlier request".into(),
+            },
+        ),
+        WaitCause::Exclusive => ("exclusive", "something needs the whole machine".into()),
+        WaitCause::Cpu { busy_pct, max_pct } => (
+            "cpu",
+            format!("CPU {busy_pct}% busy; another compile starts below {max_pct}%"),
+        ),
+        WaitCause::Settling { until } => (
+            "settling",
+            format!(
+                "the last compile started moments ago; the next may start in {} s",
+                until.saturating_sub(now).div_ceil(1000)
+            ),
+        ),
+        WaitCause::DiskStall { slow_ms, max_ms } => (
+            "disk-stall",
+            format!(
+                "the build disk is slow ({:.1} s to answer, limit {:.1} s)",
+                *slow_ms as f64 / 1000.0,
+                *max_ms as f64 / 1000.0
+            ),
+        ),
+        WaitCause::Disk { free_mb, floor_mb } => (
+            "disk",
+            format!(
+                "only {} GB of disk free (floor {} GB)",
+                free_mb / 1024,
+                floor_mb / 1024
+            ),
+        ),
+        WaitCause::Memory { free_mb, floor_mb } => (
+            "memory",
+            format!("{free_mb} MB memory free, {floor_mb} MB needed"),
+        ),
+        WaitCause::TooBig { .. } => ("too-big", explain(w, now)),
+        WaitCause::Unknown { .. } => ("unknown", explain(w, now)),
     }
 }
 

@@ -5,7 +5,7 @@
 //! limit is enforced from the host's start.
 
 mod support;
-use mason_daemon::hostedcheck::{run, CheckSpec};
+use mason_daemon::hostedcheck::{pending, run, CheckSpec};
 use serde_json::json;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -58,6 +58,39 @@ fn a_second_call_attaches_and_a_different_tree_runs_afresh() {
     let r3 = run(&d, &other).unwrap();
     assert_ne!(r3.id, r1.id);
     assert_eq!(lines(&marker), 2);
+}
+
+#[test]
+fn a_run_in_flight_is_pending_until_given_and_then_a_call_runs_afresh() {
+    // After a restart the agent's run_check arrives again. While the run it
+    // started is still going, or finished with nobody given its result, the
+    // call joins it and must not queue for a slot first (#72, 2026-11-10: its
+    // check finished while the re-sent call waited in the queue).
+    let s = Scratch::new("true", happy_script());
+    let d = s.start();
+    let work = tempfile::tempdir().unwrap();
+    let sp = spec(&d, work.path(), "sleep 2; echo done", "tree-a", 60);
+    assert!(!pending(&d, &sp), "nothing has run yet");
+    std::thread::scope(|sc| {
+        let a = sc.spawn(|| run(&d, &sp));
+        let end = Instant::now() + Duration::from_secs(30);
+        while !pending(&d, &sp) {
+            assert!(Instant::now() < end, "the run never showed as pending");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            !pending(
+                &d,
+                &spec(&d, work.path(), "sleep 2; echo done", "tree-b", 60)
+            ),
+            "another tree has nothing to join"
+        );
+        assert!(a.join().unwrap().unwrap().passed);
+    });
+    assert!(
+        !pending(&d, &sp),
+        "its result was given: a later call runs afresh"
+    );
 }
 
 #[test]
