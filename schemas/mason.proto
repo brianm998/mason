@@ -408,7 +408,8 @@ message TaskRow {
   string project = 4;
   string state = 5;
   string activity = 6;
-  // Why it is waiting, in the form "Waiting for compile slot: 2nd in line, ...".
+  // Why it is waiting, in the form "Waiting for compile slot: 2nd in line, held by #91 for 4 min".
+  // Who is ahead in line is not named; `mason resources` lists them.
   string why_waiting = 7;
   uint64 enqueued_ms = 8;
   uint64 in_state_ms = 9;
@@ -655,6 +656,9 @@ message Compilation {
   uint32 settle_s = 7;
   // The rules, in one line, for the section's footnote.
   string rules = 8;
+  // Where the CPU reading comes from: mach, proc, top, or, when that is missing,
+  // loadavg or assumed-busy. Empty from a daemon that does not say.
+  string cpu_source = 9;
 }
 
 message StepLine {

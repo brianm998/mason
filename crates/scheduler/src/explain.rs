@@ -88,38 +88,36 @@ fn noun(resource: &str, kind: Option<Kind>) -> String {
     }
 }
 
-fn plural(n: u32, one: &str, many: &str) -> String {
-    format!("{n} {}", if n == 1 { one } else { many })
+/// Most characters of an interactive command the sentence shows.
+pub const COMMAND_LIMIT: usize = 40;
+
+/// A holder's label as the sentence shows it. An interactive label is
+/// "interactive `<whole command>`"; it is cut so the command takes at most
+/// `COMMAND_LIMIT` characters, with an ellipsis when cut. Other labels (#88)
+/// are shown whole.
+fn short_label(label: &str) -> String {
+    let Some(rest) = label.strip_prefix("interactive `") else {
+        return label.to_string();
+    };
+    let cmd = rest.strip_suffix('`').unwrap_or(rest);
+    if cmd.chars().count() <= COMMAND_LIMIT {
+        return label.to_string();
+    }
+    let cut: String = cmd.chars().take(COMMAND_LIMIT).collect();
+    format!("interactive `{}…`", cut.trim_end())
 }
 
 /// The sentence for one wait, like "Waiting for compile slot: 2nd in line,
-/// behind #88 (2 steps from landing), held by #91 for 4 min".
+/// held by #91 for 4 min". Who is ahead is not named: `mason resources` lists it.
 pub fn explain(w: &Wait, now_ms: u64) -> String {
     let queue = |w: &Wait, resource: &str| {
         let mut parts = vec![format!("{} in line", ordinal(w.position))];
-        if !w.behind.is_empty() {
-            let shown: Vec<String> = w
-                .behind
-                .iter()
-                .take(2)
-                .map(|a| match a.steps {
-                    Some(n) => format!("{} ({} from landing)", a.label, plural(n, "step", "steps")),
-                    None => format!("{} (interactive)", a.label),
-                })
-                .collect();
-            let more = w.behind.len().saturating_sub(2);
-            let mut s = format!("behind {}", shown.join(" and "));
-            if more > 0 {
-                s.push_str(&format!(" and {more} more"));
-            }
-            parts.push(s);
-        }
         if !w.held_by.is_empty() {
             let shown: Vec<String> = w
                 .held_by
                 .iter()
                 .take(2)
-                .map(|h| format!("{} for {}", h.label, since(now_ms, h.since)))
+                .map(|h| format!("{} for {}", short_label(&h.label), since(now_ms, h.since)))
                 .collect();
             let more = w.held_by.len().saturating_sub(2);
             let mut s = format!("held by {}", shown.join(" and "));
@@ -203,26 +201,65 @@ mod tests {
         assert_eq!(since(0, 5_000), "0 s");
     }
 
-    #[test]
-    fn the_sentence_from_the_design() {
-        let w = Wait {
+    fn wait(behind: Vec<Ahead>, holder: &str) -> Wait {
+        Wait {
             cause: WaitCause::Full {
                 resource: "compile".into(),
             },
             kind: Some(Kind::Machine),
-            position: 2,
-            behind: vec![Ahead {
+            position: behind.len() + 1,
+            behind,
+            held_by: vec![HeldBy {
+                label: holder.into(),
+                since: 0,
+            }],
+        }
+    }
+
+    #[test]
+    fn the_sentence_from_the_design() {
+        let w = wait(
+            vec![Ahead {
                 label: "#88".into(),
                 steps: Some(2),
             }],
-            held_by: vec![HeldBy {
-                label: "#91".into(),
-                since: 0,
-            }],
-        };
+            "#91",
+        );
         assert_eq!(
             explain(&w, 240_000),
-            "Waiting for compile slot: 2nd in line, behind #88 (2 steps from landing), held by #91 for 4 min"
+            "Waiting for compile slot: 2nd in line, held by #91 for 4 min"
+        );
+    }
+
+    #[test]
+    fn interactive_waiters_ahead_are_not_named() {
+        let ahead = |c: char| Ahead {
+            label: format!("interactive `{}`", c.to_string().repeat(300)),
+            steps: None,
+        };
+        let w = wait(vec![ahead('a'), ahead('b'), ahead('c')], "#91");
+        let s = explain(&w, 240_000);
+        assert_eq!(
+            s,
+            "Waiting for compile slot: 4th in line, held by #91 for 4 min"
+        );
+        assert!(!s.contains("aaaa") && !s.contains("bbbb") && !s.contains("cccc"));
+        assert!(!s.contains("behind"));
+    }
+
+    #[test]
+    fn a_long_interactive_holder_is_cut_and_a_short_one_is_whole() {
+        let long = format!("interactive `{}`", "x".repeat(300));
+        let s = explain(&wait(vec![], &long), 240_000);
+        let want = format!(
+            "held by interactive `{}…` for 4 min",
+            "x".repeat(COMMAND_LIMIT)
+        );
+        assert!(s.ends_with(&want), "{s}");
+        let s = explain(&wait(vec![], "interactive `cargo build`"), 240_000);
+        assert!(
+            s.ends_with("held by interactive `cargo build` for 4 min"),
+            "{s}"
         );
     }
 }

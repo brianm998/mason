@@ -15,7 +15,7 @@ kill_hosts() {
   # Verified before it is killed: a stale pid in a registry may belong to someone else now.
   for hd in "$root"/d/h; do target/debug/step-host-ctl reap "$hd" >/dev/null 2>&1; done
 }
-cleanup() { stop_daemon; kill_hosts; rm -rf "$root"; }
+cleanup() { stop_daemon; kill_hosts; rm -rf "$root" 2>/dev/null || { sleep 1; rm -rf "$root"; }; }
 trap cleanup EXIT
 cargo build -q --workspace --bins
 bin=target/debug

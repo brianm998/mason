@@ -1,0 +1,6 @@
+Test Case '-[StarCoreTests.FooTests testA]' started.
+/work/StarCore/Tests/FooTests.swift:12: error: -[StarCoreTests.FooTests testA] : XCTAssertEqual failed: ("1") is not equal to ("2")
+Test Case '-[StarCoreTests.FooTests testA]' failed (0.003 seconds).
+Test Case '-[StarCoreTests.BarTests testC]' started.
+Test Case '-[StarCoreTests.BarTests testC]' passed (0.250 seconds).
+	 Executed 2 tests, with 1 failure (1 unexpected) in 0.253 (0.254) seconds
