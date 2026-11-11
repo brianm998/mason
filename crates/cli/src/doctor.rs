@@ -179,6 +179,15 @@ fn ago(ms: u64) -> String {
 
 /// The tracker: absent with a GitHub remote is a note; present, what the last
 /// look found (from the running daemon, which is the only one that knows).
+/// Which issues the tracker imports, as the project's `require_label` says.
+fn import_rule(t: &mason_daemon::config::TrackerCfg) -> String {
+    if t.require_label {
+        format!("imports only issues labelled `{}`", t.label)
+    } else {
+        "imports the owner's issues and outsiders' labelled ones".into()
+    }
+}
+
 fn check_tracker(p: &ProjectCfg, status: Option<&serde_json::Value>, out: &mut Vec<Finding>) {
     let name = &p.id;
     let Some(t) = &p.services.tracker else {
@@ -195,8 +204,9 @@ fn check_tracker(p: &ProjectCfg, status: Option<&serde_json::Value>, out: &mut V
     };
     let Some(s) = status else {
         out.push(ok(format!(
-            "project {name}: tracker {} configured; the poll state is unknown while masond is not running",
-            t.repo
+            "project {name}: tracker {} configured, {}; the poll state is unknown while masond is not running",
+            t.repo,
+            import_rule(t)
         )));
         return;
     };
@@ -221,10 +231,14 @@ fn check_tracker(p: &ProjectCfg, status: Option<&serde_json::Value>, out: &mut V
     let n = |k: &str| v[k].as_u64().unwrap_or(0);
     let mut line = match v["last_poll_ms"].as_u64() {
         Some(ms) => format!(
-            "project {name}: tracker {} last polled {}: {} imported, {} ignored, {} unchanged, {} waiting for a slot",
-            t.repo, ago(ms), n("imported"), n("ignored"), n("unchanged"), n("waiting_slot")
+            "project {name}: tracker {} last polled {}: {} imported, {} ignored, {} unchanged, {} waiting for a slot; {}",
+            t.repo, ago(ms), n("imported"), n("ignored"), n("unchanged"), n("waiting_slot"), import_rule(t)
         ),
-        None => format!("project {name}: tracker {} has not been polled yet", t.repo),
+        None => format!(
+            "project {name}: tracker {} has not been polled yet; {}",
+            t.repo,
+            import_rule(t)
+        ),
     };
     if let Some(e) = v["error"].as_str() {
         line.push_str(&format!("; the last look failed: {e}"));
@@ -834,6 +848,37 @@ mod tests {
         let mut out = vec![];
         check_tracker(&project(d.path(), tr), Some(&st), &mut out);
         assert!(matches!(out[0].level, Level::Warn) && out[0].text.contains("stopped: 404"));
+    }
+
+    #[test]
+    fn the_tracker_line_names_the_import_rule_in_force() {
+        let d = repo_with(&[("README", "x")]);
+        let st = serde_json::json!({"trackers": [{"project": "p", "state": "polling",
+            "last_poll_ms": 1, "imported": 0, "ignored": 0, "unchanged": 0, "waiting_slot": 0}]});
+        let head = "[tracker]\nkind = \"github\"\nrepo = \"me/thing\"\ntoken = \"env:T\"\nlabel = \"mason\"\n";
+        let text = |extra: &str| {
+            let mut out = vec![];
+            check_tracker(
+                &project(d.path(), &format!("{head}{extra}")),
+                Some(&st),
+                &mut out,
+            );
+            out[0].text.clone()
+        };
+        let on = text("require_label = true\n");
+        assert!(on.contains("imports only issues labelled `mason`"), "{on}");
+        let off = text("");
+        assert!(
+            off.contains("imports the owner's issues and outsiders' labelled ones"),
+            "{off}"
+        );
+        let mut out = vec![];
+        check_tracker(&project(d.path(), head), None, &mut out);
+        assert!(
+            out[0].text.contains("outsiders' labelled ones"),
+            "{}",
+            out[0].text
+        );
     }
 
     #[test]

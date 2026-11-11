@@ -6,12 +6,15 @@
 # Two pipelines will share star's tracker during the shadow period, split by label and never both:
 #   starpipe keeps claiming issues labelled `pipeline`; MASON claims only issues labelled `mason`.
 #   An issue never carries both labels. The owner creates the `mason` label in star's repository.
+#   The owner files both kinds, so the owner's name does not decide: `require_label = true` below makes
+#   the label alone decide (an unlabelled issue, or a `pipeline` one, is never imported).
 #
 # There is no [self] section: star is an ordinary project, with no holds on protected files and no
 # self-task limits.
 path = "/path/to/star/checkout"   # a clone of git@github.com:brianm998/starry_timelapse_airplane_remover.git
 base = "develop"
 remote = "origin"
+test = "true"   # the loader requires a test command; replace it with star's real one at install
 
 # Landing is `direct-ci` (.mason/landing.toml). Its CI is star's pr-gate workflow, dispatched by hand on
 # the candidate ref `mason/ci/<batch>` (pr-gate has `workflow_dispatch`). The answer is every run that
@@ -22,18 +25,21 @@ remote = "origin"
 [ci]
 kind = "github-actions"
 repo = "brianm998/starry_timelapse_airplane_remover"
-token = "env:MASON_STAR_GITHUB_TOKEN"   # a reference, never the token (or "file:/path")
+# Tokens are `file:` references: masond runs under launchd, where an `env:` variable is not set.
+token = "file:/Users/OWNER/.config/mason/star-github-token"   # a reference, never the token
 workflow = "pr-gate.yml"
 poll_s = 60
 timeout_s = 14400
 
 # Importing GitHub issues. star is a public repository, so an outsider's issue must never start work:
-# `import_as = "proposed"` makes every imported issue wait for `mason task approve N`. Only an issue
-# carrying the label `mason` is imported at all, and the label is the owner's go-ahead.
+# `import_as = "proposed"` makes every imported issue wait for `mason task approve N`. With
+# `require_label = true` only an issue carrying the label `mason` is imported at all, whoever filed it
+# (without the key, the owner's unlabelled issues would be imported too); the label is the go-ahead.
 [tracker]
 kind = "github"
 repo = "brianm998/starry_timelapse_airplane_remover"
-token = "env:MASON_STAR_GITHUB_TOKEN"
+token = "file:/Users/OWNER/.config/mason/star-github-token"
 label = "mason"
+require_label = true
 import_as = "proposed"
 interval_s = 60

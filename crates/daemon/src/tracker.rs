@@ -8,7 +8,10 @@
 //! - **Outside issues are ignored until the owner labels them.** An issue by
 //!   the owner is imported; anyone else's only once it carries the project's
 //!   label (only people with triage rights can put one on). Pull requests are
-//!   never tasks.
+//!   never tasks. With `[tracker] require_label` (a tracker shared with another
+//!   pipeline) the label alone decides, whoever filed the issue: see `admitted`.
+//!   An issue first seen unlabelled whose task was canceled is filed again as a
+//!   new task once it gains the label (decision 0131).
 //! - **Outside text stays untrusted**: an issue by someone else is filed with
 //!   `Outside` trust, so prompts fence it, whoever labeled it.
 //! - **Imports start proposed** (`[tracker] import_as`, default `proposed`; the
@@ -386,9 +389,7 @@ pub fn poll_once(
         let native = adapter.capabilities().dependencies.then(|| {
             let mut m = NativeDeps::new();
             for it in items.iter().filter(|i| !i.is_pr && i.open) {
-                let by_owner = d.cfg.owner_names.iter().any(|o| same(o, &it.author));
-                let labeled = it.labels.iter().any(|l| same(l, &cfg.label));
-                if !(by_owner || labeled) {
+                if !admitted(by_owner(d, it), carries(it, &cfg.label), cfg.require_label) {
                     continue;
                 }
                 match adapter.blocked_by(it.number) {
@@ -403,7 +404,15 @@ pub fn poll_once(
             }
             m
         });
-        summary = sync_with_deps(d, pid, &cfg.label, &cfg.repo, &items, native.as_ref());
+        summary = sync_with_rule(
+            d,
+            pid,
+            &cfg.label,
+            cfg.require_label,
+            &cfg.repo,
+            &items,
+            native.as_ref(),
+        );
         d.tracker
             .seen
             .lock()
@@ -425,6 +434,25 @@ pub fn poll_once(
 
 fn same(a: &str, b: &str) -> bool {
     a.eq_ignore_ascii_case(b)
+}
+
+/// Whether an issue carries the project's label.
+fn carries(it: &Item, label: &str) -> bool {
+    it.labels.iter().any(|l| same(l, label))
+}
+
+/// The one rule for whether MASON takes an issue: the owner's issue or a labelled one,
+/// or with `require_label` only a labelled one, whoever filed it.
+fn admitted(owner: bool, labeled: bool, require_label: bool) -> bool {
+    if require_label {
+        labeled
+    } else {
+        owner || labeled
+    }
+}
+
+fn by_owner(d: &Daemon, it: &Item) -> bool {
+    d.cfg.owner_names.iter().any(|o| same(o, &it.author))
 }
 
 fn priority(s: &str) -> Priority {
@@ -514,6 +542,19 @@ pub fn sync_with_deps(
     items: &[Item],
     native: Option<&NativeDeps>,
 ) -> Summary {
+    sync_with_rule(d, pid, label, false, repo, items, native)
+}
+
+/// [`sync_with_deps`] with the project's `require_label` setting.
+pub fn sync_with_rule(
+    d: &Arc<Daemon>,
+    pid: ProjectId,
+    label: &str,
+    require_label: bool,
+    repo: &str,
+    items: &[Item],
+    native: Option<&NativeDeps>,
+) -> Summary {
     let mut sum = Summary::default();
     let Some(p) = d.project(pid) else { return sum };
     let mut rows: HashMap<u64, TrackerItemRow> = d
@@ -570,6 +611,22 @@ pub fn sync_with_deps(
             continue;
         };
         let mut row = row.clone();
+        let labelled_now = carries(it, label);
+        if require_label && it.open && labelled_now && row.labelled == Some(false) {
+            let canceled = d
+                .world()
+                .ok()
+                .and_then(|w| w.tasks.get(&TaskId(row.task)).map(|t| t.state))
+                == Some(State::Canceled);
+            if canceled {
+                // Labelled after its task was canceled: not tied to that task any more.
+                // The import below files it anew; the old row stays until that works.
+                rows.remove(&it.number);
+                continue;
+            }
+        }
+        let relabelled = row.labelled != Some(labelled_now);
+        row.labelled = Some(labelled_now);
         let changed = row.title != it.title || row.body != it.body || row.priority != it.priority;
         if changed {
             // The tracker owns these; the task takes them if it can still change.
@@ -601,7 +658,7 @@ pub fn sync_with_deps(
         if !changed && row.open == it.open {
             sum.unchanged += 1;
         }
-        if changed || row.open != it.open {
+        if changed || relabelled || row.open != it.open {
             row.open = it.open;
             let _ = d.store.put_tracker_item(&row);
         }
@@ -621,9 +678,7 @@ pub fn sync_with_deps(
             if rows.contains_key(&it.number) {
                 continue;
             }
-            let by_owner = d.cfg.owner_names.iter().any(|o| same(o, &it.author));
-            let labeled = it.labels.iter().any(|l| same(l, label));
-            if !(by_owner || labeled) {
+            if !admitted(by_owner(d, it), carries(it, label), require_label) {
                 continue;
             }
             let linked: BTreeSet<u64> = rows.values().map(|r| r.task).collect();
@@ -644,6 +699,7 @@ pub fn sync_with_deps(
                 priority: it.priority.clone(),
                 open: true,
                 mirrored: String::new(),
+                labelled: Some(carries(it, label)),
             };
             let _ = d.store.put_tracker_item(&row);
             let nums: Vec<u64> = wants(it)
@@ -660,6 +716,10 @@ pub fn sync_with_deps(
             let Some(row) = rows.get(&it.number) else {
                 continue;
             };
+            if require_label && !carries(it, label) {
+                // Not MASON's issue: another pipeline's, on a shared tracker.
+                continue;
+            }
             if w.tasks
                 .get(&TaskId(row.task))
                 .is_some_and(|t| t.state == State::Canceled)
@@ -683,9 +743,7 @@ pub fn sync_with_deps(
         if rows.contains_key(&it.number) {
             continue;
         }
-        let by_owner = d.cfg.owner_names.iter().any(|o| same(o, &it.author));
-        let labeled = it.labels.iter().any(|l| same(l, label));
-        if !it.open || !(by_owner || labeled) {
+        if !it.open || !admitted(by_owner(d, it), carries(it, label), require_label) {
             sum.ignored += 1;
             continue;
         }
@@ -698,7 +756,6 @@ pub fn sync_with_deps(
             if rows.contains_key(&it.number) {
                 continue;
             }
-            let by_owner = d.cfg.owner_names.iter().any(|o| same(o, &it.author));
             let want = wants(it);
             let resolved: Vec<Blocked> = want.iter().map(|n| resolve(&rows, *n)).collect();
             if resolved.iter().any(|b| matches!(b, Blocked::Pending)) {
@@ -707,7 +764,7 @@ pub fn sync_with_deps(
             }
             // MASON's own repository takes tasks only within its limits; the item stays
             // unimported and is looked at again next time.
-            let trust = if by_owner {
+            let trust = if by_owner(d, it) {
                 TrustSource::Owner
             } else {
                 TrustSource::Outside
@@ -762,6 +819,7 @@ pub fn sync_with_deps(
                     priority: it.priority.clone(),
                     open: true,
                     mirrored: String::new(),
+                    labelled: Some(carries(it, label)),
                 };
                 let _ = d.store.put_tracker_item(&row);
                 let nums: Vec<u64> = held.iter().map(|(n, _)| *n).collect();
