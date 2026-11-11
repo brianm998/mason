@@ -30,6 +30,9 @@ pub struct SilentAgent {
     pub silent_ms: u64,
 }
 
+/// How long admission waits for the first definitions pass before going ahead without it.
+const DEFS_FIRST_PASS_WAIT: Duration = Duration::from_secs(30);
+
 pub struct Daemon {
     pub cfg: DaemonConfig,
     pub store: Store,
@@ -58,6 +61,10 @@ pub struct Daemon {
     repo_locks: Mutex<HashMap<PathBuf, RepoLock>>,
     /// When the definitions thread last finished a pass (ms; the start time before the first).
     pub(crate) defs_pass_ended_ms: AtomicU64,
+    /// The definitions thread has finished its first pass, which fetches. Until then a
+    /// project's own definition may be unknown (startup reads only what was already fetched),
+    /// so nothing new is admitted under the built-in one by mistake.
+    pub(crate) defs_ready: AtomicBool,
     stalls: AtomicU64,
     /// Agents that are silent past their alert limit: run -> (task, step, silent since, ms).
     pub(crate) silent: Mutex<HashMap<u64, SilentAgent>>,
@@ -253,6 +260,7 @@ impl Daemon {
             fetch_locks: Mutex::default(),
             fetch_failures: Mutex::default(),
             defs_pass_ended_ms: AtomicU64::new(now_ms()),
+            defs_ready: AtomicBool::new(false),
             stalls: AtomicU64::new(0),
             silent: Mutex::default(),
             store_full: AtomicU64::new(0),
@@ -707,6 +715,12 @@ impl Daemon {
     /// first across every project (Part 7).
     pub fn admit(self: &Arc<Self>) {
         if self.demo {
+            return;
+        }
+        // Not before the first definitions pass (which admits when it ends), unless it is
+        // taking too long: a remote that does not answer must not hold up all work.
+        if !self.defs_ready.load(Ordering::SeqCst) && self.started.elapsed() < DEFS_FIRST_PASS_WAIT
+        {
             return;
         }
         if self.admitting.swap(true, Ordering::SeqCst) {
