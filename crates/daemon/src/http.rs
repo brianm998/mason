@@ -1605,7 +1605,16 @@ async fn refresh_tracker(Shared(d): Shared<Arc<Daemon>>, Path(id): Path<u64>) ->
             };
             d2.tracker.refresh(pid);
             match crate::tracker::poll_once(&d2, pid, adapter.as_ref(), &cfg) {
-                Ok(s) => Ok(json!({"tracker": true, "imported": s.imported, "updated": s.updated, "closed": s.closed, "ignored": s.ignored, "unchanged": s.unchanged, "waiting_slot": s.refused, "adopted": s.adopted})),
+                // A look that found nothing new (the background poll it woke may just have
+                // fetched the listing) says how things stand, not zeros.
+                Ok(s) => {
+                    let s = if s == crate::tracker::Summary::default() {
+                        d2.tracker.standing(pid).unwrap_or(s)
+                    } else {
+                        s
+                    };
+                    Ok(json!({"tracker": true, "imported": s.imported, "updated": s.updated, "closed": s.closed, "ignored": s.ignored, "unchanged": s.unchanged, "waiting_slot": s.refused, "adopted": s.adopted}))
+                }
                 Err(e) => Ok(json!({"tracker": true, "error": e})),
             }
         })
