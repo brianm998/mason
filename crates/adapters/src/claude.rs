@@ -404,9 +404,10 @@ pub(crate) fn launch_process(
     // Deadline watchdog: kill the whole process group when time is up.
     if let Some(d) = spec.deadline {
         let (timed_out, done) = (timed_out.clone(), done.clone());
+        let extra = spec.deadline_extra.clone();
         thread::spawn(move || {
             let end = Instant::now() + d;
-            while Instant::now() < end {
+            while Instant::now() < end + extra.get() {
                 if done.load(Ordering::SeqCst) {
                     return;
                 }
