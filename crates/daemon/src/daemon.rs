@@ -74,7 +74,7 @@ pub struct Daemon {
     last_big_stall_ms: AtomicU64,
     pub(crate) sweep: Mutex<crate::sweep::SweepState>,
     /// Step hosts this daemon has asked to stop, so the sweep does not call a stop in flight an orphan.
-    pub(crate) stop_log: Mutex<crate::sweep::StopLog>,
+    pub stop_log: Mutex<crate::sweep::StopLog>,
     pub(crate) defs: crate::defs::Defs,
     pub broker: Arc<crate::sched::Broker>,
     /// Appended event sequence numbers, for the clients' sockets.
