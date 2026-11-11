@@ -207,7 +207,14 @@ impl Scratch {
         self.prefetch();
         let mut c = self.config();
         f(&mut c);
-        Daemon::start(c).expect("daemon starts")
+        let d = Daemon::start(c).expect("daemon starts");
+        // Admission waits for the first definitions pass; a test that files work and looks at
+        // admission right away would otherwise be looking at that wait.
+        let end = Instant::now() + Duration::from_secs(60);
+        while !d.ready_to_admit() && Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        d
     }
 
     /// Commit files to the remote's `main`, as somebody else would (a landed

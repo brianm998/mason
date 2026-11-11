@@ -2631,7 +2631,9 @@ async fn debug_store_writes(
 }
 
 /// Holds a project's repository lock for `ms` milliseconds, to show that alerts go on while git
-/// work is stuck. Returns at once; a thread holds the lock.
+/// work is stuck. With `fetch=1` it holds the project's fetch lock too, as a hung fetch would
+/// (since s81 the fetch has a lock of its own, so the repository lock alone stalls no fetch).
+/// Returns at once; a thread holds the locks.
 async fn debug_hold_repo_lock(
     Shared(d): Shared<Arc<Daemon>>,
     Query(q): Query<HashMap<String, String>>,
@@ -2646,9 +2648,13 @@ async fn debug_hold_repo_lock(
         .or_else(|| d.projects.keys().next().copied())
         .ok_or_else(|| fail(StatusCode::NOT_FOUND, "no project"))?;
     let lock = d.repo_lock(pid);
+    let fetch = (q.get("fetch").map(String::as_str) == Some("1")).then(|| d.fetch_lock(pid));
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _f = fetch
+            .as_ref()
+            .map(|f| f.lock().unwrap_or_else(|e| e.into_inner()));
         let _ = tx.send(());
         std::thread::sleep(std::time::Duration::from_millis(ms));
     });
