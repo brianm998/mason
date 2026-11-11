@@ -416,6 +416,9 @@ pub fn alerts_now(d: &Daemon) -> Vec<(String, String, String)> {
         }
     }
     out.extend(d.landing().attention());
+    if let Some(text) = d.exit_numbers_warning() {
+        out.push(("numbers".into(), "numbers".into(), text));
+    }
     out.extend(disk_alert(d, &w));
     out.extend(host_loss_alerts(
         &d.store
