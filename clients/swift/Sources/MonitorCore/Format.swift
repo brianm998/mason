@@ -218,3 +218,11 @@ extension Mason_V1_ProgressCell {
         return t
     }
 }
+
+public extension Mason_V1_Compilation {
+    /// The CPU line of the home page's Compilation section.
+    var cpuLine: String {
+        let gate = "a further compile starts below \(cpuMaxPct)%"
+        return cpuBusyPct < 0 ? "CPU not readable; \(gate)." : "CPU \(cpuBusyPct)% busy; \(gate)."
+    }
+}

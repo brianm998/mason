@@ -109,6 +109,10 @@ struct HomePage: View {
                     }
                 }
 
+                if let h = model.home, h.hasCompilation {
+                    CompilationSection(model: model, c: h.compilation)
+                }
+
                 ForEach(model.home?.stages ?? [], id: \.state) { st in
                     section(st.title, theme: theme, state: st.state) {
                         ForEach(st.rows, id: \.id) { r in
@@ -167,6 +171,77 @@ struct SessionStepper: View {
         .buttonStyle(.bordered)
         .help("Lowering the limit never stops anything running; it holds back new work until the count falls.")
         .accessibilityIdentifier("sessions")
+    }
+}
+
+/// Home's Compilation section: what holds a `compile` slot, what waits for one
+/// and why (in line order), the CPU reading, and the limit's stepper.
+struct CompilationSection: View {
+    @Environment(\.theme) var theme
+    @ObservedObject var model: MonitorModel
+    let c: Mason_V1_Compilation
+
+    private func age(_ since: UInt64) -> String {
+        let now = model.daemonNow()
+        return Format.duration(ms: now > since ? now - since : 0)
+    }
+
+    @ViewBuilder private func who(_ label: String, task: UInt64) -> some View {
+        if task > 0 {
+            Button("#\(task)") { model.go(.task(task)) }.buttonStyle(.link)
+        } else {
+            Text(label).lineLimit(1).truncationMode(.middle).help(label)
+        }
+    }
+
+    var body: some View {
+        section("Compilation", theme: theme) {
+            HStack(spacing: theme.spacing) {
+                Text("Compiling: \(c.used) of at most")
+                Button { model.setCompileLimit(c.limit > 1 ? c.limit - 1 : 1) } label: { Image(systemName: "minus") }
+                    .disabled(c.limit <= 1)
+                    .accessibilityIdentifier("compile:decrease")
+                Text("\(c.limit)").font(theme.body(.semibold))
+                Button { model.setCompileLimit(c.limit + 1) } label: { Image(systemName: "plus") }
+                    .accessibilityIdentifier("compile:increase")
+                Text(c.cpuLine).foregroundStyle(theme.muted)
+            }
+            .font(theme.body())
+            .buttonStyle(.bordered)
+            .help("Lowering the limit never stops a compile that is running; it holds back new ones until the count falls.")
+            .accessibilityIdentifier("compile")
+
+            if c.running.isEmpty {
+                Text("Nothing is compiling.").font(theme.body()).foregroundStyle(theme.muted)
+            }
+            ForEach(Array(c.running.enumerated()), id: \.offset) { i, r in
+                HStack(spacing: theme.spacing) {
+                    who(r.label, task: r.task)
+                    if r.interactive { Text("interactive").foregroundStyle(theme.muted) }
+                    Text("for \(age(r.sinceMs))").foregroundStyle(theme.muted)
+                }
+                .font(theme.body())
+                .accessibilityIdentifier("compile:running:\(i)")
+            }
+
+            if !c.pending.isEmpty {
+                Text("Waiting, in line order").font(theme.body(.semibold)).padding(.top, theme.spacingSmall)
+            }
+            ForEach(c.pending, id: \.position) { w in
+                HStack(alignment: .firstTextBaseline, spacing: theme.spacing) {
+                    Text("\(w.position).").foregroundStyle(theme.muted)
+                    who(w.label, task: w.task)
+                    Text(w.reason)
+                    Text(w.interactive ? "interactive, \(age(w.sinceMs))" : "\(w.stepsRemaining) steps from landing, \(age(w.sinceMs))")
+                        .font(theme.small()).foregroundStyle(theme.muted)
+                }
+                .font(theme.body())
+                .accessibilityIdentifier("compile:pending:\(w.position)")
+            }
+
+            Text(c.rules).font(theme.small()).foregroundStyle(theme.muted)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 }
 

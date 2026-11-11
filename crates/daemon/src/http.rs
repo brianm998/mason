@@ -2349,6 +2349,8 @@ async fn resource_limit(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) ->
             let r = d2.broker.set_limit(&name, units as u32);
             // A raised limit may free a session for a task that is queued.
             d2.admit();
+            // The home page shows the limits.
+            d2.poke();
             r
         })
         .await
