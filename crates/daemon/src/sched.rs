@@ -1397,12 +1397,14 @@ mod tests {
         let b2 = b.clone();
         let t = std::thread::spawn(move || {
             let rank = Rank::new(false, 1, 2, 1, 1, false);
+            let cancelled = std::sync::atomic::AtomicBool::new(false);
+            let still_wanted = || !cancelled.load(std::sync::atomic::Ordering::SeqCst);
             let lease = b2.acquire(
                 TaskId(7),
                 "#7",
                 rank,
                 Needs::of(&[("compile", 1)]),
-                &|| true,
+                &still_wanted,
                 &mut |why| {
                     let _ = tx.send(why.to_string());
                 },
