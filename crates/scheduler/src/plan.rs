@@ -317,17 +317,19 @@ pub fn plan(world: &World, waiting: &[Request]) -> Plan {
         };
         let cause = match (&fitted, &touch, low_memory) {
             (Fit::Never(c), _, _) | (Fit::Full(c), _, _) => Some(c.clone()),
-            (Fit::Yes, Some(Touch::Name(n)), _) => Some(WaitCause::Behind {
-                resource: n.clone(),
-            }),
-            (Fit::Yes, Some(Touch::Machine), _) => Some(WaitCause::Exclusive),
-            (Fit::Yes, None, _) if low_disk.is_some() => {
+            // Every request the disk gate holds says so, not only the first in line: the
+            // ones behind it are held by the disk too. Who is granted does not change.
+            (Fit::Yes, _, _) if low_disk.is_some() => {
                 let g = low_disk.expect("checked");
                 Some(WaitCause::Disk {
                     free_mb: g.free_mb,
                     floor_mb: g.floor_mb,
                 })
             }
+            (Fit::Yes, Some(Touch::Name(n)), _) => Some(WaitCause::Behind {
+                resource: n.clone(),
+            }),
+            (Fit::Yes, Some(Touch::Machine), _) => Some(WaitCause::Exclusive),
             (Fit::Yes, None, _) if hot.is_some() => {
                 let g = hot.expect("checked");
                 Some(WaitCause::Cpu {

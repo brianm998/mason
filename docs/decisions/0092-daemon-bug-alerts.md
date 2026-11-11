@@ -1,0 +1,3 @@
+# 0092: Daemon bugs alert the owner
+
+A bug row only added to a count in `mason status`, so a background loop that panicked every pass looked healthy. Alerts are now derived from the bug rows each time alerts are worked out (no new state): one per panic-like kind for 24 hours, per-task alerts for `missed_job`/`missed_admit` only when the same task needs repair three times in an hour (one repair is the system working), and none for housekeeping kinds. A stall of 30 s or more alerts for an hour. Kind `daemon_bug` is routed like `failed`. The 30 s threshold is fixed and separate from `stall_threshold`, which only counts. `attention.rs` is a trust file; the change adds an alert and alters nobody's right to answer, but it waits for the owner's approval.

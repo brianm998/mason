@@ -19,7 +19,11 @@ pub mod disk;
 pub mod editor;
 pub mod fdlimit;
 pub mod holds;
+<<<<<<< HEAD
 pub mod hostarchive;
+=======
+pub mod hostedcheck;
+>>>>>>> origin/develop
 pub mod hostloss;
 pub mod http;
 pub mod improve;

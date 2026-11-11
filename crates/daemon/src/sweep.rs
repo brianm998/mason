@@ -155,6 +155,7 @@ mod tests {
         assert_eq!(parse_host_id("t12r34-1"), Some((12, 34)));
         assert_eq!(parse_host_id("t3r9-test"), Some((3, 9)));
         assert_eq!(parse_host_id("t3r9"), Some((3, 9)));
+        assert_eq!(parse_host_id("t3r9-check0"), Some((3, 9)));
         for bad in ["x1r2-1", "t1-2", "tr1", "t1rx-1", ""] {
             assert_eq!(parse_host_id(bad), None, "{bad}");
         }
