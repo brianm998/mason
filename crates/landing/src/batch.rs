@@ -72,6 +72,22 @@ pub enum Finish {
     LocalBaseCheckedOut(PathBuf),
 }
 
+/// The status script reads stage notes and rewrites one block: well under a second.
+pub const STATUS_DEADLINE: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// The resolver may be an agent working through a conflict. `MASON_RESOLVER_TIMEOUT_SECS`
+/// changes it.
+pub fn resolver_deadline() -> std::time::Duration {
+    std::env::var("MASON_RESOLVER_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|s| *s > 0.0)
+        .map_or(
+            std::time::Duration::from_secs(3600),
+            std::time::Duration::from_secs_f64,
+        )
+}
+
 impl Batch<'_> {
     pub fn base_ref(&self) -> String {
         match self.remote {
@@ -176,10 +192,12 @@ impl Batch<'_> {
         if !wt.join("scripts/gen-status.sh").is_file() {
             return false;
         }
-        let ran = Command::new("bash")
-            .args(["scripts/gen-status.sh"])
-            .current_dir(wt)
-            .output();
+        let ran = crate::proc::output(
+            Command::new("bash")
+                .args(["scripts/gen-status.sh"])
+                .current_dir(wt),
+            STATUS_DEADLINE,
+        );
         if !matches!(ran, Ok(o) if o.status.success()) {
             return false;
         }
@@ -206,13 +224,15 @@ impl Batch<'_> {
         let Some(cmd) = self.resolver else {
             return false;
         };
-        let ran = Command::new("sh")
-            .args(["-c", cmd])
-            .current_dir(self.int_wt)
-            .env("MASON_TASK", task.to_string())
-            .env("MASON_CONFLICT_FILES", files.trim().replace('\n', " "))
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .output();
+        let ran = crate::proc::output(
+            Command::new("sh")
+                .args(["-c", cmd])
+                .current_dir(self.int_wt)
+                .env("MASON_TASK", task.to_string())
+                .env("MASON_CONFLICT_FILES", files.trim().replace('\n', " "))
+                .env("GIT_TERMINAL_PROMPT", "0"),
+            resolver_deadline(),
+        );
         if !matches!(ran, Ok(o) if o.status.success()) {
             return false;
         }
