@@ -16,4 +16,4 @@ dependencyResolutionManagement {
     }
 }
 
-include(":core", ":app")
+include(":core", ":app", ":desktop")
