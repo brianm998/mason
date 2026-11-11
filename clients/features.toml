@@ -291,6 +291,11 @@ description = "The mascot app icon: MASON.app has an .icns (Finder, Dock), the u
 swift = "done"
 compose = "done"
 
+[feature.mascot-status-pictures]
+description = "The Home status picture (not_connected, needs_attention, developing, no_tasks with Add task, otherwise all_clear), nothing_landing on an empty Landing page, all_clear on Health with no findings, and no_results with 'Nothing matched.' for a sidebar search that matches nothing; all decorative, scaled with the text zoom"
+swift = "done"
+compose = "done"
+
 [feature.readme-banner]
 description = "The mascot banner at the top of README.md and the social card in docs/images; repository art only, no client UI"
 swift = "done"

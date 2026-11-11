@@ -52,6 +52,9 @@ progress_cell = 14
 mascot_icon_small = 20
 mascot_icon = 24
 mascot_banner_icon = 20
+# Status pictures: beside a status line or an empty list (96), alone on an empty page (120).
+mascot_status = 96
+mascot_empty = 120
 # The start image (1536 x 1024) is shown at most this wide, whole, never cropped.
 mascot_start_width = 480
 # The state illustration at the top of a task page (shown whole, fitted to its square).

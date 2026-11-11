@@ -211,8 +211,17 @@ struct TaskScreen: View {
 
 struct LandingScreen: View {
     @ObservedObject var model: MonitorModel
+    /// Follows the phone's text size, like the rest of the screen.
+    @ScaledMetric(relativeTo: .body) private var side = CGFloat(MasonTokens.sizeMascotEmpty)
     var body: some View {
         List {
+            if (model.landing?.queue ?? []).isEmpty {
+                // Decorative; the list says nothing more, so the picture is all there is.
+                if let img = Mascot.illustration("nothing_landing") {
+                    img.resizable().scaledToFit().frame(width: side, height: side)
+                        .frame(maxWidth: .infinity).accessibilityHidden(true)
+                }
+            }
             ForEach(model.landing?.queue ?? [], id: \.id) { r in Text("\(r.key) \(r.title)") }
             ForEach(model.landing?.modes ?? [], id: \.self) { Text($0) }
         }

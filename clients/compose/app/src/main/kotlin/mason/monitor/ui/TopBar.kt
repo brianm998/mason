@@ -211,7 +211,7 @@ private fun banner(text: String, tag: String, theme: Theme, icon: String? = null
 }
 
 @Composable
-private fun AddTaskDialog(model: MonitorModel, onClose: () -> Unit) {
+internal fun AddTaskDialog(model: MonitorModel, onClose: () -> Unit) {
     val theme = LocalTheme.current
     var project by remember { mutableStateOf(model.header?.projects?.firstOrNull() ?: "") }
     var title by remember { mutableStateOf("") }
