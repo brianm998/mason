@@ -31,7 +31,7 @@ pub struct SilentAgent {
 }
 
 /// How long admission waits for the first definitions pass before going ahead without it.
-const DEFS_FIRST_PASS_WAIT: Duration = Duration::from_secs(30);
+pub(crate) const DEFS_FIRST_PASS_WAIT: Duration = Duration::from_secs(30);
 
 pub struct Daemon {
     pub cfg: DaemonConfig,

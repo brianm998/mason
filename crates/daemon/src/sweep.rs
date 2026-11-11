@@ -57,7 +57,10 @@ pub fn sweep_once(d: &Arc<Daemon>) -> Vec<String> {
     }
 
     // 2. A queued task that could start but wasn't admitted.
-    if let Some(id) = d.next_admission(&w) {
+    // (Not while admission is deliberately waiting for the first definitions pass.)
+    let admitting_now = d.defs_ready.load(std::sync::atomic::Ordering::SeqCst)
+        || d.started.elapsed() >= crate::daemon::DEFS_FIRST_PASS_WAIT;
+    if let Some(id) = d.next_admission(&w).filter(|_| admitting_now) {
         {
             let t = &w.tasks[&id];
             if confirmed(&st, format!("admit:{}", t.id)) {
