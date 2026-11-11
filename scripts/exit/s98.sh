@@ -28,8 +28,8 @@ landed_ge() { [ "$(landed)" -ge "$1" ]; }
 running_is() { [ "$(running)" = "$1" ]; }
 # Task ids start at 0: "one" is task 0 and "two" is task 1.
 # Host directories of task $1 in h/ (the registry) and in t/$1/hosts/ (moved).
-live() { { ls "$root/d/h" 2>/dev/null | grep "^t$1r" || true; } | wc -l | tr -d ' '; }
-moved() { { ls "$root/d/t/$1/hosts" 2>/dev/null | grep "^t$1r" || true; } | wc -l | tr -d ' '; }
+live() { find "$root/d/h" -maxdepth 1 -name "t$1r*" 2>/dev/null | wc -l | tr -d ' '; }
+moved() { find "$root/d/t/$1/hosts" -maxdepth 1 -name "t$1r*" 2>/dev/null | wc -l | tr -d ' '; }
 none_live() { [ "$(live "$1")" -eq 0 ]; }
 wait_until() { # what seconds command...
   local what=$1 secs=$2; shift 2; local end=$((SECONDS + secs))
