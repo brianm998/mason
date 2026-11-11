@@ -4,10 +4,11 @@
 # scripts/exit/fixtures/s68; loopback only) and bare repositories. No network.
 #  1. A project whose repository has a GitHub remote and no [tracker]: `mason doctor` notes that its
 #     issues are not imported (a note, not a failure); `mason task refresh` says so, with the config path.
-#  2. A project with a tracker and a [self] limit (max_open = 4): the owner's issues are imported, an
-#     outside issue is ignored until it carries the label; doctor shows the last poll and the counts.
-#  3. Owner issues over the limit stay unimported; the summary counts each once, however often it looks,
-#     and an alert names them. The monitors' landing view carries the same in one line per project.
+#  2. A project with a tracker and a [self] limit (max_open = 1): the owner's issues are imported (and
+#     never counted, s46), an outside issue is ignored until it carries the label, then fills the one
+#     slot; doctor shows the last poll and the counts.
+#  3. Outside issues over the limit stay unimported; the summary counts each once, however often it
+#     looks, and an alert names them. The monitors' landing view carries the same in one line per project.
 #  4. A 404 from the tracker stops the poll: doctor, the alerts and the landing view show it with the
 #     reason; once GitHub answers again, a refresh resumes it.
 set -euo pipefail
@@ -63,7 +64,7 @@ remote = "origin"
 test = "true"
 
 [self]
-max_open = 4
+max_open = 1
 per_week = 10
 
 [tracker]
@@ -114,7 +115,7 @@ echo "$r" | grep -q '1 imported' || fail "the labeled issue was not imported: $r
 m task list | grep -q "stranger's idea" || fail "issue 204 is not a task"
 echo "   issue 204 carries the label: imported"
 
-echo "== 3. owner issues over max_open stay unimported; the count is per issue"
+echo "== 3. outside issues over max_open stay unimported; the count is per issue"
 gh_set 3
 r=$(m task refresh "$seed"); echo "   $r"
 echo "$r" | grep -q '0 imported, 0 updated, 0 closed, 0 ignored, 3 unchanged, 2 waiting for a slot' || fail "the first look did not count 2 waiting: $r"

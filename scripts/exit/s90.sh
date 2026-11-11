@@ -11,7 +11,8 @@ root=$(mktemp -d /tmp/mason-s90.XXXXXX); daemon=""; waiters=()
 cleanup() {
   [ -n "$daemon" ] && kill -9 "$daemon" 2>/dev/null || true
   for p in ${waiters[@]+"${waiters[@]}"}; do
-    if kill -0 "$p" 2>/dev/null; then kill "$p"; fi
+    # It may exit between the check and the kill; a failed kill is fine only if it is gone.
+    if kill -0 "$p" 2>/dev/null; then kill "$p" 2>/dev/null || ! kill -0 "$p" 2>/dev/null; fi
   done
   rm -rf "$root"
 }
@@ -64,6 +65,8 @@ done
 echo "== while it is full"
 "$bin/../debug/examples/snapshot_probe" "$port" | tee "$root/during"
 grep -q 'views=[1-9]' "$root/during" || { echo "empty snapshot" >&2; exit 1; }
-m status | tee "$root/status" | grep -q 'pool blocking: 64 queued of 64' \
-  || { cat "$root/status" >&2; echo "status does not show the queue" >&2; exit 1; }
+# Into a file first: `tee | grep -q` under pipefail fails when grep stops reading early.
+m status > "$root/status"; cat "$root/status"
+grep -q 'pool blocking: 64 queued of 64' "$root/status" \
+  || { echo "status does not show the queue" >&2; exit 1; }
 echo "s90 OK"

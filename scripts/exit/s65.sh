@@ -3,14 +3,16 @@
 # Tracker imports (s65) exit test: imports start proposed, a refused import is visible,
 # a hand-filed task is adopted. A real masond, a fake GitHub per project, command steps.
 # Project "self" (import_as default = proposed, every limit full):
-#  1. `task add --proposed` is accepted at max_open; five issues become five proposed
-#     tasks, no alert; approving one runs it to landed.
+#  1. The owner's own filings are accepted at max_open, queued or proposed (no count caps the
+#     owner, s46); five issues become five proposed tasks, no alert; approving one runs it to
+#     landed.
 #  2. Closing an issue on the fake host cancels its proposed task.
 #  3. A task titled "(GitHub #N)" is adopted: no second task; closing the issue cancels it.
 #  4. Cancelling a linked task raises the relink alert; `task relink` (owner only) clears it.
 # Project "queued" (import_as = "queued", [self] max_open = 1):
-#  5. Two issues are not imported; the alert names them and the limit, `--pending-issues`
-#     lists them; both clear once they import.
+#  5. An outside issue (a stranger's, labeled for MASON) fills the one slot; two more are not
+#     imported; the alert names them and the limit, `--pending-issues` lists them; both clear
+#     once they import. (The owner's own issues are never held back by a count, s46.)
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 root=$(mktemp -d /tmp/mason-s65.XXXXXX); daemon=""; gh=""; gh2=""
@@ -30,6 +32,10 @@ bin=target/debug
 owner=${USER:-owner}
 m() { "$bin/mason" --data-dir "$root/d" --config-dir "$root/c" "$@"; }
 fail() { echo "FAILED: $*" >&2; set +e; m task list >&2 2>&1; m alerts >&2 2>&1; tail -20 "$root/masond.log" >&2; exit 1; }
+# An outside issue: a stranger's, labeled for MASON (imported, and counted against the limits).
+outside() {  # NUMBER
+  printf ' {"number": %s, "node_id": "I_%s", "title": "Issue %s", "body": "text", "state": "open", "user": {"login": "stranger"}, "labels": [{"name": "mason"}]}' "$1" "$1" "$1"
+}
 issue() {  # NUMBER STATE
   printf ' {"number": %s, "node_id": "I_%s", "title": "Issue %s", "body": "text", "state": "%s", "user": {"login": "%s"}, "labels": []}' "$1" "$1" "$1" "$2" "$owner"
 }
@@ -122,17 +128,17 @@ interval_s = 300
 import_as = "queued"
 TOML
 export FAKE_GITHUB_TOKEN=recorded-test-token
-"$bin/masond" --data-dir "$root/d" --config-dir "$root/c" --heartbeat-ms 100 --sweep-ms 3600000 --owner "$owner" 2>>"$root/masond.log" &
+"$bin/masond" --port 0 --data-dir "$root/d" --config-dir "$root/c" --heartbeat-ms 100 --sweep-ms 3600000 --owner "$owner" 2>>"$root/masond.log" &
 daemon=$!
 until m status >/dev/null 2>&1; do kill -0 "$daemon" || { cat "$root/masond.log" >&2; exit 1; }; sleep 0.1; done
 
-echo "== 1. the limits are full; a proposed filing and five imports are still accepted"
+echo "== 1. the limits are full; the owner's filings and five imports are still accepted"
 m task add "seed" --project self --explored >/dev/null || fail "the seed task"
 wait_state 0 developing 60
-if out=$(m task add "queued one" --project self --explored 2>&1); then fail "a queued filing was accepted at max_open"; fi
-echo "$out" | grep -q 'limit is 1' || fail "the refusal does not name the limit: $out"
+out=$(m task add "queued one" --project self --explored 2>&1) || fail "the owner's queued filing was refused at max_open: $out"
 out=$(m task add "a proposal" --project self --proposed 2>&1) || fail "--proposed was refused at max_open: $out"
-echo "   --proposed accepted at max_open; a queued filing is still refused"
+m self | grep '^self:' | grep -q '0/1 open' || fail "the owner's tasks were counted: $(m self)"
+echo "   the owner's queued and proposed filings are accepted at max_open, and not counted"
 refresh() { m task refresh "$1" >/dev/null; sleep 1; }
 G=$root/gh
 gh_issues $G "$(issue 401 open)" "$(issue 402 open)" "$(issue 403 open)" "$(issue 404 open)" "$(issue 405 open)"
@@ -197,7 +203,11 @@ touch "$hold"
 m task add "seed2" --project queued --explored >/dev/null || fail "the second seed"
 s2=$(id_of seed2); wait_state "$s2" developing 60
 Q=$root/gh2
-gh_issues $Q "$(issue 501 open)" "$(issue 502 open)"
+gh_issues $Q "$(outside 500)"
+refresh "$s2"
+t500=$(id_of 'Issue 500'); [ -n "$t500" ] || fail "the first outside issue was not imported"
+wait_state "$t500" developing 60
+gh_issues $Q "$(outside 500)" "$(outside 501)" "$(outside 502)"
 refresh "$s2"
 alerts_have '2 issues not imported (#501, #502)'
 alerts_have 'limit is 1'

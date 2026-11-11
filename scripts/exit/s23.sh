@@ -127,7 +127,9 @@ sleep 6
 eq "webhooks after the reminder" "$(count "$root/f/webhook.jsonl")" 2
 eq "ntfy after the reminder" "$(count "$root/f/ntfy.jsonl")" 2
 eq "mails after the reminder" "$(count "$root/f/mail.jsonl")" 2
-eq "announcements after the reminder" "$(nannounced)" 2
+# Queuing an announcement is not delivering it: with no monitor claiming yet and daemon speech
+# off, nothing plays the first one, so the reminder adds none for sound and speech.
+eq "announcements after the reminder" "$(nannounced)" 1
 python3 -c "import json;r=[json.loads(l) for l in open('$root/f/webhook.jsonl')];assert [json.loads(x['body'])['reminder'] for x in r]==[False,True]" || fail "second webhook is not the reminder"
 # clears: silence
 m resume --mode all >/dev/null

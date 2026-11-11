@@ -132,6 +132,29 @@ fn mark_delivered(spec: &CheckSpec, id: &str, key: &str) {
     );
 }
 
+/// Is there already a run of `spec` whose result nobody has been given: one in
+/// flight (in this process, or found again after a restart) or one that
+/// finished while the daemon was away? Such a call attaches or collects, and
+/// starts nothing, so it has nothing to queue for.
+pub fn pending(d: &Daemon, spec: &CheckSpec) -> bool {
+    let key = run_key(spec);
+    (0u32..)
+        .map(|n| format!("{}{n}", spec.id_prefix))
+        .map_while(|id| read_kv(&record_path(spec, &id)).ok().map(|kv| (id, kv)))
+        .any(|(id, kv)| {
+            kv.get("key") == Some(&key)
+                && kv.get("delivered").map(String::as_str) != Some("1")
+                && (inflight()
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .contains_key(&d.cfg.hosts_dir().join(&id))
+                    || matches!(
+                        mason_step_host::registry::status_of(&d.cfg.hosts_dir().join(&id)),
+                        Ok(s) if s.state != mason_step_host::registry::HostState::Lost
+                    ))
+        })
+}
+
 /// Run `spec` (or attach to, or take the result of, the run that already is it).
 /// Blocks until there is a result.
 pub fn run(d: &Arc<Daemon>, spec: &CheckSpec) -> Shared {
