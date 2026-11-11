@@ -15,7 +15,7 @@
 //! any phase resumes by doing the same steps over.
 
 use crate::daemon::{now_ms, Daemon};
-use crate::jobs::{run_shell, Ctx};
+use crate::jobs::Ctx;
 use mason_adapter_api::service::{
     CheckCounts, Checks, CiState, GitHostAdapter, Observed, PollEvent, Poller, PrState, Review,
 };
@@ -80,6 +80,8 @@ struct State {
     gen: u64,
     /// Things the owner should know while they are true: `(project, key) -> (kind, text)`.
     attention: HashMap<(ProjectId, String), (String, String)>,
+    /// Since when a project's landing configuration could not be read (git failed).
+    unread_since: HashMap<ProjectId, Instant>,
 }
 
 /// The landing queues of every project.
@@ -150,13 +152,52 @@ fn rank_of(p: Priority, task: TaskId) -> u64 {
 
 // ---- configuration ------------------------------------------------------------
 
+/// Why the landing configuration gave no answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigError {
+    /// The file is there and says something wrong: landing is refused.
+    Refused(String),
+    /// Git failed, so nobody knows what the file says. No decision may be made.
+    Unread(String),
+}
+
+impl std::fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ConfigError::Refused(s) => f.write_str(s),
+            ConfigError::Unread(s) => write!(f, "could not read .mason/landing.toml: {s}"),
+        }
+    }
+}
+
+/// The text of `.mason/landing.toml` on the base. `Ok("")` only when the base has no such
+/// file (the defaults); a failed git call is an error, never an empty file.
+fn read_config_text(p: &crate::config::ProjectCfg) -> Result<String, String> {
+    let base = p.base_ref();
+    let listed = git::run(&p.path, &["ls-tree", &base, "--", ".mason/landing.toml"])
+        .map_err(|e| e.to_string())?;
+    if listed.trim().is_empty() {
+        return Ok(String::new());
+    }
+    git::run(&p.path, &["show", &format!("{base}:.mason/landing.toml")])
+        .map_err(|e| e.to_string())
+}
+
 /// `.mason/landing.toml` on the base branch; absent means the defaults.
 pub fn load_config(d: &Daemon, pid: ProjectId) -> Result<LandingConfig, String> {
-    let p = d.project(pid).ok_or("no such project")?;
-    let spec = format!("{}:.mason/landing.toml", p.base_ref());
-    let text = git::run(&p.path, &["show", &spec]).unwrap_or_default();
+    read_config(d, pid).map_err(|e| e.to_string())
+}
+
+/// [`load_config`], telling a refused configuration from one that could not be read.
+pub fn read_config(d: &Daemon, pid: ProjectId) -> Result<LandingConfig, ConfigError> {
+    let p = d
+        .project(pid)
+        .ok_or_else(|| ConfigError::Refused("no such project".into()))?;
+    let text = read_config_text(&p).map_err(ConfigError::Unread)?;
     let c = config::parse(&text)
-        .map_err(|e| format!("{} (.mason/landing.toml): {}", p.id, e.join("; ")))?;
+        .map_err(|e| {
+        ConfigError::Refused(format!("{} (.mason/landing.toml): {}", p.id, e.join("; ")))
+    })?;
     let problems = config::service_problems(
         &c,
         p.remote.is_some(),
@@ -164,14 +205,18 @@ pub fn load_config(d: &Daemon, pid: ProjectId) -> Result<LandingConfig, String> 
         p.services.ci.is_some(),
     );
     if !problems.is_empty() {
-        return Err(format!("{}: {}", p.id, problems.join("; ")));
+        return Err(ConfigError::Refused(format!(
+            "{}: {}",
+            p.id,
+            problems.join("; ")
+        )));
     }
     if let Some(b) = &c.base {
         if *b != p.base {
-            return Err(format!(
+            return Err(ConfigError::Refused(format!(
                 "{}: landing.toml says base `{b}` but the project's base is `{}`",
                 p.id, p.base
-            ));
+            )));
         }
     }
     Ok(c)
@@ -258,8 +303,19 @@ fn check_numbers(c: &Ctx) -> Option<Verdict> {
     if mine.exit.is_none() && mine.decision.is_none() {
         return None; // numbers were never reserved (a demo or an old task): nothing to hold it to
     }
-    let added = crate::numbers::added_files(&c.project.path, &c.project.base_ref(), &c.branch);
-    let bad = crate::numbers::check_added(&added, &crate::numbers::base_paths(&c.project), &mine);
+    // A base that cannot be read now is waited for, not taken as having no numbered files.
+    let read =
+        crate::jobs::wait_out_environment(c, "reading the base's numbered files", || {
+            Ok((
+                crate::numbers::added_files(&c.project.path, &c.project.base_ref(), &c.branch)?,
+                crate::numbers::base_paths(&c.project)?,
+            ))
+        });
+    let (added, base) = match read {
+        Ok(v) => v,
+        Err(why) => return Some(Verdict::Failed(why)),
+    };
+    let bad = crate::numbers::check_added(&added, &base, &mine);
     if bad.is_empty() {
         return None;
     }
@@ -362,6 +418,41 @@ fn sweep_integration(d: &Arc<Daemon>, pid: ProjectId) {
     }
 }
 
+/// How long a configuration may stay unreadable before the owner is told.
+const UNREAD_ALERT_AFTER: Duration = Duration::from_secs(300);
+
+/// Record that the landing configuration was read (`None`) or not (`Some(why)`); an alert goes
+/// up once it has stayed unread for `after`, and goes away when it is read again.
+fn note_read(d: &Daemon, pid: ProjectId, unread: Option<&str>, after: Duration) {
+    let key = "config-unread";
+    match unread {
+        None => {
+            if d.landing.lock().unread_since.remove(&pid).is_some() {
+                d.landing.clear(pid, key);
+            }
+        }
+        Some(why) => {
+            let since = *d
+                .landing
+                .lock()
+                .unread_since
+                .entry(pid)
+                .or_insert_with(Instant::now);
+            if since.elapsed() >= after {
+                d.landing.raise(
+                    pid,
+                    key,
+                    "landing-config-unread",
+                    &format!(
+                        "landing is held: the configuration could not be read for {} s ({why})",
+                        since.elapsed().as_secs()
+                    ),
+                );
+            }
+        }
+    }
+}
+
 /// One look at the queue: start whatever may start. Returns how many tasks
 /// wait and how long until the next batch is due.
 fn form_and_start(
@@ -387,9 +478,18 @@ fn form_and_start(
     if waiting.is_empty() {
         return (0, None);
     }
-    let cfg = match load_config(d, pid) {
-        Ok(c) => c,
-        Err(e) => {
+    let cfg = match read_config(d, pid) {
+        Ok(c) => {
+            note_read(d, pid, None, UNREAD_ALERT_AFTER);
+            c
+        }
+        Err(ConfigError::Unread(e)) => {
+            // Git failed: nobody knows what the configuration says, so nothing starts and
+            // nothing is failed. The queue stays as it is; look again shortly.
+            note_read(d, pid, Some(&e), UNREAD_ALERT_AFTER);
+            return (waiting.len(), Some(Duration::from_secs(2)));
+        }
+        Err(ConfigError::Refused(e)) => {
             // Nothing can land with a configuration that is refused: say so, once per look.
             for w in &waiting {
                 take(d, pid, w.task);
@@ -1159,7 +1259,23 @@ impl Runner {
                             return false;
                         }
                     };
-                    return run_shell(cmd, &wt_for_cmd, p.test_timeout).0;
+                    // Under a step host, so a restarted daemon finds the run again.
+                    let spec = crate::hostedcheck::CheckSpec {
+                        id_prefix: format!("b{batch_id}-retest"),
+                        log_dir: log_dir.clone(),
+                        cmd: cmd.clone(),
+                        cwd: wt_for_cmd.clone(),
+                        env: vec![],
+                        limit: p.test_timeout,
+                        tree: crate::hostedcheck::tree_key(&wt_for_cmd),
+                    };
+                    return match crate::hostedcheck::run(d, &spec) {
+                        Ok(o) => o.passed,
+                        Err(e) => {
+                            tracing::warn!(batch = batch_id, "the re-test gave no result: {e}");
+                            false
+                        }
+                    };
                 }
                 // A moved base means CI runs again on the new tip, whatever moved.
                 if !outside && !plan::needs_reverify(moved, &union_fp, &impacts) {
