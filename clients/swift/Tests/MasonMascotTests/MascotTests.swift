@@ -2,6 +2,10 @@
 
 import XCTest
 
+#if canImport(AppKit)
+    import AppKit
+#endif
+
 @testable import MasonMascot
 
 final class MascotTests: XCTestCase {
