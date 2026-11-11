@@ -26,7 +26,7 @@ class MascotTest {
         for (f in MascotManifest.files) {
             assertNotNull(Mascot::class.java.classLoader.getResource(f), f)
         }
-        assertEquals(110, MascotManifest.files.size)
+        assertEquals(111, MascotManifest.files.size)
     }
 
     @Test
@@ -57,5 +57,19 @@ class MascotTest {
     fun anUnknownBannerKindHasNoIcon() {
         assertNull(BannerIcons.forDaemonKind("nonsense"))
         assertNull(BannerIcons.forDaemonKind(""))
+    }
+
+    @Test
+    fun theMacIconIsShapedWithTransparentCorners() {
+        val img = assertNotNull(Mascot.macAppIcon())
+        assertEquals(1024, img.width)
+        assertEquals(1024, img.height)
+        val px = IntArray(1024 * 1024)
+        img.readPixels(px, 0, 0, 1024, 1024)
+        fun alpha(x: Int, y: Int) = (px[y * 1024 + x] ushr 24) and 0xff
+        assertEquals(0, alpha(0, 0))
+        assertEquals(0, alpha(1023, 1023))
+        assertEquals(255, alpha(512, 512))
+        assertNotNull(Mascot.squareAppIcon())
     }
 }
