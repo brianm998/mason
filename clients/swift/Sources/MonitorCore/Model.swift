@@ -649,11 +649,12 @@ public struct HealthSnapshot: Equatable, Sendable {
     public var cpuBusy: Int? = nil
     /// A compile starts only while CPU use is below this percent.
     public var compileCpuMax: Int = 50
+    /// Where the reading comes from (`mach`, `proc`, `top`, `loadavg`, `assumed-busy`); empty if not said.
+    public var cpuSource: String = ""
 
     /// The CPU line of the Health page.
     public var cpuLine: String {
-        guard let b = cpuBusy else { return "CPU not readable; a compile starts below \(compileCpuMax)%." }
-        return "CPU \(b)% busy; a compile starts below \(compileCpuMax)%."
+        cpuReadingLine(busy: cpuBusy, source: cpuSource, gate: "a compile starts below \(compileCpuMax)%")
     }
 
     public init(json: String) {
@@ -674,6 +675,7 @@ public struct HealthSnapshot: Equatable, Sendable {
         if let c = v["cpu"] as? [String: Any] {
             cpuBusy = c["busy_pct"] as? Int
             compileCpuMax = c["compile_max_pct"] as? Int ?? 50
+            cpuSource = c["source"] as? String ?? ""
         }
     }
 }

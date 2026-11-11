@@ -545,6 +545,16 @@ impl Broker {
         })
     }
 
+    /// How long the primary CPU reading has been missing (ms), once that is long
+    /// enough to alert on. The gate is on its fallback meanwhile.
+    pub fn cpu_missing_ms(&self) -> Option<(u64, &'static str)> {
+        let st = lock(&self.st);
+        st.cpu
+            .primary_missing_ms()
+            .filter(|ms| *ms > crate::cpu::MISSING_ALERT_MS)
+            .map(|ms| (ms, st.cpu.source()))
+    }
+
     fn free_memory(&self, st: &mut State) -> Option<u64> {
         st.floor_mb?;
         if let Some((at, v)) = st.mem {
@@ -1184,6 +1194,7 @@ impl Broker {
             cpu_max_pct: st.cpu_max,
             settle_s: settle,
             rules,
+            cpu_source: st.cpu.source().to_string(),
         }
     }
 
@@ -1259,7 +1270,12 @@ impl Broker {
             "holders": holders,
             "waiting": waiting,
             "memory": { "floor_mb": st.floor_mb, "free_mb": free },
-            "cpu": { "busy_pct": st.cpu_busy, "compile_max_pct": st.cpu_max },
+            "cpu": {
+                "busy_pct": st.cpu_busy,
+                "compile_max_pct": st.cpu_max,
+                "source": st.cpu.source(),
+                "failed_reads": st.cpu.failed_reads(),
+            },
             "now_ms": now,
         })
     }
