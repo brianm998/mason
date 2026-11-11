@@ -20,6 +20,8 @@ use std::path::Path;
 /// `s[0-9][0-9].sh` and `s[0-9][0-9][0-9].sh`. Widening those globs is a gate change, so the
 /// counter stops here.
 pub const EXIT_CEILING: u32 = 999;
+/// The alert `numbers` is raised while this many stage and exit-script numbers or fewer are left.
+pub const EXIT_WARN_LEFT: u32 = 50;
 /// Decisions have four digits.
 pub const DECISION_CEILING: u32 = 9999;
 /// Where ad-hoc tasks start, above the planned stages (setting `adhoc_exit_start`).
@@ -129,6 +131,22 @@ impl Mine {
         self.decision
             .map(|n| format!("docs/decisions/{n:04}-<slug>.md"))
     }
+}
+
+/// The warning for the owner once `highest` (the highest stage / exit-script number handed
+/// out) leaves `EXIT_WARN_LEFT` or fewer numbers, else `None`. Nothing handed out, nothing said.
+pub fn exit_warning(highest: u32) -> Option<String> {
+    if highest == 0 {
+        return None;
+    }
+    let left = EXIT_CEILING.saturating_sub(highest);
+    if left > EXIT_WARN_LEFT {
+        return None;
+    }
+    Some(format!(
+        "{left} stage and exit-script numbers left: the highest handed out is {highest} and the ceiling is {EXIT_CEILING}. \
+         A fourth digit is a change to scripts/run-exit-scripts.sh and scripts/gen-status.sh; make it before the numbers run out."
+    ))
 }
 
 /// The ceiling for each kind's counter.
@@ -253,8 +271,9 @@ pub fn feedback(v: &[Violation]) -> String {
 
 // ---- reading the base branch and the store -------------------------------------------
 
-/// Every path on the base tip under the numbered directories.
-pub fn base_paths(p: &ProjectCfg) -> Vec<String> {
+/// Every path on the base tip under the numbered directories. A failed git call is an error:
+/// an empty list would let a number be handed out or accepted a second time.
+pub fn base_paths(p: &ProjectCfg) -> Result<Vec<String>, git::GitError> {
     git::run(
         &p.path,
         &[
@@ -269,11 +288,14 @@ pub fn base_paths(p: &ProjectCfg) -> Vec<String> {
         ],
     )
     .map(|s| s.lines().map(String::from).collect())
-    .unwrap_or_default()
 }
 
 /// Files a branch adds against its base (since the merge base).
-pub fn added_files(repo: &Path, base_ref: &str, branch: &str) -> Vec<String> {
+pub fn added_files(
+    repo: &Path,
+    base_ref: &str,
+    branch: &str,
+) -> Result<Vec<String>, git::GitError> {
     git::run(
         repo,
         &[
@@ -284,7 +306,6 @@ pub fn added_files(repo: &Path, base_ref: &str, branch: &str) -> Vec<String> {
         ],
     )
     .map(|s| s.lines().map(String::from).collect())
-    .unwrap_or_default()
 }
 
 fn mine_from(task: &Task, rows: &[ReservationRow]) -> Mine {
@@ -298,6 +319,18 @@ fn mine_from(task: &Task, rows: &[ReservationRow]) -> Mine {
 }
 
 impl Daemon {
+    /// The warning text when the exit-number counter is nearly used up. Reads only the store.
+    pub fn exit_numbers_warning(&self) -> Option<String> {
+        let rows = self.store.all_reservations().unwrap_or_default();
+        let top = rows
+            .iter()
+            .filter(|r| r.kind == KIND_EXIT)
+            .map(|r| r.number)
+            .max()
+            .unwrap_or(0);
+        exit_warning(top)
+    }
+
     /// The next exit number a new ad-hoc task would get, or `None` when the range is used
     /// up. Does not reserve anything.
     pub fn adhoc_exit_room(&self, p: &ProjectCfg) -> bool {
@@ -308,7 +341,12 @@ impl Daemon {
             .map(|r| r.number)
             .max()
             .unwrap_or(0);
-        let (base_top, _) = highest(base_paths(p).iter().map(String::as_str));
+        // Advisory (the reservation itself is checked again): if the base cannot be read
+        // now, say there is room rather than turn a new task away on a git blip.
+        let Ok(paths) = base_paths(p) else {
+            return true;
+        };
+        let (base_top, _) = highest(paths.iter().map(String::as_str));
         let floor = self.cfg.adhoc_exit_start.saturating_sub(1);
         floor.max(top).max(base_top) < EXIT_CEILING
     }
@@ -325,7 +363,9 @@ impl Daemon {
         let need_exit = stage.is_none() && !have.iter().any(|r| r.kind == KIND_EXIT);
         let need_dec = !have.iter().any(|r| r.kind == KIND_DECISION);
         if need_exit || need_dec {
-            let (base_exit, base_dec) = highest(base_paths(p).iter().map(String::as_str));
+            let paths =
+                base_paths(p).map_err(|e| format!("cannot read the base's numbers: {e}"))?;
+            let (base_exit, base_dec) = highest(paths.iter().map(String::as_str));
             if need_dec {
                 self.store
                     .reserve_number(task.0, KIND_DECISION, base_dec, DECISION_CEILING, now_ms())
@@ -404,6 +444,53 @@ mod tests {
 
     fn v(p: &[&str]) -> Vec<String> {
         p.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn warns_when_fifty_or_fewer_are_left() {
+        assert_eq!(exit_warning(0), None);
+        assert_eq!(
+            exit_warning(EXIT_CEILING - EXIT_WARN_LEFT - 1),
+            None,
+            "51 left"
+        );
+        let w = exit_warning(EXIT_CEILING - EXIT_WARN_LEFT).expect("50 left");
+        assert!(
+            w.starts_with("50 stage and exit-script numbers left"),
+            "{w}"
+        );
+        assert!(
+            w.contains("highest handed out is 949") && w.contains("ceiling is 999"),
+            "{w}"
+        );
+        assert!(
+            w.contains("scripts/run-exit-scripts.sh") && w.contains("scripts/gen-status.sh"),
+            "{w}"
+        );
+        let w = exit_warning(EXIT_CEILING).expect("none left");
+        assert!(w.starts_with("0 stage and exit-script numbers left"), "{w}");
+    }
+
+    #[test]
+    fn three_digit_numbers_name_their_files_and_are_checked() {
+        let mine = Mine {
+            exit: Some(100),
+            decision: Some(87),
+            from_stage: false,
+        };
+        assert_eq!(mine.stage_note().as_deref(), Some("docs/stages/s100.md"));
+        assert_eq!(mine.exit_script().as_deref(), Some("scripts/exit/s100.sh"));
+        let ok = v(&[
+            "docs/stages/s100.md",
+            "scripts/exit/s100.sh",
+            "scripts/exit/s100-real.sh",
+        ]);
+        assert!(check_added(&ok, &v(&["docs/stages/s99.md"]), &mine).is_empty());
+        let bad = v(&["docs/stages/s101.md", "scripts/exit/s100.sh"]);
+        let out = check_added(&bad, &v(&["scripts/exit/s100.sh"]), &mine);
+        assert_eq!(out.len(), 2, "{out:?}");
+        assert_eq!(out[0].should_use.as_deref(), Some("docs/stages/s100.md"));
+        assert_eq!(out[1].should_use.as_deref(), Some("scripts/exit/s100.sh"));
     }
 
     #[test]

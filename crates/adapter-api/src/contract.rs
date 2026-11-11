@@ -422,6 +422,17 @@ struct Inner {
     flag: SubmissionFlag,
     sock: Mutex<Option<PathBuf>>,
     stop: AtomicBool,
+    /// Calls being answered right now.
+    in_flight: std::sync::atomic::AtomicUsize,
+}
+
+/// Counts a call while it is being answered.
+struct InFlight<'a>(&'a std::sync::atomic::AtomicUsize);
+
+impl Drop for InFlight<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 #[derive(Clone)]
@@ -451,6 +462,7 @@ impl ContractHandle {
             flag: SubmissionFlag::default(),
             sock: Mutex::new(None),
             stop: AtomicBool::new(false),
+            in_flight: std::sync::atomic::AtomicUsize::new(0),
         }))
     }
 
@@ -518,7 +530,19 @@ impl ContractHandle {
         s.suspended_check = None;
     }
 
+    /// Is a tool call being answered right now (a `run_check` that is running, say)?
+    /// An agent waiting on one is not silent, however long it takes.
+    pub fn call_in_flight(&self) -> bool {
+        self.0.in_flight.load(Ordering::SeqCst) > 0
+    }
+
     pub fn call(&self, tool: &str, args: &Value) -> ToolReply {
+        self.0.in_flight.fetch_add(1, Ordering::SeqCst);
+        let _open = InFlight(&self.0.in_flight);
+        self.call_inner(tool, args)
+    }
+
+    fn call_inner(&self, tool: &str, args: &Value) -> ToolReply {
         let mut st = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
         st.calls.push(tool.to_string());
         let step = self.0.step;

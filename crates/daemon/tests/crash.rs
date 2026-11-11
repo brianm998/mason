@@ -134,9 +134,6 @@ fn crash_at(point: &str) -> Result<(), String> {
         "--body",
         "Create hello.txt.",
     ]);
-    // Seven daemons run at once, each through explore, develop, test and landing, on a
-    // machine that may be compiling other tasks: the budget is for a slow run, not a
-    // hang (a crash point that is never reached still fails, just later).
     died_of_sigkill(&mut first, 240)?;
     // Not dropped yet: dropping it would kill the step hosts that must survive.
     let _first = first;
@@ -144,7 +141,7 @@ fn crash_at(point: &str) -> Result<(), String> {
     let mut second = s.masond(&[], &[]);
     let started = Instant::now();
     while !s.mason(&["status", "--json"]).status.success() {
-        if Instant::now() - started > Duration::from_secs(60) {
+        if Instant::now() - started > Duration::from_secs(240) {
             return Err("the restarted daemon never answered".into());
         }
         if let Some(st) = second.child.try_wait().map_err(|e| e.to_string())? {

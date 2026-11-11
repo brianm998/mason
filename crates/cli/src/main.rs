@@ -1192,6 +1192,10 @@ fn main() {
                             rules.join(", ")
                         );
                     }
+                    match r["last_played"].as_u64() {
+                        Some(t) => println!("last announcement played at {t} (ms since the epoch)"),
+                        None => println!("no announcement has been played yet"),
+                    }
                     println!(
                     "one reminder after {} min; daemon speech {}; email {}, push {}, webhook {}",
                     r["reminder_after_s"].as_u64().unwrap_or(0) / 60,
@@ -1200,6 +1204,9 @@ fn main() {
                     if r["configured"]["push"].as_bool().unwrap_or(false) { "set up" } else { "not set up" },
                     if r["configured"]["webhook"].as_bool().unwrap_or(false) { "set up" } else { "not set up" },
                 );
+                    if r["reaches_without_monitor"].as_bool() == Some(false) {
+                        println!("{}", mason_daemon::notify::NO_REACH_LINE);
+                    }
                 }
                 Some(other) => die(&format!("unknown notify command {other:?}\n\n{HELP}")),
             }
@@ -1998,6 +2005,15 @@ fn main() {
                 .filter(|(_, n)| n.as_u64().unwrap_or(0) > 0)
                 .map(|(k, n)| format!("{n} {k}"))
                 .collect();
+            if let Some(st) = s["stuck"].as_object() {
+                let n = st["tasks_waiting"].as_u64().unwrap_or(0);
+                println!(
+                    "STUCK: no new compile or agent session can start: disk has {} GB free, floor {} GB; {n} task{} waiting",
+                    st["free_mb"].as_u64().unwrap_or(0) / 1024,
+                    st["floor_mb"].as_u64().unwrap_or(0) / 1024,
+                    if n == 1 { "" } else { "s" }
+                );
+            }
             println!(
                 "tasks: {}",
                 if counts.is_empty() {
@@ -2026,6 +2042,12 @@ fn main() {
                     .collect::<Vec<_>>()
                     .join(", "))
             );
+            for (name, p) in s["pools"].as_object().into_iter().flatten() {
+                println!(
+                    "pool {name}: {} queued of {} ({} threads)",
+                    p["queued"], p["queue_capacity"], p["threads"]
+                );
+            }
             let stalls = s["event_loop_stalls"].as_u64().unwrap_or(0);
             if stalls > 0 {
                 println!(

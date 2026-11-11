@@ -183,11 +183,9 @@ async fn session(d: Arc<Daemon>, mut sock: WebSocket, peer: Option<crate::lan::P
         sub.views.clear();
     }
     let d2 = d.clone();
-    let last = d
-        .pool
-        .run(move || d2.store.last_seq().unwrap_or(0))
-        .await
-        .unwrap_or(0);
+    let Ok(last) = on_view_pool(&d, move || d2.store.last_seq().unwrap_or(0)).await else {
+        return;
+    };
     let behind = last.saturating_sub(hello.last_seq);
     let resume = if hello.commands_only {
         ResumeKind::UpToDate
@@ -217,6 +215,7 @@ async fn session(d: Arc<Daemon>, mut sock: WebSocket, peer: Option<crate::lan::P
         return;
     }
     let mut sent = last;
+    let mut owed = false;
     match resume {
         ResumeKind::Snapshot => {
             let (d2, sub_views) = (
@@ -228,11 +227,11 @@ async fn session(d: Arc<Daemon>, mut sock: WebSocket, peer: Option<crate::lan::P
                     editor_step: sub.editor_step.clone(),
                 },
             );
-            let (seq, views) = d
-                .pool
-                .run(move || compute(&d2, &sub_views))
-                .await
-                .unwrap_or((last, vec![]));
+            // Never an empty snapshot: wait for room, and failing that close, so
+            // the client reconnects (and says so) rather than drawing nothing.
+            let Ok((seq, views)) = on_view_pool(&d, move || compute(&d2, &sub_views)).await else {
+                return;
+            };
             sent = seq.max(last);
             if !send(&mut sock, server(S::Snapshot(Snapshot { seq, views })), enc).await {
                 return;
@@ -241,19 +240,21 @@ async fn session(d: Arc<Daemon>, mut sock: WebSocket, peer: Option<crate::lan::P
         ResumeKind::Events => {
             // Only what was missed, then the views as they stand.
             let (d2, after) = (d.clone(), hello.last_seq);
-            let events = d
-                .pool
-                .run(move || records(&d2, after, RESUME_LIMIT as usize + 1))
-                .await
-                .unwrap_or_default();
+            let Ok(events) =
+                on_view_pool(&d, move || records(&d2, after, RESUME_LIMIT as usize + 1)).await
+            else {
+                return;
+            };
             if let Some(l) = events.last() {
                 sent = sent.max(l.seq);
             }
             if !send(&mut sock, server(S::Events(Events { events })), enc).await {
                 return;
             }
-            if !push_views(&d, &mut sock, &sub, enc).await {
-                return;
+            match push_views(&d, &mut sock, &sub, enc).await {
+                Push::Closed => return,
+                Push::Busy => owed = true,
+                Push::Sent => {}
             }
         }
         _ => {}
@@ -261,6 +262,14 @@ async fn session(d: Arc<Daemon>, mut sock: WebSocket, peer: Option<crate::lan::P
 
     loop {
         tokio::select! {
+            // Views are owed (the pool was busy): try again shortly, no event needed.
+            _ = tokio::time::sleep(VIEW_RETRY), if owed => {
+                match catch_up(&d, &mut sock, &sub, enc, &mut sent).await {
+                    Push::Closed => return,
+                    Push::Busy => {}
+                    Push::Sent => owed = false,
+                }
+            }
             incoming = sock.recv() => {
                 let Some(Ok(msg)) = incoming else { return };
                 if matches!(msg, Message::Close(_)) { return }
@@ -279,7 +288,11 @@ async fn session(d: Arc<Daemon>, mut sock: WebSocket, peer: Option<crate::lan::P
                             task: s.task,
                             editor_step: s.editor_step,
                         };
-                        if !push_views(&d, &mut sock, &sub, enc).await { return }
+                        match push_views(&d, &mut sock, &sub, enc).await {
+                            Push::Closed => return,
+                            Push::Busy => owed = true,
+                            Push::Sent => owed = false,
+                        }
                     }
                     Ok(ClientMessage { body: Some(C::Command(c)) }) => {
                         let r = run_command_as(&d, c, peer.as_ref()).await;
@@ -330,14 +343,11 @@ async fn session(d: Arc<Daemon>, mut sock: WebSocket, peer: Option<crate::lan::P
                 // A burst of events is one update.
                 tokio::time::sleep(Duration::from_millis(10)).await;
                 while bus.try_recv().is_ok() {}
-                let (d2, after) = (d.clone(), sent);
-                let events = d.pool.run(move || records(&d2, after, 1000)).await.unwrap_or_default();
-                // (A tick with no new event, such as a pause, still changes views.)
-                if !events.is_empty() {
-                    sent = events.last().map_or(sent, |e| e.seq);
-                    if !send(&mut sock, server(S::Events(Events { events })), enc).await { return }
+                match catch_up(&d, &mut sock, &sub, enc, &mut sent).await {
+                    Push::Closed => return,
+                    Push::Busy => owed = true,
+                    Push::Sent => owed = false,
                 }
-                if !push_views(&d, &mut sock, &sub, enc).await { return }
             }
         }
     }
@@ -362,7 +372,70 @@ fn wants_progress(d: &Daemon, sub: &Sub, u: &crate::progress::Update) -> bool {
                 .is_some_and(|p| p.id == sub.project))
 }
 
-async fn push_views(d: &Arc<Daemon>, sock: &mut WebSocket, sub: &Sub, e: Encoding) -> bool {
+/// How soon to try again when the view pool was full.
+const VIEW_RETRY: std::time::Duration = std::time::Duration::from_millis(100);
+/// How long a connecting client waits for the view pool before the socket is closed.
+const VIEW_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Run `f` on the view pool, waiting a few seconds for room. `Err` means it
+/// never ran (the pool stayed full, or the work was lost).
+async fn on_view_pool<T: Send + 'static>(
+    d: &Arc<Daemon>,
+    f: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, crate::pool::PoolError> {
+    use crate::pool::PoolError;
+    let end = tokio::time::Instant::now() + VIEW_WAIT;
+    let f = Arc::new(std::sync::Mutex::new(Some(f)));
+    loop {
+        let g = f.clone();
+        let job = move || g.lock().ok().and_then(|mut o| o.take()).map(|f| f());
+        // Accepted but never started (every thread stuck) also runs out of time.
+        let r = match tokio::time::timeout_at(end, d.view_pool.run(job)).await {
+            Ok(r) => r,
+            Err(_) => return Err(PoolError::Busy),
+        };
+        match r {
+            Ok(Some(v)) => return Ok(v),
+            Ok(None) | Err(PoolError::Lost) => return Err(PoolError::Lost),
+            Err(PoolError::Busy) if tokio::time::Instant::now() < end => {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await
+            }
+            Err(PoolError::Busy) => return Err(PoolError::Busy),
+        }
+    }
+}
+
+/// The events since `sent`, then the views as they stand. `Busy` if either
+/// could not be computed yet; `sent` only moves past events that went out.
+async fn catch_up(
+    d: &Arc<Daemon>,
+    sock: &mut WebSocket,
+    sub: &Sub,
+    e: Encoding,
+    sent: &mut u64,
+) -> Push {
+    let (d2, after) = (d.clone(), *sent);
+    let Ok(events) = d.view_pool.run(move || records(&d2, after, 1000)).await else {
+        return Push::Busy;
+    };
+    // (A tick with no new event, such as a pause, still changes views.)
+    if !events.is_empty() {
+        *sent = events.last().map_or(*sent, |r| r.seq);
+        if !send(sock, server(S::Events(Events { events })), e).await {
+            return Push::Closed;
+        }
+    }
+    push_views(d, sock, sub, e).await
+}
+
+enum Push {
+    Sent,
+    /// The pool was full or the work lost; the caller owes the views.
+    Busy,
+    Closed,
+}
+
+async fn push_views(d: &Arc<Daemon>, sock: &mut WebSocket, sub: &Sub, e: Encoding) -> Push {
     let (d2, s2) = (
         d.clone(),
         Sub {
@@ -372,17 +445,15 @@ async fn push_views(d: &Arc<Daemon>, sock: &mut WebSocket, sub: &Sub, e: Encodin
             editor_step: sub.editor_step.clone(),
         },
     );
-    let (seq, views) = d
-        .pool
-        .run(move || compute(&d2, &s2))
-        .await
-        .unwrap_or_default();
+    let Ok((seq, views)) = d.view_pool.run(move || compute(&d2, &s2)).await else {
+        return Push::Busy;
+    };
     for v in views {
         if !send(sock, server(S::View(ViewUpdate { seq, view: Some(v) })), e).await {
-            return false;
+            return Push::Closed;
         }
     }
-    true
+    Push::Sent
 }
 
 // ---- commands --------------------------------------------------------------

@@ -1,0 +1,3 @@
+# 0077: Command output is read lossily, and cut on character boundaries
+
+Command output is outside text and can hold any byte. Strict UTF-8 reads turned one bad byte into an empty log (so a suite looked like it ran nothing and the agent got blank feedback), and byte-offset slicing of the stderr buffer could panic the reader thread. We read with `String::from_utf8_lossy`, tail by reading only the last 1 MiB, and cut buffers at a char boundary. This touches `suites.rs` (verdict logic) only in how text is obtained: parsing and `judge` are unchanged, so a red stays red (the exit status still counts, and a parser still needs real test lines). Alternative rejected: keep strict reads and fall back to bytes in each parser; more code, no benefit.

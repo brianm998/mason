@@ -51,6 +51,36 @@ final class MonitorCoreTests: XCTestCase {
         return m
     }
 
+    // MARK: mascot choice
+
+    func testHomeMascotFollowsTheDaemonsState() {
+        let m = model(connected: false)
+        XCTAssertEqual(m.homeMascot.id, "not_connected")
+        m.connected = true
+        XCTAssertEqual(m.homeMascot.id, "needs_attention")
+        var h = m.header!; h.attention = 0; m.header = h
+        m.home = HomeView()
+        XCTAssertEqual(m.homeMascot, MascotChoice(id: "no_tasks", large: true))
+        var hv = HomeView()
+        hv.stages = [section("queued", rows: [row(1, state: "queued")])]
+        m.home = hv
+        XCTAssertEqual(m.homeMascot, MascotChoice(id: "all_clear", large: false))
+        var a = ActiveModel(); a.task = 1
+        hv.active = [a]
+        m.home = hv
+        XCTAssertEqual(m.homeMascot.id, "developing")
+    }
+
+    func testSearchWithNoMatchesSaysSo() {
+        let m = model()
+        XCTAssertFalse(m.searchMatchesNothing)
+        m.search.text = "rate"
+        XCTAssertFalse(m.searchMatchesNothing)
+        m.search.text = "zzzz"
+        XCTAssertTrue(m.searchMatchesNothing)
+        XCTAssertEqual(searchNoMatchText, "Nothing matched.")
+    }
+
     // MARK: the attention sound
 
     private func sidebarUpdate(_ sections: [SidebarSection]) -> Mason_V1_View {

@@ -16,9 +16,9 @@ mod plan;
 mod rank;
 
 pub use explain::{explain, ordinal, since, Wait, WaitCause};
-pub use ledger::{Ledger, Snapshot};
+pub use ledger::{Ledger, Snapshot, Stall};
 pub use plan::{
-    plan, Capacity, CompilePace, CpuGate, DiskGate, Holder, Kind, Needs, Plan, Request, World,
-    COMPILE,
+    plan, Capacity, CompilePace, CpuGate, DiskGate, Holder, Kind, Needs, Plan, Request, StallGate,
+    World, COMPILE,
 };
 pub use rank::Rank;

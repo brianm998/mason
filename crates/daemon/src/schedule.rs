@@ -370,7 +370,7 @@ fn run_in(dir: &std::path::Path, cmd: &str, limit: Duration) -> Result<(bool, St
             Err(e) => return Err(e.to_string()),
         }
     };
-    let text = std::fs::read_to_string(&out).unwrap_or_default();
+    let text = crate::jobs::read_tail_lossy(&out).unwrap_or_default();
     let _ = std::fs::remove_file(&out);
     match status {
         Some(s) => Ok((s.success(), text)),

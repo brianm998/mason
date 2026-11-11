@@ -24,7 +24,7 @@ data class Announcement(
     val family: String
         get() = when (kind) {
             "needs_you" -> "decision"
-            "failed", "landing", "daemon_down", "credentials", "provider_outage", "environment", "runtime", "definition",
+            "failed", "landing", "daemon_down", "credentials", "provider_outage", "stalled", "environment", "runtime", "definition",
             "disk", "blocked", "host_lost", "tracker", "provider_limit", "provider_overage", "provider_budget" -> "broke"
             else -> "info"
         }
@@ -65,7 +65,7 @@ data class SpeechSettings(
     companion object {
         /** Kinds added after the first release. A saved list gains them once (see Announcer.load). */
         val ADDED_KINDS = setOf("disk", "environment", "blocked", "host_lost", "runtime", "definition", "tracker", "provider_limit", "provider_overage", "provider_budget")
-        val DEFAULT_KINDS = setOf("needs_you", "failed", "landing", "daemon_down", "credentials", "provider_outage", "landed") + ADDED_KINDS
+        val DEFAULT_KINDS = setOf("needs_you", "failed", "landing", "daemon_down", "credentials", "provider_outage", "stalled", "landed") + ADDED_KINDS
     }
 }
 
@@ -93,6 +93,12 @@ class Announcer(
     /** This monitor is the one that speaks right now. */
     var isSpeaker by mutableStateOf(false)
         private set
+    /** The daemon's last word on whether an alert reaches the owner with no monitor open; null until it has said. */
+    var reachesWithoutMonitor by mutableStateOf<Boolean?>(null)
+        private set
+    /** One line for the notifications settings page; null unless the daemon said no channel works. */
+    val noChannelLine: String?
+        get() = if (reachesWithoutMonitor == false) "No notification channel works with no monitor open: alerts are seen only in a monitor that is open." else null
     /** The local alert: the connection has been lost for DAEMON_DOWN_AFTER_MS. Shown as a banner
      *  whether or not anything is muted. */
     var daemonDown by mutableStateOf(false)
@@ -154,6 +160,7 @@ class Announcer(
         val v = try { JSONObject(json) } catch (_: Exception) { return }
         heardFromDaemon = true
         isSpeaker = v.optBoolean("speaker", false)
+        reachesWithoutMonitor = if (v.has("reaches_without_monitor")) v.optBoolean("reaches_without_monitor") else null
         if (!isSpeaker) return
         val list = v.optJSONArray("announcements") ?: return
         for (i in 0 until list.length()) {

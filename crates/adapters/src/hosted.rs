@@ -11,7 +11,7 @@ use mason_step_host::launcher::{spawn_host, SpawnOptions};
 use mason_step_host::protocol::{CURRENT, PREVIOUS};
 use mason_step_host::registry::{read_journal, status_of, ExitRecord, HostState};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -94,10 +94,11 @@ pub fn lost_invocations(root: &Path, key: &str) -> Vec<String> {
         let Some(n) = tail.strip_prefix('-').and_then(|n| n.parse::<u32>().ok()) else {
             continue;
         };
-        let gone = match status_of(&root.join(id)) {
-            Ok(s) => s.state == HostState::Lost,
-            Err(_) => true,
-        };
+        let gone = silent_stop(&root.join(id)).is_some()
+            || match status_of(&root.join(id)) {
+                Ok(s) => s.state == HostState::Lost,
+                Err(_) => true,
+            };
         if gone {
             out.push((k, n, id.to_string()));
         }
@@ -143,9 +144,34 @@ pub fn spawn(
     Ok(id)
 }
 
+/// The file MASON leaves in a host's directory when it stopped the session for
+/// going silent. The stop leaves a normal exit record, so this is what makes the
+/// invocation count as one that has to be continued.
+const SILENT_MARK: &str = "silent";
+
+/// Why this host's session was stopped for silence, if it was.
+pub fn silent_stop(dir: &Path) -> Option<String> {
+    std::fs::read_to_string(dir.join(SILENT_MARK)).ok()
+}
+
 fn stop_host(sock: &Path) {
     if let Ok(mut c) = HostClient::connect(sock, PREVIOUS, CURRENT, "adapter") {
         let _ = c.stop(500);
+    }
+}
+
+/// Append a line of non-JSON output, keeping about the last 2000 bytes once the
+/// buffer passes 4000. The cut moves forward to a character boundary: a byte
+/// offset inside a multi-byte character would panic the slice.
+pub(crate) fn push_stderr(buf: &mut String, line: &str) {
+    buf.push_str(line);
+    buf.push('\n');
+    if buf.len() > 4000 {
+        let mut cut = buf.len() - 2000;
+        while !buf.is_char_boundary(cut) {
+            cut += 1;
+        }
+        buf.drain(..cut);
     }
 }
 
@@ -158,11 +184,14 @@ struct Feed {
     progress: Option<mason_adapter_api::ProgressSink>,
     on_tokens: Option<mason_adapter_api::TokensSink>,
     stream: String,
+    /// Bytes of output seen so far, for the idle watcher.
+    seen: Arc<AtomicU64>,
 }
 
 impl Feed {
     /// Output at an absolute journal offset: counted, then parsed.
     fn chunk(&mut self, offset: u64, b: &[u8]) {
+        self.seen.fetch_add(b.len() as u64, Ordering::SeqCst);
         if let Some(p) = &self.progress {
             p(&self.stream, offset, b);
         }
@@ -190,12 +219,7 @@ impl Feed {
             && serde_json::from_str::<serde_json::Value>(l).is_err()
             && !l.trim().is_empty()
         {
-            self.stderr.push_str(l);
-            self.stderr.push('\n');
-            if self.stderr.len() > 4000 {
-                let cut = self.stderr.len() - 2000;
-                self.stderr = self.stderr[cut..].to_string();
-            }
+            push_stderr(&mut self.stderr, l);
         }
         if let Some(id) = &self.st.session_id {
             *self.session_id.lock().unwrap_or_else(|e| e.into_inner()) = Some(id.clone());
@@ -245,15 +269,34 @@ pub fn attach_as(
         });
     }
 
+    let seen = Arc::new(AtomicU64::new(0));
+    let idled = Arc::new(AtomicBool::new(false));
+    if let Some(p) = spec
+        .idle
+        .clone()
+        .filter(|p| !p.alert_after.is_zero() || !p.stop_after.is_zero())
+    {
+        let (dir, sock, seen, idled, done) = (
+            dir.clone(),
+            sock.clone(),
+            seen.clone(),
+            idled.clone(),
+            done.clone(),
+        );
+        let contract = spec.contract.clone();
+        thread::spawn(move || watch_idle(&p, &dir, &sock, &seen, &idled, &done, contract));
+    }
+
     let accepted = spec.accepted.clone();
     {
         let progress = spec.progress.clone();
         let on_tokens = spec.on_tokens.clone();
-        let (sid, cancelled, timed_out, done) = (
+        let (sid, cancelled, timed_out, done, idled) = (
             session_id.clone(),
             cancelled.clone(),
             timed_out.clone(),
             done.clone(),
+            idled.clone(),
         );
         thread::spawn(move || {
             let mut feed = Feed {
@@ -267,6 +310,7 @@ pub fn attach_as(
                 stream: dir
                     .file_name()
                     .map_or(String::new(), |n| n.to_string_lossy().into_owned()),
+                seen,
             };
             let exit = follow(&dir, &sock, &mut feed);
             feed.flush();
@@ -275,6 +319,11 @@ pub fn attach_as(
                 Outcome::Timeout
             } else if cancelled.load(Ordering::SeqCst) {
                 Outcome::NoResult
+            } else if idled.load(Ordering::SeqCst) {
+                Outcome::HostLost {
+                    detail: silent_stop(&dir)
+                        .unwrap_or_else(|| "stopped after going silent".into()),
+                }
             } else {
                 match exit {
                     Some(rec) => decide(
@@ -304,6 +353,74 @@ pub fn attach_as(
         canceller,
         finished: false,
     })
+}
+
+/// Watch for silence: no new output and no contract call in flight. Past the
+/// alert limit it reports the silence; past the stop limit it leaves a note in the
+/// host's directory and stops the host. Ends when the session does.
+fn watch_idle(
+    p: &mason_adapter_api::IdlePolicy,
+    dir: &Path,
+    sock: &Path,
+    seen: &AtomicU64,
+    idled: &AtomicBool,
+    done: &AtomicBool,
+    contract: Option<mason_adapter_api::ContractHandle>,
+) {
+    let limits: Vec<Duration> = [p.alert_after, p.stop_after]
+        .into_iter()
+        .filter(|d| !d.is_zero())
+        .collect();
+    let tick = limits.iter().min().map_or(Duration::from_secs(1), |m| {
+        (*m / 20).clamp(Duration::from_millis(5), Duration::from_secs(1))
+    });
+    let mut quiet_since = Instant::now();
+    let mut last = seen.load(Ordering::SeqCst);
+    let mut alerted = false;
+    while !done.load(Ordering::SeqCst) {
+        thread::sleep(tick);
+        let now = seen.load(Ordering::SeqCst);
+        let busy = contract.as_ref().is_some_and(|c| c.call_in_flight());
+        if now != last || busy {
+            last = now;
+            quiet_since = Instant::now();
+            if alerted {
+                alerted = false;
+                (p.report)(None);
+            }
+            continue;
+        }
+        let quiet = quiet_since.elapsed();
+        if !p.stop_after.is_zero() && quiet >= p.stop_after {
+            let note = format!(
+                "the session was stopped after {} of silence (no output, no tool call in flight)",
+                human(quiet)
+            );
+            let _ = std::fs::write(dir.join(SILENT_MARK), &note);
+            idled.store(true, Ordering::SeqCst);
+            if alerted {
+                (p.report)(None);
+            }
+            stop_host(sock);
+            return;
+        }
+        if !p.alert_after.is_zero() && quiet >= p.alert_after {
+            alerted = true;
+            (p.report)(Some(quiet.as_millis() as u64));
+        }
+    }
+    if alerted {
+        (p.report)(None);
+    }
+}
+
+fn human(d: Duration) -> String {
+    let s = d.as_secs();
+    if s >= 120 {
+        format!("{} min", s / 60)
+    } else {
+        format!("{s} s")
+    }
 }
 
 /// Stream the journal into `feed`. `Some(record)` if the child exited,
@@ -406,3 +523,22 @@ impl SessionHandle for Session {
 
 #[allow(dead_code)]
 fn _assert_client_error_is_used(_: ClientError) {}
+
+#[cfg(test)]
+mod stderr_tests {
+    use super::push_stderr;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn the_cut_keeps_the_buffer_valid_and_bounded(
+            lines in proptest::collection::vec("[a-zé€😀 ]{0,300}", 1..60)
+        ) {
+            let mut buf = String::new();
+            for l in &lines {
+                push_stderr(&mut buf, l);
+                prop_assert!(buf.len() <= 4000 + 4 + 1 + 1200);
+            }
+        }
+    }
+}

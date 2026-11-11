@@ -114,6 +114,15 @@ fn one_alert_one_delivery_one_reminder_and_silence_after_it_clears() {
     let v: Value = serde_json::from_str(&body).unwrap();
     assert_eq!(v["reminder"], false);
 
+    // A monitor plays the first announcement; only then is the sound and speech delivered, and
+    // only then does a reminder follow.
+    assert_eq!(
+        notify::claim(&d, "mon", false)["announcements"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
     std::thread::sleep(Duration::from_millis(1300));
     for _ in 0..3 {
         notify::tick(&d);
@@ -332,6 +341,59 @@ fn with_speech_off_the_daemon_stays_silent() {
     assert!(!out.exists());
 }
 
+fn reaches(s: &Scratch, d: &Arc<Daemon>, toml: Option<&str>) -> (bool, bool) {
+    if let Some(t) = toml {
+        notify_toml(s, t);
+    }
+    (
+        notify::status(d)["reaches_without_monitor"]
+            .as_bool()
+            .unwrap(),
+        notify::claim(d, "m", true)["reaches_without_monitor"]
+            .as_bool()
+            .unwrap(),
+    )
+}
+
+#[test]
+fn reaches_without_monitor_for_each_configuration() {
+    let s = world();
+    let d = start(&s);
+    assert_eq!(reaches(&s, &d, None), (false, false), "no notify.toml");
+    for (toml, want) in [
+        ("[speech]\ndaemon = true\n", false),
+        ("[speech]\ndaemon = false\ncommand = [\"say\"]\n", false),
+        ("[speech]\ndaemon = true\ncommand = [\"say\"]\n", true),
+        ("[ntfy]\ntopic = \"t\"\n", true),
+        ("[webhook]\nurl = \"http://127.0.0.1:1/h\"\n", true),
+        (
+            "[email]\nserver = \"smtp://x\"\nfrom = \"a@b\"\nto = [\"c@d\"]\n",
+            true,
+        ),
+    ] {
+        assert_eq!(reaches(&s, &d, Some(toml)), (want, want), "{toml}");
+    }
+}
+
+#[test]
+fn a_routed_channel_that_is_not_set_up_is_not_a_failed_delivery() {
+    let s = world();
+    let d = start(&s);
+    notify_toml(&s, "[routing.paused]\nsound = \"0\"\npush = \"0\"\n");
+    pause(&d);
+    notify::tick(&d);
+    let alerts = d.store.alerts(false).unwrap();
+    assert!(!alerts.is_empty());
+    for a in alerts {
+        assert!(d
+            .store
+            .deliveries_for(&a.key, a.since)
+            .unwrap()
+            .iter()
+            .all(|r| r.channel != "push"));
+    }
+}
+
 #[test]
 fn a_speech_command_that_hangs_is_killed_and_does_not_delay_the_tick() {
     let s = world();
@@ -390,6 +452,9 @@ fn alerts_and_notifications_keep_working_while_the_repository_lock_is_held() {
     let pid = *d.projects.keys().next().unwrap();
     let lock = d.repo_lock(pid);
     let guard = lock.lock().unwrap();
+    // Fetches have a lock of their own; hold it too, so the definitions thread blocks in its fetch.
+    let fetch = d.fetch_lock(pid);
+    let fetch_guard = fetch.lock().unwrap();
     // The definitions thread now blocks in its fetch. A pause is a condition that appears
     // meanwhile; the attention thread must raise it and deliver it.
     pause(&d);
@@ -418,6 +483,7 @@ fn alerts_and_notifications_keep_working_while_the_repository_lock_is_held() {
     assert!(a.text.contains("stuck"), "{}", a.text);
     assert!(a.text.contains("notify.rs"), "names the holder: {}", a.text);
     drop(guard);
+    drop(fetch_guard);
     wait_for("the stuck alert to clear", 15, || {
         !d.store
             .alerts(true)
@@ -454,4 +520,87 @@ fn a_disk_below_the_floor_is_announced_with_sound_and_speech_once() {
     assert_eq!(disk[0]["sound"], true);
     assert_eq!(disk[0]["speech"], true);
     assert_eq!(disk[0]["sound_name"], "broke");
+}
+
+// ---- delivery is a monitor playing it -------------------------------------------------
+
+const HOUR: u64 = 3_600_000;
+
+fn audible_pause(s: &Scratch) -> Arc<Daemon> {
+    let d = start(s);
+    notify_toml(s, "[routing.paused]\nsound = \"0\"\nspeech = \"0\"\n");
+    pause(&d);
+    d
+}
+
+fn played(d: &Daemon) -> Vec<(String, String, bool)> {
+    let a = d.store.alerts(true).unwrap().remove(0);
+    d.store
+        .deliveries_for(&a.key, a.since)
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.channel == "sound" || r.channel == "speech")
+        .map(|r| (r.channel, r.delivery, r.ok))
+        .collect()
+}
+
+fn count(v: &Value) -> usize {
+    v["announcements"].as_array().unwrap().len()
+}
+
+#[test]
+fn an_alert_raised_with_no_monitor_records_no_delivery() {
+    let s = world();
+    let d = audible_pause(&s);
+    let since = d.store.alerts(true).unwrap()[0].since;
+    notify::tick_at(&d, since + 1000);
+    assert_eq!(announcements(&d), 1, "queued");
+    assert!(played(&d).is_empty(), "queued is not delivered");
+}
+
+#[test]
+fn a_claim_long_afterwards_gets_one_announcement_and_records_it() {
+    let s = world();
+    let d = audible_pause(&s);
+    let since = d.store.alerts(true).unwrap()[0].since;
+    notify::tick_at(&d, since + 1000);
+    let late = since + 3 * HOUR;
+    let first = notify::claim_at(&d, "mon", false, late);
+    assert_eq!(count(&first), 1, "{first}");
+    let got = played(&d);
+    assert!(
+        got.contains(&("sound".into(), "initial".into(), true))
+            && got.contains(&("speech".into(), "initial".into(), true)),
+        "{got:?}"
+    );
+    assert_eq!(count(&notify::claim_at(&d, "mon", false, late + 1000)), 0);
+    notify::tick_at(&d, late + 2000);
+    assert_eq!(count(&notify::claim_at(&d, "mon", false, late + 3000)), 0);
+    let status = notify::status(&d);
+    assert!(status["last_played"].as_u64().is_some());
+}
+
+#[test]
+fn an_alert_that_cleared_first_gets_nothing() {
+    let s = world();
+    let d = audible_pause(&s);
+    let since = d.store.alerts(true).unwrap()[0].since;
+    notify::tick_at(&d, since + 1000);
+    attention::resume(&d, "", "all").unwrap();
+    attention::sync_alerts(&d);
+    assert_eq!(
+        count(&notify::claim_at(&d, "mon", false, since + 3 * HOUR)),
+        0
+    );
+}
+
+#[test]
+fn a_muted_claim_gets_nothing_and_records_nothing() {
+    let s = world();
+    let d = audible_pause(&s);
+    let since = d.store.alerts(true).unwrap()[0].since;
+    notify::tick_at(&d, since + 1000);
+    let m = notify::claim_at(&d, "quiet", true, since + 3 * HOUR);
+    assert_eq!(count(&m), 0);
+    assert!(played(&d).is_empty());
 }

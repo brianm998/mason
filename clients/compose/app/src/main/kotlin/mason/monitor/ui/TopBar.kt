@@ -2,16 +2,17 @@
 package mason.monitor.ui
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -42,7 +43,7 @@ fun TopBar(model: MonitorModel) {
         if (model.attention > 0) {
             // Clicking it opens the first task that needs the owner.
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.clickable { model.openFirstNeedingYou() }.testTag("attention")) {
-                Box(Modifier.size(theme.cell * 0.7f).background(theme.attention, CircleShape))
+                StateIcon("needs_attention")
                 Spacer(Modifier.width(theme.spacingSmall))
                 Text(
                     "${model.attention} need${if (model.attention == 1) "s" else ""} you",
@@ -120,12 +121,13 @@ private fun ProjectFilter(model: MonitorModel) {
 }
 
 @Composable
-private fun updateRow(text: String, button: String?, id: String, theme: Theme, action: () -> Unit) {
+private fun updateRow(text: String, button: String?, id: String, theme: Theme, icon: String? = null, action: () -> Unit) {
     Row(
         modifier = Modifier.fillMaxWidth().background(theme.slow.copy(alpha = 0.18f))
             .padding(horizontal = theme.spacingLarge, vertical = theme.spacing).testTag("$id-banner"),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        BannerImage(icon, theme)
         Text(text, style = theme.body(FontWeight.Medium), modifier = Modifier.weight(1f))
         if (button != null) Button(onClick = action, modifier = Modifier.testTag(id)) { Text(button) }
     }
@@ -135,9 +137,9 @@ private fun updateRow(text: String, button: String?, id: String, theme: Theme, a
 fun BannersView(model: MonitorModel) {
     val theme = LocalTheme.current
     Column {
-        if (model.announcer.daemonDown) banner("Daemon down: MASON has lost its daemon. Check that masond is running.", "daemon-down", theme)
-        if (!model.connected) banner(if (model.reconnecting) "Daemon restarting, reconnecting…" else "Connection lost. Reconnecting…", "connection", theme)
-        model.readOnlyReason?.let { banner("Read-only: $it", "read-only", theme) }
+        if (model.announcer.daemonDown) banner("Daemon down: MASON has lost its daemon. Check that masond is running.", "daemon-down", theme, "daemon_down")
+        if (!model.connected) banner(if (model.reconnecting) "Daemon restarting, reconnecting…" else "Connection lost. Reconnecting…", "connection", theme, "connection_lost")
+        model.readOnlyReason?.let { banner("Read-only: $it", "read-only", theme, "read_only") }
         if (model.daemonUpdateText.isNotEmpty()) {
             updateRow(model.daemonUpdateText, if (model.canUpdateDaemon) "Update masond" else null, "daemon-update", theme) { model.updateDaemon() }
         }
@@ -145,9 +147,9 @@ fun BannersView(model: MonitorModel) {
             ?: model.updateError
             ?: if (model.updateAvailable) "A newer monitor is available (${model.latestMonitor.take(8)})." else null
         if (monitorText != null) {
-            updateRow(monitorText, if (model.updateAvailable && model.updating == null) "Update monitor" else null, "monitor-update", theme) { model.updateMonitor() }
+            updateRow(monitorText, if (model.updateAvailable && model.updating == null) "Update monitor" else null, "monitor-update", theme, "update") { model.updateMonitor() }
         }
-        model.header?.banners?.forEachIndexed { i, b -> banner(b.text, "banner:$i", theme) }
+        model.header?.banners?.forEachIndexed { i, b -> banner(b.text, "banner:$i", theme, BannerIcons.forDaemonKind(b.kind)) }
         model.header?.pending_issues?.forEach { p ->
             val uri = androidx.compose.ui.platform.LocalUriHandler.current
             Row(
@@ -188,18 +190,28 @@ private fun PendingTile(count: Int) {
     }
 }
 
+/** The decorative image at the start of a banner; nothing for an unknown id. */
 @Composable
-private fun banner(text: String, tag: String, theme: Theme) {
-    Text(
-        text,
-        style = theme.body(FontWeight.Medium),
-        modifier = Modifier.fillMaxWidth().background(theme.slow.copy(alpha = 0.18f))
-            .padding(horizontal = theme.spacingLarge, vertical = theme.spacing).testTag(tag),
-    )
+private fun BannerImage(id: String?, theme: Theme) {
+    val bmp = remember(id) { id?.let { Mascot.bannerIcon(it) } } ?: return
+    val size = with(LocalDensity.current) { theme.mascotBannerIcon.toDp() }
+    Image(bmp, contentDescription = null, modifier = Modifier.padding(end = theme.spacing).size(size))
 }
 
 @Composable
-private fun AddTaskDialog(model: MonitorModel, onClose: () -> Unit) {
+private fun banner(text: String, tag: String, theme: Theme, icon: String? = null) {
+    Row(
+        modifier = Modifier.fillMaxWidth().background(theme.slow.copy(alpha = 0.18f))
+            .padding(horizontal = theme.spacingLarge, vertical = theme.spacing).testTag(tag),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        BannerImage(icon, theme)
+        Text(text, style = theme.body(FontWeight.Medium))
+    }
+}
+
+@Composable
+internal fun AddTaskDialog(model: MonitorModel, onClose: () -> Unit) {
     val theme = LocalTheme.current
     var project by remember { mutableStateOf(model.header?.projects?.firstOrNull() ?: "") }
     var title by remember { mutableStateOf("") }
@@ -257,7 +269,7 @@ private fun ImproveDialog(model: MonitorModel, onClose: () -> Unit) {
 private val KIND_LABELS = listOf(
     "needs_you" to "Needs a decision", "failed" to "Task failed", "landing" to "Landing frozen",
     "daemon_down" to "Daemon down", "credentials" to "Credentials failing",
-    "provider_outage" to "Provider outage", "landed" to "Landed",
+    "provider_outage" to "Provider outage", "stalled" to "Pipeline stalled", "landed" to "Landed",
     "disk" to "Disk nearly full", "environment" to "Environment problem", "blocked" to "Task blocked", "host_lost" to "Host lost", "runtime" to "Runtime update failed", "definition" to "Definition refused", "tracker" to "Tracker problem", "provider_limit" to "Provider limit", "provider_overage" to "Provider overage", "provider_budget" to "Provider budget",
 )
 private val SOUND_NAMES = listOf("Glass", "Basso", "Tink", "Ping", "Pop", "Submarine", "Sosumi", "Funk")
@@ -291,6 +303,7 @@ private fun SpeechSettingsDialog(model: MonitorModel, onClose: () -> Unit) {
                 Picker("Voice", s.voice.ifEmpty { "System default" }, listOf("System default") + a.availableVoices(), "speech-voice") {
                     a.update(s.copy(voice = if (it == "System default") "" else it))
                 }
+                a.noChannelLine?.let { Text(it, style = theme.small()) }
                 Text(
                     if (a.isSpeaker) "This monitor is the one that speaks." else "Another monitor speaks, or none is needed.",
                     style = theme.small(),

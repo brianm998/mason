@@ -1,0 +1,3 @@
+# 0090: Report an unreachable owner once, not as a failed delivery per alert
+
+With no push, email, webhook or daemon speech, only an open monitor can reach the owner. That is a property of the configuration, so it is judged once (`Settings::reaches_without_monitor`) and said by `mason doctor`, `mason notify status` and the monitors. A channel that is routed but not set up is skipped in `tick` instead of recorded as a permanent failure on every alert (seven rows of "push is not configured" was noise). Channels that are configured and fail are still recorded. MASON does not choose a channel for the owner. The monitors learn the flag from the claim answer, which they already poll, so no new request exists.
