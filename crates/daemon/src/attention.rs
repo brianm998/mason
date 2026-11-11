@@ -349,6 +349,13 @@ fn disk_alert(d: &Daemon, w: &mason_engine::World) -> Option<(String, String, St
     if low.is_some() && full.is_some() {
         text.push_str("; a write to the store was refused");
     }
+    let held = d.broker.disk_held();
+    if held > 0 {
+        text.push_str(&format!(
+            "; {held} task{} waiting",
+            if held == 1 { "" } else { "s" }
+        ));
+    }
     let sizes = d.disk_sizes.get(
         vec![
             ("task_cache".into(), crate::taskcache::dirs(d, w)),
@@ -365,6 +372,31 @@ fn disk_alert(d: &Daemon, w: &mason_engine::World) -> Option<(String, String, St
         text.push_str(&format!(". MASON knows of: {}", known.join(", ")));
     }
     Some(("disk".into(), "disk".into(), text))
+}
+
+/// Waits that are not moving, or never can: one per resource and cause.
+fn wait_alerts(d: &Daemon) -> Vec<(String, String, String)> {
+    let long =
+        crate::notify::load(d).map_or(crate::notify::DEFAULT_LONG_WAIT_MS, |s| s.long_wait_ms);
+    d.broker
+        .wait_alerts(long)
+        .into_iter()
+        .map(|a| {
+            if a.never {
+                (
+                    format!("never-fits:{}", a.resource),
+                    "never_fits".into(),
+                    a.text,
+                )
+            } else {
+                (
+                    format!("long-wait:{}", a.resource),
+                    "long_wait".into(),
+                    a.text,
+                )
+            }
+        })
+        .collect()
 }
 
 /// The conditions that are true right now, as `(key, kind, text)`. An alert
@@ -409,6 +441,10 @@ pub fn alerts_now(d: &Daemon) -> Vec<(String, String, String)> {
         }
     }
     out.extend(d.landing().attention());
+    out.extend(wait_alerts(d));
+    if let Some(text) = d.exit_numbers_warning() {
+        out.push(("numbers".into(), "numbers".into(), text));
+    }
     out.extend(disk_alert(d, &w));
     out.extend(host_loss_alerts(
         &d.store
@@ -687,6 +723,7 @@ pub fn session_for(d: &Daemon, task: TaskId) -> Result<Value, String> {
                 .filter(|_| {
                     !h.info.id.ends_with("-test")
                         && !h.info.id.ends_with("-cmd")
+                        && !h.info.id.contains("-check")
                         && !h.info.id.contains("-u-")
                         && !h.info.id.contains("-r-")
                         && !h.info.id.contains("-b-")
