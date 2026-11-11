@@ -14,6 +14,14 @@ dependencies {
     testImplementation(kotlin("test"))
 }
 
+// The mascot art is one copy, in the SwiftPM target; Compose reads the same directory as
+// resources (icons/, banners/, illustrations/, brand/ at the classpath root).
+sourceSets {
+    main {
+        resources.srcDir("../../swift/Sources/MasonMascot/Art")
+    }
+}
+
 // `installDist` makes build/install/app/bin/app: the conformance and screenshot tool.
 // The window itself runs with `./gradlew :app:run` (or `desktopRun`).
 application {

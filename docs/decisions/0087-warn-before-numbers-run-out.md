@@ -1,0 +1,3 @@
+# 0087: Warn at 50 numbers left, from the store only
+
+The stage and exit-script counter stops at 999, and the first notice was a refused `mason task add`. `alerts_now` now raises `numbers` while 50 or fewer are left, computed from the highest reserved exit number in the store (`all_reservations`) so the alert pass needs no git. The cost is that numbers on the base branch above every reservation are not counted until a task reserves past them; the alert is a warning with 50 numbers of margin, so the lag is acceptable. It is routed like `failed` because a full counter stops work. The alert clears itself if the ceiling is raised. `attention.rs` is a trust file; the change adds one alert and nothing about who may answer.
