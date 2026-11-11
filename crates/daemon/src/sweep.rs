@@ -12,8 +12,34 @@ use crate::daemon::Daemon;
 use mason_core::*;
 use mason_landing::git;
 use mason_step_host::registry::{HostState, Registry};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+/// How long a host the daemon asked to stop may stay Running before the sweep doubts it.
+pub const STOP_WINDOW: Duration = Duration::from_secs(30);
+
+/// Hosts the daemon has asked to stop, and when.
+#[derive(Default)]
+pub struct StopLog(HashMap<String, Instant>);
+
+impl StopLog {
+    pub fn record(&mut self, host: &str, now: Instant) {
+        self.0.insert(host.to_string(), now);
+    }
+
+    /// Was `host` asked to stop within `STOP_WINDOW` of `now`?
+    pub fn in_flight(&self, host: &str, now: Instant) -> bool {
+        self.0
+            .get(host)
+            .is_some_and(|at| now.saturating_duration_since(*at) < STOP_WINDOW)
+    }
+
+    pub fn forget_expired(&mut self, now: Instant) {
+        self.0
+            .retain(|_, at| now.saturating_duration_since(*at) < STOP_WINDOW);
+    }
+}
 
 #[derive(Default)]
 pub struct SweepState {
@@ -84,7 +110,13 @@ pub fn sweep_once(d: &Arc<Daemon>) -> Vec<String> {
             continue;
         };
         let open = w.open_run(TaskId(task)) == Some(StepRunId(run));
-        if !open && confirmed(&st, format!("host:{}", h.info.id)) {
+        let now = Instant::now();
+        let stopping = {
+            let mut log = d.stop_log.lock().unwrap_or_else(|e| e.into_inner());
+            log.forget_expired(now);
+            log.in_flight(&h.info.id, now)
+        };
+        if !open && !stopping && confirmed(&st, format!("host:{}", h.info.id)) {
             d.record_bug(
                 "orphan_host",
                 &format!(
@@ -143,7 +175,22 @@ pub fn sweep_once(d: &Arc<Daemon>) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_host_id;
+    use super::{parse_host_id, StopLog, STOP_WINDOW};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn a_stop_request_is_recorded_reported_in_window_and_expires() {
+        let mut log = StopLog::default();
+        let t0 = Instant::now();
+        assert!(!log.in_flight("t1r2-test", t0));
+        log.record("t1r2-test", t0);
+        assert!(log.in_flight("t1r2-test", t0 + Duration::from_secs(1)));
+        assert!(!log.in_flight("t1r2-other", t0));
+        let late = t0 + STOP_WINDOW + Duration::from_secs(1);
+        assert!(!log.in_flight("t1r2-test", late));
+        log.forget_expired(late);
+        assert!(log.0.is_empty());
+    }
 
     #[test]
     fn host_ids_name_their_task_and_run() {
