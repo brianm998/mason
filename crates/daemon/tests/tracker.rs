@@ -9,7 +9,7 @@ use mason_adapter_api::service::*;
 use mason_adapter_api::webhook::{hex, hmac_sha256};
 use mason_core::*;
 use mason_daemon::config::TrackerCfg;
-use mason_daemon::tracker::{mirror_out, poll_once, sync_items};
+use mason_daemon::tracker::{mirror_out, poll_once, sync_items, sync_with_rule};
 use mason_daemon::Daemon;
 use serde_json::json;
 use std::sync::{Arc, Mutex};
@@ -90,6 +90,7 @@ fn cfg() -> TrackerCfg {
         interval_s: 30,
         webhook_secret: None,
         import_as: mason_daemon::config::ImportAs::Proposed,
+        require_label: false,
     }
 }
 
@@ -1068,4 +1069,133 @@ fn blockers_say_where_they_came_from() {
         links.iter().find(|l| l.task == id).unwrap().origin
     };
     assert_eq!((origin(2), origin(1)), ("from GitHub", "set by you"));
+}
+
+// ---- Stage 136: `[tracker] require_label` (a tracker shared with another pipeline) ----
+
+fn cancel(d: &Arc<Daemon>, task: TaskId) {
+    d.emit(EventKind::Canceled {
+        task,
+        delete_branch: false,
+    })
+    .unwrap();
+}
+
+#[test]
+fn require_label_off_imports_the_owners_unlabelled_issue_and_on_ignores_it() {
+    let (_s, d, pid) = world();
+    let o = d.cfg.owner_names[0].clone();
+    let items = vec![item(1, "Owner, unlabelled", &o, &[])];
+    let sum = sync_with_rule(&d, pid, "mason", false, "o/r", &items, None);
+    assert_eq!((sum.imported, sum.ignored), (1, 0), "{sum:?}");
+    assert_eq!(task_for(&d, 1).unwrap().trust, TrustSource::Owner);
+
+    let (_s, d, pid) = world();
+    let sum = sync_with_rule(&d, pid, "mason", true, "o/r", &items, None);
+    assert_eq!((sum.imported, sum.ignored), (0, 1), "{sum:?}");
+    assert!(task_for(&d, 1).is_none());
+}
+
+#[test]
+fn require_label_on_imports_labelled_issues_with_the_trust_of_their_author() {
+    let (_s, d, pid) = world();
+    let o = d.cfg.owner_names[0].clone();
+    let items = vec![
+        item(1, "Owner, labelled", &o, &["mason"]),
+        item(2, "Owner, other pipeline", &o, &["pipeline"]),
+        item(3, "Stranger, labelled", "stranger", &["Mason"]),
+        item(4, "Stranger, unlabelled", "stranger", &[]),
+    ];
+    let sum = sync_with_rule(&d, pid, "mason", true, "o/r", &items, None);
+    assert_eq!((sum.imported, sum.ignored), (2, 2), "{sum:?}");
+    assert_eq!(task_for(&d, 1).unwrap().trust, TrustSource::Owner);
+    assert_eq!(task_for(&d, 3).unwrap().trust, TrustSource::Outside);
+    assert!(task_for(&d, 2).is_none() && task_for(&d, 4).is_none());
+}
+
+#[test]
+fn require_label_on_names_an_unlabelled_blocker_and_ignores_what_it_blocks_in_silence() {
+    let (_s, d, pid) = world();
+    let o = d.cfg.owner_names[0].clone();
+    // A labelled issue blocked by an unlabelled open one waits, and says why.
+    let items = vec![
+        with_body(
+            item(2, "Labelled dependent", &o, &["mason"]),
+            "Blocked by #1",
+        ),
+        item(1, "Unlabelled blocker", &o, &[]),
+    ];
+    let sum = sync_with_rule(&d, pid, "mason", true, "o/r", &items, None);
+    assert_eq!(sum.imported, 0);
+    assert!(task_for(&d, 1).is_none() && task_for(&d, 2).is_none());
+    assert!(
+        alerts(&d)
+            .iter()
+            .any(|t| t.contains("issue #2 is not imported") && t.contains("#1")),
+        "{:?}",
+        alerts(&d)
+    );
+    // The reverse: the unlabelled one is blocked by a labelled one. The blocker comes in,
+    // the unlabelled issue is not MASON's, and nothing is said about it.
+    let (_s, d, pid) = world();
+    let items = vec![
+        with_body(item(2, "Unlabelled dependent", &o, &[]), "Blocked by #1"),
+        item(1, "Labelled blocker", &o, &["mason"]),
+    ];
+    let sum = sync_with_rule(&d, pid, "mason", true, "o/r", &items, None);
+    assert_eq!(sum.imported, 1);
+    assert!(task_for(&d, 1).is_some() && task_for(&d, 2).is_none());
+    assert!(alerts(&d).is_empty(), "{:?}", alerts(&d));
+}
+
+#[test]
+fn an_unlabelled_issue_of_a_canceled_task_is_listed_as_waiting_only_when_the_label_is_not_required()
+{
+    let (_s, d, pid) = world();
+    let o = d.cfg.owner_names[0].clone();
+    let items = vec![item(1, "Unlabelled", &o, &[])];
+    sync_with_rule(&d, pid, "mason", false, "o/r", &items, None);
+    cancel(&d, task_for(&d, 1).unwrap().id);
+    sync_with_rule(&d, pid, "mason", false, "o/r", &items, None);
+    let w = d.tracker_pending(pid);
+    assert!(
+        w.len() == 1 && w[0].number == 1 && w[0].reason.contains("mason task relink"),
+        "{w:?}"
+    );
+    sync_with_rule(&d, pid, "mason", true, "o/r", &items, None);
+    assert!(d.tracker_pending(pid).is_empty());
+    assert!(not_imported(&d).is_empty(), "{:?}", alerts(&d));
+}
+
+#[test]
+fn a_label_added_after_the_cancel_files_the_issue_again_but_a_label_it_had_does_not() {
+    let (_s, d, pid) = world();
+    let o = d.cfg.owner_names[0].clone();
+    let plain = vec![item(1, "Was unlabelled", &o, &[])];
+    let tagged = vec![item(1, "Was unlabelled", &o, &["mason"])];
+    sync_with_rule(&d, pid, "mason", false, "o/r", &plain, None);
+    let first = task_for(&d, 1).unwrap().id;
+    cancel(&d, first);
+    // Still unlabelled: not MASON's under the rule, and not filed again.
+    let sum = sync_with_rule(&d, pid, "mason", true, "o/r", &plain, None);
+    assert_eq!(sum.imported, 0);
+    assert_eq!(task_for(&d, 1).unwrap().id, first);
+    // The label arrives: a new task, and the issue is tied to it.
+    let sum = sync_with_rule(&d, pid, "mason", true, "o/r", &tagged, None);
+    assert_eq!(sum.imported, 1, "{sum:?}");
+    let second = task_for(&d, 1).unwrap().id;
+    assert_ne!(second, first);
+    assert_eq!(state_of(&d, first), State::Canceled);
+    // Labelled at import, then canceled: it does not come back on later looks.
+    cancel(&d, second);
+    for _ in 0..2 {
+        let sum = sync_with_rule(&d, pid, "mason", true, "o/r", &tagged, None);
+        assert_eq!(sum.imported, 0, "{sum:?}");
+        assert_eq!(task_for(&d, 1).unwrap().id, second);
+    }
+    let w = d.tracker_pending(pid);
+    assert!(
+        w.len() == 1 && w[0].reason.contains("mason task relink"),
+        "{w:?}"
+    );
 }

@@ -549,6 +549,9 @@ const STEPS: &[&str] = &[
     // output stream, as `stream=in,out,cache_read,cache_write,cost;...` (an empty field is
     // a figure not reported). Additive; a row from before has none.
     "ALTER TABLE step_progress ADD COLUMN tokens TEXT NOT NULL DEFAULT '';",
+    // 24: whether each imported issue carried the project's label at the last look (s136,
+    // decision 0131). NULL: not looked at since. Additive.
+    "ALTER TABLE tracker_items ADD COLUMN labelled INTEGER;",
 ];
 
 pub const SCHEMA_VERSION: u32 = STEPS.len() as u32;

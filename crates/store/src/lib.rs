@@ -214,6 +214,9 @@ pub struct TrackerItemRow {
     pub open: bool,
     /// The task state last mirrored out to the tracker (`landed`, `failed`, ...).
     pub mirrored: String,
+    /// Whether the issue carried the project's label at the last look (`None`: not looked
+    /// at since this was recorded). Decision 0131.
+    pub labelled: Option<bool>,
 }
 
 /// A self-change waiting for (or given) the owner's approval.
@@ -1516,8 +1519,8 @@ impl Store {
         let r = row.clone();
         self.write(move |c| {
             c.execute(
-                "INSERT OR REPLACE INTO tracker_items(project, number, task, title, body, priority, open, mirrored) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
-                params![r.project, r.number as i64, r.task as i64, r.title, r.body, r.priority, r.open, r.mirrored],
+                "INSERT OR REPLACE INTO tracker_items(project, number, task, title, body, priority, open, mirrored, labelled) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                params![r.project, r.number as i64, r.task as i64, r.title, r.body, r.priority, r.open, r.mirrored, r.labelled],
             )
             .map(|_| ())
         })
@@ -1686,7 +1689,7 @@ impl Store {
         let p = project.to_string();
         self.read(move |c| {
             let mut st = c.prepare(
-                "SELECT project, number, task, title, body, priority, open, mirrored FROM tracker_items WHERE project = ?1 ORDER BY number",
+                "SELECT project, number, task, title, body, priority, open, mirrored, labelled FROM tracker_items WHERE project = ?1 ORDER BY number",
             )?;
             let rows = st.query_map(params![p], |r| {
                 Ok(TrackerItemRow {
@@ -1698,6 +1701,7 @@ impl Store {
                     priority: r.get(5)?,
                     open: r.get::<_, i64>(6)? != 0,
                     mirrored: r.get(7)?,
+                    labelled: r.get::<_, Option<i64>>(8)?.map(|v| v != 0),
                 })
             })?;
             rows.collect()

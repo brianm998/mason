@@ -691,6 +691,9 @@ pub struct TrackerCfg {
     pub webhook_secret: Option<String>,
     /// `proposed` (default) or `queued`.
     pub import_as: ImportAs,
+    /// When true an issue is imported only if it carries `label`, whoever filed it (a
+    /// tracker shared with another pipeline). Default false: the owner's issues also import.
+    pub require_label: bool,
 }
 
 fn parse_services(id: &str, doc: &DocumentMut) -> Result<ServicesCfg, String> {
@@ -834,6 +837,12 @@ fn parse_services(id: &str, doc: &DocumentMut) -> Result<ServicesCfg, String> {
                 "{id}: `[tracker] import_as` is `proposed` or `queued`"
             ));
         }
+        let require_label = match t.get("require_label") {
+            None => false,
+            Some(v) => v
+                .as_bool()
+                .ok_or_else(|| format!("{id}: `[tracker] require_label` is `true` or `false`"))?,
+        };
         out.tracker = Some(TrackerCfg {
             api: api(t),
             repo: need(t, "tracker", "repo")?,
@@ -842,6 +851,7 @@ fn parse_services(id: &str, doc: &DocumentMut) -> Result<ServicesCfg, String> {
             interval_s: int(t, "interval_s", 60),
             webhook_secret: secret,
             import_as,
+            require_label,
         });
     }
     Ok(out)
@@ -1058,6 +1068,22 @@ mod tests {
         let e = t("import_as=\"now\"\n").unwrap_err();
         assert!(e.contains("import_as"), "{e}");
         assert!(t("import_as=3\n").unwrap_err().contains("import_as"));
+    }
+
+    #[test]
+    fn require_label_defaults_to_false_and_is_validated() {
+        let base = "path=\"/r\"\nbase=\"main\"\ntest=\"t\"\n[tracker]\nkind=\"github\"\nrepo=\"o/r\"\ntoken=\"env:X\"\n";
+        let t = |extra: &str| {
+            parse_project("p", &format!("{base}{extra}"))
+                .map(|p| p.services.tracker.unwrap().require_label)
+        };
+        assert!(!t("").unwrap());
+        assert!(t("require_label=true\n").unwrap());
+        assert!(!t("require_label=false\n").unwrap());
+        for bad in ["require_label=\"yes\"\n", "require_label=3\n"] {
+            let e = t(bad).unwrap_err();
+            assert!(e.contains("[tracker] require_label"), "{e}");
+        }
     }
 
     #[test]
