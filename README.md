@@ -1,5 +1,7 @@
 # MASON
 
+![MASON mascot banner](docs/images/readme_banner.png)
+
 **Multi-agent Automation and Session Orchestration Network.** A Rust daemon
 (`masond`) and CLI (`mason`) that run coding agents through a configurable
 pipeline of exploring, developing, testing, review and landing, for any number
