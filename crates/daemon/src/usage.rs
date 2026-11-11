@@ -549,7 +549,11 @@ pub fn view(d: &Daemon, now: u64, title: &dyn Fn(u64) -> String) -> UsageView {
                 top_bar.push(format!("{} spend ${:.2} this month", a.name, s.month_usd));
             }
         }
-        let hold = holds.iter().find(|h| h.account == a.name);
+        // A hold whose reset has passed is over, even if no session has
+        // reached the gate yet to clear it.
+        let hold = holds
+            .iter()
+            .find(|h| h.account == a.name && h.until_ms.is_none_or(|u| u > now * 1000));
         if let Some(h) = hold {
             top_bar.push(format!(
                 "{} {}",
