@@ -902,6 +902,7 @@ pub fn step_schema(kind: StepType, def: &Definition) -> Value {
         StepType::Test => {
             props.insert("suites".into(), json!({"type": "array", "title": "Suites", "items": {"type": "string", "enum": suites}, "uniqueItems": true}));
             props.insert("command".into(), json!({"type": "string", "title": "Command", "description": "A bare command with an exit-code verdict, when there are no suites."}));
+            props.insert("build".into(), json!({"type": "string", "title": "Build", "description": "Builds the tests first, holding one compile slot; the command then runs holding the step's resources without compile."}));
         }
         StepType::Approval => {
             props.insert(
@@ -925,6 +926,7 @@ pub fn step_schema(kind: StepType, def: &Definition) -> Value {
             "effort",
             "budget",
             "command",
+            "build",
             "suites",
             "tools",
             "read_only",

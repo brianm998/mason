@@ -20,7 +20,14 @@ use std::time::Duration;
 use toml_edit::DocumentMut;
 
 /// The step attributes the upper layers may set.
-pub const OVERRIDABLE: &[&str] = &["model", "effort", "budget", "max_rounds", "command"];
+pub const OVERRIDABLE: &[&str] = &[
+    "model",
+    "effort",
+    "budget",
+    "max_rounds",
+    "command",
+    "build",
+];
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Source {
@@ -59,6 +66,8 @@ pub struct Overlay {
     pub model: Option<String>,
     /// The test command for test steps that name none.
     pub test_command: Option<String>,
+    /// `build`: what builds the tests before the test step's command runs.
+    pub build_command: Option<String>,
     /// Per-step attributes: `[step.<name>] model = "opus"`.
     pub steps: BTreeMap<String, BTreeMap<String, String>>,
 }
@@ -85,13 +94,15 @@ pub struct Resolved {
     pub budget: Option<Attr<Duration>>,
     pub max_rounds: Option<Attr<u32>>,
     pub command: Option<Attr<String>>,
+    /// A test step's build command (`build`), run before `command`.
+    pub build: Option<Attr<String>>,
 }
 
 /// Is `value` acceptable for `attr`?
 pub fn check_value(attr: &str, value: &str) -> Result<(), String> {
     match attr {
         "model" | "effort" if value.trim().is_empty() => Err(format!("{attr} must not be empty")),
-        "command" if value.trim().is_empty() => Err("command must not be empty".into()),
+        "command" | "build" if value.trim().is_empty() => Err(format!("{attr} must not be empty")),
         "budget" if parse_duration(value).is_none() => Err(format!(
             "`{value}` is not a duration; use forms like 4h, 30m, 90s"
         )),
@@ -151,6 +162,7 @@ pub fn parse_overlay(text: &str) -> Result<Overlay, Vec<Problem>> {
     let mut out = vec![];
     o.model = doc.get("model").and_then(|v| v.as_str()).map(String::from);
     o.test_command = doc.get("test").and_then(|v| v.as_str()).map(String::from);
+    o.build_command = doc.get("build").and_then(|v| v.as_str()).map(String::from);
     if let Some(steps) = doc.get("step").and_then(|s| s.as_table_like()) {
         for (name, item) in steps.iter() {
             let Some(t) = item.as_table_like() else {
@@ -292,6 +304,9 @@ pub fn resolve(
     if let Some(c) = &step.command {
         set(&mut r.command, c.clone(), Source::Project);
     }
+    if let Some(b) = &step.build {
+        set(&mut r.build, b.clone(), Source::Project);
+    }
 
     // 3: the local overlay.
     if step.kind == StepType::Agent {
@@ -304,6 +319,13 @@ pub fn resolve(
             set(&mut r.command, c.clone(), Source::Overlay);
         }
     }
+    // The overlay's `build` goes with its `test`: a step that names its own
+    // command names its own build too. Suites build in their own commands.
+    if step.kind == StepType::Test && step.build.is_none() && step.suites.is_empty() {
+        if let Some(b) = &overlay.build_command {
+            set(&mut r.build, b.clone(), Source::Overlay);
+        }
+    }
     let apply =
         |attr: &str, value: &str, source: Source, r: &mut Resolved, problems: &mut Vec<Problem>| {
             if let Err(e) = check_value(attr, value) {
@@ -314,6 +336,7 @@ pub fn resolve(
                 "model" => set(&mut r.model, value.to_string(), source),
                 "effort" => set_effort(r, value, source),
                 "command" => set(&mut r.command, value.to_string(), source),
+                "build" => set(&mut r.build, value.to_string(), source),
                 "budget" => set(
                     &mut r.budget,
                     parse_duration(value).expect("checked"),
@@ -375,6 +398,38 @@ mod tests {
             owner: owner.into(),
             expires_at: exp,
         }
+    }
+
+    #[test]
+    fn a_test_steps_build_comes_from_the_step_the_overlay_or_an_override() {
+        let text = "schema = 1\nstart = \"test\"\n[step.test]\ntype = \"test\"\ncategory = \"testing\"\nnext = \"land\"\n[step.land]\ntype = \"landing\"\ncategory = \"landing\"\n";
+        let d = crate::parse(text).unwrap();
+        let t = d.step("test").unwrap();
+        let overlay =
+            parse_overlay("test = \"cargo test\"\nbuild = \"cargo test --no-run\"\n").unwrap();
+        let r = resolve(&d, t, &overlay, &[], &[], 0).unwrap();
+        assert_eq!(r.command.unwrap().value, "cargo test");
+        let b = r.build.unwrap();
+        assert_eq!(
+            (b.value.as_str(), b.source),
+            ("cargo test --no-run", Source::Overlay)
+        );
+        // Without one, there is no build: the step runs its command alone.
+        let r = resolve(&d, t, &parse_overlay("test = \"x\"").unwrap(), &[], &[], 0).unwrap();
+        assert_eq!(r.build, None);
+        // The owner's override beats the overlay.
+        let ro = [rt("step.test.build", "make tests", "brian", 1_000)];
+        let r = resolve(&d, t, &overlay, &ro, &[], 0).unwrap();
+        assert_eq!(r.build.unwrap().value, "make tests");
+        assert!(check_override(&d, "step.test.build", " ").is_err());
+        // The definition's own build is the project's.
+        let own = crate::parse(&text.replace(
+            "category = \"testing\"",
+            "category = \"testing\"\nbuild = \"make\"",
+        ))
+        .unwrap();
+        let r = resolve(&own, own.step("test").unwrap(), &overlay, &[], &[], 0).unwrap();
+        assert_eq!(r.build.unwrap().source, Source::Project);
     }
 
     #[test]

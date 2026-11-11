@@ -215,6 +215,17 @@ fn a_step_runs_suites_or_a_command_not_both() {
         .any(|m| m.contains("gates judge suites")));
 }
 
+#[test]
+fn a_build_goes_with_one_command_not_with_suites() {
+    let text = with(
+        "gates = [\"assertion_scan\"]",
+        "gates = [\"assertion_scan\"]\nbuild = \"cargo test --no-run\"",
+    );
+    assert!(problems(&text)
+        .iter()
+        .any(|m| m.contains("step.test.build") && m.contains("suites build in their own")));
+}
+
 // Stage 25: the four device environment types parse, and the old refusal of
 // them ("simulators, emulators and devices arrive in a later stage") is gone.
 #[test]

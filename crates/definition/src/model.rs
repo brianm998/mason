@@ -127,6 +127,10 @@ pub struct Step {
     pub tools: Option<Vec<String>>,
     pub read_only: Option<bool>,
     pub command: Option<String>,
+    /// For a test step's command: what builds the tests, run first while the
+    /// step holds one `compile` slot. The tests then run holding the step's
+    /// `uses` without `compile`, so a long test run does not keep a build slot.
+    pub build: Option<String>,
     pub suites: Vec<String>,
     pub when: Option<String>,
     pub uses: BTreeMap<String, u32>,
@@ -162,6 +166,7 @@ impl Step {
             tools: None,
             read_only: None,
             command: None,
+            build: None,
             suites: vec![],
             when: None,
             uses: BTreeMap::new(),

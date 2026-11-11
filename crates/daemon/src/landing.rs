@@ -1260,28 +1260,60 @@ impl Runner {
                 }
                 let outside = self.cfg.mode.uses_candidate_ref();
                 if suites.is_empty() && !outside {
-                    let Some(cmd) = legacy.as_ref() else {
+                    let Some(cmds) = legacy.as_ref() else {
                         return true;
                     };
+                    // Under a step host, so a restarted daemon finds the run again.
+                    let tree = crate::hostedcheck::tree_key(&wt_for_cmd);
+                    let spec = |prefix: &str, cmd: &str| crate::hostedcheck::CheckSpec {
+                        id_prefix: format!("b{batch_id}-{prefix}"),
+                        log_dir: log_dir.clone(),
+                        cmd: cmd.to_string(),
+                        cwd: wt_for_cmd.clone(),
+                        env: vec![],
+                        limit: p.test_timeout,
+                        tree: tree.clone(),
+                    };
+                    // A build first, as the test step does, holding one `compile`
+                    // slot; the re-test then holds the rest of what the test step uses.
+                    if let Some(build) = &cmds.build {
+                        let _lease = match self.hold(
+                            &def,
+                            crate::sched::needs_of(&crate::jobs::build_uses(), None),
+                            true,
+                        ) {
+                            Ok(l) => l,
+                            Err(e) => {
+                                self.fail_service(e);
+                                return false;
+                            }
+                        };
+                        match crate::hostedcheck::run(d, &spec("rebuild", build)) {
+                            Ok(o) if o.passed => {}
+                            Ok(_) => return false,
+                            Err(e) => {
+                                tracing::warn!(
+                                    batch = batch_id,
+                                    "the re-test's build gave no result: {e}"
+                                );
+                                return false;
+                            }
+                        }
+                    }
                     // The re-test holds what the test step uses, as any test does; the
                     // wait for it is outside the command's timeout.
-                    let _lease = match self.hold(&def, self.test_step_needs(&def), true) {
+                    let _lease = match self.hold(
+                        &def,
+                        self.test_step_needs(&def, cmds.build.is_some()),
+                        true,
+                    ) {
                         Ok(l) => l,
                         Err(e) => {
                             self.fail_service(e);
                             return false;
                         }
                     };
-                    // Under a step host, so a restarted daemon finds the run again.
-                    let spec = crate::hostedcheck::CheckSpec {
-                        id_prefix: format!("b{batch_id}-retest"),
-                        log_dir: log_dir.clone(),
-                        cmd: cmd.clone(),
-                        cwd: wt_for_cmd.clone(),
-                        env: vec![],
-                        limit: p.test_timeout,
-                        tree: crate::hostedcheck::tree_key(&wt_for_cmd),
-                    };
+                    let spec = spec("retest", &cmds.test);
                     return match crate::hostedcheck::run(d, &spec) {
                         Ok(o) => o.passed,
                         Err(e) => {
@@ -1459,8 +1491,8 @@ impl Runner {
         }
     }
 
-    fn legacy_cmd(&self, def: &mason_definition::Definition) -> Option<String> {
-        crate::jobs::test_command(&self.d, def, self.pid, None)
+    fn legacy_cmd(&self, def: &mason_definition::Definition) -> Option<crate::jobs::TestCommands> {
+        crate::jobs::test_commands(&self.d, def, self.pid, None)
     }
 
     fn verify(
@@ -1562,12 +1594,23 @@ impl Runner {
             .get_or_insert(e);
     }
 
-    /// What the definition's test step uses: the re-test of a landing holds it.
-    fn test_step_needs(&self, def: &mason_definition::Definition) -> mason_scheduler::Needs {
+    /// What the definition's test step uses: the re-test of a landing holds it,
+    /// without `compile` when a build ran first.
+    fn test_step_needs(
+        &self,
+        def: &mason_definition::Definition,
+        built: bool,
+    ) -> mason_scheduler::Needs {
         def.steps
             .iter()
             .find(|s| s.kind == mason_definition::StepType::Test)
-            .map_or_else(Default::default, |s| crate::sched::needs_of(&s.uses, None))
+            .map_or_else(Default::default, |s| {
+                if built {
+                    crate::sched::needs_of(&crate::jobs::tests_uses(&s.uses), None)
+                } else {
+                    crate::sched::needs_of(&s.uses, None)
+                }
+            })
     }
 
     /// Take `needs` from the broker for a verification, ranked as the batch's first

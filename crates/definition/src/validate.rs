@@ -243,6 +243,15 @@ fn validate_testing(def: &Definition, p: &mut Vec<Problem>) {
                 "a step runs either its suites or one command, not both",
             ));
         }
+        if !s.suites.is_empty() && s.build.is_some() {
+            p.push(Problem::new(
+                format!("{base}.build"),
+                "`build` goes with the step's one command; suites build in their own commands",
+            ));
+        }
+        if s.build.as_deref().is_some_and(|b| b.trim().is_empty()) {
+            p.push(Problem::new(format!("{base}.build"), "must not be empty"));
+        }
         if !s.gates.is_empty() && s.suites.is_empty() {
             p.push(Problem::new(
                 format!("{base}.gates"),
@@ -268,7 +277,7 @@ fn type_keys(k: StepType) -> &'static [&'static str] {
     match k {
         StepType::Agent => &["agent", "model", "effort", "budget", "tools", "read_only"],
         StepType::Command => &["command", "budget"],
-        StepType::Test => &["command", "suites", "budget", "gates"],
+        StepType::Test => &["command", "build", "suites", "budget", "gates"],
         StepType::Gate => &["command", "suites", "budget"],
         StepType::Approval => &[],
         StepType::Ci => &["suites", "budget", "policy"],
@@ -301,6 +310,9 @@ fn set_keys(s: &Step) -> Vec<&'static str> {
     }
     if s.command.is_some() {
         v.push("command");
+    }
+    if s.build.is_some() {
+        v.push("build");
     }
     if !s.suites.is_empty() {
         v.push("suites");

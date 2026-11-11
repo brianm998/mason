@@ -2486,18 +2486,22 @@ pub fn render_logs(d: &Daemon, task: u64) -> String {
     hosts.sort_by(|a, b| (a.0, &a.1.info.id).cmp(&(b.0, &b.1.info.id)));
     let mut out = String::new();
     for (run, h) in hosts {
-        // `t<task>r<run>-test`, `-cmd`, and a red test run again: `-test-again<k>`.
+        // `t<task>r<run>-test`, `-cmd`, a red test run again (`-test-again<k>`),
+        // and the build a test step with `build` runs first (`-build`).
         let what = h.info.id.split_once('-').map_or("", |(_, w)| w);
-        let kind = if what == "test"
-            || what == "cmd"
-            || what.starts_with("test-again")
-            || what.starts_with("cmd-again")
-            || what.starts_with("check")
-        {
-            "test"
-        } else {
-            "agent"
-        };
+        let kind =
+            if what == "build" || what.starts_with("build-") || what.starts_with("checkbuild") {
+                "build"
+            } else if what == "test"
+                || what == "cmd"
+                || what.starts_with("test-again")
+                || what.starts_with("cmd-again")
+                || what.starts_with("check")
+            {
+                "test"
+            } else {
+                "agent"
+            };
         let again = what
             .split_once("-again")
             .map_or(String::new(), |(_, k)| format!(", run again ({k})"));
@@ -2508,7 +2512,7 @@ pub fn render_logs(d: &Daemon, task: u64) -> String {
         let raw =
             String::from_utf8_lossy(&std::fs::read(h.info.dir.join("journal")).unwrap_or_default())
                 .to_string();
-        out.push_str(&if kind == "test" {
+        out.push_str(&if kind != "agent" {
             raw
         } else {
             render_agent(&raw)

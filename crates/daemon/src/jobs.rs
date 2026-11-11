@@ -377,7 +377,8 @@ fn run_inner(d: &Arc<Daemon>, task: TaskId, step: State, run: StepRunId) {
         if get_lease(&c).is_err() {
             return;
         }
-    } else if c.step.kind != StepType::Approval {
+    } else if c.step.kind != StepType::Approval && builds_first(&c).is_none() {
+        // A test step with a build queues phase by phase in `command_job`.
         match acquire(&c) {
             Ok(l) => *c.lease.lock().unwrap_or_else(|e| e.into_inner()) = Some(l),
             Err(_) => return, // the task was cancelled or retried while it waited
@@ -408,16 +409,7 @@ pub(crate) fn step_env_pairs(c: &Ctx) -> Vec<(String, String)> {
         // What the step already holds from the broker (its `uses`), so a command
         // that would queue for the same class (`mason run --needs`) can tell it
         // need not, and does not wait on itself.
-        (
-            "MASON_HELD".into(),
-            c.step
-                .uses
-                .iter()
-                .filter(|(_, n)| **n > 0)
-                .map(|(k, _)| k.as_str())
-                .collect::<Vec<_>>()
-                .join(","),
-        ),
+        ("MASON_HELD".into(), held_text(&c.step.uses)),
         (
             "MASON_RESULT_FILE".into(),
             result_file(c).to_string_lossy().into_owned(),
@@ -585,12 +577,10 @@ fn get_lease(c: &Ctx) -> Result<(), ()> {
 /// Wait for this step's resources (Part 7). Says why in the task's wait, once,
 /// and ends the wait when they are granted.
 fn acquire(c: &Ctx) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
-    use crate::sched::needs_of;
-    let d = &c.d;
     let account = (c.step.kind == StepType::Agent).then_some(c.project.account.as_str());
     // A definition names what it uses; a name nobody declared gets its
     // definition-given limit (or one slot).
-    let mut needs = needs_of(&c.step.uses, account);
+    let mut needs = crate::sched::needs_of(&c.step.uses, account);
     if c.step.kind == StepType::Test && !c.step.suites.is_empty() {
         // The step holds what its suites (and their environments) use.
         let more = crate::suites::needs_for(&c.project, &c.def, &c.step, &c.branch);
@@ -600,6 +590,15 @@ fn acquire(c: &Ctx) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
             *have = (*have).max(v);
         }
     }
+    acquire_needs(c, needs)
+}
+
+/// Wait for `needs`, ranked as this step's work.
+fn acquire_needs(
+    c: &Ctx,
+    needs: mason_scheduler::Needs,
+) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
+    let d = &c.d;
     // Device pools are sized by what the provider lists, never by a default.
     if needs.amounts.keys().any(|n| n.starts_with("device:")) {
         d.targets.declare_all(d);
@@ -641,17 +640,60 @@ fn acquire(c: &Ctx) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
     Ok(lease)
 }
 
-/// The command of the definition's test step for this project, layered exactly as
-/// a test step resolves it: the definition, the project's local overlay, the
+/// What a test step runs: its command, and what builds the tests first, if anything.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TestCommands {
+    /// Run first, holding one `compile` slot.
+    pub build: Option<String>,
+    /// Then this, holding the test step's `uses` without `compile` (all of
+    /// `uses` when there is no build).
+    pub test: String,
+}
+
+/// The one `compile` slot a build holds.
+pub(crate) fn build_uses() -> std::collections::BTreeMap<String, u32> {
+    std::collections::BTreeMap::from([(mason_scheduler::COMPILE.to_string(), 1)])
+}
+
+/// What a test run holds once its build is done: the test step's `uses`
+/// without `compile`. The build compiled; the run that follows only runs.
+pub(crate) fn tests_uses(
+    uses: &std::collections::BTreeMap<String, u32>,
+) -> std::collections::BTreeMap<String, u32> {
+    uses.iter()
+        .filter(|(k, n)| k.as_str() != mason_scheduler::COMPILE && **n > 0)
+        .map(|(k, n)| (k.clone(), *n))
+        .collect()
+}
+
+/// `MASON_HELD`: the classes a command already holds, so that one which would
+/// queue for the same class (`mason run --needs`) can tell it need not.
+pub(crate) fn held_text(uses: &std::collections::BTreeMap<String, u32>) -> String {
+    uses.iter()
+        .filter(|(_, n)| **n > 0)
+        .map(|(k, _)| k.as_str())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// A test step's build, when it has one: its command runs in two phases.
+fn builds_first(c: &Ctx) -> Option<String> {
+    (c.step.kind == StepType::Test && c.step.suites.is_empty())
+        .then(|| c.res.build.as_ref().map(|a| a.value.clone()))
+        .flatten()
+}
+
+/// The commands of the definition's test step for this project, layered exactly as
+/// a test step resolves them: the definition, the project's local overlay, the
 /// owner's runtime overrides (`mason config set`) and, for a task, its own
 /// overrides. `run_check` and landing's legacy suite use this, so they run the
-/// same command the test step runs.
-pub(crate) fn test_command(
+/// same commands the test step runs.
+pub(crate) fn test_commands(
     d: &Daemon,
     def: &mason_definition::Definition,
     pid: ProjectId,
     task: Option<TaskId>,
-) -> Option<String> {
+) -> Option<TestCommands> {
     let step = def.steps.iter().find(|s| s.kind == StepType::Test)?;
     let project = d.project(pid)?;
     let now = now_ms();
@@ -670,9 +712,11 @@ pub(crate) fn test_command(
     let task_overrides = task
         .and_then(|t| d.store.task_overrides(t.0).ok())
         .unwrap_or_default();
-    resolve(def, step, &d.overlay(pid), &runtime, &task_overrides, now)
-        .ok()
-        .and_then(|r| r.command.map(|a| a.value))
+    let r = resolve(def, step, &d.overlay(pid), &runtime, &task_overrides, now).ok()?;
+    Some(TestCommands {
+        test: r.command?.value,
+        build: r.build.map(|a| a.value).filter(|_| step.suites.is_empty()),
+    })
 }
 
 /// Get the worktree ready: fetch, create it on the task's branch, and bring
@@ -1023,7 +1067,7 @@ pub fn classify(cmd: &str, body: &str) -> bool {
 
 /// `run_check` for the develop step: the only check is the project's tests.
 struct TestChecks {
-    cmd: Option<String>,
+    cmd: Option<TestCommands>,
     wt: PathBuf,
     timeout: Duration,
     slots: CheckSlots,
@@ -1033,28 +1077,73 @@ struct TestChecks {
 
 impl CheckHandler for TestChecks {
     fn run(&self, name: &str) -> CheckRun {
-        let (true, Some(cmd)) = (name == "tests", &self.cmd) else {
+        let (true, Some(cmds)) = (name == "tests", &self.cmd) else {
             return CheckRun::Unknown;
         };
-        // Under a step host, so that a restarted daemon finds the run again.
-        let spec = crate::hostedcheck::CheckSpec {
-            id_prefix: self.id_prefix.clone(),
-            log_dir: self.log_dir.clone(),
-            cmd: cmd.clone(),
-            cwd: self.wt.clone(),
-            env: self.slots.env(),
-            limit: self.timeout,
-            tree: crate::hostedcheck::tree_key(&self.wt),
+        let over = || CheckRun::Done {
+            passed: false,
+            summary: "The step is over; the check did not run.".into(),
         };
+        // Under a step host, so that a restarted daemon finds the run again.
+        let tree = crate::hostedcheck::tree_key(&self.wt);
+        let spec = |prefix: String, cmd: &str, uses: &std::collections::BTreeMap<String, u32>| {
+            crate::hostedcheck::CheckSpec {
+                id_prefix: prefix,
+                log_dir: self.log_dir.clone(),
+                cmd: cmd.to_string(),
+                cwd: self.wt.clone(),
+                env: vec![("MASON_HELD".to_string(), held_text(uses))],
+                limit: self.timeout,
+                tree: tree.clone(),
+            }
+        };
+        // A build first, holding one `compile` slot; the tests then hold the
+        // rest of what the test step uses.
+        let uses = match &cmds.build {
+            None => self.slots.test_uses.clone(),
+            Some(build) => {
+                let bspec = spec(format!("{}build", self.id_prefix), build, &build_uses());
+                let queue = !crate::hostedcheck::pending(&self.slots.d, &bspec);
+                let Ok(lease) = self.slots.swap_for(queue, &build_uses()) else {
+                    return over();
+                };
+                let res = crate::hostedcheck::run(&self.slots.d, &bspec);
+                drop(lease);
+                match res {
+                    Ok(o) if o.passed => {}
+                    Ok(o) => {
+                        self.slots.take_agent_slot_back();
+                        return CheckRun::Done {
+                            passed: false,
+                            summary: if o.timed_out {
+                                format!(
+                                    "Building the tests did not finish within {} s and was stopped. Last output:\n{}",
+                                    self.timeout.as_secs(),
+                                    o.output
+                                )
+                            } else {
+                                format!("Building the tests failed. Last output:\n{}", o.output)
+                            },
+                        };
+                    }
+                    Err(e) => {
+                        self.slots.take_agent_slot_back();
+                        return CheckRun::Done {
+                            passed: false,
+                            summary: format!("Building the tests did not give a result: {e}"),
+                        };
+                    }
+                }
+                tests_uses(&self.slots.test_uses)
+            }
+        };
+        let spec = spec(self.id_prefix.clone(), &cmds.test, &uses);
         // The same call sent again after a restart attaches to the run already
         // going (or takes its result) at once: it starts nothing, so it does not
         // queue behind other work for a slot the run it joins already took.
         let queue = !crate::hostedcheck::pending(&self.slots.d, &spec);
-        let Ok(test_lease) = self.slots.swap_for_test(queue) else {
-            return CheckRun::Done {
-                passed: false,
-                summary: "The step is over; the check did not run.".into(),
-            };
+        let Ok(test_lease) = self.slots.swap_for(queue, &uses) else {
+            return over();
         };
         let res = crate::hostedcheck::run(&self.slots.d, &spec);
         drop(test_lease);
@@ -1124,13 +1213,6 @@ impl CheckSlots {
         }
     }
 
-    /// What the check's command is told it holds, so that a command which
-    /// queues for the same class (`mason run --needs`) does not wait on itself.
-    fn env(&self) -> Vec<(String, String)> {
-        let held: Vec<&str> = self.test_uses.keys().map(String::as_str).collect();
-        vec![("MASON_HELD".to_string(), held.join(","))]
-    }
-
     fn acquire(
         &self,
         needs: mason_scheduler::Needs,
@@ -1176,26 +1258,28 @@ impl CheckSlots {
         lease
     }
 
-    /// Give the agent's slot back and, if `queue`, queue for what the tests use.
-    fn swap_for_test(
+    /// Give the agent's slot back (if it still holds it) and, if `queue`,
+    /// queue for `uses`: what the tests use, or a build's `compile` slot.
+    fn swap_for(
         &self,
         queue: bool,
+        uses: &std::collections::BTreeMap<String, u32>,
     ) -> Result<Option<crate::sched::Lease>, crate::sched::Cancelled> {
         let held = self.lease.lock().unwrap_or_else(|e| e.into_inner()).take();
         if held.is_some() {
             drop(held);
             self.d.admit();
         }
-        if !queue || self.test_uses.is_empty() {
+        if !queue || uses.is_empty() {
             return Ok(None);
         }
-        for name in self.test_uses.keys() {
+        for name in uses.keys() {
             self.d
                 .broker
                 .declare(name, self.def.resources.get(name).copied().unwrap_or(1));
         }
         let as_step = self.test_step.as_deref().unwrap_or(&self.step);
-        self.acquire(crate::sched::needs_of(&self.test_uses, None), as_step)
+        self.acquire(crate::sched::needs_of(uses, None), as_step)
             .map(Some)
     }
 
@@ -1418,7 +1502,7 @@ fn agent_job(c: &Ctx) {
 
     // `run_check` runs the project's tests: the command of its test step, layered exactly
     // as the test step itself resolves it (runtime and task overrides included).
-    let tests_cmd = test_command(&c.d, &c.def, c.project_id, Some(c.task));
+    let tests_cmd = test_commands(&c.d, &c.def, c.project_id, Some(c.task));
     let checks = Box::new(TestChecks {
         cmd: tests_cmd,
         wt: c.wt.clone(),
@@ -1971,10 +2055,48 @@ fn command_job(c: &Ctx) {
         return c.fail(why);
     }
     let suffix = if is_test { "test" } else { "cmd" };
+    let what = format!("`{}`", c.step.name);
+    // A test step with a build builds first, holding one `compile` slot, and
+    // lets it go before the tests run: they hold what the step uses without
+    // `compile`, so a long test run leaves the build slot to the next task.
+    let held = match builds_first(c) {
+        None => c.step.uses.clone(),
+        Some(build) => {
+            let uses = build_uses();
+            if !started(c, "build", 0) {
+                match acquire_needs(c, crate::sched::needs_of(&uses, None)) {
+                    Ok(l) => *c.lease.lock().unwrap_or_else(|e| e.into_inner()) = Some(l),
+                    Err(_) => return,
+                }
+            }
+            let built = run_command_once(c, &build, "build", 0, &uses, &format!("{what}'s build"));
+            c.release_lease();
+            match built {
+                Err(why) => return c.fail(why),
+                Ok(CommandRun {
+                    verdict:
+                        RunVerdict::Red {
+                            reason, feedback, ..
+                        },
+                    ..
+                }) => return c.conclude(Outcome::Red, reason, Some(feedback)),
+                Ok(_) => {}
+            }
+            let uses = tests_uses(&c.step.uses);
+            let needs = crate::sched::needs_of(&uses, None);
+            if (needs.exclusive || !needs.amounts.is_empty()) && !started(c, suffix, 0) {
+                match acquire_needs(c, needs) {
+                    Ok(l) => *c.lease.lock().unwrap_or_else(|e| e.into_inner()) = Some(l),
+                    Err(_) => return,
+                }
+            }
+            uses
+        }
+    };
     let reruns = if is_test { c.project.test_reruns } else { 0 };
     let mut earlier: Vec<String> = vec![];
     for k in 0..=reruns {
-        let run = match run_command_once(c, &cmd, suffix, k) {
+        let run = match run_command_once(c, &cmd, suffix, k, &held, &what) {
             Ok(r) => r,
             Err(why) => return c.fail(why),
         };
@@ -2071,7 +2193,23 @@ impl From<String> for Unfinished {
 /// finished, run it once more on a fresh host (id ends `-host1`) and judge that
 /// run; a second loss in a row fails the step and names both. A restarted daemon
 /// finds the run already started, on whichever host it was.
-fn run_command_once(c: &Ctx, cmd: &str, suffix: &str, k: u32) -> Result<CommandRun, String> {
+/// Has the `k`th run of `suffix` already started (a daemon that restarted
+/// finds it)? Collecting it starts nothing, so it has nothing to queue for.
+fn started(c: &Ctx, suffix: &str, k: u32) -> bool {
+    let id = format!("t{}r{}-{suffix}{}", c.task.0, c.run.0, again(k));
+    c.d.cfg.hosts_dir().join(id).join("host.kv").exists()
+}
+
+/// One run of a step's command, `what` in what it says (`` `test` ``, or
+/// `` `test`'s build ``), told that it holds `held`.
+fn run_command_once(
+    c: &Ctx,
+    cmd: &str,
+    suffix: &str,
+    k: u32,
+    held: &std::collections::BTreeMap<String, u32>,
+    what: &str,
+) -> Result<CommandRun, String> {
     use crate::hostloss as hl;
     let id = format!("t{}r{}-{suffix}{}", c.task.0, c.run.0, again(k));
     let hosts = c.d.cfg.hosts_dir();
@@ -2083,7 +2221,7 @@ fn run_command_once(c: &Ctx, cmd: &str, suffix: &str, k: u32) -> Result<CommandR
         first = mason_step_host::registry::lost_report(&hosts.join(&id)).ok();
     }
     loop {
-        match run_command_on(c, cmd, suffix, k, host) {
+        match run_command_on(c, cmd, suffix, k, host, held, what) {
             Ok(r) => return Ok(r),
             Err(Unfinished::Other(e)) => return Err(e),
             Err(Unfinished::Lost(rep)) if host == 0 => {
@@ -2121,6 +2259,8 @@ fn run_command_on(
     suffix: &str,
     k: u32,
     host: u32,
+    held: &std::collections::BTreeMap<String, u32>,
+    what: &str,
 ) -> Result<CommandRun, Unfinished> {
     let hsuf = if host == 0 { "" } else { "-host1" };
     let id = format!("t{}r{}-{suffix}{}{hsuf}", c.task.0, c.run.0, again(k));
@@ -2134,13 +2274,19 @@ fn run_command_on(
     if !dir.join("host.kv").exists() {
         let _ = std::fs::remove_file(result_file(c));
         let _ = std::fs::remove_file(progress_file(c));
+        let mut env = step_env_pairs(c);
+        for (k, v) in env.iter_mut() {
+            if k == "MASON_HELD" {
+                *v = held_text(held);
+            }
+        }
         let o = SpawnOptions {
             host_bin: c.d.cfg.host_bin.clone(),
             root: hosts.clone(),
             id: id.clone(),
             cmd: vec!["sh".into(), "-c".into(), cmd.to_string()],
             cwd: Some(c.wt.clone()),
-            env: step_env_pairs(c),
+            env,
             clear_env: false,
             stdin: None,
             linger: Duration::from_secs(600),
@@ -2172,7 +2318,8 @@ fn run_command_on(
     // Lines and bytes of the output, counted as they arrive. A run found again after a
     // restart first counts what its log holds beyond what the stored record had.
     // Each run of the command is its own stream, since each log starts at 0.
-    let stream = format!("{}{hsuf}", again(k));
+    let phase = if suffix == "build" { "build" } else { "" };
+    let stream = format!("{phase}{}{hsuf}", again(k));
     c.d.progress_catch_up(c.run, &stream, &log);
     // What the command says about itself in `MASON_PROGRESS_FILE`, as it says it.
     let _tail = {
@@ -2203,11 +2350,7 @@ fn run_command_on(
         Ok(t) => match read_script_result(&t) {
             Ok(r) => Some(r),
             Err(e) => {
-                return Err(format!(
-                    "`{}` wrote a result file that cannot be used: {e}",
-                    c.step.name
-                )
-                .into())
+                return Err(format!("{what} wrote a result file that cannot be used: {e}").into())
             }
         },
         Err(_) => None,
@@ -2225,8 +2368,8 @@ fn run_command_on(
             };
             return Ok(CommandRun {
                 verdict: RunVerdict::Red {
-                    reason: format!("`{}` failed: {why}", c.step.name),
-                    feedback: format!("`{}` failed: {why}", c.step.name),
+                    reason: format!("{what} failed: {why}"),
+                    feedback: format!("{what} failed: {why}"),
                     rerun: false,
                 },
                 log,
@@ -2248,8 +2391,8 @@ fn run_command_on(
     };
     Ok(CommandRun {
         verdict: RunVerdict::Red {
-            reason: format!("`{}` failed ({how})", c.step.name),
-            feedback: format!("`{}` failed ({how}). Last output:\n{output}", c.step.name),
+            reason: format!("{what} failed ({how})"),
+            feedback: format!("{what} failed ({how}). Last output:\n{output}"),
             rerun: rec.signal == 0,
         },
         log,

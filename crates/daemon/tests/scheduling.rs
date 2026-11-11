@@ -646,3 +646,127 @@ fn a_full_account_does_not_block_another_accounts_task() {
     d.admit();
     wait_state(&d, held, State::Landed, 90);
 }
+
+/// A test step that builds first: the build holds the one `compile` slot, and
+/// the tests hold `test-suite` without it.
+const DEF_BUILD: &str = r#"schema = 1
+start = "develop"
+
+[resource.compile]
+count = 1
+
+[resource.test-suite]
+count = 1
+
+[step.develop]
+type = "agent"
+category = "developing"
+next = "test"
+
+[step.test]
+type = "test"
+category = "testing"
+build = "echo b:$MASON_HELD >> \"$HELD_LOG\""
+uses = { compile = 1, test-suite = 1 }
+max_rounds = 2
+on_red = "develop"
+next = "land"
+
+[step.land]
+type = "landing"
+category = "landing"
+"#;
+
+#[test]
+fn a_test_step_with_a_build_holds_compile_only_while_it_builds() {
+    let runs = tempfile::tempdir().unwrap();
+    let log = runs.path().join("held");
+    let def = DEF_BUILD.replace("$HELD_LOG", &log.display().to_string());
+    let cmd = format!("echo t:$MASON_HELD >> {}; test -f hello.txt", log.display());
+    let s = Scratch::new(&cmd, unique_script());
+    s.push_files(&[(".mason/mason.toml", &def)], "definition");
+    let d = s.start();
+    d.broker.declare("test-suite", 1);
+    let (id, held) = hold(&d, "interactive test run", &[("test-suite", 1)]);
+    let t = file_task(&d, "Builds, then tests");
+    // The build ran, and the tests wait for `test-suite` holding no build slot.
+    wait_for(
+        "the tests to queue for test-suite after the build",
+        90,
+        || {
+            d.broker
+                .explain_task(t)
+                .is_some_and(|w| w.contains("test-suite"))
+        },
+    );
+    assert_eq!(std::fs::read_to_string(&log).unwrap(), "b:compile\n");
+    assert_eq!(d.broker.used("compile"), 0, "the build slot was given back");
+    let (c, held_c) = hold(&d, "interactive build", &[("compile", 1)]);
+    drop(held_c);
+    d.broker.lease_close(c);
+    drop(held);
+    d.broker.lease_close(id);
+    wait_state(&d, t, State::Landed, 60);
+    let text = std::fs::read_to_string(&log).unwrap();
+    assert_eq!(
+        text.lines().collect::<Vec<_>>(),
+        ["b:compile", "t:test-suite"],
+        "{text}"
+    );
+    assert_eq!(d.broker.used("compile"), 0, "nothing leaked");
+    assert_eq!(d.broker.used("test-suite"), 0, "nothing leaked");
+}
+
+#[test]
+fn a_failed_build_is_red_and_the_tests_do_not_run() {
+    let runs = tempfile::tempdir().unwrap();
+    let log = runs.path().join("held");
+    let def = DEF_BUILD
+        .replace("$HELD_LOG", &log.display().to_string())
+        .replace(
+            "echo b:$MASON_HELD",
+            "echo cannot compile; exit 1; echo b:$MASON_HELD",
+        );
+    let cmd = format!("echo t:$MASON_HELD >> {}; test -f hello.txt", log.display());
+    let s = Scratch::new(&cmd, unique_script());
+    s.push_files(&[(".mason/mason.toml", &def)], "definition");
+    let d = s.start();
+    let t = file_task(&d, "Does not build");
+    // Red sends the task back to develop with the build's output as feedback.
+    let fb = d.cfg.task_dir(t.0).join("feedback.txt");
+    wait_for("the build's failure to come back as feedback", 90, || {
+        std::fs::read_to_string(&fb).is_ok_and(|f| f.contains("`test`'s build failed"))
+    });
+    let f = std::fs::read_to_string(&fb).unwrap();
+    assert!(f.contains("cannot compile"), "{f}");
+    assert!(!log.exists(), "the tests never ran");
+    assert_eq!(d.broker.used("compile"), 0, "nothing leaked");
+}
+
+#[test]
+fn run_check_builds_then_tests_like_the_test_step() {
+    let runs = tempfile::tempdir().unwrap();
+    let log = runs.path().join("held");
+    let def = DEF_BUILD.replace("$HELD_LOG", &log.display().to_string());
+    let cmd = format!("echo t:$MASON_HELD >> {}; test -f hello.txt", log.display());
+    let develop = serde_json::json!([
+        {"sh": TASK_SCRIPT_COMMIT},
+        {"call": {"tool": "run_check", "args": {"name": "tests"}}},
+        {"call": {"tool": "submit_change", "args": {"summary": "ok", "head": "$HEAD"}}}
+    ]);
+    let s = Scratch::new(
+        &cmd,
+        serde_json::json!({"steps": {"explore": [explore_turn()], "develop": [develop]}}),
+    );
+    s.push_files(&[(".mason/mason.toml", &def)], "definition");
+    let d = s.start();
+    let t = file_task(&d, "Checks its work in two phases");
+    wait_state(&d, t, State::Landed, 120);
+    let text = std::fs::read_to_string(&log).unwrap();
+    assert_eq!(
+        text.lines().collect::<Vec<_>>(),
+        ["b:compile", "t:test-suite", "b:compile", "t:test-suite"],
+        "{text}"
+    );
+    assert_eq!(d.broker.used("compile"), 0, "nothing leaked");
+}
