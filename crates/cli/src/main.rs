@@ -892,6 +892,7 @@ fn main() {
                             "budget",
                             "max_rounds",
                             "command",
+                            "build",
                         ] {
                             if let Some(v) = s[k]["value"].as_str() {
                                 println!(

@@ -1152,6 +1152,7 @@ async fn project_config(Shared(d): Shared<Arc<Daemon>>, Path(name): Path<String>
                         "budget": attr(r.budget.map(|a| (format!("{}s", a.value.as_secs()), a.source))),
                         "max_rounds": attr(r.max_rounds.map(|a| (a.value.to_string(), a.source))),
                         "command": attr(r.command.map(|a| (a.value, a.source))),
+                        "build": attr(r.build.map(|a| (a.value, a.source))),
                     }),
                     Err(e) => json!({"step": s.name, "error": e.iter().map(|p| p.to_string()).collect::<Vec<_>>()}),
                 })
