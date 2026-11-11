@@ -472,7 +472,9 @@ pub fn sentence(kind: &str, subject: &str, detail: &str, reminder: bool) -> Stri
         "disk" => format!("MASON is stopped: disk is nearly full, {detail}"),
         "landed" => format!("{subject} landed"),
         "daemon_down" => "MASON has lost its daemon; check that masond is running".into(),
-        "credentials" => format!("{subject}: credentials are failing; renew them"),
+        "credentials" => {
+            format!("{subject}: the agent is not logged in; log in again, work resumes by itself")
+        }
         "provider_outage" => format!("{subject}: the provider is down; work resumes by itself"),
         _ if detail.is_empty() => format!("{subject} needs a look"),
         _ => format!("{subject}: {detail}; open it to look"),
