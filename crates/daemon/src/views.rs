@@ -790,6 +790,7 @@ impl<'a> Ctx<'a> {
         let plan =
             std::fs::read_to_string(self.d.cfg.task_dir(id).join("plan.json")).unwrap_or_default();
         let plan_view = (!plan.is_empty()).then(|| crate::plan_view::parse_plan(&plan));
+        let removes = crate::landing::removals_view(&self.d.cfg.task_dir(id));
         Some(TaskDetailView {
             step_tokens: crate::usage::step_tokens(self.d, id, self.now / 1000),
             row: Some(self.row(t)),
@@ -829,7 +830,7 @@ impl<'a> Ctx<'a> {
                     "skipped exploring: the project's classifier said it was clear".into()
                 }
                 Some(Route::ExploreAnyway) => "explored, at the owner's request".into(),
-            },
+            } + &removes,
             started_at: self
                 .w
                 .step_runs

@@ -1,0 +1,10 @@
+Test Suite 'Selected tests' started at 2026-11-11 10:00:00.000.
+Test Suite 'FooTests' started at 2026-11-11 10:00:00.001.
+Test Case '-[StarCoreTests.FooTests testA]' started.
+Test Case '-[StarCoreTests.FooTests testA]' passed (0.002 seconds).
+Test Case '-[StarCoreTests.FooTests testB]' started.
+Test Case '-[StarCoreTests.FooTests testB]' skipped (0.001 seconds).
+Test Case '-[StarCoreTests.BarTests testC]' started.
+Test Case '-[StarCoreTests.BarTests testC]' passed (1.250 seconds).
+Test Suite 'Selected tests' passed at 2026-11-11 10:00:01.300.
+	 Executed 3 tests, with 1 test skipped and 0 failures (0 unexpected) in 1.253 (1.254) seconds

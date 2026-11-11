@@ -1,0 +1,39 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# `<config dir>/projects/star.toml`: MASON working on the airplane remover (star). DRAFT, Stage 27.
+# Installing it is the owner's act; nothing in the repository turns it on, and it must not be installed
+# before the owner has signed off the inventory in docs/stages/s27.md (decision 0119).
+#
+# Two pipelines will share star's tracker during the shadow period, split by label and never both:
+#   starpipe keeps claiming issues labelled `pipeline`; MASON claims only issues labelled `mason`.
+#   An issue never carries both labels. The owner creates the `mason` label in star's repository.
+#
+# There is no [self] section: star is an ordinary project, with no holds on protected files and no
+# self-task limits.
+path = "/path/to/star/checkout"   # a clone of git@github.com:brianm998/starry_timelapse_airplane_remover.git
+base = "develop"
+remote = "origin"
+
+# Landing is `direct-ci` (.mason/landing.toml). Its CI is star's pr-gate workflow, dispatched by hand on
+# the candidate ref `mason/ci/<batch>` (pr-gate has `workflow_dispatch`). The answer is every run that
+# exists for the candidate's commit. starpipe dispatched macos-gate.yml and a per-ticket gherkin.yml
+# as well; direct-ci dispatches only this one workflow, with no inputs (decisions 1 and 2).
+# A macOS job that never gets a runner keeps the run pending until `timeout_s` (decision 3); starpipe
+# let such a batch land with a note after 3 hours, so the draft timeout is a little over that.
+[ci]
+kind = "github-actions"
+repo = "brianm998/starry_timelapse_airplane_remover"
+token = "env:MASON_STAR_GITHUB_TOKEN"   # a reference, never the token (or "file:/path")
+workflow = "pr-gate.yml"
+poll_s = 60
+timeout_s = 14400
+
+# Importing GitHub issues. star is a public repository, so an outsider's issue must never start work:
+# `import_as = "proposed"` makes every imported issue wait for `mason task approve N`. Only an issue
+# carrying the label `mason` is imported at all, and the label is the owner's go-ahead.
+[tracker]
+kind = "github"
+repo = "brianm998/starry_timelapse_airplane_remover"
+token = "env:MASON_STAR_GITHUB_TOKEN"
+label = "mason"
+import_as = "proposed"
+interval_s = 60
