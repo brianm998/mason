@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+import MasonMascot
 import MasonProtocol
 import MonitorCore
 import SwiftUI
@@ -32,7 +33,7 @@ struct TopBar: View {
                 // Clicking it opens the first task that needs the owner.
                 Button { model.openFirstNeedingYou() } label: {
                     HStack(spacing: theme.spacingSmall) {
-                        Circle().fill(theme.attention).frame(width: theme.cell * 0.7, height: theme.cell * 0.7)
+                        StateIcon(state: "needs_attention")
                         Text("\(model.attention) need\(model.attention == 1 ? "s" : "") you")
                             .font(theme.body(.semibold)).foregroundStyle(theme.attention)
                             .lineLimit(1).fixedSize()
@@ -100,13 +101,13 @@ struct BannersView: View {
     var body: some View {
         VStack(spacing: 0) {
             if !model.connected {
-                banner(model.reconnecting ? "Daemon restarting, reconnecting…" : "Connection lost. Reconnecting…", id: "connection")
+                banner(model.reconnecting ? "Daemon restarting, reconnecting…" : "Connection lost. Reconnecting…", id: "connection", icon: "connection_lost")
             }
             if model.daemonDown {
-                banner("Daemon down: MASON has lost its daemon. Check that masond is running.", id: "daemon-down")
+                banner("Daemon down: MASON has lost its daemon. Check that masond is running.", id: "daemon-down", icon: "daemon_down")
             }
             if let why = model.readOnlyReason {
-                banner("Read-only: \(why)", id: "read-only")
+                banner("Read-only: \(why)", id: "read-only", icon: "read_only")
             }
             if !model.daemonUpdateText.isEmpty {
                 updateRow(model.daemonUpdateText, button: model.canUpdateDaemon ? "Update masond" : nil, id: "daemon-update") {
@@ -114,12 +115,12 @@ struct BannersView: View {
                 }
             }
             if let text = monitorUpdateText {
-                updateRow(text, button: model.updateAvailable && model.updating == nil ? "Update monitor" : nil, id: "monitor-update") {
+                updateRow(text, button: model.updateAvailable && model.updating == nil ? "Update monitor" : nil, id: "monitor-update", icon: "update") {
                     model.updateMonitor()
                 }
             }
             ForEach(Array((model.header?.banners ?? []).enumerated()), id: \.offset) { i, b in
-                banner(b.text, id: "banner:\(i)")
+                banner(b.text, id: "banner:\(i)", icon: BannerIcons.id(forDaemonKind: b.kind))
             }
             ForEach(model.header?.pendingIssues ?? [], id: \.number) { p in
                 PendingIssueRow(issue: p)
@@ -134,8 +135,9 @@ struct BannersView: View {
         return model.updateError ?? "A newer monitor is available (\(String(model.latestMonitor.prefix(8))))."
     }
 
-    func updateRow(_ text: String, button: String?, id: String, action: @escaping () -> Void) -> some View {
+    func updateRow(_ text: String, button: String?, id: String, icon: String? = nil, action: @escaping () -> Void) -> some View {
         HStack(spacing: theme.spacing) {
+            bannerImage(icon)
             Text(text).font(theme.body(.medium))
             Spacer()
             if let button { Button(button, action: action).accessibilityIdentifier(id) }
@@ -145,9 +147,20 @@ struct BannersView: View {
         .accessibilityIdentifier(id + "-banner")
     }
 
-    func banner(_ text: String, id: String) -> some View {
-        Text(text)
-            .font(theme.body(.medium))
+    /// The decorative image at the start of a banner; nothing for an unknown id.
+    @ViewBuilder func bannerImage(_ id: String?) -> some View {
+        if let id, let img = Mascot.bannerIcon(id) {
+            img.resizable().interpolation(.high)
+                .frame(width: theme.mascotBannerIcon, height: theme.mascotBannerIcon)
+                .accessibilityHidden(true)
+        }
+    }
+
+    func banner(_ text: String, id: String, icon: String? = nil) -> some View {
+        HStack(spacing: theme.spacing) {
+            bannerImage(icon)
+            Text(text).font(theme.body(.medium))
+        }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, theme.spacingLarge).padding(.vertical, theme.spacing)
             .background(theme.slow.opacity(0.18))

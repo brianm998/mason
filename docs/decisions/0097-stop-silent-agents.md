@@ -1,0 +1,10 @@
+# 0097: A silent agent is alerted on, then stopped and continued
+
+Task #67, stage s111. Each is the reading taken; change one and the others stand.
+
+- **Silence is measured at the host journal.** No new journal bytes and no contract call in flight. `ContractHandle::call_in_flight` counts open calls (every bridge call goes through `call`), so a running `run_check` is never silence, however long. The clock restarts when a call ends. Waiting for a provider hold or a lease ends or happens inside a call, so it is not silence either (a held session is not watched at all).
+- **Two project settings.** `agent_idle_alert_s` (default 2700) and `agent_idle_stop_s` (default 5400); `0` turns either off. The longest normal develop silence on record is 35.8 minutes, so 45 minutes alerts a little past anything normal and 90 minutes is well beyond.
+- **The alert** is `silent:<run>` of kind `host_lost` (so it takes the stopping-alert route from 0088 and no new kind is added), in `attention.rs::alerts_now`. It names task, step and how long, and exists while the watcher reports silence; it clears on output, on the stop, and when the step ends. `attention.rs` is a trust file: this adds one alert and changes nothing about who may answer.
+- **The stop goes down the lost-host path (0069).** The watcher in `hosted::attach_as` writes a `silent` note into the invocation directory, stops the host, and the session ends as `Outcome::HostLost`. The note is what makes `lost_invocations` count the invocation (a stopped host leaves a normal exit record, which is not "lost"), so it shares the two-restart limit and survives a daemon restart. The resume carries a different note ("went silent ... if a command hung, do not run it the same way"). A third stall fails the step; the failure names each stop.
+- **Recorded as a host loss**, so `mason task show` lists it and the "lost again" alert applies.
+- **Hosted sessions only.** The direct (non-hosted) claude path, which the daemon does not use, has no watcher.
