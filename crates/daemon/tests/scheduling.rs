@@ -463,6 +463,53 @@ fn llm_sessions_are_adjustable_live_and_lowering_kills_nothing() {
     assert_eq!(d2.broker.limit("llm:claude"), Some(1));
 }
 
+fn home_active(d: &Arc<Daemon>) -> (Vec<u64>, u32) {
+    let world = d.world().unwrap();
+    let h = mason_daemon::views::Ctx::new(d, &world).home("");
+    (h.active.iter().map(|a| a.task).collect(), h.sessions_used)
+}
+
+#[test]
+fn active_models_lists_only_tasks_that_hold_a_session() {
+    let s = Scratch::new("test -f hello.txt", unique_script());
+    let d = s.start_with(|c| c.max_concurrent = 1);
+    // Nothing running: empty, and it matches the counter.
+    assert_eq!(home_active(&d), (vec![], 0));
+    // No session is free, so nothing is admitted; admit one task by hand, as
+    // if its session had been taken from under it. Its agent step now waits.
+    d.broker.set_limit("llm:claude", 0).unwrap();
+    let t = file_task(&d, "Waits for a slot");
+    let task = task_of(&d, t);
+    let entry = d.entry_for(&task);
+    d.emit(EventKind::Admitted {
+        task: t,
+        entry: Some(entry),
+    })
+    .unwrap();
+    wait_explained(&d, t);
+    assert!(state_of(&d, t).is_step());
+    assert_eq!(home_active(&d), (vec![], 0));
+    // A second task in a step state changes nothing either.
+    let t2 = file_task(&d, "Also waits");
+    let entry = d.entry_for(&task_of(&d, t2));
+    d.emit(EventKind::Admitted {
+        task: t2,
+        entry: Some(entry),
+    })
+    .unwrap();
+    wait_explained(&d, t2);
+    assert_eq!(home_active(&d), (vec![], 0));
+    // A session held by someone else counts, but is not a task's.
+    d.broker.set_limit("llm:claude", 1).unwrap();
+    let (id, held) = hold(&d, "other session", &[("llm:claude", 1)]);
+    assert_eq!(home_active(&d), (vec![], 1));
+    // Lowering the limit below what is held changes nothing about who is listed.
+    d.broker.set_limit("llm:claude", 0).unwrap();
+    assert_eq!(home_active(&d), (vec![], 1));
+    drop(held);
+    d.broker.lease_close(id);
+}
+
 fn file_in(d: &Arc<Daemon>, project: &str, title: &str) -> TaskId {
     let pid = d.project_id_by_name(project).unwrap();
     let a = d

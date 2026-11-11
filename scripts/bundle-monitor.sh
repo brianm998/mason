@@ -29,8 +29,9 @@ for res in "$bin"/*.bundle; do
 done
 [ -d "$app/Contents/Resources/MasonMonitor_MasonMascot.bundle/Art" ] || {
   echo "bundle-monitor: the mascot resource bundle is missing from $app" >&2; exit 1; }
-# The app icon: an .icns made from the 1024 px mascot icon (Finder and the Dock read it).
-icon_src="clients/swift/Sources/MasonMascot/Art/brand/app_icon.png"
+# The app icon: an .icns made from the 1024 px macOS-shaped icon (rounded, on Apple's grid;
+# macOS does not mask icons itself). Regenerate it with scripts/gen-app-icon-macos.swift.
+icon_src="clients/swift/Sources/MasonMascot/Art/brand/app_icon_macos.png"
 iconset=$(mktemp -d)/MASON.iconset
 mkdir -p "$iconset"
 for s in 16 32 128 256 512; do

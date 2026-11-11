@@ -55,4 +55,28 @@ final class MascotTests: XCTestCase {
         XCTAssertNil(BannerIcons.id(forDaemonKind: "nonsense"))
         XCTAssertNil(BannerIcons.id(forDaemonKind: ""))
     }
+
+    #if canImport(AppKit)
+        func testTheMacIconIsShapedWithTransparentCorners() throws {
+            let d = try XCTUnwrap(Mascot.macAppIconData())
+            let rep = try XCTUnwrap(NSBitmapImageRep(data: d))
+            XCTAssertEqual(rep.pixelsWide, 1024)
+            XCTAssertEqual(rep.pixelsHigh, 1024)
+            XCTAssertTrue(rep.hasAlpha)
+            func alpha(_ x: Int, _ y: Int) -> CGFloat { rep.colorAt(x: x, y: y)?.alphaComponent ?? -1 }
+            for (x, y) in [(0, 0), (1023, 0), (0, 1023), (1023, 1023), (50, 512)] {
+                XCTAssertEqual(alpha(x, y), 0, "(\(x), \(y)) is transparent")
+            }
+            XCTAssertEqual(alpha(512, 512), 1, "the centre is opaque")
+        }
+
+        func testTheIosIconStaysOpaqueAndFullBleed() throws {
+            var url = URL(fileURLWithPath: #filePath)
+            for _ in 0..<3 { url.deleteLastPathComponent() }  // .../clients/swift
+            url.appendPathComponent("ios/MasonIOS/AppIcon-1024.png")
+            let rep = try XCTUnwrap(NSBitmapImageRep(data: try Data(contentsOf: url)))
+            XCTAssertEqual(rep.pixelsWide, 1024)
+            XCTAssertFalse(rep.hasAlpha)
+        }
+    #endif
 }

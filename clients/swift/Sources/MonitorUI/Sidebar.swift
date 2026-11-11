@@ -131,7 +131,7 @@ struct SectionHeader: View {
                 StateIcon(state: section.state)
                 Text(section.title).font(theme.body(.semibold))
                 Spacer()
-                Text(String(model.visibleCount(section)))
+                Text(model.countText(section))
                     .font(theme.body(.semibold))
                     .foregroundStyle(section.state == "needs_attention" && section.count > 0 ? theme.attention : theme.muted)
             }
@@ -140,7 +140,7 @@ struct SectionHeader: View {
         }
         .buttonStyle(.plain)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(section.title), \(model.visibleCount(section)), \(open ? "expanded" : "collapsed")")
+        .accessibilityLabel("\(section.title), \(model.countText(section)), \(open ? "expanded" : "collapsed")")
         .accessibilityIdentifier("section:\(section.state)")
     }
 }

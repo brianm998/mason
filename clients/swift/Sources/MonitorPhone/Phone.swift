@@ -123,7 +123,7 @@ struct SidebarScreen: View {
                 } header: {
                     HStack(spacing: 4) {
                         PhoneStateIcon(state: sec.state)
-                        Text("\(sec.title) (\(model.visibleCount(sec)))")
+                        Text("\(sec.title) (\(model.countText(sec)))")
                     }
                 }
             }

@@ -45,6 +45,7 @@ public enum MascotManifest {
     ]
     public static let brandIds: [String] = [
         "app_icon",
+        "app_icon_macos",
         "readme_banner",
         "social_card",
         "start_image",
@@ -75,6 +76,7 @@ public enum MascotManifest {
         "banners/update-20@2x.png",
         "banners/update-20@3x.png",
         "brand/app_icon.png",
+        "brand/app_icon_macos.png",
         "brand/readme_banner.png",
         "brand/social_card.png",
         "brand/start_image.png",
