@@ -128,6 +128,23 @@ impl Hub {
         );
     }
 
+    /// The counts as they stand after a look that found nothing new (an unmodified listing):
+    /// what the last full look imported, updated or adopted is unchanged now; what it ignored
+    /// or refused still is. `None` before any look.
+    pub fn standing(&self, p: ProjectId) -> Option<Summary> {
+        let m = self.records.lock().unwrap_or_else(|e| e.into_inner());
+        let last = &m.get(&p)?.summary;
+        Some(Summary {
+            imported: 0,
+            updated: 0,
+            closed: 0,
+            ignored: last.ignored,
+            unchanged: last.unchanged + last.imported + last.updated + last.adopted,
+            refused: last.refused,
+            adopted: 0,
+        })
+    }
+
     /// Ask now: the next look does not wait for its schedule, and a stopped
     /// poll gets one more try.
     pub fn refresh(&self, p: ProjectId) {
