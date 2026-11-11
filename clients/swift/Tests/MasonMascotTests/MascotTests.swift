@@ -36,4 +36,19 @@ final class MascotTests: XCTestCase {
         XCTAssertNil(Mascot.illustration("nonsense"))
         XCTAssertNil(Mascot.illustration("../brand/app_icon"))
     }
+
+    func testEveryBannerKindMapsToAnImageOrDeliberatelyNone() {
+        for (kind, id) in BannerIcons.daemonKinds {
+            XCTAssertEqual(BannerIcons.id(forDaemonKind: kind), id, kind)
+            if let id { XCTAssertNotNil(Mascot.bannerIcon(id), "\(kind) -> \(id)") }
+        }
+        for (_, id) in BannerIcons.clientBanners { XCTAssertNotNil(Mascot.bannerIcon(id), id) }
+        XCTAssertEqual(BannerIcons.id(forDaemonKind: "landing_frozen"), "landing_frozen")
+        XCTAssertEqual(BannerIcons.id(forDaemonKind: "provider_budget"), "provider")
+    }
+
+    func testAnUnknownBannerKindHasNoIcon() {
+        XCTAssertNil(BannerIcons.id(forDaemonKind: "nonsense"))
+        XCTAssertNil(BannerIcons.id(forDaemonKind: ""))
+    }
 }
