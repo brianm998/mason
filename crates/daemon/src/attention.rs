@@ -634,6 +634,13 @@ pub fn alerts_now(d: &Daemon) -> Vec<(String, String, String)> {
                     format!("Task #{} needs a decision: {ask}", t.id.0),
                 ));
             }
+            // Waiting for the owner's approval is a wait for a yes or no, not for an answer;
+            // the alert is the same kind so it routes the same, and `notify` words it apart.
+            State::Proposed => out.push((
+                format!("proposed:{}", t.id.0),
+                "needs_you".into(),
+                format!("Task #{} is proposed and waits for your approval", t.id.0),
+            )),
             State::Failed => out.push((
                 format!("failed:{}", t.id.0),
                 "failed".into(),
@@ -644,6 +651,15 @@ pub fn alerts_now(d: &Daemon) -> Vec<(String, String, String)> {
                 ),
             )),
             _ => {}
+        }
+        if t.state != State::Proposed
+            && t.activity == Activity::Waiting(WaitReason::On(mason_core::APPROVAL_WAIT.into()))
+        {
+            out.push((
+                format!("approval:{}", t.id.0),
+                "needs_you".into(),
+                format!("Task #{} waits for your approval", t.id.0),
+            ));
         }
         if let Some(text) = crate::blockers::alert_text(&w, t) {
             // One per task, from the world as it is: it clears when the task is released
