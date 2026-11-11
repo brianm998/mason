@@ -54,6 +54,8 @@ mascot_icon = 24
 mascot_banner_icon = 20
 # The start image (1536 x 1024) is shown at most this wide, whole, never cropped.
 mascot_start_width = 480
+# The state illustration at the top of a task page (shown whole, fitted to its square).
+mascot_illustration = 96
 
 [motion]
 # Milliseconds.

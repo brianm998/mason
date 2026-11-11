@@ -45,6 +45,7 @@ object MasonTokens {
     const val sizeMascotIcon = 24
     const val sizeMascotBannerIcon = 20
     const val sizeMascotStartWidth = 480
+    const val sizeMascotIllustration = 96
     const val motionFast = 120
     const val motionNormal = 220
 }
