@@ -27,9 +27,10 @@ running() { m status --json | python3 -c "import json,sys; print(json.load(sys.s
 landed_ge() { [ "$(landed)" -ge "$1" ]; }
 running_is() { [ "$(running)" = "$1" ]; }
 # Task ids start at 0: "one" is task 0 and "two" is task 1.
-# Host directories of task $1 in h/ (the registry) and in t/$1/hosts/ (moved).
-live() { ls "$root/d/h" 2>/dev/null | grep -c "^t$1r" || true; }
-moved() { ls "$root/d/t/$1/hosts" 2>/dev/null | grep -c "^t$1r" || true; }
+# Host directories of task $1 in h/ (the registry) and in t/$1/hosts/ (moved). find starts
+# from the data directory, which always exists, so a missing h/ or t/$1/hosts/ counts 0.
+live() { find "$root/d" -mindepth 2 -maxdepth 2 -path "$root/d/h/t$1r*" | wc -l | tr -d ' '; }
+moved() { find "$root/d" -mindepth 4 -maxdepth 4 -path "$root/d/t/$1/hosts/t$1r*" | wc -l | tr -d ' '; }
 none_live() { [ "$(live "$1")" -eq 0 ]; }
 wait_until() { # what seconds command...
   local what=$1 secs=$2; shift 2; local end=$((SECONDS + secs))
