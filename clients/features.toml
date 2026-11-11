@@ -280,3 +280,8 @@ compose = "done"
 description = "The mascot app icon: MASON.app has an .icns (Finder, Dock), the unbundled monitor sets the Dock icon, the Compose window has it; the iOS icon file sits beside its Info.plist for when a project exists"
 swift = "done"
 compose = "done"
+
+[feature.readme-banner]
+description = "The mascot banner at the top of README.md and the social card in docs/images; repository art only, no client UI"
+swift = "done"
+compose = "done"
