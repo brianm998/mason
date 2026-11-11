@@ -355,7 +355,11 @@ pub fn due(
     };
     let settled = |c: Channel, d: Delivery| -> Option<bool> {
         // Some(true): delivered. Some(false): given up on or waiting to retry. None: not tried.
-        let from = if d == Delivery::Reminder { round_start } else { 0 };
+        let from = if d == Delivery::Reminder {
+            round_start
+        } else {
+            0
+        };
         let tries: Vec<&Attempt> = done
             .iter()
             .filter(|a| a.channel == c && a.delivery == d && a.at_ms >= from)
@@ -430,10 +434,9 @@ pub fn sound_for(kind: &str) -> Sound {
     match kind {
         "needs_you" => Sound::Decision,
         "failed" | "daemon_bug" | "landing" | "daemon_down" | "credentials" | "provider_outage"
-        | "stalled"
-        | "environment" | "runtime" | "definition" | "disk" | "blocked" | "host_lost"
-        | "tracker" | "provider_limit" | "provider_overage" | "provider_budget" | "git_stuck"
-        | "numbers" => Sound::Broke,
+        | "stalled" | "environment" | "runtime" | "definition" | "disk" | "blocked"
+        | "host_lost" | "tracker" | "provider_limit" | "provider_overage" | "provider_budget"
+        | "git_stuck" | "numbers" => Sound::Broke,
         _ => Sound::Info,
     }
 }
@@ -707,7 +710,12 @@ mod tests {
         assert!(due(&r, "needs_you", st(0), &done, 100_000 * MINUTE_MS, 0).is_empty());
     }
 
-    fn heard(kind: &str, r: &Routing, done: &mut Vec<Attempt>, at: u64) -> Vec<(Channel, Delivery)> {
+    fn heard(
+        kind: &str,
+        r: &Routing,
+        done: &mut Vec<Attempt>,
+        at: u64,
+    ) -> Vec<(Channel, Delivery)> {
         let d = due(r, kind, st(0), done, at, 0);
         for (c, dl) in &d {
             done.push(attempt(*c, *dl, true, at));
@@ -726,7 +734,10 @@ mod tests {
             heard(kind, &r, &mut done, 10 * MINUTE_MS); // the push escalation
             let at = r.reminder_ms;
             let rem = heard(kind, &r, &mut done, at);
-            assert!(!rem.is_empty() && rem.iter().all(|x| x.1 == Delivery::Reminder), "{kind}");
+            assert!(
+                !rem.is_empty() && rem.iter().all(|x| x.1 == Delivery::Reminder),
+                "{kind}"
+            );
             // Nothing between rounds.
             assert!(due(&r, kind, st(0), &done, at + r.repeat_ms - 1, 0).is_empty());
             for k in 1..4u64 {
@@ -740,7 +751,15 @@ mod tests {
         heard("failed", &r, &mut done, 0);
         heard("failed", &r, &mut done, 10 * MINUTE_MS);
         assert!(!heard("failed", &r, &mut done, r.reminder_ms).is_empty());
-        assert!(due(&r, "failed", st(0), &done, r.reminder_ms + 5 * r.repeat_ms, 0).is_empty());
+        assert!(due(
+            &r,
+            "failed",
+            st(0),
+            &done,
+            r.reminder_ms + 5 * r.repeat_ms,
+            0
+        )
+        .is_empty());
     }
 
     #[test]
@@ -749,7 +768,9 @@ mod tests {
         let done = vec![attempt(Channel::Sound, Delivery::Initial, true, 0)];
         let d = due(&r, "stalled", st(0), &done, r.reminder_ms + r.repeat_ms, 0);
         assert!(d.contains(&(Channel::Sound, Delivery::Reminder)));
-        assert!(d.iter().all(|x| x.1 == Delivery::Initial || x.0 == Channel::Sound));
+        assert!(d
+            .iter()
+            .all(|x| x.1 == Delivery::Initial || x.0 == Channel::Sound));
     }
 
     #[test]

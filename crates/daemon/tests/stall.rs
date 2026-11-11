@@ -91,12 +91,20 @@ fn a_lasting_stall_hands_a_claiming_client_repeats_until_acknowledged() {
         keys.iter().filter(|k| k.contains(":reminder")).count() >= 2
     });
     let distinct: std::collections::BTreeSet<_> = keys.iter().collect();
-    assert_eq!(distinct.len(), keys.len(), "each announcement once: {keys:?}");
+    assert_eq!(
+        distinct.len(),
+        keys.len(),
+        "each announcement once: {keys:?}"
+    );
 
     assert!(mason_daemon::notify::ack(&d, "stalled").unwrap());
     poll(&mut keys); // anything already queued is taken here
     let before = keys.len();
     std::thread::sleep(Duration::from_millis(3500));
     poll(&mut keys);
-    assert_eq!(keys.len(), before, "acknowledged: no more repeats: {keys:?}");
+    assert_eq!(
+        keys.len(),
+        before,
+        "acknowledged: no more repeats: {keys:?}"
+    );
 }
