@@ -488,13 +488,20 @@ fn subject_and_detail(d: &Daemon, key: &str, kind: &str, text: &str) -> (String,
     let id = key
         .split_once(':')
         .and_then(|(p, rest)| {
-            matches!(p, "question" | "failed" | "environment" | "landed").then_some(rest)
+            matches!(
+                p,
+                "question" | "failed" | "environment" | "landed" | "approval" | "proposed"
+            )
+            .then_some(rest)
         })
         .and_then(|r| r.parse::<u64>().ok());
     if let (Some(id), Ok(w)) = (id, d.world()) {
         if let Some(t) = w.tasks.get(&TaskId(id)) {
             let subject = format!("{} {}", t.title, id);
             let detail = match kind {
+                "needs_you" if key.starts_with("approval:") || key.starts_with("proposed:") => {
+                    String::new()
+                }
                 "needs_you" => crate::attention::card_of(d, t)
                     .map(|(c, _)| c.ask)
                     .unwrap_or_default(),
@@ -657,13 +664,20 @@ pub fn tick_at(d: &Arc<Daemon>, now: u64) {
                 continue;
             }
             let reminder = delivery == Delivery::Reminder;
+            let word = if a.key.starts_with("approval:") {
+                "approval"
+            } else if a.key.starts_with("proposed:") {
+                "proposal"
+            } else {
+                a.kind.as_str()
+            };
             // A repeat is its own announcement: the round number keeps it from being taken for
             // the one already played. Round 0 keeps the plain name.
             let label = match n::Routing::reminder_round(&settings.routing, &a.kind, a.since, now) {
                 k if reminder && k > 0 => format!("reminder{k}"),
                 _ => delivery.name().to_string(),
             };
-            let line = n::sentence(&a.kind, &subject, &detail, reminder);
+            let line = n::sentence(word, &subject, &detail, reminder);
             let (sound, speech) = (
                 these.contains(&Channel::Sound),
                 these.contains(&Channel::Speech),

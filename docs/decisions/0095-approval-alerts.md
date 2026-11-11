@@ -1,0 +1,3 @@
+# 0095: Waiting for approval is an alert of kind `needs_you`, worded apart
+
+A task at an approval step or in `proposed` waits for the owner as surely as one with a question, yet only the monitor's sections showed it. Both now raise `needs_you` alerts (keys `approval:<id>`, `proposed:<id>`), so they route, remind and clear like the question alert. The spoken sentence says it waits for approval, chosen from the key prefix in `notify.rs` rather than by a new alert kind, so routing settings and sounds need no change. `attention.rs` is a trust file; the change only adds alerts and does not touch who may answer.
