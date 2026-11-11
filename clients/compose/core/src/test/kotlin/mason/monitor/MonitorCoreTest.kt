@@ -26,6 +26,34 @@ class MonitorCoreTest {
         return m
     }
 
+    // ---- mascot choice ----
+
+    @Test
+    fun homeMascotFollowsTheDaemonsState() {
+        val m = model(connected = false)
+        assertEquals("not_connected", m.homeMascot.id)
+        m.connected = true
+        assertEquals("needs_attention", m.homeMascot.id)
+        m.header = m.header!!.copy(attention = 0)
+        m.home = HomeView()
+        assertEquals(MascotChoice("no_tasks", true), m.homeMascot)
+        m.home = HomeView(stages = listOf(section("queued", rows = listOf(row(1, "queued")))))
+        assertEquals(MascotChoice("all_clear", false), m.homeMascot)
+        m.home = HomeView(active = listOf(ActiveModel(task = 1)))
+        assertEquals("developing", m.homeMascot.id)
+    }
+
+    @Test
+    fun searchWithNoMatchesSaysSo() {
+        val m = model()
+        assertEquals(false, m.searchMatchesNothing)
+        m.search = m.search.copy(text = "rate")
+        assertEquals(false, m.searchMatchesNothing)
+        m.search = m.search.copy(text = "zzzz")
+        assertEquals(true, m.searchMatchesNothing)
+        assertEquals("Nothing matched.", SEARCH_NO_MATCH_TEXT)
+    }
+
     // ---- the attention sound ----
 
     private fun sidebarOf(vararg s: SidebarSection) = View(sidebar = SidebarView(sections = s.toList()))

@@ -56,3 +56,31 @@ fn at_the_floor_a_task_runs() {
     wait_state(&d, t, State::Landed, 60);
     assert!(disk_alert(&d).is_none());
 }
+
+#[test]
+fn the_alert_and_the_status_count_the_tasks_the_disk_holds() {
+    let s = Scratch::new("true", happy_script());
+    let disk = FakeDisk::new_gb(12);
+    let d = s.start_with(|c| {
+        c.disk = Some(disk.clone());
+        c.disk_every = Duration::from_millis(50);
+    });
+    let tasks = [
+        file_task(&d, "One"),
+        file_task(&d, "Two"),
+        file_task(&d, "Three"),
+    ];
+    wait_for("every task to be held by the disk", 30, || {
+        tasks.iter().all(|t| {
+            d.broker
+                .explain_task(*t)
+                .is_some_and(|e| e.starts_with("Waiting: disk has"))
+        })
+    });
+    assert_eq!(d.broker.disk_held(), 3);
+    let text = disk_alert(&d).expect("the alert is raised");
+    assert!(text.contains("3 tasks waiting"), "{text}");
+    disk.set_gb(40);
+    wait_for("the hold to clear", 30, || d.broker.disk_held() == 0);
+    assert!(d.broker.disk_low().is_none());
+}

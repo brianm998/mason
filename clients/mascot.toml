@@ -1,0 +1,272 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# The mascot art and the names it is loaded by. `conformance mascot --write`
+# generates the Swift and Kotlin name constants from this file; `--check` also
+# fails on a listed file that is missing and on a file here that is not listed.
+# Paths are relative to clients/swift/Sources/MasonMascot/Art/.
+
+[icon.needs_attention]
+files = [
+  "icons/needs_attention-20@1x.png",
+  "icons/needs_attention-20@2x.png",
+  "icons/needs_attention-20@3x.png",
+  "icons/needs_attention-24@1x.png",
+  "icons/needs_attention-24@2x.png",
+  "icons/needs_attention-24@3x.png",
+]
+
+[icon.queued]
+files = [
+  "icons/queued-20@1x.png",
+  "icons/queued-20@2x.png",
+  "icons/queued-20@3x.png",
+  "icons/queued-24@1x.png",
+  "icons/queued-24@2x.png",
+  "icons/queued-24@3x.png",
+]
+
+[icon.exploring]
+files = [
+  "icons/exploring-20@1x.png",
+  "icons/exploring-20@2x.png",
+  "icons/exploring-20@3x.png",
+  "icons/exploring-24@1x.png",
+  "icons/exploring-24@2x.png",
+  "icons/exploring-24@3x.png",
+]
+
+[icon.developing]
+files = [
+  "icons/developing-20@1x.png",
+  "icons/developing-20@2x.png",
+  "icons/developing-20@3x.png",
+  "icons/developing-24@1x.png",
+  "icons/developing-24@2x.png",
+  "icons/developing-24@3x.png",
+]
+
+[icon.testing]
+files = [
+  "icons/testing-20@1x.png",
+  "icons/testing-20@2x.png",
+  "icons/testing-20@3x.png",
+  "icons/testing-24@1x.png",
+  "icons/testing-24@2x.png",
+  "icons/testing-24@3x.png",
+]
+
+[icon.review]
+files = [
+  "icons/review-20@1x.png",
+  "icons/review-20@2x.png",
+  "icons/review-20@3x.png",
+  "icons/review-24@1x.png",
+  "icons/review-24@2x.png",
+  "icons/review-24@3x.png",
+]
+
+[icon.landing]
+files = [
+  "icons/landing-20@1x.png",
+  "icons/landing-20@2x.png",
+  "icons/landing-20@3x.png",
+  "icons/landing-24@1x.png",
+  "icons/landing-24@2x.png",
+  "icons/landing-24@3x.png",
+]
+
+[icon.proposed]
+files = [
+  "icons/proposed-20@1x.png",
+  "icons/proposed-20@2x.png",
+  "icons/proposed-20@3x.png",
+  "icons/proposed-24@1x.png",
+  "icons/proposed-24@2x.png",
+  "icons/proposed-24@3x.png",
+]
+
+[icon.failed]
+files = [
+  "icons/failed-20@1x.png",
+  "icons/failed-20@2x.png",
+  "icons/failed-20@3x.png",
+  "icons/failed-24@1x.png",
+  "icons/failed-24@2x.png",
+  "icons/failed-24@3x.png",
+]
+
+[icon.landed]
+files = [
+  "icons/landed-20@1x.png",
+  "icons/landed-20@2x.png",
+  "icons/landed-20@3x.png",
+  "icons/landed-24@1x.png",
+  "icons/landed-24@2x.png",
+  "icons/landed-24@3x.png",
+]
+
+[icon.canceled]
+files = [
+  "icons/canceled-20@1x.png",
+  "icons/canceled-20@2x.png",
+  "icons/canceled-20@3x.png",
+  "icons/canceled-24@1x.png",
+  "icons/canceled-24@2x.png",
+  "icons/canceled-24@3x.png",
+]
+
+[banner.connection_lost]
+files = [
+  "banners/connection_lost-20@1x.png",
+  "banners/connection_lost-20@2x.png",
+  "banners/connection_lost-20@3x.png",
+]
+
+[banner.daemon_down]
+files = [
+  "banners/daemon_down-20@1x.png",
+  "banners/daemon_down-20@2x.png",
+  "banners/daemon_down-20@3x.png",
+]
+
+[banner.read_only]
+files = [
+  "banners/read_only-20@1x.png",
+  "banners/read_only-20@2x.png",
+  "banners/read_only-20@3x.png",
+]
+
+[banner.update]
+files = [
+  "banners/update-20@1x.png",
+  "banners/update-20@2x.png",
+  "banners/update-20@3x.png",
+]
+
+[banner.paused]
+files = [
+  "banners/paused-20@1x.png",
+  "banners/paused-20@2x.png",
+  "banners/paused-20@3x.png",
+]
+
+[banner.definition]
+files = [
+  "banners/definition-20@1x.png",
+  "banners/definition-20@2x.png",
+  "banners/definition-20@3x.png",
+]
+
+[banner.provider]
+files = [
+  "banners/provider-20@1x.png",
+  "banners/provider-20@2x.png",
+  "banners/provider-20@3x.png",
+]
+
+[banner.landing_frozen]
+files = [
+  "banners/landing_frozen-20@1x.png",
+  "banners/landing_frozen-20@2x.png",
+  "banners/landing_frozen-20@3x.png",
+]
+
+[illustration.needs_attention]
+files = [
+  "illustrations/needs_attention.png",
+]
+
+[illustration.queued]
+files = [
+  "illustrations/queued.png",
+]
+
+[illustration.exploring]
+files = [
+  "illustrations/exploring.png",
+]
+
+[illustration.developing]
+files = [
+  "illustrations/developing.png",
+]
+
+[illustration.testing]
+files = [
+  "illustrations/testing.png",
+]
+
+[illustration.review]
+files = [
+  "illustrations/review.png",
+]
+
+[illustration.landing]
+files = [
+  "illustrations/landing.png",
+]
+
+[illustration.proposed]
+files = [
+  "illustrations/proposed.png",
+]
+
+[illustration.failed]
+files = [
+  "illustrations/failed.png",
+]
+
+[illustration.landed]
+files = [
+  "illustrations/landed.png",
+]
+
+[illustration.canceled]
+files = [
+  "illustrations/canceled.png",
+]
+
+[illustration.all_clear]
+files = [
+  "illustrations/all_clear.png",
+]
+
+[illustration.not_connected]
+files = [
+  "illustrations/not_connected.png",
+]
+
+[illustration.no_tasks]
+files = [
+  "illustrations/no_tasks.png",
+]
+
+[illustration.nothing_landing]
+files = [
+  "illustrations/nothing_landing.png",
+]
+
+[illustration.no_results]
+files = [
+  "illustrations/no_results.png",
+]
+
+[brand.app_icon]
+files = [
+  "brand/app_icon.png",
+]
+
+[brand.readme_banner]
+files = [
+  "brand/readme_banner.png",
+]
+
+[brand.social_card]
+files = [
+  "brand/social_card.png",
+]
+
+[brand.start_image]
+files = [
+  "brand/start_image.png",
+]

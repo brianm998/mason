@@ -468,6 +468,24 @@ impl Scratch {
         let disk = self.root.path().join("disk-for-masond");
         let _ = std::fs::write(&disk, "1000\n");
         cmd.env("MASON_DISK_FILE", &disk);
+        // When MASON runs this suite as a task's test step, the step's own variables are in
+        // this process's environment. A test daemon is not part of that step: its hosts
+        // inherit what it has, so a check would read MASON_STEP and act as a test step.
+        for k in [
+            "MASON_TASK",
+            "MASON_TITLE",
+            "MASON_PROJECT",
+            "MASON_WORKTREE",
+            "MASON_BRANCH",
+            "MASON_BASE",
+            "MASON_STEP",
+            "MASON_ATTEMPT",
+            "MASON_HELD",
+            "MASON_RESULT_FILE",
+            "MASON_PROGRESS_FILE",
+        ] {
+            cmd.env_remove(k);
+        }
         for (k, v) in env {
             cmd.env(k, v);
         }

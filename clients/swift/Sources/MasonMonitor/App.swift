@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import AppKit
+import MasonMascot
 import MonitorCore
 import MonitorUI
 import SwiftUI
@@ -92,8 +93,15 @@ struct MasonMonitorApp: App {
     @StateObject private var session = Session()
 
     init() {
+        // `MasonMonitor --mascot-check`: load every mascot image and exit (no window).
+        if CommandLine.arguments.contains("--mascot-check") { exit(Mascot.selfCheck() ? 0 : 1) }
         // A plain executable needs to say it is an app with windows.
         NSApplication.shared.setActivationPolicy(.regular)
+        // Unbundled there is no Info.plist icon; MASON.app has one and keeps it.
+        if Bundle.main.object(forInfoDictionaryKey: "CFBundleIconFile") == nil,
+           let d = Mascot.appIconData(), let img = NSImage(data: d) {
+            NSApplication.shared.applicationIconImage = img
+        }
     }
 
     var body: some Scene {

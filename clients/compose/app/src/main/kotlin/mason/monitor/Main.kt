@@ -8,6 +8,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
+import androidx.compose.ui.graphics.painter.BitmapPainter
+import mason.monitor.ui.Mascot
 import mason.monitor.ui.RootView
 
 /** The monitor window. Run with `./gradlew :app:monitor` (optionally `--args="--data-dir D"`). */
@@ -42,6 +44,7 @@ fun main(args: Array<String>) = application {
     Window(
         onCloseRequest = ::exitApplication,
         title = "MASON",
+        icon = remember { Mascot.appIcon()?.let { BitmapPainter(it) } },
         state = state,
         onPreviewKeyEvent = { e -> shortcut(model, e) },
     ) {

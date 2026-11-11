@@ -4,6 +4,7 @@
 //! never onto the async event loop (Part 2). When the queue is full the caller
 //! is told so, rather than piling up unbounded work.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -13,6 +14,10 @@ type Work = Box<dyn FnOnce() + Send + 'static>;
 #[derive(Clone)]
 pub struct Pool {
     tx: SyncSender<Work>,
+    /// Work accepted and not yet picked up by a thread.
+    queued: Arc<AtomicUsize>,
+    threads: usize,
+    capacity: usize,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -27,14 +32,17 @@ impl Pool {
     pub fn new(name: &str, threads: usize, queue: usize) -> Pool {
         let (tx, rx) = sync_channel::<Work>(queue);
         let rx: Arc<Mutex<Receiver<Work>>> = Arc::new(Mutex::new(rx));
+        let queued = Arc::new(AtomicUsize::new(0));
         for i in 0..threads {
             let rx = rx.clone();
+            let queued = queued.clone();
             thread::Builder::new()
                 .name(format!("{name}-{i}"))
                 .spawn(move || loop {
                     let work = { rx.lock().unwrap_or_else(|e| e.into_inner()).recv() };
                     match work {
                         Ok(w) => {
+                            queued.fetch_sub(1, Ordering::SeqCst);
                             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(w));
                         }
                         Err(_) => break,
@@ -42,14 +50,39 @@ impl Pool {
                 })
                 .expect("spawn pool thread");
         }
-        Pool { tx }
+        Pool {
+            tx,
+            queued,
+            threads,
+            capacity: queue,
+        }
+    }
+
+    /// Work waiting for a thread.
+    pub fn queue_depth(&self) -> usize {
+        self.queued.load(Ordering::SeqCst)
+    }
+
+    /// `{threads, queue_capacity, queued}` for `mason status`.
+    pub fn stats(&self) -> serde_json::Value {
+        serde_json::json!({
+            "threads": self.threads,
+            "queue_capacity": self.capacity,
+            "queued": self.queue_depth(),
+        })
     }
 
     pub fn spawn(&self, f: impl FnOnce() + Send + 'static) -> Result<(), PoolError> {
+        self.queued.fetch_add(1, Ordering::SeqCst);
         match self.tx.try_send(Box::new(f)) {
             Ok(()) => Ok(()),
-            Err(TrySendError::Full(_)) => Err(PoolError::Busy),
-            Err(TrySendError::Disconnected(_)) => Err(PoolError::Lost),
+            Err(e) => {
+                self.queued.fetch_sub(1, Ordering::SeqCst);
+                match e {
+                    TrySendError::Full(_) => Err(PoolError::Busy),
+                    TrySendError::Disconnected(_) => Err(PoolError::Lost),
+                }
+            }
         }
     }
 

@@ -3,6 +3,11 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+  <!-- The app icon is AppIcon-1024.png beside this file (the mascot, copied from
+       clients/swift/Sources/MasonMascot/Art/brand/app_icon.png). There is no Xcode project in
+       the repo: when one is made, add the file to an asset catalog's AppIcon set as the single
+       1024 px icon (Xcode 14+ derives the other sizes) and set the target's
+       ASSETCATALOG_COMPILER_APPICON_NAME to AppIcon. -->
   <key>CFBundleName</key><string>MASON</string>
   <key>CFBundleIdentifier</key><string>dev.mason.ios</string>
   <key>NSLocalNetworkUsageDescription</key>
