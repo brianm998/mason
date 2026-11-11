@@ -51,6 +51,7 @@ public struct Theme {
     public var radius: CGFloat { CGFloat(MasonTokens.sizeCornerRadius) }
     public var cell: CGFloat { s(MasonTokens.sizeProgressCell) }
     public var mascotBannerIcon: CGFloat { s(MasonTokens.sizeMascotBannerIcon) }
+    public var illustration: CGFloat { s(MasonTokens.sizeMascotIllustration) }
     public var mascotIconSmall: CGFloat { s(MasonTokens.sizeMascotIconSmall) }
     public var mascotIcon: CGFloat { s(MasonTokens.sizeMascotIcon) }
 

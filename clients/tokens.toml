@@ -52,6 +52,8 @@ progress_cell = 14
 mascot_icon_small = 20
 mascot_icon = 24
 mascot_banner_icon = 20
+# The state illustration at the top of a task page (shown whole, fitted to its square).
+mascot_illustration = 96
 
 [motion]
 # Milliseconds.
