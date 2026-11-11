@@ -781,6 +781,7 @@ impl<'a> Ctx<'a> {
                 .collect(),
             sessions_used,
             sessions_limit,
+            compilation: Some(self.d.broker.compilation()),
             stages: [
                 State::Exploring,
                 State::Developing,

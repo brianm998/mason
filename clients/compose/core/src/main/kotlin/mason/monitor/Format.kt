@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 package mason.monitor
 
+import mason.v1.Compilation
 import mason.v1.ProgressCell
 import mason.v1.ProgressSource
 import mason.v1.TokenLine
@@ -202,3 +203,10 @@ fun ProgressCell.progressTexts(now: Long): List<String> {
     if (isStale(now)) t += "silent"
     return t
 }
+
+/** The CPU line of the home page's Compilation section. */
+val Compilation.cpuLine: String
+    get() {
+        val gate = "a further compile starts below $cpu_max_pct%"
+        return if (cpu_busy_pct < 0) "CPU not readable; $gate." else "CPU $cpu_busy_pct% busy; $gate."
+    }

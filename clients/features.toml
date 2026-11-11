@@ -66,6 +66,11 @@ description = "Status, attention queue, active models, session stepper, landing 
 swift = "done"
 compose = "done"
 
+[feature.home-compilation]
+description = "Home's Compilation section: what holds a compile slot, what waits for one and why, in line order, the CPU reading, and a stepper for how many compiles may run at once"
+swift = "done"
+compose = "done"
+
 [feature.task-detail]
 description = "Steps, activity, live log, plan, checks, tests, history, decision card, actions"
 swift = "done"

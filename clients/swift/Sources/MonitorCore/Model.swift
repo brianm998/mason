@@ -421,6 +421,10 @@ public final class MonitorModel: ObservableObject {
         let name = usage?.providers.first?.name ?? "claude"
         command { $0.setLimit = .with { $0.resource = "llm:\(name)"; $0.units = units } }
     }
+    /// How many compiles may run at once (the daemon refuses 0).
+    public func setCompileLimit(_ units: UInt32) {
+        command { $0.setLimit = .with { $0.resource = "compile"; $0.units = max(1, units) } }
+    }
     public func pause(mode: String, seconds: UInt64) {
         command { $0.pause = .with { $0.project = project; $0.mode = mode; $0.forSeconds = seconds } }
     }
