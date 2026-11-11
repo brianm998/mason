@@ -115,7 +115,7 @@ fn a_branch_that_conflicts_with_the_base_goes_to_the_agent_to_merge_and_lands() 
     let develop2 = json!([
         {"sh": "printf '%s' \"$FAKE_PROMPT\" > seen-prompt.txt; \
                 grep -q 'no longer merges cleanly' seen-prompt.txt && grep -q 'conflict.txt' seen-prompt.txt || exit 1; \
-                rm seen-prompt.txt; git -c user.name=t -c user.email=t@t merge -q origin/main; echo both > conflict.txt && echo ok > fixed.txt && \
+                rm seen-prompt.txt; git -c user.name=t -c user.email=t@t merge -q origin/main; printf 'theirs\\nboth\\n' > conflict.txt && echo ok > fixed.txt && \
                 git add -A && git -c user.name=t -c user.email=t@t commit -qm 'merge the base and fix'"},
         {"call": {"tool": "submit_change", "args": {"summary": "merged", "head": "$HEAD"}}}
     ]);
@@ -127,7 +127,7 @@ fn a_branch_that_conflicts_with_the_base_goes_to_the_agent_to_merge_and_lands() 
     let w = d.world().unwrap();
     assert_eq!(w.tasks[&t].failures, 0, "a conflict is not a failure");
     assert_eq!(w.tasks[&t].attempts[&State::Developing], 2);
-    assert_eq!(sh(&s.origin, &["show", "main:conflict.txt"]), "both");
+    assert_eq!(sh(&s.origin, &["show", "main:conflict.txt"]), "theirs\nboth");
     assert_eq!(sh(&s.origin, &["show", "main:fixed.txt"]), "ok");
 }
 
@@ -278,7 +278,7 @@ fn a_conflict_with_the_base_at_the_test_step_is_not_a_red_round() {
         {"call": {"tool": "submit_change", "args": {"summary": "first try", "head": "$HEAD"}}}
     ]);
     let develop2 = json!([
-        {"sh": "git -c user.name=t -c user.email=t@t merge -q origin/main; echo both > conflict.txt && git add -A && \
+        {"sh": "git -c user.name=t -c user.email=t@t merge -q origin/main; printf 'theirs\\nboth\\n' > conflict.txt && git add -A && \
                 git -c user.name=t -c user.email=t@t commit -qm 'merge the base'"},
         {"call": {"tool": "submit_change", "args": {"summary": "merged", "head": "$HEAD"}}}
     ]);
@@ -297,7 +297,7 @@ fn a_conflict_with_the_base_at_the_test_step_is_not_a_red_round() {
     let conflicts = std::fs::read_to_string(d.task_dir(t).join("conflicts.txt")).unwrap();
     assert_eq!(conflicts.lines().count(), 1, "{conflicts}");
     assert!(conflicts.contains("conflict.txt"), "{conflicts}");
-    assert_eq!(sh(&s.origin, &["show", "main:conflict.txt"]), "both");
+    assert_eq!(sh(&s.origin, &["show", "main:conflict.txt"]), "theirs\nboth");
 }
 
 #[test]
