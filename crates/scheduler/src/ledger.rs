@@ -537,7 +537,10 @@ mod tests {
     fn the_cpu_gate_is_a_long_wait_on_compile_and_the_disk_is_left_out() {
         let mut l = Ledger::new();
         l.set_capacity("compile", 4, Kind::Machine);
-        l.submit(rank(1, 1, 1), Needs::of(&[("compile", 1)]), "#1", 0);
+        // The CPU holds only a further compile: one is running.
+        let first = l.submit(rank(1, 1, 1), Needs::of(&[("compile", 1)]), "#1", 0);
+        assert_eq!(l.schedule(0, None, None).grants, vec![first]);
+        l.submit(rank(1, 2, 2), Needs::of(&[("compile", 1)]), "#2", 0);
         let hot = Some(CpuGate {
             busy_pct: 100,
             max_pct: 50,

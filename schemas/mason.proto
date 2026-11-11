@@ -609,6 +609,52 @@ message HomeView {
   uint32 sessions_limit = 5;
   // The tasks in each stage, for the "detail for tasks in each stage" part.
   repeated SidebarSection stages = 6;
+  // The `compile` resource: what holds it, what waits and why, and its limit.
+  Compilation compilation = 7;
+}
+
+// Who holds a `compile` slot.
+message CompileHolder {
+  // `#88`, or the command line of an interactive caller.
+  string label = 1;
+  // The task it is for; 0 for a person's command or a slot held outside the queue.
+  uint64 task = 2;
+  uint64 since_ms = 3;
+  bool interactive = 4;
+}
+
+// A request waiting for a `compile` slot, in line order.
+message CompileWaiter {
+  string label = 1;
+  uint64 task = 2;
+  uint64 since_ms = 3;
+  // 1 is next in line.
+  uint32 position = 4;
+  // Why it waits, in words: "every slot is held", "CPU 72% busy (starts below 50%)".
+  string reason = 5;
+  // The same as a code: full, behind, cpu, settling, disk-stall, disk, memory,
+  // exclusive, too-big, unknown.
+  string cause = 6;
+  bool interactive = 7;
+  // Steps from landing, which orders pipeline work; 0 for an interactive caller.
+  uint32 steps_remaining = 8;
+}
+
+message Compilation {
+  // How many compiles may run at once, and how many do. `SetLimit` with
+  // resource "compile" changes the limit.
+  uint32 limit = 1;
+  uint32 used = 2;
+  repeated CompileHolder running = 3;
+  repeated CompileWaiter pending = 4;
+  // Overall CPU use; -1 when it cannot be read.
+  int32 cpu_busy_pct = 5;
+  // A further compile starts only while CPU use is below this (the first always starts).
+  uint32 cpu_max_pct = 6;
+  // Seconds between compile starts (0: not paced).
+  uint32 settle_s = 7;
+  // The rules, in one line, for the section's footnote.
+  string rules = 8;
 }
 
 message StepLine {

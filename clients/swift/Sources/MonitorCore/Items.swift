@@ -160,6 +160,20 @@ extension MonitorModel {
                 texts: ["\(h.sessionsUsed) of \(h.sessionsLimit)"],
                 actions: ["increase", "decrease"]
             ))
+            if h.hasCompilation {
+                let c = h.compilation
+                out.append(Item(
+                    id: "compile",
+                    texts: ["\(c.used) of \(c.limit)", c.cpuLine],
+                    actions: ["increase", "decrease"]
+                ))
+                for (i, r) in c.running.enumerated() {
+                    out.append(Item(id: "compile:running:\(i)", texts: [r.label, Format.duration(ms: daemonNow() > r.sinceMs ? daemonNow() - r.sinceMs : 0)], order: i))
+                }
+                for (i, w) in c.pending.enumerated() {
+                    out.append(Item(id: "compile:pending:\(w.position)", texts: [w.label, w.reason], order: i))
+                }
+            }
         }
         if page == .usage, let u = usage { out.append(contentsOf: u.items()) }
         if page == .pipeline, let e = editor { out.append(contentsOf: e.items()) }
