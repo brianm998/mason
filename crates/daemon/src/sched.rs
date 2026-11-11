@@ -589,6 +589,16 @@ impl Broker {
         })
     }
 
+    /// How long the primary CPU reading has been missing (ms), once that is long
+    /// enough to alert on. The gate is on its fallback meanwhile.
+    pub fn cpu_missing_ms(&self) -> Option<(u64, &'static str)> {
+        let st = lock(&self.st);
+        st.cpu
+            .primary_missing_ms()
+            .filter(|ms| *ms > crate::cpu::MISSING_ALERT_MS)
+            .map(|ms| (ms, st.cpu.source()))
+    }
+
     fn free_memory(&self, st: &mut State) -> Option<u64> {
         st.floor_mb?;
         if let Some((at, v)) = st.mem {
@@ -1006,6 +1016,21 @@ impl Broker {
         lock(&self.st).by_task.contains_key(&task)
     }
 
+    /// Does this task hold (granted, not waiting) a lease that uses an
+    /// `llm:` resource, i.e. is a model session running for it right now?
+    pub fn llm_held_by(&self, task: TaskId) -> bool {
+        let st = lock(&self.st);
+        let Some(id) = st.by_task.get(&task) else {
+            return false;
+        };
+        st.ledger.holder(*id).is_some_and(|h| {
+            h.needs
+                .amounts
+                .iter()
+                .any(|(k, n)| *n > 0 && k.starts_with("llm:"))
+        })
+    }
+
     /// Units of a resource held right now.
     pub fn used(&self, name: &str) -> u32 {
         lock(&self.st)
@@ -1295,6 +1320,7 @@ impl Broker {
             cpu_max_pct: st.cpu_max,
             settle_s: settle,
             rules,
+            cpu_source: st.cpu.source().to_string(),
             notes: st
                 .notes
                 .iter()
@@ -1376,7 +1402,12 @@ impl Broker {
             "holders": holders,
             "waiting": waiting,
             "memory": { "floor_mb": st.floor_mb, "free_mb": free },
-            "cpu": { "busy_pct": st.cpu_busy, "compile_max_pct": st.cpu_max },
+            "cpu": {
+                "busy_pct": st.cpu_busy,
+                "compile_max_pct": st.cpu_max,
+                "source": st.cpu.source(),
+                "failed_reads": st.cpu.failed_reads(),
+            },
             "now_ms": now,
         })
     }

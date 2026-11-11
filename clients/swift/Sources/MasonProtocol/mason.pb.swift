@@ -1027,27 +1027,30 @@ public nonisolated struct Mason_V1_EventRecord: Sendable {
   public init() {}
 }
 
-public nonisolated struct Mason_V1_ViewUpdate: Sendable {
+public nonisolated struct Mason_V1_ViewUpdate: @unchecked Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
-  public var seq: UInt64 = 0
+  public var seq: UInt64 {
+    get {_storage._seq}
+    set {_uniqueStorage()._seq = newValue}
+  }
 
   public var view: Mason_V1_View {
-    get {_view ?? Mason_V1_View()}
-    set {_view = newValue}
+    get {_storage._view ?? Mason_V1_View()}
+    set {_uniqueStorage()._view = newValue}
   }
   /// Returns true if `view` has been explicitly set.
-  public var hasView: Bool {self._view != nil}
+  public var hasView: Bool {_storage._view != nil}
   /// Clears the value of `view`. Subsequent reads from it will return its default value.
-  public mutating func clearView() {self._view = nil}
+  public mutating func clearView() {_uniqueStorage()._view = nil}
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
 
-  fileprivate var _view: Mason_V1_View? = nil
+  fileprivate var _storage = _StorageClass.defaultInstance
 }
 
 public nonisolated struct Mason_V1_CommandResult: Sendable {
@@ -1389,7 +1392,8 @@ public nonisolated struct Mason_V1_TaskRow: @unchecked Sendable {
     set {_uniqueStorage()._activity = newValue}
   }
 
-  /// Why it is waiting, in the form "Waiting for compile slot: 2nd in line, ...".
+  /// Why it is waiting, in the form "Waiting for compile slot: 2nd in line, held by #91 for 4 min".
+  /// Who is ahead in line is not named; `mason resources` lists them.
   public var whyWaiting: String {
     get {_storage._whyWaiting}
     set {_uniqueStorage()._whyWaiting = newValue}
@@ -2025,6 +2029,10 @@ public nonisolated struct Mason_V1_Compilation: Sendable {
 
   /// The rules, in one line, for the section's footnote.
   public var rules: String = String()
+
+  /// Where the CPU reading comes from: mach, proc, top, or, when that is missing,
+  /// loadavg or assumed-busy. Empty from a daemon that does not say.
+  public var cpuSource: String = String()
 
   /// What the daemon did about the queue lately, newest first ("Stopped #95's
   /// command ...: it used no CPU for 30 min while holding a compile slot").
@@ -4603,36 +4611,74 @@ nonisolated extension Mason_V1_ViewUpdate: SwiftProtobuf.Message, SwiftProtobuf.
   public static let protoMessageName: String = _protobuf_package + ".ViewUpdate"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}seq\0\u{1}view\0")
 
+  fileprivate class _StorageClass {
+    var _seq: UInt64 = 0
+    var _view: Mason_V1_View? = nil
+
+      // This property is used as the initial default value for new instances of the type.
+      // The type itself is protecting the reference to its storage via CoW semantics.
+      // This will force a copy to be made of this reference when the first mutation occurs;
+      // hence, it is safe to mark this as `nonisolated(unsafe)`.
+      static nonisolated(unsafe) let defaultInstance = _StorageClass()
+
+    private init() {}
+
+    init(copying source: _StorageClass) {
+      _seq = source._seq
+      _view = source._view
+    }
+  }
+
+  fileprivate mutating func _uniqueStorage() -> _StorageClass {
+    if !isKnownUniquelyReferenced(&_storage) {
+      _storage = _StorageClass(copying: _storage)
+    }
+    return _storage
+  }
+
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
-    while let fieldNumber = try decoder.nextFieldNumber() {
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every case branch when no optimizations are
-      // enabled. https://github.com/apple/swift-protobuf/issues/1034
-      switch fieldNumber {
-      case 1: try { try decoder.decodeSingularUInt64Field(value: &self.seq) }()
-      case 2: try { try decoder.decodeSingularMessageField(value: &self._view) }()
-      default: break
+    _ = _uniqueStorage()
+    try withExtendedLifetime(_storage) { (_storage: _StorageClass) in
+      while let fieldNumber = try decoder.nextFieldNumber() {
+        // The use of inline closures is to circumvent an issue where the compiler
+        // allocates stack space for every case branch when no optimizations are
+        // enabled. https://github.com/apple/swift-protobuf/issues/1034
+        switch fieldNumber {
+        case 1: try { try decoder.decodeSingularUInt64Field(value: &_storage._seq) }()
+        case 2: try { try decoder.decodeSingularMessageField(value: &_storage._view) }()
+        default: break
+        }
       }
     }
   }
 
   public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    // The use of inline closures is to circumvent an issue where the compiler
-    // allocates stack space for every if/case branch local when no optimizations
-    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
-    // https://github.com/apple/swift-protobuf/issues/1182
-    if self.seq != 0 {
-      try visitor.visitSingularUInt64Field(value: self.seq, fieldNumber: 1)
+    try withExtendedLifetime(_storage) { (_storage: _StorageClass) in
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every if/case branch local when no optimizations
+      // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+      // https://github.com/apple/swift-protobuf/issues/1182
+      if _storage._seq != 0 {
+        try visitor.visitSingularUInt64Field(value: _storage._seq, fieldNumber: 1)
+      }
+      try { if let v = _storage._view {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 2)
+      } }()
     }
-    try { if let v = self._view {
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 2)
-    } }()
     try unknownFields.traverse(visitor: &visitor)
   }
 
   public static func ==(lhs: Mason_V1_ViewUpdate, rhs: Mason_V1_ViewUpdate) -> Bool {
-    if lhs.seq != rhs.seq {return false}
-    if lhs._view != rhs._view {return false}
+    if lhs._storage !== rhs._storage {
+      let storagesAreEqual: Bool = withExtendedLifetime((lhs._storage, rhs._storage)) { (_args: (_StorageClass, _StorageClass)) in
+        let _storage = _args.0
+        let rhs_storage = _args.1
+        if _storage._seq != rhs_storage._seq {return false}
+        if _storage._view != rhs_storage._view {return false}
+        return true
+      }
+      if !storagesAreEqual {return false}
+    }
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -6440,7 +6486,7 @@ nonisolated extension Mason_V1_CompileWaiter: SwiftProtobuf.Message, SwiftProtob
 
 nonisolated extension Mason_V1_Compilation: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".Compilation"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}limit\0\u{1}used\0\u{1}running\0\u{1}pending\0\u{3}cpu_busy_pct\0\u{3}cpu_max_pct\0\u{3}settle_s\0\u{1}rules\0\u{1}notes\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}limit\0\u{1}used\0\u{1}running\0\u{1}pending\0\u{3}cpu_busy_pct\0\u{3}cpu_max_pct\0\u{3}settle_s\0\u{1}rules\0\u{3}cpu_source\0\u{1}notes\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -6456,7 +6502,8 @@ nonisolated extension Mason_V1_Compilation: SwiftProtobuf.Message, SwiftProtobuf
       case 6: try { try decoder.decodeSingularUInt32Field(value: &self.cpuMaxPct) }()
       case 7: try { try decoder.decodeSingularUInt32Field(value: &self.settleS) }()
       case 8: try { try decoder.decodeSingularStringField(value: &self.rules) }()
-      case 9: try { try decoder.decodeRepeatedStringField(value: &self.notes) }()
+      case 9: try { try decoder.decodeSingularStringField(value: &self.cpuSource) }()
+      case 10: try { try decoder.decodeRepeatedStringField(value: &self.notes) }()
       default: break
       }
     }
@@ -6487,8 +6534,11 @@ nonisolated extension Mason_V1_Compilation: SwiftProtobuf.Message, SwiftProtobuf
     if !self.rules.isEmpty {
       try visitor.visitSingularStringField(value: self.rules, fieldNumber: 8)
     }
+    if !self.cpuSource.isEmpty {
+      try visitor.visitSingularStringField(value: self.cpuSource, fieldNumber: 9)
+    }
     if !self.notes.isEmpty {
-      try visitor.visitRepeatedStringField(value: self.notes, fieldNumber: 9)
+      try visitor.visitRepeatedStringField(value: self.notes, fieldNumber: 10)
     }
     try unknownFields.traverse(visitor: &visitor)
   }
@@ -6502,6 +6552,7 @@ nonisolated extension Mason_V1_Compilation: SwiftProtobuf.Message, SwiftProtobuf
     if lhs.cpuMaxPct != rhs.cpuMaxPct {return false}
     if lhs.settleS != rhs.settleS {return false}
     if lhs.rules != rhs.rules {return false}
+    if lhs.cpuSource != rhs.cpuSource {return false}
     if lhs.notes != rhs.notes {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true

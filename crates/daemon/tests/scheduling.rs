@@ -274,10 +274,10 @@ fn an_interactive_caller_goes_ahead_of_pipeline_work() {
     // An interactive request arrives after the task started waiting.
     let map = [("compile".to_string(), 1)].into();
     let i = d.broker.lease_open("interactive `make`", &map);
-    // The task now sees it is behind the interactive caller.
+    // The task now sees it is second in line, without naming the caller.
     let why = wait_explained(&d, t);
     assert!(
-        why.contains("2nd in line, behind interactive `make` (interactive)"),
+        why.contains("2nd in line") && !why.contains("behind"),
         "{why}"
     );
     drop(held);
@@ -461,6 +461,53 @@ fn llm_sessions_are_adjustable_live_and_lowering_kills_nothing() {
     drop(d);
     let d2 = s.start_with(|c| c.max_concurrent = 2);
     assert_eq!(d2.broker.limit("llm:claude"), Some(1));
+}
+
+fn home_active(d: &Arc<Daemon>) -> (Vec<u64>, u32) {
+    let world = d.world().unwrap();
+    let h = mason_daemon::views::Ctx::new(d, &world).home("");
+    (h.active.iter().map(|a| a.task).collect(), h.sessions_used)
+}
+
+#[test]
+fn active_models_lists_only_tasks_that_hold_a_session() {
+    let s = Scratch::new("test -f hello.txt", unique_script());
+    let d = s.start_with(|c| c.max_concurrent = 1);
+    // Nothing running: empty, and it matches the counter.
+    assert_eq!(home_active(&d), (vec![], 0));
+    // No session is free, so nothing is admitted; admit one task by hand, as
+    // if its session had been taken from under it. Its agent step now waits.
+    d.broker.set_limit("llm:claude", 0).unwrap();
+    let t = file_task(&d, "Waits for a slot");
+    let task = task_of(&d, t);
+    let entry = d.entry_for(&task);
+    d.emit(EventKind::Admitted {
+        task: t,
+        entry: Some(entry),
+    })
+    .unwrap();
+    wait_explained(&d, t);
+    assert!(state_of(&d, t).is_step());
+    assert_eq!(home_active(&d), (vec![], 0));
+    // A second task in a step state changes nothing either.
+    let t2 = file_task(&d, "Also waits");
+    let entry = d.entry_for(&task_of(&d, t2));
+    d.emit(EventKind::Admitted {
+        task: t2,
+        entry: Some(entry),
+    })
+    .unwrap();
+    wait_explained(&d, t2);
+    assert_eq!(home_active(&d), (vec![], 0));
+    // A session held by someone else counts, but is not a task's.
+    d.broker.set_limit("llm:claude", 1).unwrap();
+    let (id, held) = hold(&d, "other session", &[("llm:claude", 1)]);
+    assert_eq!(home_active(&d), (vec![], 1));
+    // Lowering the limit below what is held changes nothing about who is listed.
+    d.broker.set_limit("llm:claude", 0).unwrap();
+    assert_eq!(home_active(&d), (vec![], 1));
+    drop(held);
+    d.broker.lease_close(id);
 }
 
 fn file_in(d: &Arc<Daemon>, project: &str, title: &str) -> TaskId {

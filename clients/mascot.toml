@@ -256,6 +256,11 @@ files = [
   "brand/app_icon.png",
 ]
 
+[brand.app_icon_macos]
+files = [
+  "brand/app_icon_macos.png",
+]
+
 [brand.readme_banner]
 files = [
   "brand/readme_banner.png",

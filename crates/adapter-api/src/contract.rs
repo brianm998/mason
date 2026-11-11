@@ -133,7 +133,11 @@ pub fn tool_spec(tool: &str) -> Option<(String, Value)> {
             json!({
                 "summary": {"type": "string", "description": "What you changed, up to 2000 characters"},
                 "head": {"type": "string", "description": "Commit hash of the branch head (7 to 40 hex characters)"},
-                "notes": {"type": "string", "description": "Anything the reviewer should know"}
+                "notes": {"type": "string", "description": "Anything the reviewer should know"},
+                "removes": {"type": "array", "items": {"type": "object", "properties": {
+                    "file": {"type": "string"}, "line": {"type": "string"}, "reason": {"type": "string"}},
+                    "required": ["file", "line", "reason"]},
+                    "description": "Lines the base branch landed that your change removes on purpose, each with a reason. Landing sends a task back when a merge with the base dropped a landed line that is not listed here."}
             }),
             &["summary", "head"],
         ),
@@ -266,6 +270,22 @@ pub fn validate(tool: &str, a: &Value) -> Result<(), Vec<String>> {
                         "head: {h:?} is not a commit hash (7 to 40 hex characters)"
                     ));
                 }
+            }
+            match a.get("removes") {
+                None | Some(Value::Null) => {}
+                Some(Value::Array(rs)) => {
+                    for (i, r) in rs.iter().enumerate() {
+                        for k in ["file", "line", "reason"] {
+                            match r.get(k) {
+                                Some(Value::String(s)) if !s.trim().is_empty() => {}
+                                _ => p.push(format!(
+                                    "removes[{i}].{k}: required, a non-empty string"
+                                )),
+                            }
+                        }
+                    }
+                }
+                Some(_) => p.push("removes: must be an array of {file, line, reason}".into()),
             }
         }
         "submit_review" => {
@@ -921,6 +941,19 @@ mod tests {
             )
             .ok
         );
+    }
+
+    #[test]
+    fn change_may_list_lines_it_removes_on_purpose() {
+        let ok = json!({"summary": "s", "head": "0123abc", "removes": [
+            {"file": "a.rs", "line": "old();", "reason": "replaced by new()"}]});
+        assert!(validate("submit_change", &ok).is_ok());
+        let bad = json!({"summary": "s", "head": "0123abc", "removes": [
+            {"file": "a.rs", "line": "old();"}]});
+        let why = validate("submit_change", &bad).unwrap_err().join("\n");
+        assert!(why.contains("removes[0].reason"), "{why}");
+        let bad = json!({"summary": "s", "head": "0123abc", "removes": "all"});
+        assert!(validate("submit_change", &bad).is_err());
     }
 
     #[test]

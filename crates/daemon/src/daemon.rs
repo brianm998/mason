@@ -73,6 +73,8 @@ pub struct Daemon {
     last_big_stall_at: AtomicU64,
     last_big_stall_ms: AtomicU64,
     pub(crate) sweep: Mutex<crate::sweep::SweepState>,
+    /// Step hosts this daemon has asked to stop, so the sweep does not call a stop in flight an orphan.
+    pub stop_log: Mutex<crate::sweep::StopLog>,
     pub(crate) defs: crate::defs::Defs,
     pub broker: Arc<crate::sched::Broker>,
     /// Appended event sequence numbers, for the clients' sockets.
@@ -186,6 +188,9 @@ impl Daemon {
             match (&cfg.cpu, std::env::var_os("MASON_CPU_FILE")) {
                 (Some(c), _) => c.clone(),
                 (None, Some(f)) => Arc::new(crate::cpu::FileCpu(f.into())),
+                // The demo shows the same thing every run: the conformance check compares two
+                // demo daemons' views, and the machine's own reading differed between them.
+                (None, None) if demo => crate::cpu::FakeCpu::new(20),
                 (None, None) => crate::cpu::Sampler::start(),
             };
         let accounts = if demo {
@@ -269,6 +274,7 @@ impl Daemon {
             last_big_stall_at: AtomicU64::new(0),
             last_big_stall_ms: AtomicU64::new(0),
             sweep: Mutex::default(),
+            stop_log: Mutex::default(),
             defs: crate::defs::Defs::default(),
             broker,
             accounts,
@@ -697,6 +703,10 @@ impl Daemon {
                 && s.state == mason_step_host::registry::HostState::Running
             {
                 tracing::warn!(host = %s.info.id, prefix, "stopping a step host");
+                self.stop_log
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .record(&s.info.id, Instant::now());
                 if let Ok(mut c) = mason_step_host::client::HostClient::connect(
                     &s.info.sock,
                     mason_step_host::protocol::PREVIOUS,

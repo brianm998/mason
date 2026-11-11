@@ -315,6 +315,18 @@ final class MonitorCoreTests: XCTestCase {
         m.search.text = ""
         XCTAssertEqual(m.filteredRows(m.sidebar!.sections[0]).count, rows.count)
         XCTAssertEqual(m.visibleCount(m.sidebar!.sections[0]), 2)
+        XCTAssertEqual(m.countText(m.sidebar!.sections[0]), "2")
+    }
+
+    func testACappedSectionSaysSoInItsHeaderAndSearchSaysWhereItLooked() {
+        let m = MonitorModel()
+        var a = TaskRow(); a.id = 9; a.title = "newest"
+        var b = TaskRow(); b.id = 8; b.title = "older"
+        var sec = SidebarSection(); sec.state = "landed"; sec.title = "Landed"; sec.count = 2000; sec.rows = [a, b]
+        XCTAssertTrue(m.isCapped(sec))
+        XCTAssertEqual(m.countText(sec), "2 of 2000")
+        m.search.text = "newest"
+        XCTAssertEqual(m.countText(sec), "1 in newest 2")
     }
 
     // MARK: text scale
@@ -421,6 +433,9 @@ final class MonitorCoreTests: XCTestCase {
         let c = HealthSnapshot(json: ##"{"cpu":{"busy_pct":71,"compile_max_pct":50}}"##)
         XCTAssertEqual(c.cpuLine, "CPU 71% busy; a compile starts below 50%.")
         XCTAssertEqual(HealthSnapshot(json: ##"{"cpu":{"busy_pct":null,"compile_max_pct":80}}"##).cpuLine, "CPU not readable; a compile starts below 80%.")
+        XCTAssertEqual(HealthSnapshot(json: ##"{"cpu":{"busy_pct":20,"compile_max_pct":50,"source":"mach","failed_reads":0}}"##).cpuLine, "CPU 20% busy; a compile starts below 50%.")
+        XCTAssertEqual(HealthSnapshot(json: ##"{"cpu":{"busy_pct":100,"compile_max_pct":50,"source":"loadavg","failed_reads":4}}"##).cpuLine, "CPU 100% busy (load average; the CPU reading is missing); a compile starts below 50%.")
+        XCTAssertEqual(HealthSnapshot(json: ##"{"cpu":{"busy_pct":100,"compile_max_pct":50,"source":"assumed-busy","failed_reads":4}}"##).cpuLine, "CPU assumed 100% busy (nothing is readable, so new compiles wait); a compile starts below 50%.")
     }
 
     // ---- versions (Part 15) ----

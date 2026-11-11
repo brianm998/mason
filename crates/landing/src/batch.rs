@@ -9,6 +9,7 @@
 //! nothing, and a task already in the base is reported as landed. So a crash
 //! at any point resumes by running the same steps over.
 
+use crate::audit::{self, Dropped, Removal};
 use crate::git::{self, CatchUp, GitError};
 use crate::promote::{promote, PromoteError};
 use std::path::{Path, PathBuf};
@@ -18,6 +19,8 @@ use std::process::Command;
 pub struct BatchTask {
     pub id: u64,
     pub branch: String,
+    /// Base lines the task removes on purpose (its submission's `removes`).
+    pub removes: Vec<Removal>,
 }
 
 /// The subject of the commit that regenerates the README status block.
@@ -44,6 +47,13 @@ pub struct Ejected {
     pub files: String,
 }
 
+/// A task whose conflict resolution dropped lines the base had landed: its merge was undone.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Unkept {
+    pub id: u64,
+    pub lines: Vec<Dropped>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Assembled {
     /// The base tip the batch was built on.
@@ -58,6 +68,9 @@ pub struct Assembled {
     pub already: Vec<u64>,
     /// Could not be merged (the resolver failed or there is none): sent back.
     pub ejected: Vec<Ejected>,
+    /// Resolved, but the resolution dropped base lines: the merge was undone, so the
+    /// task is in none of the lists above. Sent back to restore them.
+    pub unkept: Vec<Unkept>,
 }
 
 #[derive(Debug)]
@@ -155,6 +168,7 @@ impl Batch<'_> {
                 out.already.push(t.id);
                 continue;
             }
+            let before = git::rev_parse(wt, "HEAD")?;
             match git::run(wt, &["merge", "--no-edit", "--no-ff", &t.branch]) {
                 Ok(_) => out.merged.push(t.id),
                 Err(e) => {
@@ -165,8 +179,18 @@ impl Batch<'_> {
                         return Err(e);
                     }
                     if self.resolve(t.id, &files) {
-                        out.merged.push(t.id);
-                        out.resolved.push(t.id);
+                        // Whatever the resolver did, the base's landed lines must still be there.
+                        let mb = git::run(wt, &["merge-base", &t.branch, &base_tip])?;
+                        let lines =
+                            audit::audit(wt, &mb, &base_tip, &t.branch, None, "HEAD", &t.removes)?;
+                        if lines.is_empty() {
+                            out.merged.push(t.id);
+                            out.resolved.push(t.id);
+                        } else {
+                            git::run(wt, &["reset", "--hard", "--quiet", &before])?;
+                            git::run(wt, &["clean", "-fd", "--quiet"])?;
+                            out.unkept.push(Unkept { id: t.id, lines });
+                        }
                     } else {
                         let _ = git::run(wt, &["merge", "--abort"]);
                         let _ = git::run(wt, &["reset", "--hard", "--quiet"]);

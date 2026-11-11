@@ -421,3 +421,49 @@ fn opening_a_session_finds_the_agents_session_and_says_whether_the_step_is_idle(
     );
     assert!(attention::session_for(&d, TaskId(9999)).is_err());
 }
+
+#[test]
+fn a_frozen_base_raises_an_alert_naming_the_fix_task_until_the_freeze_clears() {
+    let s = Scratch::new("true", happy_script());
+    let d = s.start();
+    let find = || {
+        mason_daemon::attention::alerts_now(&d)
+            .into_iter()
+            .find(|(k, _, _)| k == "frozen:scratch")
+    };
+    assert!(find().is_none());
+    let fix = file_task(&d, "Fix the base");
+    d.store
+        .set_freeze(
+            "scratch",
+            "smoke went red",
+            Some(fix.0),
+            mason_daemon::daemon::now_ms() - 120_000,
+        )
+        .unwrap();
+    let (_, kind, text) = find().expect("the freeze raises an alert");
+    assert_eq!(kind, "landing");
+    assert!(
+        text.contains("smoke went red")
+            && text.contains(&format!("Fix task #{}", fix.0))
+            && text.contains("2 min"),
+        "{text}"
+    );
+    assert!(!text.contains("will not lift"), "{text}");
+
+    d.emit(EventKind::StepFailed {
+        task: fix,
+        reason: "r".into(),
+    })
+    .unwrap();
+    let (_, _, text) = find().unwrap();
+    assert!(
+        text.contains("will not lift by itself")
+            && text.contains(&format!("mason task retry {}", fix.0))
+            && text.contains(&format!("mason task force {}", fix.0)),
+        "{text}"
+    );
+
+    d.store.clear_freeze("scratch").unwrap();
+    assert!(find().is_none(), "the alert clears with the freeze");
+}
