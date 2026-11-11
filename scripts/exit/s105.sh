@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Long waits (s105) exit test: a real masond, with [stall] long_wait = 1 (second) in notify.toml.
-#  1. With MASON_CPU_FILE at 100 a compile waits; `mason alerts` raises long_wait for the compile
-#     resource and names the CPU gate; dropping the reading lets it run and the alert clears.
+#  1. With MASON_CPU_FILE at 100 and one compile running, a second compile waits (the first always
+#     starts, 8cb1c7b); `mason alerts` raises long_wait for the compile resource and names the CPU
+#     gate; dropping the reading lets it run and the alert clears.
 #  2. A limit set to 0 and a request for it: `mason alerts` raises never_fits at once, with the fix.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
-root=$(mktemp -d /tmp/mason-s105.XXXXXX); daemon=""; cc=""; ww=""
+root=$(mktemp -d /tmp/mason-s105.XXXXXX); daemon=""; cc=""; ww=""; first=""
 cleanup() {
+  [ -n "$first" ] && kill "$first" 2>/dev/null || true
   [ -n "$cc" ] && kill "$cc" 2>/dev/null || true
   [ -n "$ww" ] && kill "$ww" 2>/dev/null || true
   [ -n "$daemon" ] && kill -9 "$daemon" 2>/dev/null || true
@@ -37,6 +39,15 @@ daemon=$!
 until m status >/dev/null 2>&1; do kill -0 "$daemon" || { cat "$root/masond.log" >&2; exit 1; }; sleep 0.1; done
 
 echo "== 1. a compile held back by the CPU gate raises long_wait, and it clears when the CPU falls"
+# The first compile always starts, whatever the CPU reading; the gate holds further ones. Two
+# slots, so the second waits for the CPU gate and not for a free slot.
+m resources limit compile 2 >/dev/null
+m run --needs compile -- sh -c "until [ -e '$root/release' ]; do sleep 0.1; done" 2>"$root/first.err" &
+first=$!
+end=$((SECONDS + 30))
+until m resources | grep -q 'compile .* 1/2 in use'; do
+  [ $SECONDS -lt $end ] || fail "the first compile did not start at CPU 100%"; sleep 0.2
+done
 m run --needs compile -- touch "$root/compiled" 2>"$root/cc.err" &
 cc=$!
 alerts_match 'long_wait .*CPU 100% > 50%' present || fail "no long_wait alert naming the CPU gate"
@@ -47,6 +58,7 @@ end=$((SECONDS + 30))
 until [ -e "$root/compiled" ]; do [ $SECONDS -lt $end ] || fail "the compile did not run after CPU fell"; sleep 0.2; done
 wait "$cc"; cc=""
 alerts_match 'long_wait' absent || fail "the long_wait alert did not clear"
+touch "$root/release"; wait "$first"; first=""
 echo "   CPU fell: the compile ran and the alert cleared"
 
 echo "== 2. a limit of 0 alerts at once"

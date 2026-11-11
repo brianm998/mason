@@ -6,7 +6,7 @@ not start until the owner has answered each decision below.** Nothing was instal
 repository was not touched. Star's files were read from `origin/develop` (8bbf5d9).
 
 Each decision has one recommendation, marked *Recommended*. The owner's answer is recorded under
-"Answer" when it comes; until then every line says "open".
+"Answer" when it comes; until then every line says "open". All seven were answered on 2026-11-11: the owner accepted every recommendation.
 
 ## 1. The per-ticket Gherkin feature runs (`gherkin.yml` with a `features` input)
 
@@ -23,7 +23,7 @@ names Gherkin features (`ship.py` 169-175, `train.py` 444-500) and waits for tha
 - C: teach direct-ci to dispatch extra workflows with inputs. The right long-term shape, but it changes
   landing code (a guard file), so it is its own task and the owner's approval.
 
-Answer: open.
+Answer (owner, 2026-11-11): **A**, a script step. `gherkin-features.sh` is still to be written; it waits for the shadow period to show where a MASON task carries its feature list.
 
 ## 2. `macos-gate.yml` on the batch
 
@@ -38,7 +38,7 @@ to `develop` (`gherkin-smoke.yml`).
 - B: a second script step like decision 1, dispatching `macos-gate.yml` and waiting. Keeps (b) before landing.
 - C: extend pr-gate itself to include the smoke legs on dispatch. A change to star's workflow, outside this task.
 
-Answer: open.
+Answer (owner, 2026-11-11): **A**. No `macos-gate.yml` dispatch before landing; the macOS smoke legs stay post-merge.
 
 ## 3. Hosted macOS runners that never start
 
@@ -54,7 +54,7 @@ the run Pending until the CI step's `timeout_s` and then the landing attempt end
   code in the landing guard file and the owner's explicit approval as a guard change. Not recommended until
   A has been seen to hurt in the shadow period.
 
-Answer: open. Also open: the timeout (draft: 4 h; starpipe waited 3 h).
+Answer (owner, 2026-11-11): **A**, keep MASON's rule and never land without the macOS result. Timeout: the draft's 4 h (`timeout_s = 14400`) stands.
 
 ## 4. Forcing the CPU merge in every suite (the GPU rule)
 
@@ -81,7 +81,7 @@ true).
 - C: hide Metal from the test processes (for example an environment that makes `MTLCreateSystemDefaultDevice`
   return nil). Not found in star's code and not verified to work; not recommended.
 
-Until A lands, **no MASON suite may run on this Mac**, because the key is only a request. Answer: open.
+Until A lands, **no MASON suite may run on this Mac**, because the key is only a request. Answer (owner, 2026-11-11): **A**. Filed through starpipe as brianm998/starry_timelapse_airplane_remover#544: `STAR_USE_GPU_FOR_MERGE=0` gates every `ImageAligner` merge and warp entry point (which covers `PixelatedImage`'s `?? true` fallback without changing it) and clears `Config.useGPUForMerge` on default and decode. The `.mason/` ticket, #545, is blocked by it.
 
 ## 5. Freezing, after the switch
 
@@ -98,7 +98,7 @@ suites, because they go through the wrapper. After the switch:
   and covered it by also holding the old one-slot file.
 - B: a small `mason freeze` command doing both. A MASON change; propose it after the switch if A proves clumsy.
 
-Answer: open.
+Answer (owner, 2026-11-11): **A**, `mason pause --mode all` plus an exclusive hold of the machine classes.
 
 ## 6. `pr-gate.yml` on a ref with no PR
 
@@ -109,7 +109,7 @@ slower than a narrowed PR run and it covers what a PR run skips. **No change to 
 - **A (Recommended): leave it.** Landing is a batch, and a batch always wants everything.
 - B: let `changes` also skip on a dispatch that carries only docs or pipeline paths. A change to star's workflow.
 
-Answer: open.
+Answer (owner, 2026-11-11): **A**, leave `pr-gate.yml` as it is.
 
 ## 7. The deep tier
 
@@ -119,7 +119,7 @@ the owner allows Opus (`allow-opus`, `model_<stage>`).
 - **A (Recommended): no deep tier at first.** Add `[agent.deep] tier = "deep"` and point `develop` at it later.
 - B: deep for `develop` only, from the start.
 
-Answer: open.
+Answer (owner, 2026-11-11): **A**, no deep tier at first.
 
 ## Not decisions, but the owner should know
 

@@ -106,7 +106,8 @@ impl FakeAdapter {
             let over = |c: &AtomicBool| -> Option<Outcome> {
                 if spec
                     .deadline
-                    .is_some_and(|d| start.elapsed() >= d + spec.deadline_extra.get()) {
+                    .is_some_and(|d| start.elapsed() >= d + spec.deadline_extra.get())
+                {
                     return Some(Outcome::Timeout);
                 }
                 c.load(Ordering::SeqCst).then_some(Outcome::NoResult)

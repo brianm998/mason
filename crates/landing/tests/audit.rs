@@ -60,14 +60,16 @@ fn a_line_kept_exactly() {
 
 #[test]
 fn a_line_rewrapped_over_two_lines() {
-    let base = "fn run() {\n    setup();\n    let total = compute(first, second);\n    finish();\n}\n";
+    let base =
+        "fn run() {\n    setup();\n    let total = compute(first, second);\n    finish();\n}\n";
     let result = "fn run() {\n    setup();\n    let total =\n        compute(first, second);\n    finish();\n}\n";
     assert!(Repo::new().run(base, START, result, &[]).is_empty());
 }
 
 #[test]
 fn an_argument_added_on_both_sides() {
-    let base = "fn run() {\n    setup();\n    let total = compute(first, second);\n    finish();\n}\n";
+    let base =
+        "fn run() {\n    setup();\n    let total = compute(first, second);\n    finish();\n}\n";
     let task = "fn run() {\n    setup();\n    finish();\n}\n";
     let result = "fn run() {\n    setup();\n    let total = compute(first, second, third);\n    finish();\n}\n";
     assert!(Repo::new().run(base, task, result, &[]).is_empty());
@@ -103,7 +105,8 @@ fn a_listed_removal_is_not_flagged() {
 
 #[test]
 fn blank_punctuation_and_source_hash_lines_are_ignored() {
-    let base = "fn run() {\n    setup();\n\n    // source-hash: 1234abcd\n    });\n    finish();\n}\n";
+    let base =
+        "fn run() {\n    setup();\n\n    // source-hash: 1234abcd\n    });\n    finish();\n}\n";
     let task = "fn run() {\n    own();\n    finish();\n}\n";
     assert!(Repo::new().run(base, task, task, &[]).is_empty());
 }

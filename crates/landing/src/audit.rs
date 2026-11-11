@@ -212,7 +212,10 @@ fn diff_text(repo: &Path, range: &str) -> Result<String, GitError> {
     );
     match out {
         Ok(o) if o.status.success() => Ok(String::from_utf8_lossy(&o.stdout).into_owned()),
-        Ok(o) => Err(failed(&args, String::from_utf8_lossy(&o.stderr).into_owned())),
+        Ok(o) => Err(failed(
+            &args,
+            String::from_utf8_lossy(&o.stderr).into_owned(),
+        )),
         Err(e) => Err(failed(&args, format!("{e:?}"))),
     }
 }
@@ -229,13 +232,13 @@ fn failed(args: &[&str], stderr: String) -> GitError {
 fn file_at(repo: &Path, rev: &str, file: &str) -> Option<String> {
     let spec = format!("{rev}:{file}");
     let o = proc::output(
-        Command::new("git")
-            .args(["show", &spec])
-            .current_dir(repo),
+        Command::new("git").args(["show", &spec]).current_dir(repo),
         crate::git::default_deadline(),
     )
     .ok()?;
-    o.status.success().then(|| String::from_utf8_lossy(&o.stdout).into_owned())
+    o.status
+        .success()
+        .then(|| String::from_utf8_lossy(&o.stdout).into_owned())
 }
 
 /// Audit a resolved merge: what the base (`base`) added since `merge_base` against
@@ -304,12 +307,9 @@ mod tests {
     }
 
     fn run(lines: &[&str], result: &str) -> Vec<String> {
-        unkept(
-            &one("f.rs", lines),
-            &BTreeMap::new(),
-            &[],
-            &|_| Some(result.to_string()),
-        )
+        unkept(&one("f.rs", lines), &BTreeMap::new(), &[], &|_| {
+            Some(result.to_string())
+        })
         .into_iter()
         .map(|d| d.line)
         .collect()
@@ -317,7 +317,11 @@ mod tests {
 
     #[test]
     fn exact_line_is_kept() {
-        assert!(run(&["let a = compute(x, y);"], "x\nlet a = compute(x, y);\ny\n").is_empty());
+        assert!(run(
+            &["let a = compute(x, y);"],
+            "x\nlet a = compute(x, y);\ny\n"
+        )
+        .is_empty());
     }
 
     #[test]

@@ -188,6 +188,9 @@ impl Daemon {
             match (&cfg.cpu, std::env::var_os("MASON_CPU_FILE")) {
                 (Some(c), _) => c.clone(),
                 (None, Some(f)) => Arc::new(crate::cpu::FileCpu(f.into())),
+                // The demo shows the same thing every run: the conformance check compares two
+                // demo daemons' views, and the machine's own reading differed between them.
+                (None, None) if demo => crate::cpu::FakeCpu::new(20),
                 (None, None) => crate::cpu::Sampler::start(),
             };
         let accounts = if demo {

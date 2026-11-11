@@ -7,3 +7,4 @@ clients/swift/.swiftpm/
 clients/compose/.gradle/
 clients/compose/**/build/
 clients/compose/.kotlin/
+__pycache__/

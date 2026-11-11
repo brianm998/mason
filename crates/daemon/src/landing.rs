@@ -378,37 +378,38 @@ fn check_dropped(c: &Ctx) -> Option<Verdict> {
     let repo = &c.project.path;
     let base_ref = c.project.base_ref();
     let removes = removals_in(&c.d.task_dir(c.task));
-    let read = crate::jobs::wait_out_environment(c, "auditing the task's merges with the base", || {
-        let revs = git::run(
-            repo,
-            &[
-                "rev-list",
-                "--merges",
-                "--first-parent",
-                "--parents",
-                &format!("{base_ref}..{}", c.branch),
-            ],
-        )?;
-        let mut found: Vec<audit::Dropped> = vec![];
-        for line in revs.lines() {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            let Some((&p1, others)) = parts.get(1..).and_then(<[&str]>::split_first) else {
-                continue;
-            };
-            for b in others {
-                if !git::is_ancestor(repo, b, &base_ref) {
+    let read =
+        crate::jobs::wait_out_environment(c, "auditing the task's merges with the base", || {
+            let revs = git::run(
+                repo,
+                &[
+                    "rev-list",
+                    "--merges",
+                    "--first-parent",
+                    "--parents",
+                    &format!("{base_ref}..{}", c.branch),
+                ],
+            )?;
+            let mut found: Vec<audit::Dropped> = vec![];
+            for line in revs.lines() {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                let Some((&p1, others)) = parts.get(1..).and_then(<[&str]>::split_first) else {
                     continue;
-                }
-                let mb = git::run(repo, &["merge-base", p1, b])?;
-                for d in audit::audit(repo, &mb, b, p1, Some(&base_ref), &c.branch, &removes)? {
-                    if !found.contains(&d) {
-                        found.push(d);
+                };
+                for b in others {
+                    if !git::is_ancestor(repo, b, &base_ref) {
+                        continue;
+                    }
+                    let mb = git::run(repo, &["merge-base", p1, b])?;
+                    for d in audit::audit(repo, &mb, b, p1, Some(&base_ref), &c.branch, &removes)? {
+                        if !found.contains(&d) {
+                            found.push(d);
+                        }
                     }
                 }
             }
-        }
-        Ok(found)
-    });
+            Ok(found)
+        });
     let dropped = match read {
         Ok(v) => v,
         Err(why) => return Some(Verdict::Failed(why)),

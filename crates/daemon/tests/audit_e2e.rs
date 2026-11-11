@@ -40,7 +40,8 @@ fn a_resolution_that_took_its_own_side_is_sent_back_naming_the_line_and_then_lan
                 git add -A && git -c user.name=t -c user.email=t@t commit -qm 'restore the landed call'"},
         {"call": {"tool": "submit_change", "args": {"summary": "restored", "head": "$HEAD"}}}
     ]);
-    let script = json!({"steps": {"explore": [explore_turn()], "develop": [develop1, develop2, develop3]}});
+    let script =
+        json!({"steps": {"explore": [explore_turn()], "develop": [develop1, develop2, develop3]}});
     let s = Scratch::new("test -f hello.txt && test -f fixed.txt", script);
     s.push_files(
         &[("lib.rs", "fn run() {\n    setup();\n    finish();\n}\n")],
