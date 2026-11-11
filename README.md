@@ -111,6 +111,7 @@ Status: **pre-alpha**. What each stage note says it built (generated from `docs/
 - **s122**: Both desktop monitors and the phone show the start image with the real connection status (looking for the daemon, connecting, reconnecting) until the first header arrives, and never again after it.
 - **s123**: Each ticket's state now shows its mascot icon in the count tiles, the top bar's need-you indicator, sidebar headers and rows, Home stage headings, decision cards and the phone, on both desktop clients.
 - **s124**: The task page in both desktop clients, and the phone's task screen, show the ticket's state as a 96 pt mascot illustration (the phone also shows the state name), chosen from the daemon's state and updated when it changes.
+- **s125**: Home shows a 96 pt mascot picture beside the status line (not_connected, needs_attention, developing, otherwise all_clear; no_tasks at 120 pt with an Add task button), an empty Landing queue shows nothing_landing (desktop and phone), an empty Health findings list shows all_clear, and a sidebar search with no matches shows no_results with "Nothing matched.", in both desktop clients.
 - **s126**: Every banner under the top bar now starts with a decorative 20 pt mascot icon (scaled with the text zoom) in both monitors, chosen only by the banner's own kind, and the daemon emits a `landing_frozen` banner while landing is frozen.
 - **s127**: The README opens with the mascot banner, and the 1280 x 640 social card is kept in `docs/images/`.
 <!-- status:end -->
