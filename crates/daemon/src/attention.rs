@@ -809,9 +809,7 @@ pub fn sync_alerts(d: &Daemon) -> (Vec<String>, Vec<String>) {
     // is true and then write it can cross, and the older answer would clear an alert the newer one
     // had just raised, to be raised again as "new".
     let _one = d.notify.syncing.lock().unwrap_or_else(|e| e.into_inner());
-    d.store
-        .sync_alerts(&alerts_now(d), now_ms())
-        .unwrap_or_default()
+    crate::notify::sync_table(d, &alerts_now(d))
 }
 
 // ---- the metric ------------------------------------------------------------
