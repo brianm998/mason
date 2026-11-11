@@ -112,8 +112,9 @@ pub struct DiskGate {
     pub floor_mb: u64,
 }
 
-/// The CPU gate on the `compile` resource. Checked only when a compile would
-/// start; one that has started is never revoked.
+/// The CPU gate on the `compile` resource. Checked only when a further compile
+/// would start beside one already running (the first always starts); one that
+/// has started is never revoked.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CpuGate {
     pub busy_pct: u32,
@@ -289,11 +290,15 @@ pub fn plan(world: &World, waiting: &[Request]) -> Plan {
             (Some(free), Some(floor)) if usage.any && free < floor => Some((free, floor)),
             _ => None,
         };
+        let compile_running = usage.used.get(COMPILE).is_some_and(|n| *n > 0);
+        // Only a further compile waits for the CPU: the first always starts. CPU use
+        // is the whole machine's, so other work (another pipeline's builds, an
+        // editor indexing) would otherwise hold every compile back with none of
+        // ours running, which is the queue waiting on an idle `compile`.
         let hot = match world.cpu {
-            Some(g) if compiles && g.busy_pct >= g.max_pct => Some(g),
+            Some(g) if compiles && compile_running && g.busy_pct >= g.max_pct => Some(g),
             _ => None,
         };
-        let compile_running = usage.used.get(COMPILE).is_some_and(|n| *n > 0);
         let stalled = match world.stall {
             Some(g) if compiles && compile_running && g.slow_ms >= g.max_ms => Some(g),
             _ => None,
