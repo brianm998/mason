@@ -66,7 +66,7 @@ public enum Format {
     }
 
     /// The whole percent `done` is of a real `total`: rounded down, at most 100, none for 0.
-    /// Only real totals (reported or counted) are ever passed in.
+    /// Only real totals are ever passed in.
     public static func percent(done: UInt64, total: UInt64) -> Int? {
         if total == 0 { return nil }
         return Int(min(done, total) * 100 / total)
@@ -81,7 +81,7 @@ public enum Format {
     ) -> String {
         let u = unit.isEmpty ? "" : " \(unit)"
         switch totalSource {
-        case .sourceReported, .sourceCounted:
+        case .sourceReported, .sourceCounted, .sourceExpected, .sourceMinimum:
             if total > 0 {
                 return "\(group(done)) of \(group(total))\(u), \(percent(done: done, total: total) ?? 0)%"
             }
@@ -95,12 +95,22 @@ public enum Format {
         return doneSource != .sourceNone ? "\(group(done))\(u)" : ""
     }
 
+    /// A real total (reported, counted, the last green run's count, or a suite's minimum), not a typical one.
+    public static func isReal(_ s: ProgressSource) -> Bool {
+        switch s {
+        case .sourceReported, .sourceCounted, .sourceExpected, .sourceMinimum: return true
+        default: return false
+        }
+    }
+
     /// Where a figure came from, in words.
     public static func sourceWords(_ s: ProgressSource, samples: UInt32) -> String {
         switch s {
         case .sourceReported: return "from the agent"
         case .sourceCounted: return "counted from output"
         case .sourceHistory: return "usually, from \(samples) past runs"
+        case .sourceExpected: return "the last green run's count"
+        case .sourceMinimum: return "the suite's minimum"
         default: return ""
         }
     }
@@ -130,7 +140,7 @@ public enum CellFill: Equatable, Sendable {
 
 extension Mason_V1_ProgressCell {
     public var hasRealTotal: Bool {
-        (totalSource == .sourceReported || totalSource == .sourceCounted) && total > 0
+        Format.isReal(totalSource) && total > 0
     }
 
     /// The whole percent, only from a real total.

@@ -50,6 +50,8 @@ class Theme(val dark: Boolean, val scale: Double) {
     val radius get() = T.sizeCornerRadius.dp
     val cell get() = s(T.sizeProgressCell)
     val illustration get() = s(T.sizeMascotIllustration)
+    val mascotIconSmall get() = s(T.sizeMascotIconSmall)
+    val mascotIcon get() = s(T.sizeMascotIcon)
 
     private fun style(size: Int, weight: FontWeight, color: Color, family: FontFamily? = null) =
         TextStyle(fontSize = (size * scale).sp, fontWeight = weight, color = color, fontFamily = family)
