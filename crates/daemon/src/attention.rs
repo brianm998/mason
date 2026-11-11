@@ -580,6 +580,45 @@ fn wait_alerts(d: &Daemon) -> Vec<(String, String, String)> {
         .collect()
 }
 
+/// A project's base is frozen: its post-land tier went red and only the fix task may land.
+/// Names the reason, how long, and the fix task with its state; when that task has failed or
+/// been canceled nothing will lift the freeze, so it says so and gives the commands.
+fn freeze_alerts(d: &Daemon, w: &mason_engine::World) -> Vec<(String, String, String)> {
+    let now = now_ms();
+    d.store
+        .freezes()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|f| {
+            let mins = now.saturating_sub(f.since) / 60_000;
+            let mut text = format!(
+                "{}: the base is frozen, only the fix may land ({}; frozen {mins} min)",
+                f.project, f.reason
+            );
+            let fix = f.fix_task.and_then(|n| w.tasks.get(&TaskId(n)));
+            match (f.fix_task, fix) {
+                (Some(n), Some(t)) => {
+                    text.push_str(&format!(
+                        ". Fix task #{n} is {}",
+                        format!("{:?}", t.state).to_lowercase()
+                    ));
+                    if matches!(t.state, State::Failed | State::Canceled) {
+                        text.push_str(&format!(
+                            ". The freeze will not lift by itself: run `mason task retry {n}`, \
+                             or `mason task force {n}` to land past it"
+                        ));
+                    }
+                }
+                _ => text.push_str(
+                    ". No fix task exists, so the freeze will not lift by itself: file one and \
+                     `mason task force` it past the freeze",
+                ),
+            }
+            (format!("frozen:{}", f.project), "landing".into(), text)
+        })
+        .collect()
+}
+
 /// The conditions that are true right now, as `(key, kind, text)`. An alert
 /// exists exactly as long as its condition does.
 pub fn alerts_now(d: &Daemon) -> Vec<(String, String, String)> {
@@ -623,6 +662,7 @@ pub fn alerts_now(d: &Daemon) -> Vec<(String, String, String)> {
     }
     out.extend(silent_alerts(d));
     out.extend(d.landing().attention());
+    out.extend(freeze_alerts(d, &w));
     out.extend(wait_alerts(d));
     if let Some((ms, source)) = d.broker.cpu_missing_ms() {
         out.push((
