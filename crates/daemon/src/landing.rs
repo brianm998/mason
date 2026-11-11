@@ -1004,6 +1004,8 @@ impl Runner {
         let mut note = String::new();
         let mut commit = String::new();
         let force = self.kind == "force";
+        // How long to wait before assembling again when the remote cannot be fetched.
+        let mut fetch_wait = Duration::from_secs(1);
 
         let outcome: Result<(), String> = 'outer: loop {
             for pk in parked.iter().filter(|x| delivered.insert(x.task)) {
@@ -1020,6 +1022,20 @@ impl Runner {
             };
             let mut asm = match asm {
                 Ok(a) => a,
+                // A fetch that fails decides nothing (decision 0105): the batch waits for the
+                // remote and assembles again, and its tasks stay in landing meanwhile. Waiting
+                // is not a round.
+                Err(e) if e.args.first().map(String::as_str) == Some("fetch") => {
+                    tracing::warn!(
+                        batch = batch_id,
+                        "landing waits for the remote: {e}; trying again in {} s",
+                        fetch_wait.as_secs()
+                    );
+                    rounds -= 1;
+                    std::thread::sleep(fetch_wait);
+                    fetch_wait = (fetch_wait * 2).min(Duration::from_secs(30));
+                    continue 'outer;
+                }
                 Err(e) => break Err(format!("could not assemble the batch: {e}")),
             };
             // MASON, not the tasks, writes the README status block, from the stage notes

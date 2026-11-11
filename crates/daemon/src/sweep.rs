@@ -82,8 +82,12 @@ pub fn sweep_once(d: &Arc<Daemon>) -> Vec<String> {
         }
     }
 
-    // 2. A queued task that could start but wasn't admitted.
-    if let Some(id) = d.next_admission(&w) {
+    // 2. A queued task that could start but wasn't admitted (not while admission is held on
+    // purpose, waiting for the first definitions pass).
+    if let Some(id) = (!d.admission_held())
+        .then(|| d.next_admission(&w))
+        .flatten()
+    {
         {
             let t = &w.tasks[&id];
             if confirmed(&st, format!("admit:{}", t.id)) {
