@@ -53,6 +53,8 @@ pub struct Daemon {
     admitting: AtomicBool,
     admit_again: AtomicBool,
     fetch_locks: Mutex<HashMap<PathBuf, Arc<Mutex<Option<std::time::Instant>>>>>,
+    /// Per project: when its fetches began failing (ms) and the last error. A success removes it.
+    fetch_failures: Mutex<HashMap<ProjectId, (u64, String)>>,
     repo_locks: Mutex<HashMap<PathBuf, RepoLock>>,
     /// When the definitions thread last finished a pass (ms; the start time before the first).
     pub(crate) defs_pass_ended_ms: AtomicU64,
@@ -249,6 +251,7 @@ impl Daemon {
             admit_again: AtomicBool::new(false),
             repo_locks: Mutex::default(),
             fetch_locks: Mutex::default(),
+            fetch_failures: Mutex::default(),
             defs_pass_ended_ms: AtomicU64::new(now_ms()),
             stalls: AtomicU64::new(0),
             silent: Mutex::default(),
@@ -401,10 +404,34 @@ impl Daemon {
             return Ok(());
         }
         let started = std::time::Instant::now();
-        mason_landing::git::run(&c.path, &["fetch", "--prune", &remote])
-            .map_err(|e| e.to_string())?;
-        *last_ok = Some(started);
-        Ok(())
+        let r = mason_landing::git::run(&c.path, &["fetch", "--prune", &remote])
+            .map_err(|e| e.to_string());
+        let mut f = self
+            .fetch_failures
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        match r {
+            Ok(_) => {
+                f.remove(&p);
+                *last_ok = Some(started);
+                Ok(())
+            }
+            Err(e) => {
+                f.entry(p).or_insert_with(|| (now_ms(), String::new())).1 = e.clone();
+                Err(e)
+            }
+        }
+    }
+
+    /// Projects whose fetches are failing: `(project, failing since ms, last error)`. Reads only the
+    /// record; no git, no lock but its own.
+    pub fn fetch_failing(&self) -> Vec<(ProjectId, u64, String)> {
+        self.fetch_failures
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|(p, (at, e))| (*p, *at, e.clone()))
+            .collect()
     }
 
     /// Who holds a repository lock now and since when (label, ms). Never takes a repository lock
