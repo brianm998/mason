@@ -974,7 +974,10 @@ password = "pw"
         assert!(s.routing.is_quiet(Channel::Sound, 23 * 60));
         assert_eq!(s.routing.reminder_ms, 45 * n::MINUTE_MS);
         assert_eq!(s.routing.repeat_ms, 180 * n::MINUTE_MS);
-        assert_eq!(parse("[reminder]\nrepeat = 0\n").unwrap().routing.repeat_ms, 0);
+        assert_eq!(
+            parse("[reminder]\nrepeat = 0\n").unwrap().routing.repeat_ms,
+            0
+        );
         assert_eq!(parse("").unwrap().routing.repeat_ms, 120 * n::MINUTE_MS);
         assert_eq!(s.speech_command, vec!["say", "-v", "Samantha"]);
         assert_eq!(s.ntfy.unwrap().0, "https://ntfy.sh");
