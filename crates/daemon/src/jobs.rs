@@ -1875,6 +1875,8 @@ fn finish_agent_inner(c: &Ctx, report: StepReport, dir: &Path) {
                     let _ = std::fs::write(dir.join("plan.json"), submission.to_string());
                 }
                 State::Developing => {
+                    // What landing's dropped-line audit reads: the lines removed on purpose.
+                    let _ = std::fs::write(dir.join("change.json"), submission.to_string());
                     let _ = std::fs::remove_file(dir.join("feedback.txt"));
                 }
                 _ => {}
