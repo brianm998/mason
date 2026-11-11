@@ -61,7 +61,7 @@ echo "== 2-7. the fake phone against the LAN listener"
 start
 [ "$(m lan status --json | python3 -c 'import json,sys;print(json.load(sys.stdin)["port"])')" = "$lanport" ] || fail "[lan] port was not used"
 python3 -I scripts/exit/fixtures/s24/fake_client.py "$lanport" "$port" "$bin/mason" --data-dir "$root/d" --config-dir "$root/c" || fail "the fake phone failed"
-[ "$(stat -f %Lp "$root/d/lan/key.der" 2>/dev/null || stat -c %a "$root/d/lan/key.der")" = 600 ] || fail "the private key is not mode 0600"
+[ "$(python3 -I -c 'import os,sys; print(oct(os.stat(sys.argv[1]).st_mode & 0o777)[2:])' "$root/d/lan/key.der")" = 600 ] || fail "the private key is not mode 0600"
 echo "PASS: the private key is mode 0600"
 echo "== 7. secrets are not in the log"
 python3 - "$root/masond.log" <<'PY' || fail "a code or token is in masond.log"

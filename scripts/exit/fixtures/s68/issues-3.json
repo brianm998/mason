@@ -39,23 +39,23 @@
  {
   "number": 205,
   "node_id": "I_205",
-  "title": "Owner issue five",
-  "body": "Body of Owner issue five.",
+  "title": "Outside issue five",
+  "body": "Body of Outside issue five.",
   "state": "open",
   "user": {
-   "login": "OWNER"
+   "login": "stranger"
   },
-  "labels": []
+  "labels": [{"name": "mason"}]
  },
  {
   "number": 206,
   "node_id": "I_206",
-  "title": "Owner issue six",
-  "body": "Body of Owner issue six.",
+  "title": "Outside issue six",
+  "body": "Body of Outside issue six.",
   "state": "open",
   "user": {
-   "login": "OWNER"
+   "login": "stranger"
   },
-  "labels": []
+  "labels": [{"name": "mason"}]
  }
 ]
