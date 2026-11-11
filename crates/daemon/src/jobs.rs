@@ -1027,6 +1027,8 @@ struct TestChecks {
     wt: PathBuf,
     timeout: Duration,
     slots: CheckSlots,
+    /// The step's deadline grows by the time the agent spent queued for a check.
+    extra: mason_adapter_api::DeadlineExtra,
     id_prefix: String,
     log_dir: PathBuf,
 }
@@ -1050,7 +1052,10 @@ impl CheckHandler for TestChecks {
         // going (or takes its result) at once: it starts nothing, so it does not
         // queue behind other work for a slot the run it joins already took.
         let queue = !crate::hostedcheck::pending(&self.slots.d, &spec);
-        let Ok(test_lease) = self.slots.swap_for_test(queue) else {
+        let queued = Instant::now();
+        let swapped = self.slots.swap_for_test(queue);
+        self.extra.add(queued.elapsed());
+        let Ok(test_lease) = swapped else {
             return CheckRun::Done {
                 passed: false,
                 summary: "The step is over; the check did not run.".into(),
@@ -1419,11 +1424,13 @@ fn agent_job(c: &Ctx) {
     // `run_check` runs the project's tests: the command of its test step, layered exactly
     // as the test step itself resolves it (runtime and task overrides included).
     let tests_cmd = test_command(&c.d, &c.def, c.project_id, Some(c.task));
+    let deadline_extra = mason_adapter_api::DeadlineExtra::default();
     let checks = Box::new(TestChecks {
         cmd: tests_cmd,
         wt: c.wt.clone(),
         timeout: c.project.test_timeout,
         slots: CheckSlots::new(c),
+        extra: deadline_extra.clone(),
         id_prefix: format!("t{}r{}-check", c.task.0, c.run.0),
         log_dir: c.task_dir(),
     });
@@ -1474,6 +1481,7 @@ fn agent_job(c: &Ctx) {
 
     let adapter = adapter(c);
     let mut spec = SessionSpec::new(kind, &prompt, &c.wt);
+    spec.deadline_extra = deadline_extra;
     let agent = c.project.agent();
     // Both providers go through the mapping: the requested tier and level
     // become the real model and effort, unless something names them outright.

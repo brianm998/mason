@@ -47,6 +47,21 @@ impl SubmissionFlag {
     }
 }
 
+/// Time added to a session's deadline while the agent could not work: it was
+/// waiting in the queue for a `run_check`. Shared with whoever grants it.
+#[derive(Clone, Default)]
+pub struct DeadlineExtra(Arc<std::sync::atomic::AtomicU64>);
+
+impl DeadlineExtra {
+    pub fn add(&self, d: Duration) {
+        let ms = u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
+        self.0.fetch_add(ms, Ordering::SeqCst);
+    }
+    pub fn get(&self) -> Duration {
+        Duration::from_millis(self.0.load(Ordering::SeqCst))
+    }
+}
+
 #[derive(Clone)]
 pub struct SessionSpec {
     pub step: StepKind,
@@ -60,6 +75,8 @@ pub struct SessionSpec {
     pub tool_timeout: Duration,
     /// The whole invocation is cut off after this long: `Outcome::Timeout`.
     pub deadline: Option<Duration>,
+    /// Queue time of the agent's checks, added to `deadline` as it accrues.
+    pub deadline_extra: DeadlineExtra,
     pub contract: Option<ContractHandle>,
     pub accepted: SubmissionFlag,
     /// Names this step run so a restarted controller can find its session
@@ -120,6 +137,7 @@ impl SessionSpec {
             effort: None,
             tool_timeout: Duration::from_secs(600),
             deadline: None,
+            deadline_extra: DeadlineExtra::default(),
             contract: None,
             accepted: SubmissionFlag::default(),
             run_key: None,
