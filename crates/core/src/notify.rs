@@ -231,6 +231,7 @@ impl Routing {
             "provider_limit",
             "provider_overage",
             "provider_budget",
+            "daemon_bug",
             "numbers", // the stage and exit-script numbers are nearly used up
         ] {
             put(k, broke.clone());
@@ -428,7 +429,8 @@ impl Sound {
 pub fn sound_for(kind: &str) -> Sound {
     match kind {
         "needs_you" => Sound::Decision,
-        "failed" | "landing" | "daemon_down" | "credentials" | "provider_outage" | "stalled"
+        "failed" | "daemon_bug" | "landing" | "daemon_down" | "credentials" | "provider_outage"
+        | "stalled"
         | "environment" | "runtime" | "definition" | "disk" | "blocked" | "host_lost"
         | "tracker" | "provider_limit" | "provider_overage" | "provider_budget" | "git_stuck"
         | "numbers" => Sound::Broke,
