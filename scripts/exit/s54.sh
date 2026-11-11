@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Self-hosting max_open (s54) exit test: tasks held behind a blocker do not count as open.
-# A real masond on a project with [self] max_open = 3.
+# Self-hosting max_open (s54) exit test: the owner's own tasks are shown, never counted or
+# refused (s46, decision 0024), and tasks held behind a blocker are not open.
+# A real masond on a project with [self] max_open = 3; every task here is the owner's.
 #  1. A chain of five tasks filed with --after (one runnable, four held) is all accepted, and
-#     `mason self` shows 1/3 open with four held.
-#  2. Two more running tasks fill the three slots (held ones still not counted); the next
-#     filing is refused with the new message, naming the held count.
+#     `mason self` shows 0/3 open with 1 of yours open (held ones are not open).
+#  2. Two more running tasks, then a fourth past max_open: all accepted, nothing counted,
+#     4 of yours open.
 #  3. Landing the first releases the second (and only it, the rest wait for their own blockers),
 #     one after another in order.
 set -euo pipefail
@@ -82,7 +83,7 @@ TOML
 daemon=$!
 until m status >/dev/null 2>&1; do kill -0 "$daemon" || { cat "$root/masond.log" >&2; exit 1; }; sleep 0.1; done
 
-echo "== 1. a chain of five with --after: all accepted, 1/3 open, four held"
+echo "== 1. a chain of five with --after: all accepted; 1 of yours open, the four held are not"
 c1=$(add "chain 1"); [ -n "$c1" ] || fail "chain 1 was not accepted"
 prev=$c1; ids="$c1"
 for n in 2 3 4 5; do
@@ -91,18 +92,18 @@ for n in 2 3 4 5; do
 done
 set -- $ids; c2=$2; c3=$3; c4=$4; c5=$5
 wait_for 30 "chain 1 to run" running "$c1"
-wait_for 30 "the count to read 1/3 with four held" self_is "1/3 open (4 held behind others, not counted)"
+wait_for 30 "the line to read 0/3 open, 1 of yours" self_is "0/3 open (1 of yours open, not limited)"
 echo "   $(self_line)"
 
-echo "== 2. fill the three slots; the next filing is refused with the new message"
+echo "== 2. the owner's filings past max_open are accepted and never counted"
 r1=$(add "run 1"); r2=$(add "run 2")
-[ -n "$r1" ] && [ -n "$r2" ] || fail "the running tasks were refused while only held ones were open"
-wait_for 30 "the count to read 3/3" self_is "3/3 open (4 held behind others, not counted)"
-if out=$(m task add "one too many" --project web --body x 2>&1); then fail "a filing at 3 counted tasks was accepted: $out"; fi
-echo "   refused: $out"
-echo "$out" | grep -q "3 self-tasks are open" || fail "the refusal does not say 3 are open: $out"
-echo "$out" | grep -q "limit is 3" || fail "the refusal does not say the limit: $out"
-echo "$out" | grep -q "4 held behind others" || fail "the refusal does not say 4 held are not counted: $out"
+[ -n "$r1" ] && [ -n "$r2" ] || fail "the owner's running tasks were refused"
+wait_for 30 "the line to read 3 of yours open" self_is "0/3 open (3 of yours open, not limited)"
+r3=$(add "past max_open") || true
+[ -n "$r3" ] || fail "the owner's filing past max_open was refused"
+wait_for 30 "the fourth to run" running "$r3"
+wait_for 30 "the line to read 4 of yours open" self_is "0/3 open (4 of yours open, not limited)"
+echo "   $(self_line)"
 
 echo "== 3. landing the first releases the held ones, in order"
 touch "$root/gate/chain 1"
@@ -119,5 +120,5 @@ for pair in "$c2 $c3 2" "$c3 $c4 3" "$c4 $c5 4"; do
 done
 touch "$root/gate/chain 5"
 wait_for 60 "chain 5 to land" landed "$c5"
-touch "$root/gate/run 1" "$root/gate/run 2"
+touch "$root/gate/run 1" "$root/gate/run 2" "$root/gate/past max_open"
 echo "s54 OK"
