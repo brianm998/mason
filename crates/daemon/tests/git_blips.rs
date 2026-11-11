@@ -83,7 +83,11 @@ impl Stub {
     /// Fail `sub` (when the arguments also contain `pat`, or `-` for any) with `msg`:
     /// `once`, or `always` until [`Stub::clear`].
     fn fail(&self, mode: &str, sub: &str, pat: &str, msg: &str) {
-        std::fs::write(self.dir.join("fail"), format!("{mode}\n{sub}\n{pat}\n{msg}\n")).unwrap();
+        std::fs::write(
+            self.dir.join("fail"),
+            format!("{mode}\n{sub}\n{pat}\n{msg}\n"),
+        )
+        .unwrap();
     }
     fn clear(&self) {
         let _ = std::fs::remove_file(self.dir.join("fail"));
@@ -119,7 +123,12 @@ fn a_missing_landing_toml_is_the_defaults_and_an_unreadable_one_is_no_answer() {
     );
 
     // Git failing is not "no file": no answer, never the defaults.
-    stub.fail("always", "ls-tree", "landing.toml", "fatal: Unable to create 'x/index.lock'");
+    stub.fail(
+        "always",
+        "ls-tree",
+        "landing.toml",
+        "fatal: Unable to create 'x/index.lock'",
+    );
     let e = read_config(&d, pid).unwrap_err();
     assert!(matches!(e, ConfigError::Unread(_)), "{e:?}");
     stub.fail("always", "show", "landing.toml", "fatal: broken");
@@ -139,7 +148,12 @@ fn a_step_goes_on_from_the_last_known_base_after_a_failed_fetch() {
     let (_g, stub) = stub();
     let s = Scratch::new("test -f hello.txt", happy_script());
     let d = s.start();
-    stub.fail("always", "fetch", "-", "fatal: unable to access remote: could not resolve host");
+    stub.fail(
+        "always",
+        "fetch",
+        "-",
+        "fatal: unable to access remote: could not resolve host",
+    );
     let t = file_task(&d, "fetch fails");
     wait_for("the develop step to start", 60, || {
         steps_run(&d, t).iter().any(|n| n == "develop")
@@ -251,5 +265,8 @@ fn a_lock_error_that_lasts_fails_the_step_naming_what_failed() {
     wait_for("the task to fail", 60, || state_of(&d, t) == State::Failed);
     let ev = events(&d);
     mason_daemon::jobs::set_env_wait(Duration::ZERO, Duration::ZERO);
-    assert!(ev.contains("preparing the worktree") && ev.contains("packed-refs.lock"), "{ev}");
+    assert!(
+        ev.contains("preparing the worktree") && ev.contains("packed-refs.lock"),
+        "{ev}"
+    );
 }

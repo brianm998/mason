@@ -35,10 +35,13 @@ fun MainPane(model: MonitorModel, modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun Section(title: String, content: @Composable ColumnScope.() -> Unit) {
+private fun Section(title: String, state: String? = null, content: @Composable ColumnScope.() -> Unit) {
     val theme = LocalTheme.current
     Column(verticalArrangement = Arrangement.spacedBy(theme.spacing)) {
-        Text(title, style = theme.title())
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(theme.spacingSmall)) {
+            Text(title, style = theme.title())
+            if (state != null) StateIcon(state)
+        }
         content()
     }
 }
@@ -111,7 +114,7 @@ fun HomePage(model: MonitorModel) {
             }
         }
         h?.stages?.forEach { st ->
-            Section(st.title) {
+            Section(st.title, st.state) {
                 st.rows.forEach { r ->
                     Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing), verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier.clickable { model.go(Page.Task(r.id)) }) {

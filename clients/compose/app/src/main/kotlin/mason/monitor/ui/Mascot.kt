@@ -1,9 +1,16 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 package mason.monitor.ui
 
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.layout.size
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.res.loadImageBitmap
 import mason.MascotManifest
+import mason.Tokens
 
 /**
  * The one way the Compose monitor loads the mascot art (the same files the SwiftUI monitor
@@ -23,6 +30,9 @@ object Mascot {
             null
         }
 
+    /** The app icon (the window and Dock icon), or null if it cannot be loaded. */
+    fun appIcon(): ImageBitmap? = bitmap("brand/app_icon.png")
+
     /** The resource path of a state icon at 20 or 24 (scale 1..3), or null when not in the manifest. */
     fun iconPath(id: String, size: Int, scale: Int = 2): String? =
         "icons/$id-$size@${scale}x.png".takeIf { id in MascotManifest.stateIds && it in MascotManifest.files }
@@ -41,4 +51,21 @@ object Mascot {
         bannerIconPath(id, scale)?.let { bitmap(it) }
 
     fun illustration(id: String): ImageBitmap? = illustrationPath(id)?.let { bitmap(it) }
+}
+
+/**
+ * A task state's mascot image (the daemon's own state string) at the 20 dp token, or the 24 dp
+ * one when [large], times the text zoom. Decorative (`contentDescription = null`) and never
+ * tinted. An unknown state draws nothing and takes no room.
+ */
+@Composable
+fun StateIcon(state: String, modifier: Modifier = Modifier, large: Boolean = false) {
+    val theme = LocalTheme.current
+    val size = if (large) Tokens.sizeMascotIcon else Tokens.sizeMascotIconSmall
+    // The art has 1x, 2x and 3x files; the largest is sharp at any zoom and is scaled down.
+    val bitmap = remember(state, size) { Mascot.icon(state, size, scale = 3) }
+    if (bitmap != null) {
+        val side = if (large) theme.mascotIcon else theme.mascotIconSmall
+        Image(bitmap, contentDescription = null, modifier = modifier.size(side), filterQuality = FilterQuality.High)
+    }
 }
