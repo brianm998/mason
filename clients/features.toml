@@ -265,3 +265,8 @@ platform_reason = "Long logs are not readable on a phone; the task detail shows 
 status = "deliberate-difference"
 description = "Opening, attaching to and typing into an agent's session"
 platform_reason = "A session needs a keyboard and a terminal-sized view, and a phone connection that drops would leave one half-driven"
+
+[feature.mascot-art]
+description = "The approved mascot art (clients/mascot.toml, one copy in clients/swift/Sources/MasonMascot/Art) and one loader per client: icon(id, size), bannerIcon(id) and illustration(id), nothing for an unknown id; no visible UI yet"
+swift = "done"
+compose = "done"

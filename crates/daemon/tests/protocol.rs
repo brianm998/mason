@@ -902,3 +902,128 @@ fn demo_usage_has_accounts_in_several_states() {
         .unwrap();
     assert!(q.texts.contains(&"no percentage reported".to_string()));
 }
+
+/// Fill `pool` with work that waits for `gate`, until it refuses more.
+fn clog(pool: &mason_daemon::pool::Pool, gate: &Arc<std::sync::Mutex<()>>) {
+    let mut n = 0;
+    loop {
+        let g = gate.clone();
+        match pool.spawn(move || drop(g.lock())) {
+            Ok(()) => n += 1,
+            Err(_) => break,
+        }
+        assert!(n < 10_000);
+    }
+}
+
+fn snapshot_views(m: &[ServerMessage]) -> Option<usize> {
+    m.iter().find_map(|m| match &m.body {
+        Some(server_message::Body::Snapshot(s)) => Some(s.views.len()),
+        _ => None,
+    })
+}
+
+#[test]
+fn a_full_main_pool_does_not_blank_a_new_client_or_stop_updates() {
+    let (d, port, _dir) = demo();
+    let gate = Arc::new(std::sync::Mutex::new(()));
+    let held = gate.lock().unwrap();
+    clog(&d.pool, &gate);
+    std::thread::sleep(Duration::from_millis(300));
+    clog(&d.pool, &gate);
+    assert!(d.pool.spawn(|| {}).is_err(), "the main pool is full");
+    let mut c = Client::connect(port, Encoding::Protobuf).unwrap();
+    c.hello(0, false).unwrap();
+    let got = collect(&mut c, Duration::from_secs(5), |m| !m.is_empty());
+    assert_eq!(snapshot_views(&got), Some(3), "a full snapshot: {got:?}");
+    d.demo_next().unwrap();
+    d.demo_next().unwrap();
+    let got = collect(&mut c, Duration::from_secs(5), |m| {
+        views_of(m)
+            .iter()
+            .any(|v| matches!(&v.body, Some(Body::Header(h)) if h.attention == 1))
+    });
+    assert!(!views_of(&got).is_empty(), "a view update arrived");
+    drop(held);
+}
+
+#[test]
+fn views_owed_while_the_view_pool_is_busy_arrive_when_it_clears_without_another_event() {
+    let (d, port, _dir) = demo();
+    let mut c = Client::connect(port, Encoding::Protobuf).unwrap();
+    c.hello(0, false).unwrap();
+    collect(&mut c, Duration::from_secs(2), |m| !m.is_empty());
+    let gate = Arc::new(std::sync::Mutex::new(()));
+    let held = gate.lock().unwrap();
+    clog(&d.view_pool, &gate);
+    d.demo_next().unwrap();
+    d.demo_next().unwrap();
+    // Nothing can be computed yet.
+    let got = collect(&mut c, Duration::from_millis(800), |m| {
+        !views_of(m).is_empty()
+    });
+    assert!(views_of(&got).is_empty(), "nothing while the pool is busy");
+    drop(held);
+    // No further event: the session pushes what it owes by itself.
+    let got = collect(&mut c, Duration::from_secs(5), |m| {
+        views_of(m)
+            .iter()
+            .any(|v| matches!(&v.body, Some(Body::Header(h)) if h.attention == 1))
+    });
+    assert!(
+        views_of(&got)
+            .iter()
+            .any(|v| matches!(&v.body, Some(Body::Header(h)) if h.attention == 1)),
+        "the owed update arrived: {got:?}"
+    );
+}
+
+#[test]
+fn a_snapshot_waits_for_the_view_pool_and_is_never_empty() {
+    let (d, port, _dir) = demo();
+    let gate = Arc::new(std::sync::Mutex::new(()));
+    let (g2, tx) = (gate.clone(), std::sync::mpsc::channel::<()>());
+    let releaser = std::thread::spawn(move || {
+        let _held = g2.lock().unwrap();
+        tx.0.send(()).unwrap();
+        std::thread::sleep(Duration::from_millis(1200));
+    });
+    tx.1.recv().unwrap();
+    clog(&d.view_pool, &gate);
+    let mut c = Client::connect(port, Encoding::Protobuf).unwrap();
+    c.hello(0, false).unwrap();
+    let got = collect(&mut c, Duration::from_secs(6), |m| !m.is_empty());
+    releaser.join().unwrap();
+    assert_eq!(snapshot_views(&got), Some(3), "{got:?}");
+}
+
+#[test]
+fn a_snapshot_that_cannot_be_computed_closes_the_socket_instead_of_going_out_empty() {
+    let (d, port, _dir) = demo();
+    let gate = Arc::new(std::sync::Mutex::new(()));
+    let held = gate.lock().unwrap();
+    clog(&d.view_pool, &gate);
+    std::thread::sleep(Duration::from_millis(300));
+    clog(&d.view_pool, &gate);
+    let mut c = Client::connect(port, Encoding::Protobuf).unwrap();
+    // The welcome needs the view pool too, so it may never come: either way,
+    // the client sees no snapshot, only a close.
+    let hello = c.hello(0, false);
+    let _ = hello;
+    let end = Instant::now() + Duration::from_secs(9);
+    let mut all = vec![];
+    let mut closed = false;
+    while Instant::now() < end {
+        match c.recv(Duration::from_millis(200)) {
+            Ok(Some(m)) => all.push(m),
+            Ok(None) => {}
+            Err(_) => {
+                closed = true;
+                break;
+            }
+        }
+    }
+    drop(held);
+    assert!(snapshot_views(&all).is_none(), "no snapshot, empty or not");
+    assert!(closed, "the socket was closed");
+}
