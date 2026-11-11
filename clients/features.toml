@@ -266,6 +266,11 @@ status = "deliberate-difference"
 description = "Opening, attaching to and typing into an agent's session"
 platform_reason = "A session needs a keyboard and a terminal-sized view, and a phone connection that drops would leave one half-driven"
 
+[feature.mascot-start-image]
+description = "Until the first header arrives the window shows the start image (whole, never cropped, no progress bar) with the real connection status beneath it: looking for the daemon, connecting, or the reconnect text; it goes at the first header and later disconnects use the banners only"
+swift = "done"
+compose = "done"
+
 [feature.mascot-art]
 description = "The approved mascot art (clients/mascot.toml, one copy in clients/swift/Sources/MasonMascot/Art) and one loader per client: icon(id, size), bannerIcon(id) and illustration(id), nothing for an unknown id; no visible UI yet"
 swift = "done"
