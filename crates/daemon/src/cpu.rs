@@ -465,7 +465,7 @@ mod tests {
         assert_eq!(mach_ticks([10, 20, 60, 10]), (40, 100));
         let a = mach_ticks([10, 20, 60, 10]);
         let b = mach_ticks([30, 40, 100, 10]);
-        assert_eq!(pct_between(a, b), Some(60));
+        assert_eq!(pct_between(a, b), Some(50));
         // No time passed, or a counter that wrapped: no reading.
         assert_eq!(pct_between(a, a), None);
         assert_eq!(
