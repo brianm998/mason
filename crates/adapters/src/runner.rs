@@ -31,8 +31,16 @@ impl Default for RunnerConfig {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum HoldReason {
-    UsageLimit { resets_at: Option<String> },
-    ProviderDown { detail: String },
+    UsageLimit {
+        resets_at: Option<String>,
+    },
+    ProviderDown {
+        detail: String,
+    },
+    /// The agent cannot authenticate; the owner has to log in again.
+    NotLoggedIn {
+        detail: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -395,6 +403,10 @@ impl<'a> StepRunner<'a> {
                 }
                 Outcome::ProviderDown { detail } => {
                     r.end = StepEnd::Hold(HoldReason::ProviderDown { detail });
+                    return r;
+                }
+                Outcome::NotLoggedIn { detail } => {
+                    r.end = StepEnd::Hold(HoldReason::NotLoggedIn { detail });
                     return r;
                 }
                 Outcome::Crash { detail } => return self.fail(r, FailReason::Crash { detail }),
