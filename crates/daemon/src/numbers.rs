@@ -271,8 +271,9 @@ pub fn feedback(v: &[Violation]) -> String {
 
 // ---- reading the base branch and the store -------------------------------------------
 
-/// Every path on the base tip under the numbered directories.
-pub fn base_paths(p: &ProjectCfg) -> Vec<String> {
+/// Every path on the base tip under the numbered directories. A failed git call is an error:
+/// an empty list would let a number be handed out or accepted a second time.
+pub fn base_paths(p: &ProjectCfg) -> Result<Vec<String>, git::GitError> {
     git::run(
         &p.path,
         &[
@@ -287,11 +288,10 @@ pub fn base_paths(p: &ProjectCfg) -> Vec<String> {
         ],
     )
     .map(|s| s.lines().map(String::from).collect())
-    .unwrap_or_default()
 }
 
 /// Files a branch adds against its base (since the merge base).
-pub fn added_files(repo: &Path, base_ref: &str, branch: &str) -> Vec<String> {
+pub fn added_files(repo: &Path, base_ref: &str, branch: &str) -> Result<Vec<String>, git::GitError> {
     git::run(
         repo,
         &[
@@ -302,7 +302,6 @@ pub fn added_files(repo: &Path, base_ref: &str, branch: &str) -> Vec<String> {
         ],
     )
     .map(|s| s.lines().map(String::from).collect())
-    .unwrap_or_default()
 }
 
 fn mine_from(task: &Task, rows: &[ReservationRow]) -> Mine {
@@ -338,7 +337,12 @@ impl Daemon {
             .map(|r| r.number)
             .max()
             .unwrap_or(0);
-        let (base_top, _) = highest(base_paths(p).iter().map(String::as_str));
+        // Advisory (the reservation itself is checked again): if the base cannot be read
+        // now, say there is room rather than turn a new task away on a git blip.
+        let Ok(paths) = base_paths(p) else {
+            return true;
+        };
+        let (base_top, _) = highest(paths.iter().map(String::as_str));
         let floor = self.cfg.adhoc_exit_start.saturating_sub(1);
         floor.max(top).max(base_top) < EXIT_CEILING
     }
@@ -355,7 +359,8 @@ impl Daemon {
         let need_exit = stage.is_none() && !have.iter().any(|r| r.kind == KIND_EXIT);
         let need_dec = !have.iter().any(|r| r.kind == KIND_DECISION);
         if need_exit || need_dec {
-            let (base_exit, base_dec) = highest(base_paths(p).iter().map(String::as_str));
+            let paths = base_paths(p).map_err(|e| format!("cannot read the base's numbers: {e}"))?;
+            let (base_exit, base_dec) = highest(paths.iter().map(String::as_str));
             if need_dec {
                 self.store
                     .reserve_number(task.0, KIND_DECISION, base_dec, DECISION_CEILING, now_ms())

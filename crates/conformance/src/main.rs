@@ -5,6 +5,7 @@
 //! ```text
 //! conformance features [FILE]                        check clients/features.toml
 //! conformance tokens --write|--check [--root DIR]    generate / verify the design tokens
+//! conformance mascot --write|--check [--root DIR]    generate / verify the mascot art manifest
 //! conformance expected --port P --out DIR [--actor NAME] [--now]
 //!                                                      play a manual demo daemon, write each checkpoint
 //!                                                      (--now: only the present state, for a real daemon)
@@ -14,7 +15,7 @@
 //! conformance latency --port P [--limit-ms N]        how long a state change takes to reach a client
 //! ```
 
-use mason_conformance::{conformance, features, tokens};
+use mason_conformance::{conformance, features, mascot, tokens};
 use mason_protocol::client::Client;
 use mason_protocol::*;
 use std::path::{Path, PathBuf};
@@ -91,7 +92,7 @@ fn all_views(c: &mut Client) -> Vec<View> {
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
-        die("usage: conformance features|tokens|expected|check ...");
+        die("usage: conformance features|tokens|mascot|expected|check ...");
     }
     let cmd = args.remove(0);
     match cmd.as_str() {
@@ -145,6 +146,53 @@ fn main() {
             }
             if check {
                 println!("the design tokens are current in both clients");
+            }
+        }
+        "mascot" => {
+            let write = flag(&mut args, "--write");
+            let check = flag(&mut args, "--check");
+            let root = PathBuf::from(opt(&mut args, "--root").unwrap_or_else(|| ".".into()));
+            if write == check {
+                die("give --write or --check");
+            }
+            let text = std::fs::read_to_string(root.join("clients/mascot.toml"))
+                .unwrap_or_else(|e| die(&format!("clients/mascot.toml: {e}")));
+            let m =
+                mascot::parse(&text).unwrap_or_else(|e| die(&format!("clients/mascot.toml: {e}")));
+            let outputs = [
+                (
+                    root.join("clients/swift/Sources/MasonMascot/MascotManifest.swift"),
+                    mascot::swift(&text).unwrap_or_else(|e| die(&e)),
+                ),
+                (
+                    root.join("clients/compose/core/src/main/kotlin/mason/MascotManifest.kt"),
+                    mascot::kotlin(&text).unwrap_or_else(|e| die(&e)),
+                ),
+            ];
+            let mut bad = false;
+            for (path, text) in &outputs {
+                if write {
+                    std::fs::write(path, text)
+                        .unwrap_or_else(|e| die(&format!("{}: {e}", path.display())));
+                    println!("wrote {}", path.display());
+                } else if std::fs::read_to_string(path).ok().as_deref() != Some(text.as_str()) {
+                    eprintln!(
+                        "{} is out of date: run `conformance mascot --write`",
+                        path.display()
+                    );
+                    bad = true;
+                }
+            }
+            if check {
+                let art = root.join("clients/swift/Sources/MasonMascot/Art");
+                for p in mascot::check_files(&m, &art).unwrap_or_else(|e| die(&e)) {
+                    eprintln!("  {p}");
+                    bad = true;
+                }
+                if bad {
+                    exit(1);
+                }
+                println!("the mascot art matches clients/mascot.toml and the generated names are current");
             }
         }
         "expected" => {

@@ -6,4 +6,5 @@
 
 pub mod conformance;
 pub mod features;
+pub mod mascot;
 pub mod tokens;

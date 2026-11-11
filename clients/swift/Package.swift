@@ -26,12 +26,17 @@ let package = Package(
             dependencies: [.product(name: "SwiftProtobuf", package: "swift-protobuf")]
         ),
         .target(name: "MasonTokens"),
+        // The mascot art (Part 17), one copy in Art/ that Compose reads too. Loaded by
+        // `Mascot`, which finds the resource bundle beside the executable or in the app's
+        // Resources, never through the build-directory path SwiftPM bakes in.
+        .target(name: "MasonMascot", resources: [.copy("Art")]),
         .target(name: "MonitorCore", dependencies: ["MasonProtocol", "MasonTokens"]),
-        .target(name: "MonitorPhone", dependencies: ["MonitorCore", "MasonTokens"]),
-        .target(name: "MonitorUI", dependencies: ["MonitorCore", "MasonTokens"]),
-        .executableTarget(name: "MasonMonitor", dependencies: ["MonitorUI", "MonitorCore"]),
-        .executableTarget(name: "MonitorTool", dependencies: ["MonitorUI", "MonitorCore"]),
+        .target(name: "MonitorPhone", dependencies: ["MonitorCore", "MasonTokens", "MasonMascot"]),
+        .target(name: "MonitorUI", dependencies: ["MonitorCore", "MasonTokens", "MasonMascot"]),
+        .executableTarget(name: "MasonMonitor", dependencies: ["MonitorUI", "MonitorCore", "MasonMascot"]),
+        .executableTarget(name: "MonitorTool", dependencies: ["MonitorUI", "MonitorCore", "MasonMascot"]),
         .testTarget(name: "MonitorCoreTests", dependencies: ["MonitorCore"]),
+        .testTarget(name: "MasonMascotTests", dependencies: ["MasonMascot"]),
     ],
     swiftLanguageModes: [.v5]
 )
