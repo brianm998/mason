@@ -43,6 +43,9 @@ struct SpeechSettingsView: View {
                 Text("System default").tag("")
                 ForEach(a.availableVoices(), id: \.self) { Text($0).tag($0) }
             }
+            if let line = a.noChannelLine {
+                Text(line).font(theme.small()).foregroundStyle(theme.muted)
+            }
             Text(a.isSpeaker ? "This monitor is the one that speaks." : "Another monitor speaks, or none is needed.")
                 .font(theme.small()).foregroundStyle(theme.muted)
         }

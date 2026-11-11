@@ -290,6 +290,7 @@ private fun SpeechSettingsDialog(model: MonitorModel, onClose: () -> Unit) {
                 Picker("Voice", s.voice.ifEmpty { "System default" }, listOf("System default") + a.availableVoices(), "speech-voice") {
                     a.update(s.copy(voice = if (it == "System default") "" else it))
                 }
+                a.noChannelLine?.let { Text(it, style = theme.small()) }
                 Text(
                     if (a.isSpeaker) "This monitor is the one that speaks." else "Another monitor speaks, or none is needed.",
                     style = theme.small(),

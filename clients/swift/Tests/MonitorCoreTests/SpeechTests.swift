@@ -170,6 +170,17 @@ final class SpeechTests: XCTestCase {
         XCTAssertEqual(sink.log.count, 3)
     }
 
+    func testTheNoChannelLineAppearsOnlyWhenTheDaemonSaysNoChannelWorks() {
+        let a = announcer(FakeSink())
+        XCTAssertNil(a.noChannelLine)
+        a.handle(claim: "{\"speaker\":false,\"reaches_without_monitor\":true,\"announcements\":[]}")
+        XCTAssertNil(a.noChannelLine)
+        a.handle(claim: "{\"speaker\":false,\"reaches_without_monitor\":false,\"announcements\":[]}")
+        XCTAssertNotNil(a.noChannelLine)
+        a.handle(claim: "{\"speaker\":false,\"announcements\":[]}")
+        XCTAssertNil(a.noChannelLine)
+    }
+
     func testOnlyTheSpeakerQueuesWhatTheDaemonSends() {
         let sink = FakeSink()
         let a = announcer(sink)
