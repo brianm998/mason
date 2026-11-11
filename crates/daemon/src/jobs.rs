@@ -2381,7 +2381,10 @@ mod tests {
             false
         )));
         assert!(!environmental(&e("fatal: not a git repository", false)));
-        assert!(!environmental(&e("error: pathspec 'x' did not match", false)));
+        assert!(!environmental(&e(
+            "error: pathspec 'x' did not match",
+            false
+        )));
     }
 
     #[test]

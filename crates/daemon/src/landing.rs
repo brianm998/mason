@@ -179,8 +179,7 @@ fn read_config_text(p: &crate::config::ProjectCfg) -> Result<String, String> {
     if listed.trim().is_empty() {
         return Ok(String::new());
     }
-    git::run(&p.path, &["show", &format!("{base}:.mason/landing.toml")])
-        .map_err(|e| e.to_string())
+    git::run(&p.path, &["show", &format!("{base}:.mason/landing.toml")]).map_err(|e| e.to_string())
 }
 
 /// `.mason/landing.toml` on the base branch; absent means the defaults.
@@ -193,9 +192,8 @@ pub fn read_config(d: &Daemon, pid: ProjectId) -> Result<LandingConfig, ConfigEr
     let p = d
         .project(pid)
         .ok_or_else(|| ConfigError::Refused("no such project".into()))?;
-    let text = read_config_text(&p).map_err(ConfigError::Unread)?;
-    let c = config::parse(&text)
-        .map_err(|e| {
+    let text = read_config_text(p).map_err(ConfigError::Unread)?;
+    let c = config::parse(&text).map_err(|e| {
         ConfigError::Refused(format!("{} (.mason/landing.toml): {}", p.id, e.join("; ")))
     })?;
     let problems = config::service_problems(
@@ -304,13 +302,12 @@ fn check_numbers(c: &Ctx) -> Option<Verdict> {
         return None; // numbers were never reserved (a demo or an old task): nothing to hold it to
     }
     // A base that cannot be read now is waited for, not taken as having no numbered files.
-    let read =
-        crate::jobs::wait_out_environment(c, "reading the base's numbered files", || {
-            Ok((
-                crate::numbers::added_files(&c.project.path, &c.project.base_ref(), &c.branch)?,
-                crate::numbers::base_paths(&c.project)?,
-            ))
-        });
+    let read = crate::jobs::wait_out_environment(c, "reading the base's numbered files", || {
+        Ok((
+            crate::numbers::added_files(&c.project.path, &c.project.base_ref(), &c.branch)?,
+            crate::numbers::base_paths(&c.project)?,
+        ))
+    });
     let (added, base) = match read {
         Ok(v) => v,
         Err(why) => return Some(Verdict::Failed(why)),
