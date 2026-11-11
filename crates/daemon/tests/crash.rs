@@ -134,7 +134,10 @@ fn crash_at(point: &str) -> Result<(), String> {
         "--body",
         "Create hello.txt.",
     ]);
-    died_of_sigkill(&mut first, 60)?;
+    // Seven daemons run at once, each through explore, develop, test and landing, on a
+    // machine that may be compiling other tasks: the budget is for a slow run, not a
+    // hang (a crash point that is never reached still fails, just later).
+    died_of_sigkill(&mut first, 240)?;
     // Not dropped yet: dropping it would kill the step hosts that must survive.
     let _first = first;
 
