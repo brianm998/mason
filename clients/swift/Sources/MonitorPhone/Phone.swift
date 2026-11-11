@@ -36,7 +36,6 @@ public struct PhoneRootView: View {
     }
 }
 
-<<<<<<< HEAD
 /// Shown until the first header arrives: the whole start image fitted to the screen width on a
 /// plain deep-blue ground (the robot is left, the word right, so no crop), the real connection
 /// status beneath it, and no progress bar. Later disconnects never bring it back.
@@ -58,7 +57,9 @@ struct PhoneStartView: View {
     private var status: String {
         if model.connected { return "Connecting…" }
         return model.reconnecting ? "Daemon restarting, reconnecting…" : "Looking for the daemon…"
-=======
+    }
+}
+
 /// A task state's mascot image on the phone: 20 pt in tiles and section headers, 24 pt trailing
 /// on rows, growing with Dynamic Type. Decorative, never tinted; an unknown state draws nothing.
 struct PhoneStateIcon: View {
@@ -77,7 +78,6 @@ struct PhoneStateIcon: View {
             let side = trailing ? large : small
             image.resizable().frame(width: side, height: side).accessibilityHidden(true)
         }
->>>>>>> origin/develop
     }
 }
 
