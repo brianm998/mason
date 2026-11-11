@@ -463,6 +463,44 @@ fn llm_sessions_are_adjustable_live_and_lowering_kills_nothing() {
     assert_eq!(d2.broker.limit("llm:claude"), Some(1));
 }
 
+fn home_active(d: &Arc<Daemon>) -> (Vec<u64>, u32) {
+    let world = d.world().unwrap();
+    let h = mason_daemon::views::Ctx::new(d, &world).home("");
+    (h.active.iter().map(|a| a.task).collect(), h.sessions_used)
+}
+
+#[test]
+fn active_models_lists_only_tasks_that_hold_a_session() {
+    let s = Scratch::new("test -f hello.txt", unique_script());
+    let d = s.start_with(|c| c.max_concurrent = 1);
+    // Nothing running: empty, and it matches the counter.
+    assert_eq!(home_active(&d), (vec![], 0));
+    // Every session is held by someone else; the task reaches its agent step
+    // and waits there for a slot.
+    let (id, held) = hold(&d, "other session", &[("llm:claude", 1)]);
+    let t = file_task(&d, "Waits for a slot");
+    wait_explained(&d, t);
+    assert!(matches!(
+        state_of(&d, t),
+        State::Developing | State::Exploring
+    ));
+    let (active, used) = home_active(&d);
+    assert_eq!(used, 1, "the other holder's session");
+    assert!(
+        active.is_empty(),
+        "a waiting task is not a session: {active:?}"
+    );
+    // Lowering the limit below what is held changes nothing about who runs.
+    d.broker.set_limit("llm:claude", 0).unwrap();
+    assert_eq!(home_active(&d), (vec![], 1));
+    // Free it and let the task run: while it holds the session it is listed.
+    d.broker.set_limit("llm:claude", 1).unwrap();
+    drop(held);
+    d.broker.lease_close(id);
+    wait_state(&d, t, State::Landed, 60);
+    assert_eq!(home_active(&d), (vec![], 0));
+}
+
 fn file_in(d: &Arc<Daemon>, project: &str, title: &str) -> TaskId {
     let pid = d.project_id_by_name(project).unwrap();
     let a = d

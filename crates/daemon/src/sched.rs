@@ -962,6 +962,21 @@ impl Broker {
         lock(&self.st).by_task.contains_key(&task)
     }
 
+    /// Does this task hold (granted, not waiting) a lease that uses an
+    /// `llm:` resource, i.e. is a model session running for it right now?
+    pub fn llm_held_by(&self, task: TaskId) -> bool {
+        let st = lock(&self.st);
+        let Some(id) = st.by_task.get(&task) else {
+            return false;
+        };
+        st.ledger.holder(*id).is_some_and(|h| {
+            h.needs
+                .amounts
+                .iter()
+                .any(|(k, n)| *n > 0 && k.starts_with("llm:"))
+        })
+    }
+
     /// Units of a resource held right now.
     pub fn used(&self, name: &str) -> u32 {
         lock(&self.st)

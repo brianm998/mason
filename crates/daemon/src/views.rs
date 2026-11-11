@@ -721,11 +721,20 @@ impl<'a> Ctx<'a> {
                 .collect(),
             active: tasks
                 .iter()
-                .filter(|t| t.state.is_step())
+                .filter(|t| self.d.broker.llm_held_by(t.id))
                 .map(|t| {
                     let r = self.row(t);
+                    // A held session is never hidden: with no model on the
+                    // row, fall back to its display name, then the step.
+                    let model = if !r.model.is_empty() {
+                        r.model.clone()
+                    } else if !r.display.is_empty() {
+                        r.display.clone()
+                    } else {
+                        t.step.clone()
+                    };
                     ActiveModel {
-                        model: r.model,
+                        model,
                         display: r.display,
                         model_use: r.model_use,
                         project: r.project,
@@ -733,7 +742,6 @@ impl<'a> Ctx<'a> {
                         step: t.step.clone(),
                     }
                 })
-                .filter(|a| !a.model.is_empty())
                 .collect(),
             sessions_used,
             sessions_limit,
