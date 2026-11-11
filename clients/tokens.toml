@@ -55,6 +55,8 @@ mascot_banner_icon = 20
 # Status pictures: beside a status line or an empty list (96), alone on an empty page (120).
 mascot_status = 96
 mascot_empty = 120
+# The state illustration at the top of a task page (shown whole, fitted to its square).
+mascot_illustration = 96
 
 [motion]
 # Milliseconds.

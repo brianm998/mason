@@ -8,10 +8,12 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.Image
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import mason.monitor.*
@@ -186,6 +188,11 @@ fun TaskDetailPage(model: MonitorModel, id: Long) {
 private fun TaskDetail(model: MonitorModel, d: TaskDetailView) {
     val theme = LocalTheme.current
     val r = d.row ?: return
+    Row(horizontalArrangement = Arrangement.spacedBy(theme.spacingLarge), verticalAlignment = Alignment.Top) {
+    // Chosen by the daemon's own state; an unknown state draws nothing. Decorative.
+    remember(r.state) { Mascot.illustration(r.state) }?.let {
+        Image(it, contentDescription = null, contentScale = ContentScale.Fit, modifier = Modifier.size(theme.illustration))
+    }
     Column(verticalArrangement = Arrangement.spacedBy(theme.spacingSmall)) {
         Text("${r.key} ${r.title}", style = theme.title(), modifier = Modifier.testTag("detail:${r.id}"))
         Text("${r.project}, ${r.state.replace('_', ' ')}, ${Format.duration(r.in_state_ms)} in this state", style = theme.body(color = theme.muted))
@@ -195,6 +202,7 @@ private fun TaskDetail(model: MonitorModel, d: TaskDetailView) {
             if (d.branch.isNotEmpty()) CopyButton("branch", d.branch)
             if (d.worktree.isNotEmpty()) CopyButton("worktree", d.worktree)
         }
+    }
     }
     Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing), verticalAlignment = Alignment.CenterVertically) {
         ProgressCells(model, r.progress, r.slow)

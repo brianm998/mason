@@ -191,6 +191,12 @@ struct TaskDetailPage: View {
     @ViewBuilder func content(_ d: TaskDetailView) -> some View {
         let r = d.row
         VStack(alignment: .leading, spacing: theme.spacingLarge) {
+            HStack(alignment: .top, spacing: theme.spacingLarge) {
+            if let art = Mascot.illustration(r.state) {
+                art.resizable().scaledToFit()
+                    .frame(width: theme.illustration, height: theme.illustration)
+                    .accessibilityHidden(true)
+            }
             VStack(alignment: .leading, spacing: theme.spacingSmall) {
                 Text("\(r.key) \(r.title)").font(theme.title()).accessibilityIdentifier("detail:\(r.id)")
                 Text("\(r.project), \(r.state.replacingOccurrences(of: "_", with: " ")), \(Format.duration(ms: r.inStateMs)) in this state")
@@ -203,6 +209,7 @@ struct TaskDetailPage: View {
                     if !d.branch.isEmpty { CopyButton(label: "branch", value: d.branch) }
                     if !d.worktree.isEmpty { CopyButton(label: "worktree", value: d.worktree) }
                 }
+            }
             }
 
             HStack(spacing: theme.spacing) {

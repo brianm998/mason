@@ -20,5 +20,6 @@ grep -q 'contentDescription = null' $kt/app/src/main/kotlin/mason/monitor/ui/Pag
 grep -q '"Nothing matched."' $sw/MonitorCore/MascotChoice.swift || fail "swift no-match text"
 grep -q '"Nothing matched."' $kt/core/src/main/kotlin/mason/monitor/MascotChoice.kt || fail "compose no-match text"
 grep -q 'feature.mascot-status-pictures' clients/features.toml || fail "feature not listed"
-git diff --quiet origin/develop -- clients/swift/Sources/MonitorCore/Items.swift 2>/dev/null || true
+git diff --quiet origin/develop -- clients/swift/Sources/MonitorCore/Items.swift || fail "Items.swift changed"
+git diff --quiet origin/develop -- clients/compose/core/src/main/kotlin/mason/monitor/Items.kt || fail "Items.kt changed"
 echo "s125 ok"
