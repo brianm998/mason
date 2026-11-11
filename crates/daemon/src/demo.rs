@@ -82,7 +82,7 @@ fn next(task: u64, step: &str, state: State) -> EventKind {
 /// The script. Each inner list is one step; the state after it is a
 /// checkpoint. Task ids and project ids are the ones the reducer allocates.
 fn script() -> Vec<Vec<EventKind>> {
-    let wait = "Waiting for compile slot: 2nd in line, behind #88 (2 steps from landing), held by #91 for 4 min";
+    let wait = "Waiting for compile slot: 2nd in line, held by #91 for 4 min";
     vec![
         vec![
             EventKind::ProjectRegistered {

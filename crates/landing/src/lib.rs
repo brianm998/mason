@@ -7,6 +7,7 @@
 //! Everything goes through the `git` CLI, so any remote works. The daemon does
 //! all remote git work; agents never fetch or push.
 
+pub mod audit;
 pub mod batch;
 pub mod config;
 pub mod direct;

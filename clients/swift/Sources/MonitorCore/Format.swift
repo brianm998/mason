@@ -223,6 +223,17 @@ public extension Mason_V1_Compilation {
     /// The CPU line of the home page's Compilation section.
     var cpuLine: String {
         let gate = "a further compile starts below \(cpuMaxPct)%"
-        return cpuBusyPct < 0 ? "CPU not readable; \(gate)." : "CPU \(cpuBusyPct)% busy; \(gate)."
+        return cpuReadingLine(busy: cpuBusyPct < 0 ? nil : Int(cpuBusyPct), source: cpuSource, gate: gate)
+    }
+}
+
+/// The CPU line shared by the Health page and the home page. A fallback source is named,
+/// so a held compile is not read as a broken gauge.
+public func cpuReadingLine(busy: Int?, source: String, gate: String) -> String {
+    guard let b = busy else { return "CPU not readable; \(gate)." }
+    switch source {
+    case "loadavg": return "CPU \(b)% busy (load average; the CPU reading is missing); \(gate)."
+    case "assumed-busy": return "CPU assumed \(b)% busy (nothing is readable, so new compiles wait); \(gate)."
+    default: return "CPU \(b)% busy; \(gate)."
     }
 }

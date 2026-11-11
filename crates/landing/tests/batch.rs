@@ -54,6 +54,7 @@ impl Fx {
         BatchTask {
             id: name.trim_start_matches('t').parse().unwrap(),
             branch: format!("mason/{name}"),
+            removes: vec![],
         }
     }
 
@@ -445,4 +446,64 @@ fn a_base_that_keeps_moving_during_reverify_is_never_promoted_unverified() {
         git::run(&fx.origin, &["cat-file", "-e", "main:a.txt"]).is_err(),
         "an unverified tree reached the base"
     );
+}
+
+/// A task branched before the base landed `landed_line` next to the line it changed.
+fn conflicting_with_landed_line(fx: &Fx) -> (BatchTask, BatchTask) {
+    let t1 = fx.branch("t1", "shared.txt", "mine\n");
+    let t3 = fx.branch("t3", "c.txt", "c\n");
+    write_commit(&fx.repo, "shared.txt", "one\nlanded_line(1, 2);\n");
+    sh(&fx.repo, &["push", "-q", "origin", "main"]);
+    (t1, t3)
+}
+
+#[test]
+fn a_resolution_that_drops_a_landed_line_is_undone_and_the_rest_land() {
+    let fx = Fx::new();
+    let (t1, t3) = conflicting_with_landed_line(&fx);
+    let b = fx.batch(Some("printf 'mine\\n' > shared.txt"), true);
+    let a = b.assemble(&[t1, t3], &nop).unwrap();
+    assert_eq!(a.merged, [3]);
+    assert!(a.resolved.is_empty() && a.ejected.is_empty());
+    assert_eq!(a.unkept.len(), 1);
+    assert_eq!(a.unkept[0].id, 1);
+    assert_eq!(a.unkept[0].lines[0].line, "landed_line(1, 2);");
+    assert_eq!(a.unkept[0].lines[0].file, "shared.txt");
+    // The merge was undone: clean tree, the base's content.
+    assert_eq!(sh(&fx.int_wt, &["status", "--porcelain"]), "");
+    assert_eq!(
+        std::fs::read_to_string(fx.int_wt.join("shared.txt")).unwrap(),
+        "one\nlanded_line(1, 2);\n"
+    );
+    let f = b.finish(&a, &mut |_| true, &nop).unwrap().unwrap();
+    assert!(matches!(f, Finish::Promoted { .. }), "{f:?}");
+    assert_eq!(sh(&fx.origin, &["show", "main:c.txt"]), "c");
+}
+
+#[test]
+fn a_resolution_that_keeps_the_landed_line_is_accepted() {
+    let fx = Fx::new();
+    let (t1, _) = conflicting_with_landed_line(&fx);
+    let b = fx.batch(
+        Some("printf 'mine\\nlanded_line(1, 2);\\n' > shared.txt"),
+        true,
+    );
+    let a = b.assemble(&[t1], &nop).unwrap();
+    assert_eq!((a.merged.clone(), a.resolved.clone()), (vec![1], vec![1]));
+    assert!(a.unkept.is_empty());
+}
+
+#[test]
+fn a_listed_removal_lets_the_resolution_through() {
+    use mason_landing::audit::Removal;
+    let fx = Fx::new();
+    let (mut t1, _) = conflicting_with_landed_line(&fx);
+    t1.removes = vec![Removal {
+        file: "shared.txt".into(),
+        line: "landed_line(1, 2);".into(),
+    }];
+    let b = fx.batch(Some("printf 'mine\\n' > shared.txt"), true);
+    let a = b.assemble(&[t1], &nop).unwrap();
+    assert_eq!(a.resolved, [1]);
+    assert!(a.unkept.is_empty());
 }

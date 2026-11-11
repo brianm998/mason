@@ -143,9 +143,11 @@ fn a_healthy_daemon_files_no_bugs_across_many_passes() {
     let mut passes = 0;
     wait_for("the task to land", 90, || {
         passes += 1;
+        let filed = sweep_once(&d);
         assert!(
-            sweep_once(&d).is_empty(),
-            "the sweep must not interfere with normal progress (pass {passes})"
+            filed.is_empty(),
+            "the sweep must not interfere with normal progress (pass {passes}): filed {filed:?}; bugs {:?}",
+            d.store.bugs().unwrap()
         );
         state_of(&d, t) == State::Landed
     });

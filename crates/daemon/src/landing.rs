@@ -21,6 +21,7 @@ use mason_adapter_api::service::{
 };
 use mason_core::progress::{Change, Figure};
 use mason_core::*;
+use mason_landing::audit::{self, Removal};
 use mason_landing::batch::{Assembled, Batch, BatchTask, Finish};
 use mason_landing::config::{self, LandingConfig, Rung};
 use mason_landing::git;
@@ -233,6 +234,9 @@ pub fn submit_and_wait(c: &Ctx) -> Option<Verdict> {
     if let Some(v) = check_numbers(c) {
         return Some(v);
     }
+    if let Some(v) = check_dropped(c) {
+        return Some(v);
+    }
     let paths = crate::suites::changed_paths(&c.project.path, &c.project.base_ref(), &c.branch)
         .unwrap_or_default();
     let def = d.current_def(pid);
@@ -326,6 +330,95 @@ fn check_numbers(c: &Ctx) -> Option<Verdict> {
     Some(Verdict::SentBack {
         reason,
         feedback: crate::numbers::feedback(&bad),
+    })
+}
+
+/// The lines a task's submission says it removes on purpose (`change.json`).
+pub fn removals_in(dir: &Path) -> Vec<Removal> {
+    let v: serde_json::Value = std::fs::read_to_string(dir.join("change.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default();
+    v["removes"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|r| {
+                    Some(Removal {
+                        file: r["file"].as_str()?.to_string(),
+                        line: r["line"].as_str()?.to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The task's deliberate removals as lines for the task detail: empty when there are none.
+pub fn removals_view(dir: &Path) -> String {
+    let v: serde_json::Value = std::fs::read_to_string(dir.join("change.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default();
+    let mut s = String::new();
+    for r in v["removes"].as_array().into_iter().flatten() {
+        s.push_str(&format!(
+            "\nremoves on purpose: {}: {} ({})",
+            r["file"].as_str().unwrap_or("?"),
+            r["line"].as_str().unwrap_or("?").trim(),
+            r["reason"].as_str().unwrap_or("no reason")
+        ));
+    }
+    s
+}
+
+/// A merge of the base in the task's own branch must have kept every line the base had
+/// landed (decision 0117). Each merge of a base commit is audited against the branch's head.
+fn check_dropped(c: &Ctx) -> Option<Verdict> {
+    let repo = &c.project.path;
+    let base_ref = c.project.base_ref();
+    let removes = removals_in(&c.d.task_dir(c.task));
+    let read = crate::jobs::wait_out_environment(c, "auditing the task's merges with the base", || {
+        let revs = git::run(
+            repo,
+            &[
+                "rev-list",
+                "--merges",
+                "--first-parent",
+                "--parents",
+                &format!("{base_ref}..{}", c.branch),
+            ],
+        )?;
+        let mut found: Vec<audit::Dropped> = vec![];
+        for line in revs.lines() {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            let Some((&p1, others)) = parts.get(1..).and_then(<[&str]>::split_first) else {
+                continue;
+            };
+            for b in others {
+                if !git::is_ancestor(repo, b, &base_ref) {
+                    continue;
+                }
+                let mb = git::run(repo, &["merge-base", p1, b])?;
+                for d in audit::audit(repo, &mb, b, p1, Some(&base_ref), &c.branch, &removes)? {
+                    if !found.contains(&d) {
+                        found.push(d);
+                    }
+                }
+            }
+        }
+        Ok(found)
+    });
+    let dropped = match read {
+        Ok(v) => v,
+        Err(why) => return Some(Verdict::Failed(why)),
+    };
+    if dropped.is_empty() {
+        return None;
+    }
+    Some(Verdict::SentBack {
+        reason: audit::reason(&dropped),
+        feedback: audit::feedback(&dropped),
     })
 }
 
@@ -992,6 +1085,7 @@ impl Runner {
             .map(|(t, b)| BatchTask {
                 id: t.0,
                 branch: b.clone(),
+                removes: removals_in(&d.task_dir(*t)),
             })
             .collect();
         let mut parked: Vec<Parked> = vec![];
@@ -1058,6 +1152,14 @@ impl Runner {
                         e.files
                     ),
                     conflict: true,
+                });
+            }
+            for u in &asm.unkept {
+                parked.push(Parked {
+                    task: u.id,
+                    reason: audit::reason(&u.lines),
+                    feedback: audit::feedback(&u.lines),
+                    conflict: false,
                 });
             }
             for pk in parked.iter().filter(|x| delivered.insert(x.task)) {

@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Dry runs of star's draft pipeline with the fake agent: no LLM, no star build, no network.
+# s27.sh requires the first to end Landed. The other two show the loop-back paths.
+[[scenario]]
+name = "one ticket without a plan, everything green"
+
+[[scenario]]
+name = "one ticket carrying a plan, everything green"
+explored = true
+
+[[scenario]]
+name = "tests red once, then green"
+[scenario.results]
+test = ["red", "green"]

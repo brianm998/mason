@@ -31,7 +31,14 @@ object Mascot {
         }
 
     /** The app icon (the window and Dock icon), or null if it cannot be loaded. */
-    fun appIcon(): ImageBitmap? = bitmap("brand/app_icon.png")
+    fun appIcon(): ImageBitmap? =
+        if (System.getProperty("os.name").orEmpty().startsWith("Mac")) macAppIcon() else squareAppIcon()
+
+    /** The full-bleed square icon, for desktops that do not shape it. */
+    fun squareAppIcon(): ImageBitmap? = bitmap("brand/app_icon.png")
+
+    /** The icon shaped for macOS: rounded rectangle on Apple's grid with a transparent margin. */
+    fun macAppIcon(): ImageBitmap? = bitmap("brand/app_icon_macos.png")
 
     /** The resource path of a state icon at 20 or 24 (scale 1..3), or null when not in the manifest. */
     fun iconPath(id: String, size: Int, scale: Int = 2): String? =

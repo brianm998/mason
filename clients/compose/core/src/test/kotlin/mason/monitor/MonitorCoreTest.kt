@@ -267,6 +267,18 @@ class MonitorCoreTest {
         m.search = SearchState()
         assertEquals(2, m.filteredRows(sec).size)
         assertEquals(2, m.visibleCount(sec))
+        assertEquals("2", m.countText(sec))
+    }
+
+    @Test
+    fun aCappedSectionSaysSoInItsHeaderAndSearchSaysWhereItLooked() {
+        val m = MonitorModel()
+        val rows = listOf(TaskRow(id = 9, title = "newest"), TaskRow(id = 8, title = "older"))
+        val sec = SidebarSection(state = "landed", title = "Landed", count = 2000, rows = rows)
+        assertTrue(m.isCapped(sec))
+        assertEquals("2 of 2000", m.countText(sec))
+        m.search = SearchState(text = "newest")
+        assertEquals("1 in newest 2", m.countText(sec))
     }
 
     // ---- text scale ----
@@ -390,6 +402,9 @@ class MonitorCoreTest {
         assertEquals(emptyList(), HealthSnapshot.parse("not json").resources)
         assertEquals("CPU 71% busy; a compile starts below 50%.", HealthSnapshot.parse("""{"cpu":{"busy_pct":71,"compile_max_pct":50}}""").cpuLine)
         assertEquals("CPU not readable; a compile starts below 80%.", HealthSnapshot.parse("""{"cpu":{"busy_pct":null,"compile_max_pct":80}}""").cpuLine)
+        assertEquals("CPU 20% busy; a compile starts below 50%.", HealthSnapshot.parse("""{"cpu":{"busy_pct":20,"compile_max_pct":50,"source":"mach","failed_reads":0}}""").cpuLine)
+        assertEquals("CPU 100% busy (load average; the CPU reading is missing); a compile starts below 50%.", HealthSnapshot.parse("""{"cpu":{"busy_pct":100,"compile_max_pct":50,"source":"loadavg","failed_reads":4}}""").cpuLine)
+        assertEquals("CPU assumed 100% busy (nothing is readable, so new compiles wait); a compile starts below 50%.", HealthSnapshot.parse("""{"cpu":{"busy_pct":100,"compile_max_pct":50,"source":"assumed-busy","failed_reads":4}}""").cpuLine)
     }
 
     // ---- versions (Part 15) ----
