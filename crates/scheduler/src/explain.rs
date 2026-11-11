@@ -239,7 +239,10 @@ mod tests {
         };
         let w = wait(vec![ahead('a'), ahead('b'), ahead('c')], "#91");
         let s = explain(&w, 240_000);
-        assert_eq!(s, "Waiting for compile slot: 4th in line, held by #91 for 4 min");
+        assert_eq!(
+            s,
+            "Waiting for compile slot: 4th in line, held by #91 for 4 min"
+        );
         assert!(!s.contains("aaaa") && !s.contains("bbbb") && !s.contains("cccc"));
         assert!(!s.contains("behind"));
     }
@@ -248,9 +251,15 @@ mod tests {
     fn a_long_interactive_holder_is_cut_and_a_short_one_is_whole() {
         let long = format!("interactive `{}`", "x".repeat(300));
         let s = explain(&wait(vec![], &long), 240_000);
-        let want = format!("held by interactive `{}…` for 4 min", "x".repeat(COMMAND_LIMIT));
+        let want = format!(
+            "held by interactive `{}…` for 4 min",
+            "x".repeat(COMMAND_LIMIT)
+        );
         assert!(s.ends_with(&want), "{s}");
         let s = explain(&wait(vec![], "interactive `cargo build`"), 240_000);
-        assert!(s.ends_with("held by interactive `cargo build` for 4 min"), "{s}");
+        assert!(
+            s.ends_with("held by interactive `cargo build` for 4 min"),
+            "{s}"
+        );
     }
 }
