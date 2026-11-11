@@ -75,6 +75,13 @@ public enum Mascot {
         return image(from: [(1, d)], points: 512)
     }
 
+    /// A brand image (`start_image`), the whole picture at 3:2; nil for an unknown id.
+    public static func brand(_ id: String) -> Image? {
+        let f = "brand/\(id).png"
+        guard MascotManifest.brandIds.contains(id), let d = data(f) else { return nil }
+        return image(from: [(1, d)], points: 768)
+    }
+
     /// The 1024 px app icon (`brand/app_icon.png`), for the Dock when the monitor runs unbundled.
     public static func appIconData() -> Data? { data("brand/app_icon.png") }
 

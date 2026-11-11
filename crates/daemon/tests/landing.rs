@@ -198,6 +198,13 @@ fn a_red_post_land_tier_freezes_landing_until_the_fix_lands() {
     wait_for("the freeze", 60, || {
         !w.d.store.freezes().unwrap().is_empty()
     });
+    // The freeze reaches the banner list with its own kind (the monitors show the landing_frozen icon).
+    let hv = mason_daemon::views::Ctx::new(&w.d, &w.d.world().unwrap()).header("");
+    assert!(
+        hv.banners.iter().any(|b| b.kind == "landing_frozen"),
+        "{:?}",
+        hv.banners.iter().map(|b| &b.kind).collect::<Vec<_>>()
+    );
     let f = w.d.store.freezes().unwrap().remove(0);
     let fix = TaskId(f.fix_task.expect("a fix task was filed"));
     let wd = w.d.world().unwrap();

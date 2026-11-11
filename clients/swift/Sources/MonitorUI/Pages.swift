@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+import MasonMascot
 import MasonProtocol
+import MasonTokens
 import MonitorCore
 import SwiftUI
 
@@ -42,13 +44,31 @@ func section<Content: View>(_ title: String, theme: Theme, state: String? = nil,
 struct HomePage: View {
     @Environment(\.theme) var theme
     @ObservedObject var model: MonitorModel
+    @State private var adding = false
+
+    var statusLine: some View {
+        Text(model.connected ? (model.home?.status ?? "…") : "Not connected")
+            .font(theme.title()).foregroundStyle(model.attention > 0 ? theme.attention : theme.text)
+            .accessibilityIdentifier("status")
+    }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: theme.spacingLarge) {
-                Text(model.connected ? (model.home?.status ?? "…") : "Not connected")
-                    .font(theme.title()).foregroundStyle(model.attention > 0 ? theme.attention : theme.text)
-                    .accessibilityIdentifier("status")
+                let pic = model.homeMascot
+                if pic.large {
+                    VStack(spacing: theme.spacing) {
+                        MascotPicture(id: pic.id, points: MasonTokens.sizeMascotEmpty)
+                        statusLine
+                        Button("Add task") { adding = true }.buttonStyle(.bordered)
+                            .accessibilityIdentifier("home:add-task")
+                    }.frame(maxWidth: .infinity)
+                } else {
+                    HStack(spacing: theme.spacingLarge) {
+                        MascotPicture(id: pic.id, points: MasonTokens.sizeMascotStatus)
+                        statusLine
+                    }
+                }
 
                 if let attention = model.home?.attention, !attention.isEmpty {
                     section("Needs you", theme: theme) {
@@ -107,6 +127,23 @@ struct HomePage: View {
             }
             .padding(theme.spacingLarge)
         }
+        .sheet(isPresented: $adding) { AddTaskSheet(model: model, isPresented: $adding) }
+    }
+}
+
+/// A mascot picture: decorative, sized in points that scale with the text zoom, never tinted.
+/// An id the art does not have draws nothing.
+struct MascotPicture: View {
+    @Environment(\.theme) var theme
+    let id: String
+    let points: Int
+
+    var body: some View {
+        if let img = Mascot.illustration(id) {
+            let side = CGFloat(Double(points) * theme.scale)
+            img.resizable().scaledToFit().frame(width: side, height: side)
+                .accessibilityHidden(true)
+        }
     }
 }
 
@@ -154,6 +191,12 @@ struct TaskDetailPage: View {
     @ViewBuilder func content(_ d: TaskDetailView) -> some View {
         let r = d.row
         VStack(alignment: .leading, spacing: theme.spacingLarge) {
+            HStack(alignment: .top, spacing: theme.spacingLarge) {
+            if let art = Mascot.illustration(r.state) {
+                art.resizable().scaledToFit()
+                    .frame(width: theme.illustration, height: theme.illustration)
+                    .accessibilityHidden(true)
+            }
             VStack(alignment: .leading, spacing: theme.spacingSmall) {
                 Text("\(r.key) \(r.title)").font(theme.title()).accessibilityIdentifier("detail:\(r.id)")
                 Text("\(r.project), \(r.state.replacingOccurrences(of: "_", with: " ")), \(Format.duration(ms: r.inStateMs)) in this state")
@@ -166,6 +209,7 @@ struct TaskDetailPage: View {
                     if !d.branch.isEmpty { CopyButton(label: "branch", value: d.branch) }
                     if !d.worktree.isEmpty { CopyButton(label: "worktree", value: d.worktree) }
                 }
+            }
             }
 
             HStack(spacing: theme.spacing) {
@@ -311,7 +355,10 @@ struct LandingPage: View {
                             .font(theme.body()).foregroundStyle(theme.attention)
                     }
                     section("Queue", theme: theme) {
-                        if l.queue.isEmpty { Text("Nothing is landing.").font(theme.body()).foregroundStyle(theme.muted) }
+                        if l.queue.isEmpty {
+                            MascotPicture(id: "nothing_landing", points: MasonTokens.sizeMascotEmpty)
+                            Text("Nothing is landing.").font(theme.body()).foregroundStyle(theme.muted)
+                        }
                         ForEach(l.queue, id: \.id) { r in
                             Button("\(r.key) \(r.title)") { model.go(.task(r.id)) }.buttonStyle(.link)
                         }
@@ -480,7 +527,10 @@ struct HealthPage: View {
                 }
                 if let i = model.introspection {
                     section("Findings", theme: theme) {
-                        if i.findings.isEmpty { Text("Nothing found yet.").font(theme.body()).foregroundStyle(theme.muted) }
+                        if i.findings.isEmpty {
+                            MascotPicture(id: "all_clear", points: MasonTokens.sizeMascotStatus)
+                            Text("Nothing found yet.").font(theme.body()).foregroundStyle(theme.muted)
+                        }
                         ForEach(i.findings, id: \.id) { f in
                             VStack(alignment: .leading) {
                                 Text("#\(f.id) [\(f.verdict)] \(f.title) (proposal #\(f.task), metric \(f.metric))").font(theme.body())

@@ -52,6 +52,13 @@ fun SidebarPane(model: MonitorModel, width: Dp) {
         }
         HorizontalDivider(color = theme.border)
         LazyColumn(state = state, modifier = Modifier.fillMaxWidth().weight(1f)) {
+            if (model.searchMatchesNothing) item {
+                Column(Modifier.fillMaxWidth().padding(theme.spacing), horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(theme.spacing)) {
+                    MascotPicture("no_results", theme.mascotStatus)
+                    Text(SEARCH_NO_MATCH_TEXT, style = theme.body(color = theme.muted), modifier = Modifier.testTag("search:no-results"))
+                }
+            }
             items(entries) { e ->
                 when (e) {
                     is SidebarEntry.Header -> SectionHeader(model, e.section)
