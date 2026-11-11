@@ -24,13 +24,18 @@ agent = "deep"
 budget = "4h"
 next = "test"
 
-# The project's `test` command (the whole workspace) runs here. It holds one `compile` slot
-# while it runs, so the broker queues workspace test runs (the owner sets the limit:
-# `mason resources limit compile N`), and the wait is outside the step's timeout (s61).
+# Workspace test runs, after their build. Two at once; the owner's limit
+# (`mason resources limit test-suite N`) takes precedence over this count.
+[resource.test-suite]
+count = 2
+
+# The project's `test` command (the whole workspace) runs here, the waits outside the step's
+# timeout (s61). With the overlay's `build`, the build holds one `compile` slot and gives it
+# back, and the tests hold only `test-suite` (0114); without it, the run holds both.
 [step.test]
 type = "test"
 category = "testing"
-uses = { compile = 1 }
+uses = { compile = 1, test-suite = 1 }
 max_rounds = 3
 on_red = "develop"
 next = "land"
