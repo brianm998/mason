@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 package mason.monitor
 
+import mason.v1.Compilation
 import mason.v1.ProgressCell
 import mason.v1.ProgressSource
 import mason.v1.TokenLine
@@ -77,7 +78,8 @@ object Format {
     fun countText(unit: String, done: Long, doneSource: ProgressSource, total: Long, totalSource: ProgressSource, totalLow: Long): String {
         val u = if (unit.isEmpty()) "" else " $unit"
         when (totalSource) {
-            ProgressSource.SOURCE_REPORTED, ProgressSource.SOURCE_COUNTED ->
+            ProgressSource.SOURCE_REPORTED, ProgressSource.SOURCE_COUNTED,
+            ProgressSource.SOURCE_EXPECTED, ProgressSource.SOURCE_MINIMUM ->
                 if (total > 0) return "${group(done)} of ${group(total)}$u, ${percent(done, total) ?: 0}%"
             ProgressSource.SOURCE_HISTORY ->
                 if (doneSource != ProgressSource.SOURCE_NONE) {
@@ -89,11 +91,20 @@ object Format {
         return if (doneSource != ProgressSource.SOURCE_NONE) "${group(done)}$u" else ""
     }
 
+    /** A real total (reported, counted, the last green run's count, or a suite's minimum), not a typical one. */
+    fun isReal(s: ProgressSource): Boolean = when (s) {
+        ProgressSource.SOURCE_REPORTED, ProgressSource.SOURCE_COUNTED,
+        ProgressSource.SOURCE_EXPECTED, ProgressSource.SOURCE_MINIMUM -> true
+        else -> false
+    }
+
     /** Where a figure came from, in words. */
     fun sourceWords(s: ProgressSource, samples: Int): String = when (s) {
         ProgressSource.SOURCE_REPORTED -> "from the agent"
         ProgressSource.SOURCE_COUNTED -> "counted from output"
         ProgressSource.SOURCE_HISTORY -> "usually, from $samples past runs"
+        ProgressSource.SOURCE_EXPECTED -> "the last green run's count"
+        ProgressSource.SOURCE_MINIMUM -> "the suite's minimum"
         else -> ""
     }
 
@@ -121,7 +132,7 @@ sealed class CellFill {
 }
 
 val ProgressCell.hasRealTotal: Boolean
-    get() = (total_source == ProgressSource.SOURCE_REPORTED || total_source == ProgressSource.SOURCE_COUNTED) && total > 0
+    get() = Format.isReal(total_source) && total > 0
 
 /** The whole percent, only from a real total. */
 val ProgressCell.percent: Int? get() = if (hasRealTotal) Format.percent(done.toLong(), total.toLong()) else null
@@ -192,3 +203,10 @@ fun ProgressCell.progressTexts(now: Long): List<String> {
     if (isStale(now)) t += "silent"
     return t
 }
+
+/** The CPU line of the home page's Compilation section. */
+val Compilation.cpuLine: String
+    get() {
+        val gate = "a further compile starts below $cpu_max_pct%"
+        return if (cpu_busy_pct < 0) "CPU not readable; $gate." else "CPU $cpu_busy_pct% busy; $gate."
+    }

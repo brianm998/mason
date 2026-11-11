@@ -28,6 +28,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipPath
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -226,6 +227,7 @@ fun CountTile(model: MonitorModel, count: StateCount) {
     TooltipArea(tooltip = {
         Text(model.tileTooltip(count), style = theme.small(color = theme.text), modifier = Modifier.background(theme.surface).padding(theme.spacing))
     }) {
+        Box {
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center,
@@ -258,6 +260,18 @@ fun CountTile(model: MonitorModel, count: StateCount) {
         ) {
             Text(model.tileCount(count), style = theme.count(if (wants) theme.attention else theme.text), maxLines = 1)
             Text(label, style = theme.small(), maxLines = 1, softWrap = false)
+        }
+        // An overlay, not part of the layout: Part 17 sizes a tile by its label and text size
+        // alone, so a count of any width and the icon never change it. Zero-size layout, drawn
+        // outside the tile's top-left corner, and it takes no clicks.
+        val out = with(androidx.compose.ui.platform.LocalDensity.current) { theme.spacingSmall.roundToPx() }
+        StateIcon(
+            count.state,
+            Modifier.layout { measurable, constraints ->
+                val placeable = measurable.measure(androidx.compose.ui.unit.Constraints())
+                layout(0, 0) { placeable.place(-out, -out) }
+            },
+        )
         }
     }
 }
@@ -327,7 +341,10 @@ fun DecisionCardView(model: MonitorModel, task: Long, card: DecisionCard) {
             }
             .testTag("card:$task"),
     ) {
-        Text(card.ask, style = theme.title())
+        Row(verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(theme.spacingSmall)) {
+            StateIcon("needs_attention")
+            Text(card.ask, style = theme.title())
+        }
         if (card.why.isNotEmpty()) Text(card.why, style = theme.body(color = theme.muted))
         Column(verticalArrangement = Arrangement.spacedBy(theme.spacingSmall)) {
             card.options.forEachIndexed { i, o ->

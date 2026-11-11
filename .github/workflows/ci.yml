@@ -27,6 +27,7 @@ jobs:
       # The two monitors stay in parity by machine check (Part 17).
       - run: cargo run -q -p mason-conformance -- features clients/features.toml
       - run: cargo run -q -p mason-conformance -- tokens --check
+      - run: cargo run -q -p mason-conformance -- mascot --check
       - uses: EmbarkStudios/cargo-deny-action@v2
 
   dco:
@@ -44,19 +45,31 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
-    # The budget for the whole local suite is enforced here: the job is killed,
-    # and CI fails, if build, tests and exit scripts exceed it. It was 10 minutes
-    # until Stage 15 brought macOS to 9m30s; the repository is public, so runner
-    # minutes cost nothing, and 20 leaves room while still catching a hung job.
-    timeout-minutes: 20
+    # The workspace tests alone. They took about 20 minutes by November 2026; the
+    # limit still catches a hung test.
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       - run: cargo test --workspace
+
+  # The exit scripts, in four shards per system: in one job after the workspace tests
+  # they never fitted the limit, and were cut off partway through every run.
+  exit-scripts:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        shard: [1, 2, 3, 4]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
       - run: bash scripts/run-exit-scripts.sh
         env:
-          # The workspace suite just ran; exit scripts skip re-running it.
+          MASON_EXIT_SHARD: "${{ matrix.shard }}/4"
+          # The workspace suite has a job of its own (above); exit scripts skip re-running it.
           MASON_TESTS_ALREADY_RAN: "1"
-          # The Swift monitor has a job of its own (below); this one is the Rust job.
+          # The monitors have jobs of their own (below); these are the Rust jobs.
           MASON_SKIP_SWIFT: "1"
           MASON_SKIP_COMPOSE: "1"
 

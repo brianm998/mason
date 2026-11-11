@@ -3,7 +3,7 @@
 //! The ordering rule, the passing rule, and "no deadlock, no lost lease",
 //! checked over random workloads by simulating the whole run.
 
-use mason_scheduler::{explain, CpuGate, Kind, Ledger, Needs, Rank, WaitCause};
+use mason_scheduler::{explain, CpuGate, Kind, Ledger, Needs, Rank, StallGate, WaitCause};
 use proptest::prelude::*;
 use std::collections::BTreeMap;
 
@@ -308,7 +308,7 @@ fn a_request_bigger_than_its_limit_does_not_hold_up_the_others() {
 }
 
 #[test]
-fn a_compile_waits_while_cpu_is_high_even_alone_and_starts_when_it_falls() {
+fn the_first_compile_starts_however_busy_and_a_further_one_waits_for_the_cpu() {
     let mut l = Ledger::new();
     l.set_capacity("compile", 4, Kind::Machine);
     let gate = |busy_pct| {
@@ -317,21 +317,27 @@ fn a_compile_waits_while_cpu_is_high_even_alone_and_starts_when_it_falls() {
             max_pct: 50,
         })
     };
-    let a = l.submit(
-        Rank::new(false, 1, 2, 1, 1, false),
-        Needs::of(&[("compile", 1)]),
-        "#1",
-        0,
-    );
+    let submit = |l: &mut Ledger, n: u64| {
+        l.submit(
+            Rank::new(false, 1, 2, n, n, false),
+            Needs::of(&[("compile", 1)]),
+            "#",
+            0,
+        )
+    };
+    let a = submit(&mut l, 1);
+    let b = submit(&mut l, 2);
+    // CPU use is the whole machine's: none of ours running, so it is someone
+    // else's load, and the first compile starts anyway. The second waits.
     let p = l.schedule_gated(0, None, None, gate(71));
-    assert!(p.grants.is_empty());
-    assert_eq!(explain(&p.waits[&a], 0), "compile waiting: CPU 71% > 50%");
+    assert_eq!(p.grants, vec![a]);
+    assert_eq!(explain(&p.waits[&b], 0), "compile waiting: CPU 71% > 50%");
     // At the limit still waits; below it starts on the first pass.
     assert!(l.schedule_gated(1, None, None, gate(50)).grants.is_empty());
-    assert_eq!(l.schedule_gated(2, None, None, gate(49)).grants, vec![a]);
+    assert_eq!(l.schedule_gated(2, None, None, gate(49)).grants, vec![b]);
     // A compile that has started is never revoked when load rises.
     let p = l.schedule_gated(3, None, None, gate(99));
-    assert!(l.holds(a) && p.grants.is_empty());
+    assert!(l.holds(a) && l.holds(b) && p.grants.is_empty());
 }
 
 #[test]
@@ -391,6 +397,37 @@ fn the_cpu_gate_leaves_other_resources_alone() {
         0,
     );
     assert_eq!(l.schedule_gated(0, None, None, hot).grants, vec![a]);
+}
+
+#[test]
+fn a_disk_stall_holds_only_a_further_compile() {
+    let mut l = Ledger::new();
+    l.set_capacity("llm:claude", 2, Kind::Llm);
+    l.set_capacity("compile", 4, Kind::Machine);
+    l.set_stall(Some(StallGate {
+        slow_ms: 30_000,
+        max_ms: 2_000,
+    }));
+    let compile = |n: u64| Rank::new(false, 1, 2, n, n, false);
+    let first = l.submit(compile(1), Needs::of(&[("compile", 1)]), "#1", 0);
+    assert_eq!(
+        l.schedule(0, None, None).grants,
+        vec![first],
+        "the first compile starts: nothing of ours can be causing the stall"
+    );
+    let second = l.submit(compile(2), Needs::of(&[("compile", 1)]), "#2", 1);
+    let agent = l.submit(compile(3), Needs::of(&[("llm:claude", 1)]), "#3", 1);
+    let p = l.schedule(1, None, None);
+    assert_eq!(p.grants, vec![agent], "agents are not held by a stall");
+    assert!(matches!(
+        p.waits[&second].cause,
+        WaitCause::DiskStall { .. }
+    ));
+    l.set_stall(Some(StallGate {
+        slow_ms: 3,
+        max_ms: 2_000,
+    }));
+    assert_eq!(l.schedule(2, None, None).grants, vec![second]);
 }
 
 #[test]

@@ -97,7 +97,22 @@ pub struct SessionSpec {
     /// Told of the agent's tool calls and todo lists as they arrive, before the
     /// turn ends (the runner calls it; it never holds a daemon type).
     pub on_agent_event: Option<AgentEventSink>,
+    /// Silence limits for the session (see [`IdlePolicy`]).
+    pub idle: Option<IdlePolicy>,
 }
+
+/// What to do about an agent that goes quiet. Silence is no new output from the
+/// session and no contract call in flight. `0` turns a limit off.
+#[derive(Clone)]
+pub struct IdlePolicy {
+    pub alert_after: Duration,
+    pub stop_after: Duration,
+    /// Told how long the session has been silent once past `alert_after`
+    /// (`Some(ms)`), and `None` when output resumes or the session ends.
+    pub report: IdleSink,
+}
+
+pub type IdleSink = std::sync::Arc<dyn Fn(Option<u64>) + Send + Sync>;
 
 /// Receives the agent events that say what it is doing (`ToolCall`, `Plan`).
 pub type AgentEventSink = std::sync::Arc<dyn Fn(&AgentEvent) + Send + Sync>;
@@ -131,6 +146,7 @@ impl SessionSpec {
             on_model: None,
             on_tokens: None,
             on_agent_event: None,
+            idle: None,
         }
     }
 }

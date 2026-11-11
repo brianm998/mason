@@ -96,21 +96,42 @@ impl Daemon {
     /// there, or the built-in one if the project has none. Errors say what is wrong.
     fn read_definition(&self, p: &ProjectCfg) -> Result<(Current, Option<String>), Vec<String>> {
         let base_ref = p.base_ref();
-        let sha = git::rev_parse(&p.path, &base_ref).ok();
         let path = format!("{base_ref}:.mason/mason.toml");
+        // Only "there is no such base" or "the base has no such file" mean the built-in
+        // definition. A git call that failed says nothing about the project, so it must not
+        // swap its pipeline: report it and let the one in force stay.
+        let sha = match git::run(
+            &p.path,
+            &[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("{base_ref}^{{commit}}"),
+            ],
+        ) {
+            Ok(s) => Some(s.trim().to_string()),
+            Err(e) if e.code == Some(1) && !e.timed_out => None,
+            Err(e) => return Err(vec![format!("cannot read {base_ref}: {e}")]),
+        };
         let (text, origin) = match &sha {
-            Some(sha) if git::ok(&p.path, &["cat-file", "-e", &path]) => {
-                match git::run(&p.path, &["show", &path]) {
-                    Ok(t) => (
-                        t,
-                        Origin::Project {
-                            commit: sha.clone(),
-                        },
-                    ),
-                    Err(e) => return Err(vec![format!("cannot read {path}: {e}")]),
+            Some(sha) => {
+                let listed = git::run(&p.path, &["ls-tree", sha, "--", ".mason/mason.toml"])
+                    .map_err(|e| vec![format!("cannot read {path}: {e}")])?;
+                if listed.trim().is_empty() {
+                    (BUILTIN.to_string(), Origin::Builtin)
+                } else {
+                    match git::run(&p.path, &["show", &path]) {
+                        Ok(t) => (
+                            t,
+                            Origin::Project {
+                                commit: sha.clone(),
+                            },
+                        ),
+                        Err(e) => return Err(vec![format!("cannot read {path}: {e}")]),
+                    }
                 }
             }
-            _ => (BUILTIN.to_string(), Origin::Builtin),
+            None => (BUILTIN.to_string(), Origin::Builtin),
         };
         let what = format!(".mason/mason.toml on {base_ref}");
         let caps = self.caps_for(p);
@@ -173,9 +194,8 @@ impl Daemon {
     /// is invalid starts on the last good one (or the built-in) and says why.
     pub(crate) fn load_definitions(&self) {
         for (pid, p) in &self.projects {
-            if let Some(r) = &p.remote {
-                let _ = git::run(&p.path, &["fetch", "--prune", r]);
-            }
+            // No network here: the port is not open yet. What is already fetched is
+            // read; the watcher's first pass fetches.
             let fallback = self
                 .store
                 .read(|c| {
@@ -204,7 +224,7 @@ impl Daemon {
                         error: None,
                     },
                 );
-            let r = self.reload_definition(*pid);
+            let r = self.reload_without_fetch(*pid);
             if let Reload::Refused(e) = r {
                 tracing::warn!(project = %p.id, problems = ?e, "the definition was refused at startup; using the last good one");
             }
@@ -224,10 +244,10 @@ impl Daemon {
     }
 
     fn fetch_project(&self, p: &ProjectCfg) {
-        if let Some(r) = &p.remote {
-            let lock = self.repo_lock(self.project_id_by_name(&p.id).unwrap_or(ProjectId(0)));
-            let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
-            let _ = git::run(&p.path, &["fetch", "--prune", r]);
+        if let Some(pid) = self.project_id_by_name(&p.id) {
+            if let Err(e) = self.fetch_remote(pid) {
+                tracing::warn!(project = %p.id, "fetching the remote failed: {e}");
+            }
         }
     }
 
@@ -330,9 +350,17 @@ impl Daemon {
     pub(crate) fn spawn_watcher(self: &Arc<Self>) {
         let every = self.cfg.reload_interval;
         let fetch_every = self.cfg.fetch_interval;
-        let mut last_fetch = std::time::Instant::now();
+        // The first pass fetches: startup does not.
+        let mut last_fetch = std::time::Instant::now()
+            .checked_sub(fetch_every)
+            .unwrap_or_else(std::time::Instant::now);
+        // The first pass runs at once: until it has fetched, a project's own definition may
+        // not be known yet, and admission waits for it (see `admit`).
+        let mut first = true;
         crate::bg::spawn_loop(self, "definition-watcher", move |weak| {
-            std::thread::sleep(every);
+            if !std::mem::take(&mut first) {
+                std::thread::sleep(every);
+            }
             let Some(d) = weak.upgrade() else {
                 return false;
             };
@@ -341,6 +369,8 @@ impl Daemon {
                 last_fetch = std::time::Instant::now();
             }
             d.watch_definitions(fetch);
+            d.defs_ready
+                .store(true, std::sync::atomic::Ordering::SeqCst);
             // A pause that has run out lets claims go.
             d.admit();
             d.defs_pass_ended_ms

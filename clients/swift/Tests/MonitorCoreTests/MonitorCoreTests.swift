@@ -51,6 +51,36 @@ final class MonitorCoreTests: XCTestCase {
         return m
     }
 
+    // MARK: mascot choice
+
+    func testHomeMascotFollowsTheDaemonsState() {
+        let m = model(connected: false)
+        XCTAssertEqual(m.homeMascot.id, "not_connected")
+        m.connected = true
+        XCTAssertEqual(m.homeMascot.id, "needs_attention")
+        var h = m.header!; h.attention = 0; m.header = h
+        m.home = HomeView()
+        XCTAssertEqual(m.homeMascot, MascotChoice(id: "no_tasks", large: true))
+        var hv = HomeView()
+        hv.stages = [section("queued", rows: [row(1, state: "queued")])]
+        m.home = hv
+        XCTAssertEqual(m.homeMascot, MascotChoice(id: "all_clear", large: false))
+        var a = Mason_V1_ActiveModel(); a.task = 1
+        hv.active = [a]
+        m.home = hv
+        XCTAssertEqual(m.homeMascot.id, "developing")
+    }
+
+    func testSearchWithNoMatchesSaysSo() {
+        let m = model()
+        XCTAssertFalse(m.searchMatchesNothing)
+        m.search.text = "rate"
+        XCTAssertFalse(m.searchMatchesNothing)
+        m.search.text = "zzzz"
+        XCTAssertTrue(m.searchMatchesNothing)
+        XCTAssertEqual(searchNoMatchText, "Nothing matched.")
+    }
+
     // MARK: the attention sound
 
     private func sidebarUpdate(_ sections: [SidebarSection]) -> Mason_V1_View {
@@ -355,6 +385,10 @@ final class MonitorCoreTests: XCTestCase {
             XCTAssertEqual(s.task, 5)
             if case .step(let n)? = s.scope { XCTAssertEqual(n, "test") } else { XCTFail() }
         } else { XCTFail() }
+        m.setCompileLimit(5)
+        m.setCompileLimit(0)
+        if case .setLimit(let l)? = sent[4].body { XCTAssertEqual(l.resource, "compile"); XCTAssertEqual(l.units, 5) } else { XCTFail() }
+        if case .setLimit(let l)? = sent[5].body { XCTAssertEqual(l.units, 1, "the stepper never asks for zero compiles") } else { XCTFail() }
     }
 
     // MARK: what the client shows (the conformance items)

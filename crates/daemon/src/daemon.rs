@@ -22,6 +22,17 @@ pub fn now_ms() -> u64 {
         .map_or(0, |d| d.as_millis() as u64)
 }
 
+/// An agent past its silence alert limit.
+#[derive(Clone, Debug)]
+pub struct SilentAgent {
+    pub task: u64,
+    pub step: String,
+    pub silent_ms: u64,
+}
+
+/// How long admission waits for the first definitions pass before going ahead without it.
+const DEFS_FIRST_PASS_WAIT: Duration = Duration::from_secs(30);
+
 pub struct Daemon {
     pub cfg: DaemonConfig,
     pub store: Store,
@@ -34,6 +45,9 @@ pub struct Daemon {
     pub accounts: Vec<crate::providers::Account>,
     /// Blocking work for the async layer (the store, git).
     pub pool: Pool,
+    /// View computation and event reads for the screens, apart from `pool` so
+    /// that work waiting on git or a repository lock cannot starve them.
+    pub view_pool: Pool,
     pub crash: Crash,
     pub started: Instant,
     pub started_ms: u64,
@@ -41,11 +55,23 @@ pub struct Daemon {
     emit_lock: Mutex<()>,
     admitting: AtomicBool,
     admit_again: AtomicBool,
+    fetch_locks: Mutex<HashMap<PathBuf, Arc<Mutex<Option<std::time::Instant>>>>>,
+    /// Per project: when its fetches began failing (ms) and the last error. A success removes it.
+    fetch_failures: Mutex<HashMap<ProjectId, (u64, String)>>,
     repo_locks: Mutex<HashMap<PathBuf, RepoLock>>,
     /// When the definitions thread last finished a pass (ms; the start time before the first).
     pub(crate) defs_pass_ended_ms: AtomicU64,
+    /// The definitions thread has finished its first pass, which fetches. Until then a
+    /// project's own definition may be unknown (startup reads only what was already fetched),
+    /// so nothing new is admitted under the built-in one by mistake.
+    pub(crate) defs_ready: AtomicBool,
     stalls: AtomicU64,
+    /// Agents that are silent past their alert limit: run -> (task, step, silent since, ms).
+    pub(crate) silent: Mutex<HashMap<u64, SilentAgent>>,
     worst_stall_ms: AtomicU64,
+    /// When the last stall of alert size ended (ms since epoch; 0: none) and how long it was.
+    last_big_stall_at: AtomicU64,
+    last_big_stall_ms: AtomicU64,
     pub(crate) sweep: Mutex<crate::sweep::SweepState>,
     pub(crate) defs: crate::defs::Defs,
     pub broker: Arc<crate::sched::Broker>,
@@ -204,6 +230,15 @@ impl Daemon {
                 }
             }
         }
+        // A daemon whose CPU reading is injected is a test's: like the sampler, the
+        // disk probe would add one set of threads per daemon, to no use.
+        let measures_machine = cfg.cpu.is_none() && std::env::var_os("MASON_CPU_FILE").is_none();
+        if rcfg.disk_stall_ms > 0 && measures_machine {
+            broker.set_stall(
+                crate::stall::Prober::start(disk_paths.clone()),
+                rcfg.disk_stall_ms,
+            );
+        }
         broker.set_disk(disk, disk_paths, rcfg.disk_floor_gb, disk_every);
         let targets = crate::targets::Targets::new(
             crate::config::load_targets(&cfg.config_dir)?,
@@ -213,6 +248,7 @@ impl Daemon {
             store,
             projects,
             pool: Pool::new("blocking", 4, 64),
+            view_pool: Pool::new("views", 2, 64),
             crash: Crash::from_env(),
             started: Instant::now(),
             started_ms: now_ms(),
@@ -221,11 +257,17 @@ impl Daemon {
             admitting: AtomicBool::new(false),
             admit_again: AtomicBool::new(false),
             repo_locks: Mutex::default(),
+            fetch_locks: Mutex::default(),
+            fetch_failures: Mutex::default(),
             defs_pass_ended_ms: AtomicU64::new(now_ms()),
+            defs_ready: AtomicBool::new(false),
             stalls: AtomicU64::new(0),
+            silent: Mutex::default(),
             store_full: AtomicU64::new(0),
             disk_sizes: Default::default(),
             worst_stall_ms: AtomicU64::new(0),
+            last_big_stall_at: AtomicU64::new(0),
+            last_big_stall_ms: AtomicU64::new(0),
             sweep: Mutex::default(),
             defs: crate::defs::Defs::default(),
             broker,
@@ -262,6 +304,7 @@ impl Daemon {
             d.recover();
             d.spawn_progress_ticker();
             d.spawn_sweeper();
+            d.spawn_compile_watch();
             crate::usage::spawn_probe(&d);
             d.spawn_watcher();
             crate::tracker::spawn(&d);
@@ -338,6 +381,68 @@ impl Daemon {
             .clone()
     }
 
+    /// The per-repository fetch lock (see [`Self::fetch_remote`]).
+    pub fn fetch_lock(&self, p: ProjectId) -> Arc<Mutex<Option<std::time::Instant>>> {
+        let key = self.project(p).map_or_else(PathBuf::new, |c| {
+            std::fs::canonicalize(&c.path).unwrap_or_else(|_| c.path.clone())
+        });
+        self.fetch_locks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(key)
+            .or_default()
+            .clone()
+    }
+
+    /// `git fetch --prune` for a project's remote, under a lock of its own: two
+    /// fetches in one repository must not collide on its refs, but a slow one must
+    /// not hold up `worktree add`, `merge` or cleanup, which take [`Self::repo_lock`].
+    /// A fetch that *started* while this call was waiting saw everything this call
+    /// could have wanted, so it is not repeated.
+    pub fn fetch_remote(&self, p: ProjectId) -> Result<(), String> {
+        let Some(c) = self.project(p) else {
+            return Ok(());
+        };
+        let Some(remote) = c.remote.clone() else {
+            return Ok(());
+        };
+        let lock = self.fetch_lock(p);
+        let asked = std::time::Instant::now();
+        let mut last_ok = lock.lock().unwrap_or_else(|e| e.into_inner());
+        if last_ok.is_some_and(|started| started > asked) {
+            return Ok(());
+        }
+        let started = std::time::Instant::now();
+        let r = mason_landing::git::run(&c.path, &["fetch", "--prune", &remote])
+            .map_err(|e| e.to_string());
+        let mut f = self
+            .fetch_failures
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        match r {
+            Ok(_) => {
+                f.remove(&p);
+                *last_ok = Some(started);
+                Ok(())
+            }
+            Err(e) => {
+                f.entry(p).or_insert_with(|| (now_ms(), String::new())).1 = e.clone();
+                Err(e)
+            }
+        }
+    }
+
+    /// Projects whose fetches are failing: `(project, failing since ms, last error)`. Reads only the
+    /// record; no git, no lock but its own.
+    pub fn fetch_failing(&self) -> Vec<(ProjectId, u64, String)> {
+        self.fetch_failures
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|(p, (at, e))| (*p, *at, e.clone()))
+            .collect()
+    }
+
     /// Who holds a repository lock now and since when (label, ms). Never takes a repository lock
     /// itself, so the attention thread may call it while git is stuck.
     pub fn repo_lock_holders(&self) -> Vec<(String, u64)> {
@@ -361,6 +466,17 @@ impl Daemon {
         self.worst_stall_ms
             .fetch_max(late.as_millis() as u64, Ordering::SeqCst);
         tracing::warn!(late_ms = late.as_millis() as u64, "the event loop stalled");
+        if late.as_millis() as u64 >= crate::attention::STALL_ALERT_MS {
+            self.last_big_stall_ms
+                .store(late.as_millis() as u64, Ordering::SeqCst);
+            self.last_big_stall_at.store(now_ms(), Ordering::SeqCst);
+        }
+    }
+
+    /// `(when, how long in ms)` of the latest stall long enough to alert on, if any.
+    pub fn last_big_stall(&self) -> Option<(u64, u64)> {
+        let at = self.last_big_stall_at.load(Ordering::SeqCst);
+        (at > 0).then(|| (at, self.last_big_stall_ms.load(Ordering::SeqCst)))
     }
 
     pub fn stall_stats(&self) -> (u64, u64) {
@@ -478,16 +594,53 @@ impl Daemon {
                 } => self.start_job(*task, *step, *run),
                 Effect::StopStepHost { task } => self.stop_hosts(&format!("t{}r", task.0)),
                 Effect::DeleteBranch { task } => {
+                    // On a thread of its own, not the bounded pool: a full queue there
+                    // dropped this silently and the branch stayed for good. It first waits
+                    // for the task's job to wind down (the step host was just told to
+                    // stop), so the job cannot race the removal, then checks the branch
+                    // really went.
                     let d = self.clone();
                     let task = *task;
-                    let _ = self
-                        .pool
-                        .spawn(move || crate::jobs::cleanup(&d, task, true));
+                    let _ = std::thread::Builder::new()
+                        .name(format!("delete-branch-t{}", task.0))
+                        .spawn(move || d.delete_branch_after_job(task));
                 }
                 // Leases and the scheduler arrive in Stage 8; the rest need no work.
                 _ => {}
             }
         }
+    }
+
+    /// Remove a canceled task's worktree and branch once its job has ended (or after a
+    /// minute, whichever is first), and again while the branch is still there.
+    fn delete_branch_after_job(self: &Arc<Self>, task: TaskId) {
+        let end = Instant::now() + Duration::from_secs(60);
+        while self.has_job_for_task(task) && Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        for attempt in 0..5 {
+            crate::jobs::cleanup(self, task, true);
+            if !self.task_branch_exists(task) {
+                return;
+            }
+            tracing::warn!(
+                task = task.0,
+                attempt,
+                "the branch is still there; retrying"
+            );
+            std::thread::sleep(Duration::from_secs(1 << attempt));
+        }
+    }
+
+    fn task_branch_exists(&self, task: TaskId) -> bool {
+        let Ok(w) = self.world() else { return false };
+        let Some(t) = w.tasks.get(&task) else {
+            return false;
+        };
+        let Some(p) = self.project(t.project) else {
+            return false;
+        };
+        mason_landing::git::branch_exists(&p.path, &p.branch(task.0))
     }
 
     pub fn start_job(self: &Arc<Self>, task: TaskId, step: State, run: StepRunId) {
@@ -556,10 +709,24 @@ impl Daemon {
         }
     }
 
+    /// Admission waits for the first definitions pass (which admits when it ends), unless that
+    /// takes too long: a remote that does not answer must not hold up all work.
+    pub(crate) fn admission_held(&self) -> bool {
+        !self.defs_ready.load(Ordering::SeqCst) && self.started.elapsed() < DEFS_FIRST_PASS_WAIT
+    }
+
+    /// The first definitions pass is over (or took too long), so admission is open.
+    pub fn ready_to_admit(&self) -> bool {
+        !self.admission_held()
+    }
+
     /// Start queued tasks while an LLM session is free for them, best rank
     /// first across every project (Part 7).
     pub fn admit(self: &Arc<Self>) {
         if self.demo {
+            return;
+        }
+        if self.admission_held() {
             return;
         }
         if self.admitting.swap(true, Ordering::SeqCst) {
@@ -832,6 +999,32 @@ impl Daemon {
 
     pub fn task_dir(&self, task: TaskId) -> PathBuf {
         self.cfg.task_dir(task.0)
+    }
+
+    /// Wake the sockets when the compile queue changes: who holds a slot, who
+    /// waits and why. Interactive callers and gate readings change it without an
+    /// event, and the monitor's home page shows it.
+    fn spawn_compile_watch(self: &Arc<Self>) {
+        let mut last = String::new();
+        crate::bg::spawn_loop(self, "compile-watch", move |weak| {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            let Some(d) = weak.upgrade() else {
+                return false;
+            };
+            let c = d.broker.compilation();
+            let mut now = format!("{} {}", c.limit, c.used);
+            for h in &c.running {
+                now.push_str(&format!("|{}", h.label));
+            }
+            for w in &c.pending {
+                now.push_str(&format!("|{}:{}", w.label, w.cause));
+            }
+            if now != last {
+                last = now;
+                d.poke();
+            }
+            true
+        });
     }
 
     fn spawn_sweeper(self: &Arc<Self>) {

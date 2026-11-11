@@ -26,7 +26,7 @@ public struct Announcement: Equatable, Sendable {
     public var family: String {
         switch kind {
         case "needs_you": return "decision"
-        case "failed", "landing", "daemon_down", "credentials", "provider_outage", "environment", "runtime", "definition",
+        case "failed", "landing", "daemon_down", "credentials", "provider_outage", "stalled", "environment", "runtime", "definition",
              "disk", "blocked", "host_lost", "tracker", "provider_limit", "provider_overage", "provider_budget":
             return "broke"
         default: return "info"
@@ -60,9 +60,9 @@ public struct SpeechSettings: Equatable, Sendable {
         "disk", "environment", "blocked", "host_lost", "runtime", "definition", "tracker", "provider_limit", "provider_overage", "provider_budget",
     ]
 
-    public static let defaultKinds: Set<String> = [
-        "needs_you", "failed", "landing", "daemon_down", "credentials", "provider_outage", "landed",
-    ].union(addedKinds)
+    public static let defaultKinds: Set<String> = Set([
+        "needs_you", "failed", "landing", "daemon_down", "credentials", "provider_outage", "stalled", "landed",
+    ]).union(addedKinds)
 
     public init(kinds: Set<String> = SpeechSettings.defaultKinds, sounds: [String: String]? = nil, voice: String = "") {
         self.kinds = kinds
@@ -92,6 +92,13 @@ public final class Announcer {
     public private(set) var heardFromDaemon = false
     /// This monitor is the one that speaks right now.
     public private(set) var isSpeaker = false
+    /// The daemon's last word on whether an alert reaches the owner with no monitor open;
+    /// nil until it has said.
+    public private(set) var reachesWithoutMonitor: Bool?
+    /// One line for the notifications settings page; nil unless the daemon said no channel works.
+    public var noChannelLine: String? {
+        reachesWithoutMonitor == false ? "No notification channel works with no monitor open: alerts are seen only in a monitor that is open." : nil
+    }
     /// The local alert: the connection has been lost for `daemonDownAfter`. Shown as a banner
     /// whether or not anything is muted.
     public private(set) var daemonDown = false
@@ -162,6 +169,7 @@ public final class Announcer {
         else { return }
         heardFromDaemon = true
         isSpeaker = (v["speaker"] as? Bool) ?? false
+        reachesWithoutMonitor = v["reaches_without_monitor"] as? Bool
         guard isSpeaker else { return }
         for x in (v["announcements"] as? [[String: Any]]) ?? [] {
             let id = (x["key"] as? String) ?? String(describing: x["id"] ?? "")

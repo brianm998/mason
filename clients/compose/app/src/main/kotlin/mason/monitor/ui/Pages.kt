@@ -8,14 +8,19 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.Image
 import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
 import mason.monitor.*
 import mason.v1.CellState
+import mason.v1.Compilation
 import mason.v1.TaskDetailView
 
 /** The main view: exactly one of Home, a task's detail, or another page. */
@@ -35,10 +40,13 @@ fun MainPane(model: MonitorModel, modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun Section(title: String, content: @Composable ColumnScope.() -> Unit) {
+private fun Section(title: String, state: String? = null, content: @Composable ColumnScope.() -> Unit) {
     val theme = LocalTheme.current
     Column(verticalArrangement = Arrangement.spacedBy(theme.spacing)) {
-        Text(title, style = theme.title())
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(theme.spacingSmall)) {
+            Text(title, style = theme.title())
+            if (state != null) StateIcon(state)
+        }
         content()
     }
 }
@@ -69,11 +77,29 @@ fun HomePage(model: MonitorModel) {
     val theme = LocalTheme.current
     Scrolling {
         val h = model.home
-        Text(
-            if (model.connected) h?.status ?: "…" else "Not connected",
-            style = theme.title(color = if (model.attention > 0) theme.attention else theme.text),
-            modifier = Modifier.testTag("status"),
-        )
+        var adding by remember { mutableStateOf(false) }
+        val pic = model.homeMascot
+        val statusLine: @Composable () -> Unit = {
+            Text(
+                if (model.connected) h?.status ?: "…" else "Not connected",
+                style = theme.title(color = if (model.attention > 0) theme.attention else theme.text),
+                modifier = Modifier.testTag("status"),
+            )
+        }
+        if (pic.large) {
+            Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(theme.spacing)) {
+                MascotPicture(pic.id, theme.mascotEmpty)
+                statusLine()
+                Pill("Add task", modifier = Modifier.testTag("home:add-task")) { adding = true }
+            }
+        } else {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(theme.spacingLarge)) {
+                MascotPicture(pic.id, theme.mascotStatus)
+                statusLine()
+            }
+        }
+        if (adding) AddTaskDialog(model) { adding = false }
         val attention = h?.attention.orEmpty()
         if (attention.isNotEmpty()) {
             Section("Needs you") {
@@ -110,8 +136,9 @@ fun HomePage(model: MonitorModel) {
                 queue.forEach { r -> Link("${r.key} ${r.title}") { model.go(Page.Task(r.id)) } }
             }
         }
+        h?.compilation?.let { CompilationSection(model, it) }
         h?.stages?.forEach { st ->
-            Section(st.title) {
+            Section(st.title, st.state) {
                 st.rows.forEach { r ->
                     Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing), verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier.clickable { model.go(Page.Task(r.id)) }) {
@@ -145,6 +172,54 @@ fun SessionStepper(model: MonitorModel) {
 }
 
 /**
+ * Home's Compilation section: what holds a `compile` slot, what waits for one and why
+ * (in line order), the CPU reading, and the limit's stepper.
+ */
+@Composable
+fun CompilationSection(model: MonitorModel, c: Compilation) {
+    val theme = LocalTheme.current
+    val now = model.daemonNow()
+    val age = { since: Long -> Format.duration(maxOf(0L, now - since)) }
+    val who: @Composable (String, Long) -> Unit = { label, task ->
+        if (task > 0) Link("#$task") { model.go(Page.Task(task)) }
+        else Text(label, style = theme.body(), maxLines = 1, overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.widthIn(max = 480.dp))
+    }
+    Section("Compilation") {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(theme.spacing),
+            modifier = Modifier.testTag("compile")) {
+            Text("Compiling: ${c.used} of at most", style = theme.body())
+            Pill("−", modifier = Modifier.testTag("compile:decrease")) { model.setCompileLimit(if (c.limit > 1) c.limit - 1 else 1) }
+            Text("${c.limit}", style = theme.body(FontWeight.SemiBold))
+            Pill("+", modifier = Modifier.testTag("compile:increase")) { model.setCompileLimit(c.limit + 1) }
+            Text(c.cpuLine, style = theme.body(color = theme.muted))
+        }
+        if (c.running.isEmpty()) Text("Nothing is compiling.", style = theme.body(color = theme.muted))
+        c.running.forEachIndexed { i, r ->
+            Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing), modifier = Modifier.testTag("compile:running:$i")) {
+                who(r.label, r.task)
+                if (r.interactive) Text("interactive", style = theme.body(color = theme.muted))
+                Text("for ${age(r.since_ms)}", style = theme.body(color = theme.muted))
+            }
+        }
+        if (c.pending.isNotEmpty()) Text("Waiting, in line order", style = theme.body(FontWeight.SemiBold))
+        c.pending.forEach { w ->
+            Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing), verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.testTag("compile:pending:${w.position}")) {
+                Text("${w.position}.", style = theme.body(color = theme.muted))
+                who(w.label, w.task)
+                Text(w.reason, style = theme.body())
+                Text(
+                    if (w.interactive) "interactive, ${age(w.since_ms)}" else "${w.steps_remaining} steps from landing, ${age(w.since_ms)}",
+                    style = theme.small(color = theme.muted),
+                )
+            }
+        }
+        Text(c.rules, style = theme.small(color = theme.muted))
+    }
+}
+
+/**
  * A task's page: step progress, activity, the live log, the plan, checks, the decision
  * card and the actions; copy buttons; why exploring was skipped.
  */
@@ -165,6 +240,11 @@ fun TaskDetailPage(model: MonitorModel, id: Long) {
 private fun TaskDetail(model: MonitorModel, d: TaskDetailView) {
     val theme = LocalTheme.current
     val r = d.row ?: return
+    Row(horizontalArrangement = Arrangement.spacedBy(theme.spacingLarge), verticalAlignment = Alignment.Top) {
+    // Chosen by the daemon's own state; an unknown state draws nothing. Decorative.
+    remember(r.state) { Mascot.illustration(r.state) }?.let {
+        Image(it, contentDescription = null, contentScale = ContentScale.Fit, modifier = Modifier.size(theme.illustration))
+    }
     Column(verticalArrangement = Arrangement.spacedBy(theme.spacingSmall)) {
         Text("${r.key} ${r.title}", style = theme.title(), modifier = Modifier.testTag("detail:${r.id}"))
         Text("${r.project}, ${r.state.replace('_', ' ')}, ${Format.duration(r.in_state_ms)} in this state", style = theme.body(color = theme.muted))
@@ -174,6 +254,7 @@ private fun TaskDetail(model: MonitorModel, d: TaskDetailView) {
             if (d.branch.isNotEmpty()) CopyButton("branch", d.branch)
             if (d.worktree.isNotEmpty()) CopyButton("worktree", d.worktree)
         }
+    }
     }
     Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing), verticalAlignment = Alignment.CenterVertically) {
         ProgressCells(model, r.progress, r.slow)
@@ -271,7 +352,10 @@ fun LandingPage(model: MonitorModel) {
                 )
             }
             Section("Queue") {
-                if (l.queue.isEmpty()) Text("Nothing is landing.", style = theme.body(color = theme.muted))
+                if (l.queue.isEmpty()) {
+                    MascotPicture("nothing_landing", theme.mascotEmpty)
+                    Text("Nothing is landing.", style = theme.body(color = theme.muted))
+                }
                 l.queue.forEach { r -> Link("${r.key} ${r.title}") { model.go(Page.Task(r.id)) } }
             }
             Section("Batches") {
@@ -418,7 +502,10 @@ fun HealthPage(model: MonitorModel) {
         }
         model.introspection?.let { i ->
             Section("Findings") {
-                if (i.findings.isEmpty()) Text("Nothing found yet.", style = theme.body(color = theme.muted))
+                if (i.findings.isEmpty()) {
+                    MascotPicture("all_clear", theme.mascotStatus)
+                    Text("Nothing found yet.", style = theme.body(color = theme.muted))
+                }
                 i.findings.forEach { f ->
                     Text("#${f.id} [${f.verdict}] ${f.title} (proposal #${f.task}, metric ${f.metric})", style = theme.body())
                     if (f.text.isNotEmpty()) Text(f.text, style = theme.body(color = theme.muted))
@@ -434,4 +521,11 @@ fun HealthPage(model: MonitorModel) {
             }
         }
     }
+}
+
+/** A mascot picture: decorative, [size] already scaled with the text zoom, never tinted. An id the art lacks draws nothing. */
+@Composable
+fun MascotPicture(id: String, size: androidx.compose.ui.unit.Dp, modifier: Modifier = Modifier) {
+    val bmp = remember(id) { Mascot.illustration(id) } ?: return
+    androidx.compose.foundation.Image(bmp, contentDescription = null, modifier = modifier.size(size))
 }

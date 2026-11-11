@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+import MasonMascot
 import MasonProtocol
+import MasonTokens
 import MonitorCore
 import SwiftUI
 
@@ -25,9 +27,12 @@ struct MainPane: View {
     }
 }
 
-func section<Content: View>(_ title: String, theme: Theme, @ViewBuilder _ content: () -> Content) -> some View {
+func section<Content: View>(_ title: String, theme: Theme, state: String? = nil, @ViewBuilder _ content: () -> Content) -> some View {
     VStack(alignment: .leading, spacing: theme.spacing) {
-        Text(title).font(theme.title()).foregroundStyle(theme.text)
+        HStack(spacing: theme.spacingSmall) {
+            Text(title).font(theme.title()).foregroundStyle(theme.text)
+            if let state { StateIcon(state: state) }
+        }
         content()
     }
 }
@@ -39,13 +44,31 @@ func section<Content: View>(_ title: String, theme: Theme, @ViewBuilder _ conten
 struct HomePage: View {
     @Environment(\.theme) var theme
     @ObservedObject var model: MonitorModel
+    @State private var adding = false
+
+    var statusLine: some View {
+        Text(model.connected ? (model.home?.status ?? "…") : "Not connected")
+            .font(theme.title()).foregroundStyle(model.attention > 0 ? theme.attention : theme.text)
+            .accessibilityIdentifier("status")
+    }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: theme.spacingLarge) {
-                Text(model.connected ? (model.home?.status ?? "…") : "Not connected")
-                    .font(theme.title()).foregroundStyle(model.attention > 0 ? theme.attention : theme.text)
-                    .accessibilityIdentifier("status")
+                let pic = model.homeMascot
+                if pic.large {
+                    VStack(spacing: theme.spacing) {
+                        MascotPicture(id: pic.id, points: MasonTokens.sizeMascotEmpty)
+                        statusLine
+                        Button("Add task") { adding = true }.buttonStyle(.bordered)
+                            .accessibilityIdentifier("home:add-task")
+                    }.frame(maxWidth: .infinity)
+                } else {
+                    HStack(spacing: theme.spacingLarge) {
+                        MascotPicture(id: pic.id, points: MasonTokens.sizeMascotStatus)
+                        statusLine
+                    }
+                }
 
                 if let attention = model.home?.attention, !attention.isEmpty {
                     section("Needs you", theme: theme) {
@@ -86,8 +109,12 @@ struct HomePage: View {
                     }
                 }
 
+                if let h = model.home, h.hasCompilation {
+                    CompilationSection(model: model, c: h.compilation)
+                }
+
                 ForEach(model.home?.stages ?? [], id: \.state) { st in
-                    section(st.title, theme: theme) {
+                    section(st.title, theme: theme, state: st.state) {
                         ForEach(st.rows, id: \.id) { r in
                             Button { model.go(.task(r.id)) } label: {
                                 HStack(spacing: theme.spacing) {
@@ -103,6 +130,23 @@ struct HomePage: View {
                 }
             }
             .padding(theme.spacingLarge)
+        }
+        .sheet(isPresented: $adding) { AddTaskSheet(model: model, isPresented: $adding) }
+    }
+}
+
+/// A mascot picture: decorative, sized in points that scale with the text zoom, never tinted.
+/// An id the art does not have draws nothing.
+struct MascotPicture: View {
+    @Environment(\.theme) var theme
+    let id: String
+    let points: Int
+
+    var body: some View {
+        if let img = Mascot.illustration(id) {
+            let side = CGFloat(Double(points) * theme.scale)
+            img.resizable().scaledToFit().frame(width: side, height: side)
+                .accessibilityHidden(true)
         }
     }
 }
@@ -130,6 +174,77 @@ struct SessionStepper: View {
     }
 }
 
+/// Home's Compilation section: what holds a `compile` slot, what waits for one
+/// and why (in line order), the CPU reading, and the limit's stepper.
+struct CompilationSection: View {
+    @Environment(\.theme) var theme
+    @ObservedObject var model: MonitorModel
+    let c: Mason_V1_Compilation
+
+    private func age(_ since: UInt64) -> String {
+        let now = model.daemonNow()
+        return Format.duration(ms: now > since ? now - since : 0)
+    }
+
+    @ViewBuilder private func who(_ label: String, task: UInt64) -> some View {
+        if task > 0 {
+            Button("#\(task)") { model.go(.task(task)) }.buttonStyle(.link)
+        } else {
+            Text(label).lineLimit(1).truncationMode(.middle).help(label)
+        }
+    }
+
+    var body: some View {
+        section("Compilation", theme: theme) {
+            HStack(spacing: theme.spacing) {
+                Text("Compiling: \(c.used) of at most")
+                Button { model.setCompileLimit(c.limit > 1 ? c.limit - 1 : 1) } label: { Image(systemName: "minus") }
+                    .disabled(c.limit <= 1)
+                    .accessibilityIdentifier("compile:decrease")
+                Text("\(c.limit)").font(theme.body(.semibold))
+                Button { model.setCompileLimit(c.limit + 1) } label: { Image(systemName: "plus") }
+                    .accessibilityIdentifier("compile:increase")
+                Text(c.cpuLine).foregroundStyle(theme.muted)
+            }
+            .font(theme.body())
+            .buttonStyle(.bordered)
+            .help("Lowering the limit never stops a compile that is running; it holds back new ones until the count falls.")
+            .accessibilityIdentifier("compile")
+
+            if c.running.isEmpty {
+                Text("Nothing is compiling.").font(theme.body()).foregroundStyle(theme.muted)
+            }
+            ForEach(Array(c.running.enumerated()), id: \.offset) { i, r in
+                HStack(spacing: theme.spacing) {
+                    who(r.label, task: r.task)
+                    if r.interactive { Text("interactive").foregroundStyle(theme.muted) }
+                    Text("for \(age(r.sinceMs))").foregroundStyle(theme.muted)
+                }
+                .font(theme.body())
+                .accessibilityIdentifier("compile:running:\(i)")
+            }
+
+            if !c.pending.isEmpty {
+                Text("Waiting, in line order").font(theme.body(.semibold)).padding(.top, theme.spacingSmall)
+            }
+            ForEach(c.pending, id: \.position) { w in
+                HStack(alignment: .firstTextBaseline, spacing: theme.spacing) {
+                    Text("\(w.position).").foregroundStyle(theme.muted)
+                    who(w.label, task: w.task)
+                    Text(w.reason)
+                    Text(w.interactive ? "interactive, \(age(w.sinceMs))" : "\(w.stepsRemaining) steps from landing, \(age(w.sinceMs))")
+                        .font(theme.small()).foregroundStyle(theme.muted)
+                }
+                .font(theme.body())
+                .accessibilityIdentifier("compile:pending:\(w.position)")
+            }
+
+            Text(c.rules).font(theme.small()).foregroundStyle(theme.muted)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}
+
 /// A task's page: step progress, activity, the live log, the plan, checks,
 /// the decision card and the actions; copy buttons; why exploring was skipped.
 struct TaskDetailPage: View {
@@ -151,6 +266,12 @@ struct TaskDetailPage: View {
     @ViewBuilder func content(_ d: TaskDetailView) -> some View {
         let r = d.row
         VStack(alignment: .leading, spacing: theme.spacingLarge) {
+            HStack(alignment: .top, spacing: theme.spacingLarge) {
+            if let art = Mascot.illustration(r.state) {
+                art.resizable().scaledToFit()
+                    .frame(width: theme.illustration, height: theme.illustration)
+                    .accessibilityHidden(true)
+            }
             VStack(alignment: .leading, spacing: theme.spacingSmall) {
                 Text("\(r.key) \(r.title)").font(theme.title()).accessibilityIdentifier("detail:\(r.id)")
                 Text("\(r.project), \(r.state.replacingOccurrences(of: "_", with: " ")), \(Format.duration(ms: r.inStateMs)) in this state")
@@ -163,6 +284,7 @@ struct TaskDetailPage: View {
                     if !d.branch.isEmpty { CopyButton(label: "branch", value: d.branch) }
                     if !d.worktree.isEmpty { CopyButton(label: "worktree", value: d.worktree) }
                 }
+            }
             }
 
             HStack(spacing: theme.spacing) {
@@ -308,7 +430,10 @@ struct LandingPage: View {
                             .font(theme.body()).foregroundStyle(theme.attention)
                     }
                     section("Queue", theme: theme) {
-                        if l.queue.isEmpty { Text("Nothing is landing.").font(theme.body()).foregroundStyle(theme.muted) }
+                        if l.queue.isEmpty {
+                            MascotPicture(id: "nothing_landing", points: MasonTokens.sizeMascotEmpty)
+                            Text("Nothing is landing.").font(theme.body()).foregroundStyle(theme.muted)
+                        }
                         ForEach(l.queue, id: \.id) { r in
                             Button("\(r.key) \(r.title)") { model.go(.task(r.id)) }.buttonStyle(.link)
                         }
@@ -477,7 +602,10 @@ struct HealthPage: View {
                 }
                 if let i = model.introspection {
                     section("Findings", theme: theme) {
-                        if i.findings.isEmpty { Text("Nothing found yet.").font(theme.body()).foregroundStyle(theme.muted) }
+                        if i.findings.isEmpty {
+                            MascotPicture(id: "all_clear", points: MasonTokens.sizeMascotStatus)
+                            Text("Nothing found yet.").font(theme.body()).foregroundStyle(theme.muted)
+                        }
                         ForEach(i.findings, id: \.id) { f in
                             VStack(alignment: .leading) {
                                 Text("#\(f.id) [\(f.verdict)] \(f.title) (proposal #\(f.task), metric \(f.metric))").font(theme.body())

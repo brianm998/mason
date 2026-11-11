@@ -188,8 +188,9 @@ fn task_json(d: &Daemon, w: &World, t: &Task, detail: bool) -> Value {
 
 async fn status(Shared(d): Shared<Arc<Daemon>>) -> Res {
     let d2 = d.clone();
+    // The view pool: `mason status` is how you find out the main pool is stuck.
     let v = d
-        .pool
+        .view_pool
         .run(move || {
             let w = d2.world().map_err(store_err)?;
             let mut counts = serde_json::Map::new();
@@ -221,12 +222,19 @@ async fn status(Shared(d): Shared<Arc<Daemon>>) -> Res {
                     }))
                 }).collect::<Vec<_>>(),
                 "event_loop_stalls": stalls,
+                "pools": {"blocking": d2.pool.stats(), "views": d2.view_pool.stats()},
                 "worst_stall_ms": worst,
                 "bugs": d2.store.bugs().map_or(0, |b| b.len()),
                 "thread_panics": d2.store.bugs().map_or(json!(0), |b| {
                     let p: Vec<_> = b.iter().filter(|x| x.1 == "thread_panic").collect();
                     json!({"count": p.len(), "last": p.last().map(|x| x.2.clone())})
                 }),
+                "stuck": d2.broker.disk_low().map(|g| json!({
+                    "cause": "disk",
+                    "free_mb": g.free_mb,
+                    "floor_mb": g.floor_mb,
+                    "tasks_waiting": d2.broker.disk_held(),
+                })),
                 "projects": d2.projects.values().map(|p| p.id.clone()).collect::<Vec<_>>(),
                 "step_hosts_running": running,
                 "trackers": d2.projects.keys().map(|pid| crate::tracker::state_json(&d2, *pid)).collect::<Vec<_>>(),
@@ -1597,7 +1605,16 @@ async fn refresh_tracker(Shared(d): Shared<Arc<Daemon>>, Path(id): Path<u64>) ->
             };
             d2.tracker.refresh(pid);
             match crate::tracker::poll_once(&d2, pid, adapter.as_ref(), &cfg) {
-                Ok(s) => Ok(json!({"tracker": true, "imported": s.imported, "updated": s.updated, "closed": s.closed, "ignored": s.ignored, "unchanged": s.unchanged, "waiting_slot": s.refused, "adopted": s.adopted})),
+                // A look that found nothing new (the background poll it woke may just have
+                // fetched the listing) says how things stand, not zeros.
+                Ok(s) => {
+                    let s = if s == crate::tracker::Summary::default() {
+                        d2.tracker.standing(pid).unwrap_or(s)
+                    } else {
+                        s
+                    };
+                    Ok(json!({"tracker": true, "imported": s.imported, "updated": s.updated, "closed": s.closed, "ignored": s.ignored, "unchanged": s.unchanged, "waiting_slot": s.refused, "adopted": s.adopted}))
+                }
                 Err(e) => Ok(json!({"tracker": true, "error": e})),
             }
         })
@@ -2341,6 +2358,8 @@ async fn resource_limit(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) ->
             let r = d2.broker.set_limit(&name, units as u32);
             // A raised limit may free a session for a task that is queued.
             d2.admit();
+            // The home page shows the limits.
+            d2.poke();
             r
         })
         .await
@@ -2482,6 +2501,7 @@ pub fn render_logs(d: &Daemon, task: u64) -> String {
             || what == "cmd"
             || what.starts_with("test-again")
             || what.starts_with("cmd-again")
+            || what.starts_with("check")
         {
             "test"
         } else {
@@ -2602,7 +2622,9 @@ async fn debug_stall(
 }
 
 /// Holds a project's repository lock for `ms` milliseconds, to show that alerts go on while git
-/// work is stuck. Returns at once; a thread holds the lock.
+/// work is stuck. With `fetch=1` it holds the project's fetch lock too, as a hung fetch would
+/// (since s81 the fetch has a lock of its own, so the repository lock alone stalls no fetch).
+/// Returns at once; a thread holds the locks.
 async fn debug_hold_repo_lock(
     Shared(d): Shared<Arc<Daemon>>,
     Query(q): Query<HashMap<String, String>>,
@@ -2617,14 +2639,41 @@ async fn debug_hold_repo_lock(
         .or_else(|| d.projects.keys().next().copied())
         .ok_or_else(|| fail(StatusCode::NOT_FOUND, "no project"))?;
     let lock = d.repo_lock(pid);
+    let fetch = (q.get("fetch").map(String::as_str) == Some("1")).then(|| d.fetch_lock(pid));
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _f = fetch
+            .as_ref()
+            .map(|f| f.lock().unwrap_or_else(|e| e.into_inner()));
         let _ = tx.send(());
         std::thread::sleep(std::time::Duration::from_millis(ms));
     });
     let _ = rx.recv_timeout(std::time::Duration::from_millis(100));
     Ok(Json(json!({"holding_ms": ms})))
+}
+
+/// Runs on the blocking pool and waits on the repository lock (debug daemons
+/// only): the shape of `reload_definition` and `jobs::cleanup`.
+async fn debug_wait_repo(Shared(d): Shared<Arc<Daemon>>) -> Res {
+    if !d.cfg.debug {
+        return Err(fail(StatusCode::NOT_FOUND, "not found"));
+    }
+    let pid = d
+        .projects
+        .keys()
+        .next()
+        .copied()
+        .ok_or_else(|| fail(StatusCode::NOT_FOUND, "no project"))?;
+    let d2 = d.clone();
+    d.pool
+        .run(move || {
+            let lock = d2.repo_lock(pid);
+            let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+        })
+        .await
+        .map_err(pool_err)?;
+    Ok(Json(json!({"waited": true})))
 }
 
 /// Every operation of the API, without the socket. The socket runs its
@@ -2718,6 +2767,7 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/leases/{id}/release", post(lease_release))
         .route("/debug/stall", post(debug_stall))
         .route("/debug/hold-repo-lock", post(debug_hold_repo_lock))
+        .route("/debug/wait-repo", post(debug_wait_repo))
         .layer(axum::middleware::from_fn_with_state(
             d.clone(),
             record_interventions,

@@ -18,8 +18,27 @@ fi
 bin=$(cd clients/swift && swift build -c release --show-bin-path)
 app="$out/MASON.app"
 rm -rf "$app"
-mkdir -p "$app/Contents/MacOS"
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$bin/MasonMonitor" "$app/Contents/MacOS/MasonMonitor"
+# SwiftPM puts each target's resources in a bundle beside the binary. Without them in the
+# app the mascot art is gone as soon as the build directory is (the in-app update runs this
+# script too). `Mascot` looks in Contents/Resources first.
+for res in "$bin"/*.bundle; do
+  [ -d "$res" ] || continue
+  cp -R "$res" "$app/Contents/Resources/"
+done
+[ -d "$app/Contents/Resources/MasonMonitor_MasonMascot.bundle/Art" ] || {
+  echo "bundle-monitor: the mascot resource bundle is missing from $app" >&2; exit 1; }
+# The app icon: an .icns made from the 1024 px mascot icon (Finder and the Dock read it).
+icon_src="clients/swift/Sources/MasonMascot/Art/brand/app_icon.png"
+iconset=$(mktemp -d)/MASON.iconset
+mkdir -p "$iconset"
+for s in 16 32 128 256 512; do
+  sips -z $s $s "$icon_src" --out "$iconset/icon_${s}x${s}.png" >/dev/null
+  sips -z $((s * 2)) $((s * 2)) "$icon_src" --out "$iconset/icon_${s}x${s}@2x.png" >/dev/null
+done
+iconutil -c icns "$iconset" -o "$app/Contents/Resources/MASON.icns"
+rm -rf "$(dirname "$iconset")"
 cat > "$app/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -27,6 +46,7 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
 <dict>
   <key>CFBundleIdentifier</key><string>org.mason.monitor</string>
   <key>CFBundleName</key><string>MASON</string>
+  <key>CFBundleIconFile</key><string>MASON</string>
   <key>CFBundleExecutable</key><string>MasonMonitor</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>0.0.0</string>

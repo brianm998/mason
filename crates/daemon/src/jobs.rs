@@ -38,7 +38,7 @@ use serde_json::Value;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -684,14 +684,31 @@ pub(crate) fn test_command(
 /// steps go on with the branch as it is). Failing here instead would fail
 /// every later step the same way, so no agent could ever resolve it.
 pub(crate) fn prepare(c: &Ctx) -> Result<Option<String>, String> {
+    // The fetch has a lock of its own: a stalled remote holds up other fetches,
+    // not the worktrees, merges and cleanup that take the repository lock.
+    // A fetch that fails (the network dropped, the remote is down) decides nothing: the
+    // last-known base is still there, and landing folds in the fresh base anyway.
+    if let Err(why) = c.d.fetch_remote(c.project_id) {
+        let base = c.project.base_ref();
+        if git::rev_parse(&c.project.path, &base).is_err() {
+            return Err(format!(
+                "fetching the remote failed ({why}) and there is no last-known {base} to work from"
+            ));
+        }
+        tracing::warn!(
+            task = c.task.0,
+            "fetching the remote failed ({why}); going on from the last-known {base}"
+        );
+    }
+    wait_out_environment(c, "preparing the worktree", || prepare_locked(c))
+}
+
+fn prepare_locked(c: &Ctx) -> Result<Option<String>, git::GitError> {
     let lock = c.d.repo_lock(c.project_id);
     let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
     let repo = &c.project.path;
-    if let Some(r) = &c.project.remote {
-        git::run(repo, &["fetch", "--prune", r]).map_err(|e| e.to_string())?;
-    }
     let base = c.project.base_ref();
-    git::ensure_worktree(repo, &c.wt, &c.branch, &base).map_err(|e| e.to_string())?;
+    git::ensure_worktree(repo, &c.wt, &c.branch, &base)?;
     // Uncommitted changes are an agent's work in progress: a step re-entered after
     // the daemon restarted (a self-update, say) finds its agent's edits not yet
     // committed. Merging the base into them fails ("your local changes would be
@@ -700,8 +717,7 @@ pub(crate) fn prepare(c: &Ctx) -> Result<Option<String>, String> {
     // `--no-optional-locks`: a plain `git status` refreshes the index and takes
     // `index.lock` to do it. An agent still winding down in this worktree (its step
     // just superseded) then fails its own `git commit` on that lock.
-    let dirty = git::run(&c.wt, &["--no-optional-locks", "status", "--porcelain"])
-        .map_err(|e| e.to_string())?;
+    let dirty = git::run(&c.wt, &["--no-optional-locks", "status", "--porcelain"])?;
     if !dirty.trim().is_empty() {
         tracing::info!(
             task = c.task.0,
@@ -709,10 +725,97 @@ pub(crate) fn prepare(c: &Ctx) -> Result<Option<String>, String> {
         );
         return Ok(None);
     }
-    match git::catch_up(&c.wt, &base) {
-        Ok(CatchUp::Conflict(files)) => Ok(Some(files.trim().to_string())),
-        Ok(_) => Ok(None),
-        Err(e) => Err(e.to_string()),
+    match git::catch_up(&c.wt, &base)? {
+        CatchUp::Conflict(files) => Ok(Some(files.trim().to_string())),
+        _ => Ok(None),
+    }
+}
+
+/// Whether a git failure is the environment's (a deadline passed, a lock is held) and not a
+/// verdict on the task or the repository.
+pub(crate) fn environmental(e: &git::GitError) -> bool {
+    if e.timed_out {
+        return true;
+    }
+    let s = e.stderr.to_lowercase();
+    s.contains("index.lock")
+        || s.contains("packed-refs.lock")
+        || s.contains("another git process")
+        || (s.contains(".lock") && (s.contains("file exists") || s.contains("unable to create")))
+}
+
+static ENV_WAIT_LIMIT_MS: AtomicU64 = AtomicU64::new(0);
+static ENV_BACKOFF_MS: AtomicU64 = AtomicU64::new(0);
+
+/// Shorten how long a step waits out an environmental git failure, and the first backoff
+/// (tests). Zeros restore the defaults: 15 minutes, starting at one second.
+pub fn set_env_wait(limit: Duration, first_backoff: Duration) {
+    ENV_WAIT_LIMIT_MS.store(limit.as_millis() as u64, Ordering::SeqCst);
+    ENV_BACKOFF_MS.store(first_backoff.as_millis() as u64, Ordering::SeqCst);
+}
+
+fn env_wait_limit() -> Duration {
+    match ENV_WAIT_LIMIT_MS.load(Ordering::SeqCst) {
+        0 => Duration::from_secs(15 * 60),
+        ms => Duration::from_millis(ms),
+    }
+}
+
+fn env_backoff() -> Duration {
+    match ENV_BACKOFF_MS.load(Ordering::SeqCst) {
+        0 => Duration::from_secs(1),
+        ms => Duration::from_millis(ms),
+    }
+}
+
+/// Run `f`; while it fails for environmental reasons (see [`environmental`]) say the step is
+/// waiting, back off and try again, for up to 15 minutes. Nothing is charged to the task
+/// meanwhile. A real error is returned at once; so is the last one when the time runs out,
+/// naming what failed.
+pub(crate) fn wait_out_environment<T>(
+    c: &Ctx,
+    what: &str,
+    mut f: impl FnMut() -> Result<T, git::GitError>,
+) -> Result<T, String> {
+    let started = Instant::now();
+    let limit = env_wait_limit();
+    let mut delay = env_backoff();
+    let mut waited = false;
+    loop {
+        match f() {
+            Ok(v) => {
+                if waited {
+                    c.emit(EventKind::WaitEnded { task: c.task });
+                }
+                return Ok(v);
+            }
+            Err(e) if environmental(&e) => {
+                if started.elapsed() >= limit {
+                    return Err(format!(
+                        "{what}: still failing after {} s of waiting: {e}",
+                        started.elapsed().as_secs()
+                    ));
+                }
+                if !waited {
+                    waited = true;
+                    tracing::warn!(task = c.task.0, "{what}: {e}; waiting");
+                    let on = format!("git is busy or not answering ({what}): {e}");
+                    if !c.emit(EventKind::WaitStarted { task: c.task, on }) {
+                        return Err(format!("{what}: the step was superseded while waiting"));
+                    }
+                }
+                std::thread::sleep(delay);
+                delay = (delay * 2).min(Duration::from_secs(30));
+                let alive =
+                    c.d.world()
+                        .map(|w| w.open_run(c.task) == Some(c.run))
+                        .unwrap_or(true);
+                if !alive {
+                    return Err(format!("{what}: the step was superseded while waiting"));
+                }
+            }
+            Err(e) => return Err(format!("{what}: {e}")),
+        }
     }
 }
 
@@ -749,10 +852,11 @@ pub(crate) fn conflict_note(base: &str, files: &str) -> String {
 }
 
 pub(crate) fn prepare_worktree_only(c: &Ctx) -> Result<(), String> {
-    let lock = c.d.repo_lock(c.project_id);
-    let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
-    git::ensure_worktree(&c.project.path, &c.wt, &c.branch, &c.project.base_ref())
-        .map_err(|e| e.to_string())
+    wait_out_environment(c, "preparing the worktree", || {
+        let lock = c.d.repo_lock(c.project_id);
+        let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+        git::ensure_worktree(&c.project.path, &c.wt, &c.branch, &c.project.base_ref())
+    })
 }
 
 /// Run `sh -c cmd` in `cwd`, giving up after `timeout`. Returns whether it
@@ -802,7 +906,7 @@ fn run_shell_env(
             Err(_) => break false,
         }
     };
-    let text = std::fs::read_to_string(&out).unwrap_or_default();
+    let text = read_tail_lossy(&out).unwrap_or_default();
     let _ = std::fs::remove_file(&out);
     (ok, tail(&text, 40))
 }
@@ -814,6 +918,36 @@ fn tempfile_path() -> PathBuf {
         std::process::id(),
         N.fetch_add(1, Ordering::SeqCst)
     ))
+}
+
+/// Read a text file, replacing bytes that are not valid UTF-8 with U+FFFD.
+/// A missing or unreadable file is an error, as with `read_to_string`.
+pub fn read_lossy(path: &Path) -> std::io::Result<String> {
+    Ok(String::from_utf8_lossy(&std::fs::read(path)?).into_owned())
+}
+
+/// How much of the end of a log `read_tail_lossy` looks at.
+pub const TAIL_WINDOW: u64 = 1 << 20;
+
+/// The last `TAIL_WINDOW` bytes of a text file, read lossily. When the file is
+/// longer, the partial first line is dropped.
+pub fn read_tail_lossy(path: &Path) -> std::io::Result<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path)?;
+    let len = f.metadata()?.len();
+    let cut = len > TAIL_WINDOW;
+    if cut {
+        f.seek(SeekFrom::Start(len - TAIL_WINDOW))?;
+    }
+    let mut buf = Vec::new();
+    f.take(TAIL_WINDOW).read_to_end(&mut buf)?;
+    let text = String::from_utf8_lossy(&buf);
+    if cut {
+        if let Some(i) = text.find('\n') {
+            return Ok(text[i + 1..].to_string());
+        }
+    }
+    Ok(text.into_owned())
 }
 
 pub fn tail(text: &str, lines: usize) -> String {
@@ -895,6 +1029,8 @@ struct TestChecks {
     slots: CheckSlots,
     /// The step's deadline grows by the time the agent spent queued for a check.
     extra: mason_adapter_api::DeadlineExtra,
+    id_prefix: String,
+    log_dir: PathBuf,
 }
 
 impl CheckHandler for TestChecks {
@@ -902,8 +1038,22 @@ impl CheckHandler for TestChecks {
         let (true, Some(cmd)) = (name == "tests", &self.cmd) else {
             return CheckRun::Unknown;
         };
+        // Under a step host, so that a restarted daemon finds the run again.
+        let spec = crate::hostedcheck::CheckSpec {
+            id_prefix: self.id_prefix.clone(),
+            log_dir: self.log_dir.clone(),
+            cmd: cmd.clone(),
+            cwd: self.wt.clone(),
+            env: self.slots.env(),
+            limit: self.timeout,
+            tree: crate::hostedcheck::tree_key(&self.wt),
+        };
+        // The same call sent again after a restart attaches to the run already
+        // going (or takes its result) at once: it starts nothing, so it does not
+        // queue behind other work for a slot the run it joins already took.
+        let queue = !crate::hostedcheck::pending(&self.slots.d, &spec);
         let queued = Instant::now();
-        let swapped = self.slots.swap_for_test();
+        let swapped = self.slots.swap_for_test(queue);
         self.extra.add(queued.elapsed());
         let Ok(test_lease) = swapped else {
             return CheckRun::Done {
@@ -911,12 +1061,26 @@ impl CheckHandler for TestChecks {
                 summary: "The step is over; the check did not run.".into(),
             };
         };
-        let (passed, out) = run_shell_env(cmd, &self.wt, self.timeout, &self.slots.env());
+        let res = crate::hostedcheck::run(&self.slots.d, &spec);
         drop(test_lease);
         self.slots.take_agent_slot_back();
-        CheckRun::Done {
-            passed,
-            summary: format!("Last output:\n{out}"),
+        match res {
+            Ok(o) => CheckRun::Done {
+                passed: o.passed,
+                summary: if o.timed_out {
+                    format!(
+                        "The tests did not finish within {} s and were stopped. Last output:\n{}",
+                        self.timeout.as_secs(),
+                        o.output
+                    )
+                } else {
+                    format!("Last output:\n{}", o.output)
+                },
+            },
+            Err(e) => CheckRun::Done {
+                passed: false,
+                summary: format!("The check did not give a result: {e}"),
+            },
         }
     }
 }
@@ -935,16 +1099,17 @@ struct CheckSlots {
     agent_uses: std::collections::BTreeMap<String, u32>,
     /// The test step's `uses`, without device pools: a check runs no suite.
     test_uses: std::collections::BTreeMap<String, u32>,
+    /// The test step's name: a check queues as the test step's work, which it
+    /// is, not as the develop step's. Ranked as develop it came after every test
+    /// and landing of every other task, and waited hours for a slot.
+    test_step: Option<String>,
     lease: StepLease,
 }
 
 impl CheckSlots {
     fn new(c: &Ctx) -> CheckSlots {
-        let test_uses = c
-            .def
-            .steps
-            .iter()
-            .find(|s| s.kind == StepType::Test)
+        let test = c.def.steps.iter().find(|s| s.kind == StepType::Test);
+        let test_uses = test
             .map(|s| s.uses.clone())
             .unwrap_or_default()
             .into_iter()
@@ -959,6 +1124,7 @@ impl CheckSlots {
             account: c.project.account.clone(),
             agent_uses: c.step.uses.clone(),
             test_uses,
+            test_step: test.map(|s| s.name.clone()),
             lease: c.lease.clone(),
         }
     }
@@ -973,6 +1139,7 @@ impl CheckSlots {
     fn acquire(
         &self,
         needs: mason_scheduler::Needs,
+        as_step: &str,
     ) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
         let d = &self.d;
         let t = d
@@ -980,31 +1147,51 @@ impl CheckSlots {
             .ok()
             .and_then(|w| w.tasks.get(&self.task).cloned())
             .ok_or(crate::sched::Cancelled)?;
-        let rank = d.rank_for(&t, &self.def, &self.step);
+        let rank = d.rank_for(&t, &self.def, as_step);
         let (d2, task, run) = (d.clone(), self.task, self.run);
         let alive = move || {
             d2.world()
                 .map(|w| w.open_run(task) == Some(run))
                 .unwrap_or(true)
         };
-        d.broker.acquire(
+        // The wait shows on the task, as a step's does: a check that queued
+        // used to leave the task reading "running" for hours.
+        let asked = needs.clone();
+        let mut waited = false;
+        let lease = d.broker.acquire(
             self.task,
             &format!("#{}", self.task.0),
             rank,
             needs,
             &alive,
-            &mut |_| {},
-        )
+            &mut |why| {
+                waited = d.emit_for_run(
+                    task,
+                    run,
+                    EventKind::WaitStarted {
+                        task,
+                        on: crate::targets::wait_text(d, &asked, why),
+                    },
+                );
+            },
+        );
+        if waited {
+            d.emit_for_run(task, run, EventKind::WaitEnded { task });
+        }
+        lease
     }
 
-    /// Give the agent's slot back and queue for what the tests use.
-    fn swap_for_test(&self) -> Result<Option<crate::sched::Lease>, crate::sched::Cancelled> {
+    /// Give the agent's slot back and, if `queue`, queue for what the tests use.
+    fn swap_for_test(
+        &self,
+        queue: bool,
+    ) -> Result<Option<crate::sched::Lease>, crate::sched::Cancelled> {
         let held = self.lease.lock().unwrap_or_else(|e| e.into_inner()).take();
         if held.is_some() {
             drop(held);
             self.d.admit();
         }
-        if self.test_uses.is_empty() {
+        if !queue || self.test_uses.is_empty() {
             return Ok(None);
         }
         for name in self.test_uses.keys() {
@@ -1012,7 +1199,8 @@ impl CheckSlots {
                 .broker
                 .declare(name, self.def.resources.get(name).copied().unwrap_or(1));
         }
-        self.acquire(crate::sched::needs_of(&self.test_uses, None))
+        let as_step = self.test_step.as_deref().unwrap_or(&self.step);
+        self.acquire(crate::sched::needs_of(&self.test_uses, None), as_step)
             .map(Some)
     }
 
@@ -1020,7 +1208,7 @@ impl CheckSlots {
     fn take_agent_slot_back(&self) {
         self.d.admit();
         let needs = crate::sched::needs_of(&self.agent_uses, Some(&self.account));
-        if let Ok(l) = self.acquire(needs) {
+        if let Ok(l) = self.acquire(needs, &self.step) {
             *self.lease.lock().unwrap_or_else(|e| e.into_inner()) = Some(l);
         }
     }
@@ -1212,6 +1400,13 @@ fn agent_job(c: &Ctx) {
     let prompt = if kind == StepKind::Review {
         prompt
     } else {
+        // A base that cannot be read right now is waited for; it must not look like
+        // a base with no numbered files.
+        if let Err(why) = wait_out_environment(c, "reading the base's numbered files", || {
+            crate::numbers::base_paths(&c.project)
+        }) {
+            return c.fail(why);
+        }
         match c.d.ensure_numbers(c.task) {
             Ok(m) => format!("{prompt}\n\n{}", crate::numbers::prompt_block(&m)),
             Err(why) => return c.fail(format!("no numbers could be reserved: {why}")),
@@ -1236,6 +1431,8 @@ fn agent_job(c: &Ctx) {
         timeout: c.project.test_timeout,
         slots: CheckSlots::new(c),
         extra: deadline_extra.clone(),
+        id_prefix: format!("t{}r{}-check", c.task.0, c.run.0),
+        log_dir: c.task_dir(),
     });
     let validator = (kind == StepKind::Develop).then(|| {
         change_validator(
@@ -1329,6 +1526,31 @@ fn agent_job(c: &Ctx) {
     }
     spec.run_key = Some(key.clone());
     spec.tools = c.step.tools.clone();
+    spec.idle = Some(mason_adapter_api::IdlePolicy {
+        alert_after: c.project.agent_idle_alert,
+        stop_after: c.project.agent_idle_stop,
+        report: {
+            let (d, run, task, step) = (c.d.clone(), c.run.0, c.task.0, c.step.name.clone());
+            Arc::new(move |ms| {
+                let mut m = d.silent.lock().unwrap_or_else(|e| e.into_inner());
+                match ms {
+                    Some(silent_ms) => {
+                        m.insert(
+                            run,
+                            crate::daemon::SilentAgent {
+                                task,
+                                step: step.clone(),
+                                silent_ms,
+                            },
+                        );
+                    }
+                    None => {
+                        m.remove(&run);
+                    }
+                }
+            })
+        },
+    });
     {
         let (d, run) = (c.d.clone(), c.run);
         spec.progress = Some(Arc::new(move |stream, off, bytes| {
@@ -1555,6 +1777,9 @@ fn settle_all(
     let root = c.d.cfg.hosts_dir();
     let base = format!("t{}r{}", c.task.0, c.run.0);
     let describe = |id: &str| -> (String, u64) {
+        if let Some(note) = mason_adapters::hosted::silent_stop(&root.join(id)) {
+            return (note, now_ms());
+        }
         match mason_step_host::registry::lost_report(&root.join(id)) {
             Ok(r) => (r.to_string(), if r.at_ms > 0 { r.at_ms } else { now_ms() }),
             Err(_) => (format!("host {id} never came up"), now_ms()),
@@ -1563,6 +1788,7 @@ fn settle_all(
     let mut report = settle_holds(c, runner, first, spec, contract, rec)?;
     let mut resumed = false;
     let mut fresh_after_gone = false;
+    let mut silent = false;
     loop {
         let fresh = match &report.end {
             StepEnd::Failed(FailReason::HostLost { detail }) => {
@@ -1587,6 +1813,7 @@ fn settle_all(
                 // host left running must not work beside its replacement.
                 tracing::warn!(host = %newest, "reaping a lost host before its replacement");
                 mason_step_host::registry::reap_dir(&root.join(&newest));
+                silent = mason_adapters::hosted::silent_stop(&root.join(&newest)).is_some();
                 c.release_lease();
                 if get_lease(c).is_err() {
                     return None;
@@ -1610,7 +1837,12 @@ fn settle_all(
             resumed = false;
         } else {
             rec.write(c, "resume", spec);
-            report = runner.resume(report, hl::interrupted_note(), spec.clone(), contract);
+            let note = if std::mem::take(&mut silent) {
+                hl::silent_note()
+            } else {
+                hl::interrupted_note()
+            };
+            report = runner.resume(report, note, spec.clone(), contract);
             resumed = true;
         }
         report = settle_holds(c, runner, report, spec, contract, rec)?;
@@ -2016,7 +2248,7 @@ fn run_command_on(
             log,
         });
     }
-    let output = tail(&std::fs::read_to_string(&log).unwrap_or_default(), 60);
+    let output = tail(&read_tail_lossy(&log).unwrap_or_default(), 60);
     let how = if rec.signal != 0 {
         format!("killed by signal {}", rec.signal)
     } else {
@@ -2201,6 +2433,58 @@ pub fn cleanup(d: &Arc<Daemon>, task: TaskId, delete_branch: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn locks_and_deadlines_are_environmental_real_errors_are_not() {
+        let e = |stderr: &str, timed_out: bool| git::GitError {
+            args: vec!["merge".into()],
+            code: Some(128),
+            stderr: stderr.into(),
+            timed_out,
+        };
+        assert!(environmental(&e("", true)));
+        assert!(environmental(&e(
+            "fatal: Unable to create '/r/.git/index.lock': File exists.",
+            false
+        )));
+        assert!(environmental(&e(
+            "error: cannot lock ref: Unable to create 'packed-refs.lock': File exists",
+            false
+        )));
+        assert!(!environmental(&e("fatal: not a git repository", false)));
+        assert!(!environmental(&e(
+            "error: pathspec 'x' did not match",
+            false
+        )));
+    }
+
+    #[test]
+    fn run_shell_returns_the_tail_of_output_with_a_bad_byte() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ok, out) = run_shell(
+            "printf 'first\\n\\377bad\\nlast line\\n'; exit 1",
+            dir.path(),
+            Duration::from_secs(20),
+        );
+        assert!(!ok);
+        assert!(
+            out.contains("last line") && out.contains("first"),
+            "{out:?}"
+        );
+    }
+
+    #[test]
+    fn the_tail_reader_keeps_only_the_last_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("big");
+        let mut data = b"head\n".to_vec();
+        data.extend(std::iter::repeat_n(b'x', 2 << 20));
+        data.extend(b"\n\xffend\n");
+        std::fs::write(&p, &data).unwrap();
+        let t = read_tail_lossy(&p).unwrap();
+        assert!(t.len() as u64 <= TAIL_WINDOW && t.ends_with("end\n") && !t.starts_with("head"));
+        assert!(read_lossy(&p).unwrap().starts_with("head"));
+    }
 
     #[test]
     fn a_script_steps_result_file_sets_passed_and_summary() {

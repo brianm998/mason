@@ -89,6 +89,19 @@ pub struct World<'a> {
     pub compile_pace: Option<CompilePace>,
     /// Measured by the caller: free disk against its floor. `None` means no disk gate.
     pub disk: Option<DiskGate>,
+    /// Measured by the caller: how slowly the build disk has been answering.
+    /// `None` means no stall gate.
+    pub stall: Option<StallGate>,
+}
+
+/// The build disk has stopped answering promptly. A stall shows up as *less* CPU
+/// use (everything is blocked on the disk), so the CPU gate would let more
+/// compiles in at the worst moment. Only a reason to wait while a compile is
+/// running, so a stall that is not ours can never hold the queue for good.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StallGate {
+    pub slow_ms: u64,
+    pub max_ms: u64,
 }
 
 /// The disk floor. Below it no `compile` and no LLM session is granted, even when nothing
@@ -99,8 +112,9 @@ pub struct DiskGate {
     pub floor_mb: u64,
 }
 
-/// The CPU gate on the `compile` resource. Checked only when a compile would
-/// start; one that has started is never revoked.
+/// The CPU gate on the `compile` resource. Checked only when a further compile
+/// would start beside one already running (the first always starts); one that
+/// has started is never revoked.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CpuGate {
     pub busy_pct: u32,
@@ -276,8 +290,17 @@ pub fn plan(world: &World, waiting: &[Request]) -> Plan {
             (Some(free), Some(floor)) if usage.any && free < floor => Some((free, floor)),
             _ => None,
         };
+        let compile_running = usage.used.get(COMPILE).is_some_and(|n| *n > 0);
+        // Only a further compile waits for the CPU: the first always starts. CPU use
+        // is the whole machine's, so other work (another pipeline's builds, an
+        // editor indexing) would otherwise hold every compile back with none of
+        // ours running, which is the queue waiting on an idle `compile`.
         let hot = match world.cpu {
-            Some(g) if compiles && g.busy_pct >= g.max_pct => Some(g),
+            Some(g) if compiles && compile_running && g.busy_pct >= g.max_pct => Some(g),
+            _ => None,
+        };
+        let stalled = match world.stall {
+            Some(g) if compiles && compile_running && g.slow_ms >= g.max_ms => Some(g),
             _ => None,
         };
         let settling = world
@@ -299,22 +322,31 @@ pub fn plan(world: &World, waiting: &[Request]) -> Plan {
         };
         let cause = match (&fitted, &touch, low_memory) {
             (Fit::Never(c), _, _) | (Fit::Full(c), _, _) => Some(c.clone()),
-            (Fit::Yes, Some(Touch::Name(n)), _) => Some(WaitCause::Behind {
-                resource: n.clone(),
-            }),
-            (Fit::Yes, Some(Touch::Machine), _) => Some(WaitCause::Exclusive),
-            (Fit::Yes, None, _) if low_disk.is_some() => {
+            // Every request the disk gate holds says so, not only the first in line: the
+            // ones behind it are held by the disk too. Who is granted does not change.
+            (Fit::Yes, _, _) if low_disk.is_some() => {
                 let g = low_disk.expect("checked");
                 Some(WaitCause::Disk {
                     free_mb: g.free_mb,
                     floor_mb: g.floor_mb,
                 })
             }
+            (Fit::Yes, Some(Touch::Name(n)), _) => Some(WaitCause::Behind {
+                resource: n.clone(),
+            }),
+            (Fit::Yes, Some(Touch::Machine), _) => Some(WaitCause::Exclusive),
             (Fit::Yes, None, _) if hot.is_some() => {
                 let g = hot.expect("checked");
                 Some(WaitCause::Cpu {
                     busy_pct: g.busy_pct,
                     max_pct: g.max_pct,
+                })
+            }
+            (Fit::Yes, None, _) if stalled.is_some() => {
+                let g = stalled.expect("checked");
+                Some(WaitCause::DiskStall {
+                    slow_ms: g.slow_ms,
+                    max_ms: g.max_ms,
                 })
             }
             (Fit::Yes, None, _) if settling.is_some() => Some(WaitCause::Settling {
@@ -368,6 +400,7 @@ fn build_wait(
         WaitCause::Memory { .. }
         | WaitCause::Cpu { .. }
         | WaitCause::Settling { .. }
+        | WaitCause::DiskStall { .. }
         | WaitCause::Disk { .. } => true,
         _ => false,
     };
