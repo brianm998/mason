@@ -374,6 +374,92 @@ fn disk_alert(d: &Daemon, w: &mason_engine::World) -> Option<(String, String, St
     Some(("disk".into(), "disk".into(), text))
 }
 
+/// How long a launch may wait before it is called frozen. `MASON_LAUNCH_FROZEN_MS` overrides it.
+const LAUNCH_FROZEN_MS: u64 = 2 * 60 * 1000;
+
+/// The task a host id belongs to: ids start `t<task>r<run>`.
+fn launch_task(id: &str) -> Option<u64> {
+    id.strip_prefix('t')?.split('r').next()?.parse().ok()
+}
+
+/// Whether `syspolicyd` is running, asked of `/usr/bin/pgrep` (Apple's tools do not freeze with
+/// it) for at most 2 seconds. None off macOS or when the answer did not come.
+fn syspolicyd_running() -> Option<bool> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let mut c = std::process::Command::new("/usr/bin/pgrep")
+        .args(["-x", "syspolicyd"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        match c.try_wait() {
+            Ok(Some(st)) => return Some(st.success()),
+            Ok(None) if std::time::Instant::now() < end => {
+                std::thread::sleep(std::time::Duration::from_millis(10))
+            }
+            _ => {
+                let _ = c.kill();
+                let _ = c.wait();
+                return None;
+            }
+        }
+    }
+}
+
+/// The alert for step hosts whose launch has waited longer than `threshold_ms` at `now_ms`:
+/// how many, the longest and which tasks. `syspolicyd` is the injected answer to "is it running"
+/// (None: not known). None when no launch is that old.
+pub fn launch_frozen_alert(
+    list: &[mason_step_host::launcher::Launching],
+    now_ms: u64,
+    threshold_ms: u64,
+    syspolicyd: impl FnOnce() -> Option<bool>,
+) -> Option<(String, String, String)> {
+    let old: Vec<_> = list
+        .iter()
+        .filter(|l| now_ms.saturating_sub(l.since_ms) > threshold_ms)
+        .collect();
+    if old.is_empty() {
+        return None;
+    }
+    let longest = old
+        .iter()
+        .map(|l| now_ms.saturating_sub(l.since_ms))
+        .max()
+        .unwrap_or(0)
+        / 1000;
+    let mut tasks: Vec<u64> = old.iter().filter_map(|l| launch_task(&l.id)).collect();
+    tasks.sort();
+    tasks.dedup();
+    let which = if tasks.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " (tasks {})",
+            tasks
+                .iter()
+                .map(|t| format!("#{t}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    let mut text = format!(
+        "{} step host launch(es) frozen{which}: the longest has waited {longest}s without the host coming up",
+        old.len()
+    );
+    match syspolicyd() {
+        Some(true) => text.push_str("; syspolicyd is running"),
+        Some(false) => text.push_str("; syspolicyd is NOT running"),
+        None => {}
+    }
+    Some(("launch-frozen".into(), "environment".into(), text))
+}
+
 /// Bug kinds that alert while one was filed in the last `BUG_WINDOW_MS`.
 const ALERT_BUGS: &[&str] = &["thread_panic", "job_panic", "job_spawn", "projection_drift"];
 /// Repairs that alert only when the same task needs them again and again.
@@ -549,6 +635,16 @@ pub fn alerts_now(d: &Daemon) -> Vec<(String, String, String)> {
         now_ms(),
     ));
     out.extend(stall_alert(d.last_big_stall(), now_ms()));
+    let threshold = std::env::var("MASON_LAUNCH_FROZEN_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(LAUNCH_FROZEN_MS);
+    out.extend(launch_frozen_alert(
+        &mason_step_host::launcher::launching(),
+        now_ms(),
+        threshold,
+        syspolicyd_running,
+    ));
     out.extend(host_loss_alerts(
         &d.store
             .host_losses_since(now_ms().saturating_sub(HOST_LOSS_ALERT_MS))
@@ -880,6 +976,64 @@ pub fn session_for(d: &Daemon, task: TaskId) -> Result<Value, String> {
         "idle": !running,
         "claude": p.claude_bin.as_ref().map(|b| b.display().to_string()),
     }))
+}
+
+#[cfg(test)]
+mod launch_frozen_tests {
+    use super::*;
+    use mason_step_host::launcher::Launching;
+
+    fn l(id: &str, since_ms: u64) -> Launching {
+        Launching {
+            id: id.into(),
+            since_ms,
+        }
+    }
+
+    #[test]
+    fn nothing_waiting_longer_than_the_threshold_raises_nothing() {
+        assert!(launch_frozen_alert(&[], 1_000_000, 120_000, || panic!("asked")).is_none());
+        let fresh = [l("t1r1-a", 950_000)];
+        assert!(launch_frozen_alert(&fresh, 1_000_000, 120_000, || panic!("asked")).is_none());
+    }
+
+    #[test]
+    fn old_launches_are_counted_with_the_longest_and_their_tasks() {
+        let list = [
+            l("t4r1-a", 700_000),
+            l("t9r2-b", 600_000),
+            l("t5r1-c", 990_000),
+        ];
+        let (key, kind, text) =
+            launch_frozen_alert(&list, 1_000_000, 120_000, || Some(false)).unwrap();
+        assert_eq!(
+            (key.as_str(), kind.as_str()),
+            ("launch-frozen", "environment")
+        );
+        assert!(text.starts_with("2 step host launch(es) frozen"), "{text}");
+        assert!(text.contains("#4, #9") && !text.contains("#5"), "{text}");
+        assert!(text.contains("longest has waited 400s"), "{text}");
+        assert!(text.contains("syspolicyd is NOT running"), "{text}");
+    }
+
+    #[test]
+    fn syspolicyd_running_and_unknown() {
+        let list = [l("t4r1-a", 0)];
+        let t = launch_frozen_alert(&list, 1_000_000, 120_000, || Some(true))
+            .unwrap()
+            .2;
+        assert!(t.contains("syspolicyd is running"), "{t}");
+        let t = launch_frozen_alert(&list, 1_000_000, 120_000, || None)
+            .unwrap()
+            .2;
+        assert!(!t.contains("syspolicyd"), "{t}");
+    }
+
+    #[test]
+    fn task_from_host_id() {
+        assert_eq!(launch_task("t12r3-test"), Some(12));
+        assert_eq!(launch_task("other"), None);
+    }
 }
 
 #[cfg(test)]
