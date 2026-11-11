@@ -75,6 +75,9 @@ public enum Mascot {
         return image(from: [(1, d)], points: 512)
     }
 
+    /// The 1024 px app icon (`brand/app_icon.png`), for the Dock when the monitor runs unbundled.
+    public static func appIconData() -> Data? { data("brand/app_icon.png") }
+
     private static func make(_ files: [String], points: Int) -> Image? {
         let reps: [(Int, Data)] = files.enumerated().compactMap { i, f in data(f).map { (i + 1, $0) } }
         return image(from: reps, points: points)

@@ -120,6 +120,7 @@ struct SectionHeader: View {
         Button { model.toggle(section) } label: {
             HStack(spacing: theme.spacingSmall) {
                 Image(systemName: open ? "chevron.down" : "chevron.right").frame(width: theme.cell)
+                StateIcon(state: section.state)
                 Text(section.title).font(theme.body(.semibold))
                 Spacer()
                 Text(String(model.visibleCount(section)))
@@ -161,14 +162,19 @@ struct RowView: View {
                     HStack(spacing: theme.spacing) {
                         Text(Format.duration(ms: row.inStateMs))
                             .font(theme.small()).foregroundStyle(row.slow ? theme.slow : theme.muted)
+                            .lineLimit(1).fixedSize()
                         if !row.typical.isEmpty {
                             Text(row.typical).font(theme.small()).foregroundStyle(theme.muted)
                         }
-                        ProgressCells(model: model, cells: row.progress, slow: row.slow)
+                        ProgressCells(model: model, cells: row.progress, slow: row.slow).fixedSize()
+                        // On a tight row the model text gives way first; time and cells never do.
                         if !row.display.isEmpty || !row.model.isEmpty {
                             Text(row.display.isEmpty ? row.model : row.display)
                                 .font(theme.small()).foregroundStyle(theme.muted)
+                                .lineLimit(1).truncationMode(.tail).layoutPriority(-1)
                         }
+                        Spacer(minLength: 0)
+                        StateIcon(state: row.state)
                     }
                     if let c = row.progress.running { ProgressLine(model: model, cell: c) }
                 }
