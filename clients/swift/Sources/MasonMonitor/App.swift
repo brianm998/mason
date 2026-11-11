@@ -97,6 +97,11 @@ struct MasonMonitorApp: App {
         if CommandLine.arguments.contains("--mascot-check") { exit(Mascot.selfCheck() ? 0 : 1) }
         // A plain executable needs to say it is an app with windows.
         NSApplication.shared.setActivationPolicy(.regular)
+        // Unbundled there is no Info.plist icon; MASON.app has one and keeps it.
+        if Bundle.main.object(forInfoDictionaryKey: "CFBundleIconFile") == nil,
+           let d = Mascot.appIconData(), let img = NSImage(data: d) {
+            NSApplication.shared.applicationIconImage = img
+        }
     }
 
     var body: some Scene {

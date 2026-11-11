@@ -37,6 +37,7 @@ let package = Package(
         .executableTarget(name: "MonitorTool", dependencies: ["MonitorUI", "MonitorCore", "MasonMascot"]),
         .testTarget(name: "MonitorCoreTests", dependencies: ["MonitorCore"]),
         .testTarget(name: "MasonMascotTests", dependencies: ["MasonMascot"]),
+        .testTarget(name: "MonitorUITests", dependencies: ["MonitorUI", "MonitorCore", "MasonProtocol"]),
     ],
     swiftLanguageModes: [.v5]
 )
