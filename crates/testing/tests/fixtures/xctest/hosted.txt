@@ -1,0 +1,14 @@
+2026-11-11 11:27:26.759 xcodebuild[97600:177514861] [MT] IDETestOperationsObserverDebug: 4.604 elapsed -- Testing started completed.
+
+Test session results, code coverage, and logs:
+	/tmp/dd/Logs/Test/Test-App-2026.11.11_11-26-31--0800.xcresult
+
+** TEST FAILED **
+
+Testing started
+Test suite 'AppTests' started on 'My Mac - App (6603)'
+Test case 'AppTests/example()' passed on 'My Mac - App (6603)' (0.000 seconds)
+Test case 'AppTests/divides()' failed on 'My Mac - App (6603)' (0.002 seconds)
+Test suite 'LegacyTests' started on 'My Mac - App (6603)'
+Test case 'LegacyTests.testAdd()' passed on 'My Mac - App (6603)' (0.001 seconds)
+Test case 'LegacyTests.testSlow()' skipped on 'My Mac - App (6603)' (0.000 seconds)

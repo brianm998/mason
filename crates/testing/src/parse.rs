@@ -152,8 +152,12 @@ fn xctest(text: &str) -> Vec<Case> {
     text.lines().filter_map(|l| xctest_line(&r, l)).collect()
 }
 
+/// XCTest's own lines (`Test Case '-[A b]' passed (0.1 seconds).`, what a package's bundle
+/// prints) and the ones `xcodebuild` writes for a test bundle hosted in an app (Xcode 16 on:
+/// `Test case 'A/b()' passed on 'My Mac - App (123)' (0.1 seconds)`, XCTest and Swift Testing
+/// alike). One run prints one form or the other, never both, so no test is counted twice.
 fn xctest_re() -> Regex {
-    re(r"^Test Case '(.+)' (passed|failed|skipped)\b")
+    re(r"^Test [Cc]ase '(.+?)' (passed|failed|skipped)\b")
 }
 
 fn xctest_line(r: &Regex, l: &str) -> Option<Case> {

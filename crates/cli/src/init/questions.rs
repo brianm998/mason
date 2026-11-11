@@ -647,15 +647,21 @@ pub struct SuiteSpec {
 
 impl SuiteSpec {
     pub fn toml(&self) -> String {
+        // Quoted by toml_edit, so a command with a `'` in it (xcodebuild's
+        // `-destination 'platform=macOS'`) or a regex with backslashes stays one string.
+        let q = |v: &str| toml_edit::Value::from(v).to_string().trim().to_string();
         let mut s = format!(
-            "[suite.{}]\ncommand = '{}'\nparser = \"{}\"\nmin_tests = {}\nlevel = \"unit\"\n",
-            self.name, self.command, self.parser, self.min_tests
+            "[suite.{}]\ncommand = {}\nparser = {}\nmin_tests = {}\nlevel = \"unit\"\n",
+            self.name,
+            q(&self.command),
+            q(&self.parser),
+            self.min_tests
         );
         if let Some(p) = &self.pass_regex {
-            s.push_str(&format!("pass_regex = '{p}'\n"));
+            s.push_str(&format!("pass_regex = {}\n", q(p)));
         }
         if let Some(p) = &self.fail_regex {
-            s.push_str(&format!("fail_regex = '{p}'\n"));
+            s.push_str(&format!("fail_regex = {}\n", q(p)));
         }
         s
     }
@@ -789,6 +795,24 @@ pub fn without_filing(existing: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_suite_with_quotes_and_backslashes_writes_toml_that_reads_back() {
+        let s = SuiteSpec {
+            name: "swift".into(),
+            command: "cd 'My App' && xcodebuild test -destination 'platform=macOS' 2>&1".into(),
+            parser: "regex".into(),
+            pass_regex: Some(r"^ok (\S+) 'x'$".into()),
+            fail_regex: Some(r#"^FAIL "(\S+)"$"#.into()),
+            min_tests: 1,
+        };
+        let doc: toml_edit::DocumentMut = s.toml().parse().expect("valid TOML");
+        let t = &doc["suite"]["swift"];
+        assert_eq!(t["command"].as_str(), Some(s.command.as_str()));
+        assert_eq!(t["pass_regex"].as_str(), s.pass_regex.as_deref());
+        assert_eq!(t["fail_regex"].as_str(), s.fail_regex.as_deref());
+        assert_eq!(t["parser"].as_str(), Some("regex"));
+    }
 
     fn detected() -> Detected {
         Detected {
