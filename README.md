@@ -124,6 +124,7 @@ Status: **pre-alpha**. What each stage note says it built (generated from `docs/
 - **s127**: The README opens with the mascot banner, and the 1280 x 640 social card is kept in `docs/images/`.
 - **s128**: The reconcile sweep skips a running step host the daemon asked to stop within 30 s, so normal step transitions no longer file a false orphan_host; genuinely unstopped hosts are still caught.
 - **s131**: Landing now checks that a conflict resolution kept every line the base had landed, sends the task back naming each dropped file and line, and lets a submission list deliberate removals.
+- **s132**: The Mac and Compose-on-macOS app icon is now a shaped variant (824 px rounded rectangle with a shadow on a transparent 1024 canvas) made by a committed Swift script, so it has rounded corners and the size of the icons around it.
 - **s133**: The CPU gate reads macOS CPU ticks with `host_statistics` instead of spawning `top`, and when there is no fresh reading it gates on the load average (and on "busy" if that fails too) instead of opening; the source and failed-read count show in the health JSON, `mason resources`, an alert and both monitors.
 - **s134**: The AppKit mascot loader now sizes each image from its bitmap's pixel aspect (`points` is the width), so the 1536 x 1024 start image is 768 x 512 points instead of 768 x 768; square art is unchanged.
 <!-- status:end -->
