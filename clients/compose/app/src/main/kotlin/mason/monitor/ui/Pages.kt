@@ -16,8 +16,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
 import mason.monitor.*
 import mason.v1.CellState
+import mason.v1.Compilation
 import mason.v1.TaskDetailView
 
 /** The main view: exactly one of Home, a task's detail, or another page. */
@@ -133,6 +136,7 @@ fun HomePage(model: MonitorModel) {
                 queue.forEach { r -> Link("${r.key} ${r.title}") { model.go(Page.Task(r.id)) } }
             }
         }
+        h?.compilation?.let { CompilationSection(model, it) }
         h?.stages?.forEach { st ->
             Section(st.title, st.state) {
                 st.rows.forEach { r ->
@@ -164,6 +168,54 @@ fun SessionStepper(model: MonitorModel) {
         Pill("−", modifier = Modifier.testTag("sessions:decrease")) { model.setSessionLimit(if (limit > 0) limit - 1 else 0) }
         Text("$limit", style = theme.body(FontWeight.SemiBold))
         Pill("+", modifier = Modifier.testTag("sessions:increase")) { model.setSessionLimit(limit + 1) }
+    }
+}
+
+/**
+ * Home's Compilation section: what holds a `compile` slot, what waits for one and why
+ * (in line order), the CPU reading, and the limit's stepper.
+ */
+@Composable
+fun CompilationSection(model: MonitorModel, c: Compilation) {
+    val theme = LocalTheme.current
+    val now = model.daemonNow()
+    val age = { since: Long -> Format.duration(maxOf(0L, now - since)) }
+    val who: @Composable (String, Long) -> Unit = { label, task ->
+        if (task > 0) Link("#$task") { model.go(Page.Task(task)) }
+        else Text(label, style = theme.body(), maxLines = 1, overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.widthIn(max = 480.dp))
+    }
+    Section("Compilation") {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(theme.spacing),
+            modifier = Modifier.testTag("compile")) {
+            Text("Compiling: ${c.used} of at most", style = theme.body())
+            Pill("−", modifier = Modifier.testTag("compile:decrease")) { model.setCompileLimit(if (c.limit > 1) c.limit - 1 else 1) }
+            Text("${c.limit}", style = theme.body(FontWeight.SemiBold))
+            Pill("+", modifier = Modifier.testTag("compile:increase")) { model.setCompileLimit(c.limit + 1) }
+            Text(c.cpuLine, style = theme.body(color = theme.muted))
+        }
+        if (c.running.isEmpty()) Text("Nothing is compiling.", style = theme.body(color = theme.muted))
+        c.running.forEachIndexed { i, r ->
+            Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing), modifier = Modifier.testTag("compile:running:$i")) {
+                who(r.label, r.task)
+                if (r.interactive) Text("interactive", style = theme.body(color = theme.muted))
+                Text("for ${age(r.since_ms)}", style = theme.body(color = theme.muted))
+            }
+        }
+        if (c.pending.isNotEmpty()) Text("Waiting, in line order", style = theme.body(FontWeight.SemiBold))
+        c.pending.forEach { w ->
+            Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing), verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.testTag("compile:pending:${w.position}")) {
+                Text("${w.position}.", style = theme.body(color = theme.muted))
+                who(w.label, w.task)
+                Text(w.reason, style = theme.body())
+                Text(
+                    if (w.interactive) "interactive, ${age(w.since_ms)}" else "${w.steps_remaining} steps from landing, ${age(w.since_ms)}",
+                    style = theme.small(color = theme.muted),
+                )
+            }
+        }
+        Text(c.rules, style = theme.small(color = theme.muted))
     }
 }
 

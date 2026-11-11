@@ -128,6 +128,16 @@ fun MonitorModel.visibleItems(): List<Item> {
             out += Item("active:${a.task}", listOf(a.display.ifEmpty { a.model }, a.project, "#${a.task}", a.step), order = i)
         }
         out += Item("sessions", listOf("${h.sessions_used} of ${h.sessions_limit}"), listOf("increase", "decrease"))
+        h.compilation?.let { c ->
+            out += Item("compile", listOf("${c.used} of ${c.limit}", c.cpuLine), listOf("increase", "decrease"))
+            val now = daemonNow()
+            c.running.forEachIndexed { i, r ->
+                out += Item("compile:running:$i", listOf(r.label, Format.duration(maxOf(0L, now - r.since_ms))), order = i)
+            }
+            c.pending.forEachIndexed { i, w ->
+                out += Item("compile:pending:${w.position}", listOf(w.label, w.reason), order = i)
+            }
+        }
     }
     if (page == Page.Usage) usage?.let { out += it.items() }
     if (page == Page.Pipeline) editor?.let { out += it.items() }
