@@ -120,6 +120,7 @@ Status: **pre-alpha**. What each stage note says it built (generated from `docs/
 - **s126**: Every banner under the top bar now starts with a decorative 20 pt mascot icon (scaled with the text zoom) in both monitors, chosen only by the banner's own kind, and the daemon emits a `landing_frozen` banner while landing is frozen.
 - **s127**: The README opens with the mascot banner, and the 1280 x 640 social card is kept in `docs/images/`.
 - **s128**: The reconcile sweep skips a running step host the daemon asked to stop within 30 s, so normal step transitions no longer file a false orphan_host; genuinely unstopped hosts are still caught.
+- **s131**: Landing now checks that a conflict resolution kept every line the base had landed, sends the task back naming each dropped file and line, and lets a submission list deliberate removals.
 - **s133**: The CPU gate reads macOS CPU ticks with `host_statistics` instead of spawning `top`, and when there is no fresh reading it gates on the load average (and on "busy" if that fails too) instead of opening; the source and failed-read count show in the health JSON, `mason resources`, an alert and both monitors.
 <!-- status:end -->
 
