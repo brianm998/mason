@@ -278,7 +278,7 @@ fn a_conflict_with_the_base_at_the_test_step_is_not_a_red_round() {
         {"call": {"tool": "submit_change", "args": {"summary": "first try", "head": "$HEAD"}}}
     ]);
     let develop2 = json!([
-        {"sh": "git -c user.name=t -c user.email=t@t merge -q origin/main; printf 'theirs\\nboth\\n' > conflict.txt && git add -A && \
+        {"sh": "git -c user.name=t -c user.email=t@t merge -q origin/main; { git show origin/main:conflict.txt; echo both; } > conflict.txt && git add -A && \
                 git -c user.name=t -c user.email=t@t commit -qm 'merge the base'"},
         {"call": {"tool": "submit_change", "args": {"summary": "merged", "head": "$HEAD"}}}
     ]);
@@ -297,7 +297,11 @@ fn a_conflict_with_the_base_at_the_test_step_is_not_a_red_round() {
     let conflicts = std::fs::read_to_string(d.task_dir(t).join("conflicts.txt")).unwrap();
     assert_eq!(conflicts.lines().count(), 1, "{conflicts}");
     assert!(conflicts.contains("conflict.txt"), "{conflicts}");
-    assert_eq!(sh(&s.origin, &["show", "main:conflict.txt"]), "theirs\nboth");
+    let landed = sh(&s.origin, &["show", "main:conflict.txt"]);
+    assert!(
+        landed.starts_with("theirs-") && landed.ends_with("\nboth"),
+        "{landed}"
+    );
 }
 
 #[test]
