@@ -49,6 +49,10 @@ class Theme(val dark: Boolean, val scale: Double) {
     val spacingLarge get() = s(T.sizeSpacingLarge)
     val radius get() = T.sizeCornerRadius.dp
     val cell get() = s(T.sizeProgressCell)
+    val mascotStatus get() = s(T.sizeMascotStatus)
+    val mascotEmpty get() = s(T.sizeMascotEmpty)
+    val mascotBannerIcon get() = s(T.sizeMascotBannerIcon)
+    val illustration get() = s(T.sizeMascotIllustration)
     val mascotIconSmall get() = s(T.sizeMascotIconSmall)
     val mascotIcon get() = s(T.sizeMascotIcon)
 

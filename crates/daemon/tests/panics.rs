@@ -144,4 +144,8 @@ fn a_panic_in_a_background_loop_is_filed_and_the_loop_goes_on() {
         s.mason(&["status", "--json"]).status.success(),
         "still answering"
     );
+    // The owner is told, not just counted.
+    wait_for("the daemon_bug alert", 60, || {
+        s.mason_ok(&["alerts"]).contains("thread_panic")
+    });
 }

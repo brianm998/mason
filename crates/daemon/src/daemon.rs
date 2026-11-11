@@ -53,6 +53,8 @@ pub struct Daemon {
     admitting: AtomicBool,
     admit_again: AtomicBool,
     fetch_locks: Mutex<HashMap<PathBuf, Arc<Mutex<Option<std::time::Instant>>>>>,
+    /// Per project: when its fetches began failing (ms) and the last error. A success removes it.
+    fetch_failures: Mutex<HashMap<ProjectId, (u64, String)>>,
     repo_locks: Mutex<HashMap<PathBuf, RepoLock>>,
     /// When the definitions thread last finished a pass (ms; the start time before the first).
     pub(crate) defs_pass_ended_ms: AtomicU64,
@@ -60,6 +62,9 @@ pub struct Daemon {
     /// Agents that are silent past their alert limit: run -> (task, step, silent since, ms).
     pub(crate) silent: Mutex<HashMap<u64, SilentAgent>>,
     worst_stall_ms: AtomicU64,
+    /// When the last stall of alert size ended (ms since epoch; 0: none) and how long it was.
+    last_big_stall_at: AtomicU64,
+    last_big_stall_ms: AtomicU64,
     pub(crate) sweep: Mutex<crate::sweep::SweepState>,
     pub(crate) defs: crate::defs::Defs,
     pub broker: Arc<crate::sched::Broker>,
@@ -246,12 +251,15 @@ impl Daemon {
             admit_again: AtomicBool::new(false),
             repo_locks: Mutex::default(),
             fetch_locks: Mutex::default(),
+            fetch_failures: Mutex::default(),
             defs_pass_ended_ms: AtomicU64::new(now_ms()),
             stalls: AtomicU64::new(0),
             silent: Mutex::default(),
             store_full: AtomicU64::new(0),
             disk_sizes: Default::default(),
             worst_stall_ms: AtomicU64::new(0),
+            last_big_stall_at: AtomicU64::new(0),
+            last_big_stall_ms: AtomicU64::new(0),
             sweep: Mutex::default(),
             defs: crate::defs::Defs::default(),
             broker,
@@ -396,10 +404,34 @@ impl Daemon {
             return Ok(());
         }
         let started = std::time::Instant::now();
-        mason_landing::git::run(&c.path, &["fetch", "--prune", &remote])
-            .map_err(|e| e.to_string())?;
-        *last_ok = Some(started);
-        Ok(())
+        let r = mason_landing::git::run(&c.path, &["fetch", "--prune", &remote])
+            .map_err(|e| e.to_string());
+        let mut f = self
+            .fetch_failures
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        match r {
+            Ok(_) => {
+                f.remove(&p);
+                *last_ok = Some(started);
+                Ok(())
+            }
+            Err(e) => {
+                f.entry(p).or_insert_with(|| (now_ms(), String::new())).1 = e.clone();
+                Err(e)
+            }
+        }
+    }
+
+    /// Projects whose fetches are failing: `(project, failing since ms, last error)`. Reads only the
+    /// record; no git, no lock but its own.
+    pub fn fetch_failing(&self) -> Vec<(ProjectId, u64, String)> {
+        self.fetch_failures
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|(p, (at, e))| (*p, *at, e.clone()))
+            .collect()
     }
 
     /// Who holds a repository lock now and since when (label, ms). Never takes a repository lock
@@ -425,6 +457,17 @@ impl Daemon {
         self.worst_stall_ms
             .fetch_max(late.as_millis() as u64, Ordering::SeqCst);
         tracing::warn!(late_ms = late.as_millis() as u64, "the event loop stalled");
+        if late.as_millis() as u64 >= crate::attention::STALL_ALERT_MS {
+            self.last_big_stall_ms
+                .store(late.as_millis() as u64, Ordering::SeqCst);
+            self.last_big_stall_at.store(now_ms(), Ordering::SeqCst);
+        }
+    }
+
+    /// `(when, how long in ms)` of the latest stall long enough to alert on, if any.
+    pub fn last_big_stall(&self) -> Option<(u64, u64)> {
+        let at = self.last_big_stall_at.load(Ordering::SeqCst);
+        (at > 0).then(|| (at, self.last_big_stall_ms.load(Ordering::SeqCst)))
     }
 
     pub fn stall_stats(&self) -> (u64, u64) {
