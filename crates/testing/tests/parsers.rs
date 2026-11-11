@@ -240,3 +240,23 @@ fn a_nextest_retry_is_one_case_and_the_failure_wins() {
     assert_eq!(r.executed(), 2);
     assert_eq!(r.failed_names(), vec!["a b"]);
 }
+
+#[test]
+fn xctest_reads_what_xcodebuild_prints_for_an_app_hosted_bundle() {
+    // Xcode 16 on, a test bundle hosted in an app is reported as `Test case '…' passed on
+    // '<destination>' (…)`, with a lower-case "case" (this is DiskFree's real output).
+    let r = parse(
+        ParserKind::Xctest,
+        &fixture("xctest", "hosted.txt"),
+        &suite(ParserKind::Xctest),
+    )
+    .unwrap();
+    assert_eq!(
+        [r.executed(), r.passed(), r.skipped()],
+        [3, 2, 1],
+        "{:?}",
+        r.cases
+    );
+    assert_eq!(r.failed_names(), vec!["AppTests/divides()"]);
+    assert!(r.names().contains(&"LegacyTests.testAdd()".to_string()));
+}

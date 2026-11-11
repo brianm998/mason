@@ -28,6 +28,45 @@ fn any_with_ext(dir: &Path, ext: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// The Xcode project, relative to `root`: at the top, or one folder down (an app kept in
+/// `App/App.xcodeproj` beside its README is common). Hidden folders are skipped; the first by
+/// name wins, so the answer does not depend on the order the disk lists them in.
+pub fn xcode_project(root: &Path) -> Option<PathBuf> {
+    let projects_in = |dir: &Path| -> Vec<PathBuf> {
+        let mut v: Vec<PathBuf> = std::fs::read_dir(dir)
+            .map(|rd| {
+                rd.flatten()
+                    .map(|e| e.path())
+                    .filter(|p| p.extension().is_some_and(|x| x == "xcodeproj") && p.is_dir())
+                    .collect()
+            })
+            .unwrap_or_default();
+        v.sort();
+        v
+    };
+    if let Some(p) = projects_in(root).into_iter().next() {
+        return p.strip_prefix(root).ok().map(Path::to_path_buf);
+    }
+    let mut dirs: Vec<PathBuf> = std::fs::read_dir(root)
+        .map(|rd| {
+            rd.flatten()
+                .map(|e| e.path())
+                .filter(|p| {
+                    p.is_dir()
+                        && !p
+                            .file_name()
+                            .is_some_and(|n| n.to_string_lossy().starts_with('.'))
+                        && p.extension().is_none_or(|x| x != "xcodeproj")
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    dirs.sort();
+    dirs.iter()
+        .find_map(|d| projects_in(d).into_iter().next())
+        .and_then(|p| p.strip_prefix(root).ok().map(Path::to_path_buf))
+}
+
 /// Languages by their build files: `rust`, `python`, `swift`, `go`, `node`, `gradle`, `make`.
 pub fn languages(root: &Path) -> Vec<String> {
     let mut out = vec![];
@@ -45,7 +84,7 @@ pub fn languages(root: &Path) -> Vec<String> {
         "python",
     );
     add(
-        has(root, "Package.swift") || any_with_ext(root, "xcodeproj"),
+        has(root, "Package.swift") || xcode_project(root).is_some(),
         "swift",
     );
     add(has(root, "go.mod"), "go");
@@ -173,6 +212,29 @@ pub fn describe(d: &Detected) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_xcode_project_is_found_at_the_top_or_one_folder_down() {
+        let d = tempfile::tempdir().unwrap();
+        assert_eq!(xcode_project(d.path()), None);
+        std::fs::create_dir_all(d.path().join(".build/Hidden.xcodeproj")).unwrap();
+        std::fs::create_dir_all(d.path().join("b/B.xcodeproj")).unwrap();
+        std::fs::create_dir_all(d.path().join("a/A.xcodeproj")).unwrap();
+        assert_eq!(
+            xcode_project(d.path()),
+            Some(PathBuf::from("a/A.xcodeproj"))
+        );
+        assert_eq!(languages(d.path()), ["swift"]);
+        std::fs::create_dir_all(d.path().join("Top.xcodeproj")).unwrap();
+        assert_eq!(
+            xcode_project(d.path()),
+            Some(PathBuf::from("Top.xcodeproj"))
+        );
+        // Two folders down is too deep to guess.
+        let deep = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(deep.path().join("x/y/Z.xcodeproj")).unwrap();
+        assert_eq!(xcode_project(deep.path()), None);
+    }
 
     #[test]
     fn languages_and_ci_come_from_build_files() {
