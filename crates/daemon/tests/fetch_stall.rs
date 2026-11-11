@@ -48,6 +48,7 @@ fn masond_opens_its_port_before_any_network_and_a_stalled_fetch_blocks_nothing_e
     let (url, _l) = silent_remote();
     sh(&s.repo, &["remote", "set-url", "origin", &url]);
     s.mason_ok(&["task", "add", "Stuck task"]);
+    let added = Instant::now();
     std::thread::sleep(Duration::from_secs(2)); // its first step is now fetching
 
     let t = Instant::now();
@@ -65,6 +66,14 @@ fn masond_opens_its_port_before_any_network_and_a_stalled_fetch_blocks_nothing_e
     // The stalled fetch ends at its deadline. That decides nothing: the task goes on from the
     // last-known base instead of failing, and reaches development.
     s.wait_task(1, "developing", 60);
+    // It was the deadline that ended the fetch (MASON_GIT_TIMEOUT_SECS=8), not a skipped fetch,
+    // and the task never failed over it.
+    assert!(
+        added.elapsed() >= Duration::from_secs(6),
+        "the stalled fetch was not waited out to its deadline: {:?}",
+        added.elapsed()
+    );
+    assert_ne!(s.task_json(1)["state"], "failed", "{}", s.task_json(1));
 }
 
 #[test]
