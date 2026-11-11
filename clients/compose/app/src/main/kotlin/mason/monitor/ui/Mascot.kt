@@ -40,5 +40,9 @@ object Mascot {
     fun bannerIcon(id: String, scale: Int = 2): ImageBitmap? =
         bannerIconPath(id, scale)?.let { bitmap(it) }
 
+    /** A brand image (`start_image`), the whole picture; null for an unknown id. */
+    fun brand(id: String): ImageBitmap? =
+        "brand/$id.png".takeIf { id in MascotManifest.brandIds && it in MascotManifest.files }?.let { bitmap(it) }
+
     fun illustration(id: String): ImageBitmap? = illustrationPath(id)?.let { bitmap(it) }
 }

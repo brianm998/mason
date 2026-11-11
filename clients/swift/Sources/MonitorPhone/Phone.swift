@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+import MasonMascot
+import MasonTokens
 import MonitorCore
 import SwiftUI
 
@@ -13,6 +15,14 @@ public struct PhoneRootView: View {
     public init(model: MonitorModel) { self.model = model }
 
     public var body: some View {
+        if model.header == nil {
+            PhoneStartView(model: model)
+        } else {
+            stack
+        }
+    }
+
+    private var stack: some View {
         NavigationStack(path: $path) {
             SidebarScreen(model: model) { page in
                 model.go(page)
@@ -23,6 +33,30 @@ public struct PhoneRootView: View {
             }
             .navigationTitle("MASON")
         }
+    }
+}
+
+/// Shown until the first header arrives: the whole start image fitted to the screen width on a
+/// plain deep-blue ground (the robot is left, the word right, so no crop), the real connection
+/// status beneath it, and no progress bar. Later disconnects never bring it back.
+struct PhoneStartView: View {
+    @ObservedObject var model: MonitorModel
+    @ScaledMetric(relativeTo: .body) private var gap = CGFloat(MasonTokens.sizeSpacingLarge)
+
+    var body: some View {
+        VStack(spacing: gap) {
+            if let img = Mascot.brand("start_image") {
+                img.resizable().scaledToFit().frame(maxWidth: .infinity).accessibilityHidden(true)
+            }
+            Text(status).foregroundStyle(.white).accessibilityIdentifier("start-status")
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(red: 2 / 255, green: 46 / 255, blue: 134 / 255).ignoresSafeArea())
+    }
+
+    private var status: String {
+        if model.connected { return "Connecting…" }
+        return model.reconnecting ? "Daemon restarting, reconnecting…" : "Looking for the daemon…"
     }
 }
 
