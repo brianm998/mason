@@ -208,5 +208,16 @@ fun ProgressCell.progressTexts(now: Long): List<String> {
 val Compilation.cpuLine: String
     get() {
         val gate = "a further compile starts below $cpu_max_pct%"
-        return if (cpu_busy_pct < 0) "CPU not readable; $gate." else "CPU $cpu_busy_pct% busy; $gate."
+        return cpuReadingLine(if (cpu_busy_pct < 0) null else cpu_busy_pct, cpu_source, gate)
     }
+
+/**
+ * The CPU line shared by the Health page and the home page. A fallback source is named, so a
+ * held compile is not read as a broken gauge.
+ */
+fun cpuReadingLine(busy: Int?, source: String, gate: String): String = when {
+    busy == null -> "CPU not readable; $gate."
+    source == "loadavg" -> "CPU $busy% busy (load average; the CPU reading is missing); $gate."
+    source == "assumed-busy" -> "CPU assumed $busy% busy (nothing is readable, so new compiles wait); $gate."
+    else -> "CPU $busy% busy; $gate."
+}

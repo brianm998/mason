@@ -538,6 +538,16 @@ pub fn alerts_now(d: &Daemon) -> Vec<(String, String, String)> {
     out.extend(silent_alerts(d));
     out.extend(d.landing().attention());
     out.extend(wait_alerts(d));
+    if let Some((ms, source)) = d.broker.cpu_missing_ms() {
+        out.push((
+            "cpu-reading".into(),
+            "environment".into(),
+            format!(
+                "The CPU reading has been missing for {} seconds; compiles are gated on {source} meanwhile",
+                ms / 1000
+            ),
+        ));
+    }
     if let Some(text) = d.exit_numbers_warning() {
         out.push(("numbers".into(), "numbers".into(), text));
     }

@@ -655,6 +655,9 @@ message Compilation {
   uint32 settle_s = 7;
   // The rules, in one line, for the section's footnote.
   string rules = 8;
+  // Where the CPU reading comes from: mach, proc, top, or, when that is missing,
+  // loadavg or assumed-busy. Empty from a daemon that does not say.
+  string cpu_source = 9;
 }
 
 message StepLine {

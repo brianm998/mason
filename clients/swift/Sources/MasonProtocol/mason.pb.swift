@@ -2019,6 +2019,10 @@ public nonisolated struct Mason_V1_Compilation: Sendable {
   /// The rules, in one line, for the section's footnote.
   public var rules: String = String()
 
+  /// Where the CPU reading comes from: mach, proc, top, or, when that is missing,
+  /// loadavg or assumed-busy. Empty from a daemon that does not say.
+  public var cpuSource: String = String()
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -6419,7 +6423,7 @@ nonisolated extension Mason_V1_CompileWaiter: SwiftProtobuf.Message, SwiftProtob
 
 nonisolated extension Mason_V1_Compilation: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".Compilation"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}limit\0\u{1}used\0\u{1}running\0\u{1}pending\0\u{3}cpu_busy_pct\0\u{3}cpu_max_pct\0\u{3}settle_s\0\u{1}rules\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}limit\0\u{1}used\0\u{1}running\0\u{1}pending\0\u{3}cpu_busy_pct\0\u{3}cpu_max_pct\0\u{3}settle_s\0\u{1}rules\0\u{3}cpu_source\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -6435,6 +6439,7 @@ nonisolated extension Mason_V1_Compilation: SwiftProtobuf.Message, SwiftProtobuf
       case 6: try { try decoder.decodeSingularUInt32Field(value: &self.cpuMaxPct) }()
       case 7: try { try decoder.decodeSingularUInt32Field(value: &self.settleS) }()
       case 8: try { try decoder.decodeSingularStringField(value: &self.rules) }()
+      case 9: try { try decoder.decodeSingularStringField(value: &self.cpuSource) }()
       default: break
       }
     }
@@ -6465,6 +6470,9 @@ nonisolated extension Mason_V1_Compilation: SwiftProtobuf.Message, SwiftProtobuf
     if !self.rules.isEmpty {
       try visitor.visitSingularStringField(value: self.rules, fieldNumber: 8)
     }
+    if !self.cpuSource.isEmpty {
+      try visitor.visitSingularStringField(value: self.cpuSource, fieldNumber: 9)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -6477,6 +6485,7 @@ nonisolated extension Mason_V1_Compilation: SwiftProtobuf.Message, SwiftProtobuf
     if lhs.cpuMaxPct != rhs.cpuMaxPct {return false}
     if lhs.settleS != rhs.settleS {return false}
     if lhs.rules != rhs.rules {return false}
+    if lhs.cpuSource != rhs.cpuSource {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
