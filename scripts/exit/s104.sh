@@ -9,12 +9,11 @@ trap 'rm -rf "$root"' EXIT
 cargo build -q --workspace --bins
 bin=$PWD/target/debug
 d=$root/d; c=$root/c; mkdir -p "$c" "$d"
-# doctor exits 1 when any check fails (this sandbox may lack claude, say); that is a verdict, not a
-# crash. Any other status (a panic, a usage error) fails the script.
+# With an empty data dir doctor only warns, so it must exit 0; any other status fails the script.
 doctor() {
   local out rc=0
   out=$("$bin/mason" --data-dir "$d" --config-dir "$c" doctor 2>&1) || rc=$?
-  if [ "$rc" -gt 1 ]; then echo "$out" >&2; echo "doctor exited $rc" >&2; return 99; fi
+  if [ "$rc" -ne 0 ]; then echo "$out" >&2; echo "doctor exited $rc" >&2; return 99; fi
   printf '%s\n' "$out"
 }
 
