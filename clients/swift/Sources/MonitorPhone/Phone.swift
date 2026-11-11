@@ -28,6 +28,27 @@ public struct PhoneRootView: View {
     }
 }
 
+/// A task state's mascot image on the phone: 20 pt in tiles and section headers, 24 pt trailing
+/// on rows, growing with Dynamic Type. Decorative, never tinted; an unknown state draws nothing.
+struct PhoneStateIcon: View {
+    let state: String
+    @ScaledMetric private var small = CGFloat(MasonTokens.sizeMascotIconSmall)
+    @ScaledMetric private var large = CGFloat(MasonTokens.sizeMascotIcon)
+    var trailing = false
+
+    init(state: String, trailing: Bool = false) {
+        self.state = state
+        self.trailing = trailing
+    }
+
+    var body: some View {
+        if let image = Mascot.icon(state, size: trailing ? MasonTokens.sizeMascotIcon : MasonTokens.sizeMascotIconSmall) {
+            let side = trailing ? large : small
+            image.resizable().frame(width: side, height: side).accessibilityHidden(true)
+        }
+    }
+}
+
 struct SidebarScreen: View {
     @ObservedObject var model: MonitorModel
     let choose: (Page) -> Void
@@ -40,6 +61,7 @@ struct SidebarScreen: View {
                     HStack {
                         ForEach(model.header?.counts ?? [], id: \.state) { c in
                             VStack {
+                                PhoneStateIcon(state: c.state)
                                 Text(model.tileCount(c)).font(.title2.bold())
                                 Text(model.tileLabel(c)).font(.caption)
                             }
@@ -52,15 +74,24 @@ struct SidebarScreen: View {
             Button { choose(.home) } label: { Label("Home", systemImage: "house") }
                 .accessibilityIdentifier("sidebar:home")
             ForEach(model.sidebar?.sections ?? [], id: \.state) { sec in
-                Section("\(sec.title) (\(model.visibleCount(sec)))") {
+                Section {
                     ForEach(model.filteredRows(sec), id: \.id) { r in
                         Button { choose(.task(r.id)) } label: {
-                            VStack(alignment: .leading) {
-                                Text("\(r.key) \(r.title)")
-                                if !r.activity.isEmpty { Text(r.activity).font(.caption).foregroundStyle(.secondary) }
+                            HStack {
+                                VStack(alignment: .leading) {
+                                    Text("\(r.key) \(r.title)")
+                                    if !r.activity.isEmpty { Text(r.activity).font(.caption).foregroundStyle(.secondary) }
+                                }
+                                Spacer(minLength: 0)
+                                PhoneStateIcon(state: r.state, trailing: true)
                             }
                         }
                         .accessibilityIdentifier("row:\(r.id)")
+                    }
+                } header: {
+                    HStack(spacing: 4) {
+                        PhoneStateIcon(state: sec.state)
+                        Text("\(sec.title) (\(model.visibleCount(sec)))")
                     }
                 }
             }

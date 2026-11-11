@@ -131,6 +131,8 @@ private fun SectionHeader(model: MonitorModel, s: SidebarSection) {
             .semantics { contentDescription = "${s.title}, $count, ${if (open) "expanded" else "collapsed"}" },
     ) {
         Text(if (open) "⌄" else "›", style = theme.body(), modifier = Modifier.width(theme.cell + theme.spacingSmall))
+        StateIcon(s.state)
+        Spacer(Modifier.width(theme.spacingSmall))
         Text(s.title, style = theme.body(FontWeight.SemiBold), modifier = Modifier.weight(1f))
         Text(
             count.toString(),
@@ -162,11 +164,16 @@ private fun RowView(model: MonitorModel, row: TaskRow) {
             }
             Text("${row.project}, ${row.why_waiting.ifEmpty { row.activity }}", style = theme.small(), maxLines = 2, overflow = TextOverflow.Ellipsis)
             if (row.proposal.isNotEmpty()) Text(row.proposal, style = theme.small(), modifier = Modifier.testTag("row:${row.id}:proposal"))
-            Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing), verticalAlignment = Alignment.CenterVertically) {
-                Text(Format.duration(row.in_state_ms), style = theme.small(color = if (row.slow) theme.slow else theme.muted))
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(theme.spacing), verticalAlignment = Alignment.CenterVertically) {
+                Text(Format.duration(row.in_state_ms), style = theme.small(color = if (row.slow) theme.slow else theme.muted), maxLines = 1, softWrap = false)
                 if (row.typical.isNotEmpty()) Text(row.typical, style = theme.small())
                 ProgressCells(model, row.progress, row.slow)
-                if (row.display.isNotEmpty() || row.model.isNotEmpty()) Text(row.display.ifEmpty { row.model }, style = theme.small())
+                // On a tight row the model text gives way first (it takes what is left); time and cells never do.
+                if (row.display.isNotEmpty() || row.model.isNotEmpty()) {
+                    Text(row.display.ifEmpty { row.model }, style = theme.small(), maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+                }
+                Spacer(Modifier.weight(1f))
+                StateIcon(row.state)
             }
             row.progress.running?.let { ProgressLine(model, it) }
         }

@@ -27,9 +27,12 @@ struct MainPane: View {
     }
 }
 
-func section<Content: View>(_ title: String, theme: Theme, @ViewBuilder _ content: () -> Content) -> some View {
+func section<Content: View>(_ title: String, theme: Theme, state: String? = nil, @ViewBuilder _ content: () -> Content) -> some View {
     VStack(alignment: .leading, spacing: theme.spacing) {
-        Text(title).font(theme.title()).foregroundStyle(theme.text)
+        HStack(spacing: theme.spacingSmall) {
+            Text(title).font(theme.title()).foregroundStyle(theme.text)
+            if let state { StateIcon(state: state) }
+        }
         content()
     }
 }
@@ -107,7 +110,7 @@ struct HomePage: View {
                 }
 
                 ForEach(model.home?.stages ?? [], id: \.state) { st in
-                    section(st.title, theme: theme) {
+                    section(st.title, theme: theme, state: st.state) {
                         ForEach(st.rows, id: \.id) { r in
                             Button { model.go(.task(r.id)) } label: {
                                 HStack(spacing: theme.spacing) {
