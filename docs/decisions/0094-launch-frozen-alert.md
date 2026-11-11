@@ -1,0 +1,3 @@
+# 0094: A launch frozen for two minutes is an alert; the one-hour limit stays
+
+Waiting costs a task nothing and giving up costs an attempt, so `START_LIMIT` is unchanged; what was missing was a signal. The launcher keeps an in-process list of launches with start times, and `alerts_now` raises `launch-frozen` (kind `environment`) while any has waited over 2 minutes. The syspolicyd check is `/usr/bin/pgrep` with a 2 s limit, run only while such a launch exists, because Apple's tools do not freeze with it. The list is per process: after a daemon restart it starts empty. `attention.rs` is a trust file; the change adds an alert and does not touch who may answer.
