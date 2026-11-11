@@ -708,16 +708,24 @@ impl Daemon {
         }
     }
 
+    /// Admission waits for the first definitions pass (which admits when it ends), unless that
+    /// takes too long: a remote that does not answer must not hold up all work.
+    pub(crate) fn admission_held(&self) -> bool {
+        !self.defs_ready.load(Ordering::SeqCst) && self.started.elapsed() < DEFS_FIRST_PASS_WAIT
+    }
+
+    /// The first definitions pass is over (or took too long), so admission is open.
+    pub fn ready_to_admit(&self) -> bool {
+        !self.admission_held()
+    }
+
     /// Start queued tasks while an LLM session is free for them, best rank
     /// first across every project (Part 7).
     pub fn admit(self: &Arc<Self>) {
         if self.demo {
             return;
         }
-        // Not before the first definitions pass (which admits when it ends), unless it is
-        // taking too long: a remote that does not answer must not hold up all work.
-        if !self.defs_ready.load(Ordering::SeqCst) && self.started.elapsed() < DEFS_FIRST_PASS_WAIT
-        {
+        if self.admission_held() {
             return;
         }
         if self.admitting.swap(true, Ordering::SeqCst) {
