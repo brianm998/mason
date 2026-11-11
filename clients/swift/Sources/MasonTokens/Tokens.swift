@@ -42,6 +42,10 @@ public enum MasonTokens {
     public static let sizeMascotIconSmall = 20
     public static let sizeMascotIcon = 24
     public static let sizeMascotBannerIcon = 20
+    public static let sizeMascotStatus = 96
+    public static let sizeMascotEmpty = 120
+    public static let sizeMascotStartWidth = 480
+    public static let sizeMascotIllustration = 96
     public static let motionFast = 120
     public static let motionNormal = 220
 }

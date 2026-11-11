@@ -49,6 +49,8 @@ pub struct DaemonConfig {
     /// Git work counts as stuck when the definitions thread has not finished a pass for this long
     /// (beyond its own interval).
     pub stuck_after: Duration,
+    /// A project's fetches must have been failing this long before `fetch:<project>` is raised.
+    pub fetch_alert_after: Duration,
     /// A speech command running longer than this for one sentence is killed.
     pub speech_timeout: Duration,
     /// How often alerts are brought up to date and notifications sent.
@@ -293,6 +295,7 @@ impl DaemonConfig {
             reload_interval: Duration::from_secs(5),
             fetch_interval: Duration::from_secs(60),
             stuck_after: Duration::from_secs(300),
+            fetch_alert_after: Duration::from_secs(15 * 60),
             speech_timeout: Duration::from_secs(30),
             attention_interval: Duration::from_secs(5),
             env_retry: Duration::from_secs(30),
