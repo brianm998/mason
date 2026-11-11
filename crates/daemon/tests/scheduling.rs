@@ -475,30 +475,39 @@ fn active_models_lists_only_tasks_that_hold_a_session() {
     let d = s.start_with(|c| c.max_concurrent = 1);
     // Nothing running: empty, and it matches the counter.
     assert_eq!(home_active(&d), (vec![], 0));
-    // Every session is held by someone else; the task reaches its agent step
-    // and waits there for a slot.
-    let (id, held) = hold(&d, "other session", &[("llm:claude", 1)]);
+    // No session is free, so nothing is admitted; admit one task by hand, as
+    // if its session had been taken from under it. Its agent step now waits.
+    d.broker.set_limit("llm:claude", 0).unwrap();
     let t = file_task(&d, "Waits for a slot");
+    let task = task_of(&d, t);
+    let entry = d.entry_for(&task);
+    d.emit(EventKind::Admitted {
+        task: t,
+        entry: Some(entry),
+    })
+    .unwrap();
     wait_explained(&d, t);
-    assert!(matches!(
-        state_of(&d, t),
-        State::Developing | State::Exploring
-    ));
-    let (active, used) = home_active(&d);
-    assert_eq!(used, 1, "the other holder's session");
-    assert!(
-        active.is_empty(),
-        "a waiting task is not a session: {active:?}"
-    );
-    // Lowering the limit below what is held changes nothing about who runs.
+    assert!(state_of(&d, t).is_step());
+    assert_eq!(home_active(&d), (vec![], 0));
+    // A second task in a step state changes nothing either.
+    let t2 = file_task(&d, "Also waits");
+    let entry = d.entry_for(&task_of(&d, t2));
+    d.emit(EventKind::Admitted {
+        task: t2,
+        entry: Some(entry),
+    })
+    .unwrap();
+    wait_explained(&d, t2);
+    assert_eq!(home_active(&d), (vec![], 0));
+    // A session held by someone else counts, but is not a task's.
+    d.broker.set_limit("llm:claude", 1).unwrap();
+    let (id, held) = hold(&d, "other session", &[("llm:claude", 1)]);
+    assert_eq!(home_active(&d), (vec![], 1));
+    // Lowering the limit below what is held changes nothing about who is listed.
     d.broker.set_limit("llm:claude", 0).unwrap();
     assert_eq!(home_active(&d), (vec![], 1));
-    // Free it and let the task run: while it holds the session it is listed.
-    d.broker.set_limit("llm:claude", 1).unwrap();
     drop(held);
     d.broker.lease_close(id);
-    wait_state(&d, t, State::Landed, 60);
-    assert_eq!(home_active(&d), (vec![], 0));
 }
 
 fn file_in(d: &Arc<Daemon>, project: &str, title: &str) -> TaskId {
