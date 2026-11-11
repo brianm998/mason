@@ -378,4 +378,33 @@ mod tests {
         l.schedule(4, None, None);
         assert!(l.holds(n));
     }
+
+    #[test]
+    fn every_request_in_line_behind_the_disk_gate_says_disk_and_grants_are_unchanged() {
+        let ids = |l: &mut Ledger| -> Vec<_> {
+            (0..4)
+                .map(|n| l.submit(rank(1, n + 1, n + 1), Needs::of(&[("compile", 1)]), "#", n))
+                .collect()
+        };
+        let mut low = disk_ledger();
+        low.set_disk(gate(12));
+        let low_ids = ids(&mut low);
+        let p = low.schedule(10, None, None);
+        assert!(p.grants.is_empty());
+        for id in &low_ids {
+            assert_eq!(
+                explain(&p.waits[id], 10),
+                "Waiting: disk has 12 GB free, floor 20 GB"
+            );
+        }
+        // The line order is what it was: the position counts those ahead.
+        let positions: Vec<_> = low_ids.iter().map(|i| p.waits[i].position).collect();
+        assert_eq!(positions, vec![1, 2, 3, 4]);
+        // With room, the same world grants the same two as before this change.
+        let mut ok = disk_ledger();
+        ok.set_disk(gate(30));
+        let ok_ids = ids(&mut ok);
+        let q = ok.schedule(10, None, None);
+        assert_eq!(q.grants, vec![ok_ids[0], ok_ids[1]]);
+    }
 }

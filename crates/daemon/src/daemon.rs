@@ -42,6 +42,9 @@ pub struct Daemon {
     pub accounts: Vec<crate::providers::Account>,
     /// Blocking work for the async layer (the store, git).
     pub pool: Pool,
+    /// View computation and event reads for the screens, apart from `pool` so
+    /// that work waiting on git or a repository lock cannot starve them.
+    pub view_pool: Pool,
     pub crash: Crash,
     pub started: Instant,
     pub started_ms: u64,
@@ -233,6 +236,7 @@ impl Daemon {
             store,
             projects,
             pool: Pool::new("blocking", 4, 64),
+            view_pool: Pool::new("views", 2, 64),
             crash: Crash::from_env(),
             started: Instant::now(),
             started_ms: now_ms(),
