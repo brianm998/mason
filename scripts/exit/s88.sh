@@ -61,7 +61,9 @@ m task add "will fail" --project mason --explored --body "x" >/dev/null
 # The task fails first: since f97ed39 a step waits out a held repository lock rather than
 # failing on it, so with the lock already held it could only fail once the hold was over.
 wait_for 60 "the failed task's alert" has_alert "Task #0 failed"
-curl -fsS -X POST "http://127.0.0.1:$port/debug/hold-repo-lock?ms=12000" >/dev/null || fail "no debug route"
+# Both locks, as a hung fetch holds them: since s81 the fetch has its own lock, and the
+# repository lock alone no longer stalls the definitions pass.
+curl -fsS -X POST "http://127.0.0.1:$port/debug/hold-repo-lock?ms=12000&fetch=1" >/dev/null || fail "no debug route"
 sleep 1
 has_alert "Task #0 failed" || fail "the failed task's alert went while the lock was held"
 echo "   mason alerts shows: $(m alerts | grep 'Task #0 failed')"
