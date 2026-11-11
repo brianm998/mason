@@ -1088,3 +1088,36 @@ fn a_panic_on_the_writer_thread_exits_the_process() {
         .unwrap();
     assert_eq!(out.status.code(), Some(mason_store::WRITER_PANIC_EXIT));
 }
+
+#[test]
+fn a_tracker_item_keeps_whether_it_was_labelled_and_not_looked_at_is_null() {
+    use mason_store::TrackerItemRow;
+    let (_d, p) = db();
+    let s = Store::open(&p).unwrap();
+    let row = |n: u64, labelled: Option<bool>| TrackerItemRow {
+        project: "p".into(),
+        number: n,
+        task: n,
+        title: "t".into(),
+        body: "b".into(),
+        priority: "normal".into(),
+        open: true,
+        mirrored: String::new(),
+        labelled,
+    };
+    for (n, l) in [(1, None), (2, Some(false)), (3, Some(true))] {
+        s.put_tracker_item(&row(n, l)).unwrap();
+    }
+    drop(s);
+    let s = Store::open(&p).unwrap();
+    let got: Vec<Option<bool>> = s
+        .tracker_items("p")
+        .unwrap()
+        .iter()
+        .map(|r| r.labelled)
+        .collect();
+    assert_eq!(got, vec![None, Some(false), Some(true)]);
+    drop(s);
+    let c = Connection::open(&p).unwrap();
+    assert_eq!(migrations::version(&c).unwrap(), migrations::SCHEMA_VERSION);
+}
