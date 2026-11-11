@@ -355,6 +355,11 @@ class MonitorCoreTest {
         assertEquals("llm:claude", sent[2].set_limit?.resource)
         assertEquals(3, sent[2].set_limit?.units)
         assertEquals("test", sent[3].skip?.step)
+        m.setCompileLimit(5)
+        m.setCompileLimit(0)
+        assertEquals("compile", sent[4].set_limit?.resource)
+        assertEquals(5, sent[4].set_limit?.units)
+        assertEquals(1, sent[5].set_limit?.units, "the stepper never asks for zero compiles")
     }
 
     // ---- what the client shows (the conformance items) ----
