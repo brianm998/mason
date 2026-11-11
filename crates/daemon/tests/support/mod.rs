@@ -348,7 +348,12 @@ pub fn steps_run(d: &Arc<Daemon>, t: TaskId) -> Vec<String> {
         .collect()
 }
 
+/// Every wait gets at least this long: a step host can take over a minute to
+/// launch on a busy or syspolicyd-stalled Mac, and that is not a test failure.
+const MIN_WAIT_SECS: u64 = 900;
+
 pub fn wait_for(what: &str, secs: u64, mut f: impl FnMut() -> bool) {
+    let secs = secs.max(MIN_WAIT_SECS);
     let end = Instant::now() + Duration::from_secs(secs);
     while !f() {
         assert!(
@@ -463,6 +468,24 @@ impl Scratch {
         let disk = self.root.path().join("disk-for-masond");
         let _ = std::fs::write(&disk, "1000\n");
         cmd.env("MASON_DISK_FILE", &disk);
+        // When MASON runs this suite as a task's test step, the step's own variables are in
+        // this process's environment. A test daemon is not part of that step: its hosts
+        // inherit what it has, so a check would read MASON_STEP and act as a test step.
+        for k in [
+            "MASON_TASK",
+            "MASON_TITLE",
+            "MASON_PROJECT",
+            "MASON_WORKTREE",
+            "MASON_BRANCH",
+            "MASON_BASE",
+            "MASON_STEP",
+            "MASON_ATTEMPT",
+            "MASON_HELD",
+            "MASON_RESULT_FILE",
+            "MASON_PROGRESS_FILE",
+        ] {
+            cmd.env_remove(k);
+        }
         for (k, v) in env {
             cmd.env(k, v);
         }

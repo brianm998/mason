@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+use crate::explain::{explain, WaitCause};
 use crate::plan::{
     plan, Capacity, CompilePace, CpuGate, DiskGate, Holder, Kind, Needs, Plan, Request, StallGate,
     World, COMPILE,
@@ -20,6 +21,27 @@ pub struct Ledger {
     last_compile_start: Option<u64>,
     disk: Option<DiskGate>,
     stall: Option<StallGate>,
+    /// When each resource last had a grant. Only observed, never consulted by `plan`.
+    last_grant: BTreeMap<String, u64>,
+    last_any_grant: Option<u64>,
+}
+
+/// A wait the owner should hear about.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Stall {
+    pub resource: String,
+    /// The request can never fit (too big for its limit, or an undeclared resource): no
+    /// amount of waiting helps. Otherwise the resource has granted nothing for a long time.
+    pub never: bool,
+    /// How many requests wait on the resource for this cause.
+    pub waiting: usize,
+    /// How long the resource has granted nothing to the longest-waiting one.
+    pub idle_ms: u64,
+    /// The first in line, as the owner reads it.
+    pub text: String,
+    /// What the first in line is: its label, for `never` stalls.
+    pub label: String,
+    pub cause: WaitCause,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -93,6 +115,7 @@ impl Ledger {
     pub fn adopt(&mut self, needs: Needs, label: &str, now: u64) -> u64 {
         self.next_id += 1;
         let id = self.next_id;
+        self.note_grant(&needs, now);
         self.holders.push(Holder {
             id,
             needs,
@@ -147,6 +170,7 @@ impl Ledger {
                 if r.needs.amounts.contains_key(COMPILE) {
                     self.last_compile_start = Some(now);
                 }
+                self.note_grant(&r.needs, now);
                 self.holders.push(Holder {
                     id: r.id,
                     needs: r.needs,
@@ -156,6 +180,73 @@ impl Ledger {
             }
         }
         p
+    }
+
+    fn note_grant(&mut self, needs: &Needs, now: u64) {
+        for r in needs.amounts.keys() {
+            self.last_grant.insert(r.clone(), now);
+        }
+        self.last_any_grant = Some(now);
+    }
+
+    /// Waits that will not move by themselves, as of `now`, without granting anything.
+    /// A request that can never fit is always reported. Any other is reported when nothing
+    /// has been granted on its resource for `long_after_ms` (0: never), measured from the
+    /// later of the last grant and the request's arrival. A long queue that keeps moving
+    /// is not a stall. Disk waits have their own alert and are left out.
+    pub fn stalls(
+        &self,
+        now: u64,
+        free_memory_mb: Option<u64>,
+        memory_floor_mb: Option<u64>,
+        cpu: Option<CpuGate>,
+        long_after_ms: u64,
+    ) -> Vec<Stall> {
+        let plan = self.waits_gated(now, free_memory_mb, memory_floor_mb, cpu);
+        let mut out: Vec<Stall> = vec![];
+        let mut by_rank: Vec<&Request> = self.waiting.iter().collect();
+        by_rank.sort_by_key(|r| (r.rank, r.id));
+        for r in by_rank {
+            let Some(w) = plan.waits.get(&r.id) else {
+                continue;
+            };
+            let (resource, never, last) = match &w.cause {
+                WaitCause::TooBig { resource, .. } | WaitCause::Unknown { resource } => {
+                    (resource.clone(), true, None)
+                }
+                WaitCause::Full { resource } | WaitCause::Behind { resource } => {
+                    (resource.clone(), false, self.last_grant.get(resource))
+                }
+                WaitCause::Cpu { .. } | WaitCause::Settling { .. } => {
+                    (COMPILE.to_string(), false, self.last_grant.get(COMPILE))
+                }
+                WaitCause::Exclusive => ("exclusive".into(), false, self.last_any_grant.as_ref()),
+                WaitCause::Memory { .. } => ("memory".into(), false, self.last_any_grant.as_ref()),
+                WaitCause::Disk { .. } | WaitCause::DiskStall { .. } => continue,
+            };
+            let idle_ms = now.saturating_sub(last.copied().unwrap_or(0).max(r.since));
+            if !never && (long_after_ms == 0 || idle_ms < long_after_ms) {
+                continue;
+            }
+            if let Some(s) = out
+                .iter_mut()
+                .find(|s| s.resource == resource && s.never == never)
+            {
+                s.waiting += 1;
+                s.idle_ms = s.idle_ms.max(idle_ms);
+                continue;
+            }
+            out.push(Stall {
+                resource,
+                never,
+                waiting: 1,
+                idle_ms,
+                text: explain(w, now),
+                label: r.label.clone(),
+                cause: w.cause.clone(),
+            });
+        }
+        out
     }
 
     /// Drop a holder or a waiting request. `false` if there was no such id.
@@ -232,7 +323,6 @@ impl Ledger {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::explain::explain;
 
     fn rank(steps: u32, enq: u64, id: u64) -> Rank {
         Rank::new(false, steps, 2, enq, id, false)
@@ -377,5 +467,114 @@ mod tests {
         l.set_disk(gate(30));
         l.schedule(4, None, None);
         assert!(l.holds(n));
+    }
+
+    const MIN: u64 = 60_000;
+
+    #[test]
+    fn a_waiter_with_no_grant_for_longer_than_the_limit_is_reported() {
+        let mut l = Ledger::new();
+        l.set_capacity("compile", 1, Kind::Machine);
+        let h = l.submit(rank(1, 1, 1), Needs::of(&[("compile", 1)]), "#1", 0);
+        l.schedule(0, None, None);
+        l.submit(rank(1, 2, 2), Needs::of(&[("compile", 1)]), "#2", 0);
+        l.submit(rank(1, 3, 3), Needs::of(&[("compile", 1)]), "#3", 0);
+        assert!(l.holds(h));
+        assert!(l.stalls(59 * MIN, None, None, None, 60 * MIN).is_empty());
+        let s = l.stalls(61 * MIN, None, None, None, 60 * MIN);
+        assert_eq!(s.len(), 1, "one per resource, not per task");
+        assert_eq!(s[0].resource, "compile");
+        assert_eq!(s[0].waiting, 2);
+        assert!(!s[0].never);
+        assert!(s[0].text.contains("held by #1"), "{}", s[0].text);
+        assert!(
+            l.stalls(61 * MIN, None, None, None, 0).is_empty(),
+            "0 is off"
+        );
+    }
+
+    #[test]
+    fn a_queue_that_is_moving_is_not_a_stall() {
+        let mut l = Ledger::new();
+        l.set_capacity("compile", 1, Kind::Machine);
+        let a = l.submit(rank(1, 1, 1), Needs::of(&[("compile", 1)]), "#1", 0);
+        l.submit(rank(1, 2, 2), Needs::of(&[("compile", 1)]), "#2", 0);
+        l.schedule(0, None, None);
+        l.release(a);
+        // #2 has waited 90 minutes, but was granted just now.
+        l.schedule(90 * MIN, None, None);
+        l.submit(rank(1, 3, 3), Needs::of(&[("compile", 1)]), "#3", 90 * MIN);
+        assert!(l.stalls(100 * MIN, None, None, None, 60 * MIN).is_empty());
+        assert_eq!(l.stalls(151 * MIN, None, None, None, 60 * MIN).len(), 1);
+    }
+
+    #[test]
+    fn a_new_arrival_is_not_long_just_because_the_last_grant_was_old() {
+        let mut l = Ledger::new();
+        l.set_capacity("compile", 1, Kind::Machine);
+        l.submit(rank(1, 1, 1), Needs::of(&[("compile", 1)]), "#1", 0);
+        l.schedule(0, None, None);
+        l.submit(rank(1, 2, 2), Needs::of(&[("compile", 1)]), "#2", 200 * MIN);
+        assert!(l.stalls(201 * MIN, None, None, None, 60 * MIN).is_empty());
+    }
+
+    #[test]
+    fn a_request_that_can_never_fit_is_reported_at_once() {
+        let mut l = Ledger::new();
+        l.set_capacity("widget", 0, Kind::Machine);
+        l.submit(rank(1, 1, 1), Needs::of(&[("widget", 1)]), "#1", 5);
+        l.submit(rank(1, 2, 2), Needs::of(&[("gadget", 1)]), "#2", 5);
+        let s = l.stalls(6, None, None, None, 60 * MIN);
+        assert_eq!(s.len(), 2);
+        assert!(s.iter().all(|s| s.never));
+        assert!(matches!(s[0].cause, WaitCause::TooBig { .. }));
+        assert!(matches!(s[1].cause, WaitCause::Unknown { .. }));
+        // Not governed by the long-wait setting.
+        assert_eq!(l.stalls(6, None, None, None, 0).len(), 2);
+    }
+
+    #[test]
+    fn the_cpu_gate_is_a_long_wait_on_compile_and_the_disk_is_left_out() {
+        let mut l = Ledger::new();
+        l.set_capacity("compile", 4, Kind::Machine);
+        l.submit(rank(1, 1, 1), Needs::of(&[("compile", 1)]), "#1", 0);
+        let hot = Some(CpuGate {
+            busy_pct: 100,
+            max_pct: 50,
+        });
+        let s = l.stalls(61 * MIN, None, None, hot, 60 * MIN);
+        assert_eq!(s.len(), 1);
+        assert!(s[0].text.contains("CPU 100% > 50%"), "{}", s[0].text);
+        l.set_disk(gate(1));
+        assert!(l.stalls(61 * MIN, None, None, None, 60 * MIN).is_empty());
+    }
+
+    #[test]
+    fn every_request_in_line_behind_the_disk_gate_says_disk_and_grants_are_unchanged() {
+        let ids = |l: &mut Ledger| -> Vec<_> {
+            (0..4)
+                .map(|n| l.submit(rank(1, n + 1, n + 1), Needs::of(&[("compile", 1)]), "#", n))
+                .collect()
+        };
+        let mut low = disk_ledger();
+        low.set_disk(gate(12));
+        let low_ids = ids(&mut low);
+        let p = low.schedule(10, None, None);
+        assert!(p.grants.is_empty());
+        for id in &low_ids {
+            assert_eq!(
+                explain(&p.waits[id], 10),
+                "Waiting: disk has 12 GB free, floor 20 GB"
+            );
+        }
+        // The line order is what it was: the position counts those ahead.
+        let positions: Vec<_> = low_ids.iter().map(|i| p.waits[i].position).collect();
+        assert_eq!(positions, vec![1, 2, 3, 4]);
+        // With room, the same world grants the same two as before this change.
+        let mut ok = disk_ledger();
+        ok.set_disk(gate(30));
+        let ok_ids = ids(&mut ok);
+        let q = ok.schedule(10, None, None);
+        assert_eq!(q.grants, vec![ok_ids[0], ok_ids[1]]);
     }
 }
