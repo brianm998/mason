@@ -158,7 +158,9 @@ pub fn mach_ticks(t: [u32; 4]) -> (u64, u64) {
 
 /// Cumulative ticks from `host_statistics`: a system call, no process to start.
 #[cfg(target_os = "macos")]
-#[allow(unsafe_code)]
+// `mach_host_self` is marked deprecated in favour of the `mach2` crate; it is a
+// system call and a new dependency is not worth it.
+#[allow(unsafe_code, deprecated)]
 fn read_mach_ticks() -> Result<(u64, u64), String> {
     use nix::libc;
     let mut info = libc::host_cpu_load_info { cpu_ticks: [0; 4] };
@@ -202,7 +204,7 @@ fn read_top() -> Result<u32, String> {
         std::process::Command::new("top").args(["-l", "2", "-n", "0", "-s", "1"]),
         TOP_DEADLINE,
     )
-    .map_err(|e| format!("top: {e}"))?;
+    .map_err(|e| format!("top: {e:?}"))?;
     parse_top_cpu(&String::from_utf8_lossy(&out.stdout))
         .ok_or_else(|| "top: parse error, no CPU line".to_string())
 }
@@ -466,7 +468,10 @@ mod tests {
         assert_eq!(pct_between(a, b), Some(60));
         // No time passed, or a counter that wrapped: no reading.
         assert_eq!(pct_between(a, a), None);
-        assert_eq!(pct_between(mach_ticks([u32::MAX, 0, 0, 0]), mach_ticks([5, 0, 0, 0])), None);
+        assert_eq!(
+            pct_between(mach_ticks([u32::MAX, 0, 0, 0]), mach_ticks([5, 0, 0, 0])),
+            None
+        );
     }
 
     #[test]

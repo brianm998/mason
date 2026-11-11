@@ -357,7 +357,10 @@ mod tests {
     fn the_cpu_line_names_the_source_and_never_says_no_gate_for_a_fallback() {
         let l = |v: Value| cpu_line(&v, 50);
         let mach = l(json!({"busy_pct": 20, "source": "mach", "failed_reads": 0}));
-        assert_eq!(mach, "cpu 20% busy, a compile starts below 50% [source mach]");
+        assert_eq!(
+            mach,
+            "cpu 20% busy, a compile starts below 50% [source mach]"
+        );
         let la = l(json!({"busy_pct": 100, "source": "loadavg", "failed_reads": 3}));
         assert!(la.contains("load average") && la.contains("source loadavg, 3 failed reads"));
         assert!(!la.contains("no gate"));
