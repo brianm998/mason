@@ -131,6 +131,16 @@ ladder = ["gpt-small", "gpt-big"]
 FAKE_CODEX_SCRIPT = "$root/script.json"
 TOML
 ! grep -q '^\[host\]' "$root/c/projects/web.toml"
+# Since accounts (s56), a Codex project needs an account with the codex adapter.
+cat > "$root/c/providers.toml" <<'TOML'
+[provider.claude]
+adapter = "claude"
+billing = "subscription"
+
+[provider.codex]
+adapter = "codex"
+billing = "subscription"
+TOML
 "$bin/masond" --port 0 --data-dir "$root/d" --config-dir "$root/c" --heartbeat-ms 100 --sweep-ms 3600000 --owner "$owner" 2>>"$root/masond.log" &
 daemon=$!
 until m status >/dev/null 2>&1; do kill -0 "$daemon" || { cat "$root/masond.log" >&2; exit 1; }; sleep 0.1; done

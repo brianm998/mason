@@ -105,6 +105,8 @@ api = "http://127.0.0.1:$port"
 repo = "o/r"
 token = "env:FAKE_GITHUB_TOKEN"
 interval_s = 300
+# Imports start proposed by default (since b14ad6a); this chain is meant to run.
+import_as = "queued"
 TOML
 export FAKE_GITHUB_TOKEN=recorded-test-token
 "$bin/masond" --port 0 --data-dir "$root/d" --config-dir "$root/c" --heartbeat-ms 100 --sweep-ms 3600000 --owner "$owner" 2>>"$root/masond.log" &
