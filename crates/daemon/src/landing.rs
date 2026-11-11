@@ -15,7 +15,7 @@
 //! any phase resumes by doing the same steps over.
 
 use crate::daemon::{now_ms, Daemon};
-use crate::jobs::{run_shell, Ctx};
+use crate::jobs::Ctx;
 use mason_adapter_api::service::{
     CheckCounts, Checks, CiState, GitHostAdapter, Observed, PollEvent, Poller, PrState, Review,
 };
@@ -1259,7 +1259,23 @@ impl Runner {
                             return false;
                         }
                     };
-                    return run_shell(cmd, &wt_for_cmd, p.test_timeout).0;
+                    // Under a step host, so a restarted daemon finds the run again.
+                    let spec = crate::hostedcheck::CheckSpec {
+                        id_prefix: format!("b{batch_id}-retest"),
+                        log_dir: log_dir.clone(),
+                        cmd: cmd.clone(),
+                        cwd: wt_for_cmd.clone(),
+                        env: vec![],
+                        limit: p.test_timeout,
+                        tree: crate::hostedcheck::tree_key(&wt_for_cmd),
+                    };
+                    return match crate::hostedcheck::run(d, &spec) {
+                        Ok(o) => o.passed,
+                        Err(e) => {
+                            tracing::warn!(batch = batch_id, "the re-test gave no result: {e}");
+                            false
+                        }
+                    };
                 }
                 // A moved base means CI runs again on the new tip, whatever moved.
                 if !outside && !plan::needs_reverify(moved, &union_fp, &impacts) {

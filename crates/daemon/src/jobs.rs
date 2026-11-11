@@ -1027,6 +1027,8 @@ struct TestChecks {
     wt: PathBuf,
     timeout: Duration,
     slots: CheckSlots,
+    id_prefix: String,
+    log_dir: PathBuf,
 }
 
 impl CheckHandler for TestChecks {
@@ -1040,12 +1042,36 @@ impl CheckHandler for TestChecks {
                 summary: "The step is over; the check did not run.".into(),
             };
         };
-        let (passed, out) = run_shell_env(cmd, &self.wt, self.timeout, &self.slots.env());
+        // Under a step host, so that a restarted daemon finds the run again.
+        let spec = crate::hostedcheck::CheckSpec {
+            id_prefix: self.id_prefix.clone(),
+            log_dir: self.log_dir.clone(),
+            cmd: cmd.clone(),
+            cwd: self.wt.clone(),
+            env: self.slots.env(),
+            limit: self.timeout,
+            tree: crate::hostedcheck::tree_key(&self.wt),
+        };
+        let res = crate::hostedcheck::run(&self.slots.d, &spec);
         drop(test_lease);
         self.slots.take_agent_slot_back();
-        CheckRun::Done {
-            passed,
-            summary: format!("Last output:\n{out}"),
+        match res {
+            Ok(o) => CheckRun::Done {
+                passed: o.passed,
+                summary: if o.timed_out {
+                    format!(
+                        "The tests did not finish within {} s and were stopped. Last output:\n{}",
+                        self.timeout.as_secs(),
+                        o.output
+                    )
+                } else {
+                    format!("Last output:\n{}", o.output)
+                },
+            },
+            Err(e) => CheckRun::Done {
+                passed: false,
+                summary: format!("The check did not give a result: {e}"),
+            },
         }
     }
 }
@@ -1370,6 +1396,8 @@ fn agent_job(c: &Ctx) {
         wt: c.wt.clone(),
         timeout: c.project.test_timeout,
         slots: CheckSlots::new(c),
+        id_prefix: format!("t{}r{}-check", c.task.0, c.run.0),
+        log_dir: c.task_dir(),
     });
     let validator = (kind == StepKind::Develop).then(|| {
         change_validator(
