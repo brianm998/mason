@@ -99,7 +99,7 @@ struct MasonMonitorApp: App {
         NSApplication.shared.setActivationPolicy(.regular)
         // Unbundled there is no Info.plist icon; MASON.app has one and keeps it.
         if Bundle.main.object(forInfoDictionaryKey: "CFBundleIconFile") == nil,
-           let d = Mascot.appIconData(), let img = NSImage(data: d) {
+           let d = Mascot.macAppIconData(), let img = NSImage(data: d) {
             NSApplication.shared.applicationIconImage = img
         }
     }

@@ -85,6 +85,11 @@ public enum Mascot {
     /// The 1024 px app icon (`brand/app_icon.png`), for the Dock when the monitor runs unbundled.
     public static func appIconData() -> Data? { data("brand/app_icon.png") }
 
+    /// The macOS-shaped app icon (`brand/app_icon_macos.png`): the same art inside Apple's
+    /// 824 px rounded rectangle on a 1024 canvas with a shadow, since macOS does not mask icons.
+    /// Made by `scripts/gen-app-icon-macos.swift`.
+    public static func macAppIconData() -> Data? { data("brand/app_icon_macos.png") }
+
     private static func make(_ files: [String], points: Int) -> Image? {
         let reps: [(Int, Data)] = files.enumerated().compactMap { i, f in data(f).map { (i + 1, $0) } }
         return image(from: reps, points: points)
