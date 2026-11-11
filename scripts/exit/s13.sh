@@ -24,6 +24,9 @@ cleanup() {
   rm -rf "$root"
 }
 trap cleanup EXIT
+# The daemons here must not act on what else the machine is doing (run-exit-scripts.sh does the
+# same): on a busy runner the compile gate held a landing's re-test and step 4 timed out.
+[ -n "${MASON_CPU_FILE:-}" ] || { echo 0 > "$root/cpu"; export MASON_CPU_FILE="$root/cpu"; }
 
 cargo build -q --workspace --bins
 bin=target/debug
