@@ -275,3 +275,8 @@ compose = "done"
 description = "Each ticket state as a mascot icon: a 20 pt overlay on the count tile top-left corner (not part of its layout, so tile width is unchanged), the needs_attention icon in the top bar and on decision cards, after the sidebar section chevron, at the end of the sidebar row time and cells line, and on Home stage headings; phone: 20 pt in tiles and headers, 24 pt on rows"
 swift = "done"
 compose = "done"
+
+[feature.app-icon]
+description = "The mascot app icon: MASON.app has an .icns (Finder, Dock), the unbundled monitor sets the Dock icon, the Compose window has it; the iOS icon file sits beside its Info.plist for when a project exists"
+swift = "done"
+compose = "done"
