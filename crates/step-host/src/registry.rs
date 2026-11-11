@@ -192,6 +192,12 @@ impl Registry {
     /// Every host that ever started under this root, sorted by id. Directories
     /// without a `host.kv` (a host that never finished starting) are skipped.
     pub fn scan(&self) -> io::Result<Vec<HostStatus>> {
+        self.scan_where(|_| true)
+    }
+
+    /// Like `scan`, but only reads the directories whose name `keep` accepts, so
+    /// a caller that wants one task's hosts does not read every host's files.
+    pub fn scan_where(&self, keep: impl Fn(&str) -> bool) -> io::Result<Vec<HostStatus>> {
         let mut out = vec![];
         let entries = match fs::read_dir(&self.root) {
             Ok(e) => e,
@@ -199,7 +205,11 @@ impl Registry {
             Err(e) => return Err(e),
         };
         for e in entries {
-            let p = e?.path();
+            let e = e?;
+            if !keep(&e.file_name().to_string_lossy()) {
+                continue;
+            }
+            let p = e.path();
             if p.is_dir() {
                 if let Ok(s) = status_of(&p) {
                     out.push(s);

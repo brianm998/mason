@@ -2511,10 +2511,8 @@ pub fn log_signature(d: &Daemon, task: u64) -> Vec<LogStamp> {
 }
 
 pub fn render_logs(d: &Daemon, task: u64) -> String {
-    let reg = mason_step_host::registry::Registry::new(d.cfg.hosts_dir());
-    let mut hosts: Vec<_> = reg
-        .scan()
-        .unwrap_or_default()
+    // Live hosts and the ones the sweep moved to `t/<task>/hosts/`.
+    let mut hosts: Vec<_> = crate::hostarchive::task_hosts(&d.cfg, task)
         .into_iter()
         .filter_map(|h| {
             crate::sweep::parse_host_id(&h.info.id)

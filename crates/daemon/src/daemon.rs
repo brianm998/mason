@@ -698,7 +698,10 @@ impl Daemon {
     /// Stop every running step host whose id starts with `prefix`.
     pub fn stop_hosts(&self, prefix: &str) {
         let reg = mason_step_host::registry::Registry::new(self.cfg.hosts_dir());
-        for s in reg.scan().unwrap_or_default() {
+        for s in reg
+            .scan_where(|n| n.starts_with(prefix))
+            .unwrap_or_default()
+        {
             if s.info.id.starts_with(prefix)
                 && s.state == mason_step_host::registry::HostState::Running
             {
