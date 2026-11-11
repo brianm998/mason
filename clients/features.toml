@@ -270,3 +270,8 @@ platform_reason = "A session needs a keyboard and a terminal-sized view, and a p
 description = "The approved mascot art (clients/mascot.toml, one copy in clients/swift/Sources/MasonMascot/Art) and one loader per client: icon(id, size), bannerIcon(id) and illustration(id), nothing for an unknown id; no visible UI yet"
 swift = "done"
 compose = "done"
+
+[feature.mascot-banner-icons]
+description = "Each banner under the top bar starts with a decorative 20 pt mascot icon (scaled with the text zoom) chosen only by its kind: connection, daemon-down, read-only and monitor-update by their own ids; paused, definition, landing_frozen and the provider_* kinds from Banner.kind; an unknown kind or the two provider notes show text alone. The daemon now emits a landing_frozen banner while landing is frozen"
+swift = "done"
+compose = "done"

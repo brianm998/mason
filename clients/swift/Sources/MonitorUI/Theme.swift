@@ -50,6 +50,7 @@ public struct Theme {
     public var spacingLarge: CGFloat { s(MasonTokens.sizeSpacingLarge) }
     public var radius: CGFloat { CGFloat(MasonTokens.sizeCornerRadius) }
     public var cell: CGFloat { s(MasonTokens.sizeProgressCell) }
+    public var mascotBannerIcon: CGFloat { s(MasonTokens.sizeMascotBannerIcon) }
 
     public func body(_ weight: Font.Weight = .regular) -> Font { .system(size: s(MasonTokens.sizeTextBody), weight: weight) }
     public func small(_ weight: Font.Weight = .regular) -> Font { .system(size: s(MasonTokens.sizeTextSmall), weight: weight) }

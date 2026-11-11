@@ -42,3 +42,31 @@ object Mascot {
 
     fun illustration(id: String): ImageBitmap? = illustrationPath(id)?.let { bitmap(it) }
 }
+
+/** Which banner image goes with which banner, from the banner's own identity only. */
+object BannerIcons {
+    /** Every `Banner.kind` the daemon emits today; null means deliberately no image. */
+    val daemonKinds: Map<String, String?> = mapOf(
+        "paused" to "paused",
+        "definition" to "definition",
+        "landing_frozen" to "landing_frozen",
+        "provider_outage" to "provider",
+        "provider_overage" to "provider",
+        "provider_budget" to "provider",
+        "provider_hold" to "provider",
+        "provider_limit" to "provider",
+        // Informational notes, not trouble: no image.
+        "provider_extra_billing" to null,
+        "provider_warning" to null,
+    )
+
+    /** The client's own banners, by their test tags. */
+    val clientBanners: Map<String, String> = mapOf(
+        "connection" to "connection_lost",
+        "daemon-down" to "daemon_down",
+        "read-only" to "read_only",
+        "monitor-update" to "update",
+    )
+
+    fun forDaemonKind(kind: String): String? = daemonKinds[kind]
+}
