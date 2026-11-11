@@ -567,6 +567,17 @@ impl<'a> Ctx<'a> {
                 });
             }
         }
+        for f in self.d.store.freezes().unwrap_or_default() {
+            if project.is_empty() || f.project == project {
+                banners.push(Banner {
+                    kind: "landing_frozen".into(),
+                    text: format!(
+                        "Landing is frozen for {}: only the fix task lands until the post-land suites are green ({})",
+                        f.project, f.reason
+                    ),
+                });
+            }
+        }
         for (kind, text) in crate::holds::banners(self.d) {
             banners.push(Banner { kind, text });
         }

@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 package mason.monitor.ui
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.HorizontalDivider
@@ -32,6 +34,10 @@ import mason.monitor.MonitorModel
 fun RootView(model: MonitorModel, dark: Boolean = isSystemInDarkTheme()) {
     val theme = Theme(dark, model.textScale)
     CompositionLocalProvider(LocalTheme provides theme) {
+        if (model.header == null) {
+            StartView(model)
+            return@CompositionLocalProvider
+        }
         Column(Modifier.fillMaxSize().background(theme.background)) {
             TopBar(model)
             HorizontalDivider(color = theme.border)
@@ -46,6 +52,36 @@ fun RootView(model: MonitorModel, dark: Boolean = isSystemInDarkTheme()) {
                 }
             }
         }
+    }
+}
+
+/** What the start view says, from the connection alone (never an estimate of progress). */
+internal fun startStatus(connected: Boolean, reconnecting: Boolean): String =
+    if (connected) "Connecting…" else if (reconnecting) "Daemon restarting, reconnecting…" else "Looking for the daemon…"
+
+/**
+ * Shown instead of the window until the first header arrives. The image is decorative and whole
+ * (the robot is left, the word right: a crop would lose both); there is no progress bar.
+ */
+@Composable
+private fun StartView(model: MonitorModel) {
+    val theme = LocalTheme.current
+    val image = remember { Mascot.brand("start_image") }
+    Column(
+        Modifier.fillMaxSize().background(theme.background).padding((MasonTokens.sizeSpacingLarge * theme.scale).dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        if (image != null) {
+            Image(
+                bitmap = image,
+                contentDescription = null,
+                contentScale = ContentScale.Fit,
+                modifier = Modifier.widthIn(max = (MasonTokens.sizeMascotStartWidth * theme.scale).dp).fillMaxWidth(),
+            )
+            Spacer(Modifier.height((MasonTokens.sizeSpacingLarge * theme.scale).dp))
+        }
+        androidx.compose.material3.Text(startStatus(model.connected, model.reconnecting), style = theme.body())
     }
 }
 

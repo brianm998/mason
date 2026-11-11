@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import AppKit
+import MasonMascot
 import MasonProtocol
+import MasonTokens
 import MonitorCore
 import SwiftUI
 
@@ -191,6 +193,37 @@ struct Hatch: Shape {
     }
 }
 
+/// The mascot image for a task state (the daemon's own string), drawn at the 20 pt token
+/// (or the 24 pt one when `large`) times the text zoom. Decorative: hidden from accessibility,
+/// never tinted. An unknown state draws nothing, and takes no room.
+struct StateIcon: View {
+    @Environment(\.theme) var theme
+    let state: String
+    var large = false
+
+    var body: some View {
+        if let image = StateIconCache.image(state, size: large ? MasonTokens.sizeMascotIcon : MasonTokens.sizeMascotIconSmall) {
+            let side = large ? theme.mascotIcon : theme.mascotIconSmall
+            image.resizable().interpolation(.high)
+                .frame(width: side, height: side)
+                .accessibilityHidden(true)
+        }
+    }
+}
+
+/// Decoding a PNG on every redraw would be wasteful; images are looked up once per state and size.
+@MainActor enum StateIconCache {
+    private static var images: [String: Image?] = [:]
+
+    static func image(_ state: String, size: Int) -> Image? {
+        let key = "\(state)@\(size)"
+        if let hit = images[key] { return hit }
+        let made = Mascot.icon(state, size: size)
+        images[key] = .some(made)
+        return made
+    }
+}
+
 /// A count tile: a large count over a one-line label, sized to its label so a
 /// narrow window squeezes other text and never a tile or label; tinted when
 /// the state wants the owner; a dash while disconnected.
@@ -210,6 +243,13 @@ struct CountTile: View {
         .fixedSize(horizontal: true, vertical: false)
         .background(RoundedRectangle(cornerRadius: theme.radius).fill(wants ? theme.attentionTint : theme.surface))
         .overlay(RoundedRectangle(cornerRadius: theme.radius).stroke(wants ? theme.attention : theme.border, lineWidth: 1))
+        // An overlay, not part of the layout: Part 17 sizes a tile by its label and text size
+        // alone, so a count of any width and the icon never change it.
+        .overlay(alignment: .topLeading) {
+            StateIcon(state: count.state)
+                .offset(x: -theme.spacingSmall, y: -theme.spacingSmall)
+                .allowsHitTesting(false)
+        }
         .contentShape(Rectangle())
         .onTapGesture { model.tileClicked(state: count.state, clickCount: NSApp.currentEvent?.clickCount ?? 1) }
         .help(model.tileTooltip(count))
@@ -285,7 +325,10 @@ struct DecisionCardView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: theme.spacing) {
-            Text(card.ask).font(theme.title()).foregroundStyle(theme.text).fixedSize(horizontal: false, vertical: true)
+            HStack(alignment: .firstTextBaseline, spacing: theme.spacingSmall) {
+                StateIcon(state: "needs_attention")
+                Text(card.ask).font(theme.title()).foregroundStyle(theme.text).fixedSize(horizontal: false, vertical: true)
+            }
             if !card.why.isEmpty {
                 Text(card.why).font(theme.body()).foregroundStyle(theme.muted).fixedSize(horizontal: false, vertical: true)
             }

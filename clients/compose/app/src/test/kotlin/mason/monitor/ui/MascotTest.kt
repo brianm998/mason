@@ -41,4 +41,21 @@ class MascotTest {
         assertNull(Mascot.illustration("nonsense"))
         assertNull(Mascot.illustration("../brand/app_icon"))
     }
+
+    @Test
+    fun everyBannerKindMapsToAnImageOrDeliberatelyNone() {
+        for ((kind, id) in BannerIcons.daemonKinds) {
+            assertEquals(id, BannerIcons.forDaemonKind(kind), kind)
+            if (id != null) assertNotNull(Mascot.bannerIcon(id), "$kind -> $id")
+        }
+        for ((_, id) in BannerIcons.clientBanners) assertNotNull(Mascot.bannerIcon(id), id)
+        assertEquals("landing_frozen", BannerIcons.forDaemonKind("landing_frozen"))
+        assertEquals("provider", BannerIcons.forDaemonKind("provider_budget"))
+    }
+
+    @Test
+    fun anUnknownBannerKindHasNoIcon() {
+        assertNull(BannerIcons.forDaemonKind("nonsense"))
+        assertNull(BannerIcons.forDaemonKind(""))
+    }
 }

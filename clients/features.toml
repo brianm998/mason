@@ -271,7 +271,42 @@ status = "deliberate-difference"
 description = "Opening, attaching to and typing into an agent's session"
 platform_reason = "A session needs a keyboard and a terminal-sized view, and a phone connection that drops would leave one half-driven"
 
+[feature.mascot-start-image]
+description = "Until the first header arrives the window shows the start image (whole, never cropped, no progress bar) with the real connection status beneath it: looking for the daemon, connecting, or the reconnect text; it goes at the first header and later disconnects use the banners only"
+swift = "done"
+compose = "done"
+
 [feature.mascot-art]
 description = "The approved mascot art (clients/mascot.toml, one copy in clients/swift/Sources/MasonMascot/Art) and one loader per client: icon(id, size), bannerIcon(id) and illustration(id), nothing for an unknown id; no visible UI yet"
+swift = "done"
+compose = "done"
+
+[feature.mascot-banner-icons]
+description = "Each banner under the top bar starts with a decorative 20 pt mascot icon (scaled with the text zoom) chosen only by its kind: connection, daemon-down, read-only and monitor-update by their own ids; paused, definition, landing_frozen and the provider_* kinds from Banner.kind; an unknown kind or the two provider notes show text alone. The daemon now emits a landing_frozen banner while landing is frozen"
+swift = "done"
+compose = "done"
+
+[feature.mascot-state-icons]
+description = "Each ticket state as a mascot icon: a 20 pt overlay on the count tile top-left corner (not part of its layout, so tile width is unchanged), the needs_attention icon in the top bar and on decision cards, after the sidebar section chevron, at the end of the sidebar row time and cells line, and on Home stage headings; phone: 20 pt in tiles and headers, 24 pt on rows"
+swift = "done"
+compose = "done"
+
+[feature.app-icon]
+description = "The mascot app icon: MASON.app has an .icns (Finder, Dock), the unbundled monitor sets the Dock icon, the Compose window has it; the iOS icon file sits beside its Info.plist for when a project exists"
+swift = "done"
+compose = "done"
+
+[feature.mascot-status-pictures]
+description = "The Home status picture (not_connected, needs_attention, developing, no_tasks with Add task, otherwise all_clear), nothing_landing on an empty Landing page, all_clear on Health with no findings, and no_results with 'Nothing matched.' for a sidebar search that matches nothing; all decorative, scaled with the text zoom"
+swift = "done"
+compose = "done"
+
+[feature.readme-banner]
+description = "The mascot banner at the top of README.md and the social card in docs/images; repository art only, no client UI"
+swift = "done"
+compose = "done"
+
+[feature.mascot-state-illustration]
+description = "The task page shows the ticket's state as a 96 pt illustration (scaled with text zoom) left of the title block, chosen by the daemon's state and changing with it; the phone task screen shows it with the state name at the top; decorative, nothing for an unknown state"
 swift = "done"
 compose = "done"

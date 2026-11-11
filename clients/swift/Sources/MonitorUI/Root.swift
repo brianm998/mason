@@ -2,6 +2,7 @@
 
 import AppKit
 import MasonTokens
+import MasonMascot
 import MonitorCore
 import SwiftUI
 
@@ -15,6 +16,20 @@ public struct RootView: View {
 
     public var body: some View {
         let theme = Theme(dark: scheme == .dark, scale: model.textScale)
+        Group {
+            if model.header == nil {
+                StartView(model: model)
+            } else {
+                mainLayout
+            }
+        }
+        .environment(\.theme, theme)
+        .foregroundStyle(theme.text)
+        .background(theme.background)
+        .onOpenURL { model.open(url: $0) }
+    }
+
+    private var mainLayout: some View {
         VStack(spacing: 0) {
             TopBar(model: model)
             Divider()
@@ -31,10 +46,33 @@ public struct RootView: View {
                 .coordinateSpace(name: SidebarHandle.space)
             }
         }
-        .environment(\.theme, theme)
-        .foregroundStyle(theme.text)
-        .background(theme.background)
-        .onOpenURL { model.open(url: $0) }
+    }
+}
+
+/// What the start view says, from the connection alone (never an estimate of progress).
+func startStatus(connected: Bool, reconnecting: Bool) -> String {
+    if connected { return "Connecting…" }
+    return reconnecting ? "Daemon restarting, reconnecting…" : "Looking for the daemon…"
+}
+
+/// Shown instead of the window until the first header arrives. The image is decorative and
+/// whole (the robot is left, the word right: a crop would lose both); there is no progress bar.
+struct StartView: View {
+    @Environment(\.theme) var theme
+    @ObservedObject var model: MonitorModel
+
+    var body: some View {
+        VStack(spacing: CGFloat(MasonTokens.sizeSpacingLarge) * CGFloat(theme.scale)) {
+            if let img = Mascot.brand("start_image") {
+                img.resizable().scaledToFit()
+                    .frame(maxWidth: CGFloat(MasonTokens.sizeMascotStartWidth) * CGFloat(theme.scale))
+                    .accessibilityHidden(true)
+            }
+            Text(startStatus(connected: model.connected, reconnecting: model.reconnecting))
+                .accessibilityIdentifier("start-status")
+        }
+        .padding(CGFloat(MasonTokens.sizeSpacingLarge) * CGFloat(theme.scale))
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 

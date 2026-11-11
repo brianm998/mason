@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+import MasonTokens
 import MonitorCore
 import SwiftUI
 
@@ -21,6 +22,13 @@ struct SidebarPane: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     VStack(alignment: .leading, spacing: 0) {
+                        if model.searchMatchesNothing {
+                            VStack(spacing: theme.spacing) {
+                                MascotPicture(id: "no_results", points: MasonTokens.sizeMascotStatus)
+                                Text(searchNoMatchText).font(theme.body()).foregroundStyle(theme.muted)
+                                    .accessibilityIdentifier("search:no-results")
+                            }.frame(maxWidth: .infinity).padding(theme.spacing)
+                        }
                         ForEach(Array(model.sidebarEntries.enumerated()), id: \.offset) { _, e in
                             entry(e)
                         }
@@ -120,6 +128,7 @@ struct SectionHeader: View {
         Button { model.toggle(section) } label: {
             HStack(spacing: theme.spacingSmall) {
                 Image(systemName: open ? "chevron.down" : "chevron.right").frame(width: theme.cell)
+                StateIcon(state: section.state)
                 Text(section.title).font(theme.body(.semibold))
                 Spacer()
                 Text(model.countText(section))
@@ -161,14 +170,19 @@ struct RowView: View {
                     HStack(spacing: theme.spacing) {
                         Text(Format.duration(ms: row.inStateMs))
                             .font(theme.small()).foregroundStyle(row.slow ? theme.slow : theme.muted)
+                            .lineLimit(1).fixedSize()
                         if !row.typical.isEmpty {
                             Text(row.typical).font(theme.small()).foregroundStyle(theme.muted)
                         }
-                        ProgressCells(model: model, cells: row.progress, slow: row.slow)
+                        ProgressCells(model: model, cells: row.progress, slow: row.slow).fixedSize()
+                        // On a tight row the model text gives way first; time and cells never do.
                         if !row.display.isEmpty || !row.model.isEmpty {
                             Text(row.display.isEmpty ? row.model : row.display)
                                 .font(theme.small()).foregroundStyle(theme.muted)
+                                .lineLimit(1).truncationMode(.tail).layoutPriority(-1)
                         }
+                        Spacer(minLength: 0)
+                        StateIcon(state: row.state)
                     }
                     if let c = row.progress.running { ProgressLine(model: model, cell: c) }
                 }

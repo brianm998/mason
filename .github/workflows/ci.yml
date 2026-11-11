@@ -49,7 +49,9 @@ jobs:
     # and CI fails, if build, tests and exit scripts exceed it. It was 10 minutes
     # until Stage 15 brought macOS to 9m30s; the repository is public, so runner
     # minutes cost nothing, and 20 leaves room while still catching a hung job.
-    timeout-minutes: 20
+    # By November 2026 the workspace tests alone took 18 minutes on macOS, so the
+    # exit scripts were cut off every run; 45 restores the headroom.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - run: cargo test --workspace

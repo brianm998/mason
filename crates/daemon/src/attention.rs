@@ -374,6 +374,101 @@ fn disk_alert(d: &Daemon, w: &mason_engine::World) -> Option<(String, String, St
     Some(("disk".into(), "disk".into(), text))
 }
 
+/// Bug kinds that alert while one was filed in the last `BUG_WINDOW_MS`.
+const ALERT_BUGS: &[&str] = &["thread_panic", "job_panic", "job_spawn", "projection_drift"];
+/// Repairs that alert only when the same task needs them again and again.
+const REPEAT_BUGS: &[&str] = &["missed_job", "missed_admit"];
+pub const BUG_WINDOW_MS: u64 = 24 * 3600 * 1000;
+pub const REPEAT_WINDOW_MS: u64 = 3600 * 1000;
+pub const REPEAT_COUNT: usize = 3;
+/// An event-loop stall this long (ms) alerts, for `STALL_WINDOW_MS`.
+pub const STALL_ALERT_MS: u64 = 30_000;
+pub const STALL_WINDOW_MS: u64 = 3600 * 1000;
+
+/// The `daemon_bug` alerts for the bug rows `(at_ms, kind, detail)` at time `now`. Pure.
+/// `orphan_host` and `leftover_branch` are housekeeping the sweep fixed: no alert.
+pub fn bug_alerts(rows: &[(u64, String, String)], now: u64) -> Vec<(String, String, String)> {
+    let mut out = vec![];
+    for kind in ALERT_BUGS {
+        let mine: Vec<_> = rows
+            .iter()
+            .filter(|(at, k, _)| k == kind && *at + BUG_WINDOW_MS > now && *at <= now)
+            .collect();
+        if let Some((_, _, detail)) = mine.iter().max_by_key(|(at, _, _)| *at) {
+            out.push((
+                format!("daemon_bug:{kind}"),
+                "daemon_bug".into(),
+                format!(
+                    "The daemon filed {} {kind} bug(s) in the last 24 hours; latest: {detail}",
+                    mine.len()
+                ),
+            ));
+        }
+    }
+    for kind in REPEAT_BUGS {
+        // The task is the number after "task " in the detail.
+        let mut by_task: std::collections::BTreeMap<String, Vec<&(u64, String, String)>> =
+            Default::default();
+        for r in rows
+            .iter()
+            .filter(|(at, k, _)| k == kind && *at + REPEAT_WINDOW_MS > now && *at <= now)
+        {
+            let task =
+                r.2.strip_prefix("task ")
+                    .and_then(|t| t.split_whitespace().next())
+                    .unwrap_or("?")
+                    .to_string();
+            by_task.entry(task).or_default().push(r);
+        }
+        for (task, hits) in by_task {
+            if hits.len() >= REPEAT_COUNT {
+                let latest = hits.iter().max_by_key(|r| r.0).map_or("", |r| r.2.as_str());
+                out.push((
+                    format!("daemon_bug:{kind}:{task}"),
+                    "daemon_bug".into(),
+                    format!(
+                        "The sweep has had to repair task {task} {} times in the last hour ({kind}); the repair is not holding. Latest: {latest}",
+                        hits.len()
+                    ),
+                ));
+            }
+        }
+    }
+    out
+}
+
+/// The alert for an event-loop stall of `late_ms` that ended at `at_ms`, while it is recent.
+pub fn stall_alert(last: Option<(u64, u64)>, now: u64) -> Option<(String, String, String)> {
+    let (at, late_ms) = last?;
+    (late_ms >= STALL_ALERT_MS && at + STALL_WINDOW_MS > now).then(|| {
+        (
+            "daemon_bug:stall".into(),
+            "daemon_bug".into(),
+            format!(
+                "The daemon's event loop stalled for {} seconds",
+                late_ms / 1000
+            ),
+        )
+    })
+}
+
+/// An agent that has been silent past its alert limit, one per running step. Exists
+/// until output resumes, the step is stopped for it, or the step ends.
+fn silent_alerts(d: &Daemon) -> Vec<(String, String, String)> {
+    let silent = d.silent.lock().unwrap_or_else(|e| e.into_inner());
+    let mut v: Vec<_> = silent.iter().collect();
+    v.sort_by_key(|(run, _)| **run);
+    v.into_iter()
+        .map(|(run, a)| {
+            (
+                format!("silent:{run}"),
+                "host_lost".to_string(),
+                crate::hostloss::silent_alert(a.task, &a.step, a.silent_ms),
+            )
+        })
+        .collect()
+}
+
 /// Waits that are not moving, or never can: one per resource and cause.
 fn wait_alerts(d: &Daemon) -> Vec<(String, String, String)> {
     let long =
@@ -440,12 +535,20 @@ pub fn alerts_now(d: &Daemon) -> Vec<(String, String, String)> {
             }
         }
     }
+    out.extend(silent_alerts(d));
     out.extend(d.landing().attention());
     out.extend(wait_alerts(d));
     if let Some(text) = d.exit_numbers_warning() {
         out.push(("numbers".into(), "numbers".into(), text));
     }
     out.extend(disk_alert(d, &w));
+    out.extend(bug_alerts(
+        &d.store
+            .bugs_since(now_ms().saturating_sub(BUG_WINDOW_MS))
+            .unwrap_or_default(),
+        now_ms(),
+    ));
+    out.extend(stall_alert(d.last_big_stall(), now_ms()));
     out.extend(host_loss_alerts(
         &d.store
             .host_losses_since(now_ms().saturating_sub(HOST_LOSS_ALERT_MS))
@@ -467,6 +570,7 @@ pub fn alerts_now(d: &Daemon) -> Vec<(String, String, String)> {
             ));
         }
     }
+    out.extend(fetch_alerts(d));
     out.extend(git_stuck_alert(d));
     out.extend(stalled_alert(d, &w));
     for p in d.store.pauses(now_ms()).unwrap_or_default() {
@@ -492,6 +596,34 @@ pub fn alerts_now(d: &Daemon) -> Vec<(String, String, String)> {
         ));
     }
     out
+}
+
+/// `fetch:<project>`: the project's fetches have been failing for `fetch_alert_after`. Reads only the
+/// failure record; touches no git.
+fn fetch_alerts(d: &Daemon) -> Vec<(String, String, String)> {
+    let now = now_ms();
+    let limit = d.cfg.fetch_alert_after.as_millis() as u64;
+    d.fetch_failing()
+        .into_iter()
+        .filter_map(|(pid, since, err)| {
+            let age = now.saturating_sub(since);
+            if age < limit {
+                return None;
+            }
+            let p = d.projects.get(&pid)?;
+            let first = err.lines().find(|l| !l.trim().is_empty()).unwrap_or("no error text");
+            Some((
+                format!("fetch:{}", p.id),
+                "tracker".into(),
+                format!(
+                    "{}: git fetch has been failing for {}: {first}. Tasks are working from the base as it was {} ago",
+                    p.id,
+                    span_text(age),
+                    span_text(age)
+                ),
+            ))
+        })
+        .collect()
 }
 
 /// The definitions thread (watch, fetch, admit) has not finished a pass for too long: git or the

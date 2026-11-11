@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+import MasonMascot
+import MasonTokens
 import MonitorCore
 import SwiftUI
 
@@ -13,6 +15,14 @@ public struct PhoneRootView: View {
     public init(model: MonitorModel) { self.model = model }
 
     public var body: some View {
+        if model.header == nil {
+            PhoneStartView(model: model)
+        } else {
+            stack
+        }
+    }
+
+    private var stack: some View {
         NavigationStack(path: $path) {
             SidebarScreen(model: model) { page in
                 model.go(page)
@@ -22,6 +32,51 @@ public struct PhoneRootView: View {
                 DetailScreen(model: model, page: page)
             }
             .navigationTitle("MASON")
+        }
+    }
+}
+
+/// Shown until the first header arrives: the whole start image fitted to the screen width on a
+/// plain deep-blue ground (the robot is left, the word right, so no crop), the real connection
+/// status beneath it, and no progress bar. Later disconnects never bring it back.
+struct PhoneStartView: View {
+    @ObservedObject var model: MonitorModel
+    @ScaledMetric(relativeTo: .body) private var gap = CGFloat(MasonTokens.sizeSpacingLarge)
+
+    var body: some View {
+        VStack(spacing: gap) {
+            if let img = Mascot.brand("start_image") {
+                img.resizable().scaledToFit().frame(maxWidth: .infinity).accessibilityHidden(true)
+            }
+            Text(status).foregroundStyle(.white).accessibilityIdentifier("start-status")
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(red: 2 / 255, green: 46 / 255, blue: 134 / 255).ignoresSafeArea())
+    }
+
+    private var status: String {
+        if model.connected { return "Connecting…" }
+        return model.reconnecting ? "Daemon restarting, reconnecting…" : "Looking for the daemon…"
+    }
+}
+
+/// A task state's mascot image on the phone: 20 pt in tiles and section headers, 24 pt trailing
+/// on rows, growing with Dynamic Type. Decorative, never tinted; an unknown state draws nothing.
+struct PhoneStateIcon: View {
+    let state: String
+    @ScaledMetric private var small = CGFloat(MasonTokens.sizeMascotIconSmall)
+    @ScaledMetric private var large = CGFloat(MasonTokens.sizeMascotIcon)
+    var trailing = false
+
+    init(state: String, trailing: Bool = false) {
+        self.state = state
+        self.trailing = trailing
+    }
+
+    var body: some View {
+        if let image = Mascot.icon(state, size: trailing ? MasonTokens.sizeMascotIcon : MasonTokens.sizeMascotIconSmall) {
+            let side = trailing ? large : small
+            image.resizable().frame(width: side, height: side).accessibilityHidden(true)
         }
     }
 }
@@ -38,6 +93,7 @@ struct SidebarScreen: View {
                     HStack {
                         ForEach(model.header?.counts ?? [], id: \.state) { c in
                             VStack {
+                                PhoneStateIcon(state: c.state)
                                 Text(model.tileCount(c)).font(.title2.bold())
                                 Text(model.tileLabel(c)).font(.caption)
                             }
@@ -50,15 +106,24 @@ struct SidebarScreen: View {
             Button { choose(.home) } label: { Label("Home", systemImage: "house") }
                 .accessibilityIdentifier("sidebar:home")
             ForEach(model.sidebar?.sections ?? [], id: \.state) { sec in
-                Section("\(sec.title) (\(model.countText(sec)))") {
+                Section {
                     ForEach(model.filteredRows(sec), id: \.id) { r in
                         Button { choose(.task(r.id)) } label: {
-                            VStack(alignment: .leading) {
-                                Text("\(r.key) \(r.title)")
-                                if !r.activity.isEmpty { Text(r.activity).font(.caption).foregroundStyle(.secondary) }
+                            HStack {
+                                VStack(alignment: .leading) {
+                                    Text("\(r.key) \(r.title)")
+                                    if !r.activity.isEmpty { Text(r.activity).font(.caption).foregroundStyle(.secondary) }
+                                }
+                                Spacer(minLength: 0)
+                                PhoneStateIcon(state: r.state, trailing: true)
                             }
                         }
                         .accessibilityIdentifier("row:\(r.id)")
+                    }
+                } header: {
+                    HStack(spacing: 4) {
+                        PhoneStateIcon(state: sec.state)
+                        Text("\(sec.title) (\(model.countText(sec)))")
                     }
                 }
             }
@@ -100,6 +165,8 @@ struct HomeScreen: View {
 struct TaskScreen: View {
     @ObservedObject var model: MonitorModel
     let id: UInt64
+    /// The state picture, scaled with the user's text size.
+    @ScaledMetric private var illustrationSize = CGFloat(MasonTokens.sizeMascotIllustration)
 
     var body: some View {
         let t = model.taskDetail
@@ -107,7 +174,17 @@ struct TaskScreen: View {
         let allowed = row?.allowedActions ?? []
         List {
             if let r = row {
-                Section { Text(r.title).font(.headline); Text(r.activity) }
+                Section {
+                    HStack {
+                        if let art = Mascot.illustration(r.state) {
+                            art.resizable().scaledToFit()
+                                .frame(width: illustrationSize, height: illustrationSize)
+                                .accessibilityHidden(true)
+                        }
+                        Text(r.state.replacingOccurrences(of: "_", with: " ")).font(.headline)
+                    }
+                    Text(r.title).font(.headline); Text(r.activity)
+                }
             }
             if let card = t?.card, !card.ask.isEmpty {
                 Section("Decision") {
@@ -134,8 +211,17 @@ struct TaskScreen: View {
 
 struct LandingScreen: View {
     @ObservedObject var model: MonitorModel
+    /// Follows the phone's text size, like the rest of the screen.
+    @ScaledMetric(relativeTo: .body) private var side = CGFloat(MasonTokens.sizeMascotEmpty)
     var body: some View {
         List {
+            if (model.landing?.queue ?? []).isEmpty {
+                // Decorative; the list says nothing more, so the picture is all there is.
+                if let img = Mascot.illustration("nothing_landing") {
+                    img.resizable().scaledToFit().frame(width: side, height: side)
+                        .frame(maxWidth: .infinity).accessibilityHidden(true)
+                }
+            }
             ForEach(model.landing?.queue ?? [], id: \.id) { r in Text("\(r.key) \(r.title)") }
             ForEach(model.landing?.modes ?? [], id: \.self) { Text($0) }
         }
