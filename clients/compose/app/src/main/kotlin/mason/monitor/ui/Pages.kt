@@ -9,7 +9,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
@@ -69,11 +69,29 @@ fun HomePage(model: MonitorModel) {
     val theme = LocalTheme.current
     Scrolling {
         val h = model.home
-        Text(
-            if (model.connected) h?.status ?: "…" else "Not connected",
-            style = theme.title(color = if (model.attention > 0) theme.attention else theme.text),
-            modifier = Modifier.testTag("status"),
-        )
+        var adding by remember { mutableStateOf(false) }
+        val pic = model.homeMascot
+        val statusLine: @Composable () -> Unit = {
+            Text(
+                if (model.connected) h?.status ?: "…" else "Not connected",
+                style = theme.title(color = if (model.attention > 0) theme.attention else theme.text),
+                modifier = Modifier.testTag("status"),
+            )
+        }
+        if (pic.large) {
+            Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(theme.spacing)) {
+                MascotPicture(pic.id, theme.mascotEmpty)
+                statusLine()
+                Pill("Add task", modifier = Modifier.testTag("home:add-task")) { adding = true }
+            }
+        } else {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(theme.spacingLarge)) {
+                MascotPicture(pic.id, theme.mascotStatus)
+                statusLine()
+            }
+        }
+        if (adding) AddTaskDialog(model) { adding = false }
         val attention = h?.attention.orEmpty()
         if (attention.isNotEmpty()) {
             Section("Needs you") {
@@ -271,7 +289,10 @@ fun LandingPage(model: MonitorModel) {
                 )
             }
             Section("Queue") {
-                if (l.queue.isEmpty()) Text("Nothing is landing.", style = theme.body(color = theme.muted))
+                if (l.queue.isEmpty()) {
+                    MascotPicture("nothing_landing", theme.mascotEmpty)
+                    Text("Nothing is landing.", style = theme.body(color = theme.muted))
+                }
                 l.queue.forEach { r -> Link("${r.key} ${r.title}") { model.go(Page.Task(r.id)) } }
             }
             Section("Batches") {
@@ -418,7 +439,10 @@ fun HealthPage(model: MonitorModel) {
         }
         model.introspection?.let { i ->
             Section("Findings") {
-                if (i.findings.isEmpty()) Text("Nothing found yet.", style = theme.body(color = theme.muted))
+                if (i.findings.isEmpty()) {
+                    MascotPicture("all_clear", theme.mascotStatus)
+                    Text("Nothing found yet.", style = theme.body(color = theme.muted))
+                }
                 i.findings.forEach { f ->
                     Text("#${f.id} [${f.verdict}] ${f.title} (proposal #${f.task}, metric ${f.metric})", style = theme.body())
                     if (f.text.isNotEmpty()) Text(f.text, style = theme.body(color = theme.muted))
@@ -434,4 +458,11 @@ fun HealthPage(model: MonitorModel) {
             }
         }
     }
+}
+
+/** A mascot picture: decorative, [size] already scaled with the text zoom, never tinted. An id the art lacks draws nothing. */
+@Composable
+fun MascotPicture(id: String, size: androidx.compose.ui.unit.Dp, modifier: Modifier = Modifier) {
+    val bmp = remember(id) { Mascot.illustration(id) } ?: return
+    androidx.compose.foundation.Image(bmp, contentDescription = null, modifier = modifier.size(size))
 }

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+import MasonTokens
 import MonitorCore
 import SwiftUI
 
@@ -21,6 +22,13 @@ struct SidebarPane: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     VStack(alignment: .leading, spacing: 0) {
+                        if model.searchMatchesNothing {
+                            VStack(spacing: theme.spacing) {
+                                MascotPicture(id: "no_results", points: MasonTokens.sizeMascotStatus)
+                                Text(searchNoMatchText).font(theme.body()).foregroundStyle(theme.muted)
+                                    .accessibilityIdentifier("search:no-results")
+                            }.frame(maxWidth: .infinity).padding(theme.spacing)
+                        }
                         ForEach(Array(model.sidebarEntries.enumerated()), id: \.offset) { _, e in
                             entry(e)
                         }

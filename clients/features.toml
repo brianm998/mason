@@ -270,3 +270,8 @@ platform_reason = "A session needs a keyboard and a terminal-sized view, and a p
 description = "The approved mascot art (clients/mascot.toml, one copy in clients/swift/Sources/MasonMascot/Art) and one loader per client: icon(id, size), bannerIcon(id) and illustration(id), nothing for an unknown id; no visible UI yet"
 swift = "done"
 compose = "done"
+
+[feature.mascot-status-pictures]
+description = "The Home status picture (not_connected, needs_attention, developing, no_tasks with Add task, otherwise all_clear), nothing_landing on an empty Landing page, all_clear on Health with no findings, and no_results with 'Nothing matched.' for a sidebar search that matches nothing; all decorative, scaled with the text zoom"
+swift = "done"
+compose = "done"

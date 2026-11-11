@@ -49,6 +49,8 @@ class Theme(val dark: Boolean, val scale: Double) {
     val spacingLarge get() = s(T.sizeSpacingLarge)
     val radius get() = T.sizeCornerRadius.dp
     val cell get() = s(T.sizeProgressCell)
+    val mascotStatus get() = s(T.sizeMascotStatus)
+    val mascotEmpty get() = s(T.sizeMascotEmpty)
 
     private fun style(size: Int, weight: FontWeight, color: Color, family: FontFamily? = null) =
         TextStyle(fontSize = (size * scale).sp, fontWeight = weight, color = color, fontFamily = family)
