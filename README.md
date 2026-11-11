@@ -111,6 +111,9 @@ additional permission is in
 legal review. See [docs/LICENSING.md](docs/LICENSING.md) for what the licence
 does and does not cover, including generated output and templates.
 
+The code is GPL, but the mascot character and its art are not: see the draft
+brand notice, [NOTICE.md](clients/swift/Sources/MasonMascot/Art/NOTICE.md).
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Every commit needs a DCO sign-off.
