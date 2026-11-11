@@ -63,14 +63,15 @@ until m status >/dev/null 2>&1; do kill -0 "$daemon" || { echo "masond died" >&2
 mv "$root/origin.git" "$root/origin.gone"
 echo "the remote is unreachable"
 
-m task add "Add a hello file" --body "Create hello.txt containing hello." > /dev/null
-wait_state 1 landing 120
+t=$(m task add "Add a hello file" --body "Create hello.txt containing hello." | sed -n 's/^Filed task #\([0-9]*\) .*/\1/p')
+[ -n "$t" ] || { echo "the task was not filed" >&2; exit 1; }
+wait_state "$t" landing 120
 echo "the task's steps ran from the last-known base and it waits to land"
 sleep 3
-[ "$(state_of 1)" = landing ] || { echo "the task left landing while the remote was away: $(state_of 1)" >&2; exit 1; }
+[ "$(state_of "$t")" = landing ] || { echo "the task left landing while the remote was away: $(state_of "$t")" >&2; exit 1; }
 
 mv "$root/origin.gone" "$root/origin.git"
 echo "the remote is back"
-wait_state 1 landed 120
+wait_state "$t" landed 120
 [ "$(git -C "$root/origin.git" show main:hello.txt)" = hello ]
 echo "s119 OK"
