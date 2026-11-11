@@ -122,7 +122,7 @@ private fun Check(label: String, on: Boolean, change: (Boolean) -> Unit) {
 private fun SectionHeader(model: MonitorModel, s: SidebarSection) {
     val theme = LocalTheme.current
     val open = model.isExpanded(s)
-    val count = model.visibleCount(s)
+    val count = model.countText(s)
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier.fillMaxWidth().clickable { model.toggle(s) }
@@ -135,7 +135,7 @@ private fun SectionHeader(model: MonitorModel, s: SidebarSection) {
         Spacer(Modifier.width(theme.spacingSmall))
         Text(s.title, style = theme.body(FontWeight.SemiBold), modifier = Modifier.weight(1f))
         Text(
-            count.toString(),
+            count,
             style = theme.body(FontWeight.SemiBold, if (s.state == "needs_attention" && s.count > 0) theme.attention else theme.muted),
         )
     }

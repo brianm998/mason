@@ -325,6 +325,16 @@ public final class MonitorModel: ObservableObject {
         search.isActive ? filteredRows(s).count : Int(s.count)
     }
 
+    /// The daemon sends only the newest rows of a long history section; `count` stays the true total.
+    public func isCapped(_ s: SidebarSection) -> Bool { Int(s.count) > s.rows.count }
+
+    /// The number in a section header: "500 of 2000" when capped; while searching, "3 in newest 500".
+    public func countText(_ s: SidebarSection) -> String {
+        if !isCapped(s) { return String(visibleCount(s)) }
+        if search.isActive { return "\(filteredRows(s).count) in newest \(s.rows.count)" }
+        return "\(s.rows.count) of \(s.count)"
+    }
+
     // MARK: commands
 
     /// Who is acting. Only the owner's identity counts as an answer (Part 10),

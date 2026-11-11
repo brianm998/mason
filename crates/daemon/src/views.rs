@@ -86,6 +86,70 @@ pub struct Ctx<'a> {
     pub now: u64,
     /// Task to the tracker issue it was imported from.
     issues: std::collections::HashMap<u64, u64>,
+    /// Built once: every step run by task, and the typical span per step.
+    runs: RunIndex,
+    /// Task to the tasks it blocks, in id order.
+    blocks: std::collections::HashMap<TaskId, Vec<u64>>,
+}
+
+type LogCache = std::collections::HashMap<u64, (Vec<crate::http::LogStamp>, String)>;
+
+/// Most rows a history section (landed, canceled, failed...) sends. `count`
+/// stays the true total; a task past the cap still opens by id.
+pub const HISTORY_ROW_CAP: usize = 500;
+
+/// Step runs indexed once per view, so a row costs a lookup and not a scan.
+#[derive(Default)]
+pub struct RunIndex {
+    /// A task's runs, sorted by run id.
+    by_task: std::collections::HashMap<TaskId, Vec<StepRun>>,
+    /// The latest start among a task's runs.
+    last_start: std::collections::HashMap<TaskId, u64>,
+    /// Typical (low, high) per step name; absent with too few samples.
+    typical: std::collections::HashMap<String, (u64, u64)>,
+    /// Runs looked at while building: one visit per run, twice at most.
+    pub visits: usize,
+}
+
+impl RunIndex {
+    pub fn build<'r>(runs: impl Iterator<Item = &'r StepRun>) -> RunIndex {
+        let mut ix = RunIndex::default();
+        for r in runs {
+            ix.visits += 1;
+            ix.by_task.entry(r.task).or_default().push(r.clone());
+        }
+        let mut spans: std::collections::HashMap<&str, Vec<u64>> = Default::default();
+        for (task, rs) in ix.by_task.iter_mut() {
+            rs.sort_by_key(|r| r.id);
+            ix.visits += rs.len();
+            ix.last_start
+                .insert(*task, rs.iter().map(|r| r.started_at.0).max().unwrap_or(0));
+            // A run ends when the task's next one starts: the earliest start
+            // among the runs after it, taken as a suffix minimum.
+            let mut next: Option<u64> = None;
+            for r in rs.iter().rev() {
+                if r.outcome == Some(StepOutcome::Succeeded) && !r.name.is_empty() {
+                    if let Some(end) = next {
+                        spans
+                            .entry(r.name.as_str())
+                            .or_default()
+                            .push(end.saturating_sub(r.started_at.0));
+                    }
+                }
+                next = Some(next.map_or(r.started_at.0, |n| n.min(r.started_at.0)));
+            }
+        }
+        for (name, v) in spans {
+            if let Some(t) = mason_core::progress::middle_half(&v) {
+                ix.typical.insert(name.to_string(), t);
+            }
+        }
+        ix
+    }
+
+    fn of_task(&self, t: TaskId) -> &[StepRun] {
+        self.by_task.get(&t).map_or(&[], |v| v.as_slice())
+    }
 }
 
 /// The public page of an issue, when the tracker is GitHub's own.
@@ -106,11 +170,19 @@ impl<'a> Ctx<'a> {
                 issues.insert(r.task, r.number);
             }
         }
+        let mut blocks: std::collections::HashMap<TaskId, Vec<u64>> = Default::default();
+        for o in w.tasks.values() {
+            for b in &o.blockers {
+                blocks.entry(*b).or_default().push(o.id.0);
+            }
+        }
         Ctx {
             d,
             w,
             now: now_ms(),
             issues,
+            runs: RunIndex::build(w.step_runs.values()),
+            blocks,
         }
     }
 
@@ -295,52 +367,22 @@ impl<'a> Ctx<'a> {
 
     /// When the task entered its present state.
     fn state_since(&self, t: &Task) -> u64 {
-        self.w
-            .step_runs
-            .values()
-            .filter(|r| r.task == t.id)
-            .map(|r| r.started_at.0)
-            .max()
-            .map_or(t.enqueued_at.0, |s| s.max(t.enqueued_at.0))
+        self.runs
+            .last_start
+            .get(&t.id)
+            .map_or(t.enqueued_at.0, |s| (*s).max(t.enqueued_at.0))
     }
 
     /// Typical time in a step, from this project's own history: only with
     /// enough samples to say (five), as `(low, high)` ms (the middle half).
     fn typical(&self, step: &str) -> Option<(u64, u64)> {
-        if step.is_empty() {
-            return None;
-        }
-        let mut spans: Vec<u64> = vec![];
-        for r in self
-            .w
-            .step_runs
-            .values()
-            .filter(|r| r.name == step && r.outcome == Some(StepOutcome::Succeeded))
-        {
-            // A run ends when the task's next one starts.
-            let next = self
-                .w
-                .step_runs
-                .values()
-                .filter(|n| n.task == r.task && n.id.0 > r.id.0)
-                .map(|n| n.started_at.0)
-                .min();
-            if let Some(end) = next {
-                spans.push(end.saturating_sub(r.started_at.0));
-            }
-        }
-        mason_core::progress::middle_half(&spans)
+        self.runs.typical.get(step).copied()
     }
 
     fn progress(&self, t: &Task) -> Vec<ProgressCell> {
         let def = self.def_of(t);
         let live = self.d.progress_of_task(t.id);
-        let runs: Vec<&StepRun> = self
-            .w
-            .step_runs
-            .values()
-            .filter(|r| r.task == t.id)
-            .collect();
+        let runs = self.runs.of_task(t.id);
         def.steps
             .iter()
             .map(|s| {
@@ -427,13 +469,7 @@ impl<'a> Ctx<'a> {
                     actions: l.actions.iter().map(|s| s.to_string()).collect(),
                 })
                 .collect(),
-            blocks: self
-                .w
-                .tasks
-                .values()
-                .filter(|o| o.blockers.contains(&t.id))
-                .map(|o| o.id.0)
-                .collect(),
+            blocks: self.blocks.get(&t.id).cloned().unwrap_or_default(),
             typical: typical.map_or_else(String::new, |(lo, hi)| {
                 format!("usually {} to {} min", lo / 60_000, hi.div_ceil(60_000))
             }),
@@ -646,7 +682,15 @@ impl<'a> Ctx<'a> {
             title: title_of(s).into(),
             count: tasks.len() as u32,
             collapsed: is_history(s),
-            rows: tasks.iter().map(|t| self.row(t)).collect(),
+            rows: tasks
+                .iter()
+                .take(if is_history(s) {
+                    HISTORY_ROW_CAP
+                } else {
+                    usize::MAX
+                })
+                .map(|t| self.row(t))
+                .collect(),
         }
     }
 
@@ -756,10 +800,9 @@ impl<'a> Ctx<'a> {
         let t = self.w.tasks.get(&TaskId(id))?;
         let p = self.d.project(t.project);
         let mut steps: Vec<StepLine> = self
-            .w
-            .step_runs
-            .values()
-            .filter(|r| r.task == t.id)
+            .runs
+            .of_task(t.id)
+            .iter()
             .map(|r| StepLine {
                 run: r.id.0,
                 name: r.name.clone(),
@@ -774,11 +817,7 @@ impl<'a> Ctx<'a> {
             })
             .collect();
         steps.sort_by_key(|s| s.run);
-        let log = crate::http::render_logs(self.d, id);
-        let tail: String = {
-            let lines: Vec<&str> = log.lines().collect();
-            lines[lines.len().saturating_sub(40)..].join("\n")
-        };
+        let tail = log_tail(self.d, id);
         let plan =
             std::fs::read_to_string(self.d.cfg.task_dir(id).join("plan.json")).unwrap_or_default();
         let plan_view = (!plan.is_empty()).then(|| crate::plan_view::parse_plan(&plan));
@@ -824,11 +863,9 @@ impl<'a> Ctx<'a> {
                 Some(Route::ExploreAnyway) => "explored, at the owner's request".into(),
             } + &removes,
             started_at: self
-                .w
-                .step_runs
-                .values()
-                .filter(|r| r.task == t.id)
-                .min_by_key(|r| r.id)
+                .runs
+                .of_task(t.id)
+                .first()
                 .map(|r| r.name.clone())
                 .unwrap_or_default(),
             explore_returns: t.explore_returns,
@@ -1127,6 +1164,34 @@ impl<'a> Ctx<'a> {
     }
 }
 
+/// The last 40 log lines of a task, kept with the logs' signature (each
+/// journal's size and modified time) so an event that changed nothing in the
+/// logs does not read every journal again.
+fn log_tail(d: &Daemon, id: u64) -> String {
+    static CACHE: std::sync::Mutex<Option<LogCache>> = std::sync::Mutex::new(None);
+    let stamp = crate::http::log_signature(d, id);
+    if let Some((s, tail)) = CACHE
+        .lock()
+        .ok()
+        .and_then(|c| c.as_ref().and_then(|m| m.get(&id).cloned()))
+    {
+        if s == stamp {
+            return tail;
+        }
+    }
+    let log = crate::http::render_logs(d, id);
+    let lines: Vec<&str> = log.lines().collect();
+    let tail = lines[lines.len().saturating_sub(40)..].join("\n");
+    if let Ok(mut c) = CACHE.lock() {
+        let m = c.get_or_insert_with(Default::default);
+        if m.len() >= 64 {
+            m.clear();
+        }
+        m.insert(id, (stamp, tail.clone()));
+    }
+    tail
+}
+
 fn debt_line(x: &mason_store::DebtRow) -> DebtLine {
     DebtLine {
         id: x.id,
@@ -1200,5 +1265,98 @@ mod tile_label_tests {
         assert_eq!(tile_label_of(State::Exploring), "exploring");
         assert_eq!(tile_label_of(State::Landed), "landed");
         assert_eq!(title_of(State::NeedsAttention), "Needs you");
+    }
+}
+
+#[cfg(test)]
+mod index_tests {
+    use super::*;
+
+    fn run(id: u64, task: u64, name: &str, at: u64, ok: bool) -> StepRun {
+        StepRun {
+            id: StepRunId(id),
+            task: TaskId(task),
+            step: State::Developing,
+            name: name.into(),
+            attempt: 1,
+            started_at: Timestamp(at),
+            outcome: ok.then_some(StepOutcome::Succeeded),
+        }
+    }
+
+    /// The code this index replaced: every run scans every run.
+    fn naive(runs: &[StepRun], step: &str) -> Option<(u64, u64)> {
+        let mut spans = vec![];
+        for r in runs
+            .iter()
+            .filter(|r| r.name == step && r.outcome == Some(StepOutcome::Succeeded))
+        {
+            let next = runs
+                .iter()
+                .filter(|n| n.task == r.task && n.id.0 > r.id.0)
+                .map(|n| n.started_at.0)
+                .min();
+            if let Some(end) = next {
+                spans.push(end.saturating_sub(r.started_at.0));
+            }
+        }
+        mason_core::progress::middle_half(&spans)
+    }
+
+    /// A deterministic spread of tasks, steps, outcomes and starts that go
+    /// backwards now and then (the old code took the earliest later start).
+    fn data(tasks: u64) -> Vec<StepRun> {
+        let names = ["explore", "develop", "test", "land"];
+        let mut runs = vec![];
+        let mut id = 0;
+        for t in 0..tasks {
+            for k in 0..6u64 {
+                id += 1;
+                let at = 10_000 + t * 7 + k * (3 + (t * 13 + k * 5) % 11) * 1_000
+                    - if (t + k) % 5 == 4 { 2_500 } else { 0 };
+                runs.push(run(
+                    id,
+                    t,
+                    names[((t + k) % 4) as usize],
+                    at,
+                    (t + 2 * k) % 7 != 0,
+                ));
+            }
+        }
+        runs
+    }
+
+    #[test]
+    fn typical_figures_match_the_code_they_replaced() {
+        let runs = data(60);
+        let ix = RunIndex::build(runs.iter());
+        let mut some = 0;
+        for name in ["explore", "develop", "test", "land", "nothing", ""] {
+            let want = naive(&runs, name).filter(|_| !name.is_empty());
+            some += usize::from(want.is_some());
+            assert_eq!(ix.typical.get(name).copied(), want, "{name}");
+        }
+        assert!(some >= 3, "the data must exercise real figures");
+    }
+
+    #[test]
+    fn building_the_index_visits_each_run_a_fixed_number_of_times() {
+        // By construction, not by timing: the visits grow in step with the runs.
+        for n in [50, 500, 5_000] {
+            let runs = data(n);
+            let ix = RunIndex::build(runs.iter());
+            assert_eq!(ix.visits, 2 * runs.len(), "{n} tasks");
+            // A row reads one task's runs and never the whole history.
+            assert_eq!(ix.of_task(TaskId(0)).len(), 6);
+        }
+    }
+
+    #[test]
+    fn a_tasks_runs_are_sorted_and_its_last_start_is_the_latest() {
+        let runs = [run(5, 1, "a", 10, true), run(2, 1, "a", 30, true)];
+        let ix = RunIndex::build(runs.iter());
+        let ids: Vec<u64> = ix.of_task(TaskId(1)).iter().map(|r| r.id.0).collect();
+        assert_eq!(ids, vec![2, 5]);
+        assert_eq!(ix.last_start[&TaskId(1)], 30);
     }
 }
