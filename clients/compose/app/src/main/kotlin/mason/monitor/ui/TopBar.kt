@@ -6,7 +6,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -42,7 +41,7 @@ fun TopBar(model: MonitorModel) {
         if (model.attention > 0) {
             // Clicking it opens the first task that needs the owner.
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.clickable { model.openFirstNeedingYou() }.testTag("attention")) {
-                Box(Modifier.size(theme.cell * 0.7f).background(theme.attention, CircleShape))
+                StateIcon("needs_attention")
                 Spacer(Modifier.width(theme.spacingSmall))
                 Text(
                     "${model.attention} need${if (model.attention == 1) "s" else ""} you",
