@@ -276,6 +276,11 @@ description = "The approved mascot art (clients/mascot.toml, one copy in clients
 swift = "done"
 compose = "done"
 
+[feature.mascot-banner-icons]
+description = "Each banner under the top bar starts with a decorative 20 pt mascot icon (scaled with the text zoom) chosen only by its kind: connection, daemon-down, read-only and monitor-update by their own ids; paused, definition, landing_frozen and the provider_* kinds from Banner.kind; an unknown kind or the two provider notes show text alone. The daemon now emits a landing_frozen banner while landing is frozen"
+swift = "done"
+compose = "done"
+
 [feature.mascot-state-icons]
 description = "Each ticket state as a mascot icon: a 20 pt overlay on the count tile top-left corner (not part of its layout, so tile width is unchanged), the needs_attention icon in the top bar and on decision cards, after the sidebar section chevron, at the end of the sidebar row time and cells line, and on Home stage headings; phone: 20 pt in tiles and headers, 24 pt on rows"
 swift = "done"
@@ -288,6 +293,11 @@ compose = "done"
 
 [feature.mascot-status-pictures]
 description = "The Home status picture (not_connected, needs_attention, developing, no_tasks with Add task, otherwise all_clear), nothing_landing on an empty Landing page, all_clear on Health with no findings, and no_results with 'Nothing matched.' for a sidebar search that matches nothing; all decorative, scaled with the text zoom"
+swift = "done"
+compose = "done"
+
+[feature.readme-banner]
+description = "The mascot banner at the top of README.md and the social card in docs/images; repository art only, no client UI"
 swift = "done"
 compose = "done"
 
