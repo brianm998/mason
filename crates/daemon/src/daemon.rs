@@ -73,6 +73,8 @@ pub struct Daemon {
     last_big_stall_at: AtomicU64,
     last_big_stall_ms: AtomicU64,
     pub(crate) sweep: Mutex<crate::sweep::SweepState>,
+    /// Step hosts this daemon has asked to stop, so the sweep does not call a stop in flight an orphan.
+    pub stop_log: Mutex<crate::sweep::StopLog>,
     pub(crate) defs: crate::defs::Defs,
     pub broker: Arc<crate::sched::Broker>,
     /// Appended event sequence numbers, for the clients' sockets.
@@ -269,6 +271,7 @@ impl Daemon {
             last_big_stall_at: AtomicU64::new(0),
             last_big_stall_ms: AtomicU64::new(0),
             sweep: Mutex::default(),
+            stop_log: Mutex::default(),
             defs: crate::defs::Defs::default(),
             broker,
             accounts,
@@ -304,6 +307,7 @@ impl Daemon {
             d.recover();
             d.spawn_progress_ticker();
             d.spawn_sweeper();
+            d.spawn_compile_watch();
             crate::usage::spawn_probe(&d);
             d.spawn_watcher();
             crate::tracker::spawn(&d);
@@ -696,6 +700,10 @@ impl Daemon {
                 && s.state == mason_step_host::registry::HostState::Running
             {
                 tracing::warn!(host = %s.info.id, prefix, "stopping a step host");
+                self.stop_log
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .record(&s.info.id, Instant::now());
                 if let Ok(mut c) = mason_step_host::client::HostClient::connect(
                     &s.info.sock,
                     mason_step_host::protocol::PREVIOUS,
@@ -998,6 +1006,32 @@ impl Daemon {
 
     pub fn task_dir(&self, task: TaskId) -> PathBuf {
         self.cfg.task_dir(task.0)
+    }
+
+    /// Wake the sockets when the compile queue changes: who holds a slot, who
+    /// waits and why. Interactive callers and gate readings change it without an
+    /// event, and the monitor's home page shows it.
+    fn spawn_compile_watch(self: &Arc<Self>) {
+        let mut last = String::new();
+        crate::bg::spawn_loop(self, "compile-watch", move |weak| {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            let Some(d) = weak.upgrade() else {
+                return false;
+            };
+            let c = d.broker.compilation();
+            let mut now = format!("{} {}", c.limit, c.used);
+            for h in &c.running {
+                now.push_str(&format!("|{}", h.label));
+            }
+            for w in &c.pending {
+                now.push_str(&format!("|{}:{}", w.label, w.cause));
+            }
+            if now != last {
+                last = now;
+                d.poke();
+            }
+            true
+        });
     }
 
     fn spawn_sweeper(self: &Arc<Self>) {

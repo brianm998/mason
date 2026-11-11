@@ -147,6 +147,30 @@ fn ago(now: u64, since: u64) -> String {
     }
 }
 
+/// The CPU line of `mason resources`: the reading, where it came from, and
+/// how many reads have failed.
+pub fn cpu_line(cpu: &Value, max: u64) -> String {
+    let source = cpu["source"].as_str();
+    let failed = cpu["failed_reads"].as_u64().unwrap_or(0);
+    let tail = match source {
+        Some(s) if failed > 0 => format!(" [source {s}, {failed} failed reads]"),
+        Some(s) => format!(" [source {s}]"),
+        None => String::new(),
+    };
+    match (cpu["busy_pct"].as_u64(), source) {
+        (Some(b), Some("loadavg")) => format!(
+            "cpu {b}% busy (load average; the CPU reading is missing), a compile starts below {max}%{tail}"
+        ),
+        (Some(b), Some("assumed-busy")) => format!(
+            "cpu assumed {b}% busy (nothing is readable, so new compiles wait), a compile starts below {max}%{tail}"
+        ),
+        (Some(b), _) => format!("cpu {b}% busy, a compile starts below {max}%{tail}"),
+        (None, _) => format!(
+            "cpu unknown (this daemon reports no reading), a compile starts below {max}% (no gate now)"
+        ),
+    }
+}
+
 pub fn show(d: &Daemon, json_out: bool) -> Result<(), String> {
     let v = d.call("GET", "/resources", None).map_err(say)?;
     if json_out {
@@ -173,12 +197,7 @@ pub fn show(d: &Daemon, json_out: bool) -> Result<(), String> {
         }
     }
     if let Some(max) = v["cpu"]["compile_max_pct"].as_u64() {
-        match v["cpu"]["busy_pct"].as_u64() {
-            Some(b) => println!("  cpu {b}% busy, a compile starts below {max}%"),
-            None => println!(
-                "  cpu unknown (not readable, or the last reading is over 30 seconds old), a compile starts below {max}% (no gate now)"
-            ),
-        }
+        println!("  {}", cpu_line(&v["cpu"], max));
     }
     if let Some(f) = v["memory"]["floor_mb"].as_u64() {
         println!("  memory floor {f} MB ({} MB free)", v["memory"]["free_mb"]);
@@ -257,17 +276,73 @@ pub fn hook_bash(input: &str, needs: &str, mason: &str) -> Option<Value> {
     }}))
 }
 
+/// `cargo` subcommands that compile nothing, so need no slot.
+const CARGO_NO_COMPILE: &[&str] = &[
+    "fmt",
+    "metadata",
+    "tree",
+    "clean",
+    "version",
+    "--version",
+    "-V",
+    "locate-project",
+    "pkgid",
+    "search",
+    "help",
+];
+
 /// Whether any part of a compound command (`cd x && cargo test`, `a; b`,
 /// `FOO=1 cargo build`) starts with a wrapped tool. Looking only at the first
-/// word let `cd dir && cargo test --workspace` straight past the queue.
+/// word let `cd dir && cargo test --workspace` straight past the queue. Quoted
+/// text is not split: `grep "a|cargo b"` runs grep, not cargo, and a slot taken
+/// for it is a slot every waiting task goes without.
 fn runs_wrapped(command: &str) -> bool {
-    command
-        .split(['&', '|', ';', '\n', '(', ')', '{', '}'])
-        .any(|part| {
-            part.split_whitespace()
-                .find(|w| !w.contains('=') || w.starts_with('='))
-                .is_some_and(|w| WRAPPED.contains(&w))
-        })
+    split_unquoted(command).iter().any(|part| {
+        let mut words = part
+            .split_whitespace()
+            .skip_while(|w| w.contains('=') && !w.starts_with('='));
+        match words.next() {
+            Some("cargo") => words
+                .find(|w| !w.starts_with('+'))
+                .is_none_or(|sub| !CARGO_NO_COMPILE.contains(&sub)),
+            Some(w) => WRAPPED.contains(&w),
+            None => false,
+        }
+    })
+}
+
+/// The parts of a command line between `& | ; ( ) { }` and newlines, leaving
+/// whatever is inside quotes (or escaped) in the word it belongs to.
+fn split_unquoted(command: &str) -> Vec<String> {
+    let (mut parts, mut cur) = (vec![], String::new());
+    let (mut single, mut double, mut escaped) = (false, false, false);
+    for c in command.chars() {
+        if escaped {
+            escaped = false;
+            cur.push(c);
+            continue;
+        }
+        match c {
+            '\\' if !single => {
+                escaped = true;
+                cur.push(c);
+            }
+            '\'' if !double => {
+                single = !single;
+                cur.push(c);
+            }
+            '"' if !single => {
+                double = !double;
+                cur.push(c);
+            }
+            '&' | '|' | ';' | '\n' | '(' | ')' | '{' | '}' if !single && !double => {
+                parts.push(std::mem::take(&mut cur));
+            }
+            _ => cur.push(c),
+        }
+    }
+    parts.push(cur);
+    parts
 }
 
 fn shell_quote(s: &str) -> String {
@@ -277,6 +352,22 @@ fn shell_quote(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_cpu_line_names_the_source_and_never_says_no_gate_for_a_fallback() {
+        let l = |v: Value| cpu_line(&v, 50);
+        let mach = l(json!({"busy_pct": 20, "source": "mach", "failed_reads": 0}));
+        assert_eq!(
+            mach,
+            "cpu 20% busy, a compile starts below 50% [source mach]"
+        );
+        let la = l(json!({"busy_pct": 100, "source": "loadavg", "failed_reads": 3}));
+        assert!(la.contains("load average") && la.contains("source loadavg, 3 failed reads"));
+        assert!(!la.contains("no gate"));
+        let ab = l(json!({"busy_pct": 100, "source": "assumed-busy", "failed_reads": 3}));
+        assert!(ab.contains("assumed 100% busy") && ab.contains("new compiles wait"));
+        assert!(!ab.contains("no gate"));
+    }
 
     #[test]
     fn needs_parse() {
@@ -323,6 +414,24 @@ mod tests {
             .unwrap()
             .starts_with("'/a b/mason' run --needs compile -- bash -c"));
         assert!(hook_bash(&input("echo cargo"), "compile", "mason").is_none());
+        // Quoted text is not a command, and some cargo commands compile nothing.
+        for c in [
+            r#"ps ax | grep -E "step-host|cargo |make""#,
+            "grep 'a;cargo test' notes.txt",
+            "cargo fmt --all --check",
+            "cargo +nightly fmt",
+            "cd x && cargo metadata --format-version 1",
+            "cargo --version",
+        ] {
+            assert!(hook_bash(&input(c), "compile", "mason").is_none(), "{c}");
+        }
+        for c in [
+            "cargo fmt --check && cargo clippy",
+            "cargo",
+            r#"echo "done" ; cargo build"#,
+        ] {
+            assert!(hook_bash(&input(c), "compile", "mason").is_some(), "{c}");
+        }
         assert!(hook_bash(
             &input("mason run --needs compile -- cargo build"),
             "compile",

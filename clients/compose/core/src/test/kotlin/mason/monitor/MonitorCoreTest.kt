@@ -355,6 +355,11 @@ class MonitorCoreTest {
         assertEquals("llm:claude", sent[2].set_limit?.resource)
         assertEquals(3, sent[2].set_limit?.units)
         assertEquals("test", sent[3].skip?.step)
+        m.setCompileLimit(5)
+        m.setCompileLimit(0)
+        assertEquals("compile", sent[4].set_limit?.resource)
+        assertEquals(5, sent[4].set_limit?.units)
+        assertEquals(1, sent[5].set_limit?.units, "the stepper never asks for zero compiles")
     }
 
     // ---- what the client shows (the conformance items) ----
@@ -385,6 +390,9 @@ class MonitorCoreTest {
         assertEquals(emptyList(), HealthSnapshot.parse("not json").resources)
         assertEquals("CPU 71% busy; a compile starts below 50%.", HealthSnapshot.parse("""{"cpu":{"busy_pct":71,"compile_max_pct":50}}""").cpuLine)
         assertEquals("CPU not readable; a compile starts below 80%.", HealthSnapshot.parse("""{"cpu":{"busy_pct":null,"compile_max_pct":80}}""").cpuLine)
+        assertEquals("CPU 20% busy; a compile starts below 50%.", HealthSnapshot.parse("""{"cpu":{"busy_pct":20,"compile_max_pct":50,"source":"mach","failed_reads":0}}""").cpuLine)
+        assertEquals("CPU 100% busy (load average; the CPU reading is missing); a compile starts below 50%.", HealthSnapshot.parse("""{"cpu":{"busy_pct":100,"compile_max_pct":50,"source":"loadavg","failed_reads":4}}""").cpuLine)
+        assertEquals("CPU assumed 100% busy (nothing is readable, so new compiles wait); a compile starts below 50%.", HealthSnapshot.parse("""{"cpu":{"busy_pct":100,"compile_max_pct":50,"source":"assumed-busy","failed_reads":4}}""").cpuLine)
     }
 
     // ---- versions (Part 15) ----

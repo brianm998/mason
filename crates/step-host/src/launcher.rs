@@ -74,6 +74,59 @@ fn note_exit(dir: &Path, st: ExitStatus) {
         .insert(dir.to_path_buf(), (st.signal(), crate::registry::now_ms()));
 }
 
+/// A launch in progress: the host id and when the wait began (ms since the epoch).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Launching {
+    pub id: String,
+    pub since_ms: u64,
+}
+
+type Launches = Mutex<Vec<(u64, Launching)>>;
+
+fn launches() -> &'static Launches {
+    static L: OnceLock<Launches> = OnceLock::new();
+    L.get_or_init(Default::default)
+}
+
+/// The launches this process is waiting on right now, oldest first.
+pub fn launching() -> Vec<Launching> {
+    let mut v: Vec<Launching> = launches()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .map(|(_, l)| l.clone())
+        .collect();
+    v.sort_by_key(|l| l.since_ms);
+    v
+}
+
+/// Lists a launch while it lives; removes it however the launch ends.
+struct LaunchGuard(u64);
+
+impl LaunchGuard {
+    fn new(id: &str) -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        launches().lock().unwrap_or_else(|e| e.into_inner()).push((
+            n,
+            Launching {
+                id: id.to_string(),
+                since_ms: crate::registry::now_ms(),
+            },
+        ));
+        LaunchGuard(n)
+    }
+}
+
+impl Drop for LaunchGuard {
+    fn drop(&mut self) {
+        launches()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|(n, _)| *n != self.0);
+    }
+}
+
 /// How long [`spawn_host`] waits for a host to come up. A host starts in
 /// milliseconds, but a launch can freeze before its first instruction for as long
 /// as the operating system cannot vet new processes: on macOS, while `syspolicyd`
@@ -116,6 +169,7 @@ pub fn spawn_host_within(o: &SpawnOptions, limit: Duration) -> io::Result<HostIn
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     let mut child = cmd.spawn()?;
+    let _listed = LaunchGuard::new(&o.id);
 
     let started = Instant::now();
     let mut warned = false;

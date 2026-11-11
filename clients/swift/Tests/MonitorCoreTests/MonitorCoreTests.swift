@@ -385,6 +385,10 @@ final class MonitorCoreTests: XCTestCase {
             XCTAssertEqual(s.task, 5)
             if case .step(let n)? = s.scope { XCTAssertEqual(n, "test") } else { XCTFail() }
         } else { XCTFail() }
+        m.setCompileLimit(5)
+        m.setCompileLimit(0)
+        if case .setLimit(let l)? = sent[4].body { XCTAssertEqual(l.resource, "compile"); XCTAssertEqual(l.units, 5) } else { XCTFail() }
+        if case .setLimit(let l)? = sent[5].body { XCTAssertEqual(l.units, 1, "the stepper never asks for zero compiles") } else { XCTFail() }
     }
 
     // MARK: what the client shows (the conformance items)
@@ -417,6 +421,9 @@ final class MonitorCoreTests: XCTestCase {
         let c = HealthSnapshot(json: ##"{"cpu":{"busy_pct":71,"compile_max_pct":50}}"##)
         XCTAssertEqual(c.cpuLine, "CPU 71% busy; a compile starts below 50%.")
         XCTAssertEqual(HealthSnapshot(json: ##"{"cpu":{"busy_pct":null,"compile_max_pct":80}}"##).cpuLine, "CPU not readable; a compile starts below 80%.")
+        XCTAssertEqual(HealthSnapshot(json: ##"{"cpu":{"busy_pct":20,"compile_max_pct":50,"source":"mach","failed_reads":0}}"##).cpuLine, "CPU 20% busy; a compile starts below 50%.")
+        XCTAssertEqual(HealthSnapshot(json: ##"{"cpu":{"busy_pct":100,"compile_max_pct":50,"source":"loadavg","failed_reads":4}}"##).cpuLine, "CPU 100% busy (load average; the CPU reading is missing); a compile starts below 50%.")
+        XCTAssertEqual(HealthSnapshot(json: ##"{"cpu":{"busy_pct":100,"compile_max_pct":50,"source":"assumed-busy","failed_reads":4}}"##).cpuLine, "CPU assumed 100% busy (nothing is readable, so new compiles wait); a compile starts below 50%.")
     }
 
     // ---- versions (Part 15) ----

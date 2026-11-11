@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 package mason.monitor
 
+import mason.v1.Compilation
 import mason.v1.ProgressCell
 import mason.v1.ProgressSource
 import mason.v1.TokenLine
@@ -201,4 +202,22 @@ fun ProgressCell.progressTexts(now: Long): List<String> {
     todo.forEach { t += "${it.status}: ${it.text}" }
     if (isStale(now)) t += "silent"
     return t
+}
+
+/** The CPU line of the home page's Compilation section. */
+val Compilation.cpuLine: String
+    get() {
+        val gate = "a further compile starts below $cpu_max_pct%"
+        return cpuReadingLine(if (cpu_busy_pct < 0) null else cpu_busy_pct, cpu_source, gate)
+    }
+
+/**
+ * The CPU line shared by the Health page and the home page. A fallback source is named, so a
+ * held compile is not read as a broken gauge.
+ */
+fun cpuReadingLine(busy: Int?, source: String, gate: String): String = when {
+    busy == null -> "CPU not readable; $gate."
+    source == "loadavg" -> "CPU $busy% busy (load average; the CPU reading is missing); $gate."
+    source == "assumed-busy" -> "CPU assumed $busy% busy (nothing is readable, so new compiles wait); $gate."
+    else -> "CPU $busy% busy; $gate."
 }
