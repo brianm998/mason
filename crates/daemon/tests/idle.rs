@@ -112,7 +112,14 @@ fn a_silent_session_is_stopped_and_resumed_and_the_task_lands() {
             .unwrap_or(0),
         1
     );
-    let losses = d.store.host_losses_since(0).unwrap();
+    // Only the develop step is quiet on purpose; a slow explore agent may be stopped too.
+    let losses: Vec<_> = d
+        .store
+        .host_losses_since(0)
+        .unwrap()
+        .into_iter()
+        .filter(|l| l.step == "develop")
+        .collect();
     assert_eq!(losses.len(), 1, "{losses:?}");
     assert!(losses[0].detail.contains("silence"), "{}", losses[0].detail);
     let argv = std::fs::read_to_string(format!("{}.argv", s.script.display())).unwrap();
