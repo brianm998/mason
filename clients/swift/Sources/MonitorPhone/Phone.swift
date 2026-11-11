@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+import MasonMascot
+import MasonTokens
 import MonitorCore
 import SwiftUI
 
@@ -100,6 +102,8 @@ struct HomeScreen: View {
 struct TaskScreen: View {
     @ObservedObject var model: MonitorModel
     let id: UInt64
+    /// The state picture, scaled with the user's text size.
+    @ScaledMetric private var illustrationSize = CGFloat(MasonTokens.sizeMascotIllustration)
 
     var body: some View {
         let t = model.taskDetail
@@ -107,7 +111,17 @@ struct TaskScreen: View {
         let allowed = row?.allowedActions ?? []
         List {
             if let r = row {
-                Section { Text(r.title).font(.headline); Text(r.activity) }
+                Section {
+                    HStack {
+                        if let art = Mascot.illustration(r.state) {
+                            art.resizable().scaledToFit()
+                                .frame(width: illustrationSize, height: illustrationSize)
+                                .accessibilityHidden(true)
+                        }
+                        Text(r.state.replacingOccurrences(of: "_", with: " ")).font(.headline)
+                    }
+                    Text(r.title).font(.headline); Text(r.activity)
+                }
             }
             if let card = t?.card, !card.ask.isEmpty {
                 Section("Decision") {
