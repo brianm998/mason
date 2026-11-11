@@ -278,7 +278,9 @@ pub fn validate(tool: &str, a: &Value) -> Result<(), Vec<String>> {
                         for k in ["file", "line", "reason"] {
                             match r.get(k) {
                                 Some(Value::String(s)) if !s.trim().is_empty() => {}
-                                _ => p.push(format!("removes[{i}].{k}: required, a non-empty string")),
+                                _ => p.push(format!(
+                                    "removes[{i}].{k}: required, a non-empty string"
+                                )),
                             }
                         }
                     }

@@ -127,7 +127,10 @@ fn a_branch_that_conflicts_with_the_base_goes_to_the_agent_to_merge_and_lands() 
     let w = d.world().unwrap();
     assert_eq!(w.tasks[&t].failures, 0, "a conflict is not a failure");
     assert_eq!(w.tasks[&t].attempts[&State::Developing], 2);
-    assert_eq!(sh(&s.origin, &["show", "main:conflict.txt"]), "theirs\nboth");
+    assert_eq!(
+        sh(&s.origin, &["show", "main:conflict.txt"]),
+        "theirs\nboth"
+    );
     assert_eq!(sh(&s.origin, &["show", "main:fixed.txt"]), "ok");
 }
 

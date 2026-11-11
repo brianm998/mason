@@ -181,15 +181,8 @@ impl Batch<'_> {
                     if self.resolve(t.id, &files) {
                         // Whatever the resolver did, the base's landed lines must still be there.
                         let mb = git::run(wt, &["merge-base", &t.branch, &base_tip])?;
-                        let lines = audit::audit(
-                            wt,
-                            &mb,
-                            &base_tip,
-                            &t.branch,
-                            None,
-                            "HEAD",
-                            &t.removes,
-                        )?;
+                        let lines =
+                            audit::audit(wt, &mb, &base_tip, &t.branch, None, "HEAD", &t.removes)?;
                         if lines.is_empty() {
                             out.merged.push(t.id);
                             out.resolved.push(t.id);
