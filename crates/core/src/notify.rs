@@ -734,6 +734,7 @@ mod tests {
         }
         let mut done = vec![];
         heard("failed", &r, &mut done, 0);
+        heard("failed", &r, &mut done, 10 * MINUTE_MS);
         assert!(!heard("failed", &r, &mut done, r.reminder_ms).is_empty());
         assert!(due(&r, "failed", st(0), &done, r.reminder_ms + 5 * r.repeat_ms, 0).is_empty());
     }
