@@ -31,7 +31,7 @@ count = 2
 
 # The project's `test` command (the whole workspace) runs here, the waits outside the step's
 # timeout (s61). With the overlay's `build`, the build holds one `compile` slot and gives it
-# back, and the tests hold only `test-suite` (0114); without it, the run holds both.
+# back, and the tests hold only `test-suite` (decision 0122); without it, the run holds both.
 [step.test]
 type = "test"
 category = "testing"

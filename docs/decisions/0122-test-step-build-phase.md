@@ -1,4 +1,4 @@
-# 0114: A test step may build before it tests
+# 0122: A test step may build before it tests
 
 A workspace test run held one `compile` slot from its first compile to its last test. Most of that time it launches processes and waits on disk, so CPU reads idle while builds queue behind it (2026-11-11: tasks waiting for compile on an idle machine). The starry pipeline keeps build slots and a test slot apart; this does the same.
 
