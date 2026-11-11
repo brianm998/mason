@@ -178,6 +178,12 @@ const CLEANUP_WORDS: &[&str] = &[
 // `test`, `[` and `[[` are deliberately not here: `[ "$n" -gt 0 ] || true` turns an assertion
 // into a no-op. A `[ ... ] && kill ... || true` chain is still fine, its last command is `kill`.
 
+/// A Markdown file: its lines are read, never run, so they cannot broaden a skip.
+fn is_prose(file: &str) -> bool {
+    let f = file.to_ascii_lowercase();
+    f.ends_with(".md") || f.ends_with(".markdown")
+}
+
 /// The last simple command of a shell fragment, its first word.
 fn last_command_word(fragment: &str) -> String {
     let mut seg = fragment;
@@ -415,13 +421,15 @@ fn scan_full(diff: &str) -> (Vec<Finding>, BTreeMap<String, usize>) {
                 ));
             }
             let lower = t.to_lowercase();
-            let broadened = (lower.contains("|| true") && !or_true_is_harmless(&lower))
-                || lower.contains("continue-on-error: true")
-                || lower.replace(' ', "").contains("skip=true")
-                || lower.replace(' ', "").contains("skip:true")
-                || (file.ends_with(".sh")
-                    && !f.new
-                    && (lower == "exit 0" || lower.starts_with("exit 0 ")));
+            // Markdown is prose: a note that quotes `|| true` runs nothing (decision 0122).
+            let broadened = !is_prose(file)
+                && ((lower.contains("|| true") && !or_true_is_harmless(&lower))
+                    || lower.contains("continue-on-error: true")
+                    || lower.replace(' ', "").contains("skip=true")
+                    || lower.replace(' ', "").contains("skip:true")
+                    || (file.ends_with(".sh")
+                        && !f.new
+                        && (lower == "exit 0" || lower.starts_with("exit 0 "))));
             if broadened {
                 out.push(Finding::new(
                     file,
@@ -736,6 +744,19 @@ mod tests {
             &["const OTHER_MAX: u32 = 30;"]
         ))
         .is_empty());
+    }
+
+    #[test]
+    fn a_quoted_or_true_in_markdown_is_not_a_broadened_skip() {
+        let note = "Counters use `find` instead of `ls | grep || true`.";
+        assert!(kinds(&diff("docs/stages/s98.md", &[], &[note])).is_empty());
+        assert!(kinds(&diff("README.MD", &[], &["cargo test || true"])).is_empty());
+        // The same line in a script, or a workflow, is still flagged.
+        assert_eq!(kinds(&diff("run.sh", &[], &[note])), ["broadened-skip"]);
+        assert_eq!(
+            kinds(&diff("ci.yml", &[], &["  run: cargo test || true"])),
+            ["broadened-skip"]
+        );
     }
 
     #[test]

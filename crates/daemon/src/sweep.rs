@@ -161,6 +161,11 @@ pub fn sweep_once(d: &Arc<Daemon>) -> Vec<String> {
     // it is housekeeping, not a missed event, so it files nothing.
     crate::taskcache::sweep(d, &w);
 
+    // 4c. Host directories of closed step runs move out of the registry, old ones are deleted,
+    // and the config directories of ended sessions go. Housekeeping: it files nothing, and a
+    // failure is logged and retried next pass.
+    crate::hostarchive::pass(&d.cfg, &w, crate::daemon::now_ms());
+
     // 5. Projections that no longer match the log (every tenth pass; it replays everything).
     if st.passes.is_multiple_of(10) {
         if let Err(e) = d.store.verify() {
