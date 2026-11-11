@@ -522,6 +522,55 @@ fn a_disk_below_the_floor_is_announced_with_sound_and_speech_once() {
     assert_eq!(disk[0]["sound_name"], "broke");
 }
 
+#[test]
+fn the_disk_alert_survives_a_store_that_refuses_writes_and_is_delivered_once() {
+    let (url, got) = receiver();
+    let s = world();
+    let disk = mason_daemon::disk::FakeDisk::new_gb(5);
+    let d = s.start_with(|c| {
+        c.owner_names = vec!["brian".into()];
+        c.reload_interval = Duration::from_secs(3600);
+        c.disk = Some(disk.clone());
+        c.disk_every = Duration::from_millis(50);
+    });
+    notify_toml(
+        &s,
+        &format!("[routing.disk]\nwebhook = \"0\"\n[webhook]\nurl = \"{url}\"\nsecret = \"s\"\n"),
+    );
+    notify::refuse_writes(&d, true);
+    wait_for("the disk alert, from memory", 30, || {
+        attention::sync_alerts(&d);
+        notify::live_alerts(&d, true)
+            .unwrap()
+            .iter()
+            .any(|a| a.kind == "disk")
+    });
+    assert!(notify::store_unwritable(&d));
+    assert!(
+        d.store.alerts(true).unwrap().is_empty(),
+        "nothing reached the table"
+    );
+    for _ in 0..4 {
+        notify::tick(&d);
+    }
+    assert_eq!(got.lock().unwrap().len(), 1, "sent once, not every pass");
+    assert_eq!(notify::unrecorded_deliveries(&d), 1);
+    let since = notify::live_alerts(&d, true).unwrap()[0].since;
+
+    notify::refuse_writes(&d, false);
+    attention::sync_alerts(&d);
+    assert!(!notify::store_unwritable(&d));
+    let rows = d.store.alerts(true).unwrap();
+    assert_eq!(rows.len(), 1, "the table caught up");
+    assert_eq!(rows[0].since, since, "it is the same alert");
+    for _ in 0..4 {
+        notify::tick(&d);
+    }
+    assert_eq!(got.lock().unwrap().len(), 1, "nothing announced twice");
+    assert_eq!(notify::unrecorded_deliveries(&d), 0);
+    assert_eq!(d.store.deliveries_for("disk", since).unwrap().len(), 1);
+}
+
 // ---- delivery is a monitor playing it -------------------------------------------------
 
 const HOUR: u64 = 3_600_000;
