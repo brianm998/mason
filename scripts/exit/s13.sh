@@ -190,6 +190,13 @@ rm -rf "$root/d"; mkdir -p "$root/d"
 "$bin/masond" --port 0 --data-dir "$root/d" --config-dir "$root/c" --heartbeat-ms 100 --sweep-ms 3600000 --max-concurrent 8 2>>"$root/masond.log" &
 daemon=$!
 until m status >/dev/null 2>&1; do kill -0 "$daemon" || { cat "$root/masond.log" >&2; exit 1; }; sleep 0.1; done
+# At start the daemon reads only what is already fetched, and the definition above was pushed
+# after the clone: until the watcher's first fetch the built-in pipeline is in force, and a task
+# admitted then runs `test = "true"` instead of the slow suite. Fetch and apply it now.
+for p in asker worker; do
+  m definition reload --project "$p" | grep -qE 'Applied|Nothing changed' \
+    || { echo "the $p definition did not apply" >&2; m definition show --project "$p" >&2; exit 1; }
+done
 dport=$(port)
 touch "$root/slow.flag"
 
