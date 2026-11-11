@@ -61,12 +61,26 @@ struct ProgressLine: View {
             ViewThatFits(in: .horizontal) {
                 parts(now: now, stale: stale, message: true)
                 parts(now: now, stale: stale, message: false)
+                narrow(now: now, stale: stale)
             }
             .accessibilityElement(children: .ignore)
             .accessibilityLabel([cell.countText, cell.tokensCompact, cell.message, stale ? "no output for a while" : ""]
                 .filter { !$0.isEmpty }.joined(separator: ", "))
             .accessibilityIdentifier("progress-line:\(cell.step)")
         }
+    }
+
+    /// Last fallback, which cannot exceed the width: the count truncates, the time stays whole.
+    private func narrow(now: UInt64, stale: Bool) -> some View {
+        let time = cell.timeText(now: now)
+        return HStack(spacing: theme.spacingSmall) {
+            Text([cell.countText, cell.tokensCompact].filter { !$0.isEmpty }.joined(separator: ", "))
+                .foregroundStyle(theme.text).lineLimit(1).truncationMode(.tail)
+            if !time.isEmpty {
+                Text(time).foregroundStyle(stale ? theme.slow : theme.muted).lineLimit(1).fixedSize()
+            }
+        }
+        .font(theme.small())
     }
 
     private func parts(now: UInt64, stale: Bool, message: Bool) -> some View {
