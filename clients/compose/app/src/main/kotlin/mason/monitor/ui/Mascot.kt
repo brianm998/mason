@@ -10,7 +10,7 @@ import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.res.loadImageBitmap
 import mason.MascotManifest
-import mason.Tokens
+import mason.MasonTokens as Tokens
 
 /**
  * The one way the Compose monitor loads the mascot art (the same files the SwiftUI monitor
