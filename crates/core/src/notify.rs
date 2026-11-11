@@ -88,6 +88,7 @@ pub const CONDITIONS: &[&str] = &[
     "provider_limit",
     "provider_overage",
     "provider_budget",
+    "stalled",
 ];
 
 /// Every alert kind the daemon raises. Add a new kind here when it is raised, and give it a route
@@ -113,6 +114,7 @@ pub const ALERT_KINDS: &[&str] = &[
     "tracker",
     "paused",
     "debt",
+    "stalled",
 ];
 
 /// Kinds that are deliberately shown on the monitor and nothing else: the owner did these
@@ -223,6 +225,7 @@ impl Routing {
             "provider_overage",
             "provider_budget",
             "daemon_bug",
+            "numbers", // the stage and exit-script numbers are nearly used up
         ] {
             put(k, broke.clone());
         }
@@ -237,7 +240,7 @@ impl Routing {
             rule(Email, 0),
             rule(Webhook, 0),
         ];
-        for k in ["daemon_down", "credentials", "provider_outage"] {
+        for k in ["daemon_down", "credentials", "provider_outage", "stalled"] {
             put(k, everything.clone());
         }
         put("landed", vec![rule(Monitor, 0), rule(Speech, 0)]);
@@ -400,10 +403,10 @@ pub fn sound_for(kind: &str) -> Sound {
     match kind {
         "needs_you" => Sound::Decision,
         "failed" | "daemon_bug" | "landing" | "daemon_down" | "credentials" | "provider_outage"
+        | "stalled"
         | "environment" | "runtime" | "definition" | "disk" | "blocked" | "host_lost"
-        | "tracker" | "provider_limit" | "provider_overage" | "provider_budget" | "git_stuck" => {
-            Sound::Broke
-        }
+        | "tracker" | "provider_limit" | "provider_overage" | "provider_budget" | "git_stuck"
+        | "numbers" => Sound::Broke,
         _ => Sound::Info,
     }
 }
@@ -435,6 +438,8 @@ pub fn sentence(kind: &str, subject: &str, detail: &str, reminder: bool) -> Stri
         "failed" if detail.is_empty() => format!("{subject} failed; open it to retry or cancel"),
         "failed" => format!("{subject} failed because {detail}; open it to retry or cancel"),
         "landing" => format!("{subject}: {detail}; open the landing queue to see why"),
+        "disk" if detail.is_empty() => "MASON is stopped: disk is nearly full".into(),
+        "disk" => format!("MASON is stopped: disk is nearly full, {detail}"),
         "landed" => format!("{subject} landed"),
         "daemon_down" => "MASON has lost its daemon; check that masond is running".into(),
         "credentials" => format!("{subject}: credentials are failing; renew them"),
@@ -521,6 +526,23 @@ mod tests {
     }
 
     #[test]
+    fn an_initial_notice_that_expired_unheard_is_not_delivered() {
+        let r = Routing::defaults();
+        // Queued and dropped: nothing was recorded, so the sound is still due, and no reminder
+        // for a channel that never carried the initial notice, however late it is.
+        let late = 2 * 60 * MINUTE_MS;
+        let got = due(&r, "failed", st(0), &[], late, 0);
+        assert!(got.contains(&(Channel::Sound, Delivery::Initial)));
+        assert!(got.contains(&(Channel::Speech, Delivery::Initial)));
+        assert!(!got.iter().any(|x| x.1 == Delivery::Reminder));
+        // Heard later: only then does the reminder follow.
+        let heard = [attempt(Channel::Sound, Delivery::Initial, true, late)];
+        let got = due(&r, "failed", st(0), &heard, late, 0);
+        assert!(got.contains(&(Channel::Sound, Delivery::Reminder)));
+        assert!(!got.contains(&(Channel::Speech, Delivery::Reminder)));
+    }
+
+    #[test]
     fn every_raised_kind_is_routed_or_named_monitor_only() {
         let r = Routing::defaults();
         for k in ALERT_KINDS {
@@ -593,7 +615,7 @@ mod tests {
                 vec![(Monitor, 0), (Sound, 0), (Speech, 0), (Push, 10)]
             );
         }
-        for k in ["daemon_down", "credentials", "provider_outage"] {
+        for k in ["daemon_down", "credentials", "provider_outage", "stalled"] {
             let c: Vec<Channel> = channels(k).into_iter().map(|x| x.0).collect();
             assert_eq!(c, vec![Monitor, Sound, Speech, Push, Email, Webhook]);
             assert!(channels(k).iter().all(|x| x.1 == 0));
@@ -823,5 +845,20 @@ mod tests {
         assert!(daemon_should_speak(true, None, 100));
         assert!(!daemon_should_speak(true, Some(90_000), 100_000));
         assert!(daemon_should_speak(true, Some(60_000), 100_000));
+    }
+
+    #[test]
+    fn a_full_disk_is_a_condition_that_makes_a_sound_and_speaks() {
+        assert!(CONDITIONS.contains(&"disk"));
+        let channels: Vec<Channel> = Routing::defaults()
+            .rules("disk")
+            .iter()
+            .map(|r| r.channel)
+            .collect();
+        assert!(channels.contains(&Channel::Sound) && channels.contains(&Channel::Speech));
+        assert_eq!(
+            sentence("disk", "MASON", "9 tasks waiting", false),
+            "MASON is stopped: disk is nearly full, 9 tasks waiting."
+        );
     }
 }

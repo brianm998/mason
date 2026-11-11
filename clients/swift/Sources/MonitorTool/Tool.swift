@@ -3,6 +3,7 @@
 import AppKit
 import Foundation
 import MasonProtocol
+import MasonMascot
 import MonitorCore
 import MonitorUI
 import SwiftUI
@@ -17,6 +18,7 @@ import SwiftUI
 ///     monitor-tool reject --port P --task N [--reason WORDS]   what the Reject button sends
 ///     monitor-tool task-page --port P --task N --out DIR   screenshot of a task's page (a real daemon), and whether any JSON shows
 ///     monitor-tool dump --port P --out DIR          write what the home page shows now (a real daemon), as items
+///     monitor-tool mascot-check                     load every mascot image; exit 1 if one is missing
 ///     monitor-tool usage --port P --out DIR         write what the LLM usage page shows (the demo daemon), as items
 ///     monitor-tool cancel --port P --task N         cancel a task as the Cancel button does
 ///     monitor-tool skip --port P --task N [--step S]  skip a test step as the Skip button does
@@ -26,6 +28,7 @@ struct Tool {
     static func main() async {
         _ = NSApplication.shared
         var args = Array(CommandLine.arguments.dropFirst())
+        if args.first == "mascot-check" { exit(Mascot.selfCheck() ? 0 : 1) }
         guard !args.isEmpty else { fail("usage: monitor-tool conformance|snapshot --port P --out DIR") }
         let cmd = args.removeFirst()
         guard let port = Discovery.port(arguments: args) else { fail("--port P (or --data-dir D)") }

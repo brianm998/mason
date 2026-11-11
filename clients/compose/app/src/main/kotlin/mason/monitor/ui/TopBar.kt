@@ -257,7 +257,7 @@ private fun ImproveDialog(model: MonitorModel, onClose: () -> Unit) {
 private val KIND_LABELS = listOf(
     "needs_you" to "Needs a decision", "failed" to "Task failed", "landing" to "Landing frozen",
     "daemon_down" to "Daemon down", "credentials" to "Credentials failing",
-    "provider_outage" to "Provider outage", "landed" to "Landed",
+    "provider_outage" to "Provider outage", "stalled" to "Pipeline stalled", "landed" to "Landed",
     "disk" to "Disk nearly full", "environment" to "Environment problem", "blocked" to "Task blocked", "host_lost" to "Host lost", "runtime" to "Runtime update failed", "definition" to "Definition refused", "tracker" to "Tracker problem", "provider_limit" to "Provider limit", "provider_overage" to "Provider overage", "provider_budget" to "Provider budget",
 )
 private val SOUND_NAMES = listOf("Glass", "Basso", "Tink", "Ping", "Pop", "Submarine", "Sosumi", "Funk")
@@ -291,6 +291,7 @@ private fun SpeechSettingsDialog(model: MonitorModel, onClose: () -> Unit) {
                 Picker("Voice", s.voice.ifEmpty { "System default" }, listOf("System default") + a.availableVoices(), "speech-voice") {
                     a.update(s.copy(voice = if (it == "System default") "" else it))
                 }
+                a.noChannelLine?.let { Text(it, style = theme.small()) }
                 Text(
                     if (a.isSpeaker) "This monitor is the one that speaks." else "Another monitor speaks, or none is needed.",
                     style = theme.small(),
