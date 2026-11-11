@@ -65,7 +65,7 @@ final class MonitorCoreTests: XCTestCase {
         hv.stages = [section("queued", rows: [row(1, state: "queued")])]
         m.home = hv
         XCTAssertEqual(m.homeMascot, MascotChoice(id: "all_clear", large: false))
-        var a = ActiveModel(); a.task = 1
+        var a = Mason_V1_ActiveModel(); a.task = 1
         hv.active = [a]
         m.home = hv
         XCTAssertEqual(m.homeMascot.id, "developing")
