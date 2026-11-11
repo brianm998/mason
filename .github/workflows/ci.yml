@@ -27,6 +27,7 @@ jobs:
       # The two monitors stay in parity by machine check (Part 17).
       - run: cargo run -q -p mason-conformance -- features clients/features.toml
       - run: cargo run -q -p mason-conformance -- tokens --check
+      - run: cargo run -q -p mason-conformance -- mascot --check
       - uses: EmbarkStudios/cargo-deny-action@v2
 
   dco:

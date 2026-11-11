@@ -1204,6 +1204,9 @@ fn main() {
                     if r["configured"]["push"].as_bool().unwrap_or(false) { "set up" } else { "not set up" },
                     if r["configured"]["webhook"].as_bool().unwrap_or(false) { "set up" } else { "not set up" },
                 );
+                    if r["reaches_without_monitor"].as_bool() == Some(false) {
+                        println!("{}", mason_daemon::notify::NO_REACH_LINE);
+                    }
                 }
                 Some(other) => die(&format!("unknown notify command {other:?}\n\n{HELP}")),
             }
