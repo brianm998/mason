@@ -377,6 +377,7 @@ pub fn parse_status(out: &str) -> CiState {
                             workflow: "ci".into(),
                             job: f.clone(),
                             infra: infra.contains(f).then(|| "runner lost".to_string()),
+                            log: None,
                         })
                         .collect()
                 }
