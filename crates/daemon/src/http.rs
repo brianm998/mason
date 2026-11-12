@@ -683,7 +683,7 @@ fn retry_default(def: &Definition, t: &Task) -> String {
 }
 
 /// The task's latest step run (0: it has had none).
-pub(crate) fn latest_run(w: &World, id: TaskId) -> u64 {
+pub fn latest_run(w: &World, id: TaskId) -> u64 {
     w.step_runs
         .iter()
         .rev()
