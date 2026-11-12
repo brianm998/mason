@@ -57,6 +57,10 @@ pub struct GitHub {
     token: TokenRef,
     /// The workflow file a dispatch targets (`ci.yml`), if CI is dispatched.
     pub workflow: Option<String>,
+    /// Judge each failed job as infrastructure or real (`[ci] infra_judge`). `None` is
+    /// off: no log is fetched and nothing is reported per job. `Some` holds the
+    /// project's extra log patterns, added to the built-in ones.
+    pub infra: Option<Vec<String>>,
 }
 
 impl GitHub {
@@ -67,6 +71,7 @@ impl GitHub {
             repo: repo.to_string(),
             token,
             workflow: None,
+            infra: None,
         }
     }
 
@@ -74,17 +79,21 @@ impl GitHub {
         format!("{}/repos/{}{}", self.api, self.repo, path)
     }
 
-    fn send(&self, mut r: Request) -> Result<Response, ApiError> {
+    /// The request with the token, whatever the answer's status.
+    fn send_raw(&self, mut r: Request) -> Result<Response, ApiError> {
         let token = self.token.read()?;
         r = r
             .with("Authorization", &format!("Bearer {token}"))
             .with("Accept", "application/vnd.github+json")
             .with("X-GitHub-Api-Version", "2022-11-28")
             .with("User-Agent", "mason");
-        let resp = self
-            .http
+        self.http
             .send(&r)
-            .map_err(|e| ApiError::new(ErrorKind::Unavailable, e.to_string()))?;
+            .map_err(|e| ApiError::new(ErrorKind::Unavailable, e.to_string()))
+    }
+
+    fn send(&self, r: Request) -> Result<Response, ApiError> {
+        let resp = self.send_raw(r)?;
         match classify(resp.status, &resp.headers, &resp.body) {
             None => Ok(resp),
             Some(e) => Err(e),
@@ -104,6 +113,67 @@ impl GitHub {
     fn body(v: Value) -> String {
         v.to_string()
     }
+
+    /// A job's log. GitHub answers with a redirect to a signed URL, which is fetched
+    /// without the token (it is not GitHub's to receive there). Any failure is `None`:
+    /// a log that cannot be read does not make a job infrastructure.
+    fn job_log(&self, job_id: u64) -> Option<String> {
+        let r = self
+            .send_raw(Request::get(
+                &self.url(&format!("/actions/jobs/{job_id}/logs")),
+            ))
+            .ok()?;
+        let body = match r.status {
+            200..=299 => r.body,
+            301 | 302 | 303 | 307 | 308 => {
+                let to = r.header("location")?.to_string();
+                let r2 = self.http.send(&Request::get(&to)).ok()?;
+                if !(200..300).contains(&r2.status) {
+                    return None;
+                }
+                r2.body
+            }
+            _ => return None,
+        };
+        // The end of a log is where a job says why it failed.
+        const KEEP: usize = 256 * 1024;
+        if body.len() > KEEP {
+            let mut at = body.len() - KEEP;
+            while !body.is_char_boundary(at) {
+                at += 1;
+            }
+            return Some(body[at..].to_string());
+        }
+        Some(body)
+    }
+
+    /// One failed job, judged. Only a `failure` has its log fetched.
+    fn judge_job(
+        &self,
+        workflow: &str,
+        job: &str,
+        conclusion: &str,
+        steps_run: bool,
+        job_id: Option<u64>,
+    ) -> JobFailure {
+        let extra = self.infra.clone().unwrap_or_default();
+        let log = if conclusion == "failure" {
+            job_id.and_then(|id| self.job_log(id))
+        } else {
+            None
+        };
+        JobFailure {
+            workflow: workflow.into(),
+            job: job.into(),
+            infra: crate::ci_infra::judge(conclusion, steps_run, log.as_deref(), &extra),
+        }
+    }
+}
+
+/// The job id in a check run's `details_url` (`.../runs/9/job/123`).
+fn job_id_of(url: &str) -> Option<u64> {
+    let (_, id) = url.rsplit_once("/job/")?;
+    id.split(['?', '/', '#']).next()?.parse().ok()
 }
 
 // ---- git host ----------------------------------------------------------------------------
@@ -149,6 +219,27 @@ impl GitHostAdapter for GitHub {
             &self.url(&format!("/commits/{head}/check-runs")),
         ))?;
         let (checks, failed) = fold_checks(&runs["check_runs"]);
+        let mut jobs = vec![];
+        if self.infra.is_some() {
+            for r in runs["check_runs"].as_array().into_iter().flatten() {
+                if r["status"] != "completed"
+                    || matches!(
+                        r["conclusion"].as_str(),
+                        Some("success" | "neutral" | "skipped")
+                    )
+                {
+                    continue;
+                }
+                jobs.push(self.judge_job(
+                    "checks",
+                    r["name"].as_str().unwrap_or("?"),
+                    r["conclusion"].as_str().unwrap_or(""),
+                    // A check run lists no steps: a cancelled one is judged as cancelled.
+                    true,
+                    r["details_url"].as_str().and_then(job_id_of),
+                ));
+            }
+        }
         let counts = count_checks(&runs["check_runs"]);
         let reviews = self.json(Request::get(&self.url(&format!("/pulls/{number}/reviews"))))?;
         let review = fold_reviews(
@@ -163,6 +254,7 @@ impl GitHostAdapter for GitHub {
             review,
             head,
             counts,
+            jobs,
         })
     }
 
@@ -451,6 +543,7 @@ impl BuildSystemAdapter for GitHub {
             return Ok(CiState::Green);
         }
         let mut failed = vec![];
+        let mut judged = vec![];
         for r in &bad {
             if let Some(id) = r["id"].as_u64() {
                 let jobs =
@@ -461,6 +554,18 @@ impl BuildSystemAdapter for GitHub {
                         Some("success" | "neutral" | "skipped")
                     ) {
                         failed.push(j["name"].as_str().unwrap_or("?").to_string());
+                        if self.infra.is_some() {
+                            let steps_run = j["steps"].as_array().into_iter().flatten().any(|st| {
+                                matches!(st["conclusion"].as_str(), Some("success" | "failure"))
+                            });
+                            judged.push(self.judge_job(
+                                r["name"].as_str().unwrap_or("?"),
+                                j["name"].as_str().unwrap_or("?"),
+                                j["conclusion"].as_str().unwrap_or(""),
+                                steps_run,
+                                j["id"].as_u64(),
+                            ));
+                        }
                     }
                 }
             }
@@ -474,6 +579,7 @@ impl BuildSystemAdapter for GitHub {
                     .join(", ")
             ),
             failed,
+            jobs: judged,
         })
     }
 

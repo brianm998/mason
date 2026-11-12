@@ -636,6 +636,11 @@ pub struct CiCfg {
     pub poll_s: u64,
     /// Give up on a run after this long.
     pub timeout_s: u64,
+    /// Tell infrastructure reds from real ones (`github-actions` only): only infrastructure
+    /// is rerun, a real red goes back to the tasks at once. Off by default.
+    pub infra_judge: bool,
+    /// Log phrases that also mean infrastructure, added to the built-in list.
+    pub infra_patterns: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -803,7 +808,33 @@ fn parse_services(id: &str, doc: &DocumentMut) -> Result<ServicesCfg, String> {
                 ))
             }
         };
+        let infra_judge = t
+            .get("infra_judge")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if infra_judge && !matches!(kind, CiKind::GithubActions { .. }) {
+            return Err(format!(
+                "{id}: `[ci] infra_judge` works only with `kind = \"github-actions\"`"
+            ));
+        }
+        let infra_patterns: Vec<String> = t
+            .get("infra_patterns")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str())
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !infra_patterns.is_empty() && !infra_judge {
+            return Err(format!(
+                "{id}: `[ci] infra_patterns` needs `infra_judge = true`"
+            ));
+        }
         out.ci = Some(CiCfg {
+            infra_judge,
+            infra_patterns,
             kind,
             poll_s: int(t, "poll_s", 20),
             timeout_s: int(t, "timeout_s", 7200),
@@ -1163,6 +1194,38 @@ mod tests {
             let e = parse_project("p", &format!("{base}[ci]\n{ci}\n")).unwrap_err();
             assert!(e.contains(want), "{e}");
         }
+    }
+
+    #[test]
+    fn the_infrastructure_judge_is_off_by_default_and_github_only() {
+        let base = "path=\"/r\"\nbase=\"m\"\ntest=\"t\"\n";
+        let gh = "[ci]\nkind=\"github-actions\"\nrepo=\"o/r\"\ntoken=\"env:T\"\n";
+        let c = parse_project("p", &format!("{base}{gh}"))
+            .unwrap()
+            .services
+            .ci
+            .unwrap();
+        assert!(!c.infra_judge && c.infra_patterns.is_empty());
+        let c = parse_project(
+            "p",
+            &format!("{base}{gh}infra_judge=true\ninfra_patterns=[\"sim flake\"]\n"),
+        )
+        .unwrap()
+        .services
+        .ci
+        .unwrap();
+        assert!(c.infra_judge);
+        assert_eq!(c.infra_patterns, ["sim flake"]);
+        let e = parse_project("p", &format!("{base}{gh}infra_patterns=[\"x\"]\n")).unwrap_err();
+        assert!(e.contains("needs `infra_judge = true`"), "{e}");
+        let e = parse_project(
+            "p",
+            &format!(
+                "{base}[ci]\nkind=\"command\"\ntrigger=\"a\"\nstatus=\"b\"\ninfra_judge=true\n"
+            ),
+        )
+        .unwrap_err();
+        assert!(e.contains("github-actions"), "{e}");
     }
 
     #[test]
