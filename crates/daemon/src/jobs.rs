@@ -2461,8 +2461,19 @@ fn land_job(c: &Ctx) {
         }
     }
     // Landing is batched per project: join the queue and wait for the verdict.
-    let Some(verdict) = crate::landing::submit_and_wait(c) else {
-        return; // approved, rejected, cancelled or retried while waiting
+    let verdict = loop {
+        let Some(v) = crate::landing::submit_and_wait(c) else {
+            return; // approved, rejected, cancelled or retried while waiting
+        };
+        if matches!(v, crate::landing::Verdict::Held) {
+            // The host refused the push's credentials: landing is held for the project. The task
+            // stays here, and joins the queue again once the owner has chosen a key.
+            if wait_while_paused(c).is_err() {
+                return;
+            }
+            continue;
+        }
+        break v;
     };
     match verdict {
         crate::landing::Verdict::Landed => {
@@ -2478,6 +2489,7 @@ fn land_job(c: &Ctx) {
         }
         crate::landing::Verdict::Conflict { reason, feedback } => c.conflict(reason, feedback),
         crate::landing::Verdict::Failed(why) => c.fail(format!("landing failed: {why}")),
+        crate::landing::Verdict::Held => {}
     }
 }
 

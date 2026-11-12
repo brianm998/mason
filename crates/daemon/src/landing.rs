@@ -44,6 +44,9 @@ pub enum Verdict {
     Conflict { reason: String, feedback: String },
     /// Could not land and retrying will not help.
     Failed(String),
+    /// The host refused our credentials: nothing is wrong with the change. Landing is held for
+    /// the project; the task stays in landing and submits again when the hold lifts.
+    Held,
 }
 
 /// The batch's phases: forming, integrating, running suites, landing.
@@ -1552,6 +1555,11 @@ impl Runner {
             }
         };
 
+        // A refused push is not the change's fault: hold landing, charge no failure.
+        let refused = match &outcome {
+            Err(why) => crate::ssh_keys::hold_if_refused(d, &p.id, why),
+            Ok(()) => false,
+        };
         let phase = match (&outcome, landed.is_empty(), parked.is_empty()) {
             (Ok(()), _, true) => "landed",
             (Ok(()), false, false) => "landed",
@@ -1607,6 +1615,8 @@ impl Runner {
                         deliver(d, TaskId(*id), pk.verdict());
                     } else if landed.contains(id) {
                         deliver(d, TaskId(*id), Verdict::Landed);
+                    } else if refused {
+                        deliver(d, TaskId(*id), Verdict::Held);
                     } else {
                         deliver(d, TaskId(*id), Verdict::Failed(why.clone()));
                     }

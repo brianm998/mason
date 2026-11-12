@@ -45,6 +45,7 @@ pub mod schedule;
 pub mod selfguard;
 pub mod selftest;
 pub mod services;
+pub mod ssh_keys;
 pub mod stall;
 pub mod suites;
 pub mod sweep;
