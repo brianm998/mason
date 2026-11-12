@@ -33,6 +33,7 @@ struct SidebarPane: View {
                             entry(e)
                         }
                     }
+                    .frame(width: width, alignment: .leading)
                 }
                 .onChange(of: model.scrollTarget) { _, target in
                     guard let t = target else { return }
@@ -129,10 +130,10 @@ struct SectionHeader: View {
             HStack(spacing: theme.spacingSmall) {
                 Image(systemName: open ? "chevron.down" : "chevron.right").frame(width: theme.cell)
                 StateIcon(state: section.state)
-                Text(section.title).font(theme.body(.semibold))
-                Spacer()
+                Text(section.title).font(theme.body(.semibold)).lineLimit(1).truncationMode(.tail)
+                Spacer(minLength: 0)
                 Text(model.countText(section))
-                    .font(theme.body(.semibold))
+                    .font(theme.body(.semibold)).lineLimit(1).fixedSize().layoutPriority(1)
                     .foregroundStyle(section.state == "needs_attention" && section.count > 0 ? theme.attention : theme.muted)
             }
             .padding(.horizontal, theme.spacing).padding(.vertical, theme.spacingSmall + 2)
@@ -158,7 +159,7 @@ struct RowView: View {
             Button { model.go(.task(row.id)) } label: {
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(alignment: .firstTextBaseline, spacing: theme.spacingSmall) {
-                        Text(row.key).font(theme.body(.semibold)).foregroundStyle(theme.muted)
+                        Text(row.key).font(theme.body(.semibold)).foregroundStyle(theme.muted).fixedSize()
                         Text(row.title).font(theme.body()).foregroundStyle(theme.text).lineLimit(2)
                     }
                     Text("\(row.project), \(activity)")
@@ -167,23 +168,7 @@ struct RowView: View {
                         Text(row.proposal).font(theme.small()).foregroundStyle(theme.muted)
                             .accessibilityIdentifier("row:\(row.id):proposal")
                     }
-                    HStack(spacing: theme.spacing) {
-                        Text(Format.duration(ms: row.inStateMs))
-                            .font(theme.small()).foregroundStyle(row.slow ? theme.slow : theme.muted)
-                            .lineLimit(1).fixedSize()
-                        if !row.typical.isEmpty {
-                            Text(row.typical).font(theme.small()).foregroundStyle(theme.muted)
-                        }
-                        ProgressCells(model: model, cells: row.progress, slow: row.slow).fixedSize()
-                        // On a tight row the model text gives way first; time and cells never do.
-                        if !row.display.isEmpty || !row.model.isEmpty {
-                            Text(row.display.isEmpty ? row.model : row.display)
-                                .font(theme.small()).foregroundStyle(theme.muted)
-                                .lineLimit(1).truncationMode(.tail).layoutPriority(-1)
-                        }
-                        Spacer(minLength: 0)
-                        StateIcon(state: row.state)
-                    }
+                    metaLine
                     if let c = row.progress.running { ProgressLine(model: model, cell: c) }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -220,6 +205,44 @@ struct RowView: View {
         .accessibilityElement(children: .contain)
         .accessibilityLabel("\(row.key) \(row.title), \(row.project), \(row.state)")
         .accessibilityIdentifier("row:\(row.state):\(row.id)")
+    }
+
+    /// The time / typical / cells / model / icon line. Pieces give way in order as the panel
+    /// narrows: the model first, then the typical range, then the line wraps in two. A
+    /// ViewThatFits is used (not a flow Layout) because the variants are few and fixed.
+    @ViewBuilder var metaLine: some View {
+        ViewThatFits(in: .horizontal) {
+            metaRow(typical: true, model: true)
+            metaRow(typical: true, model: false)
+            metaRow(typical: false, model: false)
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: theme.spacing) { durationText; Spacer(minLength: 0); StateIcon(state: row.state) }
+                ProgressCells(model: model, cells: row.progress, slow: row.slow)
+            }
+        }
+    }
+
+    var durationText: some View {
+        Text(Format.duration(ms: row.inStateMs))
+            .font(theme.small()).foregroundStyle(row.slow ? theme.slow : theme.muted)
+            .lineLimit(1).fixedSize()
+    }
+
+    func metaRow(typical: Bool, model showModel: Bool) -> some View {
+        HStack(spacing: theme.spacing) {
+            durationText
+            if typical && !row.typical.isEmpty {
+                Text(row.typical).font(theme.small()).foregroundStyle(theme.muted).lineLimit(1)
+            }
+            ProgressCells(model: model, cells: row.progress, slow: row.slow).fixedSize()
+            if showModel && (!row.display.isEmpty || !row.model.isEmpty) {
+                Text(row.display.isEmpty ? row.model : row.display)
+                    .font(theme.small()).foregroundStyle(theme.muted)
+                    .lineLimit(1).truncationMode(.tail)
+            }
+            Spacer(minLength: 0)
+            StateIcon(state: row.state)
+        }
     }
 
     var activity: String { row.whyWaiting.isEmpty ? row.activity : row.whyWaiting }
