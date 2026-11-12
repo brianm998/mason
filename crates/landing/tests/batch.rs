@@ -99,7 +99,7 @@ fn a_clean_batch_merges_and_promotes() {
 }
 
 #[test]
-fn a_conflicting_task_is_ejected_and_the_rest_land() {
+fn a_task_conflicting_only_with_a_mate_is_deferred_and_the_rest_land() {
     let fx = Fx::new();
     let t1 = fx.branch("t1", "shared.txt", "from one\n");
     let t2 = fx.branch("t2", "shared.txt", "from two\n");
@@ -107,15 +107,49 @@ fn a_conflicting_task_is_ejected_and_the_rest_land() {
     let b = fx.batch(None, true);
     let a = b.assemble(&[t1, t2, t3], &nop).unwrap();
     assert_eq!(a.merged, [1, 3]);
-    assert_eq!(a.ejected.len(), 1);
-    assert_eq!(a.ejected[0].id, 2);
-    assert_eq!(a.ejected[0].files, "shared.txt");
+    assert!(a.ejected.is_empty());
+    assert_eq!(a.deferred.len(), 1);
+    assert_eq!(a.deferred[0].id, 2);
+    assert_eq!(a.deferred[0].with, [1]);
+    assert_eq!(a.deferred[0].files, "shared.txt");
     // The merge was undone: the tree is clean and holds only the others.
     assert_eq!(sh(&fx.int_wt, &["status", "--porcelain"]), "");
     assert_eq!(
         std::fs::read_to_string(fx.int_wt.join("shared.txt")).unwrap(),
         "from one\n"
     );
+}
+
+#[test]
+fn a_task_conflicting_with_the_base_is_ejected() {
+    let fx = Fx::new();
+    let t1 = fx.branch("t1", "shared.txt", "from one\n");
+    let t2 = fx.branch("t2", "shared.txt", "from two\n");
+    let t3 = fx.branch("t3", "c.txt", "c\n");
+    // t1 lands elsewhere; the base now conflicts with t2, and t1 is not in the batch.
+    let b = fx.batch(None, true);
+    let a = b.assemble(&[t1], &nop).unwrap();
+    b.finish(&a, &mut |_| true, &nop).unwrap().unwrap();
+    let a = b.assemble(&[t2, t3], &nop).unwrap();
+    assert_eq!(a.merged, [3]);
+    assert!(a.deferred.is_empty());
+    assert_eq!(a.ejected.len(), 1);
+    assert_eq!(a.ejected[0].id, 2);
+    assert_eq!(a.ejected[0].files, "shared.txt");
+}
+
+#[test]
+fn a_deferred_task_goes_first_in_the_next_batch_when_its_mate_did_not_land() {
+    let fx = Fx::new();
+    let t1 = fx.branch("t1", "shared.txt", "from one\n");
+    let t2 = fx.branch("t2", "shared.txt", "from two\n");
+    let b = fx.batch(None, true);
+    let a = b.assemble(&[t1, t2.clone()], &nop).unwrap();
+    assert_eq!(a.deferred.len(), 1);
+    // t1 fails verification and never lands; t2 assembles alone, cleanly.
+    let a = b.assemble(&[t2], &nop).unwrap();
+    assert_eq!(a.merged, [2]);
+    assert!(a.deferred.is_empty() && a.ejected.is_empty());
 }
 
 #[test]
@@ -136,14 +170,14 @@ fn the_resolver_can_resolve_a_conflict() {
 }
 
 #[test]
-fn a_resolver_that_fails_or_leaves_conflicts_ejects_only_that_task() {
+fn a_resolver_that_fails_or_leaves_conflicts_sets_aside_only_that_task() {
     let fx = Fx::new();
     let t1 = fx.branch("t1", "shared.txt", "from one\n");
     let t2 = fx.branch("t2", "shared.txt", "from two\n");
     for cmd in ["exit 1", "true"] {
         let b = fx.batch(Some(cmd), true);
         let a = b.assemble(&[t1.clone(), t2.clone()], &nop).unwrap();
-        assert_eq!((a.merged.clone(), a.ejected.len()), (vec![1], 1), "{cmd}");
+        assert_eq!((a.merged.clone(), a.deferred.len()), (vec![1], 1), "{cmd}");
         assert_eq!(sh(&fx.int_wt, &["status", "--porcelain"]), "");
     }
 }
