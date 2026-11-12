@@ -1342,12 +1342,21 @@ fn main() {
                     }
                     for s in r["schedules"].as_array().cloned().unwrap_or_default() {
                         println!(
-                            "{:<28} {:<12} every {:<10} runs {:<4} {}",
+                            "{:<28} {:<12} every {:<10} runs {:<4} {}{}",
                             s["name"].as_str().unwrap_or("?"),
                             s["kind"].as_str().unwrap_or("?"),
                             every_text(s["every_ms"].as_u64().unwrap_or(0)),
                             s["runs"],
-                            s["last_status"].as_str().unwrap_or("")
+                            s["last_status"].as_str().unwrap_or(""),
+                            if s["follow"].is_object() {
+                                s["follow"]["run"]
+                                    .as_u64()
+                                    .map_or(" [following]".to_string(), |r| {
+                                        format!(" [following run {r}]")
+                                    })
+                            } else {
+                                String::new()
+                            }
                         );
                     }
                 }
@@ -2152,6 +2161,16 @@ fn main() {
             }
             for (name, w) in s["ci_watch"].as_object().into_iter().flatten() {
                 print_ci_watch(name, w);
+            }
+            for r in s["ci_runs"].as_array().into_iter().flatten() {
+                println!(
+                    "scheduled CI run in flight: {} {} (waiting for {})",
+                    r["name"].as_str().unwrap_or("?"),
+                    r["run"]
+                        .as_u64()
+                        .map_or("(run not listed yet)".to_string(), |n| format!("run {n}")),
+                    r["waiting_for"].as_str().unwrap_or("?")
+                );
             }
             for p in s["definitions"].as_array().into_iter().flatten() {
                 let hash = p["hash"].as_str().unwrap_or("");

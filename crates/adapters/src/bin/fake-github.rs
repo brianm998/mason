@@ -19,6 +19,13 @@
 //! - `jobs-N.json`: the array of jobs of run N, answered at `.../actions/runs/N/jobs`.
 //! - `log-N.txt`: the log of job N, answered at `.../actions/jobs/N/logs`.
 //!
+//! - `wf-runs.json`: the array of runs of a workflow file (finished or not), answered at
+//!   `GET .../actions/workflows/F/runs`.
+//! - `POST .../actions/workflows/F/dispatches` appends its body to `dispatch.log` and, if
+//!   `dispatch-run.json` exists, moves that run (an object) to the front of `wf-runs.json`.
+//! - `POST .../actions/runs/N/rerun-failed-jobs` appends `N` to `rerun.log`, makes
+//!   `jobs-N-2.json` (if present) the jobs of run N and sets its `run_attempt` to 2.
+//!
 //! A comment is appended to `comments.log`; closing an issue (`PATCH`) marks it
 //! closed in `issues.json`. Every request is appended to `requests.log`.
 
@@ -165,6 +172,47 @@ fn serve(dir: &Path, stream: std::net::TcpStream) {
                 &[],
                 &json!({"total_count": n, "workflow_runs": runs}).to_string(),
             );
+        }
+        ("GET", ["repos", _, _, "actions", "workflows", _, "runs"]) => {
+            let runs = read_json(&dir.join("wf-runs.json"), json!([]));
+            let n = runs.as_array().map_or(0, Vec::len);
+            reply(
+                &mut out,
+                "200 OK",
+                &[],
+                &json!({"total_count": n, "workflow_runs": runs}).to_string(),
+            );
+        }
+        ("POST", ["repos", _, _, "actions", "workflows", _, "dispatches"]) => {
+            append(&dir.join("dispatch.log"), &body);
+            let new = dir.join("dispatch-run.json");
+            if let Some(run) = std::fs::read_to_string(&new)
+                .ok()
+                .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+            {
+                let mut runs = read_json(&dir.join("wf-runs.json"), json!([]));
+                if let Some(a) = runs.as_array_mut() {
+                    a.insert(0, run);
+                }
+                let _ = std::fs::write(dir.join("wf-runs.json"), runs.to_string());
+                let _ = std::fs::remove_file(&new);
+            }
+            reply(&mut out, "204 No Content", &[], "");
+        }
+        ("POST", ["repos", _, _, "actions", "runs", n, "rerun-failed-jobs"]) => {
+            append(&dir.join("rerun.log"), n);
+            if let Ok(t) = std::fs::read_to_string(dir.join(format!("jobs-{n}-2.json"))) {
+                let _ = std::fs::write(dir.join(format!("jobs-{n}.json")), t);
+            }
+            let mut runs = read_json(&dir.join("wf-runs.json"), json!([]));
+            if let Some(r) = runs
+                .as_array_mut()
+                .and_then(|a| a.iter_mut().find(|r| r["id"].as_u64() == n.parse().ok()))
+            {
+                r["run_attempt"] = json!(2);
+            }
+            let _ = std::fs::write(dir.join("wf-runs.json"), runs.to_string());
+            reply(&mut out, "201 Created", &[], "{}");
         }
         ("GET", ["repos", _, _, "actions", "runs", n, "jobs"]) => {
             let jobs = read_json(&dir.join(format!("jobs-{n}.json")), json!([]));
