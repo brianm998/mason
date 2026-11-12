@@ -388,6 +388,14 @@ impl Daemon {
         self.progress_report(run, |p, now| p.report_tokens(stream, t, now));
     }
 
+    /// Mark a stream as a pseudo-terminal's: control sequences are removed from its
+    /// live log lines (not from the log file). Call before the first bytes are read.
+    pub fn progress_terminal(&self, run: StepRunId, stream: &str) {
+        if let Some(l) = self.progress.lock().get_mut(&run.0) {
+            l.p.terminal.insert(stream.to_string());
+        }
+    }
+
     /// A step run that is resumed after a restart: count what its log already
     /// holds beyond what the stored record had counted.
     pub fn progress_catch_up(&self, run: StepRunId, stream: &str, log: &Path) {
