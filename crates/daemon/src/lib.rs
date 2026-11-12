@@ -41,6 +41,7 @@ pub mod prompts;
 pub mod proposals;
 pub mod protect;
 pub mod providers;
+pub mod rerun;
 pub mod sched;
 pub mod schedule;
 pub mod selfguard;
