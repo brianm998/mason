@@ -9,6 +9,8 @@
 pub mod attention;
 pub mod bg;
 pub mod blockers;
+pub mod ci_schedule;
+pub mod ci_watch;
 pub mod config;
 pub mod cpu;
 pub mod crash;
@@ -41,6 +43,7 @@ pub mod prompts;
 pub mod proposals;
 pub mod protect;
 pub mod providers;
+pub mod rerun;
 pub mod sched;
 pub mod schedule;
 pub mod selfguard;
