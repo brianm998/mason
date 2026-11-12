@@ -602,10 +602,10 @@ impl Daemon {
                 Effect::StopStepHost { task } => self.stop_hosts(&format!("t{}r", task.0)),
                 Effect::DeleteBranch { task } => {
                     // On a thread of its own, not the bounded pool: a full queue there
-                    // dropped this silently and the branch stayed for good. It first waits
-                    // for the task's job to wind down (the step host was just told to
-                    // stop), so the job cannot race the removal, then checks the branch
-                    // really went.
+                    // dropped this silently and the branch stayed for good. It removes the
+                    // worktree and branch at once, then, once the task's job has wound down
+                    // (the step host was just told to stop), makes sure the branch really
+                    // went, since a job still running could race the first removal.
                     let d = self.clone();
                     let task = *task;
                     let _ = std::thread::Builder::new()
@@ -618,9 +618,11 @@ impl Daemon {
         }
     }
 
-    /// Remove a canceled task's worktree and branch once its job has ended (or after a
-    /// minute, whichever is first), and again while the branch is still there.
+    /// Remove a canceled task's worktree and branch now (a cancel never waits on a step), then
+    /// again once its job has ended (or after a minute, whichever is first) while the branch
+    /// is still there.
     fn delete_branch_after_job(self: &Arc<Self>, task: TaskId) {
+        crate::jobs::cleanup(self, task, true);
         let end = Instant::now() + Duration::from_secs(60);
         while self.has_job_for_task(task) && Instant::now() < end {
             std::thread::sleep(Duration::from_millis(100));
