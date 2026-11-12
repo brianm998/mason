@@ -43,29 +43,30 @@ fn say(e: CallError) -> String {
     e.to_string()
 }
 
-/// Run `cmd` once the resources are ours. Returns the command's exit code.
-pub fn run(
+/// Another pipeline's request: ranked as pipeline work, never a person's.
+#[derive(Clone, Debug, Default)]
+pub struct OutsideArgs {
+    pub pipeline: String,
+    pub priority: Option<String>,
+    pub progress: Option<u32>,
+}
+
+/// Queue for `uses`, wait for the grant, and take the kernel locks ourselves
+/// (they die with us). Returns the lease id and the held locks.
+fn acquire(
     d: &Daemon,
-    uses: BTreeMap<String, u32>,
-    label: Option<String>,
-    cmd: &[String],
-) -> Result<i32, String> {
-    // A run made by a task's agent (MASON_TASK is in the step environment) is
-    // that task's pipeline work; without it, it is a person's.
-    let task: Option<u64> = std::env::var("MASON_TASK")
-        .ok()
-        .and_then(|v| v.trim().parse().ok());
-    let label = label.unwrap_or_else(|| match task {
-        Some(t) => format!("task {t} `{}`", cmd.join(" ")),
-        None => format!("interactive `{}`", cmd.join(" ")),
-    });
-    let opened = d
-        .call(
-            "POST",
-            "/leases",
-            Some(&json!({"uses": uses, "label": label, "task": task})),
-        )
-        .map_err(say)?;
+    uses: &BTreeMap<String, u32>,
+    label: &str,
+    task: Option<u64>,
+    outside: Option<&OutsideArgs>,
+) -> Result<(u64, mason_resources::Held), String> {
+    let mut body = json!({"uses": uses, "label": label, "task": task});
+    if let Some(o) = outside {
+        body["pipeline"] = json!(o.pipeline);
+        body["priority"] = json!(o.priority);
+        body["progress"] = json!(o.progress);
+    }
+    let opened = d.call("POST", "/leases", Some(&body)).map_err(say)?;
     let id = opened["id"].as_u64().ok_or("the daemon sent no lease id")?;
     let release = |d: &Daemon| {
         let _ = d.call("POST", &format!("/leases/{id}/release"), Some(&json!({})));
@@ -86,50 +87,125 @@ pub fn run(
             _ => return Err("the daemon dropped the request".into()),
         }
     };
-    // Take the locks ourselves: they die with us.
-    let held = {
-        let locks = Locks::new(PathBuf::from(
-            granted["locks_dir"].as_str().unwrap_or_default(),
-        ))
-        .map_err(|e| e.to_string())?;
-        let take = Take {
-            classes: granted["classes"]
-                .as_object()
-                .into_iter()
-                .flatten()
-                .map(|(k, v)| (k.clone(), v.as_u64().unwrap_or(0) as u32))
-                .collect(),
-            exclusive: granted["exclusive"].as_bool().unwrap_or(false),
-        };
-        let caps: BTreeMap<String, u32> = granted["capacity"]
+    let locks = Locks::new(PathBuf::from(
+        granted["locks_dir"].as_str().unwrap_or_default(),
+    ))
+    .map_err(|e| e.to_string())?;
+    let take = Take {
+        classes: granted["classes"]
             .as_object()
             .into_iter()
             .flatten()
             .map(|(k, v)| (k.clone(), v.as_u64().unwrap_or(0) as u32))
-            .collect();
-        let since = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |t| t.as_millis() as u64);
-        let started = Instant::now();
-        loop {
-            match locks.take(id, &label, since, &take, &caps) {
-                Ok(h) => break h,
-                Err(TakeError::Busy) if started.elapsed() < Duration::from_secs(30) => {
-                    std::thread::sleep(Duration::from_millis(25));
-                }
-                Err(e) => {
-                    release(d);
-                    return Err(format!("could not take the granted resources: {e}"));
-                }
+            .collect(),
+        exclusive: granted["exclusive"].as_bool().unwrap_or(false),
+    };
+    let caps: BTreeMap<String, u32> = granted["capacity"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .map(|(k, v)| (k.clone(), v.as_u64().unwrap_or(0) as u32))
+        .collect();
+    let since = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |t| t.as_millis() as u64);
+    let started = Instant::now();
+    loop {
+        match locks.take(id, &held_label(label, outside), since, &take, &caps) {
+            Ok(h) => return Ok((id, h)),
+            Err(TakeError::Busy) if started.elapsed() < Duration::from_secs(30) => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(e) => {
+                release(d);
+                return Err(format!("could not take the granted resources: {e}"));
             }
         }
-    };
+    }
+}
+
+fn release_lease(d: &Daemon, id: u64) {
+    let _ = d.call("POST", &format!("/leases/{id}/release"), Some(&json!({})));
+}
+
+/// The label an outside request shows in the kernel's slot files.
+fn held_label(label: &str, outside: Option<&OutsideArgs>) -> String {
+    match outside {
+        Some(o) => mason_daemon::outside::display_label(&o.pipeline, label),
+        None => label.to_string(),
+    }
+}
+
+/// Run `cmd` once the resources are ours. Returns the command's exit code.
+pub fn run(
+    d: &Daemon,
+    uses: BTreeMap<String, u32>,
+    label: Option<String>,
+    cmd: &[String],
+    outside: Option<&OutsideArgs>,
+) -> Result<i32, String> {
+    // A run made by a task's agent (MASON_TASK is in the step environment) is
+    // that task's pipeline work; without it, it is a person's. Another
+    // pipeline's run is ranked by its own fields instead.
+    let task: Option<u64> = std::env::var("MASON_TASK")
+        .ok()
+        .and_then(|v| v.trim().parse().ok());
+    let label = label.unwrap_or_else(|| match task {
+        Some(t) => format!("task {t} `{}`", cmd.join(" ")),
+        None => format!("interactive `{}`", cmd.join(" ")),
+    });
+    let (id, held) = acquire(d, &uses, &label, task, outside)?;
     let status = Command::new(&cmd[0]).args(&cmd[1..]).status();
     drop(held);
-    release(d);
+    release_lease(d, id);
     match status {
         Ok(s) => Ok(s.code().unwrap_or(128 + signal_of(&s))),
         Err(e) => Err(format!("cannot run `{}`: {e}", cmd[0])),
+    }
+}
+
+/// Hold `uses` for a process's life: print `granted` once the resources are
+/// ours, then keep them until stdin closes or `pid` exits. A signal ends the
+/// process and the kernel frees the locks at once; the daemon then drops the
+/// lease, so no handler is needed.
+pub fn hold(
+    d: &Daemon,
+    uses: BTreeMap<String, u32>,
+    label: &str,
+    pid: Option<u32>,
+    outside: &OutsideArgs,
+) -> Result<(), String> {
+    use std::io::{Read, Write};
+    let (id, held) = acquire(d, &uses, label, None, Some(outside))?;
+    println!("granted");
+    let _ = std::io::stdout().flush();
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        let mut sink = [0u8; 256];
+        let mut stdin = std::io::stdin();
+        while matches!(stdin.read(&mut sink), Ok(n) if n > 0) {}
+        let _ = tx.send(());
+    });
+    while let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
+        rx.recv_timeout(Duration::from_millis(150))
+    {
+        if pid.is_some_and(|p| !process_alive(p)) {
+            break;
+        }
+    }
+    drop(held);
+    release_lease(d, id);
+    Ok(())
+}
+
+fn process_alive(pid: u32) -> bool {
+    use nix::sys::signal::kill;
+    use nix::unistd::Pid;
+    match kill(Pid::from_raw(pid as i32), None) {
+        Ok(()) => true,
+        Err(nix::errno::Errno::ESRCH) => false,
+        // EPERM: it exists, and is not ours to signal.
+        Err(_) => true,
     }
 }
 
@@ -202,20 +278,62 @@ pub fn show(d: &Daemon, json_out: bool) -> Result<(), String> {
     if let Some(f) = v["memory"]["floor_mb"].as_u64() {
         println!("  memory floor {f} MB ({} MB free)", v["memory"]["free_mb"]);
     }
+    let outside = outside_lines(&v, now);
+    if !outside.is_empty() {
+        println!("Another pipeline's work");
+        for l in outside {
+            println!("  {l}");
+        }
+    }
     let waiting = v["waiting"].as_array().cloned().unwrap_or_default();
     if waiting.is_empty() {
         println!("Nothing is waiting.");
     } else {
         println!("Waiting, in line order");
         for w in waiting {
-            println!(
-                "  {} {}",
-                w["label"].as_str().unwrap_or("?"),
-                w["explain"].as_str().unwrap_or("")
-            );
+            println!("  {}", waiter_line(&w));
         }
     }
     Ok(())
+}
+
+/// One waiter of `mason resources`: an outside pipeline's reads
+/// `starpipe #483 develop: waiting for llm:claude (2 ahead)`.
+pub fn waiter_line(w: &Value) -> String {
+    let label = w["label"].as_str().unwrap_or("?");
+    let why = w["explain"].as_str().unwrap_or("");
+    if w["pipeline"].is_string() {
+        format!("{label}: {why}")
+    } else {
+        format!("{label} {why}")
+    }
+}
+
+/// The holders and waiters that belong to another pipeline, for
+/// `mason resources` and `mason status`.
+pub fn outside_lines(v: &Value, now: u64) -> Vec<String> {
+    let mut out = vec![];
+    for h in v["holders"].as_array().into_iter().flatten() {
+        if h["pipeline"].is_string() {
+            let uses: Vec<&str> = h["uses"]
+                .as_object()
+                .into_iter()
+                .flat_map(|m| m.keys().map(String::as_str))
+                .collect();
+            out.push(format!(
+                "{}: holding {} for {}",
+                h["label"].as_str().unwrap_or("?"),
+                uses.join(", "),
+                ago(now, h["since_ms"].as_u64().unwrap_or(0))
+            ));
+        }
+    }
+    for w in v["waiting"].as_array().into_iter().flatten() {
+        if w["pipeline"].is_string() {
+            out.push(waiter_line(w));
+        }
+    }
+    out
 }
 
 pub fn limit(d: &Daemon, name: &str, units: u32) -> Result<(), String> {
@@ -367,6 +485,30 @@ mod tests {
         let ab = l(json!({"busy_pct": 100, "source": "assumed-busy", "failed_reads": 3}));
         assert!(ab.contains("assumed 100% busy") && ab.contains("new compiles wait"));
         assert!(!ab.contains("no gate"));
+    }
+
+    #[test]
+    fn an_outside_holder_and_waiter_are_listed_with_their_pipeline() {
+        let v = json!({
+            "holders": [
+                {"label": "agent 4", "pipeline": null, "since_ms": 0, "uses": {"llm:claude": 1}},
+                {"label": "starpipe #1 main", "pipeline": "starpipe", "since_ms": 0, "uses": {"llm:claude": 1}}
+            ],
+            "waiting": [
+                {"label": "starpipe #483 develop", "pipeline": "starpipe",
+                 "explain": "waiting for llm:claude (2 ahead)"},
+                {"label": "task 9", "pipeline": null, "explain": "1st in line"}
+            ]
+        });
+        let l = outside_lines(&v, 5000);
+        assert_eq!(
+            l,
+            vec![
+                "starpipe #1 main: holding llm:claude for 5 s",
+                "starpipe #483 develop: waiting for llm:claude (2 ahead)"
+            ]
+        );
+        assert_eq!(waiter_line(&v["waiting"][1]), "task 9 1st in line");
     }
 
     #[test]

@@ -226,6 +226,49 @@ pub struct Progress {
     pub tokens: std::collections::BTreeMap<String, Tokens>,
     /// Per output stream, the line scan (not stored).
     pub scans: std::collections::BTreeMap<String, LineScan>,
+    /// Streams written to a pseudo-terminal: their live log lines have terminal
+    /// control sequences removed (the log file keeps them). Not stored.
+    pub terminal: std::collections::BTreeSet<String>,
+}
+
+/// A line of terminal output without its control sequences: CSI (`ESC [ … final`),
+/// OSC (`ESC ] … BEL` or `ESC \`), other two-byte escapes, every carriage return, and what a backspace erases.
+pub fn strip_terminal(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut it = s.chars().peekable();
+    while let Some(c) = it.next() {
+        match c {
+            '\u{1b}' => match it.next() {
+                Some('[') => {
+                    for n in it.by_ref() {
+                        if ('\u{40}'..='\u{7e}').contains(&n) {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => {
+                    while let Some(n) = it.next() {
+                        if n == '\u{7}' {
+                            break;
+                        }
+                        if n == '\u{1b}' {
+                            it.next();
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            },
+            '\r' => {}
+            // A backspace erases the character before it: `script` starts its output with
+            // `^D` and two backspaces when its stdin is at its end.
+            '\u{8}' => {
+                out.pop();
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// A change of the record, and whether a monitor should hear of it at once.
@@ -340,6 +383,17 @@ impl Progress {
                     let text = String::from_utf8_lossy(&buf[..buf.len() - 1])
                         .trim_end_matches('\r')
                         .to_string();
+                    let text = if self.terminal.contains(stream) {
+                        let clean = strip_terminal(&text);
+                        // The latest line is what the step is doing now (for xctest,
+                        // the test that started), shown as the record's message.
+                        if !self.agent && !self.reported_message && !clean.trim().is_empty() {
+                            self.message = one_line(&clean);
+                        }
+                        clean
+                    } else {
+                        text
+                    };
                     self.pending_log.push(text);
                 }
                 buf.clear();
@@ -1118,5 +1172,26 @@ b
         assert!(!one_line("Reading crates/daemon/src/views.rs").contains("secret"));
         let long = one_line(&"word ".repeat(100));
         assert_eq!(long.chars().count(), LINE_MAX);
+    }
+
+    #[test]
+    fn terminal_streams_lose_control_sequences_in_the_live_log_only() {
+        assert_eq!(
+            strip_terminal("\u{1b}[1mTest Case\u{1b}[0m 'A.a' started.\r"),
+            "Test Case 'A.a' started."
+        );
+        assert_eq!(
+            strip_terminal("a\u{1b}]0;title\u{7}b\u{1b}]1;x\u{1b}\\c"),
+            "abc"
+        );
+        let mut p = Progress::new(1, "t", 0);
+        p.terminal.insert("s".into());
+        let raw = b"\x1b[32mgreen\x1b[0m\r\n";
+        p.output("s", 0, raw, 1);
+        p.output("plain", 0, raw, 1);
+        assert_eq!(p.pending_log[0], "green");
+        assert_eq!(p.message, "green");
+        assert!(p.pending_log[1].contains('\u{1b}'));
+        assert_eq!(p.output.bytes, 2 * raw.len() as u64);
     }
 }
