@@ -158,6 +158,11 @@ fn label_of(kind: &str) -> &'static str {
 
 /// Why and until when, as one phrase: "weekly limit, resets Tue 09:00 UTC (in 2 d 3 h)".
 pub fn describe(h: &AccountHold, now_ms: u64) -> String {
+    describe_with(h, now_ms, None)
+}
+
+/// [`describe`], told which task (if any) is running the account's probe now.
+pub fn describe_with(h: &AccountHold, now_ms: u64, probe_owner: Option<u64>) -> String {
     let now = now_ms / 1000;
     let why = if h.why.is_empty() {
         label_of(&h.kind)
@@ -181,11 +186,17 @@ pub fn describe(h: &AccountHold, now_ms: u64) -> String {
         None => {
             let next = h.probe_ms.saturating_sub(now_ms) / 1000;
             if h.kind == "credentials" {
-                format!(
-                    "{why}; log in again (`claude /login`) or `mason account release {}`, next check in {}",
-                    h.account,
-                    words::span(next)
-                )
+                match probe_owner {
+                    Some(t) => format!(
+                        "{why}; checking now with task #{t}; `mason account release {}` lifts it now",
+                        h.account
+                    ),
+                    None => format!(
+                        "{why}; logging in (`claude /login`) does not lift it: the hold lifts at the next successful check (in {}), or `mason account release {}` now",
+                        words::span(next),
+                        h.account
+                    ),
+                }
             } else if h.kind == "outage" {
                 format!("{why}, trying again in {}", words::span(next))
             } else {
@@ -199,8 +210,12 @@ pub fn describe(h: &AccountHold, now_ms: u64) -> String {
 }
 
 /// The text a waiting task shows.
-pub fn waiting_text(h: &AccountHold, now_ms: u64) -> String {
-    format!("waiting for {}: {}", h.account, describe(h, now_ms))
+pub fn waiting_text(h: &AccountHold, now_ms: u64, probe_owner: Option<u64>) -> String {
+    format!(
+        "waiting for {}: {}",
+        h.account,
+        describe_with(h, now_ms, probe_owner)
+    )
 }
 
 fn alert_kind(kind: &str) -> &'static str {
@@ -497,7 +512,7 @@ pub fn gate(d: &Daemon, account: &str, task: u64) -> Gate {
     };
     let now = now_ms();
     match h.until_ms {
-        Some(u) if now < u => return Gate::Wait(waiting_text(&h, now)),
+        Some(u) if now < u => return Gate::Wait(waiting_text(&h, now, d.probes.owner(account))),
         Some(_) => {
             // The reset has come: release the account.
             if d.store.clear_account_hold(account).unwrap_or(false) {
@@ -509,12 +524,27 @@ pub fn gate(d: &Daemon, account: &str, task: u64) -> Gate {
         None => {}
     }
     if matches!(h.kind.as_str(), "manual" | "budget") || now < h.probe_ms {
-        return Gate::Wait(waiting_text(&h, now));
+        return Gate::Wait(waiting_text(&h, now, d.probes.owner(account)));
     }
     if d.probes.claim(account, task) {
         Gate::Probe
     } else {
-        Gate::Wait(waiting_text(&h, now))
+        Gate::Wait(waiting_text(&h, now, d.probes.owner(account)))
+    }
+}
+
+/// The probe's session got a real answer from the provider: lift the hold now.
+pub fn probe_ok(d: &Daemon, account: &str, task: u64) {
+    if d.probes.owner(account) != Some(task) {
+        return;
+    }
+    d.probes.release(account, task);
+    if let Some(h) = hold_of(d, account) {
+        if !matches!(h.kind.as_str(), "manual" | "budget")
+            && d.store.clear_account_hold(account).unwrap_or(false)
+        {
+            changed(d);
+        }
     }
 }
 
@@ -610,7 +640,11 @@ pub fn alerts(d: &Daemon) -> Vec<(String, String, String)> {
         out.push((
             format!("account-hold:{}", h.account),
             alert_kind(&h.kind).into(),
-            format!("{}: {}; {tail}", h.account, describe(&h, now)),
+            format!(
+                "{}: {}; {tail}",
+                h.account,
+                describe_with(&h, now, d.probes.owner(&h.account))
+            ),
         ));
     }
     let latest: HashMap<String, UsageSnapshot> = d
@@ -706,7 +740,10 @@ pub fn banners(d: &Daemon) -> Vec<(String, String)> {
 pub fn doing(d: &Daemon, account: &str) -> String {
     let now = now_ms();
     match hold_of(d, account) {
-        Some(h) => format!("holding new sessions: {}", describe(&h, now)),
+        Some(h) => format!(
+            "holding new sessions: {}",
+            describe_with(&h, now, d.probes.owner(account))
+        ),
         None => "nothing".into(),
     }
 }
@@ -761,8 +798,45 @@ mod tests {
             by: "pipeline".into(),
         };
         assert_eq!(
-            waiting_text(&h, 1_794_052_800_000),
+            waiting_text(&h, 1_794_052_800_000, None),
             "waiting for claude: weekly limit, resets Mon 15:00 UTC (in 2 d 3 h)"
         );
+    }
+
+    fn creds() -> AccountHold {
+        AccountHold {
+            account: "claude".into(),
+            kind: "credentials".into(),
+            why: "not logged in".into(),
+            since_ms: 0,
+            until_ms: None,
+            backoff_ms: 60_000,
+            probe_ms: 120_000,
+            by: "pipeline".into(),
+        }
+    }
+
+    #[test]
+    fn a_credentials_hold_says_a_running_probe_is_checking_now() {
+        let t = describe_with(&creds(), 130_000, Some(190));
+        assert!(t.contains("checking now with task #190"), "{t}");
+        assert!(!t.contains("next check in"), "{t}");
+    }
+
+    #[test]
+    fn a_credentials_hold_says_the_login_alone_does_not_lift_it() {
+        let t = describe_with(&creds(), 60_000, None);
+        assert!(
+            t.contains("lifts at the next successful check (in 1 min"),
+            "{t}"
+        );
+        assert!(t.contains("`mason account release claude` now"), "{t}");
+        assert!(t.contains("does not lift it"), "{t}");
+    }
+
+    #[test]
+    fn a_credentials_hold_with_a_due_probe_nobody_has_claimed_names_the_check() {
+        let t = describe_with(&creds(), 130_000, None);
+        assert!(t.contains("next successful check"), "{t}");
     }
 }

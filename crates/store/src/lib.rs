@@ -1511,6 +1511,27 @@ impl Store {
         })
     }
 
+    /// When the task first joined the queue for this landing run: `now_ms` is recorded the
+    /// first time and the recorded time is returned every time after.
+    pub fn first_landing_submit(
+        &self,
+        task: u64,
+        run: u64,
+        now_ms: u64,
+    ) -> Result<u64, StoreError> {
+        self.write(move |c| {
+            c.execute(
+                "INSERT OR IGNORE INTO landing_submitted(task, run, at_ms) VALUES (?1,?2,?3)",
+                params![task as i64, run as i64, now_ms as i64],
+            )?;
+            c.query_row(
+                "SELECT at_ms FROM landing_submitted WHERE task = ?1 AND run = ?2",
+                params![task as i64, run as i64],
+                |r| r.get::<_, i64>(0).map(|t| t as u64),
+            )
+        })
+    }
+
     /// Batches a dead daemon left unfinished.
     pub fn abandon_batches(&self, project: &str, now_ms: u64) -> Result<usize, StoreError> {
         let p = project.to_string();

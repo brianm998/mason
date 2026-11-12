@@ -577,6 +577,14 @@ const STEPS: &[&str] = &[
          at     INTEGER NOT NULL,
          PRIMARY KEY (tree, cmd)
      );",
+    // 28: when a task first joined the landing queue for a landing run (s184, decision 0179),
+    // so a restart does not start its batch window over. Additive.
+    "CREATE TABLE landing_submitted (
+         task  INTEGER NOT NULL,
+         run   INTEGER NOT NULL,
+         at_ms INTEGER NOT NULL,
+         PRIMARY KEY (task, run)
+     );",
 ];
 
 pub const SCHEMA_VERSION: u32 = STEPS.len() as u32;

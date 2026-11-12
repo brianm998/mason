@@ -29,16 +29,70 @@ next = "test"
 [resource.test-suite]
 count = 2
 
-# The project's `test` command (the whole workspace) runs here, the waits outside the step's
-# timeout (s61). With the overlay's `build`, the build holds one `compile` slot and gives it
-# back, and the tests hold only `test-suite` (decision 0130); without it, the run holds both.
+# The `build` lines below are commented out: this file is validated by the daemon that is running
+# when it lands, and that one does not know a suite's `build` yet. Once the daemon with s178 is
+# live, uncomment them and drop the swift command's own `swift build --build-tests &&`.
+#
+# The test step runs suites (s178). Each suite's `build` holds one `compile` slot and gives it
+# back; its command then holds the rest of `uses` (test-suite here) and the suite's own
+# (decision 0130, per suite). `{project_test}` is the project file's `test` command, so the owner's
+# per-worktree CARGO_TARGET_DIR (set there, or in the environment) applies to the cargo suite.
+# `run_check` runs the suites bound to `development` that the impact map selects for the
+# worktree's changes; the project file's `test =` stays the command of any step without suites.
 [step.test]
 type = "test"
 category = "testing"
 uses = { compile = 1, test-suite = 1 }
+suites = ["cargo-workspace", "swift-clients", "compose-clients"]
 max_rounds = 3
 on_red = "develop"
 next = "land"
+
+# The workspace's tests: cargo's own lines, one test each (doc tests included).
+[suite.cargo-workspace]
+# build = "{project_test} --no-run"
+command = "{project_test}"
+rerun = "{project_test} {tests}"
+parser = "regex"
+pass_regex = '^test (.+) \.\.\. ok$'
+fail_regex = '^test (.+) \.\.\. FAILED$'
+min_tests = 100
+level = "unit"
+uses = { test-suite = 1 }
+
+[suite.swift-clients]
+# build = "cd clients/swift && swift build --build-tests"
+command = "cd clients/swift && swift build --build-tests && swift test"
+parser = "xctest"
+min_tests = 1
+level = "unit"
+uses = { test-suite = 1 }
+
+# Gradle prints a line per test only at --info.
+[suite.compose-clients]
+# build = "cd clients/compose && gradle testClasses --console=plain"
+command = "cd clients/compose && gradle test --info --console=plain"
+parser = "gradle"
+min_tests = 1
+level = "unit"
+uses = { test-suite = 1 }
+
+[binding.unit]
+when = ["development", "test_step"]
+
+# Which suites a change needs. A path no line names runs everything. Docs-only changes keep
+# the cargo suite for now: running none there would relax the gate (decision 0173).
+[impact]
+"crates/**" = ["cargo-workspace"]
+"Cargo.*" = ["cargo-workspace"]
+"rust-toolchain.toml" = ["cargo-workspace"]
+"clients/swift/**" = ["swift-clients"]
+"clients/compose/**" = ["compose-clients"]
+"clients/features.toml" = ["cargo-workspace", "swift-clients", "compose-clients"]
+"clients/tokens.toml" = ["cargo-workspace", "swift-clients", "compose-clients"]
+"schemas/**" = ["cargo-workspace", "swift-clients", "compose-clients"]
+"docs/**" = ["cargo-workspace"]
+"**/*.md" = ["cargo-workspace"]
 
 [step.land]
 type = "landing"

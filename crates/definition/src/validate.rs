@@ -185,6 +185,9 @@ fn validate_testing(def: &Definition, p: &mut Vec<Problem>) {
                 ),
             ));
         }
+        if s.build.as_deref().is_some_and(|b| b.trim().is_empty()) {
+            p.push(Problem::new(format!("{base}.build"), "must not be empty"));
+        }
         for r in s.uses.keys() {
             if !def.resources.contains_key(r) {
                 p.push(Problem::new(
