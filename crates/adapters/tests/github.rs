@@ -410,6 +410,44 @@ fn the_fake_host_merges_what_is_queued_when_it_is_green_and_drops_what_is_red() 
     assert_eq!((st.state, st.checks), (PrState::Closed, Checks::Red));
 }
 
+#[test]
+fn base_branch_runs_jobs_and_the_log_tail_come_from_recorded_responses() {
+    let g = gh("base_runs_green.json");
+    let runs = g.gh.base_runs("develop").unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(
+        (runs[0].workflow.as_str(), runs[0].conclusion.as_deref()),
+        ("CI", Some("success"))
+    );
+    // 2026-11-11T10:00:00Z
+    assert_eq!(runs[0].created_ms, 1_794_391_200_000);
+    let jobs = g.gh.run_jobs(11).unwrap();
+    assert_eq!(jobs[1].conclusion.as_deref(), Some("skipped"));
+    assert!(g.http.unused().is_empty());
+
+    let g = gh("base_runs_red.json");
+    let runs = g.gh.base_runs("develop").unwrap();
+    assert_eq!(runs[0].conclusion.as_deref(), Some("cancelled"));
+    assert_eq!(runs[1].id, 13);
+    assert_eq!(g.gh.run_jobs(13).unwrap()[0].name, "pr-gate");
+    // The redirect is followed, and the signed address gets no token.
+    assert_eq!(
+        g.gh.job_log_tail(131, 2).as_deref(),
+        Some("three\nFAILED test_x")
+    );
+    let reqs = g.http.requests();
+    assert!(!reqs[3].headers.iter().any(|(k, _)| k == "Authorization"));
+    assert!(g.http.unused().is_empty());
+}
+
+#[test]
+fn iso_times_read_as_milliseconds() {
+    use mason_adapters::github::iso_ms;
+    assert_eq!(iso_ms("1970-01-01T00:00:01Z"), 1000);
+    assert_eq!(iso_ms("2000-03-01T00:00:00Z"), 951_868_800_000);
+    assert_eq!(iso_ms("garbage"), 0);
+}
+
 // ---- the infrastructure judge (stage 153) ------------------------------------------------------
 
 fn judged_gh(entries: serde_json::Value, judge: bool) -> Gh {

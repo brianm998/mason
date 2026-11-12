@@ -14,6 +14,11 @@
 //! - `listing-status`: when present, an HTTP status code (e.g. `404`) the issue listing
 //!   answers with instead of the issues, to show a stopped poll.
 //!
+//! - `runs.json`: the array of workflow runs on the base branch, in GitHub's shape, answered at
+//!   `GET /repos/o/r/actions/runs`.
+//! - `jobs-N.json`: the array of jobs of run N, answered at `.../actions/runs/N/jobs`.
+//! - `log-N.txt`: the log of job N, answered at `.../actions/jobs/N/logs`.
+//!
 //! A comment is appended to `comments.log`; closing an issue (`PATCH`) marks it
 //! closed in `issues.json`. Every request is appended to `requests.log`.
 
@@ -150,6 +155,37 @@ fn serve(dir: &Path, stream: std::net::TcpStream) {
             }
             let _ = std::fs::write(&issues_path, issues.to_string());
             reply(&mut out, "200 OK", &[], "{}");
+        }
+        ("GET", ["repos", _, _, "actions", "runs"]) => {
+            let runs = read_json(&dir.join("runs.json"), json!([]));
+            let n = runs.as_array().map_or(0, Vec::len);
+            reply(
+                &mut out,
+                "200 OK",
+                &[],
+                &json!({"total_count": n, "workflow_runs": runs}).to_string(),
+            );
+        }
+        ("GET", ["repos", _, _, "actions", "runs", n, "jobs"]) => {
+            let jobs = read_json(&dir.join(format!("jobs-{n}.json")), json!([]));
+            let c = jobs.as_array().map_or(0, Vec::len);
+            reply(
+                &mut out,
+                "200 OK",
+                &[],
+                &json!({"total_count": c, "jobs": jobs}).to_string(),
+            );
+        }
+        ("GET", ["repos", _, _, "actions", "jobs", n, "logs"]) => {
+            match std::fs::read_to_string(dir.join(format!("log-{n}.txt"))) {
+                Ok(t) => reply(&mut out, "200 OK", &[], &t),
+                Err(_) => reply(
+                    &mut out,
+                    "404 Not Found",
+                    &[],
+                    "{\"message\":\"Not Found\"}",
+                ),
+            }
         }
         _ => reply(
             &mut out,

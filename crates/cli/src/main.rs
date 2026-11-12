@@ -2150,6 +2150,9 @@ fn main() {
                     s["thread_panics"]["last"].as_str().unwrap_or("?")
                 );
             }
+            for (name, w) in s["ci_watch"].as_object().into_iter().flatten() {
+                print_ci_watch(name, w);
+            }
             for p in s["definitions"].as_array().into_iter().flatten() {
                 let hash = p["hash"].as_str().unwrap_or("");
                 println!(
@@ -3127,4 +3130,66 @@ fn usage_text(r: &Value) -> String {
         out.push_str("no provider accounts\n");
     }
     out
+}
+
+/// The base-branch CI watch of one project, as `mason status` prints it.
+fn print_ci_watch(project: &str, w: &Value) {
+    let list = |v: &Value| {
+        v.as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let watched = list(&w["workflows"]);
+    println!(
+        "ci watch for {project}: {}{}{}",
+        if watched.is_empty() {
+            "no workflow seen yet".to_string()
+        } else {
+            format!("watching {watched}")
+        },
+        w["gate"]
+            .as_str()
+            .map_or(String::new(), |g| format!("; gate {g}")),
+        if w["excluded"].as_array().is_some_and(|e| !e.is_empty()) {
+            format!("; excluding {}", list(&w["excluded"]))
+        } else {
+            String::new()
+        }
+    );
+    if let Some(e) = w["error"].as_str() {
+        println!("  CANNOT LOOK: {e}");
+    }
+    if let Some(f) = w["freeze"].as_object() {
+        println!(
+            "  LANDING FROZEN: {} (fix task #{})",
+            f["reason"].as_str().unwrap_or("?"),
+            f["fix_task"]
+        );
+    }
+    for p in w["pending"].as_array().into_iter().flatten() {
+        println!(
+            "  red, waiting for agreement: {} ({} of {} runs)",
+            p["job"].as_str().unwrap_or("?"),
+            p["red_runs"],
+            p["agreement"]
+        );
+    }
+    for f in w["filed"].as_array().into_iter().flatten().take(5) {
+        println!(
+            "  filed: {} as {}{}{}",
+            f["job"].as_str().unwrap_or("?"),
+            f["task"]
+                .as_u64()
+                .map_or("no task".to_string(), |t| format!("#{t}")),
+            if f["urgent"] == true { " (urgent)" } else { "" },
+            if f["proposed"] == true {
+                " (proposed)"
+            } else {
+                ""
+            },
+        );
+    }
 }

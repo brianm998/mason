@@ -325,6 +325,7 @@ impl Daemon {
             crate::usage::spawn_probe(&d);
             d.spawn_watcher();
             crate::tracker::spawn(&d);
+            crate::ci_watch::spawn(&d);
             crate::introspect::spawn(&d);
             crate::selfguard::on_start(&d);
         }
