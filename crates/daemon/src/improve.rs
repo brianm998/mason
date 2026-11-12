@@ -204,7 +204,7 @@ pub fn switch_channel(d: &Arc<Daemon>, branch: &str, task: u64) -> Result<(), St
         }
     };
     if cfg.switch_takes_over {
-        crate::update::take_over(d, &sha);
+        crate::update::drain_and_take_over(d, &sha, false);
     }
     Ok(())
 }

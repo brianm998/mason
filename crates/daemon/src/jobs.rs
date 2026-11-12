@@ -383,8 +383,14 @@ fn run_inner(d: &Arc<Daemon>, task: TaskId, step: State, run: StepRunId) {
         if get_lease(&c).is_err() {
             return;
         }
-    } else if c.step.kind != StepType::Approval && builds_first(&c).is_none() {
-        // A test step with a build queues phase by phase in `command_job`.
+    } else if c.step.kind != StepType::Approval
+        && builds_first(&c).is_none()
+        && !(c.step.kind == StepType::Test
+            && !c.step.suites.is_empty()
+            && crate::suites::builds_per_suite(&c.project, &c.def, &c.step, &c.branch))
+    {
+        // A test step with a build queues phase by phase in `command_job`, and one whose
+        // suites build, suite by suite in `suites::run`.
         match acquire(&c) {
             Ok(l) => *c.lease.lock().unwrap_or_else(|e| e.into_inner()) = Some(l),
             Err(_) => return, // the task was cancelled or retried while it waited
@@ -498,7 +504,11 @@ fn wait_while_paused(c: &Ctx) -> Result<(), ()> {
                 &p.project
             };
             let on = format!("paused by {} ({} for {scope})", p.owner, p.mode);
-            if !c.emit(EventKind::WaitStarted { task: c.task, on }) {
+            if !c.emit(EventKind::WaitStarted {
+                task: c.task,
+                on,
+                class: Some("pause".into()),
+            }) {
                 return Err(());
             }
         }
@@ -539,7 +549,11 @@ fn wait_open(c: &Ctx) -> Result<(), ()> {
             Gate::Wait(on) => {
                 if !announced {
                     announced = true;
-                    if !c.emit(EventKind::WaitStarted { task: c.task, on }) {
+                    if !c.emit(EventKind::WaitStarted {
+                        task: c.task,
+                        on,
+                        class: Some("environment".into()),
+                    }) {
                         return Err(());
                     }
                 }
@@ -600,7 +614,7 @@ fn acquire(c: &Ctx) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
 }
 
 /// Wait for `needs`, ranked as this step's work.
-fn acquire_needs(
+pub(crate) fn acquire_needs(
     c: &Ctx,
     needs: mason_scheduler::Needs,
 ) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
@@ -637,6 +651,7 @@ fn acquire_needs(
             waited = c.emit(EventKind::WaitStarted {
                 task: c.task,
                 on: crate::targets::wait_text(d, &asked, why),
+                class: Some(crate::targets::wait_class(d, &asked, c.task)),
             });
         },
     )?;
@@ -850,7 +865,11 @@ pub(crate) fn wait_out_environment<T>(
                     waited = true;
                     tracing::warn!(task = c.task.0, "{what}: {e}; waiting");
                     let on = format!("git is busy or not answering ({what}): {e}");
-                    if !c.emit(EventKind::WaitStarted { task: c.task, on }) {
+                    if !c.emit(EventKind::WaitStarted {
+                        task: c.task,
+                        on,
+                        class: Some("environment".into()),
+                    }) {
                         return Err(format!("{what}: the step was superseded while waiting"));
                     }
                 }
@@ -1081,12 +1100,188 @@ struct TestChecks {
     extra: mason_adapter_api::DeadlineExtra,
     id_prefix: String,
     log_dir: PathBuf,
+    /// The test step's suites, when `run_check` runs those (some are bound to
+    /// `development`); otherwise it runs the one command.
+    suites: Option<DevSuites>,
     task: u64,
     run: u64,
 }
 
+/// What `run_check` needs to pick suites: the test step, and where the base is.
+struct DevSuites {
+    step: mason_definition::Step,
+    base_ref: String,
+}
+
+impl DevSuites {
+    fn of(def: &mason_definition::Definition, base_ref: String) -> Option<DevSuites> {
+        let step = def.steps.iter().find(|s| s.kind == StepType::Test)?;
+        let any = def
+            .testing
+            .bound(mason_testing::When::Development)
+            .iter()
+            .any(|s| step.suites.contains(&s.name));
+        (!step.suites.is_empty() && any).then(|| DevSuites {
+            step: step.clone(),
+            base_ref,
+        })
+    }
+}
+
+impl TestChecks {
+    /// `run_check` on a suites step: the suites bound to `development` that the impact map
+    /// selects for the worktree's changes, each after its own build, reported one by one.
+    fn run_suites(&self, dev: &DevSuites) -> CheckRun {
+        use std::collections::BTreeMap;
+        let over = || CheckRun::Done {
+            passed: false,
+            summary: "The step is over; the check did not run.".into(),
+        };
+        let def = self.slots.def.clone();
+        let paths = crate::suites::worktree_paths(&self.wt, &dev.base_ref);
+        let sels =
+            crate::suites::plan_for(&def, &dev.step, paths, mason_testing::When::Development);
+        let project_test = self.cmd.as_ref().map(|c| c.test.as_str());
+        let tree = crate::hostedcheck::tree_key(&self.wt);
+        let spec = |prefix: String, cmd: &str, uses: &BTreeMap<String, u32>, limit: Duration| {
+            crate::hostedcheck::CheckSpec {
+                id_prefix: prefix,
+                log_dir: self.log_dir.clone(),
+                cmd: cmd.to_string(),
+                cwd: self.wt.clone(),
+                env: vec![("MASON_HELD".to_string(), held_text(uses))],
+                limit,
+                tree: tree.clone(),
+            }
+        };
+        let mut lines: Vec<String> = vec![];
+        let mut failed = false;
+        let mut built: Vec<(String, bool)> = vec![];
+        let mut any = false;
+        for sel in &sels {
+            if !sel.selected {
+                lines.push(format!("{}: not run, {}", sel.suite.name, sel.why));
+                continue;
+            }
+            any = true;
+            let name = sel.suite.name.clone();
+            let suite = match crate::suites::with_project_test(&sel.suite, project_test) {
+                Ok(s) => s,
+                Err(why) => {
+                    failed = true;
+                    lines.push(format!("{name}: FAILED, {why}"));
+                    continue;
+                }
+            };
+            let limit = suite.timeout.unwrap_or(self.timeout).min(self.timeout);
+            if let Some(b) = &suite.build {
+                let known = built.iter().find(|(c, _)| c == b).map(|(_, ok)| *ok);
+                let ok = match known {
+                    Some(ok) => {
+                        if !ok {
+                            lines.push(format!("{name}: FAILED, the build it shares failed"));
+                        }
+                        ok
+                    }
+                    None => {
+                        let bspec = spec(
+                            format!("{}-{name}-build", self.id_prefix),
+                            b,
+                            &build_uses(),
+                            limit,
+                        );
+                        let queue = !crate::hostedcheck::pending(&self.slots.d, &bspec);
+                        let queued = Instant::now();
+                        let swapped = self.slots.swap_for(queue, &build_uses());
+                        self.extra.add(queued.elapsed());
+                        let Ok(lease) = swapped else {
+                            return over();
+                        };
+                        let res = crate::hostedcheck::run(&self.slots.d, &bspec);
+                        drop(lease);
+                        let ok = matches!(&res, Ok(o) if o.passed);
+                        if !ok {
+                            lines.push(match &res {
+                                Ok(o) => format!(
+                                    "{name}: FAILED, its build {}. Last output:\n{}",
+                                    if o.timed_out { "timed out" } else { "failed" },
+                                    o.output
+                                ),
+                                Err(e) => format!("{name}: FAILED, its build gave no result: {e}"),
+                            });
+                        }
+                        built.push((b.clone(), ok));
+                        ok
+                    }
+                };
+                if !ok {
+                    failed = true;
+                    continue;
+                }
+            }
+            let mut uses = if suite.build.is_some() {
+                tests_uses(&self.slots.test_uses)
+            } else {
+                self.slots.test_uses.clone()
+            };
+            for (k, v) in &suite.uses {
+                if !k.starts_with("device:") && !k.starts_with("llm:") {
+                    let have = uses.entry(k.clone()).or_insert(0);
+                    *have = (*have).max(*v);
+                }
+            }
+            let rspec = spec(
+                format!("{}-{name}", self.id_prefix),
+                &suite.command,
+                &uses,
+                limit,
+            );
+            let queue = !crate::hostedcheck::pending(&self.slots.d, &rspec);
+            let queued = Instant::now();
+            let swapped = self.slots.swap_for(queue, &uses);
+            self.extra.add(queued.elapsed());
+            let Ok(lease) = swapped else {
+                return over();
+            };
+            let res = crate::hostedcheck::run(&self.slots.d, &rspec);
+            drop(lease);
+            match res {
+                Ok(o) if o.passed => lines.push(format!("{name}: passed")),
+                Ok(o) => {
+                    failed = true;
+                    lines.push(format!(
+                        "{name}: FAILED{}. Last output:\n{}",
+                        if o.timed_out { " (timed out)" } else { "" },
+                        o.output
+                    ));
+                }
+                Err(e) => {
+                    failed = true;
+                    lines.push(format!("{name}: FAILED, no result: {e}"));
+                }
+            }
+        }
+        self.slots.take_agent_slot_back();
+        if !any {
+            lines.insert(
+                0,
+                "No suite is selected for your changes, so none ran.".into(),
+            );
+        }
+        CheckRun::Done {
+            passed: !failed,
+            summary: lines.join("\n"),
+        }
+    }
+}
+
 impl CheckHandler for TestChecks {
     fn run(&self, name: &str) -> CheckRun {
+        if name == "tests" {
+            if let Some(dev) = &self.suites {
+                return self.run_suites(dev);
+            }
+        }
         let (true, Some(cmds)) = (name == "tests", &self.cmd) else {
             return CheckRun::Unknown;
         };
@@ -1285,6 +1480,7 @@ impl CheckSlots {
                     EventKind::WaitStarted {
                         task,
                         on: crate::targets::wait_text(d, &asked, why),
+                        class: Some(crate::targets::wait_class(d, &asked, task)),
                     },
                 );
             },
@@ -1617,6 +1813,7 @@ fn agent_job(c: &Ctx) {
         extra: deadline_extra.clone(),
         id_prefix: format!("t{}r{}-check", c.task.0, c.run.0),
         log_dir: c.task_dir(),
+        suites: DevSuites::of(&c.def, c.project.base_ref()),
         task: c.task.0,
         run: c.run.0,
     });
@@ -1703,6 +1900,10 @@ fn agent_job(c: &Ctx) {
         spec.on_model = Some(Arc::new(move |m| {
             let _ = d.store.set_reported_model(run, m);
         }));
+    }
+    {
+        let (d, acct, task) = (c.d.clone(), c.project.account.clone(), c.task.0);
+        spec.on_live = Some(Arc::new(move || crate::holds::probe_ok(&d, &acct, task)));
     }
     spec.env = c.project.agent_env.clone();
     // Whoever the agent runs `mason run` for: it ranks the request as this
@@ -2781,6 +2982,7 @@ fn approval_job(c: &Ctx) {
         && !c.emit(EventKind::WaitStarted {
             task: c.task,
             on: APPROVAL_WAIT.into(),
+            class: Some("approval".into()),
         })
     {
         return;

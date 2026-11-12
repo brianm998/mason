@@ -103,6 +103,7 @@ fn events(t: TaskId, other: TaskId, decision: DecisionId) -> Vec<(&'static str, 
             E::WaitStarted {
                 task: t,
                 on: "slot".into(),
+                class: None,
             },
         ),
         ("WaitEnded", E::WaitEnded { task: t }),

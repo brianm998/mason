@@ -128,6 +128,7 @@ fn script() -> Vec<Vec<EventKind>> {
             EventKind::WaitStarted {
                 task: TaskId(1),
                 on: wait.into(),
+                class: None,
             },
         ],
         vec![EventKind::StepFailed {

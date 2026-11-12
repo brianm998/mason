@@ -516,7 +516,7 @@ fn apply(w: &mut World, k: &EventKind, fx: &mut Vec<Effect>) -> Result<(), Reduc
             }
             w.tasks.get_mut(task).expect("exists").paused = false;
         }
-        E::WaitStarted { task, on } => {
+        E::WaitStarted { task, on, class } => {
             let from = get(w, *task)?.state;
             if !from.is_step() {
                 return Err(illegal(from, k));
@@ -527,6 +527,7 @@ fn apply(w: &mut World, k: &EventKind, fx: &mut Vec<Effect>) -> Result<(), Reduc
                 Wait {
                     task: *task,
                     on: on.clone(),
+                    class: class.clone(),
                     since,
                 },
             );

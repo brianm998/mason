@@ -135,7 +135,7 @@ mason: command-line client for the MASON pipeline
   mason proposal publish <id> --preview | --confirm   send an improvement upstream, redacted
   mason proposal poll                 look at the upstream pull requests now
   mason improve \"<what to improve>\" [--project P]   ask MASON to change its own code
-  mason update [--channel stable|main|branch:X | --sha S] [--rollback] [--check]
+  mason update [--channel stable|main|branch:X | --sha S] [--rollback] [--check] [--now]
   mason update status | ack           the runtimes, a rollback alert, an update in progress
   mason config show [--project P]     every step's settings and where each came from
   mason config set <key> <value> --for 2h [--project P] [--owner O]
@@ -1626,13 +1626,15 @@ fn main() {
                     println!("acknowledged");
                 }
                 _ => {
-                    // `mason update [--channel C | --sha S] [--rollback] [--check]`
+                    // `mason update [--channel C | --sha S] [--rollback] [--check] [--now]`
                     let channel = a.opt("--channel");
                     let sha = a.opt("--sha");
                     let rollback = a.flag("--rollback");
                     let check = a.flag("--check");
+                    // Take over at once, abandoning any landing batch still running.
+                    let now = a.flag("--now");
                     finish(&a);
-                    let mut body = json!({"rollback": rollback, "check": check});
+                    let mut body = json!({"rollback": rollback, "check": check, "now": now});
                     if let Some(c) = channel {
                         body["channel"] = json!(c);
                     }
@@ -1654,11 +1656,11 @@ fn main() {
                         .and_then(|v| v.parse().ok())
                         .unwrap_or(30);
                     let mut down_since: Option<std::time::Instant> = None;
-                    let end = std::time::Instant::now() + std::time::Duration::from_secs(3600);
+                    let end = std::time::Instant::now() + std::time::Duration::from_secs(7800);
                     loop {
                         std::thread::sleep(std::time::Duration::from_millis(500));
                         if std::time::Instant::now() > end {
-                            die("gave up waiting after an hour");
+                            die("gave up waiting after two hours");
                         }
                         let Ok(r) = d.call("GET", "/update", None) else {
                             seen_down = true; // the daemon is being replaced
@@ -3066,16 +3068,31 @@ fn print_digest(r: &serde_json::Value) {
         ),
     }
     println!("Tokens per landed task: not recorded");
-    for (title, key) in [
-        ("Time by state", "time_by_state_ms"),
-        ("Waiting, by reason", "wait_by_reason_ms"),
-    ] {
-        println!("{title}:");
-        if let Some(m) = r[key].as_object() {
-            for (k, v) in m {
-                println!("  {k:<20} {}", ms_text(v.as_u64().unwrap_or(0)));
-            }
+    println!("Time by state:");
+    if let Some(m) = r["time_by_state_ms"].as_object() {
+        for (k, v) in m {
+            println!("  {k:<20} {}", ms_text(v.as_u64().unwrap_or(0)));
         }
+    }
+    println!("Waiting, by what was waited for:");
+    for row in r["wait_by_class"].as_array().cloned().unwrap_or_default() {
+        let count = row["count"]
+            .as_u64()
+            .map_or("-".to_string(), |c| c.to_string());
+        let longest = match (row["longest_ms"].as_u64(), row["longest_task"].as_u64()) {
+            (Some(ms), Some(t)) => format!("longest {} (#{t})", ms_text(ms)),
+            _ => String::new(),
+        };
+        let share = row["share"]
+            .as_f64()
+            .map_or(String::new(), |s| format!("{:.0}% of task time", s * 100.0));
+        println!(
+            "  {:<12} {:<22} {:>4} wait(s)  total {:<7} {longest}  {share}",
+            row["project"].as_str().unwrap_or("?"),
+            row["class"].as_str().unwrap_or("?"),
+            count,
+            ms_text(row["total_ms"].as_u64().unwrap_or(0)),
+        );
     }
     let ex = &r["exploring"];
     println!(

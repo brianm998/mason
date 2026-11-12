@@ -58,6 +58,9 @@ impl ParserKind {
 pub struct Suite {
     pub name: String,
     pub command: String,
+    /// Run first, holding one `compile` slot, which it gives back before `command` runs
+    /// (decision 0130, per suite). Suites with the same build command share one build.
+    pub build: Option<String>,
     pub parser: ParserKind,
     /// At least this many tests must execute (and never fewer than one).
     pub min_tests: u32,
@@ -93,6 +96,7 @@ impl Suite {
         Suite {
             name: name.into(),
             command: command.into(),
+            build: None,
             parser,
             min_tests: 1,
             level: String::new(),

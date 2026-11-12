@@ -206,7 +206,11 @@ fn wait_for_owner(c: &Ctx, why: &str, hash: &str) -> Gate {
         &format!("Task #{} changes MASON's own rules and waits for your approval: {why}. Approve with `mason task approve {}`.", c.task.0, c.task.0),
     );
     d.poke();
-    let waited = c.emit(EventKind::WaitStarted { task: c.task, on });
+    let waited = c.emit(EventKind::WaitStarted {
+        task: c.task,
+        on,
+        class: Some("approval".into()),
+    });
     let result = loop {
         std::thread::sleep(Duration::from_millis(300));
         if !matches!(d.world(), Ok(w) if w.open_run(c.task) == Some(c.run)) {

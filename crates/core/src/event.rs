@@ -129,6 +129,8 @@ pub enum EventKind {
     WaitStarted {
         task: TaskId,
         on: String,
+        /// What was waited for, for totals (see `wait_class`). Absent in old logs.
+        class: Option<String>,
     },
     WaitEnded {
         task: TaskId,

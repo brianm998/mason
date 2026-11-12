@@ -1172,3 +1172,14 @@ fn the_ci_watch_state_is_kept_per_project() {
     assert_eq!(s.ci_watch_state("p").unwrap().as_deref(), Some("b"));
     assert_eq!(s.ci_watch_state("q").unwrap(), None);
 }
+
+#[test]
+fn the_first_landing_submission_of_a_run_is_remembered() {
+    let (_d, p) = db();
+    let s = Store::open(&p).unwrap();
+    assert_eq!(s.first_landing_submit(7, 3, 1_000).unwrap(), 1_000);
+    assert_eq!(s.first_landing_submit(7, 3, 9_000).unwrap(), 1_000);
+    // Another run of the same task, and another task, have their own.
+    assert_eq!(s.first_landing_submit(7, 4, 9_000).unwrap(), 9_000);
+    assert_eq!(s.first_landing_submit(8, 3, 5_000).unwrap(), 5_000);
+}

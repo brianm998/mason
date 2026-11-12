@@ -14,6 +14,7 @@ use toml_edit::{DocumentMut, Item};
 
 pub const SUITE_KEYS: &[&str] = &[
     "command",
+    "build",
     "parser",
     "min_tests",
     "level",
@@ -157,6 +158,7 @@ pub fn parse(doc: &DocumentMut, out: &mut Vec<Problem>) -> Testing {
                     Some(n) if (0..=i64::from(u32::MAX)).contains(&n) => s.min_tests = n as u32,
                     _ => out.push(Problem::new(&path, "must be a whole number")),
                 },
+                "build" => s.build = string(v, &path, out),
                 "level" => s.level = string(v, &path, out).unwrap_or_default(),
                 "uses" => s.uses = uses(v, &path, out),
                 "env" => s.env = string(v, &path, out).unwrap_or_default(),
