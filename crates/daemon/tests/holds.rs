@@ -588,10 +588,13 @@ fn an_accepted_probe_whose_session_later_ends_not_logged_in_puts_the_hold_back()
     let go = s.script.parent().unwrap().join("go");
     cred_script(
         &s,
-        vec![
-            login_refusal(),
-            accepted_then_blocked(&go, vec![login_refusal()]),
-        ],
+        // Refused again after that, so the hold stays back for the test to see.
+        [
+            vec![login_refusal()],
+            vec![accepted_then_blocked(&go, vec![login_refusal()])],
+            vec![login_refusal(); 6],
+        ]
+        .concat(),
     );
     let d = s.start();
     let _a = file_task(&d, "Accepted then refused");
