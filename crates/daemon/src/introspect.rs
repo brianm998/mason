@@ -1156,12 +1156,23 @@ pub fn health(d: &Daemon) -> Value {
         .map(|t| json!({"id": t.id, "task": t.task, "question": t.question, "action": t.action, "answer": t.answer, "evidence": t.evidence}))
         .collect();
     let triage_on = d.projects.values().any(|p| p.introspect().triage.enabled);
+    // Tests that flaked in the last 7 days (the suites path and a test command's reruns
+    // both record them), with how many times.
+    let mut flaky: BTreeMap<String, u64> = BTreeMap::new();
+    for (suite, test, _) in d
+        .store
+        .flaky_since(now.saturating_sub(7 * DAY_MS))
+        .unwrap_or_default()
+    {
+        *flaky.entry(format!("{suite}::{test}")).or_default() += 1;
+    }
     json!({
         "at": now,
         "stall_watch": {
             "sigconts": d.stall_conts.load(std::sync::atomic::Ordering::SeqCst),
             "kills": d.stall_kills.load(std::sync::atomic::Ordering::SeqCst),
         },
+        "flaky": flaky,
         "last_cycle": d.intro.last.lock().unwrap_or_else(|e| e.into_inner()).clone(),
         "schedules": sched,
         "findings": findings,
