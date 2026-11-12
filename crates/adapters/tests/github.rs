@@ -410,7 +410,6 @@ fn the_fake_host_merges_what_is_queued_when_it_is_green_and_drops_what_is_red() 
     assert_eq!((st.state, st.checks), (PrState::Closed, Checks::Red));
 }
 
-<<<<<<< HEAD
 #[test]
 fn base_branch_runs_jobs_and_the_log_tail_come_from_recorded_responses() {
     let g = gh("base_runs_green.json");

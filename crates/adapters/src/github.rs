@@ -590,36 +590,10 @@ impl GitHub {
     /// The last `lines` lines of a job's log. GitHub answers with a redirect to a signed
     /// address, which is read without the token. Best effort: `None` if it cannot be read.
     pub fn job_log_tail(&self, job: u64, lines: usize) -> Option<String> {
-        let first = self
-            .send_raw(Request::get(
-                &self.url(&format!("/actions/jobs/{job}/logs")),
-            ))
-            .ok()?;
-        let resp = if (300..400).contains(&first.status) {
-            let to = first.header("location")?.to_string();
-            self.http.send(&Request::get(&to)).ok()?
-        } else {
-            first
-        };
-        if !(200..300).contains(&resp.status) {
-            return None;
-        }
-        let all: Vec<&str> = resp.body.lines().collect();
+        let body = self.job_log(job)?;
+        let all: Vec<&str> = body.lines().collect();
         let tail = all[all.len().saturating_sub(lines)..].join("\n");
         (!tail.trim().is_empty()).then_some(tail)
-    }
-
-    /// Like `send`, but a redirect is an answer, not an error.
-    fn send_raw(&self, r: Request) -> Result<Response, ApiError> {
-        let token = self.token.read()?;
-        let r = r
-            .with("Authorization", &format!("Bearer {token}"))
-            .with("Accept", "application/vnd.github+json")
-            .with("X-GitHub-Api-Version", "2022-11-28")
-            .with("User-Agent", "mason");
-        self.http
-            .send(&r)
-            .map_err(|e| ApiError::new(ErrorKind::Unavailable, e.to_string()))
     }
 }
 
