@@ -276,14 +276,14 @@ pub fn state_line(d: &Daemon, pid: ProjectId) -> String {
 
 /// Start the polling thread if any project has a tracker.
 pub fn spawn(d: &Arc<Daemon>) {
-    if !d.projects.values().any(|p| p.services.tracker.is_some()) {
+    if !d.projects().values().any(|p| p.services.tracker.is_some()) {
         return;
     }
     crate::bg::spawn_loop(d, "tracker", move |weak| {
         let Some(d) = weak.upgrade() else {
             return false;
         };
-        for (pid, p) in &d.projects {
+        for (pid, p) in &d.projects() {
             let Ok(Some((adapter, cfg))) = crate::services::tracker(p) else {
                 continue;
             };

@@ -328,3 +328,28 @@ fn pty_is_a_bool_on_a_suite_and_a_step_and_off_when_absent() {
         assert!(p.iter().any(|x| x.contains("pty")), "{p:?}");
     }
 }
+
+#[test]
+fn suites_bound_to_the_test_step_but_not_listed_warn() {
+    let warn = |t: &str| validate::warnings(&parse(t).unwrap(), &Capabilities::now());
+    let bare = BASE.replace("suites = [\"unit\", \"e2e\"]\n", "");
+    let w = warn(&bare);
+    assert_eq!(w.len(), 1, "{w:?}");
+    assert!(w[0].message.contains("`test`") && w[0].message.contains("`unit`"));
+    assert!(!w[0].message.contains("`e2e`"), "{w:?}");
+    assert!(warn(
+        &bare
+            .replace("type = \"test\"", "type = \"test\"\nsuites = [\"a\"]")
+            .replace(
+                "[suite.unit]",
+                "[suite.a]\ncommand = \"x\"\nparser = \"nextest\"\nlevel = \"unit\"\n[suite.unit]"
+            )
+    )
+    .is_empty());
+    assert!(warn(BASE).is_empty());
+    let unbound = bare.replace(
+        "when = [\"development\", \"test_step\"]",
+        "when = [\"development\"]",
+    );
+    assert!(warn(&unbound).is_empty());
+}

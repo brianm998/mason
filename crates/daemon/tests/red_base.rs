@@ -85,7 +85,10 @@ fn a_job_green_on_the_base_is_the_batchs() {
 #[test]
 fn a_new_failing_test_on_a_red_job_is_the_batchs() {
     let b = base("failure", &failed("['.mason']"));
-    let log = format!("{}\nFAILED tests/t.py::test_new - assert 0", failed("['.mason']"));
+    let log = format!(
+        "{}\nFAILED tests/t.py::test_new - assert 0",
+        failed("['.mason']")
+    );
     assert_eq!(assess(&b, "develop", &batch(&log)), Verdict::Blame);
 }
 
@@ -96,7 +99,10 @@ fn the_same_test_with_other_text_is_held_with_both_texts() {
     let Verdict::Differs(t) = v else {
         panic!("{v:?}")
     };
-    assert!(t.contains("['.mason', 'scripts']") && t.contains("['.mason']"), "{t}");
+    assert!(
+        t.contains("['.mason', 'scripts']") && t.contains("['.mason']"),
+        "{t}"
+    );
 }
 
 #[test]

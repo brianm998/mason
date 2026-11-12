@@ -620,5 +620,79 @@ fn with_the_judge_off_nothing_is_judged_but_the_log_is_kept_for_the_task() {
     let jobs = jobs_of(g.gh.status("sha1").unwrap());
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0].infra, None, "nothing is judged with the judge off");
-    assert!(jobs[0].log.as_deref().unwrap().contains("FAILED t.py::test_x"));
+    assert!(jobs[0]
+        .log
+        .as_deref()
+        .unwrap()
+        .contains("FAILED t.py::test_x"));
+}
+
+// ---- scheduled CI runs (stage 175) -------------------------------------------------------------
+
+#[test]
+fn a_workflow_is_dispatched_with_inputs_and_its_runs_and_rerun_come_from_recorded_responses() {
+    use serde_json::json;
+    let entries = json!([
+        {"method": "POST", "url": "/actions/workflows/gherkin.yml/dispatches",
+         "response": {"status": 204, "headers": {}, "body": ""}},
+        {"method": "POST", "url": "/actions/workflows/gherkin.yml/dispatches",
+         "response": {"status": 204, "headers": {}, "body": ""}},
+        {"method": "GET", "url": "/actions/workflows/gherkin.yml/runs?branch=develop&exclude_pull_requests=true&per_page=100",
+         "response": ok(json!({"workflow_runs": [
+            {"id": 8, "name": "Gherkin", "head_sha": "aaa", "html_url": "https://github.com/o/r/actions/runs/8",
+             "created_at": "2026-11-11T10:00:00Z", "status": "completed", "conclusion": "failure",
+             "event": "workflow_dispatch", "display_title": "Gherkin: full", "run_attempt": 2},
+            {"id": 9, "name": "Gherkin", "head_sha": "bbb", "created_at": "2026-11-11T11:00:00Z",
+             "status": "in_progress", "conclusion": null, "event": "push", "display_title": "x"}
+         ]}))},
+        {"method": "POST", "url": "/actions/runs/8/rerun-failed-jobs",
+         "response": {"status": 201, "headers": {}, "body": "{}"}},
+        {"method": "POST", "url": "/actions/runs/9/rerun-failed-jobs",
+         "response": {"status": 403, "headers": {}, "body": "{\"message\": \"Resource not accessible\"}"}},
+    ]);
+    let g = judged_gh(entries, false);
+    g.gh.dispatch_workflow(
+        "gherkin.yml",
+        "develop",
+        &[("features".to_string(), String::new())],
+    )
+    .unwrap();
+    g.gh.dispatch_workflow("gherkin.yml", "develop", &[])
+        .unwrap();
+    let runs = g.gh.workflow_file_runs("gherkin.yml", "develop").unwrap();
+    // Newest first, finished or not, with the event, run-name and attempt.
+    assert_eq!(runs.iter().map(|r| r.id).collect::<Vec<_>>(), [9, 8]);
+    assert_eq!(
+        (
+            runs[0].status.as_str(),
+            runs[0].conclusion.as_deref(),
+            runs[0].attempt
+        ),
+        ("in_progress", None, 1)
+    );
+    assert_eq!(
+        (
+            runs[1].event.as_str(),
+            runs[1].title.as_str(),
+            runs[1].attempt
+        ),
+        ("workflow_dispatch", "Gherkin: full", 2)
+    );
+    assert_eq!(runs[1].created_ms, 1_794_391_200_000);
+    g.gh.rerun_failed(8).unwrap();
+    assert!(g.gh.rerun_failed(9).is_err());
+    let reqs = g.http.requests();
+    let body = |i: usize| -> serde_json::Value {
+        serde_json::from_str(reqs[i].body.as_deref().unwrap()).unwrap()
+    };
+    assert_eq!(
+        body(0),
+        json!({"ref": "develop", "inputs": {"features": ""}})
+    );
+    assert_eq!(
+        body(1),
+        json!({"ref": "develop"}),
+        "no inputs, no inputs key"
+    );
+    assert!(g.http.unused().is_empty());
 }

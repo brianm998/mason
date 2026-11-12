@@ -16,7 +16,7 @@ fn failing_fetches_alert_after_the_limit_and_a_good_fetch_clears_it() {
         c.fetch_interval = Duration::from_secs(3600);
         c.fetch_alert_after = Duration::from_secs(2);
     });
-    let pid = *d.projects.keys().next().unwrap();
+    let pid = *d.projects().keys().next().unwrap();
     let has = |d: &std::sync::Arc<mason_daemon::Daemon>| {
         mason_daemon::attention::sync_alerts(d);
         d.store

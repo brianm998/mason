@@ -180,7 +180,10 @@ mod tests {
         let Verdict::Differs(t) = v else {
             panic!("{v:?}")
         };
-        assert!(t.contains("['.mason', 'scripts']") && t.contains("['.mason']"), "{t}");
+        assert!(
+            t.contains("['.mason', 'scripts']") && t.contains("['.mason']"),
+            "{t}"
+        );
     }
 
     #[test]

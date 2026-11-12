@@ -89,6 +89,10 @@ fun MonitorModel.visibleItems(): List<Item> {
         out += Item("status", listOf(if (connected) h.status else "Not connected"))
         h.counts.forEachIndexed { i, c -> out += Item("tile:${c.state}", listOf(tileCount(c), tileLabel(c)), order = i) }
         h.banners.forEachIndexed { i, b -> out += Item("banner:$i", listOf(b.text), order = i) }
+        // A refused push holds landing: the banner offers the action that fixes it.
+        h.banners.filter { it.kind == "push_auth" }.forEach { b ->
+            out += Item("action:push-auth:${MonitorModel.pushAuthProject(b)}", listOf("Choose SSH key…"), order = 0)
+        }
         // Issues the tracker has not imported: a count tile and a list, only while true.
         if (h.pending_issues.isNotEmpty()) {
             out += Item("tile:not_imported", listOf(h.pending_issues.size.toString(), "not imported"), order = h.counts.size)
