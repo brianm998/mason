@@ -133,6 +133,7 @@ fn script() -> Vec<Vec<EventKind>> {
         vec![EventKind::StepFailed {
             task: TaskId(3),
             reason: "the agent ended its turn 3 times without submitting".into(),
+            class: None,
         }],
         vec![
             next(0, "test", State::Testing),

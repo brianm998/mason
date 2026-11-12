@@ -101,6 +101,8 @@ pub enum EventKind {
     StepFailed {
         task: TaskId,
         reason: String,
+        /// Whether the failure is about the code (`None`: not classified).
+        class: Option<FailClass>,
     },
     /// Re-enter a step. Brings the branch up to date with the base first.
     Retried {

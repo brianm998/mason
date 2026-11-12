@@ -2442,6 +2442,9 @@ fn main() {
                     }
                     if let Some(f) = t["failure"].as_str() {
                         println!("  failed    {f}");
+                        if let Some(to) = t["retry_to"].as_str() {
+                            println!("  retry     goes to `{to}`");
+                        }
                     }
                     for l in t["host_losses"].as_array().into_iter().flatten() {
                         println!(
@@ -2588,8 +2591,15 @@ fn main() {
                     let id = task_id(&mut a);
                     let from = a.opt("--from");
                     finish(&a);
-                    // Without --from the daemon picks: the step a lost host
-                    // interrupted, otherwise developing.
+                    // Without --from the daemon picks: the failed step when the
+                    // failure was not about the code, otherwise developing. Say
+                    // which before sending.
+                    if from.is_none() {
+                        let t = or_die(d.call("GET", &format!("/tasks/{id}"), None));
+                        if let Some(to) = t["retry_to"].as_str() {
+                            println!("Task #{id} will retry from `{to}`");
+                        }
+                    }
                     let body = from.as_ref().map_or(json!({}), |f| json!({"to": f}));
                     let r = or_die(d.call("POST", &format!("/tasks/{id}/retry"), Some(&body)));
                     println!(
