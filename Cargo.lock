@@ -812,6 +812,7 @@ dependencies = [
  "mason-resources",
  "mason-step-host",
  "mason-testing",
+ "nix",
  "serde_json",
  "tempfile",
  "toml_edit",

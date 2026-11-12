@@ -298,3 +298,33 @@ fn the_device_sample_definition_is_valid_and_gets_the_mobile_signatures() {
         .iter()
         .any(|s| s.name == "expired-certificate"));
 }
+
+#[test]
+fn pty_is_a_bool_on_a_suite_and_a_step_and_off_when_absent() {
+    let d = parse(BASE).unwrap();
+    assert!(!d.testing.suite("unit").unwrap().pty);
+    assert!(!d.step("test").unwrap().pty);
+    let on = with(
+        "level = \"unit\"\nuses",
+        "level = \"unit\"\npty = true\nuses",
+    );
+    assert!(parse(&on).unwrap().testing.suite("unit").unwrap().pty);
+    let step = with(
+        "gates = [\"assertion_scan\"]",
+        "gates = [\"assertion_scan\"]\npty = true",
+    );
+    assert!(parse(&step).unwrap().step("test").unwrap().pty);
+    for bad in [
+        with(
+            "level = \"unit\"\nuses",
+            "level = \"unit\"\npty = \"yes\"\nuses",
+        ),
+        with(
+            "gates = [\"assertion_scan\"]",
+            "gates = [\"assertion_scan\"]\npty = 1",
+        ),
+    ] {
+        let p = problems(&bad);
+        assert!(p.iter().any(|x| x.contains("pty")), "{p:?}");
+    }
+}

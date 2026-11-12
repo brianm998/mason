@@ -131,6 +131,8 @@ pub struct Step {
     /// step holds one `compile` slot. The tests then run holding the step's
     /// `uses` without `compile`, so a long test run does not keep a build slot.
     pub build: Option<String>,
+    /// Run the command on a pseudo-terminal (see the suite key of the same name).
+    pub pty: bool,
     pub suites: Vec<String>,
     pub when: Option<String>,
     pub uses: BTreeMap<String, u32>,
@@ -167,6 +169,7 @@ impl Step {
             read_only: None,
             command: None,
             build: None,
+            pty: false,
             suites: vec![],
             when: None,
             uses: BTreeMap::new(),
