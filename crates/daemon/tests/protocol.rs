@@ -437,6 +437,7 @@ fn the_sidebar_is_in_queue_order_and_the_rest_newest_entry_first() {
         d.emit(EventKind::StepFailed {
             task: TaskId(t),
             reason: "x".into(),
+            class: None,
         })
         .unwrap();
     }
@@ -572,6 +573,7 @@ fn the_sidebar_is_in_queue_order_and_the_rest_newest_entry_first() {
     d.emit(EventKind::StepFailed {
         task: TaskId(9),
         reason: "x".into(),
+        class: None,
     })
     .unwrap();
     assert_eq!(

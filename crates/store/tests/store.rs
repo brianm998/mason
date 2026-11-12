@@ -143,6 +143,7 @@ fn run_scenario(s: &Store, attempts: u64) -> u64 {
             12 => EventKind::StepFailed {
                 task,
                 reason: "x".into(),
+                class: None,
             },
             _ => match rnd(3) {
                 0 => EventKind::Retried {

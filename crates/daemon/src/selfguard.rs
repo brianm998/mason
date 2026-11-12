@@ -670,6 +670,7 @@ mod tests {
             decision: None,
             cancel_keeps_branch: true,
             failure: None,
+            failure_class: None,
             def: String::new(),
             step: String::new(),
             step_attempts: Default::default(),
