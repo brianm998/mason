@@ -116,7 +116,17 @@ fn a_tree_waiting_on_a_lease_is_never_killed_while_it_waits() {
     d.broker.lease_poll(holder);
 
     let t = file_task(&d, "Waits its turn");
-    wait_for("the script to start", 120, || pid_file.exists());
+    wait_for("the script to start", 120, || {
+        assert!(
+            !matches!(
+                state_of(&d, t),
+                State::Failed | State::Canceled | State::Landed
+            ),
+            "the task ended before the script ran\n{}",
+            dump(&d, t)
+        );
+        pid_file.exists()
+    });
     let pid: u32 = std::fs::read_to_string(&pid_file)
         .unwrap()
         .trim()
