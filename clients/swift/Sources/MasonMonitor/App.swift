@@ -27,15 +27,23 @@ final class Session: ObservableObject {
             if let s = NSSound(named: NSSound.Name("Glass")) { s.play() } else { NSSound.beep() }
         }
         model.copier = { copyToPasteboard($0) }
-        model.launcher = { Self.openTerminal(running: $0) }
+        model.launcher = { [weak model] argv in
+            Self.openTerminal(running: argv) { line in
+                // Terminal refused the file after the launcher said yes: fall back to copying.
+                model?.copier?(line)
+                model?.sessionNotice = OpenSession.copiedNotice(line)
+            }
+        }
         pulse = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak model] _ in
             Task { @MainActor in model?.pulse() }
         }
     }
 
     /// A Terminal window running `argv`: a temporary .command file, which Terminal opens. False
-    /// when the file could not be written or opened. The caller copies the command then.
-    static func openTerminal(running argv: [String]) -> Bool {
+    /// when the file could not be written or Terminal is missing; the caller copies the command
+    /// then. Opening is asynchronous, so a later refusal calls `failed` on the main queue with
+    /// the command line instead.
+    static func openTerminal(running argv: [String], failed: @escaping @MainActor (String) -> Void) -> Bool {
         let line = argv.map { "'" + $0.replacingOccurrences(of: "'", with: "'\\''") + "'" }.joined(separator: " ")
         let dir = FileManager.default.temporaryDirectory
         let file = dir.appendingPathComponent("mason-open-\(UUID().uuidString).command")
@@ -45,8 +53,16 @@ final class Session: ObservableObject {
             try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: file.path)
         } catch { return false }
         let terminal = URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app")
-        let ok = NSWorkspace.shared.open([file], withApplicationAt: terminal, configuration: NSWorkspace.OpenConfiguration())
-        return ok
+        guard FileManager.default.fileExists(atPath: terminal.path) else {
+            try? FileManager.default.removeItem(at: file)
+            return false
+        }
+        NSWorkspace.shared.open([file], withApplicationAt: terminal, configuration: NSWorkspace.OpenConfiguration()) { _, error in
+            guard error != nil else { return }
+            try? FileManager.default.removeItem(at: file)
+            DispatchQueue.main.async { MainActor.assumeIsolated { failed(line) } }
+        }
+        return true
     }
 
     /// The daemon has built a new monitor at `path`: put it where this one is, so
