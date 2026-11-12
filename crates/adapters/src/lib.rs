@@ -2,6 +2,7 @@
 
 //! Built-in adapters and the step runner.
 
+pub mod ci_infra;
 pub mod claude;
 pub mod codex;
 pub mod devices;
