@@ -85,11 +85,13 @@ fn a_tree_waiting_on_a_lease_is_never_killed_while_it_waits() {
     let work = tempfile::tempdir().unwrap();
     let pid_file = work.path().join("pid");
     let sleep_file = work.path().join("sleeper");
+    let go_file = work.path().join("go");
     let (_s, d) = world(
         work.path(),
         &format!(
-            "echo $$ > {p}.tmp; mv {p}.tmp {p}; sleep 600 & echo $! > {s}; wait",
+            "echo $$ > {p}.tmp; mv {p}.tmp {p}; while [ ! -e {g} ]; do echo waiting; sleep 0.2; done; sleep 600 & echo $! > {s}; wait",
             p = pid_file.display(),
+            g = go_file.display(),
             s = sleep_file.display()
         ),
         "kill_after_s = 1",
@@ -134,6 +136,9 @@ fn a_tree_waiting_on_a_lease_is_never_killed_while_it_waits() {
         .unwrap();
     let waiter = d.broker.lease_open("nested `mason run`", &one);
     d.broker.lease_set_pid(waiter, pid);
+    // Only now does the script go quiet (until then it prints, which is progress), so the
+    // watcher never sees a silent tree before the waiter is in place.
+    std::fs::write(&go_file, "").unwrap();
     // Keep both requests alive (polling is their heartbeat) until the watcher has looked at
     // the silent tree and spared it.
     wait_for("the watcher to spare the tree", 120, || {
