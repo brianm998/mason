@@ -2107,16 +2107,56 @@ fn command_job(c: &Ctx) {
         }
     };
     let reruns = if is_test { c.project.test_reruns } else { 0 };
+    let filter = c.project.rerun_filter.as_deref();
     let mut earlier: Vec<String> = vec![];
+    // The tests that failed in every run so far (None: the first run's names were not
+    // readable, or a later red's were not, so nothing is compared and a rerun runs it all),
+    // and every test that failed in any run.
+    let mut persistent: Option<Vec<String>> = None;
+    let mut seen: Vec<String> = vec![];
+    let mut this_cmd = cmd.clone();
+    // Set when a filtered rerun ran none of the tests it was given: run it all.
+    let mut filter_off = false;
     for k in 0..=reruns {
-        let run = match run_command_once(c, &cmd, suffix, k, &held, &what) {
+        let run = match run_command_once(c, &this_cmd, suffix, k, &held, &what) {
             Ok(r) => r,
             Err(why) => return c.fail(why),
         };
+        let log = run.log.clone();
         match run.verdict {
             RunVerdict::Green => {
+                if this_cmd != cmd {
+                    let out = read_whole_log(&log).unwrap_or_default();
+                    let names = persistent.clone().unwrap_or_default();
+                    if !crate::rerun::ran_them(&out, &names) {
+                        // It exited green without running what failed: nothing is proved.
+                        earlier.push(format!(
+                            "run {}: the filtered rerun ran none of {}",
+                            k + 1,
+                            names.join(", ")
+                        ));
+                        if k < reruns {
+                            filter_off = true;
+                            this_cmd = cmd.clone();
+                            continue;
+                        }
+                        return c.conclude(
+                            Outcome::Red,
+                            format!(
+                                "{what} failed ({} runs, the filtered rerun ran none of the failed tests)",
+                                k + 1
+                            ),
+                            Some(format!(
+                                "{what} was red, and the rerun with `rerun_filter` ran none of the failing tests ({}), so it proved nothing:\n{}",
+                                names.join(", "),
+                                earlier.join("\n")
+                            )),
+                        );
+                    }
+                }
                 let _ = std::fs::remove_file(c.task_dir().join("feedback.txt"));
                 if k > 0 {
+                    record_flaky(c, &seen, &[]);
                     let note = format!(
                         "`{}` was red, then green when run again (a flaky test, not this change):\n{}",
                         c.step.name,
@@ -2130,22 +2170,92 @@ fn command_job(c: &Ctx) {
                 }
                 return c.green();
             }
-            // Red by its exit status alone: worth running again.
+            // Red by its exit status alone: worth running again, and worth reading.
             RunVerdict::Red {
                 reason,
                 feedback,
                 rerun: true,
-            } if k < reruns => {
-                earlier.push(format!("run {}: {reason}\n{feedback}", k + 1));
-                use std::io::Write as _;
-                if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&run.log) {
-                    let _ = writeln!(
-                        f,
-                        "\n== MASON: red ({reason}); running it again ({} of {reruns}) to tell a flaky test from a broken change",
-                        k + 1
-                    );
+            } => {
+                let names = crate::rerun::failing_names(&read_whole_log(&log).unwrap_or_default());
+                if k == 0 {
+                    if !names.is_empty() {
+                        persistent = Some(names.clone());
+                    }
+                } else if names.is_empty() {
+                    persistent = None;
+                } else if let Some(p) = persistent.as_mut() {
+                    p.retain(|n| names.contains(n));
                 }
-                continue;
+                if persistent.is_some() {
+                    for n in names {
+                        if !seen.contains(&n) {
+                            seen.push(n);
+                        }
+                    }
+                }
+                // No test failed in two runs: a flake, not this change.
+                if persistent.as_ref().is_some_and(|p| p.is_empty()) {
+                    let _ = std::fs::remove_file(c.task_dir().join("feedback.txt"));
+                    record_flaky(c, &seen, &[]);
+                    earlier.push(format!("run {}: {reason}\n{feedback}", k + 1));
+                    let note = format!(
+                        "`{}` was red, but no test failed in two runs (flaky, not this change): {}\n{}",
+                        c.step.name,
+                        seen.join(", "),
+                        earlier.join("\n")
+                    );
+                    tracing::warn!(task = c.task.0, run = c.run.0, "{note}");
+                    let _ = std::fs::write(
+                        c.task_dir().join(format!("{suffix}-r{}.flaky", c.run.0)),
+                        &note,
+                    );
+                    return c.green();
+                }
+                if k < reruns {
+                    earlier.push(format!("run {}: {reason}\n{feedback}", k + 1));
+                    this_cmd = if filter_off {
+                        cmd.clone()
+                    } else {
+                        crate::rerun::command(&cmd, filter, persistent.as_deref().unwrap_or(&[]))
+                    };
+                    use std::io::Write as _;
+                    if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&log) {
+                        let _ = writeln!(
+                            f,
+                            "\n== MASON: red ({reason}); running {} again ({} of {reruns}) to tell a flaky test from a broken change",
+                            if this_cmd == cmd {
+                                "it"
+                            } else {
+                                "only the failed tests"
+                            },
+                            k + 1
+                        );
+                    }
+                    continue;
+                }
+                let (reason, feedback) = match &persistent {
+                    Some(p) if k > 0 => {
+                        record_flaky(c, &seen, p);
+                        (
+                            format!(
+                                "{reason} ({} runs; failed every time: {})",
+                                k + 1,
+                                p.join(", ")
+                            ),
+                            format!(
+                                "{feedback}\n\nThese tests failed on all {} runs: {}",
+                                k + 1,
+                                p.join(", ")
+                            ),
+                        )
+                    }
+                    _ if k > 0 => (
+                        format!("{reason} ({} runs, red every time)", k + 1),
+                        format!("{feedback}\n\nIt was red on all {} runs.", k + 1),
+                    ),
+                    _ => (reason, feedback),
+                };
+                return c.conclude(Outcome::Red, reason, Some(feedback));
             }
             RunVerdict::Red {
                 reason, feedback, ..
@@ -2161,6 +2271,29 @@ fn command_job(c: &Ctx) {
                 return c.conclude(Outcome::Red, reason, Some(feedback));
             }
         }
+    }
+}
+
+/// A test step's whole log as text, if it is small enough to read: a log cut short could
+/// hide a failing name, and a name that is not seen must not make a flake.
+fn read_whole_log(path: &Path) -> Option<String> {
+    let len = std::fs::metadata(path).ok()?.len();
+    if len > 32 << 20 {
+        return None;
+    }
+    std::fs::read(path)
+        .ok()
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
+}
+
+/// Record each of `tests` that failed in some run but not in every run (`except`) as a
+/// flake, as the suites path does; the step's name stands for the suite.
+fn record_flaky(c: &Ctx, tests: &[String], except: &[String]) {
+    for t in tests.iter().filter(|t| !except.contains(t)) {
+        let _ = c
+            .d
+            .store
+            .record_flaky(&c.step.name, t, c.task.0, crate::daemon::now_ms());
     }
 }
 

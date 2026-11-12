@@ -1403,12 +1403,21 @@ fn main() {
                     }
                     for s in r["schedules"].as_array().cloned().unwrap_or_default() {
                         println!(
-                            "{:<28} {:<12} every {:<10} runs {:<4} {}",
+                            "{:<28} {:<12} every {:<10} runs {:<4} {}{}",
                             s["name"].as_str().unwrap_or("?"),
                             s["kind"].as_str().unwrap_or("?"),
                             every_text(s["every_ms"].as_u64().unwrap_or(0)),
                             s["runs"],
-                            s["last_status"].as_str().unwrap_or("")
+                            s["last_status"].as_str().unwrap_or(""),
+                            if s["follow"].is_object() {
+                                s["follow"]["run"]
+                                    .as_u64()
+                                    .map_or(" [following]".to_string(), |r| {
+                                        format!(" [following run {r}]")
+                                    })
+                            } else {
+                                String::new()
+                            }
                         );
                     }
                 }
@@ -2211,6 +2220,19 @@ fn main() {
                     s["thread_panics"]["last"].as_str().unwrap_or("?")
                 );
             }
+            for (name, w) in s["ci_watch"].as_object().into_iter().flatten() {
+                print_ci_watch(name, w);
+            }
+            for r in s["ci_runs"].as_array().into_iter().flatten() {
+                println!(
+                    "scheduled CI run in flight: {} {} (waiting for {})",
+                    r["name"].as_str().unwrap_or("?"),
+                    r["run"]
+                        .as_u64()
+                        .map_or("(run not listed yet)".to_string(), |n| format!("run {n}")),
+                    r["waiting_for"].as_str().unwrap_or("?")
+                );
+            }
             for p in s["definitions"].as_array().into_iter().flatten() {
                 let hash = p["hash"].as_str().unwrap_or("");
                 println!(
@@ -2934,6 +2956,14 @@ fn print_health(r: &serde_json::Value) {
             println!("        {t}");
         }
     }
+    println!("Flaky tests (last 7 days)");
+    let flaky = r["flaky"].as_object().cloned().unwrap_or_default();
+    if flaky.is_empty() {
+        println!("  none");
+    }
+    for (name, n) in flaky {
+        println!("  {name} ({n} time(s))");
+    }
     println!("Recurring jobs");
     for s in r["schedules"].as_array().cloned().unwrap_or_default() {
         println!(
@@ -3184,4 +3214,66 @@ fn usage_text(r: &Value) -> String {
         out.push_str("no provider accounts\n");
     }
     out
+}
+
+/// The base-branch CI watch of one project, as `mason status` prints it.
+fn print_ci_watch(project: &str, w: &Value) {
+    let list = |v: &Value| {
+        v.as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let watched = list(&w["workflows"]);
+    println!(
+        "ci watch for {project}: {}{}{}",
+        if watched.is_empty() {
+            "no workflow seen yet".to_string()
+        } else {
+            format!("watching {watched}")
+        },
+        w["gate"]
+            .as_str()
+            .map_or(String::new(), |g| format!("; gate {g}")),
+        if w["excluded"].as_array().is_some_and(|e| !e.is_empty()) {
+            format!("; excluding {}", list(&w["excluded"]))
+        } else {
+            String::new()
+        }
+    );
+    if let Some(e) = w["error"].as_str() {
+        println!("  CANNOT LOOK: {e}");
+    }
+    if let Some(f) = w["freeze"].as_object() {
+        println!(
+            "  LANDING FROZEN: {} (fix task #{})",
+            f["reason"].as_str().unwrap_or("?"),
+            f["fix_task"]
+        );
+    }
+    for p in w["pending"].as_array().into_iter().flatten() {
+        println!(
+            "  red, waiting for agreement: {} ({} of {} runs)",
+            p["job"].as_str().unwrap_or("?"),
+            p["red_runs"],
+            p["agreement"]
+        );
+    }
+    for f in w["filed"].as_array().into_iter().flatten().take(5) {
+        println!(
+            "  filed: {} as {}{}{}",
+            f["job"].as_str().unwrap_or("?"),
+            f["task"]
+                .as_u64()
+                .map_or("no task".to_string(), |t| format!("#{t}")),
+            if f["urgent"] == true { " (urgent)" } else { "" },
+            if f["proposed"] == true {
+                " (proposed)"
+            } else {
+                ""
+            },
+        );
+    }
 }

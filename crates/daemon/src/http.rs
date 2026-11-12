@@ -238,6 +238,18 @@ async fn status(Shared(d): Shared<Arc<Daemon>>) -> Res {
                 "projects": d2.projects.values().map(|p| p.id.clone()).collect::<Vec<_>>(),
                 "step_hosts_running": running,
                 "trackers": d2.projects.keys().map(|pid| crate::tracker::state_json(&d2, *pid)).collect::<Vec<_>>(),
+                // The base-branch CI watch, for each project that has it on.
+                "ci_watch": d2.projects.iter().filter_map(|(pid, p)| {
+                    let v = crate::ci_watch::view(&d2, *pid);
+                    (v["enabled"] == true).then(|| (p.id.clone(), v))
+                }).collect::<serde_json::Map<String, Value>>(),
+                // Scheduled CI runs being followed.
+                "ci_runs": d2.store.schedules().unwrap_or_default().iter().filter_map(|r| {
+                    crate::ci_schedule::follow_view(r).map(|mut v| {
+                        v["name"] = json!(r.name);
+                        v
+                    })
+                }).collect::<Vec<_>>(),
                 "definitions": d2.projects.iter().map(|(pid, p)| json!({
                     "project": p.id,
                     "hash": d2.current_def(*pid).hash,
@@ -1376,7 +1388,7 @@ async fn landing_status(Shared(d): Shared<Arc<Daemon>>) -> Res {
                 .freezes()
                 .unwrap_or_default()
                 .iter()
-                .map(|f| json!({"project": f.project, "reason": f.reason, "fix_task": f.fix_task, "since": f.since}))
+                .map(|f| json!({"project": f.project, "reason": f.reason, "fix_task": f.fix_task, "since": f.since, "source": f.source}))
                 .collect();
             json!({"projects": projects, "batches": batches, "freezes": freezes})
         })
