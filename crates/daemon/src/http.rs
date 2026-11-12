@@ -2007,6 +2007,68 @@ async fn open_session(Shared(d): Shared<Arc<Daemon>>, Path(id): Path<u64>) -> Re
     Ok(Json(v))
 }
 
+/// The keys that could be used for the project's remote (owner only).
+async fn ssh_keys_list(
+    Shared(d): Shared<Arc<Daemon>>,
+    headers: axum::http::HeaderMap,
+    Path(name): Path<String>,
+) -> Res {
+    owner_only(&d, &who_of(&headers), "list SSH keys")?;
+    project_of(&d, &name)?;
+    let d2 = d.clone();
+    let keys = d
+        .pool
+        .run(move || crate::ssh_keys::list(&d2, &name))
+        .await
+        .map_err(pool_err)?
+        .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
+    Ok(Json(json!({
+        "keys": keys.iter().map(|k| k.to_json()).collect::<Vec<_>>(),
+        "host": hostname(),
+    })))
+}
+
+fn hostname() -> String {
+    std::process::Command::new("hostname")
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default()
+}
+
+/// Use a key for the project's remote: write the repository's `core.sshCommand`, unlock the key
+/// (a dialog on this host), probe. A probe that gets through lifts the hold. No passphrase is
+/// ever a field of this request.
+async fn ssh_key_choose(
+    Shared(d): Shared<Arc<Daemon>>,
+    headers: axum::http::HeaderMap,
+    Path(name): Path<String>,
+    Json(b): Json<Value>,
+) -> Res {
+    let who = who_of(&headers);
+    owner_only(&d, &who, "choose an SSH key")?;
+    project_of(&d, &name)?;
+    let path = b["path"].as_str().unwrap_or_default().to_string();
+    if path.is_empty() {
+        return Err(fail(StatusCode::BAD_REQUEST, "path is the private key's file"));
+    }
+    let d2 = d.clone();
+    let n2 = name.clone();
+    let p2 = path.clone();
+    let r = d
+        .pool
+        .run(move || crate::ssh_keys::choose(&d2, &n2, &p2))
+        .await
+        .map_err(pool_err)?;
+    match r {
+        Ok(v) => {
+            crate::attention::intervene(&d, "ssh_key", None, &who, &format!("{name}: {path}"), "");
+            Ok(Json(v))
+        }
+        Err(e) => Err(fail(StatusCode::BAD_GATEWAY, e)),
+    }
+}
+
 async fn pause_set(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res {
     let project = b["project"].as_str().unwrap_or_default().to_string();
     let mode = b["mode"].as_str().unwrap_or("all").to_string();
@@ -2799,6 +2861,8 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/tasks/{id}/{kind}", post(land_override))
         .route("/account/hold", post(account_hold))
         .route("/account/release", post(account_release))
+        .route("/projects/{name}/ssh-keys", get(ssh_keys_list))
+        .route("/projects/{name}/ssh-key", post(ssh_key_choose))
         .route("/pause", post(pause_set))
         .route("/resume", post(pause_clear))
         .route("/pauses", get(pauses_list))

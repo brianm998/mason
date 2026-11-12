@@ -1054,6 +1054,22 @@ impl Store {
         })
     }
 
+    /// Lift the pauses of `project` in `mode` that `owner` made. Returns how many.
+    pub fn remove_pauses_of(
+        &self,
+        project: &str,
+        mode: &str,
+        owner: &str,
+    ) -> Result<usize, StoreError> {
+        let (p, m, o) = (project.to_string(), mode.to_string(), owner.to_string());
+        self.write(move |c| {
+            c.execute(
+                "DELETE FROM pauses WHERE project = ?1 AND mode = ?2 AND owner = ?3",
+                params![p, m, o],
+            )
+        })
+    }
+
     /// Pauses still in force at `now_ms`.
     pub fn pauses(&self, now_ms: u64) -> Result<Vec<PauseRow>, StoreError> {
         self.read(move |c| {
