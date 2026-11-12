@@ -27,6 +27,7 @@ pub const SUITE_KEYS: &[&str] = &[
     "artifacts",
     "progress",
     "test_paths",
+    "pty",
 ];
 const ENV_KEYS: &[&str] = &[
     "type",
@@ -167,6 +168,10 @@ pub fn parse(doc: &DocumentMut, out: &mut Vec<Problem>) -> Testing {
                 "artifacts" => s.artifacts = strings(v, &path, out),
                 "progress" => s.progress = string(v, &path, out),
                 "test_paths" => s.test_paths = strings(v, &path, out),
+                "pty" => match v.as_bool() {
+                    Some(b) => s.pty = b,
+                    None => out.push(Problem::new(&path, "must be true or false")),
+                },
                 other => out.push(unknown_key(&base, other, SUITE_KEYS)),
             }
         }

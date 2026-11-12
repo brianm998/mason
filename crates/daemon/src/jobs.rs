@@ -2264,6 +2264,17 @@ fn run_command_once(
     }
 }
 
+/// The command as it runs when `pty` is set: on macOS under `script`, which gives it a
+/// pseudo-terminal for stdout and stderr (so `xctest` writes line by line) and passes
+/// its exit status through. Elsewhere, or without `pty`, the command unchanged.
+pub(crate) fn pty_wrap(pty: bool, cmd: &str) -> String {
+    if pty && cfg!(target_os = "macos") {
+        format!("script -q /dev/null sh -c '{}'", cmd.replace('\'', "'\\''"))
+    } else {
+        cmd.to_string()
+    }
+}
+
 /// One run of the command on host number `host` (0 the first, 1 the fresh one),
 /// or collect the run a restarted daemon finds already started.
 fn run_command_on(
@@ -2297,7 +2308,7 @@ fn run_command_on(
             host_bin: c.d.cfg.host_bin.clone(),
             root: hosts.clone(),
             id: id.clone(),
-            cmd: vec!["sh".into(), "-c".into(), cmd.to_string()],
+            cmd: vec!["sh".into(), "-c".into(), pty_wrap(c.step.pty, cmd)],
             cwd: Some(c.wt.clone()),
             env,
             clear_env: false,
@@ -2333,6 +2344,9 @@ fn run_command_on(
     // Each run of the command is its own stream, since each log starts at 0.
     let phase = if suffix == "build" { "build" } else { "" };
     let stream = format!("{phase}{}{hsuf}", again(k));
+    if c.step.pty {
+        c.d.progress_terminal(c.run, &stream);
+    }
     c.d.progress_catch_up(c.run, &stream, &log);
     // What the command says about itself in `MASON_PROGRESS_FILE`, as it says it.
     let _tail = {
@@ -2593,6 +2607,79 @@ pub fn cleanup(d: &Arc<Daemon>, task: TaskId, delete_branch: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn without_pty_the_command_is_unchanged() {
+        for cmd in ["swift test", "echo 'a b'; exit 3", ""] {
+            assert_eq!(pty_wrap(false, cmd), cmd);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn with_pty_the_command_runs_under_script_with_its_own_exit_code() {
+        assert_eq!(
+            pty_wrap(true, "echo 'hi'"),
+            "script -q /dev/null sh -c 'echo '\\''hi'\\'''"
+        );
+        let run = |cmd: &str| {
+            std::process::Command::new("sh")
+                .args(["-c", &pty_wrap(true, cmd)])
+                .stdin(std::process::Stdio::null())
+                .output()
+                .unwrap()
+        };
+        let o = run("echo 'it works'; exit 3");
+        assert_eq!(o.status.code(), Some(3));
+        assert!(String::from_utf8_lossy(&o.stdout).contains("it works"));
+        assert_eq!(run("exit 0").status.code(), Some(0));
+    }
+
+    /// What the step host does to a stopped run: SIGTERM to the command's process
+    /// group. `script` starts the command in a session of its own, so this checks that
+    /// the command is gone anyway.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_stopped_pty_run_leaves_no_command_behind() {
+        use std::os::unix::process::CommandExt;
+        let dir = std::env::temp_dir().join(format!("mason-pty-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pidf = dir.join("pid");
+        let cmd = format!(
+            "echo $$ > {p}.tmp; mv {p}.tmp {p}; sleep 300",
+            p = pidf.display()
+        );
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", &pty_wrap(true, &cmd)])
+            .stdin(std::process::Stdio::null())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pid = loop {
+            if let Ok(t) = std::fs::read_to_string(&pidf) {
+                break t.trim().parse::<i32>().unwrap();
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let pg = nix::unistd::Pid::from_raw(child.id() as i32);
+        let _ = nix::sys::signal::killpg(pg, nix::sys::signal::Signal::SIGTERM);
+        let _ = child.wait();
+        let alive =
+            |pid: i32| nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok();
+        let t0 = Instant::now();
+        while alive(pid) && t0.elapsed() < Duration::from_secs(30) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let left = alive(pid);
+        if left {
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(pid),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!left, "the command outlived its stopped run");
+    }
 
     #[test]
     fn locks_and_deadlines_are_environmental_real_errors_are_not() {
