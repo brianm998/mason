@@ -70,6 +70,37 @@ final class MascotTests: XCTestCase {
             XCTAssertEqual(alpha(512, 512), 1, "the centre is opaque")
         }
 
+        func testTheStartImageKeepsItsAspect() throws {
+            let d = try XCTUnwrap(Mascot.data("brand/start_image.png"))
+            let px = try XCTUnwrap(NSBitmapImageRep(data: d))
+            XCTAssertEqual(px.pixelsWide, 1536)
+            XCTAssertEqual(px.pixelsHigh, 1024)
+            let img = try XCTUnwrap(Mascot.nsImage(from: [(1, d)], points: 768))
+            XCTAssertEqual(img.size, NSSize(width: 768, height: 512))
+            for rep in img.representations { XCTAssertEqual(rep.size, NSSize(width: 768, height: 512)) }
+        }
+
+        func testSquareArtStaysSquare() throws {
+            let f = try XCTUnwrap(Mascot.illustrationFile("all_clear"))
+            let ill = try XCTUnwrap(Mascot.nsImage(from: [(1, try XCTUnwrap(Mascot.data(f)))], points: 512))
+            XCTAssertEqual(ill.size, NSSize(width: 512, height: 512))
+            for size in [20, 24] {
+                let reps = Mascot.iconFiles("queued", size: size).enumerated().compactMap { i, f in Mascot.data(f).map { (i + 1, $0) } }
+                let icon = try XCTUnwrap(Mascot.nsImage(from: reps, points: size))
+                XCTAssertEqual(icon.size, NSSize(width: size, height: size))
+                XCTAssertEqual(icon.representations.count, reps.count)
+            }
+        }
+
+        func testARepOfAnotherAspectIsSkipped() throws {
+            let wide = try XCTUnwrap(Mascot.data("brand/start_image.png"))
+            let f = try XCTUnwrap(Mascot.illustrationFile("all_clear"))
+            let square = try XCTUnwrap(Mascot.data(f))
+            let img = try XCTUnwrap(Mascot.nsImage(from: [(1, wide), (2, square)], points: 768))
+            XCTAssertEqual(img.representations.count, 1)
+            XCTAssertEqual(img.size, NSSize(width: 768, height: 512))
+        }
+
         func testTheIosIconStaysOpaqueAndFullBleed() throws {
             var url = URL(fileURLWithPath: #filePath)
             for _ in 0..<3 { url.deleteLastPathComponent() }  // .../clients/swift

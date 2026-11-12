@@ -97,14 +97,33 @@ public enum Mascot {
 
     #if canImport(AppKit)
         private static func image(from reps: [(Int, Data)], points: Int) -> Image? {
-            guard !reps.isEmpty else { return nil }
-            let img = NSImage(size: NSSize(width: points, height: points))
+            nsImage(from: reps, points: points).map { Image(nsImage: $0) }
+        }
+
+        /// `points` is the width in points; the height follows the bitmap's pixel aspect, so the
+        /// 1536 x 1024 start image is 768 x 512 points and square art stays square. The first
+        /// readable file sets the size; a later rep whose aspect differs by more than a pixel is
+        /// skipped, never stretched, so every rep reports the same point size.
+        static func nsImage(from reps: [(Int, Data)], points: Int) -> NSImage? {
+            var size: NSSize?
+            var first: (w: Int, h: Int)?
+            var kept: [NSBitmapImageRep] = []
             for (_, d) in reps {
-                guard let rep = NSBitmapImageRep(data: d) else { continue }
-                rep.size = NSSize(width: points, height: points)
-                img.addRepresentation(rep)
+                guard let rep = NSBitmapImageRep(data: d), rep.pixelsWide > 0, rep.pixelsHigh > 0 else { continue }
+                if let f = first {
+                    let expected = Double(rep.pixelsWide) * Double(f.h) / Double(f.w)
+                    if abs(expected - Double(rep.pixelsHigh)) > 1 { continue }
+                } else {
+                    first = (rep.pixelsWide, rep.pixelsHigh)
+                    size = NSSize(width: CGFloat(points), height: CGFloat(points) * CGFloat(rep.pixelsHigh) / CGFloat(rep.pixelsWide))
+                }
+                rep.size = size!
+                kept.append(rep)
             }
-            return img.representations.isEmpty ? nil : Image(nsImage: img)
+            guard let size, !kept.isEmpty else { return nil }
+            let img = NSImage(size: size)
+            for rep in kept { img.addRepresentation(rep) }
+            return img
         }
     #elseif canImport(UIKit)
         private static func image(from reps: [(Int, Data)], points: Int) -> Image? {
@@ -123,6 +142,14 @@ public enum Mascot {
         let loaded = MascotManifest.files.filter { data($0) != nil }.count
         let ok = loaded == MascotManifest.files.count && icon("queued", size: 24) != nil
         print("mascot: \(loaded) of \(MascotManifest.files.count) files loaded from \(artRoot?.path ?? "nowhere")")
+        #if canImport(AppKit)
+            if let d = data("brand/start_image.png"), let img = nsImage(from: [(1, d)], points: 768) {
+                print("mascot: start_image is \(img.size.width) x \(img.size.height) points")
+            } else {
+                print("mascot: start_image did not load")
+                return false
+            }
+        #endif
         return ok
     }
 }
