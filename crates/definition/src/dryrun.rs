@@ -178,6 +178,7 @@ pub fn walk(
                     EventKind::StepFailed {
                         task,
                         reason: reason.clone(),
+                        class: None,
                     },
                 )?;
                 trace.end = End::Failed(reason);

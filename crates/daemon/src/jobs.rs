@@ -250,9 +250,11 @@ impl Ctx {
                 // Hand the resources back before the task shows as failed, so nobody
                 // can see a failed task still holding its device.
                 self.release_lease();
+                let class = Some(FailClass::classify(self.state, &reason));
                 self.emit(EventKind::StepFailed {
                     task: self.task,
                     reason,
+                    class,
                 });
             }
         }
@@ -358,7 +360,11 @@ fn run_inner(d: &Arc<Daemon>, task: TaskId, step: State, run: StepRunId) {
     let c = match ctx(d, task, run) {
         Ok(c) => c,
         Err(why) => {
-            d.emit_for_run(task, run, EventKind::StepFailed { task, reason: why });
+            d.emit_for_run(task, run, EventKind::StepFailed {
+                    task,
+                    reason: why,
+                    class: Some(FailClass::Code),
+                });
             return;
         }
     };
@@ -3107,6 +3113,7 @@ pub fn conclude_approval(
         Transition::Fail(why) => EventKind::StepFailed {
             task,
             reason: format!("rejected by the owner: {reason} ({why})"),
+            class: Some(FailClass::Code),
         },
     };
     if d.emit_for_run(task, run, kind) {
