@@ -1311,6 +1311,7 @@ fn change_validator(
     base_ref: String,
     branch: String,
     caps: mason_definition::Capabilities,
+    weakening: Option<WeakeningCheck>,
 ) -> Validator {
     Box::new(move |tool, args| {
         if tool != "submit_change" {
@@ -1360,12 +1361,56 @@ fn change_validator(
                 }
             }
         }
+        // The scan landing runs, now, before the test step. Where the project sends a
+        // weakening back to development, the submission is refused with each finding; where
+        // it holds for the owner, the submission is accepted and the findings are kept as a
+        // note (landing holds it).
+        if let Some(w) = &weakening {
+            if let Ok((found, notes)) =
+                crate::selfguard::submission_scan(&wt, &base_ref, &w.base, "HEAD")
+            {
+                if !found.is_empty() {
+                    match w.holds {
+                        crate::config::Holds::Review => {
+                            for f in &found {
+                                problems.push(format!(
+                                    "the change weakens a check, which MASON does not land: {}. Restore it, or reach the same goal without weakening it",
+                                    crate::selfguard::describe_finding(f)
+                                ));
+                            }
+                        }
+                        crate::config::Holds::Owner => {
+                            let list: Vec<String> = found
+                                .iter()
+                                .map(crate::selfguard::describe_finding)
+                                .collect();
+                            let _ = std::fs::write(
+                                &w.note_file,
+                                format!(
+                                    "Findings the owner will be asked about at landing:\n{}\n",
+                                    list.join("\n")
+                                ),
+                            );
+                        }
+                    }
+                }
+                let _ = notes; // lines in files the change adds: not a finding
+            }
+        }
         if problems.is_empty() {
             Ok(())
         } else {
             Err(problems)
         }
     })
+}
+
+/// What `submit_change` needs to run the weakening scan: the project's base branch, and what
+/// its `[self] holds` says to do with a finding.
+struct WeakeningCheck {
+    base: String,
+    holds: crate::config::Holds,
+    note_file: PathBuf,
 }
 
 /// The agent CLI for this project's provider, under the step host and, if the
@@ -1527,6 +1572,13 @@ fn agent_job(c: &Ctx) {
             c.project.base_ref(),
             c.branch.clone(),
             c.d.caps_for(&c.project),
+            c.project.self_cfg.as_ref().map(|s| WeakeningCheck {
+                base: c.project.base.clone(),
+                holds: s.holds,
+                note_file: c
+                    .task_dir()
+                    .join(format!("weakening-note-r{}.txt", c.run.0)),
+            }),
         )
     });
     let contract = ContractHandle::with_validator(kind, checks, validator);
@@ -2595,6 +2647,82 @@ pub fn cleanup(d: &Arc<Daemon>, task: TaskId, delete_branch: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- Task 180: the weakening scan at submit_change -----------------------------------
+
+    fn sh(dir: &Path, args: &[&str]) {
+        let o = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            o.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+    }
+
+    /// A repo whose `main` holds `scripts/run.sh`, and a branch that appends `line` to it.
+    fn submit_with(
+        line: &str,
+        holds: Option<crate::config::Holds>,
+    ) -> (Result<(), Vec<String>>, PathBuf) {
+        let dir = tempfile::tempdir().unwrap().keep();
+        sh(&dir, &["init", "-q", "-b", "main"]);
+        std::fs::create_dir_all(dir.join("scripts")).unwrap();
+        std::fs::write(dir.join("scripts/run.sh"), "echo hi\n").unwrap();
+        sh(&dir, &["add", "-A"]);
+        sh(&dir, &["commit", "-qm", "init"]);
+        sh(&dir, &["checkout", "-q", "-b", "work"]);
+        std::fs::write(dir.join("scripts/run.sh"), format!("echo hi\n{line}\n")).unwrap();
+        sh(&dir, &["commit", "-qam", "work"]);
+        let head = git::rev_parse(&dir, "HEAD").unwrap();
+        let note = dir.join("note.txt");
+        let v = change_validator(
+            dir.clone(),
+            "main".into(),
+            "work".into(),
+            mason_definition::Capabilities::now(),
+            holds.map(|holds| WeakeningCheck {
+                base: "main".into(),
+                holds,
+                note_file: note.clone(),
+            }),
+        );
+        (v("submit_change", &serde_json::json!({"head": head})), note)
+    }
+
+    #[test]
+    fn submit_refuses_a_weakening_where_the_project_sends_it_back() {
+        let (r, _) = submit_with("cargo test || true", Some(crate::config::Holds::Review));
+        let problems = r.unwrap_err();
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("scripts/run.sh:2") && p.contains("broadened-skip")),
+            "{problems:?}"
+        );
+        // Closures and counters are not findings.
+        let (r, _) = submit_with(
+            "n=$(grep -c x f) || true",
+            Some(crate::config::Holds::Review),
+        );
+        assert!(r.is_ok(), "{r:?}");
+        // A project that is not self-hosting is not scanned.
+        let (r, _) = submit_with("cargo test || true", None);
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    fn submit_accepts_a_weakening_with_a_note_where_the_owner_holds() {
+        let (r, note) = submit_with("cargo test || true", Some(crate::config::Holds::Owner));
+        assert!(r.is_ok(), "{r:?}");
+        let text = std::fs::read_to_string(note).unwrap();
+        assert!(text.contains("scripts/run.sh:2"), "{text}");
+    }
 
     #[test]
     fn without_pty_the_command_is_unchanged() {

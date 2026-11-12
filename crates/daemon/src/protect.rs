@@ -178,6 +178,140 @@ const CLEANUP_WORDS: &[&str] = &[
 // `test`, `[` and `[[` are deliberately not here: `[ "$n" -gt 0 ] || true` turns an assertion
 // into a no-op. A `[ ... ] && kill ... || true` chain is still fine, its last command is `kill`.
 
+fn extension(file: &str) -> String {
+    let name = file.rsplit('/').next().unwrap_or(file);
+    match name.rfind('.') {
+        Some(i) if i > 0 => name[i + 1..].to_ascii_lowercase(),
+        _ => String::new(),
+    }
+}
+
+/// Files whose lines are run by a shell: `.sh`, `.bash`, `.zsh`, a file with no extension
+/// that starts with a shell shebang (or sits in a `scripts/` or `bin/` directory), the
+/// lines of workflow YAML, Makefiles, and the command strings of TOML. `|| true` and
+/// `exit 0` mean something only there; in Rust, Swift or Kotlin `|| true` is an
+/// expression (`&|| true` is a closure).
+fn runs_shell(file: &str, added: &[String]) -> bool {
+    let name = file.rsplit('/').next().unwrap_or(file).to_ascii_lowercase();
+    match extension(file).as_str() {
+        "sh" | "bash" | "zsh" | "yml" | "yaml" | "mk" | "toml" => true,
+        "" => {
+            name == "makefile"
+                || name == "gnumakefile"
+                || added
+                    .first()
+                    .is_some_and(|l| l.starts_with("#!") && l.contains("sh"))
+                || file.starts_with("scripts/")
+                || file.contains("/scripts/")
+                || file.starts_with("bin/")
+                || file.contains("/bin/")
+        }
+        _ => false,
+    }
+}
+
+/// A JavaScript or TypeScript test file: `.skip(`, `xit(` and `xdescribe(` ignore a test there.
+fn is_js_test(file: &str) -> bool {
+    matches!(
+        extension(file).as_str(),
+        "js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" | "mts" | "cts"
+    ) && (file.contains(".test.")
+        || file.contains(".spec.")
+        || file.contains("/test/")
+        || file.contains("/tests/")
+        || file.contains("/__tests__/")
+        || file.starts_with("test/")
+        || file.starts_with("tests/"))
+}
+
+/// `grep -c ...`: grep exits 1 when it counts zero, so `|| true` keeps `set -e` alive and
+/// hides no check.
+fn is_grep_count(fragment: &str) -> bool {
+    let words: Vec<&str> = fragment.split_whitespace().collect();
+    let Some(g) = words
+        .iter()
+        .position(|w| w.rsplit(['$', '(', '`', '=']).next() == Some("grep"))
+    else {
+        return false;
+    };
+    words[g + 1..].iter().any(|w| {
+        *w == "--count" || (w.starts_with('-') && !w.starts_with("--") && w[1..].contains('c'))
+    })
+}
+
+/// `step-host-ctl reap DIR`: tearing a host down at cleanup.
+fn is_reap(fragment: &str) -> bool {
+    fragment.split_whitespace().any(|w| w == "reap")
+}
+
+/// `exec 3>&-`: closing a descriptor.
+fn is_fd_close(fragment: &str) -> bool {
+    let t = fragment.trim_start();
+    t.starts_with("exec ") && (t.contains(">&-") || t.contains("<&-"))
+}
+
+fn exits_nonzero(seg: &str) -> bool {
+    seg.strip_prefix("exit")
+        .map(|n| {
+            n.trim()
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect::<String>()
+        })
+        .is_some_and(|n| !n.is_empty() && n.chars().any(|c| c != '0'))
+}
+
+/// For each added line: is it inside a shell function whose body only writes diagnostics to
+/// stderr and then exits non-zero (`fail() { echo "..." >&2; tail log >&2 || true; exit 1; }`)?
+fn in_failure_handler(added: &[String], at: &[usize]) -> Vec<bool> {
+    let mut out = vec![false; added.len()];
+    let mut i = 0;
+    while i < added.len() {
+        let t = added[i].trim();
+        let opens = t.contains("() {") || t.contains("(){");
+        if !opens {
+            i += 1;
+            continue;
+        }
+        let mut j = i;
+        let mut text = String::new();
+        loop {
+            text.push_str(added[j].trim());
+            text.push('\n');
+            let closed = if j == i {
+                t.ends_with('}')
+            } else {
+                added[j].trim() == "}"
+            };
+            if closed || j + 1 >= added.len() || at[j + 1] != at[j] + 1 {
+                break;
+            }
+            j += 1;
+        }
+        let body = text
+            .split_once('{')
+            .map(|(_, b)| b)
+            .unwrap_or("")
+            .trim_end()
+            .trim_end_matches('}');
+        let segs: Vec<&str> = body
+            .split(['\n', ';'])
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && !s.starts_with('#'))
+            .collect();
+        let diag_only = segs
+            .iter()
+            .all(|s| exits_nonzero(s) || *s == "set +e" || s.contains(">&2"));
+        if diag_only && segs.iter().any(|s| exits_nonzero(s)) {
+            for k in out.iter_mut().take(j + 1).skip(i) {
+                *k = true;
+            }
+        }
+        i = j + 1;
+    }
+    out
+}
+
 /// A Markdown file: its lines are read, never run, so they cannot broaden a skip.
 fn is_prose(file: &str) -> bool {
     let f = file.to_ascii_lowercase();
@@ -229,7 +363,11 @@ fn or_true_is_harmless(lower: &str) -> bool {
                 continue;
             }
         }
-        if !CLEANUP_WORDS.contains(&last_command_word(ops[k - 1]).as_str()) {
+        let before = ops[k - 1];
+        if is_grep_count(before) || is_reap(before) || is_fd_close(before) {
+            continue;
+        }
+        if !CLEANUP_WORDS.contains(&last_command_word(before).as_str()) {
             return false;
         }
     }
@@ -307,8 +445,13 @@ pub fn scan_diff(diff: &str) -> Vec<Finding> {
     scan_full(diff).0
 }
 
+/// What the scan reports without counting it: `|| true` in a file the change adds.
+pub fn scan_notes(diff: &str) -> Vec<Finding> {
+    scan_full(diff).1
+}
+
 /// The findings, and for each file the first changed line (new side).
-fn scan_full(diff: &str) -> (Vec<Finding>, BTreeMap<String, usize>) {
+fn scan_full(diff: &str) -> (Vec<Finding>, Vec<Finding>, BTreeMap<String, usize>) {
     #[derive(Default)]
     struct F {
         removed: Vec<String>,
@@ -365,6 +508,7 @@ fn scan_full(diff: &str) -> (Vec<Finding>, BTreeMap<String, usize>) {
         }
     }
     let mut out = vec![];
+    let mut notes = vec![];
     let firsts: BTreeMap<String, usize> = files
         .iter()
         .map(|(k, f)| (k.clone(), f.first))
@@ -403,15 +547,19 @@ fn scan_full(diff: &str) -> (Vec<Finding>, BTreeMap<String, usize>) {
                 f.first,
             ));
         }
+        let js_test = is_js_test(file);
+        let shell = runs_shell(file, &f.added);
+        let handler = in_failure_handler(&f.added, &f.at);
         for (i, l) in f.added.iter().enumerate() {
             let line = f.at[i];
             let t = l.trim();
             let ignored = t.contains("#[ignore")
                 || t.contains("@Ignore")
                 || t.contains("@Disabled")
-                || t.contains(".skip(")
-                || t.starts_with("xit(")
-                || t.starts_with("xdescribe(");
+                || (js_test
+                    && (t.contains(".skip(")
+                        || t.starts_with("xit(")
+                        || t.starts_with("xdescribe(")));
             if ignored {
                 out.push(Finding::new(
                     file,
@@ -422,14 +570,23 @@ fn scan_full(diff: &str) -> (Vec<Finding>, BTreeMap<String, usize>) {
             }
             let lower = t.to_lowercase();
             // Markdown is prose: a note that quotes `|| true` runs nothing (decision 0122).
+            let or_true =
+                shell && lower.contains("|| true") && !handler[i] && !or_true_is_harmless(&lower);
+            if or_true && f.new {
+                // A file that did not exist cannot weaken an existing check.
+                notes.push(Finding::new(
+                    file,
+                    "broadened-skip",
+                    t.chars().take(100).collect::<String>(),
+                    line,
+                ));
+            }
             let broadened = !is_prose(file)
-                && ((lower.contains("|| true") && !or_true_is_harmless(&lower))
+                && ((or_true && !f.new)
                     || lower.contains("continue-on-error: true")
                     || lower.replace(' ', "").contains("skip=true")
                     || lower.replace(' ', "").contains("skip:true")
-                    || (file.ends_with(".sh")
-                        && !f.new
-                        && (lower == "exit 0" || lower.starts_with("exit 0 "))));
+                    || (shell && !f.new && (lower == "exit 0" || lower.starts_with("exit 0 "))));
             if broadened {
                 out.push(Finding::new(
                     file,
@@ -468,7 +625,7 @@ fn scan_full(diff: &str) -> (Vec<Finding>, BTreeMap<String, usize>) {
             }
         }
     }
-    (out, firsts)
+    (out, notes, firsts)
 }
 
 /// A path a change touches, and whether the change added it (it did not exist before).
@@ -491,6 +648,8 @@ pub struct Inspection {
     /// `(path, why)` of each protected file the change touches.
     pub protected: Vec<(String, String)>,
     pub weakening: Vec<Finding>,
+    /// Lines that would be findings in an existing file, in a file the change adds.
+    pub notes: Vec<Finding>,
     /// The first changed line of each file in the diff.
     pub first_lines: BTreeMap<String, usize>,
 }
@@ -567,7 +726,7 @@ pub fn inspect(paths: &[String], diff: &str, extra: &[String]) -> Inspection {
 }
 
 pub fn inspect_changed(files: &[Changed], diff: &str, extra: &[String]) -> Inspection {
-    let (weakening, first_lines) = scan_full(diff);
+    let (weakening, notes, first_lines) = scan_full(diff);
     Inspection {
         protected: files
             .iter()
@@ -580,6 +739,7 @@ pub fn inspect_changed(files: &[Changed], diff: &str, extra: &[String]) -> Inspe
             .filter_map(|c| protected_because(&c.path, extra).map(|w| (c.path.clone(), w)))
             .collect(),
         weakening,
+        notes,
         first_lines,
     }
 }
@@ -839,7 +999,7 @@ mod tests {
         only_the_real_one(
             "scripts/exit/s9.sh",
             "rm -rf \"$TMP\" || true",
-            "grep -c x out || true",
+            "grep x out || true",
         );
     }
 
@@ -872,7 +1032,7 @@ mod tests {
         only_the_real_one(
             "scripts/exit/s9.sh",
             "command -v jq >/dev/null 2>&1 || true",
-            "grep -c x out || true",
+            "grep x out || true",
         );
     }
 
@@ -927,12 +1087,12 @@ mod tests {
         // The same line in an existing file is the case the rule is for.
         let f = scan_diff(&diff("scripts/exit/s9.sh", &[], &["exit 0"]));
         assert_eq!(f.len(), 1);
-        // A new file with a real `|| true` is still flagged.
+        // A new file with `|| true` is a note, not a finding (task 180).
         let new = "--- /dev/null\n+++ b/scripts/exit/s9.sh\n@@ -0,0 +1,2 @@\n+cargo test || true\n+exit 0\n";
-        let f = scan_diff(new);
-        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(scan_diff(new).is_empty());
+        let n = scan_notes(new);
         assert_eq!(
-            (f[0].detail.as_str(), f[0].line),
+            (n[0].detail.as_str(), n[0].line),
             ("cargo test || true", Some(1))
         );
     }
@@ -997,5 +1157,129 @@ mod tests {
             "{t}"
         );
         assert!(!t.contains('\n'));
+    }
+
+    // ---- Task 180: closures, iterators and cleanup idioms --------------------------------
+
+    fn new_file_diff(file: &str, added: &[&str]) -> String {
+        let mut d = format!("--- /dev/null\n+++ b/{file}\n@@ -0,0 +1 @@\n");
+        for a in added {
+            d.push_str(&format!("+{a}\n"));
+        }
+        d
+    }
+
+    #[test]
+    fn or_true_means_something_only_where_a_shell_runs_it() {
+        assert!(kinds(&diff("crates/x/src/a.rs", &[], &["run(&|| true, 1);"])).is_empty());
+        assert!(kinds(&diff("App.swift", &[], &["let ok = a || true"])).is_empty());
+        assert!(kinds(&diff("A.kt", &[], &["val ok = a || true"])).is_empty());
+        assert_eq!(
+            kinds(&diff("scripts/t.sh", &[], &["cargo test || true"])),
+            ["broadened-skip"]
+        );
+        assert_eq!(
+            kinds(&diff(
+                ".github/workflows/ci.yml",
+                &[],
+                &["      - run: cargo test || true"]
+            )),
+            ["broadened-skip"]
+        );
+        assert_eq!(
+            kinds(&diff("Makefile", &[], &["\tcargo test || true"])),
+            ["broadened-skip"]
+        );
+        assert_eq!(
+            kinds(&diff("c.toml", &[], &["test = \"cargo test || true\""])),
+            ["broadened-skip"]
+        );
+    }
+
+    #[test]
+    fn skip_means_ignored_only_in_javascript_tests() {
+        assert!(kinds(&diff(
+            "crates/daemon/src/landing.rs",
+            &[],
+            &["for x in v.iter().skip(1) {}"]
+        ))
+        .is_empty());
+        assert_eq!(
+            kinds(&diff("foo.test.ts", &[], &["  it.skip('x', () => {});"])),
+            ["ignored-test"]
+        );
+        assert_eq!(
+            kinds(&diff("foo.test.ts", &[], &["xit('x', () => {});"])),
+            ["ignored-test"]
+        );
+        assert!(kinds(&diff("src/util.ts", &[], &["a.skip(1)"])).is_empty());
+        // Rust's `#[ignore]` still counts.
+        assert_eq!(kinds(&diff("a.rs", &[], &["#[ignore]"])), ["ignored-test"]);
+    }
+
+    #[test]
+    fn counting_reaping_and_closing_hide_no_check() {
+        for l in [
+            "n=$(grep -c x f || true)",
+            "c=$(grep -c x f) || true",
+            "grep -ci x f || true",
+            "step-host-ctl reap \"$d\" >/dev/null 2>&1 || true",
+            "target/debug/step-host-ctl reap \"$hd\" || true",
+            "exec 3>&- 2>/dev/null || true",
+        ] {
+            assert!(kinds(&diff("scripts/s.sh", &[], &[l])).is_empty(), "{l}");
+        }
+        for l in [
+            "[ \"$n\" -gt 0 ] || true",
+            "test -f x || true",
+            "grep x f || true",
+            "cargo test || true",
+        ] {
+            assert_eq!(
+                kinds(&diff("scripts/s.sh", &[], &[l])),
+                ["broadened-skip"],
+                "{l}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_failure_handler_may_print_diagnostics() {
+        let one =
+            "fail() { set +e; echo \"FAILED: $*\" >&2; m resources >&2 2>&1 || true; exit 1; }";
+        assert!(kinds(&diff("scripts/s.sh", &[], &[one])).is_empty());
+        let many = [
+            "fail() {",
+            "  echo \"FAILED\" >&2",
+            "  tail -20 log >&2 || true",
+            "  exit 1",
+            "}",
+        ];
+        assert!(kinds(&diff("scripts/s.sh", &[], &many)).is_empty());
+        // A function that does other work, or does not fail, is not a failure handler.
+        let work = [
+            "run() {",
+            "  cargo test >&2 || true",
+            "  exit 1",
+            "  deploy",
+            "}",
+        ];
+        assert_eq!(kinds(&diff("scripts/s.sh", &[], &work)), ["broadened-skip"]);
+        let ok = ["note() {", "  echo hi >&2 || true", "}"];
+        assert_eq!(kinds(&diff("scripts/s.sh", &[], &ok)), ["broadened-skip"]);
+    }
+
+    #[test]
+    fn or_true_in_a_file_the_change_adds_is_a_note() {
+        let d = new_file_diff("scripts/exit/s9.sh", &["cargo test || true"]);
+        assert!(scan_diff(&d).is_empty());
+        let n = scan_notes(&d);
+        assert_eq!(n.len(), 1);
+        assert_eq!(n[0].line, Some(1));
+        assert_eq!(
+            scan_diff(&diff("scripts/exit/s9.sh", &[], &["cargo test || true"])).len(),
+            1
+        );
+        assert!(inspect_changed(&[], &d, &[]).clean());
     }
 }
