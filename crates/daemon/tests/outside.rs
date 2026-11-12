@@ -34,6 +34,11 @@ fn scratch(name: &str) -> std::path::PathBuf {
     d
 }
 
+/// The `alive` callback for a request nobody cancels.
+fn still_wanted() -> bool {
+    true
+}
+
 fn uses(r: &str) -> BTreeMap<String, u32> {
     [(r.to_string(), 1)].into()
 }
@@ -297,7 +302,7 @@ fn an_outside_llm_hold_counts_against_the_same_claude_limit() {
         "agent one",
         Rank::new(false, 3, 2, 1, 1001, false),
         Needs::of(&[("llm:claude", 1)]),
-        &|| true,
+        &still_wanted,
         &mut |_| {},
     ) else {
         panic!("the first agent was not granted")

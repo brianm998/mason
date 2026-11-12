@@ -10,7 +10,7 @@ set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 root=$(mktemp -d /tmp/mason-s155.XXXXXX); daemon=""; holds=""
 cleanup() {
-  exec 3>&- 2>/dev/null || true
+  exec 3>&-
   for p in $holds; do kill -9 "$p" 2>/dev/null || true; done
   [ -n "$daemon" ] && kill -9 "$daemon" 2>/dev/null || true
   for hd in "$root"/d/h; do target/debug/step-host-ctl reap "$hd" >/dev/null 2>&1; done
