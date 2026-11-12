@@ -3008,6 +3008,10 @@ impl Store {
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
         conn.pragma_update(None, "busy_timeout", 5000)?;
+        // One read snapshot for every query below. Without it, an event appended between
+        // the count and the last sequence number reads as a gap in a healthy log, and the
+        // replay and the projection dump could be taken at different points.
+        let _snapshot = conn.unchecked_transaction()?;
         let n: i64 = conn.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))?;
         let last = last_seq(&conn)?;
         if n as u64 != last {
