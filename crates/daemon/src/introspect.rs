@@ -524,6 +524,17 @@ fn stats_from(d: &Daemon, rep: &Replay, project: Option<&str>, from: u64, to: u6
             })
             .count() as u64,
         wait_ms: sumo(&rep.wait_ms),
+        wait_by: {
+            let mut by = std::collections::BTreeMap::new();
+            for (p, m) in &rep.wait_ms {
+                if in_p(p) {
+                    for (on, ms) in m {
+                        *by.entry(on.clone()).or_insert(0u64) += ms;
+                    }
+                }
+            }
+            by
+        },
         active_ms: sumo(&rep.state_ms),
     }
 }
