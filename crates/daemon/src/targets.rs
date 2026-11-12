@@ -181,7 +181,7 @@ impl Targets {
 
 /// Does any loaded project declare a device environment?
 pub fn wanted(d: &Daemon) -> bool {
-    d.projects.keys().any(|pid| {
+    d.projects().keys().any(|pid| {
         d.current_def(*pid)
             .testing
             .environments

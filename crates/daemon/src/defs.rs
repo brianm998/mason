@@ -193,7 +193,7 @@ impl Daemon {
     /// Load every project's definition at startup. A project whose definition
     /// is invalid starts on the last good one (or the built-in) and says why.
     pub(crate) fn load_definitions(&self) {
-        for (pid, p) in &self.projects {
+        for (pid, p) in &self.projects() {
             // No network here: the port is not open yet. What is already fetched is
             // read; the watcher's first pass fetches.
             let fallback = self
@@ -236,7 +236,7 @@ impl Daemon {
     /// pinned); an invalid one is refused and reported while the current keeps
     /// running.
     pub fn reload_definition(&self, pid: ProjectId) -> Reload {
-        if let Some(p) = self.projects.get(&pid) {
+        if let Some(p) = self.project(pid) {
             // Someone may have landed a change: look at the remote's base, not our last view of it.
             self.fetch_project(p);
         }
@@ -252,7 +252,7 @@ impl Daemon {
     }
 
     fn reload_without_fetch(&self, pid: ProjectId) -> Reload {
-        let Some(p) = self.projects.get(&pid) else {
+        let Some(p) = self.project(pid) else {
             return Reload::Unchanged;
         };
         let cand = self.read_definition(p);
@@ -316,7 +316,7 @@ impl Daemon {
 
     /// One look for changes: has the base branch moved, or the overlay file changed?
     pub(crate) fn watch_definitions(&self, fetch: bool) {
-        for (pid, p) in &self.projects {
+        for (pid, p) in &self.projects() {
             if fetch {
                 self.fetch_project(p);
             }
@@ -454,7 +454,7 @@ impl Daemon {
 
     /// Files on the project's base branch (cached per commit).
     pub fn file_index(&self, pid: ProjectId) -> Option<Arc<FileIndex>> {
-        let p = self.projects.get(&pid)?;
+        let p = self.project(pid)?;
         let base_ref = p.base_ref();
         let sha = git::rev_parse(&p.path, &base_ref).ok()?;
         if let Some((s, idx)) = self
