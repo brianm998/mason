@@ -270,6 +270,7 @@ impl GitHostAdapter for FakeHost {
             review,
             head,
             counts: self.counts_of(n),
+            jobs: vec![],
         })
     }
 
@@ -354,14 +355,35 @@ pub fn parse_status(out: &str) -> CiState {
     match lines.next().map(str::trim) {
         Some("green") => CiState::Green,
         Some("red") => {
-            let failed: Vec<String> = lines
+            let names = |l: &str| -> Vec<String> {
+                l.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            };
+            let failed = names(lines.next().unwrap_or(""));
+            // An optional `infra: a, b` line names the jobs that are infrastructure; the
+            // rest are real. No such line: nothing is judged.
+            let jobs = match lines
                 .next()
-                .unwrap_or("")
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
+                .map(str::trim)
+                .and_then(|l| l.strip_prefix("infra:"))
+            {
+                Some(l) => {
+                    let infra = names(l);
+                    failed
+                        .iter()
+                        .map(|f| JobFailure {
+                            workflow: "ci".into(),
+                            job: f.clone(),
+                            infra: infra.contains(f).then(|| "runner lost".to_string()),
+                        })
+                        .collect()
+                }
+                None => vec![],
+            };
             CiState::Red {
+                jobs,
                 summary: if failed.is_empty() {
                     "CI is red".into()
                 } else {

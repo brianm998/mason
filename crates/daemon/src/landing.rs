@@ -790,6 +790,7 @@ fn run_batch(
                     runs: Default::default(),
                     batch_id: Default::default(),
                     ci,
+                    real_ci_red: std::sync::atomic::AtomicBool::new(false),
                     host,
                     pr: Mutex::new(None),
                     service_error: Mutex::new(None),
@@ -870,6 +871,9 @@ struct Runner {
     runs: std::sync::atomic::AtomicU64,
     batch_id: std::sync::atomic::AtomicU64,
     ci: Option<crate::services::Ci>,
+    /// Set by the last CI or PR verdict when a red job was judged a real failure (the
+    /// judge is on): the red ladder then sends the batch back without a rerun.
+    real_ci_red: std::sync::atomic::AtomicBool,
     host: Option<Arc<dyn GitHostAdapter>>,
     /// The pull request the batch is about to merge (pr modes).
     pr: Mutex<Option<OpenPr>>,
@@ -1192,6 +1196,8 @@ impl Runner {
                 &asm.head,
                 false,
             );
+            self.real_ci_red
+                .store(false, std::sync::atomic::Ordering::SeqCst);
             let mut vr = self.verify(
                 &def,
                 &suites,
@@ -1220,9 +1226,16 @@ impl Runner {
                 // The red ladder.
                 let mut resolved = false;
                 for rung in &self.cfg.ladder {
+                    // A red the CI judged a real failure is not rerun, blamed or bisected
+                    // by guesswork: the tasks hear of it now.
+                    if self.real_ci_red.load(std::sync::atomic::Ordering::SeqCst) {
+                        break;
+                    }
                     match rung {
                         Rung::RerunFailed => {
                             let again: Vec<String> = vr.failed.iter().cloned().collect();
+                            self.real_ci_red
+                                .store(false, std::sync::atomic::Ordering::SeqCst);
                             let r2 = self.verify(
                                 &def,
                                 &again,
@@ -1239,9 +1252,26 @@ impl Runner {
                                     "{} was red once and green on a rerun",
                                     again.join(", ")
                                 );
+                                // Which jobs were infrastructure, for the batch note.
+                                let judged: Vec<&String> =
+                                    vr.notes.iter().filter(|n| n.ends_with(", rerun")).collect();
+                                if !judged.is_empty() {
+                                    note = format!(
+                                        "{note} ({})",
+                                        judged
+                                            .iter()
+                                            .map(|n| n.as_str())
+                                            .collect::<Vec<_>>()
+                                            .join("; ")
+                                    );
+                                }
                                 vr.green = true;
                                 resolved = true;
                                 break;
+                            }
+                            // The rerun may itself be red for a real reason.
+                            if self.real_ci_red.load(std::sync::atomic::Ordering::SeqCst) {
+                                vr.notes.extend(r2.notes.clone());
                             }
                         }
                         Rung::BlameByImpact => {
@@ -1303,10 +1333,22 @@ impl Runner {
                     // Asking: the owner is told by an alert; nothing lands, and the batch's
                     // tasks go back with the evidence rather than waiting on a guess.
                     let all: Vec<u64> = active.iter().map(|t| t.id).collect();
-                    let why = format!(
-                        "batch #{batch_id} is red in {} and the red cannot be pinned on one task",
-                        vr.failed.iter().cloned().collect::<Vec<_>>().join(", ")
-                    );
+                    let failed_list = vr.failed.iter().cloned().collect::<Vec<_>>().join(", ");
+                    let why = if self.real_ci_red.load(std::sync::atomic::Ordering::SeqCst) {
+                        format!(
+                            "batch #{batch_id} is red in {failed_list}: CI reports a real failure ({}), not rerun",
+                            vr.notes
+                                .iter()
+                                .filter(|n| n.ends_with("real failure, not rerun"))
+                                .cloned()
+                                .collect::<Vec<_>>()
+                                .join("; ")
+                        )
+                    } else {
+                        format!(
+                            "batch #{batch_id} is red in {failed_list} and the red cannot be pinned on one task"
+                        )
+                    };
                     let _ = d.store.set_batch(
                         batch_id,
                         "red",
@@ -1898,6 +1940,8 @@ impl Runner {
     /// on it, take the answer, delete the ref. `(green, notes, failed job names)`.
     fn ci_verify(&self, wt: &Path) -> Result<(bool, Vec<String>, Vec<String>), String> {
         let (ci, cfg) = self.ci.clone().ok_or("the project has no [ci] section")?;
+        self.real_ci_red
+            .store(false, std::sync::atomic::Ordering::SeqCst);
         let batch = self.batch_id.load(std::sync::atomic::Ordering::SeqCst);
         let name = format!("mason/ci/{}-b{batch}-{}", self.project().id, self.next_n());
         let (sha, ref_id) = self.push_candidate(wt, "ci", &name)?;
@@ -1918,11 +1962,38 @@ impl Runner {
         self.drop_candidate(&name, ref_id);
         Ok(match r? {
             CiState::Green => (true, vec![format!("CI on {name}: green")], vec![]),
-            CiState::Red { failed, summary } => {
-                (false, vec![format!("CI on {name}: {summary}")], failed)
+            CiState::Red {
+                failed,
+                summary,
+                jobs,
+            } => {
+                let mut notes = vec![format!("CI on {name}: {summary}")];
+                notes.extend(self.judge_notes(&jobs));
+                (false, notes, failed)
             }
             CiState::Pending => unreachable!("pending is waited out"),
         })
+    }
+
+    /// One note per failed job the CI judged ("pr-gate/macOS: runner lost, rerun" or
+    /// "pr-gate/Linux: real failure, not rerun"), and the flag that stops the red ladder's
+    /// rerun when any of them is a real failure. Nothing is judged (no notes, no flag)
+    /// when the CI gave no per-job reasons.
+    fn judge_notes(&self, jobs: &[mason_adapter_api::service::JobFailure]) -> Vec<String> {
+        let mut real = false;
+        let notes = jobs
+            .iter()
+            .map(|j| match &j.infra {
+                Some(why) => format!("{}/{}: {why}, rerun", j.workflow, j.job),
+                None => {
+                    real = true;
+                    format!("{}/{}: real failure, not rerun", j.workflow, j.job)
+                }
+            })
+            .collect();
+        self.real_ci_red
+            .store(real, std::sync::atomic::Ordering::SeqCst);
+        notes
     }
 
     /// The pull-request modes: push a branch, open a PR from it, wait for its checks.
@@ -1932,6 +2003,8 @@ impl Runner {
             .host
             .clone()
             .ok_or("the project has no [host] section")?;
+        self.real_ci_red
+            .store(false, std::sync::atomic::Ordering::SeqCst);
         let timeout = self
             .project()
             .services
@@ -2004,15 +2077,13 @@ impl Runner {
             } else {
                 "checks failed"
             };
-            return Ok((
-                false,
-                vec![format!(
-                    "PR #{} ({name}): {why}: {}",
-                    pr.number,
-                    st.failed.join(", ")
-                )],
-                st.failed,
-            ));
+            let mut notes = vec![format!(
+                "PR #{} ({name}): {why}: {}",
+                pr.number,
+                st.failed.join(", ")
+            )];
+            notes.extend(self.judge_notes(&st.jobs));
+            return Ok((false, notes, st.failed));
         }
         *self.pr.lock().unwrap_or_else(|e| e.into_inner()) = Some(OpenPr {
             number: pr.number,
