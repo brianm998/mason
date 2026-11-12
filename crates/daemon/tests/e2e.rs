@@ -326,7 +326,10 @@ fn with_a_rerun_filter_the_rerun_carries_only_the_failing_names() {
     let t = file_task(&d, "Filtered rerun");
     wait_state(&d, t, State::Landed, 90);
     let got = std::fs::read_to_string(&args).unwrap();
-    assert_eq!(got, "\nalpha\n", "the rerun's arguments: only the failing name");
+    assert_eq!(
+        got, "\nalpha\n",
+        "the rerun's arguments: only the failing name"
+    );
     assert_eq!(flaky_tests(&d), vec!["alpha"]);
 }
 
