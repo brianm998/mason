@@ -60,6 +60,7 @@ pub mod tracker;
 pub mod update;
 pub mod usage;
 pub mod views;
+pub mod watch;
 pub mod watchdog;
 pub mod ws;
 

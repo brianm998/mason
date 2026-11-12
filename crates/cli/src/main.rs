@@ -2974,6 +2974,10 @@ fn print_health(r: &serde_json::Value) {
             s["last_status"].as_str().unwrap_or("")
         );
     }
+    println!(
+        "Stall watch: {} SIGCONT(s) sent to stopped processes, {} silent tree(s) killed",
+        r["stall_watch"]["sigconts"], r["stall_watch"]["kills"]
+    );
     let q = r["triage"]["queue"].as_array().map_or(0, Vec::len);
     println!(
         "Triage: {} ({} waiting for your review, {} reviewed)",
