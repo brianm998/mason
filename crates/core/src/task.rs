@@ -173,6 +173,9 @@ pub struct Task {
     pub cancel_keeps_branch: bool,
     /// Why the task last failed, until it is retried.
     pub failure: Option<String>,
+    /// What kind of failure it was, when it was recorded (`None`: recorded before
+    /// failures were classified).
+    pub failure_class: Option<FailClass>,
     /// Hash of the definition the task is pinned to (set when it starts).
     pub def: String,
     /// The step it is in (or last was in).
@@ -195,5 +198,66 @@ impl Task {
     /// approves the task (Part 4).
     pub fn explored_counts(&self) -> bool {
         self.explored && (self.trust != TrustSource::Outside || self.approved)
+    }
+}
+
+/// What a failure says about the change, decided when the failure is recorded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum FailClass {
+    /// About the code: red rounds used up, a weakening, an agent failure, a base conflict.
+    Code,
+    /// Not about the code: a landing push, fetch or auth failure, a CI service error,
+    /// a lost host. Nothing was judged wrong, so a retry resumes at the failed step.
+    Outside,
+}
+
+impl FailClass {
+    pub fn name(self) -> &'static str {
+        match self {
+            FailClass::Code => "code",
+            FailClass::Outside => "outside",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<FailClass> {
+        match s {
+            "code" => Some(FailClass::Code),
+            "outside" => Some(FailClass::Outside),
+            _ => None,
+        }
+    }
+
+    /// Classify the failure of a step of `state` with this `reason`. Landing's
+    /// "could not land" verdict (push, fetch, auth, CI service, services unusable) and
+    /// a lost command host are not about the code; everything else is.
+    pub fn classify(state: State, reason: &str) -> FailClass {
+        if (state == State::Landing && reason.starts_with("landing failed: "))
+            || reason.contains("the command was lost")
+        {
+            FailClass::Outside
+        } else {
+            FailClass::Code
+        }
+    }
+}
+
+#[cfg(test)]
+mod fail_class_tests {
+    use super::*;
+
+    #[test]
+    fn classes() {
+        let push = "landing failed: could not push mason/ci/x: Permission denied";
+        assert_eq!(FailClass::classify(State::Landing, push), FailClass::Outside);
+        assert_eq!(
+            FailClass::classify(State::Testing, "still red after 3 rounds"),
+            FailClass::Code
+        );
+        assert_eq!(
+            FailClass::classify(State::Testing, "the command was lost (its host died)"),
+            FailClass::Outside
+        );
+        assert_eq!(FailClass::parse("outside"), Some(FailClass::Outside));
+        assert_eq!(FailClass::parse("x"), None);
     }
 }

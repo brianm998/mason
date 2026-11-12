@@ -1138,6 +1138,7 @@ mod tests {
             decision: None,
             cancel_keeps_branch: false,
             failure: None,
+            failure_class: None,
             def: String::new(),
             step: String::new(),
             step_attempts: BTreeMap::new(),
