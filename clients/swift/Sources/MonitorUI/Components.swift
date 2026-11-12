@@ -294,7 +294,7 @@ extension View {
     func pill(prominent: Bool = false) -> some View { modifier(Pill(prominent: prominent)) }
 }
 
-func copyToPasteboard(_ s: String) {
+public func copyToPasteboard(_ s: String) {
     NSPasteboard.general.clearContents()
     NSPasteboard.general.setString(s, forType: .string)
 }
