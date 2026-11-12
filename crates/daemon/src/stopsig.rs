@@ -14,11 +14,7 @@ static FROM: AtomicI32 = AtomicI32::new(0);
 
 #[allow(unsafe_code)]
 extern "C" fn on_signal(sig: libc::c_int, info: *mut libc::siginfo_t, _: *mut libc::c_void) {
-    let pid = if info.is_null() {
-        0
-    } else {
-        sender(info)
-    };
+    let pid = if info.is_null() { 0 } else { sender(info) };
     FROM.store(pid, Ordering::SeqCst);
     GOT.store(sig, Ordering::SeqCst);
 }

@@ -2067,7 +2067,10 @@ async fn ssh_key_choose(
     project_of(&d, &name)?;
     let path = b["path"].as_str().unwrap_or_default().to_string();
     if path.is_empty() {
-        return Err(fail(StatusCode::BAD_REQUEST, "path is the private key's file"));
+        return Err(fail(
+            StatusCode::BAD_REQUEST,
+            "path is the private key's file",
+        ));
     }
     let d2 = d.clone();
     let n2 = name.clone();
@@ -2882,7 +2885,10 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/projects/{name}/editor/apply", post(editor_apply))
         .route("/projects/{name}/editor/{what}", post(editor_history))
         .route("/projects/{name}/reload", post(project_reload))
-        .route("/projects/{name}/registration/reload", post(registration_reload))
+        .route(
+            "/projects/{name}/registration/reload",
+            post(registration_reload),
+        )
         .route("/projects/{name}/config", get(project_config))
         .route(
             "/projects/{name}/overrides",
