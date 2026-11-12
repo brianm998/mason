@@ -158,6 +158,18 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     /** Where the sidebar should scroll to (a tile was clicked). */
     var scrollTarget by mutableStateOf<String?>(null)
     var lastResult by mutableStateOf<String?>(null)
+    /** Open session found the step running: the task to ask about. Answer with [answerSessionPrompt]. */
+    var sessionPrompt by mutableStateOf<Long?>(null)
+        private set
+    /** What Open session did or could not do, in words, until the next click. */
+    var sessionNotice by mutableStateOf<String?>(null)
+        private set
+    /** Starts a terminal running this argument vector; false when it could not. The app sets it. */
+    var launcher: ((List<String>) -> Boolean)? = null
+    /** Puts text on the clipboard. The app sets it. */
+    var copier: ((String) -> Unit)? = null
+    /** The CLI by its full path. */
+    var cliPath: String = OpenSession.defaultCli()
     /** What `mason proposal publish --preview` would send, once asked for. */
     var publishPreview by mutableStateOf<PublishPreview?>(null)
 
@@ -385,6 +397,25 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     fun publish(task: Long, confirm: Boolean) =
         raw("POST", "/proposals/$task/publish", id = "publish:$task", json = EditorJson.text(mapOf("confirm" to confirm)))
 
+    /** Open session: ask the daemon about the task's session first; the result carries on. */
+    fun openSession(task: Long) {
+        sessionNotice = null
+        raw("GET", "/tasks/$task/session", id = "session:$task")
+    }
+
+    fun answerSessionPrompt(yes: Boolean) {
+        val task = sessionPrompt ?: return
+        sessionPrompt = null
+        if (yes) launchSession(task, anyway = true)
+    }
+
+    private fun launchSession(task: Long, anyway: Boolean) {
+        if (launcher?.invoke(OpenSession.argv(cliPath, task, anyway)) == true) return
+        val line = OpenSession.commandLine(cliPath, task, anyway)
+        copier?.invoke(line)
+        sessionNotice = OpenSession.copiedNotice(line)
+    }
+
     fun raw(method: String, path: String, id: String = "", json: String = "") =
         send(Command(id = id, raw = Raw(method = method, path = path, json = json)))
 
@@ -479,6 +510,13 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
         m.step_progress?.let { apply(it) }
         m.result?.let { r ->
             lastResult = if (r.ok) null else r.error
+            if (r.id.startsWith("session:")) r.id.removePrefix("session:").toLongOrNull()?.let { task ->
+                when (val d = OpenSession.decide(r.ok, r.json, r.error)) {
+                    OpenSession.Decision.Confirm -> sessionPrompt = task
+                    is OpenSession.Decision.Launch -> launchSession(task, d.anyway)
+                    is OpenSession.Decision.Failed -> sessionNotice = d.why
+                }
+            }
             if (r.id == "announce" && r.ok) announcer.handleClaim(r.json)
             if (r.id == "update-monitor") {
                 if (r.ok) monitorAsked = true else monitorUpdateFailed(r.error)
