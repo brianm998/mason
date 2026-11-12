@@ -1376,6 +1376,7 @@ pub fn run(c: &Ctx) {
             waited = c.emit(EventKind::WaitStarted {
                 task: c.task,
                 on: w,
+                class: Some("environment".into()),
             });
         }
         Some(_) => {}

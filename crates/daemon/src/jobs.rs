@@ -498,7 +498,11 @@ fn wait_while_paused(c: &Ctx) -> Result<(), ()> {
                 &p.project
             };
             let on = format!("paused by {} ({} for {scope})", p.owner, p.mode);
-            if !c.emit(EventKind::WaitStarted { task: c.task, on }) {
+            if !c.emit(EventKind::WaitStarted {
+                task: c.task,
+                on,
+                class: Some("pause".into()),
+            }) {
                 return Err(());
             }
         }
@@ -539,7 +543,11 @@ fn wait_open(c: &Ctx) -> Result<(), ()> {
             Gate::Wait(on) => {
                 if !announced {
                     announced = true;
-                    if !c.emit(EventKind::WaitStarted { task: c.task, on }) {
+                    if !c.emit(EventKind::WaitStarted {
+                        task: c.task,
+                        on,
+                        class: Some("environment".into()),
+                    }) {
                         return Err(());
                     }
                 }
@@ -637,6 +645,7 @@ pub(crate) fn acquire_needs(
             waited = c.emit(EventKind::WaitStarted {
                 task: c.task,
                 on: crate::targets::wait_text(d, &asked, why),
+                class: Some(crate::targets::wait_class(d, &asked, c.task)),
             });
         },
     )?;
@@ -850,7 +859,11 @@ pub(crate) fn wait_out_environment<T>(
                     waited = true;
                     tracing::warn!(task = c.task.0, "{what}: {e}; waiting");
                     let on = format!("git is busy or not answering ({what}): {e}");
-                    if !c.emit(EventKind::WaitStarted { task: c.task, on }) {
+                    if !c.emit(EventKind::WaitStarted {
+                        task: c.task,
+                        on,
+                        class: Some("environment".into()),
+                    }) {
                         return Err(format!("{what}: the step was superseded while waiting"));
                     }
                 }
@@ -1461,6 +1474,7 @@ impl CheckSlots {
                     EventKind::WaitStarted {
                         task,
                         on: crate::targets::wait_text(d, &asked, why),
+                        class: Some(crate::targets::wait_class(d, &asked, task)),
                     },
                 );
             },
@@ -1880,6 +1894,10 @@ fn agent_job(c: &Ctx) {
         spec.on_model = Some(Arc::new(move |m| {
             let _ = d.store.set_reported_model(run, m);
         }));
+    }
+    {
+        let (d, acct, task) = (c.d.clone(), c.project.account.clone(), c.task.0);
+        spec.on_live = Some(Arc::new(move || crate::holds::probe_ok(&d, &acct, task)));
     }
     spec.env = c.project.agent_env.clone();
     // Whoever the agent runs `mason run` for: it ranks the request as this
@@ -2958,6 +2976,7 @@ fn approval_job(c: &Ctx) {
         && !c.emit(EventKind::WaitStarted {
             task: c.task,
             on: APPROVAL_WAIT.into(),
+            class: Some("approval".into()),
         })
     {
         return;

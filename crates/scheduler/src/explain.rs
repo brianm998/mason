@@ -107,6 +107,31 @@ fn short_label(label: &str) -> String {
     format!("interactive `{}…`", cut.trim_end())
 }
 
+/// What the resource is called in totals: its own name (`compile`, `test-suite`, `llm:claude`,
+/// `device:ios-simulator`).
+pub fn resource_class(resource: &str) -> String {
+    resource.to_string()
+}
+
+impl Wait {
+    /// What this wait is for, taken from its cause and not from the sentence: the resource
+    /// (`compile`, `llm:claude`, `exclusive`, ...) or the gate (`cpu`, `disk-stall`, `disk-floor`,
+    /// `memory`).
+    pub fn class(&self) -> String {
+        match &self.cause {
+            WaitCause::Full { resource }
+            | WaitCause::Behind { resource }
+            | WaitCause::TooBig { resource, .. }
+            | WaitCause::Unknown { resource } => resource_class(resource),
+            WaitCause::Exclusive => "exclusive".into(),
+            WaitCause::Memory { .. } => "memory".into(),
+            WaitCause::Disk { .. } => "disk-floor".into(),
+            WaitCause::Cpu { .. } | WaitCause::Settling { .. } => "cpu".into(),
+            WaitCause::DiskStall { .. } => "disk-stall".into(),
+        }
+    }
+}
+
 /// The sentence for one wait, like "Waiting for compile slot: 2nd in line,
 /// held by #91 for 4 min". Who is ahead is not named: `mason resources` lists it.
 pub fn explain(w: &Wait, now_ms: u64) -> String {
