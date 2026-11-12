@@ -2472,6 +2472,20 @@ fn run_command_on(
     }
     let name = format!("{suffix}-r{}{}{hsuf}", c.run.0, again(k));
     let log = c.task_dir().join(format!("{name}.log"));
+    // Silence, judged on the whole tree: continue what is stopped, kill what is stuck.
+    let stall = crate::watch::Watch::start(
+        &c.d,
+        &id,
+        log.clone(),
+        crate::watch::Thresholds::new(c.project.cont_after, c.project.kill_after),
+        {
+            let (d, run, what) = (c.d.clone(), c.run, c.step.name.clone());
+            move |text| {
+                let text = format!("{what}: {text}");
+                d.progress_report(run, |p, now| p.set_message(&text, now))
+            }
+        },
+    );
     // Lines and bytes of the output, counted as they arrive. A run found again after a
     // restart first counts what its log holds beyond what the stored record had.
     // Each run of the command is its own stream, since each log starts at 0.
@@ -2505,6 +2519,17 @@ fn run_command_on(
         }
         Err(e) => return Err(format!("cannot collect the command's result: {e}").into()),
     };
+    if let Some(why) = stall.as_ref().and_then(|w| w.stalled()) {
+        let output = tail(&read_tail_lossy(&log).unwrap_or_default(), 60);
+        return Ok(CommandRun {
+            verdict: RunVerdict::Red {
+                reason: format!("{what} failed ({why})"),
+                feedback: format!("{what} failed ({why}). Last output:\n{output}"),
+                rerun: false,
+            },
+            log,
+        });
+    }
     // A script may say more than its exit status in a JSON result file.
     let script = match std::fs::read_to_string(result_file(c)) {
         Ok(t) => match read_script_result(&t) {
@@ -2608,8 +2633,19 @@ fn land_job(c: &Ctx) {
         }
     }
     // Landing is batched per project: join the queue and wait for the verdict.
-    let Some(verdict) = crate::landing::submit_and_wait(c) else {
-        return; // approved, rejected, cancelled or retried while waiting
+    let verdict = loop {
+        let Some(v) = crate::landing::submit_and_wait(c) else {
+            return; // approved, rejected, cancelled or retried while waiting
+        };
+        if matches!(v, crate::landing::Verdict::Held) {
+            // The host refused the push's credentials: landing is held for the project. The task
+            // stays here, and joins the queue again once the owner has chosen a key.
+            if wait_while_paused(c).is_err() {
+                return;
+            }
+            continue;
+        }
+        break v;
     };
     match verdict {
         crate::landing::Verdict::Landed => {
@@ -2625,6 +2661,7 @@ fn land_job(c: &Ctx) {
         }
         crate::landing::Verdict::Conflict { reason, feedback } => c.conflict(reason, feedback),
         crate::landing::Verdict::Failed(why) => c.fail(format!("landing failed: {why}")),
+        crate::landing::Verdict::Held => {}
     }
 }
 

@@ -89,6 +89,9 @@ fn main() {
             "--heartbeat-ms" => {
                 cfg.heartbeat = Duration::from_millis(val().parse().unwrap_or_else(|_| usage()))
             }
+            "--watch-tick-ms" => {
+                cfg.watch_tick = Duration::from_millis(val().parse().unwrap_or_else(|_| usage()))
+            }
             "--hold-retry-s" => {
                 cfg.hold_retry = Duration::from_secs(val().parse().unwrap_or_else(|_| usage()))
             }

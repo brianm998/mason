@@ -2023,6 +2023,68 @@ async fn open_session(Shared(d): Shared<Arc<Daemon>>, Path(id): Path<u64>) -> Re
     Ok(Json(v))
 }
 
+/// The keys that could be used for the project's remote (owner only).
+async fn ssh_keys_list(
+    Shared(d): Shared<Arc<Daemon>>,
+    headers: axum::http::HeaderMap,
+    Path(name): Path<String>,
+) -> Res {
+    owner_only(&d, &who_of(&headers), "list SSH keys")?;
+    project_of(&d, &name)?;
+    let d2 = d.clone();
+    let keys = d
+        .pool
+        .run(move || crate::ssh_keys::list(&d2, &name))
+        .await
+        .map_err(pool_err)?
+        .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
+    Ok(Json(json!({
+        "keys": keys.iter().map(|k| k.to_json()).collect::<Vec<_>>(),
+        "host": hostname(),
+    })))
+}
+
+fn hostname() -> String {
+    std::process::Command::new("hostname")
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default()
+}
+
+/// Use a key for the project's remote: write the repository's `core.sshCommand`, unlock the key
+/// (a dialog on this host), probe. A probe that gets through lifts the hold. No passphrase is
+/// ever a field of this request.
+async fn ssh_key_choose(
+    Shared(d): Shared<Arc<Daemon>>,
+    headers: axum::http::HeaderMap,
+    Path(name): Path<String>,
+    Json(b): Json<Value>,
+) -> Res {
+    let who = who_of(&headers);
+    owner_only(&d, &who, "choose an SSH key")?;
+    project_of(&d, &name)?;
+    let path = b["path"].as_str().unwrap_or_default().to_string();
+    if path.is_empty() {
+        return Err(fail(StatusCode::BAD_REQUEST, "path is the private key's file"));
+    }
+    let d2 = d.clone();
+    let n2 = name.clone();
+    let p2 = path.clone();
+    let r = d
+        .pool
+        .run(move || crate::ssh_keys::choose(&d2, &n2, &p2))
+        .await
+        .map_err(pool_err)?;
+    match r {
+        Ok(v) => {
+            crate::attention::intervene(&d, "ssh_key", None, &who, &format!("{name}: {path}"), "");
+            Ok(Json(v))
+        }
+        Err(e) => Err(fail(StatusCode::BAD_GATEWAY, e)),
+    }
+}
+
 async fn pause_set(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res {
     let project = b["project"].as_str().unwrap_or_default().to_string();
     let mode = b["mode"].as_str().unwrap_or("all").to_string();
@@ -2424,6 +2486,7 @@ async fn lease_open(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res
     // On behalf of a task: ranked as that task's pipeline work. An id that is
     // not a live task is treated as no task at all (a person's request).
     let task = b["task"].as_u64();
+    let pid = b["pid"].as_u64().unwrap_or(0) as u32;
     // Another pipeline's work: ranked as pipeline work, never a person's, and
     // `task` is ignored (it names a MASON task).
     if let Some(name) = b["pipeline"].as_str() {
@@ -2438,15 +2501,40 @@ async fn lease_open(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res
         return Ok(Json(json!({"id": id})));
     }
     let d2 = d.clone();
-    let id = d
+    let (id, th) = d
         .pool
         .run(move || {
             let standing = task.and_then(|t| d2.lease_standing(TaskId(t)));
-            d2.broker.lease_open_as(&label, &uses, standing)
+            let id = d2.broker.lease_open_as(&label, &uses, standing);
+            d2.broker.lease_set_pid(id, pid);
+            let th = task
+                .map(|t| d2.stall_thresholds(TaskId(t)))
+                .unwrap_or_default();
+            (id, th)
         })
         .await
         .map_err(pool_err)?;
-    Ok(Json(json!({"id": id})))
+    Ok(Json(json!({
+        "id": id,
+        "cont_after_s": th.cont_after_ms / 1000, "kill_after_s": th.kill_after_ms / 1000,
+    })))
+}
+
+/// The processes of lease requests still waiting, for a `mason run` watching its own tree.
+async fn stall_waiting(Shared(d): Shared<Arc<Daemon>>) -> Res {
+    let pids: Vec<u32> = d.broker.waiting_pids().into_iter().collect();
+    Ok(Json(json!({"pids": pids})))
+}
+
+/// A `mason run` child's watcher says what it did, so `mason health` counts it.
+async fn stall_event(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res {
+    use std::sync::atomic::Ordering;
+    match b["event"].as_str() {
+        Some("cont") => d.stall_conts.fetch_add(1, Ordering::SeqCst),
+        Some("kill") => d.stall_kills.fetch_add(1, Ordering::SeqCst),
+        _ => return Err(fail(StatusCode::BAD_REQUEST, "event is cont or kill")),
+    };
+    Ok(Json(json!({"ok": true})))
 }
 
 async fn lease_poll(Shared(d): Shared<Arc<Daemon>>, Path(id): Path<u64>) -> Res {
@@ -2816,6 +2904,8 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/tasks/{id}/{kind}", post(land_override))
         .route("/account/hold", post(account_hold))
         .route("/account/release", post(account_release))
+        .route("/projects/{name}/ssh-keys", get(ssh_keys_list))
+        .route("/projects/{name}/ssh-key", post(ssh_key_choose))
         .route("/pause", post(pause_set))
         .route("/resume", post(pause_clear))
         .route("/pauses", get(pauses_list))
@@ -2853,6 +2943,8 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/resources/limit", post(resource_limit))
         .route("/leases", post(lease_open))
         .route("/leases/{id}", get(lease_poll))
+        .route("/stall/waiting", get(stall_waiting))
+        .route("/stall/event", post(stall_event))
         .route("/leases/{id}/release", post(lease_release))
         .route("/debug/stall", post(debug_stall))
         .route("/debug/store-writes", post(debug_store_writes))

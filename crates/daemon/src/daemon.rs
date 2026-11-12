@@ -78,6 +78,13 @@ pub struct Daemon {
     pub(crate) sweep: Mutex<crate::sweep::SweepState>,
     /// Step hosts this daemon has asked to stop, so the sweep does not call a stop in flight an orphan.
     pub stop_log: Mutex<crate::sweep::StopLog>,
+    /// Step hosts whose process tree the stall watcher owns (so the compile-slot idle
+    /// stop leaves them alone), and what it has done so far.
+    pub watched: Mutex<std::collections::HashSet<String>>,
+    pub stall_conts: AtomicU64,
+    pub stall_kills: AtomicU64,
+    /// Readings where a silent tree was spared because a member waits on a lease.
+    pub stall_spared: AtomicU64,
     pub(crate) defs: crate::defs::Defs,
     pub broker: Arc<crate::sched::Broker>,
     /// Appended event sequence numbers, for the clients' sockets.
@@ -282,6 +289,10 @@ impl Daemon {
             last_big_stall_ms: AtomicU64::new(0),
             sweep: Mutex::default(),
             stop_log: Mutex::default(),
+            watched: Mutex::default(),
+            stall_conts: AtomicU64::new(0),
+            stall_kills: AtomicU64::new(0),
+            stall_spared: AtomicU64::new(0),
             defs: crate::defs::Defs::default(),
             broker,
             accounts,
@@ -930,6 +941,18 @@ impl Daemon {
     /// What a `mason run` made on behalf of `task` is ranked by: the steps
     /// remaining from the step the task is in now, and its priority. `None`
     /// for a task that does not exist or is finished or not running a step.
+    /// The stall thresholds of a live task's project, for its `mason run` children
+    /// (both off for a person's command and for an unknown task).
+    pub fn stall_thresholds(&self, task: TaskId) -> crate::watch::Thresholds {
+        self.lease_standing(task)
+            .and_then(|_| {
+                let w = self.world().ok()?;
+                let p = self.project(w.tasks.get(&task)?.project)?;
+                Some(crate::watch::Thresholds::new(p.cont_after, p.kill_after))
+            })
+            .unwrap_or_default()
+    }
+
     pub fn lease_standing(&self, task: TaskId) -> Option<crate::sched::Standing> {
         let w = self.world().ok()?;
         let t = w.tasks.get(&task)?;

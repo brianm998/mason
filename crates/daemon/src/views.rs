@@ -542,6 +542,10 @@ impl<'a> Ctx<'a> {
             .count() as u32;
         let mut banners = vec![];
         for p in self.d.store.pauses(self.now).unwrap_or_default() {
+            // A hold for a refused push has its own banner, with the action that fixes it.
+            if p.owner == crate::ssh_keys::PAUSE_OWNER {
+                continue;
+            }
             banners.push(Banner {
                 kind: "paused".into(),
                 text: format!(
@@ -554,6 +558,12 @@ impl<'a> Ctx<'a> {
                     },
                     p.owner
                 ),
+            });
+        }
+        for (_, _, text) in crate::ssh_keys::alerts(self.d) {
+            banners.push(Banner {
+                kind: "push_auth".into(),
+                text,
             });
         }
         for (pid, p) in &self.d.projects() {
