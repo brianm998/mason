@@ -974,6 +974,11 @@ fn schedules_remember_their_baseline_and_triage_waits_for_review() {
         Some(vec!["a::b".to_string(), "c".to_string()])
     );
     assert!(s.schedule("nope").unwrap().is_none());
+    // The followed CI run is kept with the row (s175).
+    assert_eq!(s.schedule("base").unwrap().unwrap().follow, "");
+    row.follow = "{\"run\":7}".into();
+    s.put_schedule(&row).unwrap();
+    assert_eq!(s.schedule("base").unwrap().unwrap().follow, "{\"run\":7}");
 
     let id = s
         .add_triage(&TriageRow {
@@ -1121,4 +1126,49 @@ fn a_tracker_item_keeps_whether_it_was_labelled_and_not_looked_at_is_null() {
     drop(s);
     let c = Connection::open(&p).unwrap();
     assert_eq!(migrations::version(&c).unwrap(), migrations::SCHEMA_VERSION);
+}
+
+#[test]
+fn a_freeze_is_cleared_only_by_who_set_it() {
+    let (_d, p) = db();
+    let s = Store::open(&p).unwrap();
+    // The CI watch's freeze survives the post-land tier going green.
+    s.set_ci_freeze("p", "gate red", Some(7), 100).unwrap();
+    assert!(!s.clear_freeze("p").unwrap());
+    let f = s.freezes().unwrap();
+    assert_eq!(
+        (f.len(), f[0].source.as_str(), f[0].fix_task),
+        (1, "ci", Some(7))
+    );
+    // A post-land freeze does not replace it.
+    s.set_freeze("p", "post-land red", Some(8), 200).unwrap();
+    let f = s.freezes().unwrap();
+    assert_eq!(
+        (f[0].source.as_str(), f[0].fix_task, f[0].since),
+        ("ci", Some(7), 100)
+    );
+    // The CI freeze keeps when it began as its reason is refreshed.
+    s.set_ci_freeze("p", "gate still red", Some(9), 300)
+        .unwrap();
+    let f = s.freezes().unwrap();
+    assert_eq!((f[0].fix_task, f[0].since), (Some(9), 100));
+    assert!(s.clear_ci_freeze("p").unwrap());
+    assert!(s.freezes().unwrap().is_empty());
+    // And the other way round.
+    s.set_freeze("p", "post-land red", Some(8), 400).unwrap();
+    s.set_ci_freeze("p", "gate red", Some(7), 500).unwrap();
+    assert!(!s.clear_ci_freeze("p").unwrap());
+    assert_eq!(s.freezes().unwrap()[0].source, "post-land");
+    assert!(s.clear_freeze("p").unwrap());
+}
+
+#[test]
+fn the_ci_watch_state_is_kept_per_project() {
+    let (_d, p) = db();
+    let s = Store::open(&p).unwrap();
+    assert_eq!(s.ci_watch_state("p").unwrap(), None);
+    s.put_ci_watch_state("p", "a", 1).unwrap();
+    s.put_ci_watch_state("p", "b", 2).unwrap();
+    assert_eq!(s.ci_watch_state("p").unwrap().as_deref(), Some("b"));
+    assert_eq!(s.ci_watch_state("q").unwrap(), None);
 }

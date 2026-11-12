@@ -162,7 +162,11 @@ fn task_json(d: &Daemon, w: &World, t: &Task, detail: bool) -> Value {
             |h| json!({"reasons": h.reasons, "approved_by": h.approved_by, "since": h.at}),
         );
         v["failure"] = t.failure.as_ref().map_or(Value::Null, |f| json!(f));
+<<<<<<< HEAD
         v["failure_class"] = t.failure_class.map_or(Value::Null, |c| json!(c.name()));
+=======
+        v["excused"] = json!(crate::basecheck::recorded(&d.task_dir(t.id)));
+>>>>>>> origin/develop
         v["host_losses"] = json!(d
             .store
             .host_losses_for_task(t.id.0)
@@ -240,10 +244,22 @@ async fn status(Shared(d): Shared<Arc<Daemon>>) -> Res {
                     "floor_mb": g.floor_mb,
                     "tasks_waiting": d2.broker.disk_held(),
                 })),
-                "projects": d2.projects.values().map(|p| p.id.clone()).collect::<Vec<_>>(),
+                "projects": d2.projects().values().map(|p| p.id.clone()).collect::<Vec<_>>(),
                 "step_hosts_running": running,
-                "trackers": d2.projects.keys().map(|pid| crate::tracker::state_json(&d2, *pid)).collect::<Vec<_>>(),
-                "definitions": d2.projects.iter().map(|(pid, p)| json!({
+                "trackers": d2.projects().keys().map(|pid| crate::tracker::state_json(&d2, *pid)).collect::<Vec<_>>(),
+                // The base-branch CI watch, for each project that has it on.
+                "ci_watch": d2.projects().iter().filter_map(|(pid, p)| {
+                    let v = crate::ci_watch::view(&d2, *pid);
+                    (v["enabled"] == true).then(|| (p.id.clone(), v))
+                }).collect::<serde_json::Map<String, Value>>(),
+                // Scheduled CI runs being followed.
+                "ci_runs": d2.store.schedules().unwrap_or_default().iter().filter_map(|r| {
+                    crate::ci_schedule::follow_view(r).map(|mut v| {
+                        v["name"] = json!(r.name);
+                        v
+                    })
+                }).collect::<Vec<_>>(),
+                "definitions": d2.projects().iter().map(|(pid, p)| json!({
                     "project": p.id,
                     "hash": d2.current_def(*pid).hash,
                     "origin": d2.current_origin(*pid).label(),
@@ -340,7 +356,7 @@ async fn add_task(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res {
                     StatusCode::NOT_FOUND,
                     format!(
                         "no project {project:?}; configured: {}",
-                        d2.projects
+                        d2.projects()
                             .values()
                             .map(|p| p.id.as_str())
                             .collect::<Vec<_>>()
@@ -1136,6 +1152,22 @@ async fn project_reload(Shared(d): Shared<Arc<Daemon>>, Path(name): Path<String>
     }))
 }
 
+/// Re-read the project's registration file for tasks admitted from now on.
+async fn registration_reload(Shared(d): Shared<Arc<Daemon>>, Path(name): Path<String>) -> Res {
+    project_of(&d, &name)?;
+    let d2 = d.clone();
+    let r = d
+        .pool
+        .run(move || d2.reload_registration(&name))
+        .await
+        .map_err(pool_err)?;
+    Ok(Json(match r {
+        Ok(changed) if changed.is_empty() => json!({"result": "unchanged"}),
+        Ok(changed) => json!({"result": "applied", "changed": changed}),
+        Err(errors) => json!({"result": "refused", "errors": errors}),
+    }))
+}
+
 /// Every step's settings after the five layers, and where each came from.
 async fn project_config(Shared(d): Shared<Arc<Daemon>>, Path(name): Path<String>) -> Res {
     let pid = project_of(&d, &name)?;
@@ -1353,7 +1385,7 @@ async fn landing_status(Shared(d): Shared<Arc<Daemon>>) -> Res {
         .pool
         .run(move || {
             let projects: Vec<Value> = d2
-                .projects
+                .projects()
                 .iter()
                 .map(|(pid, p)| {
                     json!({
@@ -1391,7 +1423,7 @@ async fn landing_status(Shared(d): Shared<Arc<Daemon>>) -> Res {
                 .freezes()
                 .unwrap_or_default()
                 .iter()
-                .map(|f| json!({"project": f.project, "reason": f.reason, "fix_task": f.fix_task, "since": f.since}))
+                .map(|f| json!({"project": f.project, "reason": f.reason, "fix_task": f.fix_task, "since": f.since, "source": f.source}))
                 .collect();
             json!({"projects": projects, "batches": batches, "freezes": freezes})
         })
@@ -1514,7 +1546,7 @@ async fn self_status(Shared(d): Shared<Arc<Daemon>>) -> Res {
         .run(move || {
             let now = now_ms();
             let projects: Vec<Value> = d2
-                .projects
+                .projects()
                 .iter()
                 .filter_map(|(pid, p)| p.self_cfg.as_ref().map(|c| (pid, p, c)))
                 .map(|(pid, p, c)| {
@@ -1566,7 +1598,7 @@ async fn github_hook(
     let hit = d
         .pool
         .run(move || {
-            for (pid, p) in &d2.projects {
+            for (pid, p) in &d2.projects() {
                 let Some(t) = &p.services.tracker else {
                     continue;
                 };
@@ -1649,7 +1681,7 @@ async fn pending_issues(
         .pool
         .run(move || {
             let mut out = vec![];
-            for (pid, p) in &d2.projects {
+            for (pid, p) in &d2.projects() {
                 if q.get("project").is_some_and(|n| *n != p.id) {
                     continue;
                 }
@@ -2008,6 +2040,68 @@ async fn open_session(Shared(d): Shared<Arc<Daemon>>, Path(id): Path<u64>) -> Re
         .map_err(pool_err)?
         .map_err(|e| fail(StatusCode::NOT_FOUND, e))?;
     Ok(Json(v))
+}
+
+/// The keys that could be used for the project's remote (owner only).
+async fn ssh_keys_list(
+    Shared(d): Shared<Arc<Daemon>>,
+    headers: axum::http::HeaderMap,
+    Path(name): Path<String>,
+) -> Res {
+    owner_only(&d, &who_of(&headers), "list SSH keys")?;
+    project_of(&d, &name)?;
+    let d2 = d.clone();
+    let keys = d
+        .pool
+        .run(move || crate::ssh_keys::list(&d2, &name))
+        .await
+        .map_err(pool_err)?
+        .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
+    Ok(Json(json!({
+        "keys": keys.iter().map(|k| k.to_json()).collect::<Vec<_>>(),
+        "host": hostname(),
+    })))
+}
+
+fn hostname() -> String {
+    std::process::Command::new("hostname")
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default()
+}
+
+/// Use a key for the project's remote: write the repository's `core.sshCommand`, unlock the key
+/// (a dialog on this host), probe. A probe that gets through lifts the hold. No passphrase is
+/// ever a field of this request.
+async fn ssh_key_choose(
+    Shared(d): Shared<Arc<Daemon>>,
+    headers: axum::http::HeaderMap,
+    Path(name): Path<String>,
+    Json(b): Json<Value>,
+) -> Res {
+    let who = who_of(&headers);
+    owner_only(&d, &who, "choose an SSH key")?;
+    project_of(&d, &name)?;
+    let path = b["path"].as_str().unwrap_or_default().to_string();
+    if path.is_empty() {
+        return Err(fail(StatusCode::BAD_REQUEST, "path is the private key's file"));
+    }
+    let d2 = d.clone();
+    let n2 = name.clone();
+    let p2 = path.clone();
+    let r = d
+        .pool
+        .run(move || crate::ssh_keys::choose(&d2, &n2, &p2))
+        .await
+        .map_err(pool_err)?;
+    match r {
+        Ok(v) => {
+            crate::attention::intervene(&d, "ssh_key", None, &who, &format!("{name}: {path}"), "");
+            Ok(Json(v))
+        }
+        Err(e) => Err(fail(StatusCode::BAD_GATEWAY, e)),
+    }
 }
 
 async fn pause_set(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res {
@@ -2411,6 +2505,7 @@ async fn lease_open(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res
     // On behalf of a task: ranked as that task's pipeline work. An id that is
     // not a live task is treated as no task at all (a person's request).
     let task = b["task"].as_u64();
+    let pid = b["pid"].as_u64().unwrap_or(0) as u32;
     // Another pipeline's work: ranked as pipeline work, never a person's, and
     // `task` is ignored (it names a MASON task).
     if let Some(name) = b["pipeline"].as_str() {
@@ -2425,15 +2520,40 @@ async fn lease_open(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res
         return Ok(Json(json!({"id": id})));
     }
     let d2 = d.clone();
-    let id = d
+    let (id, th) = d
         .pool
         .run(move || {
             let standing = task.and_then(|t| d2.lease_standing(TaskId(t)));
-            d2.broker.lease_open_as(&label, &uses, standing)
+            let id = d2.broker.lease_open_as(&label, &uses, standing);
+            d2.broker.lease_set_pid(id, pid);
+            let th = task
+                .map(|t| d2.stall_thresholds(TaskId(t)))
+                .unwrap_or_default();
+            (id, th)
         })
         .await
         .map_err(pool_err)?;
-    Ok(Json(json!({"id": id})))
+    Ok(Json(json!({
+        "id": id,
+        "cont_after_s": th.cont_after_ms / 1000, "kill_after_s": th.kill_after_ms / 1000,
+    })))
+}
+
+/// The processes of lease requests still waiting, for a `mason run` watching its own tree.
+async fn stall_waiting(Shared(d): Shared<Arc<Daemon>>) -> Res {
+    let pids: Vec<u32> = d.broker.waiting_pids().into_iter().collect();
+    Ok(Json(json!({"pids": pids})))
+}
+
+/// A `mason run` child's watcher says what it did, so `mason health` counts it.
+async fn stall_event(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res {
+    use std::sync::atomic::Ordering;
+    match b["event"].as_str() {
+        Some("cont") => d.stall_conts.fetch_add(1, Ordering::SeqCst),
+        Some("kill") => d.stall_kills.fetch_add(1, Ordering::SeqCst),
+        _ => return Err(fail(StatusCode::BAD_REQUEST, "event is cont or kill")),
+    };
+    Ok(Json(json!({"ok": true})))
 }
 
 async fn lease_poll(Shared(d): Shared<Arc<Daemon>>, Path(id): Path<u64>) -> Res {
@@ -2711,7 +2831,7 @@ async fn debug_hold_repo_lock(
     let pid = q
         .get("project")
         .and_then(|n| d.project_id_by_name(n))
-        .or_else(|| d.projects.keys().next().copied())
+        .or_else(|| d.projects().keys().next().copied())
         .ok_or_else(|| fail(StatusCode::NOT_FOUND, "no project"))?;
     let lock = d.repo_lock(pid);
     let fetch = (q.get("fetch").map(String::as_str) == Some("1")).then(|| d.fetch_lock(pid));
@@ -2735,7 +2855,7 @@ async fn debug_wait_repo(Shared(d): Shared<Arc<Daemon>>) -> Res {
         return Err(fail(StatusCode::NOT_FOUND, "not found"));
     }
     let pid = d
-        .projects
+        .projects()
         .keys()
         .next()
         .copied()
@@ -2780,6 +2900,7 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/projects/{name}/editor/apply", post(editor_apply))
         .route("/projects/{name}/editor/{what}", post(editor_history))
         .route("/projects/{name}/reload", post(project_reload))
+        .route("/projects/{name}/registration/reload", post(registration_reload))
         .route("/projects/{name}/config", get(project_config))
         .route(
             "/projects/{name}/overrides",
@@ -2802,6 +2923,8 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/tasks/{id}/{kind}", post(land_override))
         .route("/account/hold", post(account_hold))
         .route("/account/release", post(account_release))
+        .route("/projects/{name}/ssh-keys", get(ssh_keys_list))
+        .route("/projects/{name}/ssh-key", post(ssh_key_choose))
         .route("/pause", post(pause_set))
         .route("/resume", post(pause_clear))
         .route("/pauses", get(pauses_list))
@@ -2839,6 +2962,8 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/resources/limit", post(resource_limit))
         .route("/leases", post(lease_open))
         .route("/leases/{id}", get(lease_poll))
+        .route("/stall/waiting", get(stall_waiting))
+        .route("/stall/event", post(stall_event))
         .route("/leases/{id}/release", post(lease_release))
         .route("/debug/stall", post(debug_stall))
         .route("/debug/store-writes", post(debug_store_writes))
@@ -2979,6 +3104,15 @@ pub fn port_taken_message(port: u16, config_dir: &std::path::Path) -> String {
 
 /// Bind loopback, announce ourselves in `daemon.json`, run the watchdog, serve.
 pub async fn serve(d: Arc<Daemon>) -> std::io::Result<()> {
+    serve_until(d, std::future::pending()).await
+}
+
+/// `serve`, stopping gracefully when `shutdown` completes: no new connections, and
+/// it returns once the open ones are done (the caller bounds the wait).
+pub async fn serve_until(
+    d: Arc<Daemon>,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> std::io::Result<()> {
     ensure_single(&d.cfg)?;
     let info = d.cfg.info_path();
     let listener = match tokio::net::TcpListener::bind(("127.0.0.1", d.cfg.port)).await {
@@ -3007,5 +3141,7 @@ pub async fn serve(d: Arc<Daemon>) -> std::io::Result<()> {
     std::fs::rename(&tmp, &info)?;
     tokio::spawn(crate::watchdog::run(d.clone()));
     tracing::info!(port, "masond listening on loopback");
-    axum::serve(listener, router(d)).await
+    axum::serve(listener, router(d))
+        .with_graceful_shutdown(shutdown)
+        .await
 }

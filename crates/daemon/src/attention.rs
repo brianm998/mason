@@ -719,7 +719,7 @@ pub fn alerts_now(d: &Daemon) -> Vec<(String, String, String)> {
     if let Some(text) = crate::update::Runtimes::new(&d.cfg.data_dir).alert() {
         out.push(("runtime".into(), "runtime".into(), text));
     }
-    for (pid, p) in &d.projects {
+    for (pid, p) in &d.projects() {
         if let Some(problems) = d.definition_error(*pid) {
             out.push((
                 format!("definition:{}", p.id),
@@ -733,6 +733,7 @@ pub fn alerts_now(d: &Daemon) -> Vec<(String, String, String)> {
         }
     }
     out.extend(fetch_alerts(d));
+    out.extend(crate::ssh_keys::alerts(d));
     out.extend(git_stuck_alert(d));
     out.extend(stalled_alert(d, &w));
     for p in d.store.pauses(now_ms()).unwrap_or_default() {
@@ -772,7 +773,18 @@ fn fetch_alerts(d: &Daemon) -> Vec<(String, String, String)> {
             if age < limit {
                 return None;
             }
-            let p = d.projects.get(&pid)?;
+            let p = d.project(pid)?;
+            // A refusal of credentials has one alert and one fix, whether a push or a fetch met it.
+            if let Some(a) = mason_landing::git::auth_failure(&err) {
+                if crate::ssh_keys::held(d, &p.id) {
+                    return None; // the hold's alert says it
+                }
+                return Some((
+                    crate::ssh_keys::alert_key(&p.id),
+                    "tracker".into(),
+                    crate::ssh_keys::alert_text(d, &p.id, a.seen_as.as_deref(), false),
+                ));
+            }
             let first = err.lines().find(|l| !l.trim().is_empty()).unwrap_or("no error text");
             Some((
                 format!("fetch:{}", p.id),
@@ -985,7 +997,7 @@ pub fn metrics(d: &Daemon, since_ms: u64) -> Value {
         let n = by_kind.get(&r.kind).and_then(Value::as_u64).unwrap_or(0);
         by_kind.insert(r.kind.clone(), json!(n + 1));
     }
-    let idle: u64 = d.projects.keys().map(|p| d.landing().idle_ms(*p)).sum();
+    let idle: u64 = d.projects().keys().map(|p| d.landing().idle_ms(*p)).sum();
     json!({
         "queue_idle_ms": idle,
         "interventions": counted.len(),

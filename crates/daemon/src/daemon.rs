@@ -39,8 +39,11 @@ pub struct Daemon {
     /// Millisecond time of the last store write refused for want of disk; 0 if none since.
     store_full: AtomicU64,
     pub disk_sizes: Arc<crate::disk::Sizes>,
-    /// By numeric id; the project's string id is `ProjectCfg::id`.
-    pub projects: BTreeMap<ProjectId, ProjectCfg>,
+    /// By numeric id; the project's string id is `ProjectCfg::id`. Each entry is
+    /// leaked (a reload of a registration file replaces it with a new one), so a
+    /// borrow stays valid while a later reload swaps the entry: the few KB left
+    /// behind per reload are the price of not threading a guard through every reader.
+    registry: std::sync::RwLock<BTreeMap<ProjectId, &'static ProjectCfg>>,
     /// The LLM provider accounts, in providers.toml order.
     pub accounts: Vec<crate::providers::Account>,
     /// Blocking work for the async layer (the store, git).
@@ -75,6 +78,13 @@ pub struct Daemon {
     pub(crate) sweep: Mutex<crate::sweep::SweepState>,
     /// Step hosts this daemon has asked to stop, so the sweep does not call a stop in flight an orphan.
     pub stop_log: Mutex<crate::sweep::StopLog>,
+    /// Step hosts whose process tree the stall watcher owns (so the compile-slot idle
+    /// stop leaves them alone), and what it has done so far.
+    pub watched: Mutex<std::collections::HashSet<String>>,
+    pub stall_conts: AtomicU64,
+    pub stall_kills: AtomicU64,
+    /// Readings where a silent tree was spared because a member waits on a lease.
+    pub stall_spared: AtomicU64,
     pub(crate) defs: crate::defs::Defs,
     pub broker: Arc<crate::sched::Broker>,
     /// Appended event sequence numbers, for the clients' sockets.
@@ -249,9 +259,13 @@ impl Daemon {
             crate::config::load_targets(&cfg.config_dir)?,
             &cfg.data_dir.join("locks"),
         )?;
+        let registry = projects
+            .into_iter()
+            .map(|(k, v)| (k, &*Box::leak(Box::new(v))))
+            .collect();
         let d = Arc::new(Daemon {
             store,
-            projects,
+            registry: std::sync::RwLock::new(registry),
             pool: Pool::new("blocking", 4, 64),
             view_pool: Pool::new("views", 2, 64),
             crash: Crash::from_env(),
@@ -275,6 +289,10 @@ impl Daemon {
             last_big_stall_ms: AtomicU64::new(0),
             sweep: Mutex::default(),
             stop_log: Mutex::default(),
+            watched: Mutex::default(),
+            stall_conts: AtomicU64::new(0),
+            stall_kills: AtomicU64::new(0),
+            stall_spared: AtomicU64::new(0),
             defs: crate::defs::Defs::default(),
             broker,
             accounts,
@@ -314,6 +332,7 @@ impl Daemon {
             crate::usage::spawn_probe(&d);
             d.spawn_watcher();
             crate::tracker::spawn(&d);
+            crate::ci_watch::spawn(&d);
             crate::introspect::spawn(&d);
             crate::selfguard::on_start(&d);
         }
@@ -362,11 +381,65 @@ impl Daemon {
     }
 
     pub fn project(&self, id: ProjectId) -> Option<&ProjectCfg> {
-        self.projects.get(&id)
+        self.registry
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&id)
+            .copied()
+    }
+
+    /// Every configured project as of now (a snapshot: a reload may replace entries after).
+    pub fn projects(&self) -> BTreeMap<ProjectId, &ProjectCfg> {
+        self.registry
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|(k, v)| (*k, *v))
+            .collect()
+    }
+
+    /// Re-read a project's registration file (`<config>/projects/<name>.toml`) and
+    /// apply it to tasks admitted from now on; tasks already running keep what they
+    /// started with. Returns what changed, as the top-level keys of the file. A file
+    /// that does not parse, or that changes something fixed at start (the repository
+    /// path, the base branch, the remote, `[self]`), is refused whole and the current
+    /// registration keeps running.
+    pub fn reload_registration(&self, name: &str) -> Result<Vec<String>, Vec<String>> {
+        let pid = self.project_id_by_name(name).ok_or_else(|| {
+            vec![format!(
+                "{name}: not a project masond started with; a new registration file needs a restart"
+            )]
+        })?;
+        let old = self
+            .project(pid)
+            .ok_or_else(|| vec![format!("{name}: no such project")])?;
+        let new = crate::config::load_project(&self.cfg.config_dir, name).map_err(|e| vec![e])?;
+        let changed = crate::config::changed_keys(&old.overlay_text, &new.overlay_text);
+        let fixed: Vec<String> = changed
+            .iter()
+            .filter(|k| crate::config::FIXED_KEYS.contains(&k.as_str()))
+            .map(|k| format!("`{k}`"))
+            .collect();
+        if !fixed.is_empty() {
+            return Err(vec![format!(
+                "{name}: {} cannot change while masond runs, so the edit is not applied. \
+                 Restart masond to apply it, or put it back",
+                fixed.join(", ")
+            )]);
+        }
+        if !changed.is_empty() {
+            let leaked: &'static ProjectCfg = Box::leak(Box::new(new));
+            self.registry
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(pid, leaked);
+            tracing::info!(project = name, changed = ?changed, "registration reloaded");
+        }
+        Ok(changed)
     }
 
     pub fn project_id_by_name(&self, name: &str) -> Option<ProjectId> {
-        self.projects
+        self.projects()
             .iter()
             .find(|(_, p)| p.id == name)
             .map(|(id, _)| *id)
@@ -601,10 +674,10 @@ impl Daemon {
                 Effect::StopStepHost { task } => self.stop_hosts(&format!("t{}r", task.0)),
                 Effect::DeleteBranch { task } => {
                     // On a thread of its own, not the bounded pool: a full queue there
-                    // dropped this silently and the branch stayed for good. It first waits
-                    // for the task's job to wind down (the step host was just told to
-                    // stop), so the job cannot race the removal, then checks the branch
-                    // really went.
+                    // dropped this silently and the branch stayed for good. It removes the
+                    // worktree and branch at once, then, once the task's job has wound down
+                    // (the step host was just told to stop), makes sure the branch really
+                    // went, since a job still running could race the first removal.
                     let d = self.clone();
                     let task = *task;
                     let _ = std::thread::Builder::new()
@@ -617,9 +690,11 @@ impl Daemon {
         }
     }
 
-    /// Remove a canceled task's worktree and branch once its job has ended (or after a
-    /// minute, whichever is first), and again while the branch is still there.
+    /// Remove a canceled task's worktree and branch now (a cancel never waits on a step), then
+    /// again once its job has ended (or after a minute, whichever is first) while the branch
+    /// is still there.
     fn delete_branch_after_job(self: &Arc<Self>, task: TaskId) {
+        crate::jobs::cleanup(self, task, true);
         let end = Instant::now() + Duration::from_secs(60);
         while self.has_job_for_task(task) && Instant::now() < end {
             std::thread::sleep(Duration::from_millis(100));
@@ -867,6 +942,18 @@ impl Daemon {
     /// What a `mason run` made on behalf of `task` is ranked by: the steps
     /// remaining from the step the task is in now, and its priority. `None`
     /// for a task that does not exist or is finished or not running a step.
+    /// The stall thresholds of a live task's project, for its `mason run` children
+    /// (both off for a person's command and for an unknown task).
+    pub fn stall_thresholds(&self, task: TaskId) -> crate::watch::Thresholds {
+        self.lease_standing(task)
+            .and_then(|_| {
+                let w = self.world().ok()?;
+                let p = self.project(w.tasks.get(&task)?.project)?;
+                Some(crate::watch::Thresholds::new(p.cont_after, p.kill_after))
+            })
+            .unwrap_or_default()
+    }
+
     pub fn lease_standing(&self, task: TaskId) -> Option<crate::sched::Standing> {
         let w = self.world().ok()?;
         let t = w.tasks.get(&task)?;
@@ -977,7 +1064,7 @@ impl Daemon {
             t.state == State::Landed || (t.state == State::Canceled && !t.cancel_keeps_branch)
         };
         let mut stale: Vec<TaskId> = vec![];
-        for (pid, p) in &self.projects {
+        for (pid, p) in &self.projects() {
             let refs = git::run(
                 &p.path,
                 &[
