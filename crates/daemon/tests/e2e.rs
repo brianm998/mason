@@ -291,13 +291,16 @@ fn a_test_that_fails_in_both_runs_keeps_the_step_red_and_is_the_only_one_named()
     );
     let (runs, _, cmd) = libtest_script(
         &s,
-        "echo 'test alpha ... FAILED'; if [ \"$n\" = 0 ]; then echo 'test beta ... FAILED'; fi; exit 1",
+        // Only the change breaks it: at the merge base (no hello.txt) it passes, so nothing is
+        // excused (decision 0172).
+        "[ -f hello.txt ] || exit 0; echo 'test alpha ... FAILED'; if [ \"$n\" = 0 ]; then echo 'test beta ... FAILED'; fi; exit 1",
     );
     s.write_project("scratch", &cmd, "max_test_rounds = 1\ntest_reruns = 1");
     let d = s.start();
     let t = file_task(&d, "Really broken");
     wait_state(&d, t, State::Failed, 120);
-    assert_eq!(std::fs::read_to_string(&runs).unwrap().trim(), "2");
+    // Two runs on the branch, and one at the merge base, which passes (nothing excused).
+    assert_eq!(std::fs::read_to_string(&runs).unwrap().trim(), "3");
     let w = d.world().unwrap();
     let why = w.tasks[&t].failure.clone().unwrap_or_default();
     assert!(why.contains("failed every time: alpha"), "{why}");
