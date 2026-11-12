@@ -380,6 +380,12 @@ fn check_landing(p: &ProjectCfg, base: &str, out: &mut Vec<Finding>) {
     for x in needs {
         out.push(fail(format!("project {name}: {x}")));
     }
+    if (cfg.mode.uses_candidate_ref() || cfg.mode.uses_pr()) && cfg.batch_suites().is_none() {
+        out.push(warn(format!(
+            "project {name}: landing mode `{}` has no `[[tier]] name = \"batch\"`, so the batch union gets no local verification and a defect that exists only in the combination reaches CI",
+            cfg.mode.name()
+        )));
+    }
     let github_ci = p
         .services
         .ci
@@ -714,6 +720,48 @@ mod tests {
         let mut out = vec![];
         check_landing(&project(d.path(), ""), "main", &mut out);
         assert!(out.iter().all(|f| !matches!(f.level, Level::Fail)));
+    }
+
+    #[test]
+    fn doctor_warns_when_a_ci_or_pr_mode_has_no_batch_tier() {
+        let tier = "[[tier]]\nname = \"batch\"\nsuites = [\"a\"]\n";
+        let warned = |toml: &str| {
+            let d = repo_with(&[(".mason/landing.toml", toml)]);
+            let mut out = vec![];
+            check_landing(&project(d.path(), ""), "main", &mut out);
+            out.iter()
+                .any(|f| matches!(f.level, Level::Warn) && f.text.contains("batch"))
+        };
+        for m in ["direct-ci", "local-only-ci", "pr-each", "pr-batch", "host-queue"] {
+            assert!(warned(&format!("mode = \"{m}\"\n")), "{m}");
+            assert!(!warned(&format!("mode = \"{m}\"\n{tier}")), "{m} with tier");
+        }
+        for m in ["direct", "local-only"] {
+            assert!(!warned(&format!("mode = \"{m}\"\n")), "{m}");
+        }
+    }
+
+    #[test]
+    fn star_example_has_a_cheap_batch_tier_the_impact_map_narrows() {
+        let cfg = mason_landing::config::parse(include_str!(
+            "../../../docs/migrations/star/.mason/landing.toml"
+        ))
+        .unwrap();
+        let suites: Vec<String> = cfg.batch_suites().unwrap().to_vec();
+        assert_eq!(suites, ["t0-pipeline-static", "t0-diff-check", "t0-i18n"]);
+        let toml = include_str!("../../../docs/migrations/star/.mason/mason.toml");
+        let testing = mason_definition::parse_with(toml, mason_definition::Plugins::Any)
+            .unwrap_or_else(|e| panic!("{e:?}"))
+            .testing;
+        let sel = testing
+            .impact
+            .select(&["pipeline/src/x.py".to_string()], &suites);
+        assert!(
+            matches!(&sel, mason_testing::Selection::Some(v) if v.iter().any(|s| s == "t0-pipeline-static")),
+            "{sel:?}"
+        );
+        let sel = testing.impact.select(&["somewhere/new.txt".to_string()], &suites);
+        assert!(matches!(sel, mason_testing::Selection::All), "{sel:?}");
     }
 
     #[test]
