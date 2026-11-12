@@ -6,6 +6,7 @@ public enum BannerIcons {
     /// Every `Banner.kind` the daemon emits today, and the image id it gets (nil: deliberately none).
     public static let daemonKinds: [String: String?] = [
         "paused": "paused",
+        "push_auth": "paused",
         "definition": "definition",
         "landing_frozen": "landing_frozen",
         "provider_outage": "provider",

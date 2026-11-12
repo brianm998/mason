@@ -35,6 +35,8 @@ pub struct DaemonConfig {
     /// How often the volume is read (`MASON_DISK_EVERY_MS` sets it for the exit script).
     pub disk_every: Duration,
     pub heartbeat: Duration,
+    /// How often the stall watcher reads a silent tree (`--watch-tick-ms` sets it for tests).
+    pub watch_tick: Duration,
     pub host_bin: PathBuf,
     pub mcp_bin: PathBuf,
     /// 0 picks a free loopback port (written to `daemon.json`).
@@ -325,6 +327,7 @@ impl DaemonConfig {
                 .map_or(Duration::from_secs(24 * 3600), Duration::from_millis),
             retention_days: DEFAULT_RETENTION_DAYS,
             heartbeat: Duration::from_secs(1),
+            watch_tick: Duration::from_secs(5),
             host_bin,
             mcp_bin,
             port: 0,
@@ -405,6 +408,12 @@ pub struct ProjectCfg {
     pub agent_idle_alert: Duration,
     /// ... and this long is stopped and continued (`agent_idle_stop_s`, default 5400); zero is off.
     pub agent_idle_stop: Duration,
+    /// A suite or command whose process tree has been silent (no output, no CPU) this long
+    /// has its stopped processes continued (`cont_after_s`, default 0 = off).
+    pub cont_after: Duration,
+    /// ... and one silent this long with nothing waiting on a lease is killed and judged red
+    /// (`kill_after_s`, default 0 = off).
+    pub kill_after: Duration,
     pub test_timeout: Duration,
     /// Test rounds before the task fails, if the overlay sets one (layer 3).
     pub max_test_rounds: Option<u32>,
@@ -413,6 +422,10 @@ pub struct ProjectCfg {
     /// flake; red every time is red. For a suite of many tests that only some
     /// machines' load makes fail, this judges the change instead of the machine.
     pub test_reruns: u32,
+    /// How a rerun runs only the tests that failed (`rerun_filter`, optional): `"cargo"`
+    /// appends `-- --exact <names>`; a template with `{tests}` has it replaced by the quoted
+    /// names. Without it a rerun runs the whole command (the names are still compared).
+    pub rerun_filter: Option<String>,
     /// Where a task's build directory is, e.g. `$HOME/.cache/mason-target/{task}` (`task_cache`,
     /// optional). Removed when the task lands (s78). Without it nothing is removed.
     pub task_cache: Option<String>,
@@ -983,6 +996,8 @@ pub fn parse_project(id: &str, text: &str) -> Result<ProjectCfg, String> {
                 .and_then(|v| v.as_integer())
                 .map_or(5400, |n| n.max(0) as u64),
         ),
+        cont_after: Duration::from_secs(secs("cont_after_s", 0)),
+        kill_after: Duration::from_secs(secs("kill_after_s", 0)),
         test_timeout: Duration::from_secs(secs("test_timeout_s", 1800)),
         max_test_rounds: doc
             .get("max_test_rounds")
@@ -992,6 +1007,13 @@ pub fn parse_project(id: &str, text: &str) -> Result<ProjectCfg, String> {
             .get("test_reruns")
             .and_then(|v| v.as_integer())
             .map_or(0, |n| n.clamp(0, 3) as u32),
+        rerun_filter: match s("rerun_filter").filter(|f| !f.trim().is_empty()) {
+            Some(f) => {
+                crate::rerun::check_filter(&f).map_err(|e| format!("{id}: {e}"))?;
+                Some(f)
+            }
+            None => None,
+        },
         task_cache_keep_days: doc
             .get("task_cache_keep_days")
             .and_then(|v| v.as_integer())
@@ -1125,6 +1147,22 @@ mod tests {
         assert_eq!(p.agent_env, vec![("FOO".to_string(), "bar".to_string())]);
         assert_eq!(p.step_timeout, Duration::from_secs(60));
         assert_eq!(p.model.as_deref(), Some("haiku"));
+    }
+
+    #[test]
+    fn stall_keys_are_off_unless_set() {
+        let base = "path=\"/r\"\nbase=\"m\"\ntest=\"t\"\n";
+        let p = parse_project("p", base).unwrap();
+        assert_eq!(
+            (p.cont_after, p.kill_after),
+            (Duration::ZERO, Duration::ZERO)
+        );
+        let p =
+            parse_project("p", &format!("{base}cont_after_s=600\nkill_after_s=1800\n")).unwrap();
+        assert_eq!(
+            (p.cont_after, p.kill_after),
+            (Duration::from_secs(600), Duration::from_secs(1800))
+        );
     }
 
     #[test]

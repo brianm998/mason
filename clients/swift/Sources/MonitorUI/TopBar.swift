@@ -99,6 +99,13 @@ struct BannersView: View {
     @ObservedObject var model: MonitorModel
 
     var body: some View {
+        bannerStack
+            .sheet(isPresented: Binding(get: { model.sshKeyProject != nil }, set: { if !$0 { model.closeSSHKeys() } })) {
+                SSHKeySheet(model: model)
+            }
+    }
+
+    var bannerStack: some View {
         VStack(spacing: 0) {
             if !model.connected {
                 banner(model.reconnecting ? "Daemon restarting, reconnecting…" : "Connection lost. Reconnecting…", id: "connection", icon: "connection_lost")
@@ -120,7 +127,15 @@ struct BannersView: View {
                 }
             }
             ForEach(Array((model.header?.banners ?? []).enumerated()), id: \.offset) { i, b in
-                banner(b.text, id: "banner:\(i)", icon: BannerIcons.id(forDaemonKind: b.kind))
+                if b.kind == "push_auth" {
+                    // A refused push holds landing; the owner picks the key that fixes it.
+                    let project = MonitorModel.pushAuthProject(b)
+                    updateRow(b.text, button: model.canAct ? "Choose SSH key…" : nil, id: "push-auth:\(project)", icon: BannerIcons.id(forDaemonKind: b.kind)) {
+                        model.chooseSSHKey(project: project)
+                    }
+                } else {
+                    banner(b.text, id: "banner:\(i)", icon: BannerIcons.id(forDaemonKind: b.kind))
+                }
             }
             ForEach(model.header?.pendingIssues ?? [], id: \.number) { p in
                 PendingIssueRow(issue: p)
