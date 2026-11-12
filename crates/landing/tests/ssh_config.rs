@@ -32,10 +32,7 @@ fn core_ssh_command_is_the_base_and_batch_mode_is_appended() {
         ],
     )
     .unwrap();
-    let r = git::run(
-        &repo,
-        &["ls-remote", "ssh://git@example.invalid/x.git", "HEAD"],
-    );
+    let r = git::run(&repo, &["ls-remote", "ssh://git@example.invalid/x.git", "HEAD"]);
     let _ = r;
     let argv = std::fs::read_to_string(&log).expect("the fake ssh was run");
     assert!(argv.contains("-i /nonexistent/key"), "{argv}");

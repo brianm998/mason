@@ -95,12 +95,7 @@ mod tests {
                  tests/x.py::test_y FAILED\nFAILED tests/z.py::test_w - assert\nfailures:\n    a::two\n";
         assert_eq!(
             failing_names(t),
-            vec![
-                "-[S t]",
-                "a::two",
-                "tests/x.py::test_y",
-                "tests/z.py::test_w"
-            ]
+            vec!["-[S t]", "a::two", "tests/x.py::test_y", "tests/z.py::test_w"]
         );
         assert!(failing_names("nope\nexit 1\n").is_empty());
     }

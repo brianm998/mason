@@ -98,26 +98,11 @@ fn mason_project_reload_applies_the_edit_through_the_daemon() {
     s.wait_daemon(&mut m);
     let file = s.config_dir.join("projects/scratch.toml");
     let text = std::fs::read_to_string(&file).unwrap();
-    std::fs::write(
-        &file,
-        text.replace("step_timeout_s = 120", "step_timeout_s = 121"),
-    )
-    .unwrap();
+    std::fs::write(&file, text.replace("step_timeout_s = 120", "step_timeout_s = 121")).unwrap();
     let out = s.mason_ok(&["project", "reload"]);
-    assert!(
-        out.contains("Reloaded") && out.contains("step_timeout_s"),
-        "{out}"
-    );
-    assert!(s
-        .mason_ok(&["project", "reload"])
-        .contains("Nothing changed"));
-    std::fs::write(
-        &file,
-        std::fs::read_to_string(&file)
-            .unwrap()
-            .replace("main", "other"),
-    )
-    .unwrap();
+    assert!(out.contains("Reloaded") && out.contains("step_timeout_s"), "{out}");
+    assert!(s.mason_ok(&["project", "reload"]).contains("Nothing changed"));
+    std::fs::write(&file, std::fs::read_to_string(&file).unwrap().replace("main", "other")).unwrap();
     let o = s.mason(&["project", "reload"]);
     assert!(!o.status.success());
     assert!(String::from_utf8_lossy(&o.stdout).contains("`base`"));
