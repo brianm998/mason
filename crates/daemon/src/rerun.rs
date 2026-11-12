@@ -6,7 +6,6 @@
 //! a parser kind there.
 
 use mason_testing::model::{ParserKind, Suite};
-use regex::Regex;
 use std::collections::BTreeSet;
 
 /// Names of the tests that failed, from libtest (`test a::b ... FAILED`), XCTest and
@@ -14,14 +13,22 @@ use std::collections::BTreeSet;
 /// and cargo-nextest lines. Sorted, one entry per name. Empty if none can be read.
 pub fn failing_names(text: &str) -> Vec<String> {
     let mut out: BTreeSet<String> = BTreeSet::new();
-    let libtest = Regex::new(r"^test (.+?) \.\.\. FAILED\b").expect("a built-in pattern");
-    let summary = Regex::new(r"^(?:FAILED|ERROR) (\S+::\S+)").expect("a built-in pattern");
     for l in text.lines() {
         let l = l.trim_end();
-        if let Some(c) = libtest.captures(l) {
-            out.insert(c[1].to_string());
-        } else if let Some(c) = summary.captures(l) {
-            out.insert(c[1].to_string());
+        if let Some(rest) = l.strip_prefix("test ") {
+            // libtest: `test a::b ... FAILED`
+            if let Some(name) = rest.strip_suffix(" ... FAILED") {
+                out.insert(name.to_string());
+            }
+        } else if let Some(rest) = l
+            .strip_prefix("FAILED ")
+            .or_else(|| l.strip_prefix("ERROR "))
+        {
+            // pytest's summary: `FAILED path::name - why`
+            let first = rest.split_whitespace().next().unwrap_or("");
+            if first.contains("::") {
+                out.insert(first.to_string());
+            }
         }
     }
     let suite = Suite::new("rerun", "", ParserKind::Xctest);
