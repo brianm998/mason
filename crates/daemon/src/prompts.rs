@@ -205,6 +205,7 @@ mod tests {
             test_timeout: Duration::from_secs(1),
             max_test_rounds: None,
             test_reruns: 0,
+            rerun_filter: None,
             task_cache: None,
             task_cache_keep_days: None,
             clarity_classifier: None,
