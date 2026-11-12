@@ -40,12 +40,13 @@ fn a_landing_push_failure_is_retried_at_land_and_no_develop_runs_again() {
     s.wait_task(0, "failed", 120);
     let t = s.task_json(0);
     assert!(
-        t["failure"].as_str().unwrap().contains("could not push"),
-        "{t:#}"
+        t["failure"].as_str().unwrap().contains("git push"),
+        "failure was {} (step {})",
+        t["failure"], t["step"]
     );
-    assert_eq!(t["failure_class"], "outside", "{t:#}");
+    assert_eq!(t["failure_class"], "outside", "failure was {}", t["failure"]);
     let at = t["step"].as_str().unwrap().to_string();
-    assert_eq!(t["retry_to"], at.as_str(), "{t:#}");
+    assert_eq!(t["retry_to"], at.as_str(), "retry_to for {}", t["failure"]);
     assert_eq!(develop_runs(&t), 1);
 
     hook(&s, false);
