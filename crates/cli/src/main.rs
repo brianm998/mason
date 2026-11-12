@@ -135,7 +135,7 @@ mason: command-line client for the MASON pipeline
   mason proposal publish <id> --preview | --confirm   send an improvement upstream, redacted
   mason proposal poll                 look at the upstream pull requests now
   mason improve \"<what to improve>\" [--project P]   ask MASON to change its own code
-  mason update [--channel stable|main|branch:X | --sha S] [--rollback] [--check]
+  mason update [--channel stable|main|branch:X | --sha S] [--rollback] [--check] [--now]
   mason update status | ack           the runtimes, a rollback alert, an update in progress
   mason config show [--project P]     every step's settings and where each came from
   mason config set <key> <value> --for 2h [--project P] [--owner O]
@@ -1626,13 +1626,15 @@ fn main() {
                     println!("acknowledged");
                 }
                 _ => {
-                    // `mason update [--channel C | --sha S] [--rollback] [--check]`
+                    // `mason update [--channel C | --sha S] [--rollback] [--check] [--now]`
                     let channel = a.opt("--channel");
                     let sha = a.opt("--sha");
                     let rollback = a.flag("--rollback");
                     let check = a.flag("--check");
+                    // Take over at once, abandoning any landing batch still running.
+                    let now = a.flag("--now");
                     finish(&a);
-                    let mut body = json!({"rollback": rollback, "check": check});
+                    let mut body = json!({"rollback": rollback, "check": check, "now": now});
                     if let Some(c) = channel {
                         body["channel"] = json!(c);
                     }
@@ -1654,11 +1656,11 @@ fn main() {
                         .and_then(|v| v.parse().ok())
                         .unwrap_or(30);
                     let mut down_since: Option<std::time::Instant> = None;
-                    let end = std::time::Instant::now() + std::time::Duration::from_secs(3600);
+                    let end = std::time::Instant::now() + std::time::Duration::from_secs(7800);
                     loop {
                         std::thread::sleep(std::time::Duration::from_millis(500));
                         if std::time::Instant::now() > end {
-                            die("gave up waiting after an hour");
+                            die("gave up waiting after two hours");
                         }
                         let Ok(r) = d.call("GET", "/update", None) else {
                             seen_down = true; // the daemon is being replaced
