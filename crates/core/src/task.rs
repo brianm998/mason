@@ -248,10 +248,7 @@ mod fail_class_tests {
     #[test]
     fn classes() {
         let push = "landing failed: could not push mason/ci/x: Permission denied";
-        assert_eq!(
-            FailClass::classify(State::Landing, push),
-            FailClass::Outside
-        );
+        assert_eq!(FailClass::classify(State::Landing, push), FailClass::Outside);
         assert_eq!(
             FailClass::classify(State::Testing, "still red after 3 rounds"),
             FailClass::Code
