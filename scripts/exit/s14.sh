@@ -25,7 +25,7 @@ t() {  # PACKAGE TEST-FILE TEST-NAME
 }
 
 echo "== 1. a batch of five: three land, the conflict and the culprit are sent back"
-t mason-daemon landing a_batch_of_five_lands_three_ejects_the_conflict_and_parks_the_culprit
+t mason-daemon landing a_batch_of_five_lands_three_defers_the_mate_conflict_and_parks_the_culprit
 echo "   t1, t2, t3 landed once each; t4 conflicted with t3 and went back; t5 broke the suite and went back alone"
 
 echo "== 2. disjoint batches run in parallel, overlapping ones wait"
