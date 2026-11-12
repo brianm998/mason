@@ -55,9 +55,11 @@ pub fn hold(d: &Arc<Daemon>, project: &str, seen_as: Option<String>) {
 
 /// Is landing held for `project` because of a refused push?
 pub fn held(d: &Daemon, project: &str) -> bool {
-    d.store.pauses(now_ms()).unwrap_or_default().iter().any(|p| {
-        p.project == project && p.mode == "landing" && p.owner == PAUSE_OWNER
-    })
+    d.store
+        .pauses(now_ms())
+        .unwrap_or_default()
+        .iter()
+        .any(|p| p.project == project && p.mode == "landing" && p.owner == PAUSE_OWNER)
 }
 
 /// Lift the hold, let what waited go on.
@@ -83,7 +85,11 @@ pub fn alert_text(d: &Daemon, project: &str, seen_as: Option<&str>, landing_held
         None => "it did not accept the credentials".to_string(),
     };
     let belongs = owner.map_or(String::new(), |o| format!(", the repo belongs to {o}"));
-    let held = if landing_held { " Landing is held." } else { "" };
+    let held = if landing_held {
+        " Landing is held."
+    } else {
+        ""
+    };
     format!("{project}: GitHub refused the push: {saw}{belongs}.{held} Choose the SSH key.")
 }
 
@@ -357,7 +363,9 @@ pub fn list_in(ssh_dir: &Path, owner: Option<&str>) -> Vec<Key> {
 // ---- choosing ----------------------------------------------------------------------------
 
 fn shell_word(s: &str) -> String {
-    if s.chars().all(|c| c.is_ascii_alphanumeric() || "/._-+=@%~".contains(c)) {
+    if s.chars()
+        .all(|c| c.is_ascii_alphanumeric() || "/._-+=@%~".contains(c))
+    {
         s.to_string()
     } else {
         format!("'{}'", s.replace('\'', "'\\''"))
@@ -413,7 +421,10 @@ pub fn unlock(key: &Path, askpass: Option<&Path>) -> Result<(), String> {
     cmd.arg(key)
         .env("SSH_ASKPASS", askpass)
         .env("SSH_ASKPASS_REQUIRE", "force")
-        .env("DISPLAY", std::env::var("DISPLAY").unwrap_or_else(|_| ":0".into()));
+        .env(
+            "DISPLAY",
+            std::env::var("DISPLAY").unwrap_or_else(|_| ":0".into()),
+        );
     // The owner has to see the dialog and answer it; that is not a step to hurry.
     let o = proc::output(&mut cmd, Duration::from_secs(180))
         .map_err(|e| format!("ssh-add did not finish: {e:?}"))?;
@@ -436,7 +447,15 @@ pub fn choose(d: &Arc<Daemon>, project: &str, path: &str) -> Result<Value, Strin
     let p = d.project(pid).ok_or("no such project")?;
     let remote = p.remote.clone().ok_or("the project has no remote")?;
     let dir = home().ok_or("no home directory")?.join(".ssh");
-    choose_in(d, project, &p.path, &remote, &dir, path, askpass_script().as_deref())
+    choose_in(
+        d,
+        project,
+        &p.path,
+        &remote,
+        &dir,
+        path,
+        askpass_script().as_deref(),
+    )
 }
 
 pub fn choose_in(
@@ -462,7 +481,12 @@ pub fn choose_in(
     let key_path = key.path.clone().unwrap_or(wanted);
     git::run(
         repo,
-        &["config", "--local", "core.sshCommand", &ssh_command(&key_path)],
+        &[
+            "config",
+            "--local",
+            "core.sshCommand",
+            &ssh_command(&key_path),
+        ],
     )
     .map_err(|e| e.to_string())?;
     let mut unlocked = false;
