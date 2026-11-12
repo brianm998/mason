@@ -280,6 +280,8 @@ pub struct FreezeRow {
     pub since: u64,
     pub reason: String,
     pub fix_task: Option<u64>,
+    /// Who set it: `post-land` or `ci` (the base-branch CI watch).
+    pub source: String,
 }
 
 /// A runtime configuration override. Every one has an owner and an expiry:
@@ -1052,6 +1054,22 @@ impl Store {
         })
     }
 
+    /// Lift the pauses of `project` in `mode` that `owner` made. Returns how many.
+    pub fn remove_pauses_of(
+        &self,
+        project: &str,
+        mode: &str,
+        owner: &str,
+    ) -> Result<usize, StoreError> {
+        let (p, m, o) = (project.to_string(), mode.to_string(), owner.to_string());
+        self.write(move |c| {
+            c.execute(
+                "DELETE FROM pauses WHERE project = ?1 AND mode = ?2 AND owner = ?3",
+                params![p, m, o],
+            )
+        })
+    }
+
     /// Pauses still in force at `now_ms`.
     pub fn pauses(&self, now_ms: u64) -> Result<Vec<PauseRow>, StoreError> {
         self.read(move |c| {
@@ -1193,6 +1211,56 @@ impl Store {
                         r.get::<_, i64>(0)? as usize,
                         r.get::<_, i64>(1)? as usize,
                         r.get::<_, i64>(2)? as u64,
+                    ))
+                },
+            )
+            .optional()
+        })
+    }
+
+    /// Remember how a test command ended on this exact content tree: green, or red with
+    /// the tests that failed. A later result for the same tree and command replaces it.
+    pub fn put_command_run(
+        &self,
+        tree: &str,
+        cmd: &str,
+        green: bool,
+        source: &str,
+        names: &[String],
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
+        let (t, k, s, n) = (
+            tree.to_string(),
+            cmd.to_string(),
+            source.to_string(),
+            names.join("\n"),
+        );
+        self.write(move |c| {
+            c.execute(
+                "INSERT OR REPLACE INTO command_runs(tree, cmd, green, source, names, at) VALUES (?1,?2,?3,?4,?5,?6)",
+                params![t, k, green as i64, s, n, now_ms as i64],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// `(green, source, failing tests)` of the last recorded run of this command on this tree.
+    pub fn command_run(
+        &self,
+        tree: &str,
+        cmd: &str,
+    ) -> Result<Option<(bool, String, Vec<String>)>, StoreError> {
+        let (t, k) = (tree.to_string(), cmd.to_string());
+        self.read(move |c| {
+            c.query_row(
+                "SELECT green, source, names FROM command_runs WHERE tree = ?1 AND cmd = ?2",
+                params![t, k],
+                |r| {
+                    let names: String = r.get(2)?;
+                    Ok((
+                        r.get::<_, i64>(0)? != 0,
+                        r.get::<_, String>(1)?,
+                        names.lines().map(str::to_string).collect(),
                     ))
                 },
             )
@@ -2620,6 +2688,7 @@ impl Store {
         })
     }
 
+    /// Freeze landing because the post-land tier is red. Never replaces a freeze the CI watch holds.
     pub fn set_freeze(
         &self,
         project: &str,
@@ -2627,37 +2696,107 @@ impl Store {
         fix_task: Option<u64>,
         now_ms: u64,
     ) -> Result<(), StoreError> {
+        self.set_freeze_from("post-land", project, reason, fix_task, now_ms)
+    }
+
+    /// Freeze landing because a gate job is red on the base branch. Replaces its own freeze
+    /// (a later pass may know the fix task), never a post-land one.
+    pub fn set_ci_freeze(
+        &self,
+        project: &str,
+        reason: &str,
+        fix_task: Option<u64>,
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
+        self.set_freeze_from("ci", project, reason, fix_task, now_ms)
+    }
+
+    fn set_freeze_from(
+        &self,
+        source: &'static str,
+        project: &str,
+        reason: &str,
+        fix_task: Option<u64>,
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
         let (p, r) = (project.to_string(), reason.to_string());
         self.write(move |c| {
+            // The same source updates its row but keeps when it began.
             c.execute(
-                "INSERT OR REPLACE INTO freezes(project, since, reason, fix_task) VALUES (?1,?2,?3,?4)",
-                params![p, now_ms as i64, r, fix_task.map(|t| t as i64)],
+                "INSERT INTO freezes(project, since, reason, fix_task, source) VALUES (?1,?2,?3,?4,?5)
+                 ON CONFLICT(project) DO UPDATE SET reason = excluded.reason, fix_task = excluded.fix_task
+                 WHERE freezes.source = excluded.source",
+                params![p, now_ms as i64, r, fix_task.map(|t| t as i64), source],
             )
             .map(|_| ())
         })
     }
 
+    /// Lift the post-land freeze. A freeze the CI watch holds stays.
     pub fn clear_freeze(&self, project: &str) -> Result<bool, StoreError> {
+        self.clear_freeze_from("post-land", project)
+    }
+
+    /// Lift the CI watch's freeze. A post-land freeze stays.
+    pub fn clear_ci_freeze(&self, project: &str) -> Result<bool, StoreError> {
+        self.clear_freeze_from("ci", project)
+    }
+
+    fn clear_freeze_from(&self, source: &'static str, project: &str) -> Result<bool, StoreError> {
         let p = project.to_string();
         self.write(move |c| {
-            c.execute("DELETE FROM freezes WHERE project = ?1", params![p])
-                .map(|n| n > 0)
+            c.execute(
+                "DELETE FROM freezes WHERE project = ?1 AND source = ?2",
+                params![p, source],
+            )
+            .map(|n| n > 0)
         })
     }
 
     pub fn freezes(&self) -> Result<Vec<FreezeRow>, StoreError> {
         self.read(move |c| {
-            let mut st =
-                c.prepare("SELECT project, since, reason, fix_task FROM freezes ORDER BY project")?;
+            let mut st = c.prepare(
+                "SELECT project, since, reason, fix_task, source FROM freezes ORDER BY project",
+            )?;
             let rows = st.query_map([], |r| {
                 Ok(FreezeRow {
                     project: r.get(0)?,
                     since: r.get::<_, i64>(1)? as u64,
                     reason: r.get(2)?,
                     fix_task: r.get::<_, Option<i64>>(3)?.map(|t| t as u64),
+                    source: r.get(4)?,
                 })
             })?;
             rows.collect()
+        })
+    }
+
+    /// What the base-branch CI watch last saw for a project (text; the daemon owns its form).
+    pub fn ci_watch_state(&self, project: &str) -> Result<Option<String>, StoreError> {
+        let p = project.to_string();
+        self.read(move |c| {
+            c.query_row(
+                "SELECT state FROM ci_watch WHERE project = ?1",
+                params![p],
+                |r| r.get(0),
+            )
+            .optional()
+        })
+    }
+
+    pub fn put_ci_watch_state(
+        &self,
+        project: &str,
+        state: &str,
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
+        let (p, s) = (project.to_string(), state.to_string());
+        self.write(move |c| {
+            c.execute(
+                "INSERT OR REPLACE INTO ci_watch(project, state, at) VALUES (?1,?2,?3)",
+                params![p, s, now_ms as i64],
+            )
+            .map(|_| ())
         })
     }
 

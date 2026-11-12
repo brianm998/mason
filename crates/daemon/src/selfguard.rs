@@ -104,6 +104,26 @@ pub fn change_of(p: &ProjectCfg, branch: &str) -> Result<Change, String> {
     change_in(&p.path, &p.base_ref(), &p.base, branch)
 }
 
+/// What `submit_change` says about a change before the test step: the weakening findings
+/// and the notes, read from the same scan landing runs. `Err` if the change cannot be read.
+pub fn submission_scan(
+    repo: &std::path::Path,
+    base_ref: &str,
+    base: &str,
+    branch: &str,
+) -> Result<(Vec<protect::Finding>, Vec<protect::Finding>), String> {
+    let ch = change_in(repo, base_ref, base, branch)?;
+    Ok((protect::scan_diff(&ch.diff), protect::scan_notes(&ch.diff)))
+}
+
+/// One finding as the agent reads it: file, line and rule.
+pub fn describe_finding(f: &protect::Finding) -> String {
+    match f.line {
+        Some(l) => format!("{}:{l}: {} ({})", f.file, f.kind, f.detail),
+        None => format!("{}: {} ({})", f.file, f.kind, f.detail),
+    }
+}
+
 /// Run by the landing job before the task joins the queue.
 pub fn gate(c: &Ctx) -> Gate {
     let Some(cfg) = c.project.self_cfg.clone() else {
@@ -489,7 +509,7 @@ pub fn on_start(d: &Arc<Daemon>) {
         .map(|b| format!("{} {} {}", b.at_ms, &b.sha[..b.sha.len().min(12)], b.event))
         .collect();
     let mut any = false;
-    for (pid, p) in &d.projects {
+    for (pid, p) in &d.projects() {
         if !is_self(p) {
             continue;
         }

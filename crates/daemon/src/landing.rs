@@ -44,6 +44,9 @@ pub enum Verdict {
     Conflict { reason: String, feedback: String },
     /// Could not land and retrying will not help.
     Failed(String),
+    /// The host refused our credentials: nothing is wrong with the change. Landing is held for
+    /// the project; the task stays in landing and submits again when the hold lifts.
+    Held,
 }
 
 /// The batch's phases: forming, integrating, running suites, landing.
@@ -786,6 +789,7 @@ fn run_batch(
                     kind,
                     fps,
                     member_runs,
+                    waits: members.clone(),
                     member_tasks,
                     runs: Default::default(),
                     batch_id: Default::default(),
@@ -865,6 +869,9 @@ struct Runner {
     fps: HashMap<u64, Footprint>,
     /// The landing step runs of the batch's tasks: where its progress is shown.
     member_runs: Vec<StepRunId>,
+    /// The members as they waited in the queue: a task deferred to the next batch is
+    /// put back as it was, so it keeps its place.
+    waits: Vec<Wait>,
     /// The batch's tasks, first by rank: the first ranks the batch's broker leases.
     member_tasks: Vec<TaskId>,
     /// Makes each suite run's host id its own: a host id names one run.
@@ -1094,6 +1101,9 @@ impl Runner {
             })
             .collect();
         let mut parked: Vec<Parked> = vec![];
+        // Tasks that conflict only with batch-mates: they stay in landing and wait for
+        // the next batch (decision 0162).
+        let mut deferred: Vec<u64> = vec![];
         // A parked task goes back to development at once, not when the batch ends: a
         // batch may wait hours for a review it needs.
         let mut delivered: HashSet<u64> = HashSet::new();
@@ -1158,6 +1168,28 @@ impl Runner {
                     ),
                     conflict: true,
                 });
+            }
+            for df in &asm.deferred {
+                if !deferred.contains(&df.id) {
+                    deferred.push(df.id);
+                }
+                let mates = df
+                    .with
+                    .iter()
+                    .map(|m| format!("#{m}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                if let Some(w) = self.waits.iter().find(|w| w.task.0 == df.id) {
+                    self.d.progress_report(w.run, |p, now| {
+                        p.set_message(
+                            &format!(
+                                "waits: conflicts with {mates} in batch #{batch_id} ({})",
+                                df.files
+                            ),
+                            now,
+                        )
+                    });
+                }
             }
             for u in &asm.unkept {
                 parked.push(Parked {
@@ -1460,7 +1492,23 @@ impl Runner {
                     };
                     let spec = spec("retest", &cmds.test);
                     return match crate::hostedcheck::run(d, &spec) {
-                        Ok(o) => o.passed,
+                        Ok(o) => {
+                            if o.passed {
+                                if let Some(t) = crate::cmdreuse::content_tree(&wt_for_cmd) {
+                                    let key = crate::cmdreuse::command_key(
+                                        cmds.build.as_deref(),
+                                        &cmds.test,
+                                    );
+                                    crate::cmdreuse::record_green(
+                                        d,
+                                        &t,
+                                        &key,
+                                        &format!("landing re-test of batch {batch_id}"),
+                                    );
+                                }
+                            }
+                            o.passed
+                        }
                         Err(e) => {
                             tracing::warn!(batch = batch_id, "the re-test gave no result: {e}");
                             false
@@ -1552,6 +1600,11 @@ impl Runner {
             }
         };
 
+        // A refused push is not the change's fault: hold landing, charge no failure.
+        let refused = match &outcome {
+            Err(why) => crate::ssh_keys::hold_if_refused(d, &p.id, why),
+            Ok(()) => false,
+        };
         let phase = match (&outcome, landed.is_empty(), parked.is_empty()) {
             (Ok(()), _, true) => "landed",
             (Ok(()), false, false) => "landed",
@@ -1587,7 +1640,7 @@ impl Runner {
         match &outcome {
             Ok(()) => {
                 for id in &all_ids {
-                    if delivered.contains(id) {
+                    if delivered.contains(id) || deferred.contains(id) {
                         continue;
                     }
                     if landed.contains(id) {
@@ -1600,18 +1653,36 @@ impl Runner {
             }
             Err(why) => {
                 for id in &all_ids {
-                    if delivered.contains(id) {
+                    if delivered.contains(id) || deferred.contains(id) {
                         continue;
                     }
                     if let Some(pk) = parked.iter().find(|x| x.task == *id) {
                         deliver(d, TaskId(*id), pk.verdict());
                     } else if landed.contains(id) {
                         deliver(d, TaskId(*id), Verdict::Landed);
+                    } else if refused {
+                        deliver(d, TaskId(*id), Verdict::Held);
                     } else {
                         deliver(d, TaskId(*id), Verdict::Failed(why.clone()));
                     }
                 }
             }
+        }
+        // The deferred tasks did nothing wrong: they go back in the queue as they were, to
+        // be assembled in the next batch, first if their mate did not land.
+        if !deferred.is_empty() {
+            {
+                let mut g = d.landing.lock();
+                for id in &deferred {
+                    g.owed.remove(&TaskId(*id));
+                    if let Some(w) = self.waits.iter().find(|w| w.task.0 == *id) {
+                        let q = g.waiting.entry(self.pid).or_default();
+                        q.retain(|x| x.task != w.task);
+                        q.push(w.clone());
+                    }
+                }
+            }
+            d.landing.wake();
         }
         if was_ok && !commit.is_empty() {
             self.post_land(batch_id, &commit, &def, &log_dir);

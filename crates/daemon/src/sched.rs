@@ -194,6 +194,9 @@ enum Meta {
         granted_at: Option<Instant>,
         /// Seen holding its marker lock at least once.
         locked: bool,
+        /// The requester's process id (0: not told), so a watcher can tell a
+        /// process tree that is waiting its turn from one that is stuck.
+        pid: u32,
     },
     /// A slot of a machine class the kernel says is held, by a process the
     /// broker has no lease for: one that took it before this daemon started
@@ -631,6 +634,7 @@ impl Broker {
                 last_poll,
                 granted_at,
                 locked,
+                ..
             }) = st.meta.get_mut(&id)
             else {
                 continue;
@@ -1176,10 +1180,31 @@ impl Broker {
                 last_poll: Instant::now(),
                 granted_at: None,
                 locked: false,
+                pid: 0,
             },
         );
         self.pass(&mut st);
         id
+    }
+
+    /// Note which process asked for lease `id`.
+    pub fn lease_set_pid(&self, id: u64, pid: u32) {
+        if let Some(Meta::External { pid: p, .. }) = lock(&self.st).meta.get_mut(&id) {
+            *p = pid;
+        }
+    }
+
+    /// The processes of requests that are still waiting for their turn. A tree
+    /// with one of these in it is waiting, not stuck.
+    pub fn waiting_pids(&self) -> std::collections::HashSet<u32> {
+        let st = lock(&self.st);
+        st.meta
+            .iter()
+            .filter_map(|(id, m)| match m {
+                Meta::External { pid, .. } if *pid > 0 && !st.ledger.holds(*id) => Some(*pid),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Where an interactive request stands. Polling is its heartbeat.
