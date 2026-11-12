@@ -47,6 +47,16 @@ pub struct Ejected {
     pub files: String,
 }
 
+/// A task that merges onto the base alone but conflicts with batch-mates merged before it:
+/// it waits for the next batch instead of going back to development.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Deferred {
+    pub id: u64,
+    /// The batch-mates it conflicts with.
+    pub with: Vec<u64>,
+    pub files: String,
+}
+
 /// A task whose conflict resolution dropped lines the base had landed: its merge was undone.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Unkept {
@@ -68,6 +78,8 @@ pub struct Assembled {
     pub already: Vec<u64>,
     /// Could not be merged (the resolver failed or there is none): sent back.
     pub ejected: Vec<Ejected>,
+    /// Conflicts with batch-mates only: waits for the next batch.
+    pub deferred: Vec<Deferred>,
     /// Resolved, but the resolution dropped base lines: the merge was undone, so the
     /// task is in none of the lists above. Sent back to restore them.
     pub unkept: Vec<Unkept>,
@@ -194,10 +206,37 @@ impl Batch<'_> {
                     } else {
                         let _ = git::run(wt, &["merge", "--abort"]);
                         let _ = git::run(wt, &["reset", "--hard", "--quiet"]);
-                        out.ejected.push(Ejected {
-                            id: t.id,
-                            files: files.trim().replace('\n', ", "),
-                        });
+                        // Does it conflict with the base alone, or only with batch-mates?
+                        let alone_ok =
+                            git::run(wt, &["merge-tree", "--write-tree", &base_tip, &t.branch])
+                                .is_ok();
+                        if alone_ok && !out.merged.is_empty() {
+                            let hit: Vec<&str> = files.lines().collect();
+                            let mut with: Vec<u64> = vec![];
+                            for m in tasks.iter().filter(|m| out.merged.contains(&m.id)) {
+                                let theirs = git::run(
+                                    wt,
+                                    &["diff", "--name-only", &format!("{base_tip}...{}", m.branch)],
+                                )
+                                .unwrap_or_default();
+                                if theirs.lines().any(|f| hit.contains(&f)) {
+                                    with.push(m.id);
+                                }
+                            }
+                            if with.is_empty() {
+                                with = out.merged.clone();
+                            }
+                            out.deferred.push(Deferred {
+                                id: t.id,
+                                with,
+                                files: files.trim().replace('\n', ", "),
+                            });
+                        } else {
+                            out.ejected.push(Ejected {
+                                id: t.id,
+                                files: files.trim().replace('\n', ", "),
+                            });
+                        }
                     }
                 }
             }
