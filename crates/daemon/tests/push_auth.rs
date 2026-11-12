@@ -64,7 +64,10 @@ fn a_refused_push_holds_landing_and_choosing_a_key_lets_the_batch_land() {
     assert!(text.contains("brian-preffect"), "{text}");
     assert!(!w.landed(t));
     assert_ne!(state_of(&w.d, t), State::Failed, "no failure is charged");
-    assert!(paused(&w.d, "other", What::Landing).is_none(), "this project only");
+    assert!(
+        paused(&w.d, "other", What::Landing).is_none(),
+        "this project only"
+    );
     std::thread::sleep(std::time::Duration::from_secs(3));
     assert_ne!(state_of(&w.d, t), State::Failed);
 
@@ -95,7 +98,10 @@ fn a_refused_push_holds_landing_and_choosing_a_key_lets_the_batch_land() {
     assert!(err.contains("landing stays held"), "{err}");
     assert!(paused(&w.d, "scratch", What::Landing).is_some());
     let cfg = mason_landing::git::run(&repo, &["config", "--local", "core.sshCommand"]).unwrap();
-    assert!(cfg.contains("id_test") && cfg.contains("IdentitiesOnly=yes"), "{cfg}");
+    assert!(
+        cfg.contains("id_test") && cfg.contains("IdentitiesOnly=yes"),
+        "{cfg}"
+    );
 
     // One that gets through lifts it; the owner's fix lets pushes through too.
     std::fs::remove_file(&flag).unwrap();
@@ -111,7 +117,10 @@ fn a_refused_push_holds_landing_and_choosing_a_key_lets_the_batch_land() {
     .unwrap();
     assert_eq!(ok["ok"], true);
     assert!(paused(&w.d, "scratch", What::Landing).is_none());
-    assert!(alert(&w, "push-auth:scratch").is_none(), "the alert is gone");
+    assert!(
+        alert(&w, "push-auth:scratch").is_none(),
+        "the alert is gone"
+    );
     wait_for("the held batch to land", 90, || w.landed(t));
     assert!(w.on_main("x/a.txt"));
 }
