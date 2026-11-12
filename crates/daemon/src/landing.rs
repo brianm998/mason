@@ -2625,7 +2625,6 @@ fn judges(c: &crate::config::CiCfg) -> bool {
 }
 
 #[cfg(test)]
-<<<<<<< HEAD
 mod idle_tests {
     use super::*;
 
@@ -2642,7 +2641,10 @@ mod idle_tests {
         s.note_idle(p, true, false, d);
         s.note_idle(p, false, false, d);
         assert_eq!(s.idle_ms.get(&p).copied(), None);
-=======
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -2666,6 +2668,5 @@ mod tests {
             plan::form_batch(&[cand(0)], clock, window, 0),
             Formation::Wait(_)
         ));
->>>>>>> origin/develop
     }
 }
