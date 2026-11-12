@@ -110,6 +110,26 @@ pub fn check_watchdog(dirs: &[PathBuf], out: &mut Vec<Finding>) {
     }
 }
 
+/// Is there a unit written by `mason service install`?
+pub fn check_service(dirs: &[PathBuf], out: &mut Vec<Finding>) {
+    let found = dirs.iter().find_map(|d| {
+        std::fs::read_dir(d)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .find(|p| {
+                p.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+                    n == crate::service::UNIT || n.starts_with(crate::service::LABEL)
+                }) && crate::service::is_ours(p)
+            })
+    });
+    match found {
+        Some(p) => out.push(ok(format!("masond runs as a service (unit {} written by `mason service install`)", p.display()))),
+        None => out.push(note("masond is not installed as a service: `mason service install` makes it start at login and restart if it dies")),
+    }
+}
+
 fn watchdog_dirs() -> Vec<PathBuf> {
     let Some(h) = std::env::var_os("HOME").map(PathBuf::from) else {
         return vec![];
@@ -540,6 +560,7 @@ pub fn run(data_dir: &Path, config_dir: &Path) -> Vec<Finding> {
 
     check_path_command(&mut out);
     check_watchdog(&watchdog_dirs(), &mut out);
+    check_service(&watchdog_dirs(), &mut out);
     let exe = std::env::current_exe().unwrap_or_default();
     for b in ["masond", "step-host", "mason-mcp"] {
         let p = exe.with_file_name(b);
