@@ -78,7 +78,7 @@ fn a_refused_push_holds_landing_and_choosing_a_key_lets_the_batch_land() {
         .status()
         .unwrap()
         .success());
-    let pid = *w.d.projects.keys().next().unwrap();
+    let pid = *w.d.projects().keys().next().unwrap();
     let repo = w.d.project(pid).unwrap().path.clone();
 
     // A probe that fails keeps the hold and gives back git's words.

@@ -536,6 +536,17 @@ struct ActionButtons: View {
                     .buttonStyle(.plain)
                     .accessibilityIdentifier("action:\(row.id):\(a)")
             }
+            if let notice = model.sessionNotice {
+                Text(notice).font(theme.small()).foregroundStyle(theme.attention)
+                    .accessibilityIdentifier("action:\(row.id):open_session:notice")
+            }
+        }
+        .alert(OpenSession.confirmQuestion, isPresented: Binding(
+            get: { model.sessionPrompt == row.id },
+            set: { if !$0 { model.answerSessionPrompt(false) } }
+        )) {
+            Button("Open anyway") { model.answerSessionPrompt(true) }
+            Button("Cancel", role: .cancel) {}
         }
     }
 
@@ -568,7 +579,7 @@ struct ActionButtons: View {
         case "land_now": model.landNow(row.id)
         case "force": model.force(row.id)
         case "skip_test": model.skipTest(row.id, step: row.step)
-        case "open_session": copyToPasteboard("mason task open \(row.id)")
+        case "open_session": model.openSession(row.id)
         default: break
         }
     }

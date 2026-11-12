@@ -120,6 +120,7 @@ mason: command-line client for the MASON pipeline
   mason ssh-key list | use <path> [--project P]   the SSH key a project's pushes use; choose the right one after a push was refused
   mason editor show|op|undo|redo|discard|simulate|apply [--project P]   the pipeline editor, without a screen
   mason definition show [--project P] | reload [--project P]
+  mason project reload [--project P]      re-read ~/.config/mason/projects/P.toml, no restart
   mason extension list|show|approve [NAME] [--project P]   project extensions; approving is the owner's
   mason lan status                    whether LAN access is on, its port and certificate fingerprint
   mason pair [--viewer]               a one-time code (and mason://pair URL) for a phone; 120 s
@@ -889,6 +890,45 @@ fn main() {
                         }
                     }
                 }
+            }
+        }
+        "project" => {
+            let sub = a.pos().unwrap_or_else(|| die("project what? reload"));
+            if sub != "reload" {
+                die(&format!("unknown project command {sub:?}\n\n{HELP}"));
+            }
+            let project = project_of(&mut a);
+            finish(&a);
+            let r = or_die(d.call(
+                "POST",
+                &format!("/projects/{project}/registration/reload"),
+                None,
+            ));
+            if json_out {
+                return println!("{r:#}");
+            }
+            match r["result"].as_str() {
+                Some("applied") => println!(
+                    "Reloaded {project}.toml; changed: {}. Tasks admitted from now on use it",
+                    r["changed"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                Some("refused") => {
+                    println!("Refused; the current registration keeps running:");
+                    r["errors"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .for_each(|e| println!("  {e}"));
+                    exit(1);
+                }
+                _ => println!("Nothing changed"),
             }
         }
         "definition" => {

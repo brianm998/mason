@@ -58,6 +58,7 @@ import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
+import mason.monitor.OpenSession
 import mason.monitor.OptionSelection
 import mason.monitor.OtherKey
 import mason.monitor.otherAnswer
@@ -486,6 +487,17 @@ fun ActionButtons(model: MonitorModel, row: TaskRow, hasApprovalView: Boolean = 
         }.forEach { a ->
             Pill(label(a), prominent = a == "approve", modifier = Modifier.testTag("action:${row.id}:$a")) { run(model, row, a) }
         }
+        model.sessionNotice?.let {
+            Text(it, style = theme.small(color = theme.attention), modifier = Modifier.testTag("action:${row.id}:open_session:notice"))
+        }
+        if (model.sessionPrompt == row.id) {
+            AlertDialog(
+                onDismissRequest = { model.answerSessionPrompt(false) },
+                text = { Text(OpenSession.CONFIRM_QUESTION, style = theme.body()) },
+                confirmButton = { TextButton(onClick = { model.answerSessionPrompt(true) }) { Text("Open anyway") } },
+                dismissButton = { TextButton(onClick = { model.answerSessionPrompt(false) }) { Text("Cancel") } },
+            )
+        }
     }
 }
 
@@ -508,7 +520,7 @@ private fun run(model: MonitorModel, row: TaskRow, a: String) {
         "land_now" -> model.landNow(row.id)
         "force" -> model.force(row.id)
         "skip_test" -> model.skipTest(row.id, row.step)
-        "open_session" -> copyToClipboard("mason task open ${row.id}")
+        "open_session" -> model.openSession(row.id)
     }
 }
 
