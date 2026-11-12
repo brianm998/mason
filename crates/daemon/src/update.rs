@@ -570,7 +570,7 @@ pub fn crashes_in(log: &[Boot], sha: &str, now_ms: u64, window_ms: u64) -> usize
     for b in log.iter().filter(|b| b.sha == sha) {
         match b.event.as_str() {
             "start" => open.push(b.at_ms),
-            "healthy" => open.clear(),
+            "healthy" | "stopped" => open.clear(),
             // The start declined to run (a daemon already there, a port taken):
             // it cancels the start the loader recorded just before it.
             "refused" => {
@@ -1286,6 +1286,24 @@ mod tests {
                 .contains("plain file names")
         );
         assert!(UpdateCfg::parse("repo = \"x\"\nchannel = \"nope\"").is_err());
+    }
+
+    #[test]
+    fn stopped_starts_are_not_crashes() {
+        let m = 60_000;
+        let mut log = vec![];
+        for i in 0..3 {
+            log.push(boot(i * m, "new", "start"));
+            log.push(boot(i * m + 1, "new", "stopped"));
+        }
+        assert_eq!(crashes_in(&log, "new", 3 * m, CRASH_WINDOW_MS), 0);
+        assert_eq!(
+            decide("new", Some("old"), &log, 3 * m),
+            Decision::Run("new".into())
+        );
+        // Starts with no ending still count.
+        let log: Vec<Boot> = (0..3).map(|i| boot(i * m, "new", "start")).collect();
+        assert_eq!(crashes_in(&log, "new", 3 * m, CRASH_WINDOW_MS), 3);
     }
 
     #[test]

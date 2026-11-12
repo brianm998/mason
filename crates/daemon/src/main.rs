@@ -306,10 +306,52 @@ fn main() {
         if demo && !demo_manual {
             d.spawn_demo_player(demo_step);
         }
-        Ok::<_, String>(http::serve(d).await)
+        // A deliberate stop (a restart, ctrl-C) is logged, and the server is
+        // shut down gracefully, bounded so launchd's 5 s exit timeout is not hit.
+        // Step hosts are separate processes and keep running.
+        // Installed once the daemon is up, so a stuck start can still be killed.
+        if let Err(e) = mason_daemon::stopsig::install() {
+            tracing::warn!("cannot handle SIGTERM: {e}");
+        }
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            let what = mason_daemon::stopsig::wait().await;
+            tracing::info!("masond stopping: {what}");
+            let _ = tx.send(());
+        });
+        let stopped = std::sync::Arc::new(tokio::sync::Notify::new());
+        let stopped2 = stopped.clone();
+        let serving = http::serve_until(d, async move {
+            if rx.await.is_ok() {
+                stopped2.notify_one();
+            } else {
+                std::future::pending::<()>().await;
+            }
+        });
+        tokio::pin!(serving);
+        let r = tokio::select! {
+            r = &mut serving => r,
+            _ = async {
+                stopped.notified().await;
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            } => Ok(()),
+        };
+        Ok::<_, String>(r)
     });
     match result {
-        Ok(Ok(())) => {}
+        Ok(Ok(())) => {
+            // Serve only returns when told to stop: say so in boots.log, so
+            // the next start does not count this one as a crash.
+            if let Some(sha) = &cfg_after.runtime_sha {
+                use mason_daemon::update::{Boots, Runtimes};
+                Boots::new(&Runtimes::new(&cfg_after.data_dir)).record(
+                    mason_daemon::daemon::now_ms(),
+                    sha,
+                    "stopped",
+                );
+            }
+            std::process::exit(0);
+        }
         // The port is held by another program: refused, not crashed.
         Ok(Err(e))
             if matches!(

@@ -459,6 +459,12 @@ impl Scratch {
             .args(extra_args)
             .stdout(Stdio::null())
             .stderr(match std::env::var("MASON_TEST_LOG") {
+                // The test asks for this daemon's log in a file of its own.
+                _ if env.iter().any(|(k, _)| *k == "MASON_TEST_STDERR") => env
+                    .iter()
+                    .find(|(k, _)| *k == "MASON_TEST_STDERR")
+                    .and_then(|(_, p)| std::fs::File::create(p).ok())
+                    .map_or(Stdio::null(), Stdio::from),
                 // A path: append the daemon's log there (failures then quote its tail).
                 Ok(p) if p.starts_with('/') => std::fs::OpenOptions::new()
                     .create(true)
@@ -493,7 +499,7 @@ impl Scratch {
         ] {
             cmd.env_remove(k);
         }
-        for (k, v) in env {
+        for (k, v) in env.iter().filter(|(k, _)| *k != "MASON_TEST_STDERR") {
             cmd.env(k, v);
         }
         let child = cmd.spawn().expect("masond starts");

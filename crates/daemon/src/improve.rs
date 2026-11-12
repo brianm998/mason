@@ -227,7 +227,7 @@ pub fn rejoin_main(d: &Arc<Daemon>) -> Result<(), String> {
 /// Names and paths of every project but MASON's own, which must not leave the machine.
 fn client_terms(d: &Daemon) -> (Vec<String>, Vec<String>) {
     let (mut names, mut roots) = (vec![], vec![]);
-    for p in d.projects.values().filter(|p| p.self_cfg.is_none()) {
+    for p in d.projects().values().filter(|p| p.self_cfg.is_none()) {
         names.push(p.id.clone());
         if let Some(n) = p.path.file_name().and_then(|n| n.to_str()) {
             names.push(n.to_string());

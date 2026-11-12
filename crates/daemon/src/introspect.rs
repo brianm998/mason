@@ -222,7 +222,7 @@ pub fn tick(d: &Arc<Daemon>) {
     if due(Some(intro.last_run), now, intro.every_ms) {
         jobs.push(("introspect".into(), Job::Cycle));
     }
-    for p in d.projects.values() {
+    for p in d.projects().values() {
         let cfg = p.introspect();
         if cfg.enabled && cfg.analyst {
             let name = format!("analyst:{}", p.id);
@@ -530,7 +530,7 @@ pub fn cycle(d: &Arc<Daemon>) -> Value {
     let mut refused = vec![];
     let mut skipped = 0u64;
     let mut found_total = 0u64;
-    let mut names: Vec<(&ProjectId, &ProjectCfg)> = d.projects.iter().collect();
+    let mut names: Vec<(&ProjectId, &ProjectCfg)> = d.projects().iter().collect();
     names.sort_by(|a, b| a.1.id.cmp(&b.1.id));
     let switches = d.store.expired_switches(now).unwrap_or_default();
     let closed = d.store.findings().unwrap_or_default();
@@ -1155,7 +1155,7 @@ pub fn health(d: &Daemon) -> Value {
         .filter(|t| t.status == "queued")
         .map(|t| json!({"id": t.id, "task": t.task, "question": t.question, "action": t.action, "answer": t.answer, "evidence": t.evidence}))
         .collect();
-    let triage_on = d.projects.values().any(|p| p.introspect().triage.enabled);
+    let triage_on = d.projects().values().any(|p| p.introspect().triage.enabled);
     json!({
         "at": now,
         "last_cycle": d.intro.last.lock().unwrap_or_else(|e| e.into_inner()).clone(),

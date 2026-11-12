@@ -18,6 +18,7 @@ pub mod demo;
 pub mod disk;
 pub mod editor;
 pub mod fdlimit;
+pub mod stopsig;
 pub mod holds;
 pub mod hostarchive;
 pub mod hostedcheck;

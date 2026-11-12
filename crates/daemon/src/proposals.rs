@@ -181,7 +181,7 @@ fn in_repo(p: &ProjectCfg, file: &str) -> bool {
 
 /// MASON's own project, if one is registered.
 pub fn self_project(d: &Daemon) -> Option<(ProjectId, &ProjectCfg)> {
-    d.projects
+    d.projects()
         .iter()
         .find(|(_, p)| p.self_cfg.is_some())
         .map(|(id, p)| (*id, p))

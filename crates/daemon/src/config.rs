@@ -1015,6 +1015,42 @@ pub fn parse_project(id: &str, text: &str) -> Result<ProjectCfg, String> {
     })
 }
 
+/// Top-level keys of a registration file that are fixed when masond starts: a
+/// reload that changes one is refused.
+pub const FIXED_KEYS: &[&str] = &["path", "base", "remote", "self"];
+
+/// The top-level keys (tables included) whose text differs between two
+/// registration files, sorted. Text that does not parse counts as empty.
+pub fn changed_keys(old: &str, new: &str) -> Vec<String> {
+    let map = |t: &str| -> std::collections::BTreeMap<String, String> {
+        t.parse::<DocumentMut>()
+            .map(|d| {
+                d.iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string().trim().to_string()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let (a, b) = (map(old), map(new));
+    let mut keys: Vec<String> = a.keys().chain(b.keys()).cloned().collect();
+    keys.sort();
+    keys.dedup();
+    keys.retain(|k| a.get(k) != b.get(k));
+    keys
+}
+
+/// One project's registration file, parsed and its account resolved.
+pub fn load_project(config_dir: &Path, id: &str) -> Result<ProjectCfg, String> {
+    let file = config_dir.join("projects").join(format!("{id}.toml"));
+    let text = std::fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
+    let mut c = parse_project(id, &text)?;
+    let accounts = crate::providers::load(config_dir)?;
+    let a = c.agent();
+    c.account = crate::providers::resolve_account(&accounts, a.provider, a.account.as_deref())
+        .map_err(|e| format!("{}: {e}", c.id))?;
+    Ok(c)
+}
+
 /// Every `*.toml` under `<config_dir>/projects`. Errors name the file.
 pub fn load_projects(config_dir: &Path) -> Result<Vec<ProjectCfg>, Vec<String>> {
     let dir = config_dir.join("projects");
