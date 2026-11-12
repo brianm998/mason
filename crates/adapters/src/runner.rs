@@ -307,9 +307,23 @@ impl<'a> StepRunner<'a> {
     ) -> StepReport {
         loop {
             r.tokens.invocations += 1;
+            let mut live = false;
+            let mut go_live = |spec: &SessionSpec| {
+                if !live {
+                    live = true;
+                    if let Some(f) = &spec.on_live {
+                        f();
+                    }
+                }
+            };
             let outcome = loop {
                 match handle.next_event() {
-                    Some(AgentEvent::Tokens(t)) => r.tokens.add(&t),
+                    Some(AgentEvent::Tokens(t)) => {
+                        if t.output.unwrap_or(0) > 0 {
+                            go_live(&spec);
+                        }
+                        r.tokens.add(&t)
+                    }
                     Some(AgentEvent::Model(m)) => {
                         if let Some(f) = &spec.on_model {
                             f(&m);
@@ -324,6 +338,7 @@ impl<'a> StepRunner<'a> {
                     }
                     Some(AgentEvent::ApiRetry { .. }) => r.api_retries += 1,
                     Some(ev @ AgentEvent::ToolCall { .. }) => {
+                        go_live(&spec);
                         if let Some(f) = &spec.on_agent_event {
                             f(&ev);
                         }
@@ -336,7 +351,7 @@ impl<'a> StepRunner<'a> {
                             f(&ev);
                         }
                     }
-                    Some(AgentEvent::Text(_)) => {}
+                    Some(AgentEvent::Text(_)) => go_live(&spec),
                     Some(AgentEvent::Finished(o)) => break o,
                     None => {
                         break Outcome::Crash {

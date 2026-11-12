@@ -430,6 +430,7 @@ fn waits_are_activity_not_state_and_clear_when_the_step_moves_on() {
     sim.ok(E::WaitStarted {
         task: t,
         on: "compile slot".into(),
+        class: None,
     });
     assert_eq!(
         sim.activity(t),
@@ -441,6 +442,7 @@ fn waits_are_activity_not_state_and_clear_when_the_step_moves_on() {
     sim.ok(E::WaitStarted {
         task: t,
         on: "phone".into(),
+        class: None,
     });
     sim.ok(E::StepSucceeded {
         task: t,
@@ -617,6 +619,7 @@ fn random_events_never_break_invariants() {
                     E::WaitStarted {
                         task,
                         on: "x".into(),
+                        class: None,
                     }
                 } else {
                     E::WaitEnded { task }
