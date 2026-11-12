@@ -505,7 +505,7 @@ pub fn on_start(d: &Arc<Daemon>) {
         .map(|b| format!("{} {} {}", b.at_ms, &b.sha[..b.sha.len().min(12)], b.event))
         .collect();
     let mut any = false;
-    for (pid, p) in &d.projects {
+    for (pid, p) in &d.projects() {
         if !is_self(p) {
             continue;
         }

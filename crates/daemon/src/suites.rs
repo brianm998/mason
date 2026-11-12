@@ -14,6 +14,7 @@ use crate::daemon::{now_ms, Daemon};
 use crate::jobs::{run_shell, tail, Ctx};
 use crate::progress::FileTail;
 use crate::sched::needs_of;
+use crate::watch::Thresholds;
 use mason_core::progress::{Change, Figure, Report, Source, SubProgress};
 use mason_core::*;
 use mason_definition::graph::Outcome;
@@ -147,6 +148,8 @@ struct Ran {
     output: String,
     stop: Stop,
     timed_out: bool,
+    /// The stall watcher killed the tree: why.
+    stalled: Option<String>,
 }
 
 type Check = Arc<dyn Fn() -> Stop + Send + Sync>;
@@ -165,6 +168,7 @@ fn run_hosted(
     check: Check,
     run: Option<StepRunId>,
     watch: Option<&Suite>,
+    th: Thresholds,
 ) -> Result<Ran, String> {
     use crate::hostloss as hl;
     let hosts = d.cfg.hosts_dir();
@@ -182,7 +186,18 @@ fn run_hosted(
         on = again_id.clone();
     }
     loop {
-        match run_hosted_once(d, &on, cmd, cwd, limit, log_dir, check.clone(), run, watch) {
+        match run_hosted_once(
+            d,
+            &on,
+            cmd,
+            cwd,
+            limit,
+            log_dir,
+            check.clone(),
+            run,
+            watch,
+            th,
+        ) {
             Ok(r) => return Ok(r),
             Err(HostedErr::Other(e)) => return Err(e),
             Err(HostedErr::Lost(rep)) if on == id => {
@@ -217,6 +232,7 @@ fn run_hosted_once(
     check: Check,
     run: Option<StepRunId>,
     watch: Option<&Suite>,
+    th: Thresholds,
 ) -> Result<Ran, HostedErr> {
     let hosts = d.cfg.hosts_dir();
     let dir = hosts.join(id);
@@ -275,6 +291,20 @@ fn run_hosted_once(
     let log = log_dir.join(format!("{id}.log"));
     // The step's generic progress: lines and bytes of this suite's output as it arrives.
     let exit = log_dir.join(format!("{id}.exit"));
+    // Silence, judged on the whole tree: continue what is stopped, kill what is stuck.
+    let stall = crate::watch::Watch::start(d, id, log.clone(), th, {
+        let d = d.clone();
+        let (name, id) = (
+            watch.map(|w| w.name.clone()).unwrap_or_default(),
+            id.to_string(),
+        );
+        move |text| {
+            if let Some(run) = run {
+                let text = format!("{}: {text}", if name.is_empty() { &id } else { &name });
+                d.progress_report(run, |p, now| p.set_message(&text, now));
+            }
+        }
+    });
     let rec = match run {
         Some(run) => {
             if watch.is_some_and(|w| w.pty) {
@@ -330,6 +360,7 @@ fn run_hosted_once(
             _ => Stop::No,
         },
         timed_out: why.load(Ordering::SeqCst) == 1,
+        stalled: stall.as_ref().and_then(|w| w.stalled()),
     })
 }
 
@@ -392,6 +423,18 @@ struct Judged {
 }
 
 fn judge_ran(suite: &Suite, ran: &Ran, cwd: &Path) -> Judged {
+    // A tree the stall watcher killed is red for that reason, whatever the partial
+    // output parses to.
+    if let Some(why) = &ran.stalled {
+        return Judged {
+            results: Results::default(),
+            verdict: Verdict::Red {
+                failures: vec![],
+                why: why.clone(),
+            },
+            output: ran.output.clone(),
+        };
+    }
     let text = match &suite.results_file {
         Some(f) => match crate::jobs::read_lossy(&cwd.join(f)) {
             Ok(t) => t,
@@ -461,6 +504,16 @@ impl Who {
     /// The step run that shows this run's progress, if any.
     fn run(&self) -> Option<StepRunId> {
         self.task.map(|(_, r)| r).or(self.sink)
+    }
+
+    /// This project's stall thresholds (both off when the project sets none).
+    fn thresholds(&self) -> Thresholds {
+        self.d
+            .project_id_by_name(&self.project)
+            .and_then(|i| self.d.project(i))
+            .map_or_else(Thresholds::default, |p| {
+                Thresholds::new(p.cont_after, p.kill_after)
+            })
     }
 
     fn check(&self, suite: &str) -> Check {
@@ -685,6 +738,7 @@ fn baseline(
             who.check(&suite.name),
             who.run(),
             None,
+            who.thresholds(),
         )
         .ok()?;
         if ran.stop != Stop::No {
@@ -843,6 +897,7 @@ fn run_suite(
             check,
             who.run(),
             Some(suite),
+            who.thresholds(),
         ) {
             Ok(r) => r,
             Err(e) => {
@@ -1082,6 +1137,7 @@ fn rerun_failing(
         who.check(&suite.name),
         who.run(),
         None,
+        who.thresholds(),
     )
     .ok()?;
     if ran.stop != Stop::No {
@@ -1434,6 +1490,7 @@ fn run_new_tests_at_base(
             who.check(&suite.name),
             who.run(),
             None,
+            who.thresholds(),
         )
         .ok()?;
         Some(judge_ran(suite, &ran, &wt).results)
@@ -1704,6 +1761,7 @@ mod lossy_tests {
             output: crate::jobs::read_lossy(&log).unwrap_or_default(),
             stop: Stop::No,
             timed_out: false,
+            stalled: None,
         };
         (ran, dir)
     }
@@ -1727,5 +1785,17 @@ mod lossy_tests {
         let (ran, dir) = ran_from(b"\xff\nnothing here\n", 0);
         let j = judge_ran(&suite, &ran, dir.path());
         assert!(!matches!(j.verdict, Verdict::Green));
+    }
+
+    #[test]
+    fn a_stalled_run_is_red_with_its_reason_even_if_the_output_looks_green() {
+        let suite = Suite::new("t", "x", ParserKind::Tap);
+        let (mut ran, dir) = ran_from(b"ok 1 - a\nok 2 - b\n", 0);
+        ran.stalled = Some("stalled: no output or CPU for 30 min".into());
+        let j = judge_ran(&suite, &ran, dir.path());
+        match j.verdict {
+            Verdict::Red { why, .. } => assert_eq!(why, "stalled: no output or CPU for 30 min"),
+            v => panic!("{v:?}"),
+        }
     }
 }

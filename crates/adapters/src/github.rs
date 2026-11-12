@@ -492,6 +492,197 @@ fn item_of(v: &Value) -> Item {
     }
 }
 
+// ---- the base branch's own runs ----------------------------------------------------------
+
+/// One workflow run on a branch, as the base-branch CI watch needs it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ActionsRun {
+    pub id: u64,
+    /// The workflow's name.
+    pub workflow: String,
+    pub sha: String,
+    pub url: String,
+    pub created_ms: u64,
+    /// `None`: not finished.
+    pub conclusion: Option<String>,
+}
+
+/// One run of a named workflow, finished or not, as a scheduled CI run needs it (s175).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WorkflowRun {
+    pub id: u64,
+    /// The workflow's name.
+    pub workflow: String,
+    pub sha: String,
+    pub url: String,
+    pub created_ms: u64,
+    /// `queued`, `in_progress`, `completed`, ...
+    pub status: String,
+    pub conclusion: Option<String>,
+    /// `workflow_dispatch`, `push`, ...
+    pub event: String,
+    /// The run-name the dispatch gave it.
+    pub title: String,
+    /// 1 for the first attempt; a rerun makes it 2.
+    pub attempt: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ActionsJob {
+    pub id: u64,
+    pub name: String,
+    pub conclusion: Option<String>,
+}
+
+/// `2026-11-11T12:30:00Z` as milliseconds since the epoch; `0` if it is not that shape.
+pub fn iso_ms(s: &str) -> u64 {
+    let b = s.as_bytes();
+    let num = |a: usize, z: usize| -> Option<i64> { s.get(a..z)?.parse().ok() };
+    if b.len() < 19 {
+        return 0;
+    }
+    let (Some(y), Some(m), Some(d), Some(h), Some(mi), Some(se)) = (
+        num(0, 4),
+        num(5, 7),
+        num(8, 10),
+        num(11, 13),
+        num(14, 16),
+        num(17, 19),
+    ) else {
+        return 0;
+    };
+    // Days from the civil date (Howard Hinnant's algorithm).
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe - 719468;
+    u64::try_from(((days * 24 + h) * 60 + mi) * 60 + se).map_or(0, |t| t * 1000)
+}
+
+impl GitHub {
+    /// The finished workflow runs on `branch`, newest first.
+    pub fn base_runs(&self, branch: &str) -> Result<Vec<ActionsRun>, ApiError> {
+        let b = branch
+            .replace('%', "%25")
+            .replace('/', "%2F")
+            .replace(' ', "%20");
+        let v = self.json(Request::get(&self.url(&format!(
+            "/actions/runs?branch={b}&status=completed&exclude_pull_requests=true&per_page=100"
+        ))))?;
+        Ok(v["workflow_runs"]
+            .as_array()
+            .ok_or_else(|| ApiError::new(ErrorKind::Unavailable, "a list of runs was expected"))?
+            .iter()
+            .filter_map(|r| {
+                Some(ActionsRun {
+                    id: r["id"].as_u64()?,
+                    workflow: r["name"].as_str().unwrap_or_default().to_string(),
+                    sha: r["head_sha"].as_str().unwrap_or_default().to_string(),
+                    url: r["html_url"].as_str().unwrap_or_default().to_string(),
+                    created_ms: iso_ms(r["created_at"].as_str().unwrap_or_default()),
+                    conclusion: r["conclusion"].as_str().map(String::from),
+                })
+            })
+            .collect())
+    }
+
+    /// Start a workflow (`gherkin.yml`) on `git_ref` with the given inputs. GitHub answers 204
+    /// with no run id: find the run with [`GitHub::workflow_file_runs`].
+    pub fn dispatch_workflow(
+        &self,
+        file: &str,
+        git_ref: &str,
+        inputs: &[(String, String)],
+    ) -> Result<(), ApiError> {
+        let inputs: serde_json::Map<String, Value> =
+            inputs.iter().map(|(k, v)| (k.clone(), json!(v))).collect();
+        let mut body = json!({"ref": git_ref});
+        if !inputs.is_empty() {
+            body["inputs"] = Value::Object(inputs);
+        }
+        self.send(Request::post(
+            &self.url(&format!("/actions/workflows/{file}/dispatches")),
+            &Self::body(body),
+        ))
+        .map(|_| ())
+    }
+
+    /// The runs of one workflow file on `branch`, finished or not, newest first.
+    pub fn workflow_file_runs(
+        &self,
+        file: &str,
+        branch: &str,
+    ) -> Result<Vec<WorkflowRun>, ApiError> {
+        let b = branch
+            .replace('%', "%25")
+            .replace('/', "%2F")
+            .replace(' ', "%20");
+        let v = self.json(Request::get(&self.url(&format!(
+            "/actions/workflows/{file}/runs?branch={b}&exclude_pull_requests=true&per_page=100"
+        ))))?;
+        let mut runs: Vec<WorkflowRun> = v["workflow_runs"]
+            .as_array()
+            .ok_or_else(|| ApiError::new(ErrorKind::Unavailable, "a list of runs was expected"))?
+            .iter()
+            .filter_map(|r| {
+                Some(WorkflowRun {
+                    id: r["id"].as_u64()?,
+                    workflow: r["name"].as_str().unwrap_or_default().to_string(),
+                    sha: r["head_sha"].as_str().unwrap_or_default().to_string(),
+                    url: r["html_url"].as_str().unwrap_or_default().to_string(),
+                    created_ms: iso_ms(r["created_at"].as_str().unwrap_or_default()),
+                    status: r["status"].as_str().unwrap_or_default().to_string(),
+                    conclusion: r["conclusion"].as_str().map(String::from),
+                    event: r["event"].as_str().unwrap_or_default().to_string(),
+                    title: r["display_title"].as_str().unwrap_or_default().to_string(),
+                    attempt: r["run_attempt"].as_u64().unwrap_or(1) as u32,
+                })
+            })
+            .collect();
+        runs.sort_by_key(|r| std::cmp::Reverse(r.id));
+        Ok(runs)
+    }
+
+    /// Rerun the failed jobs of a finished run (a new attempt of the same run).
+    pub fn rerun_failed(&self, run: u64) -> Result<(), ApiError> {
+        self.send(Request::post(
+            &self.url(&format!("/actions/runs/{run}/rerun-failed-jobs")),
+            "{}",
+        ))
+        .map(|_| ())
+    }
+
+    /// The jobs of one run (the latest attempt).
+    pub fn run_jobs(&self, run: u64) -> Result<Vec<ActionsJob>, ApiError> {
+        let v = self.json(Request::get(&self.url(&format!(
+            "/actions/runs/{run}/jobs?filter=latest&per_page=100"
+        ))))?;
+        Ok(v["jobs"]
+            .as_array()
+            .ok_or_else(|| ApiError::new(ErrorKind::Unavailable, "a list of jobs was expected"))?
+            .iter()
+            .filter_map(|j| {
+                Some(ActionsJob {
+                    id: j["id"].as_u64()?,
+                    name: j["name"].as_str().unwrap_or_default().to_string(),
+                    conclusion: j["conclusion"].as_str().map(String::from),
+                })
+            })
+            .collect())
+    }
+
+    /// The last `lines` lines of a job's log. GitHub answers with a redirect to a signed
+    /// address, which is read without the token. Best effort: `None` if it cannot be read.
+    pub fn job_log_tail(&self, job: u64, lines: usize) -> Option<String> {
+        let body = self.job_log(job)?;
+        let all: Vec<&str> = body.lines().collect();
+        let tail = all[all.len().saturating_sub(lines)..].join("\n");
+        (!tail.trim().is_empty()).then_some(tail)
+    }
+}
+
 // ---- Actions -------------------------------------------------------------------------------
 
 impl BuildSystemAdapter for GitHub {

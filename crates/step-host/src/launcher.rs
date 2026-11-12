@@ -72,6 +72,36 @@ fn note_exit(dir: &Path, st: ExitStatus) {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .insert(dir.to_path_buf(), (st.signal(), crate::registry::now_ms()));
+    reaping()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(dir);
+}
+
+/// Hosts this process started and is still waiting on (its reaper has not seen them end).
+fn reaping() -> &'static Mutex<std::collections::HashSet<PathBuf>> {
+    static R: OnceLock<Mutex<std::collections::HashSet<PathBuf>>> = OnceLock::new();
+    R.get_or_init(Default::default)
+}
+
+/// Like `exit_signal`, but when this process started the host in `dir` and its reaper has
+/// not yet seen it end, waits up to `limit` for it to. A host found dead is reaped within
+/// moments, so a caller that noticed first still gets the signal, not "unknown".
+pub fn exit_signal_within(dir: &Path, limit: Duration) -> Option<(Option<i32>, u64)> {
+    let end = Instant::now() + limit;
+    loop {
+        if let Some(s) = exit_signal(dir) {
+            return Some(s);
+        }
+        let pending = reaping()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(dir);
+        if !pending || Instant::now() >= end {
+            return None;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
 }
 
 /// A launch in progress: the host id and when the wait began (ms since the epoch).
@@ -218,6 +248,10 @@ pub fn spawn_host_within(o: &SpawnOptions, limit: Duration) -> io::Result<HostIn
     };
 
     // Reap the host when it eventually exits, without blocking the caller.
+    reaping()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(dir.clone());
     thread::spawn(move || {
         if let Ok(st) = child.wait() {
             note_exit(&dir, st);

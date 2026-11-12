@@ -17,7 +17,7 @@ use std::fs;
 use std::io;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub fn now_ms() -> u64 {
     SystemTime::now()
@@ -351,13 +351,21 @@ pub fn lost_report(dir: &Path) -> io::Result<LostReport> {
     let info = HostInfo::read(dir)?;
     let kv = read_kv(&dir.join("host.kv")).unwrap_or_default();
     let journal = fs::read(dir.join("journal")).unwrap_or_default();
-    let (signal, seen) =
-        crate::launcher::exit_signal(dir).map_or((None, None), |(s, at)| (s, Some(at)));
+    let host_alive = info.host_pid > 1 && kv_matches(&kv, "host_start", info.host_pid);
+    // A dead host this process started is reaped within moments; wait briefly for that so
+    // the report carries the signal even when the caller noticed the death first.
+    let wait = if host_alive {
+        Duration::ZERO
+    } else {
+        Duration::from_secs(2)
+    };
+    let (signal, seen) = crate::launcher::exit_signal_within(dir, wait)
+        .map_or((None, None), |(s, at)| (s, Some(at)));
     Ok(LostReport {
         id: info.id.clone(),
         host_pid: info.host_pid,
         child_pid: info.child_pid,
-        host_alive: info.host_pid > 1 && kv_matches(&kv, "host_start", info.host_pid),
+        host_alive,
         child_alive: info.child_pid > 1 && kv_matches(&kv, "child_start", info.child_pid),
         signal,
         journal_len: journal.len() as u64,

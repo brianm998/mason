@@ -111,6 +111,43 @@ data class IntrospectionSnapshot(
     }
 }
 
+/** The keys the daemon offers for a project's remote, with what is known about each. */
+data class SshKeyList(val keys: List<Key> = emptyList(), val host: String = "") {
+    data class Key(
+        val path: String = "",
+        val fingerprint: String = "",
+        val comment: String = "",
+        val inAgent: Boolean = false,
+        val encrypted: Boolean = false,
+        val onOwnerAccount: Boolean = false,
+        val seenAs: String? = null,
+    ) {
+        val id: String get() = path.ifEmpty { fingerprint }
+        /** A key with no file cannot be named to ssh: only the agent has it. */
+        val usable: Boolean get() = path.isNotEmpty()
+    }
+
+    companion object {
+        fun parse(json: String): SshKeyList {
+            val v = Codec.json(json) ?: return SshKeyList()
+            return SshKeyList(
+                keys = (v["keys"] as? List<*>)?.mapNotNull { it as? Map<*, *> }?.map { k ->
+                    Key(
+                        path = k["path"] as? String ?: "",
+                        fingerprint = k["fingerprint"] as? String ?: "",
+                        comment = k["comment"] as? String ?: "",
+                        inAgent = k["in_agent"] as? Boolean ?: false,
+                        encrypted = k["encrypted"] as? Boolean ?: false,
+                        onOwnerAccount = k["on_owner_account"] as? Boolean ?: false,
+                        seenAs = k["seen_as"] as? String,
+                    )
+                } ?: emptyList(),
+                host = v["host"] as? String ?: "",
+            )
+        }
+    }
+}
+
 /** The daemon's answer to a publish preview: the redacted text, and what it would touch. */
 data class PublishPreview(
     val title: String = "",

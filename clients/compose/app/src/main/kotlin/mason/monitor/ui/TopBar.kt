@@ -148,7 +148,18 @@ fun BannersView(model: MonitorModel) {
         if (monitorText != null) {
             updateRow(monitorText, if (model.updateAvailable && model.updating == null) "Update monitor" else null, "monitor-update", theme, "update") { model.updateMonitor() }
         }
-        model.header?.banners?.forEachIndexed { i, b -> banner(b.text, "banner:$i", theme, BannerIcons.forDaemonKind(b.kind)) }
+        model.header?.banners?.forEachIndexed { i, b ->
+            if (b.kind == "push_auth") {
+                // A refused push holds landing; the owner picks the key that fixes it.
+                val project = MonitorModel.pushAuthProject(b)
+                updateRow(b.text, if (model.canAct) "Choose SSH key…" else null, "push-auth:$project", theme, BannerIcons.forDaemonKind(b.kind)) {
+                    model.chooseSshKey(project)
+                }
+            } else {
+                banner(b.text, "banner:$i", theme, BannerIcons.forDaemonKind(b.kind))
+            }
+        }
+        if (model.sshKeyProject != null) SshKeyDialog(model)
         model.header?.pending_issues?.forEach { p ->
             val uri = androidx.compose.ui.platform.LocalUriHandler.current
             Row(
@@ -326,4 +337,52 @@ private fun Picker(label: String, current: String, options: List<String>, tag: S
             }
         }
     }
+}
+
+/**
+ * After a refused push: the keys the daemon could use, with what is known about each. Choosing one
+ * writes the repository's ssh command, unlocks the key if it has a passphrase (in a dialog on the
+ * daemon's Mac, never here) and tries the remote.
+ */
+@Composable
+internal fun SshKeyDialog(model: MonitorModel) {
+    val theme = LocalTheme.current
+    val project = model.sshKeyProject ?: return
+    AlertDialog(
+        onDismissRequest = { model.closeSshKeys() },
+        modifier = Modifier.testTag("ssh-key-sheet"),
+        title = { Text("Choose the SSH key for $project", style = theme.title()) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(theme.spacing)) {
+                val keys = model.sshKeys
+                if (keys == null) {
+                    if (model.sshKeyResult == null) Text("Looking for keys…", style = theme.body(color = theme.muted))
+                } else {
+                    if (keys.keys.isEmpty()) Text("No keys were found in ~/.ssh on the daemon's Mac.", style = theme.body(color = theme.muted))
+                    keys.keys.forEach { k ->
+                        Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing), verticalAlignment = Alignment.CenterVertically) {
+                            if (k.encrypted) Text("🔒", modifier = Modifier.semantics { contentDescription = "has a passphrase" })
+                            Column(Modifier.weight(1f)) {
+                                Text(k.path.ifEmpty { "(only in the agent)" }, style = theme.body(FontWeight.Medium))
+                                Text("${k.fingerprint}  ${k.comment}", style = theme.small(color = theme.muted))
+                            }
+                            if (k.onOwnerAccount) Text("on the repository owner's account", style = theme.small(color = theme.accent))
+                            k.seenAs?.let { Text("seen as $it", style = theme.small(color = theme.muted)) }
+                            TextButton(
+                                enabled = k.usable && !model.sshKeyBusy,
+                                onClick = { model.useSshKey(project, k.path) },
+                                modifier = Modifier.testTag("ssh-key-use:${k.id}"),
+                            ) { Text("Use") }
+                        }
+                    }
+                    if (model.sshKeyBusy) {
+                        val host = keys.host.ifEmpty { "the daemon's Mac" }
+                        Text("Enter the passphrase in the dialog on $host if it asks.", style = theme.small())
+                    }
+                }
+                model.sshKeyResult?.let { Text(it, style = theme.small(color = theme.attention)) }
+            }
+        },
+        confirmButton = { TextButton(onClick = { model.closeSshKeys() }) { Text("Close") } },
+    )
 }

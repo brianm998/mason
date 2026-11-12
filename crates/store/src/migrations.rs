@@ -552,6 +552,18 @@ const STEPS: &[&str] = &[
     // 24: whether each imported issue carried the project's label at the last look (s136,
     // decision 0131). NULL: not looked at since. Additive.
     "ALTER TABLE tracker_items ADD COLUMN labelled INTEGER;",
+    // 25: the base-branch CI watch (s154, decision 0149): what it last saw, per project, as
+    // text the daemon reads and writes; and who set each freeze, so the post-land tier going
+    // green does not lift a freeze that the CI watch holds, and the other way round.
+    "CREATE TABLE ci_watch (
+         project TEXT PRIMARY KEY,
+         state   TEXT NOT NULL,
+         at      INTEGER NOT NULL
+     );
+     ALTER TABLE freezes ADD COLUMN source TEXT NOT NULL DEFAULT 'post-land';",
+    // 26: the CI run a `ci` schedule is following (s175, decision 0170), as text the daemon
+    // reads and writes; empty when none. Additive.
+    "ALTER TABLE schedules ADD COLUMN follow TEXT NOT NULL DEFAULT '';",
 ];
 
 pub const SCHEMA_VERSION: u32 = STEPS.len() as u32;

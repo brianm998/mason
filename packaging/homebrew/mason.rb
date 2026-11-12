@@ -28,7 +28,7 @@ class Mason < Formula
   end
 
   def install
-    bin.install "mason", "masond", "step-host", "mason-mcp"
+    bin.install "mason", "masond", "step-host", "mason-mcp", "mason-askpass.sh"
   end
 
   def caveats
