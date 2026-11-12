@@ -241,7 +241,12 @@ pub fn tick(d: &Arc<Daemon>) {
         for spec in p.schedules() {
             let name = crate::schedule::row_name(&p.id, &spec.name);
             let row = ensure_row(d, &name, &p.id, &spec.kind, spec.every_ms, now);
-            if due(Some(row.last_run), now, row.every_ms) {
+            let is_due = if spec.kind == "ci" {
+                crate::ci_schedule::is_due(&row, &spec, now)
+            } else {
+                due(Some(row.last_run), now, row.every_ms)
+            };
+            if is_due {
                 jobs.push((name, Job::Schedule(p.id.clone(), spec.name.clone())));
             }
         }
@@ -251,9 +256,12 @@ pub fn tick(d: &Arc<Daemon>) {
             continue;
         }
         // Mark it run now, so a slow job is not started a second time.
+        // (A followed CI run is looked at again and again: that is not the schedule running.)
         if let Ok(Some(mut row)) = d.store.schedule(&name) {
-            row.last_run = now;
-            let _ = d.store.put_schedule(&row);
+            if row.follow.is_empty() {
+                row.last_run = now;
+                let _ = d.store.put_schedule(&row);
+            }
         }
         let d2 = d.clone();
         let spawned = std::thread::Builder::new()
@@ -1138,6 +1146,7 @@ pub fn health(d: &Daemon) -> Value {
                 "last_run": r.last_run, "next_run": r.last_run + r.every_ms, "runs": r.runs,
                 "last_task": r.last_task, "last_status": r.last_status,
                 "baseline": r.baseline.as_ref().map(|b| b.len()),
+                "follow": crate::ci_schedule::follow_view(r),
             })
         })
         .collect();

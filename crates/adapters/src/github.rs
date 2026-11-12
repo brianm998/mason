@@ -507,6 +507,26 @@ pub struct ActionsRun {
     pub conclusion: Option<String>,
 }
 
+/// One run of a named workflow, finished or not, as a scheduled CI run needs it (s175).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WorkflowRun {
+    pub id: u64,
+    /// The workflow's name.
+    pub workflow: String,
+    pub sha: String,
+    pub url: String,
+    pub created_ms: u64,
+    /// `queued`, `in_progress`, `completed`, ...
+    pub status: String,
+    pub conclusion: Option<String>,
+    /// `workflow_dispatch`, `push`, ...
+    pub event: String,
+    /// The run-name the dispatch gave it.
+    pub title: String,
+    /// 1 for the first attempt; a rerun makes it 2.
+    pub attempt: u32,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ActionsJob {
     pub id: u64,
@@ -566,6 +586,72 @@ impl GitHub {
                 })
             })
             .collect())
+    }
+
+    /// Start a workflow (`gherkin.yml`) on `git_ref` with the given inputs. GitHub answers 204
+    /// with no run id: find the run with [`GitHub::workflow_file_runs`].
+    pub fn dispatch_workflow(
+        &self,
+        file: &str,
+        git_ref: &str,
+        inputs: &[(String, String)],
+    ) -> Result<(), ApiError> {
+        let inputs: serde_json::Map<String, Value> =
+            inputs.iter().map(|(k, v)| (k.clone(), json!(v))).collect();
+        let mut body = json!({"ref": git_ref});
+        if !inputs.is_empty() {
+            body["inputs"] = Value::Object(inputs);
+        }
+        self.send(Request::post(
+            &self.url(&format!("/actions/workflows/{file}/dispatches")),
+            &Self::body(body),
+        ))
+        .map(|_| ())
+    }
+
+    /// The runs of one workflow file on `branch`, finished or not, newest first.
+    pub fn workflow_file_runs(
+        &self,
+        file: &str,
+        branch: &str,
+    ) -> Result<Vec<WorkflowRun>, ApiError> {
+        let b = branch
+            .replace('%', "%25")
+            .replace('/', "%2F")
+            .replace(' ', "%20");
+        let v = self.json(Request::get(&self.url(&format!(
+            "/actions/workflows/{file}/runs?branch={b}&exclude_pull_requests=true&per_page=100"
+        ))))?;
+        let mut runs: Vec<WorkflowRun> = v["workflow_runs"]
+            .as_array()
+            .ok_or_else(|| ApiError::new(ErrorKind::Unavailable, "a list of runs was expected"))?
+            .iter()
+            .filter_map(|r| {
+                Some(WorkflowRun {
+                    id: r["id"].as_u64()?,
+                    workflow: r["name"].as_str().unwrap_or_default().to_string(),
+                    sha: r["head_sha"].as_str().unwrap_or_default().to_string(),
+                    url: r["html_url"].as_str().unwrap_or_default().to_string(),
+                    created_ms: iso_ms(r["created_at"].as_str().unwrap_or_default()),
+                    status: r["status"].as_str().unwrap_or_default().to_string(),
+                    conclusion: r["conclusion"].as_str().map(String::from),
+                    event: r["event"].as_str().unwrap_or_default().to_string(),
+                    title: r["display_title"].as_str().unwrap_or_default().to_string(),
+                    attempt: r["run_attempt"].as_u64().unwrap_or(1) as u32,
+                })
+            })
+            .collect();
+        runs.sort_by_key(|r| std::cmp::Reverse(r.id));
+        Ok(runs)
+    }
+
+    /// Rerun the failed jobs of a finished run (a new attempt of the same run).
+    pub fn rerun_failed(&self, run: u64) -> Result<(), ApiError> {
+        self.send(Request::post(
+            &self.url(&format!("/actions/runs/{run}/rerun-failed-jobs")),
+            "{}",
+        ))
+        .map(|_| ())
     }
 
     /// The jobs of one run (the latest attempt).

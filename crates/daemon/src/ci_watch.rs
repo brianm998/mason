@@ -177,7 +177,7 @@ pub fn spawn(d: &Arc<Daemon>) {
                 }
                 continue;
             };
-            let gh = match source(p) {
+            let gh = match source(p, "[watch.ci]") {
                 Ok((gh, poll_s)) => {
                     every = every.min(poll_s.max(1));
                     gh
@@ -207,7 +207,7 @@ pub fn spawn(d: &Arc<Daemon>) {
 
 /// The GitHub Actions host of a project, or why there is none: the watch reads runs, so
 /// it needs the project's `[ci]` to be `github-actions`.
-fn source(p: &crate::config::ProjectCfg) -> Result<(GitHub, u64), String> {
+pub(crate) fn source(p: &crate::config::ProjectCfg, what: &str) -> Result<(GitHub, u64), String> {
     match p.services.ci.as_ref() {
         Some(c) => match &c.kind {
             CiKind::GithubActions {
@@ -221,9 +221,13 @@ fn source(p: &crate::config::ProjectCfg) -> Result<(GitHub, u64), String> {
                 ),
                 c.poll_s,
             )),
-            _ => Err("[watch.ci] needs a github-actions [ci] section; this project's [ci] is another kind".into()),
+            _ => Err(format!(
+                "{what} needs a github-actions [ci] section; this project's [ci] is another kind"
+            )),
         },
-        None => Err("[watch.ci] needs a github-actions [ci] section; this project has none".into()),
+        None => Err(format!(
+            "{what} needs a github-actions [ci] section; this project has none"
+        )),
     }
 }
 
@@ -325,29 +329,48 @@ fn who_names(
     }
     keys.sort();
     keys.dedup();
-    let mut named = BTreeMap::new();
+    let named = named_keys(d, pid, &keys);
     let mut open_auto = 0;
+    if let Ok(w) = d.world() {
+        let mine: std::collections::BTreeSet<u64> =
+            saved.state.filed.iter().filter_map(|f| f.task).collect();
+        open_auto = w
+            .tasks
+            .values()
+            .filter(|t| t.project == pid && !t.state.is_terminal())
+            .filter(|t| mine.contains(&t.id.0))
+            .count() as u32;
+    }
+    (named, open_auto)
+}
+
+/// Which of `keys` an open task (by its title) or an open tracker issue (by title or body)
+/// already names; `Some(task)` for a task, `None` for an issue. Shared with the scheduled CI
+/// runs, so a red one of them filed is not filed again by the other.
+pub(crate) fn named_keys(
+    d: &Daemon,
+    pid: ProjectId,
+    keys: &[String],
+) -> BTreeMap<String, Option<u64>> {
+    let mut named = BTreeMap::new();
     if let Ok(w) = d.world() {
         let open: Vec<&Task> = w
             .tasks
             .values()
             .filter(|t| t.project == pid && !t.state.is_terminal())
             .collect();
-        for k in &keys {
+        for k in keys {
             if let Some(t) = open.iter().find(|t| t.title.contains(k.as_str())) {
                 named.insert(k.clone(), Some(t.id.0));
             }
         }
-        let mine: std::collections::BTreeSet<u64> =
-            saved.state.filed.iter().filter_map(|f| f.task).collect();
-        open_auto = open.iter().filter(|t| mine.contains(&t.id.0)).count() as u32;
     }
     if let Some(p) = d.project(pid) {
         for it in d.store.tracker_items(&p.id).unwrap_or_default() {
             if !it.open {
                 continue;
             }
-            for k in &keys {
+            for k in keys {
                 if (it.title.contains(k.as_str()) || it.body.contains(k.as_str()))
                     && !named.contains_key(k)
                 {
@@ -356,7 +379,7 @@ fn who_names(
             }
         }
     }
-    (named, open_auto)
+    named
 }
 
 fn file_task(
@@ -380,19 +403,38 @@ fn file_task(
          Failed log tail:\n```\n{tail}\n```\n\nFound by the base-branch CI watch.",
         f.at.url, f.at.sha
     );
+    emit_task(
+        d,
+        pid,
+        format!("{key} red on {base}"),
+        body,
+        if f.urgent {
+            Priority::Urgent
+        } else {
+            Priority::Normal
+        },
+        f.proposed,
+    )
+}
+
+/// File one owner-trust task for a red job. Shared with the scheduled CI runs.
+pub(crate) fn emit_task(
+    d: &Arc<Daemon>,
+    pid: ProjectId,
+    title: String,
+    body: String,
+    priority: Priority,
+    proposed: bool,
+) -> Result<Option<u64>, String> {
     let a = d
         .emit(EventKind::TaskFiled {
             project: pid,
-            title: format!("{key} red on {base}"),
+            title,
             body,
-            priority: if f.urgent {
-                Priority::Urgent
-            } else {
-                Priority::Normal
-            },
+            priority,
             trust: TrustSource::Owner,
             explored: false,
-            proposed: f.proposed,
+            proposed,
             blockers: vec![],
             not_before: None,
         })
