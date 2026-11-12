@@ -264,6 +264,18 @@ pub struct PrStatus {
     pub head: String,
     /// Checks finished out of checks listed, when the host lists them.
     pub counts: Option<CheckCounts>,
+    /// The failed checks one by one, with whether each looks like infrastructure. Empty
+    /// when the host does not say (nothing is judged then).
+    pub jobs: Vec<JobFailure>,
+}
+
+/// A failed CI job and, when the adapter judged it, why it looks like infrastructure
+/// (`None`: a real failure of the change).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JobFailure {
+    pub workflow: String,
+    pub job: String,
+    pub infra: Option<String>,
 }
 
 pub trait GitHostAdapter: Send + Sync {
@@ -355,6 +367,8 @@ pub enum CiState {
         /// The jobs (or suites) that failed, when the system says.
         failed: Vec<String>,
         summary: String,
+        /// The failed jobs judged one by one; empty when the system does not say.
+        jobs: Vec<JobFailure>,
     },
 }
 
