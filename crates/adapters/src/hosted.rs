@@ -154,9 +154,25 @@ pub fn silent_stop(dir: &Path) -> Option<String> {
     std::fs::read_to_string(dir.join(SILENT_MARK)).ok()
 }
 
-fn stop_host(sock: &Path) {
-    if let Ok(mut c) = HostClient::connect(sock, PREVIOUS, CURRENT, "adapter") {
-        let _ = c.stop(500);
+/// Ask the host to stop. Returns whether the request was delivered.
+fn stop_host(sock: &Path) -> bool {
+    match HostClient::connect(sock, PREVIOUS, CURRENT, "adapter") {
+        Ok(mut c) => c.stop(500).is_ok(),
+        Err(_) => false,
+    }
+}
+
+/// Keep asking the host to stop until the session has ended (or a minute has passed). One
+/// attempt could be lost to a host slow to accept on a loaded machine, and the session would
+/// then run on past its deadline.
+fn stop_host_until_done(sock: &Path, done: &AtomicBool) {
+    let end = Instant::now() + Duration::from_secs(60);
+    while !done.load(Ordering::SeqCst) && Instant::now() < end {
+        stop_host(sock);
+        let wait = Instant::now() + Duration::from_secs(1);
+        while !done.load(Ordering::SeqCst) && Instant::now() < wait {
+            thread::sleep(Duration::from_millis(20));
+        }
     }
 }
 
@@ -266,7 +282,7 @@ pub fn attach_as(
                 thread::sleep(Duration::from_millis(20));
             }
             timed_out.store(true, Ordering::SeqCst);
-            stop_host(&sock);
+            stop_host_until_done(&sock, &done);
         });
     }
 
@@ -344,9 +360,14 @@ pub fn attach_as(
 
     let sock2 = h.root.join(&id).join("sock");
     let cancel_flag = cancelled.clone();
+    let done2 = done.clone();
     let canceller: Canceller = Arc::new(move || {
         cancel_flag.store(true, Ordering::SeqCst);
-        stop_host(&sock2);
+        // First try here; if it does not get through, keep trying off the caller's thread.
+        if !stop_host(&sock2) {
+            let (sock, done) = (sock2.clone(), done2.clone());
+            thread::spawn(move || stop_host_until_done(&sock, &done));
+        }
     });
     Box::new(Session {
         rx,

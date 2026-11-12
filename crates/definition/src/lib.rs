@@ -27,6 +27,7 @@ pub mod parse;
 mod testing_parse;
 pub mod tiers;
 pub mod validate;
+mod watch;
 
 pub use model::{AgentProfile, Definition, Join, Problem, Step, StepType};
 pub use parse::{parse, parse_with, Plugins};

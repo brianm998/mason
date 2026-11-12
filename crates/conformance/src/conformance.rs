@@ -328,6 +328,16 @@ pub fn visible(views: &[View], owner: bool) -> Vec<Item> {
                         i,
                     ));
                 }
+                // A refused push holds landing: the banner offers the action that fixes it.
+                for b in h.banners.iter().filter(|b| b.kind == "push_auth") {
+                    let project = b.text.split(':').next().unwrap_or_default();
+                    out.push(Item::new(
+                        format!("action:push-auth:{project}"),
+                        vec!["Choose SSH key…".into()],
+                        vec![],
+                        0,
+                    ));
+                }
                 // Issues the tracker has not imported: a count tile and a list, only while true.
                 if !h.pending_issues.is_empty() {
                     out.push(Item::new(

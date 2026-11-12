@@ -158,8 +158,26 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     /** Where the sidebar should scroll to (a tile was clicked). */
     var scrollTarget by mutableStateOf<String?>(null)
     var lastResult by mutableStateOf<String?>(null)
+    /** Open session found the step running: the task to ask about. Answer with [answerSessionPrompt]. */
+    var sessionPrompt by mutableStateOf<Long?>(null)
+        private set
+    /** What Open session did or could not do, in words, until the next click. */
+    var sessionNotice by mutableStateOf<String?>(null)
+        private set
+    /** Starts a terminal running this argument vector; false when it could not. The app sets it. */
+    var launcher: ((List<String>) -> Boolean)? = null
+    /** Puts text on the clipboard. The app sets it. */
+    var copier: ((String) -> Unit)? = null
+    /** The CLI by its full path. */
+    var cliPath: String = OpenSession.defaultCli()
     /** What `mason proposal publish --preview` would send, once asked for. */
     var publishPreview by mutableStateOf<PublishPreview?>(null)
+
+    /** The SSH key sheet after a refused push: its project (null: closed), the keys, what choosing said. */
+    var sshKeyProject by mutableStateOf<String?>(null)
+    var sshKeys by mutableStateOf<SshKeyList?>(null)
+    var sshKeyResult by mutableStateOf<String?>(null)
+    var sshKeyBusy by mutableStateOf(false)
 
     /** The step selected in the pipeline editor (for its inspector). */
     var editorStep by mutableStateOf("")
@@ -385,6 +403,47 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     fun publish(task: Long, confirm: Boolean) =
         raw("POST", "/proposals/$task/publish", id = "publish:$task", json = EditorJson.text(mapOf("confirm" to confirm)))
 
+    /** Open session: ask the daemon about the task's session first; the result carries on. */
+    fun openSession(task: Long) {
+        sessionNotice = null
+        raw("GET", "/tasks/$task/session", id = "session:$task")
+    }
+
+    fun answerSessionPrompt(yes: Boolean) {
+        val task = sessionPrompt ?: return
+        sessionPrompt = null
+        if (yes) launchSession(task, anyway = true)
+    }
+
+    private fun launchSession(task: Long, anyway: Boolean) {
+        if (launcher?.invoke(OpenSession.argv(cliPath, task, anyway)) == true) return
+        val line = OpenSession.commandLine(cliPath, task, anyway)
+        copier?.invoke(line)
+        sessionNotice = OpenSession.copiedNotice(line)
+    }
+
+    /** Open the key sheet for [project] and ask the daemon which keys it could use. */
+    fun chooseSshKey(project: String) {
+        sshKeyProject = project
+        sshKeys = null
+        sshKeyResult = null
+        raw("GET", "/projects/$project/ssh-keys", id = "ssh-keys:$project")
+    }
+
+    /** Use this key for the project's remote. The passphrase, if any, is asked for in a dialog on the daemon's Mac, never here. */
+    fun useSshKey(project: String, path: String) {
+        sshKeyBusy = true
+        sshKeyResult = null
+        raw("POST", "/projects/$project/ssh-key", id = "ssh-key:$project", json = EditorJson.text(mapOf("path" to path)))
+    }
+
+    fun closeSshKeys() {
+        sshKeyProject = null
+        sshKeys = null
+        sshKeyResult = null
+        sshKeyBusy = false
+    }
+
     fun raw(method: String, path: String, id: String = "", json: String = "") =
         send(Command(id = id, raw = Raw(method = method, path = path, json = json)))
 
@@ -479,6 +538,18 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
         m.step_progress?.let { apply(it) }
         m.result?.let { r ->
             lastResult = if (r.ok) null else r.error
+            if (r.id.startsWith("session:")) r.id.removePrefix("session:").toLongOrNull()?.let { task ->
+                when (val d = OpenSession.decide(r.ok, r.json, r.error)) {
+                    OpenSession.Decision.Confirm -> sessionPrompt = task
+                    is OpenSession.Decision.Launch -> launchSession(task, d.anyway)
+                    is OpenSession.Decision.Failed -> sessionNotice = d.why
+                }
+            }
+            if (r.id.startsWith("ssh-keys:")) { if (r.ok) sshKeys = SshKeyList.parse(r.json) else sshKeyResult = r.error }
+            if (r.id.startsWith("ssh-key:")) {
+                sshKeyBusy = false
+                if (r.ok) { sshKeyResult = "The remote accepted the key. Landing is released."; sshKeyProject = null } else sshKeyResult = r.error
+            }
             if (r.id == "announce" && r.ok) announcer.handleClaim(r.json)
             if (r.id == "update-monitor") {
                 if (r.ok) monitorAsked = true else monitorUpdateFailed(r.error)
@@ -522,6 +593,9 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     }
 
     companion object {
+        /** The project a `push_auth` banner is about: its text starts "<project>: ". */
+        fun pushAuthProject(b: Banner): String = b.text.substringBefore(":")
+
         /** The protocol this monitor speaks. */
         const val PROTOCOL = 1
         const val MONITOR_KIND = "compose"

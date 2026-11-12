@@ -311,6 +311,11 @@ description = "The mascot banner at the top of README.md and the social card in 
 swift = "done"
 compose = "done"
 
+[feature.push-auth-key-picker]
+description = "A banner for a project whose landing is held because the host refused the push (kind push_auth, text '<project>: GitHub refused the push: it saw X, ...') carries a 'Choose SSH key…' action (owner only); it opens a sheet listing GET /projects/<p>/ssh-keys: path, fingerprint, comment, a badge for the repository owner's account and for the account GitHub saw, a lock for a passphrase; Use POSTs the key, says 'Enter the passphrase in the dialog on <host>' while it waits, and shows the probe's result. The passphrase is never typed in the monitor"
+swift = "done"
+compose = "done"
+
 [feature.mascot-state-illustration]
 description = "The task page shows the ticket's state as a 96 pt illustration (scaled with text zoom) left of the title block, chosen by the daemon's state and changing with it; the phone task screen shows it with the state name at the top; decorative, nothing for an unknown state"
 swift = "done"
