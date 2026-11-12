@@ -232,7 +232,7 @@ pub struct Progress {
 }
 
 /// A line of terminal output without its control sequences: CSI (`ESC [ … final`),
-/// OSC (`ESC ] … BEL` or `ESC \`), other two-byte escapes, and every carriage return.
+/// OSC (`ESC ] … BEL` or `ESC \`), other two-byte escapes, every carriage return, and what a backspace erases.
 pub fn strip_terminal(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut it = s.chars().peekable();
@@ -260,6 +260,11 @@ pub fn strip_terminal(s: &str) -> String {
                 _ => {}
             },
             '\r' => {}
+            // A backspace erases the character before it: `script` starts its output with
+            // `^D` and two backspaces when its stdin is at its end.
+            '\u{8}' => {
+                out.pop();
+            }
             c => out.push(c),
         }
     }

@@ -21,7 +21,8 @@ when the process exits. This adds the same to MASON, off by default.
   negative control). One flag, one behaviour.
 - **The log keeps the raw bytes; the progress line is cleaned.** For a pty stream only, ANSI
   CSI/OSC sequences and carriage returns are removed from the lines pushed to monitors. The log
-  file and the parsers' input are untouched, so a verdict cannot depend on the stripping.
+  file and the parsers' input are untouched (on macOS `script` begins its output with `^D` and
+  two backspaces when its stdin is at its end; the progress line drops them, the log keeps them), so a verdict cannot depend on the stripping.
 - **"Current test" is the latest output line.** For a pty stream of a non-agent step, the
   latest non-empty cleaned line becomes the progress record's `message`, so `mason task show`
   and `--watch` show `Test Case 'X.y' started.` while it runs. No new parsing in `crates/testing`.
