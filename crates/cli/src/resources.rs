@@ -63,7 +63,9 @@ pub fn run(
         .call(
             "POST",
             "/leases",
-            Some(&json!({"uses": uses, "label": label, "task": task})),
+            Some(&json!({
+                "uses": uses, "label": label, "task": task, "pid": std::process::id(),
+            })),
         )
         .map_err(say)?;
     let id = opened["id"].as_u64().ok_or("the daemon sent no lease id")?;
@@ -124,12 +126,88 @@ pub fn run(
             }
         }
     };
-    let status = Command::new(&cmd[0]).args(&cmd[1..]).status();
+    // A task's `mason run` is watched for silence like its other commands; a person's
+    // (no task) never is, and neither is one whose project turns both rules off.
+    let th = mason_daemon::watch::Thresholds {
+        cont_after_ms: opened["cont_after_s"].as_u64().unwrap_or(0) * 1000,
+        kill_after_ms: opened["kill_after_s"].as_u64().unwrap_or(0) * 1000,
+    };
+    let status = run_watched(d, &cmd[0], &cmd[1..], th, task.is_some());
     drop(held);
     release(d);
     match status {
         Ok(s) => Ok(s.code().unwrap_or(128 + signal_of(&s))),
         Err(e) => Err(format!("cannot run `{}`: {e}", cmd[0])),
+    }
+}
+
+/// Run the child; with thresholds set, watch its process tree for silence (stopped
+/// descendants continued, a silent tree killed unless something in it waits on a
+/// lease). The child's output goes straight to the terminal, so only CPU movement
+/// counts as progress here.
+fn run_watched(
+    d: &Daemon,
+    prog: &str,
+    args: &[String],
+    th: mason_daemon::watch::Thresholds,
+    is_task: bool,
+) -> std::io::Result<std::process::ExitStatus> {
+    use mason_daemon::watch::{tick, Action, State};
+    use std::os::unix::process::CommandExt;
+    if th.off() || !is_task {
+        return Command::new(prog).args(args).status();
+    }
+    let mut child = Command::new(prog).args(args).process_group(0).spawn()?;
+    let root = child.id();
+    let tick_every = std::env::var("MASON_WATCH_TICK_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .map_or(Duration::from_secs(5), Duration::from_millis);
+    let mut st = State::new(mason_daemon::daemon::now_ms());
+    let mut last = Instant::now();
+    loop {
+        if let Some(s) = child.try_wait()? {
+            return Ok(s);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+        if last.elapsed() < tick_every {
+            continue;
+        }
+        last = Instant::now();
+        let now = mason_daemon::daemon::now_ms();
+        // Only the daemon knows who waits for a turn: a tree with one of them in it is not stuck.
+        let waiting = d
+            .call("GET", "/stall/waiting", None)
+            .ok()
+            .map(|v| {
+                v["pids"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|p| p.as_u64().map(|p| p as u32))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let procs = mason_daemon::hung::read_ps();
+        match tick(&mut st, &th, now, &procs, root, 0, &waiting) {
+            Some(Action::Cont(pids)) => {
+                let n = pids
+                    .iter()
+                    .filter(|p| mason_daemon::watch::cont(**p))
+                    .count();
+                if n > 0 {
+                    eprintln!("mason: no CPU for a while; sent SIGCONT to {n} stopped process(es)");
+                    let _ = d.call("POST", "/stall/event", Some(&json!({"event": "cont"})));
+                }
+            }
+            Some(Action::Kill(silent)) => {
+                eprintln!("mason: {}", mason_daemon::watch::stalled_text(silent));
+                let _ = d.call("POST", "/stall/event", Some(&json!({"event": "kill"})));
+                mason_daemon::watch::kill_group(root);
+                return child.wait();
+            }
+            Some(Action::Spared) | None => {}
+        }
     }
 }
 

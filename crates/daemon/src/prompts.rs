@@ -202,6 +202,8 @@ mod tests {
             step_timeout: Duration::from_secs(1),
             agent_idle_alert: Duration::ZERO,
             agent_idle_stop: Duration::ZERO,
+            cont_after: Duration::ZERO,
+            kill_after: Duration::ZERO,
             test_timeout: Duration::from_secs(1),
             max_test_rounds: None,
             test_reruns: 0,

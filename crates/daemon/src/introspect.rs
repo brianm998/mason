@@ -1158,6 +1158,10 @@ pub fn health(d: &Daemon) -> Value {
     let triage_on = d.projects.values().any(|p| p.introspect().triage.enabled);
     json!({
         "at": now,
+        "stall_watch": {
+            "sigconts": d.stall_conts.load(std::sync::atomic::Ordering::SeqCst),
+            "kills": d.stall_kills.load(std::sync::atomic::Ordering::SeqCst),
+        },
         "last_cycle": d.intro.last.lock().unwrap_or_else(|e| e.into_inner()).clone(),
         "schedules": sched,
         "findings": findings,
