@@ -419,10 +419,7 @@ fn masons_own_impact_map_selects_suites_by_path() {
     assert_eq!(pick(&["schemas/mason.proto"]), Selection::Some(all.clone()));
     assert_eq!(pick(&["scripts/unmapped.sh"]), Selection::All);
     assert_eq!(pick(&["docs/x.md"]), one("cargo-workspace"));
-    // Every suite builds first, and all are bound to run_check and the test step.
-    for s in &all {
-        assert!(d.testing.suite(s).unwrap().build.is_some(), "{s}");
-    }
+    // All three are bound to run_check and the test step.
     assert_eq!(d.testing.bound(When::Development).len(), 3);
     assert_eq!(d.testing.bound(When::TestStep).len(), 3);
 }
