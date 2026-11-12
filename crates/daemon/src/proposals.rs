@@ -182,9 +182,8 @@ fn in_repo(p: &ProjectCfg, file: &str) -> bool {
 /// MASON's own project, if one is registered.
 pub fn self_project(d: &Daemon) -> Option<(ProjectId, &ProjectCfg)> {
     d.projects()
-        .iter()
+        .into_iter()
         .find(|(_, p)| p.self_cfg.is_some())
-        .map(|(id, p)| (*id, p))
 }
 
 /// The body of the task a proposal becomes: the text, then the evidence.

@@ -530,7 +530,7 @@ pub fn cycle(d: &Arc<Daemon>) -> Value {
     let mut refused = vec![];
     let mut skipped = 0u64;
     let mut found_total = 0u64;
-    let mut names: Vec<(&ProjectId, &ProjectCfg)> = d.projects().iter().collect();
+    let mut names: Vec<(ProjectId, &ProjectCfg)> = d.projects().into_iter().collect();
     names.sort_by(|a, b| a.1.id.cmp(&b.1.id));
     let switches = d.store.expired_switches(now).unwrap_or_default();
     let closed = d.store.findings().unwrap_or_default();
