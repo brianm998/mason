@@ -154,6 +154,16 @@ public final class MonitorModel: ObservableObject {
     /// Where the sidebar should scroll to (a tile was clicked).
     @Published public var scrollTarget: String?
     @Published public var lastResult: String?
+    /// Open session found the step running: the task to ask about. Answer with `answerSessionPrompt`.
+    @Published public var sessionPrompt: UInt64?
+    /// What Open session did or could not do, in words, until the next click.
+    @Published public var sessionNotice: String?
+    /// Starts a terminal running this argument vector; false when it could not. The app sets it.
+    public var launcher: (([String]) -> Bool)?
+    /// Puts text on the pasteboard. The app sets it.
+    public var copier: ((String) -> Void)?
+    /// The CLI by its full path.
+    public var cliPath = OpenSession.defaultCLI()
     /// What `mason proposal publish --preview` would send, in the daemon's words, once asked for.
     @Published public var publishPreview: PublishPreview?
     /// The SSH key sheet after a refused push: the project it is for, the keys offered, and what
@@ -456,6 +466,29 @@ public final class MonitorModel: ObservableObject {
         c.raw = .with { $0.method = "POST"; $0.path = "/proposals/\(task)/publish"; $0.json = "{\"confirm\":\(confirm)}" }
         send(c)
     }
+    /// Open session: ask the daemon about the task's session first (`handle(result:)` carries on).
+    public func openSession(_ task: UInt64) {
+        sessionNotice = nil
+        var c = Mason_V1_Command()
+        c.id = "session:\(task)"
+        c.raw = .with { $0.method = "GET"; $0.path = "/tasks/\(task)/session" }
+        send(c)
+    }
+
+    public func answerSessionPrompt(_ yes: Bool) {
+        guard let task = sessionPrompt else { return }
+        sessionPrompt = nil
+        if yes { launchSession(task, anyway: true) }
+    }
+
+    func launchSession(_ task: UInt64, anyway: Bool) {
+        let argv = OpenSession.argv(cli: cliPath, task: task, anyway: anyway)
+        if launcher?(argv) == true { return }
+        let line = OpenSession.commandLine(cli: cliPath, task: task, anyway: anyway)
+        copier?(line)
+        sessionNotice = OpenSession.copiedNotice(line)
+    }
+
     /// The project a `push_auth` banner is about: its text starts "<project>: ".
     public static func pushAuthProject(_ b: Mason_V1_Banner) -> String {
         String(b.text.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false).first ?? "")
@@ -646,6 +679,13 @@ public final class MonitorModel: ObservableObject {
 
     func handle(result r: Mason_V1_CommandResult) {
         if r.id.hasPrefix("publish:"), r.ok { publishPreview = PublishPreview(json: r.json) }
+        if r.id.hasPrefix("session:"), let task = UInt64(r.id.dropFirst("session:".count)) {
+            switch OpenSession.decide(ok: r.ok, json: r.json, error: r.error) {
+            case .confirm: sessionPrompt = task
+            case .launch(let anyway): launchSession(task, anyway: anyway)
+            case .failed(let why): sessionNotice = why
+            }
+        }
         if r.id.hasPrefix("ssh-keys:"), r.ok { sshKeys = SSHKeyList(json: r.json) }
         if r.id.hasPrefix("ssh-keys:"), !r.ok { sshKeyResult = r.error }
         if r.id.hasPrefix("ssh-key:") {
