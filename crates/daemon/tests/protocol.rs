@@ -804,7 +804,11 @@ fn when_a_step_ends_the_next_task_is_the_next_one_admitted() {
         .iter()
         .find(|e| matches!(&e.event.kind, EventKind::Admitted { task, .. } if *task == b))
     {
-        let gap = adm_b.event.at.0.saturating_sub(events[a_agent_done].event.at.0);
+        let gap = adm_b
+            .event
+            .at
+            .0
+            .saturating_sub(events[a_agent_done].event.at.0);
         eprintln!("a step ends, the next task is admitted: {gap} ms");
     }
     let admissions: Vec<(usize, TaskId)> = events
