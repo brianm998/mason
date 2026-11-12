@@ -13,7 +13,7 @@ use support::lw::*;
 use support::*;
 
 #[test]
-fn a_batch_of_five_lands_three_ejects_the_conflict_and_parks_the_culprit() {
+fn a_batch_of_five_lands_three_defers_the_mate_conflict_and_parks_the_culprit() {
     let w = world(
         "window = \"30s\"\nmax_size = 5\n[[tier]]\nname = \"batch\"\nsuites = [\"integration\"]\n",
         &[],
@@ -46,7 +46,9 @@ fn a_batch_of_five_lands_three_ejects_the_conflict_and_parks_the_culprit() {
     assert!(!w.on_main("red.integration"));
     // One batch, recorded with who landed and who was parked.
     // Parked tasks go back at once, before the batch row is final: wait for the final row.
-    let want_parked = format!("{},{}", t4.0, t5.0);
+    // The conflict with a batch-mate waited for the next batch (it is not in this row), where
+    // it conflicted with the base, now that its mate had landed, and was sent back then.
+    let want_parked = t5.0.to_string();
     wait_for("the batch row to be final", 30, || {
         w.d.store
             .batches(Some("scratch"), 10)
@@ -54,13 +56,21 @@ fn a_batch_of_five_lands_three_ejects_the_conflict_and_parks_the_culprit() {
             .iter()
             .any(|b| b.phase == "landed" && b.parked == want_parked)
     });
+    let want_second = t4.0.to_string();
+    wait_for("the next batch to send the conflict back", 60, || {
+        w.d.store
+            .batches(Some("scratch"), 10)
+            .unwrap()
+            .iter()
+            .any(|b| b.phase == "parked" && b.parked == want_second)
+    });
     let rows = w.d.store.batches(Some("scratch"), 10).unwrap();
     let b = rows
         .iter()
         .find(|b| b.phase == "landed")
         .expect("a landed batch");
     assert_eq!(b.landed, format!("{},{},{}", t1.0, t2.0, t3.0));
-    assert_eq!(b.parked, format!("{},{}", t4.0, t5.0));
+    assert_eq!(b.parked, t5.0.to_string());
     // The integration branch is gone; the owner's checkout was not touched.
     assert!(!git::branch_exists(
         &w.s.repo,

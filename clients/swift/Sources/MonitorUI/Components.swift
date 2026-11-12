@@ -536,6 +536,17 @@ struct ActionButtons: View {
                     .buttonStyle(.plain)
                     .accessibilityIdentifier("action:\(row.id):\(a)")
             }
+            if let notice = model.sessionNotice {
+                Text(notice).font(theme.small()).foregroundStyle(theme.attention)
+                    .accessibilityIdentifier("action:\(row.id):open_session:notice")
+            }
+        }
+        .alert(OpenSession.confirmQuestion, isPresented: Binding(
+            get: { model.sessionPrompt == row.id },
+            set: { if !$0 { model.answerSessionPrompt(false) } }
+        )) {
+            Button("Open anyway") { model.answerSessionPrompt(true) }
+            Button("Cancel", role: .cancel) {}
         }
     }
 
@@ -568,7 +579,7 @@ struct ActionButtons: View {
         case "land_now": model.landNow(row.id)
         case "force": model.force(row.id)
         case "skip_test": model.skipTest(row.id, step: row.step)
-        case "open_session": copyToPasteboard("mason task open \(row.id)")
+        case "open_session": model.openSession(row.id)
         default: break
         }
     }
@@ -782,5 +793,51 @@ struct ImproveSheet: View {
         }
         .padding(theme.spacingLarge)
         .frame(width: 480)
+    }
+}
+
+/// After a refused push: the keys the daemon could use, with what is known about each. Choosing
+/// one writes the repository's ssh command, unlocks the key if it has a passphrase (in a dialog
+/// on the daemon's Mac, never here) and tries the remote.
+struct SSHKeySheet: View {
+    @Environment(\.theme) var theme
+    @ObservedObject var model: MonitorModel
+
+    var body: some View {
+        let project = model.sshKeyProject ?? ""
+        VStack(alignment: .leading, spacing: theme.spacing) {
+            Text("Choose the SSH key for \(project)").font(theme.title())
+            if let keys = model.sshKeys {
+                if keys.keys.isEmpty { Text("No keys were found in ~/.ssh on the daemon's Mac.").foregroundStyle(theme.muted) }
+                ForEach(keys.keys) { k in
+                    HStack(alignment: .firstTextBaseline, spacing: theme.spacing) {
+                        if k.encrypted { Image(systemName: "lock.fill").accessibilityLabel("has a passphrase") }
+                        VStack(alignment: .leading) {
+                            Text(k.path.isEmpty ? "(only in the agent)" : k.path).font(theme.body(.medium))
+                            Text("\(k.fingerprint)  \(k.comment)").font(theme.small()).foregroundStyle(theme.muted)
+                        }
+                        if k.onOwnerAccount { Text("on the repository owner's account").font(theme.small()).foregroundStyle(theme.accent) }
+                        if let u = k.seenAs { Text("seen as \(u)").font(theme.small()).foregroundStyle(theme.muted) }
+                        Spacer()
+                        Button("Use") { model.useSSHKey(project: project, path: k.path) }
+                            .disabled(!k.usable || model.sshKeyBusy)
+                            .accessibilityIdentifier("ssh-key-use:\(k.id)")
+                    }
+                }
+                if model.sshKeyBusy {
+                    Text("Enter the passphrase in the dialog on \(keys.host.isEmpty ? "the daemon's Mac" : keys.host) if it asks.").font(theme.small())
+                }
+            } else if model.sshKeyResult == nil {
+                Text("Looking for keys…").foregroundStyle(theme.muted)
+            }
+            if let r = model.sshKeyResult { Text(r).font(theme.small()).foregroundStyle(theme.attention) }
+            HStack {
+                Spacer()
+                Button("Close") { model.closeSSHKeys() }.keyboardShortcut(.cancelAction)
+            }
+        }
+        .padding(theme.spacingLarge)
+        .frame(minWidth: 520)
+        .accessibilityIdentifier("ssh-key-sheet")
     }
 }

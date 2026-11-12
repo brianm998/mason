@@ -188,7 +188,7 @@ parser = "tap"
 min_tests = 1
 level = "unit"
 TOML
-printf '#!/bin/sh\nif [ -f %s/slow.flag ]; then sleep 120; fi\necho 1..1; echo "ok 1 - slow"\n' "$root" | pusher main slow.sh "a suite"
+printf '#!/bin/sh\nif [ -f %s/slow.flag ]; then mktemp %s/asleep.XXXXXX >/dev/null; sleep 120; fi\necho 1..1; echo "ok 1 - slow"\n' "$root" "$root" | pusher main slow.sh "a suite"
 rm -rf "$root/d"; mkdir -p "$root/d"
 "$bin/masond" --port 0 --data-dir "$root/d" --config-dir "$root/c" --heartbeat-ms 100 --sweep-ms 3600000 --max-concurrent 8 2>>"$root/masond.log" &
 daemon=$!
@@ -214,9 +214,15 @@ s2=$(m task add "Skipped from Compose" --project worker --explored --body x | ta
 for t in $a $b; do wait_state "$t" needs_attention 60; done
 for t in $c1 $c2 $s1 $s2; do wait_slow "$t"; done
 echo "tasks $a $b are waiting for the owner; $c1 $c2 $s1 $s2 are running their slow suite"
-# The suites being cancelled and skipped are already asleep. Drop the flag before any monitor
-# acts, so a skipped task's landing batch, which may verify before the last action is sent,
-# does not sleep 120 s and hold the answered tasks' landings behind it.
+# Once the four suites being cancelled and skipped are asleep (each leaves a marker; its host
+# directory appears before it reads the flag), drop the flag before any monitor acts, so a
+# skipped task's landing batch, which may verify before the last action is sent, does not
+# sleep 120 s and hold the answered tasks' landings behind it.
+end=$((SECONDS + 60))
+until [ "$(ls "$root" | grep -c '^asleep\.')" -ge 4 ]; do
+  [ $SECONDS -lt $end ] || { echo "the slow suites did not all fall asleep" >&2; exit 1; }
+  sleep 0.2
+done
 rm -f "$root/slow.flag"
 
 if [ $swift_ok = 1 ]; then

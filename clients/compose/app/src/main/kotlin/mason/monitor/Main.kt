@@ -21,6 +21,8 @@ fun main(args: Array<String>) = application {
             // Sounds and sentences come from the daemon's announcements, spoken by this sink when
             // this monitor is the one that speaks. The beep stays for a daemon that sends none.
             it.announcer.sink = SystemSink()
+            it.copier = { text -> mason.monitor.ui.copyToClipboard(text) }
+            it.launcher = { argv -> openTerminal(argv) }
         }
     }
     LaunchedEffect(Unit) {
@@ -78,3 +80,24 @@ fun installMonitor(model: MonitorModel, path: String) {
     }.isSuccess
     if (started) kotlin.system.exitProcess(0) else model.monitorUpdateFailed("The new monitor would not start; this one keeps running.")
 }
+
+/**
+ * A terminal running `argv`, from a temporary script: macOS `open -a Terminal`, else `$TERMINAL`
+ * or `x-terminal-emulator`. False when none could be started; the caller copies the command then.
+ */
+internal fun openTerminal(argv: List<String>): Boolean = runCatching {
+    val line = argv.joinToString(" ") { OpenSession.quote(it) }
+    val mac = System.getProperty("os.name").orEmpty().startsWith("Mac")
+    val script = java.io.File.createTempFile("mason-open-", if (mac) ".command" else ".sh")
+    script.writeText("#!/bin/bash\nrm -f \"$0\"\n$line\n")
+    script.setExecutable(true)
+    val cmd = if (mac) {
+        listOf("open", "-a", "Terminal", script.path)
+    } else {
+        val t = System.getenv("TERMINAL")?.takeIf { it.isNotBlank() } ?: "x-terminal-emulator"
+        listOf(t, "-e", script.path)
+    }
+    val p = ProcessBuilder(cmd).redirectErrorStream(true).start()
+    // `open` returns at once; a terminal emulator stays up, so only a quick failure counts.
+    if (p.waitFor(2, java.util.concurrent.TimeUnit.SECONDS)) p.exitValue() == 0 else true
+}.getOrDefault(false)

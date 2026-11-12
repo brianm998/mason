@@ -12,6 +12,9 @@
 //!   a Low-priority task, and the baseline becomes what failed this time. `mutants` is meant for
 //!   `cargo mutants` (survivors are read from `mutants.out/missed.txt`) and `live` for the
 //!   adapters' live runs; both need what they run, so they are only ever scheduled by the owner.
+//! - `ci`: dispatches a slow CI workflow on the base branch when it matters, follows the run,
+//!   reruns its failed jobs once and files tasks for the reds and the flakes (`ci_schedule`).
+//!   Off unless configured.
 
 use crate::config::ProjectCfg;
 use crate::daemon::{now_ms, Daemon};
@@ -35,9 +38,46 @@ pub struct Spec {
     pub parser: String,
     pub results_file: Option<String>,
     pub timeout: Duration,
+    /// The `ci` kind's settings.
+    pub ci: Option<CiSpec>,
 }
 
-pub const KINDS: [&str; 4] = ["task", "base-health", "mutants", "live"];
+/// What a `kind = "ci"` schedule says (s175).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CiSpec {
+    /// The workflow file, `gherkin.yml`.
+    pub workflow: String,
+    /// The branch to dispatch on; the project's base branch when unset.
+    pub git_ref: Option<String>,
+    pub inputs: Vec<(String, String)>,
+    /// The run-name the workflow gives a dispatch, which is how its runs are told from others.
+    pub run_name: String,
+    /// Minutes after midnight, local time: once a day at this time (instead of `every`).
+    pub at: Option<u32>,
+    /// Inline globs, or the workflow file whose `on.pull_request.paths` holds them.
+    pub paths: Vec<String>,
+    pub paths_from: Option<String>,
+    pub group_by: mason_core::ci_schedule::GroupBy,
+    pub max_tickets: usize,
+}
+
+impl Default for CiSpec {
+    fn default() -> CiSpec {
+        CiSpec {
+            workflow: String::new(),
+            git_ref: None,
+            inputs: vec![],
+            run_name: String::new(),
+            at: None,
+            paths: vec![],
+            paths_from: None,
+            group_by: Default::default(),
+            max_tickets: 6,
+        }
+    }
+}
+
+pub const KINDS: [&str; 5] = ["task", "base-health", "mutants", "live", "ci"];
 
 pub fn parse(id: &str, doc: &DocumentMut) -> Result<Vec<Spec>, String> {
     let Some(t) = doc.get("schedule").and_then(|v| v.as_table_like()) else {
@@ -59,7 +99,10 @@ pub fn parse(id: &str, doc: &DocumentMut) -> Result<Vec<Spec>, String> {
             parser: "tap".into(),
             results_file: None,
             timeout: Duration::from_secs(1800),
+            ci: None,
         };
+        let mut ci = CiSpec::default();
+        let mut ci_keys: Vec<&str> = vec![];
         for (k, v) in tbl.iter() {
             let s = || {
                 v.as_str()
@@ -100,8 +143,82 @@ pub fn parse(id: &str, doc: &DocumentMut) -> Result<Vec<Spec>, String> {
                             format!("{at} `timeout_s` must be a whole number from 1")
                         })? as u64)
                 }
+                "workflow" | "ref" | "run_name" | "at" | "paths_from" | "group_by" => {
+                    ci_keys.push(k);
+                    let t = s()?;
+                    match k {
+                        "workflow" => ci.workflow = t,
+                        "ref" => ci.git_ref = Some(t).filter(|r| !r.is_empty()),
+                        "run_name" => ci.run_name = t,
+                        "paths_from" => ci.paths_from = Some(t).filter(|r| !r.is_empty()),
+                        "at" => {
+                            ci.at =
+                                Some(mason_core::ci_schedule::parse_at(&t).ok_or_else(|| {
+                                    format!("{at} `at` must be a time of day like \"23:00\"")
+                                })?)
+                        }
+                        _ => {
+                            ci.group_by = mason_core::ci_schedule::GroupBy::parse(&t)
+                                .map_err(|e| format!("{at} {e}"))?
+                        }
+                    }
+                }
+                "inputs" => {
+                    ci_keys.push(k);
+                    let tb = v
+                        .as_table_like()
+                        .ok_or_else(|| format!("{at} `inputs` must be a table of strings"))?;
+                    for (ik, iv) in tb.iter() {
+                        let val = iv
+                            .as_str()
+                            .ok_or_else(|| format!("{at} `inputs.{ik}` must be a string"))?;
+                        ci.inputs.push((ik.to_string(), val.to_string()));
+                    }
+                }
+                "paths" => {
+                    ci_keys.push(k);
+                    let arr = v
+                        .as_array()
+                        .ok_or_else(|| format!("{at} `paths` must be a list of globs"))?;
+                    for g in arr.iter() {
+                        ci.paths.push(
+                            g.as_str()
+                                .filter(|g| !g.is_empty())
+                                .ok_or_else(|| format!("{at} `paths` holds only globs"))?
+                                .to_string(),
+                        );
+                    }
+                }
+                "max_tickets" => {
+                    ci_keys.push(k);
+                    ci.max_tickets = v
+                        .as_integer()
+                        .filter(|n| *n >= 0)
+                        .ok_or_else(|| format!("{at} `max_tickets` must be a whole number"))?
+                        as usize;
+                }
                 other => return Err(format!("{at} has an unknown key `{other}`")),
             }
+        }
+        if spec.kind == "ci" {
+            if ci.workflow.trim().is_empty() {
+                return Err(format!("{at} is a ci schedule and needs a `workflow` (the file, such as \"gherkin.yml\")"));
+            }
+            if ci.at.is_some() && spec.every_ms != 0 {
+                return Err(format!("{at} takes `at` or `every`, not both"));
+            }
+            if ci.at.is_none() && spec.every_ms == 0 {
+                return Err(format!("{at} needs `at = \"23:00\"` or an `every`"));
+            }
+            if ci.paths_from.is_some() && !ci.paths.is_empty() {
+                return Err(format!("{at} takes `paths` or `paths_from`, not both"));
+            }
+            if ci.at.is_some() {
+                spec.every_ms = 24 * 3_600_000;
+            }
+            spec.ci = Some(ci);
+        } else if let Some(k) = ci_keys.first() {
+            return Err(format!("{at} `{k}` belongs to `kind = \"ci\"`"));
         }
         if spec.every_ms == 0 {
             return Err(format!(
@@ -161,10 +278,19 @@ pub fn run(d: &Arc<Daemon>, project: &ProjectCfg, spec: &Spec) -> String {
         });
     row.kind = spec.kind.clone();
     row.every_ms = spec.every_ms;
+    let before = (row.last_run, row.runs);
     row.last_run = now;
     row.runs += 1;
     let say = if spec.kind == "task" {
         run_task(d, project, spec, &mut row)
+    } else if spec.kind == "ci" {
+        let (say, decided) = crate::ci_schedule::run(d, project, spec, &mut row, now);
+        if !decided {
+            // Only a followed run moved: the schedule did not run again.
+            row.last_run = before.0;
+            row.runs = before.1;
+        }
+        say
     } else {
         run_check(d, project, spec, &mut row)
     };
@@ -408,9 +534,53 @@ every = "7d"
             "[schedule.x]\nevery = \"daily\"\n",
             "[schedule.x]\nkind = \"live\"\nevery = \"daily\"\n",
             "[schedule.x]\nkind = \"base-health\"\nevery = \"daily\"\nfast = true\n",
+            "[schedule.x]\nkind = \"base-health\"\nevery = \"daily\"\nworkflow = \"a.yml\"\n",
+            "[schedule.x]\nkind = \"ci\"\nat = \"23:00\"\n",
+            "[schedule.x]\nkind = \"ci\"\nworkflow = \"a.yml\"\n",
+            "[schedule.x]\nkind = \"ci\"\nworkflow = \"a.yml\"\nat = \"25:00\"\n",
+            "[schedule.x]\nkind = \"ci\"\nworkflow = \"a.yml\"\nat = \"23:00\"\nevery = \"daily\"\n",
+            "[schedule.x]\nkind = \"ci\"\nworkflow = \"a.yml\"\nat = \"23:00\"\npaths = [\"a\"]\npaths_from = \"b.yml\"\n",
+            "[schedule.x]\nkind = \"ci\"\nworkflow = \"a.yml\"\nat = \"23:00\"\ngroup_by = \"feature\"\n",
+            "[schedule.x]\nkind = \"ci\"\nworkflow = \"a.yml\"\nat = \"23:00\"\nfast = true\n",
+            "[schedule.x]\nkind = \"ci\"\nworkflow = \"a.yml\"\nat = \"23:00\"\ninputs = { n = 3 }\n",
         ] {
             assert!(parse("web", &bad.parse().unwrap()).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn a_ci_schedule_reads_all_its_keys() {
+        let doc: DocumentMut = r#"
+[schedule.nightly]
+kind = "ci"
+workflow = "gherkin.yml"
+inputs = { features = "" }
+run_name = "Gherkin: full"
+at = "23:00"
+paths_from = ".github/workflows/gherkin-smoke.yml"
+group_by = "<group>/<leg>"
+max_tickets = 4
+[schedule.inline]
+kind = "ci"
+workflow = "slow.yml"
+every = "12h"
+paths = ["src/**", "Cargo.toml"]
+"#
+        .parse()
+        .unwrap();
+        let s = parse("star", &doc).unwrap();
+        let n = s.iter().find(|s| s.name == "nightly").unwrap();
+        let c = n.ci.as_ref().unwrap();
+        assert_eq!(n.every_ms, 24 * 3_600_000);
+        assert_eq!(c.at, Some(23 * 60));
+        assert_eq!(c.inputs, vec![("features".to_string(), String::new())]);
+        assert_eq!(c.max_tickets, 4);
+        assert!(c.paths_from.is_some() && c.paths.is_empty());
+        let i = s.iter().find(|s| s.name == "inline").unwrap();
+        assert_eq!(i.every_ms, 12 * 3_600_000);
+        let c = i.ci.as_ref().unwrap();
+        assert_eq!((c.paths.len(), c.max_tickets, c.at), (2, 6, None));
+        assert!(s.iter().all(|s| s.kind == "ci"));
     }
 
     #[test]
