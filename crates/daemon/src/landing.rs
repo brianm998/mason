@@ -1971,7 +1971,7 @@ impl Runner {
                 jobs,
             } => {
                 let mut notes = vec![format!("CI on {name}: {summary}")];
-                if cfg.infra_judge {
+                if judges(&cfg) {
                     notes.extend(self.judge_notes(&jobs));
                 }
                 notes.extend(self.red_notes(&jobs));
@@ -2141,13 +2141,7 @@ impl Runner {
                 pr.number,
                 st.failed.join(", ")
             )];
-            if self
-                .project()
-                .services
-                .ci
-                .as_ref()
-                .is_some_and(|c| c.infra_judge)
-            {
+            if self.project().services.ci.as_ref().is_some_and(judges) {
                 notes.extend(self.judge_notes(&st.jobs));
             }
             notes.extend(self.red_notes(&st.jobs));
@@ -2465,4 +2459,10 @@ fn suites_needs(def: &mason_definition::Definition, names: &[String]) -> mason_s
         }
     }
     n
+}
+
+/// Does this CI judge its failed jobs? GitHub Actions only when `infra_judge` is on (it
+/// lists failed jobs, with their logs, either way); another kind judges when it says so.
+fn judges(c: &crate::config::CiCfg) -> bool {
+    c.infra_judge || !matches!(c.kind, crate::config::CiKind::GithubActions { .. })
 }
