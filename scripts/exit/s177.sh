@@ -57,7 +57,7 @@ echo "== the task lands though a fails, because a fails on the merge base too"
 t=$(m task add "Unrelated change" --project base --explored --body "x" | task_id)
 wait_for 180 "the task to land" state_is "$t" landed
 m task show "$t" | grep -q 'excused .*a: also fails at the merge base' || fail "no excuse in task show"
-n=$(m task list --json | grep -c '"title": "a fails on ') || true
+n=$(m task list --json | { grep '"title": "a fails on ' || test $? = 1; } | wc -l | tr -d ' ')
 [ "$n" = 1 ] || fail "$n 'a fails on' tasks were filed, not 1"
 echo "   landed, excused, one fix task"
 echo "s177: ok"
