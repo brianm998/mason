@@ -564,6 +564,27 @@ const STEPS: &[&str] = &[
     // 26: the CI run a `ci` schedule is following (s175, decision 0170), as text the daemon
     // reads and writes; empty when none. Additive.
     "ALTER TABLE schedules ADD COLUMN follow TEXT NOT NULL DEFAULT '';",
+    // 27: what a test command did on an exact content tree (s179, decision 0174), for the
+    // single-command path that has no suites: keyed by the tree and a hash of the resolved
+    // command text. `green` 1: passed (reused instead of run again); 0: red with the failing
+    // tests in `names`. `source` says who ran it. Additive.
+    "CREATE TABLE command_runs (
+         tree   TEXT NOT NULL,
+         cmd    TEXT NOT NULL,
+         green  INTEGER NOT NULL,
+         source TEXT NOT NULL,
+         names  TEXT NOT NULL,
+         at     INTEGER NOT NULL,
+         PRIMARY KEY (tree, cmd)
+     );",
+    // 28: when a task first joined the landing queue for a landing run (s184, decision 0179),
+    // so a restart does not start its batch window over. Additive.
+    "CREATE TABLE landing_submitted (
+         task  INTEGER NOT NULL,
+         run   INTEGER NOT NULL,
+         at_ms INTEGER NOT NULL,
+         PRIMARY KEY (task, run)
+     );",
 ];
 
 pub const SCHEMA_VERSION: u32 = STEPS.len() as u32;

@@ -297,7 +297,9 @@ fn main() {
                 &json!({"type": "result", "subtype": "success", "is_error": is_error, "duration_ms": 1,
                 "num_turns": 1, "result": r["text"], "api_error_status": r["api_error_status"],
                 "session_id": sid, "total_cost_usd": 0.001,
-                "usage": {"input_tokens": 4, "cache_creation_input_tokens": 100, "cache_read_input_tokens": 2000, "output_tokens": 50}}),
+                // A refused session (login, limit, outage) produced no output.
+                "usage": {"input_tokens": 4, "cache_creation_input_tokens": 100, "cache_read_input_tokens": 2000,
+                    "output_tokens": if is_error { 0 } else { 50 }}}),
             );
             finished = true;
         }

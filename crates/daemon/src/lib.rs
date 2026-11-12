@@ -12,6 +12,7 @@ pub mod bg;
 pub mod blockers;
 pub mod ci_schedule;
 pub mod ci_watch;
+pub mod cmdreuse;
 pub mod config;
 pub mod cpu;
 pub mod crash;

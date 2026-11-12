@@ -86,6 +86,9 @@ struct State {
     attention: HashMap<(ProjectId, String), (String, String)>,
     /// Since when a project's landing configuration could not be read (git failed).
     unread_since: HashMap<ProjectId, Instant>,
+    /// A self-update is waiting for the running batches to finish: no new batch starts and
+    /// the queues keep what they hold. It only holds batches back; it never changes a verdict.
+    draining: bool,
 }
 
 /// The landing queues of every project.
@@ -133,6 +136,45 @@ impl Landing {
             .get(&p)
             .map(|v| v.iter().map(|w| w.task).collect())
             .unwrap_or_default()
+    }
+
+    /// Hold new batches back (`true`) or let them start again. Queued tasks keep their place.
+    pub fn set_draining(&self, on: bool) {
+        self.lock().draining = on;
+        self.wake();
+    }
+
+    pub fn draining(&self) -> bool {
+        self.lock().draining
+    }
+
+    /// The projects with a batch running now.
+    pub fn busy_projects(&self) -> Vec<ProjectId> {
+        let mut v: Vec<ProjectId> = self
+            .lock()
+            .running
+            .iter()
+            .filter(|(_, r)| !r.is_empty())
+            .map(|(p, _)| *p)
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// Wait on the condvar (a finishing batch wakes it) for at most `tick`, or not at all if
+    /// no project has a batch running. `true`: nothing is running now.
+    pub fn wait_idle_once(&self, tick: Duration) -> bool {
+        let idle = |g: &State| g.running.values().all(Vec::is_empty);
+        let g = self.lock();
+        if idle(&g) {
+            return true;
+        }
+        let g = self
+            .cv
+            .wait_timeout(g, tick)
+            .unwrap_or_else(|e| e.into_inner())
+            .0;
+        idle(&g)
     }
 
     pub fn running_batches(&self, p: ProjectId) -> usize {
@@ -258,7 +300,7 @@ pub fn submit_and_wait(c: &Ctx) -> Option<Verdict> {
         run: c.run,
         branch: c.branch.clone(),
         rank: rank_of(priority, c.task),
-        ready_at: d.started.elapsed().as_secs(),
+        ready_at: landing_clock(d).saturating_sub(first_submit_age_s(d, c)),
         footprint: Footprint {
             files: paths.into_iter().collect(),
             suites,
@@ -297,6 +339,24 @@ pub fn submit_and_wait(c: &Ctx) -> Option<Verdict> {
             return None;
         }
     }
+}
+
+/// The landing queue's clock, in seconds. It starts far from zero so that a task first
+/// submitted before this daemon started can have a `ready_at` before the daemon's start.
+fn landing_clock(d: &Daemon) -> u64 {
+    const BIAS_S: u64 = 1 << 32;
+    BIAS_S + d.started.elapsed().as_secs()
+}
+
+/// How long ago the task first joined the queue for this landing run (0 for a first
+/// submission, or when the store cannot say). A restart does not start its window over.
+fn first_submit_age_s(d: &Daemon, c: &Ctx) -> u64 {
+    let now = now_ms();
+    let first = d
+        .store
+        .first_landing_submit(c.task.0, c.run.0, now)
+        .unwrap_or(now);
+    now.saturating_sub(first) / 1000
 }
 
 /// A task that adds a stage note, exit script or decision record under a number that is
@@ -572,6 +632,11 @@ fn form_and_start(
     if waiting.is_empty() {
         return (0, None);
     }
+    if d.landing.draining() {
+        // A self-update is waiting for the running batches: nothing new starts, and the
+        // queue is left as it is. `set_draining(false)` wakes this again.
+        return (waiting.len(), Some(Duration::from_secs(1)));
+    }
     let cfg = match read_config(d, pid) {
         Ok(c) => {
             note_read(d, pid, None, UNREAD_ALERT_AFTER);
@@ -630,7 +695,7 @@ fn form_and_start(
         take(d, pid, w.task);
         start(d, pid, vec![w], cfg.clone(), &kind);
     }
-    let now = d.started.elapsed().as_secs();
+    let now = landing_clock(d);
     let mut next_wait = None;
     let mut guard = 0;
     loop {
@@ -692,6 +757,16 @@ fn start(d: &Arc<Daemon>, pid: ProjectId, members: Vec<Wait>, cfg: LandingConfig
         .fold(Footprint::default(), |a, w| a.union(&w.footprint));
     let slot = {
         let mut g = d.landing.lock();
+        if g.draining {
+            // A drain began after the look at the queue: put the tasks back, start nothing.
+            let q = g.waiting.entry(pid).or_default();
+            for w in members {
+                if !q.iter().any(|x| x.task == w.task) {
+                    q.push(w);
+                }
+            }
+            return;
+        }
         let r = g.running.entry(pid).or_default();
         let slot = (0..).find(|s| r.iter().all(|x| x.slot != *s)).unwrap_or(0);
         r.push(Running {
@@ -1492,7 +1567,23 @@ impl Runner {
                     };
                     let spec = spec("retest", &cmds.test);
                     return match crate::hostedcheck::run(d, &spec) {
-                        Ok(o) => o.passed,
+                        Ok(o) => {
+                            if o.passed {
+                                if let Some(t) = crate::cmdreuse::content_tree(&wt_for_cmd) {
+                                    let key = crate::cmdreuse::command_key(
+                                        cmds.build.as_deref(),
+                                        &cmds.test,
+                                    );
+                                    crate::cmdreuse::record_green(
+                                        d,
+                                        &t,
+                                        &key,
+                                        &format!("landing re-test of batch {batch_id}"),
+                                    );
+                                }
+                            }
+                            o.passed
+                        }
                         Err(e) => {
                             tracing::warn!(batch = batch_id, "the re-test gave no result: {e}");
                             false
@@ -2016,14 +2107,20 @@ impl Runner {
         self.point("ci_finished");
         self.drop_candidate(&name, ref_id);
         Ok(match r? {
-            CiState::Green => (true, vec![format!("CI on {name}: green")], vec![]),
+            CiState::Green => {
+                self.d.landing.clear(self.pid, "redbase");
+                (true, vec![format!("CI on {name}: green")], vec![])
+            }
             CiState::Red {
                 failed,
                 summary,
                 jobs,
             } => {
                 let mut notes = vec![format!("CI on {name}: {summary}")];
-                notes.extend(self.judge_notes(&jobs));
+                if judges(&cfg) {
+                    notes.extend(self.judge_notes(&jobs));
+                }
+                notes.extend(self.red_notes(&jobs));
                 (false, notes, failed)
             }
             CiState::Pending => unreachable!("pending is waited out"),
@@ -2048,6 +2145,59 @@ impl Runner {
             .collect();
         self.real_ci_red
             .store(real, std::sync::atomic::Ordering::SeqCst);
+        notes
+    }
+
+    /// What a red batch tells its tasks and the owner about the failed jobs (s174): the end
+    /// of each job's log (about 60 lines in all), and the base branch's own state. A job
+    /// whose failing tests all fail on the base too, with the same text, blames nobody and
+    /// the batch waits ("red on <base> too"); with different text it waits and the owner
+    /// is alerted; a test or job that is green on the base is still the batch's.
+    fn red_notes(&self, jobs: &[mason_adapter_api::service::JobFailure]) -> Vec<String> {
+        let mut notes = vec![];
+        let logged: Vec<_> = jobs.iter().filter(|j| j.log.is_some()).collect();
+        let each = (60 / logged.len().max(1)).max(10);
+        for j in &logged {
+            if let Some(l) = &j.log {
+                notes.push(format!(
+                    "--- {}/{}: end of the job's log ---\n{}",
+                    j.workflow,
+                    j.job,
+                    mason_core::red_base::feedback_lines(l, each)
+                ));
+            }
+        }
+        let base = self.project().base.clone();
+        let verdict = match crate::ci_watch::source(self.project(), "the landing CI comparison") {
+            Ok((gh, _)) if !jobs.is_empty() => crate::ci_watch::assess(&gh, &base, jobs),
+            _ => return notes,
+        };
+        use mason_core::red_base::Verdict;
+        match verdict {
+            Verdict::Blame => self.d.landing.clear(self.pid, "redbase"),
+            Verdict::RedOnBase(names) => {
+                self.d.landing.clear(self.pid, "redbase");
+                let why = format!(
+                    "{names} red on {base} too (the same tests fail there): nobody is blamed, the batch waits"
+                );
+                notes.push(why.clone());
+                self.fail_service(why);
+            }
+            Verdict::Differs(texts) => {
+                let why = format!(
+                    "the same tests fail on {base} and in the batch, with different text: {texts}; nobody is blamed, the batch waits for the owner"
+                );
+                self.d.landing.raise(
+                    self.pid,
+                    "redbase",
+                    "landing",
+                    &format!("{}: {why}", self.project().id),
+                );
+                self.d.poke();
+                notes.push(why.clone());
+                self.fail_service(why);
+            }
+        }
         notes
     }
 
@@ -2137,7 +2287,10 @@ impl Runner {
                 pr.number,
                 st.failed.join(", ")
             )];
-            notes.extend(self.judge_notes(&st.jobs));
+            if self.project().services.ci.as_ref().is_some_and(judges) {
+                notes.extend(self.judge_notes(&st.jobs));
+            }
+            notes.extend(self.red_notes(&st.jobs));
             return Ok((false, notes, st.failed));
         }
         *self.pr.lock().unwrap_or_else(|e| e.into_inner()) = Some(OpenPr {
@@ -2452,4 +2605,37 @@ fn suites_needs(def: &mason_definition::Definition, names: &[String]) -> mason_s
         }
     }
     n
+}
+
+/// Does this CI judge its failed jobs? GitHub Actions only when `infra_judge` is on (it
+/// lists failed jobs, with their logs, either way); another kind judges when it says so.
+fn judges(c: &crate::config::CiCfg) -> bool {
+    c.infra_judge || !matches!(c.kind, crate::config::CiKind::GithubActions { .. })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A task first submitted before the daemon started has a `ready_at` before the
+    /// daemon's start, so a restart does not make it wait out the window again.
+    #[test]
+    fn a_requeued_task_counts_its_window_from_its_first_submission() {
+        let window = Duration::from_secs(3600);
+        let clock = (1u64 << 32) + 5; // the new daemon is five seconds old
+        let cand = |age_s: u64| plan::Candidate {
+            id: 1,
+            rank: 0,
+            ready_at: clock.saturating_sub(age_s),
+            footprint: Footprint::default(),
+        };
+        assert!(matches!(
+            plan::form_batch(&[cand(4000)], clock, window, 0),
+            Formation::Form(_)
+        ));
+        assert!(matches!(
+            plan::form_batch(&[cand(0)], clock, window, 0),
+            Formation::Wait(_)
+        ));
+    }
 }
