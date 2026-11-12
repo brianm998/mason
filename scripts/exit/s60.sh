@@ -19,7 +19,7 @@ run "run_check runs the test command the owner overrode at runtime" \
 run "a claim is never handed out without a free session" \
     -p mason-daemon --test e2e admission_respects_the_concurrency_limit
 run "the hand-off is driven by the step's end" \
-    -p mason-daemon --test protocol when_a_step_ends_the_next_task_is_admitted
+    -p mason-daemon --test protocol when_a_step_ends_the_next_task_is_the_next_one_admitted
 run "a waiting step's activity names what it waits for" \
     -p mason-daemon --test scheduling a_step_waits_for_a_held_class_and_says_why_then_lands
 run "the update self-test, with its reasons" \
