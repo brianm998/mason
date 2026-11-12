@@ -97,6 +97,9 @@ pub struct SessionSpec {
     /// Told of the agent's tool calls and todo lists as they arrive, before the
     /// turn ends (the runner calls it; it never holds a daemon type).
     pub on_agent_event: Option<AgentEventSink>,
+    /// Called once per session invocation, on the first event that proves the
+    /// provider accepted it: output tokens, text or a tool call.
+    pub on_live: Option<LiveSink>,
     /// Silence limits for the session (see [`IdlePolicy`]).
     pub idle: Option<IdlePolicy>,
 }
@@ -119,6 +122,9 @@ pub type AgentEventSink = std::sync::Arc<dyn Fn(&AgentEvent) + Send + Sync>;
 
 /// Receives `(host id, cumulative figures)` while a session runs.
 pub type TokensSink = std::sync::Arc<dyn Fn(&str, &TokenReport) + Send + Sync>;
+
+/// Told once that the provider accepted the session.
+pub type LiveSink = std::sync::Arc<dyn Fn() + Send + Sync>;
 
 /// Receives the model name a session reports.
 pub type ModelSink = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
@@ -146,6 +152,7 @@ impl SessionSpec {
             on_model: None,
             on_tokens: None,
             on_agent_event: None,
+            on_live: None,
             idle: None,
         }
     }

@@ -92,13 +92,14 @@ fn daemon_pid(s: &Scratch) -> u64 {
         .unwrap()
 }
 
-/// An agent that commits, then stays mid-session until `gate/release` exists (or
+/// An agent that commits, says so by creating `gate/started`, then stays
+/// mid-session until `gate/release` exists (or
 /// the gate directory is gone, so a failed test leaves nothing spinning). It ends
 /// when the test says so, never because time ran out: a fixed sleep let a slow
 /// self-test outlast the agent, and the host then exited normally, code 0.
 fn gated_script(gate: &Path) -> Value {
     let wait = format!(
-        "while [ -d '{0}' ] && [ ! -e '{0}/release' ]; do sleep 0.2; done",
+        "touch '{0}/started'; while [ -d '{0}' ] && [ ! -e '{0}/release' ]; do sleep 0.2; done",
         gate.display()
     );
     json!({"steps": {"explore": [explore_turn()], "develop": [[
@@ -202,12 +203,16 @@ fn an_update_while_an_agent_session_runs_does_not_interrupt_it() {
         "Create hello.txt.",
         "--explored",
     ]);
-    // The agent is mid-session: its step host is running.
+    // The agent is mid-session: it has committed and is waiting on the gate. Its
+    // marker, not the first running host, says so: the explore step has a host too,
+    // and a fixed sleep is no proof that the develop step got as far as the wait.
+    wait_for("the agent to reach its wait", 120, || {
+        gate.path().join("started").exists()
+    });
     wait_for("the agent's host to run", 60, || {
         !running_hosts(&s).is_empty()
     });
     let (host_before, pid_before) = (running_hosts(&s)[0].clone(), daemon_pid(&s));
-    std::thread::sleep(Duration::from_secs(1));
 
     let out = s.mason_ok(&["update"]);
     assert!(
@@ -279,8 +284,13 @@ fn a_build_that_crashes_is_rolled_back_by_itself_with_an_alert() {
     wait_status(&s, "c1 to run", 90, |v| {
         v["running"] == src.shas[0].as_str()
     });
-    // Healthy long enough to be recorded as such.
-    std::thread::sleep(Duration::from_secs(3));
+    // Healthy long enough to be recorded as such: the daemon writes the mark to the
+    // boot log, so wait for it rather than for a guess at how long it takes.
+    let boots = s.data_dir.join("runtimes/boots.log");
+    let healthy = format!("{} healthy", src.shas[0]);
+    wait_for("c1 to be recorded healthy", 120, || {
+        std::fs::read_to_string(&boots).is_ok_and(|t| t.lines().any(|l| l.contains(&healthy)))
+    });
     // c2 builds and passes its self-test, then dies the moment it starts.
     // (The command line gives up waiting for a daemon that does not come back, and says so.)
     let o = s.mason(&["update", "--sha", &src.shas[1]]);
@@ -324,9 +334,27 @@ fn a_build_that_crashes_is_rolled_back_by_itself_with_an_alert() {
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
-        std::thread::sleep(Duration::from_millis(800));
-        if c.try_wait().unwrap().is_none() {
-            alive = Some(c);
+        // Either it dies (a crash, counted, and the next start follows) or it is the
+        // daemon answering: `daemon.json` then holds its pid. No guess at how long a
+        // crashing start takes to die; the limit only stops a hang.
+        let end = Instant::now() + Duration::from_secs(120);
+        loop {
+            if c.try_wait().unwrap().is_some() {
+                break;
+            }
+            if std::fs::read_to_string(s.data_dir.join("daemon.json"))
+                .ok()
+                .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+                .is_some_and(|v| v["pid"].as_u64() == Some(u64::from(c.id())))
+            {
+                alive = Some(c);
+                break;
+            }
+            assert!(
+                Instant::now() < end,
+                "start {tries} neither died nor came up"
+            );
+            std::thread::sleep(Duration::from_millis(50));
         }
     }
     let mut daemon = alive.unwrap();
