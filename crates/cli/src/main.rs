@@ -2918,16 +2918,31 @@ fn print_digest(r: &serde_json::Value) {
         ),
     }
     println!("Tokens per landed task: not recorded");
-    for (title, key) in [
-        ("Time by state", "time_by_state_ms"),
-        ("Waiting, by reason", "wait_by_reason_ms"),
-    ] {
-        println!("{title}:");
-        if let Some(m) = r[key].as_object() {
-            for (k, v) in m {
-                println!("  {k:<20} {}", ms_text(v.as_u64().unwrap_or(0)));
-            }
+    println!("Time by state:");
+    if let Some(m) = r["time_by_state_ms"].as_object() {
+        for (k, v) in m {
+            println!("  {k:<20} {}", ms_text(v.as_u64().unwrap_or(0)));
         }
+    }
+    println!("Waiting, by what was waited for:");
+    for row in r["wait_by_class"].as_array().cloned().unwrap_or_default() {
+        let count = row["count"]
+            .as_u64()
+            .map_or("-".to_string(), |c| c.to_string());
+        let longest = match (row["longest_ms"].as_u64(), row["longest_task"].as_u64()) {
+            (Some(ms), Some(t)) => format!("longest {} (#{t})", ms_text(ms)),
+            _ => String::new(),
+        };
+        let share = row["share"]
+            .as_f64()
+            .map_or(String::new(), |s| format!("{:.0}% of task time", s * 100.0));
+        println!(
+            "  {:<12} {:<22} {:>4} wait(s)  total {:<7} {longest}  {share}",
+            row["project"].as_str().unwrap_or("?"),
+            row["class"].as_str().unwrap_or("?"),
+            count,
+            ms_text(row["total_ms"].as_u64().unwrap_or(0)),
+        );
     }
     let ex = &r["exploring"];
     println!(

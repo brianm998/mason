@@ -198,6 +198,24 @@ pub fn kind_of_env(e: &mason_testing::Environment) -> Option<DeviceKind> {
     }
 }
 
+/// What a wait is for. A device pool with no units is the environment; otherwise the broker has
+/// just said which resource or gate holds the request back, and the first thing asked for is the
+/// fallback.
+pub fn wait_class(d: &Daemon, needs: &Needs, task: mason_core::TaskId) -> String {
+    for r in needs.amounts.keys() {
+        if wait::kind_of(r).is_some() && d.broker.limit(r) == Some(0) {
+            return r.clone();
+        }
+    }
+    d.broker.wait_class(task).unwrap_or_else(|| {
+        if needs.exclusive {
+            "exclusive".into()
+        } else {
+            needs.amounts.keys().next().cloned().unwrap_or_default()
+        }
+    })
+}
+
 /// Words for a wait. A device pool with no units is waiting for a person.
 pub fn wait_text(d: &Daemon, needs: &Needs, scheduler_text: &str) -> String {
     for r in needs.amounts.keys() {

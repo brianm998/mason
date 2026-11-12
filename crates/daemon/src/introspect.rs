@@ -366,12 +366,59 @@ pub struct Replay {
     pub events: u64,
     /// Seconds of work in each state, per project name, clipped to the window.
     pub state_ms: BTreeMap<String, BTreeMap<String, u64>>,
+    /// Seconds of waiting, per project name and wait class (see `mason_core::wait_class`).
     pub wait_ms: BTreeMap<String, BTreeMap<String, u64>>,
+    /// How many waits fell (at least partly) in the window, and the longest, per project and class.
+    pub wait_runs: BTreeMap<String, BTreeMap<String, WaitRuns>>,
     /// task -> (claimed at, route, project)
     pub claims: BTreeMap<u64, (u64, &'static str, String)>,
     /// task -> (landed at, project)
     pub lands: BTreeMap<u64, (u64, String)>,
     pub returned: BTreeSet<u64>,
+}
+
+/// The waits of one class, counted one by one.
+#[derive(Default, Clone, Debug, PartialEq, Eq)]
+pub struct WaitRuns {
+    pub count: u64,
+    pub longest_ms: u64,
+    pub longest_task: u64,
+}
+
+/// Note every wait that `before` had and `after` no longer has (it ended, or was replaced by a
+/// newer one), clipped to `[from, to)`.
+fn close_waits(before: &World, after: &World, from: u64, to: u64, end: u64, r: &mut Replay) {
+    for (task, wait) in &before.waits {
+        if after.waits.get(task).is_some_and(|n| n.since == wait.since) {
+            continue;
+        }
+        note_wait(before, wait, from, to, end, r);
+    }
+}
+
+fn note_wait(w: &World, wait: &mason_core::Wait, from: u64, to: u64, end: u64, r: &mut Replay) {
+    let (lo, hi) = (wait.since.0.max(from), end.min(to));
+    if hi <= lo {
+        return;
+    }
+    let Some(p) = w
+        .tasks
+        .get(&wait.task)
+        .and_then(|t| w.projects.get(&t.project))
+    else {
+        return;
+    };
+    let e = r
+        .wait_runs
+        .entry(p.name.clone())
+        .or_default()
+        .entry(wait.class_name())
+        .or_default();
+    e.count += 1;
+    if hi - lo > e.longest_ms {
+        e.longest_ms = hi - lo;
+        e.longest_task = wait.task.0;
+    }
 }
 
 fn charge(w: &World, from: u64, to: u64, a: u64, b: u64, r: &mut Replay) {
@@ -388,9 +435,9 @@ fn charge(w: &World, from: u64, to: u64, a: u64, b: u64, r: &mut Replay) {
             State::Proposed | State::Landed | State::Failed | State::Canceled => continue,
             _ if t.paused => continue,
             State::Queued if !t.blockers.is_empty() => continue,
-            State::Queued => ("queued", Some("a slot".into())),
-            State::NeedsAttention => ("needs_attention", Some("the owner".into())),
-            s => (state_name(s), w.waits.get(&t.id).map(|x| x.on.clone())),
+            State::Queued => ("queued", Some("queue".into())),
+            State::NeedsAttention => ("needs_attention", Some("owner".into())),
+            s => (state_name(s), w.waits.get(&t.id).map(|x| x.class_name())),
         };
         *r.state_ms
             .entry(p.name.clone())
@@ -409,10 +456,8 @@ fn charge(w: &World, from: u64, to: u64, a: u64, b: u64, r: &mut Replay) {
 
 /// Replay the whole log, charging time that falls in `[from, to)`.
 pub fn replay(d: &Daemon, from: u64, to: u64) -> Replay {
-    let mut r = Replay::default();
-    let mut w = World::new();
+    let mut rp = Replayer::new(from, to);
     let mut after = 0u64;
-    let mut prev: Option<u64> = None;
     loop {
         let Ok(batch) = d.store.read_since(after, 5000) else {
             break;
@@ -422,53 +467,89 @@ pub fn replay(d: &Daemon, from: u64, to: u64) -> Replay {
         }
         for se in batch {
             after = se.seq;
-            r.events += 1;
-            let at = se.event.at.0;
-            if let Some(p) = prev {
-                charge(&w, from, to, p, at, &mut r);
-            }
-            prev = Some(at);
-            let project_of = |w: &World, t: &TaskId| {
-                w.tasks
-                    .get(t)
-                    .and_then(|x| w.projects.get(&x.project))
-                    .map(|p| p.name.clone())
-                    .unwrap_or_default()
-            };
-            match &se.event.kind {
-                EventKind::Admitted {
-                    task,
-                    entry: Some(e),
-                } => {
-                    r.claims
-                        .entry(task.0)
-                        .or_insert((at, e.route.name(), project_of(&w, task)));
-                }
-                EventKind::StepSucceeded {
-                    task,
-                    next:
-                        Some(Next {
-                            state: State::Landed,
-                            ..
-                        }),
-                }
-                | EventKind::ClosedNoChange { task, .. } => {
-                    r.lands.insert(task.0, (at, project_of(&w, task)));
-                }
-                EventKind::ExplorationRequested { task, .. } => {
-                    r.returned.insert(task.0);
-                }
-                _ => {}
-            }
-            if let Ok((next, _)) = reduce(&w, &se.event) {
-                w = next;
-            }
+            rp.feed(&se.event);
         }
     }
-    if let Some(p) = prev {
-        charge(&w, from, to, p, to, &mut r);
+    rp.finish()
+}
+
+/// The replay, one event at a time (so a test can feed it events without a daemon).
+pub struct Replayer {
+    r: Replay,
+    w: World,
+    prev: Option<u64>,
+    from: u64,
+    to: u64,
+}
+
+impl Replayer {
+    pub fn new(from: u64, to: u64) -> Self {
+        Replayer {
+            r: Replay::default(),
+            w: World::new(),
+            prev: None,
+            from,
+            to,
+        }
     }
-    r
+
+    pub fn feed(&mut self, event: &mason_core::Event) {
+        let (from, to) = (self.from, self.to);
+        let (r, w) = (&mut self.r, &self.w);
+        r.events += 1;
+        let at = event.at.0;
+        if let Some(p) = self.prev {
+            charge(w, from, to, p, at, r);
+        }
+        self.prev = Some(at);
+        let project_of = |w: &World, t: &TaskId| {
+            w.tasks
+                .get(t)
+                .and_then(|x| w.projects.get(&x.project))
+                .map(|p| p.name.clone())
+                .unwrap_or_default()
+        };
+        match &event.kind {
+            EventKind::Admitted {
+                task,
+                entry: Some(e),
+            } => {
+                r.claims
+                    .entry(task.0)
+                    .or_insert((at, e.route.name(), project_of(w, task)));
+            }
+            EventKind::StepSucceeded {
+                task,
+                next:
+                    Some(Next {
+                        state: State::Landed,
+                        ..
+                    }),
+            }
+            | EventKind::ClosedNoChange { task, .. } => {
+                r.lands.insert(task.0, (at, project_of(w, task)));
+            }
+            EventKind::ExplorationRequested { task, .. } => {
+                r.returned.insert(task.0);
+            }
+            _ => {}
+        }
+        if let Ok((next, _)) = reduce(w, event) {
+            close_waits(w, &next, from, to, at, r);
+            self.w = next;
+        }
+    }
+
+    pub fn finish(mut self) -> Replay {
+        if let Some(p) = self.prev {
+            charge(&self.w, self.from, self.to, p, self.to, &mut self.r);
+        }
+        // Waits still going count up to the end of the window.
+        for wait in self.w.waits.values() {
+            note_wait(&self.w, wait, self.from, self.to, self.to, &mut self.r);
+        }
+        self.r
+    }
 }
 
 fn sum(m: Option<&BTreeMap<String, u64>>) -> u64 {
@@ -518,6 +599,29 @@ fn stats_from(d: &Daemon, rep: &Replay, project: Option<&str>, from: u64, to: u6
         wait_ms: sumo(&rep.wait_ms),
         active_ms: sumo(&rep.state_ms),
     }
+}
+
+/// One row per project and wait class: count, total, longest (with its task) and the share of
+/// the time tasks spent in a state. Longest first.
+fn wait_rows(rep: &Replay, in_p: &dyn Fn(&str) -> bool, active_ms: u64) -> Vec<Value> {
+    let mut rows: Vec<(u64, Value)> = vec![];
+    for (p, classes) in rep.wait_ms.iter().filter(|(p, _)| in_p(p)) {
+        for (class, total) in classes {
+            let runs = rep.wait_runs.get(p).and_then(|m| m.get(class));
+            rows.push((
+                *total,
+                json!({
+                    "project": p, "class": class, "total_ms": total,
+                    "count": runs.map(|r| r.count),
+                    "longest_ms": runs.map(|r| r.longest_ms),
+                    "longest_task": runs.map(|r| r.longest_task),
+                    "share": (active_ms > 0).then(|| *total as f64 / active_ms as f64),
+                }),
+            ));
+        }
+    }
+    rows.sort_by(|a, b| b.0.cmp(&a.0));
+    rows.into_iter().map(|(_, v)| v).collect()
 }
 
 // ---- the detector cycle ------------------------------------------------------------------
@@ -1080,7 +1184,7 @@ pub fn digest(d: &Daemon, project: Option<&str>, from: u64, to: u64) -> Value {
         "interventions": stats.interventions,
         "interventions_per_landed": per(stats.interventions, stats.landed),
         "time_by_state_ms": merged(&rep.state_ms),
-        "wait_by_reason_ms": merged(&rep.wait_ms),
+        "wait_by_class": wait_rows(&rep, &in_p, stats.active_ms),
         "tokens_per_landed": Value::Null,
         "tokens_note": "token counts are not recorded per task, so none is shown",
         "exploring": {
@@ -1217,5 +1321,116 @@ mod tests {
         assert_eq!(d[1].metric, "");
         assert!(parse_drafts("{}").is_err());
         assert!(parse_drafts("not json").is_err());
+    }
+
+    fn ev(at: u64, kind: EventKind) -> mason_core::Event {
+        mason_core::Event {
+            at: mason_core::Timestamp(at),
+            kind,
+        }
+    }
+
+    fn wait(at: u64, on: &str, class: Option<&str>) -> mason_core::Event {
+        ev(
+            at,
+            EventKind::WaitStarted {
+                task: TaskId(0),
+                on: on.into(),
+                class: class.map(String::from),
+            },
+        )
+    }
+
+    /// One task, waiting three times: twice for a compile slot (old events, no class, texts that
+    /// differ in position and holder) and once for the test suite (new event, with a class).
+    fn waits_log() -> Replay {
+        let mut rp = Replayer::new(0, 100_000);
+        for e in [
+            ev(
+                0,
+                EventKind::ProjectRegistered {
+                    project: mason_core::ProjectId(1),
+                    name: "p".into(),
+                },
+            ),
+            ev(
+                0,
+                EventKind::TaskFiled {
+                    project: mason_core::ProjectId(1),
+                    title: "t".into(),
+                    body: String::new(),
+                    priority: mason_core::Priority::Normal,
+                    trust: mason_core::TrustSource::Owner,
+                    explored: false,
+                    proposed: false,
+                    blockers: vec![],
+                    not_before: None,
+                },
+            ),
+            ev(
+                0,
+                EventKind::Admitted {
+                    task: TaskId(0),
+                    entry: None,
+                },
+            ),
+            wait(
+                1_000,
+                "Waiting for compile slot: 10th in line, held by #94 for 0 s and 2 more",
+                None,
+            ),
+            ev(11_000, EventKind::WaitEnded { task: TaskId(0) }),
+            wait(
+                20_000,
+                "Waiting for compile slot: 2nd in line, held by #7 for 4 min",
+                None,
+            ),
+            ev(25_000, EventKind::WaitEnded { task: TaskId(0) }),
+            wait(
+                30_000,
+                "Waiting for test-suite slot: 1st in line",
+                Some("test-suite"),
+            ),
+            ev(60_000, EventKind::WaitEnded { task: TaskId(0) }),
+        ] {
+            rp.feed(&e);
+        }
+        rp.finish()
+    }
+
+    #[test]
+    fn old_waits_are_grouped_by_the_class_read_from_their_text() {
+        let r = waits_log();
+        let m = &r.wait_ms["p"];
+        assert_eq!(m.get("compile"), Some(&15_000), "{m:?}");
+        assert_eq!(m.get("test-suite"), Some(&30_000), "{m:?}");
+        assert!(m.keys().all(|k| !k.contains("in line")), "{m:?}");
+        let runs = &r.wait_runs["p"];
+        assert_eq!(runs["compile"].count, 2);
+        assert_eq!(
+            (runs["compile"].longest_ms, runs["compile"].longest_task),
+            (10_000, 0)
+        );
+        assert_eq!(runs["test-suite"].count, 1);
+    }
+
+    #[test]
+    fn a_digest_row_per_class_totals_the_individual_waits() {
+        let r = waits_log();
+        let rows = wait_rows(&r, &|_| true, 100_000);
+        let classes: Vec<&str> = rows.iter().map(|v| v["class"].as_str().unwrap()).collect();
+        let waiting: Vec<&&str> = classes
+            .iter()
+            .filter(|c| **c != "queue" && **c != "owner")
+            .collect();
+        assert_eq!(waiting.len(), 2, "{classes:?}");
+        let total: u64 = rows
+            .iter()
+            .filter(|v| v["count"].as_u64().is_some_and(|c| c > 0))
+            .map(|v| v["total_ms"].as_u64().unwrap())
+            .sum();
+        assert_eq!(total, 10_000 + 5_000 + 30_000);
+        assert_eq!(rows[0]["class"], "test-suite");
+        assert_eq!(rows[0]["count"], 1);
     }
 }

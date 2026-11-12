@@ -492,7 +492,11 @@ fn wait_while_paused(c: &Ctx) -> Result<(), ()> {
                 &p.project
             };
             let on = format!("paused by {} ({} for {scope})", p.owner, p.mode);
-            if !c.emit(EventKind::WaitStarted { task: c.task, on }) {
+            if !c.emit(EventKind::WaitStarted {
+                task: c.task,
+                on,
+                class: Some("pause".into()),
+            }) {
                 return Err(());
             }
         }
@@ -533,7 +537,11 @@ fn wait_open(c: &Ctx) -> Result<(), ()> {
             Gate::Wait(on) => {
                 if !announced {
                     announced = true;
-                    if !c.emit(EventKind::WaitStarted { task: c.task, on }) {
+                    if !c.emit(EventKind::WaitStarted {
+                        task: c.task,
+                        on,
+                        class: Some("environment".into()),
+                    }) {
                         return Err(());
                     }
                 }
@@ -631,6 +639,7 @@ fn acquire_needs(
             waited = c.emit(EventKind::WaitStarted {
                 task: c.task,
                 on: crate::targets::wait_text(d, &asked, why),
+                class: Some(crate::targets::wait_class(d, &asked, c.task)),
             });
         },
     )?;
@@ -844,7 +853,11 @@ pub(crate) fn wait_out_environment<T>(
                     waited = true;
                     tracing::warn!(task = c.task.0, "{what}: {e}; waiting");
                     let on = format!("git is busy or not answering ({what}): {e}");
-                    if !c.emit(EventKind::WaitStarted { task: c.task, on }) {
+                    if !c.emit(EventKind::WaitStarted {
+                        task: c.task,
+                        on,
+                        class: Some("environment".into()),
+                    }) {
                         return Err(format!("{what}: the step was superseded while waiting"));
                     }
                 }
@@ -1256,6 +1269,7 @@ impl CheckSlots {
                     EventKind::WaitStarted {
                         task,
                         on: crate::targets::wait_text(d, &asked, why),
+                        class: Some(crate::targets::wait_class(d, &asked, task)),
                     },
                 );
             },
@@ -2438,6 +2452,7 @@ fn approval_job(c: &Ctx) {
         && !c.emit(EventKind::WaitStarted {
             task: c.task,
             on: APPROVAL_WAIT.into(),
+            class: Some("approval".into()),
         })
     {
         return;

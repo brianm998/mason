@@ -65,7 +65,15 @@ fn gen(db: &str, tasks: u64) {
         ev(&s, &mut t, EventKind::Admitted { task, entry: None });
         let on = || "tests".to_string();
         for _ in 0..2 {
-            ev(&s, &mut t, EventKind::WaitStarted { task, on: on() });
+            ev(
+                &s,
+                &mut t,
+                EventKind::WaitStarted {
+                    task,
+                    on: on(),
+                    class: None,
+                },
+            );
             ev(&s, &mut t, EventKind::WaitEnded { task });
         }
         ev(&s, &mut t, EventKind::Paused { task });
