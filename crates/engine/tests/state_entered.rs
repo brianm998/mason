@@ -76,6 +76,7 @@ fn each_kind_of_transition_sets_it_to_the_event_time() {
         E::StepFailed {
             task: t,
             reason: "x".into(),
+            class: None,
         },
     )
     .unwrap();

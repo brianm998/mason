@@ -12,6 +12,7 @@ use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use mason_core::*;
+use mason_definition::Definition;
 use mason_engine::World;
 use mason_store::{state_name, StoreError};
 use serde_json::{json, Value};
@@ -95,6 +96,9 @@ fn task_json(d: &Daemon, w: &World, t: &Task, detail: bool) -> Value {
         "skipped_exploring": t.route.is_some_and(Route::skipped_exploring),
         "explore_returns": t.explore_returns,
     });
+    if t.state == State::Failed {
+        v["retry_to"] = json!(retry_default(&task_def(d, t), t));
+    }
     if detail {
         v["body"] = json!(t.body);
         v["priority"] = json!(format!("{:?}", t.priority).to_lowercase());
@@ -158,6 +162,7 @@ fn task_json(d: &Daemon, w: &World, t: &Task, detail: bool) -> Value {
             |h| json!({"reasons": h.reasons, "approved_by": h.approved_by, "since": h.at}),
         );
         v["failure"] = t.failure.as_ref().map_or(Value::Null, |f| json!(f));
+        v["failure_class"] = t.failure_class.map_or(Value::Null, |c| json!(c.name()));
         v["excused"] = json!(crate::basecheck::recorded(&d.task_dir(t.id)));
         v["host_losses"] = json!(d
             .store
@@ -659,6 +664,24 @@ async fn cancel(
     Ok(Json(json!({"ok": true})))
 }
 
+/// The definition a task runs under.
+fn task_def(d: &Daemon, t: &Task) -> Arc<Definition> {
+    d.pinned_def(&t.def)
+        .filter(|_| !t.def.is_empty())
+        .unwrap_or_else(|| d.current_def(t.project))
+}
+
+/// Where a retry that names no step goes: the failed step when the failure was not
+/// about the code (s168), otherwise the first developing step.
+fn retry_default(def: &Definition, t: &Task) -> String {
+    use crate::hostloss::retry_step;
+    if let Some(step) = retry_step(t.failure.as_deref(), t.failure_class, &t.step) {
+        return step;
+    }
+    def.first_in(State::Developing)
+        .map_or("develop".into(), |s| s.name.clone())
+}
+
 async fn retry(
     Shared(d): Shared<Arc<Daemon>>,
     Path(id): Path<u64>,
@@ -677,17 +700,9 @@ async fn retry(
                     .tasks
                     .get(&TaskId(id))
                     .ok_or_else(|| fail(StatusCode::NOT_FOUND, format!("no task #{id}")))?;
-                let def = d2
-                    .pinned_def(&t.def)
-                    .filter(|_| !t.def.is_empty())
-                    .unwrap_or_else(|| d2.current_def(t.project));
+                let def = task_def(&d2, t);
                 // `to` is a step in the task's definition, or a category (the first step in it).
-                let name = want
-                    .or_else(|| crate::hostloss::retry_step(t.failure.as_deref(), &t.step))
-                    .unwrap_or_else(|| {
-                        def.first_in(State::Developing)
-                            .map_or("develop".into(), |s| s.name.clone())
-                    });
+                let name = want.unwrap_or_else(|| retry_default(&def, t));
                 let found = match def.step(&name) {
                     Some(s) => Some((s.category, s.name.clone())),
                     None => parse_state(&name)
