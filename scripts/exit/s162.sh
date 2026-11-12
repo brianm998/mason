@@ -12,8 +12,8 @@ cargo build -q --workspace --bins
 bin=$PWD/target/debug
 owner=${USER:-owner}
 m() { "$bin/mason" --data-dir "$root/d" --config-dir "$root/c" "$@"; }
-fail() { echo "FAILED: $*" >&2; cat "$root/doctor.out" >&2 2>/dev/null || true; tail -20 "$root/masond.log" >&2 || true; exit 1; }
-doctor() { m doctor >"$root/doctor.out" 2>&1 || true; }
+fail() { echo "FAILED: $*" >&2; [ ! -f "$root/doctor.out" ] || cat "$root/doctor.out" >&2; tail -20 "$root/masond.log" >&2; exit 1; }
+doctor() { m doctor >"$root/doctor.out" 2>&1 || fail "mason doctor exited non-zero"; }
 
 mkdir -p "$root/c/projects" "$root/repo/.mason"
 git init -q -b main "$root/repo"
