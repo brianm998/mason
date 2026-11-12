@@ -760,3 +760,73 @@ fn a_provider_hold_waits_and_resumes_without_failing_the_task() {
         "a hold is never a failure"
     );
 }
+
+fn fix_tasks(d: &mason_daemon::daemon::Daemon) -> Vec<String> {
+    d.world()
+        .unwrap()
+        .tasks
+        .values()
+        .filter(|t| t.title.contains(" fails on "))
+        .map(|t| t.title.clone())
+        .collect()
+}
+
+#[test]
+fn a_red_that_also_fails_at_the_merge_base_is_excused_and_one_fix_is_filed() {
+    // `a` fails on the base too (README is there for every commit): neither task's change
+    // broke it. Both are green, the excuse is noted, and one "a fails on <base>" task is
+    // filed, not two.
+    let s = Scratch::new("true", happy_script());
+    let (_, _, cmd) = libtest_script(
+        &s,
+        "if [ -f README ]; then echo 'test a ... FAILED'; echo 'test b ... ok'; exit 1; fi",
+    );
+    s.write_project("scratch", &cmd, "test_reruns = 1");
+    let d = s.start();
+    let t1 = file_task(&d, "First unrelated change");
+    let t2 = file_task(&d, "Second unrelated change");
+    wait_state(&d, t1, State::Landed, 120);
+    wait_state(&d, t2, State::Landed, 120);
+    for t in [t1, t2] {
+        let excused = mason_daemon::basecheck::recorded(&d.task_dir(t));
+        assert_eq!(excused.len(), 1, "{excused:?}");
+        assert!(
+            excused[0].starts_with("a: also fails at the merge base"),
+            "{excused:?}"
+        );
+        assert!(excused[0].contains("fix: task #"), "{excused:?}");
+    }
+    let fixes = fix_tasks(&d);
+    assert_eq!(fixes.len(), 1, "{fixes:?}");
+    assert!(fixes[0].starts_with("a fails on "), "{fixes:?}");
+    let w = d.world().unwrap();
+    let fix = w
+        .tasks
+        .values()
+        .find(|t| t.title.contains(" fails on "))
+        .unwrap();
+    assert_eq!(fix.priority, Priority::Urgent);
+}
+
+#[test]
+fn a_red_that_fails_on_the_branch_only_stays_red_and_files_nothing() {
+    // `a` fails only where hello.txt is: the base passes it, so it is this change's.
+    let s = Scratch::new(
+        "true",
+        json!({"steps": {"explore": [explore_turn()], "develop": [develop_turn()]}}),
+    );
+    let (_, _, cmd) = libtest_script(
+        &s,
+        "if [ -f hello.txt ]; then echo 'test a ... FAILED'; exit 1; fi",
+    );
+    s.write_project("scratch", &cmd, "max_test_rounds = 1\ntest_reruns = 1");
+    let d = s.start();
+    let t = file_task(&d, "Breaks a");
+    wait_state(&d, t, State::Failed, 120);
+    assert!(mason_daemon::basecheck::recorded(&d.task_dir(t)).is_empty());
+    assert!(fix_tasks(&d).is_empty(), "{:?}", fix_tasks(&d));
+    assert!(
+        !s.origin_log().contains(&"add hello".to_string()),
+        "nothing red may land"
+    );
+}

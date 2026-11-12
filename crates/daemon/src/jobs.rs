@@ -2233,6 +2233,33 @@ fn command_job(c: &Ctx) {
                     }
                     continue;
                 }
+                // Red on every run: if every one of those tests also fails at the merge base,
+                // it is not this change's (s177).
+                if is_test {
+                    if let Some(p) = persistent.as_ref().filter(|p| !p.is_empty()) {
+                        let base_cmd = if filter_off {
+                            cmd.clone()
+                        } else {
+                            crate::rerun::command(&cmd, filter, p)
+                        };
+                        if let Some(note) = crate::basecheck::excuse(
+                            c,
+                            suffix,
+                            builds_first(c).as_deref(),
+                            &base_cmd,
+                            p,
+                        ) {
+                            record_flaky(c, &seen, p);
+                            let _ = std::fs::remove_file(c.task_dir().join("feedback.txt"));
+                            tracing::warn!(task = c.task.0, run = c.run.0, "{note}");
+                            use std::io::Write as _;
+                            if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&log) {
+                                let _ = writeln!(f, "\n== MASON: {note}");
+                            }
+                            return c.green();
+                        }
+                    }
+                }
                 let (reason, feedback) = match &persistent {
                     Some(p) if k > 0 => {
                         record_flaky(c, &seen, p);
@@ -2290,10 +2317,9 @@ fn read_whole_log(path: &Path) -> Option<String> {
 /// flake, as the suites path does; the step's name stands for the suite.
 fn record_flaky(c: &Ctx, tests: &[String], except: &[String]) {
     for t in tests.iter().filter(|t| !except.contains(t)) {
-        let _ = c
-            .d
-            .store
-            .record_flaky(&c.step.name, t, c.task.0, crate::daemon::now_ms());
+        let _ =
+            c.d.store
+                .record_flaky(&c.step.name, t, c.task.0, crate::daemon::now_ms());
     }
 }
 
