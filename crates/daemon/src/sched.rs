@@ -236,6 +236,8 @@ struct State {
     disk_read: Option<(Instant, Option<DiskGate>)>,
     /// Grants waiting on a kernel lock that something outside the broker holds, by lease.
     kernel_waits: HashMap<u64, KernelWait>,
+    /// The class of a wait being announced, by task (see `wait_class`).
+    wait_class: HashMap<TaskId, String>,
     /// The build disk's responsiveness and the limit on it. `None`: no stall gate.
     stall: Option<(Arc<dyn StallSource>, u64)>,
 }
@@ -416,6 +418,7 @@ impl Broker {
                 disk: None,
                 disk_read: None,
                 kernel_waits: HashMap::new(),
+                wait_class: HashMap::new(),
                 stall: None,
             }),
             cv: Condvar::new(),
@@ -738,6 +741,25 @@ impl Broker {
         changed
     }
 
+    /// Record, for the length of one `on_wait` call, what the wait is for. The callback reads
+    /// it with `wait_class`.
+    fn say_class(&self, task: TaskId, class: Option<String>) {
+        let mut st = lock(&self.st);
+        match class {
+            Some(c) => {
+                st.wait_class.insert(task, c);
+            }
+            None => {
+                st.wait_class.remove(&task);
+            }
+        }
+    }
+
+    /// What the wait `task` has just announced is for. Only meaningful inside `on_wait`.
+    pub fn wait_class(&self, task: TaskId) -> Option<String> {
+        lock(&self.st).wait_class.get(&task).cloned()
+    }
+
     /// Wait for a step's resources, all at once. `alive` says whether the step
     /// is still wanted (a cancelled task stops waiting). `on_wait` is called
     /// once, with the explanation, if the step has to wait at all. Time spent
@@ -782,9 +804,12 @@ impl Broker {
                     .get(&id)
                     .map(|w| explain(w, now))
                     .unwrap_or_else(|| "Waiting for resources".into());
+                let class = waits.waits.get(&id).map(|w| w.class());
                 drop(st);
                 announced = true;
+                self.say_class(task, class);
                 on_wait(&text);
+                self.say_class(task, None);
                 continue;
             }
             if last_check.elapsed() > Duration::from_millis(400) {
@@ -859,7 +884,9 @@ impl Broker {
                         text: text.clone(),
                     },
                 );
+                self.say_class(task, Some("outside-pipeline".into()));
                 on_wait(&text);
+                self.say_class(task, None);
             }
             std::thread::sleep(Duration::from_millis(25));
             if !alive() {
