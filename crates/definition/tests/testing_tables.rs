@@ -353,3 +353,73 @@ fn suites_bound_to_the_test_step_but_not_listed_warn() {
     );
     assert!(warn(&unbound).is_empty());
 }
+
+// s178: a suite may build first, holding `compile` only for the build.
+#[test]
+fn a_suite_may_have_its_own_build_and_it_must_not_be_empty() {
+    let text = with(
+        "command = \"cargo nextest run\"\n",
+        "command = \"cargo nextest run\"\nbuild = \"cargo nextest run --no-run\"\n",
+    );
+    let d = parse(&text).unwrap();
+    assert!(validate(&d, &Capabilities::now()).is_empty());
+    assert_eq!(
+        d.testing.suite("unit").unwrap().build.as_deref(),
+        Some("cargo nextest run --no-run")
+    );
+    assert_eq!(d.testing.suite("e2e").unwrap().build, None);
+    let text = with(
+        "command = \"cargo nextest run\"\n",
+        "command = \"cargo nextest run\"\nbuild = \"  \"\n",
+    );
+    assert!(problems(&text)
+        .iter()
+        .any(|m| m.contains("suite.unit.build") && m.contains("must not be empty")));
+    let text = with(
+        "command = \"cargo nextest run\"\n",
+        "command = \"cargo nextest run\"\nbuild = 3\n",
+    );
+    assert!(problems(&text)
+        .iter()
+        .any(|m| m.contains("suite.unit.build") && m.contains("must be a string")));
+}
+
+// s178: MASON's own definition runs three suites, and the impact map picks them by path.
+#[test]
+fn masons_own_impact_map_selects_suites_by_path() {
+    use mason_testing::Selection;
+    let text = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../.mason/mason.toml"
+    ))
+    .unwrap();
+    let d = parse(&text).unwrap();
+    assert!(validate(&d, &Capabilities::now()).is_empty());
+    let step = d.step("test").unwrap();
+    let all = step.suites.clone();
+    let pick = |paths: &[&str]| {
+        let p: Vec<String> = paths.iter().map(|s| s.to_string()).collect();
+        d.testing.impact.select(&p, &all)
+    };
+    let one = |n: &str| Selection::Some(vec![n.to_string()]);
+    assert_eq!(
+        pick(&["clients/swift/Sources/A.swift"]),
+        one("swift-clients")
+    );
+    assert_eq!(pick(&["clients/compose/core/B.kt"]), one("compose-clients"));
+    assert_eq!(
+        pick(&[
+            "crates/daemon/src/a.rs",
+            "Cargo.lock",
+            "rust-toolchain.toml"
+        ]),
+        one("cargo-workspace")
+    );
+    assert_eq!(pick(&["clients/tokens.toml"]), Selection::Some(all.clone()));
+    assert_eq!(pick(&["schemas/mason.proto"]), Selection::Some(all.clone()));
+    assert_eq!(pick(&["scripts/unmapped.sh"]), Selection::All);
+    assert_eq!(pick(&["docs/x.md"]), one("cargo-workspace"));
+    // All three are bound to run_check and the test step.
+    assert_eq!(d.testing.bound(When::Development).len(), 3);
+    assert_eq!(d.testing.bound(When::TestStep).len(), 3);
+}
