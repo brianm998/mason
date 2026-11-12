@@ -7,8 +7,98 @@
 pipeline of exploring, developing, testing, review and landing, for any number
 of projects at once, with SwiftUI and Compose monitors.
 
+## Status: alpha
+
+MASON is feature-complete through milestone M7 of the
+[roadmap](docs/DESIGN.md#part-24-roadmap-and-migration). It lands its own
+changes every day, but it has one user so far and no release.
+
+- **What works:** everything listed under [What it does](#what-it-does). MASON
+  runs as its own pipeline (see [docs/self-hosting.md](docs/self-hosting.md)),
+  and most recent stages make it more reliable rather than adding features.
+- **What is missing:** no tagged, signed or packaged release (the version is
+  `0.0.0`, and [docs/install.md](docs/install.md) means building from source).
+  No security review. The App Store licence permission is still waiting for
+  legal review. The first migration of another project (M8, stage s27) has
+  stopped at the owner checkpoint after step 1.
+- **What to expect:** configuration, the protocol and the stored data can still
+  change without a migration path. Breaking changes are not announced.
+
+**Beta** will mean M8 is done (the first project has switched over and others
+have been adopted) and a release can be installed without building from
+source. **1.0** is M9: signed releases, finished docs and a security review.
+
+## What it does
+
+- **Pipelines as files.** A project's pipeline lives in `.mason/mason.toml` and
+  its landing rules in `.mason/landing.toml`. `mason init` takes a project from
+  nothing to a landed first task, using one of the example workflows in
+  [`templates/`](templates).
+- **One scheduler for everything shared.** LLM sessions, compile and test
+  slots, devices and disk are all ordered by one broker. It explains every wait
+  and raises an alert when a wait looks stuck.
+- **Test verdicts proven from output.** Suites, impact maps, minimum test
+  counts and recorded flakes mean an empty or vacuous run cannot pass.
+- **Landing.** Seven landing modes, from straight to a branch through CI on
+  candidate refs and pull requests to the host's merge queue. Tasks land in
+  batches: one integration branch per batch, the suites run once, a red is
+  blamed on the task that caused it, and a red post-land tier freezes landing.
+- **Adapters.** Claude Code and Codex agents, with model ladders and usage
+  limits per provider account. GitHub Issues, pull requests and Actions, Jenkins
+  or any generic build system, and plain git over ssh. Optional `sandbox-exec`
+  or `bubblewrap` sandboxing.
+- **Extending without forking.** Script steps, prompt packs, and process plugins
+  in `.mason/extensions/` that speak versioned JSON-RPC in any language (see
+  [docs/plugin-protocol.md](docs/plugin-protocol.md)). A plugin runs only after
+  the owner approves its content hash.
+- **Monitors.** SwiftUI (`clients/swift`) and Compose (`clients/compose`)
+  desktop monitors draw the daemon's views over one WebSocket and are held in
+  parity by a machine check. Both include a canvas pipeline editor and live step
+  progress, and you answer a task's questions or approve its work by clicking.
+  Phones can pair over the LAN.
+- **Attention.** A task that needs you asks one short decision card. Alerts are
+  routed to the monitor, sound, speech and push, then go quiet once cleared or
+  acknowledged. A watchdog speaks up when the daemon itself is down.
+- **Self-hosting and self-update.** MASON works on its own repository, and
+  changes to its own gates are held for the owner. The daemon updates itself
+  without interrupting running work and rolls back by itself after repeated
+  crashes. It also files proposals about its own problems and checks whether
+  each fix helped.
+- **Durability.** Every change is an event in a SQLite log, step hosts outlive
+  the daemon, and `kill -9` mid-session loses nothing.
+
+`masond --demo` plays a scripted scenario for the monitors. The design is in
+[docs/DESIGN.md](docs/DESIGN.md), decisions in
+[docs/decisions](docs/decisions), and installation in
+[docs/install.md](docs/install.md).
+
+## Licence
+
+GPL-3.0-or-later, see [LICENSE](LICENSE). A draft section 7 App Store
+additional permission is in
+[LICENSE-ADDITIONAL-PERMISSION](LICENSE-ADDITIONAL-PERMISSION) and is awaiting
+legal review. See [docs/LICENSING.md](docs/LICENSING.md) for what the licence
+does and does not cover, including generated output and templates.
+
+The code is GPL, but the mascot character and its art are not: see the draft
+brand notice, [NOTICE.md](clients/swift/Sources/MasonMascot/Art/NOTICE.md).
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Every commit needs a DCO sign-off.
+Report vulnerabilities privately, see [SECURITY.md](SECURITY.md).
+
+## Layout
+
+`crates/` Rust workspace, `clients/` monitors, `schemas/` protocol and
+definition schemas, `templates/` starter workflows, `prompts/` default prompt
+packs, `docs/` design, decisions, spikes and stage reports, `scripts/exit/`
+per-stage exit tests.
+
+## Stage notes
+
 <!-- status:begin -->
-Status: **pre-alpha**. What each stage note says it built (generated from `docs/stages` by `scripts/gen-status.sh` when a change lands; do not edit between the markers):
+What each stage note says it built, oldest first (generated from `docs/stages` by `scripts/gen-status.sh` when a change lands; do not edit between the markers):
 
 - **s00**: Stage 0: Repository and ground rules
 - **s01**: Stage 1: Spikes
@@ -131,31 +221,7 @@ Status: **pre-alpha**. What each stage note says it built (generated from `docs/
 - **s134**: The AppKit mascot loader now sizes each image from its bitmap's pixel aspect (`points` is the width), so the 1536 x 1024 start image is 768 x 512 points instead of 768 x 768; square art is unchanged.
 - **s136**: `[tracker] require_label = true` makes the project's label the only thing that decides whether an issue is imported (whoever filed it, trust unchanged), leaves other pipelines' canceled issues out of the relink list, files an issue again once the label is added after its task was canceled, and says the rule on `mason doctor`'s tracker line; the star example is corrected.
 - **s147**: The macOS monitor's sidebar content is pinned to the panel width, and the row metadata line, progress line and section header now shrink, drop pieces or wrap instead of clipping both edges.
+- **s151**: `pty = true` on a suite or command step runs its command under `script` on a pseudo-terminal (macOS), so XCTest writes line by line and `mason task show` shows the current test while a run hangs; off by default, results and exit codes judged as before.
 - **s153**: With `[ci] infra_judge` on, MASON reads each failed GitHub Actions job as infrastructure or real, reruns CI once only when every failed job is infrastructure, and sends a real red back at once; off by default.
+- **s155**: Another pipeline can queue with masond: `mason run --pipeline` ranks its work with MASON's tasks (behind a person's), `mason hold` holds resources for a process's life and prints `granted`, an outside `llm:claude` hold counts against the same `[llm] claude` limit, and `mason resources` and `mason status` list outside holders and waiters by pipeline name.
 <!-- status:end -->
-
-Pre-alpha. Tasks can wait for others (`mason task add --after 3,4`, GitHub's "blocked by" and `Depends on #N` lines are read when issues are imported, in dependency order; a change on GitHub holds or releases a queued task; both monitors show "waiting for" and "blocks"), the owner answers a task's question and decides its approvals by clicking in either monitor (option buttons with the recommended one marked, an Other box that sends on Enter, arrow keys and Return; Approve with the exact diff hash shown and Reject with a reason for a proposal, an approval step or a self-hosting hold; the top bar's count opens the first task that needs you; a non-owner sees the card and no buttons), a second agent (the Codex CLI), a second build system (Jenkins) and a generic one (any trigger and status, each a command or a URL) pass the same conformance kits as the first, with agent profiles that retry up a ladder of models, plain git over ssh as a host with no features, and optional `sandbox-exec` / `bubblewrap` sandboxing; a project can add what it needs without forking (script steps with `MASON_*` variables and a JSON result, prompt packs, and process plugins in `.mason/extensions/` that speak versioned JSON-RPC over stdio in any language, add a step type with an editor form made from their `config_schema`, and run only after the owner approves their content hash), the pipeline can be edited on a canvas in both monitors (swimlanes, forms from JSON Schema, a test grid, the landing settings, a simulation, a diff and what it affects, undo and redo, apply) with the daemon keeping the TOML's comments, MASON can work on its own repository, with changes to its gates (or that weaken them) held for the owner by the running version's rules, the daemon updates itself from a channel without interrupting work (an immutable build proves itself on a copy of the database, takes over by `exec`, and rolls back by itself after three crashes), all seven landing modes (CI on candidate refs, pull requests, the host's merge queue; GitHub Issues, pull requests and Actions behind small adapter traits, tested on recorded responses and a fake host), tasks land in batches (one integration branch per batch, the suites run once over the union, a red is blamed on the task that caused it, a red post-land tier freezes landing), pipelines are defined in `.mason/mason.toml`, one scheduler orders every contended resource, test verdicts are proven from output, a task that needs you asks a short decision card, and two monitors (SwiftUI in `clients/swift`, Compose in `clients/compose`) draw the daemon's server-computed views over one WebSocket and are held in parity by a machine check (`masond --demo` plays a scripted scenario).
-is in [docs/DESIGN.md](docs/DESIGN.md).
-
-## Licence
-
-GPL-3.0-or-later, see [LICENSE](LICENSE). A draft section 7 App Store
-additional permission is in
-[LICENSE-ADDITIONAL-PERMISSION](LICENSE-ADDITIONAL-PERMISSION) and is awaiting
-legal review. See [docs/LICENSING.md](docs/LICENSING.md) for what the licence
-does and does not cover, including generated output and templates.
-
-The code is GPL, but the mascot character and its art are not: see the draft
-brand notice, [NOTICE.md](clients/swift/Sources/MasonMascot/Art/NOTICE.md).
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md). Every commit needs a DCO sign-off.
-Report vulnerabilities privately, see [SECURITY.md](SECURITY.md).
-
-## Layout
-
-`crates/` Rust workspace, `clients/` monitors, `schemas/` protocol and
-definition schemas, `templates/` starter workflows, `prompts/` default prompt
-packs, `docs/` design, decisions, spikes and stage reports, `scripts/exit/`
-per-stage exit tests.

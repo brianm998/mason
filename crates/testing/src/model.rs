@@ -83,6 +83,9 @@ pub struct Suite {
     pub progress: Option<String>,
     /// Where its tests live (globs). Used by the negative control.
     pub test_paths: Vec<String>,
+    /// Run the command with stdout and stderr on a pseudo-terminal, so a test runner
+    /// that block-buffers to a pipe writes line by line. Only how output is captured.
+    pub pty: bool,
 }
 
 impl Suite {
@@ -103,6 +106,7 @@ impl Suite {
             artifacts: vec![],
             progress: None,
             test_paths: vec![],
+            pty: false,
         }
     }
 }

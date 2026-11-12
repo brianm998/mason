@@ -2412,6 +2412,19 @@ async fn lease_open(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res
     // On behalf of a task: ranked as that task's pipeline work. An id that is
     // not a live task is treated as no task at all (a person's request).
     let task = b["task"].as_u64();
+    // Another pipeline's work: ranked as pipeline work, never a person's, and
+    // `task` is ignored (it names a MASON task).
+    if let Some(name) = b["pipeline"].as_str() {
+        let o = crate::outside::parse_request(name, b["priority"].as_str(), b["progress"].as_u64())
+            .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
+        let d2 = d.clone();
+        let id = d
+            .pool
+            .run(move || d2.broker.lease_open_outside(&label, &uses, &o))
+            .await
+            .map_err(pool_err)?;
+        return Ok(Json(json!({"id": id})));
+    }
     let d2 = d.clone();
     let id = d
         .pool

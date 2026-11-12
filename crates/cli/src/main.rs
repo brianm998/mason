@@ -22,6 +22,7 @@
 //! mason triage list | review <id> (--agree | --disagree)
 //! mason status [--json] [--watch]
 //! mason run --needs compile[=N],... [--exclusive] [--label L] -- <cmd>...
+//! mason hold --needs R[,R...] [--exclusive] --pipeline NAME --label L [--pid P]
 //! mason targets list [--json]
 //! mason resources [--json] | mason resources limit <resource> <units>
 //! mason doctor
@@ -104,6 +105,11 @@ mason: command-line client for the MASON pipeline
   mason remove [--yes] [--id ID]      delete the project file, .mason/ and the Filing notes (lists first without --yes)
   mason run --needs compile[=N],... [--exclusive] [--label L] -- <cmd>...
                                       queue for the pipeline's resources, ahead of its work
+  mason run ... --pipeline NAME [--priority urgent|high|normal|low] [--progress 0-6]
+                                      the same for another pipeline's work: ranked with MASON's tasks, behind a person's
+  mason hold --needs R[,R...] [--exclusive] --pipeline NAME --label L [--pid P]
+                                      hold resources for a process's life: prints `granted`, then holds until
+                                      stdin closes, --pid exits or it is signalled
   mason resources [--json]            limits, who holds what, and every wait explained
   mason targets list [--json]         simulators, emulators and phones, and who has each
   mason resources limit <resource> <units>   change a limit while things run (llm:claude, compile, ...)
@@ -197,6 +203,27 @@ fn task_id(a: &mut Args) -> u64 {
     s.trim_start_matches('#')
         .parse()
         .unwrap_or_else(|_| die(&format!("{s:?} is not a task number")))
+}
+
+/// `--pipeline NAME [--priority P] [--progress N]`: another pipeline's request.
+fn outside_args(a: &mut Args) -> Option<resources::OutsideArgs> {
+    let pipeline = a.opt("--pipeline");
+    let priority = a.opt("--priority");
+    let progress = a.opt("--progress").map(|p| {
+        p.parse::<u32>()
+            .unwrap_or_else(|_| die("--progress wants a whole number from 0 to 6"))
+    });
+    match pipeline {
+        Some(pipeline) => Some(resources::OutsideArgs {
+            pipeline,
+            priority,
+            progress,
+        }),
+        None if priority.is_some() || progress.is_some() => {
+            die("--priority and --progress go with --pipeline NAME")
+        }
+        None => None,
+    }
 }
 
 fn finish(a: &Args) {
@@ -433,11 +460,36 @@ fn main() {
             uses.insert("exclusive".into(), 1);
         }
         let label = a.opt("--label");
+        let outside = outside_args(&mut a);
         finish(&a);
         let command = run_tail.filter(|c| !c.is_empty()).unwrap_or_else(|| {
             die("give the command after `--`: mason run --needs compile -- cargo build")
         });
-        exit(resources::run(&d, uses, label, &command).unwrap_or_else(|e| die(&e)));
+        exit(
+            resources::run(&d, uses, label, &command, outside.as_ref()).unwrap_or_else(|e| die(&e)),
+        );
+    }
+    if cmd == "hold" {
+        let mut uses = resources::parse_needs(
+            &a.opt("--needs")
+                .unwrap_or_else(|| die("say what to hold: --needs llm:claude")),
+        )
+        .unwrap_or_else(|e| die(&e));
+        if a.flag("--exclusive") {
+            uses.insert("exclusive".into(), 1);
+        }
+        let label = a
+            .opt("--label")
+            .unwrap_or_else(|| die("name the hold: --label '#483 develop'"));
+        let pid = a.opt("--pid").map(|p| {
+            p.parse::<u32>()
+                .unwrap_or_else(|_| die("--pid wants a process id"))
+        });
+        let outside =
+            outside_args(&mut a).unwrap_or_else(|| die("name the pipeline: --pipeline starpipe"));
+        finish(&a);
+        resources::hold(&d, uses, &label, pid, &outside).unwrap_or_else(|e| die(&e));
+        return;
     }
     if cmd == "targets" {
         match a.pos().as_deref() {
@@ -2095,6 +2147,11 @@ fn main() {
                 "running: {} job(s) of {} allowed, {} step host(s)",
                 s["jobs"], s["max_concurrent"], s["step_hosts_running"]
             );
+            if let Ok(r) = d.call("GET", "/resources", None) {
+                for l in resources::outside_lines(&r, r["now_ms"].as_u64().unwrap_or(0)) {
+                    println!("other pipeline: {l}");
+                }
+            }
             for a in s["active"].as_array().into_iter().flatten() {
                 println!(
                     "active: #{} {} on {}",
