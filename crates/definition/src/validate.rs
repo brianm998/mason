@@ -126,7 +126,43 @@ pub fn warnings(def: &Definition, caps: &Capabilities) -> Vec<Problem> {
     for s in def.steps.iter().filter(|s| s.kind == StepType::Agent) {
         look(format!("step.{}", s.name), &s.model, &s.effort);
     }
+    unlisted_suites(def, &mut w);
     w
+}
+
+/// Suites bound to `test_step` that no test step lists: the step then runs the
+/// project file's single `test` command, and bindings, the impact map and the
+/// rest of the suite machinery go unused. A warning only; what such a step
+/// runs is unchanged.
+fn unlisted_suites(def: &Definition, w: &mut Vec<Problem>) {
+    let t = &def.testing;
+    let mut levels: Vec<&str> = vec![];
+    for b in t.bindings.iter().filter(|b| {
+        b.when.contains(&mason_testing::When::TestStep)
+            && t.suites.iter().any(|s| s.level == b.level)
+    }) {
+        if !levels.contains(&b.level.as_str()) {
+            levels.push(&b.level);
+        }
+    }
+    let tests: Vec<&Step> = def
+        .steps
+        .iter()
+        .filter(|s| s.kind == StepType::Test)
+        .collect();
+    if levels.is_empty() || tests.is_empty() || tests.iter().any(|s| !s.suites.is_empty()) {
+        return;
+    }
+    let names: Vec<String> = tests.iter().map(|s| format!("`{}`", s.name)).collect();
+    let lv: Vec<String> = levels.iter().map(|l| format!("`{l}`")).collect();
+    w.push(Problem::new(
+        format!("step.{}.suites", tests[0].name),
+        format!(
+            "suites are bound to test_step (level {}) but test step {} lists none, so it runs only the project file's `test` command and the impact map, bindings and reruns go unused; list them with `suites = [...]` on the step, or remove the binding",
+            lv.join(", "),
+            names.join(", ")
+        ),
+    ));
 }
 
 /// Gates a test step may name.
