@@ -3026,10 +3026,9 @@ fn usage_text(r: &Value) -> String {
                 w["label"].as_str().unwrap_or("?")
             ));
         }
-        if let Some(s) = p["spend"]
-            .as_object()
-            .filter(|s| s["hasSpend"].as_bool() == Some(true))
-        {
+        // Index the Value, not its Map: a field left out (proto JSON drops false and zero)
+        // reads as null instead of panicking.
+        if let Some(s) = Some(&p["spend"]).filter(|s| s["hasSpend"].as_bool() == Some(true)) {
             let f = |k: &str| s[k].as_f64().unwrap_or(0.0);
             let budget = if s["hasBudget"].as_bool() == Some(true) {
                 format!(" of ${:.2} monthly budget", f("budgetUsd"))
