@@ -429,6 +429,38 @@ fn shell(cwd: &Path, cmd: &str, log: &Path, env: &[(&str, &str)]) -> Result<(), 
     }
 }
 
+/// Ad-hoc sign an installed binary (macOS only). An unsigned binary has no
+/// identity the system can cache, so the system tccd re-evaluates it on every
+/// privacy check. masond is the responsible process for everything the
+/// pipeline runs on the external volume, so an unsigned masond kept the system
+/// tccd at 100% CPU, and WindowServer, waiting on it for Input Monitoring
+/// checks, froze the screen and was killed by its watchdog (2026-11-12).
+/// x86_64 linkers do not sign. A signing failure fails the build rather than
+/// installing an unsigned runtime.
+pub fn adhoc_sign(path: &Path) -> Result<(), String> {
+    if !cfg!(target_os = "macos") {
+        return Ok(());
+    }
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let out = Command::new("/usr/bin/codesign")
+        .args(["--sign", "-", "--force", "--identifier"])
+        .arg(format!("com.brianm998.mason.{name}"))
+        .arg(path)
+        .output()
+        .map_err(|e| format!("running codesign on {}: {e}", path.display()))?;
+    if !out.status.success() {
+        return Err(format!(
+            "codesign {} failed: {}",
+            path.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
 /// Build `sha` into `runtimes/<sha>/`: a clean copy of the source at that
 /// commit, the configured build, the binaries copied, then the READY mark.
 /// Safe to repeat; an already complete runtime is left alone.
@@ -462,6 +494,7 @@ pub fn build(cfg: &UpdateCfg, rt: &Runtimes, sha: &str) -> Result<(), String> {
             continue; // the optional ones (fake-claude, mason) may be absent
         }
         std::fs::copy(&from, dest.join(b)).map_err(|e| format!("copying {b}: {e}"))?;
+        adhoc_sign(&dest.join(b))?;
     }
     std::fs::write(dest.join("SHA"), sha).map_err(|e| e.to_string())?;
     std::fs::write(dest.join("READY"), "").map_err(|e| e.to_string())?;
@@ -1334,6 +1367,40 @@ mod tests {
             at_ms: at,
             sha: sha.into(),
             event: ev.into(),
+        }
+    }
+
+    /// The copy starts out Apple-signed and ends ad-hoc signed, so the test never
+    /// creates (or deletes) an unsigned Mach-O, which can crash syspolicyd.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn installed_binaries_are_adhoc_signed_with_a_mason_identifier() {
+        let d = tempfile::tempdir().unwrap();
+        let bin = d.path().join("masond");
+        std::fs::copy("/usr/bin/true", &bin).unwrap();
+        adhoc_sign(&bin).unwrap();
+        let out = Command::new("/usr/bin/codesign")
+            .arg("-dv")
+            .arg(&bin)
+            .output()
+            .unwrap();
+        let info = String::from_utf8_lossy(&out.stderr);
+        assert!(info.contains("Signature=adhoc"), "{info}");
+        assert!(
+            info.contains("Identifier=com.brianm998.mason.masond"),
+            "{info}"
+        );
+        assert!(Command::new(&bin).status().unwrap().success());
+    }
+
+    #[test]
+    fn adhoc_sign_reports_a_missing_file() {
+        let d = tempfile::tempdir().unwrap();
+        let missing = d.path().join("absent");
+        if cfg!(target_os = "macos") {
+            assert!(adhoc_sign(&missing).is_err());
+        } else {
+            assert!(adhoc_sign(&missing).is_ok());
         }
     }
 
