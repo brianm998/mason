@@ -42,6 +42,7 @@ pub const STEP_KEYS: &[&str] = &[
     "policy",
     "gates",
     "extends",
+    "pty",
 ];
 
 fn distance(a: &str, b: &str) -> usize {
@@ -245,6 +246,10 @@ fn parse_step(
             "tools" => step.tools = strings(v, &path, out),
             "read_only" => match v.as_bool() {
                 Some(b) => step.read_only = Some(b),
+                None => out.push(Problem::new(&path, "must be true or false")),
+            },
+            "pty" => match v.as_bool() {
+                Some(b) => step.pty = b,
                 None => out.push(Problem::new(&path, "must be true or false")),
             },
             "command" => step.command = string(v, &path, out),

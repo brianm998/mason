@@ -187,6 +187,8 @@ pub struct Cancelled;
 enum Meta {
     Task,
     External {
+        /// Another pipeline's name, when this is its work.
+        pipeline: Option<String>,
         opened: Instant,
         last_poll: Instant,
         granted_at: Option<Instant>,
@@ -624,6 +626,7 @@ impl Broker {
         let ids: Vec<u64> = st.meta.keys().copied().collect();
         for id in ids {
             let Some(Meta::External {
+                pipeline: _,
                 opened,
                 last_poll,
                 granted_at,
@@ -1086,13 +1089,10 @@ impl Broker {
         uses: &BTreeMap<String, u32>,
         standing: Option<Standing>,
     ) -> u64 {
-        let mut st = lock(&self.st);
-        let now = crate::daemon::now_ms();
-        st.rank_seq += 1;
-        let rank = match standing {
+        self.open_lease(label, uses, None, |st, now| match standing {
             None => Rank::new(true, 0, 0, now, st.rank_seq, false),
             Some(s) => order(
-                &st,
+                st,
                 Rank::new(
                     false,
                     s.steps_remaining,
@@ -1102,7 +1102,39 @@ impl Broker {
                     false,
                 ),
             ),
-        };
+        })
+    }
+
+    /// Queue a request from another pipeline. It is ranked as pipeline work,
+    /// never as a person's: `steps` and `priority` from the caller, this
+    /// request's own arrival, and the machine's ordering rule. A person's
+    /// request still sorts ahead of it.
+    pub fn lease_open_outside(
+        &self,
+        label: &str,
+        uses: &BTreeMap<String, u32>,
+        o: &crate::outside::Outside,
+    ) -> u64 {
+        let shown = crate::outside::display_label(&o.pipeline, label);
+        self.open_lease(&shown, uses, Some(o.pipeline.clone()), |st, now| {
+            order(
+                st,
+                Rank::new(false, o.steps, o.priority, now, st.rank_seq, false),
+            )
+        })
+    }
+
+    fn open_lease(
+        &self,
+        label: &str,
+        uses: &BTreeMap<String, u32>,
+        pipeline: Option<String>,
+        rank_of: impl FnOnce(&State, u64) -> Rank,
+    ) -> u64 {
+        let mut st = lock(&self.st);
+        let now = crate::daemon::now_ms();
+        st.rank_seq += 1;
+        let rank = rank_of(&st, now);
         let needs = needs_of(uses, None);
         for r in needs.amounts.keys() {
             if !st.ledger.declared(r) {
@@ -1116,6 +1148,7 @@ impl Broker {
         st.meta.insert(
             id,
             Meta::External {
+                pipeline,
                 opened: Instant::now(),
                 last_poll: Instant::now(),
                 granted_at: None,
@@ -1187,11 +1220,29 @@ impl Broker {
         let now = crate::daemon::now_ms();
         let gate = self.cpu_gate(&mut st);
         let waits = st.ledger.waits_gated(now, free, floor, gate);
+        let outside = matches!(
+            st.meta.get(&id),
+            Some(Meta::External {
+                pipeline: Some(_),
+                ..
+            })
+        );
+        let snap = st.ledger.snapshot();
         LeaseState::Waiting {
             explain: waits
                 .waits
                 .get(&id)
-                .map(|w| explain(w, now))
+                .map(|w| {
+                    let first = snap
+                        .waiting
+                        .iter()
+                        .find(|r| r.id == id)
+                        .and_then(|r| r.needs.amounts.keys().next());
+                    match (outside, first) {
+                        (true, Some(r)) => crate::outside::outside_explain(r, w.position - 1),
+                        _ => explain(w, now),
+                    }
+                })
                 .unwrap_or_else(|| "Waiting".into()),
         }
     }
@@ -1228,7 +1279,7 @@ impl Broker {
                 lease: h.id,
                 label: h.label.clone(),
                 task: task_of.get(&h.id).copied(),
-                interactive: matches!(st.meta.get(&h.id), Some(Meta::External { .. })),
+                interactive: is_person(&st, h.id),
                 pid: pid_of.get(&h.id).copied().unwrap_or(0),
             })
             .collect()
@@ -1278,7 +1329,7 @@ impl Broker {
                 label: h.label.clone(),
                 task: task_of.get(&h.id).copied().unwrap_or(0),
                 since_ms: h.since,
-                interactive: matches!(st.meta.get(&h.id), Some(Meta::External { .. })),
+                interactive: is_person(&st, h.id),
                 idle_ms: st.idle.get(&h.id).copied().unwrap_or(0),
             })
             .collect();
@@ -1401,6 +1452,7 @@ impl Broker {
             .map(|h| {
                 json!({
                     "label": h.label,
+                    "pipeline": pipeline_of(&st, h.id),
                     "since_ms": h.since,
                     "uses": h.needs.amounts,
                     "exclusive": h.needs.exclusive,
@@ -1411,14 +1463,23 @@ impl Broker {
             .waiting
             .iter()
             .map(|r| {
+                let pipeline = pipeline_of(&st, r.id);
+                let explain = match (&pipeline, waits.waits.get(&r.id)) {
+                    (Some(_), Some(w)) => Some(match r.needs.amounts.keys().next() {
+                        Some(res) => crate::outside::outside_explain(res, w.position - 1),
+                        None => explain(w, now),
+                    }),
+                    (_, w) => w.map(|w| explain(w, now)),
+                };
                 json!({
                     "label": r.label,
+                    "pipeline": pipeline,
                     "since_ms": r.since,
                     "interactive": r.rank.interactive(),
                     "steps_remaining": r.rank.steps(),
                     "uses": r.needs.amounts,
                     "exclusive": r.needs.exclusive,
-                    "explain": waits.waits.get(&r.id).map(|w| explain(w, now)),
+                    "explain": explain,
                 })
             })
             .collect();
@@ -1487,6 +1548,21 @@ fn compile_reason(w: &mason_scheduler::Wait, now: u64, limit: u32) -> (&'static 
 }
 
 /// The machine's ordering rule applied to a pipeline rank.
+fn pipeline_of(st: &State, id: u64) -> Option<String> {
+    match st.meta.get(&id) {
+        Some(Meta::External { pipeline, .. }) => pipeline.clone(),
+        _ => None,
+    }
+}
+
+/// A person's `mason run` lease: external, and not another pipeline's.
+fn is_person(st: &State, id: u64) -> bool {
+    matches!(
+        st.meta.get(&id),
+        Some(Meta::External { pipeline: None, .. })
+    )
+}
+
 fn order(st: &State, rank: Rank) -> Rank {
     if st.priority_first {
         rank.priority_first()

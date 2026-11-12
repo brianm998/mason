@@ -307,6 +307,9 @@ fn run_hosted_once(
     });
     let rec = match run {
         Some(run) => {
+            if watch.is_some_and(|w| w.pty) {
+                d.progress_terminal(run, id);
+            }
             d.progress_catch_up(run, id, &log);
             // Live test counts, for progress only: the verdict is the full parse at the end.
             // After a restart the log is read again from its start, so the counts are exact.
@@ -725,7 +728,10 @@ fn baseline(
         let ran = run_hosted(
             &who.d,
             &id,
-            &lifecycle::with_device(&suite.command, dev_id(dev)),
+            &crate::jobs::pty_wrap(
+                suite.pty,
+                &lifecycle::with_device(&suite.command, dev_id(dev)),
+            ),
             &wt,
             suite.timeout.unwrap_or(Duration::from_secs(1800)),
             &who.log_dir,
@@ -881,7 +887,10 @@ fn run_suite(
         let ran = match run_hosted(
             d,
             &id,
-            &lifecycle::with_device(&suite.command, dev_id(dev.as_ref())),
+            &crate::jobs::pty_wrap(
+                suite.pty,
+                &lifecycle::with_device(&suite.command, dev_id(dev.as_ref())),
+            ),
             cwd,
             limit,
             &who.log_dir,
@@ -1109,7 +1118,7 @@ fn rerun_failing(
         ),
         None => suite.command.clone(),
     };
-    let cmd = lifecycle::with_device(&cmd, dev_id(dev));
+    let cmd = crate::jobs::pty_wrap(suite.pty, &lifecycle::with_device(&cmd, dev_id(dev)));
     if let Some(f) = &suite.results_file {
         let _ = std::fs::remove_file(cwd.join(f));
     }
@@ -1471,7 +1480,10 @@ fn run_new_tests_at_base(
         let ran = run_hosted(
             &c.d,
             &format!("{}-n-{}", who.id_prefix, suite.name),
-            &lifecycle::with_device(&suite.command, dev_id(dev)),
+            &crate::jobs::pty_wrap(
+                suite.pty,
+                &lifecycle::with_device(&suite.command, dev_id(dev)),
+            ),
             &wt,
             suite.timeout.unwrap_or(Duration::from_secs(1800)),
             &who.log_dir,
