@@ -561,6 +561,9 @@ const STEPS: &[&str] = &[
          at      INTEGER NOT NULL
      );
      ALTER TABLE freezes ADD COLUMN source TEXT NOT NULL DEFAULT 'post-land';",
+    // 26: the CI run a `ci` schedule is following (s175, decision 0170), as text the daemon
+    // reads and writes; empty when none. Additive.
+    "ALTER TABLE schedules ADD COLUMN follow TEXT NOT NULL DEFAULT '';",
 ];
 
 pub const SCHEMA_VERSION: u32 = STEPS.len() as u32;

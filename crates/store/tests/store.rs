@@ -973,6 +973,11 @@ fn schedules_remember_their_baseline_and_triage_waits_for_review() {
         Some(vec!["a::b".to_string(), "c".to_string()])
     );
     assert!(s.schedule("nope").unwrap().is_none());
+    // The followed CI run is kept with the row (s175).
+    assert_eq!(s.schedule("base").unwrap().unwrap().follow, "");
+    row.follow = "{\"run\":7}".into();
+    s.put_schedule(&row).unwrap();
+    assert_eq!(s.schedule("base").unwrap().unwrap().follow, "{\"run\":7}");
 
     let id = s
         .add_triage(&TriageRow {
