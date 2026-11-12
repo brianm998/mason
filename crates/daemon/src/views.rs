@@ -568,7 +568,7 @@ impl<'a> Ctx<'a> {
             }
         }
         // The base-branch CI watch: what is red and waiting for agreement, or why it cannot look.
-        for (pid, p) in &self.d.projects {
+        for (pid, p) in &self.d.projects() {
             if !(project.is_empty() || p.id == project) {
                 continue;
             }

@@ -168,7 +168,7 @@ pub fn spawn(d: &Arc<Daemon>) {
             return false;
         };
         let mut every = 20;
-        for (pid, p) in &d.projects {
+        for (pid, p) in &d.projects() {
             let Some(rules) = d.current_def(*pid).watch_ci.clone() else {
                 // Switched off: a freeze it held does not outlive it.
                 if d.store.clear_ci_freeze(&p.id).unwrap_or(false) {
