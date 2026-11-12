@@ -748,6 +748,7 @@ impl Daemon {
                         EventKind::StepFailed {
                             task,
                             reason: "internal error: the step's job panicked".into(),
+                            class: Some(mason_core::FailClass::Code),
                         },
                     );
                 }

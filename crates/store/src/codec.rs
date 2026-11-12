@@ -300,8 +300,15 @@ pub fn encode(k: &EventKind) -> (&'static str, String) {
             w.n(task.0).n(decision.0).s(answer).s(step);
             "answered"
         }
-        StepFailed { task, reason } => {
+        StepFailed {
+            task,
+            reason,
+            class,
+        } => {
             w.n(task.0).s(reason);
+            if let Some(c) = class {
+                w.word(c.name());
+            }
             "step_failed"
         }
         Retried { task, to, step } => {
@@ -450,6 +457,7 @@ pub fn decode(kind: &str, payload: &str) -> Result<EventKind, CodecError> {
         "step_failed" => StepFailed {
             task: t(&mut r)?,
             reason: r.s()?,
+            class: FailClass::parse(&r.opt_s()?),
         },
         "retried" => Retried {
             task: t(&mut r)?,
@@ -601,6 +609,7 @@ mod tests {
             StepFailed {
                 task: t,
                 reason: nasty.into(),
+                class: None,
             },
             Retried {
                 task: t,

@@ -263,6 +263,7 @@ fn apply(w: &mut World, k: &EventKind, fx: &mut Vec<Effect>) -> Result<(), Reduc
                 decision: None,
                 cancel_keeps_branch: true,
                 failure: None,
+                failure_class: None,
                 def: String::new(),
                 step: String::new(),
                 step_attempts: BTreeMap::new(),
@@ -437,7 +438,11 @@ fn apply(w: &mut World, k: &EventKind, fx: &mut Vec<Effect>) -> Result<(), Reduc
             w.tasks.get_mut(task).expect("exists").decision = None;
             w.enter(*task, S::Developing, step, fx);
         }
-        E::StepFailed { task, reason } => {
+        E::StepFailed {
+            task,
+            reason,
+            class,
+        } => {
             let from = get(w, *task)?.state;
             if !from.is_step() {
                 return Err(illegal(from, k));
@@ -447,6 +452,7 @@ fn apply(w: &mut World, k: &EventKind, fx: &mut Vec<Effect>) -> Result<(), Reduc
             t.state = S::Failed;
             t.failures += 1;
             t.failure = Some(reason.clone());
+            t.failure_class = *class;
         }
         E::Retried { task, to, step } => {
             let from = get(w, *task)?.state;
@@ -462,6 +468,7 @@ fn apply(w: &mut World, k: &EventKind, fx: &mut Vec<Effect>) -> Result<(), Reduc
             fx.push(Effect::ReleaseLeases { task: *task });
             w.waits.remove(task);
             w.tasks.get_mut(task).expect("exists").failure = None;
+            w.tasks.get_mut(task).expect("exists").failure_class = None;
             w.tasks.get_mut(task).expect("exists").decision = None;
             fx.push(Effect::CatchUpWithBase { task: *task });
             w.enter(*task, *to, step, fx);
