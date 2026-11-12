@@ -481,5 +481,5 @@ fn with_no_ci_schedule_configured_the_tick_makes_no_ci_call_and_adds_no_row() {
     mason_daemon::introspect::tick(&d);
     let rows = d.store.schedules().unwrap();
     assert!(rows.iter().all(|r| r.kind != "ci"), "{rows:?}");
-    assert!(d.projects.values().all(|p| p.schedules().is_empty()));
+    assert!(d.projects().values().all(|p| p.schedules().is_empty()));
 }
