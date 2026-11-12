@@ -1961,14 +1961,20 @@ impl Runner {
         self.point("ci_finished");
         self.drop_candidate(&name, ref_id);
         Ok(match r? {
-            CiState::Green => (true, vec![format!("CI on {name}: green")], vec![]),
+            CiState::Green => {
+                self.d.landing.clear(self.pid, "redbase");
+                (true, vec![format!("CI on {name}: green")], vec![])
+            }
             CiState::Red {
                 failed,
                 summary,
                 jobs,
             } => {
                 let mut notes = vec![format!("CI on {name}: {summary}")];
-                notes.extend(self.judge_notes(&jobs));
+                if cfg.infra_judge {
+                    notes.extend(self.judge_notes(&jobs));
+                }
+                notes.extend(self.red_notes(&jobs));
                 (false, notes, failed)
             }
             CiState::Pending => unreachable!("pending is waited out"),
@@ -1993,6 +1999,59 @@ impl Runner {
             .collect();
         self.real_ci_red
             .store(real, std::sync::atomic::Ordering::SeqCst);
+        notes
+    }
+
+    /// What a red batch tells its tasks and the owner about the failed jobs (s174): the end
+    /// of each job's log (about 60 lines in all), and the base branch's own state. A job
+    /// whose failing tests all fail on the base too, with the same text, blames nobody and
+    /// the batch waits ("red on <base> too"); with different text it waits and the owner
+    /// is alerted; a test or job that is green on the base is still the batch's.
+    fn red_notes(&self, jobs: &[mason_adapter_api::service::JobFailure]) -> Vec<String> {
+        let mut notes = vec![];
+        let logged: Vec<_> = jobs.iter().filter(|j| j.log.is_some()).collect();
+        let each = (60 / logged.len().max(1)).max(10);
+        for j in &logged {
+            if let Some(l) = &j.log {
+                notes.push(format!(
+                    "--- {}/{}: end of the job's log ---\n{}",
+                    j.workflow,
+                    j.job,
+                    mason_core::red_base::feedback_lines(l, each)
+                ));
+            }
+        }
+        let base = self.project().base.clone();
+        let verdict = match crate::ci_watch::source(self.project()) {
+            Ok((gh, _)) if !jobs.is_empty() => crate::ci_watch::assess(&gh, &base, jobs),
+            _ => return notes,
+        };
+        use mason_core::red_base::Verdict;
+        match verdict {
+            Verdict::Blame => self.d.landing.clear(self.pid, "redbase"),
+            Verdict::RedOnBase(names) => {
+                self.d.landing.clear(self.pid, "redbase");
+                let why = format!(
+                    "{names} red on {base} too (the same tests fail there): nobody is blamed, the batch waits"
+                );
+                notes.push(why.clone());
+                self.fail_service(why);
+            }
+            Verdict::Differs(texts) => {
+                let why = format!(
+                    "the same tests fail on {base} and in the batch, with different text: {texts}; nobody is blamed, the batch waits for the owner"
+                );
+                self.d.landing.raise(
+                    self.pid,
+                    "redbase",
+                    "landing",
+                    &format!("{}: {why}", self.project().id),
+                );
+                self.d.poke();
+                notes.push(why.clone());
+                self.fail_service(why);
+            }
+        }
         notes
     }
 
@@ -2082,7 +2141,16 @@ impl Runner {
                 pr.number,
                 st.failed.join(", ")
             )];
-            notes.extend(self.judge_notes(&st.jobs));
+            if self
+                .project()
+                .services
+                .ci
+                .as_ref()
+                .is_some_and(|c| c.infra_judge)
+            {
+                notes.extend(self.judge_notes(&st.jobs));
+            }
+            notes.extend(self.red_notes(&st.jobs));
             return Ok((false, notes, st.failed));
         }
         *self.pr.lock().unwrap_or_else(|e| e.into_inner()) = Some(OpenPr {

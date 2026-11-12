@@ -14,6 +14,7 @@ pub mod introspect;
 pub mod notify;
 pub mod progress;
 pub mod progress_text;
+pub mod red_base;
 pub mod proposal;
 pub mod reset_text;
 mod task;

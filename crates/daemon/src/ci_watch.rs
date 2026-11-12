@@ -26,6 +26,10 @@ pub trait Source {
     fn runs(&self, branch: &str) -> Result<Vec<ActionsRun>, String>;
     fn jobs(&self, run: u64) -> Result<Vec<ActionsJob>, String>;
     fn log_tail(&self, job: u64) -> Option<String>;
+    /// A longer end of the job's log, for finding which tests failed.
+    fn log_long(&self, job: u64) -> Option<String> {
+        self.log_tail(job)
+    }
 }
 
 impl Source for GitHub {
@@ -38,6 +42,51 @@ impl Source for GitHub {
     fn log_tail(&self, job: u64) -> Option<String> {
         self.job_log_tail(job, LOG_LINES)
     }
+    fn log_long(&self, job: u64) -> Option<String> {
+        self.job_log_tail(job, 4000)
+    }
+}
+
+/// How a red landing batch stands against the base branch's own CI (s174): each failed job
+/// is looked up in the base's latest finished run of the same workflow, and the failing
+/// tests of the two logs are compared. A base that cannot be read excuses nothing.
+pub fn assess(
+    src: &dyn Source,
+    base: &str,
+    jobs: &[mason_adapter_api::service::JobFailure],
+) -> mason_core::red_base::Verdict {
+    use mason_core::red_base as rb;
+    let Ok(runs) = src.runs(base) else {
+        return rb::Verdict::Blame;
+    };
+    let mut out = vec![];
+    for j in jobs {
+        // `runs` is newest first: the latest finished run of the workflow.
+        let latest = runs
+            .iter()
+            .find(|r| r.workflow == j.workflow && r.conclusion.is_some());
+        let state = match latest {
+            None => rb::Base::Unknown,
+            Some(r) => match src.jobs(r.id) {
+                Err(_) => rb::Base::Unknown,
+                Ok(bj) => match bj.iter().find(|b| b.name == j.job) {
+                    None => rb::Base::Unknown,
+                    Some(b) => match b.conclusion.as_deref() {
+                        Some("success" | "neutral" | "skipped") => rb::Base::Green,
+                        Some("failure") => rb::Base::Red(src.log_long(b.id)),
+                        _ => rb::Base::Unknown,
+                    },
+                },
+            },
+        };
+        out.push(rb::Job {
+            workflow: j.workflow.clone(),
+            job: j.job.clone(),
+            log: j.log.clone(),
+            base: state,
+        });
+    }
+    rb::judge(&out)
 }
 
 /// What is kept between passes, and what the status shows.
@@ -207,7 +256,7 @@ pub fn spawn(d: &Arc<Daemon>) {
 
 /// The GitHub Actions host of a project, or why there is none: the watch reads runs, so
 /// it needs the project's `[ci]` to be `github-actions`.
-fn source(p: &crate::config::ProjectCfg) -> Result<(GitHub, u64), String> {
+pub(crate) fn source(p: &crate::config::ProjectCfg) -> Result<(GitHub, u64), String> {
     match p.services.ci.as_ref() {
         Some(c) => match &c.kind {
             CiKind::GithubActions {

@@ -157,6 +157,8 @@ impl GitHub {
         job_id: Option<u64>,
     ) -> JobFailure {
         let extra = self.infra.clone().unwrap_or_default();
+        // The log is read for a failure whether or not infrastructure is being judged: the
+        // task is given its end, and the landing compares it with the base branch's.
         let log = if conclusion == "failure" {
             job_id.and_then(|id| self.job_log(id))
         } else {
@@ -165,9 +167,23 @@ impl GitHub {
         JobFailure {
             workflow: workflow.into(),
             job: job.into(),
-            infra: crate::ci_infra::judge(conclusion, steps_run, log.as_deref(), &extra),
+            infra: if self.infra.is_some() {
+                crate::ci_infra::judge(conclusion, steps_run, log.as_deref(), &extra)
+            } else {
+                None
+            },
+            log: log.map(|l| tail_lines(&l, KEEP_LOG_LINES)),
         }
     }
+}
+
+/// Lines of a failed job's log kept in a `JobFailure`.
+const KEEP_LOG_LINES: usize = 400;
+
+/// The last `n` lines of `text`.
+fn tail_lines(text: &str, n: usize) -> String {
+    let all: Vec<&str> = text.lines().collect();
+    all[all.len().saturating_sub(n)..].join("\n")
 }
 
 /// The job id in a check run's `details_url` (`.../runs/9/job/123`).
@@ -220,7 +236,7 @@ impl GitHostAdapter for GitHub {
         ))?;
         let (checks, failed) = fold_checks(&runs["check_runs"]);
         let mut jobs = vec![];
-        if self.infra.is_some() {
+        {
             for r in runs["check_runs"].as_array().into_iter().flatten() {
                 if r["status"] != "completed"
                     || matches!(
@@ -591,8 +607,7 @@ impl GitHub {
     /// address, which is read without the token. Best effort: `None` if it cannot be read.
     pub fn job_log_tail(&self, job: u64, lines: usize) -> Option<String> {
         let body = self.job_log(job)?;
-        let all: Vec<&str> = body.lines().collect();
-        let tail = all[all.len().saturating_sub(lines)..].join("\n");
+        let tail = tail_lines(&body, lines);
         (!tail.trim().is_empty()).then_some(tail)
     }
 }
@@ -659,7 +674,7 @@ impl BuildSystemAdapter for GitHub {
                         Some("success" | "neutral" | "skipped")
                     ) {
                         failed.push(j["name"].as_str().unwrap_or("?").to_string());
-                        if self.infra.is_some() {
+                        {
                             let steps_run = j["steps"].as_array().into_iter().flatten().any(|st| {
                                 matches!(st["conclusion"].as_str(), Some("success" | "failure"))
                             });
