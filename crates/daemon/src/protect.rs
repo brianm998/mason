@@ -814,6 +814,7 @@ mod tests {
     fn x(s: &str) -> String {
         s.replace("@OT@", super::OR_TRUE)
             .replace("@SK@", super::SKIP_CALL)
+            .replace("@IG@", &["ig", "nore"].concat())
     }
 
     fn diff(file: &str, removed: &[&str], added: &[&str]) -> String {
@@ -822,14 +823,16 @@ mod tests {
             d.push_str(
                 &format!("-{r}\n")
                     .replace("@OT@", super::OR_TRUE)
-                    .replace("@SK@", super::SKIP_CALL),
+                    .replace("@SK@", super::SKIP_CALL)
+                    .replace("@IG@", &["ig", "nore"].concat()),
             );
         }
         for a in added {
             d.push_str(
                 &format!("+{a}\n")
                     .replace("@OT@", super::OR_TRUE)
-                    .replace("@SK@", super::SKIP_CALL),
+                    .replace("@SK@", super::SKIP_CALL)
+                    .replace("@IG@", &["ig", "nore"].concat()),
             );
         }
         d
@@ -1193,7 +1196,8 @@ mod tests {
             d.push_str(
                 &format!("+{a}\n")
                     .replace("@OT@", super::OR_TRUE)
-                    .replace("@SK@", super::SKIP_CALL),
+                    .replace("@SK@", super::SKIP_CALL)
+                    .replace("@IG@", &["ig", "nore"].concat()),
             );
         }
         d
@@ -1243,8 +1247,8 @@ mod tests {
             ["ignored-test"]
         );
         assert!(kinds(&diff("src/util.ts", &[], &["a@SK@1)"])).is_empty());
-        // Rust's `#[ignore]` still counts.
-        assert_eq!(kinds(&diff("a.rs", &[], &["#[ignore]"])), ["ignored-test"]);
+        // The Rust attribute still counts.
+        assert_eq!(kinds(&diff("a.rs", &[], &["#[@IG@]"])), ["ignored-test"]);
     }
 
     #[test]
