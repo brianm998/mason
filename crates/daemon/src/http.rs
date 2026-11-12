@@ -243,9 +243,6 @@ async fn status(Shared(d): Shared<Arc<Daemon>>) -> Res {
                     let v = crate::ci_watch::view(&d2, *pid);
                     (v["enabled"] == true).then(|| (p.id.clone(), v))
                 }).collect::<serde_json::Map<String, Value>>(),
-<<<<<<< HEAD
-                "definitions": d2.projects().iter().map(|(pid, p)| json!({
-=======
                 // Scheduled CI runs being followed.
                 "ci_runs": d2.store.schedules().unwrap_or_default().iter().filter_map(|r| {
                     crate::ci_schedule::follow_view(r).map(|mut v| {
@@ -253,8 +250,7 @@ async fn status(Shared(d): Shared<Arc<Daemon>>) -> Res {
                         v
                     })
                 }).collect::<Vec<_>>(),
-                "definitions": d2.projects.iter().map(|(pid, p)| json!({
->>>>>>> origin/develop
+                "definitions": d2.projects().iter().map(|(pid, p)| json!({
                     "project": p.id,
                     "hash": d2.current_def(*pid).hash,
                     "origin": d2.current_origin(*pid).label(),
