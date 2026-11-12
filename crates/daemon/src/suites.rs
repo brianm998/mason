@@ -60,6 +60,23 @@ pub(crate) fn changed_paths(repo: &Path, base_ref: &str, branch: &str) -> Option
     )
 }
 
+/// Paths the worktree differs in from the merge base with `base_ref`: committed,
+/// uncommitted and new files, so a `run_check` sees work not yet committed.
+pub(crate) fn worktree_paths(wt: &Path, base_ref: &str) -> Option<Vec<String>> {
+    let base = git::run(wt, &["merge-base", base_ref, "HEAD"]).ok()?;
+    let tracked = git::run(wt, &["diff", "--name-only", base.trim()]).ok()?;
+    let new = git::run(wt, &["ls-files", "--others", "--exclude-standard"]).unwrap_or_default();
+    let mut v: Vec<String> = tracked
+        .lines()
+        .chain(new.lines())
+        .filter(|l| !l.is_empty())
+        .map(String::from)
+        .collect();
+    v.sort();
+    v.dedup();
+    Some(v)
+}
+
 /// The suites of a test step, and which of them this change needs: the impact
 /// map says (an unmapped path runs everything) and the bindings must put the
 /// suite's level in the test step.
@@ -69,22 +86,29 @@ pub fn plan(
     step: &Step,
     branch: &str,
 ) -> Vec<Sel> {
+    let paths = changed_paths(&project.path, &project.base_ref(), branch);
+    plan_for(def, step, paths, When::TestStep)
+}
+
+/// `plan` for any moment (`run_check` plans for `When::Development`) and a given change.
+/// `paths` of `None` (unreadable) runs everything that is bound.
+pub fn plan_for(def: &Definition, step: &Step, paths: Option<Vec<String>>, when: When) -> Vec<Sel> {
     let t = &def.testing;
-    let selection = match changed_paths(&project.path, &project.base_ref(), branch) {
+    let selection = match paths {
         Some(paths) => t.impact.select(&paths, &step.suites),
         None => Selection::All,
     };
-    let bound: Vec<String> = t
-        .bound(When::TestStep)
-        .iter()
-        .map(|s| s.name.clone())
-        .collect();
+    let bound: Vec<String> = t.bound(when).iter().map(|s| s.name.clone()).collect();
+    let why_not = match when {
+        When::Development => "its level is not bound to development",
+        _ => "its level is not bound to the test step",
+    };
     step.suites
         .iter()
         .filter_map(|n| t.suite(n))
         .map(|s| {
             let (selected, why) = match &selection {
-                _ if !bound.contains(&s.name) => (false, "its level is not bound to the test step"),
+                _ if !bound.contains(&s.name) => (false, why_not),
                 Selection::All => (true, "an unmapped path runs everything"),
                 Selection::Some(v) if v.contains(&s.name) => (true, "the impact map selects it"),
                 Selection::Some(_) => (false, "the impact map does not select it"),
@@ -96,6 +120,54 @@ pub fn plan(
             }
         })
         .collect()
+}
+
+/// What a suite holds while its command runs: its own `uses` and those of its environment.
+pub(crate) fn suite_uses(
+    def: &Definition,
+    suite: &Suite,
+) -> std::collections::BTreeMap<String, u32> {
+    let mut uses = suite.uses.clone();
+    if let Some(e) = def.testing.environment(&suite.env) {
+        // A device environment leases one device of its kind.
+        if let Some(kind) = crate::targets::kind_of_env(e) {
+            let u = uses.entry(kind.capability()).or_insert(0);
+            *u = (*u).max(1);
+        }
+        for (k, v) in &e.uses {
+            let u = uses.entry(k.clone()).or_insert(0);
+            *u = (*u).max(*v);
+        }
+    }
+    uses
+}
+
+/// Whether the step queues suite by suite (some selected suite builds first), instead of
+/// holding everything for the whole step.
+pub fn builds_per_suite(
+    project: &crate::config::ProjectCfg,
+    def: &Definition,
+    step: &Step,
+    branch: &str,
+) -> bool {
+    plan(project, def, step, branch)
+        .iter()
+        .any(|s| s.selected && s.suite.build.is_some())
+}
+
+/// What one suite's run holds in a step that queues suite by suite: the step's `uses`
+/// (without `compile` when the suite built first) and the suite's own.
+pub(crate) fn run_needs(def: &Definition, step: &Step, suite: &Suite) -> Needs {
+    let mut uses = if suite.build.is_some() {
+        crate::jobs::tests_uses(&step.uses)
+    } else {
+        step.uses.clone()
+    };
+    for (k, v) in suite_uses(def, suite) {
+        let have = uses.entry(k).or_insert(0);
+        *have = (*have).max(v);
+    }
+    needs_of(&uses, None)
 }
 
 /// Everything a test step with suites holds while it runs: the step's own
@@ -111,24 +183,37 @@ pub fn needs_for(
         .into_iter()
         .filter(|s| s.selected)
     {
-        let mut uses = s.suite.uses.clone();
-        if let Some(e) = def.testing.environment(&s.suite.env) {
-            // A device environment leases one device of its kind.
-            if let Some(kind) = crate::targets::kind_of_env(e) {
-                let u = uses.entry(kind.capability()).or_insert(0);
-                *u = (*u).max(1);
-            }
-            for (k, v) in &e.uses {
-                let u = uses.entry(k.clone()).or_insert(0);
-                *u = (*u).max(*v);
-            }
-        }
-        for (k, v) in uses {
+        for (k, v) in suite_uses(def, &s.suite) {
             let have = n.amounts.entry(k).or_insert(0);
             *have = (*have).max(v);
         }
     }
     n
+}
+
+/// A suite with the project's `test` command written in: `{project_test}` in its
+/// `command`, `build` and `rerun` becomes that command, so the owner's per-worktree
+/// build directory (set in the project file's `test`) applies to a suite too.
+pub(crate) fn with_project_test(suite: &Suite, test: Option<&str>) -> Result<Suite, String> {
+    const KEY: &str = "{project_test}";
+    let uses = |s: &str| s.contains(KEY);
+    let mut s = suite.clone();
+    let any = uses(&s.command)
+        || s.build.as_deref().is_some_and(uses)
+        || s.rerun.as_deref().is_some_and(uses);
+    if !any {
+        return Ok(s);
+    }
+    let Some(t) = test else {
+        return Err(format!(
+            "suite `{}` uses {KEY}, but the project has no `test` command",
+            suite.name
+        ));
+    };
+    s.command = s.command.replace(KEY, t);
+    s.build = s.build.map(|b| b.replace(KEY, t));
+    s.rerun = s.rerun.map(|b| b.replace(KEY, t));
+    Ok(s)
 }
 
 // ---- running commands ------------------------------------------------------
@@ -1153,6 +1238,69 @@ fn rerun_failing(
 
 // ---- the step --------------------------------------------------------------
 
+enum Built {
+    Ok,
+    Red(String),
+    Gone,
+}
+
+/// Wait for `needs` and hold them as the step's lease. `false`: the task went away.
+fn lease(c: &Ctx, needs: Needs) -> bool {
+    if !needs.exclusive && needs.amounts.is_empty() {
+        return true;
+    }
+    match crate::jobs::acquire_needs(c, needs) {
+        Ok(l) => {
+            *c.lease.lock().unwrap_or_else(|e| e.into_inner()) = Some(l);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// A suite's build, in a worktree, under a step host. Green is exit status 0.
+fn run_build(who: &Who, suite: &Suite, build: &str, n: usize, cwd: &Path) -> Built {
+    let id = format!("{}-b{n}-{}", who.id_prefix, suite.name);
+    let limit = suite.timeout.unwrap_or(Duration::from_secs(1800));
+    let ran = match run_hosted(
+        &who.d,
+        &id,
+        build,
+        cwd,
+        limit,
+        &who.log_dir,
+        who.check(&suite.name),
+        who.run(),
+        None,
+        who.thresholds(),
+    ) {
+        Ok(r) => r,
+        Err(e) => return Built::Red(format!("Building `{}` could not run: {e}", suite.name)),
+    };
+    match ran.stop {
+        Stop::Gone => return Built::Gone,
+        // A skip is the suite's own run to notice; nothing was built, nothing is blamed.
+        Stop::Skipped => return Built::Ok,
+        Stop::No => {}
+    }
+    if ran.timed_out {
+        return Built::Red(format!(
+            "Building `{}` did not finish within {} s and was stopped. Last output:\n{}",
+            suite.name,
+            limit.as_secs(),
+            tail(&ran.output, 40)
+        ));
+    }
+    if ran.code != 0 || ran.signal != 0 {
+        return Built::Red(format!(
+            "Building `{}` failed (`{build}`). Last output:\n{}",
+            suite.name,
+            tail(&ran.output, 40)
+        ));
+    }
+    Built::Ok
+}
+
 pub fn run(c: &Ctx) {
     // As for a test command: test what would land, with the base folded in.
     match crate::jobs::prepare(c) {
@@ -1239,6 +1387,12 @@ pub fn run(c: &Ctx) {
         }
     };
 
+    // A suite that builds first queues phase by phase: its build holds one `compile` slot and
+    // gives it back, then its run holds the rest. The step then holds nothing between suites.
+    let per_suite = sels.iter().any(|s| s.selected && s.suite.build.is_some());
+    let project_test =
+        crate::jobs::test_commands(d, &c.def, c.project_id, Some(c.task)).map(|t| t.test);
+    let mut built: Vec<String> = vec![];
     for sel in &sels {
         let name = sel.suite.name.clone();
         if !sel.selected {
@@ -1246,16 +1400,53 @@ pub fn run(c: &Ctx) {
             outcomes.push((name, SuiteOutcome::NotSelected));
             continue;
         }
-        match run_suite(
+        let suite = match with_project_test(&sel.suite, project_test.as_deref()) {
+            Ok(s) => s,
+            Err(why) => return c.fail(why),
+        };
+        if per_suite {
+            c.release_lease();
+            let reused = matches!(d.store.evidence(&tree.tree, &suite.name), Ok(Some(_)));
+            if let Some(b) = suite
+                .build
+                .as_ref()
+                .filter(|b| !reused && !built.contains(b))
+            {
+                if !lease(c, needs_of(&crate::jobs::build_uses(), None)) {
+                    return;
+                }
+                let ran = run_build(&who, &suite, b, built.len(), &c.wt);
+                c.release_lease();
+                match ran {
+                    Built::Gone => return,
+                    Built::Red(feedback) => {
+                        outcomes.push((name.clone(), SuiteOutcome::Failed));
+                        let (v, note) = closing(&outcomes);
+                        let _ = d.store.set_closing(c.task.0, v.name(), &note, now_ms());
+                        let reason = format!("the build of suite `{name}` is red");
+                        return c.conclude(Outcome::Red, reason, Some(feedback));
+                    }
+                    Built::Ok => built.push(b.clone()),
+                }
+            }
+            if !lease(c, run_needs(&c.def, &c.step, &suite)) {
+                return;
+            }
+        }
+        let ran = run_suite(
             &who,
             &c.project.path,
             &lock,
             &c.def,
-            &sel.suite,
+            &suite,
             &c.wt,
             &tree,
             &mut on_wait,
-        ) {
+        );
+        if per_suite {
+            c.release_lease();
+        }
+        match ran {
             SuiteRun::Gone => return,
             SuiteRun::Done {
                 outcome,
@@ -1284,6 +1475,13 @@ pub fn run(c: &Ctx) {
         }
     }
 
+    // The optional gates run suites of their own: hold what the whole step needs for them.
+    if per_suite && !c.step.gates.is_empty() {
+        let all = needs_for(&c.project, &c.def, &c.step, &c.branch);
+        if !lease(c, all) {
+            return;
+        }
+    }
     // The optional gates, over what the suites found.
     if let Some(feedback) = gates_failed(c, &who, &base, &head_results, &mut notes) {
         let (v, note) = closing(&outcomes);
