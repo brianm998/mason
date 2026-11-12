@@ -446,7 +446,9 @@ mod auth_tests {
 
     #[test]
     fn ignores_other_failures() {
-        assert!(auth_failure("ssh: connect to host github.com port 22: Operation timed out").is_none());
+        assert!(
+            auth_failure("ssh: connect to host github.com port 22: Operation timed out").is_none()
+        );
         assert!(auth_failure(
             " ! [rejected] a -> a (non-fast-forward)\nerror: failed to push some refs"
         )
