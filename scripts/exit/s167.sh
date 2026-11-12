@@ -28,7 +28,7 @@ wait_until() { # what seconds command...
 }
 landed_count() { m task list --json | python3 -c "import json,sys; print(sum(1 for t in json.load(sys.stdin)['tasks'] if t.get('state')=='landed'))"; }
 one_landed() { [ "$(landed_count)" -ge 1 ]; }
-develops() { m task show "$1" --json | grep -c '"step": "developing"' || true; }
+develops() { m task show "$1" --json | python3 -c "import sys; print(sys.stdin.read().count('\"step\": \"developing\"'))"; }
 
 mkdir -p "$root/c/projects" "$root/repo"
 git init -q --bare -b main "$root/origin.git"
