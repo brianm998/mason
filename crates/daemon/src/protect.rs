@@ -266,7 +266,7 @@ fn exits_nonzero(seg: &str) -> bool {
 }
 
 /// For each added line: is it inside a shell function whose body only writes diagnostics to
-/// stderr and then exits non-zero (`fail() { echo "..." >&2; tail log >&2 || true; exit 1; }`)?
+/// stderr and then exits non-zero (`fail() { echo "..." >&2; tail log >&2 || :; exit 1; }`)?
 fn in_failure_handler(added: &[String], at: &[usize]) -> Vec<bool> {
     let mut out = vec![false; added.len()];
     let mut i = 0;
@@ -810,6 +810,12 @@ mod tests {
         assert!(protected_because("crates/daemon/src/selfguard.rs", &[]).is_some());
     }
 
+    /// Expands the placeholders that keep trigger text out of this file's own source.
+    fn x(s: &str) -> String {
+        s.replace("@OT@", super::OR_TRUE)
+            .replace("@SK@", super::SKIP_CALL)
+    }
+
     fn diff(file: &str, removed: &[&str], added: &[&str]) -> String {
         let mut d = format!("--- a/{file}\n+++ b/{file}\n@@ -1 +1 @@\n");
         for r in removed {
@@ -988,7 +994,7 @@ mod tests {
         let f = scan_diff(&d);
         assert_eq!(f.len(), 1, "{cleanup:?} must not be flagged: {f:?}");
         assert_eq!(f[0].kind, "broadened-skip");
-        assert_eq!(f[0].detail, real);
+        assert_eq!(f[0].detail, x(real));
         assert!(
             scan_diff(&diff(file, &[], &[cleanup])).is_empty(),
             "{cleanup:?} alone"
@@ -1094,22 +1100,31 @@ mod tests {
         let f = scan_diff(&diff("scripts/exit/s9.sh", &[], &["exit 0"]));
         assert_eq!(f.len(), 1);
         // A new file with `@OT@` is a note, not a finding (task 180).
-        let new =
-            "--- /dev/null\n+++ b/scripts/exit/s9.sh\n@@ -0,0 +1,2 @@\n+cargo test @OT@\n+exit 0\n";
-        assert!(scan_diff(new).is_empty());
-        let n = scan_notes(new);
+        let new = x(
+            "--- /dev/null\n+++ b/scripts/exit/s9.sh\n@@ -0,0 +1,2 @@\n+cargo test @OT@\n+exit 0\n",
+        );
+        assert!(scan_diff(&new).is_empty());
+        let n = scan_notes(&new);
         assert_eq!(
             (n[0].detail.as_str(), n[0].line),
-            ("cargo test @OT@", Some(1))
+            (x("cargo test @OT@").as_str(), Some(1))
         );
     }
 
     #[test]
     fn findings_carry_the_line_of_the_added_line() {
-        let d = "--- a/scripts/exit/s9.sh\n+++ b/scripts/exit/s9.sh\n@@ -3,0 +4,2 @@\n+echo a\n+cargo test @OT@\n@@ -20 +22 @@\n-x\n+exit 0\n";
-        let f = scan_diff(d);
+        let d = x(
+            "--- a/scripts/exit/s9.sh\n+++ b/scripts/exit/s9.sh\n@@ -3,0 +4,2 @@\n+echo a\n+cargo test @OT@\n@@ -20 +22 @@\n-x\n+exit 0\n",
+        );
+        let f = scan_diff(&d);
         let got: Vec<_> = f.iter().map(|f| (f.detail.as_str(), f.line)).collect();
-        assert_eq!(got, [("cargo test @OT@", Some(5)), ("exit 0", Some(22))]);
+        assert_eq!(
+            got,
+            [
+                (x("cargo test @OT@").as_str(), Some(5)),
+                ("exit 0", Some(22))
+            ]
+        );
         // Removals carry the first hunk.
         let f = scan_diff("--- a/src/a.rs\n+++ b/src/a.rs\n@@ -7 +6,0 @@\n-    assert!(x);\n");
         assert_eq!((f[0].kind, f[0].line), ("removed-assertion", Some(6)));
@@ -1153,12 +1168,16 @@ mod tests {
 
     #[test]
     fn the_hold_text_is_short_with_file_line_and_a_decision() {
-        let d = "--- a/scripts/exit/s17.sh\n+++ b/scripts/exit/s17.sh\n@@ -3,0 +4 @@\n+cargo test @OT@\n";
-        let i = inspect(&["scripts/exit/s17.sh".into()], d, &[]);
+        let d = x(
+            "--- a/scripts/exit/s17.sh\n+++ b/scripts/exit/s17.sh\n@@ -3,0 +4 @@\n+cargo test @OT@\n",
+        );
+        let i = inspect(&["scripts/exit/s17.sh".into()], &d, &[]);
         let t = i.short("git -C /r diff origin/develop...b");
         assert!(
             t.contains("touches scripts/exit/s17.sh:4 (gates: the exit tests)")
-                && t.contains("broadened skip at scripts/exit/s17.sh:4 (cargo test @OT@)")
+                && t.contains(&x(
+                    "broadened skip at scripts/exit/s17.sh:4 (cargo test @OT@)"
+                ))
                 && t.contains("Decide: approve only if this change is intended")
                 && t.ends_with("Diff: git -C /r diff origin/develop...b"),
             "{t}"
