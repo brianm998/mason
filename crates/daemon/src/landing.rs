@@ -1503,7 +1503,23 @@ impl Runner {
                     };
                     let spec = spec("retest", &cmds.test);
                     return match crate::hostedcheck::run(d, &spec) {
-                        Ok(o) => o.passed,
+                        Ok(o) => {
+                            if o.passed {
+                                if let Some(t) = crate::cmdreuse::content_tree(&wt_for_cmd) {
+                                    let key = crate::cmdreuse::command_key(
+                                        cmds.build.as_deref(),
+                                        &cmds.test,
+                                    );
+                                    crate::cmdreuse::record_green(
+                                        d,
+                                        &t,
+                                        &key,
+                                        &format!("landing re-test of batch {batch_id}"),
+                                    );
+                                }
+                            }
+                            o.passed
+                        }
                         Err(e) => {
                             tracing::warn!(batch = batch_id, "the re-test gave no result: {e}");
                             false
