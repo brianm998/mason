@@ -1477,6 +1477,7 @@ async fn update_start(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> R
         sha,
         rollback: b["rollback"].as_bool().unwrap_or(false),
         check_only: b["check"].as_bool().unwrap_or(false),
+        now: b["now"].as_bool().unwrap_or(false),
     };
     if matches!(
         d.update_status
@@ -1484,7 +1485,7 @@ async fn update_start(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> R
             .unwrap_or_else(|e| e.into_inner())
             .phase
             .as_str(),
-        "fetching" | "building" | "testing" | "taking over"
+        "fetching" | "building" | "testing" | "waiting for landing" | "taking over"
     ) {
         return Err(fail(
             StatusCode::CONFLICT,
@@ -1493,6 +1494,7 @@ async fn update_start(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> R
     }
     let d2 = d.clone();
     let check = req.check_only;
+    let now = req.now;
     let _ = std::thread::Builder::new()
         .name("update".into())
         .spawn(move || {
@@ -1500,7 +1502,7 @@ async fn update_start(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> R
                 if !check {
                     // Let the answer to `mason update` and any open request leave first.
                     std::thread::sleep(std::time::Duration::from_millis(500));
-                    crate::update::take_over(&d2, &sha);
+                    crate::update::drain_and_take_over(&d2, &sha, now);
                 }
             }
         });

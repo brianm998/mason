@@ -327,8 +327,8 @@ pub fn encode(k: &EventKind) -> (&'static str, String) {
             w.n(task.0);
             "resumed"
         }
-        WaitStarted { task, on } => {
-            w.n(task.0).s(on);
+        WaitStarted { task, on, class } => {
+            w.n(task.0).s(on).s(class.as_deref().unwrap_or(""));
             "wait_started"
         }
         WaitEnded { task } => {
@@ -469,6 +469,7 @@ pub fn decode(kind: &str, payload: &str) -> Result<EventKind, CodecError> {
         "wait_started" => WaitStarted {
             task: t(&mut r)?,
             on: r.s()?,
+            class: Some(r.opt_s()?).filter(|c| !c.is_empty()),
         },
         "wait_ended" => WaitEnded { task: t(&mut r)? },
         "blocker_added" => BlockerAdded {
@@ -619,6 +620,7 @@ mod tests {
             WaitStarted {
                 task: t,
                 on: nasty.into(),
+                class: Some(nasty.into()),
             },
             WaitEnded { task: t },
             BlockerAdded {

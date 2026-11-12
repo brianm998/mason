@@ -13,6 +13,7 @@ use mason_landing::git;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 // ---- channels and configuration -------------------------------------------------------------
 
@@ -71,7 +72,12 @@ pub struct UpdateCfg {
     pub monitor_swift_build: Option<String>,
     /// The same for the Compose monitor.
     pub monitor_compose_build: Option<String>,
+    /// How long a takeover waits for running landing batches, in seconds; then it goes anyway.
+    pub takeover_wait_s: u64,
 }
+
+/// An hour: longer than a batch's verify and CI usually take.
+pub const DEFAULT_TAKEOVER_WAIT_S: u64 = 3600;
 
 impl UpdateCfg {
     pub fn parse(text: &str) -> Result<UpdateCfg, String> {
@@ -110,6 +116,10 @@ impl UpdateCfg {
                 .map_or(DEFAULT_CHECK_INTERVAL_S, |n| n.max(0) as u64),
             monitor_swift_build: s("monitor_swift_build"),
             monitor_compose_build: s("monitor_compose_build"),
+            takeover_wait_s: doc
+                .get("takeover_wait_s")
+                .and_then(|v| v.as_integer())
+                .map_or(DEFAULT_TAKEOVER_WAIT_S, |n| n.max(0) as u64),
         })
     }
 
@@ -628,7 +638,7 @@ pub fn decide(current: &str, previous: Option<&str>, log: &[Boot], now_ms: u64) 
 /// Where an update is, for `mason update` to show.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Status {
-    /// `idle`, `fetching`, `building`, `testing`, `taking over`, `failed`.
+    /// `idle`, `fetching`, `building`, `testing`, `waiting for landing`, `taking over`, `failed`.
     pub phase: String,
     pub target: Option<String>,
     pub error: Option<String>,
@@ -643,6 +653,8 @@ pub struct Request {
     pub rollback: bool,
     /// Build and test, but do not take over.
     pub check_only: bool,
+    /// Take over without waiting for running landing batches (they are abandoned).
+    pub now: bool,
 }
 
 fn say(d: &Daemon, phase: &str, line: &str) {
@@ -672,7 +684,7 @@ pub fn run(d: &Arc<Daemon>, req: &Request) -> Result<String, String> {
         let mut s = d.update_status.lock().unwrap_or_else(|e| e.into_inner());
         if matches!(
             s.phase.as_str(),
-            "fetching" | "building" | "testing" | "taking over"
+            "fetching" | "building" | "testing" | "waiting for landing" | "taking over"
         ) {
             return Err("an update is already in progress".into());
         }
@@ -1207,6 +1219,77 @@ pub fn start_monitor_build(d: &Arc<Daemon>, kind: MonitorKind) -> Result<(), Str
             set_monitor(&d, kind.name, state);
         });
     Ok(())
+}
+
+/// The unfinished landing batches, as `<project> #<batch> (<phase>)`.
+pub fn running_batch_lines(d: &Daemon) -> Vec<String> {
+    d.store
+        .batches(None, 200)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|b| b.finished_at.is_none())
+        .map(|b| format!("{} #{} ({})", b.project, b.id, b.phase))
+        .collect()
+}
+
+/// Wait until no project has a landing batch running, so the takeover abandons none. While
+/// it waits no new batch starts and queued tasks keep their place. Gives up after
+/// `takeover_wait_s` (update.toml) and says which batches will be abandoned. The flag is left
+/// set: [`drain_and_take_over`] clears it if the takeover fails.
+pub fn drain(d: &Arc<Daemon>) {
+    let cap =
+        UpdateCfg::load(&d.cfg.config_dir).map_or(DEFAULT_TAKEOVER_WAIT_S, |c| c.takeover_wait_s);
+    drain_within(d, Duration::from_secs(cap));
+}
+
+/// [`drain`] with the cap given (zero: do not wait at all).
+pub fn drain_within(d: &Arc<Daemon>, cap: Duration) {
+    d.landing.set_draining(true);
+    let deadline = Instant::now() + cap;
+    let mut said = String::new();
+    loop {
+        if d.landing.busy_projects().is_empty() {
+            return;
+        }
+        let lines = running_batch_lines(d);
+        if Instant::now() >= deadline {
+            say(
+                d,
+                "taking over",
+                &format!(
+                    "the landing wait of {}s is over; taking over anyway, which abandons: {}",
+                    cap.as_secs(),
+                    if lines.is_empty() {
+                        "a running batch".into()
+                    } else {
+                        lines.join(", ")
+                    }
+                ),
+            );
+            return;
+        }
+        let text = format!(
+            "waiting for {} landing batch(es): {}",
+            lines.len(),
+            lines.join(", ")
+        );
+        if text != said {
+            say(d, "waiting for landing", &text);
+            said = text;
+        }
+        d.landing.wait_idle_once(Duration::from_secs(1));
+    }
+}
+
+/// [`take_over`] after waiting for the running landing batches (unless `now`). Only returns
+/// if the takeover failed; landing is then let go again.
+pub fn drain_and_take_over(d: &Arc<Daemon>, sha: &str, now: bool) -> String {
+    if !now {
+        drain(d);
+    }
+    let r = take_over(d, sha);
+    d.landing.set_draining(false);
+    r
 }
 
 /// Replace this process with the new runtime, keeping its pid. The step hosts
