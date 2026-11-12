@@ -115,6 +115,10 @@ extension MonitorModel {
             for (i, b) in h.banners.enumerated() {
                 out.append(Item(id: "banner:\(i)", texts: [b.text], order: i))
             }
+            // A refused push holds landing: the banner offers the action that fixes it.
+            for b in h.banners where b.kind == "push_auth" {
+                out.append(Item(id: "action:push-auth:\(MonitorModel.pushAuthProject(b))", texts: ["Choose SSH key…"], order: 0))
+            }
             // Issues the tracker has not imported: a count tile and a list, only while true.
             if !h.pendingIssues.isEmpty {
                 out.append(Item(id: "tile:not_imported", texts: [String(h.pendingIssues.count), "not imported"], order: h.counts.count))
