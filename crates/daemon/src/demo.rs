@@ -179,6 +179,9 @@ fn script() -> Vec<Vec<EventKind>> {
             admit(15, "land", State::Landing),
             admit(16, "test", State::Testing),
         ],
+        // GitHub refuses a push: landing is held for one project and the owner is asked to
+        // choose the SSH key (the hold is made in `demo_next`).
+        vec![],
     ]
 }
 
@@ -188,6 +191,8 @@ const PROGRESS_CHECKPOINT: usize = 9;
 /// The first task of the cases for steps that are not an agent, and the checkpoint that admits them.
 const STEP_TASK: u64 = 11;
 const STEP_CHECKPOINT: usize = 11;
+/// The checkpoint at which a push is refused and landing is held (`push-auth`).
+const PUSH_AUTH_CHECKPOINT: usize = 12;
 
 fn counted(done: u64) -> Figure {
     Figure::counted(done)
@@ -390,6 +395,9 @@ impl Daemon {
             for (n, p) in step_cases(crate::daemon::now_ms()).into_iter().enumerate() {
                 self.progress_seed(TaskId(STEP_TASK + n as u64), ProjectId(1), p);
             }
+        }
+        if i == PUSH_AUTH_CHECKPOINT {
+            crate::ssh_keys::hold(self, "web-api", Some("brian-preffect".into()));
         }
         for kind in steps[i - 1].clone() {
             if let Err(e) = self.emit(kind) {

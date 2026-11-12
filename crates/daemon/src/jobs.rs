@@ -1315,6 +1315,7 @@ fn change_validator(
     base_ref: String,
     branch: String,
     caps: mason_definition::Capabilities,
+    weakening: Option<WeakeningCheck>,
 ) -> Validator {
     Box::new(move |tool, args| {
         if tool != "submit_change" {
@@ -1364,12 +1365,56 @@ fn change_validator(
                 }
             }
         }
+        // The scan landing runs, now, before the test step. Where the project sends a
+        // weakening back to development, the submission is refused with each finding; where
+        // it holds for the owner, the submission is accepted and the findings are kept as a
+        // note (landing holds it).
+        if let Some(w) = &weakening {
+            if let Ok((found, notes)) =
+                crate::selfguard::submission_scan(&wt, &base_ref, &w.base, "HEAD")
+            {
+                if !found.is_empty() {
+                    match w.holds {
+                        crate::config::Holds::Review => {
+                            for f in &found {
+                                problems.push(format!(
+                                    "the change weakens a check, which MASON does not land: {}. Restore it, or reach the same goal without weakening it",
+                                    crate::selfguard::describe_finding(f)
+                                ));
+                            }
+                        }
+                        crate::config::Holds::Owner => {
+                            let list: Vec<String> = found
+                                .iter()
+                                .map(crate::selfguard::describe_finding)
+                                .collect();
+                            let _ = std::fs::write(
+                                &w.note_file,
+                                format!(
+                                    "Findings the owner will be asked about at landing:\n{}\n",
+                                    list.join("\n")
+                                ),
+                            );
+                        }
+                    }
+                }
+                let _ = notes; // lines in files the change adds: not a finding
+            }
+        }
         if problems.is_empty() {
             Ok(())
         } else {
             Err(problems)
         }
     })
+}
+
+/// What `submit_change` needs to run the weakening scan: the project's base branch, and what
+/// its `[self] holds` says to do with a finding.
+struct WeakeningCheck {
+    base: String,
+    holds: crate::config::Holds,
+    note_file: PathBuf,
 }
 
 /// The agent CLI for this project's provider, under the step host and, if the
@@ -1531,6 +1576,13 @@ fn agent_job(c: &Ctx) {
             c.project.base_ref(),
             c.branch.clone(),
             c.d.caps_for(&c.project),
+            c.project.self_cfg.as_ref().map(|s| WeakeningCheck {
+                base: c.project.base.clone(),
+                holds: s.holds,
+                note_file: c
+                    .task_dir()
+                    .join(format!("weakening-note-r{}.txt", c.run.0)),
+            }),
         )
     });
     let contract = ContractHandle::with_validator(kind, checks, validator);
@@ -2116,16 +2168,56 @@ fn command_job(c: &Ctx) {
         }
     };
     let reruns = if is_test { c.project.test_reruns } else { 0 };
+    let filter = c.project.rerun_filter.as_deref();
     let mut earlier: Vec<String> = vec![];
+    // The tests that failed in every run so far (None: the first run's names were not
+    // readable, or a later red's were not, so nothing is compared and a rerun runs it all),
+    // and every test that failed in any run.
+    let mut persistent: Option<Vec<String>> = None;
+    let mut seen: Vec<String> = vec![];
+    let mut this_cmd = cmd.clone();
+    // Set when a filtered rerun ran none of the tests it was given: run it all.
+    let mut filter_off = false;
     for k in 0..=reruns {
-        let run = match run_command_once(c, &cmd, suffix, k, &held, &what) {
+        let run = match run_command_once(c, &this_cmd, suffix, k, &held, &what) {
             Ok(r) => r,
             Err(why) => return c.fail(why),
         };
+        let log = run.log.clone();
         match run.verdict {
             RunVerdict::Green => {
+                if this_cmd != cmd {
+                    let out = read_whole_log(&log).unwrap_or_default();
+                    let names = persistent.clone().unwrap_or_default();
+                    if !crate::rerun::ran_them(&out, &names) {
+                        // It exited green without running what failed: nothing is proved.
+                        earlier.push(format!(
+                            "run {}: the filtered rerun ran none of {}",
+                            k + 1,
+                            names.join(", ")
+                        ));
+                        if k < reruns {
+                            filter_off = true;
+                            this_cmd = cmd.clone();
+                            continue;
+                        }
+                        return c.conclude(
+                            Outcome::Red,
+                            format!(
+                                "{what} failed ({} runs, the filtered rerun ran none of the failed tests)",
+                                k + 1
+                            ),
+                            Some(format!(
+                                "{what} was red, and the rerun with `rerun_filter` ran none of the failing tests ({}), so it proved nothing:\n{}",
+                                names.join(", "),
+                                earlier.join("\n")
+                            )),
+                        );
+                    }
+                }
                 let _ = std::fs::remove_file(c.task_dir().join("feedback.txt"));
                 if k > 0 {
+                    record_flaky(c, &seen, &[]);
                     let note = format!(
                         "`{}` was red, then green when run again (a flaky test, not this change):\n{}",
                         c.step.name,
@@ -2139,22 +2231,119 @@ fn command_job(c: &Ctx) {
                 }
                 return c.green();
             }
-            // Red by its exit status alone: worth running again.
+            // Red by its exit status alone: worth running again, and worth reading.
             RunVerdict::Red {
                 reason,
                 feedback,
                 rerun: true,
-            } if k < reruns => {
-                earlier.push(format!("run {}: {reason}\n{feedback}", k + 1));
-                use std::io::Write as _;
-                if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&run.log) {
-                    let _ = writeln!(
-                        f,
-                        "\n== MASON: red ({reason}); running it again ({} of {reruns}) to tell a flaky test from a broken change",
-                        k + 1
-                    );
+            } => {
+                let names = crate::rerun::failing_names(&read_whole_log(&log).unwrap_or_default());
+                if k == 0 {
+                    if !names.is_empty() {
+                        persistent = Some(names.clone());
+                    }
+                } else if names.is_empty() {
+                    persistent = None;
+                } else if let Some(p) = persistent.as_mut() {
+                    p.retain(|n| names.contains(n));
                 }
-                continue;
+                if persistent.is_some() {
+                    for n in names {
+                        if !seen.contains(&n) {
+                            seen.push(n);
+                        }
+                    }
+                }
+                // No test failed in two runs: a flake, not this change.
+                if persistent.as_ref().is_some_and(|p| p.is_empty()) {
+                    let _ = std::fs::remove_file(c.task_dir().join("feedback.txt"));
+                    record_flaky(c, &seen, &[]);
+                    earlier.push(format!("run {}: {reason}\n{feedback}", k + 1));
+                    let note = format!(
+                        "`{}` was red, but no test failed in two runs (flaky, not this change): {}\n{}",
+                        c.step.name,
+                        seen.join(", "),
+                        earlier.join("\n")
+                    );
+                    tracing::warn!(task = c.task.0, run = c.run.0, "{note}");
+                    let _ = std::fs::write(
+                        c.task_dir().join(format!("{suffix}-r{}.flaky", c.run.0)),
+                        &note,
+                    );
+                    return c.green();
+                }
+                if k < reruns {
+                    earlier.push(format!("run {}: {reason}\n{feedback}", k + 1));
+                    this_cmd = if filter_off {
+                        cmd.clone()
+                    } else {
+                        crate::rerun::command(&cmd, filter, persistent.as_deref().unwrap_or(&[]))
+                    };
+                    use std::io::Write as _;
+                    if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&log) {
+                        let _ = writeln!(
+                            f,
+                            "\n== MASON: red ({reason}); running {} again ({} of {reruns}) to tell a flaky test from a broken change",
+                            if this_cmd == cmd {
+                                "it"
+                            } else {
+                                "only the failed tests"
+                            },
+                            k + 1
+                        );
+                    }
+                    continue;
+                }
+                // Red on every run: if every one of those tests also fails at the merge base,
+                // it is not this change's (s177).
+                if is_test {
+                    if let Some(p) = persistent.as_ref().filter(|p| !p.is_empty()) {
+                        let base_cmd = if filter_off {
+                            cmd.clone()
+                        } else {
+                            crate::rerun::command(&cmd, filter, p)
+                        };
+                        if let Some(note) = crate::basecheck::excuse(
+                            c,
+                            suffix,
+                            builds_first(c).as_deref(),
+                            &base_cmd,
+                            p,
+                        ) {
+                            record_flaky(c, &seen, p);
+                            let _ = std::fs::remove_file(c.task_dir().join("feedback.txt"));
+                            tracing::warn!(task = c.task.0, run = c.run.0, "{note}");
+                            use std::io::Write as _;
+                            if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&log) {
+                                let _ = writeln!(f, "\n== MASON: {note}");
+                            }
+                            return c.green();
+                        }
+                    }
+                }
+                let (reason, feedback) = match &persistent {
+                    Some(p) if k > 0 => {
+                        record_flaky(c, &seen, p);
+                        (
+                            format!(
+                                "{reason} ({} runs; failed every time: {})",
+                                k + 1,
+                                p.join(", ")
+                            ),
+                            format!(
+                                "{feedback}\n\nThese tests failed on all {} runs: {}",
+                                k + 1,
+                                p.join(", ")
+                            ),
+                        )
+                    }
+                    _ if k > 0 => (
+                        format!("{reason} ({} runs, red every time)", k + 1),
+                        format!("{feedback}\n\nIt was red on all {} runs.", k + 1),
+                    ),
+                    _ => (reason, feedback),
+                };
+                return c.conclude(Outcome::Red, reason, Some(feedback));
             }
             RunVerdict::Red {
                 reason, feedback, ..
@@ -2170,6 +2359,28 @@ fn command_job(c: &Ctx) {
                 return c.conclude(Outcome::Red, reason, Some(feedback));
             }
         }
+    }
+}
+
+/// A test step's whole log as text, if it is small enough to read: a log cut short could
+/// hide a failing name, and a name that is not seen must not make a flake.
+fn read_whole_log(path: &Path) -> Option<String> {
+    let len = std::fs::metadata(path).ok()?.len();
+    if len > 32 << 20 {
+        return None;
+    }
+    std::fs::read(path)
+        .ok()
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
+}
+
+/// Record each of `tests` that failed in some run but not in every run (`except`) as a
+/// flake, as the suites path does; the step's name stands for the suite.
+fn record_flaky(c: &Ctx, tests: &[String], except: &[String]) {
+    for t in tests.iter().filter(|t| !except.contains(t)) {
+        let _ =
+            c.d.store
+                .record_flaky(&c.step.name, t, c.task.0, crate::daemon::now_ms());
     }
 }
 
@@ -2348,6 +2559,20 @@ fn run_command_on(
     }
     let name = format!("{suffix}-r{}{}{hsuf}", c.run.0, again(k));
     let log = c.task_dir().join(format!("{name}.log"));
+    // Silence, judged on the whole tree: continue what is stopped, kill what is stuck.
+    let stall = crate::watch::Watch::start(
+        &c.d,
+        &id,
+        log.clone(),
+        crate::watch::Thresholds::new(c.project.cont_after, c.project.kill_after),
+        {
+            let (d, run, what) = (c.d.clone(), c.run, c.step.name.clone());
+            move |text| {
+                let text = format!("{what}: {text}");
+                d.progress_report(run, |p, now| p.set_message(&text, now))
+            }
+        },
+    );
     // Lines and bytes of the output, counted as they arrive. A run found again after a
     // restart first counts what its log holds beyond what the stored record had.
     // Each run of the command is its own stream, since each log starts at 0.
@@ -2381,6 +2606,17 @@ fn run_command_on(
         }
         Err(e) => return Err(format!("cannot collect the command's result: {e}").into()),
     };
+    if let Some(why) = stall.as_ref().and_then(|w| w.stalled()) {
+        let output = tail(&read_tail_lossy(&log).unwrap_or_default(), 60);
+        return Ok(CommandRun {
+            verdict: RunVerdict::Red {
+                reason: format!("{what} failed ({why})"),
+                feedback: format!("{what} failed ({why}). Last output:\n{output}"),
+                rerun: false,
+            },
+            log,
+        });
+    }
     // A script may say more than its exit status in a JSON result file.
     let script = match std::fs::read_to_string(result_file(c)) {
         Ok(t) => match read_script_result(&t) {
@@ -2484,8 +2720,19 @@ fn land_job(c: &Ctx) {
         }
     }
     // Landing is batched per project: join the queue and wait for the verdict.
-    let Some(verdict) = crate::landing::submit_and_wait(c) else {
-        return; // approved, rejected, cancelled or retried while waiting
+    let verdict = loop {
+        let Some(v) = crate::landing::submit_and_wait(c) else {
+            return; // approved, rejected, cancelled or retried while waiting
+        };
+        if matches!(v, crate::landing::Verdict::Held) {
+            // The host refused the push's credentials: landing is held for the project. The task
+            // stays here, and joins the queue again once the owner has chosen a key.
+            if wait_while_paused(c).is_err() {
+                return;
+            }
+            continue;
+        }
+        break v;
     };
     match verdict {
         crate::landing::Verdict::Landed => {
@@ -2501,6 +2748,7 @@ fn land_job(c: &Ctx) {
         }
         crate::landing::Verdict::Conflict { reason, feedback } => c.conflict(reason, feedback),
         crate::landing::Verdict::Failed(why) => c.fail(format!("landing failed: {why}")),
+        crate::landing::Verdict::Held => {}
     }
 }
 
@@ -2608,6 +2856,83 @@ pub fn cleanup(d: &Arc<Daemon>, task: TaskId, delete_branch: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- Task 180: the weakening scan at submit_change -----------------------------------
+
+    fn sh(dir: &Path, args: &[&str]) {
+        let o = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            o.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+    }
+
+    /// A repo whose `main` holds `scripts/run.sh`, and a branch that appends `line` to it.
+    fn submit_with(
+        line: &str,
+        holds: Option<crate::config::Holds>,
+    ) -> (Result<(), Vec<String>>, PathBuf) {
+        let dir = tempfile::tempdir().unwrap().keep();
+        sh(&dir, &["init", "-q", "-b", "main"]);
+        std::fs::create_dir_all(dir.join("scripts")).unwrap();
+        std::fs::write(dir.join("scripts/run.sh"), "echo hi\n").unwrap();
+        sh(&dir, &["add", "-A"]);
+        sh(&dir, &["commit", "-qm", "init"]);
+        sh(&dir, &["checkout", "-q", "-b", "work"]);
+        std::fs::write(
+            dir.join("scripts/run.sh"),
+            format!("echo hi\n{line}\n").replace("@OT@", concat!("|", "| true")),
+        )
+        .unwrap();
+        sh(&dir, &["commit", "-qam", "work"]);
+        let head = git::rev_parse(&dir, "HEAD").unwrap();
+        let note = dir.join("note.txt");
+        let v = change_validator(
+            dir.clone(),
+            "main".into(),
+            "work".into(),
+            mason_definition::Capabilities::now(),
+            holds.map(|holds| WeakeningCheck {
+                base: "main".into(),
+                holds,
+                note_file: note.clone(),
+            }),
+        );
+        (v("submit_change", &serde_json::json!({"head": head})), note)
+    }
+
+    #[test]
+    fn submit_refuses_a_weakening_where_the_project_sends_it_back() {
+        let (r, _) = submit_with("cargo test @OT@", Some(crate::config::Holds::Review));
+        let problems = r.unwrap_err();
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("scripts/run.sh:2") && p.contains("broadened-skip")),
+            "{problems:?}"
+        );
+        // Closures and counters are not findings.
+        let (r, _) = submit_with("n=$(grep -c x f) @OT@", Some(crate::config::Holds::Review));
+        assert!(r.is_ok(), "{r:?}");
+        // A project that is not self-hosting is not scanned.
+        let (r, _) = submit_with("cargo test @OT@", None);
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    fn submit_accepts_a_weakening_with_a_note_where_the_owner_holds() {
+        let (r, note) = submit_with("cargo test @OT@", Some(crate::config::Holds::Owner));
+        assert!(r.is_ok(), "{r:?}");
+        let text = std::fs::read_to_string(note).unwrap();
+        assert!(text.contains("scripts/run.sh:2"), "{text}");
+    }
 
     #[test]
     fn without_pty_the_command_is_unchanged() {

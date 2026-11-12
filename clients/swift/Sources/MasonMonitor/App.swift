@@ -26,9 +26,27 @@ final class Session: ObservableObject {
         model.onAttention = {
             if let s = NSSound(named: NSSound.Name("Glass")) { s.play() } else { NSSound.beep() }
         }
+        model.copier = { copyToPasteboard($0) }
+        model.launcher = { Self.openTerminal(running: $0) }
         pulse = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak model] _ in
             Task { @MainActor in model?.pulse() }
         }
+    }
+
+    /// A Terminal window running `argv`: a temporary .command file, which Terminal opens. False
+    /// when the file could not be written or opened. The caller copies the command then.
+    static func openTerminal(running argv: [String]) -> Bool {
+        let line = argv.map { "'" + $0.replacingOccurrences(of: "'", with: "'\\''") + "'" }.joined(separator: " ")
+        let dir = FileManager.default.temporaryDirectory
+        let file = dir.appendingPathComponent("mason-open-\(UUID().uuidString).command")
+        let script = "#!/bin/bash\nrm -f \"$0\"\n\(line)\n"
+        do {
+            try script.write(to: file, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: file.path)
+        } catch { return false }
+        let terminal = URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app")
+        let ok = NSWorkspace.shared.open([file], withApplicationAt: terminal, configuration: NSWorkspace.OpenConfiguration())
+        return ok
     }
 
     /// The daemon has built a new monitor at `path`: put it where this one is, so
