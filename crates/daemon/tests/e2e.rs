@@ -236,6 +236,97 @@ fn a_test_that_is_red_every_time_is_still_red_with_reruns() {
     );
 }
 
+/// A fake test command: a script that prints libtest lines, counts its runs in `runs`, and
+/// appends the arguments it was given to `args` (one line per run).
+fn libtest_script(s: &Scratch, body: &str) -> (std::path::PathBuf, std::path::PathBuf, String) {
+    let root = s.root.path();
+    let (runs, args, script) = (root.join("runs"), root.join("args"), root.join("t.sh"));
+    std::fs::write(
+        &script,
+        format!(
+            "n=$(cat {r} 2>/dev/null || echo 0); echo $((n+1)) > {r}\necho \"$*\" >> {a}\n{body}\n",
+            r = runs.display(),
+            a = args.display()
+        ),
+    )
+    .unwrap();
+    (runs, args, format!("sh {}", script.display()))
+}
+
+fn flaky_tests(d: &mason_daemon::daemon::Daemon) -> Vec<String> {
+    let mut v: Vec<String> = d
+        .store
+        .flaky_since(0)
+        .unwrap()
+        .into_iter()
+        .map(|(_, t, _)| t)
+        .collect();
+    v.sort();
+    v
+}
+
+#[test]
+fn a_red_with_no_test_failing_twice_is_a_flake_and_both_tests_are_recorded() {
+    // Run 1 fails `alpha`, run 2 fails `beta`: no test failed in both, so it is green.
+    let s = Scratch::new("true", happy_script());
+    let (runs, _, cmd) = libtest_script(
+        &s,
+        "if [ \"$n\" = 0 ]; then echo 'test alpha ... FAILED'; else echo 'test beta ... FAILED'; fi; exit 1",
+    );
+    s.write_project("scratch", &cmd, "test_reruns = 1");
+    let d = s.start();
+    let t = file_task(&d, "Two different flakes");
+    wait_state(&d, t, State::Landed, 90);
+    let w = d.world().unwrap();
+    assert_eq!(w.tasks[&t].attempts[&State::Developing], 1, "not sent back");
+    assert_eq!(std::fs::read_to_string(&runs).unwrap().trim(), "2");
+    assert_eq!(flaky_tests(&d), vec!["alpha", "beta"]);
+}
+
+#[test]
+fn a_test_that_fails_in_both_runs_keeps_the_step_red_and_is_the_only_one_named() {
+    let s = Scratch::new(
+        "true",
+        json!({"steps": {"explore": [explore_turn()], "develop": [develop_turn()]}}),
+    );
+    let (runs, _, cmd) = libtest_script(
+        &s,
+        "echo 'test alpha ... FAILED'; if [ \"$n\" = 0 ]; then echo 'test beta ... FAILED'; fi; exit 1",
+    );
+    s.write_project("scratch", &cmd, "max_test_rounds = 1\ntest_reruns = 1");
+    let d = s.start();
+    let t = file_task(&d, "Really broken");
+    wait_state(&d, t, State::Failed, 120);
+    assert_eq!(std::fs::read_to_string(&runs).unwrap().trim(), "2");
+    let w = d.world().unwrap();
+    let why = w.tasks[&t].failure.clone().unwrap_or_default();
+    assert!(why.contains("failed every time: alpha"), "{why}");
+    assert!(!why.contains("beta"), "{why}");
+    // `beta` passed on the rerun: a flake. `alpha` is not one.
+    assert_eq!(flaky_tests(&d), vec!["beta"]);
+    assert!(
+        !s.origin_log().contains(&"add hello".to_string()),
+        "nothing red may land"
+    );
+}
+
+#[test]
+fn with_a_rerun_filter_the_rerun_carries_only_the_failing_names() {
+    let s = Scratch::new("true", happy_script());
+    let (_, args, cmd) = libtest_script(
+        &s,
+        "if [ $# -eq 0 ]; then echo 'test alpha ... FAILED'; echo 'test beta ... ok'; exit 1; fi; echo 'test alpha ... ok'",
+    );
+    let extra = format!("test_reruns = 1\nrerun_filter = \"{cmd} {{tests}}\"");
+    s.write_project("scratch", &cmd, &extra);
+    let d = s.start();
+    let t = file_task(&d, "Filtered rerun");
+    wait_state(&d, t, State::Landed, 90);
+    let got = std::fs::read_to_string(&args).unwrap();
+    assert_eq!(got, "\nalpha\n", "the rerun's arguments: only the failing name");
+    assert_eq!(flaky_tests(&d), vec!["alpha"]);
+}
+
 #[test]
 fn the_test_step_folds_in_the_base_so_a_fix_that_landed_meanwhile_counts() {
     // The tests need base-fix.txt, which reaches the base while the task is in

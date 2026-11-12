@@ -2916,6 +2916,14 @@ fn print_health(r: &serde_json::Value) {
             println!("        {t}");
         }
     }
+    println!("Flaky tests (last 7 days)");
+    let flaky = r["flaky"].as_object().cloned().unwrap_or_default();
+    if flaky.is_empty() {
+        println!("  none");
+    }
+    for (name, n) in flaky {
+        println!("  {name} ({n} time(s))");
+    }
     println!("Recurring jobs");
     for s in r["schedules"].as_array().cloned().unwrap_or_default() {
         println!(

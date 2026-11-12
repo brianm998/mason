@@ -413,6 +413,10 @@ pub struct ProjectCfg {
     /// flake; red every time is red. For a suite of many tests that only some
     /// machines' load makes fail, this judges the change instead of the machine.
     pub test_reruns: u32,
+    /// How a rerun runs only the tests that failed (`rerun_filter`, optional): `"cargo"`
+    /// appends `-- --exact <names>`; a template with `{tests}` has it replaced by the quoted
+    /// names. Without it a rerun runs the whole command (the names are still compared).
+    pub rerun_filter: Option<String>,
     /// Where a task's build directory is, e.g. `$HOME/.cache/mason-target/{task}` (`task_cache`,
     /// optional). Removed when the task lands (s78). Without it nothing is removed.
     pub task_cache: Option<String>,
@@ -992,6 +996,13 @@ pub fn parse_project(id: &str, text: &str) -> Result<ProjectCfg, String> {
             .get("test_reruns")
             .and_then(|v| v.as_integer())
             .map_or(0, |n| n.clamp(0, 3) as u32),
+        rerun_filter: match s("rerun_filter").filter(|f| !f.trim().is_empty()) {
+            Some(f) => {
+                crate::rerun::check_filter(&f).map_err(|e| format!("{id}: {e}"))?;
+                Some(f)
+            }
+            None => None,
+        },
         task_cache_keep_days: doc
             .get("task_cache_keep_days")
             .and_then(|v| v.as_integer())
