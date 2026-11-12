@@ -199,6 +199,8 @@ pub struct Definition {
     pub resources: BTreeMap<String, u32>,
     /// Suites, environments, bindings, the impact map and signatures.
     pub testing: mason_testing::Testing,
+    /// `[watch.ci]` when it is switched on (decision 0149); `None` is off.
+    pub watch_ci: Option<mason_core::ci_watch::Rules>,
     /// Identity of the definition text it was parsed from.
     pub hash: String,
 }
@@ -214,6 +216,7 @@ impl Definition {
             agents: BTreeMap::new(),
             resources: BTreeMap::new(),
             testing: mason_testing::Testing::default(),
+            watch_ci: None,
             hash: String::new(),
         }
     }

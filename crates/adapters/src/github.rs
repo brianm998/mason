@@ -400,6 +400,137 @@ fn item_of(v: &Value) -> Item {
     }
 }
 
+// ---- the base branch's own runs ----------------------------------------------------------
+
+/// One workflow run on a branch, as the base-branch CI watch needs it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ActionsRun {
+    pub id: u64,
+    /// The workflow's name.
+    pub workflow: String,
+    pub sha: String,
+    pub url: String,
+    pub created_ms: u64,
+    /// `None`: not finished.
+    pub conclusion: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ActionsJob {
+    pub id: u64,
+    pub name: String,
+    pub conclusion: Option<String>,
+}
+
+/// `2026-11-11T12:30:00Z` as milliseconds since the epoch; `0` if it is not that shape.
+pub fn iso_ms(s: &str) -> u64 {
+    let b = s.as_bytes();
+    let num = |a: usize, z: usize| -> Option<i64> { s.get(a..z)?.parse().ok() };
+    if b.len() < 19 {
+        return 0;
+    }
+    let (Some(y), Some(m), Some(d), Some(h), Some(mi), Some(se)) = (
+        num(0, 4),
+        num(5, 7),
+        num(8, 10),
+        num(11, 13),
+        num(14, 16),
+        num(17, 19),
+    ) else {
+        return 0;
+    };
+    // Days from the civil date (Howard Hinnant's algorithm).
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe - 719468;
+    u64::try_from(((days * 24 + h) * 60 + mi) * 60 + se).map_or(0, |t| t * 1000)
+}
+
+impl GitHub {
+    /// The finished workflow runs on `branch`, newest first.
+    pub fn base_runs(&self, branch: &str) -> Result<Vec<ActionsRun>, ApiError> {
+        let b = branch
+            .replace('%', "%25")
+            .replace('/', "%2F")
+            .replace(' ', "%20");
+        let v = self.json(Request::get(&self.url(&format!(
+            "/actions/runs?branch={b}&status=completed&exclude_pull_requests=true&per_page=100"
+        ))))?;
+        Ok(v["workflow_runs"]
+            .as_array()
+            .ok_or_else(|| ApiError::new(ErrorKind::Unavailable, "a list of runs was expected"))?
+            .iter()
+            .filter_map(|r| {
+                Some(ActionsRun {
+                    id: r["id"].as_u64()?,
+                    workflow: r["name"].as_str().unwrap_or_default().to_string(),
+                    sha: r["head_sha"].as_str().unwrap_or_default().to_string(),
+                    url: r["html_url"].as_str().unwrap_or_default().to_string(),
+                    created_ms: iso_ms(r["created_at"].as_str().unwrap_or_default()),
+                    conclusion: r["conclusion"].as_str().map(String::from),
+                })
+            })
+            .collect())
+    }
+
+    /// The jobs of one run (the latest attempt).
+    pub fn run_jobs(&self, run: u64) -> Result<Vec<ActionsJob>, ApiError> {
+        let v = self.json(Request::get(&self.url(&format!(
+            "/actions/runs/{run}/jobs?filter=latest&per_page=100"
+        ))))?;
+        Ok(v["jobs"]
+            .as_array()
+            .ok_or_else(|| ApiError::new(ErrorKind::Unavailable, "a list of jobs was expected"))?
+            .iter()
+            .filter_map(|j| {
+                Some(ActionsJob {
+                    id: j["id"].as_u64()?,
+                    name: j["name"].as_str().unwrap_or_default().to_string(),
+                    conclusion: j["conclusion"].as_str().map(String::from),
+                })
+            })
+            .collect())
+    }
+
+    /// The last `lines` lines of a job's log. GitHub answers with a redirect to a signed
+    /// address, which is read without the token. Best effort: `None` if it cannot be read.
+    pub fn job_log_tail(&self, job: u64, lines: usize) -> Option<String> {
+        let first = self
+            .send_raw(Request::get(
+                &self.url(&format!("/actions/jobs/{job}/logs")),
+            ))
+            .ok()?;
+        let resp = if (300..400).contains(&first.status) {
+            let to = first.header("location")?.to_string();
+            self.http.send(&Request::get(&to)).ok()?
+        } else {
+            first
+        };
+        if !(200..300).contains(&resp.status) {
+            return None;
+        }
+        let all: Vec<&str> = resp.body.lines().collect();
+        let tail = all[all.len().saturating_sub(lines)..].join("\n");
+        (!tail.trim().is_empty()).then_some(tail)
+    }
+
+    /// Like `send`, but a redirect is an answer, not an error.
+    fn send_raw(&self, r: Request) -> Result<Response, ApiError> {
+        let token = self.token.read()?;
+        let r = r
+            .with("Authorization", &format!("Bearer {token}"))
+            .with("Accept", "application/vnd.github+json")
+            .with("X-GitHub-Api-Version", "2022-11-28")
+            .with("User-Agent", "mason");
+        self.http
+            .send(&r)
+            .map_err(|e| ApiError::new(ErrorKind::Unavailable, e.to_string()))
+    }
+}
+
 // ---- Actions -------------------------------------------------------------------------------
 
 impl BuildSystemAdapter for GitHub {

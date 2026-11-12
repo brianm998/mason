@@ -20,6 +20,7 @@ const TOP_KEYS: &[&str] = &[
     "binding",
     "impact",
     "signature",
+    "watch",
 ];
 pub const STEP_KEYS: &[&str] = &[
     "type",
@@ -375,6 +376,7 @@ pub fn parse_with(text: &str, plugins: Plugins<'_>) -> Result<Definition, Vec<Pr
     let mut steps: Vec<Step> = vec![];
     let mut agents = BTreeMap::new();
     let mut resources = BTreeMap::new();
+    let mut watch_ci = None;
 
     for (k, v) in doc.iter() {
         match k {
@@ -464,6 +466,7 @@ pub fn parse_with(text: &str, plugins: Plugins<'_>) -> Result<Definition, Vec<Pr
                     "must be a table, like [resource.phone]",
                 )),
             },
+            "watch" => watch_ci = crate::watch::parse(v, &mut out),
             // Read together below.
             "suite" | "environment" | "binding" | "impact" | "signature" => {}
             other => out.push(unknown_key("", other, TOP_KEYS)),
@@ -493,6 +496,7 @@ pub fn parse_with(text: &str, plugins: Plugins<'_>) -> Result<Definition, Vec<Pr
         agents,
         resources,
         testing,
+        watch_ci,
         hash: hash(text),
     })
 }
@@ -501,6 +505,27 @@ pub fn parse_with(text: &str, plugins: Plugins<'_>) -> Result<Definition, Vec<Pr
 mod tests {
     use super::*;
     use mason_core::State;
+
+    #[test]
+    fn watch_ci_is_off_unless_enabled_and_keys_are_checked() {
+        let on = format!(
+            "{OK}\n[watch.ci]\nenabled = true\nexclude = [\"Gherkin\"]\ngate = \"CI/pr-gate\"\nred_ticket_after = \"2h\"\nmax_open_auto = 1\n"
+        );
+        let r = parse(&on).unwrap().watch_ci.unwrap();
+        assert_eq!(r.exclude, vec!["Gherkin"]);
+        assert_eq!(r.gate.as_deref(), Some("CI/pr-gate"));
+        assert_eq!((r.agreement, r.max_open_auto), (2, 1));
+        assert_eq!(r.red_ticket_after_ms, 2 * 3_600_000);
+        assert!(r.freeze_on_gate);
+        assert!(parse(OK).unwrap().watch_ci.is_none());
+        let off = format!("{OK}\n[watch.ci]\nenabled = false\n");
+        assert!(parse(&off).unwrap().watch_ci.is_none());
+        let bad = format!("{OK}\n[watch.ci]\nenabled = true\nagrement = 3\n");
+        let e = parse(&bad).unwrap_err();
+        assert!(e[0].message.contains("did you mean `agreement`"), "{e:?}");
+        let bad = format!("{OK}\n[watch.ci]\nred_ticket_after = \"soon\"\n");
+        assert!(parse(&bad).is_err());
+    }
 
     const OK: &str = r#"
 schema = 1

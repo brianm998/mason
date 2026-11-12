@@ -567,14 +567,53 @@ impl<'a> Ctx<'a> {
                 });
             }
         }
+        // The base-branch CI watch: what is red and waiting for agreement, or why it cannot look.
+        for (pid, p) in &self.d.projects {
+            if !(project.is_empty() || p.id == project) {
+                continue;
+            }
+            let v = crate::ci_watch::view(self.d, *pid);
+            if v["enabled"] != true {
+                continue;
+            }
+            let pending: Vec<String> = v["pending"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|x| x["job"].as_str().map(String::from))
+                .collect();
+            if !pending.is_empty() {
+                banners.push(Banner {
+                    kind: "ci_watch".into(),
+                    text: format!(
+                        "{}: red on the base branch, waiting for a second red run: {}",
+                        p.id,
+                        pending.join(", ")
+                    ),
+                });
+            }
+            if let Some(e) = v["error"].as_str() {
+                banners.push(Banner {
+                    kind: "ci_watch".into(),
+                    text: format!("{}: the base-branch CI watch cannot look: {e}", p.id),
+                });
+            }
+        }
         for f in self.d.store.freezes().unwrap_or_default() {
             if project.is_empty() || f.project == project {
                 banners.push(Banner {
                     kind: "landing_frozen".into(),
-                    text: format!(
-                        "Landing is frozen for {}: only the fix task lands until the post-land suites are green ({})",
-                        f.project, f.reason
-                    ),
+                    text: if f.source == "ci" {
+                        format!(
+                            "Landing is frozen for {}: only the fix task lands until that job is green on the base branch ({})",
+                            f.project, f.reason
+                        )
+                    } else {
+                        format!(
+                            "Landing is frozen for {}: only the fix task lands until the post-land suites are green ({})",
+                            f.project, f.reason
+                        )
+                    },
                 });
             }
         }
