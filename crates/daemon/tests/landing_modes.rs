@@ -110,8 +110,20 @@ fn direct_ci_batch_red_only_on_the_union_is_not_pushed_and_both_tasks_are_told()
     assert!(w.sent_back(two).unwrap().contains("alpha"));
     assert!(!w.landed(one) && !w.landed(two));
     assert!(!w.on_main("a/one.txt") && !w.on_main("a/two.txt"));
-    assert_eq!(triggers(&log), 0, "no CI run was spent on it");
-    assert!(remote_branches(&w.s).is_empty(), "no candidate was pushed");
+    // The ladder's bisection may run CI on each task alone (both green there), but the union is
+    // never pushed: no CI run saw both files.
+    let state = log.parent().unwrap();
+    for e in std::fs::read_dir(state).unwrap().flatten() {
+        let t = e.path().join("t");
+        assert!(
+            !(t.join("a/one.txt").exists() && t.join("a/two.txt").exists()),
+            "CI ran on the union: {}",
+            e.path().display()
+        );
+    }
+    wait_for("every candidate to be deleted", 30, || {
+        remote_branches(&w.s).is_empty()
+    });
 }
 
 #[test]
