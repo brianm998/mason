@@ -136,6 +136,7 @@ impl Sim {
                 self.ok(E::StepFailed {
                     task: t,
                     reason: "boom".into(),
+                    class: None,
                 });
             }
             _ => unreachable!(),

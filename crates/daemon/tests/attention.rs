@@ -454,6 +454,7 @@ fn a_frozen_base_raises_an_alert_naming_the_fix_task_until_the_freeze_clears() {
     d.emit(EventKind::StepFailed {
         task: fix,
         reason: "r".into(),
+        class: None,
     })
     .unwrap();
     let (_, _, text) = find().unwrap();

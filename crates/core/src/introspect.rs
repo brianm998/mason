@@ -170,6 +170,24 @@ pub struct Stats {
     /// Milliseconds tasks spent waiting on something (a wait reason), and all active time.
     pub wait_ms: u64,
     pub active_ms: u64,
+    /// `wait_ms` by what was waited on ("a slot", "the owner", a resource), largest first is
+    /// worked out where it is shown.
+    pub wait_by: std::collections::BTreeMap<String, u64>,
+}
+
+/// `a slot 70%, the owner 20%, ...`, largest first, at most five.
+pub fn wait_breakdown(by: &std::collections::BTreeMap<String, u64>) -> String {
+    let total: u64 = by.values().sum();
+    if total == 0 {
+        return "no breakdown recorded".into();
+    }
+    let mut v: Vec<(&String, &u64)> = by.iter().collect();
+    v.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+    v.iter()
+        .take(5)
+        .map(|(k, n)| format!("{k} {:.0}%", **n as f64 * 100.0 / total as f64))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// A metric's value over `stats`, if it can be measured over a window of recorded data.
@@ -470,7 +488,12 @@ pub fn detect(project: &str, s: &Stats, f: &Facts, t: &Thresholds) -> Vec<Findin
                     "{} ms of {} ms active time was spent waiting on a resource, a slot or the owner; the threshold is {:.0}%.",
                     s.wait_ms, s.active_ms, t.wait_share * 100.0
                 ),
-                format!("wait events in the event log: {} ms waiting of {} ms", s.wait_ms, s.active_ms),
+                format!(
+                    "wait events in the event log: {} ms waiting of {} ms; by what was waited on: {}",
+                    s.wait_ms,
+                    s.active_ms,
+                    wait_breakdown(&s.wait_by)
+                ),
                 "wait_share",
                 Some(m),
             ));
@@ -980,6 +1003,15 @@ mod tests {
         assert_eq!(ok.len(), 1);
         assert_eq!(refused.len(), 2);
         assert!(refused[1].1.contains("unknown metric"));
+    }
+
+    #[test]
+    fn wait_breakdown_orders_by_share() {
+        let mut by = std::collections::BTreeMap::new();
+        assert_eq!(wait_breakdown(&by), "no breakdown recorded");
+        by.insert("the owner".to_string(), 25);
+        by.insert("a slot".to_string(), 75);
+        assert_eq!(wait_breakdown(&by), "a slot 75%, the owner 25%");
     }
 
     #[test]
