@@ -373,6 +373,11 @@ impl DaemonConfig {
     pub fn landing_dir(&self) -> PathBuf {
         self.data_dir.join("l")
     }
+    /// The cache directory MASON owns for `task` (`MASON_TASK_CACHE`): removed when the task
+    /// lands or is canceled.
+    pub fn task_cache_dir(&self, task: u64) -> PathBuf {
+        self.data_dir.join("c").join(task.to_string())
+    }
     pub fn task_dir(&self, task: u64) -> PathBuf {
         self.data_dir.join("t").join(task.to_string())
     }

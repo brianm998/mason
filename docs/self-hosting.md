@@ -55,6 +55,14 @@ build = "cargo test --workspace --no-run"
 
 The step then runs `build` first, holding one `compile` slot, and gives the slot back. Then it runs `test`, holding the step's `uses` without `compile`. Name a class there to cap test runs, like `uses = { compile = 1, test-suite = 1 }` with `[resource.test-suite] count = 1`; with nothing left in `uses`, test runs are not counted at all. A build that fails is red with its output as the feedback, and the tests do not run. `run_check` and landing's re-test after a moved base run the same two phases. `MASON_HELD` names what each phase holds (`compile` while building), and the build's log is the step's `build-r<run>.log`. Without `build` nothing changes: the test command holds all of `uses`. `mason config set step.test.build '...' --for 2h --project <id>` overrides it for a while.
 
+## A cache directory for each task
+
+Every step of a task gets `MASON_TASK_CACHE`, a directory MASON owns under the data directory (`c/<task>`) and creates before the step starts. MASON removes it when the task lands or is canceled, and the reconcile sweep removes any whose task is landed or canceled (or failed more than `task_cache_keep_days` ago) and has no running job. A running task's directory is never touched.
+
+To give each task its own cargo target without the cleanup being your job, set `CARGO_TARGET_DIR=$MASON_TASK_CACHE` in the project's `test` and `build` commands. Parallel tasks still cannot see each other's generated code, and nothing is left behind. The cost is that each task's first build compiles every crate (80 to 215 seconds measured for this repository).
+
+To keep dependencies warm across tasks, add a shared compiler cache: install `sccache` and set `RUSTC_WRAPPER=sccache` in the same commands. Compiled dependencies are then reused from sccache's own store, while workspace crates still build per task. This is optional, and the daemon does not depend on sccache. The project file is yours to change; MASON only provides the directory and its cleanup.
+
 ## Another pipeline on the same machine
 
 A second pipeline (star's starpipe, say) can queue with masond instead of keeping its own lock queue, so the two share one arbiter. Nothing changes until it sends the new fields.
