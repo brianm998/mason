@@ -58,7 +58,9 @@ FAKE_CLAUDE_SCRIPT = "$root/work.json"
 TOML
 }
 project flaky 'if [ $# -eq 0 ]; then echo "test alpha ... FAILED"; echo "test beta ... ok"; exit 1; fi; echo "test alpha ... ok"'
-project broken 'echo "test alpha ... FAILED"; exit 1'
+# Fails only where the change is (hello.txt): at the merge base it passes, so s177's base check
+# excuses nothing.
+project broken '[ -f hello.txt ] || exit 0; echo "test alpha ... FAILED"; exit 1'
 
 "$bin/masond" --port 0 --data-dir "$root/d" --config-dir "$root/c" --heartbeat-ms 100 --sweep-ms 3600000 --max-concurrent 3 --owner "${USER:-owner}" 2>>"$root/masond.log" &
 daemon=$!
