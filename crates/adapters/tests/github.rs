@@ -606,10 +606,25 @@ fn a_log_that_cannot_be_fetched_counts_as_a_real_failure() {
 }
 
 #[test]
-fn with_the_judge_off_no_log_is_requested_and_no_job_is_reported() {
-    let g = judged_gh(red_script(&[(11, "macOS", "failure")], vec![]), false);
-    assert!(jobs_of(g.gh.status("sha1").unwrap()).is_empty());
-    assert!(g.http.requests().iter().all(|r| !r.url.contains("/logs")));
+fn with_the_judge_off_nothing_is_judged_but_the_log_is_kept_for_the_task() {
+    let g = judged_gh(
+        red_script(
+            &[(11, "macOS", "failure")],
+            vec![(
+                11,
+                serde_json::json!({"status": 200, "headers": {}, "body": "step\nFAILED t.py::test_x - assert 0"}),
+            )],
+        ),
+        false,
+    );
+    let jobs = jobs_of(g.gh.status("sha1").unwrap());
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].infra, None, "nothing is judged with the judge off");
+    assert!(jobs[0]
+        .log
+        .as_deref()
+        .unwrap()
+        .contains("FAILED t.py::test_x"));
 }
 
 // ---- scheduled CI runs (stage 175) -------------------------------------------------------------

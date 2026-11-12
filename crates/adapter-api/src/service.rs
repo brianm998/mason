@@ -276,6 +276,8 @@ pub struct JobFailure {
     pub workflow: String,
     pub job: String,
     pub infra: Option<String>,
+    /// The end of the job's log (a few hundred lines), when the adapter could read it.
+    pub log: Option<String>,
 }
 
 pub trait GitHostAdapter: Send + Sync {
