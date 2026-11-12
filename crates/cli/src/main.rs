@@ -17,6 +17,7 @@
 //! mason task land-now <id> | force <id> [--reason R]
 //! mason task open <id> [--anyway]
 //! mason pause [--project P] [--mode all|claims|landing] --for 2h | mason resume [--project P] [--mode M] | mason pause list
+//! mason ssh-key list | use <path> [--project P]
 //! mason alerts [--all] | mason metrics [--days N]
 //! mason health | mason digest [--days N] [--project P] | mason schedule list | run <name>
 //! mason triage list | review <id> (--agree | --disagree)
@@ -116,8 +117,10 @@ mason: command-line client for the MASON pipeline
   mason hook bash [--needs compile]   optional Claude Code PreToolUse hook: builds go through the queue
   mason definition check [FILE]       validate a definition (default .mason/mason.toml) and dry-run it
   mason definition dry-run [FILE] [--scenarios FILE]
+  mason ssh-key list | use <path> [--project P]   the SSH key a project's pushes use; choose the right one after a push was refused
   mason editor show|op|undo|redo|discard|simulate|apply [--project P]   the pipeline editor, without a screen
   mason definition show [--project P] | reload [--project P]
+  mason project reload [--project P]      re-read ~/.config/mason/projects/P.toml, no restart
   mason extension list|show|approve [NAME] [--project P]   project extensions; approving is the owner's
   mason lan status                    whether LAN access is on, its port and certificate fingerprint
   mason pair [--viewer]               a one-time code (and mason://pair URL) for a phone; 120 s
@@ -579,6 +582,65 @@ fn main() {
         })
     };
     match cmd.as_str() {
+        "ssh-key" => {
+            let sub = a
+                .pos()
+                .unwrap_or_else(|| die("ssh-key list | ssh-key use <path>"));
+            let project = project_of(&mut a);
+            // Choosing a key is the owner's act: say who.
+            if std::env::var("MASON_AS").is_err() {
+                if let Ok(u) = std::env::var("USER") {
+                    std::env::set_var("MASON_AS", u);
+                }
+            }
+            match sub.as_str() {
+                "list" => {
+                    let json = a.flag("--json");
+                    finish(&a);
+                    let r = or_die(d.call("GET", &format!("/projects/{project}/ssh-keys"), None));
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&r).unwrap_or_default());
+                    } else {
+                        for k in r["keys"].as_array().into_iter().flatten() {
+                            let mut tags = vec![];
+                            if k["on_owner_account"].as_bool().unwrap_or(false) {
+                                tags.push("on the repository owner's account".to_string());
+                            }
+                            if let Some(u) = k["seen_as"].as_str() {
+                                tags.push(format!("seen as {u}"));
+                            }
+                            if k["encrypted"].as_bool().unwrap_or(false) {
+                                tags.push("passphrase".into());
+                            }
+                            if k["in_agent"].as_bool().unwrap_or(false) {
+                                tags.push("in the agent".into());
+                            }
+                            println!(
+                                "{}  {}  {}  [{}]",
+                                k["path"].as_str().unwrap_or("(agent only)"),
+                                k["fingerprint"].as_str().unwrap_or(""),
+                                k["comment"].as_str().unwrap_or(""),
+                                tags.join(", ")
+                            );
+                        }
+                    }
+                }
+                "use" => {
+                    let path = a.pos().unwrap_or_else(|| die("which key file?"));
+                    finish(&a);
+                    let r = or_die(d.call(
+                        "POST",
+                        &format!("/projects/{project}/ssh-key"),
+                        Some(&json!({"path": path})),
+                    ));
+                    println!(
+                        "{project} now pushes with {}. The remote accepted it; landing is released.",
+                        r["path"].as_str().unwrap_or(&path)
+                    );
+                }
+                other => die(&format!("unknown ssh-key command {other:?}\n\n{HELP}")),
+            }
+        }
         "editor" => {
             let sub = a.pos().unwrap_or_else(|| {
                 die("editor what? show, op, undo, redo, discard, simulate or apply")
@@ -828,6 +890,45 @@ fn main() {
                         }
                     }
                 }
+            }
+        }
+        "project" => {
+            let sub = a.pos().unwrap_or_else(|| die("project what? reload"));
+            if sub != "reload" {
+                die(&format!("unknown project command {sub:?}\n\n{HELP}"));
+            }
+            let project = project_of(&mut a);
+            finish(&a);
+            let r = or_die(d.call(
+                "POST",
+                &format!("/projects/{project}/registration/reload"),
+                None,
+            ));
+            if json_out {
+                return println!("{r:#}");
+            }
+            match r["result"].as_str() {
+                Some("applied") => println!(
+                    "Reloaded {project}.toml; changed: {}. Tasks admitted from now on use it",
+                    r["changed"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                Some("refused") => {
+                    println!("Refused; the current registration keeps running:");
+                    r["errors"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .for_each(|e| println!("  {e}"));
+                    exit(1);
+                }
+                _ => println!("Nothing changed"),
             }
         }
         "definition" => {
@@ -1342,12 +1443,21 @@ fn main() {
                     }
                     for s in r["schedules"].as_array().cloned().unwrap_or_default() {
                         println!(
-                            "{:<28} {:<12} every {:<10} runs {:<4} {}",
+                            "{:<28} {:<12} every {:<10} runs {:<4} {}{}",
                             s["name"].as_str().unwrap_or("?"),
                             s["kind"].as_str().unwrap_or("?"),
                             every_text(s["every_ms"].as_u64().unwrap_or(0)),
                             s["runs"],
-                            s["last_status"].as_str().unwrap_or("")
+                            s["last_status"].as_str().unwrap_or(""),
+                            if s["follow"].is_object() {
+                                s["follow"]["run"]
+                                    .as_u64()
+                                    .map_or(" [following]".to_string(), |r| {
+                                        format!(" [following run {r}]")
+                                    })
+                            } else {
+                                String::new()
+                            }
                         );
                     }
                 }
@@ -2150,6 +2260,19 @@ fn main() {
                     s["thread_panics"]["last"].as_str().unwrap_or("?")
                 );
             }
+            for (name, w) in s["ci_watch"].as_object().into_iter().flatten() {
+                print_ci_watch(name, w);
+            }
+            for r in s["ci_runs"].as_array().into_iter().flatten() {
+                println!(
+                    "scheduled CI run in flight: {} {} (waiting for {})",
+                    r["name"].as_str().unwrap_or("?"),
+                    r["run"]
+                        .as_u64()
+                        .map_or("(run not listed yet)".to_string(), |n| format!("run {n}")),
+                    r["waiting_for"].as_str().unwrap_or("?")
+                );
+            }
             for p in s["definitions"].as_array().into_iter().flatten() {
                 let hash = p["hash"].as_str().unwrap_or("");
                 println!(
@@ -2442,6 +2565,9 @@ fn main() {
                     }
                     if let Some(f) = t["failure"].as_str() {
                         println!("  failed    {f}");
+                    }
+                    for l in t["excused"].as_array().into_iter().flatten() {
+                        println!("  excused   {}", l.as_str().unwrap_or(""));
                     }
                     for l in t["host_losses"].as_array().into_iter().flatten() {
                         println!(
@@ -2873,6 +2999,14 @@ fn print_health(r: &serde_json::Value) {
             println!("        {t}");
         }
     }
+    println!("Flaky tests (last 7 days)");
+    let flaky = r["flaky"].as_object().cloned().unwrap_or_default();
+    if flaky.is_empty() {
+        println!("  none");
+    }
+    for (name, n) in flaky {
+        println!("  {name} ({n} time(s))");
+    }
     println!("Recurring jobs");
     for s in r["schedules"].as_array().cloned().unwrap_or_default() {
         println!(
@@ -2883,6 +3017,10 @@ fn print_health(r: &serde_json::Value) {
             s["last_status"].as_str().unwrap_or("")
         );
     }
+    println!(
+        "Stall watch: {} SIGCONT(s) sent to stopped processes, {} silent tree(s) killed",
+        r["stall_watch"]["sigconts"], r["stall_watch"]["kills"]
+    );
     let q = r["triage"]["queue"].as_array().map_or(0, Vec::len);
     println!(
         "Triage: {} ({} waiting for your review, {} reviewed)",
@@ -3123,4 +3261,66 @@ fn usage_text(r: &Value) -> String {
         out.push_str("no provider accounts\n");
     }
     out
+}
+
+/// The base-branch CI watch of one project, as `mason status` prints it.
+fn print_ci_watch(project: &str, w: &Value) {
+    let list = |v: &Value| {
+        v.as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let watched = list(&w["workflows"]);
+    println!(
+        "ci watch for {project}: {}{}{}",
+        if watched.is_empty() {
+            "no workflow seen yet".to_string()
+        } else {
+            format!("watching {watched}")
+        },
+        w["gate"]
+            .as_str()
+            .map_or(String::new(), |g| format!("; gate {g}")),
+        if w["excluded"].as_array().is_some_and(|e| !e.is_empty()) {
+            format!("; excluding {}", list(&w["excluded"]))
+        } else {
+            String::new()
+        }
+    );
+    if let Some(e) = w["error"].as_str() {
+        println!("  CANNOT LOOK: {e}");
+    }
+    if let Some(f) = w["freeze"].as_object() {
+        println!(
+            "  LANDING FROZEN: {} (fix task #{})",
+            f["reason"].as_str().unwrap_or("?"),
+            f["fix_task"]
+        );
+    }
+    for p in w["pending"].as_array().into_iter().flatten() {
+        println!(
+            "  red, waiting for agreement: {} ({} of {} runs)",
+            p["job"].as_str().unwrap_or("?"),
+            p["red_runs"],
+            p["agreement"]
+        );
+    }
+    for f in w["filed"].as_array().into_iter().flatten().take(5) {
+        println!(
+            "  filed: {} as {}{}{}",
+            f["job"].as_str().unwrap_or("?"),
+            f["task"]
+                .as_u64()
+                .map_or("no task".to_string(), |t| format!("#{t}")),
+            if f["urgent"] == true { " (urgent)" } else { "" },
+            if f["proposed"] == true {
+                " (proposed)"
+            } else {
+                ""
+            },
+        );
+    }
 }

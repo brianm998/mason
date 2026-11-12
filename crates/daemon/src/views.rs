@@ -165,7 +165,7 @@ fn issue_page(d: &Daemon, pid: ProjectId, n: u64) -> String {
 impl<'a> Ctx<'a> {
     pub fn new(d: &'a Daemon, w: &'a World) -> Ctx<'a> {
         let mut issues = std::collections::HashMap::new();
-        for p in d.projects.values() {
+        for p in d.projects().values() {
             for r in d.store.tracker_items(&p.id).unwrap_or_default() {
                 issues.insert(r.task, r.number);
             }
@@ -542,6 +542,10 @@ impl<'a> Ctx<'a> {
             .count() as u32;
         let mut banners = vec![];
         for p in self.d.store.pauses(self.now).unwrap_or_default() {
+            // A hold for a refused push has its own banner, with the action that fixes it.
+            if p.owner == crate::ssh_keys::PAUSE_OWNER {
+                continue;
+            }
             banners.push(Banner {
                 kind: "paused".into(),
                 text: format!(
@@ -556,7 +560,13 @@ impl<'a> Ctx<'a> {
                 ),
             });
         }
-        for (pid, p) in &self.d.projects {
+        for (_, _, text) in crate::ssh_keys::alerts(self.d) {
+            banners.push(Banner {
+                kind: "push_auth".into(),
+                text,
+            });
+        }
+        for (pid, p) in &self.d.projects() {
             if self.d.definition_error(*pid).is_some() {
                 banners.push(Banner {
                     kind: "definition".into(),
@@ -567,14 +577,53 @@ impl<'a> Ctx<'a> {
                 });
             }
         }
+        // The base-branch CI watch: what is red and waiting for agreement, or why it cannot look.
+        for (pid, p) in &self.d.projects() {
+            if !(project.is_empty() || p.id == project) {
+                continue;
+            }
+            let v = crate::ci_watch::view(self.d, *pid);
+            if v["enabled"] != true {
+                continue;
+            }
+            let pending: Vec<String> = v["pending"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|x| x["job"].as_str().map(String::from))
+                .collect();
+            if !pending.is_empty() {
+                banners.push(Banner {
+                    kind: "ci_watch".into(),
+                    text: format!(
+                        "{}: red on the base branch, waiting for a second red run: {}",
+                        p.id,
+                        pending.join(", ")
+                    ),
+                });
+            }
+            if let Some(e) = v["error"].as_str() {
+                banners.push(Banner {
+                    kind: "ci_watch".into(),
+                    text: format!("{}: the base-branch CI watch cannot look: {e}", p.id),
+                });
+            }
+        }
         for f in self.d.store.freezes().unwrap_or_default() {
             if project.is_empty() || f.project == project {
                 banners.push(Banner {
                     kind: "landing_frozen".into(),
-                    text: format!(
-                        "Landing is frozen for {}: only the fix task lands until the post-land suites are green ({})",
-                        f.project, f.reason
-                    ),
+                    text: if f.source == "ci" {
+                        format!(
+                            "Landing is frozen for {}: only the fix task lands until that job is green on the base branch ({})",
+                            f.project, f.reason
+                        )
+                    } else {
+                        format!(
+                            "Landing is frozen for {}: only the fix task lands until the post-land suites are green ({})",
+                            f.project, f.reason
+                        )
+                    },
                 });
             }
         }
@@ -600,7 +649,7 @@ impl<'a> Ctx<'a> {
             projects: self.w.projects.values().map(|p| p.name.clone()).collect(),
             pending_issues: self
                 .d
-                .projects
+                .projects()
                 .iter()
                 .filter(|(_, p)| project.is_empty() || p.id == project)
                 .flat_map(|(pid, p)| {
@@ -914,7 +963,7 @@ impl<'a> Ctx<'a> {
         let mut trackers = vec![];
         let mut idle = 0;
         let mut running_total = 0;
-        for (pid, p) in &self.d.projects {
+        for (pid, p) in &self.d.projects() {
             if !in_scope(&p.id) {
                 continue;
             }

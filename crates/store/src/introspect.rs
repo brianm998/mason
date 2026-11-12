@@ -45,6 +45,8 @@ pub struct ScheduleRow {
     /// Failures a base-health run has accepted as already there; `None` before the first run.
     pub baseline: Option<Vec<String>>,
     pub runs: u64,
+    /// The CI run a `ci` schedule is following (encoded by the daemon); empty when none.
+    pub follow: String,
 }
 
 /// One suggestion of the triage agent, kept for the owner's review.
@@ -229,12 +231,12 @@ impl Store {
         let s = s.clone();
         self.write(move |c| {
             c.execute(
-                "INSERT OR REPLACE INTO schedules(name, project, kind, every_ms, last_run, last_task, last_status, baseline, runs)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                "INSERT OR REPLACE INTO schedules(name, project, kind, every_ms, last_run, last_task, last_status, baseline, runs, follow)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
                 params![
                     s.name, s.project, s.kind, s.every_ms as i64, s.last_run as i64,
                     s.last_task.map(|t| t as i64), s.last_status,
-                    s.baseline.as_ref().map(|b| b.join("\n")), s.runs as i64
+                    s.baseline.as_ref().map(|b| b.join("\n")), s.runs as i64, s.follow
                 ],
             )
             .map(|_| ())
@@ -371,7 +373,7 @@ impl Store {
 }
 
 const SCHEDULE_SELECT: &str =
-    "SELECT name, project, kind, every_ms, last_run, last_task, last_status, baseline, runs FROM schedules";
+    "SELECT name, project, kind, every_ms, last_run, last_task, last_status, baseline, runs, follow FROM schedules";
 
 fn schedule_of(r: &rusqlite::Row) -> rusqlite::Result<ScheduleRow> {
     Ok(ScheduleRow {
@@ -386,5 +388,6 @@ fn schedule_of(r: &rusqlite::Row) -> rusqlite::Result<ScheduleRow> {
             .get::<_, Option<String>>(7)?
             .map(|b| b.lines().map(String::from).collect()),
         runs: r.get::<_, i64>(8)? as u64,
+        follow: r.get(9)?,
     })
 }

@@ -138,32 +138,7 @@ fn longest_socket(data_dir: &Path) -> usize {
         .len()
 }
 
-/// `owner/repo` of a GitHub remote URL (https, scp-like or ssh), if it is one.
-pub fn github_repo(url: &str) -> Option<String> {
-    let u = url.trim();
-    let rest = ["https://", "http://", "ssh://", "git://"]
-        .iter()
-        .find_map(|s| u.strip_prefix(s))
-        .map(|r| r.rsplit_once('@').map_or(r, |(_, h)| h))
-        .map(|r| r.split_once('/'))
-        .unwrap_or_else(|| {
-            // scp-like: git@github.com:owner/repo.git
-            let r = u.rsplit_once('@').map_or(u, |(_, h)| h);
-            r.split_once(':')
-        })?;
-    let (host, path) = rest;
-    let host = host.split(':').next().unwrap_or(host);
-    if !host.eq_ignore_ascii_case("github.com") && !host.eq_ignore_ascii_case("www.github.com") {
-        return None;
-    }
-    let path = path.trim_matches('/');
-    let path = path.strip_suffix(".git").unwrap_or(path);
-    let mut it = path.split('/');
-    match (it.next(), it.next(), it.next()) {
-        (Some(o), Some(r), None) if !o.is_empty() && !r.is_empty() => Some(format!("{o}/{r}")),
-        _ => None,
-    }
-}
+pub use mason_daemon::ssh_keys::github_repo;
 
 fn ago(ms: u64) -> String {
     let now = std::time::SystemTime::now()
@@ -185,6 +160,28 @@ fn import_rule(t: &mason_daemon::config::TrackerCfg) -> String {
         format!("imports only issues labelled `{}`", t.label)
     } else {
         "imports the owner's issues and outsiders' labelled ones".into()
+    }
+}
+
+/// Can MASON reach the project's remote the way masond does (never asking, with the repository's
+/// own `core.sshCommand`)? A refusal names the account the host saw.
+fn check_remote_access(p: &ProjectCfg, out: &mut Vec<Finding>) {
+    let Some(remote) = p.remote.as_deref() else {
+        return;
+    };
+    let name = &p.id;
+    match git::run(&p.path, &["ls-remote", remote, "HEAD"]) {
+        Ok(_) => out.push(ok(format!("project {name}: the remote {remote} accepts our credentials"))),
+        Err(e) => match git::auth_failure(&e.stderr) {
+            Some(a) => out.push(fail(format!(
+                "project {name}: the remote refuses us{}. Pushes would fail and landing would be held; run `mason ssh-key list --project {name}` and `mason ssh-key use <path>`",
+                a.seen_as.map_or(String::new(), |u| format!(": GitHub saw the account {u}"))
+            ))),
+            None => out.push(warn(format!(
+                "project {name}: could not reach the remote {remote}: {}",
+                e.stderr.lines().next().unwrap_or("").trim()
+            ))),
+        },
     }
 }
 
@@ -576,6 +573,7 @@ pub fn run(data_dir: &Path, config_dir: &Path) -> Vec<Finding> {
                 check_project(p, &mut out);
                 check_providers(p, config_dir, &mut out);
                 check_tracker(p, live.as_ref(), &mut out);
+                check_remote_access(p, &mut out);
             }
         }
         Err(errs) => errs

@@ -69,6 +69,7 @@ object BannerIcons {
     /** Every `Banner.kind` the daemon emits today; null means deliberately no image. */
     val daemonKinds: Map<String, String?> = mapOf(
         "paused" to "paused",
+        "push_auth" to "paused",
         "definition" to "definition",
         "landing_frozen" to "landing_frozen",
         "provider_outage" to "provider",
