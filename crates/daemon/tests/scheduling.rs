@@ -235,7 +235,8 @@ fn run_check_queues_like_the_test_step_and_frees_the_agents_slot() {
     let text = std::fs::read_to_string(&log).unwrap();
     assert_eq!(
         text.lines().collect::<Vec<_>>(),
-        ["compile", "compile"],
+        // The check ran it; the test step reused that green for the same tree (s179).
+        ["compile"],
         "{text}"
     );
     assert_eq!(d.broker.used("compile"), 0, "nothing leaked");
@@ -812,7 +813,8 @@ fn run_check_builds_then_tests_like_the_test_step() {
     let text = std::fs::read_to_string(&log).unwrap();
     assert_eq!(
         text.lines().collect::<Vec<_>>(),
-        ["b:compile", "t:test-suite", "b:compile", "t:test-suite"],
+        // The check built and tested; the test step reused that green (s179).
+        ["b:compile", "t:test-suite"],
         "{text}"
     );
     assert_eq!(d.broker.used("compile"), 0, "nothing leaked");
