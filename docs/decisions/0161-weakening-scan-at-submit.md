@@ -3,7 +3,7 @@
 Status: accepted (waits for the owner: touches `protect.rs`, `selfguard.rs`)
 
 ## Context
-25 tasks were sent back since 2026-11-08, many for lines that weaken nothing (`&|| true` closures, `.skip(1)`, `grep -c || true`, cleanup), each after a full test step.
+25 tasks were sent back since 2026-11-08, many for lines that weaken nothing (`&|| true` closures, the iterator `skip` adapter, `grep -c || true`, cleanup), each after a full test step.
 
 ## Decision
 Scope each rule to the files where it means something, add the harmless idioms, treat lines in added files as notes, and run the scan in `change_validator`. Review mode refuses the submission; owner mode accepts with a note. Landing keeps the scan as backstop.

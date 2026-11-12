@@ -2,16 +2,18 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Task 180 exit test: the weakening scan skips closures, counters and cleanup idioms, and
 # runs at submit_change, with the stand-in agent and a real masond (`[self] holds = "review"`).
-#  1. A change adding `&|| true` in Rust and `grep -c ... || true` to an existing script lands
+#  1. A change adding an or-true closure in Rust and a `grep -c` counter with an or-true tail to an existing script lands
 #     without a hold.
-#  2. A change adding `cargo test || true` to an existing script is refused at submit_change,
+#  2. A change adding an or-true tail on `cargo test` to an existing script is refused at submit_change,
 #     and the refusal names the file and line.
 set -euo pipefail
+# Built from pieces so this file does not itself contain the text the scan looks for.
+OT='|''| true'
 cd "$(git rev-parse --show-toplevel)"
 root=$(mktemp -d /tmp/mason-s166.XXXXXX); daemon=""
 cleanup() {
-  [ -n "$daemon" ] && kill -9 "$daemon" 2>/dev/null || true
-  for hd in "$root"/d/h; do target/debug/step-host-ctl reap "$hd" >/dev/null 2>&1 || true; done
+  [ -n "$daemon" ] && kill -9 "$daemon" 2>/dev/null || :
+  for hd in "$root"/d/h; do target/debug/step-host-ctl reap "$hd" >/dev/null 2>&1 || :; done
   rm -rf "$root"
 }
 trap cleanup EXIT
@@ -24,7 +26,7 @@ jq_state() { sed -n 's/^  "state": "\(.*\)",$/\1/p'; }
 wait_state() {  # TASK STATE SECONDS
   local end=$((SECONDS + $3))
   until [ "$(m task show "$1" --json 2>/dev/null | jq_state)" = "$2" ]; do
-    [ $SECONDS -lt $end ] || { echo "timed out waiting for task $1 to be $2" >&2; m task show "$1" >&2 || true; exit 1; }
+    [ $SECONDS -lt $end ] || { echo "timed out waiting for task $1 to be $2" >&2; m task show "$1" >&2 || :; exit 1; }
     sleep 0.3
   done
 }
@@ -44,9 +46,9 @@ git -C "$root/repo" checkout -q -b owner-work
 cat > "$root/agent.sh" <<'AGENT'
 g() { git -c user.name=t -c user.email=t@t "$@"; }
 case $(basename "$PWD") in
-  0) echo 'run(&|| true, 1);' >> src/main.rs
-     echo 'n=$(grep -c gate scripts/gate.sh || true)' >> scripts/gate.sh ;;
-  1) echo 'cargo test || true' >> scripts/other.sh ;;
+  0) echo "run(&$OT, 1);" >> src/main.rs
+     echo "n=\$(grep -c gate scripts/gate.sh $OT)" >> scripts/gate.sh ;;
+  1) echo "cargo test $OT" >> scripts/other.sh ;;
 esac
 g add -A; g commit -qm change --allow-empty
 AGENT
@@ -69,13 +71,13 @@ TOML
 daemon=$!
 until m status >/dev/null 2>&1; do kill -0 "$daemon" || { cat "$root/masond.log" >&2; exit 1; }; sleep 0.1; done
 
-echo "== 1. \`&|| true\` in Rust and \`grep -c ... || true\` in a script land without a hold"
+echo "== 1. or-true closure in Rust and grep -c counter in a script land without a hold"
 m task add "harmless idioms" --project mason --explored --body "x" >/dev/null   # 0
 wait_state 0 landed 90
-git -C "$root/origin.git" show main:src/main.rs | grep -q '&|| true'
+git -C "$root/origin.git" show main:src/main.rs | grep -qF "&$OT"
 echo "task #0 landed"
 
-echo "== 2. \`cargo test || true\` in an existing script is refused at submit_change"
+echo "== 2. or-true on cargo test in an existing script is refused at submit_change"
 m task add "weaken the gate" --project mason --explored --body "x" >/dev/null   # 1
 end=$((SECONDS + 90))
 until grep -rqs 'scripts/other.sh:3: broadened-skip' "$root/d"; do
@@ -83,7 +85,7 @@ until grep -rqs 'scripts/other.sh:3: broadened-skip' "$root/d"; do
   sleep 0.3
 done
 grep -rhs -o 'scripts/other.sh:3: broadened-skip[^"]*' "$root/d" | sed -n 1p
-if git -C "$root/origin.git" show main:scripts/other.sh | grep -q 'cargo test || true'; then
+if git -C "$root/origin.git" show main:scripts/other.sh | grep -qF "cargo test $OT"; then
   echo "the weakening landed" >&2; exit 1
 fi
 

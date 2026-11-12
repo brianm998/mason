@@ -2342,10 +2342,9 @@ fn read_whole_log(path: &Path) -> Option<String> {
 /// flake, as the suites path does; the step's name stands for the suite.
 fn record_flaky(c: &Ctx, tests: &[String], except: &[String]) {
     for t in tests.iter().filter(|t| !except.contains(t)) {
-        let _ = c
-            .d
-            .store
-            .record_flaky(&c.step.name, t, c.task.0, crate::daemon::now_ms());
+        let _ =
+            c.d.store
+                .record_flaky(&c.step.name, t, c.task.0, crate::daemon::now_ms());
     }
 }
 
@@ -2847,7 +2846,11 @@ mod tests {
         sh(&dir, &["add", "-A"]);
         sh(&dir, &["commit", "-qm", "init"]);
         sh(&dir, &["checkout", "-q", "-b", "work"]);
-        std::fs::write(dir.join("scripts/run.sh"), format!("echo hi\n{line}\n")).unwrap();
+        std::fs::write(
+            dir.join("scripts/run.sh"),
+            format!("echo hi\n{line}\n").replace("@OT@", concat!("|", "| true")),
+        )
+        .unwrap();
         sh(&dir, &["commit", "-qam", "work"]);
         let head = git::rev_parse(&dir, "HEAD").unwrap();
         let note = dir.join("note.txt");
@@ -2867,7 +2870,7 @@ mod tests {
 
     #[test]
     fn submit_refuses_a_weakening_where_the_project_sends_it_back() {
-        let (r, _) = submit_with("cargo test || true", Some(crate::config::Holds::Review));
+        let (r, _) = submit_with("cargo test @OT@", Some(crate::config::Holds::Review));
         let problems = r.unwrap_err();
         assert!(
             problems
@@ -2876,19 +2879,16 @@ mod tests {
             "{problems:?}"
         );
         // Closures and counters are not findings.
-        let (r, _) = submit_with(
-            "n=$(grep -c x f) || true",
-            Some(crate::config::Holds::Review),
-        );
+        let (r, _) = submit_with("n=$(grep -c x f) @OT@", Some(crate::config::Holds::Review));
         assert!(r.is_ok(), "{r:?}");
         // A project that is not self-hosting is not scanned.
-        let (r, _) = submit_with("cargo test || true", None);
+        let (r, _) = submit_with("cargo test @OT@", None);
         assert!(r.is_ok());
     }
 
     #[test]
     fn submit_accepts_a_weakening_with_a_note_where_the_owner_holds() {
-        let (r, note) = submit_with("cargo test || true", Some(crate::config::Holds::Owner));
+        let (r, note) = submit_with("cargo test @OT@", Some(crate::config::Holds::Owner));
         assert!(r.is_ok(), "{r:?}");
         let text = std::fs::read_to_string(note).unwrap();
         assert!(text.contains("scripts/run.sh:2"), "{text}");

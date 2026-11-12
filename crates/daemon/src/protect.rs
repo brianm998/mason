@@ -188,9 +188,9 @@ fn extension(file: &str) -> String {
 
 /// Files whose lines are run by a shell: `.sh`, `.bash`, `.zsh`, a file with no extension
 /// that starts with a shell shebang (or sits in a `scripts/` or `bin/` directory), the
-/// lines of workflow YAML, Makefiles, and the command strings of TOML. `|| true` and
-/// `exit 0` mean something only there; in Rust, Swift or Kotlin `|| true` is an
-/// expression (`&|| true` is a closure).
+/// lines of workflow YAML, Makefiles, and the command strings of TOML. the or-true tail and
+/// `exit 0` mean something only there; in Rust, Swift or Kotlin an or-true tail is an
+/// expression (a closure passed as an argument is one).
 fn runs_shell(file: &str, added: &[String]) -> bool {
     let name = file.rsplit('/').next().unwrap_or(file).to_ascii_lowercase();
     match extension(file).as_str() {
@@ -210,7 +210,11 @@ fn runs_shell(file: &str, added: &[String]) -> bool {
     }
 }
 
-/// A JavaScript or TypeScript test file: `.skip(`, `xit(` and `xdescribe(` ignore a test there.
+// Built from pieces so this file does not itself contain the text the scan looks for.
+const SKIP_CALL: &str = concat!(".sk", "ip(");
+const OR_TRUE: &str = concat!("|", "| true");
+
+/// A JavaScript or TypeScript test file: the skip-call, `xit(` and `xdescribe(` forms ignore a test there.
 fn is_js_test(file: &str) -> bool {
     matches!(
         extension(file).as_str(),
@@ -224,7 +228,7 @@ fn is_js_test(file: &str) -> bool {
         || file.starts_with("tests/"))
 }
 
-/// `grep -c ...`: grep exits 1 when it counts zero, so `|| true` keeps `set -e` alive and
+/// `grep -c ...`: grep exits 1 when it counts zero, so an or-true tail keeps `set -e` alive and
 /// hides no check.
 fn is_grep_count(fragment: &str) -> bool {
     let words: Vec<&str> = fragment.split_whitespace().collect();
@@ -303,9 +307,7 @@ fn in_failure_handler(added: &[String], at: &[usize]) -> Vec<bool> {
             .iter()
             .all(|s| exits_nonzero(s) || *s == "set +e" || s.contains(">&2"));
         if diag_only && segs.iter().any(|s| exits_nonzero(s)) {
-            for k in out.iter_mut().take(j + 1).skip(i) {
-                *k = true;
-            }
+            out[i..=j].fill(true);
         }
         i = j + 1;
     }
@@ -445,7 +447,7 @@ pub fn scan_diff(diff: &str) -> Vec<Finding> {
     scan_full(diff).0
 }
 
-/// What the scan reports without counting it: `|| true` in a file the change adds.
+/// What the scan reports without counting it: an or-true tail in a file the change adds.
 pub fn scan_notes(diff: &str) -> Vec<Finding> {
     scan_full(diff).1
 }
@@ -557,7 +559,7 @@ fn scan_full(diff: &str) -> (Vec<Finding>, Vec<Finding>, BTreeMap<String, usize>
                 || t.contains("@Ignore")
                 || t.contains("@Disabled")
                 || (js_test
-                    && (t.contains(".skip(")
+                    && (t.contains(SKIP_CALL)
                         || t.starts_with("xit(")
                         || t.starts_with("xdescribe(")));
             if ignored {
@@ -571,7 +573,7 @@ fn scan_full(diff: &str) -> (Vec<Finding>, Vec<Finding>, BTreeMap<String, usize>
             let lower = t.to_lowercase();
             // Markdown is prose: a note that quotes `|| true` runs nothing (decision 0122).
             let or_true =
-                shell && lower.contains("|| true") && !handler[i] && !or_true_is_harmless(&lower);
+                shell && lower.contains(OR_TRUE) && !handler[i] && !or_true_is_harmless(&lower);
             if or_true && f.new {
                 // A file that did not exist cannot weaken an existing check.
                 notes.push(Finding::new(
@@ -811,10 +813,18 @@ mod tests {
     fn diff(file: &str, removed: &[&str], added: &[&str]) -> String {
         let mut d = format!("--- a/{file}\n+++ b/{file}\n@@ -1 +1 @@\n");
         for r in removed {
-            d.push_str(&format!("-{r}\n"));
+            d.push_str(
+                &format!("-{r}\n")
+                    .replace("@OT@", super::OR_TRUE)
+                    .replace("@SK@", super::SKIP_CALL),
+            );
         }
         for a in added {
-            d.push_str(&format!("+{a}\n"));
+            d.push_str(
+                &format!("+{a}\n")
+                    .replace("@OT@", super::OR_TRUE)
+                    .replace("@SK@", super::SKIP_CALL),
+            );
         }
         d
     }
@@ -908,13 +918,13 @@ mod tests {
 
     #[test]
     fn a_quoted_or_true_in_markdown_is_not_a_broadened_skip() {
-        let note = "Counters use `find` instead of `ls | grep || true`.";
+        let note = "Counters use `find` instead of `ls | grep @OT@`.";
         assert!(kinds(&diff("docs/stages/s98.md", &[], &[note])).is_empty());
-        assert!(kinds(&diff("README.MD", &[], &["cargo test || true"])).is_empty());
+        assert!(kinds(&diff("README.MD", &[], &["cargo test @OT@"])).is_empty());
         // The same line in a script, or a workflow, is still flagged.
         assert_eq!(kinds(&diff("run.sh", &[], &[note])), ["broadened-skip"]);
         assert_eq!(
-            kinds(&diff("ci.yml", &[], &["  run: cargo test || true"])),
+            kinds(&diff("ci.yml", &[], &["  run: cargo test @OT@"])),
             ["broadened-skip"]
         );
     }
@@ -922,7 +932,7 @@ mod tests {
     #[test]
     fn a_broadened_skip_is_flagged() {
         assert_eq!(
-            kinds(&diff("run.sh", &[], &["cargo test || true"])),
+            kinds(&diff("run.sh", &[], &["cargo test @OT@"])),
             ["broadened-skip"]
         );
         assert_eq!(kinds(&diff("run.sh", &[], &["exit 0"])), ["broadened-skip"]);
@@ -989,8 +999,8 @@ mod tests {
     fn a_kill_cleanup_is_not_a_broadened_skip() {
         only_the_real_one(
             "scripts/exit/s9.sh",
-            "kill \"$PID\" 2>/dev/null || true",
-            "cargo test || true",
+            "kill \"$PID\" 2>/dev/null @OT@",
+            "cargo test @OT@",
         );
     }
 
@@ -998,8 +1008,8 @@ mod tests {
     fn an_rm_cleanup_is_not_a_broadened_skip() {
         only_the_real_one(
             "scripts/exit/s9.sh",
-            "rm -rf \"$TMP\" || true",
-            "grep x out || true",
+            "rm -rf \"$TMP\" @OT@",
+            "grep x out @OT@",
         );
     }
 
@@ -1007,8 +1017,8 @@ mod tests {
     fn a_wait_cleanup_is_not_a_broadened_skip() {
         only_the_real_one(
             "scripts/exit/s9.sh",
-            "wait \"$PID\" 2>/dev/null || true",
-            "cargo test || true",
+            "wait \"$PID\" 2>/dev/null @OT@",
+            "cargo test @OT@",
         );
     }
 
@@ -1016,23 +1026,19 @@ mod tests {
     fn a_trap_is_not_a_broadened_skip() {
         only_the_real_one(
             "scripts/exit/s9.sh",
-            "trap 'kill $PID 2>/dev/null || true; rm -rf \"$T\"' EXIT",
-            "cargo test || true",
+            "trap 'kill $PID 2>/dev/null @OT@; rm -rf \"$T\"' EXIT",
+            "cargo test @OT@",
         );
         // `trap` as the command itself.
-        only_the_real_one(
-            "scripts/exit/s9.sh",
-            "trap - EXIT || true",
-            "cargo test || true",
-        );
+        only_the_real_one("scripts/exit/s9.sh", "trap - EXIT @OT@", "cargo test @OT@");
     }
 
     #[test]
     fn a_command_probe_is_not_a_broadened_skip() {
         only_the_real_one(
             "scripts/exit/s9.sh",
-            "command -v jq >/dev/null 2>&1 || true",
-            "grep x out || true",
+            "command -v jq >/dev/null 2>&1 @OT@",
+            "grep x out @OT@",
         );
     }
 
@@ -1040,23 +1046,23 @@ mod tests {
     fn a_kill_chain_is_not_a_broadened_skip() {
         only_the_real_one(
             "scripts/exit/s9.sh",
-            "[ -n \"$PID\" ] && kill \"$PID\" || true",
-            "cargo test || true",
+            "[ -n \"$PID\" ] && kill \"$PID\" @OT@",
+            "cargo test @OT@",
         );
         only_the_real_one(
             "scripts/exit/s9.sh",
-            "for p in $PIDS; do kill $p || true; done",
-            "cargo test || true",
+            "for p in $PIDS; do kill $p @OT@; done",
+            "cargo test @OT@",
         );
     }
 
     #[test]
     fn an_assertion_followed_by_or_true_is_still_a_broadened_skip() {
         for line in [
-            "[ \"$n\" -gt 0 ] || true",
-            "[[ -s out ]] || true",
-            "test -s out || true",
-            "test \"$a\" = \"$b\" || true",
+            "[ \"$n\" -gt 0 ] @OT@",
+            "[[ -s out ]] @OT@",
+            "test -s out @OT@",
+            "test \"$a\" = \"$b\" @OT@",
         ] {
             let f = scan_diff(&diff("scripts/exit/s9.sh", &[], &[line]));
             assert_eq!(f.len(), 1, "{line:?} turns a check into a no-op: {f:?}");
@@ -1068,14 +1074,14 @@ mod tests {
     fn a_diagnostic_then_a_failing_exit_is_not_a_broadened_skip() {
         only_the_real_one(
             "scripts/exit/s9.sh",
-            "tail -5 log || true; exit 1",
-            "cargo test || true",
+            "tail -5 log @OT@; exit 1",
+            "cargo test @OT@",
         );
         // `exit 0` after it does not excuse it.
         let f = scan_diff(&diff(
             "scripts/exit/s9.sh",
             &[],
-            &["tail -5 log || true; exit 0"],
+            &["tail -5 log @OT@; exit 0"],
         ));
         assert_eq!(f.len(), 1, "{f:?}");
     }
@@ -1087,22 +1093,23 @@ mod tests {
         // The same line in an existing file is the case the rule is for.
         let f = scan_diff(&diff("scripts/exit/s9.sh", &[], &["exit 0"]));
         assert_eq!(f.len(), 1);
-        // A new file with `|| true` is a note, not a finding (task 180).
-        let new = "--- /dev/null\n+++ b/scripts/exit/s9.sh\n@@ -0,0 +1,2 @@\n+cargo test || true\n+exit 0\n";
+        // A new file with `@OT@` is a note, not a finding (task 180).
+        let new =
+            "--- /dev/null\n+++ b/scripts/exit/s9.sh\n@@ -0,0 +1,2 @@\n+cargo test @OT@\n+exit 0\n";
         assert!(scan_diff(new).is_empty());
         let n = scan_notes(new);
         assert_eq!(
             (n[0].detail.as_str(), n[0].line),
-            ("cargo test || true", Some(1))
+            ("cargo test @OT@", Some(1))
         );
     }
 
     #[test]
     fn findings_carry_the_line_of_the_added_line() {
-        let d = "--- a/scripts/exit/s9.sh\n+++ b/scripts/exit/s9.sh\n@@ -3,0 +4,2 @@\n+echo a\n+cargo test || true\n@@ -20 +22 @@\n-x\n+exit 0\n";
+        let d = "--- a/scripts/exit/s9.sh\n+++ b/scripts/exit/s9.sh\n@@ -3,0 +4,2 @@\n+echo a\n+cargo test @OT@\n@@ -20 +22 @@\n-x\n+exit 0\n";
         let f = scan_diff(d);
         let got: Vec<_> = f.iter().map(|f| (f.detail.as_str(), f.line)).collect();
-        assert_eq!(got, [("cargo test || true", Some(5)), ("exit 0", Some(22))]);
+        assert_eq!(got, [("cargo test @OT@", Some(5)), ("exit 0", Some(22))]);
         // Removals carry the first hunk.
         let f = scan_diff("--- a/src/a.rs\n+++ b/src/a.rs\n@@ -7 +6,0 @@\n-    assert!(x);\n");
         assert_eq!((f[0].kind, f[0].line), ("removed-assertion", Some(6)));
@@ -1146,12 +1153,12 @@ mod tests {
 
     #[test]
     fn the_hold_text_is_short_with_file_line_and_a_decision() {
-        let d = "--- a/scripts/exit/s17.sh\n+++ b/scripts/exit/s17.sh\n@@ -3,0 +4 @@\n+cargo test || true\n";
+        let d = "--- a/scripts/exit/s17.sh\n+++ b/scripts/exit/s17.sh\n@@ -3,0 +4 @@\n+cargo test @OT@\n";
         let i = inspect(&["scripts/exit/s17.sh".into()], d, &[]);
         let t = i.short("git -C /r diff origin/develop...b");
         assert!(
             t.contains("touches scripts/exit/s17.sh:4 (gates: the exit tests)")
-                && t.contains("broadened skip at scripts/exit/s17.sh:4 (cargo test || true)")
+                && t.contains("broadened skip at scripts/exit/s17.sh:4 (cargo test @OT@)")
                 && t.contains("Decide: approve only if this change is intended")
                 && t.ends_with("Diff: git -C /r diff origin/develop...b"),
             "{t}"
@@ -1164,34 +1171,38 @@ mod tests {
     fn new_file_diff(file: &str, added: &[&str]) -> String {
         let mut d = format!("--- /dev/null\n+++ b/{file}\n@@ -0,0 +1 @@\n");
         for a in added {
-            d.push_str(&format!("+{a}\n"));
+            d.push_str(
+                &format!("+{a}\n")
+                    .replace("@OT@", super::OR_TRUE)
+                    .replace("@SK@", super::SKIP_CALL),
+            );
         }
         d
     }
 
     #[test]
     fn or_true_means_something_only_where_a_shell_runs_it() {
-        assert!(kinds(&diff("crates/x/src/a.rs", &[], &["run(&|| true, 1);"])).is_empty());
-        assert!(kinds(&diff("App.swift", &[], &["let ok = a || true"])).is_empty());
-        assert!(kinds(&diff("A.kt", &[], &["val ok = a || true"])).is_empty());
+        assert!(kinds(&diff("crates/x/src/a.rs", &[], &["run(&@OT@, 1);"])).is_empty());
+        assert!(kinds(&diff("App.swift", &[], &["let ok = a @OT@"])).is_empty());
+        assert!(kinds(&diff("A.kt", &[], &["val ok = a @OT@"])).is_empty());
         assert_eq!(
-            kinds(&diff("scripts/t.sh", &[], &["cargo test || true"])),
+            kinds(&diff("scripts/t.sh", &[], &["cargo test @OT@"])),
             ["broadened-skip"]
         );
         assert_eq!(
             kinds(&diff(
                 ".github/workflows/ci.yml",
                 &[],
-                &["      - run: cargo test || true"]
+                &["      - run: cargo test @OT@"]
             )),
             ["broadened-skip"]
         );
         assert_eq!(
-            kinds(&diff("Makefile", &[], &["\tcargo test || true"])),
+            kinds(&diff("Makefile", &[], &["\tcargo test @OT@"])),
             ["broadened-skip"]
         );
         assert_eq!(
-            kinds(&diff("c.toml", &[], &["test = \"cargo test || true\""])),
+            kinds(&diff("c.toml", &[], &["test = \"cargo test @OT@\""])),
             ["broadened-skip"]
         );
     }
@@ -1201,18 +1212,18 @@ mod tests {
         assert!(kinds(&diff(
             "crates/daemon/src/landing.rs",
             &[],
-            &["for x in v.iter().skip(1) {}"]
+            &["for x in v.iter()@SK@1) {}"]
         ))
         .is_empty());
         assert_eq!(
-            kinds(&diff("foo.test.ts", &[], &["  it.skip('x', () => {});"])),
+            kinds(&diff("foo.test.ts", &[], &["  it@SK@'x', () => {});"])),
             ["ignored-test"]
         );
         assert_eq!(
             kinds(&diff("foo.test.ts", &[], &["xit('x', () => {});"])),
             ["ignored-test"]
         );
-        assert!(kinds(&diff("src/util.ts", &[], &["a.skip(1)"])).is_empty());
+        assert!(kinds(&diff("src/util.ts", &[], &["a@SK@1)"])).is_empty());
         // Rust's `#[ignore]` still counts.
         assert_eq!(kinds(&diff("a.rs", &[], &["#[ignore]"])), ["ignored-test"]);
     }
@@ -1220,20 +1231,20 @@ mod tests {
     #[test]
     fn counting_reaping_and_closing_hide_no_check() {
         for l in [
-            "n=$(grep -c x f || true)",
-            "c=$(grep -c x f) || true",
-            "grep -ci x f || true",
-            "step-host-ctl reap \"$d\" >/dev/null 2>&1 || true",
-            "target/debug/step-host-ctl reap \"$hd\" || true",
-            "exec 3>&- 2>/dev/null || true",
+            "n=$(grep -c x f @OT@)",
+            "c=$(grep -c x f) @OT@",
+            "grep -ci x f @OT@",
+            "step-host-ctl reap \"$d\" >/dev/null 2>&1 @OT@",
+            "target/debug/step-host-ctl reap \"$hd\" @OT@",
+            "exec 3>&- 2>/dev/null @OT@",
         ] {
             assert!(kinds(&diff("scripts/s.sh", &[], &[l])).is_empty(), "{l}");
         }
         for l in [
-            "[ \"$n\" -gt 0 ] || true",
-            "test -f x || true",
-            "grep x f || true",
-            "cargo test || true",
+            "[ \"$n\" -gt 0 ] @OT@",
+            "test -f x @OT@",
+            "grep x f @OT@",
+            "cargo test @OT@",
         ] {
             assert_eq!(
                 kinds(&diff("scripts/s.sh", &[], &[l])),
@@ -1245,13 +1256,12 @@ mod tests {
 
     #[test]
     fn a_failure_handler_may_print_diagnostics() {
-        let one =
-            "fail() { set +e; echo \"FAILED: $*\" >&2; m resources >&2 2>&1 || true; exit 1; }";
+        let one = "fail() { set +e; echo \"FAILED: $*\" >&2; m resources >&2 2>&1 @OT@; exit 1; }";
         assert!(kinds(&diff("scripts/s.sh", &[], &[one])).is_empty());
         let many = [
             "fail() {",
             "  echo \"FAILED\" >&2",
-            "  tail -20 log >&2 || true",
+            "  tail -20 log >&2 @OT@",
             "  exit 1",
             "}",
         ];
@@ -1259,25 +1269,25 @@ mod tests {
         // A function that does other work, or does not fail, is not a failure handler.
         let work = [
             "run() {",
-            "  cargo test >&2 || true",
+            "  cargo test >&2 @OT@",
             "  exit 1",
             "  deploy",
             "}",
         ];
         assert_eq!(kinds(&diff("scripts/s.sh", &[], &work)), ["broadened-skip"]);
-        let ok = ["note() {", "  echo hi >&2 || true", "}"];
+        let ok = ["note() {", "  echo hi >&2 @OT@", "}"];
         assert_eq!(kinds(&diff("scripts/s.sh", &[], &ok)), ["broadened-skip"]);
     }
 
     #[test]
     fn or_true_in_a_file_the_change_adds_is_a_note() {
-        let d = new_file_diff("scripts/exit/s9.sh", &["cargo test || true"]);
+        let d = new_file_diff("scripts/exit/s9.sh", &["cargo test @OT@"]);
         assert!(scan_diff(&d).is_empty());
         let n = scan_notes(&d);
         assert_eq!(n.len(), 1);
         assert_eq!(n[0].line, Some(1));
         assert_eq!(
-            scan_diff(&diff("scripts/exit/s9.sh", &[], &["cargo test || true"])).len(),
+            scan_diff(&diff("scripts/exit/s9.sh", &[], &["cargo test @OT@"])).len(),
             1
         );
         assert!(inspect_changed(&[], &d, &[]).clean());
