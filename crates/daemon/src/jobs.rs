@@ -1645,6 +1645,10 @@ fn agent_job(c: &Ctx) {
             let _ = d.store.set_reported_model(run, m);
         }));
     }
+    {
+        let (d, acct, task) = (c.d.clone(), c.project.account.clone(), c.task.0);
+        spec.on_live = Some(Arc::new(move || crate::holds::probe_ok(&d, &acct, task)));
+    }
     spec.env = c.project.agent_env.clone();
     // Whoever the agent runs `mason run` for: it ranks the request as this
     // task's pipeline work. Set last so a project's agent_env cannot name

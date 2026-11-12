@@ -510,3 +510,93 @@ fn a_real_daemon_keeps_a_hold_across_a_kill_and_the_cli_holds_and_releases() {
     assert_eq!(metrics["by_kind"]["account_hold"], 1, "{metrics}");
     assert_eq!(metrics["by_kind"]["account_release"], 1, "{metrics}");
 }
+
+// ---- a probe that gets through lifts the hold at once (#203) ----
+
+fn login_refusal() -> Value {
+    json!([{"result": {"is_error": true, "text": "Not logged in \u{b7} Please run /login",
+        "api_error_status": null}}])
+}
+
+/// Output, then a wait on `go` (a file the test creates), then `tail`.
+fn accepted_then_blocked(go: &std::path::Path, tail: Vec<Value>) -> Value {
+    let mut v = vec![
+        json!({"say": "working"}),
+        json!({"sh": format!("while [ ! -f '{}' ]; do sleep 0.05; done", go.display())}),
+    ];
+    v.extend(tail);
+    Value::Array(v)
+}
+
+fn cred_script(s: &Scratch, develop: Vec<Value>) {
+    let u = unique_script();
+    let mut dev = develop;
+    dev.extend(vec![u["steps"]["develop"][0].clone(); 20]);
+    let v = json!({"steps": {"explore": vec![explore_turn(); 20], "develop": dev}});
+    std::fs::write(&s.script, v.to_string()).unwrap();
+}
+
+fn cred_hold(d: &Arc<Daemon>) -> Option<mason_store::AccountHold> {
+    holds::hold_of(d, "claude").filter(|h| h.kind == "credentials")
+}
+
+#[test]
+fn a_probe_that_gets_through_lifts_the_hold_before_its_session_ends() {
+    let s = Scratch::new("test -f hello.txt", happy_script());
+    let go = s.script.parent().unwrap().join("go");
+    cred_script(
+        &s,
+        vec![login_refusal(), accepted_then_blocked(&go, vec![])],
+    );
+    let d = s.start();
+    let a = file_task(&d, "Probe");
+    wait_for("the credentials hold", 60, || cred_hold(&d).is_some());
+    wait_for("the hold to lift while the session still runs", 60, || {
+        cred_hold(&d).is_none()
+    });
+    assert!(!go.exists());
+    assert_ne!(d.world().unwrap().tasks[&a].state, State::Landed);
+    assert!(matches!(holds::gate(&d, "claude", 9999), holds::Gate::Open));
+    std::fs::write(&go, "").unwrap();
+    wait_state(&d, a, State::Landed, 120);
+}
+
+#[test]
+fn a_probe_that_only_reports_a_model_and_is_refused_keeps_the_hold_and_doubles_the_backoff() {
+    let s = Scratch::new("test -f hello.txt", happy_script());
+    cred_script(&s, vec![login_refusal(); 6]);
+    let d = s.start();
+    let _a = file_task(&d, "Refused probe");
+    let mut seen = std::collections::BTreeSet::new();
+    let mut started = false;
+    wait_for("the backoff to double", 60, || {
+        match cred_hold(&d) {
+            Some(h) => {
+                started = true;
+                seen.insert(h.backoff_ms);
+            }
+            None => assert!(!started, "the hold was lifted by a refused probe"),
+        }
+        seen.contains(&600)
+    });
+    assert!(seen.contains(&300), "{seen:?}");
+}
+
+#[test]
+fn an_accepted_probe_whose_session_later_ends_not_logged_in_puts_the_hold_back() {
+    let s = Scratch::new("test -f hello.txt", happy_script());
+    let go = s.script.parent().unwrap().join("go");
+    cred_script(
+        &s,
+        vec![
+            login_refusal(),
+            accepted_then_blocked(&go, vec![login_refusal()]),
+        ],
+    );
+    let d = s.start();
+    let _a = file_task(&d, "Accepted then refused");
+    wait_for("the credentials hold", 60, || cred_hold(&d).is_some());
+    wait_for("the hold to lift", 60, || cred_hold(&d).is_none());
+    std::fs::write(&go, "").unwrap();
+    wait_for("the hold to come back", 60, || cred_hold(&d).is_some());
+}
