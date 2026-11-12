@@ -77,6 +77,54 @@ fn subcommand<'a>(args: &[&'a str]) -> Option<&'a str> {
     None
 }
 
+/// What MASON appends to every ssh command: never ask, never hang. ssh takes the first value of
+/// an option, so a key or option already in the base command wins.
+pub const SSH_OPTIONS: &str =
+    "-o BatchMode=yes -o ConnectTimeout=30 -o ServerAliveInterval=15 -o ServerAliveCountMax=4";
+
+/// The repository's `core.sshCommand`, if it has one.
+pub fn configured_ssh(cwd: &Path) -> Option<String> {
+    let o = proc::output(
+        Command::new("git")
+            .args(["config", "--get", "core.sshCommand"])
+            .current_dir(cwd),
+        default_deadline(),
+    )
+    .ok()
+    .filter(|o| o.status.success())?;
+    let v = String::from_utf8_lossy(&o.stdout).trim().to_string();
+    (!v.is_empty()).then_some(v)
+}
+
+/// Why GitHub (or the host) refused to let this client in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthFailure {
+    /// The account the host saw, when it said so ("denied to brian-preffect").
+    pub seen_as: Option<String>,
+}
+
+/// Is `stderr` a refusal of credentials, as opposed to a network failure or a rejected push?
+pub fn auth_failure(stderr: &str) -> Option<AuthFailure> {
+    if let Some(i) = stderr.find(" denied to ") {
+        let rest = &stderr[i + " denied to ".len()..];
+        let user: String = rest
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
+            .collect();
+        return Some(AuthFailure {
+            seen_as: (!user.is_empty()).then_some(user),
+        });
+    }
+    let l = stderr.to_ascii_lowercase();
+    if l.contains("permission denied (publickey")
+        || (l.contains("the requested url returned error: 403"))
+        || l.contains("authentication failed")
+    {
+        return Some(AuthFailure { seen_as: None });
+    }
+    None
+}
+
 fn is_network(sub: Option<&str>) -> bool {
     matches!(sub, Some("fetch" | "push" | "clone" | "pull" | "ls-remote"))
 }
@@ -160,10 +208,10 @@ pub fn run_for(cwd: &Path, args: &[&str], limit: Duration) -> Result<String, Git
         // A connection that stalls or crawls must end, and ssh must never ask.
         cmd.args(["-c", "http.lowSpeedLimit=1", "-c", "http.lowSpeedTime=60"]);
         if std::env::var_os("GIT_SSH_COMMAND").is_none() && std::env::var_os("GIT_SSH").is_none() {
-            cmd.env(
-                "GIT_SSH_COMMAND",
-                "ssh -o BatchMode=yes -o ConnectTimeout=30 -o ServerAliveInterval=15 -o ServerAliveCountMax=4",
-            );
+            // The repository's own `core.sshCommand` (a key the owner chose) is the base:
+            // GIT_SSH_COMMAND would otherwise take precedence over it and hide it.
+            let base = configured_ssh(cwd).unwrap_or_else(|| "ssh".to_string());
+            cmd.env("GIT_SSH_COMMAND", format!("{base} {SSH_OPTIONS}"));
         }
     }
     cmd.args(args)
@@ -372,5 +420,36 @@ mod deadline_tests {
             subcommand(&["--no-optional-locks", "status"]),
             Some("status")
         );
+    }
+}
+
+#[cfg(test)]
+mod auth_tests {
+    use super::*;
+
+    const SEEN: &str = "failed (Some(128)): ERROR: Permission to brianm998/starry_timelapse_airplane_remover.git denied to brian-preffect.\nfatal: Could not read from remote repository.";
+
+    #[test]
+    fn recognises_refusals() {
+        assert_eq!(
+            auth_failure(SEEN),
+            Some(AuthFailure {
+                seen_as: Some("brian-preffect".into())
+            })
+        );
+        assert!(auth_failure("git@github.com: Permission denied (publickey).").is_some());
+        assert!(auth_failure(
+            "fatal: unable to access 'https://x/y.git/': The requested URL returned error: 403"
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn ignores_other_failures() {
+        assert!(auth_failure("ssh: connect to host github.com port 22: Operation timed out").is_none());
+        assert!(auth_failure(
+            " ! [rejected] a -> a (non-fast-forward)\nerror: failed to push some refs"
+        )
+        .is_none());
     }
 }

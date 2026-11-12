@@ -449,7 +449,7 @@ fn alerts_and_notifications_keep_working_while_the_repository_lock_is_held() {
         &s,
         &format!("[routing.paused]\nwebhook = \"0\"\n[routing.git_stuck]\nwebhook = \"0\"\n[webhook]\nurl = \"{url}\"\n"),
     );
-    let pid = *d.projects.keys().next().unwrap();
+    let pid = *d.projects().keys().next().unwrap();
     let lock = d.repo_lock(pid);
     let guard = lock.lock().unwrap();
     // Fetches have a lock of their own; hold it too, so the definitions thread blocks in its fetch.

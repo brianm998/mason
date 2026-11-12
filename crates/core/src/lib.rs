@@ -6,6 +6,7 @@
 //! network. Time arrives inside events as a [`Timestamp`].
 
 pub mod access;
+pub mod ci_schedule;
 pub mod ci_watch;
 mod entities;
 mod event;

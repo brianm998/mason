@@ -20,6 +20,8 @@ pub struct Proc {
     pub pgid: u32,
     /// User and system CPU time used so far.
     pub cpu_ms: u64,
+    /// Stopped (`ps` state `T`): by a signal, or by a tracer.
+    pub stopped: bool,
 }
 
 /// Below this share of one core, averaged since the last reading, a holder is idle.
@@ -54,7 +56,7 @@ pub fn parse_time(t: &str) -> Option<u64> {
     Some(days * 86_400_000 + ms)
 }
 
-/// `ps -axo pid=,ppid=,pgid=,time=`, one process a line.
+/// `ps -axo pid=,ppid=,pgid=,time=,stat=`, one process a line (the state is optional).
 pub fn parse_ps(text: &str) -> Vec<Proc> {
     text.lines()
         .filter_map(|l| {
@@ -64,6 +66,7 @@ pub fn parse_ps(text: &str) -> Vec<Proc> {
                 ppid: f.next()?.parse().ok()?,
                 pgid: f.next()?.parse().ok()?,
                 cpu_ms: parse_time(f.next()?)?,
+                stopped: f.next().is_some_and(|st| st.starts_with('T')),
             })
         })
         .collect()
@@ -71,7 +74,7 @@ pub fn parse_ps(text: &str) -> Vec<Proc> {
 
 pub fn read_ps() -> Vec<Proc> {
     std::process::Command::new("ps")
-        .args(["-axo", "pid=,ppid=,pgid=,time="])
+        .args(["-axo", "pid=,ppid=,pgid=,time=,stat="])
         .output()
         .ok()
         .filter(|o| o.status.success())
@@ -79,11 +82,12 @@ pub fn read_ps() -> Vec<Proc> {
         .unwrap_or_default()
 }
 
-/// The CPU time of `root`, everything under it, and its process group's
-/// members (a child that moved itself under init is still in the group).
-/// `None` when `root` is gone.
-pub fn tree_cpu(procs: &[Proc], root: u32) -> Option<u64> {
-    let leader = procs.iter().find(|p| p.pid == root)?;
+/// `root`, everything under it, and its process group's members (a child
+/// that moved itself under init is still in the group). Empty when `root` is gone.
+pub fn tree_of(procs: &[Proc], root: u32) -> Vec<&Proc> {
+    let Some(leader) = procs.iter().find(|p| p.pid == root) else {
+        return vec![];
+    };
     let mut seen: HashSet<u32> = HashSet::from([root]);
     let mut frontier = vec![root];
     while let Some(p) = frontier.pop() {
@@ -96,13 +100,13 @@ pub fn tree_cpu(procs: &[Proc], root: u32) -> Option<u64> {
     if leader.pgid == root {
         seen.extend(procs.iter().filter(|p| p.pgid == root).map(|p| p.pid));
     }
-    Some(
-        procs
-            .iter()
-            .filter(|p| seen.contains(&p.pid))
-            .map(|p| p.cpu_ms)
-            .sum(),
-    )
+    procs.iter().filter(|p| seen.contains(&p.pid)).collect()
+}
+
+/// The CPU time of `root` and its tree (see [`tree_of`]). `None` when `root` is gone.
+pub fn tree_cpu(procs: &[Proc], root: u32) -> Option<u64> {
+    let t = tree_of(procs, root);
+    (!t.is_empty()).then(|| t.iter().map(|p| p.cpu_ms).sum())
 }
 
 /// When each holder was last seen doing something.
@@ -192,6 +196,14 @@ pub fn check(d: &Daemon, tracker: &mut Tracker, now: u64) {
         idle.insert(h.lease, idle_ms);
         if kill_after_ms > 0 && idle_ms >= kill_after_ms && h.task.is_some() && !h.interactive {
             for (id, _) in roots.iter().filter(|(id, _)| !id.is_empty()) {
+                // One watcher to a tree: the stall watcher judges this one.
+                if d.watched
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .contains(id)
+                {
+                    continue;
+                }
                 let text = format!(
                     "Stopped {}'s command `{id}`: it used no CPU for {} while holding a compile slot",
                     h.label,
@@ -252,6 +264,12 @@ mod tests {
             0,
             "forgotten, so first seen again"
         );
+    }
+
+    #[test]
+    fn the_state_column_marks_stopped_processes() {
+        let procs = parse_ps("  10     1    10   0:01.00 Ss\n  11    10    10   0:00.00 T\n  12    10    10   0:00.00 T+\n");
+        assert!(!procs[0].stopped && procs[1].stopped && procs[2].stopped);
     }
 
     #[test]
