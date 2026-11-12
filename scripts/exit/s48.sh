@@ -5,14 +5,16 @@
 #     hits max_open: 5 issues, 3 imported, while the owner's own tasks are not counted.
 #  2. The owner files 12 tasks past max_open = 3 and all are accepted; at most the llm:claude
 #     limit (4 here) agent sessions run at once, and the rest wait their turn until all land.
-#  3. With the CPU source above the threshold (MASON_CPU_FILE = 85) a compile waits with the
-#     reason "CPU 85% > 50%", `mason resources` shows the reading, and it runs when the file reads 20.
+#  3. With one compile running and the CPU source above the threshold (MASON_CPU_FILE = 85), a
+#     further compile waits with the reason "CPU 85% > 50%", `mason resources` shows the reading,
+#     and it runs when the file reads 20.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 command -v python3 >/dev/null || { echo "s48 needs python3" >&2; exit 1; }
-root=$(mktemp -d /tmp/mason-s48.XXXXXX); daemon=""; gh=""; cc=""
+root=$(mktemp -d /tmp/mason-s48.XXXXXX); daemon=""; gh=""; cc=""; first=""
 cleanup() {
   [ -n "$cc" ] && kill "$cc" 2>/dev/null || true
+  [ -n "$first" ] && { touch "$root/release"; kill "$first" 2>/dev/null; } || true
   [ -n "$daemon" ] && kill -9 "$daemon" 2>/dev/null || true
   [ -n "$gh" ] && kill -9 "$gh" 2>/dev/null || true
   for f in "$root"/d/h/*/host.kv; do
@@ -107,7 +109,13 @@ done
 [ "$peak" -ge 2 ] || fail "sessions never overlapped (peak $peak)"
 echo "   all 12 landed; at most $peak sessions at once (limit 4)"
 
-echo "== 3. a compile waits while CPU is above the threshold and runs when it falls"
+echo "== 3. a further compile waits while CPU is above the threshold and runs when it falls"
+# The first compile always starts (the CPU gate holds only further ones), so one holds a slot first.
+m resources limit compile 2 >/dev/null
+m run --needs compile -- sh -c "until [ -e '$root/release' ]; do sleep 0.1; done" 2>"$root/first.err" &
+first=$!
+end=$((SECONDS + 20))
+until m resources | grep -q 'compile .* 1/2 in use'; do [ $SECONDS -lt $end ] || fail "the first compile did not start"; sleep 0.2; done
 echo 85 > "$root/cpu"
 sleep 1.5
 m run --needs compile -- touch "$root/compiled" 2>"$root/cc.err" &
@@ -121,6 +129,7 @@ echo 20 > "$root/cpu"
 end=$((SECONDS + 20))
 until [ -e "$root/compiled" ]; do [ $SECONDS -lt $end ] || fail "the compile did not run after CPU fell"; sleep 0.2; done
 wait "$cc"; cc=""
+touch "$root/release"; wait "$first"; first=""
 echo "   CPU fell to 20%: the compile ran"
 
 trap - EXIT; cleanup

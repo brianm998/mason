@@ -214,6 +214,10 @@ s2=$(m task add "Skipped from Compose" --project worker --explored --body x | ta
 for t in $a $b; do wait_state "$t" needs_attention 60; done
 for t in $c1 $c2 $s1 $s2; do wait_slow "$t"; done
 echo "tasks $a $b are waiting for the owner; $c1 $c2 $s1 $s2 are running their slow suite"
+# The suites being cancelled and skipped are already asleep. Drop the flag before any monitor
+# acts, so a skipped task's landing batch, which may verify before the last action is sent,
+# does not sleep 120 s and hold the answered tasks' landings behind it.
+rm -f "$root/slow.flag"
 
 if [ $swift_ok = 1 ]; then
   "$sw" answer --port "$dport" --task "$a" --option 1 | tail -1
@@ -223,7 +227,6 @@ fi
 "$kt" answer --port "$dport" --task "$b" --option 1 | tail -1
 "$kt" cancel --port "$dport" --task "$c2"
 "$kt" skip --port "$dport" --task "$s2" --step test
-rm -f "$root/slow.flag"
 
 for t in $b $s2; do wait_state "$t" landed 120; done
 wait_state "$c2" canceled 30

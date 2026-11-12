@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # s130 exit test: the waiting text is short. A real masond with `compile` limited to 1: an
 # interactive run holds the slot, two more interactive runs with long commands queue, then a
-# task waits for compile. Its why_waiting (task list and task detail) starts with
+# task waits for compile. Its wait (the activity in task list and task detail, after "waiting on ") starts with
 # "Waiting for compile slot:", has "in line" and "held by", no "behind", neither queued command,
 # and is under 200 characters.
 set -euo pipefail
@@ -96,14 +96,16 @@ until [ -n "$list" ]; do
   list=$(m task list --json | ID="$id" python3 -c "
 import json,os,sys
 t=[x for x in json.load(sys.stdin)['tasks'] if str(x['id'])==os.environ['ID']]
-print(t[0].get('why_waiting','') if t else '')")
+a=t[0].get('activity','') if t else ''
+print(a[len('waiting on '):] if a.startswith('waiting on ') else '')")
   sleep 0.2
 done
 detail=$(m task show "$id" --json | python3 -c "
 import json,sys
 def find(o):
     if isinstance(o,dict):
-        if o.get('why_waiting'): return o['why_waiting']
+        a=o.get('activity')
+        if isinstance(a,str) and a.startswith('waiting on '): return a[len('waiting on '):]
         for v in o.values():
             r=find(v)
             if r: return r

@@ -183,7 +183,7 @@ echo "  #$ta: $wa"; echo "  #$tb: $wb"
 # Whichever is first in line is held up by the holder; the other is behind it.
 first="$wa"; second="$wb"; case "$wa" in *"2nd in line"*) first="$wb"; second="$wa";; esac
 echo "$first"  | grep -q '^Waiting for compile slot: 1st in line, held by interactive holder for '
-echo "$second" | grep -Eq '^Waiting for compile slot: 2nd in line, behind #[0-9]+ \(2 steps from landing\), held by interactive holder for '
+echo "$second" | grep -q '^Waiting for compile slot: 2nd in line, held by interactive holder for '
 # A second interactive caller arrives later but goes ahead of both tasks.
 "$bin/mason" --data-dir "$root/d" --config-dir "$root/c" run --needs compile --label "interactive latecomer" -- \
   sh -c "perl -MTime::HiRes=time -e 'printf \"%d\\n\", time*1000' > '$root/i.time'; echo ran > '$root/i.out'" > /dev/null 2>&1 &
