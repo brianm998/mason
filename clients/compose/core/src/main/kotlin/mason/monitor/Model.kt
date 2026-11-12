@@ -173,6 +173,12 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     /** What `mason proposal publish --preview` would send, once asked for. */
     var publishPreview by mutableStateOf<PublishPreview?>(null)
 
+    /** The SSH key sheet after a refused push: its project (null: closed), the keys, what choosing said. */
+    var sshKeyProject by mutableStateOf<String?>(null)
+    var sshKeys by mutableStateOf<SshKeyList?>(null)
+    var sshKeyResult by mutableStateOf<String?>(null)
+    var sshKeyBusy by mutableStateOf(false)
+
     /** The step selected in the pipeline editor (for its inspector). */
     var editorStep by mutableStateOf("")
         private set
@@ -416,6 +422,28 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
         sessionNotice = OpenSession.copiedNotice(line)
     }
 
+    /** Open the key sheet for [project] and ask the daemon which keys it could use. */
+    fun chooseSshKey(project: String) {
+        sshKeyProject = project
+        sshKeys = null
+        sshKeyResult = null
+        raw("GET", "/projects/$project/ssh-keys", id = "ssh-keys:$project")
+    }
+
+    /** Use this key for the project's remote. The passphrase, if any, is asked for in a dialog on the daemon's Mac, never here. */
+    fun useSshKey(project: String, path: String) {
+        sshKeyBusy = true
+        sshKeyResult = null
+        raw("POST", "/projects/$project/ssh-key", id = "ssh-key:$project", json = EditorJson.text(mapOf("path" to path)))
+    }
+
+    fun closeSshKeys() {
+        sshKeyProject = null
+        sshKeys = null
+        sshKeyResult = null
+        sshKeyBusy = false
+    }
+
     fun raw(method: String, path: String, id: String = "", json: String = "") =
         send(Command(id = id, raw = Raw(method = method, path = path, json = json)))
 
@@ -517,6 +545,11 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
                     is OpenSession.Decision.Failed -> sessionNotice = d.why
                 }
             }
+            if (r.id.startsWith("ssh-keys:")) { if (r.ok) sshKeys = SshKeyList.parse(r.json) else sshKeyResult = r.error }
+            if (r.id.startsWith("ssh-key:")) {
+                sshKeyBusy = false
+                if (r.ok) { sshKeyResult = "The remote accepted the key. Landing is released."; sshKeyProject = null } else sshKeyResult = r.error
+            }
             if (r.id == "announce" && r.ok) announcer.handleClaim(r.json)
             if (r.id == "update-monitor") {
                 if (r.ok) monitorAsked = true else monitorUpdateFailed(r.error)
@@ -560,6 +593,9 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     }
 
     companion object {
+        /** The project a `push_auth` banner is about: its text starts "<project>: ". */
+        fun pushAuthProject(b: Banner): String = b.text.substringBefore(":")
+
         /** The protocol this monitor speaks. */
         const val PROTOCOL = 1
         const val MONITOR_KIND = "compose"

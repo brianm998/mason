@@ -733,6 +733,7 @@ pub fn alerts_now(d: &Daemon) -> Vec<(String, String, String)> {
         }
     }
     out.extend(fetch_alerts(d));
+    out.extend(crate::ssh_keys::alerts(d));
     out.extend(git_stuck_alert(d));
     out.extend(stalled_alert(d, &w));
     for p in d.store.pauses(now_ms()).unwrap_or_default() {
@@ -773,6 +774,17 @@ fn fetch_alerts(d: &Daemon) -> Vec<(String, String, String)> {
                 return None;
             }
             let p = d.projects.get(&pid)?;
+            // A refusal of credentials has one alert and one fix, whether a push or a fetch met it.
+            if let Some(a) = mason_landing::git::auth_failure(&err) {
+                if crate::ssh_keys::held(d, &p.id) {
+                    return None; // the hold's alert says it
+                }
+                return Some((
+                    crate::ssh_keys::alert_key(&p.id),
+                    "tracker".into(),
+                    crate::ssh_keys::alert_text(d, &p.id, a.seen_as.as_deref(), false),
+                ));
+            }
             let first = err.lines().find(|l| !l.trim().is_empty()).unwrap_or("no error text");
             Some((
                 format!("fetch:{}", p.id),

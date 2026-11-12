@@ -166,6 +166,12 @@ public final class MonitorModel: ObservableObject {
     public var cliPath = OpenSession.defaultCLI()
     /// What `mason proposal publish --preview` would send, in the daemon's words, once asked for.
     @Published public var publishPreview: PublishPreview?
+    /// The SSH key sheet after a refused push: the project it is for, the keys offered, and what
+    /// choosing one said. nil project: the sheet is closed.
+    @Published public var sshKeyProject: String?
+    @Published public var sshKeys: SSHKeyList?
+    @Published public var sshKeyResult: String?
+    @Published public var sshKeyBusy = false
     /// The step selected in the pipeline editor (for its inspector).
     @Published public private(set) var editorStep = ""
     /// Called with every command result (the tools read them; the app shows errors).
@@ -483,6 +489,45 @@ public final class MonitorModel: ObservableObject {
         sessionNotice = OpenSession.copiedNotice(line)
     }
 
+    /// The project a `push_auth` banner is about: its text starts "<project>: ".
+    public static func pushAuthProject(_ b: Mason_V1_Banner) -> String {
+        String(b.text.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false).first ?? "")
+    }
+
+    /// Open the key sheet for `project` and ask the daemon which keys it could use.
+    public func chooseSSHKey(project: String) {
+        sshKeyProject = project
+        sshKeys = nil
+        sshKeyResult = nil
+        var c = Mason_V1_Command()
+        c.id = "ssh-keys:\(project)"
+        c.raw = .with { $0.method = "GET"; $0.path = "/projects/\(project)/ssh-keys" }
+        send(c)
+    }
+
+    /// Use this key for the project's remote. A key with a passphrase asks for it in a dialog on
+    /// the daemon's Mac; the passphrase never passes through here.
+    public func useSSHKey(project: String, path: String) {
+        sshKeyBusy = true
+        sshKeyResult = nil
+        var c = Mason_V1_Command()
+        c.id = "ssh-key:\(project)"
+        c.raw = .with { $0.method = "POST"; $0.path = "/projects/\(project)/ssh-key"; $0.json = "{\"path\":\(Self.jsonString(path))}" }
+        send(c)
+    }
+
+    public func closeSSHKeys() {
+        sshKeyProject = nil
+        sshKeys = nil
+        sshKeyResult = nil
+        sshKeyBusy = false
+    }
+
+    static func jsonString(_ s: String) -> String {
+        guard let d = try? JSONSerialization.data(withJSONObject: [s]), let t = String(data: d, encoding: .utf8) else { return "\"\"" }
+        return String(t.dropFirst().dropLast())
+    }
+
     public func raw(_ method: String, _ path: String, json: String = "") {
         command { $0.raw = .with { $0.method = method; $0.path = path; $0.json = json } }
     }
@@ -640,6 +685,13 @@ public final class MonitorModel: ObservableObject {
             case .launch(let anyway): launchSession(task, anyway: anyway)
             case .failed(let why): sessionNotice = why
             }
+        }
+        if r.id.hasPrefix("ssh-keys:"), r.ok { sshKeys = SSHKeyList(json: r.json) }
+        if r.id.hasPrefix("ssh-keys:"), !r.ok { sshKeyResult = r.error }
+        if r.id.hasPrefix("ssh-key:") {
+            sshKeyBusy = false
+            if r.ok { sshKeyResult = "The remote accepted the key. Landing is released."; sshKeyProject = nil }
+            else { sshKeyResult = r.error }
         }
         if r.id == "announce", r.ok { announcer.handle(claim: r.json) }
         if r.id == "update-monitor" {
@@ -820,6 +872,41 @@ public struct PublishPreview: Equatable, Sendable {
         redactions = o["redactions"] as? Int ?? 0
         blocked = o["blocked"] as? String
         pr = o["pr"] as? Int
+    }
+}
+
+/// The keys the daemon offers for a project's remote.
+public struct SSHKeyList: Equatable, Sendable {
+    public struct Key: Equatable, Sendable, Identifiable {
+        public var id: String { path.isEmpty ? fingerprint : path }
+        public var path = ""
+        public var fingerprint = ""
+        public var comment = ""
+        public var inAgent = false
+        public var encrypted = false
+        public var onOwnerAccount = false
+        public var seenAs: String?
+        /// A key with no file cannot be named to ssh: only the agent has it.
+        public var usable: Bool { !path.isEmpty }
+    }
+    public var keys: [Key] = []
+    /// The daemon's host: where the passphrase dialog appears.
+    public var host = ""
+
+    public init(json: String) {
+        guard let d = json.data(using: .utf8), let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return }
+        host = o["host"] as? String ?? ""
+        keys = (o["keys"] as? [[String: Any]] ?? []).map { k in
+            var x = Key()
+            x.path = k["path"] as? String ?? ""
+            x.fingerprint = k["fingerprint"] as? String ?? ""
+            x.comment = k["comment"] as? String ?? ""
+            x.inAgent = k["in_agent"] as? Bool ?? false
+            x.encrypted = k["encrypted"] as? Bool ?? false
+            x.onOwnerAccount = k["on_owner_account"] as? Bool ?? false
+            x.seenAs = k["seen_as"] as? String
+            return x
+        }
     }
 }
 

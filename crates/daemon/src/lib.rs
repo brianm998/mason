@@ -49,6 +49,7 @@ pub mod schedule;
 pub mod selfguard;
 pub mod selftest;
 pub mod services;
+pub mod ssh_keys;
 pub mod stall;
 pub mod suites;
 pub mod sweep;
@@ -59,6 +60,7 @@ pub mod tracker;
 pub mod update;
 pub mod usage;
 pub mod views;
+pub mod watch;
 pub mod watchdog;
 pub mod ws;
 
