@@ -158,6 +158,7 @@ fn task_json(d: &Daemon, w: &World, t: &Task, detail: bool) -> Value {
             |h| json!({"reasons": h.reasons, "approved_by": h.approved_by, "since": h.at}),
         );
         v["failure"] = t.failure.as_ref().map_or(Value::Null, |f| json!(f));
+        v["excused"] = json!(crate::basecheck::recorded(&d.task_dir(t.id)));
         v["host_losses"] = json!(d
             .store
             .host_losses_for_task(t.id.0)

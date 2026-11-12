@@ -2566,6 +2566,9 @@ fn main() {
                     if let Some(f) = t["failure"].as_str() {
                         println!("  failed    {f}");
                     }
+                    for l in t["excused"].as_array().into_iter().flatten() {
+                        println!("  excused   {}", l.as_str().unwrap_or(""));
+                    }
                     for l in t["host_losses"].as_array().into_iter().flatten() {
                         println!(
                             "  host lost `{}` ({}): {}",
