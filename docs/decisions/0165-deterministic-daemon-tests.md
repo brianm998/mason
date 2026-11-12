@@ -1,0 +1,13 @@
+# 0165: Four flaky daemon tests wait for conditions, not time
+
+Four tests failed on a loaded machine. Each failure had a cause that was not the code under test.
+
+**Sweep (`a_healthy_daemon_files_no_bugs_across_many_passes`).** The logs show `projection_drift` filed with "4 events but last seq 5: gap". `Store::verify` ran `COUNT(*)` and the last sequence number as two separate reads; an event appended between them looked like a gap in a healthy log. This was a real bug in `verify`, not only in the test: on a live daemon the every-tenth-pass check could file a false bug and rebuild projections. `verify` now takes one read transaction, so the count, last sequence, projected sequence, replay and dump come from one snapshot. `crates/store` is not a protected file.
+
+**Crash boundaries.** Logs show "the injected crash never happened" and "the task never landed after the restart". The test filed the task once and ignored a failure; if that one request failed on a busy machine the daemon never reached the boundary. It now repeats the request until it succeeds, the daemon is gone, or a task is recorded (so the task is never filed twice). The limits on the crash wait and the landing wait went from 240 s and 120 s to 600 s; they only stop a hang. A `git init` that timed out at 300 s in scenario setup (a stalled disk) is not fixed by this.
+
+**Hold across a kill.** The usage-limit hold lasted 25 s of wall-clock time. A stall between the hold and the kill or the restart let it expire, so "still held after the restart" or "no session starts during the hold" failed. The hold now lasts an hour and the test releases it by hand through the CLI, then waits for both tasks to land. Because that is a second recorded release, `account_release` in the final metrics is 2 (one for the usage-limit hold, one for the hand-made hold); `account_hold` stays 1. Every other assertion is unchanged.
+
+**Admission (`when_a_step_ends_the_next_task_is_the_next_one_admitted`).** The test asserted `gap < 5000` ms between the end of A's step and B's admission, which the test rules forbid. It now asserts the order in the event log: after A's agent step ends, B's `Admitted` is the next and only admission, and the admissions overall are exactly A then B (B was not admitted before A's session was free). The periodic paths that could admit are still an hour away, so an admission can only come from the step's end. The measured gap is still printed because `scripts/exit/s11.sh` reads it and holds it to 100 ms; that remains a timing check in an exit script, not in a test. `s60.sh` uses the new name.
+
+No protected file changed.

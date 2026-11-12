@@ -26,6 +26,9 @@ fn now() -> u64 {
         .as_secs()
 }
 
+/// How long the usage-limit hold in the kill test lasts. It is released by hand, never waited out.
+const HOLD_S: u64 = 3600;
+
 /// The reset is `resets_in` seconds after the fake agent emits the event, never an
 /// absolute time fixed at test start (the daemon drops resets already past).
 fn limit_turn(resets_in: u64) -> Value {
@@ -448,7 +451,7 @@ fn a_real_daemon_keeps_a_hold_across_a_kill_and_the_cli_holds_and_releases() {
     let t0 = now();
     let s = Scratch::new(
         "test -f hello.txt",
-        script(vec![limit_turn(25), develop_turn()]),
+        script(vec![limit_turn(HOLD_S), develop_turn()]),
     );
     let mut m = s.masond(&[], &[]);
     s.wait_daemon(&mut m);
@@ -477,7 +480,10 @@ fn a_real_daemon_keeps_a_hold_across_a_kill_and_the_cli_holds_and_releases() {
     drop(store);
     assert_eq!(held.len(), 1, "the hold is in the store");
     let reset = held[0].until_ms.expect("a reset") / 1000;
-    assert!((t0 + 25..=now() + 25).contains(&reset), "{reset} vs {t0}");
+    assert!(
+        (t0 + HOLD_S..=now() + HOLD_S).contains(&reset),
+        "{reset} vs {t0}"
+    );
 
     let mut m2 = s.masond(&[], &[]);
     s.wait_daemon(&mut m2);
@@ -493,8 +499,13 @@ fn a_real_daemon_keeps_a_hold_across_a_kill_and_the_cli_holds_and_releases() {
         .sum();
     drop(store);
     assert_eq!(during, before, "no session starts during the hold");
-    s.wait_task(0, "landed", 120);
-    s.wait_task(1, "landed", 120);
+    // The hold lasts far longer than this test needs, so no machine stall can end it
+    // early; it is released by hand, which is recorded like any release.
+    assert!(s
+        .mason_ok(&["account", "release", "claude"])
+        .contains("Released"));
+    s.wait_task(0, "landed", 300);
+    s.wait_task(1, "landed", 300);
     assert_eq!(usage_of(&s, "claude")["status"], "ok");
 
     // By hand, from the CLI.
@@ -508,5 +519,6 @@ fn a_real_daemon_keeps_a_hold_across_a_kill_and_the_cli_holds_and_releases() {
     assert_eq!(usage_of(&s, "claude")["status"], "ok");
     let metrics: Value = serde_json::from_str(&s.mason_ok(&["metrics", "--json"])).unwrap();
     assert_eq!(metrics["by_kind"]["account_hold"], 1, "{metrics}");
-    assert_eq!(metrics["by_kind"]["account_release"], 1, "{metrics}");
+    // One release ends the usage-limit hold, one ends the hand-made hold.
+    assert_eq!(metrics["by_kind"]["account_release"], 2, "{metrics}");
 }

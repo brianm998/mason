@@ -767,7 +767,7 @@ fn crate_steps() -> usize {
 }
 
 #[test]
-fn when_a_step_ends_the_next_task_is_admitted_within_100_ms() {
+fn when_a_step_ends_the_next_task_is_the_next_one_admitted() {
     // One LLM session and two tasks: when the first lands the second is claimed.
     // Every periodic path that also admits (the sweep, the definition watcher) is
     // an hour away, so B can only be admitted by the step's end itself.
@@ -790,31 +790,45 @@ fn when_a_step_ends_the_next_task_is_admitted_within_100_ms() {
     }
     // One session: A holds it through development, and the moment A's agent
     // step ends it is B's.
+    // One session: A holds it through development, and the moment A's agent
+    // step ends it is B's. How long that takes depends on the machine, so the test
+    // asserts the order of the log, which does not: B's admission is the next
+    // admission after A's step ends, and nothing else is admitted in between.
+    // (scripts/exit/s11.sh holds the measured latency to the DESIGN target.)
     let a_agent_done = events
         .iter()
-        .find(|e| matches!(&e.event.kind, EventKind::StepSucceeded { task, next: Some(n) } if *task == a && n.state == State::Testing))
-        .map(|e| e.event.at.0)
-        .unwrap();
-    let admitted_b = events
+        .position(|e| matches!(&e.event.kind, EventKind::StepSucceeded { task, next: Some(n) } if *task == a && n.state == State::Testing))
+        .expect("A's agent step ends");
+    // Printed for scripts/exit/s11.sh, which holds it to the DESIGN target; not asserted here.
+    if let Some(adm_b) = events
         .iter()
         .find(|e| matches!(&e.event.kind, EventKind::Admitted { task, .. } if *task == b))
-        .map(|e| e.event.at.0)
-        .unwrap();
-    assert!(
-        admitted_b + 5 >= a_agent_done,
-        "B must wait for A's session"
+    {
+        let gap = adm_b.event.at.0.saturating_sub(events[a_agent_done].event.at.0);
+        eprintln!("a step ends, the next task is admitted: {gap} ms");
+    }
+    let admissions: Vec<(usize, TaskId)> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(i, e)| match &e.event.kind {
+            EventKind::Admitted { task, .. } => Some((i, *task)),
+            _ => None,
+        })
+        .collect();
+    let after: Vec<TaskId> = admissions
+        .iter()
+        .filter(|(i, _)| *i > a_agent_done)
+        .map(|(_, t)| *t)
+        .collect();
+    assert_eq!(
+        after,
+        vec![b],
+        "B is the next and only admission after A's step ends: {admissions:?}"
     );
-    let gap = admitted_b.saturating_sub(a_agent_done);
-    eprintln!("a step ends, the next task is admitted: {gap} ms");
-    // The DESIGN target is 100 ms (Part 7), and scripts/exit/s11.sh holds the
-    // number printed above to it. Here the test proves what does not depend on how
-    // busy the machine is: the hand-off is driven by the step ending, not by a poll.
-    // With every poll an hour away, an admission within seconds can only come
-    // from the event. (On a machine running ten workspaces' tests at once the
-    // same hand-off measured 300-450 ms, and the bare 100 ms assert failed tasks.)
-    assert!(
-        gap < 5_000,
-        "admitted {gap} ms after the step ended: not driven by the step's end"
+    assert_eq!(
+        admissions.iter().map(|(_, t)| *t).collect::<Vec<_>>(),
+        vec![a, b],
+        "B was not admitted before A's session was free"
     );
 }
 
