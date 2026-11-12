@@ -22,11 +22,19 @@ fn github(api: &str, repo: &str, tok: &str, workflow: Option<String>) -> Result<
     Ok(g)
 }
 
+fn infra_of(c: Option<&CiCfg>) -> Option<Vec<String>> {
+    c.filter(|c| c.infra_judge)
+        .map(|c| c.infra_patterns.clone())
+}
+
 pub fn host(p: &ProjectCfg) -> Result<Option<Arc<dyn GitHostAdapter>>, String> {
     Ok(match &p.services.host {
         None => None,
         Some(HostCfg::Github { api, repo, token }) => {
-            Some(Arc::new(github(api, repo, token, None)?))
+            let mut g = github(api, repo, token, None)?;
+            // Pull-request checks are judged by the same `[ci]` setting.
+            g.infra = infra_of(p.services.ci.as_ref());
+            Some(Arc::new(g))
         }
         Some(HostCfg::Fake {
             dir,
@@ -57,7 +65,11 @@ pub fn ci(p: &ProjectCfg) -> Result<Option<Ci>, String> {
                     repo,
                     token,
                     workflow,
-                } => Arc::new(github(api, repo, token, workflow.clone())?),
+                } => {
+                    let mut g = github(api, repo, token, workflow.clone())?;
+                    g.infra = infra_of(Some(c));
+                    Arc::new(g)
+                }
                 CiKind::Jenkins {
                     url,
                     job,

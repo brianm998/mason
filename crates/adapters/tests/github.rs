@@ -119,7 +119,10 @@ fn the_build_system_passes_its_conformance_kit() {
 #[test]
 fn ci_red_names_the_failed_jobs_and_pending_is_pending() {
     let g = gh("ci_red.json");
-    let CiState::Red { failed, summary } = g.gh.status("ddd444").unwrap() else {
+    let CiState::Red {
+        failed, summary, ..
+    } = g.gh.status("ddd444").unwrap()
+    else {
         panic!()
     };
     assert_eq!(failed, ["integration"]);
@@ -365,7 +368,8 @@ fn the_command_ci_passes_the_build_kit() {
         red.status("abc").unwrap(),
         CiState::Red {
             failed: vec!["unit".into(), "e2e".into()],
-            summary: "unit, e2e failed".into()
+            summary: "unit, e2e failed".into(),
+            jobs: vec![],
         }
     );
     let pend = CommandCi {
@@ -406,6 +410,7 @@ fn the_fake_host_merges_what_is_queued_when_it_is_green_and_drops_what_is_red() 
     assert_eq!((st.state, st.checks), (PrState::Closed, Checks::Red));
 }
 
+<<<<<<< HEAD
 #[test]
 fn base_branch_runs_jobs_and_the_log_tail_come_from_recorded_responses() {
     let g = gh("base_runs_green.json");
@@ -442,4 +447,168 @@ fn iso_times_read_as_milliseconds() {
     assert_eq!(iso_ms("1970-01-01T00:00:01Z"), 1000);
     assert_eq!(iso_ms("2000-03-01T00:00:00Z"), 951_868_800_000);
     assert_eq!(iso_ms("garbage"), 0);
+}
+
+// ---- the infrastructure judge (stage 153) ------------------------------------------------------
+
+fn judged_gh(entries: serde_json::Value, judge: bool) -> Gh {
+    let d = tempfile::tempdir().unwrap();
+    let tok = d.path().join("token");
+    std::fs::write(&tok, "ghp_recorded_test_token\n").unwrap();
+    let http = Arc::new(Recorded::from_json(&entries.to_string()).unwrap());
+    let mut gh = GitHub::new(
+        http.clone(),
+        "https://api.github.com",
+        "o/r",
+        TokenRef::File(tok),
+    );
+    if judge {
+        gh.infra = Some(vec![]);
+    }
+    Gh { gh, http, _d: d }
+}
+
+fn ok(body: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({"status": 200, "headers": {}, "body": body})
+}
+
+/// A completed failed run `pr-gate` with the given jobs `(id, name, conclusion)`, and logs
+/// `(job id, answer)`.
+fn red_script(
+    jobs: &[(u64, &str, &str)],
+    logs: Vec<(u64, serde_json::Value)>,
+) -> serde_json::Value {
+    use serde_json::json;
+    let mut v = vec![
+        json!({"method": "GET", "url": "/actions/runs?head_sha=sha1", "response": ok(json!({
+            "workflow_runs": [{"id": 5, "name": "pr-gate", "status": "completed", "conclusion": "failure"}]}))}),
+        json!({"method": "GET", "url": "/actions/runs/5/jobs", "response": ok(json!({
+            "jobs": jobs.iter().map(|(id, n, c)| json!({
+                "id": id, "name": n, "conclusion": c,
+                "steps": [{"name": "build", "conclusion": if *c == "cancelled" { json!(null) } else { json!("failure") }}]
+            })).collect::<Vec<_>>()}))}),
+    ];
+    for (id, resp) in logs {
+        v.push(
+            json!({"method": "GET", "url": format!("/actions/jobs/{id}/logs"), "response": resp}),
+        );
+    }
+    serde_json::Value::Array(v)
+}
+
+fn redirect(to: &str) -> serde_json::Value {
+    serde_json::json!({"status": 302, "headers": {"Location": to}, "body": ""})
+}
+
+fn jobs_of(s: CiState) -> Vec<JobFailure> {
+    let CiState::Red { jobs, .. } = s else {
+        panic!("{s:?}")
+    };
+    jobs
+}
+
+const LOG_URL: &str = "https://blob.example/logs/1";
+
+fn log_entry(text: &str) -> serde_json::Value {
+    serde_json::json!({"method": "GET", "url": LOG_URL,
+        "response": {"status": 200, "headers": {}, "body": text}})
+}
+
+#[test]
+fn a_timed_out_job_is_infrastructure_without_fetching_its_log() {
+    let g = judged_gh(red_script(&[(11, "macOS", "timed_out")], vec![]), true);
+    let jobs = jobs_of(g.gh.status("sha1").unwrap());
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(
+        (jobs[0].workflow.as_str(), jobs[0].job.as_str()),
+        ("pr-gate", "macOS")
+    );
+    assert!(jobs[0].infra.is_some());
+    assert!(g.http.requests().iter().all(|r| !r.url.contains("/logs")));
+}
+
+#[test]
+fn a_failure_whose_log_says_the_runner_was_shut_down_is_infrastructure() {
+    for text in [
+        "##[error]The runner has received a shutdown signal.",
+        "ping: Temporary failure resolving 'github.com'",
+    ] {
+        let mut script = red_script(&[(11, "macOS", "failure")], vec![(11, redirect(LOG_URL))]);
+        script.as_array_mut().unwrap().push(log_entry(text));
+        let g = judged_gh(script, true);
+        let jobs = jobs_of(g.gh.status("sha1").unwrap());
+        assert!(jobs[0].infra.is_some(), "{text}");
+        assert!(g.http.unused().is_empty(), "{:?}", g.http.unused());
+        // The redirect target is not GitHub's: it never sees the token.
+        let last = g.http.requests().pop().unwrap();
+        assert_eq!(last.url, LOG_URL);
+        assert!(last
+            .headers
+            .iter()
+            .all(|(k, _)| !k.eq_ignore_ascii_case("authorization")));
+    }
+}
+
+#[test]
+fn a_compile_error_and_a_failed_xctest_assertion_are_real() {
+    for text in [
+        "error[E0308]: mismatched types",
+        "XCTAssertEqual failed: (\"1\") is not equal to (\"2\")\nTest Case '-[T testX]' failed",
+    ] {
+        let mut script = red_script(&[(11, "Linux", "failure")], vec![(11, redirect(LOG_URL))]);
+        script.as_array_mut().unwrap().push(log_entry(text));
+        let g = judged_gh(script, true);
+        let jobs = jobs_of(g.gh.status("sha1").unwrap());
+        assert_eq!(jobs[0].infra, None, "{text}");
+    }
+}
+
+#[test]
+fn a_mix_names_each_job_and_only_the_failure_job_has_its_log_fetched() {
+    // A direct 200 answer is a log too.
+    let script = red_script(
+        &[(11, "macOS", "timed_out"), (12, "Linux", "failure")],
+        vec![(12, ok(serde_json::json!("error: cannot find 'x' in scope")))],
+    );
+    let g = judged_gh(script, true);
+    let jobs = jobs_of(g.gh.status("sha1").unwrap());
+    assert!(jobs[0].infra.is_some());
+    assert_eq!(jobs[1].infra, None);
+    let logs: Vec<_> = g
+        .http
+        .requests()
+        .into_iter()
+        .filter(|r| r.url.contains("/logs"))
+        .collect();
+    assert_eq!(logs.len(), 1);
+    assert!(logs[0].url.ends_with("/actions/jobs/12/logs"));
+}
+
+#[test]
+fn a_job_cancelled_with_no_step_run_never_got_a_runner() {
+    let g = judged_gh(red_script(&[(11, "macOS", "cancelled")], vec![]), true);
+    let jobs = jobs_of(g.gh.status("sha1").unwrap());
+    assert_eq!(jobs[0].infra.as_deref(), Some("never got a runner"));
+}
+
+#[test]
+fn a_log_that_cannot_be_fetched_counts_as_a_real_failure() {
+    let g = judged_gh(
+        red_script(
+            &[(11, "macOS", "failure")],
+            vec![(
+                11,
+                serde_json::json!({"status": 404, "headers": {}, "body": {"message": "gone"}}),
+            )],
+        ),
+        true,
+    );
+    assert_eq!(jobs_of(g.gh.status("sha1").unwrap())[0].infra, None);
+}
+
+#[test]
+fn with_the_judge_off_no_log_is_requested_and_no_job_is_reported() {
+    let g = judged_gh(red_script(&[(11, "macOS", "failure")], vec![]), false);
+    assert!(jobs_of(g.gh.status("sha1").unwrap()).is_empty());
+    assert!(g.http.requests().iter().all(|r| !r.url.contains("/logs")));
 }
