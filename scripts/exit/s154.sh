@@ -27,7 +27,7 @@ m() { "$bin/mason" --data-dir "$root/d" --config-dir "$root/c" "$@"; }
 fail() { echo "FAILED: $*" >&2; set +e; m task list >&2 2>&1; m status >&2 2>&1; tail -20 "$root/masond.log" >&2; exit 1; }
 count_of() { m task list | awk -v p="$1" '/^#/ && index($0, p) { n++ } END { print n + 0 }'; }
 id_of() { m task list | grep "$1" | head -1 | sed -E 's/^#?([0-9]+).*/\1/'; }
-frozen() { m landing | grep -c '^FROZEN' || true; }
+frozen() { m landing | awk '/^FROZEN/ { n++ } END { print n + 0 }'; }
 RUNS=""
 run() {  # ID CONCLUSION GATE-JOB-CONCLUSION: serve one more finished run on the base branch
   local id=$1 when
