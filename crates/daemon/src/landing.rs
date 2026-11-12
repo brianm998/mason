@@ -2032,7 +2032,7 @@ impl Runner {
             }
         }
         let base = self.project().base.clone();
-        let verdict = match crate::ci_watch::source(self.project()) {
+        let verdict = match crate::ci_watch::source(self.project(), "the landing CI comparison") {
             Ok((gh, _)) if !jobs.is_empty() => crate::ci_watch::assess(&gh, &base, jobs),
             _ => return notes,
         };
