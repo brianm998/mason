@@ -51,7 +51,8 @@ fn command_status_reads_red_and_its_failed_jobs() {
         g.status("bad").unwrap(),
         CiState::Red {
             failed: vec!["lint".into(), "unit".into()],
-            summary: "lint, unit failed".into()
+            summary: "lint, unit failed".into(),
+            jobs: vec![],
         }
     );
 }
@@ -92,7 +93,8 @@ fn url_halves_pass_the_build_kit_on_recorded_responses() {
         g.status("build-9").unwrap(),
         CiState::Red {
             failed: vec!["unit".into()],
-            summary: "unit failed".into()
+            summary: "unit failed".into(),
+            jobs: vec![],
         }
     );
 }

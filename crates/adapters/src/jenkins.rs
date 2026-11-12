@@ -129,6 +129,7 @@ impl Jenkins {
             // An unstable build (tests failed) is not a pass.
             Some(r @ ("FAILURE" | "UNSTABLE" | "ABORTED" | "NOT_BUILT")) => CiState::Red {
                 failed: vec![],
+                jobs: vec![],
                 summary: format!("Jenkins build #{number} is {r}"),
             },
             // No result yet and not building: still being set up.
@@ -184,6 +185,7 @@ impl BuildSystemAdapter for Jenkins {
             if q["cancelled"].as_bool().unwrap_or(false) {
                 return Ok(CiState::Red {
                     failed: vec![],
+                    jobs: vec![],
                     summary: "the Jenkins queue item was cancelled".into(),
                 });
             }
