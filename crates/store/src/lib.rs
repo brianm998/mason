@@ -1218,6 +1218,56 @@ impl Store {
         })
     }
 
+    /// Remember how a test command ended on this exact content tree: green, or red with
+    /// the tests that failed. A later result for the same tree and command replaces it.
+    pub fn put_command_run(
+        &self,
+        tree: &str,
+        cmd: &str,
+        green: bool,
+        source: &str,
+        names: &[String],
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
+        let (t, k, s, n) = (
+            tree.to_string(),
+            cmd.to_string(),
+            source.to_string(),
+            names.join("\n"),
+        );
+        self.write(move |c| {
+            c.execute(
+                "INSERT OR REPLACE INTO command_runs(tree, cmd, green, source, names, at) VALUES (?1,?2,?3,?4,?5,?6)",
+                params![t, k, green as i64, s, n, now_ms as i64],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// `(green, source, failing tests)` of the last recorded run of this command on this tree.
+    pub fn command_run(
+        &self,
+        tree: &str,
+        cmd: &str,
+    ) -> Result<Option<(bool, String, Vec<String>)>, StoreError> {
+        let (t, k) = (tree.to_string(), cmd.to_string());
+        self.read(move |c| {
+            c.query_row(
+                "SELECT green, source, names FROM command_runs WHERE tree = ?1 AND cmd = ?2",
+                params![t, k],
+                |r| {
+                    let names: String = r.get(2)?;
+                    Ok((
+                        r.get::<_, i64>(0)? != 0,
+                        r.get::<_, String>(1)?,
+                        names.lines().map(str::to_string).collect(),
+                    ))
+                },
+            )
+            .optional()
+        })
+    }
+
     /// A suite went green for this base: its test count is the next run's expected total.
     pub fn put_suite_green(
         &self,

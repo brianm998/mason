@@ -1084,6 +1084,8 @@ struct TestChecks {
     /// The test step's suites, when `run_check` runs those (some are bound to
     /// `development`); otherwise it runs the one command.
     suites: Option<DevSuites>,
+    task: u64,
+    run: u64,
 }
 
 /// What `run_check` needs to pick suites: the test step, and where the base is.
@@ -1268,6 +1270,21 @@ impl CheckHandler for TestChecks {
             passed: false,
             summary: "The step is over; the check did not run.".into(),
         };
+        // The exact content tree and command already went green (here, in the test step or in
+        // landing's re-test): the answer is that result, and nothing runs.
+        let key = crate::cmdreuse::command_key(cmds.build.as_deref(), &cmds.test);
+        let ctree = crate::cmdreuse::content_tree(&self.wt);
+        if let Some(src) = ctree
+            .as_deref()
+            .and_then(|t| crate::cmdreuse::green_for(&self.slots.d, t, &key))
+        {
+            return CheckRun::Done {
+                passed: true,
+                summary: format!(
+                    "Green for this exact tree and command already ({src}); the tests were not run again."
+                ),
+            };
+        }
         // Under a step host, so that a restarted daemon finds the run again.
         let tree = crate::hostedcheck::tree_key(&self.wt);
         let spec = |prefix: String, cmd: &str, uses: &std::collections::BTreeMap<String, u32>| {
@@ -1338,6 +1355,12 @@ impl CheckHandler for TestChecks {
         let res = crate::hostedcheck::run(&self.slots.d, &spec);
         drop(test_lease);
         self.slots.take_agent_slot_back();
+        if let (Ok(o), Some(t)) = (&res, &ctree) {
+            if o.passed {
+                let src = format!("run_check of task #{}, run {}", self.task, self.run);
+                crate::cmdreuse::record_green(&self.slots.d, t, &key, &src);
+            }
+        }
         match res {
             Ok(o) => CheckRun::Done {
                 passed: o.passed,
@@ -1587,6 +1610,26 @@ fn change_validator(
     })
 }
 
+/// Wrap `inner` so a `submit_change` whose head tree was red on the test step for this
+/// command, and has not changed since, is refused with the failing tests and the run.
+fn refuse_known_red(inner: Validator, d: Arc<Daemon>, wt: PathBuf, key: String) -> Validator {
+    Box::new(move |tool, args| {
+        let mut problems = inner(tool, args).err().unwrap_or_default();
+        if tool == "submit_change" {
+            if let Ok(tree) = git::run(&wt, &["rev-parse", "HEAD^{tree}"]) {
+                if let Some(why) = crate::cmdreuse::known_red(&d, tree.trim(), &key) {
+                    problems.push(why);
+                }
+            }
+        }
+        if problems.is_empty() {
+            Ok(())
+        } else {
+            Err(problems)
+        }
+    })
+}
+
 /// What `submit_change` needs to run the weakening scan: the project's base branch, and what
 /// its `[self] holds` says to do with a finding.
 struct WeakeningCheck {
@@ -1738,6 +1781,9 @@ fn agent_job(c: &Ctx) {
     // `run_check` runs the project's tests: the command of its test step, layered exactly
     // as the test step itself resolves it (runtime and task overrides included).
     let tests_cmd = test_commands(&c.d, &c.def, c.project_id, Some(c.task));
+    let reuse_key = tests_cmd
+        .as_ref()
+        .map(|t| crate::cmdreuse::command_key(t.build.as_deref(), &t.test));
     let deadline_extra = mason_adapter_api::DeadlineExtra::default();
     let checks = Box::new(TestChecks {
         cmd: tests_cmd,
@@ -1748,6 +1794,8 @@ fn agent_job(c: &Ctx) {
         id_prefix: format!("t{}r{}-check", c.task.0, c.run.0),
         log_dir: c.task_dir(),
         suites: DevSuites::of(&c.def, c.project.base_ref()),
+        task: c.task.0,
+        run: c.run.0,
     });
     let validator = (kind == StepKind::Develop).then(|| {
         change_validator(
@@ -1764,6 +1812,11 @@ fn agent_job(c: &Ctx) {
             }),
         )
     });
+    // A head whose tree was red on the test step, unchanged since, is not submitted again.
+    let validator = match (validator, reuse_key) {
+        (Some(v), Some(key)) => Some(refuse_known_red(v, c.d.clone(), c.wt.clone(), key)),
+        (v, _) => v,
+    };
     let contract = ContractHandle::with_validator(kind, checks, validator);
     if let Some(tools) = &c.step.tools {
         contract.restrict_tools(tools.clone());
@@ -2304,6 +2357,45 @@ fn command_job(c: &Ctx) {
     }
     let suffix = if is_test { "test" } else { "cmd" };
     let what = format!("`{}`", c.step.name);
+    // The folded tree already went green for this command (a `run_check`, an earlier test
+    // step, landing's re-test): nothing new to prove. Exact tree and exact command only.
+    let reuse = is_test.then(|| {
+        (
+            crate::cmdreuse::content_tree(&c.wt),
+            crate::cmdreuse::command_key(builds_first(c).as_deref(), &cmd),
+        )
+    });
+    if let Some((Some(tree), key)) = &reuse {
+        if let Some(src) = crate::cmdreuse::green_for(&c.d, tree, key) {
+            let note =
+                format!("green for this exact tree already ({src}); {what} did not run again");
+            tracing::info!(task = c.task.0, run = c.run.0, "{note}");
+            let _ = std::fs::write(
+                c.task_dir().join(format!("{suffix}-r{}.reused", c.run.0)),
+                &note,
+            );
+            c.d.progress_report(c.run, |p, now| {
+                p.apply_report(
+                    &mason_core::progress::Report {
+                        message: Some(note.clone()),
+                        ..Default::default()
+                    },
+                    now,
+                )
+            });
+            return c.green();
+        }
+    }
+    let record = |green: bool, names: &[String]| {
+        if let Some((Some(tree), key)) = &reuse {
+            let src = format!("test step of task #{}, run {}", c.task.0, c.run.0);
+            if green {
+                crate::cmdreuse::record_green(&c.d, tree, key, &src);
+            } else {
+                crate::cmdreuse::record_red(&c.d, tree, key, &src, names);
+            }
+        }
+    };
     // A test step with a build builds first, holding one `compile` slot, and
     // lets it go before the tests run: they hold what the step uses without
     // `compile`, so a long test run leaves the build slot to the next task.
@@ -2403,6 +2495,10 @@ fn command_job(c: &Ctx) {
                         &note,
                     );
                 }
+                // Only the whole command's green counts: a filtered rerun proved less.
+                if this_cmd == cmd {
+                    record(true, &[]);
+                }
                 return c.green();
             }
             // Red by its exit status alone: worth running again, and worth reading.
@@ -2494,6 +2590,11 @@ fn command_job(c: &Ctx) {
                             return c.green();
                         }
                     }
+                }
+                // Red on every run, by exit status, with the failing tests named: this tree is
+                // known red. (A timeout, a signal or a red with no names read is never recorded.)
+                if let Some(p) = persistent.as_ref().filter(|p| !p.is_empty()) {
+                    record(false, p);
                 }
                 let (reason, feedback) = match &persistent {
                     Some(p) if k > 0 => {
