@@ -86,6 +86,9 @@ struct State {
     attention: HashMap<(ProjectId, String), (String, String)>,
     /// Since when a project's landing configuration could not be read (git failed).
     unread_since: HashMap<ProjectId, Instant>,
+    /// A self-update is waiting for the running batches to finish: no new batch starts and
+    /// the queues keep what they hold. It only holds batches back; it never changes a verdict.
+    draining: bool,
 }
 
 /// The landing queues of every project.
@@ -133,6 +136,45 @@ impl Landing {
             .get(&p)
             .map(|v| v.iter().map(|w| w.task).collect())
             .unwrap_or_default()
+    }
+
+    /// Hold new batches back (`true`) or let them start again. Queued tasks keep their place.
+    pub fn set_draining(&self, on: bool) {
+        self.lock().draining = on;
+        self.wake();
+    }
+
+    pub fn draining(&self) -> bool {
+        self.lock().draining
+    }
+
+    /// The projects with a batch running now.
+    pub fn busy_projects(&self) -> Vec<ProjectId> {
+        let mut v: Vec<ProjectId> = self
+            .lock()
+            .running
+            .iter()
+            .filter(|(_, r)| !r.is_empty())
+            .map(|(p, _)| *p)
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// Wait on the condvar (a finishing batch wakes it) for at most `tick`, or not at all if
+    /// no project has a batch running. `true`: nothing is running now.
+    pub fn wait_idle_once(&self, tick: Duration) -> bool {
+        let idle = |g: &State| g.running.values().all(Vec::is_empty);
+        let g = self.lock();
+        if idle(&g) {
+            return true;
+        }
+        let g = self
+            .cv
+            .wait_timeout(g, tick)
+            .unwrap_or_else(|e| e.into_inner())
+            .0;
+        idle(&g)
     }
 
     pub fn running_batches(&self, p: ProjectId) -> usize {
@@ -258,7 +300,7 @@ pub fn submit_and_wait(c: &Ctx) -> Option<Verdict> {
         run: c.run,
         branch: c.branch.clone(),
         rank: rank_of(priority, c.task),
-        ready_at: d.started.elapsed().as_secs(),
+        ready_at: landing_clock(d).saturating_sub(first_submit_age_s(d, c)),
         footprint: Footprint {
             files: paths.into_iter().collect(),
             suites,
@@ -297,6 +339,24 @@ pub fn submit_and_wait(c: &Ctx) -> Option<Verdict> {
             return None;
         }
     }
+}
+
+/// The landing queue's clock, in seconds. It starts far from zero so that a task first
+/// submitted before this daemon started can have a `ready_at` before the daemon's start.
+fn landing_clock(d: &Daemon) -> u64 {
+    const BIAS_S: u64 = 1 << 32;
+    BIAS_S + d.started.elapsed().as_secs()
+}
+
+/// How long ago the task first joined the queue for this landing run (0 for a first
+/// submission, or when the store cannot say). A restart does not start its window over.
+fn first_submit_age_s(d: &Daemon, c: &Ctx) -> u64 {
+    let now = now_ms();
+    let first = d
+        .store
+        .first_landing_submit(c.task.0, c.run.0, now)
+        .unwrap_or(now);
+    now.saturating_sub(first) / 1000
 }
 
 /// A task that adds a stage note, exit script or decision record under a number that is
@@ -572,6 +632,11 @@ fn form_and_start(
     if waiting.is_empty() {
         return (0, None);
     }
+    if d.landing.draining() {
+        // A self-update is waiting for the running batches: nothing new starts, and the
+        // queue is left as it is. `set_draining(false)` wakes this again.
+        return (waiting.len(), Some(Duration::from_secs(1)));
+    }
     let cfg = match read_config(d, pid) {
         Ok(c) => {
             note_read(d, pid, None, UNREAD_ALERT_AFTER);
@@ -630,7 +695,7 @@ fn form_and_start(
         take(d, pid, w.task);
         start(d, pid, vec![w], cfg.clone(), &kind);
     }
-    let now = d.started.elapsed().as_secs();
+    let now = landing_clock(d);
     let mut next_wait = None;
     let mut guard = 0;
     loop {
@@ -692,6 +757,16 @@ fn start(d: &Arc<Daemon>, pid: ProjectId, members: Vec<Wait>, cfg: LandingConfig
         .fold(Footprint::default(), |a, w| a.union(&w.footprint));
     let slot = {
         let mut g = d.landing.lock();
+        if g.draining {
+            // A drain began after the look at the queue: put the tasks back, start nothing.
+            let q = g.waiting.entry(pid).or_default();
+            for w in members {
+                if !q.iter().any(|x| x.task == w.task) {
+                    q.push(w);
+                }
+            }
+            return;
+        }
         let r = g.running.entry(pid).or_default();
         let slot = (0..).find(|s| r.iter().all(|x| x.slot != *s)).unwrap_or(0);
         r.push(Running {
@@ -2536,4 +2611,31 @@ fn suites_needs(def: &mason_definition::Definition, names: &[String]) -> mason_s
 /// lists failed jobs, with their logs, either way); another kind judges when it says so.
 fn judges(c: &crate::config::CiCfg) -> bool {
     c.infra_judge || !matches!(c.kind, crate::config::CiKind::GithubActions { .. })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A task first submitted before the daemon started has a `ready_at` before the
+    /// daemon's start, so a restart does not make it wait out the window again.
+    #[test]
+    fn a_requeued_task_counts_its_window_from_its_first_submission() {
+        let window = Duration::from_secs(3600);
+        let clock = (1u64 << 32) + 5; // the new daemon is five seconds old
+        let cand = |age_s: u64| plan::Candidate {
+            id: 1,
+            rank: 0,
+            ready_at: clock.saturating_sub(age_s),
+            footprint: Footprint::default(),
+        };
+        assert!(matches!(
+            plan::form_batch(&[cand(4000)], clock, window, 0),
+            Formation::Form(_)
+        ));
+        assert!(matches!(
+            plan::form_batch(&[cand(0)], clock, window, 0),
+            Formation::Wait(_)
+        ));
+    }
 }
