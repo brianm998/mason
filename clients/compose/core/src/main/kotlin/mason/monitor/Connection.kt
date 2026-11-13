@@ -96,11 +96,11 @@ class MonitorConnection(
             val now = discover()
             if (now != null && now.replaces(info)) break  // restarted: start over from the last seq
             val quiet = (System.nanoTime() - heard.get()) / 1e9
-            if (quiet > timing.stallAfterSeconds) break  // a stall: show reconnecting
             if ((System.nanoTime() - lastPing) / 1e9 >= timing.pingEverySeconds) {
                 lastPing = System.nanoTime()
                 write(ClientMessage(ping = Ping(nonce = ++pings)))
             }
+            if (quiet > timing.stallAfterSeconds) break  // a stall (after asking once): show reconnecting
         }
         s.close()
         return welcomed.get()
