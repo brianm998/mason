@@ -1353,7 +1353,7 @@ impl Broker {
                 pid: 0,
             },
         );
-        st = self.pass(st);
+        drop(self.pass(st));
         id
     }
 
