@@ -749,7 +749,9 @@ fn releasing_several_held_tasks_at_once_never_runs_more_than_max_concurrent() {
         peak = peak.max(running);
         assert!(
             running <= 2,
-            "{running} agent steps run at once; max_concurrent is 2"
+            "{running} agent steps run at once; max_concurrent is 2 DBG {:?} {}",
+            w.step_runs.values().filter(|r| r.outcome.is_none()).map(|r| (r.task, format!("{:?}", r.step))).collect::<Vec<_>>(),
+            d.broker.snapshot()
         );
         if held.iter().all(|t| w.tasks[t].state == State::Landed) {
             break;
