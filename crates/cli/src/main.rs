@@ -26,6 +26,7 @@
 //! mason hold --needs R[,R...] [--exclusive] --pipeline NAME --label L [--pid P]
 //! mason targets list [--json]
 //! mason resources [--json] | mason resources limit <resource> <units>
+//! mason resources gate <name> <value> | mason resources gate <name> --reset
 //! mason doctor
 //! mason init [--yes] [--tracker T] [--agent A] [--sessions N] [--workflow W] [--suites accept|skip] [--base B] [--landing L] [--alerts LIST|none] [--no-prove]
 //! mason adopt | mason remove [--yes]
@@ -114,6 +115,9 @@ mason: command-line client for the MASON pipeline
   mason resources [--json]            limits, who holds what, and every wait explained
   mason targets list [--json]         simulators, emulators and phones, and who has each
   mason resources limit <resource> <units>   change a limit while things run (llm:claude, compile, ...)
+  mason resources gate <name> <value>   change a compile gate while masond runs, kept across restarts (compile_cpu_max,
+                                      compile_settle_s, compile_jobs, compile_idle_kill_s, stall_ms, memory.floor_mb, disk.floor_gb)
+  mason resources gate <name> --reset   go back to resources.toml, or the default
   mason hook bash [--needs compile]   optional Claude Code PreToolUse hook: builds go through the queue
   mason definition check [FILE]       validate a definition (default .mason/mason.toml) and dry-run it
   mason definition dry-run [FILE] [--scenarios FILE]
@@ -562,6 +566,28 @@ fn main() {
                     .unwrap_or_else(|| die("give the new limit as a whole number"));
                 finish(&a);
                 resources::limit(&d, &name, units).unwrap_or_else(|e| die(&e));
+            }
+            Some("gate") => {
+                let name = a
+                    .pos()
+                    .unwrap_or_else(|| die("which gate? e.g. compile_cpu_max"));
+                let reset = a.flag("--reset");
+                let value: Option<i64> =
+                    if reset {
+                        None
+                    } else {
+                        Some(a.pos().and_then(|u| u.parse().ok()).unwrap_or_else(|| {
+                            die("give the new value as a whole number, or --reset")
+                        }))
+                    };
+                finish(&a);
+                // Changing a gate is the owner's act: say who.
+                if std::env::var("MASON_AS").is_err() {
+                    if let Ok(u) = std::env::var("USER") {
+                        std::env::set_var("MASON_AS", u);
+                    }
+                }
+                resources::gate(&d, &name, value).unwrap_or_else(|e| die(&e));
             }
             Some(other) => die(&format!("unknown resources command {other:?}\n\n{HELP}")),
         }

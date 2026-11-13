@@ -77,6 +77,8 @@ pub struct ResourceCfg {
     /// Order waiting work by tracker priority before steps remaining. It applies to
     /// every project at once, since one queue serves them all.
     pub priority_first: bool,
+    /// The gates (see `GATES`) that resources.toml sets, for `mason resources`.
+    pub from_file: std::collections::BTreeSet<String>,
 }
 
 /// The default `compile_cpu_max`: half the machine.
@@ -110,6 +112,7 @@ impl Default for ResourceCfg {
             disk_floor_gb: crate::disk::DEFAULT_FLOOR_GB,
             disk_stall_ms: DEFAULT_DISK_STALL_MS,
             priority_first: false,
+            from_file: Default::default(),
         }
     }
 }
@@ -132,6 +135,9 @@ pub fn parse_resource_cfg(text: &str) -> Result<ResourceCfg, String> {
                 .as_integer()
                 .filter(|n| *n >= 0)
                 .ok_or_else(|| format!("resources.toml: {key}.{name} must be a whole number"))?;
+            if let Some(g) = GATES.iter().find(|g| gate_key(g) == (key, name)) {
+                c.from_file.insert(g.to_string());
+            }
             match key {
                 "llm" => drop(c.llm.insert(name.to_string(), n as u32)),
                 "machine" => drop(c.machine.insert(name.to_string(), n as u32)),
@@ -155,6 +161,66 @@ pub fn parse_resource_cfg(text: &str) -> Result<ResourceCfg, String> {
         }
     }
     Ok(c)
+}
+
+/// The compile gates the owner can change while masond runs (`Broker::set_gate`).
+/// Each is `[cpu]`, `[memory]` or `[disk]` in resources.toml; the name is the key,
+/// with its table for the two floors.
+pub const GATES: &[&str] = &[
+    "compile_cpu_max",
+    "compile_settle_s",
+    "compile_jobs",
+    "compile_idle_kill_s",
+    "stall_ms",
+    "memory.floor_mb",
+    "disk.floor_gb",
+];
+
+/// The table and key in resources.toml of a gate.
+fn gate_key(name: &str) -> (&str, &str) {
+    match name {
+        "memory.floor_mb" => ("memory", "floor_mb"),
+        "disk.floor_gb" => ("disk", "floor_gb"),
+        "stall_ms" => ("disk", "stall_ms"),
+        n => ("cpu", n),
+    }
+}
+
+/// The same bounds `parse_resource_cfg` holds, and none looser.
+fn check_gate(name: &str, v: i64) -> Result<(), String> {
+    if !GATES.contains(&name) {
+        return Err(format!(
+            "unknown gate {name:?}; the gates are {}",
+            GATES.join(", ")
+        ));
+    }
+    if name == "compile_cpu_max" {
+        if !(1..=100).contains(&v) {
+            return Err("compile_cpu_max must be from 1 to 100".into());
+        }
+    } else if v < 0 {
+        return Err(format!("{name} must be a whole number, 0 or more"));
+    } else if matches!(
+        name,
+        "compile_settle_s" | "compile_jobs" | "compile_idle_kill_s"
+    ) && v > i64::from(u32::MAX)
+    {
+        return Err(format!("{name} is too large"));
+    }
+    Ok(())
+}
+
+/// What resources.toml (or the default) says for a gate. `None`: no memory floor.
+fn base_gate(c: &ResourceCfg, name: &str) -> Option<i64> {
+    Some(match name {
+        "compile_cpu_max" => i64::from(c.compile_cpu_max),
+        "compile_settle_s" => i64::from(c.compile_settle_s),
+        "compile_jobs" => i64::from(c.compile_jobs),
+        "compile_idle_kill_s" => i64::from(c.compile_idle_kill_s),
+        "stall_ms" => c.disk_stall_ms as i64,
+        "memory.floor_mb" => c.memory_floor_mb? as i64,
+        _ => c.disk_floor_gb as i64,
+    })
 }
 
 pub fn load_resource_cfg(config_dir: &Path) -> Result<ResourceCfg, String> {
@@ -216,6 +282,12 @@ struct State {
     fixed: HashSet<String>,
     pools: HashSet<String>,
     floor_mb: Option<u64>,
+    /// resources.toml as read, and the gates changed since (`gates.kv`).
+    base: ResourceCfg,
+    overrides: BTreeMap<String, i64>,
+    /// Whether `compile_jobs` and `compile_settle_s` apply (a CPU reading replaces the count).
+    compile_by_cpu: bool,
+    stall_ms: u64,
     mem: Option<(Instant, Option<u64>)>,
     rank_seq: u64,
     cpu_max: u32,
@@ -239,7 +311,7 @@ struct State {
     /// The class of a wait being announced, by task (see `wait_class`).
     wait_class: HashMap<TaskId, String>,
     /// The build disk's responsiveness and the limit on it. `None`: no stall gate.
-    stall: Option<(Arc<dyn StallSource>, u64)>,
+    stall: Option<Arc<dyn StallSource>>,
 }
 
 struct KernelWait {
@@ -338,6 +410,43 @@ pub enum LeaseState {
     Gone,
 }
 
+/// Put a gate's effective value (the runtime one, else resources.toml's) into `State`.
+fn apply_gate(st: &mut State, name: &str) {
+    let v = st
+        .overrides
+        .get(name)
+        .copied()
+        .or_else(|| base_gate(&st.base, name));
+    match name {
+        "compile_cpu_max" => st.cpu_max = v.unwrap_or(0) as u32,
+        "compile_settle_s" if st.compile_by_cpu => {
+            let s = v.unwrap_or(0) as u32;
+            st.compile_settle_s = s;
+            st.ledger.pace_compiles(u64::from(s) * 1000);
+        }
+        "compile_jobs" if st.compile_by_cpu && !st.fixed.contains(COMPILE) => {
+            let units = match v.unwrap_or(0) {
+                0 => std::thread::available_parallelism().map_or(8, |n| n.get()) as u32,
+                n => n as u32,
+            };
+            st.ledger.set_capacity(COMPILE, units, Kind::Machine);
+        }
+        "compile_idle_kill_s" => st.compile_idle_kill_s = v.unwrap_or(0) as u32,
+        "stall_ms" => st.stall_ms = v.unwrap_or(0) as u64,
+        "memory.floor_mb" => {
+            st.floor_mb = v.map(|n| n as u64);
+            st.mem = None;
+        }
+        "disk.floor_gb" => {
+            if let Some(d) = st.disk.as_mut() {
+                d.floor_mb = v.unwrap_or(0) as u64 * 1024;
+            }
+            st.disk_read = None;
+        }
+        _ => {}
+    }
+}
+
 fn lock<'a>(m: &'a Mutex<State>) -> MutexGuard<'a, State> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -401,6 +510,10 @@ impl Broker {
                 fixed,
                 pools,
                 floor_mb: cfg.memory_floor_mb,
+                base: cfg.clone(),
+                overrides: BTreeMap::new(),
+                compile_by_cpu,
+                stall_ms: cfg.disk_stall_ms,
                 mem: None,
                 rank_seq: 0,
                 cpu_max: cfg.compile_cpu_max,
@@ -426,6 +539,20 @@ impl Broker {
             limits_file,
             kernel_says_after: Mutex::new(KERNEL_WAIT_SAYS_AFTER),
         };
+        // Gates changed live survive a restart and win over resources.toml.
+        if let Ok(text) = std::fs::read_to_string(b.gates_file()) {
+            let mut st = lock(&b.st);
+            for line in text.lines() {
+                if let Some((name, v)) = line.split_once('\t') {
+                    if let Ok(v) = v.trim().parse::<i64>() {
+                        if check_gate(name, v).is_ok() {
+                            st.overrides.insert(name.to_string(), v);
+                            apply_gate(&mut st, name);
+                        }
+                    }
+                }
+            }
+        }
         // Limits changed live survive a restart.
         if let Ok(text) = std::fs::read_to_string(&b.limits_file) {
             for line in text.lines() {
@@ -509,6 +636,81 @@ impl Broker {
         Ok(())
     }
 
+    fn gates_file(&self) -> PathBuf {
+        self.limits_file.with_file_name("gates.kv")
+    }
+
+    /// Change a compile gate while things run, or (`None`) go back to what
+    /// resources.toml says. Checked with the bounds `parse_resource_cfg` holds,
+    /// applied at once and kept across restarts in `gates.kv`.
+    pub fn set_gate(&self, name: &str, value: Option<i64>) -> Result<(), String> {
+        if let Some(v) = value {
+            check_gate(name, v)?;
+        } else if !GATES.contains(&name) {
+            check_gate(name, 0)?;
+        }
+        let mut st = lock(&self.st);
+        match value {
+            Some(v) => drop(st.overrides.insert(name.to_string(), v)),
+            None => drop(st.overrides.remove(name)),
+        }
+        apply_gate(&mut st, name);
+        let text: String = st
+            .overrides
+            .iter()
+            .map(|(n, v)| format!("{n}\t{v}\n"))
+            .collect();
+        let saved = if text.is_empty() {
+            match std::fs::remove_file(self.gates_file()) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+                _ => Ok(()),
+            }
+        } else {
+            std::fs::write(self.gates_file(), text)
+        };
+        self.pass(&mut st);
+        drop(st);
+        self.cv.notify_all();
+        saved.map_err(|e| format!("{name} is changed but could not be kept across a restart: {e}"))
+    }
+
+    /// Every gate: its value now, where it came from, and what each other source says.
+    pub fn gates(&self) -> Vec<serde_json::Value> {
+        self.gates_locked(&lock(&self.st))
+    }
+
+    fn gates_locked(&self, st: &State) -> Vec<serde_json::Value> {
+        let dflt = ResourceCfg::default();
+        GATES
+            .iter()
+            .map(|name| {
+                let over = st.overrides.get(*name).copied();
+                let file = base_gate(&st.base, name);
+                let source = if over.is_some() {
+                    "runtime"
+                } else if st.base.from_file.contains(*name) {
+                    "resources.toml"
+                } else {
+                    "default"
+                };
+                let (lo, hi) = if *name == "compile_cpu_max" {
+                    (1, 100)
+                } else {
+                    (0, i64::MAX)
+                };
+                serde_json::json!({
+                    "name": name,
+                    "value": over.or(file),
+                    "source": source,
+                    "default": base_gate(&dflt, name),
+                    "file": if st.base.from_file.contains(*name) { file } else { None },
+                    "min": lo,
+                    "max": if hi == i64::MAX { serde_json::Value::Null } else { hi.into() },
+                })
+            })
+            .collect()
+    }
+
     /// Turn the disk floor on: free space is read from `source` on the volume of each of
     /// `paths`, at most every `every`. Without this there is no disk gate.
     pub fn set_disk(
@@ -522,7 +724,11 @@ impl Broker {
         st.disk = Some(DiskCfg {
             source,
             paths,
-            floor_mb: floor_gb * 1024,
+            floor_mb: st
+                .overrides
+                .get("disk.floor_gb")
+                .map_or(floor_gb, |v| *v as u64)
+                * 1024,
             every,
         });
         st.disk_read = None;
@@ -574,7 +780,8 @@ impl Broker {
     /// Turn the stall gate on: no further compile while `source` reads at or above `max_ms`.
     pub fn set_stall(&self, source: Arc<dyn StallSource>, max_ms: u64) {
         let mut st = lock(&self.st);
-        st.stall = Some((source, max_ms));
+        st.stall = Some(source);
+        st.stall_ms = st.overrides.get("stall_ms").map_or(max_ms, |v| *v as u64);
         self.pass(&mut st);
         drop(st);
         self.cv.notify_all();
@@ -583,11 +790,11 @@ impl Broker {
     /// Read the CPU and stall sources afresh. Every plan is made right after
     /// this, so the ledger's stall reading is always current.
     fn cpu_gate(&self, st: &mut State) -> Option<CpuGate> {
-        let stall = st.stall.as_ref().and_then(|(source, max_ms)| {
-            source.slow_ms().map(|slow_ms| StallGate {
-                slow_ms,
-                max_ms: *max_ms,
-            })
+        let max_ms = st.stall_ms;
+        let stall = st.stall.as_ref().filter(|_| max_ms > 0).and_then(|source| {
+            source
+                .slow_ms()
+                .map(|slow_ms| StallGate { slow_ms, max_ms })
         });
         st.ledger.set_stall(stall);
         st.cpu_busy = st.cpu.busy_pct();
@@ -1396,7 +1603,7 @@ impl Broker {
         if settle > 0 {
             rules.push_str(&format!(", {settle} s after the last one started"));
         }
-        if st.stall.is_some() {
+        if st.stall.is_some() && st.stall_ms > 0 {
             rules.push_str(", and not while the build disk is slow");
         }
         if st.compile_idle_kill_s > 0 {
@@ -1510,11 +1717,13 @@ impl Broker {
                 })
             })
             .collect();
+        let gates = self.gates_locked(&st);
         json!({
             "resources": resources,
             "holders": holders,
             "waiting": waiting,
             "memory": { "floor_mb": st.floor_mb, "free_mb": free },
+            "gates": gates,
             "cpu": {
                 "busy_pct": st.cpu_busy,
                 "compile_max_pct": st.cpu_max,

@@ -380,6 +380,12 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     /** How many compiles may run at once (the daemon refuses 0). */
     fun setCompileLimit(units: Int) =
         send(Command(set_limit = SetLimit(resource = "compile", units = maxOf(1, units))))
+    /** Start another compile only below [pct] percent CPU (kept to 10-100; the daemon holds 1-100 and says if it refuses). */
+    fun setCompileCpuGate(pct: Int) =
+        send(Command(set_gate = SetGate(name = "compile_cpu_max", value_ = pct.coerceIn(CPU_GATE_MIN, CPU_GATE_MAX).toLong())))
+    /** Seconds after one compile starts before the next may (0: no wait). */
+    fun setCompileSettle(seconds: Int) =
+        send(Command(set_gate = SetGate(name = "compile_settle_s", value_ = seconds.coerceIn(0, SETTLE_MAX).toLong())))
     fun pause(mode: String, seconds: Long) =
         send(Command(pause = PauseWork(project = project, mode = mode, for_seconds = seconds)))
     fun resume() = send(Command(resume = ResumeWork(project = project)))
@@ -593,6 +599,11 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     }
 
     companion object {
+        /** The CPU gate's range in the monitor, and the most the settle stepper asks for. */
+        const val CPU_GATE_MIN = 10
+        const val CPU_GATE_MAX = 100
+        const val SETTLE_MAX = 600
+
         /** The project a `push_auth` banner is about: its text starts "<project>: ". */
         fun pushAuthProject(b: Banner): String = b.text.substringBefore(":")
 

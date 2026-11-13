@@ -71,6 +71,11 @@ description = "Home's Compilation section: what holds a compile slot (and how lo
 swift = "done"
 compose = "done"
 
+[feature.runtime-gates]
+description = "Home's Compilation section has steppers for the CPU gate (start another compile below N% CPU, steps of 5, 10-100) and the settle time; the daemon keeps them across restarts and a refusal shows beside them"
+swift = "done"
+compose = "done"
+
 [feature.task-detail]
 description = "Steps, activity, live log, plan, checks, tests, history, decision card, actions"
 swift = "done"

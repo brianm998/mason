@@ -374,6 +374,31 @@ class MonitorCoreTest {
         assertEquals(1, sent[5].set_limit?.units, "the stepper never asks for zero compiles")
     }
 
+    @Test fun theCpuGateStepperSendsASetGateAndStaysWithinTenToAHundred() {
+        val m = MonitorModel()
+        val sent = mutableListOf<Command>()
+        m.sender = { sent += it }
+        m.setCompileCpuGate(70 + 5)
+        m.setCompileCpuGate(0)
+        m.setCompileCpuGate(500)
+        m.setCompileSettle(-5)
+        assertEquals("compile_cpu_max", sent[0].set_gate?.name)
+        assertEquals(75L, sent[0].set_gate?.value_)
+        assertEquals(false, sent[0].set_gate?.reset)
+        assertEquals(10L, sent[1].set_gate?.value_, "never below 10")
+        assertEquals(100L, sent[2].set_gate?.value_, "never above 100")
+        assertEquals("compile_settle_s", sent[3].set_gate?.name)
+        assertEquals(0L, sent[3].set_gate?.value_)
+    }
+
+    @Test fun aRefusedGateShowsInLastResult() {
+        val (m, sent) = ownerModel()
+        m.setCompileCpuGate(75)
+        assertEquals(75L, sent[0].set_gate!!.value_)
+        m.apply(ServerMessage(result = CommandResult(id = "m1", ok = false, status = 403, error = "only the owner can change a compile gate")))
+        assertEquals("only the owner can change a compile gate", m.lastResult)
+    }
+
     // ---- what the client shows (the conformance items) ----
 
     @Test fun visibleItemsFollowWhatTheViewsSayAndTheCollapseState() {

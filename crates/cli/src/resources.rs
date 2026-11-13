@@ -349,6 +349,10 @@ pub fn show(d: &Daemon, json_out: bool) -> Result<(), String> {
     if let Some(f) = v["memory"]["floor_mb"].as_u64() {
         println!("  memory floor {f} MB ({} MB free)", v["memory"]["free_mb"]);
     }
+    println!("Gates (mason resources gate <name> <value>)");
+    for l in gate_lines(&v["gates"]) {
+        println!("  {l}");
+    }
     let outside = outside_lines(&v, now);
     if !outside.is_empty() {
         println!("Another pipeline's work");
@@ -416,6 +420,42 @@ pub fn limit(d: &Daemon, name: &str, units: u32) -> Result<(), String> {
     .map_err(say)?;
     println!("{name} limit is now {units}. Anything running keeps running; new work waits until the count falls.");
     Ok(())
+}
+
+/// Change a compile gate while masond runs, or (`None`) go back to resources.toml.
+pub fn gate(d: &Daemon, name: &str, value: Option<i64>) -> Result<(), String> {
+    d.call(
+        "POST",
+        "/resources/gate",
+        Some(&json!({"name": name, "value": value})),
+    )
+    .map_err(say)?;
+    match value {
+        Some(v) => println!("{name} is now {v}, kept across restarts. `mason resources gate {name} --reset` goes back."),
+        None => println!("{name} is back to resources.toml, or the default."),
+    }
+    Ok(())
+}
+
+/// Where each gate's value came from, for `mason resources`.
+pub fn gate_lines(gates: &Value) -> Vec<String> {
+    gates
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|g| {
+            let name = g["name"].as_str().unwrap_or("?");
+            let value = g["value"]
+                .as_i64()
+                .map_or("none".to_string(), |v| v.to_string());
+            match g["source"].as_str().unwrap_or("default") {
+                "runtime" => format!(
+                    "{name:<20} {value:<6} set at runtime; `mason resources gate {name} --reset` goes back"
+                ),
+                s => format!("{name:<20} {value:<6} {s}"),
+            }
+        })
+        .collect()
 }
 
 /// Commands the optional agent hook routes through the queue.
