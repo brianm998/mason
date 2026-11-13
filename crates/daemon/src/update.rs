@@ -74,6 +74,11 @@ pub struct UpdateCfg {
     pub monitor_compose_build: Option<String>,
     /// How long a takeover waits for running landing batches, in seconds; then it goes anyway.
     pub takeover_wait_s: u64,
+    /// The code-signing identity installed binaries are signed with (macOS): a certificate's
+    /// SHA-1 or its name, e.g. "Developer ID Application: Name (TEAMID)". None signs ad hoc.
+    /// A real identity gives the binaries a stable designated requirement (team + identifier),
+    /// so permissions granted to MASON survive self-updates.
+    pub sign_identity: Option<String>,
 }
 
 /// An hour: longer than a batch's verify and CI usually take.
@@ -120,6 +125,7 @@ impl UpdateCfg {
                 .get("takeover_wait_s")
                 .and_then(|v| v.as_integer())
                 .map_or(DEFAULT_TAKEOVER_WAIT_S, |n| n.max(0) as u64),
+            sign_identity: s("sign_identity").filter(|v| !v.trim().is_empty()),
         })
     }
 
@@ -429,33 +435,80 @@ fn shell(cwd: &Path, cmd: &str, log: &Path, env: &[(&str, &str)]) -> Result<(), 
     }
 }
 
-/// Ad-hoc sign an installed binary (macOS only). An unsigned binary has no
-/// identity the system can cache, so the system tccd re-evaluates it on every
-/// privacy check. masond is the responsible process for everything the
-/// pipeline runs on the external volume, so an unsigned masond kept the system
-/// tccd at 100% CPU, and WindowServer, waiting on it for Input Monitoring
-/// checks, froze the screen and was killed by its watchdog (2026-11-12).
-/// x86_64 linkers do not sign. A signing failure fails the build rather than
-/// installing an unsigned runtime.
-pub fn adhoc_sign(path: &Path) -> Result<(), String> {
-    if !cfg!(target_os = "macos") {
-        return Ok(());
-    }
+/// How long one `codesign` may take. Signing with a real identity reads the private key from
+/// the login keychain; if macOS is waiting for someone to approve that in a dialog, the update
+/// fails after this instead of hanging, and the running runtime stays.
+pub const SIGN_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// The `codesign` arguments for one installed binary. With an identity, the binary gets the
+/// hardened runtime (needed for notarization, harmless otherwise) and a team-anchored
+/// designated requirement; without one it is signed ad hoc. Either way the identifier is
+/// `com.brianm998.mason.<name>`, the same across builds.
+pub fn codesign_args(path: &Path, identity: Option<&str>) -> Vec<std::ffi::OsString> {
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let out = Command::new("/usr/bin/codesign")
-        .args(["--sign", "-", "--force", "--identifier"])
-        .arg(format!("com.brianm998.mason.{name}"))
-        .arg(path)
-        .output()
+    let mut a: Vec<std::ffi::OsString> = vec!["--sign".into()];
+    match identity {
+        Some(id) => {
+            a.push(id.into());
+            a.push("--options".into());
+            a.push("runtime".into());
+        }
+        None => a.push("-".into()),
+    }
+    a.push("--force".into());
+    a.push("--identifier".into());
+    a.push(format!("com.brianm998.mason.{name}").into());
+    a.push(path.into());
+    a
+}
+
+/// Sign an installed binary (macOS only), with `identity` or ad hoc. An unsigned binary has
+/// no identity the system can cache, so the system tccd re-evaluates it on every privacy
+/// check. masond is the responsible process for everything the pipeline runs on the external
+/// volume, so an unsigned masond kept the system tccd at 100% CPU, and WindowServer, waiting
+/// on it for Input Monitoring checks, froze the screen and was killed by its watchdog
+/// (2026-11-12). x86_64 linkers do not sign. A signing failure fails the build rather than
+/// installing an unsigned runtime.
+pub fn sign_installed(path: &Path, identity: Option<&str>) -> Result<(), String> {
+    if !cfg!(target_os = "macos") {
+        return Ok(());
+    }
+    let mut child = Command::new("/usr/bin/codesign")
+        .args(codesign_args(path, identity))
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .map_err(|e| format!("running codesign on {}: {e}", path.display()))?;
-    if !out.status.success() {
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break s,
+            Ok(None) if started.elapsed() >= SIGN_TIMEOUT => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "codesign {} did not finish in {} s; if it is waiting for keychain \
+                     approval, sign once from Terminal and choose Always Allow",
+                    path.display(),
+                    SIGN_TIMEOUT.as_secs()
+                ));
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+            Err(e) => return Err(format!("waiting for codesign: {e}")),
+        }
+    };
+    if !status.success() {
+        let mut err = String::new();
+        if let Some(mut e) = child.stderr.take() {
+            let _ = std::io::Read::read_to_string(&mut e, &mut err);
+        }
         return Err(format!(
             "codesign {} failed: {}",
             path.display(),
-            String::from_utf8_lossy(&out.stderr).trim()
+            err.trim()
         ));
     }
     Ok(())
@@ -494,7 +547,7 @@ pub fn build(cfg: &UpdateCfg, rt: &Runtimes, sha: &str) -> Result<(), String> {
             continue; // the optional ones (fake-claude, mason) may be absent
         }
         std::fs::copy(&from, dest.join(b)).map_err(|e| format!("copying {b}: {e}"))?;
-        adhoc_sign(&dest.join(b))?;
+        sign_installed(&dest.join(b), cfg.sign_identity.as_deref())?;
     }
     std::fs::write(dest.join("SHA"), sha).map_err(|e| e.to_string())?;
     std::fs::write(dest.join("READY"), "").map_err(|e| e.to_string())?;
@@ -1378,7 +1431,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let bin = d.path().join("masond");
         std::fs::copy("/usr/bin/true", &bin).unwrap();
-        adhoc_sign(&bin).unwrap();
+        sign_installed(&bin, None).unwrap();
         let out = Command::new("/usr/bin/codesign")
             .arg("-dv")
             .arg(&bin)
@@ -1394,14 +1447,69 @@ mod tests {
     }
 
     #[test]
-    fn adhoc_sign_reports_a_missing_file() {
+    fn signing_reports_a_missing_file() {
         let d = tempfile::tempdir().unwrap();
         let missing = d.path().join("absent");
         if cfg!(target_os = "macos") {
-            assert!(adhoc_sign(&missing).is_err());
+            assert!(sign_installed(&missing, None).is_err());
         } else {
-            assert!(adhoc_sign(&missing).is_ok());
+            assert!(sign_installed(&missing, None).is_ok());
         }
+    }
+
+    /// Checked as arguments, not by signing: a real identity reads the login keychain, which
+    /// can put an approval dialog on screen, and nothing automated may do that.
+    #[test]
+    fn an_identity_signs_with_the_hardened_runtime_and_the_same_identifier() {
+        let p = Path::new("/rt/abc/step-host");
+        let with: Vec<String> = codesign_args(p, Some("Developer ID Application: X (T1)"))
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            with,
+            [
+                "--sign",
+                "Developer ID Application: X (T1)",
+                "--options",
+                "runtime",
+                "--force",
+                "--identifier",
+                "com.brianm998.mason.step-host",
+                "/rt/abc/step-host"
+            ]
+        );
+        let adhoc: Vec<String> = codesign_args(p, None)
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            adhoc,
+            [
+                "--sign",
+                "-",
+                "--force",
+                "--identifier",
+                "com.brianm998.mason.step-host",
+                "/rt/abc/step-host"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_signing_identity_is_optional_and_blank_means_ad_hoc() {
+        let none = UpdateCfg::parse("repo = \"/src\"\n").unwrap();
+        assert_eq!(none.sign_identity, None);
+        let blank = UpdateCfg::parse("repo = \"/src\"\nsign_identity = \"  \"\n").unwrap();
+        assert_eq!(blank.sign_identity, None);
+        let set = UpdateCfg::parse(
+            "repo = \"/src\"\nsign_identity = \"79BBD50DFCA34E5242E55366B00A8D950F5A3A59\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            set.sign_identity.as_deref(),
+            Some("79BBD50DFCA34E5242E55366B00A8D950F5A3A59")
+        );
     }
 
     #[test]
