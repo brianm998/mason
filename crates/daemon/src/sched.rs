@@ -2114,10 +2114,10 @@ mod tests {
             "{shown}"
         );
         // The outside holder ends: the slot is free for the next waiter.
+        // The kernel frees a flock only when every fd copy is closed, and a child
+        // forked by a parallel test can hold one briefly. So the release is not
+        // synchronous with the drop: retry, bounded by attempts, not by time.
         drop(held);
-        // A process another test forks in the same moment can hold a copy of the
-        // released file descriptor (and so the flock) until it execs, so the
-        // slot may read as held for a moment after `drop`. Wait for it, bounded.
         let mut granted = false;
         for _ in 0..2000 {
             if matches!(b.lease_poll(second), LeaseState::Granted { .. }) {
