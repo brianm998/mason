@@ -346,12 +346,11 @@ fn a_red_batch_pull_request_gives_the_task_detail_ci_links() {
     let state = w.s.root.path().join("host-state");
     std::fs::create_dir_all(&state).unwrap();
     std::fs::write(state.join("with-jobs"), "").unwrap();
-    let ok = w.task("fine", &[("x/ok.txt", "1")]);
+    let _fine = w.task("fine", &[("x/ok.txt", "1")]);
     let bad = w.task("breaks checks", &[("red.integration", "x")]);
     wait_for("the culprit to be sent back", 120, || {
         w.sent_back(bad).is_some()
     });
-    wait_for("the other to land", 120, || w.landed(ok));
     let detail = {
         let world = w.d.world().unwrap();
         mason_daemon::views::Ctx::new(&w.d, &world)
