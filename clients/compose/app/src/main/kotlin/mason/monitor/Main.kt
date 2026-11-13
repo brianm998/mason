@@ -33,6 +33,12 @@ fun main(args: Array<String>) = application {
     }
     val state = rememberWindowState(width = 1360.dp, height = 860.dp)
     remember { model.onInstall = { installMonitor(model, it) }; 0 }
+    remember {
+        model.onOpenUrl = { u ->
+            runCatching { java.awt.Desktop.getDesktop().browse(java.net.URI(u)) }
+        }
+        0
+    }
     LaunchedEffect(Unit) {
         // The daemon may not be up yet: look for it until it is.
         while (true) {

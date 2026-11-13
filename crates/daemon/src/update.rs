@@ -25,6 +25,8 @@ pub enum Channel {
     Main,
     /// The tip of a branch.
     Branch(String),
+    /// The newest published release, for an install that has no source (`release.rs`).
+    Release,
 }
 
 impl Channel {
@@ -32,11 +34,12 @@ impl Channel {
         match s {
             "stable" => Ok(Channel::Stable),
             "main" => Ok(Channel::Main),
+            "release" => Ok(Channel::Release),
             _ => match s.strip_prefix("branch:") {
                 Some(b) if git::valid_branch(b) => Ok(Channel::Branch(b.to_string())),
                 Some(b) => Err(format!("{b:?} is not a plain branch name")),
                 None => Err(format!(
-                    "a channel is `stable`, `main` or `branch:<name>`, not {s:?}"
+                    "a channel is `stable`, `main`, `release` or `branch:<name>`, not {s:?}"
                 )),
             },
         }
@@ -47,6 +50,7 @@ impl Channel {
             Channel::Stable => "stable".into(),
             Channel::Main => "main".into(),
             Channel::Branch(b) => format!("branch:{b}"),
+            Channel::Release => "release".into(),
         }
     }
 }
@@ -79,6 +83,10 @@ pub struct UpdateCfg {
     /// A real identity gives the binaries a stable designated requirement (team + identifier),
     /// so permissions granted to MASON survive self-updates.
     pub sign_identity: Option<String>,
+    /// The release API of the `release` channel; tests point it at a fake (`file://` or http).
+    pub release_api: String,
+    /// The page that offers the installers; what a packaged monitor's button opens.
+    pub download_page: String,
 }
 
 /// An hour: longer than a batch's verify and CI usually take.
@@ -109,9 +117,15 @@ impl UpdateCfg {
         if bins.iter().any(|b| b.contains('/') || b.starts_with('.')) {
             return Err("update.toml: `bins` are plain file names".into());
         }
+        let channel = Channel::parse(&s("channel").unwrap_or_else(|| "stable".into()))?;
         Ok(UpdateCfg {
-            channel: Channel::parse(&s("channel").unwrap_or_else(|| "stable".into()))?,
-            repo: need("repo")?,
+            // A release install has no source to name.
+            repo: if channel == Channel::Release {
+                s("repo").unwrap_or_default()
+            } else {
+                need("repo")?
+            },
+            channel,
             build: s("build").unwrap_or_else(|| "cargo build --release --bins".into()),
             out_dir: s("out_dir").unwrap_or_else(|| "target/release".into()),
             bins,
@@ -126,19 +140,37 @@ impl UpdateCfg {
                 .and_then(|v| v.as_integer())
                 .map_or(DEFAULT_TAKEOVER_WAIT_S, |n| n.max(0) as u64),
             sign_identity: s("sign_identity").filter(|v| !v.trim().is_empty()),
+            release_api: s("release_api").unwrap_or_else(|| crate::release::DEFAULT_API.into()),
+            download_page: s("download_page")
+                .unwrap_or_else(|| crate::release::DEFAULT_PAGE.into()),
         })
     }
 
+    /// `update.toml`; a packaged install without one updates from releases.
     pub fn load(config_dir: &Path) -> Result<UpdateCfg, String> {
         let p = config_dir.join("update.toml");
-        let t = std::fs::read_to_string(&p).map_err(|_| {
-            format!(
+        match std::fs::read_to_string(&p) {
+            Ok(t) => UpdateCfg::parse(&t),
+            Err(_) if is_packaged() => UpdateCfg::parse("channel = \"release\"\n"),
+            Err(_) => Err(format!(
                 "there is no {}; updates need a source (`repo = ...`)",
                 p.display()
-            )
-        })?;
-        UpdateCfg::parse(&t)
+            )),
+        }
     }
+}
+
+/// True when this `masond` was installed from a package: it is not inside a cargo `target`
+/// directory (a source build, whose updates build from source). A daemon that runs from
+/// `runtimes/<version>/` of a packaged install is packaged too.
+pub fn is_packaged() -> bool {
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
+    !exe.ancestors().any(|a| {
+        a.file_name().is_some_and(|n| n == "target")
+            && a.parent().is_some_and(|p| p.join("Cargo.toml").is_file())
+    })
 }
 
 // ---- the runtimes directory -----------------------------------------------------------------------
@@ -316,6 +348,7 @@ pub fn resolve(channel: &Channel, mirror: &Path) -> Result<String, String> {
         }
         Channel::Main => "refs/heads/main".to_string(),
         Channel::Branch(b) => format!("refs/heads/{b}"),
+        Channel::Release => return Err("the release channel has no source to resolve".into()),
     };
     git::rev_parse(mirror, &rev).map_err(|_| {
         format!(
@@ -782,44 +815,49 @@ pub fn run(d: &Arc<Daemon>, req: &Request) -> Result<String, String> {
     let go = || -> Result<String, String> {
         let cfg = UpdateCfg::load(&d.cfg.config_dir)?;
         let rt = Runtimes::new(&d.cfg.data_dir);
-        say(
-            d,
-            "fetching",
-            &format!("fetching the source of {}", cfg.repo),
-        );
-        fetch_locked(d, &cfg, &rt)?;
         let channel = req.channel.clone().unwrap_or_else(|| cfg.channel.clone());
-        let target = match &req.sha {
-            Some(s) => git::rev_parse(&rt.mirror(), s)
-                .map_err(|_| format!("{s} is not a commit in the source"))?,
-            None => resolve(&channel, &rt.mirror())?,
+        let (target, running) = if channel == Channel::Release {
+            prepare_release(d, req, &cfg, &rt)?
+        } else {
+            say(
+                d,
+                "fetching",
+                &format!("fetching the source of {}", cfg.repo),
+            );
+            fetch_locked(d, &cfg, &rt)?;
+            let target = match &req.sha {
+                Some(s) => git::rev_parse(&rt.mirror(), s)
+                    .map_err(|_| format!("{s} is not a commit in the source"))?,
+                None => resolve(&channel, &rt.mirror())?,
+            };
+            d.update_status
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .target = Some(target.clone());
+            let running = d.cfg.runtime_sha.clone().or_else(|| rt.current());
+            let mv = check_move(
+                &rt.mirror(),
+                running.as_deref(),
+                &target,
+                req.rollback,
+                &rt.bad(),
+            )?;
+            say(
+                d,
+                "fetching",
+                &format!("{}: {target} ({mv:?})", channel.name()),
+            );
+            if mv == Move::Same && !req.rollback {
+                return Err(format!("already running {target}"));
+            }
+            say(
+                d,
+                "building",
+                &format!("building {target} into runtimes/{target}/"),
+            );
+            build(&cfg, &rt, &target)?;
+            (target, running)
         };
-        d.update_status
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .target = Some(target.clone());
-        let running = d.cfg.runtime_sha.clone().or_else(|| rt.current());
-        let mv = check_move(
-            &rt.mirror(),
-            running.as_deref(),
-            &target,
-            req.rollback,
-            &rt.bad(),
-        )?;
-        say(
-            d,
-            "fetching",
-            &format!("{}: {target} ({mv:?})", channel.name()),
-        );
-        if mv == Move::Same && !req.rollback {
-            return Err(format!("already running {target}"));
-        }
-        say(
-            d,
-            "building",
-            &format!("building {target} into runtimes/{target}/"),
-        );
-        build(&cfg, &rt, &target)?;
         // Prove it on a copy of the real database, in a sandbox, before it is allowed near the real one.
         say(
             d,
@@ -852,9 +890,11 @@ pub fn run(d: &Arc<Daemon>, req: &Request) -> Result<String, String> {
             say(
                 d,
                 "idle",
-                &format!(
-                    "checked: {target} builds and passes its self-test; not taking over (--check)"
-                ),
+                &if channel == Channel::Release {
+                    format!("checked: release {target} is downloaded, verified and passes its self-test; not taking over (--check)")
+                } else {
+                    format!("checked: {target} builds and passes its self-test; not taking over (--check)")
+                },
             );
             d.update_status
                 .lock()
@@ -876,6 +916,103 @@ pub fn run(d: &Arc<Daemon>, req: &Request) -> Result<String, String> {
     match go() {
         Ok(t) => Ok(t),
         Err(e) => Err(fail(d, e)),
+    }
+}
+
+/// The `release` channel's part before the common tail: look at the newest release, refuse a
+/// downgrade, download, verify and unpack it into `runtimes/<version>/` (complete or absent).
+/// Returns the version to run and the version that runs now.
+fn prepare_release(
+    d: &Arc<Daemon>,
+    req: &Request,
+    cfg: &UpdateCfg,
+    rt: &Runtimes,
+) -> Result<(String, Option<String>), String> {
+    use crate::release as rel;
+    let work = rt.root.join("release-download");
+    say(
+        d,
+        "fetching",
+        &format!("looking for a release at {}", cfg.release_api),
+    );
+    let found = rel::lookup(&cfg.release_api, req.sha.as_deref(), &work)?;
+    let target = found.version.text();
+    d.update_status
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .target = Some(target.clone());
+    let running = d.cfg.runtime_sha.clone().or_else(|| rt.current());
+    let mv = check_release_move(
+        running.as_deref().unwrap_or(&rel::own_version()),
+        &target,
+        req.rollback,
+        &rt.bad(),
+    )?;
+    say(d, "fetching", &format!("release: {target} ({mv:?})"));
+    if mv == Move::Same && !req.rollback {
+        return Err(format!("already running {target}"));
+    }
+    if !rt.is_ready(&target) {
+        say(
+            d,
+            "building",
+            &format!("downloading and verifying release {target} into runtimes/{target}/"),
+        );
+        let partial = rt.root.join(format!("{target}.partial"));
+        let got = rel::fetch_and_unpack(
+            &cfg.release_api,
+            &found,
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            &work,
+            &partial,
+        )?;
+        let installed = (|| -> Result<(), String> {
+            for f in got.iter().filter(|f| !f.ends_with(".sh")) {
+                sign_installed(&partial.join(f), cfg.sign_identity.as_deref())?;
+            }
+            std::fs::write(partial.join("SHA"), &target).map_err(|e| e.to_string())?;
+            std::fs::write(partial.join("READY"), "").map_err(|e| e.to_string())?;
+            let _ = std::fs::remove_dir_all(rt.dir(&target));
+            std::fs::rename(&partial, rt.dir(&target)).map_err(|e| e.to_string())
+        })();
+        if let Err(e) = installed {
+            let _ = std::fs::remove_dir_all(&partial);
+            return Err(e);
+        }
+    }
+    Ok((target, running))
+}
+
+/// Pure: may a daemon running release `running` move to release `target`? Versions are
+/// compared as numbers; going back (or from something that is not a release version, such as
+/// a source commit) needs an explicit rollback.
+pub fn check_release_move(
+    running: &str,
+    target: &str,
+    rollback: bool,
+    bad: &[String],
+) -> Result<Move, String> {
+    use crate::release::Version;
+    if bad.iter().any(|b| b == target) && !rollback {
+        return Err(format!("{target} crashed when it ran and was rolled back from; naming it explicitly with --rollback overrides this"));
+    }
+    if running == target {
+        return Ok(Move::Same);
+    }
+    let (Some(r), Some(t)) = (Version::parse(running), Version::parse(target)) else {
+        return if rollback {
+            Ok(Move::Sideways)
+        } else {
+            Err(format!("the running version {running} is not a release version, so whether {target} is older cannot be told; use --rollback if you mean it"))
+        };
+    };
+    if t > r {
+        Ok(Move::Forward)
+    } else if rollback {
+        Ok(Move::Rollback)
+    } else {
+        Err(format!("{target} is older than the running {running}: moving there is a downgrade. Use --rollback to do that on purpose"))
     }
 }
 
@@ -945,6 +1082,8 @@ pub struct Check {
     pub at_ms: u64,
     /// Why the last look failed; what it found before that stands.
     pub error: Option<String>,
+    /// On the `release` channel: the download page, which a packaged monitor opens.
+    pub download_url: String,
 }
 
 /// Compare what runs with the channel, in the mirror. `running` is `None` for a
@@ -980,6 +1119,27 @@ pub fn assess(
     Ok(c)
 }
 
+/// The `release` channel's look: is the newest published release newer than what runs?
+/// A monitor has no commit to compare there; the banner points at the download page.
+pub fn assess_release(
+    cfg: &UpdateCfg,
+    rt: &Runtimes,
+    running: Option<&str>,
+) -> Result<Check, String> {
+    let found = crate::release::lookup(&cfg.release_api, None, &rt.root.join("release-check"))?;
+    let latest = found.version.text();
+    let running = running
+        .map(String::from)
+        .unwrap_or_else(crate::release::own_version);
+    Ok(Check {
+        channel: "release".into(),
+        outdated: check_release_move(&running, &latest, false, &rt.bad()) == Ok(Move::Forward),
+        latest,
+        download_url: cfg.download_page.clone(),
+        ..Default::default()
+    })
+}
+
 /// The newest commit at or before `tip` that changed this monitor.
 fn latest_of(m: MonitorKind, mirror: &Path, tip: &str) -> Result<String, String> {
     let mut args = vec!["rev-list", "-1", tip, "--"];
@@ -1002,14 +1162,18 @@ pub fn check_once(d: &Arc<Daemon>) -> std::time::Duration {
         return std::time::Duration::from_secs(DEFAULT_CHECK_INTERVAL_S);
     }
     let rt = Runtimes::new(&d.cfg.data_dir);
-    let found = fetch_locked(d, &cfg, &rt).and_then(|()| {
-        assess(
-            &cfg.channel,
-            &rt.mirror(),
-            d.cfg.runtime_sha.as_deref(),
-            &rt.bad(),
-        )
-    });
+    let found = if cfg.channel == Channel::Release {
+        assess_release(&cfg, &rt, d.cfg.runtime_sha.as_deref())
+    } else {
+        fetch_locked(d, &cfg, &rt).and_then(|()| {
+            assess(
+                &cfg.channel,
+                &rt.mirror(),
+                d.cfg.runtime_sha.as_deref(),
+                &rt.bad(),
+            )
+        })
+    };
     let next = match found {
         Ok(c) => Check {
             at_ms: now_ms(),
@@ -1099,6 +1263,12 @@ pub fn info(d: &Daemon) -> Option<mason_protocol::UpdateInfo> {
         daemon_text,
         daemon_can_update,
         monitors,
+        release_version: if c.channel == "release" {
+            c.latest.clone()
+        } else {
+            String::new()
+        },
+        download_url: c.download_url.clone(),
     })
 }
 
@@ -1139,6 +1309,10 @@ fn daemon_banner(c: &Check, running: &str, s: &Status) -> (String, bool) {
                 true,
             )
         }
+        _ if c.outdated && c.channel == "release" => (
+            format!("masond {running} is behind release {}.", c.latest),
+            true,
+        ),
         _ if c.outdated => {
             let (n, plural) = (c.behind, if c.behind == 1 { "" } else { "s" });
             let channel = c.channel.strip_prefix("branch:").unwrap_or(&c.channel);

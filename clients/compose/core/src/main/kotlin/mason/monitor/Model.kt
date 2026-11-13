@@ -99,6 +99,14 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     val daemonUpdateText: String get() = updateInfo?.daemon_text ?: ""
     val canUpdateDaemon: Boolean get() = canAct && updateInfo?.daemon_can_update == true
 
+    /** On the `release` channel (a packaged install) there is no source to build from: the button opens the download page. */
+    val downloadUrl: String get() = updateInfo?.download_url ?: ""
+    var onOpenUrl: ((String) -> Unit)? = null
+    fun openDownloadPage() {
+        val u = downloadUrl
+        if (u.startsWith("https://") || u.startsWith("http://")) onOpenUrl?.invoke(u)
+    }
+
     /** The owner's button: the daemon builds its newest version, proves it and takes over. */
     fun updateDaemon() = raw("POST", "/update", json = "{}")
 
