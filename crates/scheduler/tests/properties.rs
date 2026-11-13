@@ -3,9 +3,7 @@
 //! The ordering rule, the passing rule, and "no deadlock, no lost lease",
 //! checked over random workloads by simulating the whole run.
 
-use mason_scheduler::{
-    explain, CpuGate, DiskGate, Kind, Ledger, Needs, Rank, StallGate, WaitCause,
-};
+use mason_scheduler::{explain, CpuGate, Kind, Ledger, Needs, Rank, StallGate, WaitCause};
 use proptest::prelude::*;
 use std::collections::BTreeMap;
 
@@ -565,6 +563,7 @@ fn waiters_set_aside_what_they_need_and_the_rest_is_used() {
     l.release(suite);
     let p = l.schedule(3, None, None);
     assert_eq!(p.grants, vec![a]);
+}
 
 fn paced_ledger() -> (Ledger, CpuGate) {
     let mut l = Ledger::new();
@@ -624,17 +623,25 @@ fn with_none_running_the_first_in_a_pass_starts_and_the_second_is_paced() {
 #[test]
 fn a_request_behind_a_paused_one_names_it_and_the_reason_not_a_holder() {
     let (mut l, _) = paced_ledger();
-    // The disk floor pauses the first in line with no compile held.
-    l.set_disk(Some(DiskGate {
-        free_mb: 1,
-        floor_mb: 100,
-    }));
+    // One compile slot, so the second compile is behind the first (which reserves it), not
+    // merely held by the same gate.
+    l.set_capacity("compile", 1, Kind::Machine);
+    l.set_capacity("test-suite", 2, Kind::Machine);
+    // Other work is running, so low memory pauses the first compile in line, with no
+    // compile held.
+    let t = l.submit(
+        Rank::new(false, 1, 2, 1, 1, false),
+        Needs::of(&[("test-suite", 1)]),
+        "#1",
+        0,
+    );
+    assert_eq!(l.schedule(0, None, None).grants, vec![t]);
     submit_compile(&mut l, 2, 0);
     let c = submit_compile(&mut l, 3, 0);
-    let p = l.schedule_gated(0, None, None, None);
+    let p = l.schedule_gated(0, Some(100), Some(2000), None);
     assert!(p.grants.is_empty());
     assert_eq!(
         explain(&p.waits[&c], 0),
-        "Waiting for compile slot: 2nd in line, behind #2 (disk is low)"
+        "Waiting for compile slot: 2nd in line, behind #2 (memory is low)"
     );
 }
