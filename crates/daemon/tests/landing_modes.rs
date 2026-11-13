@@ -86,6 +86,96 @@ fn direct_ci_red_goes_to_the_same_ladder_and_only_the_culprit_is_parked() {
     });
 }
 
+// ---- [ci.local]: a red a local suite reproduces is searched for locally (s213) ----------------
+
+fn local_world(map: &str) -> (W, PathBuf) {
+    let log = std::sync::Mutex::new(PathBuf::new());
+    let t = format!("mode = \"direct-ci\"\nwindow = \"30s\"\nmax_size = 4\nmax_fold = 4\n[[tier]]\nname = \"batch\"\nsuites = [\"alpha\"]\n[ci.local]\n{map}\n");
+    let w = world_with(
+        &t,
+        &|s| {
+            let (sec, l) = ci_section(s);
+            *log.lock().unwrap() = l;
+            sec
+        },
+        &[],
+    );
+    let l = log.lock().unwrap().clone();
+    (w, l)
+}
+
+fn four(w: &W) -> (Vec<TaskId>, TaskId) {
+    let ok: Vec<TaskId> = (0..3)
+        .map(|i| w.task(&format!("fine {i}"), &[(&format!("x/ok{i}.txt"), "1")]))
+        .collect();
+    let bad = w.task("breaks CI", &[("red.integration", "x")]);
+    (ok, bad)
+}
+
+fn redbase_alert(w: &W) -> Option<String> {
+    mason_daemon::attention::alerts_now(&w.d)
+        .into_iter()
+        .find(|(k, kind, _)| k.starts_with("redbase") && kind == "landing")
+        .map(|(_, _, t)| t)
+}
+
+#[test]
+fn ci_red_in_a_mapped_job_finds_the_culprit_locally_and_dispatches_ci_once_more() {
+    let (w, log) = local_world("integration = [\"integration\"]");
+    let (ok, bad) = four(&w);
+    wait_for("the good three to land", 150, || {
+        ok.iter().all(|t| w.landed(*t))
+    });
+    wait_for("the culprit to be sent back", 60, || {
+        w.sent_back(bad).is_some()
+    });
+    assert!(w.on_main("x/ok0.txt") && !w.on_main("red.integration"));
+    // The batch's CI run, and the one on the union without the culprit: no rerun, no
+    // bisection through CI.
+    assert_eq!(
+        triggers(&log),
+        2,
+        "{}",
+        std::fs::read_to_string(&log).unwrap()
+    );
+    wait_for("every candidate to be deleted", 30, || {
+        remote_branches(&w.s).is_empty()
+    });
+}
+
+#[test]
+fn ci_red_in_an_unmapped_job_still_bisects_through_ci() {
+    let (w, log) = local_world("other = [\"integration\"]");
+    let (ok, bad) = four(&w);
+    wait_for("the good three to land", 240, || {
+        ok.iter().all(|t| w.landed(*t))
+    });
+    wait_for("the culprit to be sent back", 60, || {
+        w.sent_back(bad).is_some()
+    });
+    assert!(
+        triggers(&log) >= 3,
+        "CI ran for the batch, the rerun and the bisection: {}",
+        triggers(&log)
+    );
+}
+
+#[test]
+fn mapped_suites_green_here_while_ci_is_red_asks_the_owner_and_does_not_bisect() {
+    let (w, log) = local_world("integration = [\"smoke\"]");
+    let (ok, bad) = four(&w);
+    wait_for("the owner to be asked", 120, || redbase_alert(&w).is_some());
+    let text = redbase_alert(&w).unwrap();
+    assert!(
+        text.contains("smoke is green here: environment difference"),
+        "{text}"
+    );
+    assert_eq!(triggers(&log), 1, "no rerun and no bisection through CI");
+    assert!(ok.iter().chain([&bad]).all(|t| !w.landed(*t)));
+    assert!(ok.iter().chain([&bad]).all(|t| w.sent_back(*t).is_none()));
+    assert!(!w.on_main("x/ok0.txt"));
+}
+
 /// Two tasks that are each green alone and red together on the batch suite (a duplicate item that
 /// exists only in the union): the batch is red locally, nothing is pushed, both are told.
 #[test]
@@ -104,8 +194,12 @@ fn direct_ci_batch_red_only_on_the_union_is_not_pushed_and_both_tasks_are_told()
     let log = log.lock().unwrap().clone();
     let one = w.task("adds the item", &[("a/one.txt", "dup-item\n")]);
     let two = w.task("adds it too", &[("a/two.txt", "dup-item\n")]);
-    wait_for("task one to be sent back", 120, || w.sent_back(one).is_some());
-    wait_for("task two to be sent back", 60, || w.sent_back(two).is_some());
+    wait_for("task one to be sent back", 120, || {
+        w.sent_back(one).is_some()
+    });
+    wait_for("task two to be sent back", 60, || {
+        w.sent_back(two).is_some()
+    });
     assert!(w.sent_back(one).unwrap().contains("alpha"));
     assert!(w.sent_back(two).unwrap().contains("alpha"));
     assert!(!w.landed(one) && !w.landed(two));
