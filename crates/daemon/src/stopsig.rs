@@ -5,13 +5,16 @@
 //! which is all a signal handler may safely do; `wait` polls them from the event
 //! loop. Without a handler the default action killed the process with nothing logged.
 
+#[cfg(unix)]
 use nix::libc;
+#[cfg(unix)]
 use nix::sys::signal::{sigaction, SaFlags, SigAction, SigHandler, SigSet, Signal};
 use std::sync::atomic::{AtomicI32, Ordering};
 
 static GOT: AtomicI32 = AtomicI32::new(0);
 static FROM: AtomicI32 = AtomicI32::new(0);
 
+#[cfg(unix)]
 #[allow(unsafe_code)]
 extern "C" fn on_signal(sig: libc::c_int, info: *mut libc::siginfo_t, _: *mut libc::c_void) {
     let pid = if info.is_null() { 0 } else { sender(info) };
@@ -26,7 +29,7 @@ fn sender(info: *mut libc::siginfo_t) -> i32 {
     unsafe { (*info).si_pid }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 #[allow(unsafe_code)]
 fn sender(info: *mut libc::siginfo_t) -> i32 {
     // SAFETY: the kernel passes a valid siginfo_t to an SA_SIGINFO handler.
@@ -34,6 +37,7 @@ fn sender(info: *mut libc::siginfo_t) -> i32 {
 }
 
 /// Install the handlers for SIGTERM and SIGINT.
+#[cfg(unix)]
 #[allow(unsafe_code)]
 pub fn install() -> nix::Result<()> {
     let act = SigAction::new(
@@ -48,12 +52,26 @@ pub fn install() -> nix::Result<()> {
     Ok(())
 }
 
+/// Windows has no SIGTERM; a stop request there arrives as a service control
+/// event or a console ctrl-C, which the Windows service port task will handle.
+#[cfg(windows)]
+pub fn install() -> std::io::Result<()> {
+    Err(mason_platform::unsupported(
+        "handling a stop request",
+        "service",
+    ))
+}
+
+/// SIGTERM and SIGINT, which are the same numbers on macOS and Linux.
+const SIGTERM: i32 = 15;
+const SIGINT: i32 = 2;
+
 /// The text for the log line: `SIGTERM from pid 1`, or just `SIGTERM` when the
 /// sender is not known.
 pub fn describe(sig: i32, pid: i32) -> String {
     let name = match sig {
-        s if s == libc::SIGTERM => "SIGTERM".to_string(),
-        s if s == libc::SIGINT => "SIGINT".to_string(),
+        s if s == SIGTERM => "SIGTERM".to_string(),
+        s if s == SIGINT => "SIGINT".to_string(),
         s => format!("signal {s}"),
     };
     if pid > 0 {
@@ -80,7 +98,7 @@ mod tests {
 
     #[test]
     fn the_log_text_names_the_signal_and_the_sender_when_known() {
-        assert_eq!(describe(libc::SIGTERM, 1), "SIGTERM from pid 1");
-        assert_eq!(describe(libc::SIGINT, 0), "SIGINT");
+        assert_eq!(describe(SIGTERM, 1), "SIGTERM from pid 1");
+        assert_eq!(describe(SIGINT, 0), "SIGINT");
     }
 }

@@ -132,6 +132,20 @@ fn every_reference_must_exist_and_every_mistake_is_named() {
         ),
         (
             with(
+                r#"rerun = "cargo nextest run {tests}""#,
+                r#"dev_command = "cargo nextest run""#,
+            ),
+            "must contain `{packages}`",
+        ),
+        (
+            with(
+                r#"rerun = "cargo nextest run {tests}""#,
+                r#"dev_build = "cargo nextest run {packages}""#,
+            ),
+            "needs dev_command",
+        ),
+        (
+            with(
                 r#"suites = ["unit", "e2e"]"#,
                 r#"suites = ["unit", "ghost"]"#,
             ),

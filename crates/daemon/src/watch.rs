@@ -133,14 +133,12 @@ pub fn stalled_text(silent_ms: u64) -> String {
 
 /// SIGCONT one process. False when it could not be signalled.
 pub fn cont(pid: u32) -> bool {
-    use nix::sys::signal::{kill, Signal};
-    kill(nix::unistd::Pid::from_raw(pid as i32), Signal::SIGCONT).is_ok()
+    mason_platform::process::signal_process(pid, mason_platform::process::Signal::Cont).is_ok()
 }
 
 /// SIGKILL a process group (a `mason run` child's tree, which leads its own).
 pub fn kill_group(pgid: u32) {
-    use nix::sys::signal::{killpg, Signal};
-    let _ = killpg(nix::unistd::Pid::from_raw(pgid as i32), Signal::SIGKILL);
+    let _ = mason_platform::process::signal_group(pgid, mason_platform::process::Signal::Kill);
 }
 
 /// A watcher on one step host's tree. Dropping it stops the watching.
