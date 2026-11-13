@@ -52,18 +52,6 @@ fn run(release: bool) {
         let text = alerts(&s);
         text.contains("credentials") && text.contains("claude /login")
     });
-<<<<<<< HEAD
-    let text = alerts(&s);
-    // The wording depends on whether a probe task is in flight at that moment
-    // ("checking now with task #N") or not ("claude /login ... next check");
-    // both say the agent is not logged in and name the release command.
-    assert!(text.contains("the agent is not logged in"), "{text}");
-    assert!(
-        text.contains("claude /login") || text.contains("mason account release claude"),
-        "{text}"
-    );
-=======
->>>>>>> origin/develop
     // Give the tasks time to fail if they were going to.
     std::thread::sleep(std::time::Duration::from_secs(3));
     for id in [0u64, 1] {
