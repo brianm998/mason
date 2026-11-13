@@ -3,7 +3,9 @@
 //! The ordering rule, the passing rule, and "no deadlock, no lost lease",
 //! checked over random workloads by simulating the whole run.
 
-use mason_scheduler::{explain, CpuGate, Kind, Ledger, Needs, Rank, StallGate, WaitCause};
+use mason_scheduler::{
+    explain, CpuGate, DiskGate, Kind, Ledger, Needs, Rank, StallGate, WaitCause,
+};
 use proptest::prelude::*;
 use std::collections::BTreeMap;
 
@@ -563,4 +565,76 @@ fn waiters_set_aside_what_they_need_and_the_rest_is_used() {
     l.release(suite);
     let p = l.schedule(3, None, None);
     assert_eq!(p.grants, vec![a]);
+
+fn paced_ledger() -> (Ledger, CpuGate) {
+    let mut l = Ledger::new();
+    l.set_capacity("compile", 5, Kind::Machine);
+    l.pace_compiles(30_000);
+    let idle = CpuGate {
+        busy_pct: 10,
+        max_pct: 50,
+    };
+    (l, idle)
+}
+
+fn submit_compile(l: &mut Ledger, n: u64, now: u64) -> u64 {
+    l.submit(
+        Rank::new(false, 1, 2, n, n, false),
+        Needs::of(&[("compile", 1)]),
+        &format!("#{n}"),
+        now,
+    )
+}
+
+#[test]
+fn the_pacing_pause_does_not_apply_with_no_compile_running() {
+    let (mut l, idle) = paced_ledger();
+    let a = submit_compile(&mut l, 1, 0);
+    assert_eq!(l.schedule_gated(0, None, None, Some(idle)).grants, vec![a]);
+    // It finished inside the gap: nothing runs, so the next one starts at once.
+    assert!(l.release(a));
+    let b = submit_compile(&mut l, 2, 5_000);
+    assert_eq!(
+        l.schedule_gated(5_000, None, None, Some(idle)).grants,
+        vec![b]
+    );
+}
+
+#[test]
+fn the_pacing_pause_still_applies_beside_a_running_compile() {
+    let (mut l, idle) = paced_ledger();
+    let a = submit_compile(&mut l, 1, 0);
+    assert_eq!(l.schedule_gated(0, None, None, Some(idle)).grants, vec![a]);
+    let b = submit_compile(&mut l, 2, 5_000);
+    let p = l.schedule_gated(5_000, None, None, Some(idle));
+    assert!(p.grants.is_empty());
+    assert!(matches!(p.waits[&b].cause, WaitCause::Settling { .. }));
+}
+
+#[test]
+fn with_none_running_the_first_in_a_pass_starts_and_the_second_is_paced() {
+    let (mut l, idle) = paced_ledger();
+    let a = submit_compile(&mut l, 1, 0);
+    let b = submit_compile(&mut l, 2, 0);
+    let p = l.schedule_gated(1_000, None, None, Some(idle));
+    assert_eq!(p.grants, vec![a]);
+    assert!(matches!(p.waits[&b].cause, WaitCause::Settling { .. }));
+}
+
+#[test]
+fn a_request_behind_a_paused_one_names_it_and_the_reason_not_a_holder() {
+    let (mut l, _) = paced_ledger();
+    // The disk floor pauses the first in line with no compile held.
+    l.set_disk(Some(DiskGate {
+        free_mb: 1,
+        floor_mb: 100,
+    }));
+    submit_compile(&mut l, 2, 0);
+    let c = submit_compile(&mut l, 3, 0);
+    let p = l.schedule_gated(0, None, None, None);
+    assert!(p.grants.is_empty());
+    assert_eq!(
+        explain(&p.waits[&c], 0),
+        "Waiting for compile slot: 2nd in line, behind #2 (disk is low)"
+    );
 }
