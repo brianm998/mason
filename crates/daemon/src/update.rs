@@ -1573,7 +1573,6 @@ pub fn drain_and_take_over(d: &Arc<Daemon>, sha: &str, now: bool) -> String {
 /// are other processes and do not notice; the new daemon finds them as it
 /// would after any restart. Only returns if the exec fails.
 pub fn take_over(d: &Arc<Daemon>, sha: &str) -> String {
-    use std::os::unix::process::CommandExt;
     let rt = Runtimes::new(&d.cfg.data_dir);
     if let Err(e) = rt.set_current(sha) {
         return fail(d, format!("could not record the new runtime: {e}"));
@@ -1594,7 +1593,7 @@ pub fn take_over(d: &Arc<Daemon>, sha: &str) -> String {
         args.extend(["--port".into(), port.to_string()]);
     }
     args.extend(["--runtime-sha".into(), sha.into()]);
-    let err = Command::new(rt.masond(sha)).args(&args).exec();
+    let err = mason_platform::process::replace_process(Command::new(rt.masond(sha)).args(&args));
     // Still here: the exec failed. Put things back.
     if let Some(prev) = d.cfg.runtime_sha.as_deref() {
         let _ = rt.set_current(prev);

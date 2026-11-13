@@ -99,7 +99,7 @@ Each running step, whether an agent session, a test run or a build, gets its own
 
 - **Rust** with `tokio`, `axum` for HTTP and WebSocket, `rusqlite` in WAL mode behind a single writer thread, `prost`, `notify`, `mdns-sd`, `toml_edit`, `tracing`.
 - **Blocking work never runs on the event loop.** Git, network and process calls go through bounded worker pools. A watchdog alerts if the loop stalls, because an earlier pipeline froze entirely when one network call ran there.
-- **The daemon targets macOS and Linux** (launchd and systemd). Windows is limited to clients for now.
+- **The daemon targets macOS and Linux** (launchd and systemd), and Windows is being ported to the same standard; see [decision 0188](decisions/0188-windows-port.md), which supersedes "Windows is limited to clients for now".
 
 ### Repository layout
 

@@ -17,7 +17,6 @@
 //! Nothing here queues. Order is decided by `mason-scheduler`; this only
 //! makes the grant real, and proves after the fact that a holder is gone.
 
-use nix::fcntl::{Flock, FlockArg};
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io;
@@ -75,7 +74,7 @@ pub struct Locks {
 #[derive(Debug)]
 pub struct Held {
     // Held only to keep the kernel locks; released on drop.
-    _locks: Vec<Flock<File>>,
+    _locks: Vec<File>,
     paths: Vec<PathBuf>,
     marker: PathBuf,
 }
@@ -105,11 +104,19 @@ fn open(path: &Path) -> io::Result<File> {
         .open(path)
 }
 
-fn lock(path: &Path, arg: FlockArg) -> Result<Option<Flock<File>>, io::Error> {
-    match Flock::lock(open(path)?, arg) {
-        Ok(l) => Ok(Some(l)),
-        Err((_, nix::errno::Errno::EWOULDBLOCK)) => Ok(None),
-        Err((_, e)) => Err(io::Error::from(e)),
+/// Take a non-blocking `flock` (`LockFileEx` on Windows) on `path`; `None` if
+/// someone else holds a conflicting one. The lock lasts as long as the file.
+fn lock(path: &Path, exclusive: bool) -> Result<Option<File>, io::Error> {
+    let f = open(path)?;
+    let got = if exclusive {
+        f.try_lock()
+    } else {
+        f.try_lock_shared()
+    };
+    match got {
+        Ok(()) => Ok(Some(f)),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(e)) => Err(e),
     }
 }
 
@@ -142,17 +149,12 @@ impl Locks {
         want: &Take,
         capacity: &BTreeMap<String, u32>,
     ) -> Result<Held, TakeError> {
-        let mut locks: Vec<Flock<File>> = vec![];
+        let mut locks: Vec<File> = vec![];
         let mut paths: Vec<PathBuf> = vec![];
         let machine = self.dir.join("machine.lock");
         let uses_machine = want.exclusive || !want.classes.is_empty();
         if uses_machine {
-            let arg = if want.exclusive {
-                FlockArg::LockExclusiveNonblock
-            } else {
-                FlockArg::LockSharedNonblock
-            };
-            match lock(&machine, arg)? {
+            match lock(&machine, want.exclusive)? {
                 Some(l) => locks.push(l),
                 None => return Err(TakeError::Busy),
             }
@@ -165,7 +167,7 @@ impl Locks {
                     break;
                 }
                 let p = self.slot(class, i);
-                if let Some(l) = lock(&p, FlockArg::LockExclusiveNonblock)? {
+                if let Some(l) = lock(&p, true)? {
                     locks.push(l);
                     paths.push(p);
                     got += 1;
@@ -177,7 +179,7 @@ impl Locks {
             }
         }
         let marker = self.marker(lease);
-        match lock(&marker, FlockArg::LockExclusiveNonblock)? {
+        match lock(&marker, true)? {
             Some(l) => locks.push(l),
             None => return Err(TakeError::Busy),
         }
@@ -202,7 +204,7 @@ impl Locks {
         if !m.exists() {
             return false;
         }
-        match lock(&m, FlockArg::LockExclusiveNonblock) {
+        match lock(&m, true) {
             Ok(Some(_ours)) => {
                 // We got it, so nobody holds it: the holder is gone.
                 let _ = std::fs::remove_file(&m);
@@ -222,7 +224,7 @@ impl Locks {
                 if !p.exists() {
                     return None;
                 }
-                match lock(&p, FlockArg::LockExclusiveNonblock) {
+                match lock(&p, true) {
                     Ok(Some(_free)) => None,
                     _ => Some(
                         std::fs::read_to_string(p.with_extension("holder"))
