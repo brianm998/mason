@@ -182,11 +182,13 @@ fn run_watched(
     is_task: bool,
 ) -> std::io::Result<std::process::ExitStatus> {
     use mason_daemon::watch::{tick, Action, State};
-    use std::os::unix::process::CommandExt;
     if th.off() || !is_task {
         return Command::new(prog).args(args).status();
     }
-    let mut child = Command::new(prog).args(args).process_group(0).spawn()?;
+    let mut cmd = Command::new(prog);
+    cmd.args(args);
+    mason_platform::process::group_leader(&mut cmd);
+    let mut child = cmd.spawn()?;
     let root = child.id();
     let tick_every = std::env::var("MASON_WATCH_TICK_MS")
         .ok()
@@ -275,19 +277,12 @@ pub fn hold(
 }
 
 fn process_alive(pid: u32) -> bool {
-    use nix::sys::signal::kill;
-    use nix::unistd::Pid;
-    match kill(Pid::from_raw(pid as i32), None) {
-        Ok(()) => true,
-        Err(nix::errno::Errno::ESRCH) => false,
-        // EPERM: it exists, and is not ours to signal.
-        Err(_) => true,
-    }
+    // A process we may not signal (EPERM) still exists.
+    mason_platform::process::exists(pid)
 }
 
 fn signal_of(s: &std::process::ExitStatus) -> i32 {
-    use std::os::unix::process::ExitStatusExt;
-    s.signal().unwrap_or(1)
+    mason_platform::process::exit_signal(s).unwrap_or(1)
 }
 
 fn ago(now: u64, since: u64) -> String {
