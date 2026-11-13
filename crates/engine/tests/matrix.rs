@@ -230,5 +230,5 @@ fn every_state_and_event_pair() {
             checked += 1;
         }
     }
-    assert_eq!(checked, 11 * 23);
+    assert_eq!(checked, 11 * 24);
 }
