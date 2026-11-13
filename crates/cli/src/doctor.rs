@@ -753,7 +753,13 @@ mod tests {
             out.iter()
                 .any(|f| matches!(f.level, Level::Warn) && f.text.contains("batch"))
         };
-        for m in ["direct-ci", "local-only-ci", "pr-each", "pr-batch", "host-queue"] {
+        for m in [
+            "direct-ci",
+            "local-only-ci",
+            "pr-each",
+            "pr-batch",
+            "host-queue",
+        ] {
             assert!(warned(&format!("mode = \"{m}\"\n")), "{m}");
             assert!(!warned(&format!("mode = \"{m}\"\n{tier}")), "{m} with tier");
         }
@@ -781,7 +787,9 @@ mod tests {
             matches!(&sel, mason_testing::Selection::Some(v) if v.iter().any(|s| s == "t0-pipeline-static")),
             "{sel:?}"
         );
-        let sel = testing.impact.select(&["somewhere/new.txt".to_string()], &suites);
+        let sel = testing
+            .impact
+            .select(&["somewhere/new.txt".to_string()], &suites);
         assert!(matches!(sel, mason_testing::Selection::All), "{sel:?}");
     }
 

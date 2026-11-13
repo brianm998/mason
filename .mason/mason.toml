@@ -53,6 +53,12 @@ next = "land"
 build = "{project_test} --no-run"
 command = "{project_test}"
 rerun = "{project_test} {tests}"
+# `run_check` while developing, asked for with `changed: true`: only the crates the diff touches
+# and their dependents. The test step runs `command` whole (decision 0205). Commented out until
+# the daemon with s210 is live: the daemon that validates this file when it lands does not know
+# the keys yet (as with `build` in s178). A follow-up uncomments both lines.
+# dev_command = "{project_test} {packages}"
+# dev_build = "{project_test} {packages} --no-run"
 parser = "regex"
 pass_regex = '^test (.+) \.\.\. ok$'
 fail_regex = '^test (.+) \.\.\. FAILED$'

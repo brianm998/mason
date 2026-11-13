@@ -173,7 +173,15 @@ pub fn tool_spec(tool: &str) -> Option<(String, Value)> {
         "run_check" => s(
             "Run a named check. Short checks return their result. A long check returns at once and \
              tells you to end your turn; you will be resumed with the result.",
-            json!({"name": {"type": "string", "description": "Check name, such as 'unit'"}}),
+            json!({
+                "name": {"type": "string", "description": "Check name, such as 'unit'"},
+                "tests": {"type": "array", "items": {"type": "string"},
+                    "description": "Optional. Run only tests whose names match these filters (at most 20), on a suite that can. A scoped green is not the test step's: it still runs everything."},
+                "packages": {"type": "array", "items": {"type": "string"},
+                    "description": "Optional. Run only these packages (at most 20), on a suite that can."},
+                "changed": {"type": "boolean",
+                    "description": "Optional. Run only the packages your changes touch and what depends on them, on a suite that can."}
+            }),
             &["name"],
         ),
         "report_progress" => s(
@@ -203,6 +211,51 @@ pub fn tool_spec(tool: &str) -> Option<(String, Value)> {
             &["reason"],
         ),
         _ => None,
+    }
+}
+
+/// How many names a scope may list, and how long each may be.
+const SCOPE_MAX: usize = 20;
+const SCOPE_NAME_MAX: usize = 200;
+
+/// A scope's names are substituted into a shell command, so they are an allow-list: letters,
+/// digits and `_ : . - /`, not starting with `-` (a flag). No quote, space, `;`, `$`, backtick,
+/// newline or other metacharacter gets through.
+fn scope_name_problem(s: &str) -> Option<String> {
+    if s.is_empty() {
+        return Some("must not be empty".into());
+    }
+    if s.chars().count() > SCOPE_NAME_MAX {
+        return Some(format!("longer than {SCOPE_NAME_MAX} characters"));
+    }
+    if s.starts_with('-') {
+        return Some("must not start with '-'".into());
+    }
+    s.chars()
+        .find(|c| !(c.is_ascii_alphanumeric() || matches!(c, '_' | ':' | '.' | '-' | '/')))
+        .map(|c| format!("{c:?} is not allowed; use letters, digits and _ : . - /"))
+}
+
+fn scope_list(a: &Value, key: &str, out: &mut Vec<String>) {
+    match a.get(key) {
+        None | Some(Value::Null) => {}
+        Some(Value::Array(v)) if v.len() > SCOPE_MAX => out.push(format!(
+            "{key}: {} entries, the limit is {SCOPE_MAX}",
+            v.len()
+        )),
+        Some(Value::Array(v)) => {
+            for (i, e) in v.iter().enumerate() {
+                match e.as_str() {
+                    Some(s) => {
+                        if let Some(why) = scope_name_problem(s) {
+                            out.push(format!("{key}[{i}]: {why}"));
+                        }
+                    }
+                    None => out.push(format!("{key}[{i}]: must be a string")),
+                }
+            }
+        }
+        Some(_) => out.push(format!("{key}: must be a list of strings")),
     }
 }
 
@@ -321,6 +374,12 @@ pub fn validate(tool: &str, a: &Value) -> Result<(), Vec<String>> {
         }
         "run_check" => {
             text(a, "name", 200, &mut p);
+            for key in ["tests", "packages"] {
+                scope_list(a, key, &mut p);
+            }
+            if a.get("changed").is_some_and(|c| !c.is_boolean()) {
+                p.push("changed: must be true or false".into());
+            }
         }
         "report_progress" => {
             text(a, "message", 300, &mut p);
@@ -369,6 +428,47 @@ pub struct ToolReply {
 /// are handed to the scheduler and the agent's turn ends (suspend).
 pub trait CheckHandler: Send + Sync {
     fn run(&self, name: &str) -> CheckRun;
+    /// The same with a scope the agent asked for. A handler that cannot narrow a check runs it
+    /// whole, which is what this does.
+    fn run_scoped(&self, name: &str, _scope: &CheckScope) -> CheckRun {
+        self.run(name)
+    }
+}
+
+/// What the agent asked `run_check` to narrow to. Validated: the names are safe to put in a
+/// command. A narrowed green says nothing about the rest; the test step runs it all.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CheckScope {
+    /// Test-name filters.
+    pub tests: Vec<String>,
+    /// Packages (or the suite's equivalent).
+    pub packages: Vec<String>,
+    /// Only what the worktree's changes touch.
+    pub changed: bool,
+}
+
+impl CheckScope {
+    pub fn from_args(a: &Value) -> CheckScope {
+        let list = |k: &str| -> Vec<String> {
+            a.get(k)
+                .and_then(Value::as_array)
+                .map(|v| {
+                    v.iter()
+                        .filter_map(|e| e.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        CheckScope {
+            tests: list("tests"),
+            packages: list("packages"),
+            changed: a.get("changed").and_then(Value::as_bool).unwrap_or(false),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.tests.is_empty() && self.packages.is_empty() && !self.changed
+    }
 }
 
 pub enum CheckRun {
@@ -690,7 +790,8 @@ impl ContractHandle {
                 // A check can take many minutes. Nothing else the agent calls
                 // (report_progress, submit_change) waits for it.
                 drop(st);
-                let run = self.0.checks.run(name);
+                let scope = CheckScope::from_args(args);
+                let run = self.0.checks.run_scoped(name, &scope);
                 let mut st = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
                 match run {
                     CheckRun::Done { passed, summary } => ToolReply {
@@ -1118,6 +1219,67 @@ mod tests {
         assert!(r.ok && r.text.contains("End your turn"));
         assert_eq!(c.state().suspended_check.as_deref(), Some("chk-7"));
         assert!(!c.call("run_check", &json!({"name": "mystery"})).ok);
+    }
+
+    #[test]
+    fn a_scope_reaches_the_handler_and_its_names_are_never_shell_text() {
+        use std::sync::Mutex;
+        struct H(Arc<Mutex<Vec<CheckScope>>>);
+        impl CheckHandler for H {
+            fn run(&self, _: &str) -> CheckRun {
+                CheckRun::Unknown
+            }
+            fn run_scoped(&self, _: &str, s: &CheckScope) -> CheckRun {
+                self.0.lock().unwrap().push(s.clone());
+                CheckRun::Done {
+                    passed: true,
+                    summary: "ok".into(),
+                }
+            }
+        }
+        let seen = Arc::new(Mutex::new(vec![]));
+        let c = ContractHandle::new(StepKind::Develop, Box::new(H(seen.clone())));
+        let r = c.call(
+            "run_check",
+            &json!({"name": "tests", "tests": ["foo", "a::b_c"], "packages": ["mason-daemon"], "changed": true}),
+        );
+        assert!(r.ok, "{}", r.text);
+        assert_eq!(
+            seen.lock().unwrap()[0],
+            CheckScope {
+                tests: vec!["foo".into(), "a::b_c".into()],
+                packages: vec!["mason-daemon".into()],
+                changed: true
+            }
+        );
+        for bad in [
+            "a;b", "a$(b)", "a`b`", "a\nb", "a b", "a'b", "a|b", "a&b", "a>b", "-x", "", "a\"b",
+        ] {
+            for key in ["tests", "packages"] {
+                let r = c.call("run_check", &json!({"name": "tests", key: [bad]}));
+                assert!(!r.ok, "{bad:?} in {key} was accepted");
+            }
+        }
+        let long = "a".repeat(201);
+        assert!(
+            !c.call("run_check", &json!({"name": "tests", "tests": [long]}))
+                .ok
+        );
+        let many: Vec<String> = (0..21).map(|i| format!("t{i}")).collect();
+        assert!(
+            !c.call("run_check", &json!({"name": "tests", "packages": many}))
+                .ok
+        );
+        assert!(
+            !c.call("run_check", &json!({"name": "tests", "tests": "foo"}))
+                .ok
+        );
+        assert!(
+            !c.call("run_check", &json!({"name": "tests", "changed": "yes"}))
+                .ok
+        );
+        // Only the accepted call got through.
+        assert_eq!(seen.lock().unwrap().len(), 1);
     }
 
     #[test]
