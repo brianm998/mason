@@ -46,8 +46,7 @@ fn kill_group(pid: u32) {
 
 /// Run `cmd` to its end or `limit`, whichever comes first. Stdin is closed.
 pub fn output(cmd: &mut Command, limit: Duration) -> Result<Output, ProcError> {
-    let mut child = cmd
-        .stdin(Stdio::null())
+    cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     mason_platform::process::group_leader(cmd);

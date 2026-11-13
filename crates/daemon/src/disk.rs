@@ -197,6 +197,7 @@ mod tests {
         assert_eq!(least_free_mb(&*d, &[p]), Some(7 * 1024));
     }
 
+    #[cfg(unix)]
     #[test]
     fn sizes_add_up_and_skip_symlinks() {
         let t = tempfile::tempdir().unwrap();
