@@ -55,7 +55,7 @@ struct TopBar: View {
                     ForEach(model.header?.projects ?? [], id: \.self) { Text($0).tag($0) }
                 }
                 .labelsHidden()
-                .frame(width: 150 * min(CGFloat(theme.scale), 1.4))
+                .frame(width: 120 * min(CGFloat(theme.scale), 1.4))
                 .onChange(of: model.project) { _, _ in model.subscribe?() }
             }
 

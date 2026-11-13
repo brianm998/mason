@@ -51,17 +51,6 @@ final class TopBarFitTests: XCTestCase {
         NSHostingController(rootView: TopBar(model: model).environment(\.theme, Theme(dark: false, scale: 1)))
     }
 
-    /// Measurements for the stage note: the tile row alone, and the whole bar's least width.
-    func testMeasureTheTopBarPieces() {
-        let model = crowdedModel(attention: 3)
-        let tiles = NSHostingController(rootView: HStack(spacing: 4) {
-            ForEach(model.header?.counts ?? [], id: \.state) { CountTile(model: model, count: $0) }
-        }.environment(\.theme, Theme(dark: false, scale: 1)))
-        let t = tiles.sizeThatFits(in: CGSize(width: 0, height: 10_000))
-        let all = host(model).sizeThatFits(in: CGSize(width: 0, height: 10_000))
-        print("MEASURE tiles-alone \(t.width) whole-bar \(all.width)")
-    }
-
     func testCrowdedTopBarFitsTheMainWindowMinimum() {
         for attention: UInt32 in [0, 3] {
             // Width 0 asks for the least the bar can be: the text may truncate, nothing else gives.
