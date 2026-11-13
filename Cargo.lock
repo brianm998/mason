@@ -687,6 +687,7 @@ dependencies = [
 name = "mason-adapter-api"
 version = "0.0.0"
 dependencies = [
+ "mason-platform",
  "serde_json",
 ]
 
@@ -695,8 +696,8 @@ name = "mason-adapters"
 version = "0.0.0"
 dependencies = [
  "mason-adapter-api",
+ "mason-platform",
  "mason-step-host",
- "nix",
  "proptest",
  "serde_json",
  "tempfile",
@@ -733,6 +734,7 @@ dependencies = [
  "mason-devices",
  "mason-engine",
  "mason-landing",
+ "mason-platform",
  "mason-plugins",
  "mason-protocol",
  "mason-resources",
@@ -776,7 +778,6 @@ name = "mason-devices"
 version = "0.0.0"
 dependencies = [
  "mason-adapter-api",
- "nix",
  "serde_json",
  "tempfile",
 ]
@@ -792,7 +793,7 @@ dependencies = [
 name = "mason-landing"
 version = "0.0.0"
 dependencies = [
- "nix",
+ "mason-platform",
  "proptest",
  "serde_json",
  "tempfile",
@@ -808,14 +809,23 @@ dependencies = [
  "mason-daemon",
  "mason-definition",
  "mason-landing",
+ "mason-platform",
  "mason-protocol",
  "mason-resources",
  "mason-step-host",
  "mason-testing",
- "nix",
  "serde_json",
  "tempfile",
  "toml_edit",
+]
+
+[[package]]
+name = "mason-platform"
+version = "0.0.0"
+dependencies = [
+ "nix",
+ "tempfile",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -845,7 +855,6 @@ dependencies = [
 name = "mason-resources"
 version = "0.0.0"
 dependencies = [
- "nix",
  "tempfile",
 ]
 
@@ -860,6 +869,7 @@ dependencies = [
 name = "mason-step-host"
 version = "0.0.0"
 dependencies = [
+ "mason-platform",
  "nix",
  "tempfile",
 ]

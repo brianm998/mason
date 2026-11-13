@@ -4,7 +4,6 @@
 //! device real with a kernel `flock` on `device-<id>.lock`, so a holder that
 //! dies frees it, the way machine classes do.
 
-use nix::fcntl::{Flock, FlockArg};
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::path::PathBuf;
@@ -18,7 +17,7 @@ pub struct Leases {
 pub struct DeviceLease {
     pub id: String,
     leases: Arc<Leases>,
-    _lock: Flock<File>,
+    _lock: File,
 }
 
 impl Drop for DeviceLease {
@@ -62,7 +61,8 @@ impl Leases {
             .write(true)
             .open(&path)
             .ok()?;
-        let lock = Flock::lock(file, FlockArg::LockExclusiveNonblock).ok()?;
+        file.try_lock().ok()?;
+        let lock = file;
         self.held
             .lock()
             .unwrap_or_else(|e| e.into_inner())
