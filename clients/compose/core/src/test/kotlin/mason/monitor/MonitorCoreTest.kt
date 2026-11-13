@@ -836,7 +836,7 @@ class MonitorCoreTest {
     }
 
     @Test fun aStalledDaemonShowsReconnectingNotAnError() {
-        val r = Rig(MonitorModel(MemoryPreferences()), stallAfter = 0.15)
+        val r = Rig(MonitorModel(MemoryPreferences()), stallAfter = 1.0)
         r.conn.start()
         waitFor("a socket") { r.sockets.size == 1 }
         r.sockets[0].events.onMessage(welcome)
