@@ -1,0 +1,5 @@
+# 0219: the macOS monitor ships as a universal dmg built by a script
+
+`bundle-monitor.sh` stays host-only and unsigned by default, because the in-app update and `scripts/exit/s12.sh` use it. `--universal` builds `--arch arm64 --arch x86_64`; `SIGN_APP` signs nested resource bundles, then the app, with `--options runtime --timestamp` (no `--deep`, which Apple deprecates). No entitlements: the monitor uses no JIT, camera, microphone or network server; `ENTITLEMENTS=<file>` exists if one is ever needed, and each must be documented here. `macos-dmg.sh` makes a UDZO dmg with an /Applications link, signs it, and notarizes and staples through `notarize.sh` (`NOTARY_PROFILE`, or `APPLE_ID`, `APPLE_TEAM_ID`, `APPLE_APP_PASSWORD`). The bundle is verified with `codesign`, `plutil` and `lipo`, never launched. A universal SwiftPM build puts the resource bundle in macOS layout (`Contents/Resources/Art`), so the mascot check accepts both.
+
+Not verified: real Developer ID signing and notarization (no credentials here).
