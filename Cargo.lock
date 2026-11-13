@@ -685,7 +685,7 @@ dependencies = [
 
 [[package]]
 name = "mason-adapter-api"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "mason-platform",
  "serde_json",
@@ -693,7 +693,7 @@ dependencies = [
 
 [[package]]
 name = "mason-adapters"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "mason-adapter-api",
  "mason-platform",
@@ -705,7 +705,7 @@ dependencies = [
 
 [[package]]
 name = "mason-conformance"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "mason-core",
  "mason-plugins",
@@ -717,11 +717,11 @@ dependencies = [
 
 [[package]]
 name = "mason-core"
-version = "0.0.0"
+version = "0.1.0"
 
 [[package]]
 name = "mason-daemon"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "axum",
  "hyper",
@@ -761,7 +761,7 @@ dependencies = [
 
 [[package]]
 name = "mason-definition"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "mason-adapter-api",
  "mason-core",
@@ -775,7 +775,7 @@ dependencies = [
 
 [[package]]
 name = "mason-devices"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "mason-adapter-api",
  "serde_json",
@@ -784,14 +784,14 @@ dependencies = [
 
 [[package]]
 name = "mason-engine"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "mason-core",
 ]
 
 [[package]]
 name = "mason-landing"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "mason-platform",
  "proptest",
@@ -802,7 +802,7 @@ dependencies = [
 
 [[package]]
 name = "mason-pipeline"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "mason-adapters",
  "mason-core",
@@ -821,7 +821,7 @@ dependencies = [
 
 [[package]]
 name = "mason-platform"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "nix",
  "tempfile",
@@ -830,7 +830,7 @@ dependencies = [
 
 [[package]]
 name = "mason-plugins"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "serde_json",
  "tempfile",
@@ -839,7 +839,7 @@ dependencies = [
 
 [[package]]
 name = "mason-protocol"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "pbjson",
  "pbjson-build",
@@ -853,21 +853,21 @@ dependencies = [
 
 [[package]]
 name = "mason-resources"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "tempfile",
 ]
 
 [[package]]
 name = "mason-scheduler"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "proptest",
 ]
 
 [[package]]
 name = "mason-step-host"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "mason-platform",
  "nix",
@@ -876,7 +876,7 @@ dependencies = [
 
 [[package]]
 name = "mason-store"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "mason-core",
  "mason-engine",
@@ -886,7 +886,7 @@ dependencies = [
 
 [[package]]
 name = "mason-testing"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "proptest",
  "regex",
