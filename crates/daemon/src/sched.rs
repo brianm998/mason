@@ -1816,8 +1816,19 @@ mod tests {
             "{shown}"
         );
         // The outside holder ends: the slot is free for the next waiter.
+        // The kernel frees a flock only when every fd copy is closed, and a child
+        // forked by a parallel test can hold one briefly. So the release is not
+        // synchronous with the drop: retry, bounded by attempts, not by time.
         drop(held);
-        assert!(matches!(b.lease_poll(second), LeaseState::Granted { .. }));
+        let mut granted = false;
+        for _ in 0..500 {
+            if matches!(b.lease_poll(second), LeaseState::Granted { .. }) {
+                granted = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(granted, "the slot is free once the outside holder ends");
     }
 
     #[test]
