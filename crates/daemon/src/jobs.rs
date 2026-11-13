@@ -414,6 +414,10 @@ fn run_inner(d: &Arc<Daemon>, task: TaskId, step: State, run: StepRunId) {
 pub(crate) fn step_env_pairs(c: &Ctx) -> Vec<(String, String)> {
     vec![
         ("MASON_TASK".into(), c.task.0.to_string()),
+        (
+            "MASON_TASK_CACHE".into(),
+            crate::taskcache::own_dir(&c.d, c.task.0),
+        ),
         ("MASON_TITLE".into(), c.title.clone()),
         ("MASON_PROJECT".into(), c.project.id.clone()),
         ("MASON_WORKTREE".into(), c.wt.to_string_lossy().into_owned()),
@@ -2000,6 +2004,11 @@ fn agent_job(c: &Ctx) {
     // another task.
     spec.env.retain(|(k, _)| k != "MASON_TASK");
     spec.env.push(("MASON_TASK".into(), c.task.0.to_string()));
+    spec.env.retain(|(k, _)| k != "MASON_TASK_CACHE");
+    spec.env.push((
+        "MASON_TASK_CACHE".into(),
+        crate::taskcache::own_dir(&c.d, c.task.0),
+    ));
     spec.tool_timeout = tool_timeout_for(kind, &c.project);
     spec.deadline = Some(
         c.res
@@ -3236,6 +3245,10 @@ pub fn cleanup(d: &Arc<Daemon>, task: TaskId, delete_branch: bool) {
     // a thread of its own, outside the lock: deleting gigabytes takes a while (s78).
     if landed {
         crate::taskcache::remove_in_background(d, p, task.0);
+    }
+    // The directory MASON owns (`MASON_TASK_CACHE`) goes when the task lands or is canceled.
+    if landed || t.state == State::Canceled {
+        crate::taskcache::remove_own_in_background(d, task.0);
     }
 }
 
