@@ -26,18 +26,53 @@ pub fn changes(
         .collect()
 }
 
-/// The lowest-id ready device of a kind (and an OS version prefix, if asked)
-/// that `taken` does not claim.
+/// Which devices of a kind an environment may lease: an OS version prefix,
+/// a glob on the name, and globs on name or id that rule a device out. The
+/// empty filter admits every device.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Filter {
+    pub os: Option<String>,
+    pub name: Option<String>,
+    pub exclude: Vec<String>,
+}
+
+impl Filter {
+    pub fn admits(&self, d: &Device) -> bool {
+        self.os.as_deref().is_none_or(|p| d.os.starts_with(p))
+            && self.name.as_deref().is_none_or(|g| glob(g, &d.name))
+            && !self
+                .exclude
+                .iter()
+                .any(|g| glob(g, &d.name) || glob(g, &d.id))
+    }
+}
+
+/// `*` matches any run of characters, `?` exactly one; everything else is literal.
+pub fn glob(pattern: &str, text: &str) -> bool {
+    fn go(g: &[char], s: &[char]) -> bool {
+        match g.split_first() {
+            None => s.is_empty(),
+            Some(('*', rest)) => (0..=s.len()).any(|n| go(rest, &s[n..])),
+            Some(('?', rest)) => !s.is_empty() && go(rest, &s[1..]),
+            Some((c, rest)) => s.first() == Some(c) && go(rest, &s[1..]),
+        }
+    }
+    let (g, s): (Vec<char>, Vec<char>) = (pattern.chars().collect(), text.chars().collect());
+    go(&g, &s)
+}
+
+/// The lowest-id ready device of a kind that the filter admits and `taken`
+/// does not claim.
 pub fn pick<'a>(
     devices: &'a [Device],
     kind: DeviceKind,
-    os_prefix: Option<&str>,
+    filter: &Filter,
     taken: &dyn Fn(&str) -> bool,
 ) -> Option<&'a Device> {
     devices
         .iter()
         .filter(|d| d.kind == kind && d.state == DeviceState::Ready)
-        .filter(|d| os_prefix.is_none_or(|p| d.os.starts_with(p)))
+        .filter(|d| filter.admits(d))
         .filter(|d| !taken(&d.id))
         .min_by(|a, b| a.id.cmp(&b.id))
 }
@@ -89,23 +124,93 @@ mod tests {
             dev("c", DeviceKind::IosSimulator, "17.5", DeviceState::Ready),
         ];
         let free = |_: &str| false;
+        let any = Filter::default();
+        let os17 = Filter {
+            os: Some("17".into()),
+            ..Filter::default()
+        };
         assert_eq!(
-            pick(&v, DeviceKind::IosSimulator, None, &free).unwrap().id,
+            pick(&v, DeviceKind::IosSimulator, &any, &free).unwrap().id,
             "a"
         );
         assert_eq!(
-            pick(&v, DeviceKind::IosSimulator, Some("17"), &free)
-                .unwrap()
-                .id,
+            pick(&v, DeviceKind::IosSimulator, &os17, &free).unwrap().id,
             "b"
         );
         let a_taken = |id: &str| id == "a";
         assert_eq!(
-            pick(&v, DeviceKind::IosSimulator, None, &a_taken)
+            pick(&v, DeviceKind::IosSimulator, &any, &a_taken)
                 .unwrap()
                 .id,
             "b"
         );
-        assert!(pick(&v, DeviceKind::IosDevice, None, &free).is_none());
+        assert!(pick(&v, DeviceKind::IosDevice, &any, &free).is_none());
+    }
+
+    fn named(id: &str, name: &str) -> Device {
+        Device {
+            name: name.into(),
+            ..dev(id, DeviceKind::IosSimulator, "26.1", DeviceState::Ready)
+        }
+    }
+
+    // Another pipeline's simulators sort first by id; a name glob keeps the
+    // environment off them even when they are the only free ones.
+    #[test]
+    fn a_name_glob_never_picks_another_pipelines_simulator() {
+        let v = vec![
+            named("0A", "pipeline-slot-1"),
+            named("0B", "pipeline-slot-2"),
+            named("9Z", "tdt-1"),
+        ];
+        let f = Filter {
+            name: Some("tdt-*".into()),
+            ..Filter::default()
+        };
+        let free = |_: &str| false;
+        assert_eq!(
+            pick(&v, DeviceKind::IosSimulator, &f, &free).unwrap().name,
+            "tdt-1"
+        );
+        let tdt_taken = |id: &str| id == "9Z";
+        assert!(
+            pick(&v, DeviceKind::IosSimulator, &f, &tdt_taken).is_none(),
+            "with its own device busy it waits; it does not fall back to pipeline-slot-*"
+        );
+    }
+
+    #[test]
+    fn exclude_rules_out_by_name_or_id() {
+        let v = vec![
+            named("0A", "pipeline-slot-1"),
+            named("0B", "iPhone 17"),
+            named("0C", "iPhone 17 Pro"),
+        ];
+        let f = Filter {
+            exclude: vec!["pipeline-slot-*".into(), "0B".into()],
+            ..Filter::default()
+        };
+        let free = |_: &str| false;
+        assert_eq!(
+            pick(&v, DeviceKind::IosSimulator, &f, &free).unwrap().id,
+            "0C"
+        );
+        assert!(!f.admits(&v[0]) && !f.admits(&v[1]));
+    }
+
+    #[test]
+    fn globs_on_names() {
+        for (g, s, want) in [
+            ("tdt-*", "tdt-1", true),
+            ("tdt-*", "tdt-", true),
+            ("tdt-*", "pipeline-slot-1", false),
+            ("*slot*", "pipeline-slot-1", true),
+            ("iPhone ?? Pro", "iPhone 17 Pro", true),
+            ("iPhone ?? Pro", "iPhone 7 Pro", false),
+            ("exact", "exact", true),
+            ("exact", "exactly", false),
+        ] {
+            assert_eq!(glob(g, s), want, "{g} vs {s}");
+        }
     }
 }
