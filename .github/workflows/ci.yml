@@ -7,6 +7,15 @@ on:
   push:
     branches: [develop, "stage/**"]
   pull_request:
+  # The macOS legs of exit-scripts and monitor-compose run here, not on every push
+  # (decision 0204): GitHub caps an account's concurrent macOS jobs.
+  schedule:
+    - cron: "17 3 * * *"
+
+# A newer push to the same ref cancels the older run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -21,6 +30,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
+      - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: bash scripts/check-spdx.sh
@@ -50,6 +60,7 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace
 
   # The exit scripts, in six shards per system: in one job after the workspace tests
@@ -60,12 +71,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest]
         shard: [1, 2, 3, 4, 5, 6]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
       - run: bash scripts/run-exit-scripts.sh
         env:
           MASON_EXIT_SHARD: "${{ matrix.shard }}/6"
@@ -90,8 +102,39 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: "21" }
+      - uses: gradle/actions/setup-gradle@v4
+        with: { gradle-version: "8.12" }
+      - run: MASON_NO_GUI=1 bash scripts/exit/s13.sh
+
+  # The macOS legs of the two jobs above, nightly only (decision 0204).
+  exit-scripts-macos:
+    if: github.event_name == 'schedule'
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - run: bash scripts/run-exit-scripts.sh
+        env:
+          MASON_EXIT_SHARD: "${{ matrix.shard }}/6"
+          MASON_TESTS_ALREADY_RAN: "1"
+          MASON_SKIP_SWIFT: "1"
+          MASON_SKIP_COMPOSE: "1"
+
+  monitor-compose-macos:
+    if: github.event_name == 'schedule'
+    runs-on: macos-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4

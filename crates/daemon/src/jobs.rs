@@ -16,7 +16,7 @@
 use crate::config::ProjectCfg;
 use crate::config::Provider;
 use crate::daemon::{now_ms, Daemon};
-use mason_adapter_api::contract::{CheckHandler, CheckRun, ContractHandle, Validator};
+use mason_adapter_api::contract::{CheckHandler, CheckRun, CheckScope, ContractHandle, Validator};
 use mason_adapter_api::{AgentAdapter, SessionSpec, StepKind};
 use mason_adapters::claude::ClaudeAdapter;
 use mason_adapters::codex::CodexAdapter;
@@ -360,11 +360,15 @@ fn run_inner(d: &Arc<Daemon>, task: TaskId, step: State, run: StepRunId) {
     let c = match ctx(d, task, run) {
         Ok(c) => c,
         Err(why) => {
-            d.emit_for_run(task, run, EventKind::StepFailed {
+            d.emit_for_run(
+                task,
+                run,
+                EventKind::StepFailed {
                     task,
                     reason: why,
                     class: Some(FailClass::Code),
-                });
+                },
+            );
             return;
         }
     };
@@ -1131,7 +1135,7 @@ impl DevSuites {
 impl TestChecks {
     /// `run_check` on a suites step: the suites bound to `development` that the impact map
     /// selects for the worktree's changes, each after its own build, reported one by one.
-    fn run_suites(&self, dev: &DevSuites) -> CheckRun {
+    fn run_suites(&self, dev: &DevSuites, scope: &CheckScope) -> CheckRun {
         use std::collections::BTreeMap;
         let over = || CheckRun::Done {
             passed: false,
@@ -1139,8 +1143,15 @@ impl TestChecks {
         };
         let def = self.slots.def.clone();
         let paths = crate::suites::worktree_paths(&self.wt, &dev.base_ref);
-        let sels =
-            crate::suites::plan_for(&def, &dev.step, paths, mason_testing::When::Development);
+        let sels = crate::suites::plan_for(
+            &def,
+            &dev.step,
+            paths.clone(),
+            mason_testing::When::Development,
+        );
+        // Packages the diff touches, found once and only if a suite asks for them.
+        let mut touched: Option<Option<Vec<String>>> = None;
+        let mut narrowed: Vec<String> = vec![];
         let project_test = self.cmd.as_ref().map(|c| c.test.as_str());
         let tree = crate::hostedcheck::tree_key(&self.wt);
         let spec = |prefix: String, cmd: &str, uses: &BTreeMap<String, u32>, limit: Duration| {
@@ -1165,7 +1176,7 @@ impl TestChecks {
             }
             any = true;
             let name = sel.suite.name.clone();
-            let suite = match crate::suites::with_project_test(&sel.suite, project_test) {
+            let mut suite = match crate::suites::with_project_test(&sel.suite, project_test) {
                 Ok(s) => s,
                 Err(why) => {
                     failed = true;
@@ -1174,6 +1185,61 @@ impl TestChecks {
                 }
             };
             let limit = suite.timeout.unwrap_or(self.timeout).min(self.timeout);
+            // Only this develop-phase check narrows. The test step runs `command` whole.
+            if !scope.is_empty() {
+                let mut packages = |scope: &CheckScope| -> Option<Vec<String>> {
+                    if !scope.packages.is_empty() {
+                        return Some(scope.packages.clone());
+                    }
+                    touched
+                        .get_or_insert_with(|| {
+                            paths
+                                .as_deref()
+                                .and_then(|p| crate::scope::changed_packages(&self.wt, p))
+                        })
+                        .clone()
+                };
+                if let (false, Some(t)) = (scope.tests.is_empty(), &suite.rerun) {
+                    suite.command = t.replace(
+                        "{tests}",
+                        &scope
+                            .tests
+                            .iter()
+                            .map(|n| shell_word(n))
+                            .collect::<Vec<_>>()
+                            .join(" "),
+                    );
+                    narrowed.push(format!(
+                        "{name}: only tests matching {}",
+                        scope.tests.join(", ")
+                    ));
+                } else if let (true, Some(dc)) = (
+                    scope.changed || !scope.packages.is_empty(),
+                    suite.dev_command.clone(),
+                ) {
+                    match packages(scope) {
+                        Some(pk) => {
+                            let flags = crate::scope::flags(&pk);
+                            suite.command = dc.replace("{packages}", &flags);
+                            if let Some(db) = &suite.dev_build {
+                                suite.build = Some(db.replace("{packages}", &flags));
+                            }
+                            narrowed.push(format!(
+                                "{name}: {} packages ({})",
+                                pk.len(),
+                                pk.join(", ")
+                            ));
+                        }
+                        None => lines.push(format!(
+                            "{name}: no packages found for your changes, so it runs whole"
+                        )),
+                    }
+                } else {
+                    lines.push(format!(
+                        "{name}: cannot be narrowed that way, so it runs whole"
+                    ));
+                }
+            }
             if let Some(b) = &suite.build {
                 let known = built.iter().find(|(c, _)| c == b).map(|(_, ok)| *ok);
                 let ok = match known {
@@ -1268,6 +1334,13 @@ impl TestChecks {
                 "No suite is selected for your changes, so none ran.".into(),
             );
         }
+        if !narrowed.is_empty() {
+            lines.push(format!(
+                "Scoped ({}): this green is not the test step's. The test step runs the whole \
+                 workspace; run one unscoped run_check before you submit.",
+                narrowed.join("; ")
+            ));
+        }
         CheckRun::Done {
             passed: !failed,
             summary: lines.join("\n"),
@@ -1275,15 +1348,31 @@ impl TestChecks {
     }
 }
 
+/// A name from a validated scope (letters, digits, `_ : . - /`), quoted all the same.
+fn shell_word(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
 impl CheckHandler for TestChecks {
     fn run(&self, name: &str) -> CheckRun {
+        self.run_scoped(name, &CheckScope::default())
+    }
+
+    fn run_scoped(&self, name: &str, scope: &CheckScope) -> CheckRun {
         if name == "tests" {
             if let Some(dev) = &self.suites {
-                return self.run_suites(dev);
+                return self.run_suites(dev, scope);
             }
         }
         let (true, Some(cmds)) = (name == "tests", &self.cmd) else {
             return CheckRun::Unknown;
+        };
+        // No suites: the one command has no way to narrow, so it runs whole, and a green of
+        // it is the full command's green (the reuse below is of that only).
+        let whole = if scope.is_empty() {
+            ""
+        } else {
+            "Scope ignored: this project has no suite that can narrow, so the whole command ran.\n"
         };
         let over = || CheckRun::Done {
             passed: false,
@@ -1390,7 +1479,7 @@ impl CheckHandler for TestChecks {
                         o.output
                     )
                 } else {
-                    format!("Last output:\n{}", o.output)
+                    format!("{whole}Last output:\n{}", o.output)
                 },
             },
             Err(e) => CheckRun::Done {

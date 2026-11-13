@@ -204,6 +204,20 @@ fn validate_testing(def: &Definition, p: &mut Vec<Problem>) {
                 ));
             }
         }
+        for (key, v) in [("dev_command", &s.dev_command), ("dev_build", &s.dev_build)] {
+            if v.as_ref().is_some_and(|c| !c.contains("{packages}")) {
+                p.push(Problem::new(
+                    format!("{base}.{key}"),
+                    "must contain `{packages}`, where the `-p` list of the touched packages goes",
+                ));
+            }
+        }
+        if s.dev_build.is_some() && s.dev_command.is_none() {
+            p.push(Problem::new(
+                format!("{base}.dev_build"),
+                "needs dev_command: it is the build of that command",
+            ));
+        }
         if s.parser == mason_testing::ParserKind::Regex
             && s.pass_regex.is_none()
             && s.fail_regex.is_none()

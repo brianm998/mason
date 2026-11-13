@@ -48,6 +48,7 @@ pub mod providers;
 pub mod rerun;
 pub mod sched;
 pub mod schedule;
+pub mod scope;
 pub mod selfguard;
 pub mod selftest;
 pub mod services;

@@ -241,3 +241,60 @@ fn run_check_without_a_development_binding_keeps_the_single_command() {
     assert!(logs.contains("FROM-THE-PROJECT-TEST"), "{logs}");
     assert!(!logs.contains("second: passed"), "{logs}");
 }
+
+/// One suite that can be narrowed: a rerun template for test filters and a development command
+/// for packages. Its `command`, which the test step runs, says RAN-FULL.
+fn narrowable() -> String {
+    format!(
+        r#"{HEAD}
+[step.test]
+type = "test"
+category = "testing"
+uses = {{ compile = 1, test-suite = 1 }}
+suites = ["only"]
+on_red = "develop"
+max_rounds = 2
+next = "land"
+
+[suite.only]
+command = "echo RAN-FULL; sh checks.sh"
+rerun = "echo RAN-RERUN {{tests}}; sh checks.sh"
+dev_command = "echo RAN-DEV {{packages}}; sh checks.sh"
+parser = "tap"
+min_tests = 3
+level = "unit"
+
+[binding.unit]
+when = ["development", "test_step"]
+
+[impact]
+"hello.txt" = ["only"]
+"#
+    )
+}
+
+#[test]
+fn a_scoped_run_check_runs_the_narrowed_command_and_the_test_step_still_runs_it_all() {
+    let turns = json!([
+        {"sh": "echo hello > hello.txt && git add -A && git -c user.name=t -c user.email=t@t commit -qm change"},
+        {"call": {"tool": "run_check", "args": {"name": "tests", "tests": ["foo"]}}},
+        {"call": {"tool": "run_check", "args": {"name": "tests", "packages": ["pk-one"]}}},
+        {"call": {"tool": "submit_change", "args": {"summary": "change", "head": "$HEAD"}}}
+    ]);
+    let (_s, d) = start(vec![turns], &narrowable());
+    let t = file_task_as(
+        &d,
+        "Scoped",
+        "Please do it.",
+        true,
+        TrustSource::Owner,
+        false,
+    );
+    wait_state(&d, t, State::Landed, 120);
+    let logs = render_logs(&d, t.0);
+    assert!(logs.contains("RAN-RERUN foo"), "{logs}");
+    assert!(logs.contains("RAN-DEV -p pk-one"), "{logs}");
+    assert!(logs.contains("this green is not the test step's"), "{logs}");
+    // Neither scoped green stood in for the test step: it ran the whole suite.
+    assert!(logs.contains("RAN-FULL"), "{logs}");
+}
