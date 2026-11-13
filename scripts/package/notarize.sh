@@ -34,11 +34,18 @@ xcrun notarytool submit "$file" --wait --output-format json "${auth[@]}" >"$res"
 rc=$?
 set -e
 cat "$res"
-status=$(/usr/bin/plutil -extract status raw -o - "$res" 2>/dev/null || true)
+status=""
+id=""
+if [ "$rc" -eq 0 ]; then
+  status=$(/usr/bin/plutil -extract status raw -o - "$res" 2>/dev/null) || status=""
+fi
+id=$(/usr/bin/plutil -extract id raw -o - "$res" 2>/dev/null) || id=""
 if [ "$rc" -ne 0 ] || [ "$status" != Accepted ]; then
-  id=$(/usr/bin/plutil -extract id raw -o - "$res" 2>/dev/null || true)
   if [ -n "$id" ]; then
-    xcrun notarytool log "$id" "${auth[@]}" || true
+    # Best effort: the log is for the reader; the failure below is what counts.
+    if ! xcrun notarytool log "$id" "${auth[@]}"; then
+      echo "notarize: could not fetch the notary log for $id" >&2
+    fi
   fi
   die "notarization of $file failed (status '${status:-none}')"
 fi
