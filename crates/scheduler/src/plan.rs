@@ -279,7 +279,7 @@ pub fn plan(world: &World, waiting: &[Request]) -> Plan {
     // A request that has waited long enough is ranked as aged. Everything
     // else, capacity, gates and the passing rule, is as for a younger one.
     let rank_of = |r: &Request| match world.max_wait {
-        Some(m) if world.now.saturating_sub(r.since) >= m => r.rank.aged(),
+        Some(m) if world.now.saturating_sub(r.since) >= m => r.rank.aged(r.since),
         _ => r.rank,
     };
     let mut order: Vec<&Request> = waiting.iter().collect();

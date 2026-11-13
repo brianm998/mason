@@ -335,7 +335,7 @@ impl Ledger {
         }
         let mut waiting = self.waiting.clone();
         let rank_of = |r: &Request| match (now, self.max_wait_ms) {
-            (Some(n), Some(m)) if n.saturating_sub(r.since) >= m => r.rank.aged(),
+            (Some(n), Some(m)) if n.saturating_sub(r.since) >= m => r.rank.aged(r.since),
             _ => r.rank,
         };
         waiting.sort_by_key(|r| (rank_of(r), r.id));

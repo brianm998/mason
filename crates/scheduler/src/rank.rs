@@ -45,6 +45,8 @@ pub struct Rank {
     landing: bool,
     by_priority: bool,
     aged: bool,
+    waiting_since: u64,
+    arrived: u64,
 }
 
 impl Rank {
@@ -72,6 +74,8 @@ impl Rank {
             landing: false,
             by_priority: false,
             aged: false,
+            waiting_since: 0,
+            arrived: enqueued,
         }
         .recompute()
     }
@@ -85,6 +89,7 @@ impl Rank {
         };
         self.remaining = steps.saturating_mul(1000) / self.span.max(1);
         self.priority_key = self.priority;
+        self.enqueued = self.arrived;
         self.band = if interactive {
             2
         } else if self.landing {
@@ -92,6 +97,7 @@ impl Rank {
         } else if self.aged {
             self.remaining = 0;
             self.priority_key = 0;
+            self.enqueued = self.waiting_since;
             1
         } else if self.by_priority {
             2u8.saturating_add(self.priority)
@@ -138,9 +144,11 @@ impl Rank {
 
     /// The same rank for a request that has waited past `order.max_wait_s`: it
     /// goes ahead of all other pipeline work that is not a landing, oldest
-    /// first. A landing and an interactive caller keep their place.
-    pub fn aged(mut self) -> Rank {
+    /// first (by `since`, when the request began to wait). A landing and an
+    /// interactive caller keep their place.
+    pub fn aged(mut self, since: u64) -> Rank {
         self.aged = true;
+        self.waiting_since = since;
         self.recompute()
     }
 
@@ -252,15 +260,16 @@ mod tests {
 
     #[test]
     fn an_aged_request_goes_ahead_of_pipeline_work_oldest_first_but_not_ahead_of_a_landing() {
-        let far = Rank::new(false, 5, 3, 50, 1, false).aged();
+        let far = Rank::new(false, 5, 3, 50, 1, false).aged(100);
         let near_urgent = Rank::new(false, 1, 0, 1, 2, false);
         assert!(far.is_aged() && far < near_urgent);
         assert!(far.priority_first() < near_urgent.priority_first());
-        let older = Rank::new(false, 9, 3, 40, 3, false).aged();
+        // Oldest first is by when the request began to wait, not by the task's enqueue time.
+        let older = Rank::new(false, 9, 3, 90, 3, false).aged(40);
         assert!(older < far, "oldest first");
-        let land = Rank::new(false, 1, 4, 99, 9, false).landing().aged();
+        let land = Rank::new(false, 1, 4, 99, 9, false).landing().aged(100);
         assert!(land.is_landing() && !land.is_aged() && land < older);
-        let person = Rank::new(true, 9, 9, 99, 99, false).aged();
+        let person = Rank::new(true, 9, 9, 99, 99, false).aged(100);
         assert!(!person.is_aged() && person < land);
     }
 

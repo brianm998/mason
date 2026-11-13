@@ -580,7 +580,8 @@ proptest! {
                         && !p.grants.contains(&w.id)
                         && !inter_of[g]
                         && machine_needs(&needs_of[g])
-                        && !(needs_of[g].exclusive && now.saturating_sub(since_of[g]) >= MAX_WAIT
+                        // An aged request that has waited longer goes first.
+                        && !(now.saturating_sub(since_of[g]) >= MAX_WAIT
                             && since_of[g] <= since_of[&w.id])
                     {
                         prop_assert!(
