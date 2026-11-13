@@ -66,7 +66,8 @@ final class LinkedTextTests: XCTestCase {
         let model = MonitorModel()
         model.connected = true
         model.taskDetail = detail()
-        let host = NSHostingController(rootView: TaskDetailPage(model: model, id: 5)
+        let page = TaskDetailPage(model: model, id: 5)
+        let host = NSHostingController(rootView: page.content(detail())
             .environment(\.theme, Theme(dark: false, scale: 1)))
         let size = host.sizeThatFits(in: CGSize(width: 600, height: 10_000))
         XCTAssertGreaterThan(size.height, 0)
