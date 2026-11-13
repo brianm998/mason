@@ -658,6 +658,13 @@ public nonisolated struct Mason_V1_Retry: Sendable {
   /// A step name or category; empty means the first developing step.
   public var from: String = String()
 
+  /// The run the client was showing (`TaskRow.last_run`); 0: not given. If the task has
+  /// a newer run the retry is refused as already done. Additive.
+  public var seen: UInt64 = 0
+
+  /// Restart a step that is running (without `seen`). Additive.
+  public var restart: Bool = false
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -1498,6 +1505,12 @@ public nonisolated struct Mason_V1_TaskRow: @unchecked Sendable {
   public var blockerLinks: [Mason_V1_BlockerLink] {
     get {_storage._blockerLinks}
     set {_uniqueStorage()._blockerLinks = newValue}
+  }
+
+  /// The task's latest step run (0: none yet). A retry sends it back as `Retry.seen`. Additive.
+  public var lastRun: UInt64 {
+    get {_storage._lastRun}
+    set {_uniqueStorage()._lastRun = newValue}
   }
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
@@ -3824,7 +3837,7 @@ nonisolated extension Mason_V1_AddTask: SwiftProtobuf.Message, SwiftProtobuf._Me
 
 nonisolated extension Mason_V1_Retry: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".Retry"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}task\0\u{1}from\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}task\0\u{1}from\0\u{1}seen\0\u{1}restart\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -3834,6 +3847,8 @@ nonisolated extension Mason_V1_Retry: SwiftProtobuf.Message, SwiftProtobuf._Mess
       switch fieldNumber {
       case 1: try { try decoder.decodeSingularUInt64Field(value: &self.task) }()
       case 2: try { try decoder.decodeSingularStringField(value: &self.from) }()
+      case 3: try { try decoder.decodeSingularUInt64Field(value: &self.seen) }()
+      case 4: try { try decoder.decodeSingularBoolField(value: &self.restart) }()
       default: break
       }
     }
@@ -3846,12 +3861,20 @@ nonisolated extension Mason_V1_Retry: SwiftProtobuf.Message, SwiftProtobuf._Mess
     if !self.from.isEmpty {
       try visitor.visitSingularStringField(value: self.from, fieldNumber: 2)
     }
+    if self.seen != 0 {
+      try visitor.visitSingularUInt64Field(value: self.seen, fieldNumber: 3)
+    }
+    if self.restart != false {
+      try visitor.visitSingularBoolField(value: self.restart, fieldNumber: 4)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
   public static func ==(lhs: Mason_V1_Retry, rhs: Mason_V1_Retry) -> Bool {
     if lhs.task != rhs.task {return false}
     if lhs.from != rhs.from {return false}
+    if lhs.seen != rhs.seen {return false}
+    if lhs.restart != rhs.restart {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -5248,7 +5271,7 @@ nonisolated extension Mason_V1_TodoItem: SwiftProtobuf.Message, SwiftProtobuf._M
 
 nonisolated extension Mason_V1_TaskRow: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".TaskRow"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{1}key\0\u{1}title\0\u{1}project\0\u{1}state\0\u{1}activity\0\u{3}why_waiting\0\u{3}enqueued_ms\0\u{3}in_state_ms\0\u{1}model\0\u{1}progress\0\u{3}allowed_actions\0\u{1}blockers\0\u{1}typical\0\u{1}slow\0\u{1}step\0\u{1}body\0\u{1}blocks\0\u{1}display\0\u{3}model_use\0\u{1}proposal\0\u{1}issue\0\u{3}issue_url\0\u{3}blocker_links\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{1}key\0\u{1}title\0\u{1}project\0\u{1}state\0\u{1}activity\0\u{3}why_waiting\0\u{3}enqueued_ms\0\u{3}in_state_ms\0\u{1}model\0\u{1}progress\0\u{3}allowed_actions\0\u{1}blockers\0\u{1}typical\0\u{1}slow\0\u{1}step\0\u{1}body\0\u{1}blocks\0\u{1}display\0\u{3}model_use\0\u{1}proposal\0\u{1}issue\0\u{3}issue_url\0\u{3}blocker_links\0\u{3}last_run\0")
 
   fileprivate class _StorageClass {
     var _id: UInt64 = 0
@@ -5275,6 +5298,7 @@ nonisolated extension Mason_V1_TaskRow: SwiftProtobuf.Message, SwiftProtobuf._Me
     var _issue: UInt64 = 0
     var _issueURL: String = String()
     var _blockerLinks: [Mason_V1_BlockerLink] = []
+    var _lastRun: UInt64 = 0
 
       // This property is used as the initial default value for new instances of the type.
       // The type itself is protecting the reference to its storage via CoW semantics.
@@ -5309,6 +5333,7 @@ nonisolated extension Mason_V1_TaskRow: SwiftProtobuf.Message, SwiftProtobuf._Me
       _issue = source._issue
       _issueURL = source._issueURL
       _blockerLinks = source._blockerLinks
+      _lastRun = source._lastRun
     }
   }
 
@@ -5351,6 +5376,7 @@ nonisolated extension Mason_V1_TaskRow: SwiftProtobuf.Message, SwiftProtobuf._Me
         case 22: try { try decoder.decodeSingularUInt64Field(value: &_storage._issue) }()
         case 23: try { try decoder.decodeSingularStringField(value: &_storage._issueURL) }()
         case 24: try { try decoder.decodeRepeatedMessageField(value: &_storage._blockerLinks) }()
+        case 25: try { try decoder.decodeSingularUInt64Field(value: &_storage._lastRun) }()
         default: break
         }
       }
@@ -5435,6 +5461,9 @@ nonisolated extension Mason_V1_TaskRow: SwiftProtobuf.Message, SwiftProtobuf._Me
       if !_storage._blockerLinks.isEmpty {
         try visitor.visitRepeatedMessageField(value: _storage._blockerLinks, fieldNumber: 24)
       }
+      if _storage._lastRun != 0 {
+        try visitor.visitSingularUInt64Field(value: _storage._lastRun, fieldNumber: 25)
+      }
     }
     try unknownFields.traverse(visitor: &visitor)
   }
@@ -5468,6 +5497,7 @@ nonisolated extension Mason_V1_TaskRow: SwiftProtobuf.Message, SwiftProtobuf._Me
         if _storage._issue != rhs_storage._issue {return false}
         if _storage._issueURL != rhs_storage._issueURL {return false}
         if _storage._blockerLinks != rhs_storage._blockerLinks {return false}
+        if _storage._lastRun != rhs_storage._lastRun {return false}
         return true
       }
       if !storagesAreEqual {return false}
