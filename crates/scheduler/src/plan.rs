@@ -2,7 +2,7 @@
 
 use crate::explain::{Ahead, HeldBy, Wait, WaitCause};
 use crate::rank::Rank;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -192,9 +192,16 @@ fn uses_machine(capacity: &BTreeMap<String, Capacity>, n: &Needs) -> bool {
 }
 
 /// What earlier, still-waiting requests need, for the passing rule.
+///
+/// Each waiter sets aside (reserves) the units it needs. A later request may use only what is
+/// left after those, so it can never take what an earlier waiter is waiting for, and that waiter
+/// is not starved. Until 2026-11-13 a waiter blocked every later request that named any of its
+/// resources, however many units were free. Two waiters needing one `compile` and one
+/// `test-suite` each, with every test-suite slot taken, held back 16 compile-only builds with
+/// `compile` at 0 of 5 and the CPU 81% idle.
 #[derive(Default)]
 struct Blocked {
-    names: BTreeSet<String>,
+    reserved: BTreeMap<String, u32>,
     /// An exclusive request waits: no machine-class job may pass it.
     machine_all: bool,
     /// Some machine-class request waits: an exclusive one may not pass it.
@@ -203,7 +210,9 @@ struct Blocked {
 
 impl Blocked {
     fn add(&mut self, capacity: &BTreeMap<String, Capacity>, n: &Needs) {
-        self.names.extend(n.amounts.keys().cloned());
+        for (r, a) in &n.amounts {
+            *self.reserved.entry(r.clone()).or_insert(0) += a;
+        }
         if n.exclusive {
             self.machine_all = true;
         }
@@ -212,9 +221,24 @@ impl Blocked {
         }
     }
 
-    /// The first resource of `n` an earlier waiter also needs, if any.
-    fn touches(&self, capacity: &BTreeMap<String, Capacity>, n: &Needs) -> Option<Touch> {
-        if let Some(r) = n.amounts.keys().find(|r| self.names.contains(*r)) {
+    /// The first resource of `n` that does not fit once earlier waiters' reservations are set
+    /// aside, if any (or the machine, for the exclusive rules).
+    fn touches(
+        &self,
+        capacity: &BTreeMap<String, Capacity>,
+        usage: &Usage,
+        n: &Needs,
+    ) -> Option<Touch> {
+        let short = n.amounts.iter().find(|(r, a)| {
+            let reserved = self.reserved.get(*r).copied().unwrap_or(0);
+            if reserved == 0 {
+                return false;
+            }
+            let used = usage.used.get(*r).copied().unwrap_or(0);
+            let units = capacity.get(*r).map_or(0, |c| c.units);
+            used + reserved + **a > units
+        });
+        if let Some((r, _)) = short {
             return Some(Touch::Name(r.clone()));
         }
         if (self.machine_all && uses_machine(capacity, n)) || (n.exclusive && self.machine_any) {
@@ -271,8 +295,9 @@ fn fit(capacity: &BTreeMap<String, Capacity>, usage: &Usage, n: &Needs) -> Fit {
 }
 
 /// Decide who is granted now. Requests are taken in rank order. One is granted
-/// when its whole set fits and it uses nothing an earlier waiter needs; that is
-/// the passing rule, "a compile can pass a waiting test suite, and nothing
+/// when its whole set fits in what is left after the units earlier waiters need
+/// are set aside; that is the passing rule, "a compile can pass a waiting test
+/// suite, and may use a free compile slot a waiter does not need, but nothing
 /// passes a waiting exclusive job". Whoever is not granted gets a [`Wait`].
 pub fn plan(world: &World, waiting: &[Request]) -> Plan {
     let capacity = world.capacity;
@@ -294,7 +319,7 @@ pub fn plan(world: &World, waiting: &[Request]) -> Plan {
 
     for r in order {
         let compiles = r.needs.amounts.contains_key(COMPILE);
-        let touch = blocked.touches(capacity, &r.needs);
+        let touch = blocked.touches(capacity, &usage, &r.needs);
         let fitted = fit(capacity, &usage, &r.needs);
         let low_memory = match (world.free_memory_mb, world.memory_floor_mb) {
             (Some(free), Some(floor)) if usage.any && free < floor => Some((free, floor)),

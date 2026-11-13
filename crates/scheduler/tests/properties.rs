@@ -70,11 +70,8 @@ fn uses_machine(n: &Needs) -> bool {
             .any(|(r, k)| *k == Kind::Machine && n.amounts.contains_key(*r))
 }
 
-/// Would these two need something in common, under the passing rule?
-fn conflict(a: &Needs, b: &Needs) -> bool {
-    if a.amounts.keys().any(|r| b.amounts.contains_key(r)) {
-        return true;
-    }
+/// Would these two conflict through the exclusive rules, under the passing rule?
+fn machine_conflict(a: &Needs, b: &Needs) -> bool {
     (a.exclusive && uses_machine(b)) || (b.exclusive && uses_machine(a))
 }
 
@@ -128,16 +125,37 @@ proptest! {
             // Grant.
             let before = l.snapshot();
             let p = l.schedule(now, None, None);
-            for g in &p.grants {
+            let mut granted: Vec<u64> = p.grants.clone();
+            granted.sort_by_key(|g| ranks[g]);
+            let mut used = before.used.clone();
+            for g in &granted {
                 let (_, ji) = ends[g];
                 ends.insert(*g, (now + jobs[ji].run, ji));
-                // The passing rule: no earlier-ranked waiter that is still
-                // waiting shares anything with this grant.
-                for w in &before.waiting {
-                    if w.id != *g && !p.grants.contains(&w.id) && ranks[&w.id] < ranks[g] {
+                for (r, a) in &needs_of[g].amounts {
+                    *used.entry(r.clone()).or_insert(0) += a;
+                }
+                // The passing rule: a grant may pass an earlier-ranked waiter that is still
+                // waiting only by using units that waiter does not need. Whatever the earlier
+                // waiters need is still free after this grant. Nothing machine-class passes a
+                // waiting exclusive job, and an exclusive job passes no machine-class waiter.
+                let earlier: Vec<&Needs> = before
+                    .waiting
+                    .iter()
+                    .filter(|w| !p.grants.contains(&w.id) && ranks[&w.id] < ranks[g])
+                    .map(|w| &needs_of[&w.id])
+                    .collect();
+                for w in &earlier {
+                    prop_assert!(
+                        !machine_conflict(&needs_of[g], w),
+                        "{} passed an exclusive conflict", g
+                    );
+                }
+                for r in needs_of[g].amounts.keys() {
+                    let reserved: u32 = earlier.iter().map(|w| w.amounts.get(r).copied().unwrap_or(0)).sum();
+                    if reserved > 0 {
                         prop_assert!(
-                            !conflict(&needs_of[g], &needs_of[&w.id]),
-                            "{} passed {} which it conflicts with", g, w.id
+                            used[r] + reserved <= before.capacity[r].units,
+                            "{} took {} units an earlier waiter needs", g, r
                         );
                     }
                 }
@@ -739,4 +757,42 @@ fn a_task_in_test_of_a_longer_route_is_not_behind_a_task_in_develop_of_a_shorter
     assert_eq!(l.schedule(2, None, None).grants, vec![a_test]);
     l.release(a_test);
     assert_eq!(l.schedule(3, None, None).grants, vec![b_develop]);
+}
+
+/// 2026-11-13: two waiters that need one `compile` and one `test-suite` each, with every
+/// test-suite slot taken, held back every compile-only request with `compile` idle. Now they set
+/// aside one compile slot each, and the rest go to the requests behind them.
+#[test]
+fn waiters_set_aside_what_they_need_and_the_rest_is_used() {
+    let mut l = Ledger::new();
+    l.set_capacity("compile", 5, Kind::Machine);
+    l.set_capacity("test-suite", 1, Kind::Machine);
+    let rank = |s, id| Rank::new(false, s, 2, id, id, false);
+    let suite = l.submit(rank(1, 1), Needs::of(&[("test-suite", 1)]), "#1", 0);
+    assert_eq!(l.schedule(0, None, None).grants, vec![suite]);
+    let both = || Needs::of(&[("compile", 1), ("test-suite", 1)]);
+    let a = l.submit(rank(2, 2), both(), "#2", 1);
+    let b = l.submit(rank(2, 3), both(), "#3", 1);
+    let compiles: Vec<u64> = (4..9)
+        .map(|i| {
+            l.submit(
+                rank(3, i),
+                Needs::of(&[("compile", 1)]),
+                &format!("#{i}"),
+                1,
+            )
+        })
+        .collect();
+    let p = l.schedule(2, None, None);
+    // Five compile slots, two set aside for #2 and #3: three compiles start, two wait.
+    assert_eq!(p.grants, compiles[..3].to_vec());
+    assert!(p.waits.contains_key(&a) && p.waits.contains_key(&b));
+    assert!(matches!(
+        p.waits[&compiles[3]].cause,
+        WaitCause::Behind { ref resource } if resource == "compile"
+    ));
+    // The suite ends: #2 gets the test-suite slot and a compile slot it was promised.
+    l.release(suite);
+    let p = l.schedule(3, None, None);
+    assert_eq!(p.grants, vec![a]);
 }
