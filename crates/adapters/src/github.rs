@@ -64,6 +64,73 @@ pub struct GitHub {
 }
 
 impl GitHub {
+    /// Some run on the commit is still going. Read its jobs: one that has already failed (and
+    /// is not judged infrastructure) makes the verdict red now, and the runs MASON started are
+    /// cancelled so the runner is free. Otherwise it is still pending.
+    fn pending_or_red_early(&self, runs: &[Value]) -> Result<CiState, ApiError> {
+        let mut run_names = vec![];
+        let mut failed = vec![];
+        let mut judged = vec![];
+        for r in runs.iter().filter(|r| r["status"] != "completed") {
+            let Some(id) = r["id"].as_u64() else { continue };
+            let jobs = self.json(Request::get(&self.url(&format!("/actions/runs/{id}/jobs"))))?;
+            let mut hit = false;
+            for j in jobs["jobs"].as_array().into_iter().flatten() {
+                if j["conclusion"].as_str() != Some("failure") {
+                    continue;
+                }
+                let steps_run = j["steps"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|st| matches!(st["conclusion"].as_str(), Some("success" | "failure")));
+                let name = j["name"].as_str().unwrap_or("?");
+                let jf = self.judge_job(
+                    r["name"].as_str().unwrap_or("?"),
+                    name,
+                    "failure",
+                    steps_run,
+                    j["id"].as_u64(),
+                );
+                if jf.infra.is_some() {
+                    continue; // infrastructure: wait, the run may be retried
+                }
+                failed.push(name.to_string());
+                judged.push(jf);
+                hit = true;
+            }
+            if hit {
+                run_names.push(r["name"].as_str().unwrap_or("?").to_string());
+            }
+        }
+        if failed.is_empty() {
+            return Ok(CiState::Pending);
+        }
+        let mut cancelled = 0;
+        for r in runs.iter().filter(|r| r["status"] != "completed") {
+            if let (true, Some(id)) = (may_cancel(r), r["id"].as_u64()) {
+                // Best effort: the verdict does not depend on it.
+                if self.cancel_run(id).is_ok() {
+                    cancelled += 1;
+                }
+            }
+        }
+        Ok(CiState::Red {
+            summary: early_red_summary(&run_names, &failed[0], cancelled),
+            failed,
+            jobs: judged,
+        })
+    }
+
+    /// Cancel a run (`POST /actions/runs/{id}/cancel`).
+    pub fn cancel_run(&self, run: u64) -> Result<(), ApiError> {
+        self.send(Request::post(
+            &self.url(&format!("/actions/runs/{run}/cancel")),
+            "{}",
+        ))
+        .map(|_| ())
+    }
+
     pub fn new(http: Arc<dyn Http>, api: &str, repo: &str, token: TokenRef) -> GitHub {
         GitHub {
             http,
@@ -175,6 +242,26 @@ impl GitHub {
             log: log.map(|l| tail_lines(&l, KEEP_LOG_LINES)),
         }
     }
+}
+
+/// May MASON cancel this run? Only one on a `mason/ci/**` ref that is not a pull request's:
+/// a run on the base branch or a PR is never cancelled.
+fn may_cancel(run: &Value) -> bool {
+    run["head_branch"]
+        .as_str()
+        .is_some_and(|b| b.starts_with("mason/ci/"))
+        && run["event"].as_str() != Some("pull_request")
+}
+
+/// The summary of a run called red while it was still going.
+fn early_red_summary(runs: &[String], first_job: &str, cancelled: usize) -> String {
+    let mut s = format!("{} failed", runs.join(", "));
+    if cancelled > 0 {
+        s.push_str(&format!(
+            "; {cancelled} run(s) cancelled by MASON after {first_job} failed"
+        ));
+    }
+    s
 }
 
 /// Lines of a failed job's log kept in a `JobFailure`.
@@ -734,7 +821,7 @@ impl BuildSystemAdapter for GitHub {
             return Ok(CiState::Pending); // not started yet
         }
         if runs.iter().any(|r| r["status"] != "completed") {
-            return Ok(CiState::Pending);
+            return self.pending_or_red_early(&runs);
         }
         let bad: Vec<&Value> = runs
             .iter()
