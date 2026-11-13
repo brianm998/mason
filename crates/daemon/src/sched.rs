@@ -243,6 +243,8 @@ struct State {
     /// When the last scheduling pass finished. A waiter runs a pass only if the
     /// last one is about a tick old, so one pass serves every waiter.
     last_pass: Option<Instant>,
+    /// A pass is reading lock files right now; waiters leave it to finish.
+    pass_running: bool,
 }
 
 /// What the kernel said about lock files, read with the broker lock released.
@@ -456,6 +458,7 @@ impl Broker {
                 wait_class: HashMap::new(),
                 stall: None,
                 last_pass: None,
+                pass_running: false,
             }),
             cv: Condvar::new(),
             locks,
@@ -673,6 +676,7 @@ impl Broker {
         // Claimed now, so a waiter that wakes while the files are read does not
         // start a second pass.
         st.last_pass = Some(Instant::now());
+        st.pass_running = true;
         self.refresh_disk(&mut st);
         let mut probes = Probes::default();
         let snap = st.ledger.snapshot();
@@ -715,7 +719,7 @@ impl Broker {
         }
         let mut st = lock(&self.st);
         self.apply_pass(&mut st, Some(&probes));
-        st.last_pass = Some(Instant::now());
+        st.pass_running = false;
         st
     }
 
@@ -953,7 +957,7 @@ impl Broker {
             // One pass serves every waiter: run it only if none ran lately.
             let tick =
                 Duration::from_millis(self.tick_ms.load(std::sync::atomic::Ordering::Relaxed));
-            if st.last_pass.is_none_or(|t| t.elapsed() >= tick / 2) {
+            if !st.pass_running && st.last_pass.is_none_or(|t| t.elapsed() >= tick / 2) {
                 st = self.pass(st);
             }
             if st.ledger.holds(id) {
