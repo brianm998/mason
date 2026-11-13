@@ -2294,9 +2294,7 @@ fn settle_all(
                     .iter()
                     .filter(|id| {
                         let r = mason_step_host::registry::lost_report(&root.join(id));
-                        !r.is_ok_and(|r| {
-                            hl::is_restart_loss(&root, r.last_heartbeat_ms, r.at_ms)
-                        })
+                        !r.is_ok_and(|r| hl::is_restart_loss(&root, r.last_heartbeat_ms, r.at_ms))
                     })
                     .count();
                 let restart = counted <= hl::MAX_AGENT_RESTARTS;
