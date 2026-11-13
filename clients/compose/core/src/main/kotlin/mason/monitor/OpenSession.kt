@@ -32,7 +32,7 @@ object OpenSession {
     fun commandLine(cli: String, task: Long, anyway: Boolean): String =
         argv(cli, task, anyway).joinToString(" ") { quote(it) }
 
-    internal fun quote(s: String): String =
+    fun quote(s: String): String =
         if (s.isNotEmpty() && s.all { it.isLetterOrDigit() || it in "/._-~=" }) s else "'" + s.replace("'", "'\\''") + "'"
 
     fun copiedNotice(line: String) = "Copied `$line`; paste it in a terminal."
