@@ -211,10 +211,11 @@ pub fn sha256_hex(path: &Path) -> Result<String, String> {
 }
 
 /// What the tarball is unpacked from: the files of `mason-<ver>-<target>/` we install.
-pub const INSTALL: [&str; 5] = [
+pub const INSTALL: [&str; 6] = [
     "masond",
     "step-host",
     "mason-mcp",
+    "fake-claude",
     "mason",
     "mason-askpass.sh",
 ];
@@ -314,7 +315,7 @@ fn unpack(
             got.push(f.to_string());
         }
     }
-    for need in ["masond", "step-host", "mason-mcp"] {
+    for need in ["masond", "step-host", "mason-mcp", "fake-claude"] {
         if !got.iter().any(|g| g == need) {
             return Err(format!("the tarball has no {need}"));
         }

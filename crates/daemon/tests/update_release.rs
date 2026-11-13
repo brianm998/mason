@@ -37,6 +37,7 @@ fn publish(s: &Scratch, ver: &str, for_this_platform: bool, lie: bool) {
         ("mason-daemon", "masond"),
         ("mason-step-host", "step-host"),
         ("mason-adapters", "mason-mcp"),
+        ("mason-adapters", "fake-claude"),
     ] {
         let from = bin(pkg, name);
         let to = stage.join(name);

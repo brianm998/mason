@@ -28,6 +28,11 @@ usually no Rust toolchain, so `mason update` and the monitors' banner could do n
   `update.rs::prepare_release` calls it and the shared tail (backup, selftest, takeover) is the
   one source updates use, so the Windows takeover and signed-checksum tasks touch separate places.
 
+**Tarball contents.** `masond selftest` (protected; unchanged) runs a scripted task and fails
+without `fake-claude` next to `masond`, so the tarball and `.deb` now ship `fake-claude`
+(`scripts/package/lib.sh`, docs/RELEASING.md); the unpacker requires it. Tarballs built before
+this change cannot be installed by `mason update`.
+
 **HTTP.** The daemon has no HTTP client (only hyper's server), and adding a TLS client would
 change deny.toml, a trust file. Transport is the system `curl`, as git is the system `git`
 (curl ships with macOS, current Linux distributions and Windows 10+). curl is restricted to the
