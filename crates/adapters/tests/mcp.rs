@@ -197,6 +197,7 @@ fn a_definition_can_narrow_the_tools_the_bridge_offers() {
     assert_eq!(names, vec!["report_progress", "submit_change"]);
 }
 
+#[cfg(unix)] // Unix-only; Windows coverage comes with the later port tasks.
 #[test]
 fn a_check_is_sent_again_when_the_controller_goes_away_before_answering() {
     use std::os::unix::net::UnixListener;

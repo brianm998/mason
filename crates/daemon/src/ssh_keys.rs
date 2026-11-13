@@ -214,7 +214,7 @@ fn agent_keys() -> Vec<(String, String)> {
     String::from_utf8_lossy(&o.stdout)
         .lines()
         .filter(|l| l.starts_with("ssh-") || l.starts_with("ecdsa-") || l.starts_with("sk-"))
-        .filter_map(|l| fingerprint_of(l))
+        .filter_map(fingerprint_of)
         .collect()
 }
 
@@ -346,8 +346,7 @@ pub fn list_in(ssh_dir: &Path, owner: Option<&str>) -> Vec<Key> {
                 if let Some(p) = k.path.as_deref() {
                     k.encrypted = is_encrypted(p);
                 }
-                k.on_owner_account =
-                    on_account.is_some_and(|f| f.iter().any(|x| *x == k.fingerprint));
+                k.on_owner_account = on_account.is_some_and(|f| f.contains(&k.fingerprint));
                 if owner.is_some() && (k.in_agent || !k.encrypted) {
                     if let Some(p) = k.path.as_deref() {
                         k.seen_as = github_user_of(p);

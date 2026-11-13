@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+#![cfg(unix)]
+// Unix-only: signals, permission bits or unix sockets. Windows coverage comes with the later port tasks.
 
 //! `run_check` and landing's re-test run under a step host: a daemon that dies
 //! and comes back finds the run again, a second call attaches to it, and the

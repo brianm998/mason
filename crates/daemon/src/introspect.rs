@@ -639,7 +639,7 @@ fn wait_rows(rep: &Replay, in_p: &dyn Fn(&str) -> bool, active_ms: u64) -> Vec<V
             ));
         }
     }
-    rows.sort_by(|a, b| b.0.cmp(&a.0));
+    rows.sort_by_key(|r| std::cmp::Reverse(r.0));
     rows.into_iter().map(|(_, v)| v).collect()
 }
 
