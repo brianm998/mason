@@ -540,7 +540,10 @@ pub fn view(d: &Daemon, now: u64, title: &dyn Fn(u64) -> String) -> UsageView {
             .iter()
             .filter(|w| w.reported && !w.id.ends_with("_opus"))
             .map(|w| {
-                let len = raw.iter().find(|r| r.id == w.id).and_then(|r| r.length_secs);
+                let len = raw
+                    .iter()
+                    .find(|r| r.id == w.id)
+                    .and_then(|r| r.length_secs);
                 (len, w)
             })
             .collect();
