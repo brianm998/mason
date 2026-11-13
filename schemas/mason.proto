@@ -139,6 +139,11 @@ message Retry {
   uint64 task = 1;
   // A step name or category; empty means the first developing step.
   string from = 2;
+  // The run the client was showing (`TaskRow.last_run`); 0: not given. If the task has
+  // a newer run the retry is refused as already done. Additive.
+  uint64 seen = 3;
+  // Restart a step that is running (without `seen`). Additive.
+  bool restart = 4;
 }
 
 message Reject {
@@ -452,6 +457,8 @@ message TaskRow {
   // Each blocker with its state, where it came from ("from GitHub" or "set by you")
   // and what the owner can do about it ("release", "revive", "retry"). Additive.
   repeated BlockerLink blocker_links = 24;
+  // The task's latest step run (0: none yet). A retry sends it back as `Retry.seen`. Additive.
+  uint64 last_run = 25;
 }
 
 message BlockerLink {

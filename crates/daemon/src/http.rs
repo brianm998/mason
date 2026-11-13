@@ -682,6 +682,18 @@ fn retry_default(def: &Definition, t: &Task) -> String {
         .map_or("develop".into(), |s| s.name.clone())
 }
 
+/// The task's latest step run (0: it has had none).
+pub fn latest_run(w: &World, id: TaskId) -> u64 {
+    w.step_runs
+        .iter()
+        .rev()
+        .find(|(_, r)| r.task == id)
+        .map_or(0, |(r, _)| r.0)
+}
+
+/// Check and emit happen under this, so two retries sent together cannot both pass.
+static RETRY_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 async fn retry(
     Shared(d): Shared<Arc<Daemon>>,
     Path(id): Path<u64>,
@@ -691,15 +703,42 @@ async fn retry(
         .as_ref()
         .and_then(|b| b["to"].as_str())
         .map(String::from);
+    let seen = body.as_ref().and_then(|b| b["seen"].as_u64());
+    let restart = body
+        .as_ref()
+        .and_then(|b| b["restart"].as_bool())
+        .unwrap_or(false);
     let d2 = d.clone();
     let (to, step) =
         d.pool
             .run(move || {
+                let _gate = RETRY_GATE.lock().unwrap_or_else(|e| e.into_inner());
                 let w = d2.world().map_err(store_err)?;
                 let t = w
                     .tasks
                     .get(&TaskId(id))
                     .ok_or_else(|| fail(StatusCode::NOT_FOUND, format!("no task #{id}")))?;
+                let latest = latest_run(&w, TaskId(id));
+                if let Some(seen) = seen {
+                    if seen != latest {
+                        let now = if t.state.is_step() {
+                            "running".to_string()
+                        } else {
+                            state_name(t.state).to_string()
+                        };
+                        return Err(fail(
+                            StatusCode::CONFLICT,
+                            format!("already retried (run {latest} is {now})"),
+                        ));
+                    }
+                } else if t.state.is_step() && !restart {
+                    return Err(fail(
+                        StatusCode::CONFLICT,
+                        format!(
+                            "task #{id} is not failed (run {latest} is running); send \"restart\": true (`--restart`) to restart the step"
+                        ),
+                    ));
+                }
                 let def = task_def(&d2, t);
                 // `to` is a step in the task's definition, or a category (the first step in it).
                 let name = want.unwrap_or_else(|| retry_default(&def, t));
