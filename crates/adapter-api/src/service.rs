@@ -251,6 +251,56 @@ pub struct CheckCounts {
     pub done: u64,
     pub total: u64,
     pub running: Option<String>,
+    /// The checks told apart by state, when the host can say.
+    pub jobs: Option<CiJobCounts>,
+}
+
+/// CI jobs told apart by state. "Succeeded" is success, neutral and skipped (what counts
+/// as green); "failed" is any other finished conclusion; "queued" is queued, waiting,
+/// pending and requested; "running" is in progress.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CiJobCounts {
+    pub total: u64,
+    pub queued: u64,
+    pub running: u64,
+    pub succeeded: u64,
+    pub failed: u64,
+    pub running_names: Vec<String>,
+}
+
+impl CiJobCounts {
+    /// Count one job by its `status` and `conclusion` as GitHub spells them.
+    pub fn add(&mut self, name: &str, status: &str, conclusion: Option<&str>) {
+        self.total += 1;
+        match status {
+            "completed" => match conclusion {
+                Some("success" | "neutral" | "skipped") => self.succeeded += 1,
+                _ => self.failed += 1,
+            },
+            "in_progress" => {
+                self.running += 1;
+                self.running_names.push(name.to_string());
+            }
+            _ => self.queued += 1,
+        }
+    }
+
+    /// Add another set of counts into this one.
+    pub fn merge(&mut self, o: &CiJobCounts) {
+        self.total += o.total;
+        self.queued += o.queued;
+        self.running += o.running;
+        self.succeeded += o.succeeded;
+        self.failed += o.failed;
+        self.running_names.extend(o.running_names.iter().cloned());
+    }
+}
+
+/// The jobs of one workflow run that CI has not finished.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CiWorkflowJobs {
+    pub workflow: String,
+    pub jobs: CiJobCounts,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -383,6 +433,11 @@ pub trait BuildSystemAdapter: Send + Sync {
     /// Start CI on `git_ref` at `sha`. Returns the run's id.
     fn trigger(&self, git_ref: &str, sha: &str) -> Result<String, ApiError>;
     fn status(&self, run: &str) -> Result<CiState, ApiError>;
+    /// The state, and while it is pending the jobs of each workflow told apart by state.
+    /// Reporting only: the state is what `status` gives. A system that cannot say gives none.
+    fn status_detail(&self, run: &str) -> Result<(CiState, Vec<CiWorkflowJobs>), ApiError> {
+        Ok((self.status(run)?, vec![]))
+    }
     /// Does the repository at `repo` let CI run on a candidate ref?
     /// (`mason doctor` and, later, `mason init` use this.)
     fn doctor(&self, repo: &Path) -> Vec<Problem>;

@@ -1321,4 +1321,15 @@ final class MonitorCoreTests: XCTestCase {
         m.sidebar = sb
         XCTAssertEqual(m.blockerCandidates(for: heldRow()).map { $0.id }, [12])
     }
+
+    func testAWorkflowLineNamesEachStateThatHasJobsAndFailedIsKept() {
+        var j = Mason_V1_JobCounts()
+        j.queued = 1; j.running = 1; j.succeeded = 2; j.failed = 1; j.runningNames = ["build"]
+        XCTAssertEqual(
+            Format.jobsText(name: "macOS", jobs: j),
+            "macOS: 5 jobs · 1 queued · 1 running (build) · 2 passed · 1 failed")
+        var one = Mason_V1_JobCounts()
+        one.succeeded = 1
+        XCTAssertEqual(Format.jobsText(name: "CI", jobs: one), "CI: 1 job · 1 passed")
+    }
 }

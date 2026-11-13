@@ -2761,7 +2761,11 @@ fn progress_runs(d: &Daemon, id: TaskId) -> Vec<Value> {
                 "started_ms": p.started_ms, "updated_at_ms": p.updated_at_ms,
                 "subs": p.subs.iter().map(|s| json!({
                     "name": s.name, "unit": s.unit,
-                    "done": fig(&s.done), "total": fig(&s.total)})).collect::<Vec<_>>(),
+                    "done": fig(&s.done), "total": fig(&s.total),
+                    "jobs": s.jobs.as_ref().map(|j| json!({
+                        "queued": j.queued, "running": j.running,
+                        "succeeded": j.succeeded, "failed": j.failed,
+                        "running_names": j.running_names}))})).collect::<Vec<_>>(),
                 "todo": p.todo.iter().map(|t| json!({"text": t.text, "status": t.status})).collect::<Vec<_>>(),
                 // The tokens the step's sessions have used so far; null until one reported.
                 "tokens": p.token_total().map(|t| json!({

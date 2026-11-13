@@ -2201,6 +2201,8 @@ impl Store {
                                 value: r.get::<_, i64>(4)? as u64,
                                 source: src_of(r.get(5)?),
                             },
+                            // Not stored: a CI wait's breakdown is made again by the next poll.
+                            jobs: None,
                         })
                     })?
                     .collect::<Result<_, _>>()?;

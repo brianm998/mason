@@ -47,6 +47,7 @@ fn base(conclusion: &str, log: &str) -> Base {
                 id: 71,
                 name: "static checks".into(),
                 conclusion: Some(conclusion.into()),
+                status: "completed".into(),
             }],
         )]),
         logs: BTreeMap::from([(71, log.to_string())]),

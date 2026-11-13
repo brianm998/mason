@@ -17,7 +17,8 @@
 use crate::daemon::{now_ms, Daemon};
 use crate::jobs::Ctx;
 use mason_adapter_api::service::{
-    CheckCounts, Checks, CiState, GitHostAdapter, Observed, PollEvent, Poller, PrState, Review,
+    CheckCounts, Checks, CiJobCounts, CiState, CiWorkflowJobs, GitHostAdapter, Observed, PollEvent,
+    Poller, PrState, Review,
 };
 use mason_core::progress::{Change, Figure};
 use mason_core::*;
@@ -1054,7 +1055,42 @@ impl Runner {
                 s.unit = "checks".into();
                 s.done = Figure::reported(c.done);
                 s.total = Figure::reported(c.total);
+                s.jobs = c.jobs.as_ref().map(breakdown);
             });
+        }
+        if let Some(j) = &c.jobs {
+            self.say(&format!("checks: {}", jobs_summary(j)));
+        }
+    }
+
+    /// A CI's jobs, one sub-count per workflow (jobs finished of jobs listed, told apart by
+    /// state) and a message with the sum. Reporting only; no verdict reads it.
+    fn ci_jobs(&self, what: &str, detail: &[CiWorkflowJobs]) {
+        if detail.is_empty() {
+            return;
+        }
+        let mut sum = CiJobCounts::default();
+        for w in detail {
+            sum.merge(&w.jobs);
+            for run in &self.member_runs {
+                self.d.progress_sub(*run, &w.workflow, None, |s| {
+                    s.unit = "jobs".into();
+                    s.done = Figure::reported(w.jobs.succeeded + w.jobs.failed);
+                    s.total = Figure::reported(w.jobs.total);
+                    s.jobs = Some(breakdown(&w.jobs));
+                });
+            }
+        }
+        if sum.total > 0 {
+            self.say(&format!("CI on {what}: {}", jobs_summary(&sum)));
+        }
+    }
+
+    /// A poll got an answer and the work is still going: restart the quiet clock.
+    fn alive(&self, poll_s: u64) {
+        for run in &self.member_runs {
+            self.d
+                .progress_report(*run, |p, now| p.heartbeat(now, poll_s.saturating_mul(1000)));
         }
     }
 
@@ -2068,6 +2104,7 @@ impl Runner {
                 }
                 Ok(None) => {
                     self.d.landing.clear(self.pid, &key);
+                    self.alive(poll_s);
                     poller.observe(now, Observed::Unchanged);
                     self.nap(poll_s);
                 }
@@ -2109,8 +2146,12 @@ impl Runner {
                 ci.trigger(&name, &sha).map(Some)
             })?;
             self.ask("CI", started, cfg.timeout_s, cfg.poll_s, || {
-                Ok(match ci.status(&run)? {
-                    CiState::Pending => None,
+                let (state, detail) = ci.status_detail(&run)?;
+                Ok(match state {
+                    CiState::Pending => {
+                        self.ci_jobs(&name, &detail);
+                        None
+                    }
                     done => Some(done),
                 })
             })
@@ -2624,6 +2665,45 @@ fn judges(c: &crate::config::CiCfg) -> bool {
     c.infra_judge || !matches!(c.kind, crate::config::CiKind::GithubActions { .. })
 }
 
+/// The progress record's form of a CI's job counts.
+fn breakdown(j: &CiJobCounts) -> mason_core::progress::JobBreakdown {
+    mason_core::progress::JobBreakdown {
+        queued: j.queued,
+        running: j.running,
+        succeeded: j.succeeded,
+        failed: j.failed,
+        running_names: j.running_names.clone(),
+    }
+}
+
+/// "7 jobs: 2 queued, 1 running (macOS build), 3 passed, 1 failed"; states with no jobs are left out.
+fn jobs_summary(j: &CiJobCounts) -> String {
+    let mut parts = vec![];
+    if j.queued > 0 {
+        parts.push(format!("{} queued", j.queued));
+    }
+    if j.running > 0 {
+        let mut r = format!("{} running", j.running);
+        if !j.running_names.is_empty() {
+            r.push_str(&format!(" ({})", j.running_names.join(", ")));
+        }
+        parts.push(r);
+    }
+    if j.succeeded > 0 {
+        parts.push(format!("{} passed", j.succeeded));
+    }
+    if j.failed > 0 {
+        parts.push(format!("{} failed", j.failed));
+    }
+    format!(
+        "{} {}{}{}",
+        j.total,
+        if j.total == 1 { "job" } else { "jobs" },
+        if parts.is_empty() { "" } else { ": " },
+        parts.join(", ")
+    )
+}
+
 #[cfg(test)]
 mod idle_tests {
     use super::*;
@@ -2647,6 +2727,21 @@ mod idle_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_jobs_summary_names_states_with_jobs_and_keeps_failed_visible() {
+        let mut j = CiJobCounts::default();
+        j.add("macOS build", "in_progress", None);
+        j.add("a", "queued", None);
+        j.add("b", "queued", None);
+        j.add("c", "completed", Some("success"));
+        j.add("d", "completed", Some("failure"));
+        assert_eq!(
+            jobs_summary(&j),
+            "5 jobs: 2 queued, 1 running (macOS build), 1 passed, 1 failed"
+        );
+        assert_eq!(jobs_summary(&CiJobCounts::default()), "0 jobs");
+    }
 
     /// A task first submitted before the daemon started has a `ready_at` before the
     /// daemon's start, so a restart does not make it wait out the window again.
