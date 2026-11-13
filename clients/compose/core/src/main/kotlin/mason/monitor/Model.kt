@@ -202,6 +202,18 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     val canGoForward get() = history.canGoForward
 
     fun go(p: Page) { history = history.go(p); subscribe?.invoke() }
+    /** Whether [n] is a task this monitor has heard of (in the sidebar, or named by the open task's page). */
+    fun isKnownTask(n: Long): Boolean {
+        if (sidebar?.sections?.any { sec -> sec.rows.any { it.id == n } } == true) return true
+        val d = taskDetail ?: return false
+        val r = d.row ?: return false
+        return r.id == n || n in r.blockers || n in r.blocks || d.debts.any { it.task == n } || d.proposal?.filed_by == n
+    }
+
+    /** [text] as plain text, task links and URL links, for the open task's page. */
+    fun linkify(text: String): List<LinkSegment> =
+        Linkify.segments(text, { isKnownTask(it) }, taskDetail?.ci_links ?: emptyList())
+
     fun goBack() { history = history.goBack(); subscribe?.invoke() }
     fun goForward() { history = history.goForward(); subscribe?.invoke() }
     fun goHome() { history = history.goHome(); subscribe?.invoke() }

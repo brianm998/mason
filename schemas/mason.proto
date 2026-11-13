@@ -718,6 +718,18 @@ message TaskDetailView {
   ProposalInfo proposal = 20;
   // Tokens and cost this task's steps reported, one line per step (s64).
   repeated TokenLine step_tokens = 21;
+  // Where CI can be read for this task's landing: the batch's pull request and each failed
+  // check. Only http(s) URLs are sent. Additive; an older daemon sends none.
+  repeated CiLink ci_links = 22;
+}
+
+// A page on the git host a client opens in the browser. `label` is exactly the text the
+// task's notes use ("PR #123", a check's name), so a client can link that text.
+message CiLink {
+  string label = 1;
+  string url = 2;
+  // "pull_request", "check" or "run".
+  string kind = 3;
 }
 
 // What was noticed, by whom, with the proof; and for an improvement, where its branch is.

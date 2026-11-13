@@ -360,11 +360,15 @@ fn run_inner(d: &Arc<Daemon>, task: TaskId, step: State, run: StepRunId) {
     let c = match ctx(d, task, run) {
         Ok(c) => c,
         Err(why) => {
-            d.emit_for_run(task, run, EventKind::StepFailed {
+            d.emit_for_run(
+                task,
+                run,
+                EventKind::StepFailed {
                     task,
                     reason: why,
                     class: Some(FailClass::Code),
-                });
+                },
+            );
             return;
         }
     };

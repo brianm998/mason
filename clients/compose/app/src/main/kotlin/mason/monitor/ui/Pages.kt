@@ -256,7 +256,8 @@ private fun TaskDetail(model: MonitorModel, d: TaskDetailView) {
     Column(verticalArrangement = Arrangement.spacedBy(theme.spacingSmall)) {
         Text("${r.key} ${r.title}", style = theme.title(), modifier = Modifier.testTag("detail:${r.id}"))
         Text("${r.project}, ${r.state.replace('_', ' ')}, ${Format.duration(r.in_state_ms)} in this state", style = theme.body(color = theme.muted))
-        if (r.why_waiting.isNotEmpty()) Text(r.why_waiting, style = theme.body())
+        if (r.why_waiting.isNotEmpty()) LinkedText(model, r.why_waiting, theme.body(), Modifier.testTag("detail:why-waiting"))
+        if (r.issue != 0L || d.ci_links.isNotEmpty()) CiLinksLine(d.ci_links, r.issue, r.issue_url)
         Row(horizontalArrangement = Arrangement.spacedBy(theme.spacingLarge)) {
             CopyButton(r.key, r.key)
             if (d.branch.isNotEmpty()) CopyButton("branch", d.branch)
@@ -304,7 +305,7 @@ private fun TaskDetail(model: MonitorModel, d: TaskDetailView) {
     d.card?.let { DecisionCardView(model, r.id, it) }
     d.approval?.let { ApprovalView(model, r.id, it) }
     d.proposal?.let { ProposalView(model, r, it) }
-    if (d.failure.isNotEmpty()) Text("Failed: ${d.failure}", style = theme.body(color = theme.attention))
+    if (d.failure.isNotEmpty()) LinkedText(model, "Failed: ${d.failure}", theme.body(color = theme.attention), Modifier.testTag("detail:failure"))
     if (d.step_tokens.isNotEmpty()) Section("Tokens") {
         d.step_tokens.forEach { Text(tokenLineText(it), style = theme.body()) }
     }
@@ -323,21 +324,26 @@ private fun TaskDetail(model: MonitorModel, d: TaskDetailView) {
             }
             // Every session this run started, so a retry up the ladder shows.
             s.launches.forEach { l ->
-                Text("${l.kind}: ${l.display}", style = theme.small(color = theme.muted), modifier = Modifier.padding(start = theme.spacingLarge))
+                LinkedText(model, "${l.kind}: ${l.display}", theme.small(color = theme.muted), Modifier.padding(start = theme.spacingLarge))
             }
         }
     }
-    if (d.closing.isNotEmpty()) Section("Tests") { Text(d.closing, style = theme.body()) }
+    if (d.closing.isNotEmpty()) Section("Tests") { LinkedText(model, d.closing, theme.body(), Modifier.testTag("detail:closing")) }
     if (d.debts.isNotEmpty()) Section("Debts") {
-        d.debts.forEach { Text("#${it.id} ${it.scope}, ${it.status}${if (it.deferred) ", runs after landing" else ""}", style = theme.body()) }
-    }
-    if (d.plan.isNotEmpty() || d.plan_view != null) Section("Plan") { PlanSection(d) }
-    if (d.body.isNotEmpty()) Section("Task") { SelectionContainer { Text(d.body, style = theme.body()) } }
-    if (model.liveLog.isNotEmpty()) Section("Log") {
-        SelectionContainer {
-            Text(model.liveLog.joinToString("\n"), style = theme.mono(),
-                modifier = Modifier.fillMaxWidth().background(theme.surface, RoundedCornerShape(theme.radius)).padding(theme.spacing))
+        // The debt's own `#id` is not a task, so only the rest is linked.
+        d.debts.forEach {
+            Row {
+                Text("#${it.id} ", style = theme.body())
+                LinkedText(model, "${it.scope}, ${it.status}${if (it.deferred) ", runs after landing" else ""}", theme.body())
+            }
         }
+    }
+    if (d.plan.isNotEmpty() || d.plan_view != null) Section("Plan") { PlanSection(model, d) }
+    if (d.body.isNotEmpty()) Section("Task") { LinkedText(model, d.body, theme.body(), Modifier.testTag("detail:body"), selectable = true) }
+    if (model.liveLog.isNotEmpty()) Section("Log") {
+        LinkedText(model, model.liveLog.joinToString("\n"), theme.mono(),
+            Modifier.fillMaxWidth().background(theme.surface, RoundedCornerShape(theme.radius)).padding(theme.spacing),
+            selectable = true)
     }
 }
 
@@ -354,9 +360,9 @@ fun LandingPage(model: MonitorModel) {
                 Text(t, style = theme.body(color = if (t.contains("stopped") || t.contains(" off;")) theme.attention else theme.muted))
             }
             l.freezes.forEach { f ->
-                Text(
-                    "Frozen: ${f.project}: ${f.reason}${if (f.fix_task > 0) " (fix: task #${f.fix_task})" else ""}",
-                    style = theme.body(color = theme.attention),
+                LinkedText(
+                    model, "Frozen: ${f.project}: ${f.reason}${if (f.fix_task > 0) " (fix: task #${f.fix_task})" else ""}",
+                    theme.body(color = theme.attention),
                 )
             }
             Section("Queue") {
@@ -379,7 +385,10 @@ fun LandingPage(model: MonitorModel) {
             Section("Debts") {
                 if (l.debts.isEmpty()) Text("Nothing is owed.", style = theme.body(color = theme.muted))
                 l.debts.forEach { x ->
-                    Text("#${x.id} task #${x.task} ${x.scope}: ${x.reason.ifEmpty { "no reason given" }}", style = theme.body())
+                    Row {
+                        Text("#${x.id} ", style = theme.body())
+                        LinkedText(model, "task #${x.task} ${x.scope}: ${x.reason.ifEmpty { "no reason given" }}", theme.body())
+                    }
                 }
             }
         }

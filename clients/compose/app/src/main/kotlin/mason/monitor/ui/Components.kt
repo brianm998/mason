@@ -344,9 +344,9 @@ fun DecisionCardView(model: MonitorModel, task: Long, card: DecisionCard) {
     ) {
         Row(verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(theme.spacingSmall)) {
             StateIcon("needs_attention")
-            Text(card.ask, style = theme.title())
+            LinkedText(model, card.ask, theme.title())
         }
-        if (card.why.isNotEmpty()) Text(card.why, style = theme.body(color = theme.muted))
+        if (card.why.isNotEmpty()) LinkedText(model, card.why, theme.body(color = theme.muted))
         Column(verticalArrangement = Arrangement.spacedBy(theme.spacingSmall)) {
             card.options.forEachIndexed { i, o ->
                 val label = "${i + 1}.  ${o.label}${if (o.recommended) "   recommended" else ""}"
@@ -428,8 +428,8 @@ fun ApprovalView(model: MonitorModel, task: Long, approval: Approval) {
             .padding(theme.spacingLarge)
             .testTag("approval:$task"),
     ) {
-        Text(approval.waiting_for, style = theme.title())
-        approval.lines.forEach { Text("• $it", style = theme.body()) }
+        LinkedText(model, approval.waiting_for, theme.title())
+        approval.lines.forEach { LinkedText(model, "• $it", theme.body()) }
         if (approval.diff_hash.isNotEmpty()) Text("Diff ${approval.diff_hash}", style = theme.mono(color = theme.muted))
         if (approval.branch.isNotEmpty()) Text("Branch ${approval.branch}", style = theme.mono(color = theme.muted))
         if (approval.diff_command.isNotEmpty()) {
@@ -599,10 +599,10 @@ fun ProposalView(model: MonitorModel, row: TaskRow, info: ProposalInfo) {
             style = theme.body(FontWeight.SemiBold),
             modifier = Modifier.testTag("proposal:${row.id}:tag"),
         )
-        if (info.filed_by != 0L) Text("Filed by the agent of task #${info.filed_by}", style = theme.small())
+        if (info.filed_by != 0L) LinkedText(model, "Filed by the agent of task #${info.filed_by}", theme.small())
         if (info.evidence.isNotEmpty()) {
             Text("Evidence", style = theme.body(FontWeight.SemiBold))
-            Text(info.evidence, style = theme.mono(), modifier = Modifier.testTag("proposal:${row.id}:evidence"))
+            LinkedText(model, info.evidence, theme.mono(), Modifier.testTag("proposal:${row.id}:evidence"), selectable = true)
         }
         if (info.status == "rejected") Text("Rejected" + (if (info.reject_reason.isEmpty()) "" else ": ${info.reject_reason}"), style = theme.body(color = theme.muted))
         if (info.branch.isNotEmpty()) {

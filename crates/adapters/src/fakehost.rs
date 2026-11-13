@@ -71,6 +71,25 @@ impl FakeHost {
         }
     }
 
+    /// The failed checks as jobs with a page each, only when the test asked for them (a file
+    /// named `with-jobs` in the state directory): jobs make the landing judge each one, which
+    /// most tests do not want.
+    fn jobs_of(&self, n: u64, failed: &[String]) -> Vec<JobFailure> {
+        if !self.dir.join("with-jobs").exists() {
+            return vec![];
+        }
+        failed
+            .iter()
+            .map(|f| JobFailure {
+                workflow: "checks".into(),
+                job: f.clone(),
+                infra: None,
+                log: None,
+                url: Some(format!("https://fake-host.example/pr/{n}/checks/{f}")),
+            })
+            .collect()
+    }
+
     fn head_sha(&self, branch: &str) -> Result<String, ApiError> {
         git(
             &self.remote,
@@ -241,7 +260,7 @@ impl GitHostAdapter for FakeHost {
         self.write(n, &json!({"base": base, "head": head, "title": title, "body": body, "state": "open", "approved": false, "queued": false}));
         Ok(PrRef {
             number: n,
-            url: format!("fake://pr/{n}"),
+            url: format!("https://fake-host.example/pr/{n}"),
         })
     }
 
@@ -259,6 +278,7 @@ impl GitHostAdapter for FakeHost {
             }
             self.write(n, &v);
         }
+        let failed_for_jobs = failed.clone();
         Ok(PrStatus {
             state: match v["state"].as_str() {
                 Some("merged") => PrState::Merged,
@@ -270,7 +290,7 @@ impl GitHostAdapter for FakeHost {
             review,
             head,
             counts: self.counts_of(n),
-            jobs: vec![],
+            jobs: self.jobs_of(n, &failed_for_jobs),
         })
     }
 
@@ -378,6 +398,7 @@ pub fn parse_status(out: &str) -> CiState {
                             job: f.clone(),
                             infra: infra.contains(f).then(|| "runner lost".to_string()),
                             log: None,
+                            url: None,
                         })
                         .collect()
                 }
