@@ -787,6 +787,17 @@ impl<'a> Ctx<'a> {
         })
     }
 
+    /// The CPU shares, with each task's title filled in.
+    pub fn cpu_usage(&self) -> CpuUsage {
+        let mut u = self.d.cpu_reading().usage.clone();
+        for s in u.shares.iter_mut().filter(|s| s.kind == "task") {
+            if let Some(t) = self.w.tasks.get(&TaskId(s.task)) {
+                s.title = t.title.clone();
+            }
+        }
+        u
+    }
+
     pub fn home(&self, project: &str) -> HomeView {
         let tasks: Vec<&Task> = self
             .w
@@ -843,6 +854,7 @@ impl<'a> Ctx<'a> {
             sessions_used,
             sessions_limit,
             compilation: Some(self.d.broker.compilation()),
+            cpu: Some(self.cpu_usage()),
             stages: [
                 State::Exploring,
                 State::Developing,
@@ -885,6 +897,12 @@ impl<'a> Ctx<'a> {
         let removes = crate::landing::removals_view(&self.d.cfg.task_dir(id));
         Some(TaskDetailView {
             step_tokens: crate::usage::step_tokens(self.d, id, self.now / 1000),
+            cpu_permille: self
+                .d
+                .cpu_reading()
+                .by_task
+                .get(&id)
+                .map_or(-1, |p| *p as i32),
             row: Some(self.row(t)),
             steps,
             plan,
@@ -1046,6 +1064,12 @@ impl<'a> Ctx<'a> {
                     parked: ids(&b.parked),
                     note: b.note.clone(),
                     running: live.contains(&b.id),
+                    ci: self
+                        .d
+                        .landing
+                        .ci
+                        .get(b.id)
+                        .map(|c| crate::batch_ci::to_proto(&c)),
                 })
                 .collect(),
             freezes,
