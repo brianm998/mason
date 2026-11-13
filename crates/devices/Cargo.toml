@@ -12,7 +12,7 @@ publish = false
 workspace = true
 
 [dependencies]
-mason-adapter-api = { version = "0.0.0", path = "../adapter-api" }
+mason-adapter-api = { version = "0.1.0", path = "../adapter-api" }
 serde_json = "1.0.154"
 
 [dev-dependencies]
