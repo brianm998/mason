@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- The masond launch agent. AbandonProcessGroup is the key that matters for s212: without it,
+     launchd kills every process the job started (step hosts included) when it stops or restarts
+     the job. Add the one line to an installed agent, then `launchctl bootout` and `bootstrap` it. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.example.mason</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/path/to/MASON Daemon.app/Contents/MacOS/masond</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>AbandonProcessGroup</key><true/>
+</dict>
+</plist>
