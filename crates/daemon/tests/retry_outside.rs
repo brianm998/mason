@@ -5,6 +5,8 @@
 //! pushes, so the task fails at landing. A retry with no step goes back to landing
 //! and no develop step runs again; `--from` still overrides.
 
+#![cfg(unix)]
+
 mod support;
 use serde_json::Value;
 use std::os::unix::fs::PermissionsExt;

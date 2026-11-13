@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+#![cfg(unix)]
+// Unix-only: signals, permission bits or unix sockets. Windows coverage comes with the later port tasks.
 
 //! A repository's `core.sshCommand` is honoured by the network git MASON runs, with MASON's
 //! never-ask options appended. One test, because it edits the process environment.

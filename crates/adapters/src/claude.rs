@@ -13,11 +13,9 @@ use mason_adapter_api::{
     Canceller, Outcome, Overage, OverageState, PlanItem, PlanStatus, SessionHandle, SessionSpec,
     TokenReport, UsageModel, UsageSnapshot, Window, WindowSpec, WindowState,
 };
-use nix::sys::signal::{killpg, Signal};
-use nix::unistd::Pid;
+use mason_platform::process::{group_leader, signal_group, Signal};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -369,8 +367,8 @@ pub(crate) fn launch_process(
         .envs(cmd.env.iter().map(|(k, v)| (k, v)))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(0);
+        .stderr(Stdio::piped());
+    group_leader(&mut c);
     let mut child = c.spawn().map_err(AdapterError::Spawn)?;
     let pid = child.id();
     if let Some(mut sin) = child.stdin.take() {
@@ -414,7 +412,7 @@ pub(crate) fn launch_process(
                 thread::sleep(Duration::from_millis(20));
             }
             timed_out.store(true, Ordering::SeqCst);
-            let _ = killpg(Pid::from_raw(pid as i32), Signal::SIGKILL);
+            let _ = signal_group(pid, Signal::Kill);
         });
     }
 
@@ -444,7 +442,7 @@ pub(crate) fn launch_process(
             }
             let status = child.wait();
             done.store(true, Ordering::SeqCst);
-            let _ = killpg(Pid::from_raw(pid as i32), Signal::SIGKILL); // stragglers
+            let _ = signal_group(pid, Signal::Kill); // stragglers
             std::thread::sleep(Duration::from_millis(20)); // let the stderr reader finish
             let detail = tail
                 .lock()
@@ -518,7 +516,7 @@ impl SessionHandle for ProcessSession {
         let (c, pid) = (self.cancelled.clone(), self.pid);
         Arc::new(move || {
             c.store(true, Ordering::SeqCst);
-            let _ = killpg(Pid::from_raw(pid as i32), Signal::SIGKILL);
+            let _ = signal_group(pid, Signal::Kill);
         })
     }
 }
