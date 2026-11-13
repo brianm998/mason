@@ -342,6 +342,11 @@ fn lock<'a>(m: &'a Mutex<State>) -> MutexGuard<'a, State> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// How long a waiting request that never told us its pid may go without a poll
+/// before it is dropped. Generous: polls come every 150 ms, but they queue
+/// behind the broker's state lock, which a stalled disk can hold for a minute.
+pub const UNPOLLED_WAITER_REAP: Duration = Duration::from_secs(120);
+
 impl Broker {
     pub fn new(
         locks_dir: PathBuf,
@@ -634,11 +639,13 @@ impl Broker {
                 last_poll,
                 granted_at,
                 locked,
+                pid,
                 ..
             }) = st.meta.get_mut(&id)
             else {
                 continue;
             };
+            let mut silent_for = None;
             let dead = if st.ledger.holds(id) {
                 let alive = self.locks.alive(id);
                 if alive {
@@ -650,8 +657,38 @@ impl Broker {
                     *locked || granted_at.is_none_or(|g| g.elapsed() > Duration::from_secs(5))
                 }
             } else {
-                last_poll.elapsed() > Duration::from_secs(10) && opened.elapsed() > Duration::ZERO
+                let _ = opened;
+                if *pid > 0 {
+                    // The requester is known: it is gone only when its process
+                    // is. A late poll (a stalled disk holding the state lock)
+                    // costs it nothing.
+                    !mason_step_host::registry::pid_alive(*pid)
+                } else {
+                    let silent = last_poll.elapsed();
+                    if silent > UNPOLLED_WAITER_REAP {
+                        silent_for = Some(silent);
+                        true
+                    } else {
+                        false
+                    }
+                }
             };
+            if let Some(silent) = silent_for {
+                let label = st
+                    .ledger
+                    .snapshot()
+                    .waiting
+                    .iter()
+                    .find(|r| r.id == id)
+                    .map(|r| r.label.clone())
+                    .unwrap_or_default();
+                tracing::warn!(
+                    lease = id,
+                    label = %label,
+                    silent_s = silent.as_secs(),
+                    "dropping a waiting request that has not polled and has no pid"
+                );
+            }
             if dead {
                 st.ledger.release(id);
                 st.meta.remove(&id);
@@ -1669,6 +1706,76 @@ mod tests {
         assert!(parse_resource_cfg("[machine]\ncompile = \"x\"\n").is_err());
         assert!(parse_resource_cfg("[wat]\nx = 1\n").is_err());
         assert_eq!(parse_resource_cfg("").unwrap(), ResourceCfg::default());
+    }
+
+    fn waiting_broker(dir: &std::path::Path) -> (Arc<Broker>, u64, u64) {
+        let cfg = ResourceCfg {
+            machine: BTreeMap::from([("compile".to_string(), 1)]),
+            ..Default::default()
+        };
+        let b = Broker::new(
+            dir.join("locks"),
+            dir.join("limits.kv"),
+            &cfg,
+            2,
+            crate::cpu::FakeCpu::new(0),
+            &[],
+        )
+        .unwrap();
+        let one = BTreeMap::from([("compile".to_string(), 1)]);
+        let first = b.lease_open("first", &one);
+        assert!(matches!(b.lease_poll(first), LeaseState::Granted { .. }));
+        let second = b.lease_open("second", &one);
+        assert!(matches!(b.lease_poll(second), LeaseState::Waiting { .. }));
+        (b, first, second)
+    }
+
+    fn age_poll(b: &Broker, id: u64, by: Duration) {
+        if let Some(Meta::External { last_poll, .. }) = lock(&b.st).meta.get_mut(&id) {
+            *last_poll = Instant::now().checked_sub(by).expect("uptime");
+        }
+    }
+
+    #[test]
+    fn a_waiter_with_a_live_pid_survives_a_long_gap_between_polls() {
+        let dir = tempfile::tempdir().unwrap();
+        let (b, _first, second) = waiting_broker(dir.path());
+        b.lease_set_pid(second, std::process::id());
+        age_poll(&b, second, Duration::from_secs(600));
+        assert!(matches!(
+            b.lease_poll(second),
+            LeaseState::Waiting { .. }
+        ));
+    }
+
+    #[test]
+    fn a_waiter_whose_pid_has_exited_is_reaped_at_the_next_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let (b, _first, second) = waiting_broker(dir.path());
+        let mut child = std::process::Command::new("/usr/bin/true").spawn().unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        b.lease_set_pid(second, pid);
+        assert!(matches!(b.lease_poll(second), LeaseState::Gone));
+    }
+
+    #[test]
+    fn a_waiter_without_a_pid_is_reaped_only_after_the_long_silence() {
+        let dir = tempfile::tempdir().unwrap();
+        let (b, _first, second) = waiting_broker(dir.path());
+        age_poll(&b, second, Duration::from_secs(60));
+        {
+            let mut st = lock(&b.st);
+            b.pass(&mut st);
+        }
+        assert!(lock(&b.st).meta.contains_key(&second), "60 s is not enough");
+        age_poll(&b, second, UNPOLLED_WAITER_REAP + Duration::from_secs(1));
+        {
+            let mut st = lock(&b.st);
+            b.pass(&mut st);
+        }
+        assert!(!lock(&b.st).meta.contains_key(&second));
+        assert!(matches!(b.lease_poll(second), LeaseState::Gone));
     }
 
     #[test]
