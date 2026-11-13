@@ -460,6 +460,7 @@ impl<'a> Ctx<'a> {
             progress: self.progress(t),
             allowed_actions: self.allowed_actions(t),
             blockers: t.blockers.iter().map(|b| b.0).collect(),
+            last_run: crate::http::latest_run(self.w, t.id),
             blocker_links: crate::blockers::links(self.d, self.w, t)
                 .into_iter()
                 .map(|l| BlockerLink {
