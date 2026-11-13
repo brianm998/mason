@@ -3021,15 +3021,13 @@ async fn demo_next(Shared(d): Shared<Arc<Daemon>>) -> Res {
 /// The single-daemon lock, held for the life of the process. The file is
 /// opened close-on-exec, so an `exec` (the managed loader, `take_over`) hands
 /// it back; the new image takes it again and `ensure_single` retries briefly.
-static SINGLE_LOCK: std::sync::Mutex<Option<nix::fcntl::Flock<std::fs::File>>> =
-    std::sync::Mutex::new(None);
+static SINGLE_LOCK: std::sync::Mutex<Option<std::fs::File>> = std::sync::Mutex::new(None);
 
 /// Refuse to run if another daemon is already running on this data directory:
 /// a kernel `flock` on `daemon.lock`, which a dead daemon can never leave held.
 /// Call this *before* opening the store or resuming any work. A repeat call by
 /// the holder does nothing.
 pub fn ensure_single(cfg: &crate::config::DaemonConfig) -> std::io::Result<()> {
-    use nix::fcntl::{Flock, FlockArg};
     use std::io::{Read, Seek, Write};
     let mut held = SINGLE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     if held.is_some() {
@@ -3039,21 +3037,21 @@ pub fn ensure_single(cfg: &crate::config::DaemonConfig) -> std::io::Result<()> {
     let path = cfg.data_dir.join("daemon.lock");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
-        let f = std::fs::OpenOptions::new()
+        let mut f = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
             .open(&path)?;
-        match Flock::lock(f, FlockArg::LockExclusiveNonblock) {
-            Ok(mut l) => {
-                let _ = l.set_len(0);
-                let _ = l.rewind();
-                let _ = write!(&mut *l, "{}", std::process::id());
-                *held = Some(l);
+        match f.try_lock() {
+            Ok(()) => {
+                let _ = f.set_len(0);
+                let _ = f.rewind();
+                let _ = write!(f, "{}", std::process::id());
+                *held = Some(f);
                 return Ok(());
             }
-            Err((mut f, nix::errno::Errno::EWOULDBLOCK)) => {
+            Err(std::fs::TryLockError::WouldBlock) => {
                 if std::time::Instant::now() < deadline {
                     std::thread::sleep(std::time::Duration::from_millis(100));
                     continue;
@@ -3073,7 +3071,7 @@ pub fn ensure_single(cfg: &crate::config::DaemonConfig) -> std::io::Result<()> {
                     format!("a daemon is already running here{who}"),
                 ));
             }
-            Err((_, e)) => return Err(std::io::Error::from(e)),
+            Err(std::fs::TryLockError::Error(e)) => return Err(e),
         }
     }
 }

@@ -5,9 +5,9 @@
 
 use crate::protocol::{self, Frame, ProtoError};
 use crate::registry::{self, ExitRecord};
+use mason_platform::net::UnixStream;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
-use std::os::unix::net::UnixStream;
 use std::path::Path;
 
 #[derive(Debug)]

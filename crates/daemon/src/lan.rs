@@ -118,13 +118,9 @@ fn new_code() -> std::io::Result<String> {
 }
 
 fn write_private(path: &FsPath, bytes: &[u8]) -> std::io::Result<()> {
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut f = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)?;
+    let mut f = std::fs::OpenOptions::new();
+    f.write(true).create(true).truncate(true);
+    let mut f = mason_platform::fs::owner_only(&mut f).open(path)?;
     f.write_all(bytes)
 }
 
@@ -149,9 +145,7 @@ pub fn load_or_create_identity(data_dir: &FsPath) -> std::io::Result<(Vec<u8>, V
 }
 
 pub fn hostname() -> String {
-    nix::unistd::gethostname()
-        .ok()
-        .and_then(|h| h.into_string().ok())
+    mason_platform::host::name()
         .map(|h| h.trim_end_matches(".local").to_string())
         .filter(|h| !h.is_empty())
         .unwrap_or_else(|| "mason".into())
@@ -459,16 +453,19 @@ mod tests {
 
     #[test]
     fn the_identity_is_made_once_and_the_key_is_private() {
-        use std::os::unix::fs::PermissionsExt;
         let d = tempfile::tempdir().unwrap();
         let (c1, k1) = load_or_create_identity(d.path()).unwrap();
         let (c2, k2) = load_or_create_identity(d.path()).unwrap();
         assert_eq!((&c1, &k1), (&c2, &k2));
-        let mode = std::fs::metadata(d.path().join("lan/key.der"))
-            .unwrap()
-            .permissions()
-            .mode();
-        assert_eq!(mode & 0o777, 0o600);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(d.path().join("lan/key.der"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
         assert_eq!(sha256_hex(&c1).len(), 64);
     }
 

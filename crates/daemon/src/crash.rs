@@ -12,8 +12,7 @@
 //! `batch` (a landing batch, before it runs), `admit` (inside `admit`, after it took the
 //! flag), `loop:<name>` (one pass of the background loop of that name).
 
-use nix::sys::signal::{kill, Signal};
-use nix::unistd::Pid;
+use mason_platform::process::{signal_process, Signal};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -99,7 +98,9 @@ impl Crash {
     pub fn point(&self, point: &str) {
         if self.should_fire(point) {
             eprintln!("CRASH INJECTED at {point}");
-            let _ = kill(Pid::this(), Signal::SIGKILL);
+            if signal_process(std::process::id(), Signal::Kill).is_err() {
+                std::process::abort(); // no kill(2) of our own here: abort is as unclean
+            }
             std::thread::sleep(std::time::Duration::from_secs(10)); // SIGKILL is delivered; never returns
         }
     }

@@ -5,6 +5,8 @@
 //! pushes, so the task fails at landing. A retry with no step goes back to landing
 //! and no develop step runs again; `--from` still overrides.
 
+#![cfg(unix)]
+
 mod support;
 use serde_json::Value;
 use std::os::unix::fs::PermissionsExt;
@@ -42,9 +44,14 @@ fn a_landing_push_failure_is_retried_at_land_and_no_develop_runs_again() {
     assert!(
         t["failure"].as_str().unwrap().contains("git push"),
         "failure was {} (step {})",
-        t["failure"], t["step"]
+        t["failure"],
+        t["step"]
     );
-    assert_eq!(t["failure_class"], "outside", "failure was {}", t["failure"]);
+    assert_eq!(
+        t["failure_class"], "outside",
+        "failure was {}",
+        t["failure"]
+    );
     let at = t["step"].as_str().unwrap().to_string();
     assert_eq!(t["retry_to"], at.as_str(), "retry_to for {}", t["failure"]);
     assert_eq!(develop_runs(&t), 1);
