@@ -1126,6 +1126,9 @@ struct TestChecks {
     suites: Option<DevSuites>,
     task: u64,
     run: u64,
+    /// A develop step's project and base: before a check the base is folded in when that is
+    /// safe (`basefold`). `None` for other steps.
+    base_fold: Option<(ProjectId, String)>,
 }
 
 /// What `run_check` needs to pick suites: the test step, and where the base is.
@@ -1376,6 +1379,37 @@ impl CheckHandler for TestChecks {
     }
 
     fn run_scoped(&self, name: &str, scope: &CheckScope) -> CheckRun {
+        let note = match (&self.base_fold, name == "tests") {
+            (Some((pid, base)), true) => {
+                let fold = {
+                    let lock = self.slots.d.repo_lock(*pid);
+                    let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+                    crate::basefold::fold(&self.wt, base)
+                };
+                if !matches!(fold, crate::basefold::BaseFold::Current) {
+                    tracing::info!(
+                        task = self.task,
+                        run = self.run,
+                        ?fold,
+                        "run_check: base fold"
+                    );
+                }
+                crate::basefold::note(base, &fold)
+            }
+            _ => None,
+        };
+        match (note, self.check(name, scope)) {
+            (Some(n), CheckRun::Done { passed, summary }) => CheckRun::Done {
+                passed,
+                summary: format!("{n}\n\n{summary}"),
+            },
+            (_, r) => r,
+        }
+    }
+}
+
+impl TestChecks {
+    fn check(&self, name: &str, scope: &CheckScope) -> CheckRun {
         if name == "tests" {
             if let Some(dev) = &self.suites {
                 return self.run_suites(dev, scope);
@@ -1922,6 +1956,7 @@ fn agent_job(c: &Ctx) {
         suites: DevSuites::of(&c.def, c.project.base_ref()),
         task: c.task.0,
         run: c.run.0,
+        base_fold: (kind == StepKind::Develop).then(|| (c.project_id, c.project.base_ref())),
     });
     let validator = (kind == StepKind::Develop).then(|| {
         change_validator(
@@ -2310,7 +2345,16 @@ fn settle_all(
                 } else {
                     text
                 };
-                let restart = lost.len() <= hl::MAX_AGENT_RESTARTS;
+                // A host the daemon's own restart took is not the task's failure: it
+                // is recorded but not counted toward the restart budget.
+                let counted = lost
+                    .iter()
+                    .filter(|id| {
+                        let r = mason_step_host::registry::lost_report(&root.join(id));
+                        !r.is_ok_and(|r| hl::is_restart_loss(&root, r.last_heartbeat_ms, r.at_ms))
+                    })
+                    .count();
+                let restart = counted <= hl::MAX_AGENT_RESTARTS;
                 hl::record_as(&c.d, Some(c.run), &c.step.name, &newest, at, text, restart);
                 if !restart {
                     let all: Vec<String> = lost.iter().map(|id| describe(id).0).collect();

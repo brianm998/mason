@@ -47,3 +47,10 @@ Built by `scripts/package/tarball.sh <target> [--out DIR]`, `deb.sh <target>` an
    this outline.)
 4. Review the draft: all assets present, `SHA256SUMS` matches, installers start.
 5. Publish the release.
+
+## macOS monitor dmg
+
+`scripts/package/macos-dmg.sh` builds `MASON-<ver>-macos.dmg`. Set `SIGN_APP=1` and
+`SIGN_IDENTITY` ("Developer ID Application: ...") to sign with the hardened runtime, and
+notarization credentials (`NOTARY_PROFILE`, or `APPLE_ID`, `APPLE_TEAM_ID`, `APPLE_APP_PASSWORD`)
+to notarize and staple through `scripts/package/notarize.sh`. No entitlements are needed.

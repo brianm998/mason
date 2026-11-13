@@ -8,6 +8,7 @@
 
 pub mod attention;
 pub mod basecheck;
+pub mod basefold;
 pub mod bg;
 pub mod blockers;
 pub mod ci_schedule;
