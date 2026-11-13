@@ -7,6 +7,12 @@
 //   proguardReleaseJars  the window and its libraries put through ProGuard, in
 //                        build/compose/tmp/main-release/proguard
 //   runRelease           start the window from those jars
+// One version for every build: `-Pmason.version=X.Y.Z`, else the workspace version in Cargo.toml.
+val masonVersion: String = (findProperty("mason.version") as String?)
+    ?: Regex("""(?s)\[workspace\.package\].*?^version\s*=\s*"([^"]+)"""", RegexOption.MULTILINE)
+        .find(rootDir.resolve("../../Cargo.toml").readText())?.groupValues?.get(1)
+    ?: error("no workspace version: pass -Pmason.version")
+
 plugins {
     kotlin("jvm")
     id("org.jetbrains.compose")
@@ -32,7 +38,7 @@ compose.desktop {
         findProperty("mason.build")?.let { jvmArgs += "-Dmason.monitor.version=$it" }
         nativeDistributions {
             packageName = "MASON"
-            packageVersion = "1.0.0"
+            packageVersion = masonVersion
             modules("java.naming", "java.net.http", "jdk.unsupported")
         }
         buildTypes.release.proguard {

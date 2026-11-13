@@ -11,5 +11,5 @@ publish = false
 workspace = true
 
 [dependencies]
-mason-platform = { version = "0.0.0", path = "../platform" }
+mason-platform = { version = "0.1.0", path = "../platform" }
 serde_json = "1.0.154"
