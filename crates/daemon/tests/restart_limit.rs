@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+#![cfg(unix)]
+// Unix-only: signals, permission bits or unix sockets. Windows coverage comes with the later port tasks.
 
 //! A step's time limit counts from when its host started, not from when the daemon
 //! last attached (s84). The daemon is killed part-way through a 15-second limit and

@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+#![cfg(unix)]
+// Unix-only: signals, permission bits or unix sockets. Windows coverage comes with the later port tasks.
 
 //! A push the host refuses for credentials holds landing for the project instead of failing the
 //! task; the alert names the account the host saw; choosing a key whose probe gets through lifts

@@ -231,6 +231,16 @@ pub fn read_instant() -> Result<(u32, &'static str), String> {
 
 /// The load average over one minute divided by the logical CPU count, as a
 /// busy percentage capped at 100. Cannot stall: two system calls.
+#[cfg(windows)]
+pub fn read_loadavg() -> Option<u32> {
+    // Windows keeps no load average. `None` is this function's "no reading",
+    // which the sampler already treats as an absent fallback.
+    None
+}
+
+/// The load average over one minute divided by the logical CPU count, as a
+/// busy percentage capped at 100. Cannot stall: two system calls.
+#[cfg(unix)]
 pub fn read_loadavg() -> Option<u32> {
     let mut l = [0f64; 1];
     // SAFETY: one element is asked for and one is provided.

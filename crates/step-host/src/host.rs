@@ -7,13 +7,10 @@
 
 use crate::protocol::{self, Frame, ProtoError, DATA_CHUNK};
 use crate::registry::{now_ms, proc_start, write_kv, ExitRecord};
-use nix::sys::signal::{killpg, Signal};
-use nix::unistd::Pid;
+use mason_platform::net::{UnixListener, UnixStream};
+use mason_platform::process::{self, Signal};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
-use std::os::unix::fs::FileExt;
-use std::os::unix::net::{UnixListener, UnixStream};
-use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{channel, RecvTimeoutError};
@@ -64,7 +61,7 @@ fn lock(s: &Shared) -> std::sync::MutexGuard<'_, St> {
 pub fn run(cfg: HostConfig) -> io::Result<()> {
     // Our own session: no controlling terminal, and the launcher's death or
     // terminal closing can't signal us. Fails harmlessly if already a leader.
-    let _ = nix::unistd::setsid();
+    let _ = process::detach_session();
 
     fs::create_dir_all(&cfg.dir)?;
     let sock_path = cfg.dir.join("sock");
@@ -92,8 +89,8 @@ pub fn run(cfg: HostConfig) -> io::Result<()> {
     cmd.args(&cfg.cmd[1..])
         .stdin(stdin)
         .stdout(writer.try_clone()?)
-        .stderr(writer)
-        .process_group(0);
+        .stderr(writer);
+    process::group_leader(&mut cmd);
     if let Some(c) = &cfg.cwd {
         cmd.current_dir(c);
     }
@@ -187,7 +184,10 @@ pub fn run(cfg: HostConfig) -> io::Result<()> {
         thread::spawn(move || {
             let (code, signal) = match child {
                 Some(mut c) => match c.wait() {
-                    Ok(st) => (st.code().unwrap_or(-1), st.signal().unwrap_or(0)),
+                    Ok(st) => (
+                        st.code().unwrap_or(-1),
+                        process::exit_signal(&st).unwrap_or(0),
+                    ),
                     Err(_) => (-1, 0),
                 },
                 None => (127, 0),
@@ -266,14 +266,14 @@ fn stop_child(s: &Shared, grace_ms: u32) {
     if s.child_pid == 0 {
         return;
     }
-    let pg = Pid::from_raw(s.child_pid as i32);
-    let _ = killpg(pg, Signal::SIGTERM);
+    let pg = s.child_pid;
+    let _ = process::signal_group(pg, Signal::Term);
     let deadline = Instant::now() + Duration::from_millis(u64::from(grace_ms));
     let mut g = lock(s);
     while g.exit.is_none() {
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
-            let _ = killpg(pg, Signal::SIGKILL);
+            let _ = process::signal_group(pg, Signal::Kill);
             return;
         }
         g =
@@ -282,7 +282,7 @@ fn stop_child(s: &Shared, grace_ms: u32) {
                 .0;
     }
     // The child is gone; clean up anything it left in its group.
-    let _ = killpg(pg, Signal::SIGKILL);
+    let _ = process::signal_group(pg, Signal::Kill);
 }
 
 fn serve(mut stream: UnixStream, s: &Arc<Shared>) -> Result<(), ProtoError> {
@@ -402,7 +402,7 @@ fn serve(mut stream: UnixStream, s: &Arc<Shared>) -> Result<(), ProtoError> {
             Some(Frame::Data { .. }) => {
                 let n = ((size - off) as usize).min(DATA_CHUNK);
                 let mut buf = vec![0u8; n];
-                journal.read_exact_at(&mut buf, off)?;
+                mason_platform::fs::read_exact_at(&journal, &mut buf, off)?;
                 protocol::write_frame(
                     &mut stream,
                     &Frame::Data {
