@@ -958,8 +958,7 @@ fn run_shell_env(
         .stdin(Stdio::null())
         .stdout(file)
         .stderr(err.map_or_else(|_| Stdio::null(), Stdio::from));
-    mason_platform::process::group_leader(&mut command);
-    let child = command.spawn();
+    let child = mason_platform::process::spawn_group(&mut command);
     let Ok(mut child) = child else {
         return (false, "could not start the command".into());
     };
