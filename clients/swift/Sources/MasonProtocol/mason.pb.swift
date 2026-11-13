@@ -1668,6 +1668,14 @@ public nonisolated struct Mason_V1_UpdateInfo: Sendable {
   /// One per kind of desktop monitor the daemon can build.
   public var monitors: [Mason_V1_MonitorBuild] = []
 
+  /// The button's label: "Update masond", "Update now" (an update is built and waiting
+  /// for landing batches) or empty (additive).
+  public var daemonButton: String = String()
+
+  /// Asked before the button acts, written by the daemon so both monitors say the same
+  /// words; empty when no confirmation is needed (additive).
+  public var daemonConfirm: String = String()
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -5783,7 +5791,7 @@ nonisolated extension Mason_V1_HeaderView: SwiftProtobuf.Message, SwiftProtobuf.
 
 nonisolated extension Mason_V1_UpdateInfo: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".UpdateInfo"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}daemon_text\0\u{3}daemon_can_update\0\u{1}monitors\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}daemon_text\0\u{3}daemon_can_update\0\u{1}monitors\0\u{3}daemon_button\0\u{3}daemon_confirm\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -5794,6 +5802,8 @@ nonisolated extension Mason_V1_UpdateInfo: SwiftProtobuf.Message, SwiftProtobuf.
       case 1: try { try decoder.decodeSingularStringField(value: &self.daemonText) }()
       case 2: try { try decoder.decodeSingularBoolField(value: &self.daemonCanUpdate) }()
       case 3: try { try decoder.decodeRepeatedMessageField(value: &self.monitors) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.daemonButton) }()
+      case 5: try { try decoder.decodeSingularStringField(value: &self.daemonConfirm) }()
       default: break
       }
     }
@@ -5809,6 +5819,12 @@ nonisolated extension Mason_V1_UpdateInfo: SwiftProtobuf.Message, SwiftProtobuf.
     if !self.monitors.isEmpty {
       try visitor.visitRepeatedMessageField(value: self.monitors, fieldNumber: 3)
     }
+    if !self.daemonButton.isEmpty {
+      try visitor.visitSingularStringField(value: self.daemonButton, fieldNumber: 4)
+    }
+    if !self.daemonConfirm.isEmpty {
+      try visitor.visitSingularStringField(value: self.daemonConfirm, fieldNumber: 5)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -5816,6 +5832,8 @@ nonisolated extension Mason_V1_UpdateInfo: SwiftProtobuf.Message, SwiftProtobuf.
     if lhs.daemonText != rhs.daemonText {return false}
     if lhs.daemonCanUpdate != rhs.daemonCanUpdate {return false}
     if lhs.monitors != rhs.monitors {return false}
+    if lhs.daemonButton != rhs.daemonButton {return false}
+    if lhs.daemonConfirm != rhs.daemonConfirm {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

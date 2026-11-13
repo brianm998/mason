@@ -140,7 +140,16 @@ fun BannersView(model: MonitorModel) {
         if (!model.connected) banner(if (model.reconnecting) "Daemon restarting, reconnecting…" else "Connection lost. Reconnecting…", "connection", theme, "connection_lost")
         model.readOnlyReason?.let { banner("Read-only: $it", "read-only", theme, "read_only") }
         if (model.daemonUpdateText.isNotEmpty()) {
-            updateRow(model.daemonUpdateText, if (model.canUpdateDaemon) "Update masond" else null, "daemon-update", theme) { model.updateDaemon() }
+            updateRow(model.daemonUpdateText, if (model.canUpdateDaemon) model.daemonUpdateButton else null, "daemon-update", theme) { model.pressUpdateDaemon() }
+        }
+        if (model.confirmingDaemonUpdate) {
+            AlertDialog(
+                onDismissRequest = { model.cancelDaemonUpdate() },
+                title = { Text("Update masond now?") },
+                text = { Text(model.daemonUpdateConfirm, modifier = Modifier.testTag("daemon-update-confirm-text")) },
+                confirmButton = { Button(onClick = { model.confirmDaemonUpdate() }, modifier = Modifier.testTag("daemon-update-confirm")) { Text("Update now") } },
+                dismissButton = { Button(onClick = { model.cancelDaemonUpdate() }, modifier = Modifier.testTag("daemon-update-keep")) { Text("Keep waiting") } },
+            )
         }
         val monitorText = model.updating
             ?: model.updateError

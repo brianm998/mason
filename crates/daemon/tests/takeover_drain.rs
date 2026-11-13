@@ -123,3 +123,39 @@ fn a_failed_takeover_lets_landing_resume() {
     assert!(!w.d.landing().draining());
     wait_for("the queued task to land", 90, || w.landed(t));
 }
+
+#[test]
+fn update_now_stops_the_wait_and_names_the_batches_it_abandons() {
+    let (w, rel) = blocked_world();
+    let _t1 = w.task("one", &[("x/one.txt", "1")]);
+    running(&w);
+    // Nothing waits yet: refused with a reason.
+    assert!(update::update_now(&w.d)
+        .unwrap_err()
+        .contains("no update is waiting"));
+    let d = w.d.clone();
+    let waiter = std::thread::spawn(move || update::drain_within(&d, Duration::from_secs(3600)));
+    wait_for("the update to say it waits", 60, || {
+        phase(&w) == "waiting for landing"
+    });
+    // Still waiting: the flag is unset, so the wait does not end.
+    assert!(!waiter.is_finished());
+    let (text, button, confirm) = update::wait_view(&w.d.update_status.lock().unwrap(), true);
+    assert!(text.contains("scratch #"), "{text}");
+    assert_eq!(button, "Update now");
+    assert!(
+        confirm.contains("scratch #") && confirm.contains("tasks #"),
+        "{confirm}"
+    );
+    update::update_now(&w.d).unwrap();
+    waiter.join().unwrap();
+    let id = w.d.store.batches(Some("scratch"), 10).unwrap()[0].id;
+    let l = log(&w);
+    assert!(
+        l.contains("chose Update now") && l.contains(&format!("scratch #{id}")),
+        "{l}"
+    );
+    assert_eq!(phase(&w), "taking over");
+    release(&rel);
+    w.d.landing().set_draining(false);
+}

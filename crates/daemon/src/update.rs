@@ -729,6 +729,26 @@ pub struct Status {
     pub target: Option<String>,
     pub error: Option<String>,
     pub log: Vec<String>,
+    /// While `waiting for landing`: the batches being waited for.
+    pub wait: Option<Wait>,
+}
+
+/// What a takeover is waiting for.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Wait {
+    pub batches: Vec<WaitBatch>,
+    /// The latest time it will go ahead anyway, as a clock time (`20:53`).
+    pub deadline: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WaitBatch {
+    pub project: String,
+    pub id: u64,
+    pub phase: String,
+    pub tasks: Vec<u64>,
+    /// The project's batch window, in minutes (0: batches go at once).
+    pub window_min: u64,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1095,9 +1115,12 @@ pub fn info(d: &Daemon) -> Option<mason_protocol::UpdateInfo> {
             }
         })
         .collect();
+    let (daemon_button, daemon_confirm) = button_for(&s, daemon_can_update);
     Some(mason_protocol::UpdateInfo {
         daemon_text,
         daemon_can_update,
+        daemon_button,
+        daemon_confirm,
         monitors,
     })
 }
@@ -1126,6 +1149,10 @@ fn daemon_banner(c: &Check, running: &str, s: &Status) -> (String, bool) {
             format!("Updating masond: restarting on {}…", short(target)),
             false,
         ),
+        "waiting for landing" if s.wait.is_some() => (
+            waiting_sentence(target, s.wait.as_ref().unwrap_or(&Wait::default())),
+            true,
+        ),
         "failed" if c.outdated => {
             let why = s
                 .error
@@ -1152,6 +1179,86 @@ fn daemon_banner(c: &Check, running: &str, s: &Status) -> (String, bool) {
             )
         }
         _ => (String::new(), false),
+    }
+}
+
+/// Pure: "masond 47d6e3e6 is built and tested, and will take over when 1 landing batch
+/// finishes (star #142, verifying), or at 20:53 at the latest."
+fn waiting_sentence(target: &str, w: &Wait) -> String {
+    let n = w.batches.len();
+    let names: Vec<String> = w
+        .batches
+        .iter()
+        .map(|b| format!("{} #{}, {}", b.project, b.id, b.phase))
+        .collect();
+    format!(
+        "masond {} is built and tested, and will take over when {n} landing batch{} finish{} ({}), or at {} at the latest.",
+        short(target),
+        if n == 1 { "" } else { "es" },
+        if n == 1 { "es" } else { "" },
+        names.join("; "),
+        w.deadline
+    )
+}
+
+/// Pure: what taking over now does to the batches it is waiting for. Empty when nothing
+/// would be lost.
+fn waiting_confirm(w: &Wait) -> String {
+    if w.batches.is_empty() {
+        return String::new();
+    }
+    let n = w.batches.len();
+    let list: Vec<String> = w
+        .batches
+        .iter()
+        .map(|b| {
+            let tasks: Vec<String> = b.tasks.iter().map(|t| format!("#{t}")).collect();
+            format!("{} #{}: tasks {}", b.project, b.id, tasks.join(", "))
+        })
+        .collect();
+    let windows: Vec<String> = w
+        .batches
+        .iter()
+        .map(|b| {
+            if b.window_min == 0 {
+                format!("{} forms a batch at once", b.project)
+            } else {
+                format!("{}'s batch window is {} min", b.project, b.window_min)
+            }
+        })
+        .collect();
+    format!(
+        "Updating now restarts masond while {n} landing batch{} {} running ({}). {} abandoned: its tasks go back to the landing queue and must form a new batch and pass CI again ({}). The CI run already started for {} is left to finish and its result is ignored. Step hosts keep running; nothing is lost from tasks in other steps.",
+        if n == 1 { "" } else { "es" },
+        if n == 1 { "is" } else { "are" },
+        list.join("; "),
+        if n == 1 { "That batch is" } else { "Those batches are" },
+        windows.join("; "),
+        if n == 1 { "it" } else { "them" },
+    )
+}
+
+/// For `GET /update`: the waiting sentence (empty unless an update is waiting for landing
+/// batches), the button label and the confirmation text.
+pub fn wait_view(s: &Status, outdated: bool) -> (String, String, String) {
+    let text = match (s.phase.as_str(), s.wait.as_ref()) {
+        ("waiting for landing", Some(w)) => {
+            waiting_sentence(s.target.as_deref().unwrap_or_default(), w)
+        }
+        _ => String::new(),
+    };
+    let (button, confirm) = button_for(s, outdated || !text.is_empty());
+    (text, button, confirm)
+}
+
+/// What the header's button says and whether pressing it asks first: `(label, confirm)`.
+fn button_for(s: &Status, can_update: bool) -> (String, String) {
+    if !can_update {
+        return (String::new(), String::new());
+    }
+    match (s.phase.as_str(), s.wait.as_ref()) {
+        ("waiting for landing", Some(w)) => ("Update now".into(), waiting_confirm(w)),
+        _ => ("Update masond".into(), String::new()),
     }
 }
 
@@ -1331,25 +1438,46 @@ pub fn drain(d: &Arc<Daemon>) {
 /// [`drain`] with the cap given (zero: do not wait at all).
 pub fn drain_within(d: &Arc<Daemon>, cap: Duration) {
     d.landing.set_draining(true);
+    d.update_now.store(false, Ordering::SeqCst);
     let deadline = Instant::now() + cap;
+    let deadline_label = clock_after(cap);
     let mut said = String::new();
+    let done = |d: &Daemon| {
+        d.update_status
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .wait = None;
+    };
     loop {
         if d.landing.busy_projects().is_empty() {
+            done(d);
             return;
         }
         let lines = running_batch_lines(d);
-        if Instant::now() >= deadline {
+        let abandons = if lines.is_empty() {
+            "a running batch".into()
+        } else {
+            lines.join(", ")
+        };
+        if d.update_now.swap(false, Ordering::SeqCst) {
+            done(d);
             say(
                 d,
                 "taking over",
                 &format!(
-                    "the landing wait of {}s is over; taking over anyway, which abandons: {}",
+                    "the owner chose Update now; taking over without waiting, which abandons: {abandons}"
+                ),
+            );
+            return;
+        }
+        if Instant::now() >= deadline {
+            done(d);
+            say(
+                d,
+                "taking over",
+                &format!(
+                    "the landing wait of {}s is over; taking over anyway, which abandons: {abandons}",
                     cap.as_secs(),
-                    if lines.is_empty() {
-                        "a running batch".into()
-                    } else {
-                        lines.join(", ")
-                    }
                 ),
             );
             return;
@@ -1360,11 +1488,73 @@ pub fn drain_within(d: &Arc<Daemon>, cap: Duration) {
             lines.join(", ")
         );
         if text != said {
+            d.update_status
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .wait = Some(wait_info(d, &deadline_label));
             say(d, "waiting for landing", &text);
             said = text;
         }
         d.landing.wait_idle_once(Duration::from_secs(1));
     }
+}
+
+/// The unfinished batches with their tasks and windows.
+fn wait_info(d: &Daemon, deadline: &str) -> Wait {
+    let batches = d
+        .store
+        .batches(None, 200)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|b| b.finished_at.is_none())
+        .map(|b| WaitBatch {
+            window_min: d
+                .project_id_by_name(&b.project)
+                .and_then(|p| crate::landing::load_config(d, p).ok())
+                .map_or(0, |c| c.window.as_secs().div_ceil(60)),
+            tasks: b
+                .tasks
+                .split(',')
+                .filter_map(|t| t.trim().parse().ok())
+                .collect(),
+            project: b.project,
+            id: b.id,
+            phase: b.phase,
+        })
+        .collect();
+    Wait {
+        batches,
+        deadline: deadline.into(),
+    }
+}
+
+/// The local clock time `after` from now, `HH:MM` (UTC if `date` cannot say).
+fn clock_after(after: Duration) -> String {
+    let at = now_ms() / 1000 + after.as_secs();
+    let local = Command::new("/bin/date")
+        .args(["-r", &at.to_string(), "+%H:%M"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|t| t.len() == 5);
+    local.unwrap_or_else(|| format!("{:02}:{:02} UTC", at / 3600 % 24, at / 60 % 60))
+}
+
+/// The owner's "Update now": stop waiting for landing batches. `Err` with the reason if no
+/// update is waiting.
+pub fn update_now(d: &Daemon) -> Result<(), String> {
+    let s = d.update_status.lock().unwrap_or_else(|e| e.into_inner());
+    if s.phase != "waiting for landing" {
+        return Err(format!(
+            "no update is waiting for a landing batch (update: {})",
+            s.phase
+        ));
+    }
+    d.update_now.store(true, Ordering::SeqCst);
+    drop(s);
+    d.poke();
+    Ok(())
 }
 
 /// [`take_over`] after waiting for the running landing batches (unless `now`). Only returns
@@ -1972,6 +2162,52 @@ mod tests {
             daemon_banner(&check(false), "a", &failed),
             (String::new(), false)
         );
+    }
+
+    fn waiting() -> Status {
+        Status {
+            phase: "waiting for landing".into(),
+            target: Some("47d6e3e6aaaaaaaa".into()),
+            wait: Some(Wait {
+                batches: vec![WaitBatch {
+                    project: "star".into(),
+                    id: 142,
+                    phase: "verifying".into(),
+                    tasks: vec![161, 194, 195],
+                    window_min: 20,
+                }],
+                deadline: "20:53".into(),
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_waiting_update_says_so_offers_update_now_and_confirms() {
+        let s = waiting();
+        let (text, live) = daemon_banner(&check(true), "a", &s);
+        assert_eq!(
+            text,
+            "masond 47d6e3e6 is built and tested, and will take over when 1 landing batch finishes (star #142, verifying), or at 20:53 at the latest."
+        );
+        assert!(live);
+        let (button, confirm) = button_for(&s, true);
+        assert_eq!(button, "Update now");
+        for part in ["star #142", "tasks #161, #194, #195", "20 min", "abandoned"] {
+            assert!(confirm.contains(part), "{part}: {confirm}");
+        }
+        // Every other phase keeps its button and asks nothing.
+        let idle = Status {
+            phase: "idle".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            button_for(&idle, true),
+            ("Update masond".into(), String::new())
+        );
+        assert_eq!(button_for(&idle, false), (String::new(), String::new()));
+        let (text, _, _) = wait_view(&idle, true);
+        assert!(text.is_empty());
     }
 
     #[test]

@@ -83,8 +83,41 @@ public final class MonitorModel: ObservableObject {
     public var daemonUpdateText: String { updateInfo?.daemonText ?? "" }
     public var canUpdateDaemon: Bool { canAct && updateInfo?.daemonCanUpdate == true }
 
-    /// The owner's button: the daemon builds its newest version, proves it and takes over.
-    public func updateDaemon() { raw("POST", "/update", json: "{}") }
+    /// The button's label, as the daemon words it ("Update masond", or "Update now" while a
+    /// finished update waits for landing batches).
+    public var daemonUpdateButton: String {
+        let b = updateInfo?.daemonButton ?? ""
+        return b.isEmpty ? "Update masond" : b
+    }
+    /// What to ask before the button acts; empty when it acts at once.
+    public var daemonUpdateConfirm: String { updateInfo?.daemonConfirm ?? "" }
+    /// The confirmation dialog is open.
+    @Published public var confirmingDaemonUpdate = false
+
+    /// The button was pressed: ask first if the daemon says to, else act.
+    public func pressUpdateDaemon() {
+        if daemonUpdateConfirm.isEmpty { updateDaemon() } else { confirmingDaemonUpdate = true }
+    }
+
+    /// "Keep waiting".
+    public func cancelDaemonUpdate() { confirmingDaemonUpdate = false }
+
+    /// "Update now" in the dialog.
+    public func confirmDaemonUpdate() {
+        confirmingDaemonUpdate = false
+        updateDaemon()
+    }
+
+    /// The owner's button: the daemon builds its newest version, proves it and takes over; while
+    /// an update waits for landing batches it takes over now. A refusal lands in `updateError`.
+    public func updateDaemon() {
+        updateError = nil
+        var c = Mason_V1_Command()
+        c.id = "update-daemon"
+        let now = daemonUpdateButton == "Update now"
+        c.raw = .with { $0.method = "POST"; $0.path = now ? "/update/now" : "/update"; $0.json = "{}" }
+        send(c)
+    }
 
     /// The owner's button: the daemon builds the newest monitor; `noteMonitorBuild` takes it from there.
     public func updateMonitor() {
@@ -694,6 +727,7 @@ public final class MonitorModel: ObservableObject {
             else { sshKeyResult = r.error }
         }
         if r.id == "announce", r.ok { announcer.handle(claim: r.json) }
+        if r.id == "update-daemon", !r.ok { updateError = r.error }
         if r.id == "update-monitor" {
             if r.ok { monitorAsked = true } else { monitorUpdateFailed(r.error) }
         }

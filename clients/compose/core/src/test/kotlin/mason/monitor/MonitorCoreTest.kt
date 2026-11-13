@@ -415,7 +415,7 @@ class MonitorCoreTest {
     private fun owner(role: String = "", owner: Boolean = true) =
         ServerMessage(welcome = Welcome(protocol = 1, resume = ResumeKind.UP_TO_DATE, min_protocol = 1, owner = owner, role = role))
 
-    private fun update(latest: String, phase: String = "", path: String = "", error: String = "", daemon: String = "", canUpdate: Boolean = false) =
+    private fun update(latest: String, phase: String = "", path: String = "", error: String = "", daemon: String = "", canUpdate: Boolean = false, button: String = "", confirm: String = "") =
         ServerMessage(
             view = ViewUpdate(
                 view = View(
@@ -423,6 +423,8 @@ class MonitorCoreTest {
                         update = UpdateInfo(
                             daemon_text = daemon,
                             daemon_can_update = canUpdate,
+                            daemon_button = button,
+                            daemon_confirm = confirm,
                             monitors = listOf(
                                 MonitorBuild(kind = "swift", latest = "other"),
                                 MonitorBuild(kind = "compose", latest = latest, phase = phase, path = path, error = error),
@@ -477,6 +479,31 @@ class MonitorCoreTest {
         m.updateDaemon()
         assertEquals("POST", sent.last().raw?.method)
         assertEquals("/update", sent.last().raw?.path)
+    }
+
+    @Test fun theDaemonButtonFollowsTheDaemonsWordsAndAsksBeforeUpdatingNow() {
+        val m = MonitorModel()
+        val sent = mutableListOf<Command>()
+        m.sender = { sent.add(it) }
+        m.apply(owner())
+        m.apply(update("x", daemon = "behind", canUpdate = true))
+        assertEquals("Update masond", m.daemonUpdateButton)
+        m.apply(update("x", daemon = "waiting", canUpdate = true, button = "Update now", confirm = "Abandons star #142."))
+        assertEquals("Update now", m.daemonUpdateButton)
+        assertEquals("Abandons star #142.", m.daemonUpdateConfirm)
+        val before = sent.size
+        m.pressUpdateDaemon()
+        assertTrue(m.confirmingDaemonUpdate)
+        assertEquals(before, sent.size)
+        m.cancelDaemonUpdate()
+        assertFalse(m.confirmingDaemonUpdate)
+        assertEquals(before, sent.size)
+        m.pressUpdateDaemon()
+        m.confirmDaemonUpdate()
+        assertEquals("/update/now", sent.last().raw?.path)
+        assertEquals("update-daemon", sent.last().id)
+        m.apply(result("update-daemon", false, "no update is waiting"))
+        assertEquals("no update is waiting", m.updateError)
     }
 
     @Test fun theMonitorButtonFollowsTheBuildAndInstallsItOnce() {

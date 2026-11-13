@@ -103,6 +103,12 @@ struct BannersView: View {
             .sheet(isPresented: Binding(get: { model.sshKeyProject != nil }, set: { if !$0 { model.closeSSHKeys() } })) {
                 SSHKeySheet(model: model)
             }
+            .alert("Update masond now?", isPresented: Binding(get: { model.confirmingDaemonUpdate }, set: { if !$0 { model.cancelDaemonUpdate() } })) {
+                Button("Update now") { model.confirmDaemonUpdate() }
+                Button("Keep waiting", role: .cancel) { model.cancelDaemonUpdate() }
+            } message: {
+                Text(model.daemonUpdateConfirm)
+            }
     }
 
     var bannerStack: some View {
@@ -117,8 +123,8 @@ struct BannersView: View {
                 banner("Read-only: \(why)", id: "read-only", icon: "read_only")
             }
             if !model.daemonUpdateText.isEmpty {
-                updateRow(model.daemonUpdateText, button: model.canUpdateDaemon ? "Update masond" : nil, id: "daemon-update") {
-                    model.updateDaemon()
+                updateRow(model.daemonUpdateText, button: model.canUpdateDaemon ? model.daemonUpdateButton : nil, id: "daemon-update") {
+                    model.pressUpdateDaemon()
                 }
             }
             if let text = monitorUpdateText {

@@ -320,3 +320,8 @@ compose = "done"
 description = "The task page shows the ticket's state as a 96 pt illustration (scaled with text zoom) left of the title block, chosen by the daemon's state and changing with it; the phone task screen shows it with the state name at the top; decorative, nothing for an unknown state"
 swift = "done"
 compose = "done"
+
+[feature.update-wait-for-landing]
+description = "While a built and tested masond update waits for landing batches the daemon banner says so (names the batches and the latest time it goes ahead) and the button reads 'Update now' (UpdateInfo.daemon_button); when UpdateInfo.daemon_confirm is set, pressing it opens a dialog with the daemon's words and two buttons, 'Update now' (POST /update/now) and 'Keep waiting' (nothing sent); the update requests carry a command id and a refusal shows under the banner (updateError)"
+swift = "done"
+compose = "done"

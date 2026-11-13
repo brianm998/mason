@@ -1439,7 +1439,9 @@ async fn update_status(Shared(d): Shared<Arc<Daemon>>) -> Res {
             let rt = crate::update::Runtimes::new(&d2.cfg.data_dir);
             let s = d2.update_status.lock().unwrap_or_else(|e| e.into_inner()).clone();
             let c = d2.update_check.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            let (waiting, daemon_button, daemon_confirm) = crate::update::wait_view(&s, c.outdated);
             json!({
+                "waiting": waiting, "daemon_button": daemon_button, "daemon_confirm": daemon_confirm,
                 "latest": c.latest, "behind": c.behind, "outdated": c.outdated,
                 "checked_at_ms": c.at_ms, "check_error": c.error,
                 "running": d2.cfg.runtime_sha,

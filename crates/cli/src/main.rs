@@ -1619,6 +1619,10 @@ fn main() {
                             .as_str()
                             .map_or(String::new(), |e| format!(": {e}"))
                     );
+                    if let Some(w) = r["waiting"].as_str().filter(|w| !w.is_empty()) {
+                        println!("waiting   {w}");
+                        println!("          `mason update --now` takes over at once and abandons those batches");
+                    }
                 }
                 Some("ack") => {
                     finish(&a);
