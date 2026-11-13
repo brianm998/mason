@@ -44,11 +44,14 @@ fn run(release: bool) {
     s.mason_ok(&["task", "add", "First", "--body", "Create a file."]);
     s.mason_ok(&["task", "add", "Second", "--body", "Create another file."]);
 
-    wait_for("the credentials alert", 60, || {
-        alerts(&s).contains("credentials")
+    // The alert first says the login is being checked ("checking now with task #1"), and
+    // names `claude /login` once the probe has answered. On a busy machine the first wording
+    // lasted long enough to be read here, and the test failed in five unrelated tasks on
+    // 2026-11-13. Wait (bounded) for the advice itself.
+    wait_for("the credentials alert with the login advice", 60, || {
+        let text = alerts(&s);
+        text.contains("credentials") && text.contains("claude /login")
     });
-    let text = alerts(&s);
-    assert!(text.contains("claude /login"), "{text}");
     // Give the tasks time to fail if they were going to.
     std::thread::sleep(std::time::Duration::from_secs(3));
     for id in [0u64, 1] {
