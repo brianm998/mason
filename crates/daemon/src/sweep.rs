@@ -160,6 +160,7 @@ pub fn sweep_once(d: &Arc<Daemon>) -> Vec<String> {
     // 4b. A landed task's build directory that is still there (a restart, or a miss). Removing
     // it is housekeeping, not a missed event, so it files nothing.
     crate::taskcache::sweep(d, &w);
+    crate::taskcache::sweep_own(d, &w);
 
     // 4c. Host directories of closed step runs move out of the registry, old ones are deleted,
     // and the config directories of ended sessions go. Housekeeping: it files nothing, and a
