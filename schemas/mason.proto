@@ -906,7 +906,7 @@ message UsageTokens {
 message UsageView {
   repeated ProviderStatus providers = 1;
   string note = 2;
-  // The top-bar line: the most constrained window per account.
+  // The top-bar lines: each main window per account, shortest first (5-hour, then weekly).
   repeated string top_bar = 3;
 }
 
