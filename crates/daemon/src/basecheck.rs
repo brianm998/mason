@@ -118,6 +118,8 @@ pub struct Seen<'a> {
     pub base: &'a str,
     pub cmd: &'a str,
     pub log_tail: &'a str,
+    /// A fix task that landed with the test still red: the new task links it.
+    pub follows: Option<u64>,
 }
 
 /// The fix for `test` failing at the base: the one already open, or a new urgent task.
@@ -136,8 +138,9 @@ fn file_fix(d: &std::sync::Arc<crate::daemon::Daemon>, s: &Seen, test: &str) -> 
          task that runs `{}` there. Tasks that hit it are excused (it fails without their \
          change) until this lands. This task's own test step is not excused for it: \
          `{test}` must pass.\n\nCommand at the base:\n```\n{}\n```\n\nOutput tail:\n```\n{}\n```\n\n\
-         Filed by the known-red ledger (decision 0225).",
-        s.base, s.step, s.cmd, s.log_tail
+         Filed by the known-red ledger (decision 0225).{}",
+        s.base, s.step, s.cmd, s.log_tail,
+        s.follows.map_or(String::new(), |n| format!("\n\nFollow-up to task #{n}, which landed while this test was still red."))
     );
     let a = d
         .emit(EventKind::TaskFiled {
@@ -156,6 +159,22 @@ fn file_fix(d: &std::sync::Arc<crate::daemon::Daemon>, s: &Seen, test: &str) -> 
         Effect::TaskCreated { task } => Some(Fix::Task(task.0)),
         _ => None,
     })
+}
+
+/// The fix landed and `test` is still red: file a follow-up that links it and point the
+/// ledger entry at it. `None` if nothing could be filed.
+pub fn follow_up(
+    d: &std::sync::Arc<crate::daemon::Daemon>,
+    ledger_suite: &str,
+    s: &Seen,
+    test: &str,
+) -> Option<u64> {
+    // The landed task is terminal, so it is not found as "already open".
+    if let Fix::Task(n) = file_fix(d, s, test)? {
+        let _ = d.store.ledger_set_fix(ledger_suite, test, n);
+        return Some(n);
+    }
+    None
 }
 
 /// The tests in `suite`'s ledger whose fix is task `task`.
@@ -356,6 +375,7 @@ pub fn excuse(
         base: &base,
         cmd: base_cmd,
         log_tail: &tail,
+        follows: None,
     };
     let fixes = record_red(&c.d, &c.step.name, &seen, persistent);
     let mut lines = vec![];

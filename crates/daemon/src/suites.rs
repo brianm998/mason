@@ -1244,6 +1244,7 @@ fn record_known_red(
         base,
         cmd: &suite.command,
         log_tail: &tail,
+        follows: None,
     };
     let fixes = crate::basecheck::record_red(&who.d, &suite.name, &seen, tests);
     let named: Vec<String> = fixes
@@ -1939,9 +1940,15 @@ pub fn pay(d: &Arc<Daemon>, debt: u64) -> Result<String, String> {
         match r {
             SuiteRun::Done {
                 outcome: SuiteOutcome::Proven | SuiteOutcome::Reused,
+                results,
                 notes,
-                ..
-            } => verdicts.push(notes.join("; ")),
+            } => {
+                // A deferred debt runs on the base branch's tip: what passed there is proven.
+                if let Some(r) = &results {
+                    lift_proven(d, &s.name, r);
+                }
+                verdicts.push(notes.join("; "))
+            }
             SuiteRun::Done { notes, .. } => {
                 all_green = false;
                 verdicts.push(notes.join("; "));
@@ -1970,6 +1977,19 @@ pub fn pay(d: &Arc<Daemon>, debt: u64) -> Result<String, String> {
 
 /// After a task lands, run what it skipped and asked to have run later.
 pub fn after_landing(d: &Arc<Daemon>, task: TaskId) {
+    // The ledger's tests this task was filed for run once at the new base.
+    if d.store.ledger().is_ok_and(|l| {
+        l.iter()
+            .any(|r| r.fix_task == Some(task.0) && r.source != "owner")
+    }) {
+        let d2 = d.clone();
+        let _ = std::thread::Builder::new()
+            .name(format!("ledger-{}", task.0))
+            .spawn(move || match ledger_run(&d2, task) {
+                Ok(m) => tracing::info!(task = task.0, "{m}"),
+                Err(e) => tracing::warn!(task = task.0, "ledger run: {e}"),
+            });
+    }
     let Ok(rows) = d.store.debts(Some(task.0), true) else {
         return;
     };
@@ -1982,6 +2002,143 @@ pub fn after_landing(d: &Arc<Daemon>, task: TaskId) {
                 Err(e) => tracing::warn!(debt = r.id, "deferred run: {e}"),
             });
     }
+}
+
+/// Run the ledger's tests for fix `task` once on the base branch's tip. A test that passes
+/// is lifted. One still red reopens its entry with a note beside the fix task and gets a
+/// follow-up task that links it. A test the run did not execute stays as it is.
+pub fn ledger_run(d: &Arc<Daemon>, task: TaskId) -> Result<String, String> {
+    let rows: Vec<_> = d
+        .store
+        .ledger()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter(|r| r.fix_task == Some(task.0) && r.source != "owner")
+        .collect();
+    if rows.is_empty() {
+        return Ok("nothing in the ledger for this task".into());
+    }
+    let pid = d
+        .world()
+        .map_err(|e| e.to_string())?
+        .tasks
+        .get(&task)
+        .map(|t| t.project)
+        .ok_or("no such task")?;
+    let p = d.project(pid).ok_or("its project is gone")?.clone();
+    let def = d.current_def(pid);
+    if p.remote.is_some() {
+        let _ = d.fetch_remote(pid);
+    }
+    let tip = git::run(&p.path, &["rev-parse", &p.base_ref()])
+        .map_err(|e| e.to_string())?
+        .trim()
+        .to_string();
+    let dir = d.cfg.task_dir(task.0).join("ledger");
+    let wt = dir.join("wt");
+    let lock = d.repo_lock(pid);
+    {
+        let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+        git::remove_worktree(&p.path, &wt);
+        git::run(
+            &p.path,
+            &["worktree", "add", "--detach", &wt.to_string_lossy(), &tip],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    let who = Who {
+        d: d.clone(),
+        task: None,
+        step: String::new(),
+        project: p.id.clone(),
+        log_dir: dir.clone(),
+        id_prefix: format!("ledger{}", task.0),
+        sink: None,
+    };
+    let tree = Tree {
+        tree: git::run(&wt, &["rev-parse", "HEAD^{tree}"])
+            .map(|s| s.trim().to_string())
+            .map_err(|e| e.to_string())?,
+        base: tip.clone(),
+    };
+    let mut report = vec![];
+    let mut suites: Vec<String> = rows.iter().map(|r| r.suite.clone()).collect();
+    suites.dedup();
+    for name in suites {
+        let tests: Vec<String> = rows
+            .iter()
+            .filter(|r| r.suite == name)
+            .map(|r| r.test.clone())
+            .collect();
+        let Some(suite) = def.testing.suite(&name) else {
+            report.push(format!(
+                "{name}: not a suite of the definition; left in place"
+            ));
+            continue;
+        };
+        // A separate name, so the evidence and the base cache of the whole suite are not
+        // taken by a run of a few tests.
+        let mut s = suite.clone();
+        s.name = format!("{name}~ledger");
+        s.min_tests = 1;
+        if let Some(t) = &suite.rerun {
+            s.command = t.replace(
+                "{tests}",
+                &tests.iter().map(|f| quote(f)).collect::<Vec<_>>().join(" "),
+            );
+        }
+        let r = run_suite(&who, &p.path, &lock, &def, &s, &wt, &tree, &mut |_| {});
+        let red = match r {
+            SuiteRun::Done {
+                outcome: SuiteOutcome::Proven,
+                results: Some(res),
+                ..
+            } => {
+                lift_proven(d, &name, &res);
+                report.push(format!("{name}: green"));
+                continue;
+            }
+            SuiteRun::Done { notes, .. } => notes.join("; "),
+            SuiteRun::Product { feedback } => feedback,
+            SuiteRun::Gone => {
+                report.push(format!("{name}: stopped"));
+                continue;
+            }
+        };
+        let seen_tail = tail(&red, 30);
+        for t in tests.iter().filter(|t| red.contains(t.as_str())) {
+            let note = format!(
+                "task #{} landed but this test is still red at {}",
+                task.0,
+                &tip[..tip.len().min(10)]
+            );
+            let _ = d.store.ledger_reopen(&name, t, &note, now_ms());
+            let _ = std::fs::write(
+                d.cfg.task_dir(task.0).join(format!(
+                    "ledger-reopened-{}.txt",
+                    t.replace(['/', ':'], "_")
+                )),
+                &note,
+            );
+            let seen = crate::basecheck::Seen {
+                project: pid,
+                project_name: &p.id,
+                task: 0,
+                step: &name,
+                base: &tip,
+                cmd: &suite.command,
+                log_tail: &seen_tail,
+                follows: Some(task.0),
+            };
+            crate::basecheck::follow_up(d, &name, &seen, t);
+        }
+        report.push(format!("{name}: red"));
+    }
+    {
+        let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+        git::remove_worktree(&p.path, &wt);
+    }
+    Ok(report.join("; "))
 }
 
 /// What running suites over a batch's integration branch said.
