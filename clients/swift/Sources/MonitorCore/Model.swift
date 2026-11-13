@@ -23,6 +23,8 @@ public final class MonitorModel: ObservableObject {
     @Published public var header: HeaderView?
     @Published public var sidebar: SidebarView?
     @Published public var home: HomeView?
+    /// The CPU shares, observed apart from the whole model: the CPU section watches only this.
+    public let cpu = CpuModel()
     @Published public var taskDetail: TaskDetailView?
     @Published public var landing: LandingView?
     @Published public var usage: UsageView?
@@ -671,7 +673,9 @@ public final class MonitorModel: ObservableObject {
         case .sidebar(let x)?:
             sidebar = x
             noteAttention(x)
-        case .home(let x)?: home = x
+        case .home(let x)?:
+            home = x
+            cpu.update(x)
         case .taskDetail(let x)?:
             // A different task's page starts its log over; the same task's view carries the tail again.
             taskDetail = x
