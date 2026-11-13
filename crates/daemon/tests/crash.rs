@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+#![cfg(unix)]
+// Unix-only: signals, permission bits or unix sockets. Windows coverage comes with the later port tasks.
 
 //! Crash injection (Part 23). The real `masond` is killed, uncleanly, at every
 //! effect boundary on the way from queued to landed, then restarted. In every

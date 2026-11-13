@@ -35,7 +35,6 @@ use mason_step_host::client::{collect_to_file_observed, ClientError, HostClient}
 use mason_step_host::launcher::{spawn_host, SpawnOptions};
 use mason_step_host::protocol::{CURRENT, PREVIOUS};
 use serde_json::Value;
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -951,15 +950,16 @@ fn run_shell_env(
         Err(e) => return (false, format!("cannot capture output: {e}")),
     };
     let err = file.try_clone();
-    let child = Command::new("sh")
+    let mut command = Command::new("sh");
+    command
         .args(["-c", cmd])
         .current_dir(cwd)
         .envs(env.iter().map(|(k, v)| (k, v)))
         .stdin(Stdio::null())
         .stdout(file)
-        .stderr(err.map_or_else(|_| Stdio::null(), Stdio::from))
-        .process_group(0)
-        .spawn();
+        .stderr(err.map_or_else(|_| Stdio::null(), Stdio::from));
+    mason_platform::process::group_leader(&mut command);
+    let child = command.spawn();
     let Ok(mut child) = child else {
         return (false, "could not start the command".into());
     };
@@ -968,9 +968,9 @@ fn run_shell_env(
         match child.try_wait() {
             Ok(Some(st)) => break st.success(),
             Ok(None) if Instant::now() >= end => {
-                let _ = nix::sys::signal::killpg(
-                    nix::unistd::Pid::from_raw(child.id() as i32),
-                    nix::sys::signal::Signal::SIGKILL,
+                let _ = mason_platform::process::signal_group(
+                    child.id(),
+                    mason_platform::process::Signal::Kill,
                 );
                 let _ = child.wait();
                 break false;

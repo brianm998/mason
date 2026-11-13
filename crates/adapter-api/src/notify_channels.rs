@@ -295,12 +295,9 @@ impl MailTransport for CurlMail {
 }
 
 fn write_private(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut f = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)?;
+    let mut f = std::fs::OpenOptions::new();
+    f.write(true).create_new(true);
+    let mut f = mason_platform::fs::owner_only(&mut f).open(path)?;
     f.write_all(data)
 }
 

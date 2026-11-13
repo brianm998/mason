@@ -133,6 +133,7 @@ fn approval_is_by_hash_and_lives_outside_the_repo() {
     assert!(!t.path().join("trust").exists());
 }
 
+#[cfg(unix)] // Unix-only; Windows coverage comes with the later port tasks.
 #[test]
 fn the_copy_that_runs_is_the_hashed_bytes_and_a_tampered_copy_is_replaced() {
     let t = repo();

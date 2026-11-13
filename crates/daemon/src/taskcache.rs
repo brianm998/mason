@@ -317,6 +317,7 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_symlink_is_refused() {
         let t = tempfile::tempdir().unwrap();
