@@ -342,7 +342,7 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     }
 
     fun cancel(task: Long) = send(Command(cancel = TaskRef(task = task)))
-    fun retry(task: Long, from: String = "") = send(Command(retry = Retry(task = task, from = from)))
+    fun retry(task: Long, from: String = "", seen: Long = 0) = send(Command(retry = Retry(task = task, from = from, seen = seen)))
     fun approve(task: Long) = send(Command(approve = TaskRef(task = task)))
     /**
      * The tasks the Add blocker picker offers for [row]: any task in the sidebar that is not itself,

@@ -571,7 +571,7 @@ struct ActionButtons: View {
     func run(_ a: String) {
         switch a {
         case "cancel": model.cancel(row.id)
-        case "retry": model.retry(row.id)
+        case "retry": model.retry(row.id, seen: row.lastRun)
         case "approve": model.approve(row.id)
         case "revive": model.revive(row.id)
         case "reject": model.reject(row.id)

@@ -512,7 +512,7 @@ private fun label(a: String) = when (a) {
 private fun run(model: MonitorModel, row: TaskRow, a: String) {
     when (a) {
         "cancel" -> model.cancel(row.id)
-        "retry" -> model.retry(row.id)
+        "retry" -> model.retry(row.id, seen = row.last_run)
         "approve" -> model.approve(row.id)
         "revive" -> model.revive(row.id)
         "reject" -> model.reject(row.id)

@@ -394,7 +394,7 @@ public final class MonitorModel: ObservableObject {
     }
 
     public func cancel(_ task: UInt64) { command { $0.cancel = .with { $0.task = task } } }
-    public func retry(_ task: UInt64, from: String = "") { command { $0.retry = .with { $0.task = task; $0.from = from } } }
+    public func retry(_ task: UInt64, from: String = "", seen: UInt64 = 0) { command { $0.retry = .with { $0.task = task; $0.from = from; $0.seen = seen } } }
     public func approve(_ task: UInt64) { command { $0.approve = .with { $0.task = task } } }
     /// The tasks the Add blocker picker offers for `row`: any task in the sidebar that is not
     /// itself, not already a blocker, and could still land (not landed, canceled or failed).
