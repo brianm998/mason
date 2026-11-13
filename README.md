@@ -257,4 +257,5 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s212**: A step host lost at a daemon restart is recorded but no longer counts toward an agent step's two restarts, and the launch-agent example sets `AbandonProcessGroup`; adopting a running landing batch at startup (step 3) is not done and waits for the owner.
 - **s223**: `scripts/package/` builds the per-target `mason-<ver>-<target>.tar.gz`, the Linux `mason_<ver>_<arch>.deb` and a `SHA256SUMS` for a release folder, and an exit script installs the host tarball with `scripts/install.sh`.
 - **s225**: The Compose monitor builds a `mason-monitor` .deb and a per-user, upgradeable .msi with the brand icon, renamed to the release asset names by `clients/compose/packaging/name-installers.sh`, via `make package-deb` and `make package-msi`.
+- **s234**: The broker publishes every waiting task's explanation after each pass, and `explain_task` and the monitor views read that snapshot instead of taking the broker lock once per row.
 <!-- status:end -->
