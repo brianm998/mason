@@ -24,6 +24,7 @@ pub struct Ledger {
     /// When each resource last had a grant. Only observed, never consulted by `plan`.
     last_grant: BTreeMap<String, u64>,
     last_any_grant: Option<u64>,
+    max_wait_ms: Option<u64>,
 }
 
 /// A wait the owner should hear about.
@@ -76,6 +77,12 @@ impl Ledger {
             gap_ms,
             last_start: self.last_compile_start,
         })
+    }
+
+    /// A request that has waited this long goes ahead of other pipeline work
+    /// (`None`: requests do not age).
+    pub fn set_max_wait(&mut self, ms: Option<u64>) {
+        self.max_wait_ms = ms;
     }
 
     /// The caller's latest disk reading against its floor, used by every plan after this.
@@ -132,6 +139,11 @@ impl Ledger {
         }
     }
 
+    /// A waiting request's rank, if it is still waiting.
+    pub fn rank_of(&self, id: u64) -> Option<Rank> {
+        self.waiting.iter().find(|r| r.id == id).map(|r| r.rank)
+    }
+
     /// Grant whatever can be granted now. Granted requests become holders.
     pub fn schedule(
         &mut self,
@@ -161,6 +173,7 @@ impl Ledger {
                 compile_pace: self.compile_pace(),
                 disk: self.disk,
                 stall: self.stall,
+                max_wait: self.max_wait_ms,
             },
             &self.waiting,
         );
@@ -297,12 +310,23 @@ impl Ledger {
                 compile_pace: self.compile_pace(),
                 disk: self.disk,
                 stall: self.stall,
+                max_wait: self.max_wait_ms,
             },
             &self.waiting,
         )
     }
 
     pub fn snapshot(&self) -> Snapshot {
+        self.snapshot_ordered(None)
+    }
+
+    /// The snapshot with the waiting requests in the order `plan` would take
+    /// them at `now`, aged ones first.
+    pub fn snapshot_at(&self, now: u64) -> Snapshot {
+        self.snapshot_ordered(Some(now))
+    }
+
+    fn snapshot_ordered(&self, now: Option<u64>) -> Snapshot {
         let mut used: BTreeMap<String, u32> = BTreeMap::new();
         for h in &self.holders {
             for (r, a) in &h.needs.amounts {
@@ -310,7 +334,11 @@ impl Ledger {
             }
         }
         let mut waiting = self.waiting.clone();
-        waiting.sort_by_key(|r| (r.rank, r.id));
+        let rank_of = |r: &Request| match (now, self.max_wait_ms) {
+            (Some(n), Some(m)) if n.saturating_sub(r.since) >= m => r.rank.aged(),
+            _ => r.rank,
+        };
+        waiting.sort_by_key(|r| (rank_of(r), r.id));
         Snapshot {
             capacity: self.capacity.clone(),
             used,

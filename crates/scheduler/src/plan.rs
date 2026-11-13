@@ -92,6 +92,10 @@ pub struct World<'a> {
     /// Measured by the caller: how slowly the build disk has been answering.
     /// `None` means no stall gate.
     pub stall: Option<StallGate>,
+    /// A request that has waited this long (same unit as `now`) moves ahead of
+    /// all other pipeline work that is not a landing, oldest first
+    /// (`order.max_wait_s`). `None` means requests do not age.
+    pub max_wait: Option<u64>,
 }
 
 /// The build disk has stopped answering promptly. A stall shows up as *less* CPU
@@ -272,8 +276,14 @@ fn fit(capacity: &BTreeMap<String, Capacity>, usage: &Usage, n: &Needs) -> Fit {
 /// passes a waiting exclusive job". Whoever is not granted gets a [`Wait`].
 pub fn plan(world: &World, waiting: &[Request]) -> Plan {
     let capacity = world.capacity;
+    // A request that has waited long enough is ranked as aged. Everything
+    // else, capacity, gates and the passing rule, is as for a younger one.
+    let rank_of = |r: &Request| match world.max_wait {
+        Some(m) if world.now.saturating_sub(r.since) >= m => r.rank.aged(),
+        _ => r.rank,
+    };
     let mut order: Vec<&Request> = waiting.iter().collect();
-    order.sort_by_key(|r| (r.rank, r.id));
+    order.sort_by_key(|r| (rank_of(r), r.id));
     let mut usage = Usage::new(capacity, world.holders);
     let mut blocked = Blocked::default();
     let mut out = Plan::default();
@@ -375,7 +385,10 @@ pub fn plan(world: &World, waiting: &[Request]) -> Plan {
                 }
             }
             Some(cause) => {
-                let wait = build_wait(capacity, &holders, &ahead, cause.clone());
+                let mut wait = build_wait(capacity, &holders, &ahead, cause.clone());
+                if rank_of(r).is_aged() && !matches!(fitted, Fit::Never(_)) {
+                    wait.aged_ms = Some(world.now.saturating_sub(r.since));
+                }
                 out.waits.insert(r.id, wait);
                 // A request that can never fit must not hold up the others.
                 if !matches!(fitted, Fit::Never(_)) {
@@ -441,5 +454,6 @@ fn build_wait(
             })
             .collect(),
         held_by,
+        aged_ms: None,
     }
 }

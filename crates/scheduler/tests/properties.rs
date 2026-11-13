@@ -508,3 +508,234 @@ fn a_landing_is_not_held_by_the_cpu_or_the_pacing_but_is_by_the_count_and_a_stal
     let p = l.schedule_gated(3_000, None, None, None);
     assert!(matches!(p.waits[&land2].cause, WaitCause::DiskStall { .. }));
 }
+
+// ---- aging (`order.max_wait_s`) ------------------------------------------------------------
+
+const MAX_WAIT: u64 = 5;
+
+fn machine_needs(n: &Needs) -> bool {
+    uses_machine(n)
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(300))]
+
+    /// With aging on and holders that keep releasing, every request is
+    /// granted (no starvation), and while a pipeline request that has aged
+    /// and wants the whole machine waits, no other pipeline request that uses
+    /// the machine is granted (the machine drains for it).
+    #[test]
+    fn with_aging_every_request_is_eventually_granted(
+        jobs in prop::collection::vec(job(), 1..30),
+        caps in prop::array::uniform5(1u32..4),
+    ) {
+        let mut l = Ledger::new();
+        l.set_max_wait(Some(MAX_WAIT));
+        for (i, (name, kind)) in RESOURCES.iter().enumerate() {
+            l.set_capacity(name, caps[i], *kind);
+        }
+        let mut pending: Vec<(usize, &Job)> = jobs.iter().enumerate().collect();
+        pending.sort_by_key(|(_, j)| j.arrive);
+        let mut pending = pending.into_iter().peekable();
+        let mut ends: BTreeMap<u64, (u64, usize)> = BTreeMap::new();
+        let mut needs_of: BTreeMap<u64, Needs> = BTreeMap::new();
+        let mut inter_of: BTreeMap<u64, bool> = BTreeMap::new();
+        let mut since_of: BTreeMap<u64, u64> = BTreeMap::new();
+        let mut now = 0u64;
+        let mut finished = 0usize;
+        let mut guard = 0;
+        while finished < jobs.len() {
+            guard += 1;
+            prop_assert!(guard < 10_000, "starvation or deadlock");
+            while let Some((i, j)) = pending.next_if(|(_, j)| j.arrive <= now) {
+                let n = needs(j, &caps);
+                let rank = Rank::new(j.interactive, j.steps, j.priority, j.arrive, i as u64, false);
+                let id = l.submit(rank, n.clone(), &format!("#{i}"), now);
+                needs_of.insert(id, n);
+                inter_of.insert(id, j.interactive);
+                since_of.insert(id, now);
+                ends.insert(id, (u64::MAX, i));
+            }
+            let done: Vec<u64> = ends
+                .iter()
+                .filter(|(id, (end, _))| *end <= now && l.holds(**id))
+                .map(|(id, _)| *id)
+                .collect();
+            for id in done {
+                prop_assert!(l.release(id), "a lease was lost");
+                ends.remove(&id);
+                finished += 1;
+            }
+            let before = l.snapshot();
+            let p = l.schedule(now, None, None);
+            for g in &p.grants {
+                let (_, ji) = ends[g];
+                ends.insert(*g, (now + jobs[ji].run, ji));
+                for w in &before.waiting {
+                    let aged_exclusive = needs_of[&w.id].exclusive
+                        && !inter_of[&w.id]
+                        && now.saturating_sub(since_of[&w.id]) >= MAX_WAIT;
+                    if w.id != *g
+                        && aged_exclusive
+                        && !p.grants.contains(&w.id)
+                        && !inter_of[g]
+                        && machine_needs(&needs_of[g])
+                        && !(needs_of[g].exclusive && now.saturating_sub(since_of[g]) >= MAX_WAIT
+                            && since_of[g] <= since_of[&w.id])
+                    {
+                        prop_assert!(
+                            false,
+                            "{g} was granted the machine ahead of aged exclusive {}", w.id
+                        );
+                    }
+                }
+            }
+            let next_release = ends.values().filter(|(e, _)| *e != u64::MAX).map(|(e, _)| *e).min();
+            let next_arrival = pending.peek().map(|(_, j)| j.arrive);
+            // Time also moves to the moment a waiting request ages.
+            let next_age = l
+                .snapshot()
+                .waiting
+                .iter()
+                .map(|r| since_of[&r.id] + MAX_WAIT)
+                .filter(|t| *t > now)
+                .min();
+            let next = [next_release, next_arrival, next_age].into_iter().flatten().min();
+            match next {
+                Some(t) => now = t.max(now),
+                None => prop_assert!(finished >= jobs.len(), "waiters but nothing running: a deadlock"),
+            }
+        }
+        let s = l.snapshot();
+        prop_assert!(s.holders.is_empty() && s.waiting.is_empty());
+    }
+}
+
+/// Holders of `test-suite` and `compile` that keep arriving ahead of an
+/// exclusive request ranked last.
+#[test]
+fn an_exclusive_request_at_the_back_is_first_once_it_has_waited_max_wait() {
+    let mut l = Ledger::new();
+    l.set_max_wait(Some(1_000));
+    l.set_capacity("compile", 2, Kind::Machine);
+    l.set_capacity("test-suite", 2, Kind::Machine);
+    // The other project's route is shorter, so its requests outrank the exclusive one.
+    let mine = |id: u64| Rank::new(false, 2, 2, id, id, false);
+    let h1 = l.submit(mine(1), Needs::of(&[("test-suite", 1)]), "m#1", 0);
+    let h2 = l.submit(mine(2), Needs::of(&[("test-suite", 1)]), "m#2", 0);
+    assert_eq!(l.schedule(0, None, None).grants, vec![h1, h2]);
+    let star = l.submit(
+        Rank::new(false, 3, 2, 3, 3, false),
+        Needs {
+            exclusive: true,
+            amounts: Needs::of(&[("compile", 1)]).amounts,
+        },
+        "star#1",
+        0,
+    );
+    // Before max_wait: a stream of earlier-ranked requests keeps being granted past it.
+    let c1 = l.submit(mine(4), Needs::of(&[("compile", 1)]), "m#4", 10);
+    let p = l.schedule(10, None, None);
+    assert_eq!(
+        p.grants,
+        vec![c1],
+        "a compile passes the exclusive request, as today"
+    );
+    assert!(matches!(
+        p.waits[&star].cause,
+        WaitCause::Full { .. } | WaitCause::Exclusive
+    ));
+    assert_eq!(p.waits[&star].aged_ms, None);
+    l.release(c1);
+    // After max_wait: it is first, and nothing new that uses the machine is granted.
+    let late = l.submit(mine(5), Needs::of(&[("compile", 1)]), "m#5", 1_000);
+    let p = l.schedule(1_000, None, None);
+    assert!(
+        p.grants.is_empty(),
+        "no new machine-class request passes it: {p:?}"
+    );
+    let w = &p.waits[&star];
+    assert_eq!(w.position, 1);
+    assert_eq!(w.aged_ms, Some(1_000));
+    assert!(explain(w, 1_000).contains("waited 1 s: first in line once the machine is free"));
+    assert!(p.waits[&late].position > 1);
+    // The holders release; it is granted, then the others follow.
+    l.release(h1);
+    assert!(l.schedule(1_001, None, None).grants.is_empty());
+    l.release(h2);
+    assert_eq!(l.schedule(1_002, None, None).grants, vec![star]);
+    l.release(star);
+    assert_eq!(l.schedule(1_003, None, None).grants, vec![late]);
+}
+
+#[test]
+fn aging_is_off_without_a_max_wait_and_a_landing_keeps_its_place() {
+    let mut l = Ledger::new();
+    l.set_capacity("test-suite", 1, Kind::Machine);
+    let hold = l.submit(
+        Rank::new(false, 1, 2, 0, 0, false),
+        Needs::of(&[("test-suite", 1)]),
+        "h",
+        0,
+    );
+    assert_eq!(l.schedule(0, None, None).grants, vec![hold]);
+    let old = l.submit(
+        Rank::new(false, 5, 2, 1, 1, false),
+        Needs::of(&[("test-suite", 1)]),
+        "old",
+        0,
+    );
+    let near = l.submit(
+        Rank::new(false, 1, 2, 2, 2, false),
+        Needs::of(&[("test-suite", 1)]),
+        "near",
+        500,
+    );
+    assert_eq!(l.snapshot_at(10_000).waiting[0].id, near);
+    l.set_max_wait(Some(1_000));
+    let land = l.submit(
+        Rank::new(false, 9, 2, 3, 3, false).landing(),
+        Needs::of(&[("test-suite", 1)]),
+        "land",
+        9_999,
+    );
+    let order: Vec<u64> = l.snapshot_at(10_000).waiting.iter().map(|r| r.id).collect();
+    assert_eq!(
+        order,
+        vec![land, old, near],
+        "a landing first, then the aged, oldest first"
+    );
+}
+
+#[test]
+fn a_task_in_test_of_a_longer_route_is_not_behind_a_task_in_develop_of_a_shorter_one() {
+    let mut l = Ledger::new();
+    l.set_capacity("test-suite", 1, Kind::Machine);
+    let hold = l.submit(
+        Rank::new(false, 1, 2, 0, 0, false),
+        Needs::of(&[("test-suite", 1)]),
+        "h",
+        0,
+    );
+    l.schedule(0, None, None);
+    // Project A: explore, develop, test, review, land (5 on the route, 3 left in test).
+    let a_test = l.submit(
+        Rank::new(false, 3, 2, 5, 1, false).with_span(5),
+        Needs::of(&[("test-suite", 1)]),
+        "A#test",
+        1,
+    );
+    // Project B: explore, develop, test, land (4 on the route, 3 left in develop). B's task
+    // is older, so with raw steps (3 and 3) it would go first.
+    let b_develop = l.submit(
+        Rank::new(false, 3, 2, 1, 2, false).with_span(4),
+        Needs::of(&[("test-suite", 1)]),
+        "B#develop",
+        0,
+    );
+    // A has 3/5 of its route left, B 3/4: A has come further.
+    l.release(hold);
+    assert_eq!(l.schedule(2, None, None).grants, vec![a_test]);
+    l.release(a_test);
+    assert_eq!(l.schedule(3, None, None).grants, vec![b_develop]);
+}

@@ -54,6 +54,9 @@ pub struct Wait {
     /// In rank order.
     pub behind: Vec<Ahead>,
     pub held_by: Vec<HeldBy>,
+    /// How long this request has waited, when that is past `order.max_wait_s`
+    /// and it has therefore moved ahead of other pipeline work.
+    pub aged_ms: Option<u64>,
 }
 
 pub fn ordinal(n: usize) -> String {
@@ -135,6 +138,17 @@ impl Wait {
 /// The sentence for one wait, like "Waiting for compile slot: 2nd in line,
 /// held by #91 for 4 min". Who is ahead is not named: `mason resources` lists it.
 pub fn explain(w: &Wait, now_ms: u64) -> String {
+    let text = explain_cause(w, now_ms);
+    match w.aged_ms {
+        Some(ms) => format!(
+            "{text}; waited {}: first in line once the machine is free",
+            since(ms, 0)
+        ),
+        None => text,
+    }
+}
+
+fn explain_cause(w: &Wait, now_ms: u64) -> String {
     let queue = |w: &Wait, resource: &str| {
         let mut parts = vec![format!("{} in line", ordinal(w.position))];
         if !w.held_by.is_empty() {
@@ -238,7 +252,18 @@ mod tests {
                 label: holder.into(),
                 since: 0,
             }],
+            aged_ms: None,
         }
+    }
+
+    #[test]
+    fn an_aged_wait_says_how_long_and_that_it_is_first_in_line() {
+        let mut w = wait(vec![], "#91");
+        w.aged_ms = Some(30 * 60_000);
+        assert_eq!(
+            explain(&w, 0),
+            "Waiting for compile slot: 1st in line, held by #91 for 0 s; waited 30 min: first in line once the machine is free"
+        );
     }
 
     #[test]

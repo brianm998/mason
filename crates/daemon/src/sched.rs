@@ -51,6 +51,7 @@ pub const EXCLUSIVE: &str = "exclusive";
 /// stall_ms = 2000        # no further compile while the build disk is this slow (0: off)
 /// [order]    # who goes first when work waits for a resource
 /// priority_first = false # true: tracker priority before steps remaining
+/// max_wait_s = 1800      # a request waiting this long goes ahead of other pipeline work (0: never)
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResourceCfg {
@@ -77,7 +78,13 @@ pub struct ResourceCfg {
     /// Order waiting work by tracker priority before steps remaining. It applies to
     /// every project at once, since one queue serves them all.
     pub priority_first: bool,
+    /// Seconds after which a waiting request goes ahead of all other pipeline
+    /// work that is not a landing, oldest first (0: requests do not age).
+    pub max_wait_s: u64,
 }
+
+/// The default `order.max_wait_s`: half an hour.
+pub const DEFAULT_MAX_WAIT_S: u64 = 1800;
 
 /// The default `compile_cpu_max`: half the machine.
 pub const DEFAULT_COMPILE_CPU_MAX: u32 = 50;
@@ -110,6 +117,7 @@ impl Default for ResourceCfg {
             disk_floor_gb: crate::disk::DEFAULT_FLOOR_GB,
             disk_stall_ms: DEFAULT_DISK_STALL_MS,
             priority_first: false,
+            max_wait_s: DEFAULT_MAX_WAIT_S,
         }
     }
 }
@@ -126,6 +134,12 @@ pub fn parse_resource_cfg(text: &str) -> Result<ResourceCfg, String> {
                 c.priority_first = v.as_bool().ok_or_else(|| {
                     "resources.toml: order.priority_first must be true or false".to_string()
                 })?;
+                continue;
+            }
+            if key == "order" && name == "max_wait_s" {
+                c.max_wait_s = v.as_integer().filter(|n| *n >= 0).ok_or_else(|| {
+                    "resources.toml: order.max_wait_s must be a whole number".to_string()
+                })? as u64;
                 continue;
             }
             let n = v
@@ -211,6 +225,8 @@ struct State {
     ledger: Ledger,
     meta: HashMap<u64, Meta>,
     by_task: HashMap<TaskId, u64>,
+    /// The task a `mason run` lease was opened for, when it names one.
+    lease_tasks: HashMap<u64, TaskId>,
     /// Resources whose limit was set by the owner (config or live) and so are
     /// not changed by a definition that happens to declare the same name.
     fixed: HashSet<String>,
@@ -319,6 +335,8 @@ impl Drop for Lease {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Standing {
     pub steps_remaining: u32,
+    /// Steps on the shortest start-to-landed path of the task's definition.
+    pub span: u32,
     pub priority: u8,
 }
 
@@ -393,6 +411,9 @@ impl Broker {
                 ledger.pace_compiles(u64::from(cfg.compile_settle_s) * 1000);
             }
         }
+        if cfg.max_wait_s > 0 {
+            ledger.set_max_wait(Some(cfg.max_wait_s.saturating_mul(1000)));
+        }
         let b = Broker {
             st: Mutex::new(State {
                 ledger,
@@ -407,6 +428,7 @@ impl Broker {
                 cpu,
                 cpu_busy: None,
                 priority_first: cfg.priority_first,
+                lease_tasks: HashMap::new(),
                 idle: HashMap::new(),
                 compile_idle_kill_s: cfg.compile_idle_kill_s,
                 notes: vec![],
@@ -1035,6 +1057,7 @@ impl Broker {
         let mut st = lock(&self.st);
         st.ledger.release(id);
         st.meta.remove(&id);
+        st.lease_tasks.remove(&id);
         if let Some(t) = task {
             if st.by_task.get(&t) == Some(&id) {
                 st.by_task.remove(&t);
@@ -1127,7 +1150,8 @@ impl Broker {
                     now,
                     st.rank_seq,
                     false,
-                ),
+                )
+                .with_span(s.span),
             ),
         })
     }
@@ -1185,6 +1209,42 @@ impl Broker {
         );
         self.pass(&mut st);
         id
+    }
+
+    /// Note which task a `mason run` lease was opened for, so that a change of
+    /// the task's priority reaches it.
+    pub fn lease_set_task(&self, id: u64, task: TaskId) {
+        let mut st = lock(&self.st);
+        if st.meta.contains_key(&id) {
+            st.lease_tasks.insert(id, task);
+        }
+    }
+
+    /// Give a task's waiting requests (its step's and those of its `mason run`
+    /// commands) a new tracker priority, in place: each keeps its arrival time,
+    /// progress and landing status. Returns how many were re-ranked.
+    pub fn set_task_priority(&self, task: TaskId, priority: u8) -> usize {
+        let mut st = lock(&self.st);
+        let mut ids: Vec<u64> = st.by_task.get(&task).copied().into_iter().collect();
+        ids.extend(
+            st.lease_tasks
+                .iter()
+                .filter(|(_, t)| **t == task)
+                .map(|(id, _)| *id),
+        );
+        let mut n = 0;
+        for id in ids {
+            if let Some(rank) = st.ledger.rank_of(id) {
+                st.ledger.rerank(id, rank.with_priority(priority));
+                n += 1;
+            }
+        }
+        if n > 0 {
+            self.pass(&mut st);
+            drop(st);
+            self.cv.notify_all();
+        }
+        n
     }
 
     /// Note which process asked for lease `id`.
@@ -1344,7 +1404,7 @@ impl Broker {
         let now = crate::daemon::now_ms();
         let gate = self.cpu_gate(&mut st);
         let waits = st.ledger.waits_gated(now, free, floor, gate);
-        let snap = st.ledger.snapshot();
+        let snap = st.ledger.snapshot_at(now);
         let task_of: HashMap<u64, u64> = st.by_task.iter().map(|(t, id)| (*id, t.0)).collect();
         let compiles = |n: &Needs| n.exclusive || n.amounts.contains_key(COMPILE);
         let limit = snap.capacity.get(COMPILE).map_or(0, |c| c.units);
@@ -1407,11 +1467,11 @@ impl Broker {
         }
         rules.push_str(if st.priority_first {
             ". A landing starts whatever the CPU reads. Line order: a person's command \
-             first, then a landing, then the most urgent task, then the one fewest steps \
+             first, then a landing, then a task that has waited past order.max_wait_s (oldest first), then the most urgent task, then the one fewest steps \
              from landing, then the oldest."
         } else {
             ". A landing starts whatever the CPU reads. Line order: a person's command \
-             first, then a landing, then the task fewest steps from landing, then \
+             first, then a landing, then a task that has waited past order.max_wait_s (oldest first), then the task fewest steps from landing, then \
              priority, then the oldest."
         });
         Compilation {
@@ -1442,7 +1502,13 @@ impl Broker {
         let now = crate::daemon::now_ms();
         let gate = self.cpu_gate(&mut st);
         let waits = st.ledger.waits_gated(now, free, floor, gate);
-        let snap = st.ledger.snapshot();
+        let snap = st.ledger.snapshot_at(now);
+        let task_of: HashMap<u64, u64> = st
+            .by_task
+            .iter()
+            .map(|(t, id)| (*id, t.0))
+            .chain(st.lease_tasks.iter().map(|(id, t)| (*id, t.0)))
+            .collect();
         let kind = |k: Kind| match k {
             Kind::Llm => "llm",
             Kind::Machine => "machine",
@@ -1504,6 +1570,9 @@ impl Broker {
                     "since_ms": r.since,
                     "interactive": r.rank.interactive(),
                     "steps_remaining": r.rank.steps(),
+                    "task": task_of.get(&r.id),
+                    "priority": (!r.rank.interactive()).then(|| r.rank.priority()),
+                    "aged": r.rank.is_aged() || waits.waits.get(&r.id).is_some_and(|w| w.aged_ms.is_some()),
                     "uses": r.needs.amounts,
                     "exclusive": r.needs.exclusive,
                     "explain": explain,
