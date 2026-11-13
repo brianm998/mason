@@ -218,6 +218,7 @@ fn exploration_request_charges_no_failure_but_step_failure_does() {
     sim.ok(E::StepFailed {
         task: t,
         reason: "x".into(),
+        class: None,
     });
     assert_eq!((sim.state(t), sim.w.tasks[&t].failures), (S::Failed, 1));
 }
@@ -588,6 +589,7 @@ fn random_events_never_break_invariants() {
             14 => E::StepFailed {
                 task,
                 reason: "r".into(),
+                class: None,
             },
             15 => E::Retried {
                 task,

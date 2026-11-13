@@ -29,9 +29,9 @@ next = "test"
 [resource.test-suite]
 count = 2
 
-# The `build` lines below are commented out: this file is validated by the daemon that is running
-# when it lands, and that one does not know a suite's `build` yet. Once the daemon with s178 is
-# live, uncomment them and drop the swift command's own `swift build --build-tests &&`.
+# Each suite builds first (`build`), so the step holds a `compile` slot only while compiling. Before
+# this, a `cargo test` held its compile slot through every integration test, mostly idle, while the
+# compile queue waited (2026-11-12). The running daemon has known `build` since s178 (70f66d6).
 #
 # The test step runs suites (s178). Each suite's `build` holds one `compile` slot and gives it
 # back; its command then holds the rest of `uses` (test-suite here) and the suite's own
@@ -50,7 +50,7 @@ next = "land"
 
 # The workspace's tests: cargo's own lines, one test each (doc tests included).
 [suite.cargo-workspace]
-# build = "{project_test} --no-run"
+build = "{project_test} --no-run"
 command = "{project_test}"
 rerun = "{project_test} {tests}"
 parser = "regex"
@@ -61,8 +61,8 @@ level = "unit"
 uses = { test-suite = 1 }
 
 [suite.swift-clients]
-# build = "cd clients/swift && swift build --build-tests"
-command = "cd clients/swift && swift build --build-tests && swift test"
+build = "cd clients/swift && swift build --build-tests"
+command = "cd clients/swift && swift test"
 parser = "xctest"
 min_tests = 1
 level = "unit"
@@ -70,7 +70,7 @@ uses = { test-suite = 1 }
 
 # Gradle prints a line per test only at --info.
 [suite.compose-clients]
-# build = "cd clients/compose && gradle testClasses --console=plain"
+build = "cd clients/compose && gradle testClasses --console=plain"
 command = "cd clients/compose && gradle test --info --console=plain"
 parser = "gradle"
 min_tests = 1

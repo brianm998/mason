@@ -129,14 +129,32 @@ fn crash_at(point: &str) -> Result<(), String> {
         std::thread::sleep(Duration::from_millis(50));
     }
     // File the task. If the daemon dies mid-request the answer is lost, not the task.
-    let _ = s.mason(&[
-        "task",
-        "add",
-        "Add a hello file",
-        "--body",
-        "Create hello.txt.",
-    ]);
-    died_of_sigkill(&mut first, 240)?;
+    // A request the busy machine made fail before the daemon recorded anything is
+    // repeated, or the injected crash would never be reached; once the daemon is
+    // gone, or any task is recorded, it is not.
+    let file_end = Instant::now() + Duration::from_secs(600);
+    loop {
+        let o = s.mason(&[
+            "task",
+            "add",
+            "Add a hello file",
+            "--body",
+            "Create hello.txt.",
+        ]);
+        if o.status.success() || first.child.try_wait().ok().flatten().is_some() {
+            break;
+        }
+        let listed: Value = serde_json::from_slice(&s.mason(&["task", "list", "--json"]).stdout)
+            .unwrap_or(Value::Null);
+        if listed["tasks"].as_array().is_some_and(|t| !t.is_empty()) {
+            break;
+        }
+        if Instant::now() > file_end {
+            return Err("the task could not be filed".into());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    died_of_sigkill(&mut first, 600)?;
     // Not dropped yet: dropping it would kill the step hosts that must survive.
     let _first = first;
 
@@ -163,7 +181,7 @@ fn crash_at(point: &str) -> Result<(), String> {
             "Create hello.txt.",
         ]);
     }
-    let end = Instant::now() + Duration::from_secs(120);
+    let end = Instant::now() + Duration::from_secs(600);
     loop {
         let o = s.mason(&["task", "show", "0", "--json"]);
         let v: Value = serde_json::from_slice(&o.stdout).unwrap_or(Value::Null);

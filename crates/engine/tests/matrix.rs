@@ -64,6 +64,7 @@ fn events(t: TaskId, other: TaskId, decision: DecisionId) -> Vec<(&'static str, 
             E::StepFailed {
                 task: t,
                 reason: "r".into(),
+                class: None,
             },
         ),
         (

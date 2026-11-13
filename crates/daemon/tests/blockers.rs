@@ -147,6 +147,7 @@ fn a_failed_blocker_is_retried_not_revived() {
     d.emit(EventKind::StepFailed {
         task: x,
         reason: "r".into(),
+        class: None,
     })
     .unwrap();
     let w = d.world().unwrap();
