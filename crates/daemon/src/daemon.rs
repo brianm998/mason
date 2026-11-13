@@ -150,6 +150,7 @@ impl Daemon {
             std::fs::create_dir_all(&d)
                 .map_err(|e| format!("cannot create {}: {e}", d.display()))?;
         }
+        crate::hostloss::note_daemon_start(&cfg.hosts_dir(), now_ms());
         let configured = if demo {
             vec![]
         } else {
