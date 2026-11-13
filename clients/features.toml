@@ -71,6 +71,11 @@ description = "Home's Compilation section: what holds a compile slot (and how lo
 swift = "done"
 compose = "done"
 
+[feature.cpu-by-task]
+description = "Home's CPU section: one bar for the whole machine split by task and fixed bucket (masond, monitors, sccache, everything else), highest first, with a legend (top 8, the rest folded) in the same order and stable colours; the task page says its CPU share or 'not running'"
+swift = "done"
+compose = "done"
+
 [feature.task-detail]
 description = "Steps, activity, live log, plan, checks, tests, history, decision card, actions"
 swift = "done"

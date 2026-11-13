@@ -40,7 +40,7 @@ fun MainPane(model: MonitorModel, modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun Section(title: String, state: String? = null, content: @Composable ColumnScope.() -> Unit) {
+internal fun Section(title: String, state: String? = null, content: @Composable ColumnScope.() -> Unit) {
     val theme = LocalTheme.current
     Column(verticalArrangement = Arrangement.spacedBy(theme.spacing)) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(theme.spacingSmall)) {
@@ -52,7 +52,7 @@ private fun Section(title: String, state: String? = null, content: @Composable C
 }
 
 @Composable
-private fun Link(text: String, onClick: () -> Unit) {
+internal fun Link(text: String, onClick: () -> Unit) {
     val theme = LocalTheme.current
     Text(text, style = theme.body(color = theme.accent), modifier = Modifier.clickable(onClick = onClick))
 }
@@ -136,6 +136,7 @@ fun HomePage(model: MonitorModel) {
                 queue.forEach { r -> Link("${r.key} ${r.title}") { model.go(Page.Task(r.id)) } }
             }
         }
+        CpuSection(model)
         h?.compilation?.let { CompilationSection(model, it) }
         h?.stages?.forEach { st ->
             Section(st.title, st.state) {
@@ -257,6 +258,7 @@ private fun TaskDetail(model: MonitorModel, d: TaskDetailView) {
         Text("${r.key} ${r.title}", style = theme.title(), modifier = Modifier.testTag("detail:${r.id}"))
         Text("${r.project}, ${r.state.replace('_', ' ')}, ${Format.duration(r.in_state_ms)} in this state", style = theme.body(color = theme.muted))
         if (r.why_waiting.isNotEmpty()) Text(r.why_waiting, style = theme.body())
+        Text(cpuTaskLine(d.cpu_permille), style = theme.body(color = theme.muted), modifier = Modifier.testTag("cpu"))
         Row(horizontalArrangement = Arrangement.spacedBy(theme.spacingLarge)) {
             CopyButton(r.key, r.key)
             if (d.branch.isNotEmpty()) CopyButton("branch", d.branch)

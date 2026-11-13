@@ -109,6 +109,8 @@ struct HomePage: View {
                     }
                 }
 
+                CpuSection(model: model, cpu: model.cpu)
+
                 if let h = model.home, h.hasCompilation {
                     CompilationSection(model: model, c: h.compilation)
                 }
@@ -287,6 +289,8 @@ struct TaskDetailPage: View {
                 if !r.whyWaiting.isEmpty {
                     Text(r.whyWaiting).font(theme.body()).foregroundStyle(theme.text)
                 }
+                Text(Format.cpuTaskLine(permille: d.cpuPermille)).font(theme.body()).foregroundStyle(theme.muted)
+                    .accessibilityIdentifier("cpu")
                 HStack(spacing: theme.spacingLarge) {
                     CopyButton(label: r.key, value: r.key)
                     if !d.branch.isEmpty { CopyButton(label: "branch", value: d.branch) }
