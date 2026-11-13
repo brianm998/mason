@@ -201,6 +201,7 @@ pub(crate) fn with_project_test(suite: &Suite, test: Option<&str>) -> Result<Sui
     let any = uses(&s.command)
         || s.build.as_deref().is_some_and(uses)
         || s.rerun.as_deref().is_some_and(uses)
+        || s.skip.as_deref().is_some_and(uses)
         || s.dev_command.as_deref().is_some_and(uses)
         || s.dev_build.as_deref().is_some_and(uses);
     if !any {
@@ -215,6 +216,7 @@ pub(crate) fn with_project_test(suite: &Suite, test: Option<&str>) -> Result<Sui
     s.command = s.command.replace(KEY, t);
     s.build = s.build.map(|b| b.replace(KEY, t));
     s.rerun = s.rerun.map(|b| b.replace(KEY, t));
+    s.skip = s.skip.map(|b| b.replace(KEY, t));
     // A development command lists packages itself (`-p a -p b`); `--workspace` would override
     // that list, so the project's test command goes in without it (its prefix, such as the
     // owner's CARGO_TARGET_DIR, stays).
@@ -597,6 +599,9 @@ struct Who {
     /// The environment every command gets: for a task's step, its `MASON_*` facts with
     /// `MASON_HELD` naming what is leased for the command now running.
     env: Vec<(String, String)>,
+    /// A red that also fails at `Tree::base` is excused. Off when `base` is the very tree
+    /// under test (the post-land tier), where every red would "also fail at the base".
+    trust_base: bool,
 }
 
 impl Who {
@@ -895,14 +900,13 @@ fn run_suite(
         };
     }
     let signatures: &[Signature] = &def.testing.signatures;
-    let quarantined: Vec<String> = d
-        .store
-        .quarantined(now_ms())
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|q| q.0 == suite.name)
-        .map(|q| q.1)
-        .collect();
+    let known = crate::knownred::known_for(&d.store, &suite.name);
+    let quarantined: Vec<String> = known.iter().map(|k| k.test.clone()).collect();
+    // With a `skip` template the known-red tests are not run at all.
+    let skipped_cmd: Option<String> = suite
+        .skip
+        .as_deref()
+        .and_then(|t| crate::knownred::skip_command(t, &quarantined));
     let limit = suite.timeout.unwrap_or(Duration::from_secs(1800));
     let mut attempt = 0u32;
     let mut waiting = false;
@@ -989,7 +993,10 @@ fn run_suite(
             &id,
             &crate::jobs::pty_wrap(
                 suite.pty,
-                &lifecycle::with_device(&suite.command, dev_id(dev.as_ref())),
+                &lifecycle::with_device(
+                    skipped_cmd.as_deref().unwrap_or(&suite.command),
+                    dev_id(dev.as_ref()),
+                ),
             ),
             cwd,
             limit,
@@ -1035,6 +1042,17 @@ fn run_suite(
             )
         };
         let result = match &j.verdict {
+            Verdict::Green if skipped_cmd.is_some() => SuiteRun::Done {
+                // Not the whole suite's green: no proof is recorded for the tree or the base.
+                outcome: SuiteOutcome::Proven,
+                results: Some(j.results.clone()),
+                notes: vec![format!(
+                    "{}: green, {} tests ran; skipped, known red: {}",
+                    suite.name,
+                    j.results.executed(),
+                    quarantined.join(", ")
+                )],
+            },
             Verdict::Green => {
                 let _ = d.store.put_suite_green(
                     &who.project,
@@ -1100,7 +1118,9 @@ fn run_suite(
                         .collect(),
                     None => failures.clone(),
                 };
-                let base = if persistent.is_empty() {
+                // A known-red failure needs no base run: the ledger already excuses it.
+                let unexcused = persistent.iter().any(|t| !quarantined.contains(t));
+                let base = if persistent.is_empty() || !unexcused || !who.trust_base {
                     None
                 } else {
                     baseline(who, c_repo, def, suite, &tree.base, repo_lock, dev.as_ref())
@@ -1358,6 +1378,7 @@ pub fn run(c: &Ctx) {
         id_prefix: format!("t{}r{}", c.task.0, c.run.0),
         sink: None,
         env: vec![],
+        trust_base: true,
     };
     let head = |rev: &str| git::run(&c.wt, &["rev-parse", rev]).map(|s| s.trim().to_string());
     let (Ok(tree_hash), Ok(head_sha)) = (head("HEAD^{tree}"), head("HEAD")) else {
@@ -1846,6 +1867,7 @@ pub fn pay(d: &Arc<Daemon>, debt: u64) -> Result<String, String> {
         id_prefix: format!("debt{debt}"),
         sink: None,
         env: vec![],
+        trust_base: true,
     };
     let tree_hash = git::run(&wt, &["rev-parse", "HEAD^{tree}"])
         .map(|s| s.trim().to_string())
@@ -1919,7 +1941,9 @@ pub struct OverRun {
 /// to be landed) once, as the landing engine does over a batch's union diff.
 /// They belong to no task: nothing can skip them. Evidence is by tree, so a
 /// tree that was green is not run twice, whoever asks. `base` is where the
-/// batch started (baselines are taken there).
+/// batch started (baselines are taken there). A suite whose only reds are excused (also red
+/// at `base`, or known red) is green for the batch, with a note naming them; `base_excuses`
+/// false (post-land, where `base` is the tree itself) lets only known-red tests excuse.
 #[allow(clippy::too_many_arguments)]
 pub fn run_over(
     d: &Arc<Daemon>,
@@ -1931,6 +1955,7 @@ pub fn run_over(
     log_dir: &Path,
     id_prefix: &str,
     sink: Option<StepRunId>,
+    base_excuses: bool,
 ) -> OverRun {
     let lock = d.repo_lock(d.project_id_by_name(&p.id).unwrap_or(ProjectId(0)));
     let tree_hash = git::run(wt, &["rev-parse", "HEAD^{tree}"])
@@ -1949,6 +1974,7 @@ pub fn run_over(
         id_prefix: id_prefix.to_string(),
         sink,
         env: vec![],
+        trust_base: base_excuses,
     };
     let _ = std::fs::create_dir_all(log_dir);
     let mut out = OverRun {
@@ -1971,6 +1997,7 @@ pub fn run_over(
                     SuiteOutcome::Proven
                     | SuiteOutcome::Reused
                     | SuiteOutcome::Flaky
+                    | SuiteOutcome::Excused
                     | SuiteOutcome::NotSelected,
                 notes,
                 ..

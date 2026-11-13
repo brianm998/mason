@@ -5,8 +5,8 @@
 //! A test step that runs a plain `command` (not suites) has no baseline. When a test failed
 //! on every run, including the targeted rerun, the same tests are run at the merge base,
 //! once per (base commit, command, test set), in a throwaway worktree. A failure is excused
-//! only when **every** test that failed on every run also fails there: those are not this
-//! change's. One task, "<test> fails on <base>", is filed for the base; a test already named
+//! per test (s281): each test that failed on every run and also fails there is not this
+//! change's; the others are. One task, "<test> fails on <base>", is filed for the base; a test already named
 //! by an open task or an open tracker issue files nothing, and the excuse points at it.
 //!
 //! The base results share the `baselines` table with the suites path (keyed by a hash of
@@ -228,17 +228,25 @@ fn merge_base(c: &Ctx) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// What the base check excused: the tests that also fail at the merge base (s281: per test,
+/// so one new failure beside a known one no longer sends both back), and a line for each.
+pub struct Excused {
+    pub tests: Vec<String>,
+    pub lines: Vec<String>,
+}
+
 /// The red step's tests (`persistent`: failed on every run) are checked at the merge base.
 /// `base_cmd` is the command to run there: the rerun filter's command with only those
-/// tests, or the whole command. `Some(note)` if every one also fails there: the step is
-/// excused, the note says so (and is also written next to the step's log for `task show`).
+/// tests, or the whole command. Each one that also fails there is excused (and its fix filed
+/// or found); the rest are the change's. `None` if there is no base result or nothing is
+/// excused. The lines are also written next to the step's log for `task show`.
 pub fn excuse(
     c: &Ctx,
     suffix: &str,
     build: Option<&str>,
     base_cmd: &str,
     persistent: &[String],
-) -> Option<String> {
+) -> Option<Excused> {
     if persistent.is_empty() {
         return None;
     }
@@ -256,13 +264,14 @@ pub fn excuse(
             Some(names)
         })?
     };
-    if !all_excused(persistent, &failing) {
+    let tests = at_base(persistent, &failing);
+    if tests.is_empty() {
         return None;
     }
     let mut lines = vec![];
-    for t in persistent {
+    for t in &tests {
         let fix = fix_for(c, t, &base, base_cmd, &tail);
-        let line = format!(
+        lines.push(format!(
             "{t}: also fails at the merge base {}; {}",
             short(&base),
             fix.as_ref()
@@ -270,19 +279,22 @@ pub fn excuse(
                     "fix: {}",
                     f.text()
                 ))
-        );
-        lines.push(line);
+        ));
     }
-    let note = format!(
-        "`{}` was red, but every test that failed on every run also fails at the merge base, so none is this change's (excused):\n{}",
-        c.step.name,
-        lines.join("\n")
-    );
     let _ = std::fs::write(
         c.task_dir().join(format!("{suffix}-r{}.excused", c.run.0)),
         lines.join("\n"),
     );
-    Some(note)
+    Some(Excused { tests, lines })
+}
+
+/// The tests of `persistent` that also fail at the base.
+pub fn at_base(persistent: &[String], at_base: &[String]) -> Vec<String> {
+    persistent
+        .iter()
+        .filter(|t| at_base.contains(t))
+        .cloned()
+        .collect()
 }
 
 /// The excuse lines recorded for a task, for `mason task show`.
@@ -313,6 +325,13 @@ mod tests {
         assert!(!all_excused(&s(&["a", "b"]), &s(&["a"])));
         assert!(!all_excused(&s(&["a"]), &[]));
         assert!(!all_excused(&[], &s(&["a"])));
+    }
+
+    #[test]
+    fn each_test_is_excused_on_its_own() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert_eq!(at_base(&s(&["a", "b"]), &s(&["a", "z"])), s(&["a"]));
+        assert!(at_base(&s(&["b"]), &s(&["a"])).is_empty());
     }
 
     #[test]

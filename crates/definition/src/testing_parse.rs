@@ -166,6 +166,7 @@ pub fn parse(doc: &DocumentMut, out: &mut Vec<Problem>) -> Testing {
                 "env" => s.env = string(v, &path, out).unwrap_or_default(),
                 "results_file" => s.results_file = string(v, &path, out),
                 "rerun" => s.rerun = string(v, &path, out),
+                "skip" => s.skip = string(v, &path, out),
                 "dev_command" => s.dev_command = string(v, &path, out),
                 "dev_build" => s.dev_build = string(v, &path, out),
                 "pass_regex" => s.pass_regex = string(v, &path, out),

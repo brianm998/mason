@@ -32,6 +32,7 @@ pub mod hung;
 pub mod improve;
 pub mod introspect;
 pub mod jobs;
+pub mod knownred;
 pub mod lan;
 pub mod landing;
 pub mod launchview;
