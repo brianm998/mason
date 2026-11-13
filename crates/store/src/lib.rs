@@ -733,6 +733,23 @@ fn persist(
     Ok(seq)
 }
 
+/// One row of the known-red ledger (the `quarantine` table).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LedgerRow {
+    pub suite: String,
+    pub test: String,
+    pub owner: String,
+    pub expires_at: u64,
+    pub reason: String,
+    /// `owner`, `base` or `exhausted`.
+    pub source: String,
+    pub fix_task: Option<u64>,
+    pub first_base: String,
+    pub last_seen_ms: u64,
+    pub at: u64,
+    pub note: String,
+}
+
 impl Store {
     /// Open or create the database, migrate it, and bring projections up to
     /// date with the log.
@@ -2913,10 +2930,119 @@ impl Store {
     ) -> Result<Vec<(String, String, String, u64, String)>, StoreError> {
         self.read(move |c| {
             let mut st = c.prepare(
-                "SELECT suite, test, owner, expires_at, reason FROM quarantine WHERE expires_at > ?1 ORDER BY suite, test",
+                "SELECT suite, test, owner, expires_at, reason FROM quarantine WHERE expires_at > ?1 AND source = 'owner' ORDER BY suite, test",
             )?;
             let rows = st.query_map(params![now_ms as i64], |r| {
                 Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get::<_, i64>(3)? as u64, r.get(4)?))
+            })?;
+            rows.collect()
+        })
+    }
+
+    /// Note that `test` was seen red at `base`. Adds a ledger entry (source `base`, no
+    /// expiry) if there is none and returns `true`; otherwise only refreshes `last_seen_ms`.
+    pub fn ledger_seen_red(
+        &self,
+        suite: &str,
+        test: &str,
+        source: &str,
+        base: &str,
+        now_ms: u64,
+    ) -> Result<bool, StoreError> {
+        let (s, t, src, b) = (
+            suite.to_string(),
+            test.to_string(),
+            source.to_string(),
+            base.to_string(),
+        );
+        self.write(move |c| {
+            let n = c.execute(
+                "UPDATE quarantine SET last_seen_ms = ?3 WHERE suite = ?1 AND test = ?2",
+                params![s, t, now_ms as i64],
+            )?;
+            if n > 0 {
+                return Ok(false);
+            }
+            c.execute(
+                "INSERT INTO quarantine(suite, test, owner, expires_at, reason, at, source, first_base, last_seen_ms) \
+                 VALUES (?1,?2,'mason',?6,'red at the merge base',?3,?4,?5,?3)",
+                params![s, t, now_ms as i64, src, b, i64::MAX],
+            )
+            .map(|_| true)
+        })
+    }
+
+    /// Set the fix task of a ledger entry (and clear the note).
+    pub fn ledger_set_fix(&self, suite: &str, test: &str, fix: u64) -> Result<(), StoreError> {
+        let (s, t) = (suite.to_string(), test.to_string());
+        self.write(move |c| {
+            c.execute(
+                "UPDATE quarantine SET fix_task = ?3 WHERE suite = ?1 AND test = ?2 AND source != 'owner'",
+                params![s, t, fix as i64],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// Reopen an entry whose fix landed but whose test is still red.
+    pub fn ledger_reopen(
+        &self,
+        suite: &str,
+        test: &str,
+        note: &str,
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
+        let (s, t, n) = (suite.to_string(), test.to_string(), note.to_string());
+        self.write(move |c| {
+            c.execute(
+                "UPDATE quarantine SET note = ?3, last_seen_ms = ?4 WHERE suite = ?1 AND test = ?2 AND source != 'owner'",
+                params![s, t, n, now_ms as i64],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// Lift ledger entries (never an owner's quarantine) for tests a run executed and passed.
+    /// Returns the tests lifted.
+    pub fn ledger_lift(&self, suite: &str, passed: &[String]) -> Result<Vec<String>, StoreError> {
+        let s = suite.to_string();
+        let passed = passed.to_vec();
+        self.write(move |c| {
+            let mut lifted = vec![];
+            for t in passed {
+                let n = c.execute(
+                    "DELETE FROM quarantine WHERE suite = ?1 AND test = ?2 AND source != 'owner'",
+                    params![s, t],
+                )?;
+                if n > 0 {
+                    lifted.push(t);
+                }
+            }
+            Ok(lifted)
+        })
+    }
+
+    /// Every entry of the ledger (owner quarantines too, expired or not).
+    pub fn ledger(&self) -> Result<Vec<LedgerRow>, StoreError> {
+        self.read(move |c| {
+            let mut st = c.prepare(
+                "SELECT suite, test, owner, expires_at, reason, source, fix_task, first_base, last_seen_ms, at, note \
+                 FROM quarantine ORDER BY suite, test",
+            )?;
+            let rows = st.query_map([], |r| {
+                Ok(LedgerRow {
+                    suite: r.get(0)?,
+                    test: r.get(1)?,
+                    owner: r.get(2)?,
+                    expires_at: r.get::<_, i64>(3)? as u64,
+                    reason: r.get(4)?,
+                    source: r.get(5)?,
+                    fix_task: r.get::<_, Option<i64>>(6)?.map(|n| n as u64),
+                    first_base: r.get(7)?,
+                    last_seen_ms: r.get::<_, i64>(8)? as u64,
+                    at: r.get::<_, i64>(9)? as u64,
+                    note: r.get(10)?,
+                })
             })?;
             rows.collect()
         })

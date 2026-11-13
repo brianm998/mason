@@ -1095,8 +1095,17 @@ fn run_suite(
                 let base = if persistent.is_empty() {
                     None
                 } else {
-                    baseline(who, c_repo, def, suite, &tree.base, repo_lock, dev.as_ref())
-                        .map(|b| b.0)
+                    baseline(who, c_repo, def, suite, &tree.base, repo_lock, dev.as_ref()).map(
+                        |b| {
+                            // The fix task's own step is not excused for its tests.
+                            let own = who.task.map_or(vec![], |(t, _)| {
+                                crate::basecheck::own_tests(&d.store, &suite.name, t.0)
+                            });
+                            b.0.into_iter()
+                                .filter(|t| !own.contains(t))
+                                .collect::<Vec<String>>()
+                        },
+                    )
                 };
                 let class = classify(&Inputs {
                     failing: failures,
@@ -1106,6 +1115,17 @@ fn run_suite(
                     baseline_failing: base.as_deref(),
                     quarantined: &quarantined,
                 });
+                // What failed at the base goes into the ledger, with one fix task each.
+                let known_red: Vec<String> = match &class {
+                    RedClass::Baseline { tests } => tests.clone(),
+                    RedClass::Product { excused, .. } => excused
+                        .iter()
+                        .filter(|t| base.as_ref().is_some_and(|b| b.contains(t)))
+                        .cloned()
+                        .collect(),
+                    _ => vec![],
+                };
+                let fixes = record_known_red(who, suite, &tree.base, &known_red, &j.output);
                 match class {
                     RedClass::Environmental { signature, advice } => {
                         env_down(who, def, suite, cwd, dev.as_ref());
@@ -1138,10 +1158,11 @@ fn run_suite(
                         outcome: SuiteOutcome::Excused,
                         results: None,
                         notes: vec![format!(
-                            "{}: excused, also failing at the merge base ({}): {}",
+                            "{}: excused, also failing at the merge base ({}): {}{}",
                             suite.name,
                             &tree.base[..tree.base.len().min(10)],
-                            tests.join(", ")
+                            tests.join(", "),
+                            fixes
                         )],
                     },
                     RedClass::Quarantined { tests } => SuiteRun::Done {
@@ -1164,8 +1185,9 @@ fn run_suite(
                         }
                         if !excused.is_empty() {
                             extra.push_str(&format!(
-                                " Not yours (failing at the base too, or quarantined): {}.",
-                                excused.join(", ")
+                                " Not yours (failing at the base too, or quarantined): {}.{}",
+                                excused.join(", "),
+                                fixes
                             ));
                         }
                         if !flaky.is_empty() {
@@ -1187,6 +1209,62 @@ fn run_suite(
             on_wait(None);
         }
         return result;
+    }
+}
+
+/// Add the tests seen red at the base to the ledger and file one fix task each (the first
+/// time only). Returns a note naming the fixes, or nothing.
+fn record_known_red(
+    who: &Who,
+    suite: &Suite,
+    base: &str,
+    tests: &[String],
+    output: &str,
+) -> String {
+    if tests.is_empty() {
+        return String::new();
+    }
+    let Some(pid) = who.d.project_id_by_name(&who.project) else {
+        return String::new();
+    };
+    let tail = tail(output, 30);
+    let seen = crate::basecheck::Seen {
+        project: pid,
+        project_name: &who.project,
+        task: who.task.map_or(0, |(t, _)| t.0),
+        step: &suite.name,
+        base,
+        cmd: &suite.command,
+        log_tail: &tail,
+    };
+    let fixes = crate::basecheck::record_red(&who.d, &suite.name, &seen, tests);
+    let named: Vec<String> = fixes
+        .iter()
+        .filter_map(|(t, f)| f.as_ref().map(|f| format!("{t}: {}", f.text())))
+        .collect();
+    if named.is_empty() {
+        String::new()
+    } else {
+        format!(" Fix: {}.", named.join("; "))
+    }
+}
+
+/// Lift ledger entries for tests this run executed and passed. Only a run on the base
+/// branch calls this; a run that did not execute a test never lifts it.
+fn lift_proven(d: &Daemon, suite: &str, results: &Results) {
+    let passed: Vec<String> = results
+        .cases
+        .iter()
+        .filter(|c| c.status == mason_testing::Status::Pass)
+        .map(|c| c.name.clone())
+        .collect();
+    if passed.is_empty() {
+        return;
+    }
+    if let Ok(l) = d.store.ledger_lift(suite, &passed) {
+        for t in l {
+            tracing::info!(suite, test = %t, "known-red entry lifted: the test passed");
+        }
     }
 }
 

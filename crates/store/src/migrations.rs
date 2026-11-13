@@ -585,6 +585,15 @@ const STEPS: &[&str] = &[
          at_ms INTEGER NOT NULL,
          PRIMARY KEY (task, run)
      );",
+    // 29: the quarantine table becomes the known-red ledger (s230, decision 0225). `source`
+    // is owner (manual, with an expiry), base (seen red at the merge base) or exhausted;
+    // an entry with a `fix_task` has no expiry (expires_at is the far future) because a
+    // run that proves the test green lifts it. Additive.
+    "ALTER TABLE quarantine ADD COLUMN source TEXT NOT NULL DEFAULT 'owner';
+     ALTER TABLE quarantine ADD COLUMN fix_task INTEGER;
+     ALTER TABLE quarantine ADD COLUMN first_base TEXT NOT NULL DEFAULT '';
+     ALTER TABLE quarantine ADD COLUMN last_seen_ms INTEGER NOT NULL DEFAULT 0;
+     ALTER TABLE quarantine ADD COLUMN note TEXT NOT NULL DEFAULT '';",
 ];
 
 pub const SCHEMA_VERSION: u32 = STEPS.len() as u32;

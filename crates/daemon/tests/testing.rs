@@ -252,6 +252,24 @@ fn a_baseline_failure_is_excused_but_a_new_failure_is_the_tasks() {
         })
         .unwrap();
     assert!(cached.lines().any(|l| l == "legacy"), "{cached}");
+    // The known-red ledger has one entry for it, and one fix task was filed.
+    let ledger = d.store.ledger().unwrap();
+    assert_eq!(ledger.len(), 1, "{ledger:?}");
+    assert_eq!(
+        (ledger[0].suite.as_str(), ledger[0].test.as_str()),
+        ("checks", "legacy")
+    );
+    assert_eq!(ledger[0].source, "base");
+    let fixes: Vec<_> = d
+        .world()
+        .unwrap()
+        .tasks
+        .values()
+        .filter(|t| t.title.starts_with("legacy fails on "))
+        .map(|t| t.id.0)
+        .collect();
+    assert_eq!(fixes.len(), 1, "{fixes:?}");
+    assert_eq!(ledger[0].fix_task, Some(fixes[0]));
 }
 
 #[test]
