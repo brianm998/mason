@@ -22,6 +22,7 @@ pub mod defs;
 pub mod demo;
 pub mod disk;
 pub mod editor;
+pub mod exhausted;
 pub mod fdlimit;
 pub mod holds;
 pub mod hostarchive;

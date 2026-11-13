@@ -662,8 +662,12 @@ enum SuiteRun {
         results: Option<Results>,
         notes: Vec<String>,
     },
-    /// Red, and the task's.
-    Product { feedback: String },
+    /// Red, and the task's. `failing`: the tests that failed and are the task's (empty when
+    /// the suite did not run, or no names were read).
+    Product {
+        feedback: String,
+        failing: Vec<String>,
+    },
     /// The task went away while this ran.
     Gone,
 }
@@ -1012,6 +1016,7 @@ fn run_suite(
                 env_down(who, def, suite, cwd, dev.as_ref());
                 return SuiteRun::Product {
                     feedback: format!("`{}` could not run: {e}", suite.name),
+                    failing: vec![],
                 };
             }
         };
@@ -1101,6 +1106,7 @@ fn run_suite(
                         "`{}` proved nothing: {executed} test(s) ran and at least {needed} must. A run that executes no tests is not a pass; make the suite run the tests (or fix what stopped it).\n",
                         suite.name
                     )),
+                    failing: vec![],
                 }
             }
             Verdict::Red { failures, why } => {
@@ -1205,6 +1211,7 @@ fn run_suite(
                         extra.push('\n');
                         SuiteRun::Product {
                             feedback: out(&extra),
+                            failing: tests.clone(),
                         }
                     }
                 }
@@ -1533,11 +1540,50 @@ pub fn run(c: &Ctx) {
                 }
                 outcomes.push((name, outcome));
             }
-            SuiteRun::Product { feedback } => {
+            SuiteRun::Product { feedback, failing } => {
+                let mut reason = format!("suite `{name}` is red");
+                let mut feedback = feedback;
+                // What failed is kept for the last round, counted across tasks, and on the
+                // last round run at the merge base (s282).
+                if !failing.is_empty() {
+                    crate::exhausted::record_round(c, &failing);
+                    crate::exhausted::record_persistent(c, &name, &failing);
+                    if crate::exhausted::is_last_round(c) {
+                        let cmd_for = |t: &[String]| match &suite.rerun {
+                            Some(tpl) => tpl.replace(
+                                "{tests}",
+                                &t.iter().map(|x| quote(x)).collect::<Vec<_>>().join(" "),
+                            ),
+                            None => suite.command.clone(),
+                        };
+                        let ex = crate::exhausted::on_last_round(
+                            c,
+                            &name,
+                            suite.build.as_deref(),
+                            &cmd_for,
+                            &failing,
+                        );
+                        let left = failing.iter().any(|t| !ex.excused.contains(t));
+                        if !ex.excused.is_empty() && !left && ex.why.is_none() {
+                            // Red at the base too: in the ledger now, and the step goes on.
+                            let mut n = vec![format!(
+                                "{name}: excused on the last round, red at the merge base too"
+                            )];
+                            n.extend(ex.lines);
+                            details.extend(n.clone());
+                            notes.extend(n);
+                            outcomes.push((name, SuiteOutcome::Excused));
+                            continue;
+                        }
+                        if let Some(w) = ex.why {
+                            reason = format!("{reason}; {w}");
+                            feedback = format!("{feedback}\nChecked at the base: {w}\n");
+                        }
+                    }
+                }
                 outcomes.push((name.clone(), SuiteOutcome::Failed));
                 let (v, note) = closing(&outcomes);
                 let _ = d.store.set_closing(c.task.0, v.name(), &note, now_ms());
-                let reason = format!("suite `{name}` is red");
                 return c.conclude(Outcome::Red, reason, Some(feedback));
             }
         }
@@ -1890,7 +1936,7 @@ pub fn pay(d: &Arc<Daemon>, debt: u64) -> Result<String, String> {
                 all_green = false;
                 verdicts.push(notes.join("; "));
             }
-            SuiteRun::Product { feedback } => {
+            SuiteRun::Product { feedback, .. } => {
                 all_green = false;
                 verdicts.push(feedback.lines().next().unwrap_or("red").to_string());
             }
@@ -2007,7 +2053,7 @@ pub fn run_over(
                 out.failed.insert(name.clone());
                 out.notes.push(notes.join("; "));
             }
-            SuiteRun::Product { feedback } => {
+            SuiteRun::Product { feedback, .. } => {
                 out.green = false;
                 out.failed.insert(name.clone());
                 out.notes.push(format!("{name}: {}", tail(&feedback, 12)));

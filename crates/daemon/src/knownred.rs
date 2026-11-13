@@ -52,6 +52,28 @@ pub fn known_for(store: &Store, scope: &str) -> Vec<Known> {
     .known(scope)
 }
 
+/// How long an entry added by MASON itself stays without being proven green or renewed. The
+/// quarantine table needs an expiry; #280's ledger lifts an entry by proof instead.
+pub const AUTO_ENTRY_DAYS: u64 = 30;
+
+/// Add `test` to the ledger for `scope`, with where its fix is tracked (`fix` is free text
+/// such as `task #12`), unless it is already there. This is the one write the ledger gets
+/// here; #280's ledger replaces it with `source = exhausted` and a `fix_task`.
+pub fn add(store: &Store, scope: &str, test: &str, fix: &str) {
+    let now = crate::daemon::now_ms();
+    if known_for(store, scope).iter().any(|k| k.test == test) {
+        return;
+    }
+    let _ = store.put_quarantine(
+        scope,
+        test,
+        "mason:exhausted",
+        now + AUTO_ENTRY_DAYS * 86_400_000,
+        fix,
+        now,
+    );
+}
+
 /// Split failing tests into those that are the change's (`new`) and those in the ledger.
 pub fn split<'a>(failing: &[String], known: &'a [Known]) -> (Vec<String>, Vec<&'a Known>) {
     let mut new = vec![];

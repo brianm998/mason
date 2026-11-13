@@ -21,8 +21,8 @@ use std::time::{Duration, Instant};
 
 /// One base run at a time, and one filing at a time: a second task with the same base
 /// waits, then finds the first one's result (or the first one's fix task).
-static BASE_RUN: Mutex<()> = Mutex::new(());
-static FILING: Mutex<()> = Mutex::new(());
+pub(crate) static BASE_RUN: Mutex<()> = Mutex::new(());
+pub(crate) static FILING: Mutex<()> = Mutex::new(());
 
 /// The name a command's base result is kept under in `baselines.suite`.
 pub fn key_of(cmd: &str) -> String {
@@ -76,12 +76,12 @@ pub fn is_fix_title(title: &str, test: &str) -> bool {
     title.contains(test) && title.contains(" fails on ")
 }
 
-fn short(sha: &str) -> &str {
+pub(crate) fn short(sha: &str) -> &str {
     &sha[..sha.len().min(10)]
 }
 
 /// The open task or tracker issue that already covers `test`, if any.
-fn existing_fix(c: &Ctx, test: &str) -> Option<Fix> {
+pub(crate) fn existing_fix(c: &Ctx, test: &str) -> Option<Fix> {
     if let Ok(w) = c.d.world() {
         let mut open: Vec<&Task> = w
             .tasks
@@ -103,7 +103,7 @@ fn existing_fix(c: &Ctx, test: &str) -> Option<Fix> {
 }
 
 /// The fix for `test` failing at `base`: the one already open, or a new urgent task.
-fn fix_for(c: &Ctx, test: &str, base: &str, cmd: &str, log_tail: &str) -> Option<Fix> {
+pub(crate) fn fix_for(c: &Ctx, test: &str, base: &str, cmd: &str, log_tail: &str) -> Option<Fix> {
     let _g = FILING.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(f) = existing_fix(c, test) {
         return Some(f);
@@ -136,12 +136,15 @@ fn fix_for(c: &Ctx, test: &str, base: &str, cmd: &str, log_tail: &str) -> Option
 
 /// Run `cmd` (after `build`, if any) in a throwaway worktree at `base`; the failing names.
 /// `None` if the worktree, the run or its time limit did not give a result.
-fn run_at_base(
+/// The third part says whether the output shows every test of `expect` ran (true when
+/// `expect` is empty): a run that ran none of them proves nothing about them.
+pub(crate) fn run_at_base(
     c: &Ctx,
     base: &str,
     build: Option<&str>,
     cmd: &str,
-) -> Option<(Vec<String>, String)> {
+    expect: &[String],
+) -> Option<(Vec<String>, String, bool)> {
     let repo = &c.project.path;
     let wt = c.task_dir().join(format!("base-r{}", c.run.0));
     let lock = c.d.repo_lock(c.project_id);
@@ -207,6 +210,7 @@ fn run_at_base(
         Some((
             crate::rerun::failing_names(&text),
             crate::jobs::tail(&text, 30),
+            crate::rerun::ran_them(&text, expect),
         ))
     })();
     {
@@ -217,7 +221,7 @@ fn run_at_base(
 }
 
 /// The merge base of the change and the project's base.
-fn merge_base(c: &Ctx) -> Option<String> {
+pub(crate) fn merge_base(c: &Ctx) -> Option<String> {
     let head = git::run(&c.wt, &["rev-parse", "HEAD"])
         .ok()?
         .trim()
@@ -259,7 +263,7 @@ pub fn excuse(
     let failing = {
         let _g = BASE_RUN.lock().unwrap_or_else(|e| e.into_inner());
         cached_failures(&c.d.store, &base, &key, &mut || {
-            let (names, t) = run_at_base(c, &base, build, base_cmd)?;
+            let (names, t, _) = run_at_base(c, &base, build, base_cmd, &[])?;
             tail = t;
             Some(names)
         })?

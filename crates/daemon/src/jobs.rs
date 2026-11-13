@@ -2708,6 +2708,7 @@ fn command_job(c: &Ctx) {
                 rerun: true,
             } => {
                 let names = crate::rerun::failing_names(&read_whole_log(&log).unwrap_or_default());
+                let last_names = names.clone();
                 if k == 0 {
                     if !names.is_empty() {
                         persistent = Some(names.clone());
@@ -2768,11 +2769,16 @@ fn command_job(c: &Ctx) {
                 // the merge base, is not this change's (s177, s281). Each is told apart on its
                 // own: only the others fail the step.
                 let mut not_yours: Vec<String> = vec![];
+                // Tests excused above (by the ledger or the base), and those that are left.
+                let mut excused_names: Vec<String> = vec![];
+                let mut rest_new: Vec<String> = vec![];
+                let mut exhausted_why: Option<String> = None;
                 if is_test {
                     if let Some(p) = persistent.as_ref().filter(|p| !p.is_empty()) {
                         let known = crate::knownred::known_for(&c.d.store, &c.step.name);
                         let (mut rest, hit) = crate::knownred::split(p, &known);
                         not_yours.extend(crate::knownred::lines(&hit));
+                        excused_names.extend(hit.iter().map(|k| k.test.clone()));
                         if !not_yours.is_empty() {
                             let _ = std::fs::write(
                                 c.task_dir()
@@ -2794,9 +2800,11 @@ fn command_job(c: &Ctx) {
                                 &rest,
                             ) {
                                 rest.retain(|t| !e.tests.contains(t));
+                                excused_names.extend(e.tests);
                                 not_yours.extend(e.lines);
                             }
                         }
+                        rest_new = rest.clone();
                         if rest.is_empty() && !not_yours.is_empty() {
                             let note = format!(
                                 "`{}` was red, but every test that failed on every run is not this change's (known red, or also failing at the merge base; excused):\n{}",
@@ -2811,6 +2819,55 @@ fn command_job(c: &Ctx) {
                                 let _ = writeln!(f, "\n== MASON: {note}");
                             }
                             return c.green();
+                        }
+                    }
+                }
+                // What failed on every run and is still the change's (s282): kept for the last
+                // round, counted across tasks, and on the last round run at the merge base.
+                if is_test && !rest_new.is_empty() {
+                    crate::exhausted::record_round(c, &rest_new);
+                    crate::exhausted::record_persistent(c, &c.step.name, &rest_new);
+                    if crate::exhausted::is_last_round(c) {
+                        let build = builds_first(c);
+                        let cmd_for = |t: &[String]| {
+                            if filter_off {
+                                cmd.clone()
+                            } else {
+                                crate::rerun::command(&cmd, filter, t)
+                            }
+                        };
+                        let ex = crate::exhausted::on_last_round(
+                            c,
+                            &c.step.name,
+                            build.as_deref(),
+                            &cmd_for,
+                            &rest_new,
+                        );
+                        exhausted_why = ex.why;
+                        if !ex.excused.is_empty() {
+                            excused_names.extend(ex.excused);
+                            not_yours.extend(ex.lines);
+                            let left: Vec<&String> = last_names
+                                .iter()
+                                .filter(|t| !excused_names.contains(t))
+                                .collect();
+                            if left.is_empty() && exhausted_why.is_none() {
+                                let note = format!(
+                                    "`{}` was still red on the last round, but what failed every time is red at the merge base too (now in the known-red ledger, fix filed); the step goes on:\n{}",
+                                    c.step.name,
+                                    not_yours.join("\n")
+                                );
+                                record_flaky(c, &seen, &excused_names);
+                                let _ = std::fs::remove_file(c.task_dir().join("feedback.txt"));
+                                tracing::warn!(task = c.task.0, run = c.run.0, "{note}");
+                                use std::io::Write as _;
+                                if let Ok(mut f) =
+                                    std::fs::OpenOptions::new().append(true).open(&log)
+                                {
+                                    let _ = writeln!(f, "\n== MASON: {note}");
+                                }
+                                return c.green();
+                            }
                         }
                     }
                 }
@@ -2848,6 +2905,14 @@ fn command_job(c: &Ctx) {
                         "{feedback}\n\nNot yours (do not work on these; the others above are yours):\n{}",
                         not_yours.join("\n")
                     )
+                };
+                let reason = match &exhausted_why {
+                    Some(w) => format!("{reason}; {w}"),
+                    None => reason,
+                };
+                let feedback = match &exhausted_why {
+                    Some(w) => format!("{feedback}\n\nChecked at the base: {w}"),
+                    None => feedback,
                 };
                 return c.conclude(Outcome::Red, reason, Some(feedback));
             }
