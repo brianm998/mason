@@ -320,6 +320,7 @@ mod tests {
                 cause: Some(WaitCause::Settling { until: 37_000 }),
             }],
             held_by: vec![],
+            aged_ms: None,
         };
         let s = explain(&w, 30_000);
         assert_eq!(
