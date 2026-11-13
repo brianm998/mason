@@ -14,9 +14,9 @@
 //! turn with no `result` or `exit` gets a normal successful result. The model
 //! and sandbox it was started with are logged to `<script>.argv` for tests.
 
+use mason_platform::net::UnixStream;
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::unix::net::UnixStream;
 
 fn out(v: &Value) {
     let mut o = std::io::stdout().lock();

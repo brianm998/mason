@@ -328,6 +328,7 @@ fn branch_names_are_validated() {
     }
 }
 
+#[cfg(unix)] // Unix-only; Windows coverage comes with the later port tasks.
 #[test]
 fn a_push_refused_for_another_reason_is_an_error_not_a_race() {
     use std::os::unix::fs::PermissionsExt;

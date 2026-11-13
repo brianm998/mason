@@ -162,7 +162,6 @@ fn run_at_base(
         };
         let out = std::fs::File::create(&log).ok()?;
         let err = out.try_clone().ok()?;
-        use std::os::unix::process::CommandExt;
         let mut command = Command::new("sh");
         command
             .arg("-c")
@@ -170,8 +169,8 @@ fn run_at_base(
             .current_dir(&wt)
             .stdin(Stdio::null())
             .stdout(out)
-            .stderr(err)
-            .process_group(0);
+            .stderr(err);
+        mason_platform::process::group_leader(&mut command);
         for (k, v) in step_env_pairs(c) {
             let v = if k == "MASON_WORKTREE" {
                 wt.to_string_lossy().into_owned()

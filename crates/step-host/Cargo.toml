@@ -11,6 +11,10 @@ publish = false
 workspace = true
 
 [dependencies]
+mason-platform = { version = "0.1.0", path = "../platform" }
+
+# The tests signal processes directly.
+[target.'cfg(unix)'.dev-dependencies]
 nix = { version = "0.31.3", features = ["process", "signal"] }
 
 [dev-dependencies]

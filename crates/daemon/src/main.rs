@@ -244,14 +244,13 @@ fn main() {
                 }
             };
             if rt.is_ready(&chosen) {
-                use std::os::unix::process::CommandExt;
                 // Recorded here, not by the daemon: a build that dies at once never would.
                 boots.record(now, &chosen, "start");
                 let mut a = cfg.exec_args.clone();
                 a.extend(["--runtime-sha".into(), chosen.clone()]);
-                let err = std::process::Command::new(rt.masond(&chosen))
-                    .args(&a)
-                    .exec();
+                let err = mason_platform::process::replace_process(
+                    std::process::Command::new(rt.masond(&chosen)).args(&a),
+                );
                 eprintln!(
                     "masond: cannot start runtime {chosen}: {err}; running this build instead"
                 );
