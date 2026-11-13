@@ -15,7 +15,6 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io;
-use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -152,9 +151,7 @@ pub struct HostStatus {
 }
 
 pub fn pid_alive(pid: u32) -> bool {
-    use nix::sys::signal::kill;
-    use nix::unistd::Pid;
-    kill(Pid::from_raw(pid as i32), None).is_ok()
+    mason_platform::process::is_alive(pid)
 }
 
 pub fn status_of(dir: &Path) -> io::Result<HostStatus> {
@@ -226,7 +223,7 @@ impl Registry {
 pub fn read_journal(dir: &Path, offset: u64, max: usize) -> io::Result<Vec<u8>> {
     let f = fs::File::open(dir.join("journal"))?;
     let mut buf = vec![0u8; max];
-    let n = f.read_at(&mut buf, offset)?;
+    let n = mason_platform::fs::read_at(&f, &mut buf, offset)?;
     buf.truncate(n);
     Ok(buf)
 }
@@ -392,8 +389,7 @@ pub struct Reaped {
 /// or our own process group is never signalled, and an entry without start
 /// strings (written by an older host) is left alone.
 pub fn reap_dir(dir: &Path) -> Reaped {
-    use nix::sys::signal::{kill, killpg, Signal};
-    use nix::unistd::{getpgrp, getpid, Pid};
+    use mason_platform::process::{own_group, signal_group, signal_process, Signal};
     let mut out = Reaped {
         id: dir
             .file_name()
@@ -404,8 +400,8 @@ pub fn reap_dir(dir: &Path) -> Reaped {
     let (Ok(info), Ok(kv)) = (HostInfo::read(dir), read_kv(&dir.join("host.kv"))) else {
         return out;
     };
-    let own = getpid().as_raw() as u32;
-    let own_pg = getpgrp().as_raw() as u32;
+    let own = std::process::id();
+    let own_pg = own_group();
     let start_ok = |key: &str, pid: u32| -> bool {
         match kv.get(key) {
             Some(want) if !want.is_empty() => proc_start(pid).as_deref() == Some(want.as_str()),
@@ -419,7 +415,7 @@ pub fn reap_dir(dir: &Path) -> Reaped {
         && start_ok("child_start", child)
         && proc_pgid(child) == Some(child)
     {
-        out.child_group_killed = killpg(Pid::from_raw(child as i32), Signal::SIGKILL).is_ok();
+        out.child_group_killed = signal_group(child, Signal::Kill).is_ok();
     }
     let host = info.host_pid;
     let dir_s = dir.display().to_string();
@@ -429,7 +425,7 @@ pub fn reap_dir(dir: &Path) -> Reaped {
         && start_ok("host_start", host)
         && proc_command(host).is_some_and(|c| c.contains("step-host") && c.contains(&dir_s))
     {
-        out.host_killed = kill(Pid::from_raw(host as i32), Signal::SIGKILL).is_ok();
+        out.host_killed = signal_process(host, Signal::Kill).is_ok();
     }
     out
 }

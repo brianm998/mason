@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+#![cfg(unix)]
+// Unix-only: signals, permission bits or unix sockets. Windows coverage comes with the later port tasks.
 
 //! The stall watcher (s152): a test run whose process tree goes silent has its stopped
 //! processes continued, and one that stays silent is killed and judged red as stalled,

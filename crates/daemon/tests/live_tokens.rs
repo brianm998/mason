@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+#![cfg(unix)]
+// Unix-only: signals, permission bits or unix sockets. Windows coverage comes with the later port tasks.
 
 //! s76 end to end: a running agent step's cell gains the tokens its session has used
 //! before the step finishes, a restart mid-step neither loses nor doubles them, and the

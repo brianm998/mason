@@ -200,7 +200,9 @@ pub(crate) fn with_project_test(suite: &Suite, test: Option<&str>) -> Result<Sui
     let mut s = suite.clone();
     let any = uses(&s.command)
         || s.build.as_deref().is_some_and(uses)
-        || s.rerun.as_deref().is_some_and(uses);
+        || s.rerun.as_deref().is_some_and(uses)
+        || s.dev_command.as_deref().is_some_and(uses)
+        || s.dev_build.as_deref().is_some_and(uses);
     if !any {
         return Ok(s);
     }
@@ -213,6 +215,12 @@ pub(crate) fn with_project_test(suite: &Suite, test: Option<&str>) -> Result<Sui
     s.command = s.command.replace(KEY, t);
     s.build = s.build.map(|b| b.replace(KEY, t));
     s.rerun = s.rerun.map(|b| b.replace(KEY, t));
+    // A development command lists packages itself (`-p a -p b`); `--workspace` would override
+    // that list, so the project's test command goes in without it (its prefix, such as the
+    // owner's CARGO_TARGET_DIR, stays).
+    let narrow = t.replace(" --workspace", "");
+    s.dev_command = s.dev_command.map(|b| b.replace(KEY, &narrow));
+    s.dev_build = s.dev_build.map(|b| b.replace(KEY, &narrow));
     Ok(s)
 }
 

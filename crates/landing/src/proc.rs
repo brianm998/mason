@@ -41,22 +41,16 @@ fn take(b: &Buf) -> Vec<u8> {
 }
 
 fn kill_group(pid: u32) {
-    let _ = nix::sys::signal::killpg(
-        nix::unistd::Pid::from_raw(pid as i32),
-        nix::sys::signal::Signal::SIGKILL,
-    );
+    let _ = mason_platform::process::signal_group(pid, mason_platform::process::Signal::Kill);
 }
 
 /// Run `cmd` to its end or `limit`, whichever comes first. Stdin is closed.
 pub fn output(cmd: &mut Command, limit: Duration) -> Result<Output, ProcError> {
-    use std::os::unix::process::CommandExt;
-    let mut child = cmd
-        .stdin(Stdio::null())
+    cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(0)
-        .spawn()
-        .map_err(ProcError::Spawn)?;
+        .stderr(Stdio::piped());
+    mason_platform::process::group_leader(cmd);
+    let mut child = cmd.spawn().map_err(ProcError::Spawn)?;
     let pid = child.id();
     let (out, h1) = drain(child.stdout.take().expect("piped"));
     let (err, h2) = drain(child.stderr.take().expect("piped"));
