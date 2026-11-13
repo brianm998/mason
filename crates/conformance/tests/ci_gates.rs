@@ -50,8 +50,15 @@ fn job(text: &str, name: &str) -> String {
 #[test]
 fn ci_cancels_superseded_runs() {
     let t = ci();
-    let c = t.find("\nconcurrency:").expect("top-level concurrency group");
-    let block: String = t[c..].lines().skip(1).take(3).collect::<Vec<_>>().join("\n");
+    let c = t
+        .find("\nconcurrency:")
+        .expect("top-level concurrency group");
+    let block: String = t[c..]
+        .lines()
+        .skip(1)
+        .take(3)
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(block.contains("group: ci-${{ github.ref }}"), "{block}");
     assert!(block.contains("cancel-in-progress: true"), "{block}");
 }
@@ -61,7 +68,10 @@ fn push_triggered_matrices_have_no_macos_for_exit_scripts_or_compose() {
     let t = ci();
     for name in ["exit-scripts", "monitor-compose"] {
         let j = job(&t, name);
-        let os = j.lines().find(|l| l.trim_start().starts_with("os:")).unwrap();
+        let os = j
+            .lines()
+            .find(|l| l.trim_start().starts_with("os:"))
+            .unwrap();
         assert!(!os.contains("macos"), "{name} lists macOS: {os}");
     }
 }
