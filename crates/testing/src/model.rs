@@ -75,6 +75,12 @@ pub struct Suite {
     /// Re-run only the failing tests: `{tests}` becomes their names. Without
     /// it a failing suite is re-run whole when checking for flakiness.
     pub rerun: Option<String>,
+    /// What `run_check` runs while a task is developed and the agent asks for what its change
+    /// touches: `{packages}` becomes the `-p` list of the packages the diff touches and their
+    /// dependents. The test step never runs it; it runs `command` whole.
+    pub dev_command: Option<String>,
+    /// The build of `dev_command` (also with `{packages}`); without it the suite's `build` runs.
+    pub dev_build: Option<String>,
     /// For the `regex` parser: lines matching `pass_regex` and `fail_regex`
     /// each count one test, named by the first capture group.
     pub pass_regex: Option<String>,
@@ -104,6 +110,8 @@ impl Suite {
             env: String::new(),
             results_file: None,
             rerun: None,
+            dev_command: None,
+            dev_build: None,
             pass_regex: None,
             fail_regex: None,
             timeout: None,
