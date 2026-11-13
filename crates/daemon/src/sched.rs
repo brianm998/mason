@@ -279,6 +279,9 @@ pub struct Broker {
     limits_file: PathBuf,
     /// How long a grant waits for its kernel locks before the task's wait says so.
     kernel_says_after: Mutex<Duration>,
+    /// Wait explanation per waiting task, republished by every `pass`. Readers
+    /// clone the `Arc` and never take `st`.
+    waits_snap: std::sync::RwLock<Arc<BTreeMap<TaskId, String>>>,
 }
 
 /// One holder of `compile`, for the idle check.
@@ -338,7 +341,17 @@ pub enum LeaseState {
     Gone,
 }
 
+thread_local! {
+    static LOCKS_TAKEN: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many times the calling thread has taken the broker lock (a test counter).
+pub fn broker_locks_taken_by_this_thread() -> usize {
+    LOCKS_TAKEN.with(|c| c.get())
+}
+
 fn lock<'a>(m: &'a Mutex<State>) -> MutexGuard<'a, State> {
+    LOCKS_TAKEN.with(|c| c.set(c.get() + 1));
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -424,6 +437,7 @@ impl Broker {
             cv: Condvar::new(),
             locks,
             limits_file,
+            waits_snap: Default::default(),
             kernel_says_after: Mutex::new(KERNEL_WAIT_SAYS_AFTER),
         };
         // Limits changed live survive a restart.
@@ -670,6 +684,35 @@ impl Broker {
         if changed || !p.grants.is_empty() {
             self.cv.notify_all();
         }
+        self.publish_waits(st, now, free, floor, gate);
+    }
+
+    /// Store the wait explanation of every waiting task, for readers that must
+    /// not take the broker lock. The one place the snapshot is written.
+    fn publish_waits(
+        &self,
+        st: &mut State,
+        now: u64,
+        free: Option<u64>,
+        floor: Option<u64>,
+        gate: Option<CpuGate>,
+    ) {
+        let waits = st.ledger.waits_gated(now, free, floor, gate);
+        let by_id: HashMap<u64, TaskId> = st.by_task.iter().map(|(t, id)| (*id, *t)).collect();
+        let snap: BTreeMap<TaskId, String> = waits
+            .waits
+            .iter()
+            .filter_map(|(id, w)| by_id.get(id).map(|t| (*t, explain(w, now))))
+            .collect();
+        *self.waits_snap.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(snap);
+    }
+
+    /// The published wait explanations (at most one pass old).
+    pub fn waits_snapshot(&self) -> Arc<BTreeMap<TaskId, String>> {
+        self.waits_snap
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Make the ledger count every machine slot the kernel says is held. A slot
@@ -1080,19 +1123,10 @@ impl Broker {
         lock(&self.st).ledger.capacity(name).map(|c| c.units)
     }
 
-    /// Why a task's step is waiting, live, or `None` if it is not waiting.
+    /// Why a task's step is waiting, from the last published pass (never
+    /// takes the broker lock), or `None` if it is not waiting.
     pub fn explain_task(&self, task: TaskId) -> Option<String> {
-        let mut st = lock(&self.st);
-        let id = *st.by_task.get(&task)?;
-        if !st.ledger.is_waiting(id) {
-            return None;
-        }
-        self.refresh_disk(&mut st);
-        let (floor, free) = (st.floor_mb, self.free_memory(&mut st));
-        let now = crate::daemon::now_ms();
-        let gate = self.cpu_gate(&mut st);
-        let waits = st.ledger.waits_gated(now, free, floor, gate);
-        waits.waits.get(&id).map(|w| explain(w, now))
+        self.waits_snapshot().get(&task).cloned()
     }
 
     // ---- interactive callers: `mason run --needs` ----
@@ -1642,9 +1676,72 @@ pub fn measure_free_memory_mb() -> Option<u64> {
     Some(free * page / (1024 * 1024))
 }
 
+/// Test helper: a broker with capacity 1 and `n` tasks (ids 1..=n) queued for it.
+#[cfg(test)]
+pub(crate) fn broker_with_waiting(dir: &Path, n: u64) -> Arc<Broker> {
+    let cfg = ResourceCfg {
+        machine: BTreeMap::from([("compile".to_string(), 1)]),
+        ..Default::default()
+    };
+    let b = Broker::new(
+        dir.join("locks"),
+        dir.join("limits.kv"),
+        &cfg,
+        2,
+        crate::cpu::FakeCpu::new(0),
+        &[],
+    )
+    .unwrap();
+    let one = BTreeMap::from([("compile".to_string(), 1)]);
+    {
+        let mut st = lock(&b.st);
+        for t in 1..=n {
+            st.rank_seq += 1;
+            let rank = order(&st, Rank::new(false, 3, 0, t, st.rank_seq, false));
+            let id = st.ledger.submit(rank, needs_of(&one, None), "t", t);
+            st.meta.insert(id, Meta::Task);
+            st.by_task.insert(TaskId(t), id);
+        }
+        b.pass(&mut st);
+    }
+    b
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explain_task_reads_the_snapshot_without_the_broker_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = broker_with_waiting(dir.path(), 20);
+        let snap = b.waits_snapshot();
+        // One holder, nineteen waiting.
+        assert_eq!(snap.len(), 19);
+        let st = lock(&b.st);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let b2 = b.clone();
+        let h = std::thread::spawn(move || {
+            let all: Vec<_> = (1..=20).map(|t| b2.explain_task(TaskId(t))).collect();
+            tx.send(all).unwrap();
+        });
+        let got = rx.recv_timeout(Duration::from_secs(30));
+        drop(st);
+        h.join().unwrap();
+        let got = got.expect("explain_task blocked on the broker lock");
+        assert_eq!(got.iter().flatten().count(), 19);
+        for (t, g) in (1..=20u64).zip(&got) {
+            assert_eq!(g.as_ref(), snap.get(&TaskId(t)));
+        }
+        // The text is what the ledger says.
+        let mut st = lock(&b.st);
+        let now = crate::daemon::now_ms();
+        let w = st.ledger.waits_gated(now, None, None, None);
+        let (id, wait) = w.waits.iter().next().unwrap();
+        let task = *st.by_task.iter().find(|(_, i)| *i == id).unwrap().0;
+        assert_eq!(snap.get(&task).unwrap(), &explain(wait, now));
+        let _ = &mut st;
+    }
 
     #[test]
     fn resource_config_parses_and_refuses_nonsense() {
