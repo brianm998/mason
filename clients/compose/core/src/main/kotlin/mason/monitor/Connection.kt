@@ -95,12 +95,13 @@ class MonitorConnection(
         while (running && !closed.await(tickMs, TimeUnit.MILLISECONDS)) {
             val now = discover()
             if (now != null && now.replaces(info)) break  // restarted: start over from the last seq
-            val quiet = (System.nanoTime() - heard.get()) / 1e9
+            // Ask first, then give up: a late tick must not skip the ping that was due.
             if ((System.nanoTime() - lastPing) / 1e9 >= timing.pingEverySeconds) {
                 lastPing = System.nanoTime()
                 write(ClientMessage(ping = Ping(nonce = ++pings)))
             }
-            if (quiet > timing.stallAfterSeconds) break  // a stall (after asking once): show reconnecting
+            val quiet = (System.nanoTime() - heard.get()) / 1e9
+            if (quiet > timing.stallAfterSeconds) break  // a stall: show reconnecting
         }
         s.close()
         return welcomed.get()
