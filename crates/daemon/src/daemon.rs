@@ -85,6 +85,8 @@ pub struct Daemon {
     pub stall_kills: AtomicU64,
     /// Readings where a silent tree was spared because a member waits on a lease.
     pub stall_spared: AtomicU64,
+    /// Monitor sessions closed because the client stopped reading its socket.
+    pub ws_slow_closed: AtomicU64,
     pub(crate) defs: crate::defs::Defs,
     pub broker: Arc<crate::sched::Broker>,
     /// Appended event sequence numbers, for the clients' sockets.
@@ -294,6 +296,7 @@ impl Daemon {
             stall_conts: AtomicU64::new(0),
             stall_kills: AtomicU64::new(0),
             stall_spared: AtomicU64::new(0),
+            ws_slow_closed: AtomicU64::new(0),
             defs: crate::defs::Defs::default(),
             broker,
             accounts,
