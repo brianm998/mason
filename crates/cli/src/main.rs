@@ -25,7 +25,7 @@
 //! mason run --needs compile[=N],... [--exclusive] [--label L] -- <cmd>...
 //! mason hold --needs R[,R...] [--exclusive] --pipeline NAME --label L [--pid P]
 //! mason targets list [--json]
-//! mason resources [--json] | mason resources limit <resource> <units>
+//! mason cpu [--json] | mason resources [--json] | mason resources limit <resource> <units>
 //! mason doctor
 //! mason init [--yes] [--tracker T] [--agent A] [--sessions N] [--workflow W] [--suites accept|skip] [--base B] [--landing L] [--alerts LIST|none] [--no-prove]
 //! mason adopt | mason remove [--yes]
@@ -112,6 +112,7 @@ mason: command-line client for the MASON pipeline
                                       hold resources for a process's life: prints `granted`, then holds until
                                       stdin closes, --pid exits or it is signalled
   mason resources [--json]            limits, who holds what, and every wait explained
+  mason cpu [--json]                  where the machine's CPU goes, by task (share of all cores)
   mason targets list [--json]         simulators, emulators and phones, and who has each
   mason resources limit <resource> <units>   change a limit while things run (llm:claude, compile, ...)
   mason hook bash [--needs compile]   optional Claude Code PreToolUse hook: builds go through the queue
@@ -544,6 +545,11 @@ fn main() {
             }
             Some(other) => die(&format!("unknown targets command {other:?}\n\n{HELP}")),
         }
+        return;
+    }
+    if cmd == "cpu" {
+        finish(&a);
+        resources::cpu(&d, json_out).unwrap_or_else(|e| die(&e));
         return;
     }
     if cmd == "resources" {

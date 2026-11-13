@@ -16,6 +16,7 @@ pub mod ci_watch;
 pub mod cmdreuse;
 pub mod config;
 pub mod cpu;
+pub mod cputasks;
 pub mod crash;
 pub mod daemon;
 pub mod defs;

@@ -112,6 +112,8 @@ pub struct Daemon {
     pub lan: crate::lan::LanState,
     /// Simulators, emulators and phones, leased by capability (Stage 25).
     pub targets: crate::targets::Targets,
+    /// Each task's share of the machine's CPU, as the sampling thread last read it.
+    cpu_reading: std::sync::RwLock<Arc<crate::cputasks::Reading>>,
 }
 
 fn kind_name(k: &EventKind) -> String {
@@ -310,6 +312,7 @@ impl Daemon {
             notify: Default::default(),
             lan: crate::lan::LanState::new(),
             targets,
+            cpu_reading: std::sync::RwLock::new(Arc::new(crate::cputasks::Reading::none())),
             update_status: Mutex::new(crate::update::Status {
                 phase: "idle".into(),
                 ..Default::default()
@@ -330,6 +333,13 @@ impl Daemon {
             d.spawn_progress_ticker();
             d.spawn_sweeper();
             d.spawn_compile_watch();
+            // A daemon whose CPU reading is injected is a test's: it would add a
+            // thread running `ps` every few seconds, to no use.
+            if d.cfg.cpu.is_none() && std::env::var_os("MASON_CPU_FILE").is_none()
+                || std::env::var_os("MASON_PS_FILE").is_some()
+            {
+                crate::cputasks::spawn(&d);
+            }
             crate::usage::spawn_probe(&d);
             d.spawn_watcher();
             crate::tracker::spawn(&d);
@@ -342,6 +352,18 @@ impl Daemon {
 
     /// Something other than an event changed what a client would see (a pause,
     /// a debt, a limit): wake the sockets.
+    /// The latest reading of where the CPU goes (cheap: an `Arc` clone).
+    pub fn cpu_reading(&self) -> Arc<crate::cputasks::Reading> {
+        self.cpu_reading
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    pub fn set_cpu_reading(&self, r: crate::cputasks::Reading) {
+        *self.cpu_reading.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(r);
+    }
+
     pub fn poke(&self) {
         let _ = self.bus.send(self.store.last_seq().unwrap_or(0));
     }
