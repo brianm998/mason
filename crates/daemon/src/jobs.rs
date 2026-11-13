@@ -2199,7 +2199,18 @@ fn settle_all(
                 } else {
                     text
                 };
-                let restart = lost.len() <= hl::MAX_AGENT_RESTARTS;
+                // A host the daemon's own restart took is not the task's failure: it
+                // is recorded but not counted toward the restart budget.
+                let counted = lost
+                    .iter()
+                    .filter(|id| {
+                        let r = mason_step_host::registry::lost_report(&root.join(id));
+                        !r.is_ok_and(|r| {
+                            hl::is_restart_loss(&root, r.last_heartbeat_ms, r.at_ms)
+                        })
+                    })
+                    .count();
+                let restart = counted <= hl::MAX_AGENT_RESTARTS;
                 hl::record_as(&c.d, Some(c.run), &c.step.name, &newest, at, text, restart);
                 if !restart {
                     let all: Vec<String> = lost.iter().map(|id| describe(id).0).collect();

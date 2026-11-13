@@ -22,6 +22,7 @@ use crate::daemon::{now_ms, Daemon};
 use mason_core::{FailClass, StepRunId};
 use mason_step_host::registry::LostReport;
 use mason_store::HostLossRow;
+use std::path::{Path, PathBuf};
 
 /// The id of the fresh host that re-runs a step whose host `id` was lost.
 pub fn rerun_id(id: &str) -> String {
@@ -37,6 +38,49 @@ pub fn both(first: &LostReport, second: &LostReport) -> String {
 
 /// How many times an agent step run is restarted after a lost host.
 pub const MAX_AGENT_RESTARTS: usize = 2;
+
+/// How close to a daemon start (ms) a lost host's last sign of life must be for the
+/// loss to be put down to the restart: the daemon going away took it, or its stop
+/// came so soon before the start that nothing else can be told apart.
+pub const RESTART_WINDOW_MS: u64 = 120_000;
+
+/// The file in the hosts directory's parent that lists every daemon start (ms, one per line).
+fn starts_path(hosts_root: &Path) -> PathBuf {
+    hosts_root
+        .parent()
+        .unwrap_or(hosts_root)
+        .join("daemon-starts")
+}
+
+/// Record that a daemon starts now. Called once per start; the file keeps the last 200.
+pub fn note_daemon_start(hosts_root: &Path, at_ms: u64) {
+    let p = starts_path(hosts_root);
+    let mut lines: Vec<String> = std::fs::read_to_string(&p)
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_string)
+        .collect();
+    lines.push(at_ms.to_string());
+    let keep = lines.len().saturating_sub(200);
+    let _ = std::fs::write(&p, lines[keep..].join("\n") + "\n");
+}
+
+/// Whether a host last heard from at `last_ms` (or seen gone at `seen_ms` when it never
+/// beat) was lost at a daemon restart. Several hosts lost at one start are one event:
+/// each is judged against the same start, none counts against its task.
+pub fn is_restart_loss(hosts_root: &Path, last_ms: Option<u64>, seen_ms: u64) -> bool {
+    let t = last_ms.unwrap_or(seen_ms);
+    let text = std::fs::read_to_string(starts_path(hosts_root)).unwrap_or_default();
+    restart_loss_in(&text, t)
+}
+
+/// [`is_restart_loss`] over the text of the starts file.
+pub fn restart_loss_in(starts: &str, t: u64) -> bool {
+    starts
+        .lines()
+        .filter_map(|l| l.trim().parse::<u64>().ok())
+        .any(|s| t + RESTART_WINDOW_MS >= s && t <= s + RESTART_WINDOW_MS / 4)
+}
 
 /// What failed an agent step that lost its host more often than it may be restarted.
 pub fn agent_lost(reports: &[String]) -> String {
@@ -136,7 +180,20 @@ pub fn record_as(
 
 #[cfg(test)]
 mod tests {
-    use super::retry_step;
+    use super::{restart_loss_in, retry_step};
+
+    #[test]
+    fn a_loss_at_a_daemon_start_is_a_restart_loss_and_a_real_one_is_not() {
+        let starts = "1000000\n9000000\n";
+        // Died a few seconds before the start: a restart loss.
+        assert!(restart_loss_in(starts, 995_000));
+        assert!(restart_loss_in(starts, 9_000_000));
+        // Died mid-run, long after one start and before the next.
+        assert!(!restart_loss_in(starts, 5_000_000));
+        assert!(!restart_loss_in(starts, 1_500_000));
+        assert!(!restart_loss_in("", 5));
+    }
+
     use mason_core::FailClass;
 
     #[test]
