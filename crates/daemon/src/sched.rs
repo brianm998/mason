@@ -633,6 +633,11 @@ impl Broker {
         })
     }
 
+    /// The overall CPU reading the compile gate uses, to read from outside the broker.
+    pub fn cpu_source(&self) -> Arc<dyn CpuSource> {
+        lock(&self.st).cpu.clone()
+    }
+
     /// How long the primary CPU reading has been missing (ms), once that is long
     /// enough to alert on. The gate is on its fallback meanwhile.
     pub fn cpu_missing_ms(&self) -> Option<(u64, &'static str)> {

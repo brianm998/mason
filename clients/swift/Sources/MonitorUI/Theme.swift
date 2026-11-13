@@ -42,6 +42,27 @@ public struct Theme {
     public var ok: Color { c(MasonTokens.colorLightOk, MasonTokens.colorDarkOk) }
     public var border: Color { c(MasonTokens.colorLightBorder, MasonTokens.colorDarkBorder) }
 
+    /// A CPU share's colour by `CpuRow.color`: "1"..."10" for tasks, or "masond", "monitor", "sccache", "other".
+    public func cpu(_ key: String) -> Color {
+        switch key {
+        case "1": return c(MasonTokens.colorLightCpu1, MasonTokens.colorDarkCpu1)
+        case "2": return c(MasonTokens.colorLightCpu2, MasonTokens.colorDarkCpu2)
+        case "3": return c(MasonTokens.colorLightCpu3, MasonTokens.colorDarkCpu3)
+        case "4": return c(MasonTokens.colorLightCpu4, MasonTokens.colorDarkCpu4)
+        case "5": return c(MasonTokens.colorLightCpu5, MasonTokens.colorDarkCpu5)
+        case "6": return c(MasonTokens.colorLightCpu6, MasonTokens.colorDarkCpu6)
+        case "7": return c(MasonTokens.colorLightCpu7, MasonTokens.colorDarkCpu7)
+        case "8": return c(MasonTokens.colorLightCpu8, MasonTokens.colorDarkCpu8)
+        case "9": return c(MasonTokens.colorLightCpu9, MasonTokens.colorDarkCpu9)
+        case "10": return c(MasonTokens.colorLightCpu10, MasonTokens.colorDarkCpu10)
+        case "masond": return c(MasonTokens.colorLightCpuMasond, MasonTokens.colorDarkCpuMasond)
+        case "monitor": return c(MasonTokens.colorLightCpuMonitor, MasonTokens.colorDarkCpuMonitor)
+        case "sccache": return c(MasonTokens.colorLightCpuSccache, MasonTokens.colorDarkCpuSccache)
+        default: return c(MasonTokens.colorLightCpuOther, MasonTokens.colorDarkCpuOther)
+        }
+    }
+    public var cpuIdle: Color { c(MasonTokens.colorLightCpuIdle, MasonTokens.colorDarkCpuIdle) }
+
     private func s(_ n: Int) -> CGFloat { CGFloat(Double(n) * scale) }
     public var tileMinWidth: CGFloat { s(MasonTokens.sizeTileMinWidth) }
     public var tileHeight: CGFloat { s(MasonTokens.sizeTileHeight) }
