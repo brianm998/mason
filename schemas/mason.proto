@@ -625,6 +625,33 @@ message HomeView {
   repeated SidebarSection stages = 6;
   // The `compile` resource: what holds it, what waits and why, and its limit.
   Compilation compilation = 7;
+  // Each task's share of the machine's CPU, and the fixed buckets.
+  CpuUsage cpu = 8;
+}
+
+// One bucket's share of the machine's CPU.
+message CpuShare {
+  // The task, for kind "task"; 0 otherwise.
+  uint64 task = 1;
+  // task, masond, monitor, sccache, other.
+  string kind = 2;
+  // "#287" or a fixed name.
+  string label = 3;
+  // The task's title (empty for a fixed bucket).
+  string title = 4;
+  // Of the whole machine: 1000 is every core busy.
+  uint32 permille = 5;
+}
+
+// Where the machine's CPU went over the last sampling period.
+message CpuUsage {
+  // Overall busy, in permille (the compile gate's reading); -1 unknown.
+  int32 busy_permille = 1;
+  uint32 cores = 2;
+  // When this was read (ms since the epoch); 0 before the first reading.
+  uint64 sampled_ms = 3;
+  // Highest first; ties by task id, then kind. Under 1 permille is left out.
+  repeated CpuShare shares = 4;
 }
 
 // Who holds a `compile` slot.
@@ -731,6 +758,8 @@ message TaskDetailView {
   ProposalInfo proposal = 20;
   // Tokens and cost this task's steps reported, one line per step (s64).
   repeated TokenLine step_tokens = 21;
+  // The task's share of the machine's CPU, in permille; -1 while it has no running process.
+  int32 cpu_permille = 22;
 }
 
 // What was noticed, by whom, with the proof; and for an improvement, where its branch is.
@@ -811,6 +840,29 @@ message BatchLine {
   repeated uint64 parked = 6;
   string note = 7;
   bool running = 8;
+  // The CI the batch is waiting on, or waited on last. Absent when it has none.
+  optional BatchCi ci = 9;
+}
+
+// One workflow's job counts in a CI run.
+message WorkflowJobs {
+  string workflow = 1;
+  uint32 queued = 2;
+  uint32 running = 3;
+  uint32 passed = 4;
+  uint32 failed = 5;
+  repeated string running_names = 6;
+}
+
+// A batch's CI: the ref it runs on, the run's http(s) address, and where each workflow is.
+message BatchCi {
+  string ci_ref = 1;
+  // Empty unless http or https.
+  string url = 2;
+  uint64 started_ms = 3;
+  // queued, running, green or red.
+  string state = 4;
+  repeated WorkflowJobs workflows = 5;
 }
 
 // A project whose post-land tier went red: only the fix may land.

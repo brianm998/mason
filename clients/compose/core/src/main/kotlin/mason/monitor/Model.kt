@@ -20,6 +20,11 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     var header by mutableStateOf<HeaderView?>(null)
     var sidebar by mutableStateOf<SidebarView?>(null)
     var home by mutableStateOf<HomeView?>(null)
+    /** The CPU shares, apart from `home` so the CPU section reads only this. Null from an older daemon. */
+    var cpu by mutableStateOf<CpuUsage?>(null)
+    /** Each task's colour in the CPU bar while it is among the shares. */
+    var cpuColors by mutableStateOf<Map<Long, Int>>(emptyMap())
+    private val cpuPalette = CpuColors()
     var taskDetail by mutableStateOf<TaskDetailView?>(null)
     var landing by mutableStateOf<LandingView?>(null)
     var usage by mutableStateOf<UsageView?>(null)
@@ -606,7 +611,13 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
             noteMonitorBuild()
         }
         v.sidebar?.let { sidebar = it; noteAttention(it) }
-        v.home?.let { home = it }
+        v.home?.let {
+            home = it
+            if (it.cpu != cpu) {
+                cpu = it.cpu
+                cpuColors = cpuPalette.assign(it.cpu?.shares.orEmpty().filter { s -> s.kind == "task" }.map { s -> s.task })
+            }
+        }
         v.task_detail?.let { d ->
             // A different task's page starts its log over; the same task's view carries the tail again.
             taskDetail = d

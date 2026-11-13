@@ -1422,7 +1422,15 @@ pub fn running_batch_lines(d: &Daemon) -> Vec<String> {
         .unwrap_or_default()
         .into_iter()
         .filter(|b| b.finished_at.is_none())
-        .map(|b| format!("{} #{} ({})", b.project, b.id, b.phase))
+        .map(|b| {
+            let ci = d
+                .landing
+                .ci
+                .get(b.id)
+                .map(|c| format!(", {}", crate::batch_ci::wait_text(&c)))
+                .unwrap_or_default();
+            format!("{} #{} ({}{ci})", b.project, b.id, b.phase)
+        })
         .collect()
 }
 
