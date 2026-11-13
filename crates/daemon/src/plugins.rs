@@ -346,7 +346,6 @@ pub fn record_approval(config_dir: &Path, project: &str, a: &Approval) -> std::i
 // ---- the copy that runs ----------------------------------------------------------------------------
 
 fn disk_hash(dir: &Path) -> Option<String> {
-    use std::os::unix::fs::PermissionsExt;
     fn walk(base: &Path, dir: &Path, out: &mut Vec<Entry>) -> std::io::Result<()> {
         for e in std::fs::read_dir(dir)? {
             let e = e?;
@@ -361,7 +360,7 @@ fn disk_hash(dir: &Path) -> Option<String> {
                         .unwrap_or(&p)
                         .to_string_lossy()
                         .replace('\\', "/"),
-                    exec: meta.permissions().mode() & 0o111 != 0,
+                    exec: mason_platform::fs::is_executable(&meta, &p),
                     bytes: std::fs::read(&p)?,
                 });
             }
@@ -376,7 +375,6 @@ fn disk_hash(dir: &Path) -> Option<String> {
 /// Write the exact bytes that were hashed to `<config dir>/extensions/<hash>/`, unless an
 /// identical copy is already there, and return that folder.
 pub fn materialize(config_dir: &Path, ext: &Extension) -> std::io::Result<PathBuf> {
-    use std::os::unix::fs::PermissionsExt;
     let root = config_dir.join("extensions");
     let dest = root.join(&ext.hash);
     if dest.exists() {
@@ -397,10 +395,7 @@ pub fn materialize(config_dir: &Path, ext: &Extension) -> std::io::Result<PathBu
         }
         std::fs::create_dir_all(p.parent().expect("has a parent"))?;
         std::fs::write(&p, &e.bytes)?;
-        std::fs::set_permissions(
-            &p,
-            std::fs::Permissions::from_mode(if e.exec { 0o755 } else { 0o644 }),
-        )?;
+        mason_platform::fs::set_executable(&p, e.exec)?;
     }
     std::fs::create_dir_all(&tmp)?;
     std::fs::rename(&tmp, &dest)?;

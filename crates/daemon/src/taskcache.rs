@@ -187,6 +187,72 @@ pub fn dirs(d: &Daemon, w: &mason_engine::World) -> Vec<PathBuf> {
         .collect()
 }
 
+/// The directory MASON owns for `task` (`MASON_TASK_CACHE`), created now, as text for the
+/// environment. Creation is best effort: a step that needs it will say so itself.
+pub fn own_dir(d: &Daemon, task: u64) -> String {
+    let p = d.cfg.task_cache_dir(task);
+    let _ = std::fs::create_dir_all(&p);
+    p.to_string_lossy().into_owned()
+}
+
+/// Remove the directory MASON owns for `task`. Only ever the path MASON built under its own
+/// data directory, and never a symlink.
+pub fn remove_own_now(d: &Daemon, task: u64) -> bool {
+    let p = d.cfg.task_cache_dir(task);
+    if !std::fs::symlink_metadata(&p).is_ok_and(|m| m.file_type().is_dir()) {
+        return false;
+    }
+    match std::fs::remove_dir_all(&p) {
+        Ok(()) => true,
+        Err(e) => {
+            eprintln!("task {task}: removing {} failed: {e}", p.display());
+            false
+        }
+    }
+}
+
+/// Remove it on a thread of its own, outside any lock.
+pub fn remove_own_in_background(d: &Arc<Daemon>, task: u64) {
+    let d = d.clone();
+    let _ = std::thread::Builder::new()
+        .name(format!("own-cache-{task}"))
+        .spawn(move || {
+            remove_own_now(&d, task);
+        });
+}
+
+/// The sweep's part for the owned directories: each one whose task landed or was canceled (or
+/// failed more than the keep days ago) and has no job. Never one whose task is running.
+pub fn sweep_own(d: &Arc<Daemon>, w: &mason_engine::World) -> usize {
+    let Ok(rd) = std::fs::read_dir(d.cfg.data_dir.join("c")) else {
+        return 0;
+    };
+    let now = crate::daemon::now_ms();
+    let mut n = 0;
+    for e in rd.flatten() {
+        let Some(id) = e.file_name().to_str().and_then(|s| s.parse::<u64>().ok()) else {
+            continue;
+        };
+        let Some(t) = w.tasks.get(&TaskId(id)) else {
+            continue;
+        };
+        let keep_days = d
+            .project(t.project)
+            .and_then(|p| p.task_cache_keep_days)
+            .unwrap_or(DEFAULT_KEEP_DAYS);
+        let go = match t.state {
+            State::Landed | State::Canceled => true,
+            State::Failed => expired(t.state, last_step_ms(w, t.id), now, keep_days),
+            _ => false,
+        };
+        if go && !d.has_job_for_task(t.id) {
+            remove_own_in_background(d, id);
+            n += 1;
+        }
+    }
+    n
+}
+
 /// Days a canceled or failed task's directory is kept after its last step, unless the project
 /// says otherwise (`task_cache_keep_days`).
 pub const DEFAULT_KEEP_DAYS: u64 = 7;
@@ -317,6 +383,7 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_symlink_is_refused() {
         let t = tempfile::tempdir().unwrap();

@@ -5,7 +5,6 @@
 use crate::registry::HostInfo;
 use std::collections::HashMap;
 use std::io;
-use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::{Command, ExitStatus, Stdio};
@@ -68,10 +67,13 @@ pub fn exit_signal(dir: &Path) -> Option<(Option<i32>, u64)> {
 }
 
 fn note_exit(dir: &Path, st: ExitStatus) {
-    seen()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(dir.to_path_buf(), (st.signal(), crate::registry::now_ms()));
+    seen().lock().unwrap_or_else(|e| e.into_inner()).insert(
+        dir.to_path_buf(),
+        (
+            mason_platform::process::exit_signal(&st),
+            crate::registry::now_ms(),
+        ),
+    );
     reaping()
         .lock()
         .unwrap_or_else(|e| e.into_inner())

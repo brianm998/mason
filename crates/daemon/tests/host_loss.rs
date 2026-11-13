@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+#![cfg(unix)]
+// Unix-only: signals, permission bits or unix sockets. Windows coverage comes with the later port tasks.
 
 //! A step whose host is lost (s66): the step is run once more on a fresh host and
 //! the task goes on; two losses in a row fail the step and name both; the cause is in

@@ -104,8 +104,12 @@ fn direct_ci_batch_red_only_on_the_union_is_not_pushed_and_both_tasks_are_told()
     let log = log.lock().unwrap().clone();
     let one = w.task("adds the item", &[("a/one.txt", "dup-item\n")]);
     let two = w.task("adds it too", &[("a/two.txt", "dup-item\n")]);
-    wait_for("task one to be sent back", 120, || w.sent_back(one).is_some());
-    wait_for("task two to be sent back", 60, || w.sent_back(two).is_some());
+    wait_for("task one to be sent back", 120, || {
+        w.sent_back(one).is_some()
+    });
+    wait_for("task two to be sent back", 60, || {
+        w.sent_back(two).is_some()
+    });
     assert!(w.sent_back(one).unwrap().contains("alpha"));
     assert!(w.sent_back(two).unwrap().contains("alpha"));
     assert!(!w.landed(one) && !w.landed(two));

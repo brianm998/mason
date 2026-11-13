@@ -53,6 +53,12 @@ next = "land"
 build = "{project_test} --no-run"
 command = "{project_test}"
 rerun = "{project_test} {tests}"
+# `run_check` while developing, asked for with `changed: true`: only the crates the diff touches
+# and their dependents. The test step runs `command` whole (decision 0205). Commented out until
+# the daemon with s210 is live: the daemon that validates this file when it lands does not know
+# the keys yet (as with `build` in s178). A follow-up uncomments both lines.
+# dev_command = "{project_test} {packages}"
+# dev_build = "{project_test} {packages} --no-run"
 parser = "regex"
 pass_regex = '^test (.+) \.\.\. ok$'
 fail_regex = '^test (.+) \.\.\. FAILED$'
@@ -68,11 +74,15 @@ min_tests = 1
 level = "unit"
 uses = { test-suite = 1 }
 
-# Gradle prints a line per test only at --info.
+# Read from Gradle's JUnit XML, not its console: Gradle 9 prints no per-test lines even at --info, and it
+# skips `test` as up to date when the worktree already ran it (an agent's run_check does). Both gave 0 tests,
+# and six tasks failed `compose-clients` on 2026-11-12. `cleanTest` forces the run; the per-class XML files are
+# joined into one file for `results_file`, and Gradle's exit status is kept.
 [suite.compose-clients]
 build = "cd clients/compose && gradle testClasses --console=plain"
-command = "cd clients/compose && gradle test --info --console=plain"
-parser = "gradle"
+command = '''cd clients/compose && gradle cleanTest test --console=plain; rc=$?; mkdir -p build; { echo '<testsuites>'; for f in */build/test-results/test/TEST-*.xml; do [ -f "$f" ] && sed '1{/^<?xml/d;}' "$f"; done; echo '</testsuites>'; } > build/mason-test-results.xml; exit $rc'''
+parser = "junit"
+results_file = "clients/compose/build/mason-test-results.xml"
 min_tests = 1
 level = "unit"
 uses = { test-suite = 1 }
