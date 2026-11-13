@@ -11,9 +11,9 @@
 //! result.
 
 use mason_adapter_api::contract::{tool_spec, StepKind};
+use mason_platform::net::UnixStream;
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
 /// How long a `run_check` waits for a controller that went away mid-check.

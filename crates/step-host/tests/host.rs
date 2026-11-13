@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+#![cfg(unix)] // Unix-only: signals, permission bits or unix sockets. Windows coverage comes with the later port tasks.
 
 use mason_step_host::client::{collect_to_file, ClientError, Event, HostClient};
 use mason_step_host::launcher::{
