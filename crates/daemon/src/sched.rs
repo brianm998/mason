@@ -1742,10 +1742,7 @@ mod tests {
         let (b, _first, second) = waiting_broker(dir.path());
         b.lease_set_pid(second, std::process::id());
         age_poll(&b, second, Duration::from_secs(600));
-        assert!(matches!(
-            b.lease_poll(second),
-            LeaseState::Waiting { .. }
-        ));
+        assert!(matches!(b.lease_poll(second), LeaseState::Waiting { .. }));
     }
 
     #[test]
