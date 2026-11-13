@@ -285,8 +285,10 @@ fn a_suite_build_and_run_are_each_told_what_is_leased_for_them() {
 fn an_exclusive_suite_lease_is_named_in_the_held_list() {
     let runs = tempfile::tempdir().unwrap();
     let log = runs.path().join("held");
-    let def = suite_def("", "uses = { exclusive = 1 }", &log)
-        .replace("[resource.compile]", "[resource.exclusive]\ncount = 1\n\n[resource.compile]");
+    let def = suite_def("", "uses = { exclusive = 1 }", &log).replace(
+        "[resource.compile]",
+        "[resource.exclusive]\ncount = 1\n\n[resource.compile]",
+    );
     let (text, _) = run_suite_def(&def, &log);
     assert!(text.contains("exclusive"), "{text}");
 }
