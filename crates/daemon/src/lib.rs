@@ -9,6 +9,7 @@
 pub mod attention;
 pub mod basecheck;
 pub mod basefold;
+pub mod batch_ci;
 pub mod bg;
 pub mod blockers;
 pub mod ci_schedule;

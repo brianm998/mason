@@ -788,3 +788,22 @@ fn running_and_passed_jobs_leave_a_run_pending() {
     assert_eq!(g.gh.status("sha1").unwrap(), CiState::Pending);
     assert_eq!(cancels(&g), 0);
 }
+
+#[test]
+fn jobs_are_counted_by_where_they_are() {
+    use serde_json::json;
+    let jobs = vec![
+        json!({"name": "a", "status": "queued", "conclusion": null}),
+        json!({"name": "b", "status": "in_progress", "conclusion": null}),
+        json!({"name": "c", "status": "completed", "conclusion": "success"}),
+        json!({"name": "d", "status": "completed", "conclusion": "skipped"}),
+        json!({"name": "e", "status": "completed", "conclusion": "failure"}),
+    ];
+    let c = mason_adapters::github::count_jobs("pr-gate", "https://x/1", &jobs);
+    assert_eq!(
+        (c.queued, c.running, c.passed, c.failed),
+        (1, 1, 2, 1),
+        "{c:?}"
+    );
+    assert_eq!(c.running_names, vec!["b".to_string()]);
+}

@@ -33,6 +33,7 @@
 //! Global: `--data-dir D`, `--config-dir C` (or `MASON_DATA_DIR`, `MASON_CONFIG_DIR`).
 
 mod adopt;
+mod batch_ci;
 mod client;
 mod definition;
 mod doctor;
@@ -2077,6 +2078,12 @@ fn main() {
                     b["parked"].as_str().unwrap_or(""),
                     b["note"].as_str().unwrap_or("")
                 );
+                if b["ci"].is_object() {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |t| t.as_millis() as u64);
+                    println!("    {}", batch_ci::ci_line(&b["ci"], now));
+                }
             }
         }
         "debt" => match a.pos().as_deref() {

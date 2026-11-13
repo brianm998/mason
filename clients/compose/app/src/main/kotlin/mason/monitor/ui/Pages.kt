@@ -368,7 +368,19 @@ fun LandingPage(model: MonitorModel) {
             }
             Section("Batches") {
                 if (l.batches.isEmpty()) Text("No batch has formed yet.", style = theme.body(color = theme.muted))
-                l.batches.forEach { Text(batchText(it), style = theme.body()) }
+                l.batches.forEach { b ->
+                    Text(batchText(b), style = theme.body())
+                    b.ci?.let { ci ->
+                        val uri = androidx.compose.ui.platform.LocalUriHandler.current
+                        Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing)) {
+                            Text(
+                                batchCiText(ci),
+                                style = theme.body(color = if (batchCiFailed(ci)) theme.attention else theme.muted),
+                            )
+                            batchCiUrl(ci)?.let { u -> Link("CI run") { uri.openUri(u) } }
+                        }
+                    }
+                }
                 if (l.queue_idle_ms > 0) {
                     Text(
                         "Queue idle: ${l.queue_idle_ms / 1000} s with tasks waiting and nothing landing.",
@@ -395,6 +407,26 @@ fun batchText(b: mason.v1.BatchLine): String {
     if (b.note.isNotEmpty()) t += ". ${b.note}"
     return t
 }
+
+/** The CI line under a batch: per workflow "pr-gate: 11 jobs · 1 queued · 2 running · 7 passed". */
+fun batchCiText(ci: mason.v1.BatchCi): String {
+    val parts = ci.workflows.map { w ->
+        val total = w.queued + w.running + w.passed + w.failed
+        if (w.running + w.passed + w.failed == 0) {
+            "${w.workflow}: queued for a runner"
+        } else {
+            "${w.workflow}: $total jobs · ${w.queued} queued · ${w.running} running · ${w.passed} passed" +
+                if (w.failed > 0) " · ${w.failed} failed" else ""
+        }
+    }
+    return "CI: " + (if (parts.isEmpty()) "queued for a runner" else parts.joinToString("; "))
+}
+
+fun batchCiFailed(ci: mason.v1.BatchCi): Boolean = ci.workflows.any { it.failed > 0 }
+
+/** The run's address, only if it is http or https. */
+fun batchCiUrl(ci: mason.v1.BatchCi): String? =
+    ci.url.takeIf { it.startsWith("https://") || it.startsWith("http://") }
 
 @Composable
 fun UsagePage(model: MonitorModel) {
