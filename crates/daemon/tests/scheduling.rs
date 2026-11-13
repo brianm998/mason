@@ -304,6 +304,7 @@ fn linked(d: &Arc<Daemon>, label: &str, steps: u32) -> u64 {
         &map,
         Some(mason_daemon::sched::Standing {
             steps_remaining: steps,
+            span: 1,
             priority: 1,
         }),
     )

@@ -243,6 +243,7 @@ fn priority_first_orders_urgent_tasks_ahead_of_tasks_nearer_landing() {
     let as_task = |steps, priority| {
         Some(Standing {
             steps_remaining: steps,
+            span: 1,
             priority,
         })
     };
@@ -271,6 +272,7 @@ fn by_default_progress_orders_waiters_and_notes_show_newest_first() {
     let as_task = |steps, priority| {
         Some(Standing {
             steps_remaining: steps,
+            span: 1,
             priority,
         })
     };
