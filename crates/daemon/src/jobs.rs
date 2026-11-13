@@ -360,11 +360,15 @@ fn run_inner(d: &Arc<Daemon>, task: TaskId, step: State, run: StepRunId) {
     let c = match ctx(d, task, run) {
         Ok(c) => c,
         Err(why) => {
-            d.emit_for_run(task, run, EventKind::StepFailed {
+            d.emit_for_run(
+                task,
+                run,
+                EventKind::StepFailed {
                     task,
                     reason: why,
                     class: Some(FailClass::Code),
-                });
+                },
+            );
             return;
         }
     };
@@ -1285,6 +1289,13 @@ impl CheckHandler for TestChecks {
         let (true, Some(cmds)) = (name == "tests", &self.cmd) else {
             return CheckRun::Unknown;
         };
+        // No suites: the one command has no way to narrow, so it runs whole, and a green of
+        // it is the full command's green (the reuse below is of that only).
+        let whole = if scope.is_empty() {
+            ""
+        } else {
+            "Scope ignored: this project has no suite that can narrow, so the whole command ran.\n"
+        };
         let over = || CheckRun::Done {
             passed: false,
             summary: "The step is over; the check did not run.".into(),
@@ -1390,7 +1401,7 @@ impl CheckHandler for TestChecks {
                         o.output
                     )
                 } else {
-                    format!("Last output:\n{}", o.output)
+                    format!("{whole}Last output:\n{}", o.output)
                 },
             },
             Err(e) => CheckRun::Done {
