@@ -16,16 +16,16 @@ name = "mason"
 path = "src/main.rs"
 
 [dependencies]
-mason-adapters = { version = "0.0.0", path = "../adapters" }
-mason-daemon = { version = "0.0.0", path = "../daemon" }
-mason-definition = { version = "0.0.0", path = "../definition" }
-mason-landing = { version = "0.0.0", path = "../landing" }
-mason-core = { version = "0.0.0", path = "../core" }
-mason-protocol = { version = "0.0.0", path = "../protocol" }
-mason-resources = { version = "0.0.0", path = "../resources" }
-mason-testing = { version = "0.0.0", path = "../testing" }
-mason-step-host = { version = "0.0.0", path = "../step-host" }
-mason-platform = { version = "0.0.0", path = "../platform" }
+mason-adapters = { version = "0.1.0", path = "../adapters" }
+mason-daemon = { version = "0.1.0", path = "../daemon" }
+mason-definition = { version = "0.1.0", path = "../definition" }
+mason-landing = { version = "0.1.0", path = "../landing" }
+mason-core = { version = "0.1.0", path = "../core" }
+mason-protocol = { version = "0.1.0", path = "../protocol" }
+mason-resources = { version = "0.1.0", path = "../resources" }
+mason-testing = { version = "0.1.0", path = "../testing" }
+mason-step-host = { version = "0.1.0", path = "../step-host" }
+mason-platform = { version = "0.1.0", path = "../platform" }
 serde_json = "1.0.154"
 toml_edit = "0.25.18"
 

@@ -20,7 +20,7 @@ set -euo pipefail
 
 version="${MASON_VERSION:-latest}"
 prefix="${MASON_PREFIX:-$HOME/.local}"
-base_url="${MASON_RELEASE_URL:-https://github.com/mason-pipeline/mason/releases}"
+base_url="${MASON_RELEASE_URL:-https://github.com/brianm998/mason/releases}"
 BINS="mason masond step-host mason-mcp"
 IDENTITY="mason: command-line client for the MASON pipeline"
 

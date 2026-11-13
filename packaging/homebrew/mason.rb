@@ -6,23 +6,23 @@
 # `mason doctor` explains how to choose.
 class Mason < Formula
   desc "Pipeline that takes tasks from a tracker to landed code with LLM agents"
-  homepage "https://github.com/mason-pipeline/mason"
-  version "0.0.0"
+  homepage "https://github.com/brianm998/mason"
+  version "0.1.0"
   license "GPL-3.0-or-later"
 
   on_macos do
     on_arm do
-      url "https://github.com/mason-pipeline/mason/releases/download/v0.0.0/mason-0.0.0-aarch64-apple-darwin.tar.gz"
+      url "https://github.com/brianm998/mason/releases/download/v0.1.0/mason-0.1.0-aarch64-apple-darwin.tar.gz"
       sha256 "0000000000000000000000000000000000000000000000000000000000000000"
     end
     on_intel do
-      url "https://github.com/mason-pipeline/mason/releases/download/v0.0.0/mason-0.0.0-x86_64-apple-darwin.tar.gz"
+      url "https://github.com/brianm998/mason/releases/download/v0.1.0/mason-0.1.0-x86_64-apple-darwin.tar.gz"
       sha256 "0000000000000000000000000000000000000000000000000000000000000000"
     end
   end
   on_linux do
     on_intel do
-      url "https://github.com/mason-pipeline/mason/releases/download/v0.0.0/mason-0.0.0-x86_64-unknown-linux-gnu.tar.gz"
+      url "https://github.com/brianm998/mason/releases/download/v0.1.0/mason-0.1.0-x86_64-unknown-linux-gnu.tar.gz"
       sha256 "0000000000000000000000000000000000000000000000000000000000000000"
     end
   end
