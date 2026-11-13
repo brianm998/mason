@@ -90,6 +90,8 @@ pub struct Ctx<'a> {
     runs: RunIndex,
     /// Task to the tasks it blocks, in id order.
     blocks: std::collections::HashMap<TaskId, Vec<u64>>,
+    /// The broker's wait reasons, taken once per build.
+    waits: std::sync::Arc<std::collections::BTreeMap<TaskId, String>>,
 }
 
 type LogCache = std::collections::HashMap<u64, (Vec<crate::http::LogStamp>, String)>;
@@ -183,6 +185,7 @@ impl<'a> Ctx<'a> {
             issues,
             runs: RunIndex::build(w.step_runs.values()),
             blocks,
+            waits: d.broker.waits_snapshot(),
         }
     }
 
@@ -332,8 +335,8 @@ impl<'a> Ctx<'a> {
     }
 
     fn why_waiting(&self, t: &Task) -> String {
-        if let Some(w) = self.d.broker.explain_task(t.id) {
-            return w;
+        if let Some(w) = self.waits.get(&t.id) {
+            return w.clone();
         }
         if t.state == State::Proposed && !t.blockers.is_empty() {
             return format!(
