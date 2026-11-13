@@ -86,6 +86,46 @@ fn direct_ci_red_goes_to_the_same_ladder_and_only_the_culprit_is_parked() {
     });
 }
 
+/// Two tasks that are each green alone and red together on the batch suite (a duplicate item that
+/// exists only in the union): the batch is red locally, nothing is pushed, both are told.
+#[test]
+fn direct_ci_batch_red_only_on_the_union_is_not_pushed_and_both_tasks_are_told() {
+    let checks = "#!/bin/sh\necho \"1..1\"\nif [ -n \"$(cat a/*.txt 2>/dev/null | sort | uniq -d)\" ]; then echo \"not ok 1 - $1\"; exit 1; fi\necho \"ok 1 - $1\"\n";
+    let log = std::sync::Mutex::new(PathBuf::new());
+    let w = world_with(
+        &toml("direct-ci", ""),
+        &|s| {
+            let (sec, l) = ci_section(s);
+            *log.lock().unwrap() = l;
+            sec
+        },
+        &[("checks.sh", checks)],
+    );
+    let log = log.lock().unwrap().clone();
+    let one = w.task("adds the item", &[("a/one.txt", "dup-item\n")]);
+    let two = w.task("adds it too", &[("a/two.txt", "dup-item\n")]);
+    wait_for("task one to be sent back", 120, || w.sent_back(one).is_some());
+    wait_for("task two to be sent back", 60, || w.sent_back(two).is_some());
+    assert!(w.sent_back(one).unwrap().contains("alpha"));
+    assert!(w.sent_back(two).unwrap().contains("alpha"));
+    assert!(!w.landed(one) && !w.landed(two));
+    assert!(!w.on_main("a/one.txt") && !w.on_main("a/two.txt"));
+    // The ladder's bisection may run CI on each task alone (both green there), but the union is
+    // never pushed: no CI run saw both files.
+    let state = log.parent().unwrap();
+    for e in std::fs::read_dir(state).unwrap().flatten() {
+        let t = e.path().join("t");
+        assert!(
+            !(t.join("a/one.txt").exists() && t.join("a/two.txt").exists()),
+            "CI ran on the union: {}",
+            e.path().display()
+        );
+    }
+    wait_for("every candidate to be deleted", 30, || {
+        remote_branches(&w.s).is_empty()
+    });
+}
+
 #[test]
 fn direct_ci_folds_in_a_moved_base_and_runs_ci_again() {
     let (w, log) = ci_world("direct-ci");
