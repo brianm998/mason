@@ -413,7 +413,6 @@ pub enum LeaseState {
     Gone,
 }
 
-<<<<<<< HEAD
 /// Put a gate's effective value (the runtime one, else resources.toml's) into `State`.
 fn apply_gate(st: &mut State, name: &str) {
     let v = st
