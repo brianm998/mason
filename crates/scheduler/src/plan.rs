@@ -302,7 +302,7 @@ pub fn plan(world: &World, waiting: &[Request]) -> Plan {
     let mut usage = Usage::new(capacity, world.holders);
     let mut blocked = Blocked::default();
     let mut out = Plan::default();
-    let mut ahead: Vec<&Request> = vec![];
+    let mut ahead: Vec<(&Request, WaitCause)> = vec![];
     // Holders as the plan goes: those granted earlier in it count as held.
     let mut holders: Vec<Holder> = world.holders.to_vec();
     let mut last_compile_start = world.compile_pace.and_then(|p| p.last_start);
@@ -316,8 +316,8 @@ pub fn plan(world: &World, waiting: &[Request]) -> Plan {
             _ => None,
         };
         let compile_running = usage.used.get(COMPILE).is_some_and(|n| *n > 0);
-        // Only a further compile waits for the CPU: the first always starts. CPU use
-        // is the whole machine's, so other work (another pipeline's builds, an
+        // Only a further compile waits for the CPU or the pacing: the first always
+        // starts. CPU use is the whole machine's, so other work (another pipeline's builds, an
         // editor indexing) would otherwise hold every compile back with none of
         // ours running, which is the queue waiting on an idle `compile`.
         // A landing is not held by the CPU or the pacing either: its verification
@@ -331,9 +331,11 @@ pub fn plan(world: &World, waiting: &[Request]) -> Plan {
             Some(g) if compiles && compile_running && g.slow_ms >= g.max_ms => Some(g),
             _ => None,
         };
+        // The pacing lets a started compile show in the CPU reading; with none running
+        // there is nothing to wait for.
         let settling = world
             .compile_pace
-            .filter(|_| gated)
+            .filter(|_| gated && compile_running)
             .and_then(|p| Some(last_compile_start? + p.gap_ms))
             .filter(|until| world.now < *until);
         let low_disk = match world.disk {
@@ -405,7 +407,7 @@ pub fn plan(world: &World, waiting: &[Request]) -> Plan {
                 // A request that can never fit must not hold up the others.
                 if !matches!(fitted, Fit::Never(_)) {
                     blocked.add(capacity, &r.needs);
-                    ahead.push(r);
+                    ahead.push((r, cause));
                 }
             }
         }
@@ -416,7 +418,7 @@ pub fn plan(world: &World, waiting: &[Request]) -> Plan {
 fn build_wait(
     capacity: &BTreeMap<String, Capacity>,
     holders: &[Holder],
-    ahead: &[&Request],
+    ahead: &[(&Request, WaitCause)],
     cause: WaitCause,
 ) -> Wait {
     // The requests ahead that need what this one is stuck on.
@@ -432,7 +434,7 @@ fn build_wait(
         | WaitCause::Disk { .. } => true,
         _ => false,
     };
-    let ahead_of_me: Vec<&&Request> = ahead.iter().filter(|o| same(o)).collect();
+    let ahead_of_me: Vec<&(&Request, WaitCause)> = ahead.iter().filter(|o| same(o.0)).collect();
     let held = |h: &Holder| match &cause {
         WaitCause::Full { resource } | WaitCause::Behind { resource } => {
             h.needs.amounts.contains_key(resource)
@@ -460,9 +462,10 @@ fn build_wait(
         position: ahead_of_me.len() + 1,
         behind: ahead_of_me
             .iter()
-            .map(|o| Ahead {
+            .map(|(o, c)| Ahead {
                 label: o.label.clone(),
                 steps: (!o.rank.interactive()).then(|| o.rank.steps()),
+                cause: Some(c.clone()),
             })
             .collect(),
         held_by,
