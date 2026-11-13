@@ -303,6 +303,13 @@ fn main() {
         }
     }
     let mut a = Args { rest };
+    if a.rest.first().map(String::as_str) == Some("--version") {
+        println!(
+            "{}",
+            mason_daemon::version::line(env!("CARGO_PKG_VERSION"), env!("MASON_COMMIT"))
+        );
+        return;
+    }
     if a.rest.is_empty() || a.flag("--help") || a.flag("-h") {
         println!("{HELP}");
         return;

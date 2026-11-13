@@ -11,9 +11,9 @@ publish = false
 workspace = true
 
 [dependencies]
-mason-adapter-api = { version = "0.0.0", path = "../adapter-api" }
-mason-step-host = { version = "0.0.0", path = "../step-host" }
-mason-platform = { version = "0.0.0", path = "../platform" }
+mason-adapter-api = { version = "0.1.0", path = "../adapter-api" }
+mason-step-host = { version = "0.1.0", path = "../step-host" }
+mason-platform = { version = "0.1.0", path = "../platform" }
 serde_json = "1.0.154"
 
 [dev-dependencies]
