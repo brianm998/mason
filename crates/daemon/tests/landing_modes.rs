@@ -115,7 +115,7 @@ fn four(w: &W) -> (Vec<TaskId>, TaskId) {
 fn redbase_alert(w: &W) -> Option<String> {
     mason_daemon::attention::alerts_now(&w.d)
         .into_iter()
-        .find(|(k, kind, _)| k.starts_with("redbase") && kind == "landing")
+        .find(|(k, kind, _)| k.ends_with(":redbase") && kind == "landing")
         .map(|(_, _, t)| t)
 }
 
