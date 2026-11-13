@@ -12,6 +12,7 @@ use crate::Daemon;
 use mason_landing::git;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 

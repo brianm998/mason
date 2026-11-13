@@ -517,6 +517,12 @@ message UpdateInfo {
   bool daemon_can_update = 2;
   // One per kind of desktop monitor the daemon can build.
   repeated MonitorBuild monitors = 3;
+  // The button's label: "Update masond", "Update now" (an update is built and waiting
+  // for landing batches) or empty (additive).
+  string daemon_button = 4;
+  // Asked before the button acts, written by the daemon so both monitors say the same
+  // words; empty when no confirmation is needed (additive).
+  string daemon_confirm = 5;
 }
 
 message MonitorBuild {
