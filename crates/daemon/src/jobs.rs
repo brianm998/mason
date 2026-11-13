@@ -414,6 +414,10 @@ fn run_inner(d: &Arc<Daemon>, task: TaskId, step: State, run: StepRunId) {
 pub(crate) fn step_env_pairs(c: &Ctx) -> Vec<(String, String)> {
     vec![
         ("MASON_TASK".into(), c.task.0.to_string()),
+        (
+            "MASON_TASK_CACHE".into(),
+            crate::taskcache::own_dir(&c.d, c.task.0),
+        ),
         ("MASON_TITLE".into(), c.title.clone()),
         ("MASON_PROJECT".into(), c.project.id.clone()),
         ("MASON_WORKTREE".into(), c.wt.to_string_lossy().into_owned()),
@@ -421,9 +425,10 @@ pub(crate) fn step_env_pairs(c: &Ctx) -> Vec<(String, String)> {
         ("MASON_BASE".into(), c.project.base_ref()),
         ("MASON_STEP".into(), c.step.name.clone()),
         ("MASON_ATTEMPT".into(), c.attempt.to_string()),
-        // What the step already holds from the broker (its `uses`), so a command
-        // that would queue for the same class (`mason run --needs`) can tell it
-        // need not, and does not wait on itself.
+        // What the step already holds from the broker. Here that is the step's own
+        // `uses`; each command is told what is leased for it (`command_job` and the
+        // suites override this), so a command that would queue for the same class
+        // (`mason run --needs`) can tell it need not, and does not wait on itself.
         ("MASON_HELD".into(), held_text(&c.step.uses)),
         (
             "MASON_RESULT_FILE".into(),
@@ -698,6 +703,18 @@ pub(crate) fn held_text(uses: &std::collections::BTreeMap<String, u32>) -> Strin
         .map(|(k, _)| k.as_str())
         .collect::<Vec<_>>()
         .join(",")
+}
+
+/// `MASON_HELD` for a lease: its classes, plus `exclusive` when it holds the machine.
+pub(crate) fn held_needs_text(needs: &mason_scheduler::Needs) -> String {
+    let mut text = held_text(&needs.amounts);
+    if needs.exclusive && !needs.amounts.contains_key("exclusive") {
+        if !text.is_empty() {
+            text.push(',');
+        }
+        text.push_str("exclusive");
+    }
+    text
 }
 
 /// A test step's build, when it has one: its command runs in two phases.
@@ -2000,6 +2017,11 @@ fn agent_job(c: &Ctx) {
     // another task.
     spec.env.retain(|(k, _)| k != "MASON_TASK");
     spec.env.push(("MASON_TASK".into(), c.task.0.to_string()));
+    spec.env.retain(|(k, _)| k != "MASON_TASK_CACHE");
+    spec.env.push((
+        "MASON_TASK_CACHE".into(),
+        crate::taskcache::own_dir(&c.d, c.task.0),
+    ));
     spec.tool_timeout = tool_timeout_for(kind, &c.project);
     spec.deadline = Some(
         c.res
@@ -2288,7 +2310,16 @@ fn settle_all(
                 } else {
                     text
                 };
-                let restart = lost.len() <= hl::MAX_AGENT_RESTARTS;
+                // A host the daemon's own restart took is not the task's failure: it
+                // is recorded but not counted toward the restart budget.
+                let counted = lost
+                    .iter()
+                    .filter(|id| {
+                        let r = mason_step_host::registry::lost_report(&root.join(id));
+                        !r.is_ok_and(|r| hl::is_restart_loss(&root, r.last_heartbeat_ms, r.at_ms))
+                    })
+                    .count();
+                let restart = counted <= hl::MAX_AGENT_RESTARTS;
                 hl::record_as(&c.d, Some(c.run), &c.step.name, &newest, at, text, restart);
                 if !restart {
                     let all: Vec<String> = lost.iter().map(|id| describe(id).0).collect();
@@ -3236,6 +3267,10 @@ pub fn cleanup(d: &Arc<Daemon>, task: TaskId, delete_branch: bool) {
     // a thread of its own, outside the lock: deleting gigabytes takes a while (s78).
     if landed {
         crate::taskcache::remove_in_background(d, p, task.0);
+    }
+    // The directory MASON owns (`MASON_TASK_CACHE`) goes when the task lands or is canceled.
+    if landed || t.state == State::Canceled {
+        crate::taskcache::remove_own_in_background(d, task.0);
     }
 }
 

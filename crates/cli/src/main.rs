@@ -63,7 +63,7 @@ mason: command-line client for the MASON pipeline
   mason task revive <id>              put a canceled task whose branch was kept back in the queue (owner only)
   mason task show <id> [--json] [--watch]   with --watch, follow the live step progress
   mason task cancel <id> [--delete-branch]
-  mason task retry <id> [--from STEP]
+  mason task retry <id> [--from STEP] [--restart]
   mason task approve <id>             let a proposed task start, or an approval step go on
   mason task reject <id> [--reason R] reject a proposed task or an approval step
   mason task explore-anyway <id>      explore after all, even if it skipped exploring
@@ -300,6 +300,13 @@ fn main() {
         }
     }
     let mut a = Args { rest };
+    if a.rest.first().map(String::as_str) == Some("--version") {
+        println!(
+            "{}",
+            mason_daemon::version::line(env!("CARGO_PKG_VERSION"), env!("MASON_COMMIT"))
+        );
+        return;
+    }
     if a.rest.is_empty() || a.flag("--help") || a.flag("-h") {
         println!("{HELP}");
         return;
@@ -2718,17 +2725,26 @@ fn main() {
                 "retry" => {
                     let id = task_id(&mut a);
                     let from = a.opt("--from");
+                    let restart = a.flag("--restart");
                     finish(&a);
                     // Without --from the daemon picks: the failed step when the
                     // failure was not about the code, otherwise developing. Say
                     // which before sending.
+                    // The run shown is sent back, so a second retry of the same
+                    // failure is refused.
+                    let t = or_die(d.call("GET", &format!("/tasks/{id}"), None));
                     if from.is_none() {
-                        let t = or_die(d.call("GET", &format!("/tasks/{id}"), None));
                         if let Some(to) = t["retry_to"].as_str() {
                             println!("Task #{id} will retry from `{to}`");
                         }
                     }
-                    let body = from.as_ref().map_or(json!({}), |f| json!({"to": f}));
+                    let mut body = from.as_ref().map_or(json!({}), |f| json!({"to": f}));
+                    if let Some(run) = t["last_run"].as_u64() {
+                        body["seen"] = json!(run);
+                    }
+                    if restart {
+                        body["restart"] = json!(true);
+                    }
                     let r = or_die(d.call("POST", &format!("/tasks/{id}/retry"), Some(&body)));
                     println!(
                         "Retrying task #{id} from {}",
