@@ -493,10 +493,18 @@ fn call_for(c: &Command) -> Result<Call, String> {
         ),
         Cmd::Retry(r) => post(
             format!("/tasks/{}/retry", r.task),
-            Some(if r.from.is_empty() {
-                json!({})
-            } else {
-                json!({"to": r.from})
+            Some({
+                let mut b = json!({});
+                if !r.from.is_empty() {
+                    b["to"] = json!(r.from);
+                }
+                if r.seen != 0 {
+                    b["seen"] = json!(r.seen);
+                }
+                if r.restart {
+                    b["restart"] = json!(true);
+                }
+                b
             }),
             Some((r.task, "retry")),
         ),
