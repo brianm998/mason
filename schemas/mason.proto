@@ -834,6 +834,29 @@ message BatchLine {
   repeated uint64 parked = 6;
   string note = 7;
   bool running = 8;
+  // The CI the batch is waiting on, or waited on last. Absent when it has none.
+  optional BatchCi ci = 9;
+}
+
+// One workflow's job counts in a CI run.
+message WorkflowJobs {
+  string workflow = 1;
+  uint32 queued = 2;
+  uint32 running = 3;
+  uint32 passed = 4;
+  uint32 failed = 5;
+  repeated string running_names = 6;
+}
+
+// A batch's CI: the ref it runs on, the run's http(s) address, and where each workflow is.
+message BatchCi {
+  string ci_ref = 1;
+  // Empty unless http or https.
+  string url = 2;
+  uint64 started_ms = 3;
+  // queued, running, green or red.
+  string state = 4;
+  repeated WorkflowJobs workflows = 5;
 }
 
 // A project whose post-land tier went red: only the fix may land.

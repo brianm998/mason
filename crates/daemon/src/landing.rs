@@ -108,6 +108,8 @@ impl State {
 pub struct Landing {
     m: Mutex<State>,
     cv: Condvar,
+    /// Each batch's live CI, for the landing view (records only).
+    pub ci: crate::batch_ci::CiBook,
 }
 
 impl Landing {
@@ -2139,6 +2141,7 @@ impl Runner {
         let name = format!("mason/ci/{}-b{batch}-{}", self.project().id, self.next_n());
         let (sha, ref_id) = self.push_candidate(wt, "ci", &name)?;
         let started = Instant::now();
+        self.d.landing.ci.start(batch, &name, now_ms());
         self.say(&format!("waiting for CI on {name}"));
         let r = (|| {
             let run = self.ask("CI trigger", started, cfg.timeout_s, cfg.poll_s, || {
@@ -2146,11 +2149,22 @@ impl Runner {
             })?;
             self.ask("CI", started, cfg.timeout_s, cfg.poll_s, || {
                 Ok(match ci.status(&run)? {
-                    CiState::Pending => None,
+                    CiState::Pending => {
+                        // For the landing view only; a failed read changes nothing.
+                        if let Ok(p) = ci.progress(&run) {
+                            self.d.landing.ci.update(batch, &p);
+                        }
+                        None
+                    }
                     done => Some(done),
                 })
             })
         })();
+        match &r {
+            Ok(CiState::Green) => self.d.landing.ci.finish(batch, "green"),
+            Ok(CiState::Red { .. }) => self.d.landing.ci.finish(batch, "red"),
+            _ => {}
+        }
         self.point("ci_finished");
         self.drop_candidate(&name, ref_id);
         Ok(match r? {

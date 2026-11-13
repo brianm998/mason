@@ -1064,6 +1064,12 @@ impl<'a> Ctx<'a> {
                     parked: ids(&b.parked),
                     note: b.note.clone(),
                     running: live.contains(&b.id),
+                    ci: self
+                        .d
+                        .landing
+                        .ci
+                        .get(b.id)
+                        .map(|c| crate::batch_ci::to_proto(&c)),
                 })
                 .collect(),
             freezes,

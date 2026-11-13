@@ -2471,6 +2471,64 @@ public nonisolated struct Mason_V1_BatchLine: Sendable {
 
   public var running: Bool = false
 
+  /// The CI the batch is waiting on, or waited on last. Absent when it has none.
+  public var ci: Mason_V1_BatchCi {
+    get {_ci ?? Mason_V1_BatchCi()}
+    set {_ci = newValue}
+  }
+  /// Returns true if `ci` has been explicitly set.
+  public var hasCi: Bool {self._ci != nil}
+  /// Clears the value of `ci`. Subsequent reads from it will return its default value.
+  public mutating func clearCi() {self._ci = nil}
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _ci: Mason_V1_BatchCi? = nil
+}
+
+/// One workflow's job counts in a CI run.
+public nonisolated struct Mason_V1_WorkflowJobs: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var workflow: String = String()
+
+  public var queued: UInt32 = 0
+
+  public var running: UInt32 = 0
+
+  public var passed: UInt32 = 0
+
+  public var failed: UInt32 = 0
+
+  public var runningNames: [String] = []
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// A batch's CI: the ref it runs on, the run's http(s) address, and where each workflow is.
+public nonisolated struct Mason_V1_BatchCi: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var ciRef: String = String()
+
+  /// Empty unless http or https.
+  public var url: String = String()
+
+  public var startedMs: UInt64 = 0
+
+  /// queued, running, green or red.
+  public var state: String = String()
+
+  public var workflows: [Mason_V1_WorkflowJobs] = []
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -7362,7 +7420,7 @@ nonisolated extension Mason_V1_NumberLine: SwiftProtobuf.Message, SwiftProtobuf.
 
 nonisolated extension Mason_V1_BatchLine: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".BatchLine"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{1}project\0\u{1}phase\0\u{1}tasks\0\u{1}landed\0\u{1}parked\0\u{1}note\0\u{1}running\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{1}project\0\u{1}phase\0\u{1}tasks\0\u{1}landed\0\u{1}parked\0\u{1}note\0\u{1}running\0\u{1}ci\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -7378,12 +7436,17 @@ nonisolated extension Mason_V1_BatchLine: SwiftProtobuf.Message, SwiftProtobuf._
       case 6: try { try decoder.decodeRepeatedUInt64Field(value: &self.parked) }()
       case 7: try { try decoder.decodeSingularStringField(value: &self.note) }()
       case 8: try { try decoder.decodeSingularBoolField(value: &self.running) }()
+      case 9: try { try decoder.decodeSingularMessageField(value: &self._ci) }()
       default: break
       }
     }
   }
 
   public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
     if self.id != 0 {
       try visitor.visitSingularUInt64Field(value: self.id, fieldNumber: 1)
     }
@@ -7408,6 +7471,9 @@ nonisolated extension Mason_V1_BatchLine: SwiftProtobuf.Message, SwiftProtobuf._
     if self.running != false {
       try visitor.visitSingularBoolField(value: self.running, fieldNumber: 8)
     }
+    try { if let v = self._ci {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 9)
+    } }()
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -7420,6 +7486,112 @@ nonisolated extension Mason_V1_BatchLine: SwiftProtobuf.Message, SwiftProtobuf._
     if lhs.parked != rhs.parked {return false}
     if lhs.note != rhs.note {return false}
     if lhs.running != rhs.running {return false}
+    if lhs._ci != rhs._ci {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Mason_V1_WorkflowJobs: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".WorkflowJobs"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}workflow\0\u{1}queued\0\u{1}running\0\u{1}passed\0\u{1}failed\0\u{3}running_names\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.workflow) }()
+      case 2: try { try decoder.decodeSingularUInt32Field(value: &self.queued) }()
+      case 3: try { try decoder.decodeSingularUInt32Field(value: &self.running) }()
+      case 4: try { try decoder.decodeSingularUInt32Field(value: &self.passed) }()
+      case 5: try { try decoder.decodeSingularUInt32Field(value: &self.failed) }()
+      case 6: try { try decoder.decodeRepeatedStringField(value: &self.runningNames) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.workflow.isEmpty {
+      try visitor.visitSingularStringField(value: self.workflow, fieldNumber: 1)
+    }
+    if self.queued != 0 {
+      try visitor.visitSingularUInt32Field(value: self.queued, fieldNumber: 2)
+    }
+    if self.running != 0 {
+      try visitor.visitSingularUInt32Field(value: self.running, fieldNumber: 3)
+    }
+    if self.passed != 0 {
+      try visitor.visitSingularUInt32Field(value: self.passed, fieldNumber: 4)
+    }
+    if self.failed != 0 {
+      try visitor.visitSingularUInt32Field(value: self.failed, fieldNumber: 5)
+    }
+    if !self.runningNames.isEmpty {
+      try visitor.visitRepeatedStringField(value: self.runningNames, fieldNumber: 6)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Mason_V1_WorkflowJobs, rhs: Mason_V1_WorkflowJobs) -> Bool {
+    if lhs.workflow != rhs.workflow {return false}
+    if lhs.queued != rhs.queued {return false}
+    if lhs.running != rhs.running {return false}
+    if lhs.passed != rhs.passed {return false}
+    if lhs.failed != rhs.failed {return false}
+    if lhs.runningNames != rhs.runningNames {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Mason_V1_BatchCi: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".BatchCi"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}ci_ref\0\u{1}url\0\u{3}started_ms\0\u{1}state\0\u{1}workflows\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.ciRef) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.url) }()
+      case 3: try { try decoder.decodeSingularUInt64Field(value: &self.startedMs) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.state) }()
+      case 5: try { try decoder.decodeRepeatedMessageField(value: &self.workflows) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.ciRef.isEmpty {
+      try visitor.visitSingularStringField(value: self.ciRef, fieldNumber: 1)
+    }
+    if !self.url.isEmpty {
+      try visitor.visitSingularStringField(value: self.url, fieldNumber: 2)
+    }
+    if self.startedMs != 0 {
+      try visitor.visitSingularUInt64Field(value: self.startedMs, fieldNumber: 3)
+    }
+    if !self.state.isEmpty {
+      try visitor.visitSingularStringField(value: self.state, fieldNumber: 4)
+    }
+    if !self.workflows.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.workflows, fieldNumber: 5)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Mason_V1_BatchCi, rhs: Mason_V1_BatchCi) -> Bool {
+    if lhs.ciRef != rhs.ciRef {return false}
+    if lhs.url != rhs.url {return false}
+    if lhs.startedMs != rhs.startedMs {return false}
+    if lhs.state != rhs.state {return false}
+    if lhs.workflows != rhs.workflows {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

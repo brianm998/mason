@@ -116,6 +116,11 @@ description = "Queue, batches, phases, debts and freeze status"
 swift = "done"
 compose = "done"
 
+[feature.landing-batch-ci]
+description = "The landing page shows each batch's CI under it: per workflow the jobs queued, running, passed and failed (failed in the alert colour), 'queued for a runner' while none has started, and a link that opens the run's http(s) address"
+swift = "done"
+compose = "done"
+
 [feature.tracker-state]
 description = "The landing page shows one tracker line per project: off (with the config path to add [tracker] to), polling with imported, ignored, unchanged and waiting-for-a-slot counts, or stopped with the reason"
 swift = "done"
