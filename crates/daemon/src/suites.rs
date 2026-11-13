@@ -262,6 +262,7 @@ fn run_hosted(
     run: Option<StepRunId>,
     watch: Option<&Suite>,
     th: Thresholds,
+    env: Vec<(String, String)>,
 ) -> Result<Ran, String> {
     use crate::hostloss as hl;
     let hosts = d.cfg.hosts_dir();
@@ -290,6 +291,7 @@ fn run_hosted(
             run,
             watch,
             th,
+            env.clone(),
         ) {
             Ok(r) => return Ok(r),
             Err(HostedErr::Other(e)) => return Err(e),
@@ -326,6 +328,7 @@ fn run_hosted_once(
     run: Option<StepRunId>,
     watch: Option<&Suite>,
     th: Thresholds,
+    env: Vec<(String, String)>,
 ) -> Result<Ran, HostedErr> {
     let hosts = d.cfg.hosts_dir();
     let dir = hosts.join(id);
@@ -336,7 +339,7 @@ fn run_hosted_once(
             id: id.to_string(),
             cmd: vec!["sh".into(), "-c".into(), cmd.to_string()],
             cwd: Some(cwd.to_path_buf()),
-            env: vec![],
+            env,
             clear_env: false,
             stdin: None,
             linger: Duration::from_secs(600),
@@ -591,6 +594,9 @@ struct Who {
     /// A step run that shows this run's progress though no task owns it (a landing batch's
     /// suites report into its first member's run).
     sink: Option<StepRunId>,
+    /// The environment every command gets: for a task's step, its `MASON_*` facts with
+    /// `MASON_HELD` naming what is leased for the command now running.
+    env: Vec<(String, String)>,
 }
 
 impl Who {
@@ -832,6 +838,7 @@ fn baseline(
             who.run(),
             None,
             who.thresholds(),
+            who.env.clone(),
         )
         .ok()?;
         if ran.stop != Stop::No {
@@ -991,6 +998,7 @@ fn run_suite(
             who.run(),
             Some(suite),
             who.thresholds(),
+            who.env.clone(),
         ) {
             Ok(r) => r,
             Err(e) => {
@@ -1231,6 +1239,7 @@ fn rerun_failing(
         who.run(),
         None,
         who.thresholds(),
+        who.env.clone(),
     )
     .ok()?;
     if ran.stop != Stop::No {
@@ -1266,6 +1275,18 @@ fn lease(c: &Ctx, needs: Needs) -> bool {
     }
 }
 
+/// The step's `MASON_*` variables, with `MASON_HELD` naming what is leased for the
+/// command about to run (not just the step's own `uses`).
+fn held_env(c: &Ctx, held: &Needs) -> Vec<(String, String)> {
+    let mut env = crate::jobs::step_env_pairs(c);
+    for (k, v) in env.iter_mut() {
+        if k == "MASON_HELD" {
+            *v = crate::jobs::held_needs_text(held);
+        }
+    }
+    env
+}
+
 /// A suite's build, in a worktree, under a step host. Green is exit status 0.
 fn run_build(who: &Who, suite: &Suite, build: &str, n: usize, cwd: &Path) -> Built {
     let id = format!("{}-b{n}-{}", who.id_prefix, suite.name);
@@ -1281,6 +1302,7 @@ fn run_build(who: &Who, suite: &Suite, build: &str, n: usize, cwd: &Path) -> Bui
         who.run(),
         None,
         who.thresholds(),
+        who.env.clone(),
     ) {
         Ok(r) => r,
         Err(e) => return Built::Red(format!("Building `{}` could not run: {e}", suite.name)),
@@ -1327,7 +1349,7 @@ pub fn run(c: &Ctx) {
     }
     let d = &c.d;
     let log_dir = c.task_dir().join(format!("suites-r{}", c.run.0));
-    let who = Who {
+    let mut who = Who {
         d: d.clone(),
         task: Some((c.task, c.run)),
         step: c.step.name.clone(),
@@ -1335,6 +1357,7 @@ pub fn run(c: &Ctx) {
         log_dir: log_dir.clone(),
         id_prefix: format!("t{}r{}", c.task.0, c.run.0),
         sink: None,
+        env: vec![],
     };
     let head = |rev: &str| git::run(&c.wt, &["rev-parse", rev]).map(|s| s.trim().to_string());
     let (Ok(tree_hash), Ok(head_sha)) = (head("HEAD^{tree}"), head("HEAD")) else {
@@ -1400,6 +1423,17 @@ pub fn run(c: &Ctx) {
     // A suite that builds first queues phase by phase: its build holds one `compile` slot and
     // gives it back, then its run holds the rest. The step then holds nothing between suites.
     let per_suite = sels.iter().any(|s| s.selected && s.suite.build.is_some());
+    if !per_suite {
+        // The step holds one lease for all its suites (see `jobs::acquire`).
+        let mut needs = needs_of(&c.step.uses, None);
+        let more = needs_for(&c.project, &c.def, &c.step, &c.branch);
+        needs.exclusive |= more.exclusive;
+        for (k, v) in more.amounts {
+            let have = needs.amounts.entry(k).or_insert(0);
+            *have = (*have).max(v);
+        }
+        who.env = held_env(c, &needs);
+    }
     let project_test =
         crate::jobs::test_commands(d, &c.def, c.project_id, Some(c.task)).map(|t| t.test);
     let mut built: Vec<String> = vec![];
@@ -1422,7 +1456,9 @@ pub fn run(c: &Ctx) {
                 .as_ref()
                 .filter(|b| !reused && !built.contains(b))
             {
-                if !lease(c, needs_of(&crate::jobs::build_uses(), None)) {
+                let needs = needs_of(&crate::jobs::build_uses(), None);
+                who.env = held_env(c, &needs);
+                if !lease(c, needs) {
                     return;
                 }
                 let ran = run_build(&who, &suite, b, built.len(), &c.wt);
@@ -1439,7 +1475,9 @@ pub fn run(c: &Ctx) {
                     Built::Ok => built.push(b.clone()),
                 }
             }
-            if !lease(c, run_needs(&c.def, &c.step, &suite)) {
+            let needs = run_needs(&c.def, &c.step, &suite);
+            who.env = held_env(c, &needs);
+            if !lease(c, needs) {
                 return;
             }
         }
@@ -1488,6 +1526,7 @@ pub fn run(c: &Ctx) {
     // The optional gates run suites of their own: hold what the whole step needs for them.
     if per_suite && !c.step.gates.is_empty() {
         let all = needs_for(&c.project, &c.def, &c.step, &c.branch);
+        who.env = held_env(c, &all);
         if !lease(c, all) {
             return;
         }
@@ -1699,6 +1738,7 @@ fn run_new_tests_at_base(
             who.run(),
             None,
             who.thresholds(),
+            who.env.clone(),
         )
         .ok()?;
         Some(judge_ran(suite, &ran, &wt).results)
@@ -1806,6 +1846,7 @@ pub fn pay(d: &Arc<Daemon>, debt: u64) -> Result<String, String> {
         log_dir: dir.clone(),
         id_prefix: format!("debt{debt}"),
         sink: None,
+        env: vec![],
     };
     let tree_hash = git::run(&wt, &["rev-parse", "HEAD^{tree}"])
         .map(|s| s.trim().to_string())
@@ -1908,6 +1949,7 @@ pub fn run_over(
         log_dir: log_dir.to_path_buf(),
         id_prefix: id_prefix.to_string(),
         sink,
+        env: vec![],
     };
     let _ = std::fs::create_dir_all(log_dir);
     let mut out = OverRun {
