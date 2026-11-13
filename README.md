@@ -247,4 +247,5 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s182**: The landing queue's idle counter is reset when a batch runs or the queue empties, so `landing_idle_ms` no longer accumulates forever and falsely flags a healthy queue.
 - **s183**: star's example landing config gets a `batch` tier of the cheap static suites, so a defect that exists only in the merged union is found before `mason/ci/<batch>` is pushed, and `mason doctor` warns when a CI or PR mode has no batch tier.
 - **s184**: A takeover (`mason update`, branch switch) first waits, up to `takeover_wait_s` (default 3600), until no project has a landing batch running, holding new batches back meanwhile, and a re-queued task's window counts from its first submission, so a self-update no longer abandons other projects' batches or restarts their windows.
+- **s209**: develop is `cargo fmt` clean and a workspace test now keeps it so, `ci.yml` cancels superseded runs, caches cargo, and runs the macOS legs of exit-scripts and monitor-compose nightly instead of on every push.
 <!-- status:end -->
