@@ -91,6 +91,18 @@ struct State {
     draining: bool,
 }
 
+impl State {
+    /// Count `elapsed` as idle while tasks wait with nothing running; any other look ends the
+    /// idle spell, so the reading is how long the queue has idled now, not a lifetime total.
+    fn note_idle(&mut self, pid: ProjectId, waiting: bool, running: bool, elapsed: Duration) {
+        if waiting && !running {
+            *self.idle_ms.entry(pid).or_default() += elapsed.as_millis() as u64;
+        } else {
+            self.idle_ms.remove(&pid);
+        }
+    }
+}
+
 /// The landing queues of every project.
 #[derive(Default)]
 pub struct Landing {
@@ -625,9 +637,8 @@ fn form_and_start(
     *last = Instant::now();
     {
         let mut g = d.landing.lock();
-        if !waiting.is_empty() && g.running.get(&pid).is_none_or(Vec::is_empty) {
-            *g.idle_ms.entry(pid).or_default() += elapsed.as_millis() as u64;
-        }
+        let running = g.running.get(&pid).is_some_and(|v| !v.is_empty());
+        g.note_idle(pid, !waiting.is_empty(), running, elapsed);
     }
     if waiting.is_empty() {
         return (0, None);
@@ -2611,6 +2622,26 @@ fn suites_needs(def: &mason_definition::Definition, names: &[String]) -> mason_s
 /// lists failed jobs, with their logs, either way); another kind judges when it says so.
 fn judges(c: &crate::config::CiCfg) -> bool {
     c.infra_judge || !matches!(c.kind, crate::config::CiKind::GithubActions { .. })
+}
+
+#[cfg(test)]
+mod idle_tests {
+    use super::*;
+
+    #[test]
+    fn idle_spell_ends_when_a_batch_runs_or_the_queue_empties() {
+        let p = ProjectId(1);
+        let mut s = State::default();
+        let d = Duration::from_millis(500);
+        s.note_idle(p, true, false, d);
+        s.note_idle(p, true, false, d);
+        assert_eq!(s.idle_ms.get(&p).copied(), Some(1000));
+        s.note_idle(p, true, true, d);
+        assert_eq!(s.idle_ms.get(&p).copied(), None);
+        s.note_idle(p, true, false, d);
+        s.note_idle(p, false, false, d);
+        assert_eq!(s.idle_ms.get(&p).copied(), None);
+    }
 }
 
 #[cfg(test)]
