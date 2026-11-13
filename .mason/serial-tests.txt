@@ -1,0 +1,3 @@
+# Test targets that scripts/test-parallel.py runs alone, after the parallel ones (s248).
+# One target name per line (the name cargo gives the test executable, e.g. `crash`).
+# Add a target here only when it fails in a parallel run and passes alone, with the reason.

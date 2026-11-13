@@ -29,6 +29,11 @@ next = "test"
 [resource.test-suite]
 count = 2
 
+# A scoped `run_check` (changed, tests or packages) takes this instead of `test-suite`, so a short
+# check does not queue behind a full run (s248).
+[resource.test-small]
+count = 2
+
 # Each suite builds first (`build`), so the step holds a `compile` slot only while compiling. Before
 # this, a `cargo test` held its compile slot through every integration test, mostly idle, while the
 # compile queue waited (2026-11-12). The running daemon has known `build` since s178 (70f66d6).
@@ -48,15 +53,17 @@ max_rounds = 3
 on_red = "develop"
 next = "land"
 
-# The workspace's tests: cargo's own lines, one test each (doc tests included).
+# The workspace's tests: cargo's own lines, one test each (doc tests included). `command` and
+# `dev_command` run the test executables four at a time (scripts/test-parallel.py, s248; the ones in
+# .mason/serial-tests.txt alone afterwards); `rerun` names a few tests and stays plain cargo.
 [suite.cargo-workspace]
 build = "{project_test} --no-run"
-command = "{project_test}"
+command = "python3 -I scripts/test-parallel.py -- {project_test}"
 rerun = "{project_test} {tests}"
 # `run_check` while developing, asked for with `changed: true`: only the crates the diff touches
 # and their dependents. The test step runs `command` whole (decision 0205). Enabled by the owner
 # on 2026-11-13, once the running daemon knew the keys (s210, #265).
-dev_command = "{project_test} {packages}"
+dev_command = "python3 -I scripts/test-parallel.py -- {project_test} {packages}"
 dev_build = "{project_test} {packages} --no-run"
 parser = "regex"
 pass_regex = '^test (.+) \.\.\. ok$'
