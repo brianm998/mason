@@ -37,6 +37,8 @@ pub struct Ahead {
     pub label: String,
     /// `None` for an interactive caller.
     pub steps: Option<u32>,
+    /// Why this one is waiting itself, when that is a pause or a gate and not a slot.
+    pub cause: Option<WaitCause>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -135,6 +137,21 @@ impl Wait {
     }
 }
 
+/// Why a request is paused by a gate, for naming it in the wait behind it.
+fn reason(cause: &WaitCause, now_ms: u64) -> Option<String> {
+    match cause {
+        WaitCause::Settling { until } => Some(format!(
+            "letting the last compile show in CPU use, {} s",
+            until.saturating_sub(now_ms).div_ceil(1000)
+        )),
+        WaitCause::Cpu { busy_pct, max_pct } => Some(format!("CPU {busy_pct}% > {max_pct}%")),
+        WaitCause::DiskStall { .. } => Some("the build disk is slow".into()),
+        WaitCause::Disk { .. } => Some("disk is low".into()),
+        WaitCause::Memory { .. } => Some("memory is low".into()),
+        _ => None,
+    }
+}
+
 /// The sentence for one wait, like "Waiting for compile slot: 2nd in line,
 /// held by #91 for 4 min". Who is ahead is not named: `mason resources` lists it.
 pub fn explain(w: &Wait, now_ms: u64) -> String {
@@ -162,6 +179,13 @@ fn explain_cause(w: &Wait, now_ms: u64) -> String {
             let mut s = format!("held by {}", shown.join(" and "));
             if more > 0 {
                 s.push_str(&format!(" and {more} more"));
+            }
+            parts.push(s);
+        } else if let Some(first) = w.behind.first() {
+            // No holder: the queue waits behind a paused request, not for a slot.
+            let mut s = format!("behind {}", first.label);
+            if let Some(reason) = first.cause.as_ref().and_then(|c| reason(c, now_ms)) {
+                s.push_str(&format!(" ({reason})"));
             }
             parts.push(s);
         }
@@ -272,6 +296,7 @@ mod tests {
             vec![Ahead {
                 label: "#88".into(),
                 steps: Some(2),
+                cause: None,
             }],
             "#91",
         );
@@ -282,10 +307,34 @@ mod tests {
     }
 
     #[test]
+    fn behind_a_paused_request_with_no_holder() {
+        let w = Wait {
+            cause: WaitCause::Behind {
+                resource: "compile".into(),
+            },
+            kind: Some(Kind::Machine),
+            position: 4,
+            behind: vec![Ahead {
+                label: "#289".into(),
+                steps: Some(2),
+                cause: Some(WaitCause::Settling { until: 37_000 }),
+            }],
+            held_by: vec![],
+        };
+        let s = explain(&w, 30_000);
+        assert_eq!(
+            s,
+            "Waiting for compile slot: 4th in line, behind #289 (letting the last compile show in CPU use, 7 s)"
+        );
+        assert!(!s.contains("held by"));
+    }
+
+    #[test]
     fn interactive_waiters_ahead_are_not_named() {
         let ahead = |c: char| Ahead {
             label: format!("interactive `{}`", c.to_string().repeat(300)),
             steps: None,
+            cause: None,
         };
         let w = wait(vec![ahead('a'), ahead('b'), ahead('c')], "#91");
         let s = explain(&w, 240_000);
