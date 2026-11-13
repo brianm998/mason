@@ -41,7 +41,8 @@ pub const MAX_AGENT_RESTARTS: usize = 2;
 
 /// How close to a daemon start (ms) a lost host's last sign of life must be for the
 /// loss to be put down to the restart: the daemon going away took it, or its stop
-/// came so soon before the start that nothing else can be told apart.
+/// came so soon before the start that nothing else can be told apart. A host that beat
+/// after the start was lost while the new daemon was up: a real loss.
 pub const RESTART_WINDOW_MS: u64 = 120_000;
 
 /// The file in the hosts directory's parent that lists every daemon start (ms, one per line).
@@ -79,7 +80,7 @@ pub fn restart_loss_in(starts: &str, t: u64) -> bool {
     starts
         .lines()
         .filter_map(|l| l.trim().parse::<u64>().ok())
-        .any(|s| t + RESTART_WINDOW_MS >= s && t <= s + RESTART_WINDOW_MS / 4)
+        .any(|s| t + RESTART_WINDOW_MS >= s && t <= s)
 }
 
 /// What failed an agent step that lost its host more often than it may be restarted.
@@ -188,6 +189,8 @@ mod tests {
         // Died a few seconds before the start: a restart loss.
         assert!(restart_loss_in(starts, 995_000));
         assert!(restart_loss_in(starts, 9_000_000));
+        // After the start the new daemon was up: a real loss.
+        assert!(!restart_loss_in(starts, 1_000_001));
         // Died mid-run, long after one start and before the next.
         assert!(!restart_loss_in(starts, 5_000_000));
         assert!(!restart_loss_in(starts, 1_500_000));
