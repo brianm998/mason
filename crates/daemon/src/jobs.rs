@@ -2297,7 +2297,15 @@ fn settle_all(
                 } else {
                     text
                 };
-                let restart = lost.len() <= hl::MAX_AGENT_RESTARTS;
+                // A host lost together with other tasks' hosts (a daemon restart, a
+                // mass kill) is not this run's fault: it does not use up a restart,
+                // though a hard cap still ends a run that keeps losing hosts.
+                let counted = lost
+                    .iter()
+                    .filter(|id| !mason_adapters::hosted::lost_with_others(&root, id))
+                    .count();
+                let restart = counted <= hl::MAX_AGENT_RESTARTS
+                    && lost.len() <= hl::MAX_AGENT_RESTARTS * 4;
                 hl::record_as(&c.d, Some(c.run), &c.step.name, &newest, at, text, restart);
                 if !restart {
                     let all: Vec<String> = lost.iter().map(|id| describe(id).0).collect();
