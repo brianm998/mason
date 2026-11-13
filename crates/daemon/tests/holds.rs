@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+#![cfg(unix)]
+// Unix-only: signals, permission bits or unix sockets. Windows coverage comes with the later port tasks.
 
 //! Stage 67 end to end: MASON acts on provider usage. A real daemon runs tasks
 //! with the fake agent. A usage limit with a reset holds the whole account

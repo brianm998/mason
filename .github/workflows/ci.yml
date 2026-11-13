@@ -30,6 +30,19 @@ jobs:
       - run: cargo run -q -p mason-conformance -- mascot --check
       - uses: EmbarkStudios/cargo-deny-action@v2
 
+  # The workspace builds for Windows (Windows port 1). Only the build and clippy run here:
+  # the tests come with the later port tasks, and the Unix-only ones are gated with
+  # `cfg(unix)` until then. Known to fail on Windows today: anything that needs a
+  # unix socket (the step host, the daemon's IPC, the MCP bridge), process groups, `sh`,
+  # or signals; those are the work of the IPC, process-tree, shell and service tasks.
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo build --workspace --all-targets
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
   dco:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest

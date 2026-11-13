@@ -23,14 +23,13 @@ pub trait DiskSource: Send + Sync + std::fmt::Debug {
     fn free_mb(&self, path: &Path) -> Option<u64>;
 }
 
-/// The real volume, by `statvfs`.
+/// The real volume, by `statvfs` (`GetDiskFreeSpaceExW` on Windows).
 #[derive(Debug)]
 pub struct Statvfs;
 
 impl DiskSource for Statvfs {
     fn free_mb(&self, path: &Path) -> Option<u64> {
-        let s = nix::sys::statvfs::statvfs(path).ok()?;
-        let bytes = (s.blocks_available() as u128) * (s.fragment_size() as u128);
+        let bytes = mason_platform::disk::available_bytes(path)?;
         Some((bytes / (1024 * 1024)) as u64)
     }
 }

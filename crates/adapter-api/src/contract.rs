@@ -8,9 +8,9 @@
 //! accepted terminal submission is a `NoResult`, handled by nudging.
 
 use crate::SubmissionFlag;
+use mason_platform::net::{UnixListener, UnixStream};
 use serde_json::{json, Value};
 use std::io::{self, BufRead, BufReader, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
