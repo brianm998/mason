@@ -1824,7 +1824,21 @@ mod tests {
         );
         // The outside holder ends: the slot is free for the next waiter.
         drop(held);
-        assert!(matches!(b.lease_poll(second), LeaseState::Granted { .. }));
+        // A process forked by a parallel test can briefly share the lock's open
+        // file description, so the kernel may take a moment to let go.
+        let mut got = b.lease_poll(second);
+        for _ in 0..200 {
+            if matches!(got, LeaseState::Granted { .. }) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+            got = b.lease_poll(second);
+        }
+        assert!(
+            matches!(got, LeaseState::Granted { .. }),
+            "{got:?} {}",
+            b.snapshot()
+        );
     }
 
     #[test]

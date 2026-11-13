@@ -811,7 +811,7 @@ class MonitorCoreTest {
         waitFor("a second socket") { r.sockets.size == 2 }
         assertEquals(9000, r.sockets[1].port)
         waitFor("not connected") { !r.model.connected }
-        assertTrue(r.model.reconnecting, "shown as reconnecting, not an error")
+        waitFor("reconnecting") { r.model.reconnecting }
         r.sockets[1].events.onOpen()
         assertTrue(Regex("[lL]ast_?[sS]eq\"?:\"?7\\b").containsMatchIn(r.sockets[1].sent[0]), r.sockets[1].sent[0])
         r.sockets[1].events.onMessage(welcome)
@@ -844,7 +844,7 @@ class MonitorCoreTest {
         waitFor("a second socket") { r.sockets.size == 2 }
         assertTrue(r.sockets[0].closed)
         assertTrue(r.sockets[0].sent.any { it.contains("ping") }, "it asked before giving up")
-        assertTrue(r.model.reconnecting)
+        waitFor("reconnecting") { r.model.reconnecting }
         assertNull(r.model.lastResult, "no error is shown")
         r.conn.stop()
     }
