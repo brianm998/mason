@@ -10,8 +10,9 @@
 use crate::config::ProjectCfg;
 use crate::daemon::Daemon;
 use mason_core::*;
+use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// Check a `task_cache` template when the project file is read: it must name the task, so that
 /// no two tasks share a directory.
@@ -163,17 +164,53 @@ pub fn remove_now(d: &Daemon, p: &ProjectCfg, task: u64) -> bool {
     }
 }
 
-/// Remove it on a thread of its own, outside any lock: it can take a while.
+/// Removals queued or running, by thread name (`task-cache-7`, `own-cache-7`).
+static BUSY: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+/// Held by the removal that is running, so they run one at a time.
+static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+
+/// Run `remove` on a thread of its own, outside any daemon lock (it can take minutes), unless a
+/// removal of the same name is already queued or running, and never two at once.
+///
+/// On 2026-11-13 `task_cache` was set on a project with 90 landed tasks' directories (8 GB each).
+/// The sweep started a thread for each, and every later pass started another for each one not
+/// yet gone. Over a thousand threads unlinked files on one USB disk at once, and every build on
+/// it stalled in the kernel. One at a time, a backlog takes longer to clear but stalls nothing.
+fn in_background(name: String, remove: impl FnOnce() + Send + 'static) {
+    if !BUSY
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(name.clone())
+    {
+        return;
+    }
+    let done = |key: &str| {
+        BUSY.lock().unwrap_or_else(|e| e.into_inner()).remove(key);
+    };
+    let key = name.clone();
+    let spawned = std::thread::Builder::new()
+        .name(name.clone())
+        .spawn(move || {
+            {
+                let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+                remove();
+            }
+            done(&key);
+        });
+    if spawned.is_err() {
+        done(&name);
+    }
+}
+
+/// Remove it in the background (see [`in_background`]).
 pub fn remove_in_background(d: &Arc<Daemon>, p: &ProjectCfg, task: u64) {
     if p.task_cache.is_none() {
         return;
     }
     let (d, p) = (d.clone(), p.clone());
-    let _ = std::thread::Builder::new()
-        .name(format!("task-cache-{task}"))
-        .spawn(move || {
-            remove_now(&d, &p, task);
-        });
+    in_background(format!("task-cache-{task}"), move || {
+        remove_now(&d, &p, task);
+    });
 }
 
 /// Every `task_cache` directory that exists for a task in `w`, for sizing.
@@ -211,14 +248,12 @@ pub fn remove_own_now(d: &Daemon, task: u64) -> bool {
     }
 }
 
-/// Remove it on a thread of its own, outside any lock.
+/// Remove it in the background (see [`in_background`]).
 pub fn remove_own_in_background(d: &Arc<Daemon>, task: u64) {
     let d = d.clone();
-    let _ = std::thread::Builder::new()
-        .name(format!("own-cache-{task}"))
-        .spawn(move || {
-            remove_own_now(&d, task);
-        });
+    in_background(format!("own-cache-{task}"), move || {
+        remove_own_now(&d, task);
+    });
 }
 
 /// The sweep's part for the owned directories: each one whose task landed or was canceled (or
@@ -419,5 +454,42 @@ mod tests {
         assert!(check_template("$HOME/c/{task}").is_ok());
         assert!(check_template("$HOME/c").is_err());
         assert!(check_template("").is_err());
+    }
+
+    /// A removal already queued or running is not started again, and removals never overlap.
+    /// Ordered by channels, not by time.
+    #[test]
+    fn a_removal_is_not_started_twice_and_they_run_one_at_a_time() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::mpsc::channel;
+        static RAN: AtomicUsize = AtomicUsize::new(0);
+        static RUNNING: AtomicUsize = AtomicUsize::new(0);
+        static MOST: AtomicUsize = AtomicUsize::new(0);
+        let work = || {
+            let now = RUNNING.fetch_add(1, Ordering::SeqCst) + 1;
+            MOST.fetch_max(now, Ordering::SeqCst);
+            RAN.fetch_add(1, Ordering::SeqCst);
+            RUNNING.fetch_sub(1, Ordering::SeqCst);
+        };
+        // The first holds its slot until told to go.
+        let (go_tx, go_rx) = channel::<()>();
+        let (started_tx, started_rx) = channel::<()>();
+        let (end_tx, end_rx) = channel::<()>();
+        in_background("test-dedupe-a".into(), move || {
+            started_tx.send(()).unwrap();
+            go_rx.recv().unwrap();
+            work();
+        });
+        started_rx.recv().unwrap();
+        // Same name while it runs: dropped. Another name: queued behind it.
+        in_background("test-dedupe-a".into(), work);
+        in_background("test-dedupe-b".into(), move || {
+            work();
+            end_tx.send(()).unwrap();
+        });
+        go_tx.send(()).unwrap();
+        end_rx.recv().unwrap();
+        assert_eq!(RAN.load(Ordering::SeqCst), 2);
+        assert_eq!(MOST.load(Ordering::SeqCst), 1);
     }
 }
