@@ -35,7 +35,7 @@ class LinkedTextTest {
         val base = inlineMarkdown("run **#12** now")
         val a = linkedString(base, Linkify.segments(base.text, { it == 12L }, links), Color.Blue, none)
         assertEquals("run #12 now", base.text)
-        assertEquals(listOf("#12" to "task:12"), linkTargets(a), "segments: " + Linkify.segments(base.text, { it == 12L }, links))
+        assertEquals(listOf("#12" to "task:12"), linkTargets(a))
         assertEquals(base.spanStyles.size, a.spanStyles.size)
     }
 }

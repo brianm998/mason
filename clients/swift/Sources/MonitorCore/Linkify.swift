@@ -22,14 +22,14 @@ public enum LinkSegment: Equatable {
 /// Turns a string into plain text, task links and URL links. Pure, so tests cover it.
 ///
 /// - `#N` is a task link only when `isKnownTask(N)` and the text before it does not make it
-///   something else: `PR #N`, `pull request #N`, `Batch #N`, `debt #N`, `issue #N`, and the
+///   something else: `PR #N`, `pull request #N`, `Batch #N`, `debt #N`, `issue #N` (a bare `run N` has no `#`), and the
 ///   `(#N)` of "the pull request's checks (#N)" are not tasks.
 /// - A `CiLink`'s label (`PR #7`, a failed check's name) becomes a URL link when its URL is
 ///   http(s); the label of a link with another kind of URL stays plain text.
 /// - A bare `http(s)://` URL becomes a URL link.
 public enum Linkify {
     /// Words that, right before a `#N`, say it is not a task.
-    static let notTask = ["pr", "pull request", "batch", "debt", "issue", "run"]
+    static let notTask = ["pr", "pull request", "batch", "debt", "issue"]
 
     public static func isWebURL(_ s: String) -> Bool {
         let l = s.lowercased()
