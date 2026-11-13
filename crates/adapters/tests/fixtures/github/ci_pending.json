@@ -27,5 +27,24 @@
     ]
    }
   }
+ },
+ {
+  "method": "GET",
+  "url": "/actions/runs/31/jobs",
+  "response": {
+   "status": 200,
+   "headers": {},
+   "body": {
+    "jobs": [
+     {
+      "id": 1,
+      "name": "build",
+      "status": "in_progress",
+      "conclusion": null,
+      "steps": []
+     }
+    ]
+   }
+  }
  }
 ]

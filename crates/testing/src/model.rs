@@ -75,6 +75,10 @@ pub struct Suite {
     /// Re-run only the failing tests: `{tests}` becomes their names. Without
     /// it a failing suite is re-run whole when checking for flakiness.
     pub rerun: Option<String>,
+    /// Run the suite without the known-red tests: `{tests}` becomes their quoted names and
+    /// `{skips}` becomes `--skip 'a' --skip 'b'` (for cargo, `{project_test} -- --exact {skips}`).
+    /// Without it a known-red test runs and its failure is excused instead.
+    pub skip: Option<String>,
     /// What `run_check` runs while a task is developed and the agent asks for what its change
     /// touches: `{packages}` becomes the `-p` list of the packages the diff touches and their
     /// dependents. The test step never runs it; it runs `command` whole.
@@ -110,6 +114,7 @@ impl Suite {
             env: String::new(),
             results_file: None,
             rerun: None,
+            skip: None,
             dev_command: None,
             dev_build: None,
             pass_regex: None,
