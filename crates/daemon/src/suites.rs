@@ -2054,6 +2054,7 @@ pub fn ledger_run(d: &Arc<Daemon>, task: TaskId) -> Result<String, String> {
         log_dir: dir.clone(),
         id_prefix: format!("ledger{}", task.0),
         sink: None,
+        env: vec![],
     };
     let tree = Tree {
         tree: git::run(&wt, &["rev-parse", "HEAD^{tree}"])
