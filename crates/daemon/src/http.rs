@@ -2670,7 +2670,11 @@ async fn lease_open(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res
         let d2 = d.clone();
         let id = d
             .pool
-            .run(move || d2.broker.lease_open_outside(&label, &uses, &o))
+            .run(move || {
+                let id = d2.broker.lease_open_outside(&label, &uses, &o);
+                d2.broker.lease_set_pid(id, pid);
+                id
+            })
             .await
             .map_err(pool_err)?;
         return Ok(Json(json!({"id": id})));
