@@ -218,47 +218,22 @@ fn main() {
         cfg.exec_args = keep;
     }
     // Run from `runtimes/<sha>/`: the loader picks the runtime, rolling back by itself
-    // after three crashes in five minutes.
+    // after three crashes in five minutes. Unix replaces itself with it (exec); Windows
+    // has no exec, so the loader stays and supervises the daemon as a child.
     if managed && cfg.runtime_sha.is_none() {
-        use mason_daemon::update::{decide, Boots, Decision, Runtimes};
-        let rt = Runtimes::new(&cfg.data_dir);
-        if let Some(cur) = rt.current().filter(|c| rt.is_ready(c)) {
-            let boots = Boots::new(&rt);
-            let now = mason_daemon::daemon::now_ms();
-            let chosen = match decide(&cur, rt.previous().as_deref(), &boots.all(), now) {
-                Decision::Run(s) => s,
-                Decision::RollBack { from, to } => {
-                    rt.mark_bad(&from);
-                    rt.record_rollback(&from, &to, now);
-                    let _ = rt.set_current(&to);
-                    rt.leave_alert(&format!(
-                        "{} crashed three times in five minutes and was rolled back to {}",
-                        &from[..from.len().min(12)],
-                        &to[..to.len().min(12)]
-                    ));
-                    eprintln!(
-                        "masond: {from} crashed three times in five minutes: rolling back to {to}"
-                    );
-                    to
-                }
-                Decision::RunAnyway { sha, crashes } => {
-                    rt.leave_alert(&format!("{} has crashed {crashes} times and there is no earlier runtime to go back to", &sha[..sha.len().min(12)]));
-                    sha
-                }
-            };
-            if rt.is_ready(&chosen) {
-                // Recorded here, not by the daemon: a build that dies at once never would.
-                boots.record(now, &chosen, "start");
-                let mut a = cfg.exec_args.clone();
-                a.extend(["--runtime-sha".into(), chosen.clone()]);
-                let err = mason_platform::process::replace_process(
-                    std::process::Command::new(rt.masond(&chosen)).args(&a),
-                );
-                eprintln!(
-                    "masond: cannot start runtime {chosen}: {err}; running this build instead"
-                );
-            }
+        #[cfg(unix)]
+        {
+            let _ = managed_once(&cfg);
         }
+        #[cfg(windows)]
+        supervise(&cfg);
+    }
+    // A successor started by a takeover on Windows: the old daemon still holds the port
+    // until it has gone. Wait for that (a condition, bounded), then carry on as usual.
+    if let Some(pid) = mason_platform::process::predecessor() {
+        mason_platform::process::wait_until(Duration::from_secs(60), || {
+            !mason_platform::process::is_alive(pid)
+        });
     }
     if let Some(sha) = &cfg.runtime_sha {
         use mason_daemon::update::{Boots, Runtimes};
@@ -380,6 +355,114 @@ fn main() {
         Err(e) => {
             eprintln!("masond: {e}");
             std::process::exit(1);
+        }
+    }
+}
+
+/// What one try at starting the chosen runtime came to.
+enum Started {
+    /// Nothing usable to start (no current runtime, or it would not start): run this build.
+    Fallback,
+    /// Windows: the child ran and exited with this code (`None`: killed), and had this pid.
+    #[cfg(windows)]
+    Exited(Option<i32>, u32),
+}
+
+/// Pick the runtime (rolling back after three crashes in five minutes) and start it:
+/// by `exec` on Unix, which only returns if that fails; as a child on Windows.
+fn managed_once(cfg: &DaemonConfig) -> Started {
+    use mason_daemon::update::{decide, Boots, Decision, Runtimes};
+    let rt = Runtimes::new(&cfg.data_dir);
+    let Some(cur) = rt.current().filter(|c| rt.is_ready(c)) else {
+        return Started::Fallback;
+    };
+    let boots = Boots::new(&rt);
+    let now = mason_daemon::daemon::now_ms();
+    let chosen = match decide(&cur, rt.previous().as_deref(), &boots.all(), now) {
+        Decision::Run(s) => s,
+        Decision::RollBack { from, to } => {
+            rt.mark_bad(&from);
+            rt.record_rollback(&from, &to, now);
+            let _ = rt.set_current(&to);
+            rt.leave_alert(&format!(
+                "{} crashed three times in five minutes and was rolled back to {}",
+                &from[..from.len().min(12)],
+                &to[..to.len().min(12)]
+            ));
+            eprintln!("masond: {from} crashed three times in five minutes: rolling back to {to}");
+            to
+        }
+        Decision::RunAnyway { sha, crashes } => {
+            rt.leave_alert(&format!(
+                "{} has crashed {crashes} times and there is no earlier runtime to go back to",
+                &sha[..sha.len().min(12)]
+            ));
+            sha
+        }
+    };
+    if !rt.is_ready(&chosen) {
+        return Started::Fallback;
+    }
+    // Recorded here, not by the daemon: a build that dies at once never would.
+    boots.record(now, &chosen, "start");
+    let mut a = cfg.exec_args.clone();
+    a.extend(["--runtime-sha".into(), chosen.clone()]);
+    let mut cmd = std::process::Command::new(rt.masond(&chosen));
+    cmd.args(&a);
+    #[cfg(unix)]
+    {
+        let err = mason_platform::process::replace_process(&mut cmd);
+        eprintln!("masond: cannot start runtime {chosen}: {err}; running this build instead");
+        Started::Fallback
+    }
+    #[cfg(windows)]
+    match cmd.spawn() {
+        Ok(mut child) => {
+            let pid = child.id();
+            match child.wait() {
+                Ok(st) => Started::Exited(st.code(), pid),
+                Err(_) => Started::Exited(None, pid),
+            }
+        }
+        Err(err) => {
+            eprintln!("masond: cannot start runtime {chosen}: {err}; running this build instead");
+            Started::Fallback
+        }
+    }
+}
+
+/// Windows loader: keep one daemon running. A clean exit ends the loader; a handover
+/// (the daemon started a successor and left) is followed to the successor's end; a crash
+/// starts again, and `managed_once` counts it and rolls back. Returns only to fall back
+/// to running this build.
+#[cfg(windows)]
+fn supervise(cfg: &DaemonConfig) {
+    use mason_platform::process::{is_alive, wait_until, HANDOVER_EXIT};
+    loop {
+        match managed_once(cfg) {
+            Started::Fallback => return,
+            Started::Exited(Some(0), _) => std::process::exit(0),
+            Started::Exited(Some(HANDOVER_EXIT), old) => {
+                // The successor announces itself in daemon.json once it holds the port.
+                let info = cfg.info_path();
+                let mut succ = None;
+                let found = wait_until(Duration::from_secs(120), || {
+                    succ = std::fs::read_to_string(&info)
+                        .ok()
+                        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+                        .and_then(|v| v["pid"].as_u64())
+                        .map(|p| p as u32)
+                        .filter(|p| *p != old && is_alive(*p));
+                    succ.is_some()
+                });
+                if let (true, Some(p)) = (found, succ) {
+                    wait_until(Duration::from_secs(u64::MAX / 4), || !is_alive(p));
+                }
+            }
+            Started::Exited(..) => {
+                // Not a clean stop: a short breath so a build that dies at once does not spin.
+                std::thread::sleep(Duration::from_secs(1));
+            }
         }
     }
 }
