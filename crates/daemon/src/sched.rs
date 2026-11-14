@@ -823,8 +823,6 @@ impl Broker {
             self.cv.notify_all();
         }
         self.publish_waits(st, now, free, floor, gate);
-        st.last_pass = Some(Instant::now());
-        st.passes += 1;
     }
 
     /// Store the wait explanation of every waiting task, for readers that must
