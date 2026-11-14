@@ -937,6 +937,30 @@ impl Daemon {
         }
     }
 
+    /// Is this queued task held back because its project's check queue is long (s256)? The
+    /// count of the project's `run_check` and test-suite requests that wait, and the limit.
+    /// Tasks already admitted are not asked; an urgent one is never held.
+    pub fn check_hold(&self, w: &mason_engine::World, t: &Task) -> Option<(usize, u32)> {
+        if t.priority == Priority::Urgent {
+            return None;
+        }
+        let def = self.current_def(t.project);
+        let suite_slots = self
+            .broker
+            .limit("test-suite")
+            .or_else(|| def.resources.get("test-suite").copied())
+            .unwrap_or(1);
+        let waiting = w
+            .waits
+            .values()
+            .filter(|x| {
+                w.tasks.get(&x.task).is_some_and(|o| o.project == t.project)
+                    && matches!(x.class_name().as_str(), "test-suite" | "test-small")
+            })
+            .count();
+        check_hold_decision(waiting, def.max_check_queue, suite_slots)
+    }
+
     /// The queued task that goes next, if an LLM session is free for it.
     pub fn next_admission(&self, w: &mason_engine::World) -> Option<TaskId> {
         // Accounts are separate: a full one holds back only its own projects.
@@ -956,6 +980,8 @@ impl Daemon {
                 let name = self.project(t.project).map_or("", |p| p.id.as_str());
                 crate::attention::paused(self, name, crate::attention::What::Claim).is_none()
             })
+            // A project whose check queue is long starts nothing new (s256).
+            .filter(|t| self.check_hold(w, t).is_none())
             .min_by_key(|t| self.queued_rank(t))
             .map(|t| t.id)
     }
@@ -1191,6 +1217,20 @@ impl Daemon {
     }
 }
 
+/// The limit on waiting checks: `max_check_queue` of the definition (0 turns it off), else twice
+/// the test-suite slots. A task is held when more than that many wait; `None` when it is not.
+pub fn check_hold_decision(
+    waiting: usize,
+    max_check_queue: Option<u32>,
+    suite_slots: u32,
+) -> Option<(usize, u32)> {
+    let limit = match max_check_queue {
+        Some(n) => n,
+        None => suite_slots.saturating_mul(2),
+    };
+    (limit > 0 && waiting > limit as usize).then_some((waiting, limit))
+}
+
 /// Clears `admitting` on every way out of `admit`.
 struct AdmitReset<'a>(&'a AtomicBool);
 
@@ -1274,5 +1314,28 @@ impl RepoLock {
 
     pub fn holder(&self) -> Option<(String, u64)> {
         self.who.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+}
+
+#[cfg(test)]
+mod admission_tests {
+    use super::check_hold_decision;
+
+    #[test]
+    fn a_long_check_queue_holds_the_next_task_and_a_short_one_does_not() {
+        // The default is twice the test-suite slots: 2 slots, a limit of 4.
+        assert_eq!(check_hold_decision(5, None, 2), Some((5, 4)));
+        assert_eq!(
+            check_hold_decision(4, None, 2),
+            None,
+            "at the limit is not over it"
+        );
+        assert_eq!(check_hold_decision(0, None, 2), None);
+        // The definition's own limit; 0 turns it off.
+        assert_eq!(check_hold_decision(3, Some(2), 2), Some((3, 2)));
+        assert_eq!(check_hold_decision(3, Some(3), 2), None);
+        assert_eq!(check_hold_decision(500, Some(0), 2), None);
+        // No test-suite slots at all is not a reason to hold everything.
+        assert_eq!(check_hold_decision(500, None, 0), None);
     }
 }
