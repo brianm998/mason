@@ -359,9 +359,20 @@ pub fn exit_signal(status: &ExitStatus) -> Option<i32> {
     }
 }
 
-/// Replace this process with `cmd`, keeping the pid (`exec`). Only returns, with
-/// the error, if that fails. Windows cannot replace an image in place; the
-/// takeover port task will do an equivalent hand-over.
+/// The exit code of a daemon that has handed over to a successor it started
+/// (Windows takeover). The managed loader reads it as "do not restart me".
+pub const HANDOVER_EXIT: i32 = 75;
+
+/// The environment variable that tells a successor which pid it replaces: it
+/// does not bind its port until that process is gone.
+pub const TAKEOVER_FROM_ENV: &str = "MASON_TAKEOVER_FROM";
+
+/// Replace this process with `cmd`. Unix: `exec`, keeping the pid; only returns,
+/// with the error, if that fails. Windows has no exec: the successor is started
+/// with [`TAKEOVER_FROM_ENV`] set, and this process exits with [`HANDOVER_EXIT`]
+/// (it holds the port, which cannot be shared there, so it must leave before the
+/// successor can bind; the successor waits for that, see [`predecessor`]).
+/// Windows only returns, with the error, if the successor cannot be started.
 pub fn replace_process(cmd: &mut Command) -> io::Error {
     #[cfg(unix)]
     {
@@ -369,8 +380,36 @@ pub fn replace_process(cmd: &mut Command) -> io::Error {
     }
     #[cfg(windows)]
     {
-        let _ = cmd;
-        crate::unsupported("replacing the running daemon in place", "daemon takeover")
+        cmd.env(TAKEOVER_FROM_ENV, std::process::id().to_string());
+        match detached(cmd).spawn() {
+            Ok(mut child) => {
+                // One look: a successor that died at once is a failed start, not a handover.
+                if let Ok(Some(status)) = child.try_wait() {
+                    return io::Error::other(format!("the new runtime exited at once ({status})"));
+                }
+                std::process::exit(HANDOVER_EXIT)
+            }
+            Err(e) => e,
+        }
+    }
+}
+
+/// In a successor: the pid named by [`TAKEOVER_FROM_ENV`], if this start is a takeover.
+pub fn predecessor() -> Option<u32> {
+    std::env::var(TAKEOVER_FROM_ENV).ok()?.parse().ok()
+}
+
+/// Poll `cond` until it holds or `limit` passes; whether it held.
+pub fn wait_until(limit: std::time::Duration, mut cond: impl FnMut() -> bool) -> bool {
+    let end = std::time::Instant::now() + limit;
+    loop {
+        if cond() {
+            return true;
+        }
+        if std::time::Instant::now() >= end {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
     }
 }
 
