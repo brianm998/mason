@@ -695,6 +695,24 @@ pub(crate) fn tests_uses(
         .collect()
 }
 
+/// The resource a scoped `run_check` takes instead of `test-suite`, when the definition declares it.
+pub(crate) const TEST_SMALL: &str = "test-small";
+
+/// `uses` for a scoped check: `test-small` in place of `test-suite` when the definition declares
+/// `[resource.test-small]`. Otherwise `uses` unchanged. Full checks and the test step never call this.
+pub(crate) fn small_lane(
+    def: &Definition,
+    mut uses: std::collections::BTreeMap<String, u32>,
+) -> std::collections::BTreeMap<String, u32> {
+    if !def.resources.contains_key(TEST_SMALL) {
+        return uses;
+    }
+    if let Some(n) = uses.remove("test-suite") {
+        uses.insert(TEST_SMALL.to_string(), n);
+    }
+    uses
+}
+
 /// `MASON_HELD`: the classes a command already holds, so that one which would
 /// queue for the same class (`mason run --needs`) can tell it need not.
 pub(crate) fn held_text(uses: &std::collections::BTreeMap<String, u32>) -> String {
@@ -1205,6 +1223,7 @@ impl TestChecks {
                 }
             };
             let limit = suite.timeout.unwrap_or(self.timeout).min(self.timeout);
+            let before = suite.command.clone();
             // Only this develop-phase check narrows. The test step runs `command` whole.
             if !scope.is_empty() {
                 let mut packages = |scope: &CheckScope| -> Option<Vec<String>> {
@@ -1315,6 +1334,11 @@ impl TestChecks {
                     let have = uses.entry(k.clone()).or_insert(0);
                     *have = (*have).max(*v);
                 }
+            }
+            // A command that was narrowed is short: it takes the small lane when the definition
+            // declares one, so it does not queue behind a full run.
+            if suite.command != before {
+                uses = small_lane(&def, uses);
             }
             let rspec = spec(
                 format!("{}-{name}", self.id_prefix),
@@ -3429,6 +3453,39 @@ pub fn cleanup(d: &Arc<Daemon>, task: TaskId, delete_branch: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- s248: the small lane for scoped checks ------------------------------------------
+
+    fn uses_of(pairs: &[(&str, u32)]) -> std::collections::BTreeMap<String, u32> {
+        pairs.iter().map(|(k, n)| (k.to_string(), *n)).collect()
+    }
+
+    fn def_with(extra: &str) -> Definition {
+        let text = format!(
+            "schema = 1\nstart = \"develop\"\n{extra}\n[step.develop]\ntype = \"agent\"\n\
+             category = \"developing\"\nagent = \"deep\"\nnext = \"test\"\n\
+             [step.test]\ntype = \"test\"\ncategory = \"testing\"\nuses = {{ test-suite = 1 }}\n\
+             next = \"land\"\n[step.land]\ntype = \"landing\"\ncategory = \"landing\"\n"
+        );
+        mason_definition::parse(&text).unwrap_or_else(|p| panic!("{p:?}"))
+    }
+
+    #[test]
+    fn a_scoped_check_takes_test_small_when_declared() {
+        let def = def_with("[resource.test-suite]\ncount = 2\n[resource.test-small]\ncount = 2\n");
+        let u = small_lane(&def, uses_of(&[("test-suite", 1)]));
+        assert_eq!(u, uses_of(&[("test-small", 1)]));
+        // Other classes are untouched.
+        let u = small_lane(&def, uses_of(&[("test-suite", 1), ("disk", 3)]));
+        assert_eq!(u, uses_of(&[("test-small", 1), ("disk", 3)]));
+    }
+
+    #[test]
+    fn a_scoped_check_keeps_test_suite_without_a_small_lane() {
+        let def = def_with("[resource.test-suite]\ncount = 2\n");
+        let u = small_lane(&def, uses_of(&[("test-suite", 1)]));
+        assert_eq!(u, uses_of(&[("test-suite", 1)]));
+    }
 
     // ---- Task 180: the weakening scan at submit_change -----------------------------------
 
