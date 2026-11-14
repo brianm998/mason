@@ -23,7 +23,7 @@ the `v`. Nothing else is published under a release.
 | `MASON-<ver>-macos.dmg` | Swift monitor, universal, signed + notarized |
 | `mason-monitor_<ver>_amd64.deb` | Compose monitor, Linux |
 | `MASON-Monitor-<ver>-windows.msi` | Compose monitor, Windows |
-| `SHA256SUMS` (later also `SHA256SUMS.minisig`) | SHA-256 of every other asset |
+| `SHA256SUMS` (and `SHA256SUMS.minisig` when signed, see Signing) | SHA-256 of every other asset |
 
 ## Package layout
 
@@ -60,6 +60,25 @@ identities), `APPLE_CERTIFICATE_PASSWORD`, `KEYCHAIN_PASSWORD`, `APPLE_API_KEY_P
 `APPLE_API_KEY_ID`, `APPLE_API_ISSUER_ID`, `APPLE_TEAM_ID`. Without them the macOS packages are
 built unsigned and `publish` removes them and reports an error, so an unsigned build is never
 attached to a release.
+
+### Signing
+
+`SHA256SUMS` proves a download matches the release, not that the release is yours. The
+`publish` job signs it with minisign and uploads `SHA256SUMS.minisig`. Once your public key
+is pinned, `scripts/install.sh` and `mason update` (release channel) refuse a release that is
+unsigned, badly signed, or checked on a machine without `minisign`.
+
+1. Generate the pair once, on your own machine (`brew install minisign` / `apt install minisign`):
+   `minisign -G -p minisign.pub -s minisign.key` (it asks for a password). Keep `minisign.key`
+   and the password out of the repository.
+2. Add two repository secrets: `MINISIGN_SECRET_KEY` (the whole contents of `minisign.key`) and
+   `MINISIGN_PASSWORD`. Without the first, `publish` warns and the release is unsigned.
+3. Pin the public key, the second line of `minisign.pub` (starts `RW`, 56 characters), in two
+   places that must match: `PINNED_PUBKEY` in `scripts/install.sh` and `PINNED_PUBKEY` in
+   `crates/daemon/src/release.rs`. Both hold the placeholder `REPLACE_WITH_MINISIGN_PUBLIC_KEY`
+   until you do; a placeholder is never used as a key, and releases are then not signature-checked.
+   Pin the key only after a signed release exists, or every install is refused.
+4. `MASON_MINISIGN_PUBKEY` overrides the pinned key in both (tests use it).
 
 ### Dry run
 
