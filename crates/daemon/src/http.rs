@@ -711,6 +711,8 @@ pub struct RetryAsk {
     pub restart: bool,
     /// The daemon retries a failure outside the code by itself (s247).
     pub auto: bool,
+    /// A note for the next round's prompt, shown once (s250).
+    pub message: Option<String>,
 }
 
 /// Re-enter a step of a task. The one place a `Retried` event is made: the HTTP endpoint and the
@@ -779,6 +781,12 @@ pub fn retry_task(
             ),
         )
     })?;
+    // The note is in place before the step the retry starts reads its prompt.
+    if let Some(m) = ask.message.as_deref().filter(|m| !m.trim().is_empty()) {
+        let dir = d.task_dir(TaskId(id));
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(dir.join(crate::jobs::RETRY_NOTE), m);
+    }
     d.emit(EventKind::Retried {
         task: TaskId(id),
         to,
@@ -805,6 +813,10 @@ async fn retry(
             .and_then(|b| b["restart"].as_bool())
             .unwrap_or(false),
         auto: false,
+        message: body
+            .as_ref()
+            .and_then(|b| b["message"].as_str())
+            .map(String::from),
     };
     let d2 = d.clone();
     let (to, step) = d
@@ -818,6 +830,56 @@ async fn retry(
 }
 
 /// Approve: a proposed task (let it start) or an approval step (let it go on).
+/// The diagnoses of a task (s250), newest last.
+async fn diagnoses(Shared(d): Shared<Arc<Daemon>>, Path(id): Path<u64>) -> Res {
+    let rows = d.store.diagnoses(Some(id)).map_err(store_err)?;
+    Ok(Json(json!(rows
+        .iter()
+        .map(|r| {
+            let a: Value = serde_json::from_str(&r.args).unwrap_or(json!({}));
+            json!({"id": r.id, "task": r.task, "at": r.at_ms, "verdict": r.verdict,
+                   "status": r.status, "args": a,
+                   "text": crate::diagnose::card_text(r.task, r.id, &r.verdict, &a)})
+        })
+        .collect::<Vec<_>>())))
+}
+
+/// Apply or dismiss a pending diagnosis the owner chose (s250).
+async fn decide_diagnosis(
+    Shared(d): Shared<Arc<Daemon>>,
+    Path((id, did, what)): Path<(u64, u64, String)>,
+) -> Res {
+    let d2 = d.clone();
+    let said = d
+        .pool
+        .run(move || {
+            let row = d2
+                .store
+                .diagnoses(Some(id))
+                .map_err(store_err)?
+                .into_iter()
+                .find(|r| r.id == did)
+                .ok_or_else(|| {
+                    fail(
+                        StatusCode::NOT_FOUND,
+                        format!("no diagnosis #{did} of task #{id}"),
+                    )
+                })?;
+            match what.as_str() {
+                "apply" => {
+                    crate::diagnose::apply(&d2, &row).map_err(|e| fail(StatusCode::CONFLICT, e))
+                }
+                "dismiss" => crate::diagnose::dismiss(&d2, &row)
+                    .map(|_| "dismissed".to_string())
+                    .map_err(|e| fail(StatusCode::CONFLICT, e)),
+                _ => Err(fail(StatusCode::BAD_REQUEST, "apply or dismiss")),
+            }
+        })
+        .await
+        .map_err(pool_err)??;
+    Ok(Json(json!({"ok": true, "said": said})))
+}
+
 async fn approve(
     Shared(d): Shared<Arc<Daemon>>,
     headers: axum::http::HeaderMap,
@@ -3162,6 +3224,8 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/tasks/{id}", get(task_detail))
         .route("/tasks/{id}/cancel", post(cancel))
         .route("/tasks/{id}/retry", post(retry))
+        .route("/tasks/{id}/diagnoses", get(diagnoses))
+        .route("/tasks/{id}/diagnoses/{did}/{what}", post(decide_diagnosis))
         .route("/tasks/{id}/approve", post(approve))
         .route("/tasks/{id}/reject", post(reject))
         .route("/tasks/{id}/explore-anyway", post(explore_anyway))

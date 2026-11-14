@@ -641,6 +641,20 @@ const STEPS: &[&str] = &[
          at    INTEGER NOT NULL,
          PRIMARY KEY (suite, test)
      );",
+    // 34: what a diagnosis session said about a task that failed on its own code (s250, decision
+    // 0245): at most two per task, counted here so a restart does not allow a third. `status`
+    // is pending (a card waits for the owner), applied, dismissed or none (nothing to apply).
+    // Additive.
+    "CREATE TABLE diagnoses (
+         id      INTEGER PRIMARY KEY AUTOINCREMENT,
+         task    INTEGER NOT NULL,
+         at_ms   INTEGER NOT NULL,
+         verdict TEXT NOT NULL,
+         args    TEXT NOT NULL,
+         status  TEXT NOT NULL,
+         decided_ms INTEGER NOT NULL DEFAULT 0
+     );
+     CREATE INDEX diagnoses_task ON diagnoses(task);",
 ];
 
 pub const SCHEMA_VERSION: u32 = STEPS.len() as u32;

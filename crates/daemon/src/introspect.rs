@@ -383,6 +383,13 @@ pub struct Replay {
     /// task -> (landed at, project)
     pub lands: BTreeMap<u64, (u64, String)>,
     pub returned: BTreeSet<u64>,
+    /// Send-backs in the window, per project and class (`send_back_class`).
+    pub sent_back: BTreeMap<String, BTreeMap<&'static str, u64>>,
+    /// Retries in the window, per project and the failure class of the task at the time
+    /// (`code`, `outside`, `unclassified`): (by the owner, by the daemon).
+    pub retries: BTreeMap<String, BTreeMap<&'static str, (u64, u64)>>,
+    /// How long each test-step run took, per project, for runs that ended in the window.
+    pub test_runs_ms: BTreeMap<String, Vec<u64>>,
 }
 
 /// The waits of one class, counted one by one.
@@ -541,6 +548,52 @@ impl Replayer {
                 r.returned.insert(task.0);
             }
             _ => {}
+        }
+        let in_window = at >= from && at < to;
+        match &event.kind {
+            EventKind::SentBack { task, reason, .. } if in_window => {
+                *r.sent_back
+                    .entry(project_of(w, task))
+                    .or_default()
+                    .entry(send_back_class(reason))
+                    .or_default() += 1;
+            }
+            EventKind::Retried { task, auto, .. } if in_window => {
+                let class = match w.tasks.get(task).and_then(|t| t.failure_class) {
+                    Some(FailClass::Code) => "code",
+                    Some(FailClass::Outside) => "outside",
+                    None => "unclassified",
+                };
+                let e = r
+                    .retries
+                    .entry(project_of(w, task))
+                    .or_default()
+                    .entry(class)
+                    .or_default();
+                if *auto {
+                    e.1 += 1;
+                } else {
+                    e.0 += 1;
+                }
+            }
+            _ => {}
+        }
+        // A test-step run ends with one of these: its length is its start and this event.
+        if let (
+            true,
+            EventKind::StepSucceeded { task, .. }
+            | EventKind::SentBack { task, .. }
+            | EventKind::StepFailed { task, .. },
+        ) = (in_window, &event.kind)
+        {
+            if w.tasks.get(task).is_some_and(|t| t.state == State::Testing) {
+                if let Some(run) = w.open_run(*task).and_then(|id| w.step_runs.get(&id)) {
+                    r.test_runs_ms
+                        .entry(project_of(w, task))
+                        .or_default()
+                        .push(at.saturating_sub(run.started_at.0));
+                }
+            }
         }
         if let Ok((next, _)) = reduce(w, event) {
             close_waits(w, &next, from, to, at, r);
@@ -1195,8 +1248,10 @@ pub fn digest(d: &Daemon, project: Option<&str>, from: u64, to: u64) -> Value {
         .filter(|f| in_p(&f.project))
         .map(finding_json)
         .collect();
+    let per_project = per_project_numbers(&rep, &in_p, from, to);
     json!({
         "from": from, "to": to, "project": project,
+        "per_project": per_project,
         "landed": stats.landed,
         "median_claim_to_land_ms": median(times.clone()),
         "claim_to_land_samples": times.len(),
@@ -1233,6 +1288,87 @@ pub fn digest(d: &Daemon, project: Option<&str>, from: u64, to: u64) -> Value {
             "note": "each number above is a count or sum of these rows and events; nothing is estimated",
         },
     })
+}
+
+/// The numbers the reviews counted by hand, per project (s255): the claim-to-land median and
+/// p90, send-backs per landed task by class, retries by failure class (the owner's and the
+/// daemon's), how long test-step runs took, and what is not recorded.
+fn per_project_numbers(rep: &Replay, in_p: &dyn Fn(&str) -> bool, from: u64, to: u64) -> Value {
+    let mut names: BTreeSet<&String> = BTreeSet::new();
+    names.extend(rep.lands.values().map(|(_, p)| p));
+    names.extend(rep.sent_back.keys());
+    names.extend(rep.retries.keys());
+    names.extend(rep.test_runs_ms.keys());
+    names.extend(rep.wait_runs.keys());
+    let mut out = serde_json::Map::new();
+    for p in names.into_iter().filter(|p| !p.is_empty() && in_p(p)) {
+        let times: Vec<u64> = rep
+            .lands
+            .iter()
+            .filter(|(_, (at, lp))| *at >= from && *at < to && lp == p)
+            .filter_map(|(t, (at, _))| rep.claims.get(t).map(|(c, _, _)| at.saturating_sub(*c)))
+            .collect();
+        let landed = rep
+            .lands
+            .values()
+            .filter(|(at, lp)| *at >= from && *at < to && lp == p)
+            .count() as u64;
+        let mut by_class = serde_json::Map::new();
+        let mut per_landed = serde_json::Map::new();
+        let sb = rep.sent_back.get(p.as_str());
+        for class in ["test_red", "build_red", "conflict", "weakening", "other"] {
+            let n = sb.and_then(|m| m.get(class)).copied().unwrap_or(0);
+            by_class.insert(class.into(), json!(n));
+            per_landed.insert(class.into(), json!(per(n, landed)));
+        }
+        // A red the base has too does not send a task back: its waits are counted instead.
+        let base_red = rep
+            .wait_runs
+            .get(p.as_str())
+            .and_then(|m| m.get("base-red"))
+            .map_or(0, |w| w.count);
+        by_class.insert("base_red".into(), json!(base_red));
+        per_landed.insert("base_red".into(), json!(per(base_red, landed)));
+        let mut retries = serde_json::Map::new();
+        for (class, (manual, auto)) in rep.retries.get(p.as_str()).into_iter().flatten() {
+            retries.insert(class.to_string(), json!({"manual": manual, "auto": auto}));
+        }
+        let runs = rep
+            .test_runs_ms
+            .get(p.as_str())
+            .cloned()
+            .unwrap_or_default();
+        out.insert(
+            p.to_string(),
+            json!({
+                "landed": landed,
+                "claim_to_land": {
+                    "median_ms": median(times.clone()),
+                    "p90_ms": p90(times.clone()),
+                    "samples": times.len(),
+                },
+                "send_backs": {
+                    "by_class": by_class,
+                    "per_landed": per_landed,
+                    "note": "base_red counts waits (a task waits, it is not sent back)",
+                },
+                "retries_by_failure_class": retries,
+                "test_step_run_ms": {
+                    "median": median(runs.clone()),
+                    "p90": p90(runs.clone()),
+                    "runs": runs.len(),
+                },
+                "suite_run_ms": null_not_recorded("the run time of each suite is not recorded; only the test step's whole run is (test_step_run_ms)"),
+                "run_check_ms": null_not_recorded("how long run_check calls took is not recorded"),
+                "run_check_calls_per_task": null_not_recorded("run_check calls are not counted in the store or the event log"),
+            }),
+        );
+    }
+    Value::Object(out)
+}
+
+fn null_not_recorded(why: &str) -> Value {
+    json!({"value": Value::Null, "not_recorded": why})
 }
 
 pub fn finding_json(f: &FindingRow) -> Value {
@@ -1468,5 +1604,118 @@ mod tests {
         assert_eq!(total, 10_000 + 5_000 + 30_000);
         assert_eq!(rows[0]["class"], "test-suite");
         assert_eq!(rows[0]["count"], 1);
+    }
+
+    /// One project, one task that is sent back once for a red test, fails outside the code, is
+    /// retried by the daemon, and lands.
+    fn numbers_log() -> Replay {
+        use mason_core::{FailClass, Next, Route};
+        let mut rp = Replayer::new(0, 100_000);
+        let step = |at, to: State| {
+            ev(
+                at,
+                EventKind::StepSucceeded {
+                    task: TaskId(0),
+                    next: Some(Next {
+                        step: String::new(),
+                        state: to,
+                    }),
+                },
+            )
+        };
+        for e in [
+            ev(
+                0,
+                EventKind::ProjectRegistered {
+                    project: mason_core::ProjectId(1),
+                    name: "p".into(),
+                },
+            ),
+            ev(
+                0,
+                EventKind::TaskFiled {
+                    project: mason_core::ProjectId(1),
+                    title: "t".into(),
+                    body: String::new(),
+                    priority: mason_core::Priority::Normal,
+                    trust: mason_core::TrustSource::Owner,
+                    explored: true,
+                    proposed: false,
+                    blockers: vec![],
+                    not_before: None,
+                },
+            ),
+            ev(
+                0,
+                EventKind::Admitted {
+                    task: TaskId(0),
+                    entry: Some(mason_core::Entry {
+                        def: "d".into(),
+                        step: "develop".into(),
+                        state: State::Developing,
+                        route: Route::Explore,
+                    }),
+                },
+            ),
+            step(1_000, State::Testing),
+            ev(
+                5_000,
+                EventKind::SentBack {
+                    task: TaskId(0),
+                    reason: "suite `cargo-workspace` is red".into(),
+                    to_step: "develop".into(),
+                },
+            ),
+            ev(
+                6_000,
+                EventKind::StepFailed {
+                    task: TaskId(0),
+                    reason: "the step host was lost 3 times".into(),
+                    class: Some(FailClass::Outside),
+                },
+            ),
+            ev(
+                7_000,
+                EventKind::Retried {
+                    task: TaskId(0),
+                    to: State::Developing,
+                    step: "develop".into(),
+                    auto: true,
+                },
+            ),
+            step(8_000, State::Testing),
+            step(20_000, State::Landed),
+        ] {
+            rp.feed(&e);
+        }
+        rp.finish()
+    }
+
+    #[test]
+    fn the_digest_counts_send_backs_retries_and_run_times_per_project_from_the_events() {
+        let r = numbers_log();
+        let v = per_project_numbers(&r, &|_| true, 0, 100_000);
+        let p = &v["p"];
+        assert_eq!(p["landed"], 1);
+        assert_eq!(p["claim_to_land"]["median_ms"], 20_000);
+        assert_eq!(p["claim_to_land"]["p90_ms"], 20_000);
+        assert_eq!(p["send_backs"]["by_class"]["test_red"], 1);
+        assert_eq!(p["send_backs"]["by_class"]["conflict"], 0);
+        assert_eq!(p["send_backs"]["per_landed"]["test_red"], 1.0);
+        assert_eq!(p["retries_by_failure_class"]["outside"]["auto"], 1);
+        assert_eq!(p["retries_by_failure_class"]["outside"]["manual"], 0);
+        // The test step ran 1 to 5 s, then 8 to 20 s.
+        assert_eq!(p["test_step_run_ms"]["runs"], 2);
+        assert_eq!(p["test_step_run_ms"]["median"], 8_000);
+        assert_eq!(p["test_step_run_ms"]["p90"], 12_000);
+        // What is not recorded says so.
+        assert!(p["run_check_calls_per_task"]["value"].is_null());
+        assert!(p["run_check_calls_per_task"]["not_recorded"]
+            .as_str()
+            .unwrap()
+            .contains("not"));
+        // Outside the window nothing is counted.
+        let none = per_project_numbers(&r, &|_| true, 50_000, 60_000);
+        assert!(none["p"].is_null() || none["p"]["send_backs"]["by_class"]["test_red"] == 0);
     }
 }
