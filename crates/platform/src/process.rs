@@ -658,6 +658,16 @@ mod tests {
         let e = replace_process(&mut Command::new("/no/such/program/anywhere"));
         assert_eq!(e.kind(), io::ErrorKind::NotFound);
     }
+
+    #[test]
+    fn wait_until_returns_when_the_condition_holds_and_says_so_when_it_never_does() {
+        let mut n = 0;
+        assert!(wait_until(std::time::Duration::from_secs(30), || {
+            n += 1;
+            n == 3
+        }));
+        assert!(!wait_until(std::time::Duration::ZERO, || false));
+    }
 }
 
 #[cfg(all(test, windows))]
