@@ -87,7 +87,12 @@ fn task_json(d: &Daemon, w: &World, t: &Task, detail: bool) -> Value {
         ),
         "title": t.title,
         "state": state_name(t.state),
-        "activity": activity_text(&t.activity),
+        "activity": match (t.state, &t.activity, d.check_hold(w, t)) {
+            (State::Queued, Activity::Waiting(WaitReason::Slot), Some((n, limit))) => {
+                format!("held: {n} checks are waiting (limit {limit})")
+            }
+            _ => activity_text(&t.activity),
+        },
         "landed": t.landed.map(|l| match l { LandedOutcome::Merged => "merged", LandedOutcome::ClosedNoChange => "closed with no change" }),
         "enqueued_at": t.enqueued_at.0,
         "failures": t.failures,
