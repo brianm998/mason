@@ -70,6 +70,7 @@ mason: command-line client for the MASON pipeline
   mason task reject <id> [--reason R] reject a proposed task or an approval step
   mason task explore-anyway <id>      explore after all, even if it skipped exploring
   mason task override <id> <key> <value>
+  mason task priority <id> urgent|high|normal|low   owner only; re-ranks its waiting requests
   mason task answer <id> <option number | text> [--card HASH] [--as NAME]
                                       answer the open question; the card's hash guards against a stale one
   mason task refresh <id>             ask the tracker now (what opening a task does)
@@ -140,7 +141,7 @@ mason: command-line client for the MASON pipeline
   mason proposal publish <id> --preview | --confirm   send an improvement upstream, redacted
   mason proposal poll                 look at the upstream pull requests now
   mason improve \"<what to improve>\" [--project P]   ask MASON to change its own code
-  mason update [--channel stable|main|branch:X | --sha S] [--rollback] [--check] [--now]
+  mason update [--channel stable|main|release|branch:X | --sha S] [--rollback] [--check] [--now]
   mason update status | ack           the runtimes, a rollback alert, an update in progress
   mason config show [--project P]     every step's settings and where each came from
   mason config set <key> <value> --for 2h [--project P] [--owner O]
@@ -3005,6 +3006,22 @@ fn main() {
                     finish(&a);
                     or_die(d.call("POST", &format!("/tasks/{id}/overrides"), Some(&json!({"key": key, "value": value, "owner": std::env::var("USER").unwrap_or_else(|_| "owner".into())}))));
                     println!("Task #{id}: {key} = {value}");
+                }
+                "priority" => {
+                    let id = task_id(&mut a);
+                    let level = a
+                        .pos()
+                        .unwrap_or_else(|| die("which priority? urgent, high, normal or low"));
+                    finish(&a);
+                    let r = or_die(d.call(
+                        "POST",
+                        &format!("/tasks/{id}/priority"),
+                        Some(&json!({"priority": level})),
+                    ));
+                    println!(
+                        "Task #{id}: priority {level} ({} waiting request(s) re-ranked)",
+                        r["reranked"]
+                    );
                 }
                 other => die(&format!("unknown task command {other:?}\n\n{HELP}")),
             }

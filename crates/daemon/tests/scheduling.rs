@@ -339,6 +339,52 @@ fn run_check_queues_like_the_test_step_and_frees_the_agents_slot() {
 }
 
 #[test]
+fn skipping_the_test_step_ends_a_waiting_run_check_and_runs_nothing() {
+    // On 2026-11-13 the owner skipped testing for every active task, and their agents
+    // still waited in `run_check` for compile slots to run the tests anyway.
+    let runs = tempfile::tempdir().unwrap();
+    let log = runs.path().join("held");
+    let cmd = format!("echo $MASON_HELD >> {}; test -f hello.txt", log.display());
+    let develop = serde_json::json!([
+        {"sh": TASK_SCRIPT_COMMIT},
+        {"call": {"tool": "run_check", "args": {"name": "tests"}}},
+        {"call": {"tool": "submit_change", "args": {"summary": "ok", "head": "$HEAD"}}}
+    ]);
+    let s = Scratch::new(
+        &cmd,
+        serde_json::json!({"steps": {"explore": [explore_turn()], "develop": [develop]}}),
+    );
+    // Shaped like mason's own: a test step whose suite builds first, phase by phase.
+    let def = DEF_COMPILE
+        .replace(
+            "uses = { compile = 1 }\nmax_rounds = 2",
+            "uses = { compile = 1 }\nsuites = [\"unit\"]\nmax_rounds = 2",
+        )
+        + "\n[suite.unit]\nbuild = \"true\"\ncommand = \"sh -c 'echo 1..1; echo ok 1 - a'\"\nparser = \"tap\"\nmin_tests = 1\nlevel = \"unit\"\n";
+    s.push_files(&[(".mason/mason.toml", &def)], "definition");
+    let d = s.start();
+    // The only compile slot stays held outside for the whole test.
+    let (id, held) = hold(&d, "interactive", &[("compile", 1)]);
+    let t = file_task(&d, "Checks its work");
+    wait_for("the check to queue for compile", 60, || {
+        d.broker
+            .explain_task(t)
+            .is_some_and(|w| w.contains("compile"))
+    });
+    mason_daemon::suites::skip(&d, t, "step:test", "drain the queue", "brian", false).unwrap();
+    // The check stops waiting and says it did not run; the test step is skipped too.
+    wait_state(&d, t, State::Landed, 90);
+    assert!(!log.exists(), "nothing ran the tests");
+    assert_eq!(
+        d.broker.used("compile"),
+        1,
+        "only the outside holder has it"
+    );
+    drop(held);
+    d.broker.lease_close(id);
+}
+
+#[test]
 fn waiting_is_outside_every_timeout() {
     let s = compile_scratch();
     // A 2 second test timeout, and a wait for the class that lasts longer.
@@ -400,6 +446,7 @@ fn linked(d: &Arc<Daemon>, label: &str, steps: u32) -> u64 {
         &map,
         Some(mason_daemon::sched::Standing {
             steps_remaining: steps,
+            span: 1,
             priority: 1,
         }),
     )
@@ -632,7 +679,7 @@ fn file_in(d: &Arc<Daemon>, project: &str, title: &str) -> TaskId {
 }
 
 #[test]
-fn two_projects_share_the_pool_and_admission_follows_the_rank() {
+fn two_projects_share_the_pool_and_admission_follows_progress_through_each_route() {
     let s = Scratch::new("test -f hello.txt", unique_script());
     s.push_files(&[(".mason/mason.toml", DEF_LONG)], "long definition");
     // A second project on its own base branch, with a shorter graph.
@@ -671,8 +718,10 @@ fn two_projects_share_the_pool_and_admission_follows_the_rank() {
     d.admit();
     wait_state(&d, short, State::Landed, 90);
     wait_state(&d, long, State::Landed, 90);
-    // The first step run is the first admission: fewer steps remaining won,
-    // across projects, even though it was filed later.
+    // The first step run is the first admission. Both tasks are at the start of
+    // their own route, so neither has come further (4 of 4 steps left against
+    // 2 of 2): the route's length no longer decides across projects (#287), and
+    // the one filed first goes first.
     let w = d.world().unwrap();
     let first = |t: TaskId| {
         w.step_runs
@@ -683,10 +732,12 @@ fn two_projects_share_the_pool_and_admission_follows_the_rank() {
             .unwrap()
     };
     assert!(
-        first(short) < first(long),
-        "short ({} steps) goes before long ({} steps)",
+        first(long) < first(short),
+        "equally far along ({} of {} steps left against {} of {}): the one filed first goes first",
+        4,
+        4,
         2,
-        4
+        2
     );
     // Isolation: each landed on its own base.
     let on = |branch: &str| sh(&s.origin, &["log", "--format=%s", branch]);
