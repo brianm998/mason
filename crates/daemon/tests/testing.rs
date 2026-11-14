@@ -405,6 +405,60 @@ fn a_force_skip_stops_a_running_suite_keeps_green_lanes_and_records_a_debt() {
 }
 
 #[test]
+fn a_skip_ends_the_wait_for_a_build_slot_and_takes_no_slot() {
+    // On 2026-11-13 #288's test step was skipped while it waited for a compile slot; it
+    // waited on until a slot came, then built, and only then noticed the skip.
+    let definition = def("build = \"true\"", "", "");
+    let s = world(vec![commit(HELLO, "add hello")], &[], &definition);
+    let d = start(&s);
+    // Something outside the step holds the only compile slot for the whole test.
+    let uses = [("compile".to_string(), 1)].into();
+    let id = d.broker.lease_open("outside build", &uses);
+    let held = {
+        let mut held = None;
+        for _ in 0..2_000 {
+            if let mason_daemon::sched::LeaseState::Granted {
+                classes,
+                exclusive,
+                capacity,
+                locks_dir,
+            } = d.broker.lease_poll(id)
+            {
+                let locks = mason_resources::Locks::new(locks_dir).unwrap();
+                let want = mason_resources::Take { classes, exclusive };
+                if let Ok(h) = locks.take(id, "outside build", 0, &want, &capacity) {
+                    held = Some(h);
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        held.expect("the outside build got the compile slot")
+    };
+    d.broker.lease_poll(id);
+    let t = file_it(&d, "Skip me while I wait");
+    wait_for("the test step to wait for compile", 90, || {
+        state_of(&d, t) == State::Testing
+            && d.broker
+                .explain_task(t)
+                .is_some_and(|w| w.contains("compile"))
+    });
+    mason_daemon::suites::skip(&d, t, "step:test", "too many tests", "brian", false).unwrap();
+    // It lands with the slot still held outside: the skip ended its wait.
+    wait_state(&d, t, State::Landed, 90);
+    assert_eq!(
+        d.broker.used("compile"),
+        1,
+        "only the outside build holds it"
+    );
+    let (v, note) = closing(&d, t);
+    assert_eq!(v, "unverified", "{note}");
+    assert!(note.contains("skipped by force"), "{note}");
+    drop(held);
+    d.broker.lease_close(id);
+}
+
+#[test]
 fn an_environmental_failure_is_a_wait_charged_to_no_task() {
     let counter = s_counter();
     let script = CHECKS.replace(
