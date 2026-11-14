@@ -1,0 +1,3 @@
+# 0283: Do not retune the scheduler or the wait_share gate for #312
+
+Task #312 repeats the finding of 0176: 89% of active time waiting, 63% of it on `exclusive`, 23% on `compile`, 6% the owner, 5% queue. The breakdown 0176 added shows the cause: star's exclusive test steps need the whole machine and queue behind mason's work (steps-first rank, tracked as #287). Waiting for the whole machine is the design of `exclusive`; the share falls when that rank is fixed, not when `sched.rs` gains a second rule here. The metric and the 60% threshold stay as they are, because moving either would hide the problem (0176). No code changed.

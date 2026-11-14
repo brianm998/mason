@@ -14,7 +14,7 @@ A task's test step runs its suites on the task's own tree. Landing then merges u
 - **The build floor.** When a project has no batch tier and no CI checks the batch, landing runs the `build` of the test step's suites that the impact map selects for the batch's diff (for MASON, `cargo test --workspace --no-run` in the integration worktree, whose build directory stays warm). It compiles and links every test without running one. A suite with no `build` has nothing to run, and a tree that already has green evidence for a suite (a task's own test run leaves it) is not built again. A red build goes down the red ladder like any red; its rerun rung builds again rather than running the whole suite.
 - **A red base is nobody's red.** When the floor is red, landing builds the base alone first. If the base does not build, nobody is blamed, nothing lands, the batch ends with a note saying so and the `redbase` alert is raised until a batch builds again. (Before this, a base that did not build made the ladder blame the first task of every batch in turn.)
 
-A force (`mason task force`) lands past the floor, as it does past every verification; the marker check still applies to it. Skipping a task's testing (a debt) does not skip the floor: the floor is the batch's, not the task's.
+A force (`mason task force`) lands past the floor, as it does past every verification; the marker check still applies to it. Skipping a task's testing (a debt) does not skip the floor: the floor is the batch's, not the task's. Its build takes a compile slot (one per batch), so a task whose tests were skipped still waits for a slot at landing.
 
 ## Importing issues
 

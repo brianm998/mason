@@ -16,13 +16,15 @@ cleanup() {
   [ -n "$gh" ] && kill -9 "$gh" 2>/dev/null || true
   for f in "$root"/d/h/*/host.kv; do
     [ -e "$f" ] || continue
-    for k in host_pid child_pid; do pid=$(sed -n "s/^$k=//p" "$f"); kill -9 "-$pid" 2>/dev/null || kill -9 "$pid" 2>/dev/null || true; done
+    # Only a real pid: an empty or 0 child_pid made this `kill -9 -0`, which killed the
+    # script's own process group (2026-11-14).
+    for k in host_pid child_pid; do pid=$(sed -n "s/^$k=//p" "$f"); [ "${pid:-0}" -gt 1 ] 2>/dev/null || continue; kill -9 "-$pid" 2>/dev/null || kill -9 "$pid" 2>/dev/null || true; done
   done
   rm -rf "$root"
 }
 trap cleanup EXIT
 cargo build -q --workspace --bins
-bin=target/debug
+bin=${CARGO_TARGET_DIR:-target}/debug
 owner=${USER:-owner}
 m() { "$bin/mason" --data-dir "$root/d" --config-dir "$root/c" "$@"; }
 fail() { echo "FAILED: $*" >&2; set +e; m task list >&2 2>&1; m task progress "${t:-1}" >&2 2>&1; tail -20 "$root/masond.log" >&2; exit 1; }
@@ -34,10 +36,20 @@ cat > "$root/gh/runs.json" <<'JSON'
 [{"id": 101, "name": "pr-gate", "status": "in_progress", "conclusion": null},
  {"id": 102, "name": "macOS", "status": "in_progress", "conclusion": null}]
 JSON
-echo '[{"id": 1011, "name": "lint", "status": "completed", "conclusion": "success"}, {"id": 1012, "name": "unit", "status": "completed", "conclusion": "failure"}]' > "$root/gh/jobs-101.json"
+# The finished, unsuccessful job is `cancelled`, not `failure`: since #264 a failed job in a
+# running CI makes it red at once, which would end the wait this script watches. A cancelled
+# job still counts as failed in the progress.
+echo '[{"id": 1011, "name": "lint", "status": "completed", "conclusion": "success"}, {"id": 1012, "name": "unit", "status": "completed", "conclusion": "cancelled"}]' > "$root/gh/jobs-101.json"
 echo '[{"id": 1021, "name": "macOS build", "status": "in_progress", "conclusion": null}, {"id": 1022, "name": "macOS ui", "status": "queued", "conclusion": null}]' > "$root/gh/jobs-102.json"
 "$bin/fake-github" "$root/gh" "$root/gh.port" 2>"$root/gh.log" & gh=$!
-until [ -s "$root/gh.port" ]; do sleep 0.05; done
+# The fake writes its port once it listens. A fake that never started (a missing binary) or
+# died must fail the script, not leave it waiting: on 2026-11-13 this loop waited 7 hours.
+end=$((SECONDS + 30))
+until [ -s "$root/gh.port" ]; do
+  kill -0 "$gh" 2>/dev/null || { echo "FAILED: fake-github exited before it listened" >&2; cat "$root/gh.log" >&2; exit 1; }
+  [ $SECONDS -lt $end ] || { echo "FAILED: fake-github wrote no port in 30 s" >&2; cat "$root/gh.log" >&2; exit 1; }
+  sleep 0.05
+done
 port=$(cat "$root/gh.port")
 git init -q --bare -b main "$root/origin.git"
 git clone -q "$root/origin.git" "$root/repo" 2>/dev/null
