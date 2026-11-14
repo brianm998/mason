@@ -10,6 +10,7 @@ use mason_adapters::fakehost::{CommandCi, FakeHost};
 use mason_adapters::generic::Generic;
 use mason_adapters::github::{GitHub, TokenRef};
 use mason_adapters::jenkins::Jenkins;
+use mason_plugins::adapters::{PluginCi, PluginHost, PluginTracker};
 use std::sync::Arc;
 
 pub fn token(r: &str) -> Result<TokenRef, String> {
@@ -27,6 +28,17 @@ fn infra_of(c: Option<&CiCfg>) -> Option<Vec<String>> {
         .map(|c| c.infra_patterns.clone())
 }
 
+/// A plugin's adapter, built only if the owner approved the extension's exact bytes.
+fn plugin_parts(
+    p: &ProjectCfg,
+    kind: &str,
+    name: &str,
+) -> Result<(mason_plugins::host::Launch, mason_plugins::Manifest), String> {
+    crate::plugins::approved_provider(p, &format!("adapter:{kind}:{name}"))
+}
+
+const PLUGIN_CALL: std::time::Duration = std::time::Duration::from_secs(60);
+
 pub fn host(p: &ProjectCfg) -> Result<Option<Arc<dyn GitHostAdapter>>, String> {
     Ok(match &p.services.host {
         None => None,
@@ -35,6 +47,16 @@ pub fn host(p: &ProjectCfg) -> Result<Option<Arc<dyn GitHostAdapter>>, String> {
             // Pull-request checks are judged by the same `[ci]` setting.
             g.infra = infra_of(p.services.ci.as_ref());
             Some(Arc::new(g))
+        }
+        Some(HostCfg::Plugin { name }) => {
+            let (l, m) = plugin_parts(p, "host", name)?;
+            Some(Arc::new(PluginHost::new(
+                l,
+                &m.name,
+                m.protocol,
+                name,
+                PLUGIN_CALL,
+            )))
         }
         Some(HostCfg::Fake {
             dir,
@@ -60,6 +82,10 @@ pub fn ci(p: &ProjectCfg) -> Result<Option<Ci>, String> {
         None => None,
         Some(c) => {
             let a: Arc<dyn BuildSystemAdapter> = match &c.kind {
+                CiKind::Plugin { name } => {
+                    let (l, m) = plugin_parts(p, "ci", name)?;
+                    Arc::new(PluginCi::new(l, &m.name, m.protocol, name, PLUGIN_CALL))
+                }
                 CiKind::GithubActions {
                     api,
                     repo,
@@ -111,6 +137,20 @@ pub fn ci(p: &ProjectCfg) -> Result<Option<Ci>, String> {
 pub fn tracker(p: &ProjectCfg) -> Result<Option<Tracker>, String> {
     Ok(match &p.services.tracker {
         None => None,
+        Some(t) if t.plugin.is_some() => {
+            let name = t.plugin.as_deref().unwrap_or_default();
+            let (l, m) = plugin_parts(p, "tracker", name)?;
+            Some((
+                Arc::new(PluginTracker::new(
+                    l,
+                    &m.name,
+                    m.protocol,
+                    name,
+                    PLUGIN_CALL,
+                )),
+                t.clone(),
+            ))
+        }
         Some(t) => Some((
             Arc::new(github(&t.api, &t.repo, &t.token, None)?),
             t.clone(),
