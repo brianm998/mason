@@ -117,8 +117,8 @@ struct BannersView: View {
                 banner("Read-only: \(why)", id: "read-only", icon: "read_only")
             }
             if !model.daemonUpdateText.isEmpty {
-                updateRow(model.daemonUpdateText, button: model.canUpdateDaemon ? "Update masond" : nil, id: "daemon-update") {
-                    model.updateDaemon()
+                updateRow(model.daemonUpdateText, button: model.canUpdateDaemon ? (model.downloadURL.isEmpty ? "Update masond" : "Download") : nil, id: "daemon-update") {
+                    if model.downloadURL.isEmpty { model.updateDaemon() } else { model.openDownloadPage() }
                 }
             }
             if let text = monitorUpdateText {

@@ -115,6 +115,14 @@ public final class MonitorModel: ObservableObject {
     public var daemonUpdateText: String { updateInfo?.daemonText ?? "" }
     public var canUpdateDaemon: Bool { canAct && updateInfo?.daemonCanUpdate == true }
 
+    /// On the `release` channel (a packaged install) there is no source to build from: the
+    /// button opens the download page instead.
+    public var downloadURL: String { updateInfo?.downloadURL ?? "" }
+    public var onOpenURL: ((URL) -> Void)?
+    public func openDownloadPage() {
+        if let u = URL(string: downloadURL), ["https", "http"].contains(u.scheme) { onOpenURL?(u) }
+    }
+
     /// The owner's button: the daemon builds its newest version, proves it and takes over.
     public func updateDaemon() { raw("POST", "/update", json: "{}") }
 

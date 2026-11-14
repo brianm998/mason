@@ -90,7 +90,6 @@ pub fn run(cfg: HostConfig) -> io::Result<()> {
         .stdin(stdin)
         .stdout(writer.try_clone()?)
         .stderr(writer);
-    process::group_leader(&mut cmd);
     if let Some(c) = &cfg.cwd {
         cmd.current_dir(c);
     }
@@ -98,7 +97,7 @@ pub fn run(cfg: HostConfig) -> io::Result<()> {
         cmd.env_clear();
     }
     cmd.envs(cfg.env.iter().map(|(k, v)| (k, v)));
-    let spawned = cmd.spawn();
+    let spawned = process::spawn_group(&mut cmd);
     drop(cmd); // closes our copies of the pipe's write end
 
     let mut initial_len = 0u64;
