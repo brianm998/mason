@@ -744,14 +744,28 @@ async fn retry(
                         ),
                     ));
                 }
-                let def = task_def(&d2, t);
-                // `to` is a step in the task's definition, or a category (the first step in it).
-                let name = want.unwrap_or_else(|| retry_default(&def, t));
-                let found = match def.step(&name) {
-                    Some(s) => Some((s.category, s.name.clone())),
-                    None => parse_state(&name)
-                        .and_then(|c| def.first_in(c).map(|s| (c, s.name.clone()))),
+                let pinned = task_def(&d2, t);
+                // A retry starts the task over from an earlier step, so it runs the
+                // project's definition as it is now (decision 0206), if that has the step.
+                let cur = d2.current_def(t.project);
+                // `to` is a step in the definition, or a category (the first step in it).
+                let resolve = |def: &Definition| {
+                    let name = want.clone().unwrap_or_else(|| retry_default(def, t));
+                    let found = match def.step(&name) {
+                        Some(s) => Some((s.category, s.name.clone())),
+                        None => parse_state(&name)
+                            .and_then(|c| def.first_in(c).map(|s| (c, s.name.clone()))),
+                    };
+                    (name, found)
                 };
+                let (name, found) = match resolve(&cur) {
+                    (n, Some(f)) => {
+                        d2.repin_to(TaskId(id), None, &cur);
+                        (n, Some(f))
+                    }
+                    _ => resolve(&pinned),
+                };
+                let def = pinned;
                 let (to, step) = found.ok_or_else(|| {
                     let names: Vec<&str> = def.steps.iter().map(|s| s.name.as_str()).collect();
                     fail(
