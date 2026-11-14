@@ -4,6 +4,42 @@ import MasonProtocol
 import MonitorCore
 import SwiftUI
 
+/// What the editor's controls do, apart from drawing them. The buttons, pickers and fields call
+/// these, and so do the offscreen tests, so a test drives the same code a click does.
+enum EditorActions {
+    static func undo(_ model: MonitorModel) { model.editorCall("undo") }
+    static func redo(_ model: MonitorModel) { model.editorCall("redo") }
+
+    static func freshName(_ base: String, taken: [String]) -> String {
+        var n = 1
+        while taken.contains("\(base)-\(n)") { n += 1 }
+        return "\(base)-\(n)"
+    }
+
+    /// Add a step after the selected one (a palette button).
+    static func insertStep(_ model: MonitorModel, _ e: Mason_V1_EditorView, type: String, categories: [String], fields: [String: Any], extends: Bool) {
+        guard let sel = e.nodes.first(where: { $0.name == e.selected }) else { return }
+        let laneOrder = e.lanes.map(\.category)
+        let here = laneOrder.firstIndex(of: sel.category) ?? 0
+        let category = categories.contains(sel.category) ? sel.category
+            : (categories.first { (laneOrder.firstIndex(of: $0) ?? 0) >= here } ?? categories.first ?? sel.category)
+        var op: [String: Any] = ["op": "insert_step", "after": sel.name, "name": freshName(extends ? sel.name : type, taken: e.stepNames), "type": extends ? sel.kind : type, "category": extends ? sel.category : category]
+        if extends { op["extends"] = sel.name } else { op["fields"] = fields }
+        model.editorOp(op)
+    }
+
+    /// Point a step's `next` or `on_red` edge at another step (an edge picker); empty is nowhere.
+    static func connect(_ model: MonitorModel, from: String, kind: String, to: String) {
+        model.editorOp(["op": "set_edge", "from": from, "edge": kind, "to": to.isEmpty ? NSNull() : to])
+    }
+
+    /// Set (or, with nil, unset) one field of a step's form.
+    static func setField(_ model: MonitorModel, step: String, key: String, value: Any?) {
+        if let value { model.editorOp(["op": "set_field", "step": step, "key": key, "value": value]) }
+        else { model.editorOp(["op": "unset_field", "step": step, "key": key]) }
+    }
+}
+
 /// The pipeline editor (Part 18). The daemon validates, lays out and computes everything
 /// (`EditorView`); this draws it and sends small operations back. Nothing here knows a
 /// pipeline rule: a step's form is built from the JSON Schema the daemon sends.
@@ -42,8 +78,8 @@ struct EditorPage: View {
                 Text("Pipeline: \(e.project)").font(theme.title())
                 if e.protected { Text("MASON's own: .mason/ is protected").font(theme.body()).foregroundStyle(theme.muted) }
                 Spacer()
-                Button("Undo") { model.editorCall("undo") }.disabled(!e.canUndo).accessibilityIdentifier("undo")
-                Button("Redo") { model.editorCall("redo") }.disabled(!e.canRedo).accessibilityIdentifier("redo")
+                Button("Undo") { EditorActions.undo(model) }.disabled(!e.canUndo).accessibilityIdentifier("undo")
+                Button("Redo") { EditorActions.redo(model) }.disabled(!e.canRedo).accessibilityIdentifier("redo")
                 Button("Discard") { model.editorCall("discard") }.disabled(!e.dirty).accessibilityIdentifier("discard")
                 Button("Simulate") { model.editorCall("simulate"); tab = .preview }.accessibilityIdentifier("simulate")
                 TextField("Message", text: $message).frame(width: 220)
@@ -204,23 +240,10 @@ private struct Palette: View {
         }
     }
 
-    func freshName(_ base: String) -> String {
-        var n = 1
-        while e.stepNames.contains("\(base)-\(n)") { n += 1 }
-        return "\(base)-\(n)"
-    }
-
     var selectedNode: Mason_V1_EditorNode? { e.nodes.first { $0.name == e.selected } }
 
     func insert(_ en: Entry, extends: Bool) {
-        guard let sel = selectedNode else { return }
-        let laneOrder = e.lanes.map(\.category)
-        let here = laneOrder.firstIndex(of: sel.category) ?? 0
-        let category = en.categories.contains(sel.category) ? sel.category
-            : (en.categories.first { (laneOrder.firstIndex(of: $0) ?? 0) >= here } ?? en.categories.first ?? sel.category)
-        var op: [String: Any] = ["op": "insert_step", "after": sel.name, "name": freshName(extends ? sel.name : en.type), "type": extends ? sel.kind : en.type, "category": extends ? sel.category : category]
-        if extends { op["extends"] = sel.name } else { op["fields"] = en.fields }
-        model.editorOp(op)
+        EditorActions.insertStep(model, e, type: en.type, categories: en.categories, fields: en.fields, extends: extends)
     }
 
     var body: some View {
@@ -247,7 +270,7 @@ private struct Inspector: View {
     func target(_ kind: String) -> String { e.edges.first { $0.from == e.selected && $0.kind == kind }?.to ?? "" }
 
     func edgePicker(_ title: String, kind: String) -> some View {
-        let binding = Binding<String>(get: { target(kind) }, set: { model.editorOp(["op": "set_edge", "from": e.selected, "edge": kind, "to": $0.isEmpty ? NSNull() : $0]) })
+        let binding = Binding<String>(get: { target(kind) }, set: { EditorActions.connect(model, from: e.selected, kind: kind, to: $0) })
         return Picker(title, selection: binding) {
             Text("(nowhere)").tag("")
             ForEach(e.stepNames.filter { $0 != e.selected || kind == "on_red" }, id: \.self) { Text($0).tag($0) }
@@ -298,8 +321,7 @@ private struct SchemaForm: View {
     var vals: [String: Any] { (try? JSONSerialization.jsonObject(with: Data(values.utf8)) as? [String: Any]) ?? [:] }
 
     func set(_ key: String, _ v: Any?) {
-        if let v { model.editorOp(["op": "set_field", "step": step, "key": key, "value": v]) }
-        else { model.editorOp(["op": "unset_field", "step": step, "key": key]) }
+        EditorActions.setField(model, step: step, key: key, value: v)
     }
 
     var body: some View {
