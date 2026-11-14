@@ -425,9 +425,10 @@ pub(crate) fn step_env_pairs(c: &Ctx) -> Vec<(String, String)> {
         ("MASON_BASE".into(), c.project.base_ref()),
         ("MASON_STEP".into(), c.step.name.clone()),
         ("MASON_ATTEMPT".into(), c.attempt.to_string()),
-        // What the step already holds from the broker (its `uses`), so a command
-        // that would queue for the same class (`mason run --needs`) can tell it
-        // need not, and does not wait on itself.
+        // What the step already holds from the broker. Here that is the step's own
+        // `uses`; each command is told what is leased for it (`command_job` and the
+        // suites override this), so a command that would queue for the same class
+        // (`mason run --needs`) can tell it need not, and does not wait on itself.
         ("MASON_HELD".into(), held_text(&c.step.uses)),
         (
             "MASON_RESULT_FILE".into(),
@@ -702,6 +703,18 @@ pub(crate) fn held_text(uses: &std::collections::BTreeMap<String, u32>) -> Strin
         .map(|(k, _)| k.as_str())
         .collect::<Vec<_>>()
         .join(",")
+}
+
+/// `MASON_HELD` for a lease: its classes, plus `exclusive` when it holds the machine.
+pub(crate) fn held_needs_text(needs: &mason_scheduler::Needs) -> String {
+    let mut text = held_text(&needs.amounts);
+    if needs.exclusive && !needs.amounts.contains_key("exclusive") {
+        if !text.is_empty() {
+            text.push(',');
+        }
+        text.push_str("exclusive");
+    }
+    text
 }
 
 /// A test step's build, when it has one: its command runs in two phases.
@@ -1113,6 +1126,9 @@ struct TestChecks {
     suites: Option<DevSuites>,
     task: u64,
     run: u64,
+    /// A develop step's project and base: before a check the base is folded in when that is
+    /// safe (`basefold`). `None` for other steps.
+    base_fold: Option<(ProjectId, String)>,
 }
 
 /// What `run_check` needs to pick suites: the test step, and where the base is.
@@ -1324,6 +1340,9 @@ impl TestChecks {
                         if o.timed_out { " (timed out)" } else { "" },
                         o.output
                     ));
+                    if let Some(h) = known_header(&self.slots.d, &self.log_dir, &o.id, &name) {
+                        lines.push(format!("{name}: {h}"));
+                    }
                 }
                 Err(e) => {
                     failed = true;
@@ -1352,6 +1371,14 @@ impl TestChecks {
     }
 }
 
+/// A header for `run_check`'s output naming the failing tests that are known red (not the
+/// agent's to fix) and their fixes: read from the whole log of the run `id`, `scope` being
+/// the suite or test step the ledger keeps them under.
+fn known_header(d: &Daemon, log_dir: &Path, id: &str, scope: &str) -> Option<String> {
+    let text = read_whole_log(&log_dir.join(format!("{id}.log")))?;
+    crate::knownred::header(&text, &crate::knownred::known_for(&d.store, scope))
+}
+
 /// A name from a validated scope (letters, digits, `_ : . - /`), quoted all the same.
 fn shell_word(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
@@ -1363,6 +1390,37 @@ impl CheckHandler for TestChecks {
     }
 
     fn run_scoped(&self, name: &str, scope: &CheckScope) -> CheckRun {
+        let note = match (&self.base_fold, name == "tests") {
+            (Some((pid, base)), true) => {
+                let fold = {
+                    let lock = self.slots.d.repo_lock(*pid);
+                    let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+                    crate::basefold::fold(&self.wt, base)
+                };
+                if !matches!(fold, crate::basefold::BaseFold::Current) {
+                    tracing::info!(
+                        task = self.task,
+                        run = self.run,
+                        ?fold,
+                        "run_check: base fold"
+                    );
+                }
+                crate::basefold::note(base, &fold)
+            }
+            _ => None,
+        };
+        match (note, self.check(name, scope)) {
+            (Some(n), CheckRun::Done { passed, summary }) => CheckRun::Done {
+                passed,
+                summary: format!("{n}\n\n{summary}"),
+            },
+            (_, r) => r,
+        }
+    }
+}
+
+impl TestChecks {
+    fn check(&self, name: &str, scope: &CheckScope) -> CheckRun {
         if name == "tests" {
             if let Some(dev) = &self.suites {
                 return self.run_suites(dev, scope);
@@ -1473,18 +1531,28 @@ impl CheckHandler for TestChecks {
                 crate::cmdreuse::record_green(&self.slots.d, t, &key, &src);
             }
         }
+        let header = match &res {
+            Ok(o) if !o.passed => {
+                let step = self.slots.test_step.as_deref().unwrap_or("test");
+                known_header(&self.slots.d, &self.log_dir, &o.id, step)
+                    .map(|h| format!("{h}\n\n"))
+                    .unwrap_or_default()
+            }
+            _ => String::new(),
+        };
         match res {
             Ok(o) => CheckRun::Done {
                 passed: o.passed,
-                summary: if o.timed_out {
-                    format!(
+                summary: header
+                    + &if o.timed_out {
+                        format!(
                         "The tests did not finish within {} s and were stopped. Last output:\n{}",
                         self.timeout.as_secs(),
                         o.output
                     )
-                } else {
-                    format!("{whole}Last output:\n{}", o.output)
-                },
+                    } else {
+                        format!("{whole}Last output:\n{}", o.output)
+                    },
             },
             Err(e) => CheckRun::Done {
                 passed: false,
@@ -1909,6 +1977,7 @@ fn agent_job(c: &Ctx) {
         suites: DevSuites::of(&c.def, c.project.base_ref()),
         task: c.task.0,
         run: c.run.0,
+        base_fold: (kind == StepKind::Develop).then(|| (c.project_id, c.project.base_ref())),
     });
     let validator = (kind == StepKind::Develop).then(|| {
         change_validator(
@@ -2305,7 +2374,16 @@ fn settle_all(
                 } else {
                     text
                 };
-                let restart = lost.len() <= hl::MAX_AGENT_RESTARTS;
+                // A host the daemon's own restart took is not the task's failure: it
+                // is recorded but not counted toward the restart budget.
+                let counted = lost
+                    .iter()
+                    .filter(|id| {
+                        let r = mason_step_host::registry::lost_report(&root.join(id));
+                        !r.is_ok_and(|r| hl::is_restart_loss(&root, r.last_heartbeat_ms, r.at_ms))
+                    })
+                    .count();
+                let restart = counted <= hl::MAX_AGENT_RESTARTS;
                 hl::record_as(&c.d, Some(c.run), &c.step.name, &newest, at, text, restart);
                 if !restart {
                     let all: Vec<String> = lost.iter().map(|id| describe(id).0).collect();
@@ -2644,6 +2722,7 @@ fn command_job(c: &Ctx) {
                 rerun: true,
             } => {
                 let names = crate::rerun::failing_names(&read_whole_log(&log).unwrap_or_default());
+                let last_names = names.clone();
                 if k == 0 {
                     if !names.is_empty() {
                         persistent = Some(names.clone());
@@ -2700,22 +2779,52 @@ fn command_job(c: &Ctx) {
                     }
                     continue;
                 }
-                // Red on every run: if every one of those tests also fails at the merge base,
-                // it is not this change's (s177).
+                // Red on every run: a test in the known-red ledger, or one that also fails at
+                // the merge base, is not this change's (s177, s281). Each is told apart on its
+                // own: only the others fail the step.
+                let mut not_yours: Vec<String> = vec![];
+                // Tests excused above (by the ledger or the base), and those that are left.
+                let mut excused_names: Vec<String> = vec![];
+                let mut rest_new: Vec<String> = vec![];
+                let mut exhausted_why: Option<String> = None;
                 if is_test {
                     if let Some(p) = persistent.as_ref().filter(|p| !p.is_empty()) {
-                        let base_cmd = if filter_off {
-                            cmd.clone()
-                        } else {
-                            crate::rerun::command(&cmd, filter, p)
-                        };
-                        if let Some(note) = crate::basecheck::excuse(
-                            c,
-                            suffix,
-                            builds_first(c).as_deref(),
-                            &base_cmd,
-                            p,
-                        ) {
+                        let known = crate::knownred::known_for(&c.d.store, &c.step.name);
+                        let (mut rest, hit) = crate::knownred::split(p, &known);
+                        not_yours.extend(crate::knownred::lines(&hit));
+                        excused_names.extend(hit.iter().map(|k| k.test.clone()));
+                        if !not_yours.is_empty() {
+                            let _ = std::fs::write(
+                                c.task_dir()
+                                    .join(format!("{suffix}-r{}-known.excused", c.run.0)),
+                                not_yours.join("\n"),
+                            );
+                        }
+                        if !rest.is_empty() {
+                            let base_cmd = if filter_off {
+                                cmd.clone()
+                            } else {
+                                crate::rerun::command(&cmd, filter, &rest)
+                            };
+                            if let Some(e) = crate::basecheck::excuse(
+                                c,
+                                suffix,
+                                builds_first(c).as_deref(),
+                                &base_cmd,
+                                &rest,
+                            ) {
+                                rest.retain(|t| !e.tests.contains(t));
+                                excused_names.extend(e.tests);
+                                not_yours.extend(e.lines);
+                            }
+                        }
+                        rest_new = rest.clone();
+                        if rest.is_empty() && !not_yours.is_empty() {
+                            let note = format!(
+                                "`{}` was red, but every test that failed on every run is not this change's (known red, or also failing at the merge base; excused):\n{}",
+                                c.step.name,
+                                not_yours.join("\n")
+                            );
                             record_flaky(c, &seen, p);
                             let _ = std::fs::remove_file(c.task_dir().join("feedback.txt"));
                             tracing::warn!(task = c.task.0, run = c.run.0, "{note}");
@@ -2724,6 +2833,55 @@ fn command_job(c: &Ctx) {
                                 let _ = writeln!(f, "\n== MASON: {note}");
                             }
                             return c.green();
+                        }
+                    }
+                }
+                // What failed on every run and is still the change's (s282): kept for the last
+                // round, counted across tasks, and on the last round run at the merge base.
+                if is_test && !rest_new.is_empty() {
+                    crate::exhausted::record_round(c, &rest_new);
+                    crate::exhausted::record_persistent(c, &c.step.name, &rest_new);
+                    if crate::exhausted::is_last_round(c) {
+                        let build = builds_first(c);
+                        let cmd_for = |t: &[String]| {
+                            if filter_off {
+                                cmd.clone()
+                            } else {
+                                crate::rerun::command(&cmd, filter, t)
+                            }
+                        };
+                        let ex = crate::exhausted::on_last_round(
+                            c,
+                            &c.step.name,
+                            build.as_deref(),
+                            &cmd_for,
+                            &rest_new,
+                        );
+                        exhausted_why = ex.why;
+                        if !ex.excused.is_empty() {
+                            excused_names.extend(ex.excused);
+                            not_yours.extend(ex.lines);
+                            let left: Vec<&String> = last_names
+                                .iter()
+                                .filter(|t| !excused_names.contains(t))
+                                .collect();
+                            if left.is_empty() && exhausted_why.is_none() {
+                                let note = format!(
+                                    "`{}` was still red on the last round, but what failed every time is red at the merge base too (now in the known-red ledger, fix filed); the step goes on:\n{}",
+                                    c.step.name,
+                                    not_yours.join("\n")
+                                );
+                                record_flaky(c, &seen, &excused_names);
+                                let _ = std::fs::remove_file(c.task_dir().join("feedback.txt"));
+                                tracing::warn!(task = c.task.0, run = c.run.0, "{note}");
+                                use std::io::Write as _;
+                                if let Ok(mut f) =
+                                    std::fs::OpenOptions::new().append(true).open(&log)
+                                {
+                                    let _ = writeln!(f, "\n== MASON: {note}");
+                                }
+                                return c.green();
+                            }
                         }
                     }
                 }
@@ -2753,6 +2911,22 @@ fn command_job(c: &Ctx) {
                         format!("{feedback}\n\nIt was red on all {} runs.", k + 1),
                     ),
                     _ => (reason, feedback),
+                };
+                let feedback = if not_yours.is_empty() {
+                    feedback
+                } else {
+                    format!(
+                        "{feedback}\n\nNot yours (do not work on these; the others above are yours):\n{}",
+                        not_yours.join("\n")
+                    )
+                };
+                let reason = match &exhausted_why {
+                    Some(w) => format!("{reason}; {w}"),
+                    None => reason,
+                };
+                let feedback = match &exhausted_why {
+                    Some(w) => format!("{feedback}\n\nChecked at the base: {w}"),
+                    None => feedback,
                 };
                 return c.conclude(Outcome::Red, reason, Some(feedback));
             }

@@ -204,6 +204,14 @@ fn validate_testing(def: &Definition, p: &mut Vec<Problem>) {
                 ));
             }
         }
+        if let Some(r) = &s.skip {
+            if !r.contains("{tests}") && !r.contains("{skips}") {
+                p.push(Problem::new(
+                    format!("{base}.skip"),
+                    "must contain `{tests}` or `{skips}`, where the known-red test names go",
+                ));
+            }
+        }
         for (key, v) in [("dev_command", &s.dev_command), ("dev_build", &s.dev_build)] {
             if v.as_ref().is_some_and(|c| !c.contains("{packages}")) {
                 p.push(Problem::new(

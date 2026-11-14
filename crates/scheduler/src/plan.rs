@@ -2,7 +2,7 @@
 
 use crate::explain::{Ahead, HeldBy, Wait, WaitCause};
 use crate::rank::Rank;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -188,9 +188,16 @@ fn uses_machine(capacity: &BTreeMap<String, Capacity>, n: &Needs) -> bool {
 }
 
 /// What earlier, still-waiting requests need, for the passing rule.
+///
+/// Each waiter sets aside (reserves) the units it needs. A later request may use only what is
+/// left after those, so it can never take what an earlier waiter is waiting for, and that waiter
+/// is not starved. Until 2026-11-13 a waiter blocked every later request that named any of its
+/// resources, however many units were free. Two waiters needing one `compile` and one
+/// `test-suite` each, with every test-suite slot taken, held back 16 compile-only builds with
+/// `compile` at 0 of 5 and the CPU 81% idle.
 #[derive(Default)]
 struct Blocked {
-    names: BTreeSet<String>,
+    reserved: BTreeMap<String, u32>,
     /// An exclusive request waits: no machine-class job may pass it.
     machine_all: bool,
     /// Some machine-class request waits: an exclusive one may not pass it.
@@ -199,7 +206,9 @@ struct Blocked {
 
 impl Blocked {
     fn add(&mut self, capacity: &BTreeMap<String, Capacity>, n: &Needs) {
-        self.names.extend(n.amounts.keys().cloned());
+        for (r, a) in &n.amounts {
+            *self.reserved.entry(r.clone()).or_insert(0) += a;
+        }
         if n.exclusive {
             self.machine_all = true;
         }
@@ -208,9 +217,24 @@ impl Blocked {
         }
     }
 
-    /// The first resource of `n` an earlier waiter also needs, if any.
-    fn touches(&self, capacity: &BTreeMap<String, Capacity>, n: &Needs) -> Option<Touch> {
-        if let Some(r) = n.amounts.keys().find(|r| self.names.contains(*r)) {
+    /// The first resource of `n` that does not fit once earlier waiters' reservations are set
+    /// aside, if any (or the machine, for the exclusive rules).
+    fn touches(
+        &self,
+        capacity: &BTreeMap<String, Capacity>,
+        usage: &Usage,
+        n: &Needs,
+    ) -> Option<Touch> {
+        let short = n.amounts.iter().find(|(r, a)| {
+            let reserved = self.reserved.get(*r).copied().unwrap_or(0);
+            if reserved == 0 {
+                return false;
+            }
+            let used = usage.used.get(*r).copied().unwrap_or(0);
+            let units = capacity.get(*r).map_or(0, |c| c.units);
+            used + reserved + **a > units
+        });
+        if let Some((r, _)) = short {
             return Some(Touch::Name(r.clone()));
         }
         if (self.machine_all && uses_machine(capacity, n)) || (n.exclusive && self.machine_any) {
@@ -267,8 +291,9 @@ fn fit(capacity: &BTreeMap<String, Capacity>, usage: &Usage, n: &Needs) -> Fit {
 }
 
 /// Decide who is granted now. Requests are taken in rank order. One is granted
-/// when its whole set fits and it uses nothing an earlier waiter needs; that is
-/// the passing rule, "a compile can pass a waiting test suite, and nothing
+/// when its whole set fits in what is left after the units earlier waiters need
+/// are set aside; that is the passing rule, "a compile can pass a waiting test
+/// suite, and may use a free compile slot a waiter does not need, but nothing
 /// passes a waiting exclusive job". Whoever is not granted gets a [`Wait`].
 pub fn plan(world: &World, waiting: &[Request]) -> Plan {
     let capacity = world.capacity;
@@ -277,22 +302,22 @@ pub fn plan(world: &World, waiting: &[Request]) -> Plan {
     let mut usage = Usage::new(capacity, world.holders);
     let mut blocked = Blocked::default();
     let mut out = Plan::default();
-    let mut ahead: Vec<&Request> = vec![];
+    let mut ahead: Vec<(&Request, WaitCause)> = vec![];
     // Holders as the plan goes: those granted earlier in it count as held.
     let mut holders: Vec<Holder> = world.holders.to_vec();
     let mut last_compile_start = world.compile_pace.and_then(|p| p.last_start);
 
     for r in order {
         let compiles = r.needs.amounts.contains_key(COMPILE);
-        let touch = blocked.touches(capacity, &r.needs);
+        let touch = blocked.touches(capacity, &usage, &r.needs);
         let fitted = fit(capacity, &usage, &r.needs);
         let low_memory = match (world.free_memory_mb, world.memory_floor_mb) {
             (Some(free), Some(floor)) if usage.any && free < floor => Some((free, floor)),
             _ => None,
         };
         let compile_running = usage.used.get(COMPILE).is_some_and(|n| *n > 0);
-        // Only a further compile waits for the CPU: the first always starts. CPU use
-        // is the whole machine's, so other work (another pipeline's builds, an
+        // Only a further compile waits for the CPU or the pacing: the first always
+        // starts. CPU use is the whole machine's, so other work (another pipeline's builds, an
         // editor indexing) would otherwise hold every compile back with none of
         // ours running, which is the queue waiting on an idle `compile`.
         // A landing is not held by the CPU or the pacing either: its verification
@@ -306,9 +331,11 @@ pub fn plan(world: &World, waiting: &[Request]) -> Plan {
             Some(g) if compiles && compile_running && g.slow_ms >= g.max_ms => Some(g),
             _ => None,
         };
+        // The pacing lets a started compile show in the CPU reading; with none running
+        // there is nothing to wait for.
         let settling = world
             .compile_pace
-            .filter(|_| gated)
+            .filter(|_| gated && compile_running)
             .and_then(|p| Some(last_compile_start? + p.gap_ms))
             .filter(|until| world.now < *until);
         let low_disk = match world.disk {
@@ -380,7 +407,7 @@ pub fn plan(world: &World, waiting: &[Request]) -> Plan {
                 // A request that can never fit must not hold up the others.
                 if !matches!(fitted, Fit::Never(_)) {
                     blocked.add(capacity, &r.needs);
-                    ahead.push(r);
+                    ahead.push((r, cause));
                 }
             }
         }
@@ -391,7 +418,7 @@ pub fn plan(world: &World, waiting: &[Request]) -> Plan {
 fn build_wait(
     capacity: &BTreeMap<String, Capacity>,
     holders: &[Holder],
-    ahead: &[&Request],
+    ahead: &[(&Request, WaitCause)],
     cause: WaitCause,
 ) -> Wait {
     // The requests ahead that need what this one is stuck on.
@@ -407,7 +434,7 @@ fn build_wait(
         | WaitCause::Disk { .. } => true,
         _ => false,
     };
-    let ahead_of_me: Vec<&&Request> = ahead.iter().filter(|o| same(o)).collect();
+    let ahead_of_me: Vec<&(&Request, WaitCause)> = ahead.iter().filter(|o| same(o.0)).collect();
     let held = |h: &Holder| match &cause {
         WaitCause::Full { resource } | WaitCause::Behind { resource } => {
             h.needs.amounts.contains_key(resource)
@@ -435,9 +462,10 @@ fn build_wait(
         position: ahead_of_me.len() + 1,
         behind: ahead_of_me
             .iter()
-            .map(|o| Ahead {
+            .map(|(o, c)| Ahead {
                 label: o.label.clone(),
                 steps: (!o.rank.interactive()).then(|| o.rank.steps()),
+                cause: Some(c.clone()),
             })
             .collect(),
         held_by,
