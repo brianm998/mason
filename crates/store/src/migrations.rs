@@ -623,6 +623,15 @@ const STEPS: &[&str] = &[
          reason TEXT NOT NULL
      );
      CREATE INDEX auto_retries_task ON auto_retries(task, at_ms);",
+    // 32: the tests a suite has been seen to pass (s253, decision 0248), one row per suite and test,
+    // so that a name a parser took from a log line, which never passes, cannot be quarantined.
+    // Additive.
+    "CREATE TABLE seen_passing (
+         suite TEXT NOT NULL,
+         test  TEXT NOT NULL,
+         at    INTEGER NOT NULL,
+         PRIMARY KEY (suite, test)
+     );",
 ];
 
 pub const SCHEMA_VERSION: u32 = STEPS.len() as u32;

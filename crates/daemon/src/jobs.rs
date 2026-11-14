@@ -3079,6 +3079,12 @@ fn record_flaky(c: &Ctx, tests: &[String], except: &[String]) {
             c.d.store
                 .record_flaky(&c.step.name, t, c.task.0, crate::daemon::now_ms());
     }
+    let flaked: Vec<String> = tests
+        .iter()
+        .filter(|t| !except.contains(t))
+        .cloned()
+        .collect();
+    crate::autoquarantine::consider(&c.d, c.project_id, &c.step.name, &flaked);
 }
 
 enum RunVerdict {
