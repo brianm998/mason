@@ -1231,6 +1231,35 @@ impl Broker {
         alive: &dyn Fn() -> bool,
         on_wait: &mut dyn FnMut(&str),
     ) -> Result<Lease, Cancelled> {
+        self.acquire_as(task, label, rank, needs, alive, on_wait, false)
+    }
+
+    /// [`Broker::acquire`] for one of several requests a step makes at once (s345: suites run
+    /// side by side). It is recorded like a `mason run` command's request, beside the step's
+    /// own, so it never takes the step's place in `by_task`.
+    pub fn acquire_beside(
+        self: &Arc<Self>,
+        task: TaskId,
+        label: &str,
+        rank: Rank,
+        needs: Needs,
+        alive: &dyn Fn() -> bool,
+        on_wait: &mut dyn FnMut(&str),
+    ) -> Result<Lease, Cancelled> {
+        self.acquire_as(task, label, rank, needs, alive, on_wait, true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn acquire_as(
+        self: &Arc<Self>,
+        task: TaskId,
+        label: &str,
+        rank: Rank,
+        needs: Needs,
+        alive: &dyn Fn() -> bool,
+        on_wait: &mut dyn FnMut(&str),
+        beside: bool,
+    ) -> Result<Lease, Cancelled> {
         let id = {
             let mut st = lock(&self.st);
             let rank = order(&st, rank);
@@ -1238,7 +1267,11 @@ impl Broker {
                 .ledger
                 .submit(rank, needs.clone(), label, crate::daemon::now_ms());
             st.meta.insert(id, Meta::Task);
-            st.by_task.insert(task, id);
+            if beside {
+                st.lease_tasks.insert(id, task);
+            } else {
+                st.by_task.insert(task, id);
+            }
             // Granted in the same hold as the submit: admission reads the ledger
             // and must never see a lease that is neither held nor waiting.
             self.quick_pass(&mut st);
