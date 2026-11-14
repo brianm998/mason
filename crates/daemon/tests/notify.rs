@@ -95,8 +95,12 @@ fn one_alert_one_delivery_one_reminder_and_silence_after_it_clears() {
         &format!("[routing.paused]\nsound = \"0\"\nspeech = \"0\"\nwebhook = \"0\"\n[reminder]\nafter = \"1s\"\n[webhook]\nurl = \"{url}\"\nsecret = \"s3cret\"\n"),
     );
     pause(&d);
+    // The clock is driven by hand (`tick_at`, `claim_at`), not by sleeping: with the reminder
+    // due 1 s after the alert, three real ticks on a busy machine took longer than that, the
+    // reminder went out early, and "one webhook" read 2 in five unrelated tasks on 2026-11-13.
+    let t0 = mason_daemon::daemon::now_ms();
     for _ in 0..3 {
-        notify::tick(&d);
+        notify::tick_at(&d, t0);
     }
     assert_eq!(d.store.alerts(true).unwrap().len(), 1);
     assert_eq!(
@@ -117,15 +121,14 @@ fn one_alert_one_delivery_one_reminder_and_silence_after_it_clears() {
     // A monitor plays the first announcement; only then is the sound and speech delivered, and
     // only then does a reminder follow.
     assert_eq!(
-        notify::claim(&d, "mon", false)["announcements"]
+        notify::claim_at(&d, "mon", false, t0 + 100)["announcements"]
             .as_array()
             .unwrap()
             .len(),
         1
     );
-    std::thread::sleep(Duration::from_millis(1300));
     for _ in 0..3 {
-        notify::tick(&d);
+        notify::tick_at(&d, t0 + 1_300);
     }
     assert_eq!(announcements(&d), 2, "the one reminder");
     assert_eq!(got.lock().unwrap().len(), 2);
@@ -135,9 +138,8 @@ fn one_alert_one_delivery_one_reminder_and_silence_after_it_clears() {
     );
     assert!(d.store.alerts(true).unwrap()[0].reminded_at.is_some());
 
-    std::thread::sleep(Duration::from_millis(1300));
     for _ in 0..3 {
-        notify::tick(&d);
+        notify::tick_at(&d, t0 + 2_600);
     }
     assert_eq!(
         (announcements(&d), got.lock().unwrap().len()),
@@ -148,7 +150,7 @@ fn one_alert_one_delivery_one_reminder_and_silence_after_it_clears() {
     // Clearing it: nothing more, ever, and the alert is gone from the live list.
     attention::resume(&d, "", "all").unwrap();
     attention::sync_alerts(&d);
-    notify::tick(&d);
+    notify::tick_at(&d, t0 + 3_900);
     assert!(d.store.alerts(true).unwrap().is_empty());
     assert_eq!((announcements(&d), got.lock().unwrap().len()), (2, 2));
 }
