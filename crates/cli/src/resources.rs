@@ -187,8 +187,7 @@ fn run_watched(
     }
     let mut cmd = Command::new(prog);
     cmd.args(args);
-    mason_platform::process::group_leader(&mut cmd);
-    let mut child = cmd.spawn()?;
+    let mut child = mason_platform::process::spawn_group(&mut cmd)?;
     let root = child.id();
     let tick_every = std::env::var("MASON_WATCH_TICK_MS")
         .ok()

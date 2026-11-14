@@ -535,6 +535,11 @@ message UpdateInfo {
   bool daemon_can_update = 2;
   // One per kind of desktop monitor the daemon can build.
   repeated MonitorBuild monitors = 3;
+  // On the `release` channel (a packaged install): the newest published release, and the
+  // page that offers its installers. A packaged monitor's button opens the page; there is
+  // no source to build from. Empty on the source channels.
+  string release_version = 4;
+  string download_url = 5;
 }
 
 message MonitorBuild {
