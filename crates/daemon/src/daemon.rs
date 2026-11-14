@@ -273,7 +273,7 @@ impl Daemon {
             store,
             registry: std::sync::RwLock::new(registry),
             pool: Pool::new("blocking", 4, 64),
-            view_pool: Pool::new("views", 2, 64),
+            view_pool: Pool::new("views", 4, 64),
             crash: Crash::from_env(),
             started: Instant::now(),
             started_ms: now_ms(),

@@ -1053,3 +1053,105 @@ fn a_snapshot_that_cannot_be_computed_closes_the_socket_instead_of_going_out_emp
     assert!(snapshot_views(&all).is_none(), "no snapshot, empty or not");
     assert!(closed, "the socket was closed");
 }
+
+/// Hold `n` threads of `pool` on `gate` (and wait until they have all started).
+fn hold_threads(pool: &mason_daemon::pool::Pool, gate: &Arc<std::sync::Mutex<()>>, n: usize) {
+    for _ in 0..n {
+        let g = gate.clone();
+        pool.spawn(move || drop(g.lock())).unwrap();
+    }
+    wait_for("the pool threads to start", 20, || pool.queue_depth() == 0);
+}
+
+fn pong_of(m: &[ServerMessage], nonce: u64) -> bool {
+    m.iter()
+        .any(|m| matches!(&m.body, Some(server_message::Body::Pong(p)) if p.nonce == nonce))
+}
+
+fn has_result(m: &[ServerMessage]) -> bool {
+    m.iter()
+        .any(|m| matches!(&m.body, Some(server_message::Body::Result(_))))
+}
+
+#[test]
+fn a_blocked_command_does_not_stop_pings_or_a_new_task_detail_view() {
+    let (d, port, _dir) = demo();
+    for _ in 0..5 {
+        d.demo_next().unwrap();
+    }
+    let mut c = Client::connect(port, Encoding::Protobuf).unwrap();
+    c.hello(0, false).unwrap();
+    collect(&mut c, Duration::from_secs(5), |m| !m.is_empty());
+    // The command waits in the blocking pool; two of the view pool's threads are held too.
+    let gate = Arc::new(std::sync::Mutex::new(()));
+    let held = gate.lock().unwrap();
+    hold_threads(&d.pool, &gate, 4);
+    hold_threads(&d.view_pool, &gate, 2);
+    let cancel = Command {
+        id: "slow".into(),
+        body: Some(command::Body::Cancel(TaskRef { task: 1 })),
+        actor: "brian".into(),
+        reason: String::new(),
+    };
+    c.send(&ClientMessage {
+        body: Some(client_message::Body::Command(cancel)),
+    })
+    .unwrap();
+    c.send(&ClientMessage {
+        body: Some(client_message::Body::Ping(Ping { nonce: 77 })),
+    })
+    .unwrap();
+    c.subscribe(&[ViewKind::Header, ViewKind::Sidebar], "", 0)
+        .unwrap();
+    c.subscribe(
+        &[ViewKind::Header, ViewKind::Sidebar, ViewKind::TaskDetail],
+        "",
+        1,
+    )
+    .unwrap();
+    let got = collect(&mut c, Duration::from_secs(10), |m| {
+        pong_of(m, 77)
+            && views_of(m)
+                .iter()
+                .any(|v| matches!(v.body, Some(Body::TaskDetail(_))))
+    });
+    assert!(pong_of(&got, 77), "pong while the command waits: {got:?}");
+    assert!(
+        views_of(&got)
+            .iter()
+            .any(|v| matches!(v.body, Some(Body::TaskDetail(_)))),
+        "task detail arrived: {got:?}"
+    );
+    assert!(!has_result(&got), "the command is still blocked");
+    drop(held);
+    let got = collect(&mut c, Duration::from_secs(10), has_result);
+    assert!(
+        got.iter()
+            .any(|m| matches!(&m.body, Some(server_message::Body::Result(r)) if r.id == "slow")),
+        "the result comes once released: {got:?}"
+    );
+}
+
+#[test]
+fn a_burst_of_ticks_queues_at_most_one_rebuild_for_a_session() {
+    let (d, port, _dir) = demo();
+    let mut c = Client::connect(port, Encoding::Protobuf).unwrap();
+    c.hello(0, false).unwrap();
+    collect(&mut c, Duration::from_secs(5), |m| !m.is_empty());
+    let gate = Arc::new(std::sync::Mutex::new(()));
+    let held = gate.lock().unwrap();
+    hold_threads(&d.view_pool, &gate, 4);
+    d.demo_next().unwrap();
+    // The first tick queues one rebuild behind the held threads.
+    wait_for("a rebuild to queue", 20, || d.view_pool.queue_depth() >= 1);
+    for _ in 0..10 {
+        d.demo_next().unwrap();
+    }
+    collect(&mut c, Duration::from_millis(500), |_| false);
+    assert_eq!(
+        d.view_pool.queue_depth(),
+        1,
+        "one rebuild, however many ticks"
+    );
+    drop(held);
+}
