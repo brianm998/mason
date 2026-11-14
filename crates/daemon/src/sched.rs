@@ -802,6 +802,8 @@ impl Broker {
             self.cv.notify_all();
         }
         self.publish_waits(st, now, free, floor, gate);
+        st.last_pass = Some(Instant::now());
+        st.passes += 1;
     }
 
     /// Store the wait explanation of every waiting task, for readers that must
@@ -959,7 +961,9 @@ impl Broker {
         let mut last_check = Instant::now();
         loop {
             // The check and the wait share one hold of the lock, so a release
-            // that happens in between cannot be missed (it needs the lock).
+            // that happens in between cannot be missed (it needs the lock). A pass
+            // that another waiter ran moments ago already granted what it could,
+            // and grants wake every waiter, so this one only checks its own lease.
             let mut st = lock(&self.st);
             // One pass serves every waiter: run it only if none ran lately.
             let tick =
@@ -1253,6 +1257,24 @@ impl Broker {
     fn expire_pass_for_test(&self) {
         lock(&self.st).last_pass = None;
         self.cv.notify_all();
+    }
+
+    /// The tasks holding an `llm:` lease right now, under one hold of the lock: the
+    /// home view used to call `llm_held_by` once per task, each queuing for the lock.
+    pub fn llm_holders(&self) -> HashSet<TaskId> {
+        let st = lock(&self.st);
+        st.by_task
+            .iter()
+            .filter(|(_, id)| {
+                st.ledger.holder(**id).is_some_and(|h| {
+                    h.needs
+                        .amounts
+                        .iter()
+                        .any(|(k, n)| *n > 0 && k.starts_with("llm:"))
+                })
+            })
+            .map(|(t, _)| *t)
+            .collect()
     }
 
     /// Units of a resource held right now.
@@ -1858,6 +1880,99 @@ pub(crate) fn broker_with_waiting(dir: &Path, n: u64) -> Arc<Broker> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_waiters_pass_is_due_only_when_none_ran_lately() {
+        assert!(pass_due(None));
+        assert!(!pass_due(Some(Instant::now() + Duration::from_secs(60))));
+        if let Some(old) = Instant::now().checked_sub(PASS_EVERY * 2) {
+            assert!(pass_due(Some(old)));
+        }
+    }
+
+    #[test]
+    fn waiting_jobs_share_one_pass_and_all_get_their_turn() {
+        // On 2026-11-13 forty waiters each ran the whole pass ten times a second, so
+        // the broker lock was almost never free and the home view waited 20 s for it.
+        // Measured against the waiters' own liveness checks (each makes one per four
+        // or more wake-ups), not against the clock: the old shape ran at least four
+        // passes per check, the shared pass far fewer than one.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = ResourceCfg {
+            machine: BTreeMap::from([("compile".to_string(), 1)]),
+            ..Default::default()
+        };
+        let b = Broker::new(
+            dir.path().join("locks"),
+            dir.path().join("limits.kv"),
+            &cfg,
+            2,
+            crate::cpu::FakeCpu::new(0),
+            &[],
+        )
+        .unwrap();
+        let rank = |t: u64| Rank::new(false, 1, 2, t, t, false);
+        let first = b
+            .acquire(
+                TaskId(1),
+                "#1",
+                rank(1),
+                Needs::of(&[("compile", 1)]),
+                &|| true,
+                &mut |_| {},
+            )
+            .unwrap();
+        let checks = Arc::new(AtomicU64::new(0));
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let waiters: Vec<_> = (2..=31u64)
+            .map(|t| {
+                let (b, checks, tx) = (b.clone(), checks.clone(), tx.clone());
+                std::thread::spawn(move || {
+                    let alive = || {
+                        checks.fetch_add(1, Ordering::SeqCst);
+                        true
+                    };
+                    let lease = b.acquire(
+                        TaskId(t),
+                        &format!("#{t}"),
+                        rank(t),
+                        Needs::of(&[("compile", 1)]),
+                        &alive,
+                        &mut |_| {
+                            let _ = tx.send(());
+                        },
+                    );
+                    lease.is_ok()
+                })
+            })
+            .collect();
+        for _ in 0..30 {
+            rx.recv_timeout(Duration::from_secs(60))
+                .expect("every waiter says it waits");
+        }
+        let (p0, c0) = (lock(&b.st).passes, checks.load(Ordering::SeqCst));
+        // Bounded by attempts, not asserted on time.
+        for _ in 0..12_000 {
+            if checks.load(Ordering::SeqCst) - c0 >= 120 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let (p1, c1) = (lock(&b.st).passes, checks.load(Ordering::SeqCst));
+        assert!(c1 - c0 >= 120, "the waiters kept checking ({})", c1 - c0);
+        assert!(
+            p1 - p0 < c1 - c0,
+            "{} passes for {} liveness checks: each waiter is running its own pass",
+            p1 - p0,
+            c1 - c0
+        );
+        // Every waiter still gets the slot in turn once it is released.
+        drop(first);
+        for w in waiters {
+            assert!(w.join().unwrap(), "a waiter was never granted");
+        }
+    }
 
     #[test]
     fn explain_task_reads_the_snapshot_without_the_broker_lock() {
