@@ -65,7 +65,7 @@ impl Link {
                 ),
             ));
         }
-        if !init.provides.iter().any(|x| *x == self.provides) {
+        if !init.provides.contains(&self.provides) {
             return Err(ApiError::new(
                 ErrorKind::Invalid,
                 format!(

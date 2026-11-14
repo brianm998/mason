@@ -1358,6 +1358,12 @@ impl Runner {
                 }
                 Err(e) => break Err(format!("could not assemble the batch: {e}")),
             };
+            // The integration worktree is MASON's own checkout: it gets the definition's
+            // worktree setup (s312) after every assembly, as a task's worktree did. A setup
+            // that fails is logged, not fatal: landing went without it before.
+            if let Err(e) = crate::jobs::setup_checkout(&def, &int_wt) {
+                tracing::warn!(batch = batch_id, "{e}");
+            }
             // MASON, not the tasks, writes the README status block, from the stage notes
             // the batch brings. It is committed here so the union that is verified is the
             // union that lands.
@@ -3110,6 +3116,12 @@ impl Runner {
             {
                 return;
             }
+        }
+        if let Err(e) = crate::jobs::setup_checkout(def, &wt) {
+            tracing::warn!(batch = batch_id, "post-land suites not run: {e}");
+            let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+            git::remove_worktree(&p.path, &wt);
+            return;
         }
         // Held like any suite run; the batch's tasks have left landing by now, so
         // there is nothing to stop waiting for.
