@@ -41,6 +41,7 @@ fn name(k: &EventKind) -> &'static str {
         Answered { .. } => "Answered",
         StepFailed { .. } => "StepFailed",
         Retried { .. } => "Retried",
+        Repinned { .. } => "Repinned",
         ExploreAnyway { .. } => "ExploreAnyway",
         Canceled { .. } => "Canceled",
         ClosedNoChange { .. } => "ClosedNoChange",
@@ -134,6 +135,7 @@ fn task_of(k: &EventKind) -> Option<TaskId> {
         | Answered { task, .. }
         | StepFailed { task, .. }
         | Retried { task, .. }
+        | Repinned { task, .. }
         | ExploreAnyway { task, .. }
         | Canceled { task, .. }
         | ClosedNoChange { task, .. }
@@ -472,6 +474,13 @@ fn apply(w: &mut World, k: &EventKind, fx: &mut Vec<Effect>) -> Result<(), Reduc
             w.tasks.get_mut(task).expect("exists").decision = None;
             fx.push(Effect::CatchUpWithBase { task: *task });
             w.enter(*task, *to, step, fx);
+        }
+        E::Repinned { task, to, .. } => {
+            let from = get(w, *task)?.state;
+            if !(from.is_step() || matches!(from, S::NeedsAttention | S::Failed)) {
+                return Err(illegal(from, k));
+            }
+            w.tasks.get_mut(task).expect("exists").def = to.clone();
         }
         E::Canceled {
             task,

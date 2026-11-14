@@ -748,13 +748,27 @@ pub fn retry_task(
             ),
         ));
     }
-    let def = task_def(d, t);
-    // `to` is a step in the task's definition, or a category (the first step in it).
-    let name = ask.to.unwrap_or_else(|| retry_default(&def, t));
-    let found = match def.step(&name) {
-        Some(s) => Some((s.category, s.name.clone())),
-        None => parse_state(&name).and_then(|c| def.first_in(c).map(|s| (c, s.name.clone()))),
+    let pinned = task_def(d, t);
+    // A retry starts the task over from an earlier step, so it runs the
+    // project's definition as it is now (decision 0206), if that has the step.
+    let cur = d.current_def(t.project);
+    // `to` is a step in the definition, or a category (the first step in it).
+    let resolve = |def: &Definition| {
+        let name = ask.to.clone().unwrap_or_else(|| retry_default(def, t));
+        let found = match def.step(&name) {
+            Some(s) => Some((s.category, s.name.clone())),
+            None => parse_state(&name).and_then(|c| def.first_in(c).map(|s| (c, s.name.clone()))),
+        };
+        (name, found)
     };
+    let (name, found) = match resolve(&cur) {
+        (n, Some(f)) => {
+            d.repin_to(TaskId(id), None, &cur);
+            (n, Some(f))
+        }
+        _ => resolve(&pinned),
+    };
+    let def = pinned;
     let (to, step) = found.ok_or_else(|| {
         let names: Vec<&str> = def.steps.iter().map(|s| s.name.as_str()).collect();
         fail(
@@ -2691,7 +2705,11 @@ async fn lease_open(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res
         let d2 = d.clone();
         let id = d
             .pool
-            .run(move || d2.broker.lease_open_outside(&label, &uses, &o))
+            .run(move || {
+                let id = d2.broker.lease_open_outside(&label, &uses, &o);
+                d2.broker.lease_set_pid(id, pid);
+                id
+            })
             .await
             .map_err(pool_err)?;
         return Ok(Json(json!({"id": id})));
@@ -2939,7 +2957,11 @@ fn progress_runs(d: &Daemon, id: TaskId) -> Vec<Value> {
                 "started_ms": p.started_ms, "updated_at_ms": p.updated_at_ms,
                 "subs": p.subs.iter().map(|s| json!({
                     "name": s.name, "unit": s.unit,
-                    "done": fig(&s.done), "total": fig(&s.total)})).collect::<Vec<_>>(),
+                    "done": fig(&s.done), "total": fig(&s.total),
+                    "jobs": s.jobs.as_ref().map(|j| json!({
+                        "queued": j.queued, "running": j.running,
+                        "succeeded": j.succeeded, "failed": j.failed,
+                        "running_names": j.running_names}))})).collect::<Vec<_>>(),
                 "todo": p.todo.iter().map(|t| json!({"text": t.text, "status": t.status})).collect::<Vec<_>>(),
                 // The tokens the step's sessions have used so far; null until one reported.
                 "tokens": p.token_total().map(|t| json!({

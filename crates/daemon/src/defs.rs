@@ -427,6 +427,39 @@ impl Daemon {
             .and_then(|e| e.error.clone())
     }
 
+    /// Pin `task` to `cur`, the project's current definition, and record it
+    /// (decision 0206). Returns whether the task was repinned: `false` when it
+    /// already runs `cur`, or the event was refused (the step ended meanwhile).
+    /// A step that is running keeps the definition it holds; this changes what
+    /// the next step starts under.
+    pub(crate) fn repin_to(
+        self: &Arc<Self>,
+        task: mason_core::TaskId,
+        run: Option<mason_core::StepRunId>,
+        cur: &Definition,
+    ) -> bool {
+        let Ok(w) = self.world() else { return false };
+        let Some(t) = w.tasks.get(&task) else {
+            return false;
+        };
+        let Some(old) = self.pinned_def(&t.def) else {
+            return false;
+        };
+        if old.hash == cur.hash && t.def == cur.hash {
+            return false;
+        }
+        let kind = mason_core::EventKind::Repinned {
+            task,
+            from: old.hash.clone(),
+            to: cur.hash.clone(),
+            changed: def_changes(&old, cur),
+        };
+        match run {
+            Some(r) => self.emit_for_run(task, r, kind),
+            None => self.emit(kind).is_ok(),
+        }
+    }
+
     /// The definition a task is pinned to. An empty hash is a task from before
     /// definitions existed: it ran the built-in graph.
     pub fn pinned_def(&self, hash: &str) -> Option<Arc<Definition>> {
@@ -483,4 +516,46 @@ impl Daemon {
             .insert(pid, (sha, idx.clone()));
         Some(idx)
     }
+}
+
+/// Which steps and suites differ between two definitions, for the repin event.
+pub(crate) fn def_changes(old: &Definition, new: &Definition) -> String {
+    let mut steps: Vec<&str> = Vec::new();
+    for s in &old.steps {
+        if new.step(&s.name) != Some(s) {
+            steps.push(&s.name);
+        }
+    }
+    for s in &new.steps {
+        if old.step(&s.name).is_none() {
+            steps.push(&s.name);
+        }
+    }
+    let mut suites: Vec<&str> = Vec::new();
+    for s in &old.testing.suites {
+        if new.testing.suite(&s.name) != Some(s) {
+            suites.push(&s.name);
+        }
+    }
+    for s in &new.testing.suites {
+        if old.testing.suite(&s.name).is_none() {
+            suites.push(&s.name);
+        }
+    }
+    let mut parts = Vec::new();
+    if !steps.is_empty() {
+        parts.push(format!("steps: {}", steps.join(", ")));
+    }
+    if !suites.is_empty() {
+        parts.push(format!("suites: {}", suites.join(", ")));
+    }
+    if parts.is_empty() {
+        parts.push("other settings".into());
+    }
+    parts.join("; ")
+}
+
+/// Did suite `name` change between two definitions (added and removed count)?
+pub(crate) fn suite_changed(old: &Definition, new: &Definition, name: &str) -> bool {
+    old.testing.suite(name) != new.testing.suite(name)
 }

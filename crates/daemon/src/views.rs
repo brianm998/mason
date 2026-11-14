@@ -1309,6 +1309,7 @@ pub fn summarize(kind: &EventKind) -> (String, String, u64) {
         | EventKind::Answered { task, .. }
         | EventKind::StepFailed { task, .. }
         | EventKind::Retried { task, .. }
+        | EventKind::Repinned { task, .. }
         | EventKind::Canceled { task, .. }
         | EventKind::ClosedNoChange { task, .. }
         | EventKind::Paused { task }
@@ -1326,6 +1327,9 @@ pub fn summarize(kind: &EventKind) -> (String, String, u64) {
         EventKind::TaskFiled { title, .. } => format!("filed: {title}"),
         EventKind::StepFailed { reason, .. } => format!("failed: {reason}"),
         EventKind::SentBack { reason, .. } => format!("sent back: {reason}"),
+        EventKind::Repinned {
+            from, to, changed, ..
+        } => format!("repinned {from} -> {to}: {changed}"),
         EventKind::WaitStarted { on, .. } => format!("waiting: {on}"),
         EventKind::Canceled { .. } => "canceled".into(),
         EventKind::TrackerEdited { .. } => "edited in the tracker".into(),

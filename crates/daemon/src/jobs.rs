@@ -233,6 +233,10 @@ impl Ctx {
         feedback: Option<String>,
         round: u32,
     ) {
+        if outcome == Outcome::Red && self.step.kind == StepType::Test && self.rerun_on_current(&reason)
+        {
+            return;
+        }
         self.d
             .crash
             .point(&format!("before_event:{:?}", self.state));
@@ -288,6 +292,16 @@ impl Ctx {
                         .open(self.task_dir().join(FEEDBACK_HISTORY))
                         .and_then(|mut h| std::io::Write::write_all(&mut h, entry.as_bytes()));
                 }
+                let step = repin_for_send_back(
+                    &self.d,
+                    self.task,
+                    self.run,
+                    &self.step.name,
+                    outcome,
+                    round,
+                    rounds,
+                    step,
+                );
                 self.emit(EventKind::SentBack {
                     task: self.task,
                     reason,
@@ -314,6 +328,40 @@ impl Ctx {
         self.release_lease();
     }
 
+    /// A red suite whose definition changed on the base since this task was
+    /// pinned is not the change's fault, or not yet known to be: run the test
+    /// step once more, in this same run (so it is the same round, and
+    /// `max_rounds` still bounds it), under the current definition. Returns
+    /// whether the step was rerun, in which case it has concluded.
+    fn rerun_on_current(&self, reason: &str) -> bool {
+        let Some(name) = red_suite_of(reason) else {
+            return false;
+        };
+        let cur = self.d.current_def(self.project_id);
+        if cur.hash == self.def.hash
+            || cur.step(&self.step.name).is_none()
+            || !crate::defs::suite_changed(&self.def, &cur, &name)
+        {
+            return false;
+        }
+        let file = self.task_dir().join(DEF_RERUNS_FILE);
+        let seen = std::fs::read_to_string(&file).unwrap_or_default();
+        let mine = self.run.0.to_string();
+        if seen.lines().any(|l| l == mine) {
+            return false;
+        }
+        let _ = std::fs::write(&file, format!("{seen}{mine}\n"));
+        if !self.d.repin_to(self.task, Some(self.run), &cur) {
+            return false;
+        }
+        self.release_lease();
+        match ctx(&self.d, self.task, self.run) {
+            Ok(c) => execute(&c, c.state),
+            Err(why) => self.fail(why),
+        }
+        true
+    }
+
     pub(crate) fn green(&self) {
         self.conclude(Outcome::Green, String::new(), None);
     }
@@ -326,6 +374,70 @@ impl Ctx {
         let p = self.d.task_dir(self.task);
         let _ = std::fs::create_dir_all(&p);
         p
+    }
+}
+
+/// The note for a develop prompt when the branch changes `.mason/`.
+pub const PIPELINE_DEFINITION_NOTE: &str = "Note: your branch changes files under `.mason/`. \
+This project's pipeline runs the definition on the base branch, not the one on your branch, so \
+those changes cannot affect how your task is built, tested or reviewed (for example a suite you \
+add is not run, and `run_check` knows only the base's checks). Changes to `.mason/` need a task of \
+their own. Keep them only if this task is about them.";
+
+/// Does any path in a `git diff --name-only` listing lie under `.mason/`?
+pub fn touches_pipeline_definition(names: &str) -> bool {
+    names.lines().any(|f| f.trim().starts_with(".mason/"))
+}
+
+/// Step runs whose red was rerun under a newer definition (one line each).
+const DEF_RERUNS_FILE: &str = "def-reruns.txt";
+
+/// The suite a test step's red reason names (`suite `x` is red`, or the same
+/// for its build), or `None` for any other red (a gate, a reviewer).
+pub fn red_suite_of(reason: &str) -> Option<String> {
+    let rest = reason
+        .strip_prefix("suite `")
+        .or_else(|| reason.strip_prefix("the build of suite `"))?;
+    let (name, tail) = rest.split_once('`')?;
+    tail.starts_with(" is red").then(|| name.to_string())
+}
+
+/// A task goes back to an earlier step: pin it to the project's current
+/// definition first, so what runs next is what the base says now (decision
+/// 0206). Returns the step to go back to, named in that definition. If the
+/// current definition has no such way back, the task keeps its pin.
+#[allow(clippy::too_many_arguments)]
+fn repin_for_send_back(
+    d: &Arc<Daemon>,
+    task: TaskId,
+    run: StepRunId,
+    from_step: &str,
+    outcome: Outcome,
+    round: u32,
+    rounds: Option<u32>,
+    back: String,
+) -> String {
+    let Ok(w) = d.world() else { return back };
+    let Some(t) = w.tasks.get(&task) else {
+        return back;
+    };
+    let cur = d.current_def(t.project);
+    if cur.hash == t.def {
+        return back;
+    }
+    let Some(step) = cur.step(from_step) else {
+        return back;
+    };
+    let Transition::SendBack { step: to } = after(&cur, step, outcome, round, rounds) else {
+        return back;
+    };
+    if !to.is_empty() && cur.step(&to).is_none() {
+        return back;
+    }
+    if d.repin_to(task, Some(run), &cur) {
+        to
+    } else {
+        back
     }
 }
 
@@ -425,10 +537,15 @@ fn run_inner(d: &Arc<Daemon>, task: TaskId, step: State, run: StepRunId) {
             return;
         }
     };
-    d.crash.point(&format!("job_started:{step:?}"));
+    execute(&c, step);
+}
+
+/// Run the step `c` describes, from waiting out a pause to its verdict.
+fn execute(c: &Ctx, step: State) {
+    c.d.crash.point(&format!("job_started:{step:?}"));
     // A pause stops work at the step boundary: nothing new starts until it
     // lifts or runs out. (A running step finishes.)
-    if let Err(()) = wait_while_paused(&c) {
+    if let Err(()) = wait_while_paused(c) {
         return;
     }
     // Everything the step needs, acquired at once, in rank order across every
@@ -437,29 +554,29 @@ fn run_inner(d: &Arc<Daemon>, task: TaskId, step: State, run: StepRunId) {
     // machine, so it takes nothing.
     if c.step.kind == StepType::Agent {
         // A held account starts no new session; the task waits without a lease.
-        if get_lease(&c).is_err() {
+        if get_lease(c).is_err() {
             return;
         }
     } else if c.step.kind != StepType::Approval
-        && builds_first(&c).is_none()
+        && builds_first(c).is_none()
         && !(c.step.kind == StepType::Test
             && !c.step.suites.is_empty()
             && crate::suites::builds_per_suite(&c.project, &c.def, &c.step, &c.branch))
     {
         // A test step with a build queues phase by phase in `command_job`, and one whose
         // suites build, suite by suite in `suites::run`.
-        match acquire(&c) {
+        match acquire(c) {
             Ok(l) => *c.lease.lock().unwrap_or_else(|e| e.into_inner()) = Some(l),
             Err(_) => return, // the task was cancelled or retried while it waited
         }
     }
     match c.step.kind {
-        StepType::Agent => agent_job(&c),
-        StepType::Test if !c.step.suites.is_empty() => crate::suites::run(&c),
-        StepType::Command | StepType::Test => command_job(&c),
-        StepType::Approval => approval_job(&c),
-        StepType::Landing => land_job(&c),
-        StepType::Plugin => crate::plugins::plugin_job(&c),
+        StepType::Agent => agent_job(c),
+        StepType::Test if !c.step.suites.is_empty() => crate::suites::run(c),
+        StepType::Command | StepType::Test => command_job(c),
+        StepType::Approval => approval_job(c),
+        StepType::Landing => land_job(c),
+        StepType::Plugin => crate::plugins::plugin_job(c),
         other => c.fail(format!("step type `{}` cannot run yet", other.name())),
     }
 }
@@ -2165,6 +2282,27 @@ fn agent_job(c: &Ctx) {
         None => prompt,
     };
 
+    // On an ordinary project the pipeline runs the base's definition, not the branch's
+    // (decision 0206): say so to a task that has touched `.mason/`.
+    let prompt = if kind == StepKind::Develop && c.project.self_cfg.is_none() {
+        let changed = git::run(
+            &c.wt,
+            &[
+                "diff",
+                "--name-only",
+                &format!("{}...HEAD", c.project.base_ref()),
+            ],
+        )
+        .unwrap_or_default();
+        if touches_pipeline_definition(&changed) {
+            format!("{prompt}\n\n{PIPELINE_DEFINITION_NOTE}")
+        } else {
+            prompt
+        }
+    } else {
+        prompt
+    };
+
     // `run_check` runs the project's tests: the command of its test step, layered exactly
     // as the test step itself resolves it (runtime and task overrides included).
     let tests_cmd = test_commands(&c.d, &c.def, c.project_id, Some(c.task));
@@ -3597,6 +3735,16 @@ pub fn conclude_approval(
             let _ = std::fs::write(
                 d.task_dir(task).join("feedback.txt"),
                 format!("The owner rejected the work at `{}`: {reason}", step.name),
+            );
+            let back = repin_for_send_back(
+                d,
+                task,
+                run,
+                &step.name,
+                outcome,
+                r.attempt,
+                step.max_rounds,
+                back,
             );
             EventKind::SentBack {
                 task,

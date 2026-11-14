@@ -1484,6 +1484,7 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
             unit: "tests".into(),
             done: Figure::counted(0),
             total: expected_total(d, &c.project.id, &s.suite, &base),
+            ..SubProgress::default()
         })
         .collect();
     d.progress_report(c.run, |p, now| {

@@ -534,16 +534,25 @@ pub fn view(d: &Daemon, now: u64, title: &dyn Fn(u64) -> String) -> UsageView {
             .and_then(|s| s.1.blocked.as_ref())
             .filter(|b| b.until.is_none_or(|u| u > now))
             .map(|b| blocked_text(b, &raw, now));
-        // The most constrained window: the fullest, else one that is not ok, else the soonest reset.
-        let worst = windows.iter().filter(|w| w.reported).max_by(|x, y| {
-            let key = |w: &UsageWindow| (w.has_percent, w.percent, w.state != "ok");
-            let (kx, ky) = (key(x), key(y));
-            kx.0.cmp(&ky.0)
-                .then(kx.1.total_cmp(&ky.1))
-                .then(kx.2.cmp(&ky.2))
-        });
-        if let Some(w) = worst {
-            top_bar.push(format!("{} {}", a.name, w.short_text));
+        // Every main window the account reports, shortest first (Claude: 5-hour, then weekly),
+        // so the top bar shows both at once. A per-model window (Opus) stays on the Usage page.
+        let mut main: Vec<(Option<u64>, &UsageWindow)> = windows
+            .iter()
+            .filter(|w| w.reported && !w.id.ends_with("_opus"))
+            .map(|w| {
+                let len = raw
+                    .iter()
+                    .find(|r| r.id == w.id)
+                    .and_then(|r| r.length_secs);
+                (len, w)
+            })
+            .collect();
+        // Stable: windows of unknown length keep the adapter's order, after the known ones.
+        main.sort_by_key(|(len, _)| len.unwrap_or(u64::MAX));
+        if !main.is_empty() {
+            for (_, w) in &main {
+                top_bar.push(format!("{} {}", a.name, w.short_text));
+            }
         } else if api {
             if let Some(s) = spend.as_ref().filter(|s| s.has_spend) {
                 top_bar.push(format!("{} spend ${:.2} this month", a.name, s.month_usd));

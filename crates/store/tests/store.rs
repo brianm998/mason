@@ -608,6 +608,7 @@ fn live_progress_is_kept_per_run_and_dropped_when_not_open() {
         unit: "tests".into(),
         done: Figure::reported(3),
         total: Figure::reported(8),
+        ..Default::default()
     });
     a.report_tokens(
         "t0r7-agent-1",
