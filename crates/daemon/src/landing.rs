@@ -17,7 +17,8 @@
 use crate::daemon::{now_ms, Daemon};
 use crate::jobs::Ctx;
 use mason_adapter_api::service::{
-    CheckCounts, Checks, CiState, GitHostAdapter, Observed, PollEvent, Poller, PrState, Review,
+    CheckCounts, Checks, CiJobCounts, CiRunJobs, CiState, GitHostAdapter, Observed, PollEvent,
+    Poller, PrState, Review,
 };
 use mason_core::progress::{Change, Figure};
 use mason_core::*;
@@ -429,6 +430,64 @@ pub fn removals_in(dir: &Path) -> Vec<Removal> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// A page on the git host for a task's landing: the batch's pull request or a failed check.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CiRef {
+    pub label: String,
+    pub url: String,
+    pub kind: &'static str,
+}
+
+/// Only an http(s) URL is ever sent to a client to open.
+fn is_web_url(u: &str) -> bool {
+    let l = u.to_ascii_lowercase();
+    (l.starts_with("https://") || l.starts_with("http://"))
+        && !u.chars().any(|c| c.is_whitespace() || c.is_control())
+}
+
+/// Remember `links` for the task (`ci_links.json` in its directory), replacing an earlier
+/// link with the same label. Links that are not http(s) are dropped.
+pub fn record_ci_links(dir: &Path, links: &[CiRef]) {
+    let mut all = ci_links_of(dir);
+    for l in links.iter().filter(|l| is_web_url(&l.url)) {
+        all.retain(|o| o.label != l.label);
+        all.push(l.clone());
+    }
+    let v: Vec<serde_json::Value> = all
+        .iter()
+        .map(|l| serde_json::json!({"label": l.label, "url": l.url, "kind": l.kind}))
+        .collect();
+    let _ = std::fs::create_dir_all(dir);
+    let _ = std::fs::write(
+        dir.join("ci_links.json"),
+        serde_json::Value::Array(v).to_string(),
+    );
+}
+
+/// The links recorded for the task, oldest first.
+pub fn ci_links_of(dir: &Path) -> Vec<CiRef> {
+    let v: serde_json::Value = std::fs::read_to_string(dir.join("ci_links.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default();
+    v.as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|e| {
+            let url = e["url"].as_str()?;
+            is_web_url(url).then(|| CiRef {
+                label: e["label"].as_str().unwrap_or_default().to_string(),
+                url: url.to_string(),
+                kind: match e["kind"].as_str() {
+                    Some("pull_request") => "pull_request",
+                    Some("run") => "run",
+                    _ => "check",
+                },
+            })
+        })
+        .collect()
 }
 
 /// The task's deliberate removals as lines for the task detail: empty when there are none.
@@ -1056,7 +1115,42 @@ impl Runner {
                 s.unit = "checks".into();
                 s.done = Figure::reported(c.done);
                 s.total = Figure::reported(c.total);
+                s.jobs = c.jobs.as_ref().map(breakdown);
             });
+        }
+        if let Some(j) = &c.jobs {
+            self.say(&format!("checks: {}", jobs_summary(j)));
+        }
+    }
+
+    /// A CI's jobs, one sub-count per workflow (jobs finished of jobs listed, told apart by
+    /// state) and a message with the sum. Reporting only; no verdict reads it.
+    fn ci_jobs(&self, what: &str, detail: &[CiRunJobs]) {
+        if detail.is_empty() {
+            return;
+        }
+        let mut sum = CiJobCounts::default();
+        for w in detail {
+            sum.merge(&w.jobs);
+            for run in &self.member_runs {
+                self.d.progress_sub(*run, &w.workflow, None, |s| {
+                    s.unit = "jobs".into();
+                    s.done = Figure::reported(w.jobs.succeeded + w.jobs.failed);
+                    s.total = Figure::reported(w.jobs.total);
+                    s.jobs = Some(breakdown(&w.jobs));
+                });
+            }
+        }
+        if sum.total > 0 {
+            self.say(&format!("CI on {what}: {}", jobs_summary(&sum)));
+        }
+    }
+
+    /// A poll got an answer and the work is still going: restart the quiet clock.
+    fn alive(&self, poll_s: u64) {
+        for run in &self.member_runs {
+            self.d
+                .progress_report(*run, |p, now| p.heartbeat(now, poll_s.saturating_mul(1000)));
         }
     }
 
@@ -1887,7 +1981,6 @@ impl Runner {
         }
     }
 
-<<<<<<< HEAD
     /// The local suites that cover every failed CI job (`[ci.local]`), or `None` when any
     /// failed job has no mapping (or maps to a suite the project does not define): that red
     /// is searched for through CI, as before.
@@ -1910,7 +2003,8 @@ impl Runner {
             }
         }
         Some(out)
-=======
+    }
+
     /// A red re-test whose failing tests are all in the known-red ledger is green for the
     /// batch (s281). A timeout, a red with no readable test names, or any test that is not in
     /// the ledger stays red (and is bisected as before).
@@ -1944,7 +2038,6 @@ impl Runner {
             crate::knownred::lines(&hit).join("; ")
         );
         true
->>>>>>> origin/develop
     }
 
     fn legacy_cmd(&self, def: &mason_definition::Definition) -> Option<crate::jobs::TestCommands> {
@@ -2242,6 +2335,7 @@ impl Runner {
                 }
                 Ok(None) => {
                     self.d.landing.clear(self.pid, &key);
+                    self.alive(poll_s);
                     poller.observe(now, Observed::Unchanged);
                     self.nap(poll_s);
                 }
@@ -2284,8 +2378,10 @@ impl Runner {
                 ci.trigger(&name, &sha).map(Some)
             })?;
             self.ask("CI", started, cfg.timeout_s, cfg.poll_s, || {
-                Ok(match ci.status(&run)? {
+                let (state, detail) = ci.status_detail(&run)?;
+                Ok(match state {
                     CiState::Pending => {
+                        self.ci_jobs(&name, &detail);
                         // For the landing view only; a failed read changes nothing.
                         if let Ok(p) = ci.progress(&run) {
                             self.d.landing.ci.update(batch, &p);
@@ -2322,6 +2418,13 @@ impl Runner {
             }
             CiState::Pending => unreachable!("pending is waited out"),
         })
+    }
+
+    /// Remember pages on the host against every task of the batch, for the task detail.
+    fn note_ci_links(&self, links: &[CiRef]) {
+        for t in self.fps.keys() {
+            record_ci_links(&self.d.task_dir(TaskId(*t)), links);
+        }
     }
 
     /// One note per failed job the CI judged ("pr-gate/macOS: runner lost, rerun" or
@@ -2442,6 +2545,11 @@ impl Runner {
         };
         let _ = self.d.store.set_ref_number(ref_id, pr.number);
         self.point("pr_opened");
+        self.note_ci_links(&[CiRef {
+            label: format!("PR #{}", pr.number),
+            url: pr.url.clone(),
+            kind: "pull_request",
+        }]);
         // A newer green PR replaces an older one the batch was holding.
         if let Some(old) = self.pr.lock().unwrap_or_else(|e| e.into_inner()).take() {
             let _ = host.close_pr(old.number);
@@ -2471,6 +2579,18 @@ impl Runner {
             }
         };
         self.point("pr_checked");
+        self.note_ci_links(
+            &st.jobs
+                .iter()
+                .filter_map(|j| {
+                    Some(CiRef {
+                        label: j.job.clone(),
+                        url: j.url.clone()?,
+                        kind: "check",
+                    })
+                })
+                .collect::<Vec<_>>(),
+        );
         if st.checks == Checks::Red || st.state == PrState::Closed {
             let _ = host.close_pr(pr.number);
             self.drop_candidate(&name, ref_id);
@@ -2812,6 +2932,45 @@ fn judges(c: &crate::config::CiCfg) -> bool {
     c.infra_judge || !matches!(c.kind, crate::config::CiKind::GithubActions { .. })
 }
 
+/// The progress record's form of a CI's job counts.
+fn breakdown(j: &CiJobCounts) -> mason_core::progress::JobBreakdown {
+    mason_core::progress::JobBreakdown {
+        queued: j.queued,
+        running: j.running,
+        succeeded: j.succeeded,
+        failed: j.failed,
+        running_names: j.running_names.clone(),
+    }
+}
+
+/// "7 jobs: 2 queued, 1 running (macOS build), 3 passed, 1 failed"; states with no jobs are left out.
+fn jobs_summary(j: &CiJobCounts) -> String {
+    let mut parts = vec![];
+    if j.queued > 0 {
+        parts.push(format!("{} queued", j.queued));
+    }
+    if j.running > 0 {
+        let mut r = format!("{} running", j.running);
+        if !j.running_names.is_empty() {
+            r.push_str(&format!(" ({})", j.running_names.join(", ")));
+        }
+        parts.push(r);
+    }
+    if j.succeeded > 0 {
+        parts.push(format!("{} passed", j.succeeded));
+    }
+    if j.failed > 0 {
+        parts.push(format!("{} failed", j.failed));
+    }
+    format!(
+        "{} {}{}{}",
+        j.total,
+        if j.total == 1 { "job" } else { "jobs" },
+        if parts.is_empty() { "" } else { ": " },
+        parts.join(", ")
+    )
+}
+
 #[cfg(test)]
 mod idle_tests {
     use super::*;
@@ -2835,6 +2994,21 @@ mod idle_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_jobs_summary_names_states_with_jobs_and_keeps_failed_visible() {
+        let mut j = CiJobCounts::default();
+        j.add("macOS build", "in_progress", None);
+        j.add("a", "queued", None);
+        j.add("b", "queued", None);
+        j.add("c", "completed", Some("success"));
+        j.add("d", "completed", Some("failure"));
+        assert_eq!(
+            jobs_summary(&j),
+            "5 jobs: 2 queued, 1 running (macOS build), 1 passed, 1 failed"
+        );
+        assert_eq!(jobs_summary(&CiJobCounts::default()), "0 jobs");
+    }
 
     /// A task first submitted before the daemon started has a `ready_at` before the
     /// daemon's start, so a restart does not make it wait out the window again.
