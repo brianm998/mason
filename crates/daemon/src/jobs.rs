@@ -2978,6 +2978,10 @@ fn finish_agent(c: &Ctx, report: StepReport, dir: &Path) {
 fn finish_agent_inner(c: &Ctx, report: StepReport, dir: &Path) {
     let task = c.task;
     match report.end {
+        // An explorer found nothing to build: the owner gets a window to veto the close (s254).
+        StepEnd::Accepted { tool, submission } if tool == "submit_close" => {
+            crate::closer::ask(c, &submission);
+        }
         StepEnd::Accepted { submission, .. } => {
             match c.state {
                 State::Exploring => {

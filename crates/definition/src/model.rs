@@ -200,6 +200,10 @@ pub struct Definition {
     pub steps: Vec<Step>,
     pub agents: BTreeMap<String, AgentProfile>,
     pub resources: BTreeMap<String, u32>,
+    /// `[admission] max_check_queue` (s256): a project's next queued task is not started while
+    /// more than this many `run_check` and test-suite requests of the project wait. `None`: the
+    /// default, twice the test-suite resource's count; `Some(0)`: off.
+    pub max_check_queue: Option<u32>,
     /// Suites, environments, bindings, the impact map and signatures.
     pub testing: mason_testing::Testing,
     /// `[watch.ci]` when it is switched on (decision 0149); `None` is off.
@@ -218,6 +222,7 @@ impl Definition {
             steps: vec![],
             agents: BTreeMap::new(),
             resources: BTreeMap::new(),
+            max_check_queue: None,
             testing: mason_testing::Testing::default(),
             watch_ci: None,
             hash: String::new(),

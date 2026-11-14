@@ -76,6 +76,12 @@ pub struct DaemonConfig {
     pub auto_retry_delays: Vec<Duration>,
     pub auto_retry_window: Duration,
     pub auto_retry_tick: Duration,
+    /// How long an explorer's `submit_close` waits for the owner's veto before it closes the
+    /// task: for the owner's own tasks, and for tasks MASON or its agents filed (s254). How
+    /// often the waiting closes are looked at.
+    pub close_window_owner: Duration,
+    pub close_window_agent: Duration,
+    pub close_tick: Duration,
     /// This many tasks failing outside the code with the same reason within `burst_window` are
     /// one host-wide event: one alert, and their retries wait for a probe.
     pub burst_min: usize,
@@ -359,6 +365,9 @@ impl DaemonConfig {
             auto_retry_delays: vec![Duration::from_secs(600), Duration::from_secs(3600)],
             auto_retry_window: Duration::from_secs(24 * 3600),
             auto_retry_tick: Duration::from_secs(30),
+            close_window_owner: Duration::from_secs(24 * 3600),
+            close_window_agent: Duration::from_secs(2 * 3600),
+            close_tick: Duration::from_secs(30),
             burst_min: 3,
             burst_window: Duration::from_secs(600),
             runtime_sha: None,
