@@ -353,10 +353,10 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     fun setPauseCollapsed(project: String, mode: String, collapsed: Boolean) {
         val key = pauseKey(project, mode)
         prefs.setBool(key, collapsed)
-        setCollapsedPauses(if (collapsed) collapsedPauses + key else collapsedPauses - key)
+        storeCollapsedPauses(if (collapsed) collapsedPauses + key else collapsedPauses - key)
     }
 
-    private fun setCollapsedPauses(keys: Set<String>) {
+    private fun storeCollapsedPauses(keys: Set<String>) {
         collapsedPauses = keys
         prefs.setString(PAUSE_INDEX, keys.joinToString("\n"))
     }
@@ -368,7 +368,7 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
         val gone = collapsedPauses - live
         if (gone.isEmpty()) return
         gone.forEach { prefs.setBool(it, false) }
-        setCollapsedPauses(collapsedPauses - gone)
+        storeCollapsedPauses(collapsedPauses - gone)
     }
 
     /** One row of the pause group: banner indices. Collapsed icons lead the row; `expanded` null is an icon-only row. */
