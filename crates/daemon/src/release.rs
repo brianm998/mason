@@ -210,6 +210,59 @@ pub fn sha256_hex(path: &Path) -> Result<String, String> {
     Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 
+/// What stands in for the owner's minisign public key until they pin the real one. It is not a
+/// key and is never handed to minisign: while it is here no release is checked for a signature.
+pub const PUBKEY_PLACEHOLDER: &str = "REPLACE_WITH_MINISIGN_PUBLIC_KEY";
+/// The owner's minisign public key (the second line of `minisign.pub`). Releases are refused
+/// unless `SHA256SUMS.minisig` verifies against it. scripts/install.sh pins the same key.
+pub const PINNED_PUBKEY: &str = PUBKEY_PLACEHOLDER;
+
+/// A minisign public key is 42 bytes in base64: 56 characters starting `RW`.
+fn looks_like_key(k: &str) -> bool {
+    k.len() == 56
+        && k.starts_with("RW")
+        && k.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'=')
+}
+
+/// Pure: the key releases must be signed with. `from_env` is `MASON_MINISIGN_PUBKEY` (it
+/// overrides the pinned key, as it does in install.sh); `pinned` is the compiled-in key.
+/// `Ok(None)` only when the placeholder is still pinned and nothing overrides it; anything
+/// that is set but is not a key (the placeholder included) is an error, never "unsigned ok".
+pub fn trusted_key(from_env: Option<&str>, pinned: &str) -> Result<Option<String>, String> {
+    let given = from_env.map(str::trim).filter(|k| !k.is_empty());
+    match given {
+        Some(k) if looks_like_key(k) => Ok(Some(k.to_string())),
+        Some(k) => Err(format!(
+            "MASON_MINISIGN_PUBKEY {k:?} is not a minisign public key; refusing to update"
+        )),
+        None if pinned == PUBKEY_PLACEHOLDER => Ok(None),
+        None if looks_like_key(pinned) => Ok(Some(pinned.to_string())),
+        None => Err("the pinned minisign public key is malformed; refusing to update".into()),
+    }
+}
+
+/// Check `sums` against its `sig` with the system `minisign` and `key`.
+pub fn verify_signature(sums: &Path, sig: &Path, key: &str) -> Result<(), String> {
+    let o = Command::new("minisign")
+        .arg("-Vm")
+        .arg(sums)
+        .args(["-P", key, "-x"])
+        .arg(sig)
+        .output()
+        .map_err(|e| {
+            format!("cannot run minisign: {e} (a signed release needs it; refusing the download)")
+        })?;
+    if o.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "the signature of SHA256SUMS does not verify; refusing the download: {}",
+            String::from_utf8_lossy(&o.stderr).trim()
+        ))
+    }
+}
+
 /// What the tarball is unpacked from: the files of `mason-<ver>-<target>/` we install.
 pub const INSTALL: [&str; 6] = [
     "masond",
@@ -221,7 +274,8 @@ pub const INSTALL: [&str; 6] = [
 ];
 
 /// Download the tarball for this platform and `SHA256SUMS`, check the one against the other,
-/// and unpack it into `dest` (which is made fresh). Returns the names installed. On any
+/// and unpack it into `dest` (which is made fresh). With a `pubkey`, the release's
+/// `SHA256SUMS.minisig` must be there and verify against it first; unsigned is refused. Returns the names installed. On any
 /// failure `dest` is removed; nothing outside `work` and `dest` is touched.
 pub fn fetch_and_unpack(
     api: &str,
@@ -230,6 +284,7 @@ pub fn fetch_and_unpack(
     arch: &str,
     work: &Path,
     dest: &Path,
+    pubkey: Option<&str>,
 ) -> Result<Vec<String>, String> {
     let scheme = scheme_of(api.trim_end_matches('/'))?;
     let ver = rel.version.text();
@@ -247,6 +302,14 @@ pub fn fetch_and_unpack(
         let tarball = work.join(&name);
         let sums = work.join("SHA256SUMS");
         curl(sums_url, scheme, &sums)?;
+        if let Some(key) = pubkey {
+            let sig_url = rel.asset("SHA256SUMS.minisig").ok_or_else(|| {
+                format!("release {ver} has no SHA256SUMS.minisig but a key is pinned; refusing an unsigned release")
+            })?;
+            let sig = work.join("SHA256SUMS.minisig");
+            curl(sig_url, scheme, &sig)?;
+            verify_signature(&sums, &sig, key)?;
+        }
         curl(url, scheme, &tarball)?;
         let sums = std::fs::read_to_string(&sums).map_err(|e| e.to_string())?;
         let want = checksum_for(&sums, &name)
@@ -325,6 +388,21 @@ fn unpack(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_placeholder_is_never_a_key() {
+        const K: &str = "RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3";
+        assert_eq!(trusted_key(None, PUBKEY_PLACEHOLDER), Ok(None));
+        assert!(trusted_key(Some(PUBKEY_PLACEHOLDER), K).is_err());
+        assert!(trusted_key(Some("RWshort"), K).is_err());
+        assert!(trusted_key(None, "garbage").is_err());
+        assert_eq!(trusted_key(None, K), Ok(Some(K.to_string())));
+        assert_eq!(
+            trusted_key(Some(K), PUBKEY_PLACEHOLDER),
+            Ok(Some(K.to_string()))
+        );
+        assert_eq!(trusted_key(Some("  "), PUBKEY_PLACEHOLDER), Ok(None));
+    }
+
     use super::*;
 
     #[test]

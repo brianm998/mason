@@ -980,6 +980,17 @@ fn prepare_release(
             &format!("downloading and verifying release {target} into runtimes/{target}/"),
         );
         let partial = rt.root.join(format!("{target}.partial"));
+        let key = rel::trusted_key(
+            std::env::var("MASON_MINISIGN_PUBKEY").ok().as_deref(),
+            rel::PINNED_PUBKEY,
+        )?;
+        if key.is_none() {
+            say(
+                d,
+                "building",
+                "no signing key is pinned: the release signature is NOT checked, only its checksum",
+            );
+        }
         let got = rel::fetch_and_unpack(
             &cfg.release_api,
             &found,
@@ -987,6 +998,7 @@ fn prepare_release(
             std::env::consts::ARCH,
             &work,
             &partial,
+            key.as_deref(),
         )?;
         let installed = (|| -> Result<(), String> {
             for f in got.iter().filter(|f| !f.ends_with(".sh")) {

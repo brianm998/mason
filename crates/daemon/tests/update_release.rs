@@ -82,6 +82,131 @@ fn publish(s: &Scratch, ver: &str, for_this_platform: bool, lie: bool) {
     .unwrap();
 }
 
+fn have_minisign() -> bool {
+    let ok = Command::new("minisign").arg("-v").output().is_ok();
+    if !ok {
+        eprintln!("minisign is not installed: signature test skipped");
+    }
+    ok
+}
+
+/// Make a throwaway key pair in `dir` (never committed); returns the public key text.
+fn make_key(dir: &Path) -> String {
+    let (sk, pk) = (dir.join("k.key"), dir.join("k.pub"));
+    run(
+        dir,
+        "minisign",
+        &[
+            "-G",
+            "-W",
+            "-f",
+            "-s",
+            sk.to_str().unwrap(),
+            "-p",
+            pk.to_str().unwrap(),
+        ],
+    );
+    let text = std::fs::read_to_string(pk).unwrap();
+    text.lines().nth(1).unwrap().trim().to_string()
+}
+
+/// Sign the published SHA256SUMS with `key_dir`'s key and list the signature in the release.
+fn sign_release(s: &Scratch, key_dir: &Path, tamper: bool) {
+    let root = s.root.path().join("fake-release");
+    let assets = root.join("assets");
+    let sums = assets.join("SHA256SUMS");
+    let sig = assets.join("SHA256SUMS.minisig");
+    run(
+        key_dir,
+        "minisign",
+        &[
+            "-S",
+            "-s",
+            key_dir.join("k.key").to_str().unwrap(),
+            "-m",
+            sums.to_str().unwrap(),
+            "-x",
+            sig.to_str().unwrap(),
+        ],
+    );
+    if tamper {
+        let mut t = std::fs::read_to_string(&sums).unwrap();
+        t.push_str("# tampered\n");
+        std::fs::write(&sums, t).unwrap();
+    }
+    let api = root.join("api/releases/latest");
+    let mut body: Value = serde_json::from_slice(&std::fs::read(&api).unwrap()).unwrap();
+    body["assets"].as_array_mut().unwrap().push(json!({
+        "name": "SHA256SUMS.minisig",
+        "browser_download_url": format!("file://{}", sig.display()),
+    }));
+    std::fs::write(api, body.to_string()).unwrap();
+}
+
+/// Run `mason update --check` against a daemon that pins `key`.
+fn check_with_key(s: &Scratch, key: &str) -> (bool, String) {
+    let mut m = s.masond(
+        &["--managed", "--healthy-after-ms", "1500"],
+        &[("MASON_MINISIGN_PUBKEY", key)],
+    );
+    s.wait_daemon(&mut m);
+    let o = s.mason(&["update", "--check"]);
+    (o.status.success(), said(&o))
+}
+
+#[test]
+fn a_release_signed_with_the_pinned_key_is_accepted() {
+    if !have_minisign() {
+        return;
+    }
+    let s = Scratch::new("true", json!({"steps": {}}));
+    publish(&s, "99.0.0", true, false);
+    let kd = tempfile::tempdir().unwrap();
+    let key = make_key(kd.path());
+    sign_release(&s, kd.path(), false);
+    let (ok, text) = check_with_key(&s, &key);
+    assert!(ok, "{text}");
+}
+
+#[test]
+fn an_unsigned_or_badly_signed_release_is_refused_once_a_key_is_pinned() {
+    if !have_minisign() {
+        return;
+    }
+    let (ta, tb) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let key = make_key(ta.path());
+    let _ = make_key(tb.path());
+    // Missing signature.
+    let s = Scratch::new("true", json!({"steps": {}}));
+    publish(&s, "99.0.0", true, false);
+    let (ok, text) = check_with_key(&s, &key);
+    assert!(!ok && text.contains("unsigned"), "{text}");
+    assert!(ready_runtimes(&s).is_empty());
+    drop(s);
+    // Signed by a different key.
+    let s = Scratch::new("true", json!({"steps": {}}));
+    publish(&s, "99.0.0", true, false);
+    sign_release(&s, tb.path(), false);
+    let (ok, text) = check_with_key(&s, &key);
+    assert!(!ok && text.contains("signature"), "{text}");
+    drop(s);
+    // SHA256SUMS changed after signing.
+    let s = Scratch::new("true", json!({"steps": {}}));
+    publish(&s, "99.0.0", true, false);
+    sign_release(&s, ta.path(), true);
+    let (ok, text) = check_with_key(&s, &key);
+    assert!(!ok && text.contains("signature"), "{text}");
+    assert!(!s.data_dir.join("runtimes/99.0.0").exists());
+}
+
+#[test]
+fn the_placeholder_key_is_refused_not_trusted() {
+    let s = Scratch::new("true", json!({"steps": {}}));
+    publish(&s, "99.0.0", true, false);
+    let (ok, text) = check_with_key(&s, "REPLACE_WITH_MINISIGN_PUBLIC_KEY");
+    assert!(!ok && text.contains("not a minisign public key"), "{text}");
+}
+
 fn start(s: &Scratch) -> Masond {
     let mut m = s.masond(&["--managed", "--healthy-after-ms", "1500"], &[]);
     s.wait_daemon(&mut m);
