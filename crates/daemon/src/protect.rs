@@ -14,6 +14,8 @@
 use mason_adapter_api::webhook::{hex, sha256};
 use std::collections::BTreeMap;
 
+mod timing;
+
 /// Paths whose change always stops for the owner, and why.
 pub const PROTECTED: &[(&str, &str)] = &[
     // gates: what must pass before anything lands
@@ -549,6 +551,7 @@ fn scan_full(diff: &str) -> (Vec<Finding>, Vec<Finding>, BTreeMap<String, usize>
                 f.first,
             ));
         }
+        out.extend(timing::findings(file, &f.added, &f.at, timing::today()));
         let js_test = is_js_test(file);
         let shell = runs_shell(file, &f.added);
         let handler = in_failure_handler(&f.added, &f.at);
@@ -754,6 +757,21 @@ pub fn diff_hash(diff: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_timing_dependent_test_in_a_diff_is_a_finding_with_its_file_line_and_rule() {
+        let diff = "diff --git a/crates/x/tests/t.rs b/crates/x/tests/t.rs\n--- a/crates/x/tests/t.rs\n+++ b/crates/x/tests/t.rs\n@@ -10,0 +11,3 @@\n+    let h = start();\n+    std::thread::sleep(std::time::Duration::from_millis(200));\n+    assert!(h.done());\n";
+        let f = scan_diff(diff);
+        let t: Vec<_> = f
+            .iter()
+            .filter(|f| f.kind == "timing-dependent-test")
+            .collect();
+        assert_eq!(t.len(), 1, "{f:?}");
+        assert_eq!(
+            (t[0].file.as_str(), t[0].line),
+            ("crates/x/tests/t.rs", Some(12))
+        );
+    }
 
     #[test]
     fn globs() {
