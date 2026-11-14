@@ -2179,8 +2179,26 @@ fn main() {
                     return println!("{r:#}");
                 }
                 let list = r["quarantined"].as_array().cloned().unwrap_or_default();
-                if list.is_empty() {
+                let ledger = r["ledger"].as_array().cloned().unwrap_or_default();
+                if list.is_empty() && ledger.is_empty() {
                     println!("nothing is quarantined");
+                }
+                for x in ledger {
+                    println!(
+                        "{} :: {}   known red ({}), fix {}, since {}, last seen {}{}",
+                        x["suite"].as_str().unwrap_or("?"),
+                        x["test"].as_str().unwrap_or("?"),
+                        x["source"].as_str().unwrap_or("?"),
+                        x["fix_task"]
+                            .as_u64()
+                            .map_or("none".to_string(), |n| format!("task #{n}")),
+                        ago(x["since"].as_u64().unwrap_or(0)),
+                        ago(x["last_seen_ms"].as_u64().unwrap_or(0)),
+                        x["note"]
+                            .as_str()
+                            .filter(|n| !n.is_empty())
+                            .map_or(String::new(), |n| format!("   {n}"))
+                    );
                 }
                 for x in list {
                     println!(

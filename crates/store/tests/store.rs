@@ -607,6 +607,7 @@ fn live_progress_is_kept_per_run_and_dropped_when_not_open() {
         unit: "tests".into(),
         done: Figure::reported(3),
         total: Figure::reported(8),
+        ..Default::default()
     });
     a.report_tokens(
         "t0r7-agent-1",
@@ -1182,4 +1183,38 @@ fn the_first_landing_submission_of_a_run_is_remembered() {
     // Another run of the same task, and another task, have their own.
     assert_eq!(s.first_landing_submit(7, 4, 9_000).unwrap(), 9_000);
     assert_eq!(s.first_landing_submit(8, 3, 5_000).unwrap(), 5_000);
+}
+
+#[test]
+fn the_ledger_adds_one_entry_per_test_and_lifts_only_what_passed() {
+    let (_d, p) = db();
+    let s = Store::open(&p).unwrap();
+    assert!(s
+        .ledger_seen_red("unit", "a::b", "base", "base1", 10)
+        .unwrap());
+    // A newer base sees the same test: no second entry, only last-seen moves.
+    assert!(!s
+        .ledger_seen_red("unit", "a::b", "base", "base2", 20)
+        .unwrap());
+    s.ledger_set_fix("unit", "a::b", 7).unwrap();
+    let rows = s.ledger().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].fix_task, Some(7));
+    assert_eq!(rows[0].first_base, "base1");
+    assert_eq!(rows[0].last_seen_ms, 20);
+    // A ledger entry is not an owner quarantine: it excuses nothing by itself.
+    assert!(s.quarantined(30).unwrap().is_empty());
+    // A test the run did not pass leaves the entry; an owner's entry is never lifted here.
+    s.put_quarantine("unit", "own", "brian", 1000, "flaky", 5)
+        .unwrap();
+    assert!(s
+        .ledger_lift("unit", &["other".into(), "own".into()])
+        .unwrap()
+        .is_empty());
+    assert_eq!(s.ledger().unwrap().len(), 2);
+    assert_eq!(
+        s.ledger_lift("unit", &["a::b".into()]).unwrap(),
+        vec!["a::b".to_string()]
+    );
+    assert_eq!(s.ledger().unwrap().len(), 1);
 }
