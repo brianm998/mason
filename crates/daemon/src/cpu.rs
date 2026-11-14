@@ -612,7 +612,8 @@ mod tests {
         assert_eq!(windows_ticks(600, 800, 200), (400, 1000));
         let a = windows_ticks(600, 800, 200);
         let b = windows_ticks(700, 900, 400);
-        assert_eq!(pct_between(a, b), Some(75));
+        // busy 400 -> 600 and total 1000 -> 1300: 200 of 300 ticks.
+        assert_eq!(pct_between(a, b), Some(66));
         assert_eq!(windows_ticks(5, 1, 1), (0, 2));
     }
 
