@@ -241,6 +241,13 @@ struct StateIcon: View {
     }
 }
 
+/// The colour of a tile's number: the attention colour when the state wants the owner, gray
+/// when the count is zero, else the text colour. The dash shown while disconnected is plain text.
+func tileCountColor(_ theme: Theme, count: UInt32, wants: Bool, connected: Bool) -> Color {
+    if wants { return theme.attention }
+    return connected && count == 0 ? theme.muted : theme.text
+}
+
 /// A count tile: a large count over a one-line label, sized to its label so a
 /// narrow window squeezes other text and never a tile or label; tinted when
 /// the state wants the owner; a dash while disconnected.
@@ -252,7 +259,7 @@ struct CountTile: View {
     var body: some View {
         let wants = count.wantsYou && model.connected
         VStack(spacing: 0) {
-            Text(model.tileCount(count)).font(theme.count()).foregroundStyle(wants ? theme.attention : theme.text)
+            Text(model.tileCount(count)).font(theme.count()).foregroundStyle(tileCountColor(theme, count: count.count, wants: wants, connected: model.connected))
             Text(label).font(theme.small()).foregroundStyle(theme.muted).lineLimit(1).fixedSize()
         }
         .padding(.horizontal, theme.spacing)
