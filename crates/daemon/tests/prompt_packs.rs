@@ -86,9 +86,11 @@ fn a_custom_step_and_a_fix_round_get_their_own_prompt_files() {
         (".mason/prompts/fix.md", "FIX-PACK repair it. {feedback}"),
     ]);
     assert!(review.contains("SECURITY-PACK"), "{review}");
+    // The review prompt carries the branch's diff (which shows the edit), but its
+    // instructions are the base commit's text, not the task's edit.
     assert!(
-        !review.contains("edited-by-the-task"),
-        "the task's own edit is not read: {review}"
+        review.starts_with("SECURITY-PACK look for secrets."),
+        "{review}"
     );
     assert!(!dev1.contains("FIX-PACK"), "{dev1}");
     assert!(dev2.contains("FIX-PACK"), "{dev2}");
