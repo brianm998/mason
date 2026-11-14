@@ -585,7 +585,17 @@ const STEPS: &[&str] = &[
          at_ms INTEGER NOT NULL,
          PRIMARY KEY (task, run)
      );",
-    // 29: what a suite did at a base commit beyond its failing names (s246, decision 0241): the
+    // 29: a test that failed on every run of a task's test step (s282), one row per task, test
+    // and suite (or step) name, so a test red across several different tasks can be told from
+    // one task's retries. Next to `flaky`. Additive.
+    "CREATE TABLE persistent_red (
+         suite TEXT NOT NULL,
+         test  TEXT NOT NULL,
+         task  INTEGER NOT NULL,
+         at    INTEGER NOT NULL,
+         PRIMARY KEY (suite, test, task)
+     );",
+    // 30: what a suite did at a base commit beyond its failing names (s246, decision 0241): the
     // build's first error, whether the run proved nothing, whether it was red, and the first
     // error line of a red run. `complete` 1 marks a row written with all of that; an older row
     // has 0 and is worked out again when a comparison needs it. And the base-red wait of a task
@@ -604,7 +614,7 @@ const STEPS: &[&str] = &[
          text       TEXT NOT NULL,
          at_ms      INTEGER NOT NULL
      );",
-    // 30: the retries the daemon made by itself after a failure outside the code (s247), so a
+    // 31: the retries the daemon made by itself after a failure outside the code (s247), so a
     // restart neither forgets nor repeats them. Additive.
     "CREATE TABLE auto_retries (
          id     INTEGER PRIMARY KEY AUTOINCREMENT,

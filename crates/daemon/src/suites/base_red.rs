@@ -13,13 +13,9 @@
 //! running the suite a second time.
 
 use super::*;
+use crate::basecheck::{short, BASE_RUN};
 use mason_store::{BaseProfile, BaseRedWait};
 use mason_testing::basered::{same_red, BaseSide};
-use std::sync::Mutex;
-
-/// One base run at a time, and one filing at a time: a second task with the same base waits,
-/// then finds the first one's cached result and the first one's task.
-static BASE_RUN: Mutex<()> = Mutex::new(());
 
 /// How a suite stands against its base.
 pub(super) enum Gate {
@@ -41,10 +37,6 @@ fn side(p: &BaseProfile) -> BaseSide {
         failing: p.failing.clone(),
         first_error: p.first_error.clone(),
     }
-}
-
-fn short(sha: &str) -> &str {
-    &sha[..sha.len().min(10)]
 }
 
 /// What the build or the run says, without the header the step wrapped around it.
@@ -194,6 +186,11 @@ fn existing_filing(c: &Ctx, suite: &str, error: &str) -> Option<crate::basecheck
     let norm = basered::normalise(error);
     if norm.is_empty() {
         return None;
+    }
+    // A fix task already filed by the base check (s177, s281, s282) for a test that names this
+    // error covers it too: one red on the base files one task.
+    if let Some(f) = crate::basecheck::existing_fix(c, error) {
+        return Some(f);
     }
     c.d.store
         .tracker_items(&c.project.id)
