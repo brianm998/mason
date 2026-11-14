@@ -1223,6 +1223,34 @@ pub(crate) fn prepare_worktree_only(c: &Ctx) -> Result<(), String> {
     })
 }
 
+/// How long a worktree setup step may take when it has no `budget`.
+const SETUP_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// Run the definition's worktree setup steps (s312, [`Definition::worktree_setup`]) in a
+/// checkout MASON made for itself: a base profile, a negative control, a debt payment, a
+/// ledger run, the landing worktree. A task's worktree got them as steps; without them a
+/// project's gitignored artifacts (star's OpenCV) are missing and the build fails for a
+/// reason that has nothing to do with the code. Err names the step and its last output.
+pub(crate) fn setup_checkout(def: &Definition, wt: &Path) -> Result<(), String> {
+    for s in def.worktree_setup() {
+        let Some(cmd) = &s.command else { continue };
+        let env = [(
+            "MASON_WORKTREE".to_string(),
+            wt.to_string_lossy().into_owned(),
+        )];
+        let (ok, out) = run_shell_env(cmd, wt, s.budget.unwrap_or(SETUP_TIMEOUT), &env);
+        if !ok {
+            return Err(format!(
+                "worktree setup step `{}` failed in {}: {}",
+                s.name,
+                wt.display(),
+                out.trim()
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Run `sh -c cmd` in `cwd`, giving up after `timeout`. Returns whether it
 /// exited 0 and the last lines of its output.
 pub fn run_shell(cmd: &str, cwd: &Path, timeout: Duration) -> (bool, String) {
