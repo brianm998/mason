@@ -68,6 +68,10 @@ repo alpha <<'TOML'
 schema = 1
 start = "develop"
 
+# A step may only use a resource the definition declares; `exclusive` is the whole machine.
+[resource.exclusive]
+count = 1
+
 [step.develop]
 type = "agent"
 category = "developing"
@@ -143,24 +147,28 @@ echo "   granted"
 
 echo "== a non-owner cannot change a priority; the owner can, and the request moves"
 if m task priority "$b3" urgent --as someone-else >/dev/null 2>&1; then fail "a non-owner changed a priority"; fi
-# b3's request waits with another beta request ahead of it.
+# b3's request waits with another beta request ahead of it. Places are counted among requests that
+# have not aged: an aged request goes first whatever its priority (part 1), so it is no part of what
+# a priority change moves. One that ages between the readings only moves b3 up.
+young="ws = [w for w in r['waiting'] if w['task'] in ($b1,$b2,$b3) and (not w['aged'] or w['task'] == $b3)]"
 behind() { res "
-ws = [w for w in r['waiting'] if w['task'] in ($b1,$b2,$b3)]
+$young
 i = [k for k, w in enumerate(ws) if w['task'] == $b3]
-sys.exit(0 if i and i[0] >= 1 and ws[i[0]]['priority'] == 1 else 1)"; }
+sys.exit(0 if i and i[0] >= 1 and ws[i[0]]['priority'] == 1 and not ws[i[0]]['aged'] else 1)"; }
 wait_for 120 "b3's request to wait behind another beta request" behind
 before=$(res "
-ws = [w for w in r['waiting'] if w['task'] in ($b1,$b2,$b3)]
-print([k for k, w in enumerate(ws) if w['task'] == $b3][0])")
+$young
+i = [k for k, w in enumerate(ws) if w['task'] == $b3]
+print(i[0] if i else -1)")
 m task priority "$b3" urgent | tee "$root/prio.out"
 grep -q 're-ranked' "$root/prio.out" || fail "no re-rank was reported"
 after=$(res "
-ws = [w for w in r['waiting'] if w['task'] in ($b1,$b2,$b3)]
+$young
 i = [k for k, w in enumerate(ws) if w['task'] == $b3]
 print(i[0] if i else -1, ws[i[0]]['priority'] if i else -1)")
 echo "   b3's place among beta's waiting requests: $before -> ${after%% *} (priority ${after##* })"
-case "$after" in
-  -1*) : ;;  # granted between the two readings, which is also ahead of the others
+case "$before $after" in
+  "-1 "*|*" -1 "*) : ;;  # granted around the readings, which is also ahead of the others
   *) [ "${after%% *}" -lt "$before" ] || fail "the request did not move ahead: $before -> $after"
      [ "${after##* }" = 0 ] || fail "the request's priority is not urgent: $after" ;;
 esac
