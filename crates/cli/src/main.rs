@@ -3163,6 +3163,12 @@ fn main() {
                         .pos()
                         .unwrap_or_else(|| die("which priority? urgent, high, normal or low"));
                     finish(&a);
+                    // Owner only: this user's identity, as `unblock` takes it, unless MASON_AS says otherwise.
+                    if std::env::var("MASON_AS").is_err() {
+                        if let Ok(u) = std::env::var("USER") {
+                            std::env::set_var("MASON_AS", u);
+                        }
+                    }
                     let r = or_die(d.call(
                         "POST",
                         &format!("/tasks/{id}/priority"),
