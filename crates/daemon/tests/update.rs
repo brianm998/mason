@@ -538,20 +538,38 @@ fn append_config(s: &Scratch, more: &str) {
     std::fs::write(&p, format!("{t}{more}\n")).unwrap();
 }
 
-/// Ask for a monitor build as a monitor would; the HTTP status comes back.
-fn post_monitor(s: &Scratch, kind: &str) -> String {
+/// POST a body to the daemon; the HTTP status and the answer come back.
+fn post(s: &Scratch, path: &str, body: &str) -> (String, String) {
     let t = std::fs::read_to_string(s.data_dir.join("daemon.json")).unwrap();
     let port = serde_json::from_str::<Value>(&t).unwrap()["port"]
         .as_u64()
         .unwrap();
     let out = Command::new("curl")
-        .args(["-s", "-o", "/dev/null", "-w", "%{http_code}", "-X", "POST"])
+        .args(["-s", "-w", "\n%{http_code}", "-X", "POST"])
         .args(["-H", "content-type: application/json"])
-        .args(["-d", &format!("{{\"kind\":\"{kind}\"}}")])
-        .arg(format!("http://127.0.0.1:{port}/update/monitor"))
+        .args(["-d", body])
+        .arg(format!("http://127.0.0.1:{port}{path}"))
         .output()
         .unwrap();
-    String::from_utf8_lossy(&out.stdout).to_string()
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    let (answer, code) = text.rsplit_once('\n').unwrap_or(("", &text));
+    (code.to_string(), answer.to_string())
+}
+
+/// Ask for a monitor build as a monitor would; the HTTP status comes back.
+fn post_monitor(s: &Scratch, kind: &str) -> String {
+    post(s, "/update/monitor", &format!("{{\"kind\":\"{kind}\"}}")).0
+}
+
+#[test]
+fn update_now_with_no_update_waiting_is_a_409_with_a_reason() {
+    let s = Scratch::new("true", json!({"steps": {}}));
+    let _src = source(&s, &[&[("a", "1")]]);
+    let _m = start(&s);
+    let (code, answer) = post(&s, "/update/now", "{}");
+    assert_eq!(code, "409", "{answer}");
+    assert!(answer.contains("no update is waiting"), "{answer}");
+    assert_eq!(status(&s)["waiting"], "");
 }
 
 #[test]

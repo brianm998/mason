@@ -552,6 +552,12 @@ message UpdateInfo {
   // no source to build from. Empty on the source channels.
   string release_version = 4;
   string download_url = 5;
+  // The button's label: "Update masond", "Update now" (an update is built and waiting
+  // for landing batches) or empty (additive).
+  string daemon_button = 6;
+  // Asked before the button acts, written by the daemon so both monitors say the same
+  // words; empty when no confirmation is needed (additive).
+  string daemon_confirm = 7;
 }
 
 message MonitorBuild {
