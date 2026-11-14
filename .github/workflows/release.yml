@@ -388,9 +388,133 @@ jobs:
           if (-not (Test-Path (Join-Path $root 'MASON.exe'))) { Get-ChildItem $root -Recurse | Select-Object -First 40; throw "launcher missing" }
           if (-not (Test-Path (Join-Path $root 'runtime\bin\java.exe'))) { throw "bundled runtime missing" }
 
-  # WINDOWS-CLI-JOBS: the Windows packaging task adds its package and end-to-end jobs here
-  # (mason-<ver>-x86_64-pc-windows-msvc.zip and mason-<ver>-x86_64-windows-setup.msi), uploads
-  # them as artifacts named windows-cli-*, and adds them to `publish`'s needs.
+  # ── Windows CLI + daemon: zip and per-user .msi, static CRT ────────────────────
+  windows-package:
+    needs: version
+    runs-on: windows-2022
+    timeout-minutes: 60
+    env:
+      MASON_BUILD_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the zip and the .msi
+        shell: pwsh
+        run: |
+          ./scripts/package/windows.ps1 -Out dist
+          Get-ChildItem dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-cli-zip
+          path: dist/mason-*-x86_64-pc-windows-msvc.zip
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-cli-msi
+          path: dist/mason-*-x86_64-windows-setup.msi
+          if-no-files-found: error
+
+  # Unzips and runs the zip, checks DLL dependencies, then installs the .msi silently, repeats
+  # the smoke run, uninstalls and checks nothing is left. A fresh runner, no Rust build.
+  windows-e2e:
+    needs: [version, windows-package]
+    runs-on: windows-2022
+    timeout-minutes: 30
+    env:
+      VER: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: windows-cli-zip, path: dist }
+      - uses: actions/download-artifact@v4
+        with: { name: windows-cli-msi, path: dist }
+      - name: Smoke the zip
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          function Smoke($bindir, $tag) {
+            & "$bindir\mason.exe" --version
+            if ($LASTEXITCODE -ne 0) { throw "mason --version failed ($tag)" }
+            & "$bindir\masond.exe" --version
+            if ($LASTEXITCODE -ne 0) { throw "masond --version failed ($tag)" }
+            $env:MASON_DATA_DIR = Join-Path $env:RUNNER_TEMP "mason-data-$tag"
+            New-Item -ItemType Directory -Force $env:MASON_DATA_DIR | Out-Null
+            $p = Start-Process "$bindir\masond.exe" -ArgumentList '--demo' -PassThru `
+              -RedirectStandardOutput "$env:RUNNER_TEMP\masond-$tag.log" -RedirectStandardError "$env:RUNNER_TEMP\masond-$tag.err"
+            try {
+              $ok = $false
+              for ($i = 0; $i -lt 60; $i++) {
+                & "$bindir\mason.exe" status *> $null
+                if ($LASTEXITCODE -eq 0) { $ok = $true; break }
+                Start-Sleep -Seconds 1
+              }
+              if (-not $ok) { Get-Content "$env:RUNNER_TEMP\masond-$tag.*" -ErrorAction SilentlyContinue; throw "mason status never succeeded ($tag)" }
+              & "$bindir\mason.exe" status
+            } finally { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
+          }
+          $zip = (Get-ChildItem dist -Filter 'mason-*-x86_64-pc-windows-msvc.zip').FullName
+          $x = Join-Path $env:RUNNER_TEMP 'unzipped'
+          Expand-Archive $zip $x
+          $dir = (Get-ChildItem $x -Directory | Select-Object -First 1).FullName
+          foreach ($f in 'mason.exe','masond.exe','step-host.exe','mason-mcp.exe','fake-claude.exe','mason-askpass.cmd','LICENSE','LICENSE-ADDITIONAL-PERMISSION','README.md') {
+            if (-not (Test-Path "$dir\$f")) { throw "zip lacks $f" }
+          }
+          Smoke $dir 'zip'
+          # DLL dependencies: only Windows system DLLs. The C runtime is linked statically
+          # (+crt-static), so any VC runtime / UCRT import means a redistributable would be needed.
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $dumpbin = Get-ChildItem "$vs\VC\Tools\MSVC" -Recurse -Filter dumpbin.exe | Where-Object { $_.FullName -match 'Hostx64\\x64' } | Select-Object -First 1
+          if (-not $dumpbin) { throw 'dumpbin.exe not found' }
+          $bad = 0
+          foreach ($exe in Get-ChildItem $dir -Filter *.exe) {
+            $deps = & $dumpbin.FullName /nologo /dependents $exe.FullName | Where-Object { $_ -match '^\s+\S+\.dll\s*$' } | ForEach-Object { $_.Trim() }
+            "$($exe.Name): $($deps -join ', ')"
+            foreach ($d in $deps) {
+              if ($d -match '^(vcruntime|msvcp|concrt|vcomp|ucrtbase|api-ms-win-crt)' ) { Write-Host "::error::$($exe.Name) needs the C runtime DLL $d"; $bad = 1 }
+              elseif (-not (Test-Path "$env:WINDIR\System32\$d") -and $d -notmatch '^api-ms-win-') { Write-Host "::error::$($exe.Name) needs $d, which is not a Windows system DLL"; $bad = 1 }
+            }
+          }
+          if ($bad) { throw 'unexpected DLL dependencies' }
+      - name: Install the .msi silently, smoke it, uninstall
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          function Msi($args2, $log) {
+            $p = Start-Process msiexec.exe -ArgumentList $args2 -Wait -PassThru
+            if ($p.ExitCode -ne 0) { Get-Content $log -Tail 80; throw "msiexec exit $($p.ExitCode)" }
+          }
+          $msi = (Get-ChildItem dist -Filter 'mason-*-x86_64-windows-setup.msi').FullName
+          $log = "$env:RUNNER_TEMP\msi.log"
+          Msi @('/i', "`"$msi`"", '/qn', '/norestart', '/l*v', "`"$log`"") $log
+          $root = Join-Path $env:LOCALAPPDATA 'Programs\MASON'
+          foreach ($f in 'mason.exe','masond.exe','step-host.exe','mason-mcp.exe','fake-claude.exe','mason-askpass.cmd') {
+            if (-not (Test-Path "$root\$f")) { throw "installed folder lacks $f" }
+          }
+          $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+          if (($userPath -split ';') -notcontains $root) { throw "user PATH lacks $root" }
+          & "$root\mason.exe" --version
+          if ($LASTEXITCODE -ne 0) { throw 'installed mason --version failed' }
+          & "$root\masond.exe" --version
+          if ($LASTEXITCODE -ne 0) { throw 'installed masond --version failed' }
+          $env:MASON_DATA_DIR = Join-Path $env:RUNNER_TEMP 'mason-data-msi'
+          New-Item -ItemType Directory -Force $env:MASON_DATA_DIR | Out-Null
+          $p = Start-Process "$root\masond.exe" -ArgumentList '--demo' -PassThru `
+            -RedirectStandardOutput "$env:RUNNER_TEMP\masond-msi.log" -RedirectStandardError "$env:RUNNER_TEMP\masond-msi.err"
+          try {
+            $ok = $false
+            for ($i = 0; $i -lt 60; $i++) {
+              & "$root\mason.exe" status *> $null
+              if ($LASTEXITCODE -eq 0) { $ok = $true; break }
+              Start-Sleep -Seconds 1
+            }
+            if (-not $ok) { throw 'mason status never succeeded (msi)' }
+            & "$root\mason.exe" status
+          } finally { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
+          Start-Sleep -Seconds 2
+          Msi @('/x', "`"$msi`"", '/qn', '/norestart', '/l*v', "`"$env:RUNNER_TEMP\msi-uninstall.log`"") "$env:RUNNER_TEMP\msi-uninstall.log"
+          if (Test-Path $root) { Get-ChildItem $root -Recurse; throw "$root left after uninstall" }
+          $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+          if (($userPath -split ';') -contains $root) { throw 'user PATH still lists the install folder' }
+          if (Test-Path 'HKCU:\Software\MASON') { throw 'HKCU\Software\MASON left after uninstall' }
 
   # ── Publish: tags only; drops anything that was not proven, then drafts the release ──
   publish:
@@ -406,6 +530,8 @@ jobs:
       - compose-package
       - compose-deb-e2e
       - compose-msi-e2e
+      - windows-package
+      - windows-e2e
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
@@ -426,7 +552,8 @@ jobs:
           # artifact : the job that tested it
           for pair in linux-cli-amd64:linux-e2e linux-cli-arm64:linux-e2e \
                       macos-pkg:macos-pkg-e2e macos-cli-tarballs:macos-tarball-e2e \
-                      macos-dmg:macos-dmg-e2e compose-deb:compose-deb-e2e compose-msi:compose-msi-e2e; do
+                      macos-dmg:macos-dmg-e2e compose-deb:compose-deb-e2e compose-msi:compose-msi-e2e \
+                      windows-cli-zip:windows-e2e windows-cli-msi:windows-e2e; do
             art=${pair%%:*}; job=${pair##*:}
             r=$(res "$job")
             if [ "$r" != success ]; then
