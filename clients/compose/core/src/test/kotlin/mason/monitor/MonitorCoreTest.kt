@@ -846,10 +846,7 @@ class MonitorCoreTest {
         assertTrue(r.sockets[0].sent.any { it.contains("ping") }, "it asked before giving up")
         waitFor("a second socket") { r.sockets.size == 2 }
         assertTrue(r.sockets[0].closed)
-<<<<<<< HEAD
-=======
         assertTrue(r.sockets[0].sent.any { it.contains("ping") }, "it asked before giving up")
->>>>>>> origin/develop
         waitFor("reconnecting") { r.model.reconnecting }
         assertTrue(r.model.reconnecting)
         assertNull(r.model.lastResult, "no error is shown")
