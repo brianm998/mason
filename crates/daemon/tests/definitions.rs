@@ -626,15 +626,15 @@ fn rejecting_an_approval_with_no_way_back_fails_the_task_with_the_reason() {
 
 #[test]
 fn steps_that_cannot_run_yet_are_refused_when_a_definition_is_applied() {
-    let gate = DEF_SKIP.replace("type = \"test\"", "type = \"gate\"");
+    let gate = DEF_SKIP.replace("type = \"test\"", "type = \"ci\"");
     let s = scratch_with(Some(DEF_SKIP), happy_script());
     let d = s.start();
     let pid = d.project_id_by_name("scratch").unwrap();
     let before = d.current_def(pid).hash.clone();
-    s.push_files(&[(".mason/mason.toml", &gate)], "use a gate");
+    s.push_files(&[(".mason/mason.toml", &gate)], "use a ci step");
     match d.reload_definition(pid) {
         Reload::Refused(e) => assert!(
-            e.join(" ").contains("cannot run yet") && e.join(" ").contains("Stage 9"),
+            e.join(" ").contains("cannot run yet") && e.join(" ").contains("Stage 15"),
             "{e:?}"
         ),
         other => panic!("{other:?}"),

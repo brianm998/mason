@@ -34,14 +34,13 @@ pub struct Capabilities {
 }
 
 impl Capabilities {
-    /// What the daemon can run now: agent, command, test, approval and landing
-    /// steps in a straight line with loops back. (`gate` and the suites behind
-    /// `test` arrive in Stage 9, `ci` and `pr` in Stage 15, fan-out and
-    /// conditions later still.)
+    /// What the daemon can run now: agent, command, test, gate, approval and
+    /// landing steps in a straight line with loops back. (`ci` and `pr` arrive
+    /// in Stage 15, fan-out and conditions later still.)
     pub fn now() -> Capabilities {
         use StepType::*;
         Capabilities {
-            step_types: vec![Agent, Command, Test, Approval, Landing],
+            step_types: vec![Agent, Command, Test, Gate, Approval, Landing],
             fan_out: false,
             conditions: false,
             plugins: vec![],
