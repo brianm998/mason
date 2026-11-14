@@ -75,6 +75,13 @@ fn profile(
         )
         .ok()?;
     }
+    // A base that could not be set up says nothing about the base: not cached.
+    if let Err(e) = crate::jobs::setup_checkout(&c.def, &wt) {
+        tracing::warn!("base profile of {} at {base}: {e}", suite.name);
+        let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+        git::remove_worktree(&c.project.path, &wt);
+        return None;
+    }
     let mut who = who.clone();
     let result = (|| {
         if let Some(b) = &suite.build {
