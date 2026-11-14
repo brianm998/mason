@@ -271,6 +271,7 @@ pub struct Flags {
     pub landing: Option<String>,
     pub alerts: Option<String>,
     pub ci_workflow: Option<String>,
+    pub land: Option<String>,
     pub no_prove: bool,
     pub prove_only: bool,
 }
@@ -317,6 +318,7 @@ pub fn parse_flags(args: &mut Vec<String>) -> Result<Flags, String> {
             "--landing" => f.landing = Some(take(args)?),
             "--alerts" => f.alerts = Some(take(args)?),
             "--ci-workflow" => f.ci_workflow = Some(take(args)?),
+            "--land" => f.land = Some(take(args)?),
             _ => i += 1,
         }
     }
@@ -334,6 +336,37 @@ pub struct Question {
     pub flag: &'static str,
 }
 
+/// What `init` does with the setup branch when it has written it. Only ever the owner's
+/// explicit answer: `--yes` and a missing terminal both mean `No`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Land {
+    /// Leave the branch and print the commands.
+    #[default]
+    No,
+    /// Fast-forward the base to the setup branch (locally).
+    Merge,
+    /// Merge, then push: the base (direct, direct-ci) or the setup branch (pr).
+    Push,
+    /// Push the setup branch and open a pull request (the pr landing mode).
+    Pr,
+}
+
+impl Land {
+    pub fn name(self) -> &'static str {
+        match self {
+            Land::No => "no",
+            Land::Merge => "merge",
+            Land::Push => "push",
+            Land::Pr => "pr",
+        }
+    }
+    pub fn from_name(s: &str) -> Option<Land> {
+        [Land::No, Land::Merge, Land::Push, Land::Pr]
+            .into_iter()
+            .find(|l| l.name() == s)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Answers {
     pub id: String,
@@ -348,6 +381,7 @@ pub struct Answers {
     /// `None`: keep the built-in routing.
     pub alerts: Option<Vec<Alert>>,
     pub ci_workflow: bool,
+    pub land: Land,
     pub prove: bool,
     /// Said while resolving, for the report.
     pub notes: Vec<String>,
@@ -581,6 +615,36 @@ pub fn resolve(
             .unwrap_or(false)
     };
 
+    // What to do with the branch: never decided for the owner.
+    let land = match f.land.as_deref() {
+        Some(v) => Land::from_name(v)
+            .ok_or_else(|| format!("--land takes no, merge, push or pr, not {v:?}"))?,
+        None if f.yes || !mode.interactive => Land::No,
+        None => {
+            let a = answer(
+                None,
+                q(
+                    "land",
+                    "Land the setup now? merge = into the base here; push = merge, then push (never without this answer); pr = push the branch and open a pull request; no = leave the branch and print the commands",
+                    &["no", "merge", "push", "pr"],
+                    "no",
+                    "--land",
+                ),
+            )?;
+            Land::from_name(&a)
+                .ok_or_else(|| format!("land takes no, merge, push or pr, not {a:?}"))?
+        }
+    };
+    if land != Land::No && d.remote_name.is_none() && land != Land::Merge {
+        return Err(format!(
+            "--land {} needs a remote, and this repository has none; use --land merge or no",
+            land.name()
+        ));
+    }
+    if land == Land::Pr && landing != Landing::Pr {
+        return Err("--land pr opens a pull request for the setup branch, which only the `pr` landing mode uses; pass --landing pr or another --land".into());
+    }
+
     // 8. Prove it.
     let prove = !f.no_prove;
 
@@ -602,6 +666,7 @@ pub fn resolve(
         landing,
         alerts,
         ci_workflow,
+        land,
         prove,
         notes,
     })
@@ -898,12 +963,70 @@ mod tests {
     }
 
     #[test]
+    fn land_is_never_chosen_for_the_owner() {
+        let ok = |f: Flags, interactive| run(&f, &detected(), interactive).0;
+        // `--yes` and no terminal both mean no, even with a remote.
+        assert_eq!(
+            ok(
+                Flags {
+                    yes: true,
+                    ..Default::default()
+                },
+                false
+            )
+            .unwrap()
+            .land,
+            Land::No
+        );
+        assert_eq!(
+            ok(
+                Flags {
+                    tracker: Some("local".into()),
+                    agent: Some("claude".into()),
+                    sessions: Some("1".into()),
+                    workflow: Some("solo".into()),
+                    suites: Some("skip".into()),
+                    base: Some("main".into()),
+                    landing: Some("direct".into()),
+                    alerts: Some("none".into()),
+                    ..Default::default()
+                },
+                false
+            )
+            .unwrap()
+            .land,
+            Land::No
+        );
+        for (v, want) in [
+            ("merge", Land::Merge),
+            ("push", Land::Push),
+            ("no", Land::No),
+        ] {
+            let f = Flags {
+                yes: true,
+                land: Some(v.into()),
+                ..Default::default()
+            };
+            assert_eq!(ok(f, false).unwrap().land, want);
+        }
+        let f = Flags {
+            yes: true,
+            land: Some("sometimes".into()),
+            ..Default::default()
+        };
+        assert!(ok(f, false).unwrap_err().contains("--land takes"));
+    }
+
+    #[test]
     fn a_terminal_is_asked_in_part_21s_order_and_only_what_flags_leave() {
         let (r, asked) = run(&Flags::default(), &detected(), true);
         r.unwrap();
         assert_eq!(
             asked,
-            ["tracker", "agent", "sessions", "workflow", "suites", "base", "landing", "alerts"]
+            [
+                "tracker", "agent", "sessions", "workflow", "suites", "base", "landing", "alerts",
+                "land"
+            ]
         );
         let f = Flags {
             tracker: Some("local".into()),
@@ -914,7 +1037,7 @@ mod tests {
         };
         let (r, asked) = run(&f, &detected(), true);
         r.unwrap();
-        assert_eq!(asked, ["agent", "sessions", "suites", "base"]);
+        assert_eq!(asked, ["agent", "sessions", "suites", "base", "land"]);
     }
 
     #[test]
@@ -1225,6 +1348,7 @@ mod tests {
             landing,
             alerts: None,
             ci_workflow: false,
+            land: Land::No,
             prove: true,
             notes: vec![],
         };

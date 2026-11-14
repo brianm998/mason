@@ -694,3 +694,41 @@ fn paying_a_debt_writes_in_the_projects_test_command() {
     );
     assert_eq!(d.store.debts(Some(t.0), false).unwrap()[0].status, "paid");
 }
+
+#[test]
+fn paying_a_debt_runs_the_worktree_setup_first() {
+    // On 2026-11-14 star's base checks could never build: MASON's own checkouts skipped the
+    // `setup` command step that links star's gitignored OpenCV into a worktree (s312).
+    let definition = def("", "", "")
+        .replace("start = \"develop\"", "start = \"setup\"")
+        .replace(
+            "[step.develop]",
+            "[step.setup]\ntype = \"command\"\ncategory = \"developing\"\ncommand = \"touch linked.flag\"\nnext = \"develop\"\n\n[step.develop]",
+        )
+        .replace(
+            "command = \"sh checks.sh\"",
+            "command = \"test -f linked.flag && sh checks.sh\"",
+        );
+    let s = Scratch::new(
+        "sh checks.sh",
+        json!({"steps": {"develop": [commit(HELLO, "add hello")]}}),
+    );
+    s.push_files(
+        &[
+            (".mason/mason.toml", &definition),
+            ("checks.sh", CHECKS),
+            (".gitignore", "linked.flag\n"),
+        ],
+        "project setup",
+    );
+    let d = start(&s);
+    let t = file_it(&d, "Test me later");
+    wait_state(&d, t, State::Landed, 120);
+    s.push_files(&[("later.txt", "later\n")], "a later change");
+    let debt = mason_daemon::suites::skip(&d, t, "suite:checks", "owed", "brian", false).unwrap();
+    let paid = mason_daemon::suites::pay(&d, debt);
+    assert!(
+        paid.as_deref().is_ok_and(|m| m.starts_with("paid")),
+        "the payment's checkout had no linked.flag: {paid:?}"
+    );
+}
