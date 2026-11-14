@@ -121,6 +121,15 @@ fn tables<'a>(doc: &'a DocumentMut, key: &str, out: &mut Vec<Problem>) -> Vec<(&
     }
 }
 
+/// The extension named by `plugin:<name>`, if that is what the value says.
+fn plugin_name(v: &str) -> Option<&str> {
+    v.strip_prefix("plugin:").filter(|n| {
+        n.chars().next().is_some_and(|c| c.is_ascii_lowercase())
+            && n.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+    })
+}
+
 pub fn parse(doc: &DocumentMut, out: &mut Vec<Problem>) -> Testing {
     let mut t = Testing::default();
 
@@ -144,6 +153,10 @@ pub fn parse(doc: &DocumentMut, out: &mut Vec<Problem>) -> Testing {
                 "parser" => {
                     if let Some(p) = string(v, &path, out) {
                         match ParserKind::from_name(&p) {
+                            None if plugin_name(&p).is_some() => {
+                                s.plugin_parser = plugin_name(&p).map(String::from);
+                                have_parser = true;
+                            }
                             Some(k) => {
                                 s.parser = k;
                                 have_parser = true;
@@ -151,7 +164,7 @@ pub fn parse(doc: &DocumentMut, out: &mut Vec<Problem>) -> Testing {
                             None => out.push(Problem::new(
                                 &path,
                                 format!(
-                                    "unknown parser `{p}`; the built-in parsers are {}",
+                                    "unknown parser `{p}`; the built-in parsers are {}, or `plugin:<name>` for a parser an approved extension provides",
                                     ParserKind::ALL.map(ParserKind::name).join(", ")
                                 ),
                             )),
@@ -211,11 +224,14 @@ pub fn parse(doc: &DocumentMut, out: &mut Vec<Problem>) -> Testing {
                         match s.as_str() {
                             "local" => e.kind = EnvKind::Local,
                             "compose" => e.kind = EnvKind::Compose,
+                            other if plugin_name(other).is_some() => {
+                                e.plugin = plugin_name(other).map(String::from)
+                            }
                             other => match DeviceType::from_name(other) {
                                 Some(t) => e.kind = EnvKind::Device(t),
                                 None => out.push(Problem::new(
                                     &path,
-                                    "must be \"local\", \"compose\", \"ios-simulator\", \"android-emulator\", \"ios-device\" or \"android-device\"",
+                                    "must be \"local\", \"compose\", \"ios-simulator\", \"android-emulator\", \"ios-device\" or \"android-device\" (or \"plugin:<name>\" for an environment an approved extension provides)",
                                 )),
                             },
                         }

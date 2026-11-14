@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+name = "canceler"
+version = "1.0.0"
+protocol = 3
+description = "A step that runs until it is told to cancel (test fixture)."
+provides = ["step-type:wait-for-cancel"]
+run = "python3 canceler.py"
