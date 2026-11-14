@@ -52,6 +52,14 @@ struct HomePage: View {
             .accessibilityIdentifier("status")
     }
 
+    @ViewBuilder var versionLine: some View {
+        if !model.versionLine.isEmpty {
+            Text(model.versionLine).font(theme.small()).foregroundStyle(theme.muted)
+                .textSelection(.enabled).help(model.versionTip)
+                .accessibilityIdentifier("home:version")
+        }
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: theme.spacingLarge) {
@@ -69,6 +77,7 @@ struct HomePage: View {
                         statusLine
                     }
                 }
+                versionLine
 
                 if let attention = model.home?.attention, !attention.isEmpty {
                     section("Needs you", theme: theme) {

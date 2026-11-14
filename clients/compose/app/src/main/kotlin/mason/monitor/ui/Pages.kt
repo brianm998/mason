@@ -9,6 +9,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.TooltipArea
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -97,6 +98,15 @@ fun HomePage(model: MonitorModel) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(theme.spacingLarge)) {
                 MascotPicture(pic.id, theme.mascotStatus)
                 statusLine()
+            }
+        }
+        if (model.versionLine.isNotEmpty()) {
+            TooltipArea(tooltip = {
+                Text(model.versionTip, style = theme.small(color = theme.text), modifier = Modifier.background(theme.surface).padding(theme.spacing))
+            }) {
+                SelectionContainer {
+                    Text(model.versionLine, style = theme.small(), modifier = Modifier.testTag("home:version"))
+                }
             }
         }
         if (adding) AddTaskDialog(model) { adding = false }

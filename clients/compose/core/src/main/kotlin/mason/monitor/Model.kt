@@ -106,6 +106,23 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     /** The commit a monitor update would go to. */
     val latestMonitor: String get() = monitorBuild?.latest ?: ""
 
+    /** How many commits behind develop the daemon says it is (parsed from its sentence); null when it does not say. */
+    val daemonCommitsBehind: Int?
+        get() = Regex("""(\d+) commits? behind""").find(daemonUpdateText)?.groupValues?.get(1)?.toIntOrNull()
+
+    /** Home's version line: masond's short commit (or "unversioned build"), how far behind develop, and this monitor's own commit. Empty before a welcome. */
+    val versionLine: String
+        get() {
+            if (daemonVersion.isEmpty()) return ""
+            var d = if (daemonVersion == "dev") "masond (unversioned build)" else "masond ${daemonVersion.take(8)}"
+            daemonCommitsBehind?.let { d += " ($it commit${if (it == 1) "" else "s"} behind develop)" }
+            val o = if (ownVersion == "dev") "monitor (unversioned build)" else "monitor ${ownVersion.take(8)}"
+            return "$d · $o"
+        }
+
+    /** The full hashes, for the tooltip. */
+    val versionTip: String get() = if (daemonVersion.isEmpty()) "" else "masond $daemonVersion\nmonitor $ownVersion"
+
     /** What to say about the daemon's own version; empty when there is nothing to say. */
     val daemonUpdateText: String get() = updateInfo?.daemon_text ?: ""
     val canUpdateDaemon: Boolean get() = canAct && updateInfo?.daemon_can_update == true

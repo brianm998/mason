@@ -546,6 +546,23 @@ final class MonitorCoreTests: XCTestCase {
         XCTAssertFalse(m.updateAvailable, "not the owner")
     }
 
+    func testHomeShowsTheDaemonsShortCommit() {
+        let m = MonitorModel()
+        m.ownVersion = "dev"
+        XCTAssertEqual(m.versionLine, "")
+        m.apply(welcome(version: "64b3068a5c0ffee1234"))
+        XCTAssertTrue(m.versionLine.contains("masond 64b3068a"))
+        XCTAssertFalse(m.versionLine.contains("64b3068a5"))
+        XCTAssertTrue(m.versionTip.contains("64b3068a5c0ffee1234"))
+        XCTAssertTrue(m.versionLine.contains("monitor (unversioned build)"))
+        m.ownVersion = "abcdef0123456"
+        XCTAssertTrue(m.versionLine.contains("monitor abcdef01"))
+        m.apply(update(latest: "x", daemon: "masond is 3 commits behind develop"))
+        XCTAssertTrue(m.versionLine.contains("3 commits behind develop"))
+        m.apply(welcome(version: "dev"))
+        XCTAssertTrue(m.versionLine.contains("masond (unversioned build)"))
+    }
+
     func testTheDaemonButtonIsTheOwnersAndSendsTheUpdate() {
         let m = MonitorModel()
         var sent: [Mason_V1_Command] = []
