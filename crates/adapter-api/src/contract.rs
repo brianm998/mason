@@ -217,7 +217,8 @@ pub fn tool_spec(tool: &str) -> Option<(String, Value)> {
                     "description": "2 to 4 complete answers, exactly one with recommended: true"},
                 "evidence": {"type": "array", "items": {"type": "string"}, "description": "At most 10 short lines. Quote the decisive ones; never paste a log."},
                 "links": {"type": "array", "items": {"type": "string"}, "description": "Links to stored logs or files"},
-                "key": {"type": "string", "description": "What this is about, such as a gate's name"}
+                "key": {"type": "string", "description": "What this is about, such as a gate's name"},
+                "multi_select": {"type": "boolean", "description": "Several answers are allowed; the owner picks any number of options"}
             }),
             &["ask", "why", "options"],
         ),

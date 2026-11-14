@@ -13,7 +13,7 @@
 //! mason debt list | run <id>
 //! mason quarantine list | add <suite> <test> --owner O --days N [--reason R] | remove <suite> <test>
 //! mason test parse <parser> <file> [--min N]
-//! mason task answer <id> <option number | text> [--card HASH] [--as NAME]
+//! mason task answer <id> <option number | 1,3 for a multi-select card | text> [--card HASH] [--as NAME]
 //! mason task land-now <id> | force <id> [--reason R]
 //! mason task open <id> [--anyway]
 //! mason pause [--project P] [--mode all|claims|landing] --for 2h | mason resume [--project P] [--mode M] | mason pause list
@@ -75,8 +75,8 @@ mason: command-line client for the MASON pipeline
   mason task explore-anyway <id>      explore after all, even if it skipped exploring
   mason task override <id> <key> <value>
   mason task priority <id> urgent|high|normal|low   owner only; re-ranks its waiting requests
-  mason task answer <id> <option number | text> [--card HASH] [--as NAME]
-                                      answer the open question; the card's hash guards against a stale one
+  mason task answer <id> <option number | 1,3 | text> [--card HASH] [--as NAME]
+                                      answer the open question (a multi-select card takes 1,3); the card's hash guards against a stale one
   mason task refresh <id>             ask the tracker now (what opening a task does)
   mason task land-now <id> | force <id> [--reason R]   marks the task and records an override and a debt
   mason task open <id> [--anyway]     open an interactive agent in the task's worktree, resuming its session
@@ -209,6 +209,29 @@ fn die(msg: &str) -> ! {
 
 fn or_die<T>(r: Result<T, CallError>) -> T {
     r.unwrap_or_else(|e| die(&e.to_string()))
+}
+
+/// The words after `mason task answer <id>` as one answer: `1,3` stays as
+/// typed, and `1 3` arrives as two words and is joined with a space.
+fn answer_text(words: &[String]) -> String {
+    words.join(" ")
+}
+
+#[cfg(test)]
+mod answer_tests {
+    use super::answer_text;
+
+    #[test]
+    fn a_list_of_options_is_one_answer() {
+        assert_eq!(answer_text(&["1,3".to_string()]), "1,3");
+        assert_eq!(answer_text(&["1".to_string(), "3".to_string()]), "1 3");
+        let mut a = super::Args {
+            rest: vec!["12".into(), "1,3".into(), "--as".into(), "me".into()],
+        };
+        assert_eq!(super::task_id(&mut a), 12);
+        assert_eq!(a.opt("--as").as_deref(), Some("me"));
+        assert_eq!(answer_text(&a.rest), "1,3");
+    }
 }
 
 fn task_id(a: &mut Args) -> u64 {
@@ -2943,7 +2966,7 @@ fn main() {
                     let r = or_die(d.call(
                         "POST",
                         &format!("/tasks/{id}/answer"),
-                        Some(&json!({"answer": answer.join(" "), "hash": hash, "as": who})),
+                        Some(&json!({"answer": answer_text(&answer), "hash": hash, "as": who})),
                     ));
                     println!(
                         "Answered task #{id}: {}",
