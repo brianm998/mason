@@ -626,6 +626,16 @@ pub(crate) fn acquire_needs(
     c: &Ctx,
     needs: mason_scheduler::Needs,
 ) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
+    acquire_needs_while(c, needs, &|| true)
+}
+
+/// Like `acquire_needs`, but the wait also ends (`Cancelled`) as soon as `wanted`
+/// says no: a suite whose skip arrives while it waits for its slot.
+pub(crate) fn acquire_needs_while(
+    c: &Ctx,
+    needs: mason_scheduler::Needs,
+    wanted: &dyn Fn() -> bool,
+) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
     let d = &c.d;
     // Device pools are sized by what the provider lists, never by a default.
     if needs.amounts.keys().any(|n| n.starts_with("device:")) {
@@ -646,6 +656,7 @@ pub(crate) fn acquire_needs(
         d2.world()
             .map(|w| w.open_run(task) == Some(run))
             .unwrap_or(true)
+            && wanted()
     };
     let mut waited = false;
     let asked = needs.clone();
@@ -1158,7 +1169,7 @@ impl TestChecks {
         use std::collections::BTreeMap;
         let over = || CheckRun::Done {
             passed: false,
-            summary: "The step is over; the check did not run.".into(),
+            summary: STEP_OVER.into(),
         };
         let def = self.slots.def.clone();
         let paths = crate::suites::worktree_paths(&self.wt, &dev.base_ref);
@@ -1419,7 +1430,45 @@ impl CheckHandler for TestChecks {
 }
 
 impl TestChecks {
+    /// The open debt that skips this task's test step, if the owner skipped it: the
+    /// agent's own checks then run nothing either (s264).
+    fn skipped_by_owner(&self) -> Option<u64> {
+        let step = self.slots.test_step.as_deref()?;
+        crate::suites::skip_for(&self.slots.d, TaskId(self.task), "", step)
+    }
+
     fn check(&self, name: &str, scope: &CheckScope) -> CheckRun {
+        // On 2026-11-13 the owner skipped testing for every active task to drain the queue,
+        // but their agents kept queueing `run_check` for compile slots. A skip before the
+        // check, or one that ends its wait for a slot (`CheckSlots::acquire`), is answered
+        // with what happened, not run.
+        if name == "tests" {
+            if let Some(debt) = self.skipped_by_owner() {
+                return not_run_skipped(debt);
+            }
+        }
+        let r = self.check_unskipped(name, scope);
+        // Only a check whose wait was ended is replaced; one that ran keeps its result.
+        let ended = matches!(&r, CheckRun::Done { passed: false, summary } if summary == STEP_OVER);
+        match (name == "tests" && ended, self.skipped_by_owner()) {
+            (true, Some(debt)) => {
+                // A skip that ended the wait left the agent without its slot.
+                if self
+                    .slots
+                    .lease
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .is_none()
+                {
+                    self.slots.take_agent_slot_back();
+                }
+                not_run_skipped(debt)
+            }
+            _ => r,
+        }
+    }
+
+    fn check_unskipped(&self, name: &str, scope: &CheckScope) -> CheckRun {
         if name == "tests" {
             if let Some(dev) = &self.suites {
                 return self.run_suites(dev, scope);
@@ -1437,7 +1486,7 @@ impl TestChecks {
         };
         let over = || CheckRun::Done {
             passed: false,
-            summary: "The step is over; the check did not run.".into(),
+            summary: STEP_OVER.into(),
         };
         // The exact content tree and command already went green (here, in the test step or in
         // landing's re-test): the answer is that result, and nothing runs.
@@ -1609,6 +1658,7 @@ impl CheckSlots {
         &self,
         needs: mason_scheduler::Needs,
         as_step: &str,
+        end_on_skip: bool,
     ) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
         let d = &self.d;
         let t = d
@@ -1618,10 +1668,15 @@ impl CheckSlots {
             .ok_or(crate::sched::Cancelled)?;
         let rank = d.rank_for(&t, &self.def, as_step);
         let (d2, task, run) = (d.clone(), self.task, self.run);
+        let test_step = self.test_step.clone().filter(|_| end_on_skip);
+        // A skip of the task's test step ends a check's wait too: the check then says so.
         let alive = move || {
             d2.world()
                 .map(|w| w.open_run(task) == Some(run))
                 .unwrap_or(true)
+                && test_step
+                    .as_deref()
+                    .is_none_or(|s| crate::suites::skip_for(&d2, task, "", s).is_none())
         };
         // The wait shows on the task, as a step's does: a check that queued
         // used to leave the task reading "running" for hours.
@@ -1671,18 +1726,48 @@ impl CheckSlots {
                 .broker
                 .declare(name, self.def.resources.get(name).copied().unwrap_or(1));
         }
-        let as_step = self.test_step.as_deref().unwrap_or(&self.step);
-        self.acquire(crate::sched::needs_of(uses, None), as_step)
-            .map(Some)
+        // Ranked as the agent's own step, not the test step: a task that has reached
+        // its test step is further along and goes first (s262). The check used to
+        // rank as the test step so that a long wait could not run the agent out of
+        // time; the wait is now added back to the agent's deadline (`extra`), and on
+        // 2026-11-13 develop checks tied with test steps and took every compile
+        // slot ahead of four tasks already in test.
+        self.acquire(
+            crate::sched::needs_of(uses, None),
+            check_rank_step(&self.step, self.test_step.as_deref()),
+            true,
+        )
+        .map(Some)
     }
 
     /// Queue for the agent's slot again, before the agent is told the result.
     fn take_agent_slot_back(&self) {
         self.d.admit();
         let needs = crate::sched::needs_of(&self.agent_uses, Some(&self.account));
-        if let Ok(l) = self.acquire(needs, &self.step) {
+        if let Ok(l) = self.acquire(needs, &self.step, false) {
             *self.lease.lock().unwrap_or_else(|e| e.into_inner()) = Some(l);
         }
+    }
+}
+
+/// The step a `run_check` is ranked as: the agent's own, never the test step it
+/// runs the commands of (see `CheckSlots::swap_for`).
+fn check_rank_step<'a>(agent_step: &'a str, _test_step: Option<&'a str>) -> &'a str {
+    agent_step
+}
+
+/// What a check says when its wait for a slot was ended.
+const STEP_OVER: &str = "The step is over; the check did not run.";
+
+/// What a `run_check` says when the owner skipped the task's testing (s264).
+fn not_run_skipped(debt: u64) -> CheckRun {
+    CheckRun::Done {
+        passed: true,
+        summary: format!(
+            "Not run: the owner skipped testing for this task (debt #{debt}); the tests run \
+             once on the base after it lands. Nothing was built or tested, so this says \
+             nothing about your change: finish it and submit."
+        ),
     }
 }
 
@@ -3428,6 +3513,30 @@ pub fn cleanup(d: &Arc<Daemon>, task: TaskId, delete_branch: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_develop_check_ranks_behind_a_task_already_in_test() {
+        // On 2026-11-13 develop checks ranked as the test step tied with real test
+        // steps, so priority and filing age decided, and four tasks in test waited
+        // behind every older or higher-priority develop agent.
+        let def = mason_definition::parse::parse(
+            "schema = 1\nstart = \"develop\"\n\n[step.develop]\ntype = \"agent\"\n\
+             category = \"developing\"\nnext = \"test\"\n\n[step.test]\ntype = \"test\"\n\
+             category = \"testing\"\nnext = \"land\"\n\n[step.land]\ntype = \"landing\"\n\
+             category = \"landing\"\n",
+        )
+        .unwrap();
+        let steps = |s: &str| mason_definition::graph::steps_remaining(&def, s);
+        let check = check_rank_step("develop", Some("test"));
+        assert_eq!(check, "develop");
+        // A high-priority develop check filed long ago, against a normal test step filed later.
+        let develop_check = mason_scheduler::Rank::new(false, steps(check), 1, 100, 1, false);
+        let test_step = mason_scheduler::Rank::new(false, steps("test"), 2, 900, 2, false);
+        assert!(
+            test_step < develop_check,
+            "the task in test goes first: {test_step:?} vs {develop_check:?}"
+        );
+    }
 
     // ---- Task 180: the weakening scan at submit_change -----------------------------------
 

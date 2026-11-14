@@ -49,6 +49,13 @@ on_red = "develop"
 #   env = "simulator"
 #
 # Physical phones: add `[environment.phone]` with `type = "ios-device"` or `"android-device"`.
+#
+# A device environment leases any ready device of its type unless you narrow it:
+#   os = "17"                         # OS version prefix
+#   name = "myapp-*"                  # glob on the device name (`*` any run, `?` one character)
+#   exclude = ["pipeline-slot-*"]     # globs on name or id it must never lease
+# Use `name` or `exclude` when another pipeline on this Mac uses its own simulators, so this
+# project never boots or shuts down a device in use there.
 [environment.simulator]
 type = "ios-simulator"
 

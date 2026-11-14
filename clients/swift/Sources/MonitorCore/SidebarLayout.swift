@@ -4,11 +4,22 @@ import Foundation
 
 /// One thing in the sidebar's scrolling part. Home and search are not here: they are
 /// pinned above the scrolling part and never scroll.
-public enum SidebarEntry {
+public enum SidebarEntry: Identifiable {
     case header(SidebarSection)
     case row(TaskRow)
     case rule
     case pageLink(title: String, page: Page)
+
+    /// The entry's identity: by what it is (a section's state, a task's id), never by position,
+    /// so a task that moves to another section keeps its row.
+    public var id: String {
+        switch self {
+        case .header(let s): return "h:\(s.state)"
+        case .row(let r): return "r:\(r.id)"
+        case .rule: return "rule"
+        case .pageLink(let t, _): return "p:\(t)"
+        }
+    }
 }
 
 extension MonitorModel {
