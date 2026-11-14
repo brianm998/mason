@@ -230,6 +230,7 @@ pub fn read_journal(dir: &Path, offset: u64, max: usize) -> io::Result<Vec<u8>> 
 
 // ---- Why a host was lost, and killing only what is verifiably ours ----
 
+#[cfg(unix)]
 fn ps_field(pid: u32, field: &str) -> Option<String> {
     let out = std::process::Command::new("ps")
         .args(["-o", &format!("{field}="), "-p", &pid.to_string()])
@@ -246,17 +247,42 @@ fn ps_field(pid: u32, field: &str) -> Option<String> {
 /// The start time of a process as `ps` prints it (whole seconds). With the pid it
 /// identifies one process, even after the OS reuses the pid.
 pub fn proc_start(pid: u32) -> Option<String> {
-    ps_field(pid, "lstart")
+    #[cfg(unix)]
+    {
+        ps_field(pid, "lstart")
+    }
+    #[cfg(windows)]
+    {
+        mason_platform::process::start_time(pid)
+    }
 }
 
 /// The command line of a process, as `ps` prints it.
+/// On Windows this is the executable's path: there is no cheap way to read
+/// another process's command line, so `reap_dir` does not check the directory
+/// there (the start time already pins the process).
 pub fn proc_command(pid: u32) -> Option<String> {
-    ps_field(pid, "command")
+    #[cfg(unix)]
+    {
+        ps_field(pid, "command")
+    }
+    #[cfg(windows)]
+    {
+        mason_platform::process::image_path(pid)
+    }
 }
 
 /// The process group of a process.
 pub fn proc_pgid(pid: u32) -> Option<u32> {
-    ps_field(pid, "pgid")?.parse().ok()
+    #[cfg(unix)]
+    {
+        ps_field(pid, "pgid")?.parse().ok()
+    }
+    #[cfg(windows)]
+    {
+        // `spawn_group` makes every child the leader of its own job, named by its pid.
+        mason_platform::process::is_alive(pid).then_some(pid)
+    }
 }
 
 /// `HH:MM:SS` local time of a time in ms since the epoch.
@@ -423,7 +449,8 @@ pub fn reap_dir(dir: &Path) -> Reaped {
         && host != own
         && host != own_pg
         && start_ok("host_start", host)
-        && proc_command(host).is_some_and(|c| c.contains("step-host") && c.contains(&dir_s))
+        && proc_command(host)
+            .is_some_and(|c| c.contains("step-host") && (cfg!(windows) || c.contains(&dir_s)))
     {
         out.host_killed = signal_process(host, Signal::Kill).is_ok();
     }
