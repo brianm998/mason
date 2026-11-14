@@ -107,9 +107,12 @@ mason: command-line client for the MASON pipeline
              [--tracker local|github] [--agent claude|codex] [--agent-bin P] [--sessions N]
              [--suites accept|skip] [--base B] [--landing direct|direct-ci|pr|batched]
              [--alerts sound,speech,email,push|none] [--ci-workflow yes|no] [--id ID]
-             [--no-prove] [--force]
+             [--land no|merge|push|pr] [--no-prove] [--force]
                                       guided setup: writes .mason/ and the Filing notes on branch
-                                      mason/setup (no push), and the project file; every question has a flag
+                                      mason/setup and the project file; lands it only on --land
+                                      (default no; never pushes otherwise), then registers the
+                                      project with a running masond, files the proof task and
+                                      opens the monitor; every question has a flag
   mason init --prove-only             file the one harmless first task, once masond knows the project
   mason adopt [--id ID] [--base B] [--test CMD]   register a project that already has .mason/ (never writes it)
   mason remove [--yes] [--id ID]      delete the project file, .mason/ and the Filing notes (lists first without --yes)

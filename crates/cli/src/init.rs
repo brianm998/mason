@@ -3,10 +3,13 @@
 //! `mason init`: the guided setup of Part 21. It detects what it can, asks the eight
 //! questions in order (each also a flag), writes `.mason/` and the "Filing work" notes on a
 //! new branch, writes the project overlay, and offers to prove the setup with one harmless
-//! task. It never pushes, never merges, and never touches the working tree: the branch is
-//! made in a temporary worktree and the owner merges it.
+//! task. It writes the branch in a temporary worktree and never touches the working tree. It
+//! lands the branch (merge, push, pull request) only when the owner answers `--land`; `--yes`
+//! never does. Then it registers the project with a running masond, files the proof task and
+//! points at the monitor.
 
 pub mod detect;
+pub mod land;
 pub mod questions;
 pub mod suites;
 
@@ -126,21 +129,112 @@ pub fn run(mut args: Vec<String>, data_dir: &Path, config_dir: &Path) -> i32 {
             for n in &a.notes {
                 println!("note: {n}");
             }
-            println!("{next}");
+            // The "Next:" paragraph is for an owner who is landing by hand.
+            if a.land == questions::Land::No {
+                println!("{next}");
+            } else {
+                println!("{}", next.split("\nNext:").next().unwrap_or(&next));
+            }
         }
         Err(e) => return fail(&e),
     }
-    if !a.prove {
-        return 0;
+    let landed = land::apply(&d, &a);
+    let mut code = i32::from(landed.refused);
+    if a.land == questions::Land::No {
+        println!("\nNothing was merged or pushed. Land it with the commands above, then `mason init --prove-only`.");
     }
-    println!("\nProve it:");
-    match prove(&d, &a.id, &a.base, data_dir) {
-        Ok(()) => 0,
-        Err(e) => {
+    let daemon = client::find(data_dir).ok();
+    match &daemon {
+        Some(_) => match register(data_dir, &a.id) {
+            Ok(()) => println!("\nRegistered {} with the running masond (no restart needed).", a.id),
+            Err(e) => {
+                println!("\n  {e}");
+                code = 1;
+            }
+        },
+        None => println!("\nmasond is not running. Start it (`masond`, or `mason service install`); it reads {} when it starts.", overlay_path(config_dir, &a.id).display()),
+    }
+    if a.prove {
+        println!("\nProve it:");
+        if d.remote_name.is_some() && landed.merged && !landed.published {
+            println!("  {} is merged here but not pushed, and masond lands from the remote: push it, then run `mason init --prove-only`.", a.base);
+        } else if let Err(e) = prove(&d, &a.id, &a.base, data_dir) {
             println!("  {e}");
-            0
         }
     }
+    if daemon.is_some() {
+        open_monitor(data_dir);
+    }
+    print!("{}", summary(&a, config_dir));
+    code
+}
+
+/// Tell the running masond about a project whose file `init` just wrote.
+pub fn register(data_dir: &Path, id: &str) -> Result<(), String> {
+    let daemon = client::find(data_dir).map_err(|e| e.to_string())?;
+    let r = daemon
+        .call("POST", &format!("/projects/{id}/register"), None)
+        .map_err(|e| e.to_string())?;
+    match r["result"].as_str() {
+        Some("registered") | Some("known") => Ok(()),
+        _ => Err(format!(
+            "masond refused project {id:?}: {}",
+            r["errors"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|v| v.as_str())
+                .collect::<Vec<_>>()
+                .join("; ")
+        )),
+    }
+}
+
+/// The monitor app on a Mac you are sitting at; otherwise the pairing code for one.
+fn open_monitor(data_dir: &Path) {
+    let app = Path::new("/Applications/Mason Monitor.app");
+    let watching = std::io::stdin().is_terminal() && std::env::var_os("MASON_NO_OPEN").is_none();
+    if cfg!(target_os = "macos") && watching && app.exists() {
+        let opened = std::process::Command::new("/usr/bin/open")
+            .args(["-a", "Mason Monitor"])
+            .status()
+            .is_ok_and(|s| s.success());
+        if opened {
+            println!("\nOpened the monitor.");
+            return;
+        }
+    }
+    println!("\nMonitor: open the Mason Monitor app (or any paired device) and pair with:");
+    match client::find(data_dir)
+        .map_err(|e| e.to_string())
+        .and_then(|d| {
+            d.call("POST", "/pair/codes", Some(&json!({"role": "owner"})))
+                .map_err(|e| e.to_string())
+        }) {
+        Ok(r) => println!(
+            "  pairing code (owner, one use, {} s): {}  {}",
+            r["expires_in_s"],
+            r["code"].as_str().unwrap_or("?"),
+            r["url"].as_str().unwrap_or("")
+        ),
+        Err(_) => println!("  mason pair"),
+    }
+}
+
+/// Where each choice lives, so it can be changed later.
+pub fn summary(a: &Answers, config_dir: &Path) -> String {
+    format!(
+        "\nWhere to change what you chose:\n  definition (the steps)  .mason/mason.toml, or `mason definition` and the monitor's editor\n  landing ({})  .mason/landing.toml\n  alerts ({})  {}\n  providers and sessions ({})  {} and {}\n  this project  {} (`mason project reload` applies an edit)\n",
+        a.landing.name(),
+        a.alerts.as_ref().map_or("built-in routing".to_string(), |c| {
+            c.iter().map(|x| x.name()).collect::<Vec<_>>().join(", ")
+        }),
+        config_dir.join("notify.toml").display(),
+        a.agent.name(),
+        config_dir.join("providers.toml").display(),
+        config_dir.join("resources.toml").display(),
+        overlay_path(config_dir, &a.id).display(),
+    )
 }
 
 fn fail(msg: &str) -> i32 {
@@ -426,16 +520,10 @@ pub fn setup(
     for s in said {
         out.push_str(&format!("  {s}\n"));
     }
-    let push = if d.remote_name.is_some() {
-        format!(
-            "\n  git push {} {}",
-            d.remote_name.as_deref().unwrap_or("origin"),
-            a.base
-        )
-    } else {
-        String::new()
-    };
-    out.push_str(&format!("\nNext: review and merge the branch, so tasks use it:\n  git diff {}...{SETUP_BRANCH}\n  git checkout {} && git merge --ff-only {SETUP_BRANCH}{push}\nthen start `masond`, and run `mason init --prove-only` to land a harmless first task.", a.base, a.base));
+    out.push_str(&format!(
+        "\nNext: review and merge the branch, so tasks use it:\n{}\nthen start `masond` if it is not running, and run `mason init --prove-only` to land a harmless first task.",
+        land::commands(d, a)
+    ));
     Ok(out)
 }
 
@@ -456,23 +544,12 @@ pub fn prove(d: &Detected, id: &str, base: &str, data_dir: &Path) -> Result<(), 
     {
         return Err(format!("{base} has no .mason/ yet, so a task would run the built-in pipeline rather than your workflow. Merge {SETUP_BRANCH} into {base} (and push it, if there is a remote), then run `mason init --prove-only`"));
     }
-    let daemon = client::find(data_dir).map_err(|_| "masond is not running. Start it (`masond`), then run `mason init --prove-only` to file the first task".to_string())?;
-    let status = daemon
-        .call("GET", "/status", None)
-        .map_err(|e| e.to_string())?;
-    let known = status["projects"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .any(|p| p.as_str() == Some(id));
-    if !known {
-        return Err(format!("the running masond does not know project {id:?} yet: it reads projects when it starts. Restart it, then run `mason init --prove-only`"));
-    }
+    client::find(data_dir).map_err(|_| "masond is not running. Start it (`masond`), then run `mason init --prove-only` to file the first task".to_string())?;
+    register(data_dir, id)?;
     let r = daemon
         .call("POST", "/tasks", Some(&json!({"project": id, "title": PROOF_TITLE, "body": PROOF_BODY, "priority": "normal", "proposed": false, "explored": true, "after": []})))
         .map_err(|e| e.to_string())?;
     println!("  Filed task #{} in {id}: {PROOF_TITLE:?}.", r["task"]);
     println!("  Watch it with `mason task show {} --watch`, or in the monitor. When it lands, MASON-WORKS.md is on {base}.", r["task"]);
-    println!("  (Opening the monitor for you is not done: it is a separate app.)");
     Ok(())
 }
