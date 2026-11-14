@@ -255,6 +255,10 @@ struct CompilationSection: View {
             ForEach(Array(c.running.enumerated()), id: \.offset) { i, r in
                 HStack(spacing: theme.spacing) {
                     who(r.label, task: r.task)
+                    let detail = Format.compileHolder(project: r.project, title: r.title)
+                    if r.task > 0 && !detail.isEmpty {
+                        Text(detail).help(r.title.isEmpty ? r.project : "\(r.project) - \(r.title)")
+                    }
                     if r.interactive { Text("interactive").foregroundStyle(theme.muted) }
                     Text("for \(age(r.sinceMs))").foregroundStyle(theme.muted)
                     if r.idleMs >= 60_000 {
