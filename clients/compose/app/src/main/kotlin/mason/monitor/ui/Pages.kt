@@ -40,7 +40,7 @@ fun MainPane(model: MonitorModel, modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun Section(title: String, state: String? = null, content: @Composable ColumnScope.() -> Unit) {
+internal fun Section(title: String, state: String? = null, content: @Composable ColumnScope.() -> Unit) {
     val theme = LocalTheme.current
     Column(verticalArrangement = Arrangement.spacedBy(theme.spacing)) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(theme.spacingSmall)) {
@@ -52,7 +52,7 @@ private fun Section(title: String, state: String? = null, content: @Composable C
 }
 
 @Composable
-private fun Link(text: String, onClick: () -> Unit) {
+internal fun Link(text: String, onClick: () -> Unit) {
     val theme = LocalTheme.current
     Text(text, style = theme.body(color = theme.accent), modifier = Modifier.clickable(onClick = onClick))
 }
@@ -136,6 +136,7 @@ fun HomePage(model: MonitorModel) {
                 queue.forEach { r -> Link("${r.key} ${r.title}") { model.go(Page.Task(r.id)) } }
             }
         }
+        CpuSection(model)
         h?.compilation?.let { CompilationSection(model, it) }
         h?.stages?.forEach { st ->
             Section(st.title, st.state) {
@@ -258,6 +259,7 @@ private fun TaskDetail(model: MonitorModel, d: TaskDetailView) {
         Text("${r.project}, ${r.state.replace('_', ' ')}, ${Format.duration(r.in_state_ms)} in this state", style = theme.body(color = theme.muted))
         if (r.why_waiting.isNotEmpty()) LinkedText(model, r.why_waiting, theme.body(), Modifier.testTag("detail:why-waiting"))
         if (r.issue != 0L || d.ci_links.isNotEmpty()) CiLinksLine(d.ci_links, r.issue, r.issue_url)
+        Text(cpuTaskLine(d.cpu_permille), style = theme.body(color = theme.muted), modifier = Modifier.testTag("cpu"))
         Row(horizontalArrangement = Arrangement.spacedBy(theme.spacingLarge)) {
             CopyButton(r.key, r.key)
             if (d.branch.isNotEmpty()) CopyButton("branch", d.branch)
@@ -374,7 +376,19 @@ fun LandingPage(model: MonitorModel) {
             }
             Section("Batches") {
                 if (l.batches.isEmpty()) Text("No batch has formed yet.", style = theme.body(color = theme.muted))
-                l.batches.forEach { Text(batchText(it), style = theme.body()) }
+                l.batches.forEach { b ->
+                    Text(batchText(b), style = theme.body())
+                    b.ci?.let { ci ->
+                        val uri = androidx.compose.ui.platform.LocalUriHandler.current
+                        Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing)) {
+                            Text(
+                                batchCiText(ci),
+                                style = theme.body(color = if (batchCiFailed(ci)) theme.attention else theme.muted),
+                            )
+                            batchCiUrl(ci)?.let { u -> Link("CI run") { uri.openUri(u) } }
+                        }
+                    }
+                }
                 if (l.queue_idle_ms > 0) {
                     Text(
                         "Queue idle: ${l.queue_idle_ms / 1000} s with tasks waiting and nothing landing.",
@@ -404,6 +418,26 @@ fun batchText(b: mason.v1.BatchLine): String {
     if (b.note.isNotEmpty()) t += ". ${b.note}"
     return t
 }
+
+/** The CI line under a batch: per workflow "pr-gate: 11 jobs · 1 queued · 2 running · 7 passed". */
+fun batchCiText(ci: mason.v1.BatchCi): String {
+    val parts = ci.workflows.map { w ->
+        val total = w.queued + w.running + w.passed + w.failed
+        if (w.running + w.passed + w.failed == 0) {
+            "${w.workflow}: queued for a runner"
+        } else {
+            "${w.workflow}: $total jobs · ${w.queued} queued · ${w.running} running · ${w.passed} passed" +
+                if (w.failed > 0) " · ${w.failed} failed" else ""
+        }
+    }
+    return "CI: " + (if (parts.isEmpty()) "queued for a runner" else parts.joinToString("; "))
+}
+
+fun batchCiFailed(ci: mason.v1.BatchCi): Boolean = ci.workflows.any { it.failed > 0 }
+
+/** The run's address, only if it is http or https. */
+fun batchCiUrl(ci: mason.v1.BatchCi): String? =
+    ci.url.takeIf { it.startsWith("https://") || it.startsWith("http://") }
 
 @Composable
 fun UsagePage(model: MonitorModel) {

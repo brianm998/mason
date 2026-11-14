@@ -201,6 +201,7 @@ pub(crate) fn with_project_test(suite: &Suite, test: Option<&str>) -> Result<Sui
     let any = uses(&s.command)
         || s.build.as_deref().is_some_and(uses)
         || s.rerun.as_deref().is_some_and(uses)
+        || s.skip.as_deref().is_some_and(uses)
         || s.dev_command.as_deref().is_some_and(uses)
         || s.dev_build.as_deref().is_some_and(uses);
     if !any {
@@ -215,6 +216,7 @@ pub(crate) fn with_project_test(suite: &Suite, test: Option<&str>) -> Result<Sui
     s.command = s.command.replace(KEY, t);
     s.build = s.build.map(|b| b.replace(KEY, t));
     s.rerun = s.rerun.map(|b| b.replace(KEY, t));
+    s.skip = s.skip.map(|b| b.replace(KEY, t));
     // A development command lists packages itself (`-p a -p b`); `--workspace` would override
     // that list, so the project's test command goes in without it (its prefix, such as the
     // owner's CARGO_TARGET_DIR, stays).
@@ -597,6 +599,9 @@ struct Who {
     /// The environment every command gets: for a task's step, its `MASON_*` facts with
     /// `MASON_HELD` naming what is leased for the command now running.
     env: Vec<(String, String)>,
+    /// A red that also fails at `Tree::base` is excused. Off when `base` is the very tree
+    /// under test (the post-land tier), where every red would "also fail at the base".
+    trust_base: bool,
 }
 
 impl Who {
@@ -642,7 +647,7 @@ impl Who {
 }
 
 /// An open debt that skips this suite or its whole step.
-fn skip_for(d: &Daemon, task: TaskId, suite: &str, step: &str) -> Option<u64> {
+pub(crate) fn skip_for(d: &Daemon, task: TaskId, suite: &str, step: &str) -> Option<u64> {
     d.store
         .debts(Some(task.0), true)
         .ok()?
@@ -657,8 +662,12 @@ enum SuiteRun {
         results: Option<Results>,
         notes: Vec<String>,
     },
-    /// Red, and the task's.
-    Product { feedback: String },
+    /// Red, and the task's. `failing`: the tests that failed and are the task's (empty when
+    /// the suite did not run, or no names were read).
+    Product {
+        feedback: String,
+        failing: Vec<String>,
+    },
     /// The task went away while this ran.
     Gone,
 }
@@ -680,15 +689,13 @@ struct Dev {
 /// `Err` when the suite needs a device and none is free: the gate is skipped,
 /// not failed.
 fn lease_dev(who: &Who, def: &Definition, suite: &Suite) -> Result<Option<Dev>, ()> {
-    let Some((kind, os)) = def
-        .testing
-        .environment(&suite.env)
-        .and_then(|e| crate::targets::kind_of_env(e).map(|k| (k, e.os.clone())))
-    else {
+    let Some((kind, filter)) = def.testing.environment(&suite.env).and_then(|e| {
+        crate::targets::kind_of_env(e).map(|k| (k, crate::targets::filter_of_env(e)))
+    }) else {
         return Ok(None);
     };
     let label = format!("#{} {}", who.task.map_or(0, |t| t.0 .0), suite.name);
-    match who.d.targets.lease(kind, os.as_deref(), &label) {
+    match who.d.targets.lease(kind, &filter, &label) {
         Some(l) => Ok(Some(Dev {
             id: l.id.clone(),
             _lease: l,
@@ -895,14 +902,13 @@ fn run_suite(
         };
     }
     let signatures: &[Signature] = &def.testing.signatures;
-    let quarantined: Vec<String> = d
-        .store
-        .quarantined(now_ms())
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|q| q.0 == suite.name)
-        .map(|q| q.1)
-        .collect();
+    let known = crate::knownred::known_for(&d.store, &suite.name);
+    let quarantined: Vec<String> = known.iter().map(|k| k.test.clone()).collect();
+    // With a `skip` template the known-red tests are not run at all.
+    let skipped_cmd: Option<String> = suite
+        .skip
+        .as_deref()
+        .and_then(|t| crate::knownred::skip_command(t, &quarantined));
     let limit = suite.timeout.unwrap_or(Duration::from_secs(1800));
     let mut attempt = 0u32;
     let mut waiting = false;
@@ -940,14 +946,12 @@ fn run_suite(
             )));
         };
         // A device environment leases one particular device for this attempt.
-        let dev: Option<Dev> = match def
-            .testing
-            .environment(&suite.env)
-            .and_then(|e| crate::targets::kind_of_env(e).map(|k| (k, e.os.clone())))
-        {
-            Some((kind, os)) => {
+        let dev: Option<Dev> = match def.testing.environment(&suite.env).and_then(|e| {
+            crate::targets::kind_of_env(e).map(|k| (k, crate::targets::filter_of_env(e)))
+        }) {
+            Some((kind, filter)) => {
                 let label = format!("#{} {}", who.task.map_or(0, |t| t.0 .0), suite.name);
-                match d.targets.lease(kind, os.as_deref(), &label) {
+                match d.targets.lease(kind, &filter, &label) {
                     Some(l) => Some(Dev {
                         id: l.id.clone(),
                         _lease: l,
@@ -989,7 +993,10 @@ fn run_suite(
             &id,
             &crate::jobs::pty_wrap(
                 suite.pty,
-                &lifecycle::with_device(&suite.command, dev_id(dev.as_ref())),
+                &lifecycle::with_device(
+                    skipped_cmd.as_deref().unwrap_or(&suite.command),
+                    dev_id(dev.as_ref()),
+                ),
             ),
             cwd,
             limit,
@@ -1005,6 +1012,7 @@ fn run_suite(
                 env_down(who, def, suite, cwd, dev.as_ref());
                 return SuiteRun::Product {
                     feedback: format!("`{}` could not run: {e}", suite.name),
+                    failing: vec![],
                 };
             }
         };
@@ -1035,6 +1043,17 @@ fn run_suite(
             )
         };
         let result = match &j.verdict {
+            Verdict::Green if skipped_cmd.is_some() => SuiteRun::Done {
+                // Not the whole suite's green: no proof is recorded for the tree or the base.
+                outcome: SuiteOutcome::Proven,
+                results: Some(j.results.clone()),
+                notes: vec![format!(
+                    "{}: green, {} tests ran; skipped, known red: {}",
+                    suite.name,
+                    j.results.executed(),
+                    quarantined.join(", ")
+                )],
+            },
             Verdict::Green => {
                 let _ = d.store.put_suite_green(
                     &who.project,
@@ -1083,6 +1102,7 @@ fn run_suite(
                         "`{}` proved nothing: {executed} test(s) ran and at least {needed} must. A run that executes no tests is not a pass; make the suite run the tests (or fix what stopped it).\n",
                         suite.name
                     )),
+                    failing: vec![],
                 }
             }
             Verdict::Red { failures, why } => {
@@ -1100,7 +1120,9 @@ fn run_suite(
                         .collect(),
                     None => failures.clone(),
                 };
-                let base = if persistent.is_empty() {
+                // A known-red failure needs no base run: the ledger already excuses it.
+                let unexcused = persistent.iter().any(|t| !quarantined.contains(t));
+                let base = if persistent.is_empty() || !unexcused || !who.trust_base {
                     None
                 } else {
                     baseline(who, c_repo, def, suite, &tree.base, repo_lock, dev.as_ref())
@@ -1185,6 +1207,7 @@ fn run_suite(
                         extra.push('\n');
                         SuiteRun::Product {
                             feedback: out(&extra),
+                            failing: tests.clone(),
                         }
                     }
                 }
@@ -1259,6 +1282,39 @@ enum Built {
     Ok,
     Red(String),
     Gone,
+}
+
+/// What waiting for a suite's slot came to.
+enum Leased {
+    Got,
+    /// The suite (or its step) was skipped by force before or while it waited: it holds
+    /// nothing, and its own run reports the skip at once.
+    Skipped,
+    Gone,
+}
+
+/// Wait for `needs` for one suite and hold them as the step's lease, unless the suite
+/// is skipped first: a skip ends the wait, so a skipped suite never takes a slot. On
+/// 2026-11-13 #288's test step was skipped while it waited for a compile slot, and it
+/// waited on until a slot came, built, and only then noticed.
+fn lease_suite(c: &Ctx, needs: Needs, check: &Check) -> Leased {
+    match check() {
+        Stop::Skipped => return Leased::Skipped,
+        Stop::Gone => return Leased::Gone,
+        Stop::No => {}
+    }
+    if !needs.exclusive && needs.amounts.is_empty() {
+        return Leased::Got;
+    }
+    let wanted = || check() == Stop::No;
+    match crate::jobs::acquire_needs_while(c, needs, &wanted) {
+        Ok(l) => {
+            *c.lease.lock().unwrap_or_else(|e| e.into_inner()) = Some(l);
+            Leased::Got
+        }
+        Err(_) if check() == Stop::Skipped => Leased::Skipped,
+        Err(_) => Leased::Gone,
+    }
 }
 
 /// Wait for `needs` and hold them as the step's lease. `false`: the task went away.
@@ -1358,6 +1414,7 @@ pub fn run(c: &Ctx) {
         id_prefix: format!("t{}r{}", c.task.0, c.run.0),
         sink: None,
         env: vec![],
+        trust_base: true,
     };
     let head = |rev: &str| git::run(&c.wt, &["rev-parse", rev]).map(|s| s.trim().to_string());
     let (Ok(tree_hash), Ok(head_sha)) = (head("HEAD^{tree}"), head("HEAD")) else {
@@ -1457,26 +1514,31 @@ pub fn run(c: &Ctx) {
             {
                 let needs = needs_of(&crate::jobs::build_uses(), None);
                 who.env = held_env(c, &needs);
-                if !lease(c, needs) {
-                    return;
-                }
-                let ran = run_build(&who, &suite, b, built.len(), &c.wt);
-                c.release_lease();
-                match ran {
-                    Built::Gone => return,
-                    Built::Red(feedback) => {
-                        outcomes.push((name.clone(), SuiteOutcome::Failed));
-                        let (v, note) = closing(&outcomes);
-                        let _ = d.store.set_closing(c.task.0, v.name(), &note, now_ms());
-                        let reason = format!("the build of suite `{name}` is red");
-                        return c.conclude(Outcome::Red, reason, Some(feedback));
+                match lease_suite(c, needs, &who.check(&name)) {
+                    Leased::Gone => return,
+                    // Nothing is built; the suite's run below reports the skip.
+                    Leased::Skipped => {}
+                    Leased::Got => {
+                        let ran = run_build(&who, &suite, b, built.len(), &c.wt);
+                        c.release_lease();
+                        match ran {
+                            Built::Gone => return,
+                            Built::Red(feedback) => {
+                                outcomes.push((name.clone(), SuiteOutcome::Failed));
+                                let (v, note) = closing(&outcomes);
+                                let _ = d.store.set_closing(c.task.0, v.name(), &note, now_ms());
+                                let reason = format!("the build of suite `{name}` is red");
+                                return c.conclude(Outcome::Red, reason, Some(feedback));
+                            }
+                            Built::Ok => built.push(b.clone()),
+                        }
                     }
-                    Built::Ok => built.push(b.clone()),
                 }
             }
             let needs = run_needs(&c.def, &c.step, &suite);
             who.env = held_env(c, &needs);
-            if !lease(c, needs) {
+            // A skipped suite holds nothing: `run_suite` sees the skip before it runs.
+            if let Leased::Gone = lease_suite(c, needs, &who.check(&name)) {
                 return;
             }
         }
@@ -1512,11 +1574,50 @@ pub fn run(c: &Ctx) {
                 }
                 outcomes.push((name, outcome));
             }
-            SuiteRun::Product { feedback } => {
+            SuiteRun::Product { feedback, failing } => {
+                let mut reason = format!("suite `{name}` is red");
+                let mut feedback = feedback;
+                // What failed is kept for the last round, counted across tasks, and on the
+                // last round run at the merge base (s282).
+                if !failing.is_empty() {
+                    crate::exhausted::record_round(c, &failing);
+                    crate::exhausted::record_persistent(c, &name, &failing);
+                    if crate::exhausted::is_last_round(c) {
+                        let cmd_for = |t: &[String]| match &suite.rerun {
+                            Some(tpl) => tpl.replace(
+                                "{tests}",
+                                &t.iter().map(|x| quote(x)).collect::<Vec<_>>().join(" "),
+                            ),
+                            None => suite.command.clone(),
+                        };
+                        let ex = crate::exhausted::on_last_round(
+                            c,
+                            &name,
+                            suite.build.as_deref(),
+                            &cmd_for,
+                            &failing,
+                        );
+                        let left = failing.iter().any(|t| !ex.excused.contains(t));
+                        if !ex.excused.is_empty() && !left && ex.why.is_none() {
+                            // Red at the base too: in the ledger now, and the step goes on.
+                            let mut n = vec![format!(
+                                "{name}: excused on the last round, red at the merge base too"
+                            )];
+                            n.extend(ex.lines);
+                            details.extend(n.clone());
+                            notes.extend(n);
+                            outcomes.push((name, SuiteOutcome::Excused));
+                            continue;
+                        }
+                        if let Some(w) = ex.why {
+                            reason = format!("{reason}; {w}");
+                            feedback = format!("{feedback}\nChecked at the base: {w}\n");
+                        }
+                    }
+                }
                 outcomes.push((name.clone(), SuiteOutcome::Failed));
                 let (v, note) = closing(&outcomes);
                 let _ = d.store.set_closing(c.task.0, v.name(), &note, now_ms());
-                let reason = format!("suite `{name}` is red");
                 return c.conclude(Outcome::Red, reason, Some(feedback));
             }
         }
@@ -1846,6 +1947,7 @@ pub fn pay(d: &Arc<Daemon>, debt: u64) -> Result<String, String> {
         id_prefix: format!("debt{debt}"),
         sink: None,
         env: vec![],
+        trust_base: true,
     };
     let tree_hash = git::run(&wt, &["rev-parse", "HEAD^{tree}"])
         .map(|s| s.trim().to_string())
@@ -1868,7 +1970,7 @@ pub fn pay(d: &Arc<Daemon>, debt: u64) -> Result<String, String> {
                 all_green = false;
                 verdicts.push(notes.join("; "));
             }
-            SuiteRun::Product { feedback } => {
+            SuiteRun::Product { feedback, .. } => {
                 all_green = false;
                 verdicts.push(feedback.lines().next().unwrap_or("red").to_string());
             }
@@ -1919,7 +2021,9 @@ pub struct OverRun {
 /// to be landed) once, as the landing engine does over a batch's union diff.
 /// They belong to no task: nothing can skip them. Evidence is by tree, so a
 /// tree that was green is not run twice, whoever asks. `base` is where the
-/// batch started (baselines are taken there).
+/// batch started (baselines are taken there). A suite whose only reds are excused (also red
+/// at `base`, or known red) is green for the batch, with a note naming them; `base_excuses`
+/// false (post-land, where `base` is the tree itself) lets only known-red tests excuse.
 #[allow(clippy::too_many_arguments)]
 pub fn run_over(
     d: &Arc<Daemon>,
@@ -1931,6 +2035,7 @@ pub fn run_over(
     log_dir: &Path,
     id_prefix: &str,
     sink: Option<StepRunId>,
+    base_excuses: bool,
 ) -> OverRun {
     let lock = d.repo_lock(d.project_id_by_name(&p.id).unwrap_or(ProjectId(0)));
     let tree_hash = git::run(wt, &["rev-parse", "HEAD^{tree}"])
@@ -1949,6 +2054,7 @@ pub fn run_over(
         id_prefix: id_prefix.to_string(),
         sink,
         env: vec![],
+        trust_base: base_excuses,
     };
     let _ = std::fs::create_dir_all(log_dir);
     let mut out = OverRun {
@@ -1971,6 +2077,7 @@ pub fn run_over(
                     SuiteOutcome::Proven
                     | SuiteOutcome::Reused
                     | SuiteOutcome::Flaky
+                    | SuiteOutcome::Excused
                     | SuiteOutcome::NotSelected,
                 notes,
                 ..
@@ -1980,7 +2087,7 @@ pub fn run_over(
                 out.failed.insert(name.clone());
                 out.notes.push(notes.join("; "));
             }
-            SuiteRun::Product { feedback } => {
+            SuiteRun::Product { feedback, .. } => {
                 out.green = false;
                 out.failed.insert(name.clone());
                 out.notes.push(format!("{name}: {}", tail(&feedback, 12)));

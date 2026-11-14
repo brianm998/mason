@@ -41,6 +41,25 @@ class Theme(val dark: Boolean, val scale: Double) {
     val ok get() = c(T.colorLightOk, T.colorDarkOk)
     val border get() = c(T.colorLightBorder, T.colorDarkBorder)
 
+    /** A CPU share's colour by `CpuRow.color`: "1".."10" for tasks, or "masond", "monitor", "sccache", "other". */
+    fun cpu(key: String): Color = when (key) {
+        "1" -> c(T.colorLightCpu1, T.colorDarkCpu1)
+        "2" -> c(T.colorLightCpu2, T.colorDarkCpu2)
+        "3" -> c(T.colorLightCpu3, T.colorDarkCpu3)
+        "4" -> c(T.colorLightCpu4, T.colorDarkCpu4)
+        "5" -> c(T.colorLightCpu5, T.colorDarkCpu5)
+        "6" -> c(T.colorLightCpu6, T.colorDarkCpu6)
+        "7" -> c(T.colorLightCpu7, T.colorDarkCpu7)
+        "8" -> c(T.colorLightCpu8, T.colorDarkCpu8)
+        "9" -> c(T.colorLightCpu9, T.colorDarkCpu9)
+        "10" -> c(T.colorLightCpu10, T.colorDarkCpu10)
+        "masond" -> c(T.colorLightCpuMasond, T.colorDarkCpuMasond)
+        "monitor" -> c(T.colorLightCpuMonitor, T.colorDarkCpuMonitor)
+        "sccache" -> c(T.colorLightCpuSccache, T.colorDarkCpuSccache)
+        else -> c(T.colorLightCpuOther, T.colorDarkCpuOther)
+    }
+    val cpuIdle get() = c(T.colorLightCpuIdle, T.colorDarkCpuIdle)
+
     private fun s(n: Int): Dp = (n * scale).dp
     val tileMinWidth get() = s(T.sizeTileMinWidth)
     val tileHeight get() = s(T.sizeTileHeight)

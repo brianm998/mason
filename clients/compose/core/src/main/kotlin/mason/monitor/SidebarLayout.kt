@@ -13,6 +13,15 @@ sealed class SidebarEntry {
     data class Row(val row: TaskRow) : SidebarEntry()
     data object Rule : SidebarEntry()
     data class PageLink(val title: String, val page: Page) : SidebarEntry()
+
+    /** What the entry is, not where it is: a lazy list keyed by it keeps a row when a task above moves. */
+    val key: String
+        get() = when (this) {
+            is Header -> "h:${section.state}"
+            is Row -> "r:${row.id}"
+            Rule -> "rule"
+            is PageLink -> "p:$title"
+        }
 }
 
 /** The pinned area's test tags in reading order (the search toggles follow `search`). */
