@@ -2608,10 +2608,11 @@ fn settle_all(
                 } else {
                     text
                 };
-                // A host lost together with other tasks' hosts (a mass kill), or taken
-                // by the daemon's own restart, is not this run's fault: it is recorded
-                // but does not use up a restart. A hard cap still ends a run that
-                // keeps losing hosts.
+                // A host the daemon's own restart took is not the task's failure: it
+                // is recorded but not counted toward the restart budget.
+                // A host lost together with other tasks' hosts (a mass kill) is
+                // treated the same way. A hard cap still ends a run that keeps
+                // losing hosts.
                 let counted = lost
                     .iter()
                     .filter(|id| {
