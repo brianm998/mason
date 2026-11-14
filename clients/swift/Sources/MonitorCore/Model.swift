@@ -114,6 +114,14 @@ public final class MonitorModel: ObservableObject {
     public var daemonUpdateText: String { updateInfo?.daemonText ?? "" }
     public var canUpdateDaemon: Bool { canAct && updateInfo?.daemonCanUpdate == true }
 
+    /// On the `release` channel (a packaged install) there is no source to build from: the
+    /// button opens the download page instead.
+    public var downloadURL: String { updateInfo?.downloadURL ?? "" }
+    public var onOpenURL: ((URL) -> Void)?
+    public func openDownloadPage() {
+        if let u = URL(string: downloadURL), ["https", "http"].contains(u.scheme) { onOpenURL?(u) }
+    }
+
     /// The button's label, as the daemon words it ("Update masond", or "Update now" while a
     /// finished update waits for landing batches).
     public var daemonUpdateButton: String {

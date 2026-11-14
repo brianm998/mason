@@ -111,6 +111,15 @@ pub enum EventKind {
         /// The step to re-enter (empty: the first one of that category).
         step: String,
     },
+    /// The task is pinned to the project's current definition instead of the one
+    /// it was admitted under (decision 0206). Changes nothing else.
+    Repinned {
+        task: TaskId,
+        from: String,
+        to: String,
+        /// The steps and suites that differ, for the record.
+        changed: String,
+    },
     Canceled {
         task: TaskId,
         delete_branch: bool,

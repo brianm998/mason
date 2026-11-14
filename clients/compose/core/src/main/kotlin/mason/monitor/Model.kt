@@ -104,6 +104,15 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     val daemonUpdateText: String get() = updateInfo?.daemon_text ?: ""
     val canUpdateDaemon: Boolean get() = canAct && updateInfo?.daemon_can_update == true
 
+    /** On the `release` channel (a packaged install) there is no source to build from: the button opens the download page. */
+    val downloadUrl: String get() = updateInfo?.download_url ?: ""
+    var onOpenUrl: ((String) -> Unit)? = null
+    fun openDownloadPage() {
+        val u = downloadUrl
+        if (u.startsWith("https://") || u.startsWith("http://")) onOpenUrl?.invoke(u)
+    }
+
+
     /** The button's label, as the daemon words it ("Update masond", or "Update now" while a finished update waits for landing batches). */
     val daemonUpdateButton: String get() = updateInfo?.daemon_button?.takeIf { it.isNotEmpty() } ?: "Update masond"
 

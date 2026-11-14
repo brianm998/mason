@@ -15,7 +15,7 @@ use mason_resources::{Held, Locks, Take, TakeError};
 use mason_scheduler::{
     explain, since, CpuGate, DiskGate, Kind, Ledger, Needs, Rank, StallGate, WaitCause, COMPILE,
 };
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -51,6 +51,7 @@ pub const EXCLUSIVE: &str = "exclusive";
 /// stall_ms = 2000        # no further compile while the build disk is this slow (0: off)
 /// [order]    # who goes first when work waits for a resource
 /// priority_first = false # true: tracker priority before steps remaining
+/// max_wait_s = 1800      # a request waiting this long goes ahead of other pipeline work (0: never)
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResourceCfg {
@@ -77,7 +78,13 @@ pub struct ResourceCfg {
     /// Order waiting work by tracker priority before steps remaining. It applies to
     /// every project at once, since one queue serves them all.
     pub priority_first: bool,
+    /// Seconds after which a waiting request goes ahead of all other pipeline
+    /// work that is not a landing, oldest first (0: requests do not age).
+    pub max_wait_s: u64,
 }
+
+/// The default `order.max_wait_s`: half an hour.
+pub const DEFAULT_MAX_WAIT_S: u64 = 1800;
 
 /// The default `compile_cpu_max`: half the machine.
 pub const DEFAULT_COMPILE_CPU_MAX: u32 = 50;
@@ -110,6 +117,7 @@ impl Default for ResourceCfg {
             disk_floor_gb: crate::disk::DEFAULT_FLOOR_GB,
             disk_stall_ms: DEFAULT_DISK_STALL_MS,
             priority_first: false,
+            max_wait_s: DEFAULT_MAX_WAIT_S,
         }
     }
 }
@@ -126,6 +134,12 @@ pub fn parse_resource_cfg(text: &str) -> Result<ResourceCfg, String> {
                 c.priority_first = v.as_bool().ok_or_else(|| {
                     "resources.toml: order.priority_first must be true or false".to_string()
                 })?;
+                continue;
+            }
+            if key == "order" && name == "max_wait_s" {
+                c.max_wait_s = v.as_integer().filter(|n| *n >= 0).ok_or_else(|| {
+                    "resources.toml: order.max_wait_s must be a whole number".to_string()
+                })? as u64;
                 continue;
             }
             let n = v
@@ -211,6 +225,8 @@ struct State {
     ledger: Ledger,
     meta: HashMap<u64, Meta>,
     by_task: HashMap<TaskId, u64>,
+    /// The task a `mason run` lease was opened for, when it names one.
+    lease_tasks: HashMap<u64, TaskId>,
     /// Resources whose limit was set by the owner (config or live) and so are
     /// not changed by a definition that happens to declare the same name.
     fixed: HashSet<String>,
@@ -243,6 +259,8 @@ struct State {
     /// When the last scheduling pass ran. A waiter skips its own pass while this is
     /// younger than `PASS_EVERY` (see `acquire`).
     last_pass: Option<Instant>,
+    /// A pass is reading lock files right now; waiters leave it to finish.
+    pass_running: bool,
     /// Scheduling passes run since start, for tests and diagnosis.
     passes: u64,
 }
@@ -251,12 +269,29 @@ struct State {
 /// and submits still pass at once; this only paces the waiters' periodic re-check.
 const PASS_EVERY: Duration = Duration::from_millis(100);
 
-/// Is a waiter's periodic pass due? Not while one ran less than `PASS_EVERY` ago:
-/// that pass already granted whatever could be granted, and on 2026-11-13 forty
-/// waiters each passing ten times a second held the broker lock almost all the time,
+/// Is a waiter's periodic pass due? Not while one ran less than `every` ago: that pass
+/// already granted whatever could be granted, and on 2026-11-13 forty waiters each
+/// passing ten times a second held the broker lock almost all the time,
 /// so monitor views waited 20 s for it.
+fn pass_due_in(last: Option<Instant>, every: Duration) -> bool {
+    last.is_none_or(|t| t.elapsed() >= every)
+}
+
+#[cfg(test)]
 fn pass_due(last: Option<Instant>) -> bool {
-    last.is_none_or(|t| t.elapsed() >= PASS_EVERY)
+    pass_due_in(last, PASS_EVERY)
+}
+
+/// What the kernel said about lock files, read with the broker lock released.
+#[derive(Default)]
+struct Probes {
+    /// Leases whose marker was probed (holders, not outside holders).
+    alive: HashMap<u64, bool>,
+    slots: HashMap<String, Vec<Option<mason_resources::HolderInfo>>>,
+    /// Ids of every ledger holder when the probe began.
+    holders: BTreeSet<u64>,
+    /// External leases that were holding when the probe began.
+    holding: HashSet<u64>,
 }
 
 struct KernelWait {
@@ -299,6 +334,13 @@ pub struct Broker {
     /// Wait explanation per waiting task, republished by every `pass`. Readers
     /// clone the `Arc` and never take `st`.
     waits_snap: std::sync::RwLock<Arc<BTreeMap<TaskId, String>>>,
+    /// Scheduling passes run so far (a test counter).
+    pass_count: std::sync::atomic::AtomicUsize,
+    /// A waiter's pass interval in ms.
+    tick_ms: std::sync::atomic::AtomicU64,
+    /// Test seam: called after the broker lock is released, before lock files are probed.
+    #[cfg(test)]
+    probe_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 /// One holder of `compile`, for the idle check.
@@ -339,6 +381,8 @@ impl Drop for Lease {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Standing {
     pub steps_remaining: u32,
+    /// Steps on the shortest start-to-landed path of the task's definition.
+    pub span: u32,
     pub priority: u8,
 }
 
@@ -371,6 +415,11 @@ fn lock<'a>(m: &'a Mutex<State>) -> MutexGuard<'a, State> {
     LOCKS_TAKEN.with(|c| c.set(c.get() + 1));
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
+
+/// How long a waiting request that never told us its pid may go without a poll
+/// before it is dropped. Generous: polls come every 150 ms, but they queue
+/// behind the broker's state lock, which a stalled disk can hold for a minute.
+pub const UNPOLLED_WAITER_REAP: Duration = Duration::from_secs(120);
 
 impl Broker {
     pub fn new(
@@ -423,6 +472,9 @@ impl Broker {
                 ledger.pace_compiles(u64::from(cfg.compile_settle_s) * 1000);
             }
         }
+        if cfg.max_wait_s > 0 {
+            ledger.set_max_wait(Some(cfg.max_wait_s.saturating_mul(1000)));
+        }
         let b = Broker {
             st: Mutex::new(State {
                 ledger,
@@ -437,6 +489,7 @@ impl Broker {
                 cpu,
                 cpu_busy: None,
                 priority_first: cfg.priority_first,
+                lease_tasks: HashMap::new(),
                 idle: HashMap::new(),
                 compile_idle_kill_s: cfg.compile_idle_kill_s,
                 notes: vec![],
@@ -451,12 +504,17 @@ impl Broker {
                 wait_class: HashMap::new(),
                 stall: None,
                 last_pass: None,
+                pass_running: false,
                 passes: 0,
             }),
             cv: Condvar::new(),
             locks,
             limits_file,
             waits_snap: Default::default(),
+            pass_count: Default::default(),
+            tick_ms: std::sync::atomic::AtomicU64::new(100),
+            #[cfg(test)]
+            probe_hook: Mutex::new(None),
             kernel_says_after: Mutex::new(KERNEL_WAIT_SAYS_AFTER),
         };
         // Limits changed live survive a restart.
@@ -506,7 +564,7 @@ impl Broker {
         }
         st.ledger.set_capacity(name, units, Kind::Pool);
         st.pools.insert(name.to_string());
-        self.pass(&mut st);
+        st = self.pass(st);
         drop(st);
         self.cv.notify_all();
         true
@@ -536,7 +594,7 @@ impl Broker {
         lines.insert(name.to_string(), units);
         let text: String = lines.iter().map(|(n, u)| format!("{n}\t{u}\n")).collect();
         let _ = std::fs::write(&self.limits_file, text);
-        self.pass(&mut st);
+        st = self.pass(st);
         drop(st);
         self.cv.notify_all();
         Ok(())
@@ -559,7 +617,7 @@ impl Broker {
             every,
         });
         st.disk_read = None;
-        self.pass(&mut st);
+        st = self.pass(st);
         drop(st);
         self.cv.notify_all();
     }
@@ -608,7 +666,7 @@ impl Broker {
     pub fn set_stall(&self, source: Arc<dyn StallSource>, max_ms: u64) {
         let mut st = lock(&self.st);
         st.stall = Some((source, max_ms));
-        self.pass(&mut st);
+        st = self.pass(st);
         drop(st);
         self.cv.notify_all();
     }
@@ -660,11 +718,85 @@ impl Broker {
     /// Reap holders that died, then grant whatever can be granted. Called by
     /// everything that waits, and after everything that releases, so the next
     /// waiter starts at once.
-    fn pass(&self, st: &mut State) {
-        let now = crate::daemon::now_ms();
+    ///
+    /// The lock files are probed with the broker lock released (a stalled disk
+    /// must not block every reader of the broker); the guard comes back
+    /// re-taken, and what changed meanwhile is ignored.
+    fn pass<'a>(&'a self, mut st: MutexGuard<'a, State>) -> MutexGuard<'a, State> {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.pass_count.fetch_add(1, Relaxed);
+        st.passes += 1;
+        // Claimed now, so a waiter that wakes while the files are read does not
+        // start a second pass.
+        st.last_pass = Some(Instant::now());
+        st.pass_running = true;
+        self.refresh_disk(&mut st);
+        let mut probes = Probes::default();
+        let snap = st.ledger.snapshot();
+        probes.holders = snap.holders.iter().map(|h| h.id).collect();
+        for (id, m) in &st.meta {
+            if matches!(m, Meta::External { .. }) && st.ledger.holds(*id) {
+                probes.holding.insert(*id);
+            }
+        }
+        let alive_ids: Vec<u64> = snap
+            .holders
+            .iter()
+            .map(|h| h.id)
+            .filter(|id| !matches!(st.meta.get(id), Some(Meta::Outside { .. })))
+            .collect();
+        let classes: Vec<(String, u32)> = snap
+            .capacity
+            .iter()
+            .filter(|(_, c)| c.kind == Kind::Machine)
+            .map(|(k, c)| (k.clone(), c.units))
+            .collect();
+        drop(st);
+        #[cfg(test)]
+        {
+            let hook = self
+                .probe_hook
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            if let Some(h) = hook {
+                h();
+            }
+        }
+        for id in alive_ids {
+            probes.alive.insert(id, self.locks.alive(id));
+        }
+        for (class, units) in classes {
+            let v = self.locks.slots(&class, units);
+            probes.slots.insert(class, v);
+        }
+        let mut st = lock(&self.st);
+        self.apply_pass(&mut st, Some(&probes));
+        st.pass_running = false;
+        st
+    }
+
+    /// A pass for a release: grant what the freed units allow, at once, with no
+    /// lock-file I/O. The next full pass does the reaping.
+    fn quick_pass(&self, st: &mut State) {
+        self.pass_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        st.passes += 1;
         self.refresh_disk(st);
+        self.apply_pass(st, None);
+    }
+
+    /// The part of a pass that needs the lock and does no lock-file I/O.
+    /// With no `probes` it only grants (and publishes); reaping dead holders and
+    /// counting outside holders wait for the next full pass.
+    fn apply_pass(&self, st: &mut State, probes: Option<&Probes>) {
+        let now = crate::daemon::now_ms();
         let mut changed = false;
-        let ids: Vec<u64> = st.meta.keys().copied().collect();
+        let ids: Vec<u64> = if probes.is_some() {
+            st.meta.keys().copied().collect()
+        } else {
+            vec![]
+        };
         for id in ids {
             let Some(Meta::External {
                 pipeline: _,
@@ -672,13 +804,23 @@ impl Broker {
                 last_poll,
                 granted_at,
                 locked,
+                pid,
                 ..
             }) = st.meta.get_mut(&id)
             else {
                 continue;
             };
+            let mut silent_for = None;
             let dead = if st.ledger.holds(id) {
-                let alive = self.locks.alive(id);
+                // Granted since the probe began: nothing was read for it.
+                let probes = probes.expect("ids is empty without probes");
+                let Some(&alive) = probes
+                    .alive
+                    .get(&id)
+                    .filter(|_| probes.holding.contains(&id))
+                else {
+                    continue;
+                };
                 if alive {
                     *locked = true;
                     false
@@ -688,15 +830,47 @@ impl Broker {
                     *locked || granted_at.is_none_or(|g| g.elapsed() > Duration::from_secs(5))
                 }
             } else {
-                last_poll.elapsed() > Duration::from_secs(10) && opened.elapsed() > Duration::ZERO
+                let _ = opened;
+                if *pid > 0 {
+                    // The requester is known: it is gone only when its process
+                    // is. A late poll (a stalled disk holding the state lock)
+                    // costs it nothing.
+                    !mason_step_host::registry::pid_alive(*pid)
+                } else {
+                    let silent = last_poll.elapsed();
+                    if silent > UNPOLLED_WAITER_REAP {
+                        silent_for = Some(silent);
+                        true
+                    } else {
+                        false
+                    }
+                }
             };
+            if let Some(silent) = silent_for {
+                let label = st
+                    .ledger
+                    .snapshot()
+                    .waiting
+                    .iter()
+                    .find(|r| r.id == id)
+                    .map(|r| r.label.clone())
+                    .unwrap_or_default();
+                tracing::warn!(
+                    lease = id,
+                    label = %label,
+                    silent_s = silent.as_secs(),
+                    "dropping a waiting request that has not polled and has no pid"
+                );
+            }
             if dead {
                 st.ledger.release(id);
                 st.meta.remove(&id);
                 changed = true;
             }
         }
-        changed |= self.count_outside_holders(st, now);
+        if let Some(probes) = probes {
+            changed |= self.count_outside_holders(st, now, probes);
+        }
         let (floor, free) = (st.floor_mb, self.free_memory(st));
         let gate = self.cpu_gate(st);
         let p = st.ledger.schedule_gated(now, free, floor, gate);
@@ -709,8 +883,6 @@ impl Broker {
             self.cv.notify_all();
         }
         self.publish_waits(st, now, free, floor, gate);
-        st.last_pass = Some(Instant::now());
-        st.passes += 1;
     }
 
     /// Store the wait explanation of every waiting task, for readers that must
@@ -749,15 +921,22 @@ impl Broker {
     /// outside holder, and released once the kernel says the slot is free.
     /// Only leases holding their locks are compared with the kernel, so a grant
     /// whose holder has not taken them yet never hides an outside holder.
-    fn count_outside_holders(&self, st: &mut State, now: u64) -> bool {
+    fn count_outside_holders(&self, st: &mut State, now: u64, probes: &Probes) -> bool {
         let snap = st.ledger.snapshot();
+        // A holder came or went while the files were read: the reading and the
+        // ledger no longer describe the same moment. The next pass redoes it.
+        if snap.holders.iter().map(|h| h.id).collect::<BTreeSet<_>>() != probes.holders {
+            return false;
+        }
         let mut changed = false;
         for (class, cap) in snap
             .capacity
             .iter()
             .filter(|(_, c)| c.kind == Kind::Machine)
         {
-            let slots = self.locks.slots(class, cap.units);
+            let Some(slots) = probes.slots.get(class) else {
+                continue;
+            };
             let kernel = slots.iter().filter(|s| s.is_some()).count() as u32;
             let mut outside: Vec<u64> = st
                 .meta
@@ -771,7 +950,9 @@ impl Broker {
             let ours: u32 = snap
                 .holders
                 .iter()
-                .filter(|h| !outside.contains(&h.id) && self.locks.alive(h.id))
+                .filter(|h| {
+                    !outside.contains(&h.id) && probes.alive.get(&h.id).copied().unwrap_or(false)
+                })
                 .map(|h| {
                     if h.needs.exclusive {
                         cap.units
@@ -850,7 +1031,9 @@ impl Broker {
                 .submit(rank, needs.clone(), label, crate::daemon::now_ms());
             st.meta.insert(id, Meta::Task);
             st.by_task.insert(task, id);
-            self.pass(&mut st);
+            // Granted in the same hold as the submit: admission reads the ledger
+            // and must never see a lease that is neither held nor waiting.
+            self.quick_pass(&mut st);
             id
         };
         let mut announced = false;
@@ -861,8 +1044,11 @@ impl Broker {
             // that another waiter ran moments ago already granted what it could,
             // and grants wake every waiter, so this one only checks its own lease.
             let mut st = lock(&self.st);
-            if pass_due(st.last_pass) {
-                self.pass(&mut st);
+            // One pass serves every waiter: run it only if none ran lately.
+            let tick =
+                Duration::from_millis(self.tick_ms.load(std::sync::atomic::Ordering::Relaxed));
+            if !st.pass_running && pass_due_in(st.last_pass, tick) {
+                st = self.pass(st);
             }
             if st.ledger.holds(id) {
                 break;
@@ -1108,12 +1294,13 @@ impl Broker {
         let mut st = lock(&self.st);
         st.ledger.release(id);
         st.meta.remove(&id);
+        st.lease_tasks.remove(&id);
         if let Some(t) = task {
             if st.by_task.get(&t) == Some(&id) {
                 st.by_task.remove(&t);
             }
         }
-        self.pass(&mut st);
+        self.quick_pass(&mut st);
         drop(st);
         self.cv.notify_all();
     }
@@ -1136,6 +1323,20 @@ impl Broker {
                 .iter()
                 .any(|(k, n)| *n > 0 && k.starts_with("llm:"))
         })
+    }
+
+    /// Test seams for the shared pass.
+    #[cfg(test)]
+    fn set_tick_for_test(&self, d: Duration) {
+        self.tick_ms
+            .store(d.as_millis() as u64, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Make the last pass look a tick old and wake every waiter.
+    #[cfg(test)]
+    fn expire_pass_for_test(&self) {
+        lock(&self.st).last_pass = None;
+        self.cv.notify_all();
     }
 
     /// The tasks holding an `llm:` lease right now, under one hold of the lock: the
@@ -1209,7 +1410,8 @@ impl Broker {
                     now,
                     st.rank_seq,
                     false,
-                ),
+                )
+                .with_span(s.span),
             ),
         })
     }
@@ -1265,8 +1467,45 @@ impl Broker {
                 pid: 0,
             },
         );
-        self.pass(&mut st);
+        self.quick_pass(&mut st);
+        drop(st);
         id
+    }
+
+    /// Note which task a `mason run` lease was opened for, so that a change of
+    /// the task's priority reaches it.
+    pub fn lease_set_task(&self, id: u64, task: TaskId) {
+        let mut st = lock(&self.st);
+        if st.meta.contains_key(&id) {
+            st.lease_tasks.insert(id, task);
+        }
+    }
+
+    /// Give a task's waiting requests (its step's and those of its `mason run`
+    /// commands) a new tracker priority, in place: each keeps its arrival time,
+    /// progress and landing status. Returns how many were re-ranked.
+    pub fn set_task_priority(&self, task: TaskId, priority: u8) -> usize {
+        let mut st = lock(&self.st);
+        let mut ids: Vec<u64> = st.by_task.get(&task).copied().into_iter().collect();
+        ids.extend(
+            st.lease_tasks
+                .iter()
+                .filter(|(_, t)| **t == task)
+                .map(|(id, _)| *id),
+        );
+        let mut n = 0;
+        for id in ids {
+            if let Some(rank) = st.ledger.rank_of(id) {
+                st.ledger.rerank(id, rank.with_priority(priority));
+                n += 1;
+            }
+        }
+        if n > 0 {
+            self.pass(&mut st);
+            drop(st);
+            self.cv.notify_all();
+        }
+        n
     }
 
     /// Note which process asked for lease `id`.
@@ -1295,7 +1534,7 @@ impl Broker {
         if let Some(Meta::External { last_poll, .. }) = st.meta.get_mut(&id) {
             *last_poll = Instant::now();
         }
-        self.pass(&mut st);
+        st = self.pass(st);
         if st.ledger.holds(id) {
             let snap = st.ledger.snapshot();
             let h = snap.holders.iter().find(|h| h.id == id).expect("holds");
@@ -1360,7 +1599,7 @@ impl Broker {
         let mut st = lock(&self.st);
         let had = st.ledger.release(id);
         st.meta.remove(&id);
-        self.pass(&mut st);
+        st = self.pass(st);
         drop(st);
         self.cv.notify_all();
         had
@@ -1421,12 +1660,12 @@ impl Broker {
     pub fn compilation(&self) -> mason_protocol::Compilation {
         use mason_protocol::{Compilation, CompileHolder, CompileWaiter};
         let mut st = lock(&self.st);
-        self.pass(&mut st);
+        st = self.pass(st);
         let (floor, free) = (st.floor_mb, self.free_memory(&mut st));
         let now = crate::daemon::now_ms();
         let gate = self.cpu_gate(&mut st);
         let waits = st.ledger.waits_gated(now, free, floor, gate);
-        let snap = st.ledger.snapshot();
+        let snap = st.ledger.snapshot_at(now);
         let task_of: HashMap<u64, u64> = st.by_task.iter().map(|(t, id)| (*id, t.0)).collect();
         let compiles = |n: &Needs| n.exclusive || n.amounts.contains_key(COMPILE);
         let limit = snap.capacity.get(COMPILE).map_or(0, |c| c.units);
@@ -1489,11 +1728,11 @@ impl Broker {
         }
         rules.push_str(if st.priority_first {
             ". A landing starts whatever the CPU reads. Line order: a person's command \
-             first, then a landing, then the most urgent task, then the one fewest steps \
+             first, then a landing, then a task that has waited past order.max_wait_s (oldest first), then the most urgent task, then the one fewest steps \
              from landing, then the oldest."
         } else {
             ". A landing starts whatever the CPU reads. Line order: a person's command \
-             first, then a landing, then the task fewest steps from landing, then \
+             first, then a landing, then a task that has waited past order.max_wait_s (oldest first), then the task fewest steps from landing, then \
              priority, then the oldest."
         });
         Compilation {
@@ -1519,12 +1758,18 @@ impl Broker {
     pub fn snapshot(&self) -> serde_json::Value {
         use serde_json::json;
         let mut st = lock(&self.st);
-        self.pass(&mut st);
+        st = self.pass(st);
         let (floor, free) = (st.floor_mb, self.free_memory(&mut st));
         let now = crate::daemon::now_ms();
         let gate = self.cpu_gate(&mut st);
         let waits = st.ledger.waits_gated(now, free, floor, gate);
-        let snap = st.ledger.snapshot();
+        let snap = st.ledger.snapshot_at(now);
+        let task_of: HashMap<u64, u64> = st
+            .by_task
+            .iter()
+            .map(|(t, id)| (*id, t.0))
+            .chain(st.lease_tasks.iter().map(|(id, t)| (*id, t.0)))
+            .collect();
         let kind = |k: Kind| match k {
             Kind::Llm => "llm",
             Kind::Machine => "machine",
@@ -1586,6 +1831,9 @@ impl Broker {
                     "since_ms": r.since,
                     "interactive": r.rank.interactive(),
                     "steps_remaining": r.rank.steps(),
+                    "task": task_of.get(&r.id),
+                    "priority": (!r.rank.interactive()).then(|| r.rank.priority()),
+                    "aged": r.rank.is_aged() || waits.waits.get(&r.id).is_some_and(|w| w.aged_ms.is_some()),
                     "uses": r.needs.amounts,
                     "exclusive": r.needs.exclusive,
                     "explain": explain,
@@ -1750,7 +1998,7 @@ pub(crate) fn broker_with_waiting(dir: &Path, n: u64) -> Arc<Broker> {
             st.meta.insert(id, Meta::Task);
             st.by_task.insert(TaskId(t), id);
         }
-        b.pass(&mut st);
+        drop(b.pass(st));
     }
     b
 }
@@ -1884,6 +2132,164 @@ mod tests {
         let _ = &mut st;
     }
 
+    /// A capacity-1 broker with one holder and `n` waiters in `acquire`, waiter `i`
+    /// (task i+2) with `i + 1` steps remaining. Returns the broker, the holder's
+    /// lease and a channel that gets each waiter's task as it is granted.
+    fn full_broker_with_waiters(
+        dir: &Path,
+        n: u64,
+    ) -> (
+        Arc<Broker>,
+        Lease,
+        std::sync::mpsc::Receiver<u64>,
+        Vec<std::thread::JoinHandle<()>>,
+    ) {
+        let cfg = ResourceCfg {
+            machine: BTreeMap::from([("compile".to_string(), 1)]),
+            ..Default::default()
+        };
+        let b = Broker::new(
+            dir.join("locks"),
+            dir.join("limits.kv"),
+            &cfg,
+            2,
+            crate::cpu::FakeCpu::new(0),
+            &[],
+        )
+        .unwrap();
+        b.set_tick_for_test(Duration::from_secs(3600));
+        let held = b
+            .acquire(
+                TaskId(1),
+                "#1",
+                Rank::new(false, 1, 2, 1, 1, false),
+                Needs::of(&[("compile", 1)]),
+                &|| true,
+                &mut |_| {},
+            )
+            .unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut hs = vec![];
+        for i in 0..n {
+            let (b2, tx) = (b.clone(), tx.clone());
+            hs.push(std::thread::spawn(move || {
+                let t = i + 2;
+                let l = b2.acquire(
+                    TaskId(t),
+                    "w",
+                    Rank::new(false, i as u32 + 1, 2, t, t, false),
+                    Needs::of(&[("compile", 1)]),
+                    &|| true,
+                    &mut |_| {},
+                );
+                let _l = l.unwrap();
+                let _ = tx.send(t);
+            }));
+        }
+        // Everyone is queued once the ledger shows them.
+        for _ in 0..6000 {
+            if b.waits_snapshot().len() as u64 == n {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(b.waits_snapshot().len() as u64, n);
+        (b, held, rx, hs)
+    }
+
+    #[test]
+    fn one_pass_serves_every_waiter_per_tick() {
+        let dir = tempfile::tempdir().unwrap();
+        let (b, held, rx, hs) = full_broker_with_waiters(dir.path(), 30);
+        let base = b.pass_count.load(std::sync::atomic::Ordering::SeqCst);
+        let ticks = 5;
+        for k in 1..=ticks {
+            b.expire_pass_for_test();
+            // Wait (bounded; only to report failure) until this tick's pass ran.
+            let mut ran = false;
+            for _ in 0..6000 {
+                if b.pass_count.load(std::sync::atomic::Ordering::SeqCst) > base + k - 1 {
+                    ran = true;
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert!(ran, "tick {k} ran no pass");
+        }
+        let n = b.pass_count.load(std::sync::atomic::Ordering::SeqCst) - base;
+        assert!(n <= ticks, "{n} passes for {ticks} ticks with 30 waiters");
+        // The first waiter in rank order is granted on release.
+        drop(held);
+        assert_eq!(rx.recv_timeout(Duration::from_secs(60)).unwrap(), 2);
+        for want in 3..=31 {
+            assert_eq!(rx.recv_timeout(Duration::from_secs(60)).unwrap(), want);
+        }
+        for h in hs {
+            h.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn readers_and_release_do_not_wait_for_a_blocked_lock_file_probe() {
+        let dir = tempfile::tempdir().unwrap();
+        let (b, held, rx, hs) = full_broker_with_waiters(dir.path(), 30);
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let (g, e) = (gate.clone(), entered.clone());
+            *b.probe_hook.lock().unwrap() = Some(Arc::new(move || {
+                e.store(true, std::sync::atomic::Ordering::SeqCst);
+                let (m, cv) = &*g;
+                let mut open = m.lock().unwrap();
+                while !*open {
+                    open = cv.wait(open).unwrap();
+                }
+            }));
+        }
+        b.expire_pass_for_test();
+        for _ in 0..6000 {
+            if entered.load(std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(entered.load(std::sync::atomic::Ordering::SeqCst));
+        // A probe is blocked now. Readers and the release must still complete.
+        let (tx, done) = std::sync::mpsc::channel();
+        let b2 = b.clone();
+        let reader = std::thread::spawn(move || {
+            let _ = b2.explain_task(TaskId(5));
+            let _ = b2.used("compile");
+            let _ = tx.send(());
+        });
+        let ok = done.recv_timeout(Duration::from_secs(60)).is_ok();
+        // Release on this thread with the probe still blocked, in a helper so a
+        // failure to return cannot hang the test forever.
+        let (tx2, rel) = std::sync::mpsc::channel();
+        let releaser = std::thread::spawn(move || {
+            drop(held);
+            let _ = tx2.send(());
+        });
+        let rel_ok = rel.recv_timeout(Duration::from_secs(60)).is_ok();
+        // Let the probes go (the hook stays open for every later pass).
+        {
+            let (m, cv) = &*gate;
+            *m.lock().unwrap() = true;
+            cv.notify_all();
+        }
+        assert!(ok, "explain_task/used blocked behind a lock-file probe");
+        assert!(rel_ok, "release blocked behind a lock-file probe");
+        reader.join().unwrap();
+        releaser.join().unwrap();
+        assert_eq!(rx.recv_timeout(Duration::from_secs(60)).unwrap(), 2);
+        for want in 3..=31 {
+            assert_eq!(rx.recv_timeout(Duration::from_secs(60)).unwrap(), want);
+        }
+        for h in hs {
+            h.join().unwrap();
+        }
+    }
+
     #[test]
     fn resource_config_parses_and_refuses_nonsense() {
         let c = parse_resource_cfg(
@@ -1907,6 +2313,73 @@ mod tests {
         assert!(parse_resource_cfg("[machine]\ncompile = \"x\"\n").is_err());
         assert!(parse_resource_cfg("[wat]\nx = 1\n").is_err());
         assert_eq!(parse_resource_cfg("").unwrap(), ResourceCfg::default());
+    }
+
+    fn waiting_broker(dir: &std::path::Path) -> (Arc<Broker>, u64, u64) {
+        let cfg = ResourceCfg {
+            machine: BTreeMap::from([("compile".to_string(), 1)]),
+            ..Default::default()
+        };
+        let b = Broker::new(
+            dir.join("locks"),
+            dir.join("limits.kv"),
+            &cfg,
+            2,
+            crate::cpu::FakeCpu::new(0),
+            &[],
+        )
+        .unwrap();
+        let one = BTreeMap::from([("compile".to_string(), 1)]);
+        let first = b.lease_open("first", &one);
+        assert!(matches!(b.lease_poll(first), LeaseState::Granted { .. }));
+        let second = b.lease_open("second", &one);
+        assert!(matches!(b.lease_poll(second), LeaseState::Waiting { .. }));
+        (b, first, second)
+    }
+
+    fn age_poll(b: &Broker, id: u64, by: Duration) {
+        if let Some(Meta::External { last_poll, .. }) = lock(&b.st).meta.get_mut(&id) {
+            *last_poll = Instant::now().checked_sub(by).expect("uptime");
+        }
+    }
+
+    #[test]
+    fn a_waiter_with_a_live_pid_survives_a_long_gap_between_polls() {
+        let dir = tempfile::tempdir().unwrap();
+        let (b, _first, second) = waiting_broker(dir.path());
+        b.lease_set_pid(second, std::process::id());
+        age_poll(&b, second, Duration::from_secs(600));
+        assert!(matches!(b.lease_poll(second), LeaseState::Waiting { .. }));
+    }
+
+    #[test]
+    fn a_waiter_whose_pid_has_exited_is_reaped_at_the_next_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let (b, _first, second) = waiting_broker(dir.path());
+        let mut child = std::process::Command::new("/usr/bin/true").spawn().unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        b.lease_set_pid(second, pid);
+        assert!(matches!(b.lease_poll(second), LeaseState::Gone));
+    }
+
+    #[test]
+    fn a_waiter_without_a_pid_is_reaped_only_after_the_long_silence() {
+        let dir = tempfile::tempdir().unwrap();
+        let (b, _first, second) = waiting_broker(dir.path());
+        age_poll(&b, second, Duration::from_secs(60));
+        {
+            let mut st = lock(&b.st);
+            b.pass(&mut st);
+        }
+        assert!(lock(&b.st).meta.contains_key(&second), "60 s is not enough");
+        age_poll(&b, second, UNPOLLED_WAITER_REAP + Duration::from_secs(1));
+        {
+            let mut st = lock(&b.st);
+            b.pass(&mut st);
+        }
+        assert!(!lock(&b.st).meta.contains_key(&second));
+        assert!(matches!(b.lease_poll(second), LeaseState::Gone));
     }
 
     #[test]
@@ -1962,14 +2435,14 @@ mod tests {
         // synchronous with the drop: retry, bounded by attempts, not by time.
         drop(held);
         let mut granted = false;
-        for _ in 0..500 {
+        for _ in 0..2000 {
             if matches!(b.lease_poll(second), LeaseState::Granted { .. }) {
                 granted = true;
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_millis(10));
+            std::thread::sleep(Duration::from_millis(10));
         }
-        assert!(granted, "the slot is free once the outside holder ends");
+        assert!(granted, "{}", b.snapshot());
     }
 
     #[test]

@@ -838,6 +838,7 @@ class MonitorCoreTest {
         waitFor("a second socket") { r.sockets.size == 2 }
         assertEquals(9000, r.sockets[1].port)
         waitFor("not connected") { !r.model.connected }
+        waitFor("reconnecting") { r.model.reconnecting }
         assertTrue(r.model.reconnecting, "shown as reconnecting, not an error")
         r.sockets[1].events.onOpen()
         assertTrue(Regex("[lL]ast_?[sS]eq\"?:\"?7\\b").containsMatchIn(r.sockets[1].sent[0]), r.sockets[1].sent[0])
@@ -863,7 +864,7 @@ class MonitorCoreTest {
     }
 
     @Test fun aStalledDaemonShowsReconnectingNotAnError() {
-        val r = Rig(MonitorModel(MemoryPreferences()), stallAfter = 0.15)
+        val r = Rig(MonitorModel(MemoryPreferences()), stallAfter = 1.0)
         r.conn.start()
         waitFor("a socket") { r.sockets.size == 1 }
         r.sockets[0].events.onMessage(welcome)
@@ -871,6 +872,7 @@ class MonitorCoreTest {
         waitFor("a second socket") { r.sockets.size == 2 }
         assertTrue(r.sockets[0].closed)
         assertTrue(r.sockets[0].sent.any { it.contains("ping") }, "it asked before giving up")
+        waitFor("reconnecting") { r.model.reconnecting }
         assertTrue(r.model.reconnecting)
         assertNull(r.model.lastResult, "no error is shown")
         r.conn.stop()

@@ -992,6 +992,7 @@ impl Daemon {
         let def = self.current_def(t.project);
         Some(crate::sched::Standing {
             steps_remaining: mason_definition::graph::steps_remaining(&def, &t.step),
+            span: mason_definition::graph::route_length(&def),
             priority: t.priority as u8,
         })
     }
@@ -1013,7 +1014,8 @@ impl Daemon {
             t.enqueued_at.0,
             t.id.0,
             jump,
-        );
+        )
+        .with_span(mason_definition::graph::route_length(def));
         let landing = def
             .step(step)
             .is_some_and(|s| s.kind == mason_definition::StepType::Landing);
