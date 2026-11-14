@@ -184,6 +184,13 @@ pub struct Environment {
     pub file: Option<String>,
     /// For a device: the OS version it must start with ("17", "14").
     pub os: Option<String>,
+    /// For a device: a glob its name must match (`*` any run, `?` one
+    /// character), so a project leases only the devices meant for it. The
+    /// `name` key in `[environment.*]`.
+    pub device_name: Option<String>,
+    /// For a device: globs on name or id it must not match, so a project
+    /// keeps off devices another pipeline on the same machine uses.
+    pub exclude: Vec<String>,
     /// Pool resources leased while it is up.
     pub uses: BTreeMap<String, u32>,
     pub health_timeout: Duration,
@@ -199,6 +206,8 @@ impl Environment {
             teardown: None,
             file: None,
             os: None,
+            device_name: None,
+            exclude: vec![],
             uses: BTreeMap::new(),
             health_timeout: Duration::from_secs(60),
         }
