@@ -1115,9 +1115,11 @@ fn run_shell_env(
         Err(e) => return (false, format!("cannot capture output: {e}")),
     };
     let err = file.try_clone();
-    let mut command = Command::new("sh");
+    let mut command = match mason_platform::shell::shell_command(cmd) {
+        Ok(c) => c,
+        Err(e) => return (false, e),
+    };
     command
-        .args(["-c", cmd])
         .current_dir(cwd)
         .envs(env.iter().map(|(k, v)| (k, v)))
         .stdin(Stdio::null())
@@ -1197,8 +1199,8 @@ pub fn tail(text: &str, lines: usize) -> String {
 /// Run `cmd` with `input` on stdin; its stdout if it succeeds within 30 s.
 pub fn run_filter(cmd: &str, input: &str) -> Option<String> {
     use std::io::{Read, Write};
-    let mut child = Command::new("sh")
-        .args(["-c", cmd])
+    let mut child = mason_platform::shell::shell_command(cmd)
+        .ok()?
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -1227,12 +1229,15 @@ pub fn run_filter(cmd: &str, input: &str) -> Option<String> {
 
 pub fn classify(cmd: &str, body: &str) -> bool {
     use std::io::{Read, Write};
-    let Ok(mut child) = Command::new("sh")
-        .args(["-c", cmd])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
+    let Some(mut child) = mason_platform::shell::shell_command(cmd)
+        .ok()
+        .and_then(|mut c| {
+            c.stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .ok()
+        })
     else {
         return false;
     };
@@ -3341,7 +3346,13 @@ fn run_command_on(
             host_bin: c.d.cfg.host_bin.clone(),
             root: hosts.clone(),
             id: id.clone(),
-            cmd: vec!["sh".into(), "-c".into(), pty_wrap(c.step.pty, cmd)],
+            cmd: vec![
+                mason_platform::shell::shell_program()?
+                    .display()
+                    .to_string(),
+                "-c".into(),
+                pty_wrap(c.step.pty, cmd),
+            ],
             cwd: Some(c.wt.clone()),
             env,
             clear_env: false,
@@ -3798,8 +3809,8 @@ mod tests {
             "script -q /dev/null sh -c 'echo '\\''hi'\\'''"
         );
         let run = |cmd: &str| {
-            std::process::Command::new("sh")
-                .args(["-c", &pty_wrap(true, cmd)])
+            mason_platform::shell::shell_command(&pty_wrap(true, cmd))
+                .unwrap()
                 .stdin(std::process::Stdio::null())
                 .output()
                 .unwrap()
@@ -3824,8 +3835,8 @@ mod tests {
             "echo $$ > {p}.tmp; mv {p}.tmp {p}; sleep 300",
             p = pidf.display()
         );
-        let mut child = std::process::Command::new("sh")
-            .args(["-c", &pty_wrap(true, &cmd)])
+        let mut child = mason_platform::shell::shell_command(&pty_wrap(true, &cmd))
+            .unwrap()
             .stdin(std::process::Stdio::null())
             .process_group(0)
             .spawn()

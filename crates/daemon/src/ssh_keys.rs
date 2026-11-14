@@ -383,6 +383,16 @@ pub fn ssh_command(key: &Path) -> String {
     c
 }
 
+/// The helper's file name: a `.cmd` on Windows (it opens a PowerShell dialog), a shell script
+/// elsewhere.
+pub fn askpass_file_name() -> &'static str {
+    if cfg!(windows) {
+        "mason-askpass.cmd"
+    } else {
+        "mason-askpass.sh"
+    }
+}
+
 /// Where the askpass helper is: `MASON_ASKPASS`, else beside the running binary.
 pub fn askpass_script() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("MASON_ASKPASS") {
@@ -390,10 +400,11 @@ pub fn askpass_script() -> Option<PathBuf> {
     }
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
+    let name = askpass_file_name();
     [
-        dir.join("mason-askpass.sh"),
-        dir.join("../packaging/mason-askpass.sh"),
-        dir.join("../../packaging/mason-askpass.sh"),
+        dir.join(name),
+        dir.join("../packaging").join(name),
+        dir.join("../../packaging").join(name),
     ]
     .into_iter()
     .find(|p| p.is_file())

@@ -327,8 +327,9 @@ pub struct CommandCi {
 /// Run `cmd` with `sh -c` in `cwd` with extra environment; its trimmed stdout, or
 /// `Unavailable` when it fails. Shared by the command CI and the generic adapter.
 pub fn run_command(cwd: &Path, cmd: &str, env: &[(&str, &str)]) -> Result<String, ApiError> {
-    let mut c = Command::new("sh");
-    c.args(["-c", cmd]).current_dir(cwd);
+    let mut c = mason_platform::shell::shell_command(cmd)
+        .map_err(|e| ApiError::new(ErrorKind::Unavailable, e))?;
+    c.current_dir(cwd);
     for (k, v) in env {
         c.env(k, v);
     }
