@@ -52,6 +52,46 @@ pub struct Hub {
     records: Mutex<HashMap<ProjectId, PollRecord>>,
     /// Open issues that are not (or not rightly) tasks, with why, as of the last pass.
     pending: Mutex<HashMap<ProjectId, Vec<Waiting>>>,
+    /// Priorities the owner set with `mason task priority` that the tracker has
+    /// not been told yet (project, issue number, priority). Until it is told, a
+    /// listing that still carries the old label does not take the task's
+    /// priority back.
+    owner_priority: Mutex<HashMap<(ProjectId, u64), String>>,
+}
+
+impl Hub {
+    /// Remember a priority to push to the tracker's issue.
+    pub fn set_owner_priority(&self, pid: ProjectId, number: u64, priority: &str) {
+        self.owner_priority
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert((pid, number), priority.to_string());
+    }
+
+    fn owner_priority(&self, pid: ProjectId, number: u64) -> Option<String> {
+        self.owner_priority
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&(pid, number))
+            .cloned()
+    }
+
+    fn owner_priorities(&self, pid: ProjectId) -> Vec<(u64, String)> {
+        self.owner_priority
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|((p, _), _)| *p == pid)
+            .map(|((_, n), v)| (*n, v.clone()))
+            .collect()
+    }
+
+    fn clear_owner_priority(&self, pid: ProjectId, number: u64) {
+        self.owner_priority
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&(pid, number));
+    }
 }
 
 /// The outcome of the last look at a project's tracker.
@@ -627,18 +667,23 @@ pub fn sync_with_rule(
         }
         let relabelled = row.labelled != Some(labelled_now);
         row.labelled = Some(labelled_now);
-        let changed = row.title != it.title || row.body != it.body || row.priority != it.priority;
+        // A priority the owner set here and the tracker has not heard yet is not
+        // undone by a listing that still carries the old label.
+        let pending = d.tracker.owner_priority(pid, it.number);
+        let tracker_priority = pending.as_deref().unwrap_or(&it.priority);
+        let changed =
+            row.title != it.title || row.body != it.body || row.priority != tracker_priority;
         if changed {
             // The tracker owns these; the task takes them if it can still change.
             let _ = d.emit(EventKind::TrackerEdited {
                 task: TaskId(row.task),
                 title: it.title.clone(),
                 body: it.body.clone(),
-                priority: priority(&it.priority),
+                priority: priority(tracker_priority),
             });
             row.title = it.title.clone();
             row.body = it.body.clone();
-            row.priority = it.priority.clone();
+            row.priority = tracker_priority.to_string();
             sum.updated += 1;
         }
         if row.open && !it.open {
@@ -1102,6 +1147,17 @@ pub fn relink(d: &Arc<Daemon>, pid: ProjectId, issue: u64, task: TaskId) -> Resu
 /// State back out: a comment, or a close when the work landed. Best effort,
 /// and what was mirrored is remembered only when it worked.
 pub fn mirror_out(d: &Arc<Daemon>, pid: ProjectId, adapter: &dyn TrackerAdapter) {
+    // A priority the owner set here goes out as the issue's label; once it has,
+    // the tracker's listing agrees and the pending note is dropped.
+    for (number, prio) in d.tracker.owner_priorities(pid) {
+        match adapter.set_priority(number, &prio) {
+            Ok(()) => d.tracker.clear_owner_priority(pid, number),
+            Err(e) => tracing::warn!(
+                issue = number,
+                "setting the issue's priority label failed (will try again): {e}"
+            ),
+        }
+    }
     let Some(p) = d.project(pid) else { return };
     let Ok(w) = d.world() else { return };
     for row in d.store.tracker_items(&p.id).unwrap_or_default() {
