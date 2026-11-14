@@ -120,13 +120,18 @@ impl Targets {
         }
     }
 
-    /// Lease one device of a kind that nobody holds. `None` if all are taken
-    /// or none matches the OS prefix.
-    pub fn lease(&self, kind: DeviceKind, os: Option<&str>, label: &str) -> Option<DeviceLease> {
+    /// Lease one device of a kind that nobody holds and the environment's
+    /// filter admits. `None` if all such devices are taken or none matches.
+    pub fn lease(
+        &self,
+        kind: DeviceKind,
+        filter: &inventory::Filter,
+        label: &str,
+    ) -> Option<DeviceLease> {
         let devices = self.reading().devices.clone();
         let mut skip: HashSet<String> = HashSet::new();
         loop {
-            let id = inventory::pick(&devices, kind, os, &|id| {
+            let id = inventory::pick(&devices, kind, filter, &|id| {
                 skip.contains(id) || self.leases.is_held(id)
             })?
             .id
@@ -198,6 +203,15 @@ pub fn kind_of_env(e: &mason_testing::Environment) -> Option<DeviceKind> {
     }
 }
 
+/// Which devices of its kind an environment may lease (`os`, `name`, `exclude`).
+pub fn filter_of_env(e: &mason_testing::Environment) -> inventory::Filter {
+    inventory::Filter {
+        os: e.os.clone(),
+        name: e.device_name.clone(),
+        exclude: e.exclude.clone(),
+    }
+}
+
 /// What a wait is for. A device pool with no units is the environment; otherwise the broker has
 /// just said which resource or gate holds the request back, and the first thing asked for is the
 /// fallback.
@@ -244,4 +258,99 @@ pub fn spawn(d: &Arc<Daemon>) {
         }
         true
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const DEF: &str = r#"schema = 1
+start = "test"
+
+[step.test]
+type = "test"
+category = "testing"
+suites = ["ui"]
+
+[suite.ui]
+command = "true"
+parser = "tap"
+min_tests = 1
+level = "unit"
+env = "sim"
+
+[environment.sim]
+type = "ios-simulator"
+name = "tdt-*"
+"#;
+
+    /// Targets on the fake provider, holding what the fixture lists.
+    fn targets(dir: &std::path::Path, devices: &str) -> Targets {
+        let fixture = dir.join("devices.json");
+        std::fs::write(&fixture, format!(r#"{{"devices":[{devices}]}}"#)).unwrap();
+        let cfg = TargetsCfg {
+            fake: true,
+            fake_file: Some(fixture),
+            ..TargetsCfg::default()
+        };
+        let t = Targets::new(cfg, dir).unwrap();
+        let listed = t.provider.list().unwrap();
+        t.reading().devices = listed;
+        t
+    }
+
+    fn sim(id: &str, name: &str) -> String {
+        format!(r#"{{"id":"{id}","kind":"ios-simulator","os":"26.1","name":"{name}"}}"#)
+    }
+
+    // The case that matters on a shared Mac: another pipeline's
+    // `pipeline-slot-*` simulators are listed (and sort first), and an
+    // environment with `name = "tdt-*"` leases only its own.
+    #[test]
+    fn a_name_glob_from_the_definition_never_leases_pipeline_slot_1() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = targets(
+            dir.path(),
+            &[
+                sim("0000-SLOT1", "pipeline-slot-1"),
+                sim("0001-SLOT2", "pipeline-slot-2"),
+                sim("9999-TDT1", "tdt-1"),
+            ]
+            .join(","),
+        );
+        let def = mason_definition::parse(DEF).unwrap();
+        let env = def.testing.environment("sim").unwrap();
+        let kind = kind_of_env(env).unwrap();
+        let filter = filter_of_env(env);
+
+        let first = t.lease(kind, &filter, "#1 ui").unwrap();
+        assert_eq!(first.id, "9999-TDT1");
+        // Its own simulator is busy: no lease, rather than a pipeline-slot one.
+        assert!(t.lease(kind, &filter, "#2 ui").is_none());
+        assert!(!t.leases.is_held("0000-SLOT1") && !t.leases.is_held("0001-SLOT2"));
+        drop(first);
+        assert_eq!(t.lease(kind, &filter, "#2 ui").unwrap().id, "9999-TDT1");
+    }
+
+    #[test]
+    fn with_only_another_pipelines_simulators_nothing_is_leased() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = targets(dir.path(), &sim("0000-SLOT1", "pipeline-slot-1"));
+        let def = mason_definition::parse(
+            &DEF.replace("name = \"tdt-*\"", "exclude = [\"pipeline-slot-*\"]"),
+        )
+        .unwrap();
+        let env = def.testing.environment("sim").unwrap();
+        assert!(t
+            .lease(kind_of_env(env).unwrap(), &filter_of_env(env), "#1 ui")
+            .is_none());
+        // Without a filter the same simulator is leased: the filter is what keeps it off.
+        assert!(t
+            .lease(
+                DeviceKind::IosSimulator,
+                &inventory::Filter::default(),
+                "#1 ui"
+            )
+            .is_some());
+    }
 }

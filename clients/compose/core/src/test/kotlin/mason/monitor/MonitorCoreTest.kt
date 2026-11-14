@@ -811,6 +811,7 @@ class MonitorCoreTest {
         waitFor("a second socket") { r.sockets.size == 2 }
         assertEquals(9000, r.sockets[1].port)
         waitFor("not connected") { !r.model.connected }
+        waitFor("reconnecting") { r.model.reconnecting }
         assertTrue(r.model.reconnecting, "shown as reconnecting, not an error")
         r.sockets[1].events.onOpen()
         assertTrue(Regex("[lL]ast_?[sS]eq\"?:\"?7\\b").containsMatchIn(r.sockets[1].sent[0]), r.sockets[1].sent[0])
@@ -836,7 +837,7 @@ class MonitorCoreTest {
     }
 
     @Test fun aStalledDaemonShowsReconnectingNotAnError() {
-        val r = Rig(MonitorModel(MemoryPreferences()), stallAfter = 0.15)
+        val r = Rig(MonitorModel(MemoryPreferences()), stallAfter = 1.0)
         r.conn.start()
         waitFor("a socket") { r.sockets.size == 1 }
         r.sockets[0].events.onMessage(welcome)
@@ -844,6 +845,7 @@ class MonitorCoreTest {
         waitFor("a second socket") { r.sockets.size == 2 }
         assertTrue(r.sockets[0].closed)
         assertTrue(r.sockets[0].sent.any { it.contains("ping") }, "it asked before giving up")
+        waitFor("reconnecting") { r.model.reconnecting }
         assertTrue(r.model.reconnecting)
         assertNull(r.model.lastResult, "no error is shown")
         r.conn.stop()
@@ -1034,6 +1036,12 @@ class MonitorCoreTest {
         assertEquals(800.0 - 360 - 8, MonitorModel.fit(500.0, 800.0, 1.0))
         assertEquals(220.0, MonitorModel.fit(500.0, 400.0, 1.0))
         assertEquals(330.0, MonitorModel.fit(300.0, 400.0, 2.0))
+    }
+
+    @Test fun sidebarEntryKeysAreUniqueAndNotPositional() {
+        val keys = model().sidebarEntries().map { it.key }
+        assertEquals(keys.size, keys.toSet().size)
+        assertTrue(keys.any { it.startsWith("r:") })
     }
 
     @Test fun homeAndSearchAreNotInTheScrollingEntries() {

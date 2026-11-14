@@ -111,6 +111,11 @@ fn windows_tokens_restart_and_cli() {
         "{:?}",
         v.top_bar
     );
+    assert!(
+        v.top_bar.len() == 2 && v.top_bar[1].starts_with("claude Weekly"),
+        "5-hour first, then weekly: {:?}",
+        v.top_bar
+    );
     assert_eq!(a.doing, "nothing");
     // Not an api account: no spend.
     assert!(a.spend.is_none());

@@ -217,6 +217,28 @@ fn compiles_start_one_at_a_time_on_an_idle_machine() {
 }
 
 #[test]
+fn the_pause_between_compile_starts_applies_only_while_a_compile_is_running() {
+    let dir = scratch("settle-idle");
+    let cfg = mason_daemon::sched::parse_resource_cfg("[cpu]\ncompile_settle_s = 600\n").unwrap();
+    let b = broker(&dir, &cfg, &FakeCpu::replacing_compile_count(0));
+    let first = b.lease_open("cc1", &compile());
+    assert!(matches!(b.lease_poll(first), LeaseState::Granted { .. }));
+    // It finished at once: nothing compiles, so the next starts without waiting 600 s.
+    assert!(b.lease_close(first));
+    let second = b.lease_open("cc2", &compile());
+    assert!(matches!(b.lease_poll(second), LeaseState::Granted { .. }));
+    // With one held, a third waits, and says why.
+    let third = b.lease_open("cc3", &compile());
+    match b.lease_poll(third) {
+        LeaseState::Waiting { explain } => assert!(
+            explain.starts_with("compile waiting: letting the last compile show in CPU use"),
+            "{explain}"
+        ),
+        other => panic!("should wait: {other:?}"),
+    }
+}
+
+#[test]
 fn an_owners_compile_count_in_the_config_is_kept_and_not_paced() {
     let dir = scratch("owned");
     let cfg = mason_daemon::sched::parse_resource_cfg("[machine]\ncompile = 3\n").unwrap();
@@ -243,6 +265,7 @@ fn priority_first_orders_urgent_tasks_ahead_of_tasks_nearer_landing() {
     let as_task = |steps, priority| {
         Some(Standing {
             steps_remaining: steps,
+            span: 1,
             priority,
         })
     };
@@ -271,6 +294,7 @@ fn by_default_progress_orders_waiters_and_notes_show_newest_first() {
     let as_task = |steps, priority| {
         Some(Standing {
             steps_remaining: steps,
+            span: 1,
             priority,
         })
     };

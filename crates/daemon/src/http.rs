@@ -112,6 +112,11 @@ fn task_json(d: &Daemon, w: &World, t: &Task, detail: bool) -> Value {
             v["worktree"] = json!(p.worktree(&d.cfg, t.id.0).display().to_string());
         }
         v["definition"] = json!(t.def);
+        v["cpu_permille"] = json!(d
+            .cpu_reading()
+            .by_task
+            .get(&t.id.0)
+            .map_or(-1, |p| *p as i32));
         v["progress"] = json!({"now_ms": crate::daemon::now_ms(), "runs": progress_runs(d, t.id)});
         v["numbers"] = json!(d
             .number_lines(t)
@@ -977,6 +982,74 @@ async fn task_override(
     Ok(Json(json!({"ok": true})))
 }
 
+/// `mason task priority <id> urgent|high|normal|low` (owner only): the task's
+/// priority, and with it the place of its waiting resource requests, which keep
+/// their arrival time. For a task imported from a tracker the tracker's own
+/// `priority:*` label is set too (on its next look), so the next sync does not
+/// take the priority back.
+async fn task_priority(
+    Shared(d): Shared<Arc<Daemon>>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<u64>,
+    Json(b): Json<Value>,
+) -> Res {
+    let who = who_of(&headers);
+    let name = b["priority"].as_str().unwrap_or_default().to_string();
+    let (prio, level) = match name.as_str() {
+        "urgent" => (Priority::Urgent, 0u8),
+        "high" => (Priority::High, 1),
+        "normal" => (Priority::Normal, 2),
+        "low" => (Priority::Low, 3),
+        other => {
+            return Err(fail(
+                StatusCode::BAD_REQUEST,
+                format!("priority must be urgent, high, normal or low, not {other:?}"),
+            ))
+        }
+    };
+    let d2 = d.clone();
+    let reranked = d
+        .pool
+        .run(move || {
+            owner_only(&d2, &who, "change a task's priority")?;
+            let w = d2.world().map_err(store_err)?;
+            let t = w
+                .tasks
+                .get(&TaskId(id))
+                .ok_or_else(|| fail(StatusCode::NOT_FOUND, format!("no task #{id}")))?;
+            if t.state.is_terminal() {
+                return Err(fail(
+                    StatusCode::BAD_REQUEST,
+                    format!("task #{id} is over; its priority cannot change"),
+                ));
+            }
+            d2.emit(EventKind::TrackerEdited {
+                task: TaskId(id),
+                title: t.title.clone(),
+                body: t.body.clone(),
+                priority: prio,
+            })
+            .map_err(store_err)?;
+            if let Some(p) = d2.project(t.project) {
+                let row = d2
+                    .store
+                    .tracker_items(&p.id)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .find(|r| r.task == id);
+                if let Some(mut row) = row {
+                    row.priority = name.clone();
+                    d2.store.put_tracker_item(&row).map_err(store_err)?;
+                    d2.tracker.set_owner_priority(t.project, row.number, &name);
+                }
+            }
+            Ok::<_, (StatusCode, Json<Value>)>(d2.broker.set_task_priority(TaskId(id), level))
+        })
+        .await
+        .map_err(pool_err)??;
+    Ok(Json(json!({"ok": true, "reranked": reranked})))
+}
+
 fn project_of(d: &Daemon, name: &str) -> Result<ProjectId, (StatusCode, Json<Value>)> {
     d.project_id_by_name(name)
         .ok_or_else(|| fail(StatusCode::NOT_FOUND, format!("no project {name:?}")))
@@ -1361,6 +1434,7 @@ fn override_kind(path: &str) -> Option<(&'static str, Option<u64>)> {
                 "reject" => "reject",
                 "explore-anyway" => "explore_anyway",
                 "overrides" => "task_override",
+                "priority" => "task_priority",
                 "skip" => "skip_test",
                 "land-now" => "land_now",
                 "force" => "force",
@@ -2477,6 +2551,42 @@ async fn triage_review(
     ))
 }
 
+/// Where the machine's CPU goes, by task (proto3 JSON, as the monitors get it).
+async fn cpu_usage(Shared(d): Shared<Arc<Daemon>>) -> Res {
+    let d2 = d.clone();
+    let v = d
+        .pool
+        .run(move || {
+            let w = d2.world().map_err(store_err)?;
+            let u = crate::views::Ctx::new(&d2, &w).cpu_usage();
+            serde_json::to_value(&u)
+                .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        })
+        .await
+        .map_err(pool_err)??;
+    Ok(Json(v))
+}
+
+/// The home view, as the monitors get it (proto3 JSON).
+async fn home_view(
+    Shared(d): Shared<Arc<Daemon>>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Res {
+    let project = q.get("project").cloned().unwrap_or_default();
+    let d2 = d.clone();
+    let v = d
+        .view_pool
+        .run(move || {
+            let w = d2.world().map_err(store_err)?;
+            let h = crate::views::Ctx::new(&d2, &w).home(&project);
+            serde_json::to_value(&h)
+                .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        })
+        .await
+        .map_err(pool_err)??;
+    Ok(Json(v))
+}
+
 async fn resources(Shared(d): Shared<Arc<Daemon>>) -> Res {
     let d2 = d.clone();
     let v = d
@@ -2555,7 +2665,11 @@ async fn lease_open(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res
         let d2 = d.clone();
         let id = d
             .pool
-            .run(move || d2.broker.lease_open_outside(&label, &uses, &o))
+            .run(move || {
+                let id = d2.broker.lease_open_outside(&label, &uses, &o);
+                d2.broker.lease_set_pid(id, pid);
+                id
+            })
             .await
             .map_err(pool_err)?;
         return Ok(Json(json!({"id": id})));
@@ -2567,6 +2681,9 @@ async fn lease_open(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res
             let standing = task.and_then(|t| d2.lease_standing(TaskId(t)));
             let id = d2.broker.lease_open_as(&label, &uses, standing);
             d2.broker.lease_set_pid(id, pid);
+            if let (Some(t), Some(_)) = (task, standing) {
+                d2.broker.lease_set_task(id, TaskId(t));
+            }
             let th = task
                 .map(|t| d2.stall_thresholds(TaskId(t)))
                 .unwrap_or_default();
@@ -2929,6 +3046,7 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/tasks/{id}/reject", post(reject))
         .route("/tasks/{id}/explore-anyway", post(explore_anyway))
         .route("/tasks/{id}/overrides", post(task_override))
+        .route("/tasks/{id}/priority", post(task_priority))
         .route("/projects/{name}/definition", get(project_definition))
         .route("/projects/{name}/extensions", get(extensions_list))
         .route(
@@ -2954,6 +3072,8 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/tasks/{id}/logs", get(logs))
         .route("/tasks/{id}/progress", get(task_progress))
         .route("/resources", get(resources))
+        .route("/cpu", get(cpu_usage))
+        .route("/views/home", get(home_view))
         .route("/targets", get(targets))
         .route("/health", get(health))
         .route("/digest", get(digest))
