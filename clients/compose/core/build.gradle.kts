@@ -26,4 +26,7 @@ wire {
 
 tasks.test {
     useJUnitPlatform()
+    // Never skip as up-to-date: the test step counts the per-test lines `--info` prints, and a
+    // skipped task prints none, which reads as "0 tests ran".
+    outputs.upToDateWhen { false }
 }

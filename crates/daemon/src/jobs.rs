@@ -64,6 +64,15 @@ pub(crate) fn conflict_runs(task_dir: &Path) -> Vec<u64> {
     v
 }
 
+/// Every send-back's feedback, in order, for the escalated last round.
+const FEEDBACK_HISTORY: &str = "feedback-history.txt";
+
+/// Is the next test round the last one the test step will give (another red would fail the
+/// task), after at least one red round? `done`: test rounds that went red so far.
+pub(crate) fn last_round_ahead(done: u32, max_rounds: u32) -> bool {
+    done >= 1 && done + 1 >= max_rounds
+}
+
 /// Everything a job needs to know, read once at the start.
 pub struct Ctx {
     pub d: Arc<Daemon>,
@@ -151,6 +160,41 @@ impl Ctx {
         n.max(1)
     }
 
+    /// How many rounds of the test step (the one that sends back to this step) went red since
+    /// the owner last restarted the task, leaving out conflict runs, as `round` counts them.
+    /// `None` when no test step sends work back here.
+    fn test_rounds_done(&self) -> Option<(u32, u32)> {
+        let test = self.def.steps.iter().find(|s| {
+            s.kind == StepType::Test && s.on_red.as_deref() == Some(self.step.name.as_str())
+        })?;
+        let max = self.project.max_test_rounds.or(test.max_rounds)?;
+        let w = self.d.world().ok()?;
+        let conflicts = self.conflict_runs();
+        let mut runs: Vec<&StepRun> = w
+            .step_runs
+            .values()
+            .filter(|r| r.task == self.task && r.id.0 < self.run.0)
+            .collect();
+        runs.sort_by_key(|r| r.id.0);
+        let restart = runs
+            .iter()
+            .rev()
+            .find(|r| {
+                matches!(
+                    r.outcome,
+                    Some(StepOutcome::Failed | StepOutcome::Superseded | StepOutcome::Canceled)
+                )
+            })
+            .map_or(0, |r| r.id.0);
+        let done = runs
+            .iter()
+            .filter(|r| r.id.0 > restart && r.name == test.name)
+            .filter(|r| !conflicts.contains(&r.id.0))
+            .filter(|r| matches!(r.outcome, Some(StepOutcome::SentBack)))
+            .count() as u32;
+        Some((done, max))
+    }
+
     /// The change conflicts with the base (or with the rest of its landing
     /// batch): back to the step's `on_red`, with the note for the agent, and
     /// not counted as a red round, since the change is not what is wrong. A
@@ -236,7 +280,17 @@ impl Ctx {
             }
             Transition::SendBack { step } => {
                 if let Some(f) = feedback {
-                    let _ = std::fs::write(self.task_dir().join("feedback.txt"), f);
+                    let _ = std::fs::write(self.task_dir().join("feedback.txt"), &f);
+                    // Every round's feedback is kept for the last round's fresh session (s251).
+                    let entry = format!(
+                        "## After run {} ({}): {}\n{}\n\n",
+                        self.run.0, self.step.name, reason, f
+                    );
+                    let _ = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(self.task_dir().join(FEEDBACK_HISTORY))
+                        .and_then(|mut h| std::io::Write::write_all(&mut h, entry.as_bytes()));
                 }
                 let step = repin_for_send_back(
                     &self.d,
@@ -823,6 +877,24 @@ pub(crate) fn tests_uses(
         .collect()
 }
 
+/// The resource a scoped `run_check` takes instead of `test-suite`, when the definition declares it.
+pub(crate) const TEST_SMALL: &str = "test-small";
+
+/// `uses` for a scoped check: `test-small` in place of `test-suite` when the definition declares
+/// `[resource.test-small]`. Otherwise `uses` unchanged. Full checks and the test step never call this.
+pub(crate) fn small_lane(
+    def: &Definition,
+    mut uses: std::collections::BTreeMap<String, u32>,
+) -> std::collections::BTreeMap<String, u32> {
+    if !def.resources.contains_key(TEST_SMALL) {
+        return uses;
+    }
+    if let Some(n) = uses.remove("test-suite") {
+        uses.insert(TEST_SMALL.to_string(), n);
+    }
+    uses
+}
+
 /// `MASON_HELD`: the classes a command already holds, so that one which would
 /// queue for the same class (`mason run --needs`) can tell it need not.
 pub(crate) fn held_text(uses: &std::collections::BTreeMap<String, u32>) -> String {
@@ -1352,6 +1424,7 @@ impl TestChecks {
                 }
             };
             let limit = suite.timeout.unwrap_or(self.timeout).min(self.timeout);
+            let before = suite.command.clone();
             // Only this develop-phase check narrows. The test step runs `command` whole.
             if !scope.is_empty() {
                 let mut packages = |scope: &CheckScope| -> Option<Vec<String>> {
@@ -1462,6 +1535,11 @@ impl TestChecks {
                     let have = uses.entry(k.clone()).or_insert(0);
                     *have = (*have).max(*v);
                 }
+            }
+            // A command that was narrowed is short: it takes the small lane when the definition
+            // declares one, so it does not queue behind a full run.
+            if suite.command != before {
+                uses = small_lane(&def, uses);
             }
             let rspec = spec(
                 format!("{}-{name}", self.id_prefix),
@@ -2110,6 +2188,30 @@ fn agent_job(c: &Ctx) {
             });
         }
     }
+    // The last round the test step will give runs on the stronger model, in a fresh session that
+    // is shown every earlier round's feedback (s251).
+    let escalate_to: Option<String> = if kind == StepKind::Develop {
+        let agent = c.project.agent();
+        match (agent.escalate_model, c.test_rounds_done()) {
+            (Some(m), Some((done, max))) if last_round_ahead(done, max) => Some(m),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    if escalate_to.is_some() {
+        if let Ok(h) = std::fs::read_to_string(dir.join(FEEDBACK_HISTORY)) {
+            if !h.trim().is_empty() {
+                let note = format!(
+                    "This is your last round: another red test round fails the task. This session starts fresh; the feedback of every earlier round follows.\n\n{h}"
+                );
+                feedback = Some(match feedback {
+                    Some(f) if !f.trim().is_empty() => format!("{f}\n\n{note}"),
+                    _ => note,
+                });
+            }
+        }
+    }
     let decisions = std::fs::read_to_string(dir.join("decisions.txt")).ok();
     let pack_name = match kind {
         StepKind::Develop => "develop",
@@ -2296,8 +2398,14 @@ fn agent_job(c: &Ctx) {
         max: agent.max_retries,
         tries: std::cell::Cell::new(0),
         moved_from: std::cell::RefCell::new(String::new()),
+        escalated: std::cell::Cell::new(false),
     };
     spec.model = launched.model.clone();
+    if let Some(m) = escalate_to.filter(|m| spec.model.as_deref() != Some(m.as_str())) {
+        *rec.moved_from.borrow_mut() = spec.model.clone().unwrap_or_default();
+        rec.escalated.set(true);
+        spec.model = Some(m);
+    }
     spec.effort = launched.effort.clone();
     {
         let (d, run) = (c.d.clone(), c.run.0);
@@ -2464,6 +2572,8 @@ struct LaunchRec<'a> {
     max: u32,
     tries: std::cell::Cell<u32>,
     moved_from: std::cell::RefCell<String>,
+    /// The model was raised for the task's last test round (s251).
+    escalated: std::cell::Cell<bool>,
 }
 
 impl LaunchRec<'_> {
@@ -2485,6 +2595,8 @@ impl LaunchRec<'_> {
             provider: self.provider.into(),
             model_from: if retried {
                 "the retry ladder".into()
+            } else if self.escalated.get() {
+                "escalated for the last round (escalate_model)".into()
             } else {
                 l.model_from.clone()
             },
@@ -2618,14 +2730,19 @@ fn settle_all(
                 };
                 // A host the daemon's own restart took is not the task's failure: it
                 // is recorded but not counted toward the restart budget.
+                // A host lost together with other tasks' hosts (a mass kill) is
+                // treated the same way. A hard cap still ends a run that keeps
+                // losing hosts.
                 let counted = lost
                     .iter()
                     .filter(|id| {
                         let r = mason_step_host::registry::lost_report(&root.join(id));
                         !r.is_ok_and(|r| hl::is_restart_loss(&root, r.last_heartbeat_ms, r.at_ms))
+                            && !mason_adapters::hosted::lost_with_others(&root, id)
                     })
                     .count();
-                let restart = counted <= hl::MAX_AGENT_RESTARTS;
+                let restart =
+                    counted <= hl::MAX_AGENT_RESTARTS && lost.len() <= hl::MAX_AGENT_RESTARTS * 4;
                 hl::record_as(&c.d, Some(c.run), &c.step.name, &newest, at, text, restart);
                 if !restart {
                     let all: Vec<String> = lost.iter().map(|id| describe(id).0).collect();
@@ -3209,6 +3326,12 @@ fn record_flaky(c: &Ctx, tests: &[String], except: &[String]) {
             c.d.store
                 .record_flaky(&c.step.name, t, c.task.0, crate::daemon::now_ms());
     }
+    let flaked: Vec<String> = tests
+        .iter()
+        .filter(|t| !except.contains(t))
+        .cloned()
+        .collect();
+    crate::autoquarantine::consider(&c.d, c.project_id, &c.step.name, &flaked);
 }
 
 enum RunVerdict {
@@ -3695,6 +3818,55 @@ pub fn cleanup(d: &Arc<Daemon>, task: TaskId, delete_branch: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- s251: the last round -------------------------------------------------------------
+
+    #[test]
+    fn the_last_round_is_the_one_before_another_red_would_fail_the_task() {
+        // Three test rounds: rounds 1 and 2 are not it, the develop run before test round 3 is.
+        assert!(!last_round_ahead(0, 3));
+        assert!(!last_round_ahead(1, 3));
+        assert!(last_round_ahead(2, 3));
+        assert!(last_round_ahead(3, 3));
+        // One round only: the first run is never "escalated", there is no earlier feedback.
+        assert!(!last_round_ahead(0, 1));
+        assert!(last_round_ahead(1, 1));
+        assert!(last_round_ahead(1, 2));
+        assert!(!last_round_ahead(0, 2));
+    }
+
+    // ---- s248: the small lane for scoped checks ------------------------------------------
+
+    fn uses_of(pairs: &[(&str, u32)]) -> std::collections::BTreeMap<String, u32> {
+        pairs.iter().map(|(k, n)| (k.to_string(), *n)).collect()
+    }
+
+    fn def_with(extra: &str) -> Definition {
+        let text = format!(
+            "schema = 1\nstart = \"develop\"\n{extra}\n[step.develop]\ntype = \"agent\"\n\
+             category = \"developing\"\nagent = \"deep\"\nnext = \"test\"\n\
+             [step.test]\ntype = \"test\"\ncategory = \"testing\"\nuses = {{ test-suite = 1 }}\n\
+             next = \"land\"\n[step.land]\ntype = \"landing\"\ncategory = \"landing\"\n"
+        );
+        mason_definition::parse(&text).unwrap_or_else(|p| panic!("{p:?}"))
+    }
+
+    #[test]
+    fn a_scoped_check_takes_test_small_when_declared() {
+        let def = def_with("[resource.test-suite]\ncount = 2\n[resource.test-small]\ncount = 2\n");
+        let u = small_lane(&def, uses_of(&[("test-suite", 1)]));
+        assert_eq!(u, uses_of(&[("test-small", 1)]));
+        // Other classes are untouched.
+        let u = small_lane(&def, uses_of(&[("test-suite", 1), ("disk", 3)]));
+        assert_eq!(u, uses_of(&[("test-small", 1), ("disk", 3)]));
+    }
+
+    #[test]
+    fn a_scoped_check_keeps_test_suite_without_a_small_lane() {
+        let def = def_with("[resource.test-suite]\ncount = 2\n");
+        let u = small_lane(&def, uses_of(&[("test-suite", 1)]));
+        assert_eq!(u, uses_of(&[("test-suite", 1)]));
+    }
 
     #[test]
     fn a_develop_check_ranks_behind_a_task_already_in_test() {

@@ -404,6 +404,26 @@ final class MonitorCoreTests: XCTestCase {
         if case .setLimit(let l)? = sent[5].body { XCTAssertEqual(l.units, 1, "the stepper never asks for zero compiles") } else { XCTFail() }
     }
 
+    func testTheCpuGateStepperSendsASetGateAndStaysWithinTenToAHundred() {
+        let m = MonitorModel()
+        var sent: [Mason_V1_Command] = []
+        m.sender = { sent.append($0) }
+        m.setCompileCpuGate(70 + 5)
+        m.setCompileCpuGate(0)
+        m.setCompileCpuGate(500)
+        m.setCompileSettle(-5)
+        if case .setGate(let g)? = sent[0].body { XCTAssertEqual(g.name, "compile_cpu_max"); XCTAssertEqual(g.value, 75); XCTAssertFalse(g.reset) } else { XCTFail() }
+        if case .setGate(let g)? = sent[1].body { XCTAssertEqual(g.value, 10, "never below 10") } else { XCTFail() }
+        if case .setGate(let g)? = sent[2].body { XCTAssertEqual(g.value, 100, "never above 100") } else { XCTFail() }
+        if case .setGate(let g)? = sent[3].body { XCTAssertEqual(g.name, "compile_settle_s"); XCTAssertEqual(g.value, 0) } else { XCTFail() }
+    }
+
+    func testARefusedGateShowsInLastResult() {
+        let m = MonitorModel()
+        m.apply(result(id: "m1", ok: false, error: "compile_cpu_max must be from 1 to 100"))
+        XCTAssertEqual(m.lastResult, "compile_cpu_max must be from 1 to 100")
+    }
+
     // MARK: what the client shows (the conformance items)
 
     func testVisibleItemsFollowWhatTheViewsSayAndTheCollapseState() {
@@ -453,12 +473,14 @@ final class MonitorCoreTests: XCTestCase {
     }
 
     /// A header saying where the Swift monitor's build is.
-    private func update(latest: String, phase: String = "", path: String = "", error: String = "", daemon: String = "", canUpdate: Bool = false) -> Mason_V1_ServerMessage {
+    private func update(latest: String, phase: String = "", path: String = "", error: String = "", daemon: String = "", canUpdate: Bool = false, button: String = "", confirm: String = "") -> Mason_V1_ServerMessage {
         var v = Mason_V1_View()
         v.header = .with {
             $0.update = .with {
                 $0.daemonText = daemon
                 $0.daemonCanUpdate = canUpdate
+                $0.daemonButton = button
+                $0.daemonConfirm = confirm
                 $0.monitors = [
                     .with { $0.kind = "compose"; $0.latest = "other" },
                     .with { $0.kind = "swift"; $0.latest = latest; $0.phase = phase; $0.path = path; $0.error = error },
@@ -536,6 +558,32 @@ final class MonitorCoreTests: XCTestCase {
         m.updateDaemon()
         XCTAssertEqual(sent.last?.raw.method, "POST")
         XCTAssertEqual(sent.last?.raw.path, "/update")
+    }
+
+    func testTheDaemonButtonFollowsTheDaemonsWordsAndAsksBeforeUpdatingNow() {
+        let m = MonitorModel()
+        var sent: [Mason_V1_Command] = []
+        m.sender = { sent.append($0) }
+        m.apply(owner())
+        m.apply(update(latest: "x", daemon: "behind", canUpdate: true))
+        XCTAssertEqual(m.daemonUpdateButton, "Update masond")
+        m.apply(update(latest: "x", daemon: "waiting", canUpdate: true, button: "Update now", confirm: "Abandons star #142."))
+        XCTAssertEqual(m.daemonUpdateButton, "Update now")
+        XCTAssertEqual(m.daemonUpdateConfirm, "Abandons star #142.")
+        let before = sent.count
+        m.pressUpdateDaemon()
+        XCTAssertTrue(m.confirmingDaemonUpdate)
+        XCTAssertEqual(sent.count, before, "nothing is sent before the owner confirms")
+        m.cancelDaemonUpdate()
+        XCTAssertFalse(m.confirmingDaemonUpdate)
+        XCTAssertEqual(sent.count, before, "Keep waiting sends nothing")
+        m.pressUpdateDaemon()
+        m.confirmDaemonUpdate()
+        XCTAssertEqual(sent.last?.raw.path, "/update/now")
+        XCTAssertEqual(sent.last?.id, "update-daemon")
+        // A press never does nothing: a refusal is shown.
+        m.apply(result(id: "update-daemon", ok: false, error: "no update is waiting"))
+        XCTAssertEqual(m.updateError, "no update is waiting")
     }
 
     func testTheMonitorButtonFollowsTheBuildAndInstallsItOnce() {

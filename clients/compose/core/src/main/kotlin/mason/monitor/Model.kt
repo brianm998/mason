@@ -112,8 +112,39 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
         if (u.startsWith("https://") || u.startsWith("http://")) onOpenUrl?.invoke(u)
     }
 
-    /** The owner's button: the daemon builds its newest version, proves it and takes over. */
-    fun updateDaemon() = raw("POST", "/update", json = "{}")
+
+    /** The button's label, as the daemon words it ("Update masond", or "Update now" while a finished update waits for landing batches). */
+    val daemonUpdateButton: String get() = updateInfo?.daemon_button?.takeIf { it.isNotEmpty() } ?: "Update masond"
+
+    /** What to ask before the button acts; empty when it acts at once. */
+    val daemonUpdateConfirm: String get() = updateInfo?.daemon_confirm ?: ""
+
+    /** The confirmation dialog is open. */
+    var confirmingDaemonUpdate by mutableStateOf(false)
+
+    /** The button was pressed: ask first if the daemon says to, else act. */
+    fun pressUpdateDaemon() {
+        if (daemonUpdateConfirm.isEmpty()) updateDaemon() else confirmingDaemonUpdate = true
+    }
+
+    /** "Keep waiting". */
+    fun cancelDaemonUpdate() { confirmingDaemonUpdate = false }
+
+    /** "Update now" in the dialog. */
+    fun confirmDaemonUpdate() {
+        confirmingDaemonUpdate = false
+        updateDaemon()
+    }
+
+    /**
+     * The owner's button: the daemon builds its newest version, proves it and takes over; while an
+     * update waits for landing batches it takes over now. A refusal lands in [updateError].
+     */
+    fun updateDaemon() {
+        updateError = null
+        val now = daemonUpdateButton == "Update now"
+        raw("POST", if (now) "/update/now" else "/update", id = "update-daemon", json = "{}")
+    }
 
     /** The owner's button: the daemon builds the newest monitor; [noteMonitorBuild] takes it from there. */
     fun updateMonitor() {
@@ -405,6 +436,12 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     /** How many compiles may run at once (the daemon refuses 0). */
     fun setCompileLimit(units: Int) =
         send(Command(set_limit = SetLimit(resource = "compile", units = maxOf(1, units))))
+    /** Start another compile only below [pct] percent CPU (kept to 10-100; the daemon holds 1-100 and says if it refuses). */
+    fun setCompileCpuGate(pct: Int) =
+        send(Command(set_gate = SetGate(name = "compile_cpu_max", value_ = pct.coerceIn(CPU_GATE_MIN, CPU_GATE_MAX).toLong())))
+    /** Seconds after one compile starts before the next may (0: no wait). */
+    fun setCompileSettle(seconds: Int) =
+        send(Command(set_gate = SetGate(name = "compile_settle_s", value_ = seconds.coerceIn(0, SETTLE_MAX).toLong())))
     fun pause(mode: String, seconds: Long) =
         send(Command(pause = PauseWork(project = project, mode = mode, for_seconds = seconds)))
     fun resume() = send(Command(resume = ResumeWork(project = project)))
@@ -576,6 +613,7 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
                 if (r.ok) { sshKeyResult = "The remote accepted the key. Landing is released."; sshKeyProject = null } else sshKeyResult = r.error
             }
             if (r.id == "announce" && r.ok) announcer.handleClaim(r.json)
+            if (r.id == "update-daemon" && !r.ok) updateError = r.error
             if (r.id == "update-monitor") {
                 if (r.ok) monitorAsked = true else monitorUpdateFailed(r.error)
             }
@@ -624,6 +662,11 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     }
 
     companion object {
+        /** The CPU gate's range in the monitor, and the most the settle stepper asks for. */
+        const val CPU_GATE_MIN = 10
+        const val CPU_GATE_MAX = 100
+        const val SETTLE_MAX = 600
+
         /** The project a `push_auth` banner is about: its text starts "<project>: ". */
         fun pushAuthProject(b: Banner): String = b.text.substringBefore(":")
 

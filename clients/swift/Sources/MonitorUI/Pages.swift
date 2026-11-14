@@ -213,6 +213,42 @@ struct CompilationSection: View {
             .help("Lowering the limit never stops a compile that is running; it holds back new ones until the count falls.")
             .accessibilityIdentifier("compile")
 
+            HStack(spacing: theme.spacing) {
+                Text("Start another compile below")
+                Button { model.setCompileCpuGate(Int(c.cpuMaxPct) - 5) } label: { Image(systemName: "minus") }
+                    .disabled(Int(c.cpuMaxPct) <= MonitorModel.cpuGateRange.lowerBound)
+                    .accessibilityIdentifier("compile:cpu:decrease")
+                Text("\(c.cpuMaxPct)% CPU").font(theme.body(.semibold))
+                Button { model.setCompileCpuGate(Int(c.cpuMaxPct) + 5) } label: { Image(systemName: "plus") }
+                    .disabled(Int(c.cpuMaxPct) >= MonitorModel.cpuGateRange.upperBound)
+                    .accessibilityIdentifier("compile:cpu:increase")
+            }
+            .font(theme.body())
+            .buttonStyle(.bordered)
+            .help("A compile starts only while CPU use is below this. Kept across restarts; resources.toml has the starting value.")
+            .accessibilityIdentifier("compile:cpu")
+
+            HStack(spacing: theme.spacing) {
+                Text("and wait")
+                Button { model.setCompileSettle(Int(c.settleS) - 5) } label: { Image(systemName: "minus") }
+                    .disabled(c.settleS == 0)
+                    .accessibilityIdentifier("compile:settle:decrease")
+                Text("\(c.settleS) s").font(theme.body(.semibold))
+                Button { model.setCompileSettle(Int(c.settleS) + 5) } label: { Image(systemName: "plus") }
+                    .disabled(Int(c.settleS) >= MonitorModel.settleMax)
+                    .accessibilityIdentifier("compile:settle:increase")
+                Text("after the last one started")
+            }
+            .font(theme.body())
+            .buttonStyle(.bordered)
+            .accessibilityIdentifier("compile:settle")
+
+            if let refused = model.lastResult {
+                Text(refused).font(theme.body()).foregroundStyle(theme.attention)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("compile:refused")
+            }
+
             if c.running.isEmpty {
                 Text("Nothing is compiling.").font(theme.body()).foregroundStyle(theme.muted)
             }

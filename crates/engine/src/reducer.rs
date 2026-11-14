@@ -456,7 +456,7 @@ fn apply(w: &mut World, k: &EventKind, fx: &mut Vec<Effect>) -> Result<(), Reduc
             t.failure = Some(reason.clone());
             t.failure_class = *class;
         }
-        E::Retried { task, to, step } => {
+        E::Retried { task, to, step, .. } => {
             let from = get(w, *task)?.state;
             if !(from.is_step() || matches!(from, S::NeedsAttention | S::Failed)) {
                 return Err(illegal(from, k));

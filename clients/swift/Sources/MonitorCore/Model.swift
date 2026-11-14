@@ -123,8 +123,41 @@ public final class MonitorModel: ObservableObject {
         if let u = URL(string: downloadURL), ["https", "http"].contains(u.scheme) { onOpenURL?(u) }
     }
 
-    /// The owner's button: the daemon builds its newest version, proves it and takes over.
-    public func updateDaemon() { raw("POST", "/update", json: "{}") }
+    /// The button's label, as the daemon words it ("Update masond", or "Update now" while a
+    /// finished update waits for landing batches).
+    public var daemonUpdateButton: String {
+        let b = updateInfo?.daemonButton ?? ""
+        return b.isEmpty ? "Update masond" : b
+    }
+    /// What to ask before the button acts; empty when it acts at once.
+    public var daemonUpdateConfirm: String { updateInfo?.daemonConfirm ?? "" }
+    /// The confirmation dialog is open.
+    @Published public var confirmingDaemonUpdate = false
+
+    /// The button was pressed: ask first if the daemon says to, else act.
+    public func pressUpdateDaemon() {
+        if daemonUpdateConfirm.isEmpty { updateDaemon() } else { confirmingDaemonUpdate = true }
+    }
+
+    /// "Keep waiting".
+    public func cancelDaemonUpdate() { confirmingDaemonUpdate = false }
+
+    /// "Update now" in the dialog.
+    public func confirmDaemonUpdate() {
+        confirmingDaemonUpdate = false
+        updateDaemon()
+    }
+
+    /// The owner's button: the daemon builds its newest version, proves it and takes over; while
+    /// an update waits for landing batches it takes over now. A refusal lands in `updateError`.
+    public func updateDaemon() {
+        updateError = nil
+        var c = Mason_V1_Command()
+        c.id = "update-daemon"
+        let now = daemonUpdateButton == "Update now"
+        c.raw = .with { $0.method = "POST"; $0.path = now ? "/update/now" : "/update"; $0.json = "{}" }
+        send(c)
+    }
 
     /// The owner's button: the daemon builds the newest monitor; `noteMonitorBuild` takes it from there.
     public func updateMonitor() {
@@ -500,6 +533,21 @@ public final class MonitorModel: ObservableObject {
     public func setCompileLimit(_ units: UInt32) {
         command { $0.setLimit = .with { $0.resource = "compile"; $0.units = max(1, units) } }
     }
+    /// The CPU gate's range in the monitor: a further compile starts below this percent.
+    public static let cpuGateRange = 10...100
+    /// The most seconds the settle stepper asks for.
+    public static let settleMax = 600
+    /// Start another compile only below `pct` percent CPU (kept to 10-100; the daemon holds 1-100
+    /// and refuses the rest, and says so in `lastResult`).
+    public func setCompileCpuGate(_ pct: Int) {
+        let v = min(max(pct, Self.cpuGateRange.lowerBound), Self.cpuGateRange.upperBound)
+        command { $0.setGate = .with { $0.name = "compile_cpu_max"; $0.value = Int64(v) } }
+    }
+    /// Seconds after one compile starts before the next may (0: no wait).
+    public func setCompileSettle(_ seconds: Int) {
+        let v = min(max(seconds, 0), Self.settleMax)
+        command { $0.setGate = .with { $0.name = "compile_settle_s"; $0.value = Int64(v) } }
+    }
     public func pause(mode: String, seconds: UInt64) {
         command { $0.pause = .with { $0.project = project; $0.mode = mode; $0.forSeconds = seconds } }
     }
@@ -752,6 +800,7 @@ public final class MonitorModel: ObservableObject {
             else { sshKeyResult = r.error }
         }
         if r.id == "announce", r.ok { announcer.handle(claim: r.json) }
+        if r.id == "update-daemon", !r.ok { updateError = r.error }
         if r.id == "update-monitor" {
             if r.ok { monitorAsked = true } else { monitorUpdateFailed(r.error) }
         }

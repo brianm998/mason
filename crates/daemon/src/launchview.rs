@@ -27,7 +27,12 @@ fn shown_model(row: &LaunchRow) -> String {
 
 fn why_of(row: &LaunchRow, shown: &str) -> String {
     let mut why = format!("model: {}; effort: {}", row.model_from, row.effort_from);
-    if !row.moved_up_from.is_empty() {
+    if !row.moved_up_from.is_empty() && row.model_from.starts_with("escalated") {
+        why.push_str(&format!(
+            "; was {} before the last round",
+            row.moved_up_from
+        ));
+    } else if !row.moved_up_from.is_empty() {
         why.push_str(&format!("; moved up the ladder from {}", row.moved_up_from));
     }
     if shown != row.model {

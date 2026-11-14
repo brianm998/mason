@@ -150,6 +150,7 @@ fn run_scenario(s: &Store, attempts: u64) -> u64 {
                     task,
                     to: State::Testing,
                     step: String::new(),
+                    auto: false,
                 },
                 1 => EventKind::Canceled {
                     task,

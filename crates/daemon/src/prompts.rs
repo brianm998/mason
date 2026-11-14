@@ -208,6 +208,7 @@ mod tests {
             cont_after: Duration::ZERO,
             kill_after: Duration::ZERO,
             test_timeout: Duration::from_secs(1),
+            auto_retry: true,
             max_test_rounds: None,
             test_reruns: 0,
             rerun_filter: None,

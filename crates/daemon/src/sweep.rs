@@ -58,6 +58,7 @@ pub fn parse_host_id(id: &str) -> Option<(u64, u64)> {
 /// Run one pass. Returns the kinds of bugs it filed.
 pub fn sweep_once(d: &Arc<Daemon>) -> Vec<String> {
     let mut filed = vec![];
+    crate::autoquarantine::lift_landed(d);
     let Ok(w) = d.world() else { return filed };
     let mut st = d.sweep.lock().unwrap_or_else(|e| e.into_inner());
     st.passes += 1;

@@ -195,6 +195,24 @@ fun CompilationSection(model: MonitorModel, c: Compilation) {
             Pill("+", modifier = Modifier.testTag("compile:increase")) { model.setCompileLimit(c.limit + 1) }
             Text(c.cpuLine, style = theme.body(color = theme.muted))
         }
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(theme.spacing),
+            modifier = Modifier.testTag("compile:cpu")) {
+            Text("Start another compile below", style = theme.body())
+            Pill("−", modifier = Modifier.testTag("compile:cpu:decrease")) { model.setCompileCpuGate(c.cpu_max_pct - 5) }
+            Text("${c.cpu_max_pct}% CPU", style = theme.body(FontWeight.SemiBold))
+            Pill("+", modifier = Modifier.testTag("compile:cpu:increase")) { model.setCompileCpuGate(c.cpu_max_pct + 5) }
+        }
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(theme.spacing),
+            modifier = Modifier.testTag("compile:settle")) {
+            Text("and wait", style = theme.body())
+            Pill("−", modifier = Modifier.testTag("compile:settle:decrease")) { model.setCompileSettle(c.settle_s - 5) }
+            Text("${c.settle_s} s", style = theme.body(FontWeight.SemiBold))
+            Pill("+", modifier = Modifier.testTag("compile:settle:increase")) { model.setCompileSettle(c.settle_s + 5) }
+            Text("after the last one started", style = theme.body())
+        }
+        model.lastResult?.let {
+            Text(it, style = theme.body(color = theme.attention), modifier = Modifier.testTag("compile:refused"))
+        }
         if (c.running.isEmpty()) Text("Nothing is compiling.", style = theme.body(color = theme.muted))
         c.running.forEachIndexed { i, r ->
             Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing), modifier = Modifier.testTag("compile:running:$i")) {

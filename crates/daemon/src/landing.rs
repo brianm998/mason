@@ -1981,7 +1981,6 @@ impl Runner {
         }
     }
 
-<<<<<<< HEAD
     /// The local suites that cover every failed CI job (`[ci.local]`), or `None` when any
     /// failed job has no mapping (or maps to a suite the project does not define): that red
     /// is searched for through CI, as before.
@@ -2004,7 +2003,8 @@ impl Runner {
             }
         }
         Some(out)
-=======
+    }
+
     /// A red re-test whose failing tests are all in the known-red ledger is green for the
     /// batch (s281). A timeout, a red with no readable test names, or any test that is not in
     /// the ledger stays red (and is bisected as before).
@@ -2038,7 +2038,6 @@ impl Runner {
             crate::knownred::lines(&hit).join("; ")
         );
         true
->>>>>>> origin/develop
     }
 
     fn legacy_cmd(&self, def: &mason_definition::Definition) -> Option<crate::jobs::TestCommands> {
