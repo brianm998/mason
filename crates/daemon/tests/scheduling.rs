@@ -986,7 +986,7 @@ fn home_compile_holders_carry_the_tasks_project_and_full_title() {
         let h = mason_daemon::views::Ctx::new(&d, &world).home(filter);
         let running = h.compilation.unwrap().running;
         let task_row = running.iter().find(|r| r.task == t.0).unwrap();
-        assert_eq!(task_row.project, name);
+        assert_eq!(task_row.project, name, "t={} running={running:?} tasks={:?}", t.0, world.tasks.keys().collect::<Vec<_>>());
         assert_eq!(task_row.title, title);
         let person = running.iter().find(|r| r.task == 0).unwrap();
         assert_eq!((person.project.as_str(), person.title.as_str()), ("", ""));
