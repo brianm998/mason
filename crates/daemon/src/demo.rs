@@ -274,12 +274,14 @@ fn progress_cases(now: u64) -> Vec<Progress> {
             unit: "tests".into(),
             done: Figure::reported(120),
             total: Figure::reported(120),
+            ..SubProgress::default()
         },
         SubProgress {
             name: "integration".into(),
             unit: "tests".into(),
             done: Figure::reported(44),
             total: Figure::reported(90),
+            ..SubProgress::default()
         },
     ];
     // 5. An agent's todo list.
@@ -323,6 +325,7 @@ fn step_cases(now: u64) -> Vec<Progress> {
         unit: unit.into(),
         done,
         total,
+        ..SubProgress::default()
     };
     // 0. A test step: passed of the last green run's count, a sub-count per suite.
     let mut tests = base(0, "test", 90_000, 1_000);
