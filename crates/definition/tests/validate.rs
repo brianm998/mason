@@ -300,13 +300,12 @@ fn what_cannot_run_yet_is_refused_when_applying_but_is_valid_language() {
         "type = \"test\"\ncategory = \"testing\"",
         "type = \"gate\"\ncategory = \"testing\"",
     );
-    good(&gate); // the language has it
-    let p = problems(&gate, &Capabilities::now());
+    good(&gate); // the language has it, and the daemon runs it
     assert!(
-        p.iter().any(|x| x.path == "step.test.type"
-            && x.message.contains("cannot run yet")
-            && x.message.contains("Stage 9")),
-        "{p:?}"
+        !problems(&gate, &Capabilities::now())
+            .iter()
+            .any(|x| x.path == "step.test.type"),
+        "a gate step is runnable"
     );
     let ci = line("", "").replace(
         "type = \"test\"\ncategory = \"testing\"",

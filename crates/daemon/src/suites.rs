@@ -567,6 +567,9 @@ fn quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+/// Reads a suite's output with its parser plugin.
+type PluginParse = dyn Fn(&str) -> Result<Results, String>;
+
 /// What a finished attempt says, once parsed and judged.
 struct Judged {
     results: Results,
@@ -575,6 +578,12 @@ struct Judged {
 }
 
 fn judge_ran(suite: &Suite, ran: &Ran, cwd: &Path) -> Judged {
+    judge_ran_with(suite, ran, cwd, None)
+}
+
+/// [`judge_ran`], reading the output with `plugin` when the suite names a parser plugin
+/// (`Who::plugin_parser`). The verdict is judged from the cases exactly as for a built-in parser.
+fn judge_ran_with(suite: &Suite, ran: &Ran, cwd: &Path, plugin: Option<&PluginParse>) -> Judged {
     // A tree the stall watcher killed is red for that reason, whatever the partial
     // output parses to.
     if let Some(why) = &ran.stalled {
@@ -603,7 +612,11 @@ fn judge_ran(suite: &Suite, ran: &Ran, cwd: &Path) -> Judged {
         },
         None => ran.output.clone(),
     };
-    match parse(suite.parser, &text, suite) {
+    let parsed = match plugin {
+        Some(f) => f(&text),
+        None => parse(suite.parser, &text, suite),
+    };
+    match parsed {
         Ok(results) => {
             let exit = if ran.signal != 0 {
                 Some(128 + ran.signal)
@@ -662,6 +675,29 @@ impl Who {
     /// The step run that shows this run's progress, if any.
     fn run(&self) -> Option<StepRunId> {
         self.task.map(|(_, r)| r).or(self.sink)
+    }
+
+    fn project_cfg(&self) -> Option<crate::config::ProjectCfg> {
+        self.d
+            .project_id_by_name(&self.project)
+            .and_then(|i| self.d.project(i))
+            .cloned()
+    }
+
+    /// The parser plugin for this suite, if it names one (`parser = "plugin:<name>"`). A
+    /// plugin that is not approved gives a parser that fails, naming what to approve, so the
+    /// suite is red for that reason and nothing runs.
+    fn plugin_parser(&self, suite: &Suite) -> Option<Box<PluginParse>> {
+        let name = suite.plugin_parser.clone()?;
+        let p = self
+            .d
+            .project_id_by_name(&self.project)
+            .and_then(|i| self.d.project(i))
+            .cloned();
+        Some(Box::new(move |text: &str| match &p {
+            Some(p) => crate::plugins::parse_with_plugin(p, &name, text),
+            None => Err(format!("no project to find the parser plugin `{name}` in")),
+        }))
     }
 
     /// This project's stall thresholds (both off when the project sets none).
@@ -766,6 +802,11 @@ fn dev_id(dev: Option<&Dev>) -> Option<&str> {
 
 fn env_down(who: &Who, def: &Definition, suite: &Suite, cwd: &Path, dev: Option<&Dev>) {
     if let Some(e) = def.testing.environment(&suite.env) {
+        if let Some(name) = &e.plugin {
+            if let Some(p) = who.project_cfg() {
+                let _ = crate::plugins::environment_call(&p, name, "teardown", &env_config(e, cwd));
+            }
+        }
         for p in lifecycle::down(e) {
             let _ = run_shell(
                 &lifecycle::with_device(&p.command, dev_id(dev)),
@@ -776,6 +817,47 @@ fn env_down(who: &Who, def: &Definition, suite: &Suite, cwd: &Path, dev: Option<
         // The provider lets the device go last, and only what it started.
         if let Some(dev) = dev {
             let _ = who.d.targets.provider().teardown(&dev.id);
+        }
+    }
+}
+
+/// What an environment plugin is told about the environment.
+fn env_config(e: &mason_testing::Environment, cwd: &Path) -> serde_json::Value {
+    serde_json::json!({
+        "name": e.name,
+        "cwd": cwd.to_string_lossy(),
+        "setup": e.setup,
+        "health": e.health,
+        "teardown": e.teardown,
+        "uses": e.uses,
+    })
+}
+
+/// `environment:<name>` plugin: setup, then health until it says ok or `health_timeout` is spent.
+fn env_up_plugin(
+    who: &Who,
+    e: &mason_testing::Environment,
+    name: &str,
+    cwd: &Path,
+) -> Result<(), String> {
+    let p = who
+        .project_cfg()
+        .ok_or_else(|| format!("environment `{}`: no project to find `{name}` in", e.name))?;
+    let cfg = env_config(e, cwd);
+    crate::plugins::environment_call(&p, name, "setup", &cfg)
+        .map_err(|x| format!("environment `{}` failed at setup: {x}", e.name))?;
+    let end = Instant::now() + e.health_timeout;
+    loop {
+        match crate::plugins::environment_call(&p, name, "health", &cfg) {
+            Ok(()) => return Ok(()),
+            Err(x) if Instant::now() >= end => {
+                return Err(format!(
+                    "environment `{}` was not healthy after {}s: {x}",
+                    e.name,
+                    e.health_timeout.as_secs()
+                ))
+            }
+            Err(_) => std::thread::sleep(Duration::from_millis(500)),
         }
     }
 }
@@ -793,6 +875,9 @@ fn env_up(
         return Ok(());
     };
     let provider = who.d.targets.provider();
+    if let Some(name) = &e.plugin {
+        return env_up_plugin(who, e, name, cwd);
+    }
     if let Some(dev) = dev {
         provider.prepare(&dev.id).map_err(|x| {
             format!(
@@ -907,7 +992,7 @@ fn baseline(
         if ran.stop != Stop::No {
             return None;
         }
-        let j = judge_ran(suite, &ran, &wt);
+        let j = judge_ran_with(suite, &ran, &wt, who.plugin_parser(suite).as_deref());
         Some((
             j.results.failed_names(),
             j.results.names(),
@@ -1114,7 +1199,7 @@ fn run_suite(
             }
             Stop::No => {}
         }
-        let j = judge_ran(suite, &ran, cwd);
+        let j = judge_ran_with(suite, &ran, cwd, who.plugin_parser(suite).as_deref());
         let out = |extra: &str| {
             format!(
                 "{extra}Last output of `{}`:\n{}",
@@ -1445,7 +1530,7 @@ fn rerun_failing(
     if ran.stop != Stop::No {
         return None;
     }
-    let j = judge_ran(suite, &ran, cwd);
+    let j = judge_ran_with(suite, &ran, cwd, who.plugin_parser(suite).as_deref());
     if j.results.executed() == 0 {
         // It ran nothing, so it proved nothing: not flaky.
         return None;
@@ -2141,7 +2226,7 @@ fn run_new_tests_at_base(
             who.env.clone(),
         )
         .ok()?;
-        Some(judge_ran(suite, &ran, &wt).results)
+        Some(judge_ran_with(suite, &ran, &wt, who.plugin_parser(suite).as_deref()).results)
     })();
     env_down(who, &c.def, suite, &wt, dev);
     {
