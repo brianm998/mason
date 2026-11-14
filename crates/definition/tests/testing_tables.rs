@@ -261,6 +261,39 @@ fn device_environments_parse_with_an_optional_os_prefix() {
     assert!(validate(&d, &Capabilities::now()).is_empty());
 }
 
+// A device environment can be kept to some devices by name, so it shares a
+// machine with another pipeline's simulators without touching them.
+#[test]
+fn a_device_environment_takes_a_name_glob_and_an_exclude_list() {
+    let text = format!(
+        "{BASE}\n[environment.sim]\ntype = \"ios-simulator\"\nname = \"tdt-*\"\nexclude = [\"pipeline-slot-*\", \"ABCD-1234\"]\n"
+    );
+    let d = parse(&text).unwrap();
+    let sim = d.testing.environment("sim").unwrap();
+    assert_eq!(sim.device_name.as_deref(), Some("tdt-*"));
+    assert_eq!(sim.exclude, vec!["pipeline-slot-*", "ABCD-1234"]);
+}
+
+#[test]
+fn name_and_exclude_are_refused_off_a_device_environment_and_must_be_the_right_shape() {
+    let local = format!("{BASE}\n[environment.db]\ntype = \"local\"\nname = \"tdt-*\"\n");
+    let p = problems(&local);
+    assert!(
+        p.iter()
+            .any(|m| m.contains("environment.db.name") && m.contains("only to a device")),
+        "{p:?}"
+    );
+    let bad = format!(
+        "{BASE}\n[environment.sim]\ntype = \"ios-simulator\"\nexclude = \"pipeline-slot-*\"\n"
+    );
+    let p = problems(&bad);
+    assert!(
+        p.iter()
+            .any(|m| m.contains("environment.sim.exclude") && m.contains("list of strings")),
+        "{p:?}"
+    );
+}
+
 #[test]
 fn an_unknown_environment_type_lists_the_real_ones() {
     let text = format!("{BASE}\n[environment.x]\ntype = \"toaster\"\n");
