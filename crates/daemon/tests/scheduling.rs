@@ -339,6 +339,52 @@ fn run_check_queues_like_the_test_step_and_frees_the_agents_slot() {
 }
 
 #[test]
+fn skipping_the_test_step_ends_a_waiting_run_check_and_runs_nothing() {
+    // On 2026-11-13 the owner skipped testing for every active task, and their agents
+    // still waited in `run_check` for compile slots to run the tests anyway.
+    let runs = tempfile::tempdir().unwrap();
+    let log = runs.path().join("held");
+    let cmd = format!("echo $MASON_HELD >> {}; test -f hello.txt", log.display());
+    let develop = serde_json::json!([
+        {"sh": TASK_SCRIPT_COMMIT},
+        {"call": {"tool": "run_check", "args": {"name": "tests"}}},
+        {"call": {"tool": "submit_change", "args": {"summary": "ok", "head": "$HEAD"}}}
+    ]);
+    let s = Scratch::new(
+        &cmd,
+        serde_json::json!({"steps": {"explore": [explore_turn()], "develop": [develop]}}),
+    );
+    // Shaped like mason's own: a test step whose suite builds first, phase by phase.
+    let def = DEF_COMPILE
+        .replace(
+            "uses = { compile = 1 }\nmax_rounds = 2",
+            "uses = { compile = 1 }\nsuites = [\"unit\"]\nmax_rounds = 2",
+        )
+        + "\n[suite.unit]\nbuild = \"true\"\ncommand = \"sh -c 'echo 1..1; echo ok 1 - a'\"\nparser = \"tap\"\nmin_tests = 1\nlevel = \"unit\"\n";
+    s.push_files(&[(".mason/mason.toml", &def)], "definition");
+    let d = s.start();
+    // The only compile slot stays held outside for the whole test.
+    let (id, held) = hold(&d, "interactive", &[("compile", 1)]);
+    let t = file_task(&d, "Checks its work");
+    wait_for("the check to queue for compile", 60, || {
+        d.broker
+            .explain_task(t)
+            .is_some_and(|w| w.contains("compile"))
+    });
+    mason_daemon::suites::skip(&d, t, "step:test", "drain the queue", "brian", false).unwrap();
+    // The check stops waiting and says it did not run; the test step is skipped too.
+    wait_state(&d, t, State::Landed, 90);
+    assert!(!log.exists(), "nothing ran the tests");
+    assert_eq!(
+        d.broker.used("compile"),
+        1,
+        "only the outside holder has it"
+    );
+    drop(held);
+    d.broker.lease_close(id);
+}
+
+#[test]
 fn waiting_is_outside_every_timeout() {
     let s = compile_scratch();
     // A 2 second test timeout, and a wait for the class that lasts longer.
