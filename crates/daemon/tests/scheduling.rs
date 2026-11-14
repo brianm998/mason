@@ -294,6 +294,39 @@ fn an_exclusive_suite_lease_is_named_in_the_held_list() {
 }
 
 #[test]
+fn a_step_with_an_exclusive_suite_holds_the_machine_only_for_that_suite() {
+    // On 2026-11-14 a star test step held `exclusive` for all 17 minutes of its suites, though
+    // one suite of two minutes needed it: 26 builds waited and the CPU sat at 8% (s340).
+    let runs = tempfile::tempdir().unwrap();
+    let log = runs.path().join("held");
+    let def = suite_def("", "uses = { exclusive = 1 }", &log)
+        .replace(
+            "[resource.compile]",
+            "[resource.exclusive]\ncount = 1\n\n[resource.compile]",
+        )
+        .replace("suites = [\"checks\"]", "suites = [\"plain\", \"checks\"]")
+        + &format!(
+            r#"
+[suite.plain]
+command = "echo \"p:$MASON_HELD\" >> {}; echo 1..1; echo ok 1 - p"
+parser = "tap"
+min_tests = 1
+level = "unit"
+uses = {{ test-suite = 1 }}
+"#,
+            log.display()
+        );
+    let (text, _) = run_suite_def(&def, &log);
+    let plain = text.lines().find(|l| l.starts_with("p:")).expect(&text);
+    assert_eq!(
+        plain, "p:test-suite",
+        "the plain suite held more than its own: {text}"
+    );
+    let exclusive = text.lines().find(|l| l.starts_with("r:")).expect(&text);
+    assert!(exclusive.contains("exclusive"), "{text}");
+}
+
+#[test]
 fn run_check_queues_like_the_test_step_and_frees_the_agents_slot() {
     // An agent waiting for its tests holds no LLM session slot, and the check waits
     // for the test step's `compile` like the test step does.

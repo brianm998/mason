@@ -143,8 +143,10 @@ pub(crate) fn suite_uses(
     uses
 }
 
-/// Whether the step queues suite by suite (some selected suite builds first), instead of
-/// holding everything for the whole step.
+/// Whether the step queues suite by suite instead of holding everything for the whole step:
+/// some selected suite builds first, or needs the whole machine (s340). A step-wide lease
+/// with `exclusive` in it would keep every other build and test off the machine for the
+/// whole step, though only the exclusive suites need that.
 pub fn builds_per_suite(
     project: &crate::config::ProjectCfg,
     def: &Definition,
@@ -153,7 +155,8 @@ pub fn builds_per_suite(
 ) -> bool {
     plan(project, def, step, branch)
         .iter()
-        .any(|s| s.selected && s.suite.build.is_some())
+        .filter(|s| s.selected)
+        .any(|s| s.suite.build.is_some() || run_needs(def, step, &s.suite).exclusive)
 }
 
 /// What one suite's run holds in a step that queues suite by suite: the step's `uses`
@@ -1769,7 +1772,13 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
 
     // A suite that builds first queues phase by phase: its build holds one `compile` slot and
     // gives it back, then its run holds the rest. The step then holds nothing between suites.
-    let per_suite = sels.iter().any(|s| s.selected && s.suite.build.is_some());
+    // So does a step with a suite that needs the whole machine (s340): only that suite's run
+    // holds `exclusive`. Base-red checks still go with builds, as before.
+    let builds = sels.iter().any(|s| s.selected && s.suite.build.is_some());
+    let per_suite = builds
+        || sels
+            .iter()
+            .any(|s| s.selected && run_needs(&c.def, &c.step, &s.suite).exclusive);
     if !per_suite {
         // The step holds one lease for all its suites (see `jobs::acquire`).
         let mut needs = needs_of(&c.step.uses, None);
@@ -1785,7 +1794,7 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
         crate::jobs::test_commands(d, &c.def, c.project_id, Some(c.task)).map(|t| t.test);
     let mut built: Vec<String> = vec![];
     // A restarted daemon finds the wait it was in: no second run of the suite to learn the same.
-    if per_suite {
+    if builds {
         if let Ok(Some(w)) = d.store.base_red(c.task.0) {
             let suite = c
                 .def
@@ -1920,7 +1929,7 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
                 failing,
                 red,
             } => {
-                if let (true, Some((kind, err))) = (per_suite, red) {
+                if let (true, Some((kind, err))) = (builds, red) {
                     match base_red::gate(c, &who, &lock, &suite, &tree.base, kind, &err, None) {
                         base_red::Gate::Cleared => {
                             again.set(true);
