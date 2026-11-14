@@ -20,6 +20,7 @@ use mason_protocol::{
     client_message::Body as C, command::Body as Cmd, server_message::Body as S, *,
 };
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tower::ServiceExt;
@@ -37,6 +38,7 @@ pub async fn handler(
     ws.on_upgrade(move |sock| session(d, sock, peer))
 }
 
+#[derive(Clone)]
 struct Sub {
     views: Vec<ViewKind>,
     project: String,
@@ -260,14 +262,87 @@ async fn session(d: Arc<Daemon>, mut sock: WebSocket, peer: Option<crate::lan::P
         _ => {}
     }
 
+    // Off the session loop: commands (one at a time, so results keep their order) and
+    // view rebuilds, which come back through `out`.
+    let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel::<Out>();
+    let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<Command>();
+    {
+        let (d2, out, peer2) = (d.clone(), out_tx.clone(), peer.clone());
+        tokio::spawn(async move {
+            while let Some(c) = cmd_rx.recv().await {
+                let r = run_command_as(&d2, c, peer2.as_ref()).await;
+                if out.send(Out::Result(r)).is_err() {
+                    break;
+                }
+            }
+        });
+    }
+    // At most one rebuild queued or running; a tick meanwhile only marks it dirty.
+    let mut gen: u64 = 0;
+    let mut pending = false;
+    let mut dirty = false;
+    let mut shown: HashMap<std::mem::Discriminant<mason_protocol::view::Body>, u64> =
+        HashMap::new();
+    macro_rules! rebuild {
+        () => {
+            if pending {
+                dirty = true;
+            } else {
+                pending = true;
+                dirty = false;
+                owed = false;
+                spawn_rebuild(&d, &out_tx, sub.clone(), sent, gen);
+            }
+        };
+    }
+    if owed {
+        owed = false;
+        rebuild!();
+    }
+
     loop {
         tokio::select! {
             // Views are owed (the pool was busy): try again shortly, no event needed.
             _ = tokio::time::sleep(VIEW_RETRY), if owed => {
-                match catch_up(&d, &mut sock, &sub, enc, &mut sent).await {
-                    Push::Closed => return,
-                    Push::Busy => {}
-                    Push::Sent => owed = false,
+                rebuild!();
+            }
+            Some(o) = out_rx.recv() => {
+                match o {
+                    Out::Result(r) => {
+                        if !send(&mut sock, server(S::Result(r)), enc).await { return }
+                    }
+                    Out::Rebuilt { gen: g, res } => {
+                        pending = false;
+                        match res {
+                            Err(()) => {
+                                owed = true;
+                                dirty = false;
+                            }
+                            Ok((events, seq, views)) => {
+                                if !events.is_empty() {
+                                    sent = events.last().map_or(sent, |r| r.seq);
+                                    if !send(&mut sock, server(S::Events(Events { events })), enc).await { return }
+                                }
+                                if g == gen {
+                                    if !send_views(&mut sock, seq, views, &mut shown, enc).await { return }
+                                } else {
+                                    dirty = true;
+                                }
+                                if dirty {
+                                    rebuild!();
+                                }
+                            }
+                        }
+                    }
+                    Out::First { gen: g, res } => {
+                        // The newly asked-for views, ahead of the rest; stale if the
+                        // subscription has changed since.
+                        if g == gen {
+                            if let Ok((_, seq, views)) = res {
+                                if !send_views(&mut sock, seq, views, &mut shown, enc).await { return }
+                            }
+                        }
+                    }
                 }
             }
             incoming = sock.recv() => {
@@ -282,21 +357,28 @@ async fn session(d: Arc<Daemon>, mut sock: WebSocket, peer: Option<crate::lan::P
                         if !send(&mut sock, server(S::Pong(Pong { nonce: p.nonce })), enc).await { return }
                     }
                     Ok(ClientMessage { body: Some(C::Subscribe(s)) }) => {
-                        sub = Sub {
+                        let old = std::mem::replace(&mut sub, Sub {
                             views: s.views.iter().filter_map(|v| ViewKind::try_from(*v).ok()).collect(),
                             project: s.project,
                             task: s.task,
                             editor_step: s.editor_step,
-                        };
-                        match push_views(&d, &mut sock, &sub, enc).await {
-                            Push::Closed => return,
-                            Push::Busy => owed = true,
-                            Push::Sent => owed = false,
+                        });
+                        gen += 1;
+                        // What the client did not have (or what follows the task it
+                        // changed) goes first, on its own job.
+                        let first: Vec<ViewKind> = sub.views.iter().copied().filter(|k| {
+                            !old.views.contains(k)
+                                || (*k == ViewKind::TaskDetail && old.task != sub.task)
+                                || (*k == ViewKind::Editor && old.editor_step != sub.editor_step)
+                        }).collect();
+                        if !first.is_empty() {
+                            spawn_first(&d, &out_tx, Sub { views: first, ..sub.clone() }, gen);
                         }
+                        // Then the rest, as one rebuild once any running one lands.
+                        if pending { dirty = true } else { rebuild!(); }
                     }
                     Ok(ClientMessage { body: Some(C::Command(c)) }) => {
-                        let r = run_command_as(&d, c, peer.as_ref()).await;
-                        if !send(&mut sock, server(S::Result(r)), enc).await { return }
+                        if cmd_tx.send(c).is_err() { return }
                     }
                     Ok(_) => {
                         if !send(&mut sock, server(S::Error(Error { message: "unexpected message".into() })), enc).await { return }
@@ -343,11 +425,7 @@ async fn session(d: Arc<Daemon>, mut sock: WebSocket, peer: Option<crate::lan::P
                 // A burst of events is one update.
                 tokio::time::sleep(Duration::from_millis(10)).await;
                 while bus.try_recv().is_ok() {}
-                match catch_up(&d, &mut sock, &sub, enc, &mut sent).await {
-                    Push::Closed => return,
-                    Push::Busy => owed = true,
-                    Push::Sent => owed = false,
-                }
+                rebuild!();
             }
         }
     }
@@ -405,27 +483,82 @@ async fn on_view_pool<T: Send + 'static>(
     }
 }
 
-/// The events since `sent`, then the views as they stand. `Busy` if either
-/// could not be computed yet; `sent` only moves past events that went out.
-async fn catch_up(
+/// Something finished off the session loop.
+enum Out {
+    Result(CommandResult),
+    /// Events since `sent` and the views, computed together on one job.
+    Rebuilt {
+        gen: u64,
+        res: Result<(Vec<EventRecord>, u64, Vec<View>), ()>,
+    },
+    /// Only the views a subscription newly asked for.
+    First {
+        gen: u64,
+        res: Result<((), u64, Vec<View>), ()>,
+    },
+}
+
+fn spawn_rebuild(
     d: &Arc<Daemon>,
+    out: &tokio::sync::mpsc::UnboundedSender<Out>,
+    sub: Sub,
+    after: u64,
+    gen: u64,
+) {
+    let (d, out) = (d.clone(), out.clone());
+    tokio::spawn(async move {
+        let d2 = d.clone();
+        let res = d
+            .view_pool
+            .run(move || {
+                let events = records(&d2, after, 1000);
+                let (seq, views) = compute(&d2, &sub);
+                (events, seq, views)
+            })
+            .await
+            .map_err(|_| ());
+        let _ = out.send(Out::Rebuilt { gen, res });
+    });
+}
+
+fn spawn_first(d: &Arc<Daemon>, out: &tokio::sync::mpsc::UnboundedSender<Out>, sub: Sub, gen: u64) {
+    let (d, out) = (d.clone(), out.clone());
+    tokio::spawn(async move {
+        let d2 = d.clone();
+        let res = d
+            .view_pool
+            .run(move || {
+                let (seq, views) = compute(&d2, &sub);
+                ((), seq, views)
+            })
+            .await
+            .map_err(|_| ());
+        let _ = out.send(Out::First { gen, res });
+    });
+}
+
+/// Send views, skipping any older than one of that kind already sent (two jobs can
+/// finish out of order).
+async fn send_views(
     sock: &mut WebSocket,
-    sub: &Sub,
+    seq: u64,
+    views: Vec<View>,
+    shown: &mut HashMap<std::mem::Discriminant<mason_protocol::view::Body>, u64>,
     e: Encoding,
-    sent: &mut u64,
-) -> Push {
-    let (d2, after) = (d.clone(), *sent);
-    let Ok(events) = d.view_pool.run(move || records(&d2, after, 1000)).await else {
-        return Push::Busy;
-    };
-    // (A tick with no new event, such as a pause, still changes views.)
-    if !events.is_empty() {
-        *sent = events.last().map_or(*sent, |r| r.seq);
-        if !send(sock, server(S::Events(Events { events })), e).await {
-            return Push::Closed;
+) -> bool {
+    for v in views {
+        let Some(kind) = v.body.as_ref().map(std::mem::discriminant) else {
+            continue;
+        };
+        if shown.get(&kind).is_some_and(|s| *s > seq) {
+            continue;
+        }
+        shown.insert(kind, seq);
+        if !send(sock, server(S::View(ViewUpdate { seq, view: Some(v) })), e).await {
+            return false;
         }
     }
-    push_views(d, sock, sub, e).await
+    true
 }
 
 enum Push {
