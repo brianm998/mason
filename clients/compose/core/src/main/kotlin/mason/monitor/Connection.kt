@@ -63,9 +63,13 @@ class MonitorConnection(
         val closed = CountDownLatch(1)
         val heard = java.util.concurrent.atomic.AtomicLong(System.nanoTime())
         val welcomed = java.util.concurrent.atomic.AtomicBoolean(false)
+        val mine = java.util.concurrent.atomic.AtomicReference<MonitorSocket?>(null)
+        val ready = CountDownLatch(1)
+        fun say(m: ClientMessage) { mine.get()?.send(Codec.encode(m)) }
         val events = object : SocketEvents {
             override fun onOpen() {
-                write(ClientMessage(hello = Hello(
+                ready.await()  // the session's socket is registered before the hello goes out
+                say(ClientMessage(hello = Hello(
                     protocol = 1,
                     last_seq = model.lastSeq,
                     client = "mason-monitor-compose",
@@ -80,7 +84,7 @@ class MonitorConnection(
                 if (msg.welcome != null) {
                     welcomed.set(true)
                     model.apply(msg)
-                    sendSubscription()
+                    say(subscriptionMessage())
                 } else {
                     model.apply(msg)
                 }
@@ -89,7 +93,9 @@ class MonitorConnection(
             override fun onClosed() { closed.countDown() }
         }
         val s = factory.open(info.port, events)
+        mine.set(s)
         socket = s
+        ready.countDown()
         val tickMs = (minOf(timing.watchEverySeconds, timing.pingEverySeconds) * 1000).toLong().coerceAtLeast(1)
         var lastPing = System.nanoTime()
         while (running && !closed.await(tickMs, TimeUnit.MILLISECONDS)) {
@@ -98,7 +104,7 @@ class MonitorConnection(
             // Ask first, then give up: a late tick must not skip the ping that was due.
             if ((System.nanoTime() - lastPing) / 1e9 >= timing.pingEverySeconds) {
                 lastPing = System.nanoTime()
-                write(ClientMessage(ping = Ping(nonce = ++pings)))
+                say(ClientMessage(ping = Ping(nonce = ++pings)))
             }
             val quiet = (System.nanoTime() - heard.get()) / 1e9
             if (quiet > timing.stallAfterSeconds) break  // a stall: show reconnecting
@@ -109,6 +115,10 @@ class MonitorConnection(
 
     /** Which views to keep sending, given the page being shown. */
     fun sendSubscription() {
+        write(subscriptionMessage())
+    }
+
+    private fun subscriptionMessage(): ClientMessage {
         val views = mutableListOf(ViewKind.HEADER, ViewKind.SIDEBAR, ViewKind.HOME, ViewKind.USAGE)
         var task = 0L
         when (val p = model.page) {
@@ -121,7 +131,7 @@ class MonitorConnection(
             }
             else -> {}
         }
-        write(ClientMessage(subscribe = Subscribe(views = views, project = model.project, task = task, editor_step = model.editorStep)))
+        return ClientMessage(subscribe = Subscribe(views = views, project = model.project, task = task, editor_step = model.editorStep))
     }
 
     private fun send(c: Command) {
