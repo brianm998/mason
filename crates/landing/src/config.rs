@@ -147,6 +147,9 @@ pub struct LandingConfig {
     pub resolver: Option<String>,
     /// How many times the base may move under a batch before it gives up.
     pub max_fold: u32,
+    /// `[ci.local]`: a CI job name and the local suites that cover it. A red confined to
+    /// mapped jobs is searched for locally (the culprit), not with more CI runs.
+    pub ci_local: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 impl Default for LandingConfig {
@@ -166,6 +169,7 @@ impl Default for LandingConfig {
             ],
             resolver: None,
             max_fold: 3,
+            ci_local: Default::default(),
         }
     }
 }
@@ -210,6 +214,7 @@ pub fn parse_duration(s: &str) -> Option<Duration> {
 
 const TOP: &[&str] = &[
     "mode", "base", "window", "max_size", "parallel", "tier", "on_red", "resolver", "max_fold",
+    "ci",
 ];
 
 /// Read a `landing.toml`. `Err` lists every problem, each naming its key.
@@ -315,6 +320,34 @@ pub fn parse(text: &str) -> Result<LandingConfig, Vec<String>> {
                     None => p.push("on_red.ladder: must be a list".into()),
                 },
                 None => p.push("on_red: only `ladder` is known".into()),
+            },
+            "ci" => match v.as_table_like() {
+                Some(t) => {
+                    for (ck, cv) in t.iter() {
+                        if ck != "local" {
+                            p.push(format!("ci: only `local` is known, not `{ck}`"));
+                            continue;
+                        }
+                        let Some(m) = cv.as_table_like() else {
+                            p.push("ci.local: write job = [\"suite\"] pairs".into());
+                            continue;
+                        };
+                        for (job, suites) in m.iter() {
+                            let list: Option<Vec<String>> = suites.as_array().and_then(|a| {
+                                a.iter().map(|x| x.as_str().map(String::from)).collect()
+                            });
+                            match list {
+                                Some(l) if !l.is_empty() => {
+                                    c.ci_local.insert(job.to_string(), l);
+                                }
+                                _ => p.push(format!(
+                                    "ci.local.{job}: must be a non-empty list of suite names"
+                                )),
+                            }
+                        }
+                    }
+                }
+                None => p.push("ci: write the table [ci.local]".into()),
             },
             other => {
                 let close = TOP

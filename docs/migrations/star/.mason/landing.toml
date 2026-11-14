@@ -26,3 +26,12 @@ suites = ["t0-pipeline-static", "t0-diff-check", "t0-i18n"]
 [on_red]
 # A red CI run is rerun once (the whole run: MASON does not tell an infrastructure red from a real one).
 ladder = ["rerun-failed", "blame-by-impact", "bisect", "ask"]
+
+# s213: a red in the CI job `static checks` is a red star's own `t0-pipeline-static` suite covers
+# (ruff, pyright, pytest of pipeline/). MASON then finds the culprit of such a red by running that
+# suite on each half of the batch locally, and dispatches CI once more only on the union without
+# the culprit. A red in any other job still bisects through CI. If the suite is green here while
+# CI is red, MASON says "environment difference" and asks the owner. A job red on `develop` too
+# is held, not bisected.
+[ci.local]
+"static checks" = ["t0-pipeline-static"]

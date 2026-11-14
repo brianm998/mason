@@ -49,8 +49,7 @@ pub fn output(cmd: &mut Command, limit: Duration) -> Result<Output, ProcError> {
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    mason_platform::process::group_leader(cmd);
-    let mut child = cmd.spawn().map_err(ProcError::Spawn)?;
+    let mut child = mason_platform::process::spawn_group(cmd).map_err(ProcError::Spawn)?;
     let pid = child.id();
     let (out, h1) = drain(child.stdout.take().expect("piped"));
     let (err, h2) = drain(child.stderr.take().expect("piped"));
