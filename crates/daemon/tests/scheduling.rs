@@ -327,6 +327,64 @@ uses = {{ test-suite = 1 }}
 }
 
 #[test]
+fn a_steps_build_suites_run_side_by_side() {
+    // On 2026-11-14 a star test step built five packages one after another for ten minutes,
+    // each on one of three free `compile` slots (s345). Each suite here passes only if it sees
+    // the other one start while it waits, so run one after the other the first goes red.
+    let runs = tempfile::tempdir().unwrap();
+    let dir = runs.path().display().to_string();
+    let suite = |me: &str, other: &str| {
+        format!(
+            r#"
+[suite.build-{me}]
+command = "touch {dir}/{me}-$MASON_ATTEMPT; i=0; while [ ! -e {dir}/{other}-$MASON_ATTEMPT ] && [ $i -lt 300 ]; do sleep 0.1; i=$((i+1)); done; echo 1..1; if [ -e {dir}/{other}-$MASON_ATTEMPT ]; then echo {me}:saw >> {dir}/log; echo ok 1 - {me}; else echo {me}:alone >> {dir}/log; echo not ok 1 - {me}; fi"
+parser = "tap"
+min_tests = 1
+level = "unit"
+uses = {{ compile = 1 }}
+"#
+        )
+    };
+    let def = format!(
+        r#"schema = 1
+start = "develop"
+
+[resource.compile]
+count = 2
+
+[step.develop]
+type = "agent"
+category = "developing"
+next = "test"
+
+[step.test]
+type = "test"
+category = "testing"
+suites = ["build-a", "build-b"]
+max_rounds = 1
+on_red = "develop"
+next = "land"
+
+[step.land]
+type = "landing"
+category = "landing"
+{}{}"#,
+        suite("a", "b"),
+        suite("b", "a")
+    );
+    let s = Scratch::new("false", unique_script());
+    s.push_files(&[(".mason/mason.toml", &def)], "definition");
+    let d = s.start();
+    let t = file_task(&d, "Builds side by side");
+    wait_state(&d, t, State::Landed, 120);
+    let log = std::fs::read_to_string(runs.path().join("log")).unwrap();
+    assert!(
+        !log.contains("alone"),
+        "a build ran without the other beside it: {log}"
+    );
+}
+
+#[test]
 fn run_check_queues_like_the_test_step_and_frees_the_agents_slot() {
     // An agent waiting for its tests holds no LLM session slot, and the check waits
     // for the test step's `compile` like the test step does.
