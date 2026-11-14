@@ -59,6 +59,37 @@ impl std::fmt::Display for StoreError {
 
 impl std::error::Error for StoreError {}
 
+/// What a suite did at a base commit (s246): failing names and every name, the executed count,
+/// and why a base can be called red the same way as a branch.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BaseProfile {
+    pub failing: Vec<String>,
+    pub names: Vec<String>,
+    pub executed: usize,
+    /// The build was red: its first error.
+    pub build_error: Option<String>,
+    /// The run executed too few tests to prove anything.
+    pub vacuous: bool,
+    /// The run was red.
+    pub red: bool,
+    /// The first error line of a red run.
+    pub first_error: String,
+}
+
+/// A task waiting in its test step because the base is red the same way (s246).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BaseRedWait {
+    pub task: u64,
+    pub suite: String,
+    /// `build`, `vacuous` or `nameless`.
+    pub kind: String,
+    pub first_error: String,
+    /// The base commit the task was last found red against.
+    pub base: String,
+    pub text: String,
+    pub at_ms: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StoredEvent {
     pub seq: u64,
@@ -1355,6 +1386,116 @@ impl Store {
                     )
                 })
             })
+        })
+    }
+
+    /// What a suite did at a base commit, with the facts a base-red comparison needs. Written
+    /// once per (base, suite) and read back by [`Store::baseline_profile`].
+    pub fn put_baseline_profile(
+        &self,
+        base: &str,
+        suite: &str,
+        p: &BaseProfile,
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
+        let (b, s, p) = (base.to_string(), suite.to_string(), p.clone());
+        self.write(move |c| {
+            c.execute(
+                "INSERT OR REPLACE INTO baselines(base, suite, failing, names, executed, at,
+                     build_error, vacuous, red, first_error, complete)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,1)",
+                params![
+                    b,
+                    s,
+                    p.failing.join("\n"),
+                    p.names.join("\n"),
+                    p.executed as i64,
+                    now_ms as i64,
+                    p.build_error.clone().unwrap_or_default(),
+                    p.vacuous,
+                    p.red,
+                    p.first_error
+                ],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// The profile of a suite at a base commit, if one was recorded with every field.
+    pub fn baseline_profile(
+        &self,
+        base: &str,
+        suite: &str,
+    ) -> Result<Option<BaseProfile>, StoreError> {
+        let (b, s) = (base.to_string(), suite.to_string());
+        self.read(move |c| {
+            c.query_row(
+                "SELECT failing, names, executed, build_error, vacuous, red, first_error
+                 FROM baselines WHERE base = ?1 AND suite = ?2 AND complete = 1",
+                params![b, s],
+                |r| {
+                    let build: String = r.get(3)?;
+                    Ok(BaseProfile {
+                        failing: r.get::<_, String>(0)?.lines().map(String::from).collect(),
+                        names: r.get::<_, String>(1)?.lines().map(String::from).collect(),
+                        executed: r.get::<_, i64>(2)? as usize,
+                        build_error: (!build.is_empty()).then_some(build),
+                        vacuous: r.get(4)?,
+                        red: r.get(5)?,
+                        first_error: r.get(6)?,
+                    })
+                },
+            )
+            .optional()
+        })
+    }
+
+    /// A task waits in its test step because the base is red the same way (one row per task).
+    pub fn put_base_red(&self, w: &BaseRedWait) -> Result<(), StoreError> {
+        let w = w.clone();
+        self.write(move |c| {
+            c.execute(
+                "INSERT OR REPLACE INTO base_red(task, suite, kind, first_error, base, text, at_ms)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                params![
+                    w.task as i64,
+                    w.suite,
+                    w.kind,
+                    w.first_error,
+                    w.base,
+                    w.text,
+                    w.at_ms as i64
+                ],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn base_red(&self, task: u64) -> Result<Option<BaseRedWait>, StoreError> {
+        self.read(move |c| {
+            c.query_row(
+                "SELECT suite, kind, first_error, base, text, at_ms FROM base_red WHERE task = ?1",
+                params![task as i64],
+                |r| {
+                    Ok(BaseRedWait {
+                        task,
+                        suite: r.get(0)?,
+                        kind: r.get(1)?,
+                        first_error: r.get(2)?,
+                        base: r.get(3)?,
+                        text: r.get(4)?,
+                        at_ms: r.get::<_, i64>(5)? as u64,
+                    })
+                },
+            )
+            .optional()
+        })
+    }
+
+    pub fn clear_base_red(&self, task: u64) -> Result<(), StoreError> {
+        self.write(move |c| {
+            c.execute("DELETE FROM base_red WHERE task = ?1", params![task as i64])
+                .map(|_| ())
         })
     }
 

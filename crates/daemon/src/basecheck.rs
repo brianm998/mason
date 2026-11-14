@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 /// One base run at a time, and one filing at a time: a second task with the same base
 /// waits, then finds the first one's result (or the first one's fix task).
 static BASE_RUN: Mutex<()> = Mutex::new(());
-static FILING: Mutex<()> = Mutex::new(());
+pub(crate) static FILING: Mutex<()> = Mutex::new(());
 
 /// The name a command's base result is kept under in `baselines.suite`.
 pub fn key_of(cmd: &str) -> String {

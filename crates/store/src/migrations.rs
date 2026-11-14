@@ -585,6 +585,25 @@ const STEPS: &[&str] = &[
          at_ms INTEGER NOT NULL,
          PRIMARY KEY (task, run)
      );",
+    // 29: what a suite did at a base commit beyond its failing names (s246, decision 0241): the
+    // build's first error, whether the run proved nothing, whether it was red, and the first
+    // error line of a red run. `complete` 1 marks a row written with all of that; an older row
+    // has 0 and is worked out again when a comparison needs it. And the base-red wait of a task
+    // (one row per task), so that a restarted daemon finds the wait again. Additive.
+    "ALTER TABLE baselines ADD COLUMN build_error TEXT NOT NULL DEFAULT '';
+     ALTER TABLE baselines ADD COLUMN vacuous INTEGER NOT NULL DEFAULT 0;
+     ALTER TABLE baselines ADD COLUMN red INTEGER NOT NULL DEFAULT 0;
+     ALTER TABLE baselines ADD COLUMN first_error TEXT NOT NULL DEFAULT '';
+     ALTER TABLE baselines ADD COLUMN complete INTEGER NOT NULL DEFAULT 0;
+     CREATE TABLE base_red (
+         task       INTEGER PRIMARY KEY,
+         suite      TEXT NOT NULL,
+         kind       TEXT NOT NULL,
+         first_error TEXT NOT NULL,
+         base       TEXT NOT NULL,
+         text       TEXT NOT NULL,
+         at_ms      INTEGER NOT NULL
+     );",
 ];
 
 pub const SCHEMA_VERSION: u32 = STEPS.len() as u32;

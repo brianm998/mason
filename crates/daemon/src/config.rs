@@ -67,6 +67,9 @@ pub struct DaemonConfig {
     /// How long a suite waits before trying again after an environmental
     /// failure (no device, the stack would not come up). Charged to no task.
     pub env_retry: Duration,
+    /// How often a task waiting because the base is red the same way looks at whether the base
+    /// branch has moved (s246).
+    pub base_red_poll: Duration,
     /// Identities whose answers count (Part 10). Default: the user running the
     /// daemon.
     pub owner_names: Vec<String>,
@@ -342,6 +345,7 @@ impl DaemonConfig {
             speech_timeout: Duration::from_secs(30),
             attention_interval: Duration::from_secs(5),
             env_retry: Duration::from_secs(30),
+            base_red_poll: Duration::from_secs(60),
             runtime_sha: None,
             exec_args: vec![],
             healthy_after: Duration::from_secs(30),
