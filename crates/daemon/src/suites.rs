@@ -192,6 +192,53 @@ pub fn needs_for(
     n
 }
 
+/// The files a suite's `results_file` names under `cwd`: the path itself, or, when its last
+/// segment has a wildcard (`build/test-results/test/*.xml`, one file per test class as
+/// Gradle writes them), the matching files in that directory, sorted (s286). A wildcard in
+/// an earlier segment is not expanded.
+pub(crate) fn results_paths(cwd: &Path, f: &str) -> Vec<PathBuf> {
+    let (dir, name) = f.rsplit_once('/').unwrap_or(("", f));
+    if !name.contains(['*', '?']) {
+        return vec![cwd.join(f)];
+    }
+    let mut out: Vec<PathBuf> = std::fs::read_dir(cwd.join(dir))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| mason_testing::glob::matches(name, &e.file_name().to_string_lossy()))
+        .map(|e| e.path())
+        .filter(|p| p.is_file())
+        .collect();
+    out.sort();
+    out
+}
+
+/// A suite's results, read before it judges them: every file `results_file` names, one
+/// after another (the parsers read test cases from the text, so several files read as one).
+pub(crate) fn read_results(cwd: &Path, f: &str) -> std::io::Result<String> {
+    let paths = results_paths(cwd, f);
+    if paths.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "no file matches",
+        ));
+    }
+    let mut text = String::new();
+    for p in paths {
+        text.push_str(&crate::jobs::read_lossy(&p)?);
+        text.push('\n');
+    }
+    Ok(text)
+}
+
+/// Remove a suite's results before it runs, so a run that writes none is not judged on the
+/// last run's (and a tool that skips an up-to-date task runs it again).
+pub(crate) fn remove_results(cwd: &Path, f: &str) {
+    for p in results_paths(cwd, f) {
+        let _ = std::fs::remove_file(p);
+    }
+}
+
 const PROJECT_TEST: &str = "{project_test}";
 
 /// Whether any of the suite's commands names `{project_test}`.
@@ -281,7 +328,7 @@ fn run_hosted(
     // A progress file left by an earlier attempt says nothing about this one.
     if !hosts.join(id).join("host.kv").exists() && !hosts.join(&again_id).join("host.kv").exists() {
         if let Some(f) = watch.and_then(|w| w.progress.as_ref()) {
-            let _ = std::fs::remove_file(cwd.join(f));
+            remove_results(cwd, f);
         }
     }
     if hosts.join(&again_id).join("host.kv").exists() {
@@ -541,7 +588,7 @@ fn judge_ran(suite: &Suite, ran: &Ran, cwd: &Path) -> Judged {
         };
     }
     let text = match &suite.results_file {
-        Some(f) => match crate::jobs::read_lossy(&cwd.join(f)) {
+        Some(f) => match read_results(cwd, f) {
             Ok(t) => t,
             Err(e) => {
                 return Judged {
@@ -837,7 +884,7 @@ fn baseline(
     let outcome = (|| {
         env_up(who, def, suite, &wt, dev).ok()?;
         if let Some(f) = &suite.results_file {
-            let _ = std::fs::remove_file(wt.join(f));
+            remove_results(&wt, f);
         }
         let id = format!("{}-b-{}", who.id_prefix, suite.name);
         let ran = run_hosted(
@@ -962,7 +1009,7 @@ fn run_suite(
             Stop::No => {}
         }
         if let Some(f) = &suite.results_file {
-            let _ = std::fs::remove_file(cwd.join(f));
+            remove_results(cwd, f);
         }
         let environmental = |why: String,
                              advice: String,
@@ -1374,7 +1421,7 @@ fn rerun_failing(
     };
     let cmd = crate::jobs::pty_wrap(suite.pty, &lifecycle::with_device(&cmd, dev_id(dev)));
     if let Some(f) = &suite.results_file {
-        let _ = std::fs::remove_file(cwd.join(f));
+        remove_results(cwd, f);
     }
     let id = if attempt == 0 {
         format!("{}-r-{}", who.id_prefix, suite.name)
@@ -2075,7 +2122,7 @@ fn run_new_tests_at_base(
         }
         env_up(who, &c.def, suite, &wt, dev).ok()?;
         if let Some(f) = &suite.results_file {
-            let _ = std::fs::remove_file(wt.join(f));
+            remove_results(&wt, f);
         }
         let ran = run_hosted(
             &c.d,
@@ -2564,5 +2611,43 @@ mod lossy_tests {
             Verdict::Red { why, .. } => assert_eq!(why, "stalled: no output or CPU for 30 min"),
             v => panic!("{v:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod results_file_tests {
+    use super::*;
+
+    #[test]
+    fn a_wildcard_results_file_reads_every_matching_file_and_a_plain_one_reads_itself() {
+        // On 2026-11-14 star's test-desktop (`star-desktop/build/test-results/test/*.xml`)
+        // had never been green: the pattern was opened as a file name.
+        let dir = tempfile::tempdir().unwrap();
+        let res = dir.path().join("build/test-results/test");
+        std::fs::create_dir_all(&res).unwrap();
+        std::fs::write(res.join("TEST-b.xml"), "<testcase name=\"b\"/>").unwrap();
+        std::fs::write(res.join("TEST-a.xml"), "<testcase name=\"a\"/>").unwrap();
+        std::fs::write(res.join("output.bin"), "not results").unwrap();
+        let pattern = "build/test-results/test/*.xml";
+        let paths = results_paths(dir.path(), pattern);
+        assert_eq!(paths, vec![res.join("TEST-a.xml"), res.join("TEST-b.xml")]);
+        let text = read_results(dir.path(), pattern).unwrap();
+        assert!(
+            text.contains("name=\"a\"") && text.contains("name=\"b\""),
+            "{text}"
+        );
+        assert!(!text.contains("not results"));
+        // A plain path is the file itself, read as before.
+        assert_eq!(
+            read_results(dir.path(), "build/test-results/test/TEST-a.xml").unwrap(),
+            "<testcase name=\"a\"/>\n"
+        );
+        // Removing before a run takes every match and leaves the rest.
+        remove_results(dir.path(), pattern);
+        assert!(results_paths(dir.path(), pattern).is_empty());
+        assert!(res.join("output.bin").exists());
+        // No match reads as "not written", as a missing plain file does.
+        assert!(read_results(dir.path(), pattern).is_err());
+        assert!(read_results(dir.path(), "missing.xml").is_err());
     }
 }

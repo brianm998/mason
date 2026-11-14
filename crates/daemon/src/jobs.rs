@@ -1282,6 +1282,49 @@ fn tempfile_path() -> PathBuf {
 
 /// Read a text file, replacing bytes that are not valid UTF-8 with U+FFFD.
 /// A missing or unreadable file is an error, as with `read_to_string`.
+/// The most of a diff a review prompt carries; past it the reviewer is told to read the files.
+const REVIEW_DIFF_MAX: usize = 60_000;
+
+/// The change a review checks, written into its prompt. A review step is read-only (Read,
+/// Grep and Glob, no shell), so it cannot run `git diff` itself; on 2026-11-14 two reviews of
+/// star #255 refused for that reason and one of #305 approved without seeing the change (s287).
+pub(crate) fn review_diff_block(wt: &Path, base_ref: &str) -> String {
+    let range = format!("{base_ref}...HEAD");
+    let stat = git::run(wt, &["diff", "--stat", &range]);
+    let diff = git::run(wt, &["diff", &range]);
+    let (Ok(stat), Ok(diff)) = (stat, diff) else {
+        return format!(
+            "The change could not be read with `git diff {range}`; review the files the plan names, \
+             and say in your summary that you could not see the diff."
+        );
+    };
+    if diff.trim().is_empty() {
+        return format!(
+            "`git diff {range}` is empty: the branch changes nothing against the base."
+        );
+    }
+    let (shown, note) = if diff.len() > REVIEW_DIFF_MAX {
+        let mut end = REVIEW_DIFF_MAX;
+        while !diff.is_char_boundary(end) {
+            end -= 1;
+        }
+        (
+            &diff[..end],
+            format!(
+                "\nThe diff is {} bytes; the first {end} follow. Read the files listed above for the rest.",
+                diff.len()
+            ),
+        )
+    } else {
+        (diff.as_str(), String::new())
+    };
+    format!(
+        "This step has no shell, so here is the change (`git diff {range}`):\n\n```\n{}\n```{note}\n\n```diff\n{}\n```",
+        stat.trim_end(),
+        shown.trim_end()
+    )
+}
+
 pub fn read_lossy(path: &Path) -> std::io::Result<String> {
     Ok(String::from_utf8_lossy(&std::fs::read(path)?).into_owned())
 }
@@ -2366,7 +2409,10 @@ fn agent_job(c: &Ctx) {
     // The numbers MASON reserved for this task (a task claimed before numbers existed gets
     // them now), stated as facts in every explore and develop prompt.
     let prompt = if kind == StepKind::Review {
-        prompt
+        format!(
+            "{prompt}\n\n{}",
+            review_diff_block(&c.wt, &c.project.base_ref())
+        )
     } else {
         // A base that cannot be read right now is waited for; it must not look like
         // a base with no numbered files.
@@ -4290,5 +4336,77 @@ mod signaled_tests {
         assert!(!cli_was_signaled(
             "the CLI exited with status 2 and no result; stderr: boom"
         ));
+    }
+}
+
+#[cfg(test)]
+mod review_diff_tests {
+    use super::*;
+
+    fn git(cwd: &Path, args: &[&str]) {
+        git::run(cwd, args).unwrap_or_else(|e| panic!("git {args:?}: {e}"));
+    }
+
+    #[test]
+    fn a_review_prompt_carries_the_change_and_cuts_a_long_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let wt = dir.path();
+        git(wt, &["init", "-q", "-b", "main"]);
+        std::fs::write(wt.join("README"), "base\n").unwrap();
+        git(wt, &["add", "-A"]);
+        git(
+            wt,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-qm",
+                "base",
+            ],
+        );
+        git(wt, &["checkout", "-q", "-b", "task"]);
+        // Nothing changed yet: the reviewer is told so.
+        assert!(review_diff_block(wt, "main").contains("is empty"));
+        std::fs::write(wt.join("hello.txt"), "hello reviewer\n").unwrap();
+        git(wt, &["add", "-A"]);
+        git(
+            wt,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-qm",
+                "change",
+            ],
+        );
+        let block = review_diff_block(wt, "main");
+        assert!(block.contains("git diff main...HEAD"), "{block}");
+        assert!(block.contains("hello.txt | 1 +"), "{block}");
+        assert!(block.contains("+hello reviewer"), "{block}");
+        assert!(!block.contains("first"), "a short diff is whole: {block}");
+        // A diff past the limit is cut, and the reviewer is told where the rest is.
+        std::fs::write(wt.join("big.txt"), "x".repeat(REVIEW_DIFF_MAX * 2)).unwrap();
+        git(wt, &["add", "-A"]);
+        git(
+            wt,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-qm",
+                "big",
+            ],
+        );
+        let block = review_diff_block(wt, "main");
+        assert!(block.len() < REVIEW_DIFF_MAX + 2_000, "{}", block.len());
+        assert!(block.contains("big.txt") && block.contains("Read the files listed above"));
+        // A base that does not exist is said plainly, not shown as an empty change.
+        assert!(review_diff_block(wt, "nope").contains("could not be read"));
     }
 }

@@ -106,7 +106,7 @@ fn profile(
         let out = (|| {
             env_up(&who, &c.def, suite, &wt, dev.as_ref()).ok()?;
             if let Some(f) = &suite.results_file {
-                let _ = std::fs::remove_file(wt.join(f));
+                super::remove_results(&wt, f);
             }
             let ran = run_hosted(
                 &who.d,
