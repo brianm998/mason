@@ -53,17 +53,18 @@ max_rounds = 3
 on_red = "develop"
 next = "land"
 
-# The workspace's tests: cargo's own lines, one test each (doc tests included). `command` and
-# `dev_command` run the test executables four at a time (scripts/test-parallel.py, s248; the ones in
-# .mason/serial-tests.txt alone afterwards); `rerun` names a few tests and stays plain cargo.
+# The workspace's tests: cargo's own lines, one test each (doc tests included). The commands run
+# the executables one after another. scripts/test-parallel.py (s248) can run them side by side:
+# point `command` and `dev_command` at `python3 -I scripts/test-parallel.py -- {project_test}` (and
+# `{packages}`) and set MASON_TEST_JOBS if the machine has headroom; decision 0243 says why it is off.
 [suite.cargo-workspace]
 build = "{project_test} --no-run"
-command = "python3 -I scripts/test-parallel.py -- {project_test}"
+command = "{project_test}"
 rerun = "{project_test} {tests}"
 # `run_check` while developing, asked for with `changed: true`: only the crates the diff touches
 # and their dependents. The test step runs `command` whole (decision 0205). Enabled by the owner
 # on 2026-11-13, once the running daemon knew the keys (s210, #265).
-dev_command = "python3 -I scripts/test-parallel.py -- {project_test} {packages}"
+dev_command = "{project_test} {packages}"
 dev_build = "{project_test} {packages} --no-run"
 parser = "regex"
 pass_regex = '^test (.+) \.\.\. ok$'
