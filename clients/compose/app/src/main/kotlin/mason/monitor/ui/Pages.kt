@@ -283,8 +283,9 @@ private fun TaskDetail(model: MonitorModel, d: TaskDetailView) {
         Text(cpuTaskLine(d.cpu_permille), style = theme.body(color = theme.muted), modifier = Modifier.testTag("cpu"))
         Row(horizontalArrangement = Arrangement.spacedBy(theme.spacingLarge)) {
             CopyButton(r.key, r.key)
-            if (d.branch.isNotEmpty()) CopyButton("branch", d.branch)
-            if (d.worktree.isNotEmpty()) CopyButton("worktree", d.worktree)
+            CopyTarget.detail(d.branch, d.worktree).forEach { t ->
+                CopyValueButton(t) { (model.copier ?: ::copyToClipboard)(it) }
+            }
         }
     }
     }

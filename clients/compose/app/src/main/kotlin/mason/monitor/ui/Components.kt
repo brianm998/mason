@@ -309,6 +309,44 @@ fun CopyButton(label: String, value: String) {
     Text("⧉ $label", style = theme.small(), modifier = Modifier.clickable { copyToClipboard(value) })
 }
 
+/** One labelled copy button on the task detail page. */
+data class CopyTarget(val label: String, val value: String) {
+    /** What the button reads: its label, or "Copied" for a moment after a click. */
+    fun shown(copied: Boolean): String = if (copied) "Copied" else label
+
+    companion object {
+        /** Branch name then worktree, each only when the daemon sent a value. */
+        fun detail(branch: String, worktree: String): List<CopyTarget> = buildList {
+            if (branch.isNotEmpty()) add(CopyTarget("Copy branch name", branch))
+            if (worktree.isNotEmpty()) add(CopyTarget("Copy worktree", worktree))
+        }
+    }
+}
+
+/** A bordered, labelled button that copies its value and says "Copied" for a moment. */
+@Composable
+fun CopyValueButton(target: CopyTarget, copy: (String) -> Unit) {
+    val theme = LocalTheme.current
+    var copied by remember { mutableStateOf(false) }
+    LaunchedEffect(copied) {
+        if (copied) {
+            kotlinx.coroutines.delay(1500)
+            copied = false
+        }
+    }
+    val shape = RoundedCornerShape(theme.radius)
+    Row(
+        modifier = Modifier
+            .testTag("copy:${target.label}")
+            .border(BorderStroke(1.dp, theme.border), shape)
+            .clickable { copy(target.value); copied = true }
+            .padding(horizontal = theme.spacing, vertical = theme.spacingSmall),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text("⧉ ${target.shown(copied)}", style = theme.small())
+    }
+}
+
 /**
  * The decision card (Part 10): the ask, why only the owner can settle it, 2 to 4 options
  * with one recommended, "Other" with a text box, and the evidence. An answer carries the
