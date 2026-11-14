@@ -487,7 +487,13 @@ fn apply(w: &mut World, k: &EventKind, fx: &mut Vec<Effect>) -> Result<(), Reduc
             delete_branch,
         } => {
             let from = get(w, *task)?.state;
-            if !(matches!(from, S::Proposed | S::Queued | S::NeedsAttention) || from.is_step()) {
+            // Failed is not terminal, so it can be canceled like any other non-terminal state
+            // (s337): a task made obsolete while it sat failed is closed, not left failed.
+            if !(matches!(
+                from,
+                S::Proposed | S::Queued | S::NeedsAttention | S::Failed
+            ) || from.is_step())
+            {
                 return Err(illegal(from, k));
             }
             wind_down(w, *task, StepOutcome::Canceled, fx);
