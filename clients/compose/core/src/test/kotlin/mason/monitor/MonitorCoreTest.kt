@@ -374,6 +374,31 @@ class MonitorCoreTest {
         assertEquals(1, sent[5].set_limit?.units, "the stepper never asks for zero compiles")
     }
 
+    @Test fun theCpuGateStepperSendsASetGateAndStaysWithinTenToAHundred() {
+        val m = MonitorModel()
+        val sent = mutableListOf<Command>()
+        m.sender = { sent += it }
+        m.setCompileCpuGate(70 + 5)
+        m.setCompileCpuGate(0)
+        m.setCompileCpuGate(500)
+        m.setCompileSettle(-5)
+        assertEquals("compile_cpu_max", sent[0].set_gate?.name)
+        assertEquals(75L, sent[0].set_gate?.value_)
+        assertEquals(false, sent[0].set_gate?.reset)
+        assertEquals(10L, sent[1].set_gate?.value_, "never below 10")
+        assertEquals(100L, sent[2].set_gate?.value_, "never above 100")
+        assertEquals("compile_settle_s", sent[3].set_gate?.name)
+        assertEquals(0L, sent[3].set_gate?.value_)
+    }
+
+    @Test fun aRefusedGateShowsInLastResult() {
+        val (m, sent) = ownerModel()
+        m.setCompileCpuGate(75)
+        assertEquals(75L, sent[0].set_gate!!.value_)
+        m.apply(ServerMessage(result = CommandResult(id = "m1", ok = false, status = 403, error = "only the owner can change a compile gate")))
+        assertEquals("only the owner can change a compile gate", m.lastResult)
+    }
+
     // ---- what the client shows (the conformance items) ----
 
     @Test fun visibleItemsFollowWhatTheViewsSayAndTheCollapseState() {
@@ -415,7 +440,7 @@ class MonitorCoreTest {
     private fun owner(role: String = "", owner: Boolean = true) =
         ServerMessage(welcome = Welcome(protocol = 1, resume = ResumeKind.UP_TO_DATE, min_protocol = 1, owner = owner, role = role))
 
-    private fun update(latest: String, phase: String = "", path: String = "", error: String = "", daemon: String = "", canUpdate: Boolean = false) =
+    private fun update(latest: String, phase: String = "", path: String = "", error: String = "", daemon: String = "", canUpdate: Boolean = false, button: String = "", confirm: String = "") =
         ServerMessage(
             view = ViewUpdate(
                 view = View(
@@ -423,6 +448,8 @@ class MonitorCoreTest {
                         update = UpdateInfo(
                             daemon_text = daemon,
                             daemon_can_update = canUpdate,
+                            daemon_button = button,
+                            daemon_confirm = confirm,
                             monitors = listOf(
                                 MonitorBuild(kind = "swift", latest = "other"),
                                 MonitorBuild(kind = "compose", latest = latest, phase = phase, path = path, error = error),
@@ -477,6 +504,31 @@ class MonitorCoreTest {
         m.updateDaemon()
         assertEquals("POST", sent.last().raw?.method)
         assertEquals("/update", sent.last().raw?.path)
+    }
+
+    @Test fun theDaemonButtonFollowsTheDaemonsWordsAndAsksBeforeUpdatingNow() {
+        val m = MonitorModel()
+        val sent = mutableListOf<Command>()
+        m.sender = { sent.add(it) }
+        m.apply(owner())
+        m.apply(update("x", daemon = "behind", canUpdate = true))
+        assertEquals("Update masond", m.daemonUpdateButton)
+        m.apply(update("x", daemon = "waiting", canUpdate = true, button = "Update now", confirm = "Abandons star #142."))
+        assertEquals("Update now", m.daemonUpdateButton)
+        assertEquals("Abandons star #142.", m.daemonUpdateConfirm)
+        val before = sent.size
+        m.pressUpdateDaemon()
+        assertTrue(m.confirmingDaemonUpdate)
+        assertEquals(before, sent.size)
+        m.cancelDaemonUpdate()
+        assertFalse(m.confirmingDaemonUpdate)
+        assertEquals(before, sent.size)
+        m.pressUpdateDaemon()
+        m.confirmDaemonUpdate()
+        assertEquals("/update/now", sent.last().raw?.path)
+        assertEquals("update-daemon", sent.last().id)
+        m.apply(result("update-daemon", false, "no update is waiting"))
+        assertEquals("no update is waiting", m.updateError)
     }
 
     @Test fun theMonitorButtonFollowsTheBuildAndInstallsItOnce() {
@@ -842,6 +894,7 @@ class MonitorCoreTest {
         waitFor("a socket") { r.sockets.size == 1 }
         r.sockets[0].events.onMessage(welcome)
         waitFor("connected") { r.model.connected }
+        waitFor("a ping") { r.sockets[0].sent.any { it.contains("ping") } }
         waitFor("a second socket") { r.sockets.size == 2 }
         assertTrue(r.sockets[0].closed)
         assertTrue(r.sockets[0].sent.any { it.contains("ping") }, "it asked before giving up")

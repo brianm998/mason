@@ -227,13 +227,23 @@ impl FailClass {
         }
     }
 
-    /// Classify the failure of a step of `state` with this `reason`. Landing's
-    /// "could not land" verdict (push, fetch, auth, CI service, services unusable) and
-    /// a lost command host are not about the code; everything else is.
+    /// Classify the failure of a step of `state` with this `reason`. A failure that is not about
+    /// the code is `Outside`: landing's "could not land" verdict (push, fetch, auth, CI service,
+    /// services unusable), a lost command, a lost or never-started step host, a fetch that timed
+    /// out, an agent CLI that exited with no result. Red rounds, weakenings, conflicts and agent
+    /// submissions are about the code, as is anything this does not name.
     pub fn classify(state: State, reason: &str) -> FailClass {
-        if (state == State::Landing && reason.starts_with("landing failed: "))
-            || reason.contains("the command was lost")
-        {
+        let r = reason;
+        let outside = (state == State::Landing && r.starts_with("landing failed: "))
+            || r.contains("the command was lost")
+            || r.contains("the step host was lost")
+            || r.contains("step host did not start")
+            || r.starts_with("fetching the remote failed")
+            || (r.contains("git fetch") && r.contains("timed out"))
+            || (r.starts_with("the agent failed: the CLI exited with status")
+                && r.contains("and no result"))
+            || (r.contains("mason/ci/") && (r.contains("push") || r.contains("refused")));
+        if outside {
             FailClass::Outside
         } else {
             FailClass::Code
@@ -260,6 +270,36 @@ mod fail_class_tests {
             FailClass::classify(State::Testing, "the command was lost (its host died)"),
             FailClass::Outside
         );
+        // The reasons the event log records for failures outside the code (s247).
+        for outside in [
+            "fetching the remote failed (git fetch --prune origin timed out after 120s) and there is no last-known origin/develop to work from",
+            "the step host was lost 3 times",
+            "the agent failed: the step host was lost before the agent finished",
+            "could not start the step: Spawn(TimedOut) step host did not start within 30s",
+            "the agent failed: the CLI exited with status 1 and no result",
+            "could not push mason/ci/t12 to origin: refused",
+        ] {
+            assert_eq!(
+                FailClass::classify(State::Developing, outside),
+                FailClass::Outside,
+                "{outside}"
+            );
+        }
+        // And what stays about the code, whatever step it came from.
+        for code in [
+            "still red after 3 rounds",
+            "suite `x` is red",
+            "the branch conflicts with origin/develop in: a.rs; still conflicting with the base after 3 merges",
+            "the change weakens assertions and does not say so",
+            "the agent failed: the agent submitted nothing",
+            "the agent failed: the CLI exited with status 1 and said: rate limited",
+        ] {
+            assert_eq!(
+                FailClass::classify(State::Testing, code),
+                FailClass::Code,
+                "{code}"
+            );
+        }
         assert_eq!(FailClass::parse("outside"), Some(FailClass::Outside));
         assert_eq!(FailClass::parse("x"), None);
     }

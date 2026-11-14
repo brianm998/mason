@@ -98,6 +98,10 @@ fn task_json(d: &Daemon, w: &World, t: &Task, detail: bool) -> Value {
     });
     if t.state == State::Failed {
         v["retry_to"] = json!(retry_default(&task_def(d, t), t));
+        if let Some((done, next)) = crate::autoretry::status(d, t) {
+            v["auto_retries"] = json!(done);
+            v["next_auto_retry_ms"] = json!(next);
+        }
     }
     if detail {
         v["body"] = json!(t.body);
@@ -699,93 +703,115 @@ pub fn latest_run(w: &World, id: TaskId) -> u64 {
 /// Check and emit happen under this, so two retries sent together cannot both pass.
 static RETRY_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// How a retry asks: where to, which run the caller saw, and whether the daemon itself asks.
+#[derive(Default, Clone)]
+pub struct RetryAsk {
+    pub to: Option<String>,
+    pub seen: Option<u64>,
+    pub restart: bool,
+    /// The daemon retries a failure outside the code by itself (s247).
+    pub auto: bool,
+}
+
+/// Re-enter a step of a task. The one place a `Retried` event is made: the HTTP endpoint and the
+/// automatic retry both come here, so both have the same guard against a retry that was already
+/// done (`seen`) and the same check-and-emit under one lock.
+pub fn retry_task(
+    d: &Arc<Daemon>,
+    id: u64,
+    ask: RetryAsk,
+) -> Result<(State, String), (StatusCode, Json<Value>)> {
+    let _gate = RETRY_GATE.lock().unwrap_or_else(|e| e.into_inner());
+    let w = d.world().map_err(store_err)?;
+    let t = w
+        .tasks
+        .get(&TaskId(id))
+        .ok_or_else(|| fail(StatusCode::NOT_FOUND, format!("no task #{id}")))?;
+    let latest = latest_run(&w, TaskId(id));
+    if let Some(seen) = ask.seen {
+        if seen != latest {
+            let now = if t.state.is_step() {
+                "running".to_string()
+            } else {
+                state_name(t.state).to_string()
+            };
+            return Err(fail(
+                StatusCode::CONFLICT,
+                format!("already retried (run {latest} is {now})"),
+            ));
+        }
+    } else if t.state.is_step() && !ask.restart {
+        return Err(fail(
+            StatusCode::CONFLICT,
+            format!(
+                "task #{id} is not failed (run {latest} is running); send \"restart\": true (`--restart`) to restart the step"
+            ),
+        ));
+    }
+    let pinned = task_def(d, t);
+    // A retry starts the task over from an earlier step, so it runs the
+    // project's definition as it is now (decision 0206), if that has the step.
+    let cur = d.current_def(t.project);
+    // `to` is a step in the definition, or a category (the first step in it).
+    let resolve = |def: &Definition| {
+        let name = ask.to.clone().unwrap_or_else(|| retry_default(def, t));
+        let found = match def.step(&name) {
+            Some(s) => Some((s.category, s.name.clone())),
+            None => parse_state(&name).and_then(|c| def.first_in(c).map(|s| (c, s.name.clone()))),
+        };
+        (name, found)
+    };
+    let (name, found) = match resolve(&cur) {
+        (n, Some(f)) => {
+            d.repin_to(TaskId(id), None, &cur);
+            (n, Some(f))
+        }
+        _ => resolve(&pinned),
+    };
+    let def = pinned;
+    let (to, step) = found.ok_or_else(|| {
+        let names: Vec<&str> = def.steps.iter().map(|s| s.name.as_str()).collect();
+        fail(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "unknown step {name:?}; this task's steps are {}",
+                names.join(", ")
+            ),
+        )
+    })?;
+    d.emit(EventKind::Retried {
+        task: TaskId(id),
+        to,
+        step: step.clone(),
+        auto: ask.auto,
+    })
+    .map_err(store_err)?;
+    Ok((to, step))
+}
+
 async fn retry(
     Shared(d): Shared<Arc<Daemon>>,
     Path(id): Path<u64>,
     body: Option<Json<Value>>,
 ) -> Res {
-    let want = body
-        .as_ref()
-        .and_then(|b| b["to"].as_str())
-        .map(String::from);
-    let seen = body.as_ref().and_then(|b| b["seen"].as_u64());
-    let restart = body
-        .as_ref()
-        .and_then(|b| b["restart"].as_bool())
-        .unwrap_or(false);
+    let ask = RetryAsk {
+        to: body
+            .as_ref()
+            .and_then(|b| b["to"].as_str())
+            .map(String::from),
+        seen: body.as_ref().and_then(|b| b["seen"].as_u64()),
+        restart: body
+            .as_ref()
+            .and_then(|b| b["restart"].as_bool())
+            .unwrap_or(false),
+        auto: false,
+    };
     let d2 = d.clone();
-    let (to, step) =
-        d.pool
-            .run(move || {
-                let _gate = RETRY_GATE.lock().unwrap_or_else(|e| e.into_inner());
-                let w = d2.world().map_err(store_err)?;
-                let t = w
-                    .tasks
-                    .get(&TaskId(id))
-                    .ok_or_else(|| fail(StatusCode::NOT_FOUND, format!("no task #{id}")))?;
-                let latest = latest_run(&w, TaskId(id));
-                if let Some(seen) = seen {
-                    if seen != latest {
-                        let now = if t.state.is_step() {
-                            "running".to_string()
-                        } else {
-                            state_name(t.state).to_string()
-                        };
-                        return Err(fail(
-                            StatusCode::CONFLICT,
-                            format!("already retried (run {latest} is {now})"),
-                        ));
-                    }
-                } else if t.state.is_step() && !restart {
-                    return Err(fail(
-                        StatusCode::CONFLICT,
-                        format!(
-                            "task #{id} is not failed (run {latest} is running); send \"restart\": true (`--restart`) to restart the step"
-                        ),
-                    ));
-                }
-                let pinned = task_def(&d2, t);
-                // A retry starts the task over from an earlier step, so it runs the
-                // project's definition as it is now (decision 0206), if that has the step.
-                let cur = d2.current_def(t.project);
-                // `to` is a step in the definition, or a category (the first step in it).
-                let resolve = |def: &Definition| {
-                    let name = want.clone().unwrap_or_else(|| retry_default(def, t));
-                    let found = match def.step(&name) {
-                        Some(s) => Some((s.category, s.name.clone())),
-                        None => parse_state(&name)
-                            .and_then(|c| def.first_in(c).map(|s| (c, s.name.clone()))),
-                    };
-                    (name, found)
-                };
-                let (name, found) = match resolve(&cur) {
-                    (n, Some(f)) => {
-                        d2.repin_to(TaskId(id), None, &cur);
-                        (n, Some(f))
-                    }
-                    _ => resolve(&pinned),
-                };
-                let def = pinned;
-                let (to, step) = found.ok_or_else(|| {
-                    let names: Vec<&str> = def.steps.iter().map(|s| s.name.as_str()).collect();
-                    fail(
-                        StatusCode::BAD_REQUEST,
-                        format!(
-                            "unknown step {name:?}; this task's steps are {}",
-                            names.join(", ")
-                        ),
-                    )
-                })?;
-                d2.emit(EventKind::Retried {
-                    task: TaskId(id),
-                    to,
-                    step: step.clone(),
-                })
-                .map_err(store_err)?;
-                Ok::<_, (StatusCode, Json<Value>)>((to, step))
-            })
-            .await
-            .map_err(pool_err)??;
+    let (to, step) = d
+        .pool
+        .run(move || retry_task(&d2, id, ask))
+        .await
+        .map_err(pool_err)??;
     Ok(Json(
         json!({"ok": true, "to": state_name(to), "step": step}),
     ))
@@ -1457,6 +1483,8 @@ fn override_kind(path: &str) -> Option<(&'static str, Option<u64>)> {
             Some((kind, id.parse().ok()))
         }
         ["pause"] => Some(("pause", None)),
+        ["update", "now"] => Some(("update_now", None)),
+        ["resources", "gate"] => Some(("gate", None)),
         ["resume"] => Some(("resume", None)),
         ["projects", _, "overrides"] => Some(("override", None)),
         _ => None,
@@ -1566,7 +1594,9 @@ async fn update_status(Shared(d): Shared<Arc<Daemon>>) -> Res {
             let rt = crate::update::Runtimes::new(&d2.cfg.data_dir);
             let s = d2.update_status.lock().unwrap_or_else(|e| e.into_inner()).clone();
             let c = d2.update_check.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            let (waiting, daemon_button, daemon_confirm) = crate::update::wait_view(&s, c.outdated);
             json!({
+                "waiting": waiting, "daemon_button": daemon_button, "daemon_confirm": daemon_confirm,
                 "latest": c.latest, "behind": c.behind, "outdated": c.outdated,
                 "checked_at_ms": c.at_ms, "check_error": c.error,
                 "running": d2.cfg.runtime_sha,
@@ -1597,7 +1627,36 @@ async fn monitor_update_start(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Valu
     Ok(Json(json!({"started": true})))
 }
 
-async fn update_start(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res {
+/// The owner's "Update now": an update waiting for landing batches stops waiting and takes
+/// over. 409 when no update is waiting.
+async fn update_now(Shared(d): Shared<Arc<Daemon>>) -> Res {
+    crate::update::update_now(&d).map_err(|e| fail(StatusCode::CONFLICT, e))?;
+    Ok(Json(json!({"taking_over": true})))
+}
+
+async fn update_start(
+    Shared(d): Shared<Arc<Daemon>>,
+    headers: axum::http::HeaderMap,
+    Json(b): Json<Value>,
+) -> Res {
+    // `now` while an update is waiting for landing batches is the same as "Update now".
+    if b["now"].as_bool().unwrap_or(false)
+        && d.update_status
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .phase
+            == "waiting for landing"
+    {
+        crate::update::update_now(&d).map_err(|e| fail(StatusCode::CONFLICT, e))?;
+        let who = who_of(&headers);
+        let who = if who.is_empty() {
+            d.cfg.owner_names.first().cloned().unwrap_or_default()
+        } else {
+            who
+        };
+        crate::attention::intervene(&d, "update_now", None, &who, "/update", "");
+        return Ok(Json(json!({"started": false, "taking_over": true})));
+    }
     let channel = match b["channel"].as_str() {
         Some(c) => {
             Some(crate::update::Channel::parse(c).map_err(|e| fail(StatusCode::BAD_REQUEST, e))?)
@@ -2654,6 +2713,45 @@ async fn resource_limit(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) ->
     Ok(Json(json!({"ok": true})))
 }
 
+/// Change a compile gate while masond runs (`value: null` goes back to resources.toml).
+/// Owner only. Kept across restarts.
+async fn resource_gate(
+    Shared(d): Shared<Arc<Daemon>>,
+    headers: axum::http::HeaderMap,
+    Json(b): Json<Value>,
+) -> Res {
+    owner_only(&d, &who_of(&headers), "change a compile gate")?;
+    let name = b["name"].as_str().unwrap_or_default().to_string();
+    let value = match &b["value"] {
+        Value::Null => None,
+        v => match v.as_i64() {
+            Some(n) => Some(n),
+            None => {
+                return Err(fail(
+                    StatusCode::BAD_REQUEST,
+                    "`value` must be a whole number, or null to go back to resources.toml",
+                ))
+            }
+        },
+    };
+    if name.is_empty() {
+        return Err(fail(StatusCode::BAD_REQUEST, "give a gate `name`"));
+    }
+    let d2 = d.clone();
+    d.pool
+        .run(move || {
+            let r = d2.broker.set_gate(&name, value);
+            // A looser gate may free a session for a task that is queued.
+            d2.admit();
+            d2.poke();
+            r
+        })
+        .await
+        .map_err(pool_err)?
+        .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
+    Ok(Json(json!({"ok": true})))
+}
+
 /// An interactive caller asks for resources (`mason run --needs`).
 async fn lease_open(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res {
     let mut uses = std::collections::BTreeMap::new();
@@ -2817,10 +2915,9 @@ fn render_agent(text: &str) -> String {
 pub type LogStamp = (String, u64, Option<std::time::SystemTime>);
 
 pub fn log_signature(d: &Daemon, task: u64) -> Vec<LogStamp> {
-    let reg = mason_step_host::registry::Registry::new(d.cfg.hosts_dir());
-    let mut v: Vec<LogStamp> = reg
-        .scan()
-        .unwrap_or_default()
+    // Same hosts as `render_logs` (live and moved), found by directory name: no other
+    // task's host is opened.
+    let mut v: Vec<LogStamp> = crate::hostarchive::task_hosts(&d.cfg, task)
         .into_iter()
         .filter(|h| crate::sweep::parse_host_id(&h.info.id).is_some_and(|(t, _)| t == task))
         .map(|h| {
@@ -3130,6 +3227,7 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/hooks/github", post(github_hook))
         .route("/update", get(update_status).post(update_start))
         .route("/update/ack", post(update_ack))
+        .route("/update/now", post(update_now))
         .route("/update/monitor", post(monitor_update_start))
         .route("/tasks/{id}/refresh", post(refresh_tracker))
         .route("/tasks/{id}/relink", post(relink_task))
@@ -3147,6 +3245,7 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/quarantine", get(quarantine_list).post(quarantine_add))
         .route("/quarantine/remove", post(quarantine_remove))
         .route("/resources/limit", post(resource_limit))
+        .route("/resources/gate", post(resource_gate))
         .route("/leases", post(lease_open))
         .route("/leases/{id}", get(lease_poll))
         .route("/stall/waiting", get(stall_waiting))

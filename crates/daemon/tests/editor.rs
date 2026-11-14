@@ -119,7 +119,7 @@ fn where_landing_uses_pull_requests_apply_opens_one_and_changes_nothing_yet() {
         v["pull_request"]
             .as_str()
             .unwrap()
-            .starts_with("fake://pr/"),
+            .starts_with("https://fake-host.example/pr/"),
         "{v}"
     );
     assert!(

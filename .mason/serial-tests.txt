@@ -1,0 +1,13 @@
+# Test targets that scripts/test-parallel.py runs alone, after the parallel ones (s248).
+# One target name per line (the name cargo gives the test executable, e.g. `crash`).
+# Add a target here only when it fails in a parallel run and passes alone, with the reason.
+# The runner is off by default (decision 0243); this list is right if it is switched on.
+#
+# Each of these failed in the 4-way run of 2026-11-13 and passed alone on the same build.
+# They are timing and load sensitive (waits on slots, leases and stall timers) and the machine
+# was saturated; the cause was not narrowed further.
+scheduling
+holds
+wait_classes
+stallwatch
+taskcache_own

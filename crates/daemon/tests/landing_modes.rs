@@ -421,6 +421,54 @@ fn pr_batch_red_checks_go_to_the_ladder_and_a_required_approval_is_waited_for() 
     });
 }
 
+/// A red batch pull request reaches the task's detail as links: the pull request and each
+/// failed check, as http(s) URLs a client can open.
+#[test]
+fn a_red_batch_pull_request_gives_the_task_detail_ci_links() {
+    let checks = "#!/bin/sh\nn=\"$1\"\necho \"1..1\"\nif [ -n \"$(find . -name \"red.$n\" -not -path \"./.git/*\")\" ]; then\n  [ \"$n\" = integration ] && echo \"FAILED: lint\"\n  echo \"not ok 1 - $n\"; exit 1\nfi\necho \"ok 1 - $n\"\n";
+    let w = world_with(
+        &toml("pr-batch", ""),
+        &|s| {
+            format!("{}[ci]\nkind = \"command\"\ntrigger = \"true\"\nstatus = \"echo green\"\npoll_s = 1\ntimeout_s = 120\n", host_section(s, false, false))
+        },
+        &[("checks.sh", checks)],
+    );
+    let state = w.s.root.path().join("host-state");
+    std::fs::create_dir_all(&state).unwrap();
+    std::fs::write(state.join("with-jobs"), "").unwrap();
+    let _fine = w.task("fine", &[("x/ok.txt", "1")]);
+    let bad = w.task("breaks checks", &[("red.integration", "x")]);
+    wait_for("the culprit to be sent back", 120, || {
+        w.sent_back(bad).is_some()
+    });
+    let detail = {
+        let world = w.d.world().unwrap();
+        mason_daemon::views::Ctx::new(&w.d, &world)
+            .task_detail(bad.0)
+            .unwrap()
+    };
+    let pr = detail
+        .ci_links
+        .iter()
+        .find(|l| l.kind == "pull_request")
+        .unwrap_or_else(|| panic!("no pull request link: {:?}", detail.ci_links));
+    assert!(pr.label.starts_with("PR #"), "{pr:?}");
+    assert!(
+        pr.url.starts_with("https://fake-host.example/pr/"),
+        "{pr:?}"
+    );
+    let lint = detail
+        .ci_links
+        .iter()
+        .find(|l| l.kind == "check" && l.label == "lint")
+        .unwrap_or_else(|| panic!("no check link: {:?}", detail.ci_links));
+    assert!(lint.url.ends_with("/checks/lint"), "{lint:?}");
+    assert!(detail
+        .ci_links
+        .iter()
+        .all(|l| l.url.starts_with("https://") || l.url.starts_with("http://")));
+}
+
 #[test]
 fn host_queue_hands_the_pull_request_to_the_hosts_own_queue() {
     let w = pr_world("host-queue", false, true);

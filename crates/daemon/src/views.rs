@@ -898,6 +898,14 @@ impl<'a> Ctx<'a> {
         let removes = crate::landing::removals_view(&self.d.cfg.task_dir(id));
         Some(TaskDetailView {
             step_tokens: crate::usage::step_tokens(self.d, id, self.now / 1000),
+            ci_links: crate::landing::ci_links_of(&self.d.cfg.task_dir(id))
+                .into_iter()
+                .map(|l| CiLink {
+                    label: l.label,
+                    url: l.url,
+                    kind: l.kind.into(),
+                })
+                .collect(),
             cpu_permille: self
                 .d
                 .cpu_reading()

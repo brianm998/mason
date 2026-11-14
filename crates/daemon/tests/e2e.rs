@@ -466,6 +466,7 @@ fn a_retried_task_gets_its_test_rounds_again() {
         task: t,
         to: State::Testing,
         step: String::new(),
+        auto: false,
     })
     .unwrap();
     wait_state(&d, t, State::Landed, 120);
@@ -706,6 +707,7 @@ fn a_step_entered_again_with_uncommitted_work_does_not_merge_the_base_into_it() 
         task: t,
         to: State::Developing,
         step: String::new(),
+        auto: false,
     })
     .unwrap();
     wait_state(&d, t, State::Landed, 90);
@@ -730,6 +732,7 @@ fn a_failed_task_can_be_retried_and_lands() {
         task: t,
         to: State::Developing,
         step: String::new(),
+        auto: false,
     })
     .unwrap();
     wait_state(&d, t, State::Landed, 60);

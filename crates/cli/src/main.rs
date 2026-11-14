@@ -26,6 +26,7 @@
 //! mason hold --needs R[,R...] [--exclusive] --pipeline NAME --label L [--pid P]
 //! mason targets list [--json]
 //! mason cpu [--json] | mason resources [--json] | mason resources limit <resource> <units>
+//! mason resources gate <name> <value> | mason resources gate <name> --reset
 //! mason doctor
 //! mason init [--yes] [--tracker T] [--agent A] [--sessions N] [--workflow W] [--suites accept|skip] [--base B] [--landing L] [--alerts LIST|none] [--no-prove]
 //! mason adopt | mason remove [--yes]
@@ -120,6 +121,9 @@ mason: command-line client for the MASON pipeline
   mason cpu [--json]                  where the machine's CPU goes, by task (share of all cores)
   mason targets list [--json]         simulators, emulators and phones, and who has each
   mason resources limit <resource> <units>   change a limit while things run (llm:claude, compile, ...)
+  mason resources gate <name> <value>   change a compile gate while masond runs, kept across restarts (compile_cpu_max,
+                                      compile_settle_s, compile_jobs, compile_idle_kill_s, stall_ms, memory.floor_mb, disk.floor_gb)
+  mason resources gate <name> --reset   go back to resources.toml, or the default
   mason hook bash [--needs compile]   optional Claude Code PreToolUse hook: builds go through the queue
   mason definition check [FILE]       validate a definition (default .mason/mason.toml) and dry-run it
   mason definition dry-run [FILE] [--scenarios FILE]
@@ -580,6 +584,28 @@ fn main() {
                     .unwrap_or_else(|| die("give the new limit as a whole number"));
                 finish(&a);
                 resources::limit(&d, &name, units).unwrap_or_else(|e| die(&e));
+            }
+            Some("gate") => {
+                let name = a
+                    .pos()
+                    .unwrap_or_else(|| die("which gate? e.g. compile_cpu_max"));
+                let reset = a.flag("--reset");
+                let value: Option<i64> =
+                    if reset {
+                        None
+                    } else {
+                        Some(a.pos().and_then(|u| u.parse().ok()).unwrap_or_else(|| {
+                            die("give the new value as a whole number, or --reset")
+                        }))
+                    };
+                finish(&a);
+                // Changing a gate is the owner's act: say who.
+                if std::env::var("MASON_AS").is_err() {
+                    if let Ok(u) = std::env::var("USER") {
+                        std::env::set_var("MASON_AS", u);
+                    }
+                }
+                resources::gate(&d, &name, value).unwrap_or_else(|e| die(&e));
             }
             Some(other) => die(&format!("unknown resources command {other:?}\n\n{HELP}")),
         }
@@ -1644,6 +1670,10 @@ fn main() {
                             .as_str()
                             .map_or(String::new(), |e| format!(": {e}"))
                     );
+                    if let Some(w) = r["waiting"].as_str().filter(|w| !w.is_empty()) {
+                        println!("waiting   {w}");
+                        println!("          `mason update --now` takes over at once and abandons those batches");
+                    }
                 }
                 Some("ack") => {
                     finish(&a);
@@ -2618,6 +2648,22 @@ fn main() {
                         println!("  failed    {f}");
                         if let Some(to) = t["retry_to"].as_str() {
                             println!("  retry     goes to `{to}`");
+                        }
+                        if let Some(n) = t["auto_retries"].as_u64() {
+                            let next = match t["next_auto_retry_ms"].as_u64() {
+                                Some(at) => {
+                                    let now = t["progress"]["now_ms"].as_u64().unwrap_or(at);
+                                    format!(
+                                        "the next one in {}",
+                                        mason_core::progress_text::duration(at.saturating_sub(now))
+                                    )
+                                }
+                                None => "no more will be made".to_string(),
+                            };
+                            println!(
+                                "  auto      {n} automatic retr{} in the last 24 h; {next}",
+                                if n == 1 { "y" } else { "ies" }
+                            );
                         }
                     }
                     for l in t["excused"].as_array().into_iter().flatten() {

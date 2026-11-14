@@ -100,6 +100,8 @@ pub struct Daemon {
     pub(crate) landing: crate::landing::Landing,
     pub(crate) tracker: crate::tracker::Hub,
     pub update_status: Mutex<crate::update::Status>,
+    /// The owner chose "Update now" while a takeover waits for landing batches.
+    pub update_now: AtomicBool,
     /// What the last look at the update channel found.
     pub update_check: Mutex<crate::update::Check>,
     /// One fetch into the source mirror at a time.
@@ -253,7 +255,8 @@ impl Daemon {
         // A daemon whose CPU reading is injected is a test's: like the sampler, the
         // disk probe would add one set of threads per daemon, to no use.
         let measures_machine = cfg.cpu.is_none() && std::env::var_os("MASON_CPU_FILE").is_none();
-        if rcfg.disk_stall_ms > 0 && measures_machine {
+        // Started even when the gate is off, so the owner can turn it on while masond runs.
+        if measures_machine {
             broker.set_stall(
                 crate::stall::Prober::start(disk_paths.clone()),
                 rcfg.disk_stall_ms,
@@ -272,7 +275,7 @@ impl Daemon {
             store,
             registry: std::sync::RwLock::new(registry),
             pool: Pool::new("blocking", 4, 64),
-            view_pool: Pool::new("views", 2, 64),
+            view_pool: Pool::new("views", 4, 64),
             crash: Crash::from_env(),
             started: Instant::now(),
             started_ms: now_ms(),
@@ -320,6 +323,7 @@ impl Daemon {
                 phase: "idle".into(),
                 ..Default::default()
             }),
+            update_now: AtomicBool::new(false),
             update_check: Default::default(),
             update_fetch: Mutex::new(()),
             monitor_builds: Default::default(),
@@ -347,6 +351,7 @@ impl Daemon {
             d.spawn_watcher();
             crate::tracker::spawn(&d);
             crate::ci_watch::spawn(&d);
+            crate::autoretry::spawn(&d);
             crate::introspect::spawn(&d);
             crate::selfguard::on_start(&d);
         }

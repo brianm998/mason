@@ -73,6 +73,7 @@ fn events(t: TaskId, other: TaskId, decision: DecisionId) -> Vec<(&'static str, 
                 task: t,
                 to: S::Testing,
                 step: String::new(),
+                auto: false,
             },
         ),
         (

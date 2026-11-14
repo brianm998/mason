@@ -60,6 +60,7 @@ fn batch(log: &str) -> Vec<JobFailure> {
         job: "static checks".into(),
         infra: None,
         log: Some(log.into()),
+        url: None,
     }]
 }
 
