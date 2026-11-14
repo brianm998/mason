@@ -1524,6 +1524,78 @@ impl Store {
         })
     }
 
+    /// These tests of `suite` passed in a green run just now.
+    pub fn note_passing(
+        &self,
+        suite: &str,
+        tests: &[String],
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
+        let (s, t) = (suite.to_string(), tests.to_vec());
+        self.write(move |c| {
+            let tx = c.unchecked_transaction()?;
+            {
+                let mut st = tx.prepare(
+                    "INSERT INTO seen_passing(suite, test, at) VALUES (?1,?2,?3)
+                     ON CONFLICT(suite, test) DO UPDATE SET at = excluded.at",
+                )?;
+                for name in &t {
+                    st.execute(params![s, name, now_ms as i64])?;
+                }
+            }
+            tx.commit()
+        })
+    }
+
+    /// Has `suite` been seen to pass `test`, in a green run or at a base?
+    pub fn seen_passing(&self, suite: &str, test: &str) -> Result<bool, StoreError> {
+        let (s, t) = (suite.to_string(), test.to_string());
+        self.read(move |c| {
+            let green: Option<i64> = c
+                .query_row(
+                    "SELECT at FROM seen_passing WHERE suite = ?1 AND test = ?2",
+                    params![s, t],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if green.is_some() {
+                return Ok(true);
+            }
+            // A name the base listed and did not fail.
+            let mut st = c.prepare("SELECT failing, names FROM baselines WHERE suite = ?1")?;
+            let rows = st.query_map(params![s], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?;
+            for row in rows {
+                let (failing, names) = row?;
+                if names.lines().any(|n| n == t) && !failing.lines().any(|n| n == t) {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        })
+    }
+
+    /// `(suite, test, task, at_ms)` for every flake since `since_ms`.
+    pub fn flaky_tasks_since(
+        &self,
+        since_ms: u64,
+    ) -> Result<Vec<(String, String, u64, u64)>, StoreError> {
+        self.read(move |c| {
+            let mut st =
+                c.prepare("SELECT suite, test, task, at FROM flaky WHERE at >= ?1 ORDER BY id")?;
+            let rows = st.query_map(params![since_ms as i64], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get::<_, i64>(2)? as u64,
+                    r.get::<_, i64>(3)? as u64,
+                ))
+            })?;
+            rows.collect()
+        })
+    }
+
     pub fn record_flaky(
         &self,
         suite: &str,

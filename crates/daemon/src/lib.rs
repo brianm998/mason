@@ -7,6 +7,7 @@
 //! events. Nothing blocks the async event loop.
 
 pub mod attention;
+pub mod autoquarantine;
 pub mod autoretry;
 pub mod basecheck;
 pub mod basefold;

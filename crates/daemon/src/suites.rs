@@ -1059,6 +1059,10 @@ fn run_suite(
                 )],
             },
             Verdict::Green => {
+                // What a green run ran passed: the proof that these names are tests (s253).
+                let _ = d
+                    .store
+                    .note_passing(&suite.name, &j.results.names(), now_ms());
                 let _ = d.store.put_suite_green(
                     &who.project,
                     &suite.name,
@@ -1158,6 +1162,10 @@ fn run_suite(
                                 who.task.map_or(0, |t| t.0 .0),
                                 now_ms(),
                             );
+                        }
+                        // Three tasks in a week make it a quarantine and a task (s253).
+                        if let Some(pid) = d.project_id_by_name(&who.project) {
+                            crate::autoquarantine::consider(d, pid, &suite.name, &tests);
                         }
                         SuiteRun::Done {
                             outcome: SuiteOutcome::Flaky,
