@@ -110,6 +110,15 @@ pub fn check_watchdog(dirs: &[PathBuf], out: &mut Vec<Finding>) {
     }
 }
 
+/// The shell project commands run under (`sh`; on Windows, Git Bash). Missing on Windows is a
+/// failure: no step, hook or push can run without it.
+pub fn check_shell(found: Result<String, String>, out: &mut Vec<Finding>) {
+    match found {
+        Ok(t) => out.push(ok(t)),
+        Err(e) => out.push(fail(e)),
+    }
+}
+
 /// Is there a unit written by `mason service install`?
 pub fn check_service(dirs: &[PathBuf], out: &mut Vec<Finding>) {
     let found = dirs.iter().find_map(|d| {
@@ -565,6 +574,7 @@ pub fn run(data_dir: &Path, config_dir: &Path) -> Vec<Finding> {
     }
 
     check_path_command(&mut out);
+    check_shell(mason_platform::shell::describe(), &mut out);
     check_watchdog(&watchdog_dirs(), &mut out);
     check_service(&watchdog_dirs(), &mut out);
     let exe = std::env::current_exe().unwrap_or_default();
@@ -645,6 +655,20 @@ pub fn run(data_dir: &Path, config_dir: &Path) -> Vec<Finding> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn doctor_reports_the_shell_or_what_to_install() {
+        let mut out = vec![];
+        super::check_shell(
+            Ok("project commands run under C:/Git/bin/bash.exe".into()),
+            &mut out,
+        );
+        super::check_shell(Err(mason_platform::shell::MISSING.into()), &mut out);
+        assert_eq!(out[0].level, super::Level::Ok);
+        assert!(out[0].text.contains("bash.exe"));
+        assert_eq!(out[1].level, super::Level::Fail);
+        assert!(out[1].text.contains("Git for Windows"));
+    }
+
     use super::*;
 
     fn repo_with(files: &[(&str, &str)]) -> tempfile::TempDir {

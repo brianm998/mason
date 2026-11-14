@@ -1104,9 +1104,14 @@ mod tests {
         for t in ALL_TOOLS {
             assert!(tool_spec(t).is_some(), "{t}");
             assert!(
-                [StepKind::Explore, StepKind::Develop, StepKind::Review]
-                    .iter()
-                    .any(|s| s.tools().contains(&t)),
+                [
+                    StepKind::Explore,
+                    StepKind::Develop,
+                    StepKind::Review,
+                    StepKind::Diagnose
+                ]
+                .iter()
+                .any(|s| s.tools().contains(&t)),
                 "{t} is in no step"
             );
         }

@@ -562,12 +562,15 @@ impl<'a> Ctx<'a> {
                     },
                     p.owner
                 ),
+                project: p.project.clone(),
+                mode: p.mode.clone(),
             });
         }
         for (_, _, text) in crate::ssh_keys::alerts(self.d) {
             banners.push(Banner {
                 kind: "push_auth".into(),
                 text,
+                ..Default::default()
             });
         }
         for (pid, p) in &self.d.projects() {
@@ -578,6 +581,7 @@ impl<'a> Ctx<'a> {
                         "{}: the definition is refused; the last good one is running",
                         p.id
                     ),
+                    ..Default::default()
                 });
             }
         }
@@ -604,12 +608,14 @@ impl<'a> Ctx<'a> {
                         p.id,
                         pending.join(", ")
                     ),
+                    ..Default::default()
                 });
             }
             if let Some(e) = v["error"].as_str() {
                 banners.push(Banner {
                     kind: "ci_watch".into(),
                     text: format!("{}: the base-branch CI watch cannot look: {e}", p.id),
+                    ..Default::default()
                 });
             }
         }
@@ -628,11 +634,16 @@ impl<'a> Ctx<'a> {
                             f.project, f.reason
                         )
                     },
+                    ..Default::default()
                 });
             }
         }
         for (kind, text) in crate::holds::banners(self.d) {
-            banners.push(Banner { kind, text });
+            banners.push(Banner {
+                kind,
+                text,
+                ..Default::default()
+            });
         }
         HeaderView {
             attention,
@@ -798,6 +809,19 @@ impl<'a> Ctx<'a> {
         u
     }
 
+    /// The broker's compilation with each holder's project and full title filled
+    /// in from the store, looked up by task id (not from home's filtered list).
+    fn compilation_named(&self) -> mason_protocol::Compilation {
+        let mut c = self.d.broker.compilation();
+        for h in c.running.iter_mut().filter(|h| h.task > 0) {
+            if let Some(t) = self.w.tasks.get(&TaskId(h.task)) {
+                h.project = self.project_name(t);
+                h.title = t.title.clone();
+            }
+        }
+        c
+    }
+
     pub fn home(&self, project: &str) -> HomeView {
         let tasks: Vec<&Task> = self
             .w
@@ -854,7 +878,7 @@ impl<'a> Ctx<'a> {
                 .collect(),
             sessions_used,
             sessions_limit,
-            compilation: Some(self.d.broker.compilation()),
+            compilation: Some(self.compilation_named()),
             cpu: Some(self.cpu_usage()),
             stages: [
                 State::Exploring,

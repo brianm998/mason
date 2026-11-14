@@ -23,7 +23,7 @@ the `v`. Nothing else is published under a release.
 | `MASON-<ver>-macos.dmg` | Swift monitor, universal, signed + notarized |
 | `mason-monitor_<ver>_amd64.deb` | Compose monitor, Linux |
 | `MASON-Monitor-<ver>-windows.msi` | Compose monitor, Windows |
-| `SHA256SUMS` (later also `SHA256SUMS.minisig`) | SHA-256 of every other asset |
+| `SHA256SUMS` (and `SHA256SUMS.minisig` when signed, see Signing) | SHA-256 of every other asset |
 
 ## Package layout
 
@@ -42,11 +42,60 @@ Built by `scripts/package/tarball.sh <target> [--out DIR]`, `deb.sh <target>` an
 1. Bump `version` under `[workspace.package]` in `Cargo.toml` (and the path-dependency
    versions in the crates), update `Cargo.lock`, merge to `develop`.
 2. Tag the merge commit `vX.Y.Z` and push the tag.
-3. The release workflow runs `scripts/release-version.sh` first, builds every asset above and
-   uploads them to a draft release. (The workflow is added by a later task, which completes
-   this outline.)
+3. `.github/workflows/release.yml` runs `scripts/release-version.sh` first, then builds every
+   asset above, installs each one on a fresh runner (`*-e2e` jobs), and in `publish` drops any
+   asset whose end-to-end job did not succeed (an `::error::` names it), writes `SHA256SUMS`,
+   creates a draft release `MASON <ver>` with generated notes, and fails if an asset from the
+   table is missing.
 4. Review the draft: all assets present, `SHA256SUMS` matches, installers start.
 5. Publish the release.
+
+### Secrets
+
+Repository secrets for the signed macOS builds (copy them from the star repository's settings):
+`APPLE_CERTIFICATE_P12_BASE64` (a .p12 holding the Developer ID Application and Installer
+identities), `APPLE_CERTIFICATE_PASSWORD`, `KEYCHAIN_PASSWORD`, `APPLE_API_KEY_P8_BASE64`,
+`APPLE_API_KEY_ID`, `APPLE_API_ISSUER_ID`, `APPLE_TEAM_ID`. Without them the macOS packages are
+built unsigned and `publish` removes them and reports an error, so an unsigned build is never
+attached to a release.
+
+### Signing
+
+`SHA256SUMS` proves a download matches the release, not that the release is yours. The
+`publish` job signs it with minisign and uploads `SHA256SUMS.minisig`. Once your public key
+is pinned, `scripts/install.sh` and `mason update` (release channel) refuse a release that is
+unsigned, badly signed, or checked on a machine without `minisign`.
+
+1. Generate the pair once, on your own machine (`brew install minisign` / `apt install minisign`):
+   `minisign -G -p minisign.pub -s minisign.key` (it asks for a password). Keep `minisign.key`
+   and the password out of the repository.
+2. Add two repository secrets: `MINISIGN_SECRET_KEY` (the whole contents of `minisign.key`) and
+   `MINISIGN_PASSWORD`. Without the first, `publish` warns and the release is unsigned.
+3. Pin the public key, the second line of `minisign.pub` (starts `RW`, 56 characters), in two
+   places that must match: `PINNED_PUBKEY` in `scripts/install.sh` and `PINNED_PUBKEY` in
+   `crates/daemon/src/release.rs`. Both hold the placeholder `REPLACE_WITH_MINISIGN_PUBLIC_KEY`
+   until you do; a placeholder is never used as a key, and releases are then not signature-checked.
+   Pin the key only after a signed release exists, or every install is refused.
+4. `MASON_MINISIGN_PUBKEY` overrides the pinned key in both (tests use it).
+
+### Dry run
+
+Actions, Release, Run workflow (`workflow_dispatch`) on any branch. It builds, signs and tests
+everything with the workspace version and creates no release (`publish` runs on tags only).
+Do this once after landing changes to the workflow, before the first real tag.
+The workflow has not been run yet.
+
+## Windows CLI and daemon
+
+`pwsh scripts/package/windows.ps1 [-Out DIR]` builds `mason-<ver>-x86_64-pc-windows-msvc.zip`
+(folder `mason-<ver>-x86_64-pc-windows-msvc/` with the five `.exe`, `mason-askpass.cmd`, the
+LICENSE files and README) and `mason-<ver>-x86_64-windows-setup.msi` from
+`packaging/windows/mason.wxs` (WiX v3). The C runtime is linked statically
+(`-C target-feature=+crt-static`), so no VC++ redistributable is needed. The MSI installs per
+user to `%LOCALAPPDATA%\Programs\MASON`, appends that folder to the user PATH and has the fixed
+UpgradeCode `3571d89e-2987-428c-a619-e8d01075c3a6`; never change it. Neither file is signed.
+`windows-e2e` unzips, runs, checks DLL imports with `dumpbin`, installs the MSI with
+`msiexec /qn`, runs again, uninstalls and checks nothing is left.
 
 ## macOS monitor dmg
 

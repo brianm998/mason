@@ -1682,6 +1682,12 @@ public nonisolated struct Mason_V1_Banner: Sendable {
 
   public var text: String = String()
 
+  /// For kind "paused": which pause this is, so a client can lift just that one.
+  /// The project is empty for a pause on everything.
+  public var project: String = String()
+
+  public var mode: String = String()
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -1748,6 +1754,14 @@ public nonisolated struct Mason_V1_UpdateInfo: Sendable {
   public var releaseVersion: String = String()
 
   public var downloadURL: String = String()
+
+  /// The button's label: "Update masond", "Update now" (an update is built and waiting
+  /// for landing batches) or empty (additive).
+  public var daemonButton: String = String()
+
+  /// Asked before the button acts, written by the daemon so both monitors say the same
+  /// words; empty when no confirmation is needed (additive).
+  public var daemonConfirm: String = String()
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -2119,6 +2133,12 @@ public nonisolated struct Mason_V1_CompileHolder: Sendable {
   /// How long its processes have used almost no CPU (0: busy, or not read yet).
   /// A task's command idle past `[cpu] compile_idle_kill_s` is stopped.
   public var idleMs: UInt64 = 0
+
+  /// The task's project and full title, for the monitor's row; empty for a person's
+  /// command, a slot held outside the queue, or a task the store no longer has.
+  public var project: String = String()
+
+  public var title: String = String()
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -2960,7 +2980,7 @@ public nonisolated struct Mason_V1_UsageView: Sendable {
 
   public var note: String = String()
 
-  /// The top-bar line: the most constrained window per account.
+  /// The top-bar lines: each main window per account, shortest first (5-hour, then weekly).
   public var topBar: [String] = []
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
@@ -6021,7 +6041,7 @@ nonisolated extension Mason_V1_StateCount: SwiftProtobuf.Message, SwiftProtobuf.
 
 nonisolated extension Mason_V1_Banner: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".Banner"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}kind\0\u{1}text\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}kind\0\u{1}text\0\u{1}project\0\u{1}mode\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -6031,6 +6051,8 @@ nonisolated extension Mason_V1_Banner: SwiftProtobuf.Message, SwiftProtobuf._Mes
       switch fieldNumber {
       case 1: try { try decoder.decodeSingularStringField(value: &self.kind) }()
       case 2: try { try decoder.decodeSingularStringField(value: &self.text) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.project) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.mode) }()
       default: break
       }
     }
@@ -6043,12 +6065,20 @@ nonisolated extension Mason_V1_Banner: SwiftProtobuf.Message, SwiftProtobuf._Mes
     if !self.text.isEmpty {
       try visitor.visitSingularStringField(value: self.text, fieldNumber: 2)
     }
+    if !self.project.isEmpty {
+      try visitor.visitSingularStringField(value: self.project, fieldNumber: 3)
+    }
+    if !self.mode.isEmpty {
+      try visitor.visitSingularStringField(value: self.mode, fieldNumber: 4)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
   public static func ==(lhs: Mason_V1_Banner, rhs: Mason_V1_Banner) -> Bool {
     if lhs.kind != rhs.kind {return false}
     if lhs.text != rhs.text {return false}
+    if lhs.project != rhs.project {return false}
+    if lhs.mode != rhs.mode {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -6125,7 +6155,7 @@ nonisolated extension Mason_V1_HeaderView: SwiftProtobuf.Message, SwiftProtobuf.
 
 nonisolated extension Mason_V1_UpdateInfo: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".UpdateInfo"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}daemon_text\0\u{3}daemon_can_update\0\u{1}monitors\0\u{3}release_version\0\u{3}download_url\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}daemon_text\0\u{3}daemon_can_update\0\u{1}monitors\0\u{3}release_version\0\u{3}download_url\0\u{3}daemon_button\0\u{3}daemon_confirm\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -6138,6 +6168,8 @@ nonisolated extension Mason_V1_UpdateInfo: SwiftProtobuf.Message, SwiftProtobuf.
       case 3: try { try decoder.decodeRepeatedMessageField(value: &self.monitors) }()
       case 4: try { try decoder.decodeSingularStringField(value: &self.releaseVersion) }()
       case 5: try { try decoder.decodeSingularStringField(value: &self.downloadURL) }()
+      case 6: try { try decoder.decodeSingularStringField(value: &self.daemonButton) }()
+      case 7: try { try decoder.decodeSingularStringField(value: &self.daemonConfirm) }()
       default: break
       }
     }
@@ -6159,6 +6191,12 @@ nonisolated extension Mason_V1_UpdateInfo: SwiftProtobuf.Message, SwiftProtobuf.
     if !self.downloadURL.isEmpty {
       try visitor.visitSingularStringField(value: self.downloadURL, fieldNumber: 5)
     }
+    if !self.daemonButton.isEmpty {
+      try visitor.visitSingularStringField(value: self.daemonButton, fieldNumber: 6)
+    }
+    if !self.daemonConfirm.isEmpty {
+      try visitor.visitSingularStringField(value: self.daemonConfirm, fieldNumber: 7)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -6168,6 +6206,8 @@ nonisolated extension Mason_V1_UpdateInfo: SwiftProtobuf.Message, SwiftProtobuf.
     if lhs.monitors != rhs.monitors {return false}
     if lhs.releaseVersion != rhs.releaseVersion {return false}
     if lhs.downloadURL != rhs.downloadURL {return false}
+    if lhs.daemonButton != rhs.daemonButton {return false}
+    if lhs.daemonConfirm != rhs.daemonConfirm {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -6868,7 +6908,7 @@ nonisolated extension Mason_V1_CpuUsage: SwiftProtobuf.Message, SwiftProtobuf._M
 
 nonisolated extension Mason_V1_CompileHolder: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".CompileHolder"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}label\0\u{1}task\0\u{3}since_ms\0\u{1}interactive\0\u{3}idle_ms\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}label\0\u{1}task\0\u{3}since_ms\0\u{1}interactive\0\u{3}idle_ms\0\u{1}project\0\u{1}title\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -6881,6 +6921,8 @@ nonisolated extension Mason_V1_CompileHolder: SwiftProtobuf.Message, SwiftProtob
       case 3: try { try decoder.decodeSingularUInt64Field(value: &self.sinceMs) }()
       case 4: try { try decoder.decodeSingularBoolField(value: &self.interactive) }()
       case 5: try { try decoder.decodeSingularUInt64Field(value: &self.idleMs) }()
+      case 6: try { try decoder.decodeSingularStringField(value: &self.project) }()
+      case 7: try { try decoder.decodeSingularStringField(value: &self.title) }()
       default: break
       }
     }
@@ -6902,6 +6944,12 @@ nonisolated extension Mason_V1_CompileHolder: SwiftProtobuf.Message, SwiftProtob
     if self.idleMs != 0 {
       try visitor.visitSingularUInt64Field(value: self.idleMs, fieldNumber: 5)
     }
+    if !self.project.isEmpty {
+      try visitor.visitSingularStringField(value: self.project, fieldNumber: 6)
+    }
+    if !self.title.isEmpty {
+      try visitor.visitSingularStringField(value: self.title, fieldNumber: 7)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -6911,6 +6959,8 @@ nonisolated extension Mason_V1_CompileHolder: SwiftProtobuf.Message, SwiftProtob
     if lhs.sinceMs != rhs.sinceMs {return false}
     if lhs.interactive != rhs.interactive {return false}
     if lhs.idleMs != rhs.idleMs {return false}
+    if lhs.project != rhs.project {return false}
+    if lhs.title != rhs.title {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

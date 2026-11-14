@@ -10,10 +10,12 @@
 # SHA256SUMS; https://, http:// and file:// all work, which is how the test runs against a local
 # fake release. A checksum that does not match stops the install before anything is copied.
 #
-# Signatures: the release also publishes SHA256SUMS.minisig. This script checks it only when
-# `minisign` is installed AND a public key is given (MASON_MINISIGN_PUBKEY); otherwise it says
-# plainly that the signature was NOT verified. The checksum alone proves the download matches
-# the release's checksum file, not that the release is the owner's. No release is signed yet.
+# Signatures: the release publishes SHA256SUMS.minisig, made with the owner's minisign key. Once
+# that key is pinned below (PINNED_PUBKEY), or given as MASON_MINISIGN_PUBKEY, the install is
+# REFUSED unless minisign is installed and the signature verifies; an unsigned release, a bad
+# signature and a missing minisign all stop it. While the placeholder is still pinned and no key
+# is given, it says plainly that the signature was NOT verified. The placeholder is never used as
+# a key. The checksum alone proves a download matches the checksum file, not that it is the owner's.
 #
 # It never uses sudo and never edits your shell profile; it says what to add to PATH.
 set -euo pipefail
@@ -21,6 +23,10 @@ set -euo pipefail
 version="${MASON_VERSION:-latest}"
 prefix="${MASON_PREFIX:-$HOME/.local}"
 base_url="${MASON_RELEASE_URL:-https://github.com/brianm998/mason/releases}"
+# The owner's minisign public key (the second line of minisign.pub; see docs/RELEASING.md).
+# TRUST: change only with the owner's approval. Until they pin it, this placeholder is not a key.
+PUBKEY_PLACEHOLDER="REPLACE_WITH_MINISIGN_PUBLIC_KEY"
+PINNED_PUBKEY="$PUBKEY_PLACEHOLDER"
 BINS="mason masond step-host mason-mcp"
 IDENTITY="mason: command-line client for the MASON pipeline"
 
@@ -32,7 +38,7 @@ while [ $# -gt 0 ]; do
     --version) [ $# -ge 2 ] || die "--version needs a value"; version=$2; shift 2 ;;
     --prefix) [ $# -ge 2 ] || die "--prefix needs a value"; prefix=$2; shift 2 ;;
     --base-url) [ $# -ge 2 ] || die "--base-url needs a value"; base_url=$2; shift 2 ;;
-    -h|--help) sed -n '3,19p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '3,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "unknown option $1 (try --help)" ;;
   esac
 done
@@ -110,6 +116,23 @@ say "downloading $archive"
 fetch "$release_dir/$archive" "$tmp/$archive" || die "could not download $release_dir/$archive"
 fetch "$release_dir/SHA256SUMS" "$tmp/SHA256SUMS" || die "could not download $release_dir/SHA256SUMS; refusing to install what cannot be checked"
 
+# The signature comes first: nothing in SHA256SUMS is believed until it verifies.
+key="${MASON_MINISIGN_PUBKEY:-$PINNED_PUBKEY}"
+if [ "$key" = "$PUBKEY_PLACEHOLDER" ] && [ -z "${MASON_MINISIGN_PUBKEY:-}" ]; then
+  say "signature NOT verified: no signing key is pinned yet. The checksum below only matches the release's own checksum file"
+else
+  case "$key" in
+    RW*) [ "${#key}" -eq 56 ] || die "the minisign public key is malformed (not 56 characters); refusing to install" ;;
+    *) die "the minisign public key is not a key ($key); refusing to install" ;;
+  esac
+  command -v minisign >/dev/null 2>&1 || die "a signing key is pinned, so minisign is needed to check the release; install it (https://jedisct1.github.io/minisign/) and retry. Nothing was installed"
+  fetch "$release_dir/SHA256SUMS.minisig" "$tmp/SHA256SUMS.minisig" 2>/dev/null \
+    || die "release has no SHA256SUMS.minisig; refusing an unsigned release. Nothing was installed"
+  minisign -Vm "$tmp/SHA256SUMS" -P "$key" -x "$tmp/SHA256SUMS.minisig" >/dev/null 2>&1 \
+    || die "SIGNATURE CHECK FAILED for SHA256SUMS. Nothing was installed"
+  say "signature ok (minisign)"
+fi
+
 want=$(awk -v f="$archive" '$2 == f || $2 == "*" f { print $1 }' "$tmp/SHA256SUMS" | head -n 1)
 [ -n "$want" ] || die "SHA256SUMS has no entry for $archive; refusing to install"
 got=$(sha256_of "$tmp/$archive")
@@ -117,14 +140,6 @@ if [ "$want" != "$got" ]; then
   die "CHECKSUM MISMATCH for $archive (expected $want, got $got). Nothing was installed. The download is corrupt or has been tampered with"
 fi
 say "checksum ok ($got)"
-
-if command -v minisign >/dev/null 2>&1 && [ -n "${MASON_MINISIGN_PUBKEY:-}" ] && fetch "$release_dir/SHA256SUMS.minisig" "$tmp/SHA256SUMS.minisig" 2>/dev/null; then
-  minisign -Vm "$tmp/SHA256SUMS" -P "$MASON_MINISIGN_PUBKEY" -x "$tmp/SHA256SUMS.minisig" >/dev/null \
-    || die "SIGNATURE CHECK FAILED for SHA256SUMS. Nothing was installed"
-  say "signature ok (minisign)"
-else
-  say "signature NOT verified: needs minisign, MASON_MINISIGN_PUBKEY, and a published SHA256SUMS.minisig. The checksum above only matches the release's own checksum file"
-fi
 
 mkdir "$tmp/x"
 tar -xzf "$tmp/$archive" -C "$tmp/x" || die "could not unpack $archive"

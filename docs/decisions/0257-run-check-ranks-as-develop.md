@@ -6,4 +6,4 @@
 
 **Supersedes** the ranking part of the 2026-11-11 run_check change (`5e012882`); rejoining a run in flight and showing the wait are unchanged.
 
-**Trust.** `jobs.rs` is not in `PROTECTED`. No gate, limit or test is weakened.
+**Trust.** `jobs.rs` is not in `PROTECTED`; `scripts/exit/s262.sh` (exit tests) is. The owner approved this change on 2026-11-13 ("Yes, change it"). No gate, limit or test is weakened. (Corrected in s271: the first version said none of these paths was protected.)

@@ -730,12 +730,12 @@ fn a_pending_ci_counts_its_jobs_by_state_one_entry_per_workflow() {
             {"method": "GET", "url": "/actions/runs/5/jobs?filter=latest&per_page=100", "response": ok(json!({"jobs": [
                 {"id": 51, "name": "lint", "status": "completed", "conclusion": "success"},
                 {"id": 52, "name": "docs", "status": "completed", "conclusion": "skipped"},
-                {"id": 53, "name": "unit", "status": "completed", "conclusion": "failure"},
+                {"id": 53, "name": "unit", "status": "completed", "conclusion": "cancelled"},
                 {"id": 54, "name": "build", "status": "in_progress", "conclusion": null},
                 {"id": 55, "name": "e2e", "status": "queued", "conclusion": null}]}))},
             {"method": "GET", "url": "/actions/runs/6/jobs?filter=latest&per_page=100", "response": ok(json!({"jobs": []}))},
         ]),
-        false,
+        true, // judged: a cancelled job with no step run is infrastructure, so the run stays pending
     );
     let (state, detail) = g.gh.status_detail("sha1").unwrap();
     assert_eq!(state, CiState::Pending);

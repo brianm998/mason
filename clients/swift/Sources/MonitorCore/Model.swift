@@ -38,7 +38,7 @@ public final class LiveState: ObservableObject {
 @MainActor
 public final class MonitorModel: ObservableObject {
     // From the daemon.
-    @Published public var header: HeaderView?
+    @Published public var header: HeaderView? { didSet { prunePauseCollapse() } }
     @Published public var sidebar: SidebarView?
     @Published public var home: HomeView?
     /// The CPU shares, observed apart from the whole model: the CPU section watches only this.
@@ -123,8 +123,41 @@ public final class MonitorModel: ObservableObject {
         if let u = URL(string: downloadURL), ["https", "http"].contains(u.scheme) { onOpenURL?(u) }
     }
 
-    /// The owner's button: the daemon builds its newest version, proves it and takes over.
-    public func updateDaemon() { raw("POST", "/update", json: "{}") }
+    /// The button's label, as the daemon words it ("Update masond", or "Update now" while a
+    /// finished update waits for landing batches).
+    public var daemonUpdateButton: String {
+        let b = updateInfo?.daemonButton ?? ""
+        return b.isEmpty ? "Update masond" : b
+    }
+    /// What to ask before the button acts; empty when it acts at once.
+    public var daemonUpdateConfirm: String { updateInfo?.daemonConfirm ?? "" }
+    /// The confirmation dialog is open.
+    @Published public var confirmingDaemonUpdate = false
+
+    /// The button was pressed: ask first if the daemon says to, else act.
+    public func pressUpdateDaemon() {
+        if daemonUpdateConfirm.isEmpty { updateDaemon() } else { confirmingDaemonUpdate = true }
+    }
+
+    /// "Keep waiting".
+    public func cancelDaemonUpdate() { confirmingDaemonUpdate = false }
+
+    /// "Update now" in the dialog.
+    public func confirmDaemonUpdate() {
+        confirmingDaemonUpdate = false
+        updateDaemon()
+    }
+
+    /// The owner's button: the daemon builds its newest version, proves it and takes over; while
+    /// an update waits for landing batches it takes over now. A refusal lands in `updateError`.
+    public func updateDaemon() {
+        updateError = nil
+        var c = Mason_V1_Command()
+        c.id = "update-daemon"
+        let now = daemonUpdateButton == "Update now"
+        c.raw = .with { $0.method = "POST"; $0.path = now ? "/update/now" : "/update"; $0.json = "{}" }
+        send(c)
+    }
 
     /// The owner's button: the daemon builds the newest monitor; `noteMonitorBuild` takes it from there.
     public func updateMonitor() {
@@ -226,6 +259,8 @@ public final class MonitorModel: ObservableObject {
         static let mute = "muted"
         static let sidebarWidth = "sidebarWidth"
         static func section(_ s: String) -> String { "section.\(s).expanded" }
+        static func pause(project: String, mode: String) -> String { "paused:\(project):\(mode)" }
+        static let pauseIndex = "paused.collapsed.keys"
     }
 
     public static let scaleRange: ClosedRange<Double> = 0.8...2.4
@@ -357,6 +392,56 @@ public final class MonitorModel: ObservableObject {
     public func setExpanded(_ state: String, _ open: Bool) {
         overrides[state] = open
         prefs.setBool(open, for: Keys.section(state))
+    }
+
+    // MARK: paused banners
+
+    private var collapsedPauseKeys: [String] {
+        (prefs.string(Keys.pauseIndex) ?? "").split(separator: "\n").map(String.init)
+    }
+
+    /// Whether this pause's banner is collapsed to its icon (kept per device, across launches).
+    public func isPauseCollapsed(project: String, mode: String) -> Bool {
+        prefs.bool(Keys.pause(project: project, mode: mode)) ?? false
+    }
+
+    public func setPauseCollapsed(project: String, mode: String, _ collapsed: Bool) {
+        let key = Keys.pause(project: project, mode: mode)
+        var keys = collapsedPauseKeys.filter { $0 != key }
+        if collapsed { keys.append(key) }
+        prefs.setBool(collapsed, for: key)
+        prefs.setString(keys.joined(separator: "\n"), for: Keys.pauseIndex)
+        objectWillChange.send()
+    }
+
+    /// One row of the pause group: banner indices. `collapsed` icons sit at the leading edge of the
+    /// row; `expanded` is the full banner in that row (nil: an icon-only row).
+    public struct PauseRow: Equatable {
+        public let collapsed: [Int]
+        public let expanded: Int?
+    }
+
+    /// The pause group's rows, in banner order: collapsed icons ride in the first expanded pause's
+    /// row, or share one icon-only row when every pause is collapsed.
+    public func pauseRows() -> [PauseRow] {
+        let all = (header?.banners ?? []).enumerated().filter { $0.element.kind == "paused" }
+        let isCollapsed = { (b: Mason_V1_Banner) in self.isPauseCollapsed(project: b.project, mode: b.mode) }
+        let collapsed = all.filter { isCollapsed($0.element) }.map(\.offset)
+        let expanded = all.filter { !isCollapsed($0.element) }.map(\.offset)
+        if expanded.isEmpty { return collapsed.isEmpty ? [] : [PauseRow(collapsed: collapsed, expanded: nil)] }
+        return expanded.enumerated().map { PauseRow(collapsed: $0.offset == 0 ? collapsed : [], expanded: $0.element) }
+    }
+
+    /// A pause that is no longer in the header (resumed or expired) forgets its collapse, so a
+    /// later pause on the same project and mode starts expanded and is noticed.
+    private func prunePauseCollapse() {
+        guard let h = header else { return }
+        let live = Set(h.banners.filter { $0.kind == "paused" }.map { Keys.pause(project: $0.project, mode: $0.mode) })
+        let keys = collapsedPauseKeys
+        let kept = keys.filter { live.contains($0) }
+        guard kept.count != keys.count else { return }
+        for k in keys where !live.contains(k) { prefs.setBool(false, for: k) }
+        prefs.setString(kept.joined(separator: "\n"), for: Keys.pauseIndex)
     }
 
     public func toggle(_ s: SidebarSection) { setExpanded(s.state, !isExpanded(s)) }
@@ -519,6 +604,10 @@ public final class MonitorModel: ObservableObject {
         command { $0.pause = .with { $0.project = project; $0.mode = mode; $0.forSeconds = seconds } }
     }
     public func resume() { command { $0.resume = .with { $0.project = project } } }
+    /// Lift exactly one pause: its project (empty for everything) and its mode.
+    public func resumePause(project: String, mode: String) {
+        command { $0.resume = .with { $0.project = project; $0.mode = mode } }
+    }
     /// Change a proposal's title, body or evidence while it waits for the owner (nil: unchanged).
     public func editProposal(_ task: UInt64, title: String?, body: String?, evidence: String?) {
         var o: [String: String] = [:]
@@ -767,6 +856,7 @@ public final class MonitorModel: ObservableObject {
             else { sshKeyResult = r.error }
         }
         if r.id == "announce", r.ok { announcer.handle(claim: r.json) }
+        if r.id == "update-daemon", !r.ok { updateError = r.error }
         if r.id == "update-monitor" {
             if r.ok { monitorAsked = true } else { monitorUpdateFailed(r.error) }
         }

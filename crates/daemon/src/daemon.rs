@@ -100,6 +100,8 @@ pub struct Daemon {
     pub(crate) landing: crate::landing::Landing,
     pub(crate) tracker: crate::tracker::Hub,
     pub update_status: Mutex<crate::update::Status>,
+    /// The owner chose "Update now" while a takeover waits for landing batches.
+    pub update_now: AtomicBool,
     /// What the last look at the update channel found.
     pub update_check: Mutex<crate::update::Check>,
     /// One fetch into the source mirror at a time.
@@ -321,6 +323,7 @@ impl Daemon {
                 phase: "idle".into(),
                 ..Default::default()
             }),
+            update_now: AtomicBool::new(false),
             update_check: Default::default(),
             update_fetch: Mutex::new(()),
             monitor_builds: Default::default(),

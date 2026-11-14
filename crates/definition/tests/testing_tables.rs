@@ -462,11 +462,27 @@ fn masons_own_impact_map_selects_suites_by_path() {
         ]),
         one("cargo-workspace")
     );
-    assert_eq!(pick(&["clients/tokens.toml"]), Selection::Some(all.clone()));
-    assert_eq!(pick(&["schemas/mason.proto"]), Selection::Some(all.clone()));
+    // Shared client inputs run the three build suites; `exit-scripts` (s249) runs only for a
+    // change under `scripts/exit/`.
+    let three = Selection::Some(
+        ["cargo-workspace", "swift-clients", "compose-clients"]
+            .map(String::from)
+            .to_vec(),
+    );
+    assert_eq!(pick(&["clients/tokens.toml"]), three);
+    assert_eq!(pick(&["schemas/mason.proto"]), three);
+    assert_eq!(
+        pick(&["scripts/exit/s1.sh"]),
+        Selection::Some(
+            ["cargo-workspace", "exit-scripts"]
+                .map(String::from)
+                .to_vec()
+        )
+    );
     assert_eq!(pick(&["scripts/unmapped.sh"]), Selection::All);
     assert_eq!(pick(&["docs/x.md"]), one("cargo-workspace"));
-    // All three are bound to run_check and the test step.
-    assert_eq!(d.testing.bound(When::Development).len(), 3);
-    assert_eq!(d.testing.bound(When::TestStep).len(), 3);
+    // All four are bound to run_check and the test step.
+    assert_eq!(all.len(), 4);
+    assert_eq!(d.testing.bound(When::Development).len(), 4);
+    assert_eq!(d.testing.bound(When::TestStep).len(), 4);
 }

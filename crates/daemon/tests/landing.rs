@@ -307,10 +307,10 @@ fn landing_with_no_config_is_the_old_direct_landing() {
 
 #[test]
 fn a_red_reverification_after_the_base_moved_ends_and_does_not_hang() {
-    // The batch is green on its own tree; while it verifies, the base gains a file that
-    // turns `integration` red. The re-verification then has a named test red on both
-    // runs with no baseline stored, which used to take the repository lock a second time
-    // from the landing thread, holding it, and hang. It must end: here, sent back.
+    // The batch is green on its own tree; while it verifies, the base gains a change that
+    // turns `integration` red together with the batch's file. The re-verification then has
+    // a named test red on both runs with no baseline stored, which used to take the
+    // repository lock a second time from the landing thread, holding it, and hang. It must end: here, sent back.
     let w = world(
         "window = \"1s\"\n[[tier]]\nname = \"batch\"\nsuites = [\"integration\"]\n",
         &[],
@@ -323,11 +323,15 @@ fn a_red_reverification_after_the_base_moved_ends_and_does_not_hang() {
             .iter()
             .any(|b| b.phase == "verifying")
     });
-    w.s.push_files(&[("red.integration", "boom")], "turn integration red");
+    // Red only with the batch's change on top: the new base on its own stays green, so the
+    // red is the batch's and cannot be excused as also failing at the merge base (s177).
+    let checks = "#!/bin/sh\nn=\"$1\"\n[ -n \"$(find . -name \"slow.$n\" -not -path \"./.git/*\")\" ] && sleep 3\necho \"1..1\"\nif [ -n \"$(find . -name \"red.$n\" -not -path \"./.git/*\")\" ] || [ -f \"x/slow.$n\" ]; then echo \"not ok 1 - $n\"; exit 1; fi\necho \"ok 1 - $n\"\n";
+    w.s.push_files(&[("checks.sh", checks)], "turn integration red with x/slow");
     wait_for("the landing to end instead of hanging", 120, || {
         w.sent_back(t).is_some() || w.landed(t)
     });
     assert!(!w.on_main("x/slow.integration"), "a red tree was promoted");
+    assert!(w.sent_back(t).is_some(), "the red batch was not sent back");
     // The repository lock is free: another step can take it.
     let pid = w.d.project_id_by_name("scratch").unwrap();
     let lock = w.d.repo_lock(pid);

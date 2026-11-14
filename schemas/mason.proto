@@ -521,6 +521,10 @@ message StateCount {
 message Banner {
   string kind = 1;
   string text = 2;
+  // For kind "paused": which pause this is, so a client can lift just that one.
+  // The project is empty for a pause on everything.
+  string project = 3;
+  string mode = 4;
 }
 
 message HeaderView {
@@ -552,6 +556,12 @@ message UpdateInfo {
   // no source to build from. Empty on the source channels.
   string release_version = 4;
   string download_url = 5;
+  // The button's label: "Update masond", "Update now" (an update is built and waiting
+  // for landing batches) or empty (additive).
+  string daemon_button = 6;
+  // Asked before the button acts, written by the daemon so both monitors say the same
+  // words; empty when no confirmation is needed (additive).
+  string daemon_confirm = 7;
 }
 
 message MonitorBuild {
@@ -687,6 +697,10 @@ message CompileHolder {
   // How long its processes have used almost no CPU (0: busy, or not read yet).
   // A task's command idle past `[cpu] compile_idle_kill_s` is stopped.
   uint64 idle_ms = 5;
+  // The task's project and full title, for the monitor's row; empty for a person's
+  // command, a slot held outside the queue, or a task the store no longer has.
+  string project = 6;
+  string title = 7;
 }
 
 // A request waiting for a `compile` slot, in line order.

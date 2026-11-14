@@ -329,7 +329,7 @@ struct State {
     /// The build disk's responsiveness and the limit on it. `None`: no stall gate.
     stall: Option<Arc<dyn StallSource>>,
     /// When the last scheduling pass ran. A waiter skips its own pass while this is
-    /// younger than `PASS_EVERY` (see `acquire`).
+    /// younger than the broker's tick (see `acquire`).
     last_pass: Option<Instant>,
     /// A pass is reading lock files right now; waiters leave it to finish.
     pass_running: bool,
@@ -337,8 +337,9 @@ struct State {
     passes: u64,
 }
 
-/// How often waiting jobs re-run the scheduling pass between them, at most. Releases
-/// and submits still pass at once; this only paces the waiters' periodic re-check.
+/// The pacing the tests of `pass_due` check against. The waiters themselves pace by the
+/// broker's tick (`tick_ms`, see `acquire`); releases and submits still pass at once.
+#[cfg(test)]
 const PASS_EVERY: Duration = Duration::from_millis(100);
 
 /// Is a waiter's periodic pass due? Not while one ran less than `every` ago: that pass
@@ -1886,6 +1887,8 @@ impl Broker {
                 since_ms: h.since,
                 interactive: is_person(&st, h.id),
                 idle_ms: st.idle.get(&h.id).copied().unwrap_or(0),
+                project: String::new(),
+                title: String::new(),
             })
             .collect();
         let pending = snap
@@ -2149,6 +2152,31 @@ fn kind_for(st: &State, name: &str) -> Kind {
 
 /// Free memory in MB, or `None` if it cannot be read. Never load average.
 pub fn measure_free_memory_mb() -> Option<u64> {
+    #[cfg(windows)]
+    {
+        return windows_free_memory_mb();
+    }
+    #[cfg(not(windows))]
+    unix_free_memory_mb()
+}
+
+/// `GlobalMemoryStatusEx`: available physical memory.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn windows_free_memory_mb() -> Option<u64> {
+    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    // SAFETY: an all-zero MEMORYSTATUSEX is valid; dwLength is set as the API requires.
+    let mut m: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
+    m.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
+    // SAFETY: `m` is live and sized as dwLength says.
+    if unsafe { GlobalMemoryStatusEx(&mut m) } == 0 {
+        return None;
+    }
+    Some(crate::cpu::windows_free_mb(m.ullAvailPhys))
+}
+
+#[cfg(not(windows))]
+fn unix_free_memory_mb() -> Option<u64> {
     if let Ok(t) = std::fs::read_to_string("/proc/meminfo") {
         let kb: u64 = t
             .lines()

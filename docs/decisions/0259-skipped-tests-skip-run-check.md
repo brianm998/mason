@@ -4,4 +4,4 @@
 
 **Why.** The owner skips testing to stop spending the machine on it; a develop check runs the same tests, and on 2026-11-13 develop checks were most of the compile queue. A skip that leaves them running does not do what the owner asked.
 
-**Trust.** `jobs.rs`, `suites.rs` and `tests/scheduling.rs` are not in `PROTECTED`. The skip still records its debt and downgrades the task's closing verdict; no gate, limit or test is weakened.
+**Trust.** `crates/daemon/src/suites.rs` (verdict logic: running suites) and `scripts/exit/s264.sh` (exit tests) are in `PROTECTED`; `jobs.rs` and `tests/scheduling.rs` are not. The owner asked for testing to be disabled for these tasks on 2026-11-13. The skip still records its debt and downgrades the task's closing verdict; no gate, limit or test is weakened. (Corrected in s271: the first version said none of these paths was protected.)

@@ -6,4 +6,4 @@
 
 **Alternatives.** #284 also moves lock-file probes outside the lock. That is a larger change still in development, and releasing the lock mid-pass needs care so grants are not doubled. This decision does not preclude it.
 
-**Trust.** `sched.rs` and `views.rs` are not in `PROTECTED`. No gate, limit, ranking or test is weakened.
+**Trust.** `crates/daemon/src/sched.rs` (scheduler) and `scripts/exit/s260.sh` (exit tests) are in `PROTECTED`; `views.rs` is not. The owner approved this change on 2026-11-13 ("Yes, fix and land"). No gate, limit, ranking or test is weakened. (Corrected in s271: the first version said none of these paths was protected.)

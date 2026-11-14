@@ -192,20 +192,26 @@ pub fn needs_for(
     n
 }
 
-/// A suite with the project's `test` command written in: `{project_test}` in its
-/// `command`, `build` and `rerun` becomes that command, so the owner's per-worktree
-/// build directory (set in the project file's `test`) applies to a suite too.
-pub(crate) fn with_project_test(suite: &Suite, test: Option<&str>) -> Result<Suite, String> {
-    const KEY: &str = "{project_test}";
-    let uses = |s: &str| s.contains(KEY);
-    let mut s = suite.clone();
-    let any = uses(&s.command)
+const PROJECT_TEST: &str = "{project_test}";
+
+/// Whether any of the suite's commands names `{project_test}`.
+fn uses_project_test(s: &Suite) -> bool {
+    let uses = |c: &str| c.contains(PROJECT_TEST);
+    uses(&s.command)
         || s.build.as_deref().is_some_and(uses)
         || s.rerun.as_deref().is_some_and(uses)
         || s.skip.as_deref().is_some_and(uses)
         || s.dev_command.as_deref().is_some_and(uses)
-        || s.dev_build.as_deref().is_some_and(uses);
-    if !any {
+        || s.dev_build.as_deref().is_some_and(uses)
+}
+
+/// A suite with the project's `test` command written in: `{project_test}` in its
+/// `command`, `build` and `rerun` becomes that command, so the owner's per-worktree
+/// build directory (set in the project file's `test`) applies to a suite too.
+pub(crate) fn with_project_test(suite: &Suite, test: Option<&str>) -> Result<Suite, String> {
+    const KEY: &str = PROJECT_TEST;
+    let mut s = suite.clone();
+    if !uses_project_test(&s) {
         return Ok(s);
     }
     let Some(t) = test else {
@@ -886,6 +892,29 @@ fn run_suite(
     on_wait: &mut dyn FnMut(Option<String>),
 ) -> SuiteRun {
     let d = &who.d;
+    // The test step writes the project's `test` command into its suites before it calls here;
+    // a debt run, a ledger rerun and a landing batch did not, and ran `{project_test}` as a
+    // command (s271). Writing it in again changes nothing for a suite that has it already.
+    let filled;
+    let suite = if uses_project_test(suite) {
+        let test = d
+            .project_id_by_name(&who.project)
+            .and_then(|pid| crate::jobs::test_commands(d, def, pid, who.task.map(|(t, _)| t)))
+            .map(|t| t.test);
+        filled = match with_project_test(suite, test.as_deref()) {
+            Ok(s) => s,
+            Err(why) => {
+                return SuiteRun::Done {
+                    outcome: SuiteOutcome::Failed,
+                    results: None,
+                    notes: vec![format!("{}: {why}", suite.name)],
+                }
+            }
+        };
+        &filled
+    } else {
+        suite
+    };
     // Identical code never tests twice.
     if let Ok(Some((executed, _, task))) = d.store.evidence(&tree.tree, &suite.name) {
         if let Some(run) = who.run() {
@@ -1784,13 +1813,43 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
                             ),
                             None => suite.command.clone(),
                         };
-                        let ex = crate::exhausted::on_last_round(
-                            c,
-                            &name,
-                            suite.build.as_deref(),
-                            &cmd_for,
-                            &failing,
-                        );
+                        // The suite's own lease and device are gone by now: a suite with an
+                        // environment runs at the base on one too, brought up before the base
+                        // runs and torn down after, as its own attempts are.
+                        let dev = lease_dev(&who, &c.def, &suite);
+                        let up = match &dev {
+                            Ok(dv) => env_up(&who, &c.def, &suite, &c.wt, dv.as_ref()),
+                            Err(()) => Err("no device is free for it".to_string()),
+                        };
+                        let ex = match up {
+                            Ok(()) => {
+                                let id = dev
+                                    .as_ref()
+                                    .ok()
+                                    .and_then(|x| dev_id(x.as_ref()))
+                                    .map(str::to_string);
+                                let on_dev = |t: &[String]| {
+                                    lifecycle::with_device(&cmd_for(t), id.as_deref())
+                                };
+                                crate::exhausted::on_last_round(
+                                    c,
+                                    &name,
+                                    suite.build.as_deref(),
+                                    &on_dev,
+                                    &failing,
+                                )
+                            }
+                            Err(why) => crate::exhausted::Exhausted {
+                                why: Some(format!(
+                                    "could not check at the base: `{}` ({why})",
+                                    failing.join("`, `")
+                                )),
+                                ..Default::default()
+                            },
+                        };
+                        if let Ok(dv) = &dev {
+                            env_down(&who, &c.def, &suite, &c.wt, dv.as_ref());
+                        }
                         let left = failing.iter().any(|t| !ex.excused.contains(t));
                         if !ex.excused.is_empty() && !left && ex.why.is_none() {
                             // Red at the base too: in the ledger now, and the step goes on.
