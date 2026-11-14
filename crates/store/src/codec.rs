@@ -311,8 +311,16 @@ pub fn encode(k: &EventKind) -> (&'static str, String) {
             }
             "step_failed"
         }
-        Retried { task, to, step } => {
+        Retried {
+            task,
+            to,
+            step,
+            auto,
+        } => {
             w.n(task.0).word(state_name(*to)).s(step);
+            if *auto {
+                w.word("auto");
+            }
             "retried"
         }
         Canceled {
@@ -463,6 +471,7 @@ pub fn decode(kind: &str, payload: &str) -> Result<EventKind, CodecError> {
             task: t(&mut r)?,
             to: state_from(r.raw()?)?,
             step: r.opt_s()?,
+            auto: r.opt_s()? == "auto",
         },
         "canceled" => Canceled {
             task: t(&mut r)?,
@@ -615,6 +624,13 @@ mod tests {
                 task: t,
                 to: State::Review,
                 step: "review".into(),
+                auto: false,
+            },
+            Retried {
+                task: t,
+                to: State::Testing,
+                step: "test".into(),
+                auto: true,
             },
             Canceled {
                 task: t,

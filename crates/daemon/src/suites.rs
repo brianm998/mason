@@ -24,6 +24,7 @@ use mason_scheduler::Needs;
 use mason_step_host::client::{collect_to_file, collect_to_file_observed, ClientError, HostClient};
 use mason_step_host::launcher::{spawn_host, SpawnOptions};
 use mason_step_host::protocol::{CURRENT, PREVIOUS};
+use mason_testing::basered::{self, RedKind};
 use mason_testing::env as lifecycle;
 use mason_testing::gates;
 use mason_testing::parse::parse;
@@ -663,10 +664,12 @@ enum SuiteRun {
         notes: Vec<String>,
     },
     /// Red, and the task's. `failing`: the tests that failed and are the task's (empty when
-    /// the suite did not run, or no names were read).
+    /// the suite did not run, or no names were read). `red` is set for the reds that name no
+    /// failing test (a vacuous run, a red run with no names): what the base is compared with (s246).
     Product {
         feedback: String,
         failing: Vec<String>,
+        red: Option<(RedKind, String)>,
     },
     /// The task went away while this ran.
     Gone,
@@ -1013,6 +1016,7 @@ fn run_suite(
                 return SuiteRun::Product {
                     feedback: format!("`{}` could not run: {e}", suite.name),
                     failing: vec![],
+                    red: None,
                 };
             }
         };
@@ -1102,6 +1106,7 @@ fn run_suite(
                         "`{}` proved nothing: {executed} test(s) ran and at least {needed} must. A run that executes no tests is not a pass; make the suite run the tests (or fix what stopped it).\n",
                         suite.name
                     )),
+                    red: Some((RedKind::Vacuous, String::new())),
                     failing: vec![],
                 }
             }
@@ -1205,8 +1210,17 @@ fn run_suite(
                             ));
                         }
                         extra.push('\n');
+                        // A red that names no test is compared with the base by its first error.
+                        let red = failures.is_empty().then(|| {
+                            let e = basered::first_error(&j.output);
+                            (
+                                RedKind::Nameless,
+                                if e.is_empty() { why.clone() } else { e },
+                            )
+                        });
                         SuiteRun::Product {
                             feedback: out(&extra),
+                            red,
                             failing: tests.clone(),
                         }
                     }
@@ -1354,7 +1368,25 @@ fn run_build(who: &Who, suite: &Suite, build: &str, n: usize, cwd: &Path) -> Bui
     Built::Ok
 }
 
+mod base_red;
+
+/// The test step. A suite that is red in a way the base has too (s246) makes the task wait; once
+/// the base is green and folded in, the step runs again from the start.
 pub fn run(c: &Ctx) {
+    let again = std::cell::Cell::new(false);
+    let mut pass = 0u32;
+    loop {
+        run_once(c, &again, pass);
+        if !again.replace(false) {
+            return;
+        }
+        pass += 1;
+    }
+}
+
+/// `pass` counts the runs of the step in this job: each one names its commands apart, so a host
+/// that finished the first pass's command is not mistaken for this pass's.
+fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
     // As for a test command: test what would land, with the base folded in.
     match crate::jobs::prepare(c) {
         Ok(None) => {}
@@ -1378,7 +1410,11 @@ pub fn run(c: &Ctx) {
         step: c.step.name.clone(),
         project: c.project.id.clone(),
         log_dir: log_dir.clone(),
-        id_prefix: format!("t{}r{}", c.task.0, c.run.0),
+        id_prefix: if pass == 0 {
+            format!("t{}r{}", c.task.0, c.run.0)
+        } else {
+            format!("t{}r{}p{pass}", c.task.0, c.run.0)
+        },
         sink: None,
         env: vec![],
         trust_base: true,
@@ -1460,6 +1496,32 @@ pub fn run(c: &Ctx) {
     let project_test =
         crate::jobs::test_commands(d, &c.def, c.project_id, Some(c.task)).map(|t| t.test);
     let mut built: Vec<String> = vec![];
+    // A restarted daemon finds the wait it was in: no second run of the suite to learn the same.
+    if per_suite {
+        if let Ok(Some(w)) = d.store.base_red(c.task.0) {
+            let suite = c
+                .def
+                .testing
+                .suite(&w.suite)
+                .and_then(|s| with_project_test(s, project_test.as_deref()).ok());
+            match (suite, RedKind::parse(&w.kind)) {
+                (Some(suite), Some(kind)) => {
+                    let fe = w.first_error.clone();
+                    match base_red::gate(c, &who, &lock, &suite, &tree.base, kind, &fe, Some(w)) {
+                        base_red::Gate::Cleared => {
+                            again.set(true);
+                            return;
+                        }
+                        base_red::Gate::Gone => return,
+                        base_red::Gate::NotBase | base_red::Gate::Skipped => {}
+                    }
+                }
+                _ => {
+                    let _ = d.store.clear_base_red(c.task.0);
+                }
+            }
+        }
+    }
     for sel in &sels {
         let name = sel.suite.name.clone();
         if !sel.selected {
@@ -1489,6 +1551,30 @@ pub fn run(c: &Ctx) {
                 match ran {
                     Built::Gone => return,
                     Built::Red(feedback) => {
+                        let err = basered::first_error(base_red::output_of(&feedback));
+                        match base_red::gate(
+                            c,
+                            &who,
+                            &lock,
+                            &suite,
+                            &tree.base,
+                            RedKind::Build,
+                            &err,
+                            None,
+                        ) {
+                            base_red::Gate::Cleared => {
+                                again.set(true);
+                                return;
+                            }
+                            base_red::Gate::Gone => return,
+                            base_red::Gate::Skipped => {
+                                let _ = record_skip_debt(d, c, &name);
+                                notes.push(format!("{name}: skipped by force"));
+                                outcomes.push((name, SuiteOutcome::Skipped));
+                                continue;
+                            }
+                            base_red::Gate::NotBase => {}
+                        }
                         outcomes.push((name.clone(), SuiteOutcome::Failed));
                         let (v, note) = closing(&outcomes);
                         let _ = d.store.set_closing(c.task.0, v.name(), &note, now_ms());
@@ -1536,7 +1622,27 @@ pub fn run(c: &Ctx) {
                 }
                 outcomes.push((name, outcome));
             }
-            SuiteRun::Product { feedback, failing } => {
+            SuiteRun::Product {
+                feedback,
+                failing,
+                red,
+            } => {
+                if let (true, Some((kind, err))) = (per_suite, red) {
+                    match base_red::gate(c, &who, &lock, &suite, &tree.base, kind, &err, None) {
+                        base_red::Gate::Cleared => {
+                            again.set(true);
+                            return;
+                        }
+                        base_red::Gate::Gone => return,
+                        base_red::Gate::Skipped => {
+                            let _ = record_skip_debt(d, c, &name);
+                            notes.push(format!("{name}: skipped by force"));
+                            outcomes.push((name, SuiteOutcome::Skipped));
+                            continue;
+                        }
+                        base_red::Gate::NotBase => {}
+                    }
+                }
                 let mut reason = format!("suite `{name}` is red");
                 let mut feedback = feedback;
                 // What failed is kept for the last round, counted across tasks, and on the

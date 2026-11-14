@@ -641,6 +641,9 @@ pub fn alerts_now(d: &Daemon) -> Vec<(String, String, String)> {
                 "needs_you".into(),
                 format!("Task #{} is proposed and waits for your approval", t.id.0),
             )),
+            // A failure outside the code that the daemon is about to retry is not news yet; a
+            // third one in the window (no retry left) is, and raises this as usual (s247).
+            State::Failed if crate::autoretry::pending(d, t) => {}
             State::Failed => out.push((
                 format!("failed:{}", t.id.0),
                 "failed".into(),
@@ -677,6 +680,21 @@ pub fn alerts_now(d: &Daemon) -> Vec<(String, String, String)> {
         }
     }
     out.extend(silent_alerts(d));
+    for b in crate::autoretry::current_bursts(d, &w) {
+        let key: u64 = b.reason.bytes().fold(0xcbf2_9ce4_8422_2325, |h, c| {
+            (h ^ u64::from(c)).wrapping_mul(0x0100_0000_01b3)
+        });
+        out.push((
+            format!("outside-burst:{key:016x}"),
+            "environment".into(),
+            format!(
+                "{} tasks failed outside the code with the same reason within {} minutes: {}",
+                b.tasks.len(),
+                d.cfg.burst_window.as_secs() / 60,
+                b.reason
+            ),
+        ));
+    }
     out.extend(d.landing().attention());
     out.extend(freeze_alerts(d, &w));
     out.extend(wait_alerts(d));

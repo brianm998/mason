@@ -88,6 +88,7 @@ fn each_kind_of_transition_sets_it_to_the_event_time() {
             task: t,
             to: State::Developing,
             step: String::new(),
+            auto: false,
         },
     )
     .unwrap();

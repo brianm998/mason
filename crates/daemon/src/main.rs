@@ -135,6 +135,9 @@ fn main() {
             "--env-retry-ms" => {
                 cfg.env_retry = Duration::from_millis(val().parse().unwrap_or_else(|_| usage()))
             }
+            "--base-red-poll-ms" => {
+                cfg.base_red_poll = Duration::from_millis(val().parse().unwrap_or_else(|_| usage()))
+            }
             "--owner" => {
                 // The first --owner replaces the default identity; more add to it.
                 if !owners_set {

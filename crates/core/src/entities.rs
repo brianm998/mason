@@ -82,6 +82,9 @@ pub fn wait_class(on: &str, recorded: Option<&str>) -> String {
     if has("paused by ") {
         return "pause".into();
     }
+    if on.contains("` is red on ") && on.contains(" too: ") {
+        return "base-red".into();
+    }
     if has("environment problem") || has("git is busy") {
         return "environment".into();
     }
@@ -185,6 +188,10 @@ mod wait_class_tests {
             ("Waiting: disk has 3 GB free, floor 10 GB", "disk-floor"),
             ("paused by owner (all for everything)", "pause"),
             ("git is busy or not answering (fetch): x", "environment"),
+            (
+                "`compose-clients` is red on 812a7849ab too: error: x",
+                "base-red",
+            ),
             ("something new", "other"),
         ] {
             assert_eq!(wait_class(text, None), class, "{text}");

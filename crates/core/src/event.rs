@@ -110,6 +110,9 @@ pub enum EventKind {
         to: State,
         /// The step to re-enter (empty: the first one of that category).
         step: String,
+        /// The daemon retried it by itself (s247), after a failure outside the code. An event
+        /// from before this field decodes as `false`: the owner's retry.
+        auto: bool,
     },
     Canceled {
         task: TaskId,

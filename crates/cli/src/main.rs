@@ -2600,6 +2600,22 @@ fn main() {
                         if let Some(to) = t["retry_to"].as_str() {
                             println!("  retry     goes to `{to}`");
                         }
+                        if let Some(n) = t["auto_retries"].as_u64() {
+                            let next = match t["next_auto_retry_ms"].as_u64() {
+                                Some(at) => {
+                                    let now = t["progress"]["now_ms"].as_u64().unwrap_or(at);
+                                    format!(
+                                        "the next one in {}",
+                                        mason_core::progress_text::duration(at.saturating_sub(now))
+                                    )
+                                }
+                                None => "no more will be made".to_string(),
+                            };
+                            println!(
+                                "  auto      {n} automatic retr{} in the last 24 h; {next}",
+                                if n == 1 { "y" } else { "ies" }
+                            );
+                        }
                     }
                     for l in t["excused"].as_array().into_iter().flatten() {
                         println!("  excused   {}", l.as_str().unwrap_or(""));

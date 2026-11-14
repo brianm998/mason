@@ -16,6 +16,7 @@
 //!   quarantine.
 //! * [`env`]: the lifecycle of an environment as commands to run.
 
+pub mod basered;
 pub mod env;
 pub mod gates;
 pub mod glob;
