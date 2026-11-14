@@ -377,7 +377,7 @@ fn definition_check_and_dry_run_need_no_daemon_and_say_what_is_wrong() {
 
     // Valid language that this version cannot run yet is called out separately.
     let gate = dir.join("gate.toml");
-    std::fs::write(&gate, DEF.replace("type = \"test\"", "type = \"gate\"")).unwrap();
+    std::fs::write(&gate, DEF.replace("type = \"test\"", "type = \"ci\"")).unwrap();
     let o = s.mason(&["definition", "check", gate.to_str().unwrap()]);
     assert!(
         !o.status.success()

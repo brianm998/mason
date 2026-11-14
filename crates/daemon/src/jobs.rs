@@ -622,7 +622,13 @@ fn execute(c: &Ctx, step: State) {
     match c.step.kind {
         StepType::Agent => agent_job(c),
         StepType::Test if !c.step.suites.is_empty() => crate::suites::run(c),
-        StepType::Command | StepType::Test => command_job(c),
+        // A gate runs its `command` as a check; `command_job` treats it like a command
+        // step (no test-only reuse or conflict probe). Suites on a gate need the
+        // test machinery, so they are refused here, not run wrongly.
+        StepType::Gate if !c.step.suites.is_empty() => {
+            c.fail("a gate step runs its `command`; suites are for test steps".to_string())
+        }
+        StepType::Command | StepType::Test | StepType::Gate => command_job(c),
         StepType::Approval => approval_job(c),
         StepType::Landing => land_job(c),
         StepType::Plugin => crate::plugins::plugin_job(c),
