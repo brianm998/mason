@@ -1,7 +1,7 @@
 # Installing MASON
 
 Three routes, one result: the `mason`, `masond`, `step-host` and `mason-mcp` binaries, and then
-`mason init` in your project. None of them runs as root or edits your shell profile.
+`mason init` in your project. None of them runs as root. The install script edits your shell profile only if you say yes (below).
 
 | Route | Command | State |
 | --- | --- | --- |
@@ -15,12 +15,23 @@ Until a release exists, build from source: `cargo build --release --workspace --
 ## The install script
 
 ```text
-bash install.sh [--version X.Y.Z] [--prefix DIR] [--base-url URL]
+bash install.sh [--version X.Y.Z] [--prefix DIR] [--base-url URL] [--profile|--no-profile]
 ```
 
 It downloads `mason-<version>-<target>.tar.gz` and `SHA256SUMS` from the release folder, checks
 the archive's SHA-256, and only then copies the binaries into `<prefix>/bin` (default
 `~/.local/bin`). A mismatch, or a release with no checksum file, installs nothing.
+
+**The `mason` shell function.** Several `mason` binaries can exist on one machine, and the one on
+PATH is often not the one the daemon runs. When stdin is a terminal the script asks whether to add
+a `mason()` function to your login shell's profile (zsh: `~/.zprofile`; bash: `~/.bash_profile` if
+it exists, else `~/.profile`; anything else: `~/.profile`; the question names the file). The
+function runs `<data dir>/runtimes/<contents of runtimes/current>/mason`, which self-update moves,
+and falls back to `~/.config/mason/bin/mason` when `runtimes/current` is missing. The data dir is
+`~/Library/Application Support/mason` on macOS and the XDG data dir on Linux. It is appended
+between `# >>> mason >>>` and `# <<< mason <<<`; a block already there is replaced in place and
+nothing outside the markers is touched. `--profile` says yes without asking, `--no-profile` says
+no, and a non-interactive run (or `--yes` alone) edits nothing.
 
 **What the checksum does and does not prove.** It shows the download matches the release's own
 checksum file. It does not show the release is the owner's: that is the signature. The script
