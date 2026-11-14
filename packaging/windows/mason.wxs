@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- WiX v3 source for mason-<ver>-x86_64-windows-setup.msi. Per-user install to
+     %LOCALAPPDATA%\Programs\MASON, adds that folder to the user PATH. UpgradeCode is fixed
+     forever: changing it makes a new version install beside the old one.
+     Variables: Version (x.y.z), SourceDir (folder holding the files to install). -->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*" Name="MASON" Language="1033" Version="$(var.Version)"
+           Manufacturer="MASON" UpgradeCode="3571d89e-2987-428c-a619-e8d01075c3a6">
+    <Package InstallerVersion="500" Compressed="yes" InstallScope="perUser" Platform="x64"
+             Description="MASON CLI and daemon" />
+    <MediaTemplate EmbedCab="yes" />
+    <MajorUpgrade DowngradeErrorMessage="A newer MASON is already installed." />
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="LocalAppDataFolder">
+        <Directory Id="ProgramsDir" Name="Programs">
+          <Directory Id="INSTALLFOLDER" Name="MASON" />
+        </Directory>
+      </Directory>
+    </Directory>
+
+    <DirectoryRef Id="INSTALLFOLDER">
+      <Component Id="MasonExe" Guid="*" Win64="yes">
+        <File Id="mason.exe" Source="$(var.SourceDir)\mason.exe" KeyPath="no" />
+        <RegistryValue Root="HKCU" Key="Software\MASON" Name="installed" Type="integer" Value="1" KeyPath="yes" />
+        <Environment Id="UserPath" Name="PATH" Value="[INSTALLFOLDER]" Action="set" Part="last" System="no" Permanent="no" />
+        <RemoveFolder Id="RemoveInstallFolder" On="uninstall" />
+      </Component>
+      <Component Id="MasondExe" Guid="*" Win64="yes">
+        <File Id="masond.exe" Source="$(var.SourceDir)\masond.exe" />
+      </Component>
+      <Component Id="StepHostExe" Guid="*" Win64="yes">
+        <File Id="step_host.exe" Name="step-host.exe" Source="$(var.SourceDir)\step-host.exe" />
+      </Component>
+      <Component Id="MasonMcpExe" Guid="*" Win64="yes">
+        <File Id="mason_mcp.exe" Name="mason-mcp.exe" Source="$(var.SourceDir)\mason-mcp.exe" />
+      </Component>
+      <Component Id="FakeClaudeExe" Guid="*" Win64="yes">
+        <File Id="fake_claude.exe" Name="fake-claude.exe" Source="$(var.SourceDir)\fake-claude.exe" />
+      </Component>
+      <Component Id="Askpass" Guid="*" Win64="yes">
+        <File Id="mason_askpass.cmd" Name="mason-askpass.cmd" Source="$(var.SourceDir)\mason-askpass.cmd" />
+      </Component>
+      <Component Id="Docs" Guid="*" Win64="yes">
+        <File Id="LICENSE" Name="LICENSE" Source="$(var.SourceDir)\LICENSE" />
+        <File Id="LICENSE_ADD" Name="LICENSE-ADDITIONAL-PERMISSION" Source="$(var.SourceDir)\LICENSE-ADDITIONAL-PERMISSION" />
+        <File Id="README_MD" Name="README.md" Source="$(var.SourceDir)\README.md" />
+      </Component>
+    </DirectoryRef>
+
+    <Feature Id="Main" Title="MASON" Level="1">
+      <ComponentRef Id="MasonExe" />
+      <ComponentRef Id="MasondExe" />
+      <ComponentRef Id="StepHostExe" />
+      <ComponentRef Id="MasonMcpExe" />
+      <ComponentRef Id="FakeClaudeExe" />
+      <ComponentRef Id="Askpass" />
+      <ComponentRef Id="Docs" />
+    </Feature>
+  </Product>
+</Wix>
