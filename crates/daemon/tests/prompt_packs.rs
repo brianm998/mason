@@ -63,7 +63,7 @@ fn run(files: &[(&str, &str)]) -> (String, String, String) {
                  commit("echo hello > hello.txt && git add hello.txt", "second"), submit()],
             ],
             "review": [[record(r, "review"),
-                {"call": {"tool": "submit_review", "args": {"verdict": "approve"}}}]],
+                {"call": {"tool": "submit_review", "args": {"verdict": "approve", "summary": "fine"}}}]],
         }}),
     );
     let mut all: Vec<(&str, &str)> = vec![(".mason/mason.toml", DEF)];
@@ -112,7 +112,7 @@ fn a_step_whose_prompt_file_is_missing_fails_and_names_it() {
         "false",
         json!({"steps": {
             "develop": [[commit("echo hello > hello.txt && git add hello.txt", "x"), submit()]],
-            "review": [[{"call": {"tool": "submit_review", "args": {"verdict": "approve"}}}]],
+            "review": [[{"call": {"tool": "submit_review", "args": {"verdict": "approve", "summary": "fine"}}}]],
         }}),
     );
     s.push_files(&[(".mason/mason.toml", DEF)], "project setup");
