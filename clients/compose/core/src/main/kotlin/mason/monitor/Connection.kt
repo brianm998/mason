@@ -95,7 +95,7 @@ class MonitorConnection(
         while (running && !closed.await(tickMs, TimeUnit.MILLISECONDS)) {
             val now = discover()
             if (now != null && now.replaces(info)) break  // restarted: start over from the last seq
-            // Ask first, then judge the silence: a late tick must not give up unasked.
+            // Ask first, then give up: a late tick must not skip the ping that was due.
             if ((System.nanoTime() - lastPing) / 1e9 >= timing.pingEverySeconds) {
                 lastPing = System.nanoTime()
                 write(ClientMessage(ping = Ping(nonce = ++pings)))
