@@ -358,6 +358,15 @@ pub fn encode(k: &EventKind) -> (&'static str, String) {
             w.n(task.0).ids(released).ids(added);
             "blockers_changed"
         }
+        Repinned {
+            task,
+            from,
+            to,
+            changed,
+        } => {
+            w.n(task.0).s(from).s(to).s(changed);
+            "repinned"
+        }
         Revived { task } => {
             w.n(task.0);
             "revived"
@@ -492,6 +501,12 @@ pub fn decode(kind: &str, payload: &str) -> Result<EventKind, CodecError> {
             task: t(&mut r)?,
             released: r.ids()?,
             added: r.ids()?,
+        },
+        "repinned" => Repinned {
+            task: t(&mut r)?,
+            from: r.s()?,
+            to: r.s()?,
+            changed: r.s()?,
         },
         "revived" => Revived { task: t(&mut r)? },
         "tracker_edited" => TrackerEdited {
@@ -645,6 +660,12 @@ mod tests {
                 released: vec![TaskId(2), TaskId(3)],
                 added: vec![],
             },
+            Repinned {
+                task: t,
+                from: "a".into(),
+                to: nasty.into(),
+                changed: "steps: x\nsuites: y".into(),
+            },
             Revived { task: t },
             TrackerEdited {
                 task: t,
@@ -662,7 +683,7 @@ mod tests {
         let mut kinds: Vec<_> = all.iter().map(|k| encode(k).0).collect();
         kinds.sort_unstable();
         kinds.dedup();
-        assert_eq!(kinds.len(), 25, "one sample per EventKind variant");
+        assert_eq!(kinds.len(), 26, "one sample per EventKind variant");
         for k in all {
             let (kind, payload) = encode(&k);
             assert!(!payload.contains('\n'), "payload is one line");
