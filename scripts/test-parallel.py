@@ -101,13 +101,14 @@ def list_executables(flags, root):
         seen.add(exe)
         target = m["target"]
         kinds = target.get("kind", [])
+        # As cargo's own header: the source path relative to the package.
+        pkg_dir = os.path.dirname(m["manifest_path"])
         try:
-            src = os.path.relpath(target["src_path"], root)
+            src = os.path.relpath(target["src_path"], pkg_dir)
         except ValueError:
             src = target["src_path"]
         if any(k in ("lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro", "bin") for k in kinds):
             src = "unittests " + src
-        pkg_dir = os.path.dirname(m["manifest_path"])
         pkg = m.get("package_id", "").split("#")[-1].split("@")[0].split("/")[-1].split(" ")[0]
         found.append({"name": target["name"], "src": src, "exe": exe, "dir": pkg_dir, "pkg": pkg})
     rc = p.wait()
