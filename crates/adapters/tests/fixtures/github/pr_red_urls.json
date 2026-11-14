@@ -1,0 +1,55 @@
+[
+ {
+  "method": "GET",
+  "url": "/pulls/9",
+  "response": {
+   "status": 200,
+   "headers": {},
+   "body": {
+    "number": 9,
+    "html_url": "https://github.com/o/r/pull/7",
+    "node_id": "PR_node7",
+    "state": "open",
+    "merged": false,
+    "merged_at": null,
+    "mergeable_state": "unstable",
+    "head": {
+     "sha": "fff666"
+    }
+   }
+  }
+ },
+ {
+  "method": "GET",
+  "url": "/commits/fff666/check-runs",
+  "response": {
+   "status": 200,
+   "headers": {},
+   "body": {
+    "check_runs": [
+     {
+      "name": "build",
+      "status": "completed",
+      "conclusion": "failure",
+      "details_url": "https://github.com/o/r/actions/runs/9/job/not-a-number"
+     },
+     {
+      "name": "lint",
+      "status": "in_progress",
+      "conclusion": null,
+      "details_url": "https://github.com/o/r/actions/runs/9/job/2"
+     }
+    ]
+   }
+  }
+ },
+ {
+  "method": "GET",
+  "url": "/pulls/9/reviews",
+  "response": {
+   "status": 200,
+   "headers": {},
+   "body": []
+  }
+ }
+]
