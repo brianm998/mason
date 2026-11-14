@@ -859,9 +859,29 @@ pub(crate) fn prepare(c: &Ctx) -> Result<Option<String>, String> {
     if let Err(why) = c.d.fetch_remote(c.project_id) {
         let base = c.project.base_ref();
         if git::rev_parse(&c.project.path, &base).is_err() {
-            return Err(format!(
-                "fetching the remote failed ({why}) and there is no last-known {base} to work from"
-            ));
+            // A fetch that timed out is the network's, not the task's: with nothing to work
+            // from, wait it out and fetch again (nothing charged to the task) instead of
+            // failing the step, which failed three tasks in a row the same way.
+            if why.contains("timed out") {
+                let first = std::cell::Cell::new(Some(why.clone()));
+                wait_out_environment(c, "fetching the remote", || {
+                    let r = match first.take() {
+                        Some(w) => Err(w),
+                        None => c.d.fetch_remote(c.project_id),
+                    };
+                    r.map_err(|w| git::GitError {
+                        args: vec!["fetch".into(), "--prune".into()],
+                        code: None,
+                        timed_out: w.contains("timed out"),
+                        stderr: w,
+                    })
+                })
+                .map_err(|e| format!("{e} and there is no last-known {base} to work from"))?;
+            } else {
+                return Err(format!(
+                    "fetching the remote failed ({why}) and there is no last-known {base} to work from"
+                ));
+            }
         }
         tracing::warn!(
             task = c.task.0,
@@ -1058,8 +1078,7 @@ fn run_shell_env(
         .stdin(Stdio::null())
         .stdout(file)
         .stderr(err.map_or_else(|_| Stdio::null(), Stdio::from));
-    mason_platform::process::group_leader(&mut command);
-    let child = command.spawn();
+    let child = mason_platform::process::spawn_group(&mut command);
     let Ok(mut child) = child else {
         return (false, "could not start the command".into());
     };
