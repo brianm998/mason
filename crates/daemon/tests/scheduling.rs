@@ -979,12 +979,14 @@ fn home_compile_holders_carry_the_tasks_project_and_full_title() {
     d.broker.lease_set_task(tid, t);
     let (pid, held_person) = hold(&d, "interactive `cargo build`", &[("compile", 1)]);
     let world = d.world().unwrap();
+    let name = world.projects[&world.tasks[&t].project].name.clone();
+    assert!(!name.is_empty());
     // Home filtered to a project the holder does not belong to still names it.
     for filter in ["", "elsewhere"] {
         let h = mason_daemon::views::Ctx::new(&d, &world).home(filter);
         let running = h.compilation.unwrap().running;
         let task_row = running.iter().find(|r| r.task == t.0).unwrap();
-        assert_eq!(task_row.project, "scratch");
+        assert_eq!(task_row.project, name);
         assert_eq!(task_row.title, title);
         let person = running.iter().find(|r| r.task == 0).unwrap();
         assert_eq!((person.project.as_str(), person.title.as_str()), ("", ""));
