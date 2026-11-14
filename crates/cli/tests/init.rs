@@ -111,7 +111,7 @@ impl Fixture {
             &self.repo,
             &[
                 "config",
-                &format!("url.{}.insteadOf", bare.display()),
+                &format!("url.{}.pushInsteadOf", bare.display()),
                 "https://github.com/o/r.git",
             ],
         );
@@ -763,9 +763,11 @@ fn yes_never_merges_or_pushes_even_with_a_remote() {
 fn land_no_writes_the_same_files_as_before() {
     let a = fixture(&[]);
     let b = fixture(&[]);
-    let one = ok(&run_init(&a, &[], &[]));
-    let two = ok(&run_init(&b, &["--land", "no"], &[]));
-    assert_eq!(one, two);
+    ok(&run_init(&a, &[], &[]));
+    ok(&run_init(&b, &["--land", "no"], &[]));
+    for file in [".mason/mason.toml", ".mason/landing.toml", "AGENTS.md"] {
+        assert_eq!(on_setup(&a, file), on_setup(&b, file), "{file}");
+    }
     assert_eq!(
         std::fs::read_to_string(a.overlay()).unwrap(),
         std::fs::read_to_string(b.overlay()).unwrap()
