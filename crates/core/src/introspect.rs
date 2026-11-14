@@ -657,6 +657,39 @@ pub fn median(mut v: Vec<u64>) -> Option<u64> {
     })
 }
 
+/// The 90th percentile of recorded values by the nearest-rank rule (the smallest value that at
+/// least 90% of the values are not above), or `None` for none.
+pub fn p90(mut v: Vec<u64>) -> Option<u64> {
+    if v.is_empty() {
+        return None;
+    }
+    v.sort_unstable();
+    let rank = (v.len() * 9).div_ceil(10).max(1);
+    Some(v[rank - 1])
+}
+
+/// The class of a send-back, from the reason the event records: `test_red`, `build_red`,
+/// `conflict`, `weakening` or `other`. (A wait on a red the base has too is not a send-back; the
+/// digest counts those as `base_red` from the waits.)
+pub fn send_back_class(reason: &str) -> &'static str {
+    let r = reason.to_ascii_lowercase();
+    if r.contains("conflict") {
+        "conflict"
+    } else if r.contains("weaken") || r.contains("weakening") {
+        "weakening"
+    } else if r.contains("build of") || r.contains("build is red") || r.contains("building") {
+        "build_red"
+    } else if r.contains(" red")
+        || r.contains("failing")
+        || r.contains("failed")
+        || r.contains("tests")
+    {
+        "test_red"
+    } else {
+        "other"
+    }
+}
+
 /// `a / b`, or `None` if `b` is zero (no division by zero, no made-up zero).
 pub fn per(a: u64, b: u64) -> Option<f64> {
     (b > 0).then(|| a as f64 / b as f64)
@@ -955,11 +988,36 @@ mod tests {
     }
 
     #[test]
+    fn a_send_back_reason_is_put_in_a_class() {
+        assert_eq!(
+            send_back_class("suite `cargo-workspace` is red"),
+            "test_red"
+        );
+        assert_eq!(
+            send_back_class("the build of suite `compose-clients` is red"),
+            "build_red"
+        );
+        assert_eq!(
+            send_back_class("the branch conflicts with origin/develop in: a.rs"),
+            "conflict"
+        );
+        assert_eq!(send_back_class("the change weakens a check"), "weakening");
+        assert_eq!(send_back_class("a gate failed"), "test_red");
+        assert_eq!(send_back_class("the reviewer wants another look"), "other");
+    }
+
+    #[test]
     fn digest_arithmetic_makes_nothing_up() {
         assert_eq!(median(vec![]), None);
         assert_eq!(median(vec![5, 1, 9]), Some(5));
         assert_eq!(median(vec![2, 4]), Some(3));
         assert_eq!(per(3, 0), None);
+        assert_eq!(p90(vec![]), None);
+        assert_eq!(p90(vec![7]), Some(7));
+        // Nearest rank: ten values, the ninth smallest; eleven, the tenth.
+        assert_eq!(p90((1..=10).collect()), Some(9));
+        assert_eq!(p90((1..=11).rev().collect()), Some(10));
+        assert_eq!(p90(vec![1, 1, 1, 1, 1, 1, 1, 1, 1, 100]), Some(1));
         assert_eq!(per(3, 2), Some(1.5));
     }
 

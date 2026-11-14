@@ -128,9 +128,18 @@ pub fn consider(d: &Arc<Daemon>, project: ProjectId, scope: &str, tests: &[Strin
             Some(t) => format!("{}; task #{}", q.reason, t.0),
             None => q.reason.clone(),
         };
-        let _ = d
-            .store
-            .put_quarantine(scope, test, OWNER, q.expires_at_ms, &full, now);
+        let note = format!(
+            "flaked in tasks {}; first on {}",
+            tasks
+                .iter()
+                .map(|t| format!("#{t}"))
+                .collect::<Vec<_>>()
+                .join(", "),
+            date_of(first)
+        );
+        let _ =
+            d.store
+                .put_flaky_quarantine(scope, test, OWNER, q.expires_at_ms, &full, &note, now);
         tracing::info!(%scope, %test, "quarantined for {QUARANTINE_DAYS} days: {full}");
     }
 }

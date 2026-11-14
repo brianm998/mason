@@ -22,9 +22,13 @@ pub enum StepKind {
     Explore,
     Develop,
     Review,
+    /// A read-only session that looks at a task that failed on its own code and says what
+    /// should happen next (s250). Not a step of the graph.
+    Diagnose,
 }
 
-pub const ALL_TOOLS: [&str; 8] = [
+pub const ALL_TOOLS: [&str; 9] = [
+    "submit_diagnosis",
     "submit_plan",
     "submit_change",
     "submit_review",
@@ -41,13 +45,19 @@ impl StepKind {
             StepKind::Explore => "explore",
             StepKind::Develop => "develop",
             StepKind::Review => "review",
+            StepKind::Diagnose => "diagnose",
         }
     }
 
     pub fn from_name(s: &str) -> Option<StepKind> {
-        [StepKind::Explore, StepKind::Develop, StepKind::Review]
-            .into_iter()
-            .find(|k| k.name() == s)
+        [
+            StepKind::Explore,
+            StepKind::Develop,
+            StepKind::Review,
+            StepKind::Diagnose,
+        ]
+        .into_iter()
+        .find(|k| k.name() == s)
     }
 
     /// Tools available in this step. Read-only steps get no tool that changes
@@ -64,6 +74,7 @@ impl StepKind {
                 "request_exploration",
             ],
             StepKind::Review => &["submit_review", "ask", "file_proposal", "report_progress"],
+            StepKind::Diagnose => &["submit_diagnosis", "report_progress"],
         }
     }
 
@@ -73,6 +84,7 @@ impl StepKind {
             StepKind::Explore => &["submit_plan"],
             StepKind::Develop => &["submit_change", "request_exploration"],
             StepKind::Review => &["submit_review"],
+            StepKind::Diagnose => &["submit_diagnosis"],
         }
     }
 
@@ -140,6 +152,26 @@ pub fn tool_spec(tool: &str) -> Option<(String, Value)> {
                     "description": "Lines the base branch landed that your change removes on purpose, each with a reason. Landing sends a task back when a merge with the base dropped a landed line that is not listed here."}
             }),
             &["summary", "head"],
+        ),
+        "submit_diagnosis" => s(
+            "End your diagnosis with exactly one of these verdicts: 'retry' (run again from a step, \
+             with a note for the next agent), 'explore' (the plan does not hold: back to exploring, \
+             with the reason), 'close' (the work is already done or a duplicate, with evidence) or \
+             'ask' (only the owner can decide: your recommendation first). You may not change files.",
+            json!({
+                "verdict": {"type": "string", "enum": ["retry", "explore", "close", "ask"]},
+                "summary": {"type": "string", "description": "What went wrong and why, up to 2000 characters"},
+                "step": {"type": "string", "description": "retry: the step to run again from (default: the step that failed)"},
+                "note": {"type": "string", "description": "retry: what the next agent must know, up to 2000 characters"},
+                "reason": {"type": "string", "description": "explore: why the plan does not hold"},
+                "kind": {"type": "string", "enum": ["already_done", "duplicate"], "description": "close: which"},
+                "duplicate_of": {"type": "integer", "description": "close, duplicate: the other task's number"},
+                "evidence": {"type": "string", "description": "close: what shows it (commit, file, test, task)"},
+                "question": {"type": "string", "description": "ask: the one decision, one sentence"},
+                "recommendation": {"type": "string", "description": "ask: the answer you recommend, first on the card"},
+                "alternatives": {"type": "array", "items": {"type": "string"}, "description": "ask: other answers"}
+            }),
+            &["verdict", "summary"],
         ),
         "submit_review" => s(
             "Submit your review. verdict is 'approve' or 'changes'. 'changes' needs at least one finding.",
@@ -339,6 +371,37 @@ pub fn validate(tool: &str, a: &Value) -> Result<(), Vec<String>> {
                     }
                 }
                 Some(_) => p.push("removes: must be an array of {file, line, reason}".into()),
+            }
+        }
+        "submit_diagnosis" => {
+            text(a, "summary", 2000, &mut p);
+            match a.get("verdict").and_then(Value::as_str) {
+                Some("retry") => {
+                    text(a, "note", 2000, &mut p);
+                }
+                Some("explore") => {
+                    text(a, "reason", 2000, &mut p);
+                }
+                Some("close") => {
+                    text(a, "evidence", 2000, &mut p);
+                    match a.get("kind").and_then(Value::as_str) {
+                        Some("already_done") => {}
+                        Some("duplicate") => {
+                            if a.get("duplicate_of").and_then(Value::as_u64).is_none() {
+                                p.push("duplicate_of: the other task's number is required for a duplicate".into());
+                            }
+                        }
+                        _ => p.push("kind: required, 'already_done' or 'duplicate'".into()),
+                    }
+                }
+                Some("ask") => {
+                    text(a, "question", 400, &mut p);
+                    text(a, "recommendation", 600, &mut p);
+                }
+                Some(v) => p.push(format!(
+                    "verdict: {v:?} must be 'retry', 'explore', 'close' or 'ask'"
+                )),
+                None => p.push("verdict: required, 'retry', 'explore', 'close' or 'ask'".into()),
             }
         }
         "submit_review" => {
@@ -937,6 +1000,44 @@ impl Drop for Inner {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_diagnosis_needs_what_its_verdict_needs() {
+        let ok = |v: Value| validate("submit_diagnosis", &v).is_ok();
+        assert!(ok(
+            json!({"verdict": "retry", "summary": "s", "note": "use the fixture"})
+        ));
+        assert!(
+            !ok(json!({"verdict": "retry", "summary": "s"})),
+            "a retry needs a note"
+        );
+        assert!(ok(
+            json!({"verdict": "explore", "summary": "s", "reason": "the plan names a file that is gone"})
+        ));
+        assert!(ok(
+            json!({"verdict": "close", "summary": "s", "kind": "already_done", "evidence": "commit abc"})
+        ));
+        assert!(
+            !ok(
+                json!({"verdict": "close", "summary": "s", "kind": "duplicate", "evidence": "same"})
+            ),
+            "a duplicate names its task"
+        );
+        assert!(ok(
+            json!({"verdict": "close", "summary": "s", "kind": "duplicate", "duplicate_of": 4, "evidence": "same"})
+        ));
+        assert!(ok(
+            json!({"verdict": "ask", "summary": "s", "question": "Keep it?", "recommendation": "Keep it"})
+        ));
+        assert!(!ok(
+            json!({"verdict": "ask", "summary": "s", "question": "Keep it?"})
+        ));
+        assert!(!ok(json!({"verdict": "maybe", "summary": "s"})));
+        // Only a diagnosis session has the tool, and it changes nothing.
+        assert_eq!(StepKind::Diagnose.terminal_tools(), &["submit_diagnosis"]);
+        assert!(StepKind::Diagnose.read_only());
+        assert!(!StepKind::Explore.tools().contains(&"submit_diagnosis"));
+    }
 
     fn plan() -> Value {
         json!({"summary": "s", "files": ["src/a.rs"], "approach": "a", "acceptance_criteria": ["c"]})

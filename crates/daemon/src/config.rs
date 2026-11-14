@@ -439,6 +439,9 @@ pub struct ProjectCfg {
     /// (`kill_after_s`, default 0 = off).
     pub kill_after: Duration,
     pub test_timeout: Duration,
+    /// Run a diagnosis session for a task that fails on its own code (`diagnose`, default true;
+    /// s250).
+    pub diagnose: bool,
     /// Retry a failure outside the code by itself (`auto_retry`, default true; s247).
     pub auto_retry: bool,
     /// Test rounds before the task fails, if the overlay sets one (layer 3).
@@ -1039,6 +1042,10 @@ pub fn parse_project(id: &str, text: &str) -> Result<ProjectCfg, String> {
         cont_after: Duration::from_secs(secs("cont_after_s", 0)),
         kill_after: Duration::from_secs(secs("kill_after_s", 0)),
         test_timeout: Duration::from_secs(secs("test_timeout_s", 1800)),
+        diagnose: doc
+            .get("diagnose")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true),
         auto_retry: doc
             .get("auto_retry")
             .and_then(|v| v.as_bool())
