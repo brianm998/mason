@@ -66,7 +66,10 @@ mason: command-line client for the MASON pipeline
   mason task revive <id>              put a canceled task whose branch was kept back in the queue (owner only)
   mason task show <id> [--json] [--watch]   with --watch, follow the live step progress
   mason task cancel <id> [--delete-branch]
-  mason task retry <id> [--from STEP] [--restart]
+  mason task retry <id> [--from STEP] [--restart] [--message TEXT]
+                                      the message is shown once in the next round's prompt
+  mason task diagnosis <id> [apply|dismiss N]   what the diagnosis agent said about a task that
+                                      failed on its own code; apply or dismiss a pending one
   mason task approve <id>             let a proposed task start, or an approval step go on
   mason task reject <id> [--reason R] reject a proposed task or an approval step
   mason task explore-anyway <id>      explore after all, even if it skipped exploring
@@ -2810,6 +2813,7 @@ fn main() {
                     let id = task_id(&mut a);
                     let from = a.opt("--from");
                     let restart = a.flag("--restart");
+                    let message = a.opt("--message");
                     finish(&a);
                     // Without --from the daemon picks: the failed step when the
                     // failure was not about the code, otherwise developing. Say
@@ -2829,11 +2833,46 @@ fn main() {
                     if restart {
                         body["restart"] = json!(true);
                     }
+                    if let Some(m) = message {
+                        body["message"] = json!(m);
+                    }
                     let r = or_die(d.call("POST", &format!("/tasks/{id}/retry"), Some(&body)));
                     println!(
                         "Retrying task #{id} from {}",
                         r["to"].as_str().unwrap_or("developing")
                     );
+                }
+                "diagnosis" => {
+                    let id = task_id(&mut a);
+                    let what = a.pos();
+                    let n = a.pos();
+                    finish(&a);
+                    match (what.as_deref(), n.and_then(|n| n.parse::<u64>().ok())) {
+                        (None, _) => {
+                            let r = or_die(d.call("GET", &format!("/tasks/{id}/diagnoses"), None));
+                            let rows = r.as_array().cloned().unwrap_or_default();
+                            if rows.is_empty() {
+                                println!("Task #{id} has no diagnosis.");
+                            }
+                            for row in rows {
+                                println!(
+                                    "#{} [{}] {}",
+                                    row["id"],
+                                    row["status"].as_str().unwrap_or("?"),
+                                    row["text"].as_str().unwrap_or("")
+                                );
+                            }
+                        }
+                        (Some(w @ ("apply" | "dismiss")), Some(n)) => {
+                            let r = or_die(d.call(
+                                "POST",
+                                &format!("/tasks/{id}/diagnoses/{n}/{w}"),
+                                Some(&json!({})),
+                            ));
+                            println!("Diagnosis #{n}: {}", r["said"].as_str().unwrap_or("done"));
+                        }
+                        _ => die("usage: mason task diagnosis <id> [apply|dismiss N]"),
+                    }
                 }
                 "skip" => {
                     let id = task_id(&mut a);

@@ -730,6 +730,7 @@ pub fn alerts_now(d: &Daemon) -> Vec<(String, String, String)> {
             }
         }
     }
+    out.extend(crate::diagnose::alerts(d));
     out.extend(silent_alerts(d));
     for b in crate::autoretry::current_bursts(d, &w) {
         let key: u64 = b.reason.bytes().fold(0xcbf2_9ce4_8422_2325, |h, c| {

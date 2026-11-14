@@ -59,6 +59,19 @@ impl std::fmt::Display for StoreError {
 
 impl std::error::Error for StoreError {}
 
+/// A diagnosis of a failed task (s250).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DiagnosisRow {
+    pub id: u64,
+    pub task: u64,
+    pub at_ms: u64,
+    pub verdict: String,
+    /// The submitted arguments, as JSON text.
+    pub args: String,
+    pub status: String,
+    pub decided_ms: u64,
+}
+
 /// What a suite did at a base commit (s246): failing names and every name, the executed count,
 /// and why a base can be called red the same way as a branch.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1513,6 +1526,63 @@ impl Store {
         self.write(move |c| {
             c.execute("DELETE FROM base_red WHERE task = ?1", params![task as i64])
                 .map(|_| ())
+        })
+    }
+
+    /// A diagnosis was submitted for `task`. Returns its id.
+    pub fn add_diagnosis(
+        &self,
+        task: u64,
+        verdict: &str,
+        args: &str,
+        status: &str,
+        now_ms: u64,
+    ) -> Result<u64, StoreError> {
+        let (v, a, s) = (verdict.to_string(), args.to_string(), status.to_string());
+        self.write(move |c| {
+            c.execute(
+                "INSERT INTO diagnoses(task, at_ms, verdict, args, status) VALUES (?1,?2,?3,?4,?5)",
+                params![task as i64, now_ms as i64, v, a, s],
+            )?;
+            Ok(c.last_insert_rowid() as u64)
+        })
+    }
+
+    /// Every diagnosis of a task (or of all tasks, `None`), oldest first.
+    pub fn diagnoses(&self, task: Option<u64>) -> Result<Vec<DiagnosisRow>, StoreError> {
+        self.read(move |c| {
+            let mut st = c.prepare(
+                "SELECT id, task, at_ms, verdict, args, status, decided_ms FROM diagnoses \
+                 WHERE (?1 IS NULL OR task = ?1) ORDER BY id",
+            )?;
+            let rows = st.query_map(params![task.map(|t| t as i64)], |r| {
+                Ok(DiagnosisRow {
+                    id: r.get::<_, i64>(0)? as u64,
+                    task: r.get::<_, i64>(1)? as u64,
+                    at_ms: r.get::<_, i64>(2)? as u64,
+                    verdict: r.get(3)?,
+                    args: r.get(4)?,
+                    status: r.get(5)?,
+                    decided_ms: r.get::<_, i64>(6)? as u64,
+                })
+            })?;
+            rows.collect()
+        })
+    }
+
+    pub fn set_diagnosis_status(
+        &self,
+        id: u64,
+        status: &str,
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
+        let s = status.to_string();
+        self.write(move |c| {
+            c.execute(
+                "UPDATE diagnoses SET status = ?2, decided_ms = ?3 WHERE id = ?1",
+                params![id as i64, s, now_ms as i64],
+            )
+            .map(|_| ())
         })
     }
 
