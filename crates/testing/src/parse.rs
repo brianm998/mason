@@ -25,6 +25,34 @@ pub fn parse(kind: ParserKind, text: &str, suite: &Suite) -> Result<Results, Str
     }))
 }
 
+/// The cases a results-parser plugin answered with: `{"tests": [{"name", "passed"?, "status"?,
+/// "detail"?}]}`. A test is `status` `pass`, `fail` or `skip`, or else `passed` true or false.
+/// A malformed answer is an error, never "no tests found".
+pub fn from_plugin(v: &Value) -> Result<Results, String> {
+    let tests = v["tests"]
+        .as_array()
+        .ok_or("the parser plugin's answer has no `tests` list")?;
+    let mut cases = vec![];
+    for (i, t) in tests.iter().enumerate() {
+        let name = t["name"]
+            .as_str()
+            .filter(|n| !n.is_empty())
+            .ok_or_else(|| format!("test {i} of the parser plugin's answer has no `name`"))?;
+        let detail = t["detail"].as_str().unwrap_or("failed");
+        cases.push(match (t["status"].as_str(), t["passed"].as_bool()) {
+            (Some("pass"), _) | (None, Some(true)) => Case::pass(name),
+            (Some("fail"), _) | (None, Some(false)) => Case::fail(name, detail),
+            (Some("skip"), _) => Case::skip(name),
+            _ => {
+                return Err(format!(
+                    "test `{name}` of the parser plugin's answer needs `status` (pass, fail or skip) or `passed`"
+                ))
+            }
+        });
+    }
+    Ok(Results::new(cases))
+}
+
 /// Is this a pattern the regex engine accepts?
 pub fn check_regex(p: &str) -> Result<(), String> {
     Regex::new(p)

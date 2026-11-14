@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+name = "fixture-parser"
+version = "1.0.0"
+protocol = 3
+description = "Reads `PASS name` and `FAIL name: why` lines; and a test environment (test fixture)."
+provides = ["parser:fixture-parser", "environment:fixture-parser"]
+run = "python3 parser.py"

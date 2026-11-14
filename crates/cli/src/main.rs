@@ -131,7 +131,9 @@ mason: command-line client for the MASON pipeline
                                       compile_settle_s, compile_jobs, compile_idle_kill_s, stall_ms, memory.floor_mb, disk.floor_gb)
   mason resources gate <name> --reset   go back to resources.toml, or the default
   mason hook bash [--needs compile]   optional Claude Code PreToolUse hook: builds go through the queue
-  mason definition check [FILE]       validate a definition (default .mason/mason.toml) and dry-run it
+  mason definition check [FILE] [--project P]
+                                      validate a definition (default .mason/mason.toml) and dry-run it;
+                                      --project also knows P's approved plugin step types
   mason definition dry-run [FILE] [--scenarios FILE]
   mason ssh-key list | use <path> [--project P]   the SSH key a project's pushes use; choose the right one after a push was refused
   mason editor show|op|undo|redo|discard|simulate|apply [--project P]   the pipeline editor, without a screen
@@ -472,10 +474,21 @@ fn main() {
     {
         let sub = a.pos().unwrap_or_default();
         let scenarios = a.opt("--scenarios").map(PathBuf::from);
+        let project = a.opt("--project");
         let file = PathBuf::from(a.pos().unwrap_or_else(|| ".mason/mason.toml".into()));
         finish(&a);
+        // With --project, the step types the project's approved extensions provide are
+        // known too, so a plugin step validates offline.
+        let plugins = match &project {
+            Some(id) => {
+                let p =
+                    mason_daemon::config::load_project(&config_dir, id).unwrap_or_else(|e| die(&e));
+                mason_daemon::plugins::approved_types(&p)
+            }
+            None => vec![],
+        };
         exit(if sub == "check" {
-            definition::check(&file)
+            definition::check(&file, &plugins)
         } else {
             definition::dry(&file, scenarios.as_deref())
         });

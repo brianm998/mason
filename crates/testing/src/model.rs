@@ -62,6 +62,10 @@ pub struct Suite {
     /// (decision 0130, per suite). Suites with the same build command share one build.
     pub build: Option<String>,
     pub parser: ParserKind,
+    /// `parser = "plugin:<name>"`: the output is read by the approved extension that provides
+    /// `parser:<name>` instead of a built-in parser (`parser` above is then unused). The
+    /// verdict is judged from the cases it returns exactly as for a built-in parser.
+    pub plugin_parser: Option<String>,
     /// At least this many tests must execute (and never fewer than one).
     pub min_tests: u32,
     pub level: String,
@@ -108,6 +112,7 @@ impl Suite {
             command: command.into(),
             build: None,
             parser,
+            plugin_parser: None,
             min_tests: 1,
             level: String::new(),
             uses: BTreeMap::new(),
@@ -177,6 +182,10 @@ impl DeviceType {
 pub struct Environment {
     pub name: String,
     pub kind: EnvKind,
+    /// `type = "plugin:<name>"`: the approved extension that provides `environment:<name>`
+    /// sets it up, checks its health and tears it down, instead of `setup`, `health` and
+    /// `teardown` commands (`kind` is then `Local`).
+    pub plugin: Option<String>,
     pub setup: Option<String>,
     pub health: Option<String>,
     pub teardown: Option<String>,
@@ -201,6 +210,7 @@ impl Environment {
         Environment {
             name: name.into(),
             kind: EnvKind::Local,
+            plugin: None,
             setup: None,
             health: None,
             teardown: None,

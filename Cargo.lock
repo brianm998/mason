@@ -812,6 +812,7 @@ dependencies = [
  "mason-definition",
  "mason-landing",
  "mason-platform",
+ "mason-plugins",
  "mason-protocol",
  "mason-resources",
  "mason-step-host",
@@ -834,6 +835,7 @@ dependencies = [
 name = "mason-plugins"
 version = "0.1.0"
 dependencies = [
+ "mason-adapter-api",
  "serde_json",
  "tempfile",
  "toml_edit",
