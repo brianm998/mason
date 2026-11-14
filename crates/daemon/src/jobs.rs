@@ -626,6 +626,16 @@ pub(crate) fn acquire_needs(
     c: &Ctx,
     needs: mason_scheduler::Needs,
 ) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
+    acquire_needs_while(c, needs, &|| true)
+}
+
+/// Like `acquire_needs`, but the wait also ends (`Cancelled`) as soon as `wanted`
+/// says no: a suite whose skip arrives while it waits for its slot.
+pub(crate) fn acquire_needs_while(
+    c: &Ctx,
+    needs: mason_scheduler::Needs,
+    wanted: &dyn Fn() -> bool,
+) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
     let d = &c.d;
     // Device pools are sized by what the provider lists, never by a default.
     if needs.amounts.keys().any(|n| n.starts_with("device:")) {
@@ -646,6 +656,7 @@ pub(crate) fn acquire_needs(
         d2.world()
             .map(|w| w.open_run(task) == Some(run))
             .unwrap_or(true)
+            && wanted()
     };
     let mut waited = false;
     let asked = needs.clone();

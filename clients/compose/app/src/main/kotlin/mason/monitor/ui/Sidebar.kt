@@ -59,7 +59,7 @@ fun SidebarPane(model: MonitorModel, width: Dp) {
                     Text(SEARCH_NO_MATCH_TEXT, style = theme.body(color = theme.muted), modifier = Modifier.testTag("search:no-results"))
                 }
             }
-            items(entries) { e ->
+            items(entries, key = { it.key }) { e ->
                 when (e) {
                     is SidebarEntry.Header -> SectionHeader(model, e.section)
                     is SidebarEntry.Row -> RowView(model, e.row)
