@@ -80,7 +80,12 @@ public final class MonitorModel: ObservableObject {
     /// The protocol this monitor speaks.
     public static let protocolVersion: UInt32 = 1
     /// This monitor's own build: a commit, or "dev" for a build nobody versioned.
-    public var ownVersion: String = ProcessInfo.processInfo.environment["MASON_MONITOR_VERSION"] ?? "dev"
+    /// The commit comes from the environment, else from `BuildStamp`, which every build made by
+    /// the daemon or `make` stamps; a build nobody stamped stays "dev" and does not nag.
+    public var ownVersion: String = ProcessInfo.processInfo.environment["MASON_MONITOR_VERSION"]
+        ?? (BuildStamp.commit.isEmpty ? "dev" : BuildStamp.commit)
+    /// Where this monitor's executable is, so the daemon can rebuild a bare binary in place.
+    public var ownPath: String = ""
     /// The daemon's build, from its welcome.
     @Published public var daemonVersion = ""
     /// Set when the daemon needs a newer protocol than this monitor speaks: nothing
@@ -165,8 +170,36 @@ public final class MonitorModel: ObservableObject {
         updating = "Building the new monitor…"
         var c = Mason_V1_Command()
         c.id = "update-monitor"
-        c.raw = .with { $0.method = "POST"; $0.path = "/update/monitor"; $0.json = "{\"kind\":\"\(Self.monitorKind)\"}" }
+        let body: [String: String] = ["kind": Self.monitorKind, "own_path": ownPath, "own_version": ownVersion]
+        let json = (try? JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+        c.raw = .with { $0.method = "POST"; $0.path = "/update/monitor"; $0.json = json }
         send(c)
+    }
+
+    /// The build can be stopped: it is running and the daemon is the one doing it.
+    public var canCancelMonitorUpdate: Bool { monitorAsked && monitorBuild?.phase == "building" }
+
+    /// The owner's Cancel while the new monitor builds; this one keeps running.
+    public func cancelMonitorUpdate() {
+        var c = Mason_V1_Command()
+        c.id = "update-monitor-cancel"
+        c.raw = .with { $0.method = "POST"; $0.path = "/update/monitor/cancel"; $0.json = "{\"kind\":\"\(Self.monitorKind)\"}" }
+        send(c)
+    }
+
+    /// What the build is doing, in words: "Compiling 12 of 48", then the build's last line.
+    public static func buildText(_ b: Mason_V1_MonitorBuild) -> String {
+        var head: String
+        switch b.step {
+        case "fetching": head = "Fetching the new source…"
+        case "waiting": head = "Waiting for a build slot…"
+        case "compiling": head = b.total > 0 ? "Compiling \(b.done) of \(b.total)…" : "Compiling…"
+        case "linking": head = "Linking…"
+        case "installing": head = "Installing the new monitor…"
+        default: return "Building the new monitor…"
+        }
+        if !b.lastLine.isEmpty, b.step == "compiling" || b.step == "linking" { head += " " + String(b.lastLine.prefix(90)) }
+        return head
     }
 
     /// The update of this monitor stopped; this one keeps running.
@@ -176,18 +209,25 @@ public final class MonitorModel: ObservableObject {
         updateError = why
     }
 
+    /// Why the build stopped, with where its log is.
+    public static func failureText(_ b: Mason_V1_MonitorBuild?) -> String {
+        var t = "The new monitor did not build: \(b?.error ?? "")"
+        if let log = b?.log, !log.isEmpty { t += " (log: \(log))" }
+        return t
+    }
+
     /// Follow the build the owner asked for, from each new header.
     private func noteMonitorBuild() {
         guard monitorAsked else { return }
         switch monitorBuild?.phase {
         case "building":
-            break
+            if let b = monitorBuild { updating = Self.buildText(b) }
         case "ready":
             monitorAsked = false
             updating = "Starting the new monitor…"
             onInstall?(monitorBuild?.path ?? "")
         case "failed":
-            monitorUpdateFailed("The new monitor did not build: \(monitorBuild?.error ?? "")")
+            monitorUpdateFailed(Self.failureText(monitorBuild))
         default:
             monitorUpdateFailed("The daemon restarted during the build. Press Update to start it again.")
         }

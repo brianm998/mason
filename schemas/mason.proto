@@ -573,8 +573,18 @@ message MonitorBuild {
   // "" (nothing asked for), "building", "ready" or "failed".
   string phase = 3;
   string error = 4;
-  // When ready: the finished build, on the daemon's own disk.
+  // When ready: the finished build, on the daemon's own disk. For a bare binary built in
+  // place, the path of the binary that now holds the new build (the one the monitor runs from).
   string path = 5;
+  // While building: "fetching", "waiting" (for a compile slot), "compiling", "linking" or
+  // "installing" (additive).
+  string step = 6;
+  // Compile progress, `done` of `total` build steps, when the build tool says (additive).
+  uint32 done = 7;
+  uint32 total = 8;
+  // The build's last log line, and the log file (additive).
+  string last_line = 9;
+  string log = 10;
 }
 
 message PendingIssue {

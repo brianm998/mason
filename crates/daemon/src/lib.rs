@@ -72,6 +72,7 @@ pub mod targets;
 pub mod taskcache;
 pub mod tiermap;
 pub mod tracker;
+pub mod monitor_inplace;
 pub mod update;
 pub mod usage;
 pub mod version;
