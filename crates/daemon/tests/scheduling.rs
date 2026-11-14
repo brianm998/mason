@@ -966,3 +966,30 @@ fn run_check_builds_then_tests_like_the_test_step() {
     );
     assert_eq!(d.broker.used("compile"), 0, "nothing leaked");
 }
+
+#[test]
+fn home_compile_holders_carry_the_tasks_project_and_full_title() {
+    let s = Scratch::new("test -f hello.txt", unique_script());
+    let d = s.start_with(|c| c.max_concurrent = 1);
+    d.broker.set_limit("llm:claude", 0).unwrap();
+    let title = "A very long title that is certainly longer than the monitor will show in a row";
+    let t = file_in(&d, "scratch", title);
+    let (tid, held_task) = hold(&d, "#task", &[("compile", 1)]);
+    d.broker.lease_set_task(tid, t);
+    let (pid, held_person) = hold(&d, "interactive `cargo build`", &[("compile", 1)]);
+    let world = d.world().unwrap();
+    // Home filtered to a project the holder does not belong to still names it.
+    for filter in ["", "elsewhere"] {
+        let h = mason_daemon::views::Ctx::new(&d, &world).home(filter);
+        let running = h.compilation.unwrap().running;
+        let task_row = running.iter().find(|r| r.task == t.0).unwrap();
+        assert_eq!(task_row.project, "scratch");
+        assert_eq!(task_row.title, title);
+        let person = running.iter().find(|r| r.task == 0).unwrap();
+        assert_eq!((person.project.as_str(), person.title.as_str()), ("", ""));
+    }
+    drop(held_task);
+    drop(held_person);
+    d.broker.lease_close(tid);
+    d.broker.lease_close(pid);
+}

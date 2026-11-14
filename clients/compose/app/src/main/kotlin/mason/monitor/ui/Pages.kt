@@ -217,6 +217,9 @@ fun CompilationSection(model: MonitorModel, c: Compilation) {
         c.running.forEachIndexed { i, r ->
             Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing), modifier = Modifier.testTag("compile:running:$i")) {
                 who(r.label, r.task)
+                val detail = Format.compileHolder(r.project, r.title)
+                if (r.task > 0 && detail.isNotEmpty()) Text(detail, style = theme.body(), maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.widthIn(max = 480.dp))
                 if (r.interactive) Text("interactive", style = theme.body(color = theme.muted))
                 Text("for ${age(r.since_ms)}", style = theme.body(color = theme.muted))
                 if (r.idle_ms >= 60_000) Text("no CPU for ${Format.duration(r.idle_ms)}", style = theme.body(color = theme.slow))
