@@ -446,6 +446,7 @@ fn linked(d: &Arc<Daemon>, label: &str, steps: u32) -> u64 {
         &map,
         Some(mason_daemon::sched::Standing {
             steps_remaining: steps,
+            span: 1,
             priority: 1,
         }),
     )
@@ -678,7 +679,7 @@ fn file_in(d: &Arc<Daemon>, project: &str, title: &str) -> TaskId {
 }
 
 #[test]
-fn two_projects_share_the_pool_and_admission_follows_the_rank() {
+fn two_projects_share_the_pool_and_admission_follows_progress_through_each_route() {
     let s = Scratch::new("test -f hello.txt", unique_script());
     s.push_files(&[(".mason/mason.toml", DEF_LONG)], "long definition");
     // A second project on its own base branch, with a shorter graph.
@@ -717,8 +718,10 @@ fn two_projects_share_the_pool_and_admission_follows_the_rank() {
     d.admit();
     wait_state(&d, short, State::Landed, 90);
     wait_state(&d, long, State::Landed, 90);
-    // The first step run is the first admission: fewer steps remaining won,
-    // across projects, even though it was filed later.
+    // The first step run is the first admission. Both tasks are at the start of
+    // their own route, so neither has come further (4 of 4 steps left against
+    // 2 of 2): the route's length no longer decides across projects (#287), and
+    // the one filed first goes first.
     let w = d.world().unwrap();
     let first = |t: TaskId| {
         w.step_runs
@@ -729,10 +732,12 @@ fn two_projects_share_the_pool_and_admission_follows_the_rank() {
             .unwrap()
     };
     assert!(
-        first(short) < first(long),
-        "short ({} steps) goes before long ({} steps)",
+        first(long) < first(short),
+        "equally far along ({} of {} steps left against {} of {}): the one filed first goes first",
+        4,
+        4,
         2,
-        4
+        2
     );
     // Isolation: each landed on its own base.
     let on = |branch: &str| sh(&s.origin, &["log", "--format=%s", branch]);
