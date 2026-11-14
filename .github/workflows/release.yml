@@ -1,0 +1,483 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+name: Release
+
+# A pushed tag vX.Y.Z builds every package, proves each one installs and runs on a fresh
+# runner, and attaches the ones that passed to a DRAFT GitHub release. workflow_dispatch is a
+# dry run: it builds, signs and tests everything and creates no release. See docs/RELEASING.md.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+# One run per ref, and a release run is never cancelled half way.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Fails the whole run early when the tag is malformed or differs from Cargo.toml.
+  version:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [ "$REF_TYPE" = tag ]; then
+            ver=$(bash scripts/release-version.sh "$REF_NAME")
+          else
+            # Dry run: the workspace version.
+            ver=$(bash -c '. scripts/package/lib.sh; pkg_version')
+          fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+
+  # ── Linux CLI + daemon: tarball and .deb, one runner per architecture ──────────
+  linux-package:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, target: x86_64-unknown-linux-gnu, arch: amd64 }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, arch: arm64 }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: Build tarball and .deb
+        env:
+          MASON_BUILD_SHA: ${{ github.sha }}
+        run: |
+          bash scripts/package/tarball.sh "${{ matrix.target }}" --out dist
+          bash scripts/package/deb.sh "${{ matrix.target }}" --out dist
+          ls -l dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-cli-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  # Installs the built .deb and the tarball (through install.sh) on a fresh runner of the same
+  # architecture; downloads only its own artifact.
+  linux-e2e:
+    needs: [version, linux-package]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, target: x86_64-unknown-linux-gnu, arch: amd64 }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, arch: arm64 }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    env:
+      VER: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-cli-${{ matrix.arch }}
+          path: dist
+      - name: Install the .deb and run it
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y ./dist/mason_*.deb
+          mason --version
+          masond --version
+          data="$RUNNER_TEMP/mason-data"
+          mkdir -p "$data"
+          export MASON_DATA_DIR="$data"
+          masond --demo > "$RUNNER_TEMP/masond.log" 2>&1 &
+          pid=$!
+          for _ in $(seq 1 60); do mason status >/dev/null 2>&1 && break; sleep 1; done
+          mason status
+          kill "$pid"
+          wait "$pid" || true
+          sudo dpkg -r mason
+          for b in mason masond step-host mason-mcp fake-claude mason-askpass.sh; do
+            ! test -e "/usr/bin/$b" || { echo "::error::/usr/bin/$b left after dpkg -r"; exit 1; }
+          done
+          ! test -d /usr/share/doc/mason || { echo "::error::/usr/share/doc/mason left"; exit 1; }
+      - name: install.sh against the tarball
+        run: |
+          set -euxo pipefail
+          bash scripts/package/checksums.sh dist
+          # install.sh reads the tarball and SHA256SUMS from the folder
+          mkdir -p "$RUNNER_TEMP/rel"
+          cp dist/mason-*.tar.gz dist/SHA256SUMS "$RUNNER_TEMP/rel/"
+          bash scripts/install.sh --version "$VER" --prefix "$RUNNER_TEMP/prefix" \
+            --base-url "file://$RUNNER_TEMP/rel"
+          "$RUNNER_TEMP/prefix/bin/mason" --version
+
+  # ── macOS CLI + daemon (.pkg, per-arch tarballs) and Swift monitor (.dmg), signed ──
+  # Developer ID identities go into a throwaway keychain, as in the star repository's
+  # macos-signed-release. Without the secrets (a fork, or before they are added) everything is
+  # built unsigned and the run is marked so `publish` refuses it.
+  macos-package:
+    needs: version
+    runs-on: macos-15
+    timeout-minutes: 120
+    outputs:
+      signed: ${{ steps.mode.outputs.signed }}
+    env:
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      MASON_BUILD_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: Add the macOS targets
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - name: Decide signed or unsigned
+        id: mode
+        env:
+          HAVE_P12: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+          HAVE_API: ${{ secrets.APPLE_API_KEY_P8_BASE64 }}
+          HAVE_TEAM: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -n "$HAVE_P12" ] && [ -n "$HAVE_API" ] && [ -n "$HAVE_TEAM" ]; then
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Apple signing secrets are absent: building UNSIGNED packages that cannot be published."
+          fi
+      - name: Import Developer ID certificates into a temporary keychain
+        if: steps.mode.outputs.signed == 'true'
+        env:
+          P12_B64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+          P12_PASS: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KC_PASS: ${{ secrets.KEYCHAIN_PASSWORD }}
+          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -e
+          KC="$RUNNER_TEMP/build.keychain"
+          P12="$RUNNER_TEMP/certs.p12"
+          echo "$P12_B64" | base64 --decode > "$P12"
+          security create-keychain -p "$KC_PASS" "$KC"
+          security set-keychain-settings -lut 21600 "$KC"
+          security unlock-keychain -p "$KC_PASS" "$KC"
+          security import "$P12" -k "$KC" -P "$P12_PASS" \
+              -T /usr/bin/codesign -T /usr/bin/pkgbuild -T /usr/bin/productsign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KC_PASS" "$KC"
+          existing=$(security list-keychains -d user | tr -d '"')
+          # shellcheck disable=SC2086
+          security list-keychains -d user -s "$KC" $existing
+          # No `-p codesigning`: it hides the Developer ID Installer identity.
+          security find-identity -v "$KC"
+          APP_FOUND=$(security find-identity -v "$KC" | grep -c "Developer ID Application:.*${TEAM_ID}" || true)
+          INST_FOUND=$(security find-identity -v "$KC" | grep -c "Developer ID Installer:.*${TEAM_ID}" || true)
+          if [ "$APP_FOUND" -lt 1 ] || [ "$INST_FOUND" -lt 1 ]; then
+            echo "::error::Missing Developer ID identities for team ${TEAM_ID} (Application=${APP_FOUND}, Installer=${INST_FOUND}; need one of each)."
+            exit 1
+          fi
+      - name: Stage the App Store Connect API key
+        if: steps.mode.outputs.signed == 'true'
+        env:
+          KEY_B64: ${{ secrets.APPLE_API_KEY_P8_BASE64 }}
+          KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+        run: |
+          set -e
+          mkdir -p "$RUNNER_TEMP/private_keys"
+          echo "$KEY_B64" | base64 --decode > "$RUNNER_TEMP/private_keys/AuthKey_${KEY_ID}.p8"
+      - name: Build, sign and notarize
+        env:
+          APPLE_API_KEY_PATH: ${{ runner.temp }}/private_keys/AuthKey_${{ secrets.APPLE_API_KEY_ID }}.p8
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          SIGNED: ${{ steps.mode.outputs.signed }}
+        run: |
+          set -euxo pipefail
+          mkdir -p dist
+          if [ "$SIGNED" = true ]; then
+            export SIGN_APP="Developer ID Application: Brian Martin ($APPLE_TEAM_ID)"
+            export SIGN_PKG="Developer ID Installer: Brian Martin ($APPLE_TEAM_ID)"
+            export SIGN_IDENTITY="$SIGN_APP"
+            export MASON_CODESIGN_IDENTITY="$SIGN_APP"
+          else
+            export NOTARIZE=0
+          fi
+          bash scripts/package/tarball.sh aarch64-apple-darwin --out dist
+          bash scripts/package/tarball.sh x86_64-apple-darwin --out dist
+          bash scripts/package/macos-pkg.sh --out dist
+          if [ "$SIGNED" = true ]; then bash scripts/package/notarize.sh dist/mason-*-macos.pkg; fi
+          bash scripts/package/macos-dmg.sh dist
+          ls -l dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-cli-tarballs
+          path: dist/mason-*.tar.gz
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-pkg
+          path: dist/mason-*-macos.pkg
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg
+          path: dist/MASON-*-macos.dmg
+          if-no-files-found: error
+      - name: Clean up the keychain and keys
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/build.keychain" || true
+          rm -f "$RUNNER_TEMP/certs.p12"
+          rm -rf "$RUNNER_TEMP/private_keys"
+
+  # A fresh macOS runner installs the .pkg and runs it. Signature checks apply to signed runs.
+  macos-pkg-e2e:
+    needs: [version, macos-package]
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: macos-pkg, path: dist }
+      - name: Check, install and run
+        env:
+          SIGNED: ${{ needs.macos-package.outputs.signed }}
+        run: |
+          set -euxo pipefail
+          pkg=$(ls dist/mason-*-macos.pkg)
+          if [ "$SIGNED" = true ]; then
+            pkgutil --check-signature "$pkg"
+            xcrun stapler validate "$pkg"
+          fi
+          sudo installer -pkg "$pkg" -target /
+          export PATH=/usr/local/bin:$PATH
+          mason --version
+          masond --version
+          export MASON_DATA_DIR="$RUNNER_TEMP/mason-data"
+          mkdir -p "$MASON_DATA_DIR"
+          masond --demo > "$RUNNER_TEMP/masond.log" 2>&1 &
+          pid=$!
+          for _ in $(seq 1 60); do mason status >/dev/null 2>&1 && break; sleep 1; done
+          mason status
+          kill "$pid"
+          wait "$pid" || true
+
+  # The tarballs through install.sh on a fresh runner of the matching architecture.
+  macos-tarball-e2e:
+    needs: [version, macos-package]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-15, target: aarch64-apple-darwin }
+          - { os: macos-15-intel, target: x86_64-apple-darwin }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    env:
+      VER: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: macos-cli-tarballs, path: dist }
+      - run: |
+          set -euxo pipefail
+          mkdir -p "$RUNNER_TEMP/rel"
+          cp "dist/mason-$VER-${{ matrix.target }}.tar.gz" "$RUNNER_TEMP/rel/"
+          bash scripts/package/checksums.sh "$RUNNER_TEMP/rel"
+          bash scripts/install.sh --version "$VER" --prefix "$RUNNER_TEMP/prefix" \
+            --base-url "file://$RUNNER_TEMP/rel"
+          "$RUNNER_TEMP/prefix/bin/mason" --version
+
+  # The dmg is checked, never launched: a window would block a headless runner.
+  macos-dmg-e2e:
+    needs: [version, macos-package]
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: macos-dmg, path: dist }
+      - env:
+          SIGNED: ${{ needs.macos-package.outputs.signed }}
+        run: |
+          set -euxo pipefail
+          dmg=$(ls dist/MASON-*-macos.dmg)
+          if [ "$SIGNED" = true ]; then
+            spctl -a -t open --context context:primary-signature -vv "$dmg"
+            xcrun stapler validate "$dmg"
+          fi
+          mnt="$RUNNER_TEMP/dmg"
+          mkdir -p "$mnt"
+          hdiutil attach -nobrowse -readonly -mountpoint "$mnt" "$dmg"
+          trap 'hdiutil detach "$mnt" || true' EXIT
+          test -d "$mnt/MASON.app"
+          codesign --verify --deep --strict --verbose=2 "$mnt/MASON.app"
+          lipo -archs "$mnt/MASON.app/Contents/MacOS/MasonMonitor"
+
+  # ── Compose monitor: .deb on Linux, .msi on Windows ────────────────────────────
+  compose-package:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, kind: deb, artifact: compose-deb }
+          - { os: windows-2022, kind: msi, artifact: compose-msi }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      VER: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: "21" }
+      - uses: gradle/actions/setup-gradle@v4
+        with: { gradle-version: "8.12" }
+      - name: Package
+        shell: bash
+        working-directory: clients/compose
+        run: |
+          set -euxo pipefail
+          case "${{ matrix.kind }}" in
+            deb) gradle --no-daemon -Pmason.version="$VER" :desktop:packageReleaseDeb ;;
+            msi) gradle --no-daemon -Pmason.version="$VER" :desktop:packageReleaseMsi ;;
+          esac
+          bash packaging/name-installers.sh "$VER" desktop/build/compose/binaries "$PWD/../../dist"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/*
+          if-no-files-found: error
+
+  # Installs the Compose package on a fresh runner and checks the launcher and the bundled
+  # runtime exist. No window is opened.
+  compose-deb-e2e:
+    needs: [version, compose-package]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: compose-deb, path: dist }
+      - run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y ./dist/mason-monitor_*.deb
+          dpkg -L mason-monitor | head -40
+          launcher=$(dpkg -L mason-monitor | grep -E '/bin/[^/]+$' | head -1)
+          test -x "$launcher"
+          test -e "$(dirname "$(dirname "$launcher")")/lib/runtime/bin/java"
+          sudo dpkg -r mason-monitor
+
+  compose-msi-e2e:
+    needs: [version, compose-package]
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: compose-msi, path: dist }
+      - shell: pwsh
+        run: |
+          $msi = (Get-ChildItem dist -Filter 'MASON-Monitor-*-windows.msi').FullName
+          $p = Start-Process msiexec.exe -ArgumentList '/i', "`"$msi`"", '/qn', '/norestart', '/l*v', "$env:RUNNER_TEMP\msi.log" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Get-Content "$env:RUNNER_TEMP\msi.log" -Tail 80; throw "msiexec exit $($p.ExitCode)" }
+          # perUserInstall = true: the app lands under %LOCALAPPDATA%
+          $root = Join-Path $env:LOCALAPPDATA 'MASON'
+          if (-not (Test-Path (Join-Path $root 'MASON.exe'))) { Get-ChildItem $root -Recurse | Select-Object -First 40; throw "launcher missing" }
+          if (-not (Test-Path (Join-Path $root 'runtime\bin\java.exe'))) { throw "bundled runtime missing" }
+
+  # WINDOWS-CLI-JOBS: the Windows packaging task adds its package and end-to-end jobs here
+  # (mason-<ver>-x86_64-pc-windows-msvc.zip and mason-<ver>-x86_64-windows-setup.msi), uploads
+  # them as artifacts named windows-cli-*, and adds them to `publish`'s needs.
+
+  # ── Publish: tags only; drops anything that was not proven, then drafts the release ──
+  publish:
+    if: ${{ !cancelled() && github.ref_type == 'tag' }}
+    needs:
+      - version
+      - linux-package
+      - linux-e2e
+      - macos-package
+      - macos-pkg-e2e
+      - macos-tarball-e2e
+      - macos-dmg-e2e
+      - compose-package
+      - compose-deb-e2e
+      - compose-msi-e2e
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    env:
+      VER: ${{ needs.version.outputs.version }}
+      NEEDS: ${{ toJSON(needs) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Collect, dropping every asset whose end-to-end job did not succeed
+        run: |
+          set -euo pipefail
+          res() { echo "$NEEDS" | jq -r --arg j "$1" '.[$j].result // "missing"'; }
+          mkdir -p dist
+          # artifact : the job that tested it
+          for pair in linux-cli-amd64:linux-e2e linux-cli-arm64:linux-e2e \
+                      macos-pkg:macos-pkg-e2e macos-cli-tarballs:macos-tarball-e2e \
+                      macos-dmg:macos-dmg-e2e compose-deb:compose-deb-e2e compose-msi:compose-msi-e2e; do
+            art=${pair%%:*}; job=${pair##*:}
+            r=$(res "$job")
+            if [ "$r" != success ]; then
+              echo "::error::Dropping $art: $job finished '$r'"
+              continue
+            fi
+            [ -d "artifacts/$art" ] && cp -v artifacts/"$art"/* dist/ || echo "::error::artifact $art is missing"
+          done
+          if [ "$(res macos-package | tr -d '\n')" = success ] && \
+             [ "$(echo "$NEEDS" | jq -r '.["macos-package"].outputs.signed')" != true ]; then
+            echo "::error::The macOS packages were built UNSIGNED (secrets absent); removing them."
+            rm -f dist/*.pkg dist/*.dmg dist/mason-*-apple-darwin.tar.gz
+          fi
+          # Per-arch Linux tarballs are tested only through install.sh on their own runner; the
+          # arch-specific .deb is covered by the same job, so one verdict covers both.
+          ls -l dist
+      - name: Checksums
+        run: bash scripts/package/checksums.sh dist
+      - name: Draft the release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          name: MASON ${{ needs.version.outputs.version }}
+          generate_release_notes: true
+          fail_on_unmatched_files: false
+          files: dist/*
+      # The list equals the table in docs/RELEASING.md (scripts/tests/release-assets.sh checks).
+      # The draft exists by now, so a failure here leaves it for the owner to inspect, not publish.
+      - name: Fail if any expected asset is missing
+        run: |
+          set -euo pipefail
+          # EXPECTED-ASSETS-BEGIN
+          expected="
+          mason-@VER@-aarch64-apple-darwin.tar.gz
+          mason-@VER@-x86_64-apple-darwin.tar.gz
+          mason-@VER@-x86_64-unknown-linux-gnu.tar.gz
+          mason-@VER@-aarch64-unknown-linux-gnu.tar.gz
+          mason-@VER@-x86_64-pc-windows-msvc.zip
+          mason-@VER@-x86_64-windows-setup.msi
+          mason_@VER@_amd64.deb
+          mason_@VER@_arm64.deb
+          mason-@VER@-macos.pkg
+          MASON-@VER@-macos.dmg
+          mason-monitor_@VER@_amd64.deb
+          MASON-Monitor-@VER@-windows.msi
+          SHA256SUMS
+          "
+          # EXPECTED-ASSETS-END
+          missing=0
+          for a in $expected; do
+            f=${a//@VER@/$VER}
+            [ -f "dist/$f" ] || { echo "::error::expected asset missing: $f"; missing=1; }
+          done
+          exit $missing
