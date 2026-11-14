@@ -963,6 +963,32 @@ impl ProjectCfg {
         cfg.landing_dir().join(&self.id)
     }
     /// The ref work starts from and lands onto.
+    /// The project file's own run settings, as `mason config show` lists them under the
+    /// steps: timeouts, the agent idle rules, the stall watcher, retries. These come from
+    /// `projects/<id>.toml`, not the definition, and an agent checking for them in the
+    /// definition's settings alone finds nothing (#170 asked the owner twice on 2026-11-14).
+    /// A zero that turns a rule off is shown as `0 (off)`.
+    pub fn file_settings(&self) -> Vec<(&'static str, String)> {
+        let secs = |d: Duration| d.as_secs().to_string();
+        let off_at_zero = |d: Duration| match d.as_secs() {
+            0 => "0 (off)".to_string(),
+            n => n.to_string(),
+        };
+        vec![
+            ("step_timeout_s", secs(self.step_timeout)),
+            ("test_timeout_s", secs(self.test_timeout)),
+            ("tool_timeout_s", secs(self.tool_timeout)),
+            ("agent_idle_alert_s", off_at_zero(self.agent_idle_alert)),
+            ("agent_idle_stop_s", off_at_zero(self.agent_idle_stop)),
+            ("cont_after_s", off_at_zero(self.cont_after)),
+            ("kill_after_s", off_at_zero(self.kill_after)),
+            ("test_reruns", self.test_reruns.to_string()),
+            ("auto_retry", self.auto_retry.to_string()),
+            ("diagnose", self.diagnose.to_string()),
+            ("priority_jump", self.priority_jump.to_string()),
+        ]
+    }
+
     pub fn base_ref(&self) -> String {
         match &self.remote {
             Some(r) => format!("{r}/{}", self.base),
@@ -1193,6 +1219,29 @@ mod tests {
         assert_eq!(p.max_test_rounds, None);
         assert_eq!(p.branch(7), "mason/web-api/t7");
         assert_eq!(p.base_ref(), "develop");
+    }
+
+    #[test]
+    fn the_project_files_own_settings_are_listed_with_an_off_zero_named() {
+        // `mason config show` printed only the definition's settings, so an agent looking for
+        // the stall watcher there found nothing and asked the owner twice (#170, 2026-11-14).
+        let p = parse_project(
+            "star",
+            "path = \"/r\"\nbase = \"develop\"\ntest = \"t\"\ncont_after_s = 600\nkill_after_s = 900\n",
+        )
+        .unwrap();
+        let s = p.file_settings();
+        let get = |k: &str| s.iter().find(|(key, _)| *key == k).map(|(_, v)| v.as_str());
+        assert_eq!(get("cont_after_s"), Some("600"));
+        assert_eq!(get("kill_after_s"), Some("900"));
+        assert_eq!(get("step_timeout_s"), Some("14400"));
+        let plain =
+            parse_project("p", "path = \"/r\"\nbase = \"develop\"\ntest = \"t\"\n").unwrap();
+        let s = plain.file_settings();
+        assert!(
+            s.contains(&("kill_after_s", "0 (off)".to_string())),
+            "{s:?}"
+        );
     }
 
     #[test]
