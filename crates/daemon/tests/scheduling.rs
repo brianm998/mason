@@ -372,16 +372,24 @@ fn skipping_the_test_step_ends_a_waiting_run_check_and_runs_nothing() {
             .is_some_and(|w| w.contains("compile"))
     });
     mason_daemon::suites::skip(&d, t, "step:test", "drain the queue", "brian", false).unwrap();
-    // The check stops waiting and says it did not run; the test step is skipped too.
-    wait_state(&d, t, State::Landed, 90);
+    // The check stops waiting and says it did not run; the test step is skipped too, and the
+    // task is on to landing with the slot still held outside.
+    wait_state(&d, t, State::Landing, 90);
     assert!(!log.exists(), "nothing ran the tests");
     assert_eq!(
         d.broker.used("compile"),
         1,
         "only the outside holder has it"
     );
+    // Landing builds the batch before it promotes, whatever was skipped (the build floor), and
+    // that build takes a compile slot of its own: the task lands once the outside holder lets go.
     drop(held);
     d.broker.lease_close(id);
+    wait_state(&d, t, State::Landed, 90);
+    assert!(!log.exists(), "the landing build ran no tests either");
+    wait_for("the landing build to give its slot back", 60, || {
+        d.broker.used("compile") == 0
+    });
 }
 
 #[test]

@@ -444,18 +444,25 @@ fn a_skip_ends_the_wait_for_a_build_slot_and_takes_no_slot() {
                 .is_some_and(|w| w.contains("compile"))
     });
     mason_daemon::suites::skip(&d, t, "step:test", "too many tests", "brian", false).unwrap();
-    // It lands with the slot still held outside: the skip ended its wait.
-    wait_state(&d, t, State::Landed, 90);
+    // The skip ended its wait and took no slot: the task is on to landing with the slot still
+    // held outside.
+    wait_state(&d, t, State::Landing, 90);
     assert_eq!(
         d.broker.used("compile"),
         1,
         "only the outside build holds it"
     );
+    // Landing builds the batch before it promotes, whatever was skipped (the build floor), under
+    // a compile slot of its own, so the task lands once the outside build lets go.
+    drop(held);
+    d.broker.lease_close(id);
+    wait_state(&d, t, State::Landed, 90);
     let (v, note) = closing(&d, t);
     assert_eq!(v, "unverified", "{note}");
     assert!(note.contains("skipped by force"), "{note}");
-    drop(held);
-    d.broker.lease_close(id);
+    wait_for("the landing build to give its slot back", 60, || {
+        d.broker.used("compile") == 0
+    });
 }
 
 #[test]
