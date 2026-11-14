@@ -2618,14 +2618,19 @@ fn settle_all(
                 };
                 // A host the daemon's own restart took is not the task's failure: it
                 // is recorded but not counted toward the restart budget.
+                // A host lost together with other tasks' hosts (a mass kill) is
+                // treated the same way. A hard cap still ends a run that keeps
+                // losing hosts.
                 let counted = lost
                     .iter()
                     .filter(|id| {
                         let r = mason_step_host::registry::lost_report(&root.join(id));
                         !r.is_ok_and(|r| hl::is_restart_loss(&root, r.last_heartbeat_ms, r.at_ms))
+                            && !mason_adapters::hosted::lost_with_others(&root, id)
                     })
                     .count();
-                let restart = counted <= hl::MAX_AGENT_RESTARTS;
+                let restart =
+                    counted <= hl::MAX_AGENT_RESTARTS && lost.len() <= hl::MAX_AGENT_RESTARTS * 4;
                 hl::record_as(&c.d, Some(c.run), &c.step.name, &newest, at, text, restart);
                 if !restart {
                     let all: Vec<String> = lost.iter().map(|id| describe(id).0).collect();
