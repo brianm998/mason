@@ -1692,9 +1692,17 @@ impl CheckSlots {
                 .broker
                 .declare(name, self.def.resources.get(name).copied().unwrap_or(1));
         }
-        let as_step = self.test_step.as_deref().unwrap_or(&self.step);
-        self.acquire(crate::sched::needs_of(uses, None), as_step)
-            .map(Some)
+        // Ranked as the agent's own step, not the test step: a task that has reached
+        // its test step is further along and goes first (s262). The check used to
+        // rank as the test step so that a long wait could not run the agent out of
+        // time; the wait is now added back to the agent's deadline (`extra`), and on
+        // 2026-11-13 develop checks tied with test steps and took every compile
+        // slot ahead of four tasks already in test.
+        self.acquire(
+            crate::sched::needs_of(uses, None),
+            check_rank_step(&self.step, self.test_step.as_deref()),
+        )
+        .map(Some)
     }
 
     /// Queue for the agent's slot again, before the agent is told the result.
@@ -1705,6 +1713,12 @@ impl CheckSlots {
             *self.lease.lock().unwrap_or_else(|e| e.into_inner()) = Some(l);
         }
     }
+}
+
+/// The step a `run_check` is ranked as: the agent's own, never the test step it
+/// runs the commands of (see `CheckSlots::swap_for`).
+fn check_rank_step<'a>(agent_step: &'a str, _test_step: Option<&'a str>) -> &'a str {
+    agent_step
 }
 
 /// Proof before acceptance: the submitted commit really is the tip of the
@@ -3449,6 +3463,30 @@ pub fn cleanup(d: &Arc<Daemon>, task: TaskId, delete_branch: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_develop_check_ranks_behind_a_task_already_in_test() {
+        // On 2026-11-13 develop checks ranked as the test step tied with real test
+        // steps, so priority and filing age decided, and four tasks in test waited
+        // behind every older or higher-priority develop agent.
+        let def = mason_definition::parse::parse(
+            "schema = 1\nstart = \"develop\"\n\n[step.develop]\ntype = \"agent\"\n\
+             category = \"developing\"\nnext = \"test\"\n\n[step.test]\ntype = \"test\"\n\
+             category = \"testing\"\nnext = \"land\"\n\n[step.land]\ntype = \"landing\"\n\
+             category = \"landing\"\n",
+        )
+        .unwrap();
+        let steps = |s: &str| mason_definition::graph::steps_remaining(&def, s);
+        let check = check_rank_step("develop", Some("test"));
+        assert_eq!(check, "develop");
+        // A high-priority develop check filed long ago, against a normal test step filed later.
+        let develop_check = mason_scheduler::Rank::new(false, steps(check), 1, 100, 1, false);
+        let test_step = mason_scheduler::Rank::new(false, steps("test"), 2, 900, 2, false);
+        assert!(
+            test_step < develop_check,
+            "the task in test goes first: {test_step:?} vs {develop_check:?}"
+        );
+    }
 
     // ---- Task 180: the weakening scan at submit_change -----------------------------------
 
