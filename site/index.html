@@ -1,0 +1,55 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Download MASON</title>
+<link rel="icon" href="assets/icon.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+  <img class="banner" src="assets/banner.png" alt="MASON">
+  <h1>Download MASON</h1>
+  <p id="status" class="muted">Looking for the latest release…</p>
+
+  <section id="main" hidden>
+    <p id="detected"></p>
+    <div id="downloads" class="cards"></div>
+    <details id="extras-box" hidden><summary>Other files for this system</summary><ul id="extras"></ul></details>
+    <p><label for="picker">Not your system? Change: </label>
+      <select id="picker">
+        <option value="mac">macOS</option>
+        <option value="windows">Windows</option>
+        <option value="linux-x64">Linux (x86_64)</option>
+        <option value="linux-arm64">Linux (arm64)</option>
+      </select></p>
+  </section>
+
+  <section id="phone" hidden>
+    <p>MASON's mobile clients are not published yet. Open this page on a Mac, Windows or Linux computer to download MASON.</p>
+  </section>
+
+  <section id="next">
+    <h2>Install from a terminal</h2>
+    <pre><code>curl -fsSL https://raw.githubusercontent.com/brianm998/mason/develop/scripts/install.sh | bash</code></pre>
+    <h2>Next steps</h2>
+    <pre><code>mason service install   # start the daemon at login
+mason init              # set up a project</code></pre>
+  </section>
+
+  <noscript><p>JavaScript is off, so this page cannot pick a build for you. Get every build from the
+    <a href="https://github.com/brianm998/mason/releases/latest">latest release</a>.</p></noscript>
+
+  <footer>
+    <a href="https://github.com/brianm998/mason/releases">All releases</a> ·
+    <a href="https://github.com/brianm998/mason">Source</a> ·
+    <a href="assets/NOTICE.md">Mascot art notice</a>
+  </footer>
+</main>
+<script src="pick.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

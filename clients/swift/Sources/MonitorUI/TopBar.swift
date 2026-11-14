@@ -5,9 +5,9 @@ import MasonProtocol
 import MonitorCore
 import SwiftUI
 
-/// The top bar, on every page: back, forward, home; the attention indicator
-/// (only while something needs a look); the project filter; LLM usage; one
-/// count tile per state; add task; mute.
+/// The top bar, on every page: home over back and forward; the attention indicator
+/// (only while something needs a look) over the project filter; LLM usage (5-hour
+/// over weekly); one count tile per state; a 2x2 grid of add task, improve, mute, voice.
 struct TopBar: View {
     @Environment(\.theme) var theme
     @ObservedObject var model: MonitorModel
@@ -17,46 +17,56 @@ struct TopBar: View {
 
     var body: some View {
         HStack(spacing: theme.spacing) {
-            HStack(spacing: theme.spacingSmall) {
-                Button { model.goBack() } label: { Image(systemName: "chevron.left") }
-                    .keyboardShortcut("[", modifiers: .command).disabled(!model.canGoBack).help("Back (⌘[)")
-                    .accessibilityIdentifier("nav:back")
-                Button { model.goForward() } label: { Image(systemName: "chevron.right") }
-                    .keyboardShortcut("]", modifiers: .command).disabled(!model.canGoForward).help("Forward (⌘])")
-                    .accessibilityIdentifier("nav:forward")
+            // Home on top; back and forward in a row under it.
+            VStack(alignment: .leading, spacing: theme.spacingSmall) {
                 Button { model.goHome() } label: { Label("Home", systemImage: "house") }
                     .help("Home").accessibilityIdentifier("nav:home")
+                HStack(spacing: theme.spacingSmall) {
+                    Button { model.goBack() } label: { Image(systemName: "chevron.left") }
+                        .keyboardShortcut("[", modifiers: .command).disabled(!model.canGoBack).help("Back (⌘[)")
+                        .accessibilityIdentifier("nav:back")
+                    Button { model.goForward() } label: { Image(systemName: "chevron.right") }
+                        .keyboardShortcut("]", modifiers: .command).disabled(!model.canGoForward).help("Forward (⌘])")
+                        .accessibilityIdentifier("nav:forward")
+                }
             }
             .buttonStyle(.bordered)
 
-            if model.attention > 0 {
-                // Clicking it opens the first task that needs the owner.
-                Button { model.openFirstNeedingYou() } label: {
-                    HStack(spacing: theme.spacingSmall) {
-                        StateIcon(state: "needs_attention")
-                        Text("\(model.attention) need\(model.attention == 1 ? "s" : "") you")
-                            .font(theme.body(.semibold)).foregroundStyle(theme.attention)
-                            .lineLimit(1).fixedSize()
+            // The indicator (only while something needs a look) over the project filter; the
+            // picker stands alone, centred, when nothing does.
+            VStack(alignment: .leading, spacing: theme.spacingSmall) {
+                if model.attention > 0 {
+                    // Clicking it opens the first task that needs the owner.
+                    Button { model.openFirstNeedingYou() } label: {
+                        HStack(spacing: theme.spacingSmall) {
+                            StateIcon(state: "needs_attention")
+                            Text("\(model.attention) need\(model.attention == 1 ? "s" : "") you")
+                                .font(theme.body(.semibold)).foregroundStyle(theme.attention)
+                                .lineLimit(1).fixedSize()
+                        }
                     }
+                    .buttonStyle(.plain)
+                    .help("Open the first task that needs you")
+                    .accessibilityIdentifier("attention")
                 }
-                .buttonStyle(.plain)
-                .help("Open the first task that needs you")
-                .accessibilityIdentifier("attention")
-            }
 
-            Picker("", selection: $model.project) {
-                Text("All projects").tag("")
-                ForEach(model.header?.projects ?? [], id: \.self) { Text($0).tag($0) }
+                Picker("", selection: $model.project) {
+                    Text("All projects").tag("")
+                    ForEach(model.header?.projects ?? [], id: \.self) { Text($0).tag($0) }
+                }
+                .labelsHidden()
+                .frame(width: 120 * min(CGFloat(theme.scale), 1.4))
+                .onChange(of: model.project) { _, _ in model.subscribe?() }
             }
-            .labelsHidden()
-            .frame(width: 150 * min(CGFloat(theme.scale), 1.4))
-            .onChange(of: model.project) { _, _ in model.subscribe?() }
 
             VStack(alignment: .leading, spacing: 0) {
                 ForEach(model.usage?.providers ?? [], id: \.name) { p in
-                    Text(topBarUsageLine(model.usage, p))
-                        .font(theme.small()).foregroundStyle(theme.muted).lineLimit(1)
-                        .accessibilityIdentifier("topbar-usage:\(p.name)")
+                    // 5-hour above weekly; the first line keeps the account's id, the rest add a number.
+                    ForEach(Array(topBarUsageLines(model.usage, p).enumerated()), id: \.offset) { i, line in
+                        Text(line)
+                            .font(theme.small()).foregroundStyle(theme.muted).lineLimit(1)
+                            .accessibilityIdentifier(i == 0 ? "topbar-usage:\(p.name)" : "topbar-usage:\(p.name):\(i)")
+                    }
                 }
                 if let note = model.usage?.note, (model.usage?.providers.isEmpty ?? true) {
                     Text(note).font(theme.small()).foregroundStyle(theme.muted).lineLimit(1)
@@ -73,17 +83,28 @@ struct TopBar: View {
                 if let n = model.header?.pendingIssues.count, n > 0 { PendingTile(count: n) }
             }
 
-            Button { adding = true } label: { Image(systemName: "plus") }
-                .buttonStyle(.bordered).help("Add task").accessibilityIdentifier("add-task")
-            if !model.selfProject.isEmpty {
-                Button { improving = true } label: { Image(systemName: "wand.and.stars") }
-                    .buttonStyle(.bordered).help("Improve the pipeline").accessibilityIdentifier("improve-pipeline")
+            // A 2x2 grid: add task and improve on top, mute and voice under. With no self
+            // project the wand's cell stays empty so the others keep their places.
+            Grid(horizontalSpacing: theme.spacingSmall, verticalSpacing: theme.spacingSmall) {
+                GridRow {
+                    Button { adding = true } label: { Image(systemName: "plus") }
+                        .help("Add task").accessibilityIdentifier("add-task")
+                    if !model.selfProject.isEmpty {
+                        Button { improving = true } label: { Image(systemName: "wand.and.stars") }
+                            .help("Improve the pipeline").accessibilityIdentifier("improve-pipeline")
+                    } else {
+                        Color.clear.frame(width: 1, height: 1)
+                    }
+                }
+                GridRow {
+                    Button { model.muted.toggle() } label: { Image(systemName: model.muted ? "speaker.slash" : "speaker.wave.2") }
+                        .help(model.muted ? "Unmute" : "Mute").accessibilityIdentifier("mute")
+                    Button { voices = true } label: { Image(systemName: "waveform") }
+                        .help("Sounds and voice").accessibilityIdentifier("voice-settings")
+                        .popover(isPresented: $voices) { SpeechSettingsView(model: model) }
+                }
             }
-            Button { model.muted.toggle() } label: { Image(systemName: model.muted ? "speaker.slash" : "speaker.wave.2") }
-                .buttonStyle(.bordered).help(model.muted ? "Unmute" : "Mute").accessibilityIdentifier("mute")
-            Button { voices = true } label: { Image(systemName: "waveform") }
-                .buttonStyle(.bordered).help("Sounds and voice").accessibilityIdentifier("voice-settings")
-                .popover(isPresented: $voices) { SpeechSettingsView(model: model) }
+            .buttonStyle(.bordered)
         }
         .font(theme.body())
         .padding(theme.spacing)
@@ -262,9 +283,9 @@ struct PendingIssueRow: View {
     }
 }
 
-/// The top-bar line for an account: its most constrained window ("claude 5-hour 82%, resets 1 h 10 m")
-/// when it has reported one, else its sessions.
-func topBarUsageLine(_ u: Mason_V1_UsageView?, _ p: Mason_V1_ProviderStatus) -> String {
-    if let line = u?.topBar.first(where: { $0.hasPrefix("\(p.name) ") }) { return line }
-    return "\(p.name): \(p.sessionsUsed) of \(p.sessionsLimit) sessions"
+/// The top-bar lines for an account, in the order received (5-hour, then weekly:
+/// "claude 5-hour 82%, resets 1 h 10 m"); its sessions when it has reported none.
+func topBarUsageLines(_ u: Mason_V1_UsageView?, _ p: Mason_V1_ProviderStatus) -> [String] {
+    let lines = (u?.topBar ?? []).filter { $0.hasPrefix("\(p.name) ") }
+    return lines.isEmpty ? ["\(p.name): \(p.sessionsUsed) of \(p.sessionsLimit) sessions"] : lines
 }
