@@ -55,7 +55,7 @@ final class SidebarFitTests: XCTestCase {
         let floor = CGFloat(MasonTokens.sizeSidebarWidthMin)
         for scale in [1.0, 1.5] {
             let width = floor * CGFloat(MonitorModel.sidebarFactor(scale: scale))
-            let row = needed(RowView(model: model, row: crowdedRow()), width: width, scale: scale)
+            let row = needed(RowView(row: crowdedRow(), selected: false, canAct: model.canAct, clock: model.live, go: { _ in }, approve: { _ in }), width: width, scale: scale)
             XCTAssertLessThanOrEqual(row.width, width + 0.5, "row at \(scale)x needs \(row.width) of \(width)")
             let header = needed(SectionHeader(model: model, section: section), width: width, scale: scale)
             XCTAssertLessThanOrEqual(header.width, width + 0.5, "header at \(scale)x needs \(header.width) of \(width)")
