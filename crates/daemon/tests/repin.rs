@@ -128,7 +128,10 @@ fn a_task_sent_back_runs_the_definition_on_the_base_now_and_a_running_step_keeps
     assert_eq!(task_of(&d, t).def, new);
     let r = repins(&d, t);
     assert_eq!(r.len(), 1, "{r:?}");
-    assert_eq!((r[0].0.as_str(), r[0].1.as_str()), (old.as_str(), new.as_str()));
+    assert_eq!(
+        (r[0].0.as_str(), r[0].1.as_str()),
+        (old.as_str(), new.as_str())
+    );
     assert!(r[0].2.contains("steps: test"), "{}", r[0].2);
 }
 
@@ -160,10 +163,7 @@ level = "unit"
 /// Suite `s` as star's build suites were: a clean run counts no tests, so it is red.
 /// The fix gives it a pass marker.
 fn fixed_suite_def(g: &str) -> String {
-    suite_def(g, false, 3).replace(
-        "fail_regex = \"NEVER-PRINTED\"",
-        "pass_regex = \"^clean$\"",
-    )
+    suite_def(g, false, 3).replace("fail_regex = \"NEVER-PRINTED\"", "pass_regex = \"^clean$\"")
 }
 
 #[test]
@@ -175,7 +175,14 @@ fn a_red_in_a_suite_that_changed_is_rerun_once_on_the_current_definition() {
         .current_def(d.project_id_by_name("scratch").unwrap())
         .hash
         .clone();
-    let t = file_task_as(&d, "Fixed on base", "Do it.", true, TrustSource::Owner, false);
+    let t = file_task_as(
+        &d,
+        "Fixed on base",
+        "Do it.",
+        true,
+        TrustSource::Owner,
+        false,
+    );
     wait_for("the suite to start", 90, || {
         exists(&gates.path().join("started"))
     });
@@ -230,7 +237,10 @@ fn only_a_project_without_a_self_section_is_told_its_mason_changes_do_nothing() 
 #[test]
 fn the_suite_a_red_names_is_read_from_its_reason() {
     use mason_daemon::jobs::red_suite_of;
-    assert_eq!(red_suite_of("suite `build-x` is red").as_deref(), Some("build-x"));
+    assert_eq!(
+        red_suite_of("suite `build-x` is red").as_deref(),
+        Some("build-x")
+    );
     assert_eq!(
         red_suite_of("the build of suite `b` is red").as_deref(),
         Some("b")

@@ -38,7 +38,10 @@ pub fn find_windows_bash(
         return if exists(p) {
             Ok(p.clone())
         } else {
-            Err(format!("MASON_SHELL is {} but no file is there", p.display()))
+            Err(format!(
+                "MASON_SHELL is {} but no file is there",
+                p.display()
+            ))
         };
     }
     if let Some(g) = &inputs.git_exec_path {
@@ -61,7 +64,10 @@ pub fn find_windows_bash(
         }
     }
     for d in &inputs.path_dirs {
-        if d.to_string_lossy().to_ascii_lowercase().contains("system32") {
+        if d.to_string_lossy()
+            .to_ascii_lowercase()
+            .contains("system32")
+        {
             continue;
         }
         let c = d.join("bash.exe");
