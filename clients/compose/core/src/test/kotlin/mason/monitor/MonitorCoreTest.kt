@@ -843,7 +843,6 @@ class MonitorCoreTest {
         r.sockets[0].events.onMessage(welcome)
         waitFor("connected") { r.model.connected }
         waitFor("a ping") { r.sockets[0].sent.any { it.contains("ping") } }
-        assertTrue(r.sockets[0].sent.any { it.contains("ping") }, "it asked before giving up")
         waitFor("a second socket") { r.sockets.size == 2 }
         assertTrue(r.sockets[0].closed)
         assertTrue(r.sockets[0].sent.any { it.contains("ping") }, "it asked before giving up")
