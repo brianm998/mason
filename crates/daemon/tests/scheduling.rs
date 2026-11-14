@@ -197,6 +197,102 @@ fn a_step_is_told_what_it_holds_so_its_command_need_not_queue_for_it() {
     wait_state(&d, t, State::Landed, 60);
 }
 
+/// A test step listing one suite whose command records `MASON_HELD` and `MASON_TASK`.
+fn suite_def(step_extra: &str, suite_extra: &str, log: &std::path::Path) -> String {
+    let l = log.display();
+    format!(
+        r#"schema = 1
+start = "develop"
+
+[resource.compile]
+count = 1
+
+[resource.test-suite]
+count = 1
+
+[step.develop]
+type = "agent"
+category = "developing"
+next = "test"
+
+[step.test]
+type = "test"
+category = "testing"
+suites = ["checks"]
+{step_extra}
+max_rounds = 2
+on_red = "develop"
+next = "land"
+
+[step.land]
+type = "landing"
+category = "landing"
+
+[suite.checks]
+command = "echo \"r:$MASON_HELD:$MASON_TASK\" >> {l}; echo 1..1; echo ok 1 - a"
+parser = "tap"
+min_tests = 1
+level = "unit"
+{suite_extra}
+"#
+    )
+}
+
+fn run_suite_def(def: &str, log: &std::path::Path) -> (String, TaskId) {
+    let s = Scratch::new("false", unique_script());
+    s.push_files(&[(".mason/mason.toml", def)], "definition");
+    let d = s.start();
+    let t = file_task(&d, "Suites hold");
+    wait_state(&d, t, State::Landed, 90);
+    (std::fs::read_to_string(log).unwrap(), t)
+}
+
+#[test]
+fn a_suite_command_is_told_what_its_step_holds() {
+    let runs = tempfile::tempdir().unwrap();
+    let log = runs.path().join("held");
+    let def = suite_def("", "uses = { test-suite = 1 }", &log);
+    let (text, t) = run_suite_def(&def, &log);
+    let line = text.lines().next().unwrap();
+    assert_eq!(line, format!("r:test-suite:{}", t.0), "{text}");
+}
+
+#[test]
+fn a_suite_build_and_run_are_each_told_what_is_leased_for_them() {
+    let runs = tempfile::tempdir().unwrap();
+    let log = runs.path().join("held");
+    let mut def = suite_def(
+        "uses = { compile = 1, test-suite = 1 }",
+        "uses = { test-suite = 1 }",
+        &log,
+    );
+    def = def.replace(
+        "parser = \"tap\"",
+        &format!(
+            "build = \"echo b:$MASON_HELD >> {}\"\nparser = \"tap\"",
+            log.display()
+        ),
+    );
+    let (text, t) = run_suite_def(&def, &log);
+    assert_eq!(
+        text.lines().collect::<Vec<_>>(),
+        ["b:compile".to_string(), format!("r:test-suite:{}", t.0)],
+        "{text}"
+    );
+}
+
+#[test]
+fn an_exclusive_suite_lease_is_named_in_the_held_list() {
+    let runs = tempfile::tempdir().unwrap();
+    let log = runs.path().join("held");
+    let def = suite_def("", "uses = { exclusive = 1 }", &log).replace(
+        "[resource.compile]",
+        "[resource.exclusive]\ncount = 1\n\n[resource.compile]",
+    );
+    let (text, _) = run_suite_def(&def, &log);
+    assert!(text.contains("exclusive"), "{text}");
+}
+
 #[test]
 fn run_check_queues_like_the_test_step_and_frees_the_agents_slot() {
     // An agent waiting for its tests holds no LLM session slot, and the check waits
@@ -240,6 +336,52 @@ fn run_check_queues_like_the_test_step_and_frees_the_agents_slot() {
         "{text}"
     );
     assert_eq!(d.broker.used("compile"), 0, "nothing leaked");
+}
+
+#[test]
+fn skipping_the_test_step_ends_a_waiting_run_check_and_runs_nothing() {
+    // On 2026-11-13 the owner skipped testing for every active task, and their agents
+    // still waited in `run_check` for compile slots to run the tests anyway.
+    let runs = tempfile::tempdir().unwrap();
+    let log = runs.path().join("held");
+    let cmd = format!("echo $MASON_HELD >> {}; test -f hello.txt", log.display());
+    let develop = serde_json::json!([
+        {"sh": TASK_SCRIPT_COMMIT},
+        {"call": {"tool": "run_check", "args": {"name": "tests"}}},
+        {"call": {"tool": "submit_change", "args": {"summary": "ok", "head": "$HEAD"}}}
+    ]);
+    let s = Scratch::new(
+        &cmd,
+        serde_json::json!({"steps": {"explore": [explore_turn()], "develop": [develop]}}),
+    );
+    // Shaped like mason's own: a test step whose suite builds first, phase by phase.
+    let def = DEF_COMPILE
+        .replace(
+            "uses = { compile = 1 }\nmax_rounds = 2",
+            "uses = { compile = 1 }\nsuites = [\"unit\"]\nmax_rounds = 2",
+        )
+        + "\n[suite.unit]\nbuild = \"true\"\ncommand = \"sh -c 'echo 1..1; echo ok 1 - a'\"\nparser = \"tap\"\nmin_tests = 1\nlevel = \"unit\"\n";
+    s.push_files(&[(".mason/mason.toml", &def)], "definition");
+    let d = s.start();
+    // The only compile slot stays held outside for the whole test.
+    let (id, held) = hold(&d, "interactive", &[("compile", 1)]);
+    let t = file_task(&d, "Checks its work");
+    wait_for("the check to queue for compile", 60, || {
+        d.broker
+            .explain_task(t)
+            .is_some_and(|w| w.contains("compile"))
+    });
+    mason_daemon::suites::skip(&d, t, "step:test", "drain the queue", "brian", false).unwrap();
+    // The check stops waiting and says it did not run; the test step is skipped too.
+    wait_state(&d, t, State::Landed, 90);
+    assert!(!log.exists(), "nothing ran the tests");
+    assert_eq!(
+        d.broker.used("compile"),
+        1,
+        "only the outside holder has it"
+    );
+    drop(held);
+    d.broker.lease_close(id);
 }
 
 #[test]

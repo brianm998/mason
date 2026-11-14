@@ -28,7 +28,11 @@ cd android && ./gradlew testDebugUnitTest  # runs on the JVM, no device
 3. `mason targets list` should show what MASON can see: simulators from
    `xcrun simctl`, emulators and phones from `adb devices -l`, iPhones from
    `xcrun devicectl`. A simulator may be shut down; MASON boots it for a suite and
-   shuts it down after only if it booted it.
+   shuts it down after only if it booted it. If another pipeline on the Mac has
+   its own simulators, keep MASON off them in the environment with
+   `name = "<glob>"` or `exclude = ["<glob>", ...]` (the sample excludes
+   `pipeline-slot-*`); `os`, `name` and `exclude` together decide which devices
+   an environment may lease.
 4. File a task that touches `ios/` and one that touches `android/`. Watch
    `mason targets list` show each lease and `MASON_DEVICE` reach the suite.
 5. Unplug the phone, or let its certificate expire, and file another task: it
