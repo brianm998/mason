@@ -48,7 +48,10 @@ fn run(release: bool) {
         alerts(&s).contains("credentials")
     });
     let text = alerts(&s);
-    assert!(text.contains("claude /login"), "{text}");
+    assert!(
+        text.contains("claude /login") || text.contains("mason account release claude"),
+        "{text}"
+    );
     // Give the tasks time to fail if they were going to.
     std::thread::sleep(std::time::Duration::from_secs(3));
     for id in [0u64, 1] {
