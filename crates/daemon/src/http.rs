@@ -1991,12 +1991,13 @@ async fn debt_run(Shared(d): Shared<Arc<Daemon>>, Path(id): Path<u64>) -> Res {
 
 async fn quarantine_list(Shared(d): Shared<Arc<Daemon>>) -> Res {
     let d2 = d.clone();
-    let (rows, flaky) = d
+    let (rows, ledger, flaky) = d
         .pool
         .run(move || {
             let now = now_ms();
             (
                 d2.store.quarantined(now).unwrap_or_default(),
+                d2.store.ledger().unwrap_or_default(),
                 d2.store
                     .flaky_since(now.saturating_sub(7 * 86_400_000))
                     .unwrap_or_default(),
@@ -2008,6 +2009,10 @@ async fn quarantine_list(Shared(d): Shared<Arc<Daemon>>) -> Res {
         mason_testing::gates::quarantine_candidates(&flaky, now_ms(), 7 * 86_400_000, 3);
     Ok(Json(json!({
         "quarantined": rows.iter().map(|(s, t, o, e, r)| json!({"suite": s, "test": t, "owner": o, "expires_at": e, "reason": r})).collect::<Vec<_>>(),
+        "ledger": ledger.iter().filter(|r| r.source != "owner").map(|r| json!({
+            "suite": r.suite, "test": r.test, "source": r.source, "fix_task": r.fix_task,
+            "first_base": r.first_base, "since": r.at, "last_seen_ms": r.last_seen_ms, "note": r.note,
+        })).collect::<Vec<_>>(),
         "candidates": candidates.iter().map(|(s, t)| json!({"suite": s, "test": t})).collect::<Vec<_>>(),
     })))
 }
@@ -2931,7 +2936,11 @@ fn progress_runs(d: &Daemon, id: TaskId) -> Vec<Value> {
                 "started_ms": p.started_ms, "updated_at_ms": p.updated_at_ms,
                 "subs": p.subs.iter().map(|s| json!({
                     "name": s.name, "unit": s.unit,
-                    "done": fig(&s.done), "total": fig(&s.total)})).collect::<Vec<_>>(),
+                    "done": fig(&s.done), "total": fig(&s.total),
+                    "jobs": s.jobs.as_ref().map(|j| json!({
+                        "queued": j.queued, "running": j.running,
+                        "succeeded": j.succeeded, "failed": j.failed,
+                        "running_names": j.running_names}))})).collect::<Vec<_>>(),
                 "todo": p.todo.iter().map(|t| json!({"text": t.text, "status": t.status})).collect::<Vec<_>>(),
                 // The tokens the step's sessions have used so far; null until one reported.
                 "tokens": p.token_total().map(|t| json!({

@@ -123,6 +123,10 @@ struct ProgressDetail: View {
                     unit: s.unit, done: UInt64(s.done), doneSource: s.doneSource,
                     total: UInt64(s.total), totalSource: s.totalSource, totalLow: 0)
                 Text("\(s.name): \(text)").font(theme.body())
+                if s.hasJobs {
+                    Text(Format.jobsText(name: s.name, jobs: s.jobs)).font(theme.body())
+                        .foregroundStyle(s.jobs.failed > 0 ? theme.attention : theme.text)
+                }
             }
             ForEach(Array(cell.todo.enumerated()), id: \.offset) { _, t in
                 HStack(spacing: theme.spacingSmall) {

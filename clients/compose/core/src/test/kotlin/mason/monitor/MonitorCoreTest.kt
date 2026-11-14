@@ -1114,4 +1114,10 @@ class MonitorCoreTest {
         )
         assertEquals(listOf(12L), m.blockerCandidates(heldRow()).map { it.id })
     }
+
+    @Test fun aWorkflowLineNamesEachStateThatHasJobsAndFailedIsKept() {
+        val j = JobCounts(queued = 1, running = 1, succeeded = 2, failed = 1, running_names = listOf("build"))
+        assertEquals("macOS: 5 jobs · 1 queued · 1 running (build) · 2 passed · 1 failed", Format.jobsText("macOS", j))
+        assertEquals("CI: 1 job · 1 passed", Format.jobsText("CI", JobCounts(succeeded = 1)))
+    }
 }

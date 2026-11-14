@@ -157,6 +157,7 @@ impl FakeHost {
             done: v["done"].as_u64()?,
             total: v["total"].as_u64()?,
             running: v["running"].as_str().map(String::from),
+            jobs: None,
         })
     }
 
