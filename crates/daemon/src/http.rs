@@ -1415,7 +1415,13 @@ async fn project_config(Shared(d): Shared<Arc<Daemon>>, Path(name): Path<String>
                     Err(e) => json!({"step": s.name, "error": e.iter().map(|p| p.to_string()).collect::<Vec<_>>()}),
                 })
                 .collect();
-            json!({"definition": def.hash, "steps": steps})
+            let file = d2.project(pid).map(|p| {
+                json!({
+                    "path": d2.cfg.config_dir.join("projects").join(format!("{}.toml", p.id)).display().to_string(),
+                    "settings": p.file_settings().into_iter().map(|(k, v)| json!({"key": k, "value": v})).collect::<Vec<_>>(),
+                })
+            });
+            json!({"definition": def.hash, "steps": steps, "project_file": file})
         })
         .await
         .map_err(pool_err)?;
