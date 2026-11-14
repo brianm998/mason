@@ -39,6 +39,8 @@ const ENV_KEYS: &[&str] = &[
     "teardown",
     "file",
     "os",
+    "name",
+    "exclude",
     "uses",
     "health_timeout",
 ];
@@ -166,6 +168,7 @@ pub fn parse(doc: &DocumentMut, out: &mut Vec<Problem>) -> Testing {
                 "env" => s.env = string(v, &path, out).unwrap_or_default(),
                 "results_file" => s.results_file = string(v, &path, out),
                 "rerun" => s.rerun = string(v, &path, out),
+                "skip" => s.skip = string(v, &path, out),
                 "dev_command" => s.dev_command = string(v, &path, out),
                 "dev_build" => s.dev_build = string(v, &path, out),
                 "pass_regex" => s.pass_regex = string(v, &path, out),
@@ -223,6 +226,8 @@ pub fn parse(doc: &DocumentMut, out: &mut Vec<Problem>) -> Testing {
                 "teardown" => e.teardown = string(v, &path, out),
                 "file" => e.file = string(v, &path, out),
                 "os" => e.os = string(v, &path, out),
+                "name" => e.device_name = string(v, &path, out),
+                "exclude" => e.exclude = strings(v, &path, out),
                 "uses" => e.uses = uses(v, &path, out),
                 "health_timeout" => {
                     if let Some(d) = duration(v, &path, out) {
@@ -230,6 +235,19 @@ pub fn parse(doc: &DocumentMut, out: &mut Vec<Problem>) -> Testing {
                     }
                 }
                 other => out.push(unknown_key(&base, other, ENV_KEYS)),
+            }
+        }
+        if !matches!(e.kind, EnvKind::Device(_)) {
+            for (k, set) in [
+                ("name", e.device_name.is_some()),
+                ("exclude", !e.exclude.is_empty()),
+            ] {
+                if set {
+                    out.push(Problem::new(
+                        format!("{base}.{k}"),
+                        "applies only to a device environment (ios-simulator, android-emulator, ios-device, android-device)",
+                    ));
+                }
             }
         }
         t.environments.push(e);

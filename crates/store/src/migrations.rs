@@ -585,6 +585,16 @@ const STEPS: &[&str] = &[
          at_ms INTEGER NOT NULL,
          PRIMARY KEY (task, run)
      );",
+    // 29: a test that failed on every run of a task's test step (s282), one row per task, test
+    // and suite (or step) name, so a test red across several different tasks can be told from
+    // one task's retries. Next to `flaky`. Additive.
+    "CREATE TABLE persistent_red (
+         suite TEXT NOT NULL,
+         test  TEXT NOT NULL,
+         task  INTEGER NOT NULL,
+         at    INTEGER NOT NULL,
+         PRIMARY KEY (suite, test, task)
+     );",
 ];
 
 pub const SCHEMA_VERSION: u32 = STEPS.len() as u32;

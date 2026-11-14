@@ -112,6 +112,11 @@ fn task_json(d: &Daemon, w: &World, t: &Task, detail: bool) -> Value {
             v["worktree"] = json!(p.worktree(&d.cfg, t.id.0).display().to_string());
         }
         v["definition"] = json!(t.def);
+        v["cpu_permille"] = json!(d
+            .cpu_reading()
+            .by_task
+            .get(&t.id.0)
+            .map_or(-1, |p| *p as i32));
         v["progress"] = json!({"now_ms": crate::daemon::now_ms(), "runs": progress_runs(d, t.id)});
         v["numbers"] = json!(d
             .number_lines(t)
@@ -682,6 +687,18 @@ fn retry_default(def: &Definition, t: &Task) -> String {
         .map_or("develop".into(), |s| s.name.clone())
 }
 
+/// The task's latest step run (0: it has had none).
+pub fn latest_run(w: &World, id: TaskId) -> u64 {
+    w.step_runs
+        .iter()
+        .rev()
+        .find(|(_, r)| r.task == id)
+        .map_or(0, |(r, _)| r.0)
+}
+
+/// Check and emit happen under this, so two retries sent together cannot both pass.
+static RETRY_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 async fn retry(
     Shared(d): Shared<Arc<Daemon>>,
     Path(id): Path<u64>,
@@ -691,15 +708,42 @@ async fn retry(
         .as_ref()
         .and_then(|b| b["to"].as_str())
         .map(String::from);
+    let seen = body.as_ref().and_then(|b| b["seen"].as_u64());
+    let restart = body
+        .as_ref()
+        .and_then(|b| b["restart"].as_bool())
+        .unwrap_or(false);
     let d2 = d.clone();
     let (to, step) =
         d.pool
             .run(move || {
+                let _gate = RETRY_GATE.lock().unwrap_or_else(|e| e.into_inner());
                 let w = d2.world().map_err(store_err)?;
                 let t = w
                     .tasks
                     .get(&TaskId(id))
                     .ok_or_else(|| fail(StatusCode::NOT_FOUND, format!("no task #{id}")))?;
+                let latest = latest_run(&w, TaskId(id));
+                if let Some(seen) = seen {
+                    if seen != latest {
+                        let now = if t.state.is_step() {
+                            "running".to_string()
+                        } else {
+                            state_name(t.state).to_string()
+                        };
+                        return Err(fail(
+                            StatusCode::CONFLICT,
+                            format!("already retried (run {latest} is {now})"),
+                        ));
+                    }
+                } else if t.state.is_step() && !restart {
+                    return Err(fail(
+                        StatusCode::CONFLICT,
+                        format!(
+                            "task #{id} is not failed (run {latest} is running); send \"restart\": true (`--restart`) to restart the step"
+                        ),
+                    ));
+                }
                 let pinned = task_def(&d2, t);
                 // A retry starts the task over from an earlier step, so it runs the
                 // project's definition as it is now (decision 0206), if that has the step.
@@ -2452,6 +2496,42 @@ async fn triage_review(
     ))
 }
 
+/// Where the machine's CPU goes, by task (proto3 JSON, as the monitors get it).
+async fn cpu_usage(Shared(d): Shared<Arc<Daemon>>) -> Res {
+    let d2 = d.clone();
+    let v = d
+        .pool
+        .run(move || {
+            let w = d2.world().map_err(store_err)?;
+            let u = crate::views::Ctx::new(&d2, &w).cpu_usage();
+            serde_json::to_value(&u)
+                .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        })
+        .await
+        .map_err(pool_err)??;
+    Ok(Json(v))
+}
+
+/// The home view, as the monitors get it (proto3 JSON).
+async fn home_view(
+    Shared(d): Shared<Arc<Daemon>>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Res {
+    let project = q.get("project").cloned().unwrap_or_default();
+    let d2 = d.clone();
+    let v = d
+        .view_pool
+        .run(move || {
+            let w = d2.world().map_err(store_err)?;
+            let h = crate::views::Ctx::new(&d2, &w).home(&project);
+            serde_json::to_value(&h)
+                .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        })
+        .await
+        .map_err(pool_err)??;
+    Ok(Json(v))
+}
+
 async fn resources(Shared(d): Shared<Arc<Daemon>>) -> Res {
     let d2 = d.clone();
     let v = d
@@ -2929,6 +3009,8 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/tasks/{id}/logs", get(logs))
         .route("/tasks/{id}/progress", get(task_progress))
         .route("/resources", get(resources))
+        .route("/cpu", get(cpu_usage))
+        .route("/views/home", get(home_view))
         .route("/targets", get(targets))
         .route("/health", get(health))
         .route("/digest", get(digest))

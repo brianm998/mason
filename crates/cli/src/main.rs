@@ -25,7 +25,7 @@
 //! mason run --needs compile[=N],... [--exclusive] [--label L] -- <cmd>...
 //! mason hold --needs R[,R...] [--exclusive] --pipeline NAME --label L [--pid P]
 //! mason targets list [--json]
-//! mason resources [--json] | mason resources limit <resource> <units>
+//! mason cpu [--json] | mason resources [--json] | mason resources limit <resource> <units>
 //! mason doctor
 //! mason init [--yes] [--tracker T] [--agent A] [--sessions N] [--workflow W] [--suites accept|skip] [--base B] [--landing L] [--alerts LIST|none] [--no-prove]
 //! mason adopt | mason remove [--yes]
@@ -33,6 +33,7 @@
 //! Global: `--data-dir D`, `--config-dir C` (or `MASON_DATA_DIR`, `MASON_CONFIG_DIR`).
 
 mod adopt;
+mod batch_ci;
 mod client;
 mod definition;
 mod doctor;
@@ -40,6 +41,7 @@ mod init;
 mod progress;
 mod remove;
 mod resources;
+mod service;
 mod testing;
 
 use client::{CallError, Daemon};
@@ -63,7 +65,7 @@ mason: command-line client for the MASON pipeline
   mason task revive <id>              put a canceled task whose branch was kept back in the queue (owner only)
   mason task show <id> [--json] [--watch]   with --watch, follow the live step progress
   mason task cancel <id> [--delete-branch]
-  mason task retry <id> [--from STEP]
+  mason task retry <id> [--from STEP] [--restart]
   mason task approve <id>             let a proposed task start, or an approval step go on
   mason task reject <id> [--reason R] reject a proposed task or an approval step
   mason task explore-anyway <id>      explore after all, even if it skipped exploring
@@ -93,6 +95,8 @@ mason: command-line client for the MASON pipeline
   mason test parse <parser> <file> [--min N]   read a results file the way a suite would, and judge it
   mason logs <id> [--follow]
   mason status [--json] [--watch]     with --watch, follow every running step's progress
+  mason service install [--print] [--force] | uninstall | status
+                                      run masond --managed under launchd (macOS) or a systemd user unit
   mason doctor                        checks the setup, and that `mason` on PATH is this program
   mason init [--yes] [--workflow solo-fast|reviewed-pr|batched-ci|device-mobile|human-gated]
              [--tracker local|github] [--agent claude|codex] [--agent-bin P] [--sessions N]
@@ -112,6 +116,7 @@ mason: command-line client for the MASON pipeline
                                       hold resources for a process's life: prints `granted`, then holds until
                                       stdin closes, --pid exits or it is signalled
   mason resources [--json]            limits, who holds what, and every wait explained
+  mason cpu [--json]                  where the machine's CPU goes, by task (share of all cores)
   mason targets list [--json]         simulators, emulators and phones, and who has each
   mason resources limit <resource> <units>   change a limit while things run (llm:claude, compile, ...)
   mason hook bash [--needs compile]   optional Claude Code PreToolUse hook: builds go through the queue
@@ -300,6 +305,13 @@ fn main() {
         }
     }
     let mut a = Args { rest };
+    if a.rest.first().map(String::as_str) == Some("--version") {
+        println!(
+            "{}",
+            mason_daemon::version::line(env!("CARGO_PKG_VERSION"), env!("MASON_COMMIT"))
+        );
+        return;
+    }
     if a.rest.is_empty() || a.flag("--help") || a.flag("-h") {
         println!("{HELP}");
         return;
@@ -409,6 +421,13 @@ fn main() {
     }
     if cmd == "adopt" {
         exit(adopt::run(std::mem::take(&mut a.rest), &config_dir));
+    }
+    if cmd == "service" {
+        exit(service::run(
+            std::mem::take(&mut a.rest),
+            &data_dir,
+            &config_dir,
+        ));
     }
     if cmd == "remove" {
         exit(remove::run(std::mem::take(&mut a.rest), &config_dir));
@@ -537,6 +556,11 @@ fn main() {
             }
             Some(other) => die(&format!("unknown targets command {other:?}\n\n{HELP}")),
         }
+        return;
+    }
+    if cmd == "cpu" {
+        finish(&a);
+        resources::cpu(&d, json_out).unwrap_or_else(|e| die(&e));
         return;
     }
     if cmd == "resources" {
@@ -2070,6 +2094,12 @@ fn main() {
                     b["parked"].as_str().unwrap_or(""),
                     b["note"].as_str().unwrap_or("")
                 );
+                if b["ci"].is_object() {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |t| t.as_millis() as u64);
+                    println!("    {}", batch_ci::ci_line(&b["ci"], now));
+                }
             }
         }
         "debt" => match a.pos().as_deref() {
@@ -2718,17 +2748,26 @@ fn main() {
                 "retry" => {
                     let id = task_id(&mut a);
                     let from = a.opt("--from");
+                    let restart = a.flag("--restart");
                     finish(&a);
                     // Without --from the daemon picks: the failed step when the
                     // failure was not about the code, otherwise developing. Say
                     // which before sending.
+                    // The run shown is sent back, so a second retry of the same
+                    // failure is refused.
+                    let t = or_die(d.call("GET", &format!("/tasks/{id}"), None));
                     if from.is_none() {
-                        let t = or_die(d.call("GET", &format!("/tasks/{id}"), None));
                         if let Some(to) = t["retry_to"].as_str() {
                             println!("Task #{id} will retry from `{to}`");
                         }
                     }
-                    let body = from.as_ref().map_or(json!({}), |f| json!({"to": f}));
+                    let mut body = from.as_ref().map_or(json!({}), |f| json!({"to": f}));
+                    if let Some(run) = t["last_run"].as_u64() {
+                        body["seen"] = json!(run);
+                    }
+                    if restart {
+                        body["restart"] = json!(true);
+                    }
                     let r = or_die(d.call("POST", &format!("/tasks/{id}/retry"), Some(&body)));
                     println!(
                         "Retrying task #{id} from {}",
@@ -3032,6 +3071,12 @@ fn print_health(r: &serde_json::Value) {
     println!(
         "Stall watch: {} SIGCONT(s) sent to stopped processes, {} silent tree(s) killed",
         r["stall_watch"]["sigconts"], r["stall_watch"]["kills"]
+    );
+    println!(
+        "Monitor sessions closed for not reading: {}",
+        r["ws_sessions_closed_for_not_reading"]
+            .as_u64()
+            .unwrap_or(0)
     );
     let q = r["triage"]["queue"].as_array().map_or(0, Vec::len);
     println!(

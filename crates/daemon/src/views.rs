@@ -90,6 +90,8 @@ pub struct Ctx<'a> {
     runs: RunIndex,
     /// Task to the tasks it blocks, in id order.
     blocks: std::collections::HashMap<TaskId, Vec<u64>>,
+    /// The broker's wait reasons, taken once per build.
+    waits: std::sync::Arc<std::collections::BTreeMap<TaskId, String>>,
 }
 
 type LogCache = std::collections::HashMap<u64, (Vec<crate::http::LogStamp>, String)>;
@@ -183,6 +185,7 @@ impl<'a> Ctx<'a> {
             issues,
             runs: RunIndex::build(w.step_runs.values()),
             blocks,
+            waits: d.broker.waits_snapshot(),
         }
     }
 
@@ -332,8 +335,8 @@ impl<'a> Ctx<'a> {
     }
 
     fn why_waiting(&self, t: &Task) -> String {
-        if let Some(w) = self.d.broker.explain_task(t.id) {
-            return w;
+        if let Some(w) = self.waits.get(&t.id) {
+            return w.clone();
         }
         if t.state == State::Proposed && !t.blockers.is_empty() {
             return format!(
@@ -460,6 +463,7 @@ impl<'a> Ctx<'a> {
             progress: self.progress(t),
             allowed_actions: self.allowed_actions(t),
             blockers: t.blockers.iter().map(|b| b.0).collect(),
+            last_run: crate::http::latest_run(self.w, t.id),
             blocker_links: crate::blockers::links(self.d, self.w, t)
                 .into_iter()
                 .map(|l| BlockerLink {
@@ -783,6 +787,17 @@ impl<'a> Ctx<'a> {
         })
     }
 
+    /// The CPU shares, with each task's title filled in.
+    pub fn cpu_usage(&self) -> CpuUsage {
+        let mut u = self.d.cpu_reading().usage.clone();
+        for s in u.shares.iter_mut().filter(|s| s.kind == "task") {
+            if let Some(t) = self.w.tasks.get(&TaskId(s.task)) {
+                s.title = t.title.clone();
+            }
+        }
+        u
+    }
+
     pub fn home(&self, project: &str) -> HomeView {
         let tasks: Vec<&Task> = self
             .w
@@ -802,6 +817,7 @@ impl<'a> Ctx<'a> {
                 l + self.d.broker.limit(&r).unwrap_or(0),
             )
         });
+        let llm_holders = self.d.broker.llm_holders();
         HomeView {
             status: self.header(project).status,
             attention: attention
@@ -814,7 +830,7 @@ impl<'a> Ctx<'a> {
                 .collect(),
             active: tasks
                 .iter()
-                .filter(|t| self.d.broker.llm_held_by(t.id))
+                .filter(|t| llm_holders.contains(&t.id))
                 .map(|t| {
                     let r = self.row(t);
                     // A held session is never hidden: with no model on the
@@ -839,6 +855,7 @@ impl<'a> Ctx<'a> {
             sessions_used,
             sessions_limit,
             compilation: Some(self.d.broker.compilation()),
+            cpu: Some(self.cpu_usage()),
             stages: [
                 State::Exploring,
                 State::Developing,
@@ -881,6 +898,12 @@ impl<'a> Ctx<'a> {
         let removes = crate::landing::removals_view(&self.d.cfg.task_dir(id));
         Some(TaskDetailView {
             step_tokens: crate::usage::step_tokens(self.d, id, self.now / 1000),
+            cpu_permille: self
+                .d
+                .cpu_reading()
+                .by_task
+                .get(&id)
+                .map_or(-1, |p| *p as i32),
             row: Some(self.row(t)),
             steps,
             plan,
@@ -1042,6 +1065,12 @@ impl<'a> Ctx<'a> {
                     parked: ids(&b.parked),
                     note: b.note.clone(),
                     running: live.contains(&b.id),
+                    ci: self
+                        .d
+                        .landing
+                        .ci
+                        .get(b.id)
+                        .map(|c| crate::batch_ci::to_proto(&c)),
                 })
                 .collect(),
             freezes,

@@ -542,9 +542,10 @@ pub(crate) fn step_env_pairs(c: &Ctx) -> Vec<(String, String)> {
         ("MASON_BASE".into(), c.project.base_ref()),
         ("MASON_STEP".into(), c.step.name.clone()),
         ("MASON_ATTEMPT".into(), c.attempt.to_string()),
-        // What the step already holds from the broker (its `uses`), so a command
-        // that would queue for the same class (`mason run --needs`) can tell it
-        // need not, and does not wait on itself.
+        // What the step already holds from the broker. Here that is the step's own
+        // `uses`; each command is told what is leased for it (`command_job` and the
+        // suites override this), so a command that would queue for the same class
+        // (`mason run --needs`) can tell it need not, and does not wait on itself.
         ("MASON_HELD".into(), held_text(&c.step.uses)),
         (
             "MASON_RESULT_FILE".into(),
@@ -742,6 +743,16 @@ pub(crate) fn acquire_needs(
     c: &Ctx,
     needs: mason_scheduler::Needs,
 ) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
+    acquire_needs_while(c, needs, &|| true)
+}
+
+/// Like `acquire_needs`, but the wait also ends (`Cancelled`) as soon as `wanted`
+/// says no: a suite whose skip arrives while it waits for its slot.
+pub(crate) fn acquire_needs_while(
+    c: &Ctx,
+    needs: mason_scheduler::Needs,
+    wanted: &dyn Fn() -> bool,
+) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
     let d = &c.d;
     // Device pools are sized by what the provider lists, never by a default.
     if needs.amounts.keys().any(|n| n.starts_with("device:")) {
@@ -762,6 +773,7 @@ pub(crate) fn acquire_needs(
         d2.world()
             .map(|w| w.open_run(task) == Some(run))
             .unwrap_or(true)
+            && wanted()
     };
     let mut waited = false;
     let asked = needs.clone();
@@ -819,6 +831,18 @@ pub(crate) fn held_text(uses: &std::collections::BTreeMap<String, u32>) -> Strin
         .map(|(k, _)| k.as_str())
         .collect::<Vec<_>>()
         .join(",")
+}
+
+/// `MASON_HELD` for a lease: its classes, plus `exclusive` when it holds the machine.
+pub(crate) fn held_needs_text(needs: &mason_scheduler::Needs) -> String {
+    let mut text = held_text(&needs.amounts);
+    if needs.exclusive && !needs.amounts.contains_key("exclusive") {
+        if !text.is_empty() {
+            text.push(',');
+        }
+        text.push_str("exclusive");
+    }
+    text
 }
 
 /// A test step's build, when it has one: its command runs in two phases.
@@ -1230,6 +1254,9 @@ struct TestChecks {
     suites: Option<DevSuites>,
     task: u64,
     run: u64,
+    /// A develop step's project and base: before a check the base is folded in when that is
+    /// safe (`basefold`). `None` for other steps.
+    base_fold: Option<(ProjectId, String)>,
 }
 
 /// What `run_check` needs to pick suites: the test step, and where the base is.
@@ -1260,7 +1287,7 @@ impl TestChecks {
         use std::collections::BTreeMap;
         let over = || CheckRun::Done {
             passed: false,
-            summary: "The step is over; the check did not run.".into(),
+            summary: STEP_OVER.into(),
         };
         let def = self.slots.def.clone();
         let paths = crate::suites::worktree_paths(&self.wt, &dev.base_ref);
@@ -1441,6 +1468,9 @@ impl TestChecks {
                         if o.timed_out { " (timed out)" } else { "" },
                         o.output
                     ));
+                    if let Some(h) = known_header(&self.slots.d, &self.log_dir, &o.id, &name) {
+                        lines.push(format!("{name}: {h}"));
+                    }
                 }
                 Err(e) => {
                     failed = true;
@@ -1469,6 +1499,14 @@ impl TestChecks {
     }
 }
 
+/// A header for `run_check`'s output naming the failing tests that are known red (not the
+/// agent's to fix) and their fixes: read from the whole log of the run `id`, `scope` being
+/// the suite or test step the ledger keeps them under.
+fn known_header(d: &Daemon, log_dir: &Path, id: &str, scope: &str) -> Option<String> {
+    let text = read_whole_log(&log_dir.join(format!("{id}.log")))?;
+    crate::knownred::header(&text, &crate::knownred::known_for(&d.store, scope))
+}
+
 /// A name from a validated scope (letters, digits, `_ : . - /`), quoted all the same.
 fn shell_word(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
@@ -1480,6 +1518,75 @@ impl CheckHandler for TestChecks {
     }
 
     fn run_scoped(&self, name: &str, scope: &CheckScope) -> CheckRun {
+        let note = match (&self.base_fold, name == "tests") {
+            (Some((pid, base)), true) => {
+                let fold = {
+                    let lock = self.slots.d.repo_lock(*pid);
+                    let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+                    crate::basefold::fold(&self.wt, base)
+                };
+                if !matches!(fold, crate::basefold::BaseFold::Current) {
+                    tracing::info!(
+                        task = self.task,
+                        run = self.run,
+                        ?fold,
+                        "run_check: base fold"
+                    );
+                }
+                crate::basefold::note(base, &fold)
+            }
+            _ => None,
+        };
+        match (note, self.check(name, scope)) {
+            (Some(n), CheckRun::Done { passed, summary }) => CheckRun::Done {
+                passed,
+                summary: format!("{n}\n\n{summary}"),
+            },
+            (_, r) => r,
+        }
+    }
+}
+
+impl TestChecks {
+    /// The open debt that skips this task's test step, if the owner skipped it: the
+    /// agent's own checks then run nothing either (s264).
+    fn skipped_by_owner(&self) -> Option<u64> {
+        let step = self.slots.test_step.as_deref()?;
+        crate::suites::skip_for(&self.slots.d, TaskId(self.task), "", step)
+    }
+
+    fn check(&self, name: &str, scope: &CheckScope) -> CheckRun {
+        // On 2026-11-13 the owner skipped testing for every active task to drain the queue,
+        // but their agents kept queueing `run_check` for compile slots. A skip before the
+        // check, or one that ends its wait for a slot (`CheckSlots::acquire`), is answered
+        // with what happened, not run.
+        if name == "tests" {
+            if let Some(debt) = self.skipped_by_owner() {
+                return not_run_skipped(debt);
+            }
+        }
+        let r = self.check_unskipped(name, scope);
+        // Only a check whose wait was ended is replaced; one that ran keeps its result.
+        let ended = matches!(&r, CheckRun::Done { passed: false, summary } if summary == STEP_OVER);
+        match (name == "tests" && ended, self.skipped_by_owner()) {
+            (true, Some(debt)) => {
+                // A skip that ended the wait left the agent without its slot.
+                if self
+                    .slots
+                    .lease
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .is_none()
+                {
+                    self.slots.take_agent_slot_back();
+                }
+                not_run_skipped(debt)
+            }
+            _ => r,
+        }
+    }
+
+    fn check_unskipped(&self, name: &str, scope: &CheckScope) -> CheckRun {
         if name == "tests" {
             if let Some(dev) = &self.suites {
                 return self.run_suites(dev, scope);
@@ -1497,7 +1604,7 @@ impl CheckHandler for TestChecks {
         };
         let over = || CheckRun::Done {
             passed: false,
-            summary: "The step is over; the check did not run.".into(),
+            summary: STEP_OVER.into(),
         };
         // The exact content tree and command already went green (here, in the test step or in
         // landing's re-test): the answer is that result, and nothing runs.
@@ -1590,18 +1697,28 @@ impl CheckHandler for TestChecks {
                 crate::cmdreuse::record_green(&self.slots.d, t, &key, &src);
             }
         }
+        let header = match &res {
+            Ok(o) if !o.passed => {
+                let step = self.slots.test_step.as_deref().unwrap_or("test");
+                known_header(&self.slots.d, &self.log_dir, &o.id, step)
+                    .map(|h| format!("{h}\n\n"))
+                    .unwrap_or_default()
+            }
+            _ => String::new(),
+        };
         match res {
             Ok(o) => CheckRun::Done {
                 passed: o.passed,
-                summary: if o.timed_out {
-                    format!(
+                summary: header
+                    + &if o.timed_out {
+                        format!(
                         "The tests did not finish within {} s and were stopped. Last output:\n{}",
                         self.timeout.as_secs(),
                         o.output
                     )
-                } else {
-                    format!("{whole}Last output:\n{}", o.output)
-                },
+                    } else {
+                        format!("{whole}Last output:\n{}", o.output)
+                    },
             },
             Err(e) => CheckRun::Done {
                 passed: false,
@@ -1659,6 +1776,7 @@ impl CheckSlots {
         &self,
         needs: mason_scheduler::Needs,
         as_step: &str,
+        end_on_skip: bool,
     ) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
         let d = &self.d;
         let t = d
@@ -1668,10 +1786,15 @@ impl CheckSlots {
             .ok_or(crate::sched::Cancelled)?;
         let rank = d.rank_for(&t, &self.def, as_step);
         let (d2, task, run) = (d.clone(), self.task, self.run);
+        let test_step = self.test_step.clone().filter(|_| end_on_skip);
+        // A skip of the task's test step ends a check's wait too: the check then says so.
         let alive = move || {
             d2.world()
                 .map(|w| w.open_run(task) == Some(run))
                 .unwrap_or(true)
+                && test_step
+                    .as_deref()
+                    .is_none_or(|s| crate::suites::skip_for(&d2, task, "", s).is_none())
         };
         // The wait shows on the task, as a step's does: a check that queued
         // used to leave the task reading "running" for hours.
@@ -1721,18 +1844,48 @@ impl CheckSlots {
                 .broker
                 .declare(name, self.def.resources.get(name).copied().unwrap_or(1));
         }
-        let as_step = self.test_step.as_deref().unwrap_or(&self.step);
-        self.acquire(crate::sched::needs_of(uses, None), as_step)
-            .map(Some)
+        // Ranked as the agent's own step, not the test step: a task that has reached
+        // its test step is further along and goes first (s262). The check used to
+        // rank as the test step so that a long wait could not run the agent out of
+        // time; the wait is now added back to the agent's deadline (`extra`), and on
+        // 2026-11-13 develop checks tied with test steps and took every compile
+        // slot ahead of four tasks already in test.
+        self.acquire(
+            crate::sched::needs_of(uses, None),
+            check_rank_step(&self.step, self.test_step.as_deref()),
+            true,
+        )
+        .map(Some)
     }
 
     /// Queue for the agent's slot again, before the agent is told the result.
     fn take_agent_slot_back(&self) {
         self.d.admit();
         let needs = crate::sched::needs_of(&self.agent_uses, Some(&self.account));
-        if let Ok(l) = self.acquire(needs, &self.step) {
+        if let Ok(l) = self.acquire(needs, &self.step, false) {
             *self.lease.lock().unwrap_or_else(|e| e.into_inner()) = Some(l);
         }
+    }
+}
+
+/// The step a `run_check` is ranked as: the agent's own, never the test step it
+/// runs the commands of (see `CheckSlots::swap_for`).
+fn check_rank_step<'a>(agent_step: &'a str, _test_step: Option<&'a str>) -> &'a str {
+    agent_step
+}
+
+/// What a check says when its wait for a slot was ended.
+const STEP_OVER: &str = "The step is over; the check did not run.";
+
+/// What a `run_check` says when the owner skipped the task's testing (s264).
+fn not_run_skipped(debt: u64) -> CheckRun {
+    CheckRun::Done {
+        passed: true,
+        summary: format!(
+            "Not run: the owner skipped testing for this task (debt #{debt}); the tests run \
+             once on the base after it lands. Nothing was built or tested, so this says \
+             nothing about your change: finish it and submit."
+        ),
     }
 }
 
@@ -2047,6 +2200,7 @@ fn agent_job(c: &Ctx) {
         suites: DevSuites::of(&c.def, c.project.base_ref()),
         task: c.task.0,
         run: c.run.0,
+        base_fold: (kind == StepKind::Develop).then(|| (c.project_id, c.project.base_ref())),
     });
     let validator = (kind == StepKind::Develop).then(|| {
         change_validator(
@@ -2435,7 +2589,16 @@ fn settle_all(
                 } else {
                     text
                 };
-                let restart = lost.len() <= hl::MAX_AGENT_RESTARTS;
+                // A host the daemon's own restart took is not the task's failure: it
+                // is recorded but not counted toward the restart budget.
+                let counted = lost
+                    .iter()
+                    .filter(|id| {
+                        let r = mason_step_host::registry::lost_report(&root.join(id));
+                        !r.is_ok_and(|r| hl::is_restart_loss(&root, r.last_heartbeat_ms, r.at_ms))
+                    })
+                    .count();
+                let restart = counted <= hl::MAX_AGENT_RESTARTS;
                 hl::record_as(&c.d, Some(c.run), &c.step.name, &newest, at, text, restart);
                 if !restart {
                     let all: Vec<String> = lost.iter().map(|id| describe(id).0).collect();
@@ -2768,6 +2931,7 @@ fn command_job(c: &Ctx) {
                 rerun: true,
             } => {
                 let names = crate::rerun::failing_names(&read_whole_log(&log).unwrap_or_default());
+                let last_names = names.clone();
                 if k == 0 {
                     if !names.is_empty() {
                         persistent = Some(names.clone());
@@ -2824,22 +2988,52 @@ fn command_job(c: &Ctx) {
                     }
                     continue;
                 }
-                // Red on every run: if every one of those tests also fails at the merge base,
-                // it is not this change's (s177).
+                // Red on every run: a test in the known-red ledger, or one that also fails at
+                // the merge base, is not this change's (s177, s281). Each is told apart on its
+                // own: only the others fail the step.
+                let mut not_yours: Vec<String> = vec![];
+                // Tests excused above (by the ledger or the base), and those that are left.
+                let mut excused_names: Vec<String> = vec![];
+                let mut rest_new: Vec<String> = vec![];
+                let mut exhausted_why: Option<String> = None;
                 if is_test {
                     if let Some(p) = persistent.as_ref().filter(|p| !p.is_empty()) {
-                        let base_cmd = if filter_off {
-                            cmd.clone()
-                        } else {
-                            crate::rerun::command(&cmd, filter, p)
-                        };
-                        if let Some(note) = crate::basecheck::excuse(
-                            c,
-                            suffix,
-                            builds_first(c).as_deref(),
-                            &base_cmd,
-                            p,
-                        ) {
+                        let known = crate::knownred::known_for(&c.d.store, &c.step.name);
+                        let (mut rest, hit) = crate::knownred::split(p, &known);
+                        not_yours.extend(crate::knownred::lines(&hit));
+                        excused_names.extend(hit.iter().map(|k| k.test.clone()));
+                        if !not_yours.is_empty() {
+                            let _ = std::fs::write(
+                                c.task_dir()
+                                    .join(format!("{suffix}-r{}-known.excused", c.run.0)),
+                                not_yours.join("\n"),
+                            );
+                        }
+                        if !rest.is_empty() {
+                            let base_cmd = if filter_off {
+                                cmd.clone()
+                            } else {
+                                crate::rerun::command(&cmd, filter, &rest)
+                            };
+                            if let Some(e) = crate::basecheck::excuse(
+                                c,
+                                suffix,
+                                builds_first(c).as_deref(),
+                                &base_cmd,
+                                &rest,
+                            ) {
+                                rest.retain(|t| !e.tests.contains(t));
+                                excused_names.extend(e.tests);
+                                not_yours.extend(e.lines);
+                            }
+                        }
+                        rest_new = rest.clone();
+                        if rest.is_empty() && !not_yours.is_empty() {
+                            let note = format!(
+                                "`{}` was red, but every test that failed on every run is not this change's (known red, or also failing at the merge base; excused):\n{}",
+                                c.step.name,
+                                not_yours.join("\n")
+                            );
                             record_flaky(c, &seen, p);
                             let _ = std::fs::remove_file(c.task_dir().join("feedback.txt"));
                             tracing::warn!(task = c.task.0, run = c.run.0, "{note}");
@@ -2848,6 +3042,55 @@ fn command_job(c: &Ctx) {
                                 let _ = writeln!(f, "\n== MASON: {note}");
                             }
                             return c.green();
+                        }
+                    }
+                }
+                // What failed on every run and is still the change's (s282): kept for the last
+                // round, counted across tasks, and on the last round run at the merge base.
+                if is_test && !rest_new.is_empty() {
+                    crate::exhausted::record_round(c, &rest_new);
+                    crate::exhausted::record_persistent(c, &c.step.name, &rest_new);
+                    if crate::exhausted::is_last_round(c) {
+                        let build = builds_first(c);
+                        let cmd_for = |t: &[String]| {
+                            if filter_off {
+                                cmd.clone()
+                            } else {
+                                crate::rerun::command(&cmd, filter, t)
+                            }
+                        };
+                        let ex = crate::exhausted::on_last_round(
+                            c,
+                            &c.step.name,
+                            build.as_deref(),
+                            &cmd_for,
+                            &rest_new,
+                        );
+                        exhausted_why = ex.why;
+                        if !ex.excused.is_empty() {
+                            excused_names.extend(ex.excused);
+                            not_yours.extend(ex.lines);
+                            let left: Vec<&String> = last_names
+                                .iter()
+                                .filter(|t| !excused_names.contains(t))
+                                .collect();
+                            if left.is_empty() && exhausted_why.is_none() {
+                                let note = format!(
+                                    "`{}` was still red on the last round, but what failed every time is red at the merge base too (now in the known-red ledger, fix filed); the step goes on:\n{}",
+                                    c.step.name,
+                                    not_yours.join("\n")
+                                );
+                                record_flaky(c, &seen, &excused_names);
+                                let _ = std::fs::remove_file(c.task_dir().join("feedback.txt"));
+                                tracing::warn!(task = c.task.0, run = c.run.0, "{note}");
+                                use std::io::Write as _;
+                                if let Ok(mut f) =
+                                    std::fs::OpenOptions::new().append(true).open(&log)
+                                {
+                                    let _ = writeln!(f, "\n== MASON: {note}");
+                                }
+                                return c.green();
+                            }
                         }
                     }
                 }
@@ -2877,6 +3120,22 @@ fn command_job(c: &Ctx) {
                         format!("{feedback}\n\nIt was red on all {} runs.", k + 1),
                     ),
                     _ => (reason, feedback),
+                };
+                let feedback = if not_yours.is_empty() {
+                    feedback
+                } else {
+                    format!(
+                        "{feedback}\n\nNot yours (do not work on these; the others above are yours):\n{}",
+                        not_yours.join("\n")
+                    )
+                };
+                let reason = match &exhausted_why {
+                    Some(w) => format!("{reason}; {w}"),
+                    None => reason,
+                };
+                let feedback = match &exhausted_why {
+                    Some(w) => format!("{feedback}\n\nChecked at the base: {w}"),
+                    None => feedback,
                 };
                 return c.conclude(Outcome::Red, reason, Some(feedback));
             }
@@ -3403,6 +3662,30 @@ pub fn cleanup(d: &Arc<Daemon>, task: TaskId, delete_branch: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_develop_check_ranks_behind_a_task_already_in_test() {
+        // On 2026-11-13 develop checks ranked as the test step tied with real test
+        // steps, so priority and filing age decided, and four tasks in test waited
+        // behind every older or higher-priority develop agent.
+        let def = mason_definition::parse::parse(
+            "schema = 1\nstart = \"develop\"\n\n[step.develop]\ntype = \"agent\"\n\
+             category = \"developing\"\nnext = \"test\"\n\n[step.test]\ntype = \"test\"\n\
+             category = \"testing\"\nnext = \"land\"\n\n[step.land]\ntype = \"landing\"\n\
+             category = \"landing\"\n",
+        )
+        .unwrap();
+        let steps = |s: &str| mason_definition::graph::steps_remaining(&def, s);
+        let check = check_rank_step("develop", Some("test"));
+        assert_eq!(check, "develop");
+        // A high-priority develop check filed long ago, against a normal test step filed later.
+        let develop_check = mason_scheduler::Rank::new(false, steps(check), 1, 100, 1, false);
+        let test_step = mason_scheduler::Rank::new(false, steps("test"), 2, 900, 2, false);
+        assert!(
+            test_step < develop_check,
+            "the task in test goes first: {test_step:?} vs {develop_check:?}"
+        );
+    }
 
     // ---- Task 180: the weakening scan at submit_change -----------------------------------
 
