@@ -70,6 +70,7 @@ mason: command-line client for the MASON pipeline
   mason task reject <id> [--reason R] reject a proposed task or an approval step
   mason task explore-anyway <id>      explore after all, even if it skipped exploring
   mason task override <id> <key> <value>
+  mason task priority <id> urgent|high|normal|low   owner only; re-ranks its waiting requests
   mason task answer <id> <option number | text> [--card HASH] [--as NAME]
                                       answer the open question; the card's hash guards against a stale one
   mason task refresh <id>             ask the tracker now (what opening a task does)
@@ -3023,6 +3024,22 @@ fn main() {
                     finish(&a);
                     or_die(d.call("POST", &format!("/tasks/{id}/overrides"), Some(&json!({"key": key, "value": value, "owner": std::env::var("USER").unwrap_or_else(|_| "owner".into())}))));
                     println!("Task #{id}: {key} = {value}");
+                }
+                "priority" => {
+                    let id = task_id(&mut a);
+                    let level = a
+                        .pos()
+                        .unwrap_or_else(|| die("which priority? urgent, high, normal or low"));
+                    finish(&a);
+                    let r = or_die(d.call(
+                        "POST",
+                        &format!("/tasks/{id}/priority"),
+                        Some(&json!({"priority": level})),
+                    ));
+                    println!(
+                        "Task #{id}: priority {level} ({} waiting request(s) re-ranked)",
+                        r["reranked"]
+                    );
                 }
                 other => die(&format!("unknown task command {other:?}\n\n{HELP}")),
             }
