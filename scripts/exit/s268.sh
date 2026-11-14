@@ -10,5 +10,6 @@ else
   echo "s268: actionlint is not installed; SKIPPED linting release.yml"
 fi
 bash scripts/tests/release-assets.sh
-grep -q "WINDOWS-CLI-JOBS" .github/workflows/release.yml
+# The Windows CLI jobs (the former WINDOWS-CLI-JOBS gap) landed in s275.
+grep -q "^  windows-e2e:" .github/workflows/release.yml
 echo "s268 OK"

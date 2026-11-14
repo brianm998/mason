@@ -7,6 +7,33 @@ public typealias ProgressCell = Mason_V1_ProgressCell
 public typealias ProgressSource = Mason_V1_ProgressSource
 
 public enum Format {
+    /// The longest title a compile row shows before it is cut (same in the Compose core).
+    public static let compileTitleLimit = 40
+
+    /// A title cut to `limit` characters at a word boundary where possible; "..."
+    /// is appended only when something was cut.
+    public static func shortTitle(_ title: String, limit: Int = compileTitleLimit) -> String {
+        let t = title.trimmingCharacters(in: .whitespaces)
+        if t.count <= limit { return t }
+        var head = String(t.prefix(limit))
+        let nextIsSpace = t[t.index(t.startIndex, offsetBy: limit)] == " "
+        if !nextIsSpace, let sp = head.lastIndex(of: " "), head.distance(from: head.startIndex, to: sp) >= limit / 2 {
+            head = String(head[..<sp])
+        }
+        while let l = head.last, l == " " { head.removeLast() }
+        return head + "..."
+    }
+
+    /// What follows a compiling task's `#N`: "(project) - short title -", or "" when
+    /// the daemon sent neither.
+    public static func compileHolder(project: String, title: String) -> String {
+        var parts: [String] = []
+        if !project.isEmpty { parts.append("(\(project))") }
+        let t = shortTitle(title)
+        if !t.isEmpty { parts.append("- \(t) -") }
+        return parts.joined(separator: " ")
+    }
+
     /// Time in state: "42 s", "9 min", "3h10". Always shown, never hidden.
     public static func duration(ms: UInt64) -> String {
         let s = ms / 1000

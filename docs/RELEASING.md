@@ -46,9 +46,7 @@ Built by `scripts/package/tarball.sh <target> [--out DIR]`, `deb.sh <target>` an
    asset above, installs each one on a fresh runner (`*-e2e` jobs), and in `publish` drops any
    asset whose end-to-end job did not succeed (an `::error::` names it), writes `SHA256SUMS`,
    creates a draft release `MASON <ver>` with generated notes, and fails if an asset from the
-   table is missing. Until the Windows packaging jobs are added (the `WINDOWS-CLI-JOBS` mark in
-   the workflow) the two Windows CLI assets are missing and `publish` fails after creating the
-   draft; that is intended, so nothing incomplete is mistaken for a release.
+   table is missing.
 4. Review the draft: all assets present, `SHA256SUMS` matches, installers start.
 5. Publish the release.
 
@@ -86,6 +84,18 @@ Actions, Release, Run workflow (`workflow_dispatch`) on any branch. It builds, s
 everything with the workspace version and creates no release (`publish` runs on tags only).
 Do this once after landing changes to the workflow, before the first real tag.
 The workflow has not been run yet.
+
+## Windows CLI and daemon
+
+`pwsh scripts/package/windows.ps1 [-Out DIR]` builds `mason-<ver>-x86_64-pc-windows-msvc.zip`
+(folder `mason-<ver>-x86_64-pc-windows-msvc/` with the five `.exe`, `mason-askpass.cmd`, the
+LICENSE files and README) and `mason-<ver>-x86_64-windows-setup.msi` from
+`packaging/windows/mason.wxs` (WiX v3). The C runtime is linked statically
+(`-C target-feature=+crt-static`), so no VC++ redistributable is needed. The MSI installs per
+user to `%LOCALAPPDATA%\Programs\MASON`, appends that folder to the user PATH and has the fixed
+UpgradeCode `3571d89e-2987-428c-a619-e8d01075c3a6`; never change it. Neither file is signed.
+`windows-e2e` unzips, runs, checks DLL imports with `dumpbin`, installs the MSI with
+`msiexec /qn`, runs again, uninstalls and checks nothing is left.
 
 ## macOS monitor dmg
 

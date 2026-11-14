@@ -1886,6 +1886,8 @@ impl Broker {
                 since_ms: h.since,
                 interactive: is_person(&st, h.id),
                 idle_ms: st.idle.get(&h.id).copied().unwrap_or(0),
+                project: String::new(),
+                title: String::new(),
             })
             .collect();
         let pending = snap

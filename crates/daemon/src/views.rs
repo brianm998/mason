@@ -798,6 +798,19 @@ impl<'a> Ctx<'a> {
         u
     }
 
+    /// The broker's compilation with each holder's project and full title filled
+    /// in from the store, looked up by task id (not from home's filtered list).
+    fn compilation_named(&self) -> mason_protocol::Compilation {
+        let mut c = self.d.broker.compilation();
+        for h in c.running.iter_mut().filter(|h| h.task > 0) {
+            if let Some(t) = self.w.tasks.get(&TaskId(h.task)) {
+                h.project = self.project_name(t);
+                h.title = t.title.clone();
+            }
+        }
+        c
+    }
+
     pub fn home(&self, project: &str) -> HomeView {
         let tasks: Vec<&Task> = self
             .w
@@ -854,7 +867,7 @@ impl<'a> Ctx<'a> {
                 .collect(),
             sessions_used,
             sessions_limit,
-            compilation: Some(self.d.broker.compilation()),
+            compilation: Some(self.compilation_named()),
             cpu: Some(self.cpu_usage()),
             stages: [
                 State::Exploring,

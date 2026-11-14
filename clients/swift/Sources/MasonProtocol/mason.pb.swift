@@ -2128,6 +2128,12 @@ public nonisolated struct Mason_V1_CompileHolder: Sendable {
   /// A task's command idle past `[cpu] compile_idle_kill_s` is stopped.
   public var idleMs: UInt64 = 0
 
+  /// The task's project and full title, for the monitor's row; empty for a person's
+  /// command, a slot held outside the queue, or a task the store no longer has.
+  public var project: String = String()
+
+  public var title: String = String()
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -2968,7 +2974,7 @@ public nonisolated struct Mason_V1_UsageView: Sendable {
 
   public var note: String = String()
 
-  /// The top-bar line: the most constrained window per account.
+  /// The top-bar lines: each main window per account, shortest first (5-hour, then weekly).
   public var topBar: [String] = []
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
@@ -6886,7 +6892,7 @@ nonisolated extension Mason_V1_CpuUsage: SwiftProtobuf.Message, SwiftProtobuf._M
 
 nonisolated extension Mason_V1_CompileHolder: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".CompileHolder"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}label\0\u{1}task\0\u{3}since_ms\0\u{1}interactive\0\u{3}idle_ms\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}label\0\u{1}task\0\u{3}since_ms\0\u{1}interactive\0\u{3}idle_ms\0\u{1}project\0\u{1}title\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -6899,6 +6905,8 @@ nonisolated extension Mason_V1_CompileHolder: SwiftProtobuf.Message, SwiftProtob
       case 3: try { try decoder.decodeSingularUInt64Field(value: &self.sinceMs) }()
       case 4: try { try decoder.decodeSingularBoolField(value: &self.interactive) }()
       case 5: try { try decoder.decodeSingularUInt64Field(value: &self.idleMs) }()
+      case 6: try { try decoder.decodeSingularStringField(value: &self.project) }()
+      case 7: try { try decoder.decodeSingularStringField(value: &self.title) }()
       default: break
       }
     }
@@ -6920,6 +6928,12 @@ nonisolated extension Mason_V1_CompileHolder: SwiftProtobuf.Message, SwiftProtob
     if self.idleMs != 0 {
       try visitor.visitSingularUInt64Field(value: self.idleMs, fieldNumber: 5)
     }
+    if !self.project.isEmpty {
+      try visitor.visitSingularStringField(value: self.project, fieldNumber: 6)
+    }
+    if !self.title.isEmpty {
+      try visitor.visitSingularStringField(value: self.title, fieldNumber: 7)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -6929,6 +6943,8 @@ nonisolated extension Mason_V1_CompileHolder: SwiftProtobuf.Message, SwiftProtob
     if lhs.sinceMs != rhs.sinceMs {return false}
     if lhs.interactive != rhs.interactive {return false}
     if lhs.idleMs != rhs.idleMs {return false}
+    if lhs.project != rhs.project {return false}
+    if lhs.title != rhs.title {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

@@ -693,6 +693,10 @@ message CompileHolder {
   // How long its processes have used almost no CPU (0: busy, or not read yet).
   // A task's command idle past `[cpu] compile_idle_kill_s` is stopped.
   uint64 idle_ms = 5;
+  // The task's project and full title, for the monitor's row; empty for a person's
+  // command, a slot held outside the queue, or a task the store no longer has.
+  string project = 6;
+  string title = 7;
 }
 
 // A request waiting for a `compile` slot, in line order.

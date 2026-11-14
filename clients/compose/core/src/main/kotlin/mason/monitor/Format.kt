@@ -8,6 +8,28 @@ import mason.v1.ProgressSource
 import mason.v1.TokenLine
 
 object Format {
+    /** The longest title a compile row shows before it is cut (same in the Swift core). */
+    const val COMPILE_TITLE_LIMIT = 40
+
+    /** A title cut to [limit] characters at a word boundary where possible; "..." only when cut. */
+    fun shortTitle(title: String, limit: Int = COMPILE_TITLE_LIMIT): String {
+        val t = title.trim(' ')
+        if (t.length <= limit) return t
+        var head = t.substring(0, limit)
+        val sp = head.lastIndexOf(' ')
+        if (t[limit] != ' ' && sp >= limit / 2) head = head.substring(0, sp)
+        return head.trimEnd(' ') + "..."
+    }
+
+    /** What follows a compiling task's `#N`: "(project) - short title -", or "" when neither was sent. */
+    fun compileHolder(project: String, title: String): String {
+        val parts = ArrayList<String>()
+        if (project.isNotEmpty()) parts.add("($project)")
+        val t = shortTitle(title)
+        if (t.isNotEmpty()) parts.add("- $t -")
+        return parts.joinToString(" ")
+    }
+
     /** Time in state: "42 s", "9 min", "3h10". Always shown, never hidden. */
     fun duration(ms: Long): String {
         val s = ms / 1000
