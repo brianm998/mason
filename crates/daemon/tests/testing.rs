@@ -659,3 +659,31 @@ fn a_definition_whose_suites_name_a_missing_parser_is_refused_and_the_old_one_ru
     let t = file_it(&d, "Still fine");
     wait_state(&d, t, State::Landed, 90);
 }
+
+#[test]
+fn paying_a_debt_writes_in_the_projects_test_command() {
+    // On 2026-11-13 `mason debt run` on mason's own test step failed at once: the debt run
+    // gave `{project_test}` to the shell as a command (exit 127), so no debt could be paid.
+    let definition =
+        def("", "", "").replace("command = \"sh checks.sh\"", "command = \"{project_test}\"");
+    let s = Scratch::new(
+        "sh checks.sh",
+        json!({"steps": {"develop": [commit(HELLO, "add hello")]}}),
+    );
+    s.push_files(
+        &[(".mason/mason.toml", &definition), ("checks.sh", CHECKS)],
+        "project setup",
+    );
+    let d = start(&s);
+    let t = file_it(&d, "Test me later");
+    wait_state(&d, t, State::Landed, 120);
+    // A new tip, so the debt run cannot reuse the green the test step left for the landed tree.
+    s.push_files(&[("later.txt", "later\n")], "a later change");
+    let debt = mason_daemon::suites::skip(&d, t, "suite:checks", "owed", "brian", false).unwrap();
+    let paid = mason_daemon::suites::pay(&d, debt);
+    assert!(
+        paid.as_deref().is_ok_and(|m| m.starts_with("paid")),
+        "{paid:?}"
+    );
+    assert_eq!(d.store.debts(Some(t.0), false).unwrap()[0].status, "paid");
+}

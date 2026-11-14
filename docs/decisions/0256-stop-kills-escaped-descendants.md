@@ -8,4 +8,4 @@
 
 **Limits.** A process that escapes and is started in the window between the last snapshot and the child's death is not found. Windows keeps its current behaviour.
 
-**Trust.** `crates/step-host` and `crates/platform` are not in `PROTECTED`. No gate, limit or test is weakened.
+**Trust.** `crates/step-host` and `crates/platform` are not in `PROTECTED`; `scripts/exit/s261.sh` (exit tests) is. The owner asked for this fix on 2026-11-13 ("Yes, fix it"). No gate, limit or test is weakened. (Corrected in s271: the first version said none of these paths was protected.)

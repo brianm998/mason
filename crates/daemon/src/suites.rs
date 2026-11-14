@@ -192,20 +192,26 @@ pub fn needs_for(
     n
 }
 
-/// A suite with the project's `test` command written in: `{project_test}` in its
-/// `command`, `build` and `rerun` becomes that command, so the owner's per-worktree
-/// build directory (set in the project file's `test`) applies to a suite too.
-pub(crate) fn with_project_test(suite: &Suite, test: Option<&str>) -> Result<Suite, String> {
-    const KEY: &str = "{project_test}";
-    let uses = |s: &str| s.contains(KEY);
-    let mut s = suite.clone();
-    let any = uses(&s.command)
+const PROJECT_TEST: &str = "{project_test}";
+
+/// Whether any of the suite's commands names `{project_test}`.
+fn uses_project_test(s: &Suite) -> bool {
+    let uses = |c: &str| c.contains(PROJECT_TEST);
+    uses(&s.command)
         || s.build.as_deref().is_some_and(uses)
         || s.rerun.as_deref().is_some_and(uses)
         || s.skip.as_deref().is_some_and(uses)
         || s.dev_command.as_deref().is_some_and(uses)
-        || s.dev_build.as_deref().is_some_and(uses);
-    if !any {
+        || s.dev_build.as_deref().is_some_and(uses)
+}
+
+/// A suite with the project's `test` command written in: `{project_test}` in its
+/// `command`, `build` and `rerun` becomes that command, so the owner's per-worktree
+/// build directory (set in the project file's `test`) applies to a suite too.
+pub(crate) fn with_project_test(suite: &Suite, test: Option<&str>) -> Result<Suite, String> {
+    const KEY: &str = PROJECT_TEST;
+    let mut s = suite.clone();
+    if !uses_project_test(&s) {
         return Ok(s);
     }
     let Some(t) = test else {
@@ -886,6 +892,29 @@ fn run_suite(
     on_wait: &mut dyn FnMut(Option<String>),
 ) -> SuiteRun {
     let d = &who.d;
+    // The test step writes the project's `test` command into its suites before it calls here;
+    // a debt run, a ledger rerun and a landing batch did not, and ran `{project_test}` as a
+    // command (s271). Writing it in again changes nothing for a suite that has it already.
+    let filled;
+    let suite = if uses_project_test(suite) {
+        let test = d
+            .project_id_by_name(&who.project)
+            .and_then(|pid| crate::jobs::test_commands(d, def, pid, who.task.map(|(t, _)| t)))
+            .map(|t| t.test);
+        filled = match with_project_test(suite, test.as_deref()) {
+            Ok(s) => s,
+            Err(why) => {
+                return SuiteRun::Done {
+                    outcome: SuiteOutcome::Failed,
+                    results: None,
+                    notes: vec![format!("{}: {why}", suite.name)],
+                }
+            }
+        };
+        &filled
+    } else {
+        suite
+    };
     // Identical code never tests twice.
     if let Ok(Some((executed, _, task))) = d.store.evidence(&tree.tree, &suite.name) {
         if let Some(run) = who.run() {
