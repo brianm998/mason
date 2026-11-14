@@ -144,19 +144,30 @@ pub(crate) fn suite_uses(
 }
 
 /// Whether the step queues suite by suite instead of holding everything for the whole step:
-/// some selected suite builds first, or needs the whole machine (s340). A step-wide lease
-/// with `exclusive` in it would keep every other build and test off the machine for the
-/// whole step, though only the exclusive suites need that.
+/// some selected suite builds first, or needs the whole machine (s340), or two or more only
+/// build and can run side by side (s345). A step-wide lease with `exclusive` in it would keep
+/// every other build and test off the machine for the whole step, though only the exclusive
+/// suites need that.
 pub fn builds_per_suite(
     project: &crate::config::ProjectCfg,
     def: &Definition,
     step: &Step,
     branch: &str,
 ) -> bool {
-    plan(project, def, step, branch)
-        .iter()
+    let chosen: Vec<Suite> = plan(project, def, step, branch)
+        .into_iter()
         .filter(|s| s.selected)
-        .any(|s| s.suite.build.is_some() || run_needs(def, step, &s.suite).exclusive)
+        .map(|s| s.suite)
+        .collect();
+    queues_per_suite(def, step, &chosen)
+}
+
+/// [`builds_per_suite`] over the selected suites.
+fn queues_per_suite(def: &Definition, step: &Step, chosen: &[Suite]) -> bool {
+    chosen
+        .iter()
+        .any(|s| s.build.is_some() || run_needs(def, step, s).exclusive)
+        || chosen.iter().filter(|s| compile_only(def, step, s)).count() > 1
 }
 
 /// What one suite's run holds in a step that queues suite by suite: the step's `uses`
@@ -1604,6 +1615,69 @@ fn lease(c: &Ctx, needs: Needs) -> bool {
 
 /// The step's `MASON_*` variables, with `MASON_HELD` naming what is leased for the
 /// command about to run (not just the step's own `uses`).
+/// A suite whose run needs `compile` and nothing else, with no build of its own: a build
+/// that can run beside others of its kind (s345).
+fn compile_only(def: &Definition, step: &Step, suite: &Suite) -> bool {
+    let n = run_needs(def, step, suite);
+    suite.build.is_none()
+        && !n.exclusive
+        && !n.amounts.is_empty()
+        && n.amounts.keys().all(|k| k == "compile")
+}
+
+/// Run `suites` side by side, each in its own thread on its own lease, as [`lease_suite`]
+/// and the step's loop would one at a time. The broker decides how many run at once.
+fn run_side_by_side(
+    c: &Ctx,
+    who: &Who,
+    lock: &crate::daemon::RepoLock,
+    suites: &[Suite],
+    tree: &Tree,
+) -> std::collections::HashMap<String, SuiteRun> {
+    std::thread::scope(|sc| {
+        let runs: Vec<_> = suites
+            .iter()
+            .map(|suite| {
+                sc.spawn(move || {
+                    let needs = run_needs(&c.def, &c.step, suite);
+                    let mut who = who.clone();
+                    who.env = held_env(c, &needs);
+                    let check = who.check(&suite.name);
+                    // A skipped suite holds nothing: `run_suite` sees the skip before it runs.
+                    let lease = match check() {
+                        Stop::Gone => return (suite.name.clone(), SuiteRun::Gone),
+                        Stop::Skipped => None,
+                        Stop::No => {
+                            let wanted = || check() == Stop::No;
+                            match crate::jobs::acquire_needs_beside(c, needs, &wanted) {
+                                Ok(l) => Some(l),
+                                Err(_) if check() == Stop::Skipped => None,
+                                Err(_) => return (suite.name.clone(), SuiteRun::Gone),
+                            }
+                        }
+                    };
+                    let ran = run_suite(
+                        &who,
+                        &c.project.path,
+                        lock,
+                        &c.def,
+                        suite,
+                        &c.wt,
+                        tree,
+                        &mut |_| {},
+                    );
+                    if lease.is_some() {
+                        drop(lease);
+                        c.d.admit();
+                    }
+                    (suite.name.clone(), ran)
+                })
+            })
+            .collect();
+        runs.into_iter().filter_map(|h| h.join().ok()).collect()
+    })
+}
+
 fn held_env(c: &Ctx, held: &Needs) -> Vec<(String, String)> {
     let mut env = crate::jobs::step_env_pairs(c);
     for (k, v) in env.iter_mut() {
@@ -1773,12 +1847,15 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
     // A suite that builds first queues phase by phase: its build holds one `compile` slot and
     // gives it back, then its run holds the rest. The step then holds nothing between suites.
     // So does a step with a suite that needs the whole machine (s340): only that suite's run
-    // holds `exclusive`. Base-red checks still go with builds, as before.
+    // holds `exclusive`; and one with two or more suites that only build (s345), which run
+    // side by side below. Base-red checks still go with builds, as before.
     let builds = sels.iter().any(|s| s.selected && s.suite.build.is_some());
-    let per_suite = builds
-        || sels
-            .iter()
-            .any(|s| s.selected && run_needs(&c.def, &c.step, &s.suite).exclusive);
+    let chosen: Vec<Suite> = sels
+        .iter()
+        .filter(|s| s.selected)
+        .map(|s| s.suite.clone())
+        .collect();
+    let per_suite = queues_per_suite(&c.def, &c.step, &chosen);
     if !per_suite {
         // The step holds one lease for all its suites (see `jobs::acquire`).
         let mut needs = needs_of(&c.step.uses, None);
@@ -1819,6 +1896,21 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
             }
         }
     }
+    // Suites whose run needs nothing but `compile` (star's `build-*`) run side by side first,
+    // each on its own lease (s345): as many at once as the broker grants `compile` slots. The
+    // loop below then takes their results in order, so reds, debts and notes are as before.
+    let mut side: std::collections::HashMap<String, SuiteRun> = Default::default();
+    if per_suite {
+        let builds_only: Vec<Suite> = sels
+            .iter()
+            .filter(|s| s.selected)
+            .filter_map(|s| with_project_test(&s.suite, project_test.as_deref()).ok())
+            .filter(|s| compile_only(&c.def, &c.step, s))
+            .collect();
+        if builds_only.len() > 1 {
+            side = run_side_by_side(c, &who, &lock, &builds_only, &tree);
+        }
+    }
     for sel in &sels {
         let name = sel.suite.name.clone();
         if !sel.selected {
@@ -1830,7 +1922,8 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
             Ok(s) => s,
             Err(why) => return c.fail(why),
         };
-        if per_suite {
+        let ran_beside = side.remove(&name);
+        if per_suite && ran_beside.is_none() {
             c.release_lease();
             let reused = matches!(d.store.evidence(&tree.tree, &suite.name), Ok(Some(_)));
             if let Some(b) = suite
@@ -1892,16 +1985,19 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
                 return;
             }
         }
-        let ran = run_suite(
-            &who,
-            &c.project.path,
-            &lock,
-            &c.def,
-            &suite,
-            &c.wt,
-            &tree,
-            &mut on_wait,
-        );
+        let ran = match ran_beside {
+            Some(r) => r,
+            None => run_suite(
+                &who,
+                &c.project.path,
+                &lock,
+                &c.def,
+                &suite,
+                &c.wt,
+                &tree,
+                &mut on_wait,
+            ),
+        };
         if per_suite {
             c.release_lease();
         }
