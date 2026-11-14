@@ -613,7 +613,7 @@ fn execute(c: &Ctx, step: State) {
             && crate::suites::builds_per_suite(&c.project, &c.def, &c.step, &c.branch))
     {
         // A test step with a build queues phase by phase in `command_job`, and one whose
-        // suites build, suite by suite in `suites::run`.
+        // suites build or need the whole machine, suite by suite in `suites::run`.
         match acquire(c) {
             Ok(l) => *c.lease.lock().unwrap_or_else(|e| e.into_inner()) = Some(l),
             Err(_) => return, // the task was cancelled or retried while it waited
