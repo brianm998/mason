@@ -54,6 +54,21 @@ public enum Format {
 
     /// Each reported figure in full: "input 4", "output 988", "cache read 7,664", "cache write
     /// 4,503", and "cost $0.0123" when there is one.
+    /// A CI workflow's jobs on one line: "macOS: 4 jobs · 1 queued · 1 running (build) · 2 passed".
+    public static func jobsText(name: String, jobs j: Mason_V1_JobCounts) -> String {
+        let total = j.queued + j.running + j.succeeded + j.failed
+        var parts = ["\(total) \(total == 1 ? "job" : "jobs")"]
+        if j.queued > 0 { parts.append("\(j.queued) queued") }
+        if j.running > 0 {
+            var r = "\(j.running) running"
+            if !j.runningNames.isEmpty { r += " (\(j.runningNames.joined(separator: ", ")))" }
+            parts.append(r)
+        }
+        if j.succeeded > 0 { parts.append("\(j.succeeded) passed") }
+        if j.failed > 0 { parts.append("\(j.failed) failed") }
+        return "\(name): " + parts.joined(separator: " · ")
+    }
+
     public static func tokensDetail(_ t: Mason_V1_TokenLine?) -> [String] {
         guard let t else { return [] }
         var v: [String] = []
@@ -213,6 +228,7 @@ extension Mason_V1_ProgressCell {
             )
             t.append("\(s.name): \(text)")
         }
+        for s in subs where s.hasJobs { t.append(Format.jobsText(name: s.name, jobs: s.jobs)) }
         for i in todo { t.append("\(i.status): \(i.text)") }
         if isStale(now: now) { t.append("silent") }
         return t

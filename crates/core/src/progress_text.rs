@@ -145,6 +145,37 @@ pub fn source_words(source: Source, samples: u32) -> String {
     }
 }
 
+/// A CI workflow's jobs on one line: "macOS: 4 jobs · 1 queued · 1 running (build) · 2 passed
+/// · 1 failed". A state with no jobs is left out; the running jobs' names follow the count.
+pub fn jobs_text(
+    name: &str,
+    total: u64,
+    (queued, running, succeeded, failed): (u64, u64, u64, u64),
+    running_names: &[String],
+) -> String {
+    let mut parts = vec![format!(
+        "{total} {}",
+        if total == 1 { "job" } else { "jobs" }
+    )];
+    if queued > 0 {
+        parts.push(format!("{queued} queued"));
+    }
+    if running > 0 {
+        let mut r = format!("{running} running");
+        if !running_names.is_empty() {
+            r.push_str(&format!(" ({})", running_names.join(", ")));
+        }
+        parts.push(r);
+    }
+    if succeeded > 0 {
+        parts.push(format!("{succeeded} passed"));
+    }
+    if failed > 0 {
+        parts.push(format!("{failed} failed"));
+    }
+    format!("{name}: {}", parts.join(" · "))
+}
+
 /// "updated 4 s ago", counted against the daemon's clock. Empty when nothing moved yet.
 pub fn updated_text(now_ms: u64, moved_ms: u64) -> String {
     if moved_ms == 0 {
@@ -173,6 +204,19 @@ pub fn time_text(now_ms: u64, moved_ms: u64, stale_after_ms: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_workflow_line_names_each_state_that_has_jobs() {
+        let names = vec!["build".to_string()];
+        assert_eq!(
+            jobs_text("macOS", 5, (1, 1, 2, 1), &names),
+            "macOS: 5 jobs · 1 queued · 1 running (build) · 2 passed · 1 failed"
+        );
+        assert_eq!(
+            jobs_text("CI", 1, (0, 0, 1, 0), &[]),
+            "CI: 1 job · 1 passed"
+        );
+    }
 
     #[test]
     fn token_figures_are_compact_and_the_in_side_sums() {
