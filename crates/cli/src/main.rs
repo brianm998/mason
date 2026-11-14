@@ -3107,6 +3107,71 @@ fn print_health(r: &serde_json::Value) {
     );
 }
 
+/// The per-project numbers of the digest (s255): p90 beside the median, send-backs per landed
+/// task by class, retries by failure class, test-step run times, and what is not recorded.
+fn print_digest_projects(r: &serde_json::Value) {
+    let Some(m) = r["per_project"].as_object().filter(|m| !m.is_empty()) else {
+        return;
+    };
+    println!("By project:");
+    for (name, p) in m {
+        println!("  {name}: {} landed", p["landed"]);
+        let c = &p["claim_to_land"];
+        match (c["median_ms"].as_u64(), c["p90_ms"].as_u64()) {
+            (Some(med), Some(p90)) => println!(
+                "    claim to land: median {}, p90 {} ({} task(s))",
+                ms_text(med),
+                ms_text(p90),
+                c["samples"]
+            ),
+            _ => println!("    claim to land: no landed task in the window"),
+        }
+        let by = p["send_backs"]["by_class"]
+            .as_object()
+            .cloned()
+            .unwrap_or_default();
+        let per = p["send_backs"]["per_landed"]
+            .as_object()
+            .cloned()
+            .unwrap_or_default();
+        let parts: Vec<String> = by
+            .iter()
+            .map(|(k, n)| {
+                let rate = per[k]
+                    .as_f64()
+                    .map_or("n/a".to_string(), |v| format!("{v:.2}"));
+                format!("{k} {n} ({rate} per landed)")
+            })
+            .collect();
+        println!("    send-backs: {}", parts.join(", "));
+        let retries = p["retries_by_failure_class"]
+            .as_object()
+            .cloned()
+            .unwrap_or_default();
+        if retries.is_empty() {
+            println!("    retries: none");
+        } else {
+            let parts: Vec<String> = retries
+                .iter()
+                .map(|(k, v)| format!("{k}: {} by hand, {} automatic", v["manual"], v["auto"]))
+                .collect();
+            println!("    retries: {}", parts.join("; "));
+        }
+        let t = &p["test_step_run_ms"];
+        match (t["median"].as_u64(), t["p90"].as_u64()) {
+            (Some(med), Some(p90)) => println!(
+                "    test step run: median {}, p90 {} ({} run(s))",
+                ms_text(med),
+                ms_text(p90),
+                t["runs"]
+            ),
+            _ => println!("    test step run: none in the window"),
+        }
+        println!("    run time per suite: not recorded");
+        println!("    run_check calls per task: not recorded");
+    }
+}
+
 fn print_digest(r: &serde_json::Value) {
     let n = |k: &str| r[k].to_string();
     println!("Landed: {}", n("landed"));
@@ -3129,6 +3194,7 @@ fn print_digest(r: &serde_json::Value) {
         ),
     }
     println!("Tokens per landed task: not recorded");
+    print_digest_projects(r);
     println!("Time by state:");
     if let Some(m) = r["time_by_state_ms"].as_object() {
         for (k, v) in m {
