@@ -692,15 +692,13 @@ struct Dev {
 /// `Err` when the suite needs a device and none is free: the gate is skipped,
 /// not failed.
 fn lease_dev(who: &Who, def: &Definition, suite: &Suite) -> Result<Option<Dev>, ()> {
-    let Some((kind, os)) = def
-        .testing
-        .environment(&suite.env)
-        .and_then(|e| crate::targets::kind_of_env(e).map(|k| (k, e.os.clone())))
-    else {
+    let Some((kind, filter)) = def.testing.environment(&suite.env).and_then(|e| {
+        crate::targets::kind_of_env(e).map(|k| (k, crate::targets::filter_of_env(e)))
+    }) else {
         return Ok(None);
     };
     let label = format!("#{} {}", who.task.map_or(0, |t| t.0 .0), suite.name);
-    match who.d.targets.lease(kind, os.as_deref(), &label) {
+    match who.d.targets.lease(kind, &filter, &label) {
         Some(l) => Ok(Some(Dev {
             id: l.id.clone(),
             _lease: l,
@@ -951,14 +949,12 @@ fn run_suite(
             )));
         };
         // A device environment leases one particular device for this attempt.
-        let dev: Option<Dev> = match def
-            .testing
-            .environment(&suite.env)
-            .and_then(|e| crate::targets::kind_of_env(e).map(|k| (k, e.os.clone())))
-        {
-            Some((kind, os)) => {
+        let dev: Option<Dev> = match def.testing.environment(&suite.env).and_then(|e| {
+            crate::targets::kind_of_env(e).map(|k| (k, crate::targets::filter_of_env(e)))
+        }) {
+            Some((kind, filter)) => {
                 let label = format!("#{} {}", who.task.map_or(0, |t| t.0 .0), suite.name);
-                match d.targets.lease(kind, os.as_deref(), &label) {
+                match d.targets.lease(kind, &filter, &label) {
                     Some(l) => Some(Dev {
                         id: l.id.clone(),
                         _lease: l,
