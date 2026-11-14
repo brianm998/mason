@@ -432,6 +432,64 @@ pub fn removals_in(dir: &Path) -> Vec<Removal> {
         .unwrap_or_default()
 }
 
+/// A page on the git host for a task's landing: the batch's pull request or a failed check.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CiRef {
+    pub label: String,
+    pub url: String,
+    pub kind: &'static str,
+}
+
+/// Only an http(s) URL is ever sent to a client to open.
+fn is_web_url(u: &str) -> bool {
+    let l = u.to_ascii_lowercase();
+    (l.starts_with("https://") || l.starts_with("http://"))
+        && !u.chars().any(|c| c.is_whitespace() || c.is_control())
+}
+
+/// Remember `links` for the task (`ci_links.json` in its directory), replacing an earlier
+/// link with the same label. Links that are not http(s) are dropped.
+pub fn record_ci_links(dir: &Path, links: &[CiRef]) {
+    let mut all = ci_links_of(dir);
+    for l in links.iter().filter(|l| is_web_url(&l.url)) {
+        all.retain(|o| o.label != l.label);
+        all.push(l.clone());
+    }
+    let v: Vec<serde_json::Value> = all
+        .iter()
+        .map(|l| serde_json::json!({"label": l.label, "url": l.url, "kind": l.kind}))
+        .collect();
+    let _ = std::fs::create_dir_all(dir);
+    let _ = std::fs::write(
+        dir.join("ci_links.json"),
+        serde_json::Value::Array(v).to_string(),
+    );
+}
+
+/// The links recorded for the task, oldest first.
+pub fn ci_links_of(dir: &Path) -> Vec<CiRef> {
+    let v: serde_json::Value = std::fs::read_to_string(dir.join("ci_links.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default();
+    v.as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|e| {
+            let url = e["url"].as_str()?;
+            is_web_url(url).then(|| CiRef {
+                label: e["label"].as_str().unwrap_or_default().to_string(),
+                url: url.to_string(),
+                kind: match e["kind"].as_str() {
+                    Some("pull_request") => "pull_request",
+                    Some("run") => "run",
+                    _ => "check",
+                },
+            })
+        })
+        .collect()
+}
+
 /// The task's deliberate removals as lines for the task detail: empty when there are none.
 pub fn removals_view(dir: &Path) -> String {
     let v: serde_json::Value = std::fs::read_to_string(dir.join("change.json"))
@@ -2363,6 +2421,13 @@ impl Runner {
         })
     }
 
+    /// Remember pages on the host against every task of the batch, for the task detail.
+    fn note_ci_links(&self, links: &[CiRef]) {
+        for t in self.fps.keys() {
+            record_ci_links(&self.d.task_dir(TaskId(*t)), links);
+        }
+    }
+
     /// One note per failed job the CI judged ("pr-gate/macOS: runner lost, rerun" or
     /// "pr-gate/Linux: real failure, not rerun"), and the flag that stops the red ladder's
     /// rerun when any of them is a real failure. Nothing is judged (no notes, no flag)
@@ -2481,6 +2546,11 @@ impl Runner {
         };
         let _ = self.d.store.set_ref_number(ref_id, pr.number);
         self.point("pr_opened");
+        self.note_ci_links(&[CiRef {
+            label: format!("PR #{}", pr.number),
+            url: pr.url.clone(),
+            kind: "pull_request",
+        }]);
         // A newer green PR replaces an older one the batch was holding.
         if let Some(old) = self.pr.lock().unwrap_or_else(|e| e.into_inner()).take() {
             let _ = host.close_pr(old.number);
@@ -2510,6 +2580,18 @@ impl Runner {
             }
         };
         self.point("pr_checked");
+        self.note_ci_links(
+            &st.jobs
+                .iter()
+                .filter_map(|j| {
+                    Some(CiRef {
+                        label: j.job.clone(),
+                        url: j.url.clone()?,
+                        kind: "check",
+                    })
+                })
+                .collect::<Vec<_>>(),
+        );
         if st.checks == Checks::Red || st.state == PrState::Closed {
             let _ = host.close_pr(pr.number);
             self.drop_candidate(&name, ref_id);

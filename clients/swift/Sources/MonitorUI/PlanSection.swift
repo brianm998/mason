@@ -14,12 +14,13 @@ func inlineMarkdown(_ s: String) -> AttributedString {
 /// A task's plan: summary, steps, files, criteria and any extra keys, as a document.
 struct PlanSection: View {
     @Environment(\.theme) var theme
+    @ObservedObject var model: MonitorModel
     let detail: Mason_V1_TaskDetailView
 
     var body: some View {
         if !detail.hasPlanView {
             // An older daemon: only the text.
-            Text(detail.plan).font(theme.body()).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+            LinkedText(model: model, text: detail.plan, selectable: true).frame(maxWidth: .infinity, alignment: .leading)
         } else {
             let v = detail.planView
             if !v.note.isEmpty {
@@ -92,7 +93,7 @@ struct PlanSection: View {
     }
 
     func text(_ s: String) -> some View {
-        Text(inlineMarkdown(s)).font(theme.body()).textSelection(.enabled)
+        LinkedText(model: model, text: s, selectable: true, base: inlineMarkdown(s))
             .frame(maxWidth: .infinity, alignment: .leading)
             .fixedSize(horizontal: false, vertical: true)
     }
