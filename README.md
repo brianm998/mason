@@ -306,7 +306,9 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s268**: A pushed `v*` tag now builds, signs, test-installs on fresh runners and drafts a GitHub release for every package (`.github/workflows/release.yml`), with a dry run by `workflow_dispatch`; a test keeps its asset list equal to docs/RELEASING.md.
 - **s269**: Home's Compilation section now reads `#294 (mason) - Known red ledger record a test failure... - for 5 min` for each task holding a `compile` slot, in both the Swift and Compose monitors.
 - **s270**: Each paused banner in the Swift and Compose monitors gets a Resume button that lifts exactly that pause and an X that collapses it to its icon (icons gather in one strip, double-click expands, the choice is kept per device and pruned when the pause ends).
+- **s271**: `{project_test}` in a suite's commands is now written in by `run_suite` itself, so every caller gets the project's `test` command, not only the test step. Before this, `mason debt run` on mason's own test step failed at once with `sh: {project_test}: command not found`, and no debt for that step could be paid.
 - **s273**: `SidebarFitTests` now builds `RowView` with its current by-value initializer, so the `swift-clients` suite compiles again.
 - **s274**: `release.yml` signs `SHA256SUMS` with minisign, and `scripts/install.sh` and the release update channel refuse an unsigned or badly signed release once the owner's public key is pinned (a placeholder until then).
 - **s275**: The release workflow now builds a static-CRT Windows zip and a per-user WiX MSI of the CLI and daemon, installs and smoke-tests both on a fresh windows-2022 runner, and publishes them only if that passed.
+- **s280**: Task #309's two findings came from a bad merge and do not exist on `origin/develop`, so this stage only records that and adds an exit script that pins both facts.
 <!-- status:end -->
