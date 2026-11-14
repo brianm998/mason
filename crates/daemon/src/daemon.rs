@@ -253,7 +253,8 @@ impl Daemon {
         // A daemon whose CPU reading is injected is a test's: like the sampler, the
         // disk probe would add one set of threads per daemon, to no use.
         let measures_machine = cfg.cpu.is_none() && std::env::var_os("MASON_CPU_FILE").is_none();
-        if rcfg.disk_stall_ms > 0 && measures_machine {
+        // Started even when the gate is off, so the owner can turn it on while masond runs.
+        if measures_machine {
             broker.set_stall(
                 crate::stall::Prober::start(disk_paths.clone()),
                 rcfg.disk_stall_ms,
@@ -272,7 +273,7 @@ impl Daemon {
             store,
             registry: std::sync::RwLock::new(registry),
             pool: Pool::new("blocking", 4, 64),
-            view_pool: Pool::new("views", 2, 64),
+            view_pool: Pool::new("views", 4, 64),
             crash: Crash::from_env(),
             started: Instant::now(),
             started_ms: now_ms(),
@@ -990,6 +991,7 @@ impl Daemon {
         let def = self.current_def(t.project);
         Some(crate::sched::Standing {
             steps_remaining: mason_definition::graph::steps_remaining(&def, &t.step),
+            span: mason_definition::graph::route_length(&def),
             priority: t.priority as u8,
         })
     }
@@ -1011,7 +1013,8 @@ impl Daemon {
             t.enqueued_at.0,
             t.id.0,
             jump,
-        );
+        )
+        .with_span(mason_definition::graph::route_length(def));
         let landing = def
             .step(step)
             .is_some_and(|s| s.kind == mason_definition::StepType::Landing);

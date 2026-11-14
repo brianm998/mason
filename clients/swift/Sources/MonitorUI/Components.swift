@@ -14,14 +14,14 @@ import SwiftUI
 /// typical time, or quiet past its usual gap, turns amber, never red: slow is not broken.
 struct ProgressCells: View {
     @Environment(\.theme) var theme
-    @ObservedObject var model: MonitorModel
+    let clock: LiveState
     let cells: [Mason_V1_ProgressCell]
     var slow: Bool = false
 
     var body: some View {
         HStack(spacing: theme.spacingSmall) {
             ForEach(Array(cells.enumerated()), id: \.offset) { _, c in
-                let quiet = c.state == .part && c.isStale(now: model.daemonNow())
+                let quiet = c.state == .part && c.isStale(now: clock.daemonNow())
                 Cell(state: c.state, fill: c.state == .part ? c.fill : .outline,
                      tint: (slow || quiet) && c.state == .part ? theme.slow : theme.accent)
                     .frame(width: theme.cell, height: theme.cell)
@@ -51,12 +51,13 @@ extension Array where Element == Mason_V1_ProgressCell {
 /// time is not announced every second.
 struct ProgressLine: View {
     @Environment(\.theme) var theme
-    @ObservedObject var model: MonitorModel
+    let clock: LiveState
     let cell: Mason_V1_ProgressCell
+    @ObservedObject private var ticker = SharedTick.shared
 
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 1)) { ctx in
-            let now = model.daemonNow(ctx.date)
+        Group {
+            let now = clock.daemonNow(ticker.now)
             let stale = cell.isStale(now: now)
             ViewThatFits(in: .horizontal) {
                 parts(now: now, stale: stale, message: true)
@@ -68,6 +69,8 @@ struct ProgressLine: View {
                 .filter { !$0.isEmpty }.joined(separator: ", "))
             .accessibilityIdentifier("progress-line:\(cell.step)")
         }
+        .onAppear { SharedTick.shared.join() }
+        .onDisappear { SharedTick.shared.leave() }
     }
 
     /// Last fallback, which cannot exceed the width: the count truncates, the time stays whole.
@@ -113,13 +116,17 @@ struct ProgressDetail: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: theme.spacingSmall) {
-            ProgressLine(model: model, cell: cell)
+            ProgressLine(clock: model.live, cell: cell)
             if !cell.message.isEmpty { Text(cell.message).font(theme.body()) }
             ForEach(Array(cell.subs.enumerated()), id: \.offset) { _, s in
                 let text = Format.countText(
                     unit: s.unit, done: UInt64(s.done), doneSource: s.doneSource,
                     total: UInt64(s.total), totalSource: s.totalSource, totalLow: 0)
                 Text("\(s.name): \(text)").font(theme.body())
+                if s.hasJobs {
+                    Text(Format.jobsText(name: s.name, jobs: s.jobs)).font(theme.body())
+                        .foregroundStyle(s.jobs.failed > 0 ? theme.attention : theme.text)
+                }
             }
             ForEach(Array(cell.todo.enumerated()), id: \.offset) { _, t in
                 HStack(spacing: theme.spacingSmall) {
@@ -238,6 +245,13 @@ struct StateIcon: View {
     }
 }
 
+/// The colour of a tile's number: the attention colour when the state wants the owner, gray
+/// when the count is zero, else the text colour. The dash shown while disconnected is plain text.
+func tileCountColor(_ theme: Theme, count: UInt32, wants: Bool, connected: Bool) -> Color {
+    if wants { return theme.attention }
+    return connected && count == 0 ? theme.muted : theme.text
+}
+
 /// A count tile: a large count over a one-line label, sized to its label so a
 /// narrow window squeezes other text and never a tile or label; tinted when
 /// the state wants the owner; a dash while disconnected.
@@ -249,7 +263,7 @@ struct CountTile: View {
     var body: some View {
         let wants = count.wantsYou && model.connected
         VStack(spacing: 0) {
-            Text(model.tileCount(count)).font(theme.count()).foregroundStyle(wants ? theme.attention : theme.text)
+            Text(model.tileCount(count)).font(theme.count()).foregroundStyle(tileCountColor(theme, count: count.count, wants: wants, connected: model.connected))
             Text(label).font(theme.small()).foregroundStyle(theme.muted).lineLimit(1).fixedSize()
         }
         .padding(.horizontal, theme.spacing)
@@ -341,10 +355,10 @@ struct DecisionCardView: View {
         VStack(alignment: .leading, spacing: theme.spacing) {
             HStack(alignment: .firstTextBaseline, spacing: theme.spacingSmall) {
                 StateIcon(state: "needs_attention")
-                Text(card.ask).font(theme.title()).foregroundStyle(theme.text).fixedSize(horizontal: false, vertical: true)
+                LinkedText(model: model, text: card.ask, font: theme.title()).fixedSize(horizontal: false, vertical: true)
             }
             if !card.why.isEmpty {
-                Text(card.why).font(theme.body()).foregroundStyle(theme.muted).fixedSize(horizontal: false, vertical: true)
+                LinkedText(model: model, text: card.why, color: theme.muted).fixedSize(horizontal: false, vertical: true)
             }
             VStack(alignment: .leading, spacing: theme.spacingSmall) {
                 ForEach(Array(card.options.enumerated()), id: \.offset) { i, o in
@@ -461,10 +475,10 @@ struct ApprovalView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: theme.spacing) {
-            Text(approval.waitingFor).font(theme.title()).foregroundStyle(theme.text)
+            LinkedText(model: model, text: approval.waitingFor, font: theme.title())
                 .fixedSize(horizontal: false, vertical: true)
             ForEach(Array(approval.lines.enumerated()), id: \.offset) { _, l in
-                Text("• \(l)").font(theme.body()).foregroundStyle(theme.text)
+                LinkedText(model: model, text: "• \(l)")
                     .fixedSize(horizontal: false, vertical: true)
             }
             if !approval.diffHash.isEmpty {
@@ -661,11 +675,11 @@ struct ProposalView: View {
                 .font(theme.body(.semibold)).foregroundStyle(theme.text)
                 .accessibilityIdentifier("proposal:\(row.id):tag")
             if info.filedBy != 0 {
-                Text("Filed by the agent of task #\(info.filedBy)").font(theme.small()).foregroundStyle(theme.muted)
+                LinkedText(model: model, text: "Filed by the agent of task #\(info.filedBy)", font: theme.small(), color: theme.muted)
             }
             if !info.evidence.isEmpty {
                 Text("Evidence").font(theme.body(.semibold)).foregroundStyle(theme.text)
-                Text(info.evidence).font(theme.mono()).foregroundStyle(theme.text).textSelection(.enabled)
+                LinkedText(model: model, text: info.evidence, font: theme.mono(), selectable: true)
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("proposal:\(row.id):evidence")
             }
@@ -839,5 +853,153 @@ struct SSHKeySheet: View {
         .padding(theme.spacingLarge)
         .frame(minWidth: 520)
         .accessibilityIdentifier("ssh-key-sheet")
+    }
+}
+
+/// Text whose task numbers and CI references are links (`Linkify`): a task opens its page in the
+/// monitor (so back and forward work), a CI reference opens in the default browser. Selection is
+/// kept when `selectable`.
+struct LinkedText: View {
+    @Environment(\.theme) var theme
+    @ObservedObject var model: MonitorModel
+    let text: String
+    var font: Font? = nil
+    var color: Color? = nil
+    var selectable = false
+    /// Already styled text (the plan's Markdown): its own styling is kept and links are added on top.
+    var base: AttributedString? = nil
+
+    static let taskScheme = "mason-task"
+
+    /// The text as an attributed string: one `link` run per task or URL segment.
+    static func attributed(_ segments: [LinkSegment], linkColor: Color) -> AttributedString {
+        var out = AttributedString()
+        for s in segments {
+            var a = AttributedString(s.text)
+            switch s {
+            case .text: break
+            case .task(let id, _):
+                a.link = URL(string: "\(taskScheme)://\(id)")
+                a.foregroundColor = linkColor
+            case .url(let u, _):
+                if let url = URL(string: u) {
+                    a.link = url
+                    a.foregroundColor = linkColor
+                }
+            }
+            out += a
+        }
+        return out
+    }
+
+    /// `base` with a `link` on the part of it each task or URL segment covers.
+    static func link(_ base: AttributedString, _ segments: [LinkSegment], linkColor: Color) -> AttributedString {
+        var out = base
+        var pos = 0
+        for s in segments {
+            let n = s.text.count
+            defer { pos += n }
+            var target: URL?
+            switch s {
+            case .text: continue
+            case .task(let id, _): target = URL(string: "\(taskScheme)://\(id)")
+            case .url(let u, _): target = URL(string: u)
+            }
+            guard let target else { continue }
+            let start = out.characters.index(out.startIndex, offsetBy: pos)
+            let end = out.characters.index(start, offsetBy: n)
+            out[start..<end].link = target
+            out[start..<end].foregroundColor = linkColor
+        }
+        return out
+    }
+
+    private var styled: Text {
+        if let base {
+            return Text(Self.link(base, model.linkify(String(base.characters)), linkColor: theme.accent))
+        }
+        return Text(Self.attributed(model.linkify(text), linkColor: theme.accent))
+    }
+
+    var body: some View {
+        let t = styled.font(font ?? theme.body()).foregroundStyle(color ?? theme.text)
+            .environment(\.openURL, OpenURLAction { url in
+                if url.scheme == Self.taskScheme, let n = UInt64(url.host ?? "") {
+                    model.go(.task(n))
+                    return .handled
+                }
+                guard let s = url.scheme?.lowercased(), s == "https" || s == "http" else { return .discarded }
+                return .systemAction
+            })
+        if selectable { t.textSelection(.enabled) } else { t.textSelection(.disabled) }
+    }
+}
+
+/// The "CI" line and the tracker issue of a task's page: each reference a link.
+struct CiLinksLine: View {
+    @Environment(\.theme) var theme
+    let links: [Mason_V1_CiLink]
+    let issue: UInt64
+    let issueURL: String
+
+    var body: some View {
+        HStack(spacing: theme.spacingSmall) {
+            if issue != 0 {
+                if Linkify.isWebURL(issueURL), let u = URL(string: issueURL) {
+                    Link("issue #\(issue)", destination: u).font(theme.body())
+                        .accessibilityIdentifier("detail:issue")
+                } else {
+                    Text("issue #\(issue)").font(theme.body()).foregroundStyle(theme.muted)
+                }
+            }
+            let shown = links.filter { Linkify.isWebURL($0.url) }
+            if !shown.isEmpty {
+                Text("CI").font(theme.body()).foregroundStyle(theme.muted)
+                ForEach(Array(shown.enumerated()), id: \.offset) { _, l in
+                    if let u = URL(string: l.url) {
+                        Link(l.label.isEmpty ? l.url : l.label, destination: u).font(theme.body())
+                    }
+                }
+            }
+        }
+        .accessibilityIdentifier("detail:ci")
+    }
+}
+
+/// One one-second tick for every progress line on the page, in place of a timer per row. It runs
+/// only while some line is on screen and the app is visible: hidden or minimised, it stops.
+@MainActor
+final class SharedTick: ObservableObject {
+    static let shared = SharedTick()
+    @Published private(set) var now = Date()
+    private var users = 0
+    private var visible = true
+    private var timer: Timer?
+
+    private init() {
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeOcclusionStateNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.visible = NSApp.occlusionState.contains(.visible)
+                self?.update()
+            }
+        }
+    }
+
+    func join() { users += 1; update() }
+    func leave() { users = max(0, users - 1); update() }
+
+    private func update() {
+        if users > 0 && visible {
+            guard timer == nil else { return }
+            now = Date()
+            timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated { self?.now = Date() }
+            }
+        } else {
+            timer?.invalidate()
+            timer = nil
+        }
     }
 }

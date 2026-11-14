@@ -265,6 +265,7 @@ fn priority_first_orders_urgent_tasks_ahead_of_tasks_nearer_landing() {
     let as_task = |steps, priority| {
         Some(Standing {
             steps_remaining: steps,
+            span: 1,
             priority,
         })
     };
@@ -293,6 +294,7 @@ fn by_default_progress_orders_waiters_and_notes_show_newest_first() {
     let as_task = |steps, priority| {
         Some(Standing {
             steps_remaining: steps,
+            span: 1,
             priority,
         })
     };
@@ -313,4 +315,75 @@ fn by_default_progress_orders_waiters_and_notes_show_newest_first() {
     assert_eq!(c.notes.len(), 5, "the last five");
     assert!(c.notes[0].ends_with("note 6"), "{}", c.notes[0]);
     assert!(c.rules.contains("is stopped"), "{}", c.rules);
+}
+
+#[test]
+fn a_compile_gate_set_at_runtime_changes_the_next_pass() {
+    let dir = scratch("gate-live");
+    let cpu = FakeCpu::new(60);
+    let b = broker(&dir, &ResourceCfg::default(), &cpu);
+    b.declare("compile", 4);
+    // The first always starts; the second waits at 60% with the gate at 50.
+    let first = b.lease_open("cc", &compile());
+    assert!(matches!(b.lease_poll(first), LeaseState::Granted { .. }));
+    let id = b.lease_open("cc2", &compile());
+    assert!(matches!(b.lease_poll(id), LeaseState::Waiting { .. }));
+    b.set_gate("compile_cpu_max", Some(70)).unwrap();
+    assert_eq!(b.snapshot()["cpu"]["compile_max_pct"], 70);
+    assert!(matches!(b.lease_poll(id), LeaseState::Granted { .. }));
+}
+
+#[test]
+fn a_gate_out_of_range_or_unknown_is_refused_and_the_old_value_stays() {
+    let dir = scratch("gate-range");
+    let cpu = FakeCpu::new(0);
+    let b = broker(&dir, &ResourceCfg::default(), &cpu);
+    for bad in [0, 101, -1] {
+        assert!(b.set_gate("compile_cpu_max", Some(bad)).is_err(), "{bad}");
+    }
+    assert!(b.set_gate("compile_jobs", Some(-1)).is_err());
+    assert!(b.set_gate("no_such_gate", Some(1)).is_err());
+    assert!(b.set_gate("no_such_gate", None).is_err());
+    assert_eq!(b.snapshot()["cpu"]["compile_max_pct"], 50);
+    assert!(!dir.join("gates.kv").exists(), "a refusal writes nothing");
+}
+
+#[test]
+fn a_runtime_gate_survives_a_restart_wins_over_the_file_and_reset_returns_to_it() {
+    let dir = scratch("gate-keep");
+    let cpu = FakeCpu::new(0);
+    let cfg = mason_daemon::sched::parse_resource_cfg("[cpu]\ncompile_cpu_max = 80\n").unwrap();
+    let source = |b: &Broker, name: &str| {
+        let g = b.gates().into_iter().find(|g| g["name"] == name).unwrap();
+        (
+            g["value"].as_i64(),
+            g["source"].as_str().unwrap().to_string(),
+        )
+    };
+    let b = broker(&dir, &cfg, &cpu);
+    assert_eq!(
+        source(&b, "compile_cpu_max"),
+        (Some(80), "resources.toml".into())
+    );
+    assert_eq!(source(&b, "compile_settle_s"), (Some(30), "default".into()));
+    b.set_gate("compile_cpu_max", Some(70)).unwrap();
+    b.set_gate("compile_settle_s", Some(5)).unwrap();
+    assert_eq!(source(&b, "compile_cpu_max"), (Some(70), "runtime".into()));
+    drop(b);
+    let b2 = broker(&dir, &cfg, &cpu);
+    assert_eq!(b2.snapshot()["cpu"]["compile_max_pct"], 70);
+    assert_eq!(source(&b2, "compile_cpu_max"), (Some(70), "runtime".into()));
+    assert_eq!(source(&b2, "compile_settle_s"), (Some(5), "runtime".into()));
+    b2.set_gate("compile_cpu_max", None).unwrap();
+    assert_eq!(b2.snapshot()["cpu"]["compile_max_pct"], 80);
+    assert_eq!(
+        source(&b2, "compile_cpu_max"),
+        (Some(80), "resources.toml".into())
+    );
+    drop(b2);
+    let b3 = broker(&dir, &cfg, &cpu);
+    assert_eq!(b3.snapshot()["cpu"]["compile_max_pct"], 80);
+    assert_eq!(source(&b3, "compile_settle_s"), (Some(5), "runtime".into()));
+    b3.set_gate("compile_settle_s", None).unwrap();
+    assert!(!dir.join("gates.kv").exists(), "nothing left to keep");
 }

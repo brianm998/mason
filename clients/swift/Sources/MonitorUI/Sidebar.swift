@@ -29,7 +29,7 @@ struct SidebarPane: View {
                                     .accessibilityIdentifier("search:no-results")
                             }.frame(maxWidth: .infinity).padding(theme.spacing)
                         }
-                        ForEach(Array(model.sidebarEntries.enumerated()), id: \.offset) { _, e in
+                        ForEach(model.sidebarEntries) { e in
                             entry(e)
                         }
                     }
@@ -51,7 +51,11 @@ struct SidebarPane: View {
     @ViewBuilder func entry(_ e: SidebarEntry) -> some View {
         switch e {
         case .header(let sec): SectionHeader(model: model, section: sec).id(sec.state)
-        case .row(let r): RowView(model: model, row: r)
+        case .row(let r):
+            RowView(
+                row: r, selected: model.page == .task(r.id), canAct: model.canAct, clock: model.live,
+                go: { [model] p in model.go(p) }, approve: { [model] id in model.approve(id) }
+            ).equatable()
         case .rule: Divider().padding(.vertical, theme.spacing)
         case .pageLink(let title, let page):
             pageLink(title, icon: Self.icon(page), page: page)
@@ -148,15 +152,32 @@ struct SectionHeader: View {
 
 /// A sidebar row: key and title, project, activity, time in state, progress
 /// cells, the model when one is running, and a link for each blocker.
-struct RowView: View {
+struct RowView: View, Equatable {
     @Environment(\.theme) var theme
-    @ObservedObject var model: MonitorModel
     let row: TaskRow
+    let selected: Bool
+    let canAct: Bool
+    /// Read for the clock offset only; never observed, so a change to it does not redraw the row.
+    let clock: LiveState
+    let go: (Page) -> Void
+    let approve: (UInt64) -> Void
+
+    /// Rows are redrawn only when what they show changes; the closures and the clock do not count.
+    static func == (a: RowView, b: RowView) -> Bool {
+        a.row == b.row && a.selected == b.selected && a.canAct == b.canAct && a.clock === b.clock
+    }
+
+    #if DEBUG
+    /// Body evaluations, for the offscreen test that counts them.
+    nonisolated(unsafe) static var evaluations = 0
+    #endif
 
     var body: some View {
-        let selected = model.page == .task(row.id)
+        #if DEBUG
+        let _ = { Self.evaluations += 1 }()
+        #endif
         VStack(alignment: .leading, spacing: 2) {
-            Button { model.go(.task(row.id)) } label: {
+            Button { go(.task(row.id)) } label: {
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(alignment: .firstTextBaseline, spacing: theme.spacingSmall) {
                         Text(row.key).font(theme.body(.semibold)).foregroundStyle(theme.muted).fixedSize()
@@ -169,7 +190,7 @@ struct RowView: View {
                             .accessibilityIdentifier("row:\(row.id):proposal")
                     }
                     metaLine
-                    if let c = row.progress.running { ProgressLine(model: model, cell: c) }
+                    if let c = row.progress.running { ProgressLine(clock: clock, cell: c) }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
@@ -183,8 +204,8 @@ struct RowView: View {
                     } else {
                         Text("issue #\(row.issue)").font(theme.small()).foregroundStyle(theme.muted)
                     }
-                    if row.state == "proposed" && model.canAct && row.allowedActions.contains("approve") {
-                        Button { model.approve(row.id) } label: { Text("Approve").pill(prominent: true) }
+                    if row.state == "proposed" && canAct && row.allowedActions.contains("approve") {
+                        Button { approve(row.id) } label: { Text("Approve").pill(prominent: true) }
                             .buttonStyle(.plain)
                             .accessibilityIdentifier("row:\(row.id):approve")
                     }
@@ -194,7 +215,7 @@ struct RowView: View {
                 HStack(spacing: theme.spacingSmall) {
                     Text("blocked by").font(theme.small()).foregroundStyle(theme.muted)
                     ForEach(row.blockers, id: \.self) { b in
-                        Button("#\(b)") { model.go(.task(b)) }
+                        Button("#\(b)") { go(.task(b)) }
                             .buttonStyle(.link).font(theme.small())
                     }
                 }
@@ -217,7 +238,7 @@ struct RowView: View {
             metaRow(typical: false, model: false)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: theme.spacing) { durationText; Spacer(minLength: 0); StateIcon(state: row.state) }
-                ProgressCells(model: model, cells: row.progress, slow: row.slow)
+                ProgressCells(clock: clock, cells: row.progress, slow: row.slow)
             }
         }
     }
@@ -234,7 +255,7 @@ struct RowView: View {
             if typical && !row.typical.isEmpty {
                 Text(row.typical).font(theme.small()).foregroundStyle(theme.muted).lineLimit(1)
             }
-            ProgressCells(model: model, cells: row.progress, slow: row.slow).fixedSize()
+            ProgressCells(clock: clock, cells: row.progress, slow: row.slow).fixedSize()
             if showModel && (!row.display.isEmpty || !row.model.isEmpty) {
                 Text(row.display.isEmpty ? row.model : row.display)
                     .font(theme.small()).foregroundStyle(theme.muted)

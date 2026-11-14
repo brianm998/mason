@@ -200,6 +200,7 @@ pub fn spawn_host_within(o: &SpawnOptions, limit: Duration) -> io::Result<HostIn
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    mason_platform::process::detached(&mut cmd);
     let mut child = cmd.spawn()?;
     let _listed = LaunchGuard::new(&o.id);
 

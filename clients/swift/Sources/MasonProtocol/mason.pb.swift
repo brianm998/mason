@@ -536,6 +536,15 @@ public nonisolated struct Mason_V1_Command: Sendable {
     set {body = .revive(newValue)}
   }
 
+  /// Change a compile gate while masond runs, or go back to resources.toml.
+  public var setGate: Mason_V1_SetGate {
+    get {
+      if case .setGate(let v)? = body {return v}
+      return Mason_V1_SetGate()
+    }
+    set {body = .setGate(newValue)}
+  }
+
   public var raw: Mason_V1_Raw {
     get {
       if case .raw(let v)? = body {return v}
@@ -572,6 +581,8 @@ public nonisolated struct Mason_V1_Command: Sendable {
     case unblock(Mason_V1_Unblock)
     case block(Mason_V1_Block)
     case revive(Mason_V1_TaskRef)
+    /// Change a compile gate while masond runs, or go back to resources.toml.
+    case setGate(Mason_V1_SetGate)
     case raw(Mason_V1_Raw)
 
   }
@@ -793,6 +804,25 @@ public nonisolated struct Mason_V1_SetLimit: Sendable {
   public var resource: String = String()
 
   public var units: UInt32 = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// A compile gate by name (compile_cpu_max, compile_settle_s, compile_jobs,
+/// compile_idle_kill_s, stall_ms, memory.floor_mb, disk.floor_gb). `reset` goes
+/// back to resources.toml or the default and ignores `value`. Owner only.
+public nonisolated struct Mason_V1_SetGate: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var name: String = String()
+
+  public var value: Int64 = 0
+
+  public var reset: Bool = false
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -1338,6 +1368,40 @@ public nonisolated struct Mason_V1_ProgressSub: Sendable {
 
   public var totalSource: Mason_V1_ProgressSource = .sourceNone
 
+  /// For a CI workflow: its jobs told apart by state. Absent for any other count.
+  public var jobs: Mason_V1_JobCounts {
+    get {_jobs ?? Mason_V1_JobCounts()}
+    set {_jobs = newValue}
+  }
+  /// Returns true if `jobs` has been explicitly set.
+  public var hasJobs: Bool {self._jobs != nil}
+  /// Clears the value of `jobs`. Subsequent reads from it will return its default value.
+  public mutating func clearJobs() {self._jobs = nil}
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _jobs: Mason_V1_JobCounts? = nil
+}
+
+/// CI jobs by state. "Succeeded" is success, neutral and skipped.
+public nonisolated struct Mason_V1_JobCounts: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var queued: UInt32 = 0
+
+  public var running: UInt32 = 0
+
+  public var succeeded: UInt32 = 0
+
+  public var failed: UInt32 = 0
+
+  /// The names of the running jobs.
+  public var runningNames: [String] = []
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -1677,6 +1741,13 @@ public nonisolated struct Mason_V1_UpdateInfo: Sendable {
 
   /// One per kind of desktop monitor the daemon can build.
   public var monitors: [Mason_V1_MonitorBuild] = []
+
+  /// On the `release` channel (a packaged install): the newest published release, and the
+  /// page that offers its installers. A packaged monitor's button opens the page; there is
+  /// no source to build from. Empty on the source channels.
+  public var releaseVersion: String = String()
+
+  public var downloadURL: String = String()
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -2315,11 +2386,37 @@ public nonisolated struct Mason_V1_TaskDetailView: @unchecked Sendable {
     set {_uniqueStorage()._cpuPermille = newValue}
   }
 
+  /// Where CI can be read for this task's landing: the batch's pull request and each failed
+  /// check. Only http(s) URLs are sent. Additive; an older daemon sends none.
+  public var ciLinks: [Mason_V1_CiLink] {
+    get {_storage._ciLinks}
+    set {_uniqueStorage()._ciLinks = newValue}
+  }
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
 
   fileprivate var _storage = _StorageClass.defaultInstance
+}
+
+/// A page on the git host a client opens in the browser. `label` is exactly the text the
+/// task's notes use ("PR #123", a check's name), so a client can link that text.
+public nonisolated struct Mason_V1_CiLink: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var label: String = String()
+
+  public var url: String = String()
+
+  /// "pull_request", "check" or "run".
+  public var kind: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
 }
 
 /// What was noticed, by whom, with the proof; and for an improvement, where its branch is.
@@ -3455,7 +3552,7 @@ nonisolated extension Mason_V1_Ping: SwiftProtobuf.Message, SwiftProtobuf._Messa
 
 nonisolated extension Mason_V1_Command: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".Command"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{3}add_task\0\u{1}cancel\0\u{1}retry\0\u{1}approve\0\u{1}reject\0\u{3}explore_anyway\0\u{1}answer\0\u{1}skip\0\u{3}land_now\0\u{1}force\0\u{1}pause\0\u{1}resume\0\u{3}set_limit\0\u{3}approve_hold\0\u{1}unblock\0\u{1}block\0\u{1}revive\0\u{2}\u{c}raw\0\u{2}\u{a}actor\0\u{1}reason\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{3}add_task\0\u{1}cancel\0\u{1}retry\0\u{1}approve\0\u{1}reject\0\u{3}explore_anyway\0\u{1}answer\0\u{1}skip\0\u{3}land_now\0\u{1}force\0\u{1}pause\0\u{1}resume\0\u{3}set_limit\0\u{3}approve_hold\0\u{1}unblock\0\u{1}block\0\u{1}revive\0\u{3}set_gate\0\u{2}\u{b}raw\0\u{2}\u{a}actor\0\u{1}reason\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -3685,6 +3782,19 @@ nonisolated extension Mason_V1_Command: SwiftProtobuf.Message, SwiftProtobuf._Me
           self.body = .revive(v)
         }
       }()
+      case 19: try {
+        var v: Mason_V1_SetGate?
+        var hadOneofValue = false
+        if let current = self.body {
+          hadOneofValue = true
+          if case .setGate(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.body = .setGate(v)
+        }
+      }()
       case 30: try {
         var v: Mason_V1_Raw?
         var hadOneofValue = false
@@ -3781,6 +3891,10 @@ nonisolated extension Mason_V1_Command: SwiftProtobuf.Message, SwiftProtobuf._Me
     case .revive?: try {
       guard case .revive(let v)? = self.body else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 18)
+    }()
+    case .setGate?: try {
+      guard case .setGate(let v)? = self.body else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 19)
     }()
     case .raw?: try {
       guard case .raw(let v)? = self.body else { preconditionFailure() }
@@ -4299,6 +4413,46 @@ nonisolated extension Mason_V1_SetLimit: SwiftProtobuf.Message, SwiftProtobuf._M
   public static func ==(lhs: Mason_V1_SetLimit, rhs: Mason_V1_SetLimit) -> Bool {
     if lhs.resource != rhs.resource {return false}
     if lhs.units != rhs.units {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Mason_V1_SetGate: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".SetGate"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}name\0\u{1}value\0\u{1}reset\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.name) }()
+      case 2: try { try decoder.decodeSingularInt64Field(value: &self.value) }()
+      case 3: try { try decoder.decodeSingularBoolField(value: &self.reset) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.name.isEmpty {
+      try visitor.visitSingularStringField(value: self.name, fieldNumber: 1)
+    }
+    if self.value != 0 {
+      try visitor.visitSingularInt64Field(value: self.value, fieldNumber: 2)
+    }
+    if self.reset != false {
+      try visitor.visitSingularBoolField(value: self.reset, fieldNumber: 3)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Mason_V1_SetGate, rhs: Mason_V1_SetGate) -> Bool {
+    if lhs.name != rhs.name {return false}
+    if lhs.value != rhs.value {return false}
+    if lhs.reset != rhs.reset {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -5280,7 +5434,7 @@ nonisolated extension Mason_V1_ProgressCell: SwiftProtobuf.Message, SwiftProtobu
 
 nonisolated extension Mason_V1_ProgressSub: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ProgressSub"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}name\0\u{1}unit\0\u{1}done\0\u{1}total\0\u{3}done_source\0\u{3}total_source\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}name\0\u{1}unit\0\u{1}done\0\u{1}total\0\u{3}done_source\0\u{3}total_source\0\u{1}jobs\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -5294,12 +5448,17 @@ nonisolated extension Mason_V1_ProgressSub: SwiftProtobuf.Message, SwiftProtobuf
       case 4: try { try decoder.decodeSingularUInt32Field(value: &self.total) }()
       case 5: try { try decoder.decodeSingularEnumField(value: &self.doneSource) }()
       case 6: try { try decoder.decodeSingularEnumField(value: &self.totalSource) }()
+      case 7: try { try decoder.decodeSingularMessageField(value: &self._jobs) }()
       default: break
       }
     }
   }
 
   public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
     if !self.name.isEmpty {
       try visitor.visitSingularStringField(value: self.name, fieldNumber: 1)
     }
@@ -5318,6 +5477,9 @@ nonisolated extension Mason_V1_ProgressSub: SwiftProtobuf.Message, SwiftProtobuf
     if self.totalSource != .sourceNone {
       try visitor.visitSingularEnumField(value: self.totalSource, fieldNumber: 6)
     }
+    try { if let v = self._jobs {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 7)
+    } }()
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -5328,6 +5490,57 @@ nonisolated extension Mason_V1_ProgressSub: SwiftProtobuf.Message, SwiftProtobuf
     if lhs.total != rhs.total {return false}
     if lhs.doneSource != rhs.doneSource {return false}
     if lhs.totalSource != rhs.totalSource {return false}
+    if lhs._jobs != rhs._jobs {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Mason_V1_JobCounts: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".JobCounts"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}queued\0\u{1}running\0\u{1}succeeded\0\u{1}failed\0\u{3}running_names\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularUInt32Field(value: &self.queued) }()
+      case 2: try { try decoder.decodeSingularUInt32Field(value: &self.running) }()
+      case 3: try { try decoder.decodeSingularUInt32Field(value: &self.succeeded) }()
+      case 4: try { try decoder.decodeSingularUInt32Field(value: &self.failed) }()
+      case 5: try { try decoder.decodeRepeatedStringField(value: &self.runningNames) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if self.queued != 0 {
+      try visitor.visitSingularUInt32Field(value: self.queued, fieldNumber: 1)
+    }
+    if self.running != 0 {
+      try visitor.visitSingularUInt32Field(value: self.running, fieldNumber: 2)
+    }
+    if self.succeeded != 0 {
+      try visitor.visitSingularUInt32Field(value: self.succeeded, fieldNumber: 3)
+    }
+    if self.failed != 0 {
+      try visitor.visitSingularUInt32Field(value: self.failed, fieldNumber: 4)
+    }
+    if !self.runningNames.isEmpty {
+      try visitor.visitRepeatedStringField(value: self.runningNames, fieldNumber: 5)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Mason_V1_JobCounts, rhs: Mason_V1_JobCounts) -> Bool {
+    if lhs.queued != rhs.queued {return false}
+    if lhs.running != rhs.running {return false}
+    if lhs.succeeded != rhs.succeeded {return false}
+    if lhs.failed != rhs.failed {return false}
+    if lhs.runningNames != rhs.runningNames {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -5912,7 +6125,7 @@ nonisolated extension Mason_V1_HeaderView: SwiftProtobuf.Message, SwiftProtobuf.
 
 nonisolated extension Mason_V1_UpdateInfo: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".UpdateInfo"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}daemon_text\0\u{3}daemon_can_update\0\u{1}monitors\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}daemon_text\0\u{3}daemon_can_update\0\u{1}monitors\0\u{3}release_version\0\u{3}download_url\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -5923,6 +6136,8 @@ nonisolated extension Mason_V1_UpdateInfo: SwiftProtobuf.Message, SwiftProtobuf.
       case 1: try { try decoder.decodeSingularStringField(value: &self.daemonText) }()
       case 2: try { try decoder.decodeSingularBoolField(value: &self.daemonCanUpdate) }()
       case 3: try { try decoder.decodeRepeatedMessageField(value: &self.monitors) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.releaseVersion) }()
+      case 5: try { try decoder.decodeSingularStringField(value: &self.downloadURL) }()
       default: break
       }
     }
@@ -5938,6 +6153,12 @@ nonisolated extension Mason_V1_UpdateInfo: SwiftProtobuf.Message, SwiftProtobuf.
     if !self.monitors.isEmpty {
       try visitor.visitRepeatedMessageField(value: self.monitors, fieldNumber: 3)
     }
+    if !self.releaseVersion.isEmpty {
+      try visitor.visitSingularStringField(value: self.releaseVersion, fieldNumber: 4)
+    }
+    if !self.downloadURL.isEmpty {
+      try visitor.visitSingularStringField(value: self.downloadURL, fieldNumber: 5)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -5945,6 +6166,8 @@ nonisolated extension Mason_V1_UpdateInfo: SwiftProtobuf.Message, SwiftProtobuf.
     if lhs.daemonText != rhs.daemonText {return false}
     if lhs.daemonCanUpdate != rhs.daemonCanUpdate {return false}
     if lhs.monitors != rhs.monitors {return false}
+    if lhs.releaseVersion != rhs.releaseVersion {return false}
+    if lhs.downloadURL != rhs.downloadURL {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -6955,7 +7178,7 @@ nonisolated extension Mason_V1_DebtLine: SwiftProtobuf.Message, SwiftProtobuf._M
 
 nonisolated extension Mason_V1_TaskDetailView: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".TaskDetailView"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}row\0\u{1}steps\0\u{1}plan\0\u{1}card\0\u{1}closing\0\u{1}debts\0\u{3}log_tail\0\u{1}branch\0\u{1}worktree\0\u{1}definition\0\u{1}failure\0\u{1}body\0\u{1}route\0\u{3}started_at\0\u{3}explore_returns\0\u{2}\u{2}approval\0\u{1}numbers\0\u{3}plan_view\0\u{1}proposal\0\u{3}step_tokens\0\u{3}cpu_permille\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}row\0\u{1}steps\0\u{1}plan\0\u{1}card\0\u{1}closing\0\u{1}debts\0\u{3}log_tail\0\u{1}branch\0\u{1}worktree\0\u{1}definition\0\u{1}failure\0\u{1}body\0\u{1}route\0\u{3}started_at\0\u{3}explore_returns\0\u{2}\u{2}approval\0\u{1}numbers\0\u{3}plan_view\0\u{1}proposal\0\u{3}step_tokens\0\u{3}cpu_permille\0\u{3}ci_links\0")
 
   fileprivate class _StorageClass {
     var _row: Mason_V1_TaskRow? = nil
@@ -6979,6 +7202,7 @@ nonisolated extension Mason_V1_TaskDetailView: SwiftProtobuf.Message, SwiftProto
     var _proposal: Mason_V1_ProposalInfo? = nil
     var _stepTokens: [Mason_V1_TokenLine] = []
     var _cpuPermille: Int32 = 0
+    var _ciLinks: [Mason_V1_CiLink] = []
 
       // This property is used as the initial default value for new instances of the type.
       // The type itself is protecting the reference to its storage via CoW semantics.
@@ -7010,6 +7234,7 @@ nonisolated extension Mason_V1_TaskDetailView: SwiftProtobuf.Message, SwiftProto
       _proposal = source._proposal
       _stepTokens = source._stepTokens
       _cpuPermille = source._cpuPermille
+      _ciLinks = source._ciLinks
     }
   }
 
@@ -7049,6 +7274,7 @@ nonisolated extension Mason_V1_TaskDetailView: SwiftProtobuf.Message, SwiftProto
         case 20: try { try decoder.decodeSingularMessageField(value: &_storage._proposal) }()
         case 21: try { try decoder.decodeRepeatedMessageField(value: &_storage._stepTokens) }()
         case 22: try { try decoder.decodeSingularInt32Field(value: &_storage._cpuPermille) }()
+        case 23: try { try decoder.decodeRepeatedMessageField(value: &_storage._ciLinks) }()
         default: break
         }
       }
@@ -7124,6 +7350,9 @@ nonisolated extension Mason_V1_TaskDetailView: SwiftProtobuf.Message, SwiftProto
       if _storage._cpuPermille != 0 {
         try visitor.visitSingularInt32Field(value: _storage._cpuPermille, fieldNumber: 22)
       }
+      if !_storage._ciLinks.isEmpty {
+        try visitor.visitRepeatedMessageField(value: _storage._ciLinks, fieldNumber: 23)
+      }
     }
     try unknownFields.traverse(visitor: &visitor)
   }
@@ -7154,10 +7383,51 @@ nonisolated extension Mason_V1_TaskDetailView: SwiftProtobuf.Message, SwiftProto
         if _storage._proposal != rhs_storage._proposal {return false}
         if _storage._stepTokens != rhs_storage._stepTokens {return false}
         if _storage._cpuPermille != rhs_storage._cpuPermille {return false}
+        if _storage._ciLinks != rhs_storage._ciLinks {return false}
         return true
       }
       if !storagesAreEqual {return false}
     }
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Mason_V1_CiLink: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".CiLink"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}label\0\u{1}url\0\u{1}kind\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.label) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.url) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.kind) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.label.isEmpty {
+      try visitor.visitSingularStringField(value: self.label, fieldNumber: 1)
+    }
+    if !self.url.isEmpty {
+      try visitor.visitSingularStringField(value: self.url, fieldNumber: 2)
+    }
+    if !self.kind.isEmpty {
+      try visitor.visitSingularStringField(value: self.kind, fieldNumber: 3)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Mason_V1_CiLink, rhs: Mason_V1_CiLink) -> Bool {
+    if lhs.label != rhs.label {return false}
+    if lhs.url != rhs.url {return false}
+    if lhs.kind != rhs.kind {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

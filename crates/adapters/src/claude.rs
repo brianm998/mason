@@ -13,7 +13,7 @@ use mason_adapter_api::{
     Canceller, Outcome, Overage, OverageState, PlanItem, PlanStatus, SessionHandle, SessionSpec,
     TokenReport, UsageModel, UsageSnapshot, Window, WindowSpec, WindowState,
 };
-use mason_platform::process::{group_leader, signal_group, Signal};
+use mason_platform::process::{signal_group, spawn_group, Signal};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -368,8 +368,7 @@ pub(crate) fn launch_process(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    group_leader(&mut c);
-    let mut child = c.spawn().map_err(AdapterError::Spawn)?;
+    let mut child = spawn_group(&mut c).map_err(AdapterError::Spawn)?;
     let pid = child.id();
     if let Some(mut sin) = child.stdin.take() {
         let _ = sin.write_all(cmd.stdin.as_bytes());

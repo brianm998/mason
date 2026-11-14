@@ -898,6 +898,14 @@ impl<'a> Ctx<'a> {
         let removes = crate::landing::removals_view(&self.d.cfg.task_dir(id));
         Some(TaskDetailView {
             step_tokens: crate::usage::step_tokens(self.d, id, self.now / 1000),
+            ci_links: crate::landing::ci_links_of(&self.d.cfg.task_dir(id))
+                .into_iter()
+                .map(|l| CiLink {
+                    label: l.label,
+                    url: l.url,
+                    kind: l.kind.into(),
+                })
+                .collect(),
             cpu_permille: self
                 .d
                 .cpu_reading()
@@ -1309,6 +1317,7 @@ pub fn summarize(kind: &EventKind) -> (String, String, u64) {
         | EventKind::Answered { task, .. }
         | EventKind::StepFailed { task, .. }
         | EventKind::Retried { task, .. }
+        | EventKind::Repinned { task, .. }
         | EventKind::Canceled { task, .. }
         | EventKind::ClosedNoChange { task, .. }
         | EventKind::Paused { task }
@@ -1326,6 +1335,9 @@ pub fn summarize(kind: &EventKind) -> (String, String, u64) {
         EventKind::TaskFiled { title, .. } => format!("filed: {title}"),
         EventKind::StepFailed { reason, .. } => format!("failed: {reason}"),
         EventKind::SentBack { reason, .. } => format!("sent back: {reason}"),
+        EventKind::Repinned {
+            from, to, changed, ..
+        } => format!("repinned {from} -> {to}: {changed}"),
         EventKind::WaitStarted { on, .. } => format!("waiting: {on}"),
         EventKind::Canceled { .. } => "canceled".into(),
         EventKind::TrackerEdited { .. } => "edited in the tracker".into(),

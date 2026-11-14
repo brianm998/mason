@@ -107,6 +107,51 @@ pub fn lost_invocations(root: &Path, key: &str) -> Vec<String> {
     out.into_iter().map(|(_, _, id)| id).collect()
 }
 
+/// How close two hosts' last heartbeats must be for their loss to be one event.
+pub const MASS_LOSS_WINDOW_MS: u64 = 30_000;
+
+/// The step run an invocation id belongs to: `t7r2` of `t7r2-3` or `t7r2u1-3`.
+fn run_of(id: &str) -> &str {
+    let end = id.find(['-', 'u']).unwrap_or(id.len());
+    &id[..end]
+}
+
+fn last_beat(root: &Path, id: &str) -> Option<u64> {
+    std::fs::read_to_string(root.join(id).join("hb"))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// Was the host `id` lost together with the host of another step run: their last
+/// heartbeats within [`MASS_LOSS_WINDOW_MS`] of each other? Then the machine, a
+/// daemon restart or a mass kill took them, not anything about this run, and the
+/// loss does not count against its restarts.
+pub fn lost_with_others(root: &Path, id: &str) -> bool {
+    let Some(mine) = last_beat(root, id) else {
+        return false;
+    };
+    let me = run_of(id);
+    for e in std::fs::read_dir(root).into_iter().flatten().flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        let Some(other) = name.strip_suffix(".in") else {
+            continue;
+        };
+        if run_of(other) == me || !other.starts_with('t') {
+            continue;
+        }
+        let gone = matches!(status_of(&root.join(other)), Ok(s) if s.state == HostState::Lost);
+        if !gone {
+            continue;
+        }
+        if last_beat(root, other).is_some_and(|b| b.abs_diff(mine) <= MASS_LOSS_WINDOW_MS) {
+            return true;
+        }
+    }
+    false
+}
+
 pub fn latest_invocation(root: &Path, key: &str) -> Option<String> {
     invocations(root, key).pop().map(|(_, id)| id)
 }

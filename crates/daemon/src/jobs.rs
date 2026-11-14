@@ -233,6 +233,10 @@ impl Ctx {
         feedback: Option<String>,
         round: u32,
     ) {
+        if outcome == Outcome::Red && self.step.kind == StepType::Test && self.rerun_on_current(&reason)
+        {
+            return;
+        }
         self.d
             .crash
             .point(&format!("before_event:{:?}", self.state));
@@ -288,6 +292,16 @@ impl Ctx {
                         .open(self.task_dir().join(FEEDBACK_HISTORY))
                         .and_then(|mut h| std::io::Write::write_all(&mut h, entry.as_bytes()));
                 }
+                let step = repin_for_send_back(
+                    &self.d,
+                    self.task,
+                    self.run,
+                    &self.step.name,
+                    outcome,
+                    round,
+                    rounds,
+                    step,
+                );
                 self.emit(EventKind::SentBack {
                     task: self.task,
                     reason,
@@ -314,6 +328,40 @@ impl Ctx {
         self.release_lease();
     }
 
+    /// A red suite whose definition changed on the base since this task was
+    /// pinned is not the change's fault, or not yet known to be: run the test
+    /// step once more, in this same run (so it is the same round, and
+    /// `max_rounds` still bounds it), under the current definition. Returns
+    /// whether the step was rerun, in which case it has concluded.
+    fn rerun_on_current(&self, reason: &str) -> bool {
+        let Some(name) = red_suite_of(reason) else {
+            return false;
+        };
+        let cur = self.d.current_def(self.project_id);
+        if cur.hash == self.def.hash
+            || cur.step(&self.step.name).is_none()
+            || !crate::defs::suite_changed(&self.def, &cur, &name)
+        {
+            return false;
+        }
+        let file = self.task_dir().join(DEF_RERUNS_FILE);
+        let seen = std::fs::read_to_string(&file).unwrap_or_default();
+        let mine = self.run.0.to_string();
+        if seen.lines().any(|l| l == mine) {
+            return false;
+        }
+        let _ = std::fs::write(&file, format!("{seen}{mine}\n"));
+        if !self.d.repin_to(self.task, Some(self.run), &cur) {
+            return false;
+        }
+        self.release_lease();
+        match ctx(&self.d, self.task, self.run) {
+            Ok(c) => execute(&c, c.state),
+            Err(why) => self.fail(why),
+        }
+        true
+    }
+
     pub(crate) fn green(&self) {
         self.conclude(Outcome::Green, String::new(), None);
     }
@@ -326,6 +374,70 @@ impl Ctx {
         let p = self.d.task_dir(self.task);
         let _ = std::fs::create_dir_all(&p);
         p
+    }
+}
+
+/// The note for a develop prompt when the branch changes `.mason/`.
+pub const PIPELINE_DEFINITION_NOTE: &str = "Note: your branch changes files under `.mason/`. \
+This project's pipeline runs the definition on the base branch, not the one on your branch, so \
+those changes cannot affect how your task is built, tested or reviewed (for example a suite you \
+add is not run, and `run_check` knows only the base's checks). Changes to `.mason/` need a task of \
+their own. Keep them only if this task is about them.";
+
+/// Does any path in a `git diff --name-only` listing lie under `.mason/`?
+pub fn touches_pipeline_definition(names: &str) -> bool {
+    names.lines().any(|f| f.trim().starts_with(".mason/"))
+}
+
+/// Step runs whose red was rerun under a newer definition (one line each).
+const DEF_RERUNS_FILE: &str = "def-reruns.txt";
+
+/// The suite a test step's red reason names (`suite `x` is red`, or the same
+/// for its build), or `None` for any other red (a gate, a reviewer).
+pub fn red_suite_of(reason: &str) -> Option<String> {
+    let rest = reason
+        .strip_prefix("suite `")
+        .or_else(|| reason.strip_prefix("the build of suite `"))?;
+    let (name, tail) = rest.split_once('`')?;
+    tail.starts_with(" is red").then(|| name.to_string())
+}
+
+/// A task goes back to an earlier step: pin it to the project's current
+/// definition first, so what runs next is what the base says now (decision
+/// 0206). Returns the step to go back to, named in that definition. If the
+/// current definition has no such way back, the task keeps its pin.
+#[allow(clippy::too_many_arguments)]
+fn repin_for_send_back(
+    d: &Arc<Daemon>,
+    task: TaskId,
+    run: StepRunId,
+    from_step: &str,
+    outcome: Outcome,
+    round: u32,
+    rounds: Option<u32>,
+    back: String,
+) -> String {
+    let Ok(w) = d.world() else { return back };
+    let Some(t) = w.tasks.get(&task) else {
+        return back;
+    };
+    let cur = d.current_def(t.project);
+    if cur.hash == t.def {
+        return back;
+    }
+    let Some(step) = cur.step(from_step) else {
+        return back;
+    };
+    let Transition::SendBack { step: to } = after(&cur, step, outcome, round, rounds) else {
+        return back;
+    };
+    if !to.is_empty() && cur.step(&to).is_none() {
+        return back;
+    }
+    if d.repin_to(task, Some(run), &cur) {
+        to
+    } else {
+        back
     }
 }
 
@@ -425,10 +537,15 @@ fn run_inner(d: &Arc<Daemon>, task: TaskId, step: State, run: StepRunId) {
             return;
         }
     };
-    d.crash.point(&format!("job_started:{step:?}"));
+    execute(&c, step);
+}
+
+/// Run the step `c` describes, from waiting out a pause to its verdict.
+fn execute(c: &Ctx, step: State) {
+    c.d.crash.point(&format!("job_started:{step:?}"));
     // A pause stops work at the step boundary: nothing new starts until it
     // lifts or runs out. (A running step finishes.)
-    if let Err(()) = wait_while_paused(&c) {
+    if let Err(()) = wait_while_paused(c) {
         return;
     }
     // Everything the step needs, acquired at once, in rank order across every
@@ -437,29 +554,29 @@ fn run_inner(d: &Arc<Daemon>, task: TaskId, step: State, run: StepRunId) {
     // machine, so it takes nothing.
     if c.step.kind == StepType::Agent {
         // A held account starts no new session; the task waits without a lease.
-        if get_lease(&c).is_err() {
+        if get_lease(c).is_err() {
             return;
         }
     } else if c.step.kind != StepType::Approval
-        && builds_first(&c).is_none()
+        && builds_first(c).is_none()
         && !(c.step.kind == StepType::Test
             && !c.step.suites.is_empty()
             && crate::suites::builds_per_suite(&c.project, &c.def, &c.step, &c.branch))
     {
         // A test step with a build queues phase by phase in `command_job`, and one whose
         // suites build, suite by suite in `suites::run`.
-        match acquire(&c) {
+        match acquire(c) {
             Ok(l) => *c.lease.lock().unwrap_or_else(|e| e.into_inner()) = Some(l),
             Err(_) => return, // the task was cancelled or retried while it waited
         }
     }
     match c.step.kind {
-        StepType::Agent => agent_job(&c),
-        StepType::Test if !c.step.suites.is_empty() => crate::suites::run(&c),
-        StepType::Command | StepType::Test => command_job(&c),
-        StepType::Approval => approval_job(&c),
-        StepType::Landing => land_job(&c),
-        StepType::Plugin => crate::plugins::plugin_job(&c),
+        StepType::Agent => agent_job(c),
+        StepType::Test if !c.step.suites.is_empty() => crate::suites::run(c),
+        StepType::Command | StepType::Test => command_job(c),
+        StepType::Approval => approval_job(c),
+        StepType::Landing => land_job(c),
+        StepType::Plugin => crate::plugins::plugin_job(c),
         other => c.fail(format!("step type `{}` cannot run yet", other.name())),
     }
 }
@@ -680,6 +797,16 @@ pub(crate) fn acquire_needs(
     c: &Ctx,
     needs: mason_scheduler::Needs,
 ) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
+    acquire_needs_while(c, needs, &|| true)
+}
+
+/// Like `acquire_needs`, but the wait also ends (`Cancelled`) as soon as `wanted`
+/// says no: a suite whose skip arrives while it waits for its slot.
+pub(crate) fn acquire_needs_while(
+    c: &Ctx,
+    needs: mason_scheduler::Needs,
+    wanted: &dyn Fn() -> bool,
+) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
     let d = &c.d;
     // Device pools are sized by what the provider lists, never by a default.
     if needs.amounts.keys().any(|n| n.starts_with("device:")) {
@@ -700,6 +827,7 @@ pub(crate) fn acquire_needs(
         d2.world()
             .map(|w| w.open_run(task) == Some(run))
             .unwrap_or(true)
+            && wanted()
     };
     let mut waited = false;
     let asked = needs.clone();
@@ -848,9 +976,29 @@ pub(crate) fn prepare(c: &Ctx) -> Result<Option<String>, String> {
     if let Err(why) = c.d.fetch_remote(c.project_id) {
         let base = c.project.base_ref();
         if git::rev_parse(&c.project.path, &base).is_err() {
-            return Err(format!(
-                "fetching the remote failed ({why}) and there is no last-known {base} to work from"
-            ));
+            // A fetch that timed out is the network's, not the task's: with nothing to work
+            // from, wait it out and fetch again (nothing charged to the task) instead of
+            // failing the step, which failed three tasks in a row the same way.
+            if why.contains("timed out") {
+                let first = std::cell::Cell::new(Some(why.clone()));
+                wait_out_environment(c, "fetching the remote", || {
+                    let r = match first.take() {
+                        Some(w) => Err(w),
+                        None => c.d.fetch_remote(c.project_id),
+                    };
+                    r.map_err(|w| git::GitError {
+                        args: vec!["fetch".into(), "--prune".into()],
+                        code: None,
+                        timed_out: w.contains("timed out"),
+                        stderr: w,
+                    })
+                })
+                .map_err(|e| format!("{e} and there is no last-known {base} to work from"))?;
+            } else {
+                return Err(format!(
+                    "fetching the remote failed ({why}) and there is no last-known {base} to work from"
+                ));
+            }
         }
         tracing::warn!(
             task = c.task.0,
@@ -1047,8 +1195,7 @@ fn run_shell_env(
         .stdin(Stdio::null())
         .stdout(file)
         .stderr(err.map_or_else(|_| Stdio::null(), Stdio::from));
-    mason_platform::process::group_leader(&mut command);
-    let child = command.spawn();
+    let child = mason_platform::process::spawn_group(&mut command);
     let Ok(mut child) = child else {
         return (false, "could not start the command".into());
     };
@@ -1231,7 +1378,7 @@ impl TestChecks {
         use std::collections::BTreeMap;
         let over = || CheckRun::Done {
             passed: false,
-            summary: "The step is over; the check did not run.".into(),
+            summary: STEP_OVER.into(),
         };
         let def = self.slots.def.clone();
         let paths = crate::suites::worktree_paths(&self.wt, &dev.base_ref);
@@ -1498,7 +1645,45 @@ impl CheckHandler for TestChecks {
 }
 
 impl TestChecks {
+    /// The open debt that skips this task's test step, if the owner skipped it: the
+    /// agent's own checks then run nothing either (s264).
+    fn skipped_by_owner(&self) -> Option<u64> {
+        let step = self.slots.test_step.as_deref()?;
+        crate::suites::skip_for(&self.slots.d, TaskId(self.task), "", step)
+    }
+
     fn check(&self, name: &str, scope: &CheckScope) -> CheckRun {
+        // On 2026-11-13 the owner skipped testing for every active task to drain the queue,
+        // but their agents kept queueing `run_check` for compile slots. A skip before the
+        // check, or one that ends its wait for a slot (`CheckSlots::acquire`), is answered
+        // with what happened, not run.
+        if name == "tests" {
+            if let Some(debt) = self.skipped_by_owner() {
+                return not_run_skipped(debt);
+            }
+        }
+        let r = self.check_unskipped(name, scope);
+        // Only a check whose wait was ended is replaced; one that ran keeps its result.
+        let ended = matches!(&r, CheckRun::Done { passed: false, summary } if summary == STEP_OVER);
+        match (name == "tests" && ended, self.skipped_by_owner()) {
+            (true, Some(debt)) => {
+                // A skip that ended the wait left the agent without its slot.
+                if self
+                    .slots
+                    .lease
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .is_none()
+                {
+                    self.slots.take_agent_slot_back();
+                }
+                not_run_skipped(debt)
+            }
+            _ => r,
+        }
+    }
+
+    fn check_unskipped(&self, name: &str, scope: &CheckScope) -> CheckRun {
         if name == "tests" {
             if let Some(dev) = &self.suites {
                 return self.run_suites(dev, scope);
@@ -1516,7 +1701,7 @@ impl TestChecks {
         };
         let over = || CheckRun::Done {
             passed: false,
-            summary: "The step is over; the check did not run.".into(),
+            summary: STEP_OVER.into(),
         };
         // The exact content tree and command already went green (here, in the test step or in
         // landing's re-test): the answer is that result, and nothing runs.
@@ -1688,6 +1873,7 @@ impl CheckSlots {
         &self,
         needs: mason_scheduler::Needs,
         as_step: &str,
+        end_on_skip: bool,
     ) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
         let d = &self.d;
         let t = d
@@ -1697,10 +1883,15 @@ impl CheckSlots {
             .ok_or(crate::sched::Cancelled)?;
         let rank = d.rank_for(&t, &self.def, as_step);
         let (d2, task, run) = (d.clone(), self.task, self.run);
+        let test_step = self.test_step.clone().filter(|_| end_on_skip);
+        // A skip of the task's test step ends a check's wait too: the check then says so.
         let alive = move || {
             d2.world()
                 .map(|w| w.open_run(task) == Some(run))
                 .unwrap_or(true)
+                && test_step
+                    .as_deref()
+                    .is_none_or(|s| crate::suites::skip_for(&d2, task, "", s).is_none())
         };
         // The wait shows on the task, as a step's does: a check that queued
         // used to leave the task reading "running" for hours.
@@ -1759,6 +1950,7 @@ impl CheckSlots {
         self.acquire(
             crate::sched::needs_of(uses, None),
             check_rank_step(&self.step, self.test_step.as_deref()),
+            true,
         )
         .map(Some)
     }
@@ -1767,7 +1959,7 @@ impl CheckSlots {
     fn take_agent_slot_back(&self) {
         self.d.admit();
         let needs = crate::sched::needs_of(&self.agent_uses, Some(&self.account));
-        if let Ok(l) = self.acquire(needs, &self.step) {
+        if let Ok(l) = self.acquire(needs, &self.step, false) {
             *self.lease.lock().unwrap_or_else(|e| e.into_inner()) = Some(l);
         }
     }
@@ -1777,6 +1969,21 @@ impl CheckSlots {
 /// runs the commands of (see `CheckSlots::swap_for`).
 fn check_rank_step<'a>(agent_step: &'a str, _test_step: Option<&'a str>) -> &'a str {
     agent_step
+}
+
+/// What a check says when its wait for a slot was ended.
+const STEP_OVER: &str = "The step is over; the check did not run.";
+
+/// What a `run_check` says when the owner skipped the task's testing (s264).
+fn not_run_skipped(debt: u64) -> CheckRun {
+    CheckRun::Done {
+        passed: true,
+        summary: format!(
+            "Not run: the owner skipped testing for this task (debt #{debt}); the tests run \
+             once on the base after it lands. Nothing was built or tested, so this says \
+             nothing about your change: finish it and submit."
+        ),
+    }
 }
 
 /// Proof before acceptance: the submitted commit really is the tip of the
@@ -2073,6 +2280,27 @@ fn agent_job(c: &Ctx) {
             d.trim_end()
         ),
         None => prompt,
+    };
+
+    // On an ordinary project the pipeline runs the base's definition, not the branch's
+    // (decision 0206): say so to a task that has touched `.mason/`.
+    let prompt = if kind == StepKind::Develop && c.project.self_cfg.is_none() {
+        let changed = git::run(
+            &c.wt,
+            &[
+                "diff",
+                "--name-only",
+                &format!("{}...HEAD", c.project.base_ref()),
+            ],
+        )
+        .unwrap_or_default();
+        if touches_pipeline_definition(&changed) {
+            format!("{prompt}\n\n{PIPELINE_DEFINITION_NOTE}")
+        } else {
+            prompt
+        }
+    } else {
+        prompt
     };
 
     // `run_check` runs the project's tests: the command of its test step, layered exactly
@@ -2450,6 +2678,13 @@ fn transcript_gone(detail: &str) -> bool {
     .any(|m| d.contains(m))
 }
 
+/// The CLI was stopped from outside (SIGTERM, status 143; or SIGKILL, 137) before it
+/// gave a result: a restart or a reaper, not something the agent did.
+fn cli_was_signaled(detail: &str) -> bool {
+    detail.contains("the CLI exited with status 143 and no result")
+        || detail.contains("the CLI exited with status 137 and no result")
+}
+
 /// Holds, then lost hosts, until the step has an end that is neither. A lost host
 /// (or one that never came up) is not a failure: it is recorded, the lease taken
 /// again, and the step continued, with `resume` and a note when the journal gave a
@@ -2481,6 +2716,7 @@ fn settle_all(
     let mut resumed = false;
     let mut fresh_after_gone = false;
     let mut silent = false;
+    let mut signaled_retried = false;
     loop {
         let fresh = match &report.end {
             StepEnd::Failed(FailReason::HostLost { detail }) => {
@@ -2494,14 +2730,19 @@ fn settle_all(
                 };
                 // A host the daemon's own restart took is not the task's failure: it
                 // is recorded but not counted toward the restart budget.
+                // A host lost together with other tasks' hosts (a mass kill) is
+                // treated the same way. A hard cap still ends a run that keeps
+                // losing hosts.
                 let counted = lost
                     .iter()
                     .filter(|id| {
                         let r = mason_step_host::registry::lost_report(&root.join(id));
                         !r.is_ok_and(|r| hl::is_restart_loss(&root, r.last_heartbeat_ms, r.at_ms))
+                            && !mason_adapters::hosted::lost_with_others(&root, id)
                     })
                     .count();
-                let restart = counted <= hl::MAX_AGENT_RESTARTS;
+                let restart =
+                    counted <= hl::MAX_AGENT_RESTARTS && lost.len() <= hl::MAX_AGENT_RESTARTS * 4;
                 hl::record_as(&c.d, Some(c.run), &c.step.name, &newest, at, text, restart);
                 if !restart {
                     let all: Vec<String> = lost.iter().map(|id| describe(id).0).collect();
@@ -2526,6 +2767,12 @@ fn settle_all(
             {
                 fresh_after_gone = true;
                 true
+            }
+            StepEnd::Failed(FailReason::Crash { detail })
+                if !signaled_retried && cli_was_signaled(detail) =>
+            {
+                signaled_retried = true;
+                report.session_id.is_none()
             }
             _ => return Some(report),
         };
@@ -3508,6 +3755,16 @@ pub fn conclude_approval(
                 d.task_dir(task).join("feedback.txt"),
                 format!("The owner rejected the work at `{}`: {reason}", step.name),
             );
+            let back = repin_for_send_back(
+                d,
+                task,
+                run,
+                &step.name,
+                outcome,
+                r.attempt,
+                step.max_rounds,
+                back,
+            );
             EventKind::SentBack {
                 task,
                 reason: format!("rejected by the owner: {reason}"),
@@ -3859,5 +4116,20 @@ mod tests {
         ] {
             assert!(read_script_result(bad).is_err(), "{bad}");
         }
+    }
+}
+
+#[cfg(test)]
+mod signaled_tests {
+    use super::cli_was_signaled;
+
+    #[test]
+    fn a_sigterm_exit_is_signaled_and_a_plain_failure_is_not() {
+        assert!(cli_was_signaled(
+            "the CLI exited with status 143 and no result; stderr: "
+        ));
+        assert!(!cli_was_signaled(
+            "the CLI exited with status 2 and no result; stderr: boom"
+        ));
     }
 }

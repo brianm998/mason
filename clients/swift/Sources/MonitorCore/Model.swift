@@ -13,10 +13,28 @@ public typealias LandingView = Mason_V1_LandingView
 public typealias UsageView = Mason_V1_UsageView
 public typealias EditorView = Mason_V1_EditorView
 public typealias StateCount = Mason_V1_StateCount
+public typealias CiLink = Mason_V1_CiLink
 
 /// What the monitor knows and what the user has done to it. The client draws
 /// this and sends commands; it never re-derives pipeline rules: counts,
 /// sorting, allowed actions and waiting text all arrive from the daemon.
+/// State that changes on nearly every message. Views that show it observe this object; the rest
+/// of the model, and every sidebar row, do not. `clockOffsetMs` is not published: the progress
+/// lines read it on their shared one-second tick.
+@MainActor
+public final class LiveState: ObservableObject {
+    @Published public var lastSeq: UInt64 = 0
+    @Published public var liveLog: [String] = []
+    public var clockOffsetMs: Int64 = 0
+    public init() {}
+
+    /// The daemon's time now, ms since the epoch, by this device's clock and the offset.
+    public func daemonNow(_ local: Date = Date()) -> UInt64 {
+        let ms = Int64(local.timeIntervalSince1970 * 1000) + clockOffsetMs
+        return ms > 0 ? UInt64(ms) : 0
+    }
+}
+
 @MainActor
 public final class MonitorModel: ObservableObject {
     // From the daemon.
@@ -31,12 +49,24 @@ public final class MonitorModel: ObservableObject {
     @Published public var editor: EditorView?
     @Published public var health: HealthSnapshot?
     @Published public var introspection: IntrospectionSnapshot?
-    @Published public var lastSeq: UInt64 = 0
+    /// The high-frequency state (last sequence number, live log, clock offset) lives in its own
+    /// object, so a change to it redraws only the views that show it, never the sidebar rows.
+    public let live = LiveState()
+    public var lastSeq: UInt64 {
+        get { live.lastSeq }
+        set { live.lastSeq = newValue }
+    }
     /// The daemon's clock minus this device's, ms, as of the last message that carried the daemon's
     /// time (the welcome, each StepProgress): "updated 4 s ago" counts on the local clock, corrected by this.
-    @Published public private(set) var clockOffsetMs: Int64 = 0
+    public private(set) var clockOffsetMs: Int64 {
+        get { live.clockOffsetMs }
+        set { live.clockOffsetMs = newValue }
+    }
     /// The open task's live log: its last 40 lines, followed from the stream.
-    @Published public private(set) var liveLog: [String] = []
+    public private(set) var liveLog: [String] {
+        get { live.liveLog }
+        set { live.liveLog = newValue }
+    }
     @Published public var connected = false
     /// The connection is down and being retried: the daemon is restarting or has
     /// not answered. Shown as "reconnecting", never as a hard error.
@@ -84,6 +114,14 @@ public final class MonitorModel: ObservableObject {
     /// What to say about the daemon's own version; empty when there is nothing to say.
     public var daemonUpdateText: String { updateInfo?.daemonText ?? "" }
     public var canUpdateDaemon: Bool { canAct && updateInfo?.daemonCanUpdate == true }
+
+    /// On the `release` channel (a packaged install) there is no source to build from: the
+    /// button opens the download page instead.
+    public var downloadURL: String { updateInfo?.downloadURL ?? "" }
+    public var onOpenURL: ((URL) -> Void)?
+    public func openDownloadPage() {
+        if let u = URL(string: downloadURL), ["https", "http"].contains(u.scheme) { onOpenURL?(u) }
+    }
 
     /// The owner's button: the daemon builds its newest version, proves it and takes over.
     public func updateDaemon() { raw("POST", "/update", json: "{}") }
@@ -226,6 +264,25 @@ public final class MonitorModel: ObservableObject {
     public var page: Page { history.current }
     public var canGoBack: Bool { history.canGoBack }
     public var canGoForward: Bool { history.canGoForward }
+
+    /// Whether `n` is a task this monitor has heard of (in the sidebar, or named by the open
+    /// task's page), so a `#n` in text can be a link to its page.
+    public func isKnownTask(_ n: UInt64) -> Bool {
+        if sidebar?.sections.contains(where: { $0.rows.contains { $0.id == n } }) == true { return true }
+        if let d = taskDetail, d.hasRow {
+            let r = d.row
+            if r.id == n || r.blockers.contains(n) || r.blocks.contains(n) { return true }
+            if d.debts.contains(where: { $0.task == n }) { return true }
+            if d.hasProposal && d.proposal.filedBy == n { return true }
+        }
+        return false
+    }
+
+    /// `text` as plain text, task links and URL links, for the open task's page.
+    public func linkify(_ text: String) -> [LinkSegment] {
+        Linkify.segments(text, isKnownTask: { [unowned self] in self.isKnownTask($0) },
+                         ciLinks: taskDetail?.ciLinks ?? [])
+    }
 
     public func go(_ p: Page) { history.go(p); subscribe?() }
     public func goBack() { history.goBack(); subscribe?() }
@@ -443,6 +500,21 @@ public final class MonitorModel: ObservableObject {
     public func setCompileLimit(_ units: UInt32) {
         command { $0.setLimit = .with { $0.resource = "compile"; $0.units = max(1, units) } }
     }
+    /// The CPU gate's range in the monitor: a further compile starts below this percent.
+    public static let cpuGateRange = 10...100
+    /// The most seconds the settle stepper asks for.
+    public static let settleMax = 600
+    /// Start another compile only below `pct` percent CPU (kept to 10-100; the daemon holds 1-100
+    /// and refuses the rest, and says so in `lastResult`).
+    public func setCompileCpuGate(_ pct: Int) {
+        let v = min(max(pct, Self.cpuGateRange.lowerBound), Self.cpuGateRange.upperBound)
+        command { $0.setGate = .with { $0.name = "compile_cpu_max"; $0.value = Int64(v) } }
+    }
+    /// Seconds after one compile starts before the next may (0: no wait).
+    public func setCompileSettle(_ seconds: Int) {
+        let v = min(max(seconds, 0), Self.settleMax)
+        command { $0.setGate = .with { $0.name = "compile_settle_s"; $0.value = Int64(v) } }
+    }
     public func pause(mode: String, seconds: UInt64) {
         command { $0.pause = .with { $0.project = project; $0.mode = mode; $0.forSeconds = seconds } }
     }
@@ -561,10 +633,7 @@ public final class MonitorModel: ObservableObject {
     public static let logKeep = 40
 
     /// The daemon's time now, ms since the epoch, by this device's clock and the offset.
-    public func daemonNow(_ local: Date = Date()) -> UInt64 {
-        let ms = Int64(local.timeIntervalSince1970 * 1000) + clockOffsetMs
-        return ms > 0 ? UInt64(ms) : 0
-    }
+    public func daemonNow(_ local: Date = Date()) -> UInt64 { live.daemonNow(local) }
 
     func anchor(daemonNow ms: UInt64, local: Date = Date()) {
         guard ms > 0 else { return }

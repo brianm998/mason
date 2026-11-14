@@ -374,6 +374,31 @@ class MonitorCoreTest {
         assertEquals(1, sent[5].set_limit?.units, "the stepper never asks for zero compiles")
     }
 
+    @Test fun theCpuGateStepperSendsASetGateAndStaysWithinTenToAHundred() {
+        val m = MonitorModel()
+        val sent = mutableListOf<Command>()
+        m.sender = { sent += it }
+        m.setCompileCpuGate(70 + 5)
+        m.setCompileCpuGate(0)
+        m.setCompileCpuGate(500)
+        m.setCompileSettle(-5)
+        assertEquals("compile_cpu_max", sent[0].set_gate?.name)
+        assertEquals(75L, sent[0].set_gate?.value_)
+        assertEquals(false, sent[0].set_gate?.reset)
+        assertEquals(10L, sent[1].set_gate?.value_, "never below 10")
+        assertEquals(100L, sent[2].set_gate?.value_, "never above 100")
+        assertEquals("compile_settle_s", sent[3].set_gate?.name)
+        assertEquals(0L, sent[3].set_gate?.value_)
+    }
+
+    @Test fun aRefusedGateShowsInLastResult() {
+        val (m, sent) = ownerModel()
+        m.setCompileCpuGate(75)
+        assertEquals(75L, sent[0].set_gate!!.value_)
+        m.apply(ServerMessage(result = CommandResult(id = "m1", ok = false, status = 403, error = "only the owner can change a compile gate")))
+        assertEquals("only the owner can change a compile gate", m.lastResult)
+    }
+
     // ---- what the client shows (the conformance items) ----
 
     @Test fun visibleItemsFollowWhatTheViewsSayAndTheCollapseState() {
@@ -811,6 +836,7 @@ class MonitorCoreTest {
         waitFor("a second socket") { r.sockets.size == 2 }
         assertEquals(9000, r.sockets[1].port)
         waitFor("not connected") { !r.model.connected }
+        waitFor("reconnecting") { r.model.reconnecting }
         assertTrue(r.model.reconnecting, "shown as reconnecting, not an error")
         r.sockets[1].events.onOpen()
         assertTrue(Regex("[lL]ast_?[sS]eq\"?:\"?7\\b").containsMatchIn(r.sockets[1].sent[0]), r.sockets[1].sent[0])
@@ -836,14 +862,16 @@ class MonitorCoreTest {
     }
 
     @Test fun aStalledDaemonShowsReconnectingNotAnError() {
-        val r = Rig(MonitorModel(MemoryPreferences()), stallAfter = 0.15)
+        val r = Rig(MonitorModel(MemoryPreferences()), stallAfter = 1.0)
         r.conn.start()
         waitFor("a socket") { r.sockets.size == 1 }
         r.sockets[0].events.onMessage(welcome)
         waitFor("connected") { r.model.connected }
+        waitFor("a ping") { r.sockets[0].sent.any { it.contains("ping") } }
         waitFor("a second socket") { r.sockets.size == 2 }
         assertTrue(r.sockets[0].closed)
         assertTrue(r.sockets[0].sent.any { it.contains("ping") }, "it asked before giving up")
+        waitFor("reconnecting") { r.model.reconnecting }
         assertTrue(r.model.reconnecting)
         assertNull(r.model.lastResult, "no error is shown")
         r.conn.stop()
@@ -1036,6 +1064,12 @@ class MonitorCoreTest {
         assertEquals(330.0, MonitorModel.fit(300.0, 400.0, 2.0))
     }
 
+    @Test fun sidebarEntryKeysAreUniqueAndNotPositional() {
+        val keys = model().sidebarEntries().map { it.key }
+        assertEquals(keys.size, keys.toSet().size)
+        assertTrue(keys.any { it.startsWith("r:") })
+    }
+
     @Test fun homeAndSearchAreNotInTheScrollingEntries() {
         val m = model()
         assertEquals(listOf("sidebar:home", "search"), SIDEBAR_PINNED_IDS)
@@ -1105,5 +1139,11 @@ class MonitorCoreTest {
             ),
         )
         assertEquals(listOf(12L), m.blockerCandidates(heldRow()).map { it.id })
+    }
+
+    @Test fun aWorkflowLineNamesEachStateThatHasJobsAndFailedIsKept() {
+        val j = JobCounts(queued = 1, running = 1, succeeded = 2, failed = 1, running_names = listOf("build"))
+        assertEquals("macOS: 5 jobs · 1 queued · 1 running (build) · 2 passed · 1 failed", Format.jobsText("macOS", j))
+        assertEquals("CI: 1 job · 1 passed", Format.jobsText("CI", JobCounts(succeeded = 1)))
     }
 }

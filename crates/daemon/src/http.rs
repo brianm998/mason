@@ -748,13 +748,27 @@ pub fn retry_task(
             ),
         ));
     }
-    let def = task_def(d, t);
-    // `to` is a step in the task's definition, or a category (the first step in it).
-    let name = ask.to.unwrap_or_else(|| retry_default(&def, t));
-    let found = match def.step(&name) {
-        Some(s) => Some((s.category, s.name.clone())),
-        None => parse_state(&name).and_then(|c| def.first_in(c).map(|s| (c, s.name.clone()))),
+    let pinned = task_def(d, t);
+    // A retry starts the task over from an earlier step, so it runs the
+    // project's definition as it is now (decision 0206), if that has the step.
+    let cur = d.current_def(t.project);
+    // `to` is a step in the definition, or a category (the first step in it).
+    let resolve = |def: &Definition| {
+        let name = ask.to.clone().unwrap_or_else(|| retry_default(def, t));
+        let found = match def.step(&name) {
+            Some(s) => Some((s.category, s.name.clone())),
+            None => parse_state(&name).and_then(|c| def.first_in(c).map(|s| (c, s.name.clone()))),
+        };
+        (name, found)
     };
+    let (name, found) = match resolve(&cur) {
+        (n, Some(f)) => {
+            d.repin_to(TaskId(id), None, &cur);
+            (n, Some(f))
+        }
+        _ => resolve(&pinned),
+    };
+    let def = pinned;
     let (to, step) = found.ok_or_else(|| {
         let names: Vec<&str> = def.steps.iter().map(|s| s.name.as_str()).collect();
         fail(
@@ -1006,6 +1020,74 @@ async fn task_override(
         .await
         .map_err(pool_err)??;
     Ok(Json(json!({"ok": true})))
+}
+
+/// `mason task priority <id> urgent|high|normal|low` (owner only): the task's
+/// priority, and with it the place of its waiting resource requests, which keep
+/// their arrival time. For a task imported from a tracker the tracker's own
+/// `priority:*` label is set too (on its next look), so the next sync does not
+/// take the priority back.
+async fn task_priority(
+    Shared(d): Shared<Arc<Daemon>>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<u64>,
+    Json(b): Json<Value>,
+) -> Res {
+    let who = who_of(&headers);
+    let name = b["priority"].as_str().unwrap_or_default().to_string();
+    let (prio, level) = match name.as_str() {
+        "urgent" => (Priority::Urgent, 0u8),
+        "high" => (Priority::High, 1),
+        "normal" => (Priority::Normal, 2),
+        "low" => (Priority::Low, 3),
+        other => {
+            return Err(fail(
+                StatusCode::BAD_REQUEST,
+                format!("priority must be urgent, high, normal or low, not {other:?}"),
+            ))
+        }
+    };
+    let d2 = d.clone();
+    let reranked = d
+        .pool
+        .run(move || {
+            owner_only(&d2, &who, "change a task's priority")?;
+            let w = d2.world().map_err(store_err)?;
+            let t = w
+                .tasks
+                .get(&TaskId(id))
+                .ok_or_else(|| fail(StatusCode::NOT_FOUND, format!("no task #{id}")))?;
+            if t.state.is_terminal() {
+                return Err(fail(
+                    StatusCode::BAD_REQUEST,
+                    format!("task #{id} is over; its priority cannot change"),
+                ));
+            }
+            d2.emit(EventKind::TrackerEdited {
+                task: TaskId(id),
+                title: t.title.clone(),
+                body: t.body.clone(),
+                priority: prio,
+            })
+            .map_err(store_err)?;
+            if let Some(p) = d2.project(t.project) {
+                let row = d2
+                    .store
+                    .tracker_items(&p.id)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .find(|r| r.task == id);
+                if let Some(mut row) = row {
+                    row.priority = name.clone();
+                    d2.store.put_tracker_item(&row).map_err(store_err)?;
+                    d2.tracker.set_owner_priority(t.project, row.number, &name);
+                }
+            }
+            Ok::<_, (StatusCode, Json<Value>)>(d2.broker.set_task_priority(TaskId(id), level))
+        })
+        .await
+        .map_err(pool_err)??;
+    Ok(Json(json!({"ok": true, "reranked": reranked})))
 }
 
 fn project_of(d: &Daemon, name: &str) -> Result<ProjectId, (StatusCode, Json<Value>)> {
@@ -1392,6 +1474,7 @@ fn override_kind(path: &str) -> Option<(&'static str, Option<u64>)> {
                 "reject" => "reject",
                 "explore-anyway" => "explore_anyway",
                 "overrides" => "task_override",
+                "priority" => "task_priority",
                 "skip" => "skip_test",
                 "land-now" => "land_now",
                 "force" => "force",
@@ -1400,6 +1483,7 @@ fn override_kind(path: &str) -> Option<(&'static str, Option<u64>)> {
             Some((kind, id.parse().ok()))
         }
         ["pause"] => Some(("pause", None)),
+        ["resources", "gate"] => Some(("gate", None)),
         ["resume"] => Some(("resume", None)),
         ["projects", _, "overrides"] => Some(("override", None)),
         _ => None,
@@ -1934,12 +2018,13 @@ async fn debt_run(Shared(d): Shared<Arc<Daemon>>, Path(id): Path<u64>) -> Res {
 
 async fn quarantine_list(Shared(d): Shared<Arc<Daemon>>) -> Res {
     let d2 = d.clone();
-    let (rows, flaky) = d
+    let (rows, ledger, flaky) = d
         .pool
         .run(move || {
             let now = now_ms();
             (
                 d2.store.quarantined(now).unwrap_or_default(),
+                d2.store.ledger().unwrap_or_default(),
                 d2.store
                     .flaky_since(now.saturating_sub(7 * 86_400_000))
                     .unwrap_or_default(),
@@ -1951,6 +2036,10 @@ async fn quarantine_list(Shared(d): Shared<Arc<Daemon>>) -> Res {
         mason_testing::gates::quarantine_candidates(&flaky, now_ms(), 7 * 86_400_000, 3);
     Ok(Json(json!({
         "quarantined": rows.iter().map(|(s, t, o, e, r)| json!({"suite": s, "test": t, "owner": o, "expires_at": e, "reason": r})).collect::<Vec<_>>(),
+        "ledger": ledger.iter().filter(|r| r.source != "owner").map(|r| json!({
+            "suite": r.suite, "test": r.test, "source": r.source, "fix_task": r.fix_task,
+            "first_base": r.first_base, "since": r.at, "last_seen_ms": r.last_seen_ms, "note": r.note,
+        })).collect::<Vec<_>>(),
         "candidates": candidates.iter().map(|(s, t)| json!({"suite": s, "test": t})).collect::<Vec<_>>(),
     })))
 }
@@ -2592,6 +2681,45 @@ async fn resource_limit(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) ->
     Ok(Json(json!({"ok": true})))
 }
 
+/// Change a compile gate while masond runs (`value: null` goes back to resources.toml).
+/// Owner only. Kept across restarts.
+async fn resource_gate(
+    Shared(d): Shared<Arc<Daemon>>,
+    headers: axum::http::HeaderMap,
+    Json(b): Json<Value>,
+) -> Res {
+    owner_only(&d, &who_of(&headers), "change a compile gate")?;
+    let name = b["name"].as_str().unwrap_or_default().to_string();
+    let value = match &b["value"] {
+        Value::Null => None,
+        v => match v.as_i64() {
+            Some(n) => Some(n),
+            None => {
+                return Err(fail(
+                    StatusCode::BAD_REQUEST,
+                    "`value` must be a whole number, or null to go back to resources.toml",
+                ))
+            }
+        },
+    };
+    if name.is_empty() {
+        return Err(fail(StatusCode::BAD_REQUEST, "give a gate `name`"));
+    }
+    let d2 = d.clone();
+    d.pool
+        .run(move || {
+            let r = d2.broker.set_gate(&name, value);
+            // A looser gate may free a session for a task that is queued.
+            d2.admit();
+            d2.poke();
+            r
+        })
+        .await
+        .map_err(pool_err)?
+        .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
+    Ok(Json(json!({"ok": true})))
+}
+
 /// An interactive caller asks for resources (`mason run --needs`).
 async fn lease_open(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res {
     let mut uses = std::collections::BTreeMap::new();
@@ -2622,7 +2750,11 @@ async fn lease_open(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res
         let d2 = d.clone();
         let id = d
             .pool
-            .run(move || d2.broker.lease_open_outside(&label, &uses, &o))
+            .run(move || {
+                let id = d2.broker.lease_open_outside(&label, &uses, &o);
+                d2.broker.lease_set_pid(id, pid);
+                id
+            })
             .await
             .map_err(pool_err)?;
         return Ok(Json(json!({"id": id})));
@@ -2634,6 +2766,9 @@ async fn lease_open(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res
             let standing = task.and_then(|t| d2.lease_standing(TaskId(t)));
             let id = d2.broker.lease_open_as(&label, &uses, standing);
             d2.broker.lease_set_pid(id, pid);
+            if let (Some(t), Some(_)) = (task, standing) {
+                d2.broker.lease_set_task(id, TaskId(t));
+            }
             let th = task
                 .map(|t| d2.stall_thresholds(TaskId(t)))
                 .unwrap_or_default();
@@ -2748,10 +2883,9 @@ fn render_agent(text: &str) -> String {
 pub type LogStamp = (String, u64, Option<std::time::SystemTime>);
 
 pub fn log_signature(d: &Daemon, task: u64) -> Vec<LogStamp> {
-    let reg = mason_step_host::registry::Registry::new(d.cfg.hosts_dir());
-    let mut v: Vec<LogStamp> = reg
-        .scan()
-        .unwrap_or_default()
+    // Same hosts as `render_logs` (live and moved), found by directory name: no other
+    // task's host is opened.
+    let mut v: Vec<LogStamp> = crate::hostarchive::task_hosts(&d.cfg, task)
         .into_iter()
         .filter(|h| crate::sweep::parse_host_id(&h.info.id).is_some_and(|(t, _)| t == task))
         .map(|h| {
@@ -2867,7 +3001,11 @@ fn progress_runs(d: &Daemon, id: TaskId) -> Vec<Value> {
                 "started_ms": p.started_ms, "updated_at_ms": p.updated_at_ms,
                 "subs": p.subs.iter().map(|s| json!({
                     "name": s.name, "unit": s.unit,
-                    "done": fig(&s.done), "total": fig(&s.total)})).collect::<Vec<_>>(),
+                    "done": fig(&s.done), "total": fig(&s.total),
+                    "jobs": s.jobs.as_ref().map(|j| json!({
+                        "queued": j.queued, "running": j.running,
+                        "succeeded": j.succeeded, "failed": j.failed,
+                        "running_names": j.running_names}))})).collect::<Vec<_>>(),
                 "todo": p.todo.iter().map(|t| json!({"text": t.text, "status": t.status})).collect::<Vec<_>>(),
                 // The tokens the step's sessions have used so far; null until one reported.
                 "tokens": p.token_total().map(|t| json!({
@@ -2996,6 +3134,7 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/tasks/{id}/reject", post(reject))
         .route("/tasks/{id}/explore-anyway", post(explore_anyway))
         .route("/tasks/{id}/overrides", post(task_override))
+        .route("/tasks/{id}/priority", post(task_priority))
         .route("/projects/{name}/definition", get(project_definition))
         .route("/projects/{name}/extensions", get(extensions_list))
         .route(
@@ -3073,6 +3212,7 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/quarantine", get(quarantine_list).post(quarantine_add))
         .route("/quarantine/remove", post(quarantine_remove))
         .route("/resources/limit", post(resource_limit))
+        .route("/resources/gate", post(resource_gate))
         .route("/leases", post(lease_open))
         .route("/leases/{id}", get(lease_poll))
         .route("/stall/waiting", get(stall_waiting))

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import MasonProtocol
+import Combine
 import XCTest
 
 @testable import MonitorCore
@@ -401,6 +402,26 @@ final class MonitorCoreTests: XCTestCase {
         m.setCompileLimit(0)
         if case .setLimit(let l)? = sent[4].body { XCTAssertEqual(l.resource, "compile"); XCTAssertEqual(l.units, 5) } else { XCTFail() }
         if case .setLimit(let l)? = sent[5].body { XCTAssertEqual(l.units, 1, "the stepper never asks for zero compiles") } else { XCTFail() }
+    }
+
+    func testTheCpuGateStepperSendsASetGateAndStaysWithinTenToAHundred() {
+        let m = MonitorModel()
+        var sent: [Mason_V1_Command] = []
+        m.sender = { sent.append($0) }
+        m.setCompileCpuGate(70 + 5)
+        m.setCompileCpuGate(0)
+        m.setCompileCpuGate(500)
+        m.setCompileSettle(-5)
+        if case .setGate(let g)? = sent[0].body { XCTAssertEqual(g.name, "compile_cpu_max"); XCTAssertEqual(g.value, 75); XCTAssertFalse(g.reset) } else { XCTFail() }
+        if case .setGate(let g)? = sent[1].body { XCTAssertEqual(g.value, 10, "never below 10") } else { XCTFail() }
+        if case .setGate(let g)? = sent[2].body { XCTAssertEqual(g.value, 100, "never above 100") } else { XCTFail() }
+        if case .setGate(let g)? = sent[3].body { XCTAssertEqual(g.name, "compile_settle_s"); XCTAssertEqual(g.value, 0) } else { XCTFail() }
+    }
+
+    func testARefusedGateShowsInLastResult() {
+        let m = MonitorModel()
+        m.apply(result(id: "m1", ok: false, error: "compile_cpu_max must be from 1 to 100"))
+        XCTAssertEqual(m.lastResult, "compile_cpu_max must be from 1 to 100")
     }
 
     // MARK: what the client shows (the conformance items)
@@ -1165,6 +1186,58 @@ final class MonitorCoreTests: XCTestCase {
         XCTAssertEqual(m.liveLog.last, "l59")
     }
 
+    func testAProgressPushForOneTaskLeavesOtherRowsEqualAndHighFrequencyStateOutOfTheSidebar() {
+        let m = model()
+        var c = cell(done: 1, total: 4, totalSrc: .sourceReported)
+        c.step = "develop"
+        m.sidebar?.sections[0].rows[0].progress = [c]
+        m.sidebar?.sections[0].rows[1].progress = [c]
+        let other = m.sidebar!.sections[0].rows[1]
+        var sidebarChanges = 0
+        let sub = m.$sidebar.dropFirst().sink { _ in sidebarChanges += 1 }
+        var liveChanges = 0
+        let liveSub = m.live.objectWillChange.sink { _ in liveChanges += 1 }
+        var p = Mason_V1_StepProgress()
+        p.task = 1
+        var n = c
+        n.done = 3
+        p.progress = n
+        p.nowMs = 5_000_000
+        m.apply(progress: p)
+        XCTAssertEqual(m.sidebar?.sections[0].rows[1], other, "task 2's row is untouched")
+        XCTAssertNotEqual(m.sidebar?.sections[0].rows[0].progress.first?.done, 1)
+        XCTAssertEqual(sidebarChanges, 1)
+        // A sequence bump and a log line change the live state and not the sidebar.
+        sidebarChanges = 0
+        m.lastSeq = 99
+        p.log = ["x"]
+        p.progress = Mason_V1_ProgressCell()
+        m.apply(progress: p)
+        XCTAssertEqual(sidebarChanges, 0)
+        XCTAssertGreaterThan(liveChanges, 0)
+        sub.cancel()
+        liveSub.cancel()
+    }
+
+    func testSidebarEntriesAreIdentifiedByWhatTheyAreNotWhereTheyAre() {
+        let m = model()
+        func ids() -> [String] { m.sidebarEntries.map(\.id) }
+        let before = ids()
+        XCTAssertEqual(Set(before).count, before.count)
+        XCTAssertTrue(before.contains("r:2"))
+        // Task 1 moves to another section: row 2 keeps its identity.
+        var s = m.sidebar!
+        let moved = s.sections[0].rows.remove(at: 0)
+        s.sections[1].rows.insert(moved, at: 0)
+        m.sidebar = s
+        let after = ids()
+        XCTAssertTrue(after.contains("r:2"))
+        XCTAssertFalse(after.contains("r:1"), "the failed section is collapsed")
+        m.reveal(state: "failed")
+        XCTAssertTrue(ids().contains("r:1"))
+        XCTAssertTrue(ids().contains("r:2"))
+    }
+
     func testProgressItemsHaveNoClockText() {
         var c = cell(done: 212, total: 340, totalSrc: .sourceReported)
         c.message = "running the api suite"
@@ -1320,5 +1393,16 @@ final class MonitorCoreTests: XCTestCase {
         ]
         m.sidebar = sb
         XCTAssertEqual(m.blockerCandidates(for: heldRow()).map { $0.id }, [12])
+    }
+
+    func testAWorkflowLineNamesEachStateThatHasJobsAndFailedIsKept() {
+        var j = Mason_V1_JobCounts()
+        j.queued = 1; j.running = 1; j.succeeded = 2; j.failed = 1; j.runningNames = ["build"]
+        XCTAssertEqual(
+            Format.jobsText(name: "macOS", jobs: j),
+            "macOS: 5 jobs · 1 queued · 1 running (build) · 2 passed · 1 failed")
+        var one = Mason_V1_JobCounts()
+        one.succeeded = 1
+        XCTAssertEqual(Format.jobsText(name: "CI", jobs: one), "CI: 1 job · 1 passed")
     }
 }

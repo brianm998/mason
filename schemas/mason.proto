@@ -100,6 +100,8 @@ message Command {
     Unblock unblock = 16;
     Block block = 17;
     TaskRef revive = 18;
+    // Change a compile gate while masond runs, or go back to resources.toml.
+    SetGate set_gate = 19;
     Raw raw = 30;
   }
   // Who is acting and, optionally, why (recorded with overrides).
@@ -188,6 +190,15 @@ message ResumeWork {
 message SetLimit {
   string resource = 1;
   uint32 units = 2;
+}
+
+// A compile gate by name (compile_cpu_max, compile_settle_s, compile_jobs,
+// compile_idle_kill_s, stall_ms, memory.floor_mb, disk.floor_gb). `reset` goes
+// back to resources.toml or the default and ignores `value`. Owner only.
+message SetGate {
+  string name = 1;
+  int64 value = 2;
+  bool reset = 3;
 }
 
 // Any other operation of the API, by HTTP-style method and path, with a JSON
@@ -380,6 +391,18 @@ message ProgressSub {
   uint32 total = 4;
   ProgressSource done_source = 5;
   ProgressSource total_source = 6;
+  // For a CI workflow: its jobs told apart by state. Absent for any other count.
+  JobCounts jobs = 7;
+}
+
+// CI jobs by state. "Succeeded" is success, neutral and skipped.
+message JobCounts {
+  uint32 queued = 1;
+  uint32 running = 2;
+  uint32 succeeded = 3;
+  uint32 failed = 4;
+  // The names of the running jobs.
+  repeated string running_names = 5;
 }
 
 // One item of an agent's todo list.
@@ -524,6 +547,11 @@ message UpdateInfo {
   bool daemon_can_update = 2;
   // One per kind of desktop monitor the daemon can build.
   repeated MonitorBuild monitors = 3;
+  // On the `release` channel (a packaged install): the newest published release, and the
+  // page that offers its installers. A packaged monitor's button opens the page; there is
+  // no source to build from. Empty on the source channels.
+  string release_version = 4;
+  string download_url = 5;
 }
 
 message MonitorBuild {
@@ -754,6 +782,18 @@ message TaskDetailView {
   repeated TokenLine step_tokens = 21;
   // The task's share of the machine's CPU, in permille; -1 while it has no running process.
   int32 cpu_permille = 22;
+  // Where CI can be read for this task's landing: the batch's pull request and each failed
+  // check. Only http(s) URLs are sent. Additive; an older daemon sends none.
+  repeated CiLink ci_links = 23;
+}
+
+// A page on the git host a client opens in the browser. `label` is exactly the text the
+// task's notes use ("PR #123", a check's name), so a client can link that text.
+message CiLink {
+  string label = 1;
+  string url = 2;
+  // "pull_request", "check" or "run".
+  string kind = 3;
 }
 
 // What was noticed, by whom, with the proof; and for an improvement, where its branch is.
@@ -965,7 +1005,7 @@ message UsageTokens {
 message UsageView {
   repeated ProviderStatus providers = 1;
   string note = 2;
-  // The top-bar line: the most constrained window per account.
+  // The top-bar lines: each main window per account, shortest first (5-hour, then weekly).
   repeated string top_bar = 3;
 }
 

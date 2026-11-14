@@ -91,6 +91,7 @@ impl GitHub {
                     "failure",
                     steps_run,
                     j["id"].as_u64(),
+                    j["html_url"].as_str(),
                 );
                 if jf.infra.is_some() {
                     continue; // infrastructure: wait, the run may be retried
@@ -222,6 +223,7 @@ impl GitHub {
         conclusion: &str,
         steps_run: bool,
         job_id: Option<u64>,
+        url: Option<&str>,
     ) -> JobFailure {
         let extra = self.infra.clone().unwrap_or_default();
         // The log is read for a failure whether or not infrastructure is being judged: the
@@ -240,6 +242,7 @@ impl GitHub {
                 None
             },
             log: log.map(|l| tail_lines(&l, KEEP_LOG_LINES)),
+            url: url.filter(|u| !u.is_empty()).map(String::from),
         }
     }
 }
@@ -340,6 +343,7 @@ impl GitHostAdapter for GitHub {
                     // A check run lists no steps: a cancelled one is judged as cancelled.
                     true,
                     r["details_url"].as_str().and_then(job_id_of),
+                    r["details_url"].as_str(),
                 ));
             }
         }
@@ -418,10 +422,19 @@ fn count_checks(runs: &Value) -> Option<CheckCounts> {
         .find(|r| r["status"] == "in_progress")
         .or_else(|| list.iter().find(|r| r["status"] != "completed"))
         .and_then(|r| r["name"].as_str().map(String::from));
+    let mut jobs = CiJobCounts::default();
+    for r in list {
+        jobs.add(
+            r["name"].as_str().unwrap_or("?"),
+            r["status"].as_str().unwrap_or(""),
+            r["conclusion"].as_str(),
+        );
+    }
     Some(CheckCounts {
         done: list.iter().filter(|r| r["status"] == "completed").count() as u64,
         total: list.len() as u64,
         running,
+        jobs: Some(jobs),
     })
 }
 
@@ -568,6 +581,30 @@ impl TrackerAdapter for GitHub {
         )
         .map(|_| ())
     }
+
+    fn set_priority(&self, number: u64, priority: &str) -> Result<(), ApiError> {
+        for other in ["urgent", "high", "low"]
+            .into_iter()
+            .filter(|p| *p != priority)
+        {
+            match self.send(
+                Request::get(&self.url(&format!("/issues/{number}/labels/priority:{other}")))
+                    .method("DELETE"),
+            ) {
+                Ok(_) => {}
+                // The issue did not carry that label.
+                Err(e) if e.kind == ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+            }
+        }
+        if priority != "normal" {
+            self.send(Request::post(
+                &self.url(&format!("/issues/{number}/labels")),
+                &Self::body(json!({"labels": [format!("priority:{priority}")]})),
+            ))?;
+        }
+        Ok(())
+    }
 }
 
 fn item_of(v: &Value) -> Item {
@@ -635,6 +672,8 @@ pub struct ActionsJob {
     pub id: u64,
     pub name: String,
     pub conclusion: Option<String>,
+    /// queued, in_progress or completed (and the other spellings of "not yet").
+    pub status: String,
 }
 
 /// `2026-11-11T12:30:00Z` as milliseconds since the epoch; `0` if it is not that shape.
@@ -771,6 +810,7 @@ impl GitHub {
                     id: j["id"].as_u64()?,
                     name: j["name"].as_str().unwrap_or_default().to_string(),
                     conclusion: j["conclusion"].as_str().map(String::from),
+                    status: j["status"].as_str().unwrap_or_default().to_string(),
                 })
             })
             .collect())
@@ -813,16 +853,50 @@ impl BuildSystemAdapter for GitHub {
     }
 
     fn status(&self, run: &str) -> Result<CiState, ApiError> {
+        self.status_detail(run).map(|(s, _)| s)
+    }
+
+    /// While a run is unfinished the jobs of every run of the commit are read (one request
+    /// each, no logs) and told apart by state, one entry per workflow run. A failed read of
+    /// the jobs only leaves the detail out; the verdict never depends on it.
+    fn status_detail(&self, run: &str) -> Result<(CiState, Vec<CiRunJobs>), ApiError> {
         let v = self.json(Request::get(
             &self.url(&format!("/actions/runs?head_sha={run}&per_page=20")),
         ))?;
         let runs = v["workflow_runs"].as_array().cloned().unwrap_or_default();
         if runs.is_empty() {
-            return Ok(CiState::Pending); // not started yet
+            return Ok((CiState::Pending, vec![])); // not started yet
         }
         if runs.iter().any(|r| r["status"] != "completed") {
-            return self.pending_or_red_early(&runs);
+            let state = self.pending_or_red_early(&runs)?;
+            if state != CiState::Pending {
+                return Ok((state, vec![]));
+            }
+            let mut detail = vec![];
+            for r in &runs {
+                let Some(id) = r["id"].as_u64() else { continue };
+                let mut jobs = CiJobCounts::default();
+                for j in self.run_jobs(id).unwrap_or_default() {
+                    jobs.add(&j.name, &j.status, j.conclusion.as_deref());
+                }
+                detail.push(CiRunJobs {
+                    workflow: r["name"].as_str().unwrap_or("?").to_string(),
+                    jobs,
+                });
+            }
+            return Ok((state, detail));
         }
+        self.finished(&runs).map(|s| (s, vec![]))
+    }
+
+    fn doctor(&self, repo: &Path) -> Vec<Problem> {
+        workflow_problems(repo)
+    }
+}
+
+impl GitHub {
+    /// The verdict of runs that have all finished.
+    fn finished(&self, runs: &[Value]) -> Result<CiState, ApiError> {
         let bad: Vec<&Value> = runs
             .iter()
             .filter(|r| {
@@ -857,6 +931,7 @@ impl BuildSystemAdapter for GitHub {
                                 j["conclusion"].as_str().unwrap_or(""),
                                 steps_run,
                                 j["id"].as_u64(),
+                                j["html_url"].as_str(),
                             ));
                         }
                     }

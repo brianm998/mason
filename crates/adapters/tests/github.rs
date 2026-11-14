@@ -141,6 +141,26 @@ fn ci_red_names_the_failed_jobs_and_pending_is_pending() {
 }
 
 #[test]
+fn a_failed_checks_details_url_is_carried_into_its_job_failure() {
+    let g = gh("pr_red_urls.json");
+    let st = g.gh.pr_status(9).unwrap();
+    assert_eq!(
+        st.jobs.len(),
+        1,
+        "only the completed failure is a job: {:?}",
+        st.jobs
+    );
+    assert_eq!(st.jobs[0].job, "build");
+    assert_eq!(
+        st.jobs[0].url.as_deref(),
+        Some("https://github.com/o/r/actions/runs/9/job/not-a-number")
+    );
+    // A check run with no `details_url` has no URL.
+    let g = gh("pr_red.json");
+    assert_eq!(g.gh.pr_status(9).unwrap().jobs[0].url, None);
+}
+
+#[test]
 fn a_pr_waits_for_a_required_review_and_a_requested_change_is_not_a_review() {
     let g = gh("pr_review_required.json");
     let st = g.gh.pr_status(9).unwrap();
@@ -695,6 +715,73 @@ fn a_workflow_is_dispatched_with_inputs_and_its_runs_and_rerun_come_from_recorde
         "no inputs, no inputs key"
     );
     assert!(g.http.unused().is_empty());
+}
+
+// ---- CI progress: jobs told apart by state (stage 205) ------------------------------------------
+
+#[test]
+fn a_pending_ci_counts_its_jobs_by_state_one_entry_per_workflow() {
+    use serde_json::json;
+    let g = judged_gh(
+        json!([
+            {"method": "GET", "url": "/actions/runs?head_sha=sha1", "response": ok(json!({"workflow_runs": [
+                {"id": 5, "name": "pr-gate", "status": "in_progress", "conclusion": null},
+                {"id": 6, "name": "macOS", "status": "queued", "conclusion": null}]}))},
+            {"method": "GET", "url": "/actions/runs/5/jobs?filter=latest&per_page=100", "response": ok(json!({"jobs": [
+                {"id": 51, "name": "lint", "status": "completed", "conclusion": "success"},
+                {"id": 52, "name": "docs", "status": "completed", "conclusion": "skipped"},
+                {"id": 53, "name": "unit", "status": "completed", "conclusion": "failure"},
+                {"id": 54, "name": "build", "status": "in_progress", "conclusion": null},
+                {"id": 55, "name": "e2e", "status": "queued", "conclusion": null}]}))},
+            {"method": "GET", "url": "/actions/runs/6/jobs?filter=latest&per_page=100", "response": ok(json!({"jobs": []}))},
+        ]),
+        false,
+    );
+    let (state, detail) = g.gh.status_detail("sha1").unwrap();
+    assert_eq!(state, CiState::Pending);
+    assert_eq!(detail.len(), 2);
+    assert_eq!(detail[0].workflow, "pr-gate");
+    assert_eq!(
+        detail[0].jobs,
+        CiJobCounts {
+            total: 5,
+            queued: 1,
+            running: 1,
+            succeeded: 2,
+            failed: 1,
+            running_names: vec!["build".into()],
+        }
+    );
+    assert_eq!(detail[1].workflow, "macOS");
+    assert_eq!(
+        detail[1].jobs,
+        CiJobCounts::default(),
+        "no jobs yet is zeros"
+    );
+    assert!(g.http.unused().is_empty());
+}
+
+#[test]
+fn check_runs_give_the_same_breakdown() {
+    use serde_json::json;
+    let list = json!([
+        {"name": "a", "status": "completed", "conclusion": "success"},
+        {"name": "b", "status": "completed", "conclusion": "cancelled"},
+        {"name": "c", "status": "in_progress", "conclusion": null},
+        {"name": "d", "status": "waiting", "conclusion": null}]);
+    let mut j = CiJobCounts::default();
+    for r in list.as_array().unwrap() {
+        j.add(
+            r["name"].as_str().unwrap(),
+            r["status"].as_str().unwrap(),
+            r["conclusion"].as_str(),
+        );
+    }
+    assert_eq!(
+        (j.total, j.queued, j.running, j.succeeded, j.failed),
+        (4, 1, 1, 1, 1)
+    );
+    assert_eq!(j.running_names, ["c"]);
 }
 
 // ---- red as soon as a required job fails (cancel the rest) ------------------------------------

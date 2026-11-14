@@ -130,6 +130,15 @@ fn events(t: TaskId, other: TaskId, decision: DecisionId) -> Vec<(&'static str, 
                 added: vec![other],
             },
         ),
+        (
+            "Repinned",
+            E::Repinned {
+                task: t,
+                from: "a".into(),
+                to: "b".into(),
+                changed: "steps: x".into(),
+            },
+        ),
         ("Revived", E::Revived { task: t }),
         (
             "TrackerEdited",
@@ -179,6 +188,7 @@ fn expected(from: State, ev: &str) -> Option<State> {
         "BlockerAdded" if matches!(from, S::Proposed | S::Queued) => Some(from),
         "BlockerRemoved" if matches!(from, S::Proposed | S::Queued) => Some(from),
         "BlockersChanged" if matches!(from, S::Proposed | S::Queued) => Some(from),
+        "Repinned" if step || matches!(from, S::NeedsAttention | S::Failed) => Some(from),
         "Revived" if from == S::Canceled => Some(S::Queued),
         "TrackerEdited" if live || from == S::Proposed => Some(from),
         "Tick" => Some(from),
@@ -221,5 +231,5 @@ fn every_state_and_event_pair() {
             checked += 1;
         }
     }
-    assert_eq!(checked, 11 * 23);
+    assert_eq!(checked, 11 * 24);
 }
