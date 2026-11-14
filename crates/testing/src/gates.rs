@@ -234,6 +234,34 @@ pub fn check_quarantine(q: &Quarantine, now_ms: u64, max_days: u64) -> Result<()
     Ok(())
 }
 
+/// A ledger entry that is not an owner's quarantine has no expiry, because a run that
+/// proves the test green lifts it; it needs a fix task, or to be `exhausted` (no fix could
+/// be filed, shown to the owner). An owner's quarantine keeps [`check_quarantine`].
+pub fn check_ledger_source(source: &str, fix_task: Option<u64>) -> Result<(), String> {
+    match (source, fix_task) {
+        ("owner", _) => Err("an owner's quarantine goes through check_quarantine".into()),
+        ("base", _) | ("exhausted", _) => Ok(()),
+        (other, _) => Err(format!("unknown ledger source `{other}`")),
+    }
+}
+
+/// Is `name` something a parser could report as one test's name, rather than a line of
+/// source or prose picked out of the output? The ledger takes only these.
+pub fn is_test_name(name: &str) -> bool {
+    let n = name.trim();
+    if n.is_empty() || n != name || n.len() > 300 || n.chars().any(|c| c.is_control()) {
+        return false;
+    }
+    if n.contains([';', '{', '}']) || n.contains(" = ") || n.contains("://") {
+        return false;
+    }
+    let first = n.split_whitespace().next().unwrap_or("");
+    !matches!(
+        first,
+        "let" | "var" | "func" | "import" | "if" | "guard" | "return" | "class" | "struct"
+    )
+}
+
 pub fn active(entries: &[Quarantine], suite: &str, now_ms: u64) -> Vec<String> {
     entries
         .iter()
@@ -394,6 +422,22 @@ diff --git a/tests/calc_test.py b/tests/calc_test.py
         assert_eq!(active(&list, "unit", 10), s(&["t"]));
         assert!(active(&list, "unit", 60).is_empty());
         assert!(active(&list, "other", 10).is_empty());
+    }
+
+    #[test]
+    fn only_test_names_enter_the_ledger() {
+        assert!(is_test_name("a::b::c"));
+        assert!(is_test_name("Suite.testThing()"));
+        assert!(is_test_name("tests/x.py::test_y[1-2]"));
+        assert!(!is_test_name(
+            "let status = asset.statusOfValue(forKey: \"x\")"
+        ));
+        assert!(!is_test_name("  padded"));
+        assert!(!is_test_name(""));
+        assert!(!is_test_name("a\nb"));
+        assert!(check_ledger_source("base", Some(3)).is_ok());
+        assert!(check_ledger_source("owner", None).is_err());
+        assert!(check_ledger_source("x", None).is_err());
     }
 
     #[test]
