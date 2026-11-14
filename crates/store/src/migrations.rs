@@ -666,6 +666,8 @@ const STEPS: &[&str] = &[
          deadline_ms INTEGER NOT NULL,
          at_ms       INTEGER NOT NULL
      );",
+    // 36: which rule chose a proposal's disposition (s295, decision 0289). Additive.
+    "ALTER TABLE proposals ADD COLUMN decided_by TEXT NOT NULL DEFAULT '';",
 ];
 
 pub const SCHEMA_VERSION: u32 = STEPS.len() as u32;
