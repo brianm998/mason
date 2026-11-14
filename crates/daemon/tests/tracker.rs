@@ -83,6 +83,7 @@ fn item(n: u64, title: &str, author: &str, labels: &[&str]) -> Item {
 
 fn cfg() -> TrackerCfg {
     TrackerCfg {
+        plugin: None,
         api: "x".into(),
         repo: "o/r".into(),
         token: "env:X".into(),
