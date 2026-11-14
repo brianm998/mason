@@ -2151,6 +2151,31 @@ fn kind_for(st: &State, name: &str) -> Kind {
 
 /// Free memory in MB, or `None` if it cannot be read. Never load average.
 pub fn measure_free_memory_mb() -> Option<u64> {
+    #[cfg(windows)]
+    {
+        return windows_free_memory_mb();
+    }
+    #[cfg(not(windows))]
+    unix_free_memory_mb()
+}
+
+/// `GlobalMemoryStatusEx`: available physical memory.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn windows_free_memory_mb() -> Option<u64> {
+    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    // SAFETY: an all-zero MEMORYSTATUSEX is valid; dwLength is set as the API requires.
+    let mut m: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
+    m.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
+    // SAFETY: `m` is live and sized as dwLength says.
+    if unsafe { GlobalMemoryStatusEx(&mut m) } == 0 {
+        return None;
+    }
+    Some(crate::cpu::windows_free_mb(m.ullAvailPhys))
+}
+
+#[cfg(not(windows))]
+fn unix_free_memory_mb() -> Option<u64> {
     if let Ok(t) = std::fs::read_to_string("/proc/meminfo") {
         let kb: u64 = t
             .lines()

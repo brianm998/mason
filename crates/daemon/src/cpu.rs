@@ -192,6 +192,49 @@ fn read_mach_ticks() -> Result<(u64, u64), String> {
     Err("no mach host statistics on this system".into())
 }
 
+/// `(busy, total)` from `GetSystemTimes`: idle, kernel and user time in 100 ns units.
+/// Windows counts idle time inside kernel time, so total is kernel + user and busy is
+/// total minus idle. Pure, so it is tested on every platform.
+pub fn windows_ticks(idle: u64, kernel: u64, user: u64) -> (u64, u64) {
+    let total = kernel + user;
+    (total.saturating_sub(idle), total)
+}
+
+/// Free memory in MB from the `ullAvailPhys` byte count of `GlobalMemoryStatusEx`.
+pub fn windows_free_mb(avail_phys_bytes: u64) -> u64 {
+    avail_phys_bytes / (1024 * 1024)
+}
+
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn read_windows_ticks() -> Result<(u64, u64), String> {
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::Threading::GetSystemTimes;
+    let z = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+    let (mut idle, mut kernel, mut user) = (z, z, z);
+    // SAFETY: three live FILETIMEs for the call to fill in.
+    if unsafe { GetSystemTimes(&mut idle, &mut kernel, &mut user) } == 0 {
+        return Err("GetSystemTimes failed".into());
+    }
+    let n = |f: FILETIME| (u64::from(f.dwHighDateTime) << 32) | u64::from(f.dwLowDateTime);
+    Ok(windows_ticks(n(idle), n(kernel), n(user)))
+}
+
+#[cfg(not(windows))]
+fn read_windows_ticks() -> Result<(u64, u64), String> {
+    Err("no GetSystemTimes on this system".into())
+}
+
+fn read_windows() -> Result<u32, String> {
+    let a = read_windows_ticks()?;
+    std::thread::sleep(Duration::from_millis(250));
+    let b = read_windows_ticks()?;
+    pct_between(a, b).ok_or_else(|| "windows ticks did not advance (parse error)".to_string())
+}
+
 fn read_mach() -> Result<u32, String> {
     let a = read_mach_ticks()?;
     std::thread::sleep(Duration::from_millis(250));
@@ -221,6 +264,9 @@ pub fn read_instant() -> Result<(u32, &'static str), String> {
             .map(|v| (v, "proc"))
             .ok_or_else(|| "proc: ticks did not advance (parse error)".to_string());
     }
+    if cfg!(windows) {
+        return read_windows().map(|v| (v, "windows"));
+    }
     match read_mach() {
         Ok(v) => Ok((v, "mach")),
         Err(mach) => read_top()
@@ -234,7 +280,8 @@ pub fn read_instant() -> Result<(u32, &'static str), String> {
 #[cfg(windows)]
 pub fn read_loadavg() -> Option<u32> {
     // Windows keeps no load average. `None` is this function's "no reading",
-    // which the sampler already treats as an absent fallback.
+    // which the sampler already treats as an absent fallback; the primary reading
+    // (`GetSystemTimes` over an interval, see `read_windows`) does the work.
     None
 }
 
@@ -557,5 +604,20 @@ mod tests {
         assert_eq!(FileCpu(p.clone()).busy_pct(), None);
         std::fs::write(&p, "85\n").unwrap();
         assert_eq!(FileCpu(p).busy_pct(), Some(85));
+    }
+
+    #[test]
+    fn windows_ticks_subtract_idle_from_kernel_plus_user() {
+        // kernel includes idle: busy = kernel + user - idle.
+        assert_eq!(windows_ticks(600, 800, 200), (400, 1000));
+        let a = windows_ticks(600, 800, 200);
+        let b = windows_ticks(700, 900, 400);
+        assert_eq!(pct_between(a, b), Some(75));
+        assert_eq!(windows_ticks(5, 1, 1), (0, 2));
+    }
+
+    #[test]
+    fn windows_free_memory_is_megabytes() {
+        assert_eq!(windows_free_mb(8 * 1024 * 1024 * 1024), 8192);
     }
 }
