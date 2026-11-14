@@ -966,6 +966,12 @@ fn baseline(
         )
         .ok()?;
     }
+    if let Err(e) = crate::jobs::setup_checkout(def, &wt) {
+        tracing::warn!("baseline of {} at {base}: {e}", suite.name);
+        let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+        git::remove_worktree(c_repo, &wt);
+        return None;
+    }
     let outcome = (|| {
         env_up(who, def, suite, &wt, dev).ok()?;
         if let Some(f) = &suite.results_file {
@@ -2190,6 +2196,12 @@ fn run_new_tests_at_base(
         )
         .ok()?;
     }
+    if let Err(e) = crate::jobs::setup_checkout(&c.def, &wt) {
+        tracing::warn!("negative control of {} at {base}: {e}", suite.name);
+        let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+        git::remove_worktree(&c.project.path, &wt);
+        return None;
+    }
     let result = (|| {
         let changed = git::run(&c.wt, &["diff", "--name-only", &format!("{base}..HEAD")]).ok()?;
         for p in changed
@@ -2323,6 +2335,11 @@ pub fn pay(d: &Arc<Daemon>, debt: u64) -> Result<String, String> {
         )
         .map_err(|e| e.to_string())?;
     }
+    if let Err(e) = crate::jobs::setup_checkout(&def, &wt) {
+        let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+        git::remove_worktree(&p.path, &wt);
+        return Err(e);
+    }
     let who = Who {
         d: d.clone(),
         task: None,
@@ -2453,6 +2470,11 @@ pub fn ledger_run(d: &Arc<Daemon>, task: TaskId) -> Result<String, String> {
             &["worktree", "add", "--detach", &wt.to_string_lossy(), &tip],
         )
         .map_err(|e| e.to_string())?;
+    }
+    if let Err(e) = crate::jobs::setup_checkout(&def, &wt) {
+        let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+        git::remove_worktree(&p.path, &wt);
+        return Err(e);
     }
     let who = Who {
         d: d.clone(),
