@@ -1458,6 +1458,7 @@ fn override_kind(path: &str) -> Option<(&'static str, Option<u64>)> {
         }
         ["pause"] => Some(("pause", None)),
         ["update", "now"] => Some(("update_now", None)),
+        ["resources", "gate"] => Some(("gate", None)),
         ["resume"] => Some(("resume", None)),
         ["projects", _, "overrides"] => Some(("override", None)),
         _ => None,
@@ -2686,6 +2687,45 @@ async fn resource_limit(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) ->
     Ok(Json(json!({"ok": true})))
 }
 
+/// Change a compile gate while masond runs (`value: null` goes back to resources.toml).
+/// Owner only. Kept across restarts.
+async fn resource_gate(
+    Shared(d): Shared<Arc<Daemon>>,
+    headers: axum::http::HeaderMap,
+    Json(b): Json<Value>,
+) -> Res {
+    owner_only(&d, &who_of(&headers), "change a compile gate")?;
+    let name = b["name"].as_str().unwrap_or_default().to_string();
+    let value = match &b["value"] {
+        Value::Null => None,
+        v => match v.as_i64() {
+            Some(n) => Some(n),
+            None => {
+                return Err(fail(
+                    StatusCode::BAD_REQUEST,
+                    "`value` must be a whole number, or null to go back to resources.toml",
+                ))
+            }
+        },
+    };
+    if name.is_empty() {
+        return Err(fail(StatusCode::BAD_REQUEST, "give a gate `name`"));
+    }
+    let d2 = d.clone();
+    d.pool
+        .run(move || {
+            let r = d2.broker.set_gate(&name, value);
+            // A looser gate may free a session for a task that is queued.
+            d2.admit();
+            d2.poke();
+            r
+        })
+        .await
+        .map_err(pool_err)?
+        .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
+    Ok(Json(json!({"ok": true})))
+}
+
 /// An interactive caller asks for resources (`mason run --needs`).
 async fn lease_open(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res {
     let mut uses = std::collections::BTreeMap::new();
@@ -3179,6 +3219,7 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/quarantine", get(quarantine_list).post(quarantine_add))
         .route("/quarantine/remove", post(quarantine_remove))
         .route("/resources/limit", post(resource_limit))
+        .route("/resources/gate", post(resource_gate))
         .route("/leases", post(lease_open))
         .route("/leases/{id}", get(lease_poll))
         .route("/stall/waiting", get(stall_waiting))

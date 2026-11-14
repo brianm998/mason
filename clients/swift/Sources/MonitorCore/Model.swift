@@ -533,6 +533,21 @@ public final class MonitorModel: ObservableObject {
     public func setCompileLimit(_ units: UInt32) {
         command { $0.setLimit = .with { $0.resource = "compile"; $0.units = max(1, units) } }
     }
+    /// The CPU gate's range in the monitor: a further compile starts below this percent.
+    public static let cpuGateRange = 10...100
+    /// The most seconds the settle stepper asks for.
+    public static let settleMax = 600
+    /// Start another compile only below `pct` percent CPU (kept to 10-100; the daemon holds 1-100
+    /// and refuses the rest, and says so in `lastResult`).
+    public func setCompileCpuGate(_ pct: Int) {
+        let v = min(max(pct, Self.cpuGateRange.lowerBound), Self.cpuGateRange.upperBound)
+        command { $0.setGate = .with { $0.name = "compile_cpu_max"; $0.value = Int64(v) } }
+    }
+    /// Seconds after one compile starts before the next may (0: no wait).
+    public func setCompileSettle(_ seconds: Int) {
+        let v = min(max(seconds, 0), Self.settleMax)
+        command { $0.setGate = .with { $0.name = "compile_settle_s"; $0.value = Int64(v) } }
+    }
     public func pause(mode: String, seconds: UInt64) {
         command { $0.pause = .with { $0.project = project; $0.mode = mode; $0.forSeconds = seconds } }
     }

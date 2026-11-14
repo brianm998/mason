@@ -815,6 +815,15 @@ fn call_for(c: &Command) -> Result<Call, String> {
             Some(json!({"resource": l.resource, "units": l.units})),
             None,
         ),
+        Cmd::SetGate(g) => post(
+            "/resources/gate".into(),
+            Some(if g.reset {
+                json!({"name": g.name, "value": null})
+            } else {
+                json!({"name": g.name, "value": g.value})
+            }),
+            None,
+        ),
         Cmd::Raw(r) => Call {
             method: match r.method.to_uppercase().as_str() {
                 "GET" => "GET",

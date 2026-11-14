@@ -536,6 +536,15 @@ public nonisolated struct Mason_V1_Command: Sendable {
     set {body = .revive(newValue)}
   }
 
+  /// Change a compile gate while masond runs, or go back to resources.toml.
+  public var setGate: Mason_V1_SetGate {
+    get {
+      if case .setGate(let v)? = body {return v}
+      return Mason_V1_SetGate()
+    }
+    set {body = .setGate(newValue)}
+  }
+
   public var raw: Mason_V1_Raw {
     get {
       if case .raw(let v)? = body {return v}
@@ -572,6 +581,8 @@ public nonisolated struct Mason_V1_Command: Sendable {
     case unblock(Mason_V1_Unblock)
     case block(Mason_V1_Block)
     case revive(Mason_V1_TaskRef)
+    /// Change a compile gate while masond runs, or go back to resources.toml.
+    case setGate(Mason_V1_SetGate)
     case raw(Mason_V1_Raw)
 
   }
@@ -793,6 +804,25 @@ public nonisolated struct Mason_V1_SetLimit: Sendable {
   public var resource: String = String()
 
   public var units: UInt32 = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// A compile gate by name (compile_cpu_max, compile_settle_s, compile_jobs,
+/// compile_idle_kill_s, stall_ms, memory.floor_mb, disk.floor_gb). `reset` goes
+/// back to resources.toml or the default and ignores `value`. Owner only.
+public nonisolated struct Mason_V1_SetGate: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var name: String = String()
+
+  public var value: Int64 = 0
+
+  public var reset: Bool = false
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -3530,7 +3560,7 @@ nonisolated extension Mason_V1_Ping: SwiftProtobuf.Message, SwiftProtobuf._Messa
 
 nonisolated extension Mason_V1_Command: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".Command"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{3}add_task\0\u{1}cancel\0\u{1}retry\0\u{1}approve\0\u{1}reject\0\u{3}explore_anyway\0\u{1}answer\0\u{1}skip\0\u{3}land_now\0\u{1}force\0\u{1}pause\0\u{1}resume\0\u{3}set_limit\0\u{3}approve_hold\0\u{1}unblock\0\u{1}block\0\u{1}revive\0\u{2}\u{c}raw\0\u{2}\u{a}actor\0\u{1}reason\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{3}add_task\0\u{1}cancel\0\u{1}retry\0\u{1}approve\0\u{1}reject\0\u{3}explore_anyway\0\u{1}answer\0\u{1}skip\0\u{3}land_now\0\u{1}force\0\u{1}pause\0\u{1}resume\0\u{3}set_limit\0\u{3}approve_hold\0\u{1}unblock\0\u{1}block\0\u{1}revive\0\u{3}set_gate\0\u{2}\u{b}raw\0\u{2}\u{a}actor\0\u{1}reason\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -3760,6 +3790,19 @@ nonisolated extension Mason_V1_Command: SwiftProtobuf.Message, SwiftProtobuf._Me
           self.body = .revive(v)
         }
       }()
+      case 19: try {
+        var v: Mason_V1_SetGate?
+        var hadOneofValue = false
+        if let current = self.body {
+          hadOneofValue = true
+          if case .setGate(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.body = .setGate(v)
+        }
+      }()
       case 30: try {
         var v: Mason_V1_Raw?
         var hadOneofValue = false
@@ -3856,6 +3899,10 @@ nonisolated extension Mason_V1_Command: SwiftProtobuf.Message, SwiftProtobuf._Me
     case .revive?: try {
       guard case .revive(let v)? = self.body else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 18)
+    }()
+    case .setGate?: try {
+      guard case .setGate(let v)? = self.body else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 19)
     }()
     case .raw?: try {
       guard case .raw(let v)? = self.body else { preconditionFailure() }
@@ -4374,6 +4421,46 @@ nonisolated extension Mason_V1_SetLimit: SwiftProtobuf.Message, SwiftProtobuf._M
   public static func ==(lhs: Mason_V1_SetLimit, rhs: Mason_V1_SetLimit) -> Bool {
     if lhs.resource != rhs.resource {return false}
     if lhs.units != rhs.units {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Mason_V1_SetGate: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".SetGate"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}name\0\u{1}value\0\u{1}reset\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.name) }()
+      case 2: try { try decoder.decodeSingularInt64Field(value: &self.value) }()
+      case 3: try { try decoder.decodeSingularBoolField(value: &self.reset) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.name.isEmpty {
+      try visitor.visitSingularStringField(value: self.name, fieldNumber: 1)
+    }
+    if self.value != 0 {
+      try visitor.visitSingularInt64Field(value: self.value, fieldNumber: 2)
+    }
+    if self.reset != false {
+      try visitor.visitSingularBoolField(value: self.reset, fieldNumber: 3)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Mason_V1_SetGate, rhs: Mason_V1_SetGate) -> Bool {
+    if lhs.name != rhs.name {return false}
+    if lhs.value != rhs.value {return false}
+    if lhs.reset != rhs.reset {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
