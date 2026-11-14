@@ -6,6 +6,7 @@ import SwiftUI
 
 /// What the editor's controls do, apart from drawing them. The buttons, pickers and fields call
 /// these, and so do the offscreen tests, so a test drives the same code a click does.
+@MainActor
 enum EditorActions {
     static func undo(_ model: MonitorModel) { model.editorCall("undo") }
     static func redo(_ model: MonitorModel) { model.editorCall("redo") }
