@@ -966,3 +966,43 @@ fn run_check_builds_then_tests_like_the_test_step() {
     );
     assert_eq!(d.broker.used("compile"), 0, "nothing leaked");
 }
+
+#[test]
+fn home_compile_holders_carry_the_tasks_project_and_full_title() {
+    let s = Scratch::new("test -f hello.txt", unique_script());
+    let d = s.start_with(|c| c.max_concurrent = 1);
+    d.broker.set_limit("llm:claude", 0).unwrap();
+    let title = "A very long title that is certainly longer than the monitor will show in a row";
+    // Task 0 would read as "no task" in a holder, so file one first.
+    let _first = file_in(&d, "scratch", "first");
+    let t = file_in(&d, "scratch", title);
+    assert!(t.0 > 0);
+    d.broker.set_limit("compile", 3).unwrap();
+    let Ok(held_task) = d.broker.acquire(
+        t,
+        "#task",
+        mason_scheduler::Rank::new(false, 3, 2, 1, 1001, false),
+        mason_scheduler::Needs::of(&[("compile", 1)]),
+        &|| true,
+        &mut |_| {},
+    ) else {
+        panic!("the task was not granted a compile slot")
+    };
+    let (pid, held_person) = hold(&d, "interactive `cargo build`", &[("compile", 1)]);
+    let world = d.world().unwrap();
+    let name = world.projects[&world.tasks[&t].project].name.clone();
+    assert!(!name.is_empty());
+    // Home filtered to a project the holder does not belong to still names it.
+    for filter in ["", "elsewhere"] {
+        let h = mason_daemon::views::Ctx::new(&d, &world).home(filter);
+        let running = h.compilation.unwrap().running;
+        let task_row = running.iter().find(|r| r.task == t.0).unwrap();
+        assert_eq!(task_row.project, name);
+        assert_eq!(task_row.title, title);
+        let person = running.iter().find(|r| r.task == 0).unwrap();
+        assert_eq!((person.project.as_str(), person.title.as_str()), ("", ""));
+    }
+    drop(held_task);
+    drop(held_person);
+    d.broker.lease_close(pid);
+}
