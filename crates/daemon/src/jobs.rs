@@ -64,6 +64,15 @@ pub(crate) fn conflict_runs(task_dir: &Path) -> Vec<u64> {
     v
 }
 
+/// Every send-back's feedback, in order, for the escalated last round.
+const FEEDBACK_HISTORY: &str = "feedback-history.txt";
+
+/// Is the next test round the last one the test step will give (another red would fail the
+/// task), after at least one red round? `done`: test rounds that went red so far.
+pub(crate) fn last_round_ahead(done: u32, max_rounds: u32) -> bool {
+    done >= 1 && done + 1 >= max_rounds
+}
+
 /// Everything a job needs to know, read once at the start.
 pub struct Ctx {
     pub d: Arc<Daemon>,
@@ -151,6 +160,41 @@ impl Ctx {
         n.max(1)
     }
 
+    /// How many rounds of the test step (the one that sends back to this step) went red since
+    /// the owner last restarted the task, leaving out conflict runs, as `round` counts them.
+    /// `None` when no test step sends work back here.
+    fn test_rounds_done(&self) -> Option<(u32, u32)> {
+        let test = self.def.steps.iter().find(|s| {
+            s.kind == StepType::Test && s.on_red.as_deref() == Some(self.step.name.as_str())
+        })?;
+        let max = self.project.max_test_rounds.or(test.max_rounds)?;
+        let w = self.d.world().ok()?;
+        let conflicts = self.conflict_runs();
+        let mut runs: Vec<&StepRun> = w
+            .step_runs
+            .values()
+            .filter(|r| r.task == self.task && r.id.0 < self.run.0)
+            .collect();
+        runs.sort_by_key(|r| r.id.0);
+        let restart = runs
+            .iter()
+            .rev()
+            .find(|r| {
+                matches!(
+                    r.outcome,
+                    Some(StepOutcome::Failed | StepOutcome::Superseded | StepOutcome::Canceled)
+                )
+            })
+            .map_or(0, |r| r.id.0);
+        let done = runs
+            .iter()
+            .filter(|r| r.id.0 > restart && r.name == test.name)
+            .filter(|r| !conflicts.contains(&r.id.0))
+            .filter(|r| matches!(r.outcome, Some(StepOutcome::SentBack)))
+            .count() as u32;
+        Some((done, max))
+    }
+
     /// The change conflicts with the base (or with the rest of its landing
     /// batch): back to the step's `on_red`, with the note for the agent, and
     /// not counted as a red round, since the change is not what is wrong. A
@@ -232,7 +276,17 @@ impl Ctx {
             }
             Transition::SendBack { step } => {
                 if let Some(f) = feedback {
-                    let _ = std::fs::write(self.task_dir().join("feedback.txt"), f);
+                    let _ = std::fs::write(self.task_dir().join("feedback.txt"), &f);
+                    // Every round's feedback is kept for the last round's fresh session (s251).
+                    let entry = format!(
+                        "## After run {} ({}): {}\n{}\n\n",
+                        self.run.0, self.step.name, reason, f
+                    );
+                    let _ = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(self.task_dir().join(FEEDBACK_HISTORY))
+                        .and_then(|mut h| std::io::Write::write_all(&mut h, entry.as_bytes()));
                 }
                 self.emit(EventKind::SentBack {
                     task: self.task,
@@ -1927,6 +1981,30 @@ fn agent_job(c: &Ctx) {
             });
         }
     }
+    // The last round the test step will give runs on the stronger model, in a fresh session that
+    // is shown every earlier round's feedback (s251).
+    let escalate_to: Option<String> = if kind == StepKind::Develop {
+        let agent = c.project.agent();
+        match (agent.escalate_model, c.test_rounds_done()) {
+            (Some(m), Some((done, max))) if last_round_ahead(done, max) => Some(m),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    if escalate_to.is_some() {
+        if let Ok(h) = std::fs::read_to_string(dir.join(FEEDBACK_HISTORY)) {
+            if !h.trim().is_empty() {
+                let note = format!(
+                    "This is your last round: another red test round fails the task. This session starts fresh; the feedback of every earlier round follows.\n\n{h}"
+                );
+                feedback = Some(match feedback {
+                    Some(f) if !f.trim().is_empty() => format!("{f}\n\n{note}"),
+                    _ => note,
+                });
+            }
+        }
+    }
     let decisions = std::fs::read_to_string(dir.join("decisions.txt")).ok();
     let pack_name = match kind {
         StepKind::Develop => "develop",
@@ -2092,8 +2170,14 @@ fn agent_job(c: &Ctx) {
         max: agent.max_retries,
         tries: std::cell::Cell::new(0),
         moved_from: std::cell::RefCell::new(String::new()),
+        escalated: std::cell::Cell::new(false),
     };
     spec.model = launched.model.clone();
+    if let Some(m) = escalate_to.filter(|m| spec.model.as_deref() != Some(m.as_str())) {
+        *rec.moved_from.borrow_mut() = spec.model.clone().unwrap_or_default();
+        rec.escalated.set(true);
+        spec.model = Some(m);
+    }
     spec.effort = launched.effort.clone();
     {
         let (d, run) = (c.d.clone(), c.run.0);
@@ -2260,6 +2344,8 @@ struct LaunchRec<'a> {
     max: u32,
     tries: std::cell::Cell<u32>,
     moved_from: std::cell::RefCell<String>,
+    /// The model was raised for the task's last test round (s251).
+    escalated: std::cell::Cell<bool>,
 }
 
 impl LaunchRec<'_> {
@@ -2281,6 +2367,8 @@ impl LaunchRec<'_> {
             provider: self.provider.into(),
             model_from: if retried {
                 "the retry ladder".into()
+            } else if self.escalated.get() {
+                "escalated for the last round (escalate_model)".into()
             } else {
                 l.model_from.clone()
             },
@@ -3467,6 +3555,22 @@ pub fn cleanup(d: &Arc<Daemon>, task: TaskId, delete_branch: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- s251: the last round -------------------------------------------------------------
+
+    #[test]
+    fn the_last_round_is_the_one_before_another_red_would_fail_the_task() {
+        // Three test rounds: rounds 1 and 2 are not it, the develop run before test round 3 is.
+        assert!(!last_round_ahead(0, 3));
+        assert!(!last_round_ahead(1, 3));
+        assert!(last_round_ahead(2, 3));
+        assert!(last_round_ahead(3, 3));
+        // One round only: the first run is never "escalated", there is no earlier feedback.
+        assert!(!last_round_ahead(0, 1));
+        assert!(last_round_ahead(1, 1));
+        assert!(last_round_ahead(1, 2));
+        assert!(!last_round_ahead(0, 2));
+    }
 
     // ---- s248: the small lane for scoped checks ------------------------------------------
 

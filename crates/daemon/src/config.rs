@@ -504,6 +504,9 @@ pub struct AgentCfg {
     /// Retries up the ladder per step.
     pub max_retries: u32,
     pub sandbox: mason_adapters::sandbox::SandboxKind,
+    /// The model the last round a task may get runs on (`escalate_model`; default `opus` for
+    /// the Claude provider, none for the others; empty turns it off).
+    pub escalate_model: Option<String>,
 }
 
 pub fn parse_agent(id: &str, doc: &DocumentMut) -> Result<AgentCfg, String> {
@@ -550,8 +553,19 @@ pub fn parse_agent(id: &str, doc: &DocumentMut) -> Result<AgentCfg, String> {
             })
             .collect::<Result<_, _>>()?,
     };
+    let escalate_model = match doc.get("escalate_model") {
+        None => (provider == Provider::Claude).then(|| "opus".to_string()),
+        Some(v) => Some(
+            v.as_str()
+                .ok_or_else(|| format!("{id}: `escalate_model` is a model name, or \"\" for none"))?
+                .trim()
+                .to_string(),
+        )
+        .filter(|m| !m.is_empty()),
+    };
     Ok(AgentCfg {
         provider,
+        escalate_model,
         account,
         codex_bin: s("codex_bin").map(PathBuf::from),
         ladder,
@@ -1239,6 +1253,21 @@ mod tests {
         assert!(a.ladder.is_empty() && a.codex_bin.is_none());
         assert_eq!(a.max_retries, 1);
         assert_eq!(a.sandbox, mason_adapters::sandbox::SandboxKind::None);
+    }
+
+    #[test]
+    fn escalate_model_defaults_to_opus_for_claude_and_can_be_changed_or_turned_off() {
+        let base = "path=\"/r\"\nbase=\"m\"\ntest=\"t\"\n";
+        let m = |extra: &str| {
+            parse_project("p", &format!("{base}{extra}\n"))
+                .unwrap()
+                .agent()
+                .escalate_model
+        };
+        assert_eq!(m(""), Some("opus".to_string()));
+        assert_eq!(m("escalate_model = \"fable\""), Some("fable".to_string()));
+        assert_eq!(m("escalate_model = \"\""), None);
+        assert_eq!(m("provider = \"codex\""), None);
     }
 
     #[test]

@@ -48,7 +48,7 @@ count = 2
 type = "test"
 category = "testing"
 uses = { compile = 1, test-suite = 1 }
-suites = ["cargo-workspace", "swift-clients", "compose-clients"]
+suites = ["cargo-workspace", "swift-clients", "compose-clients", "exit-scripts"]
 max_rounds = 3
 on_red = "develop"
 next = "land"
@@ -94,6 +94,17 @@ min_tests = 1
 level = "unit"
 uses = { test-suite = 1 }
 
+# The exit scripts this change adds or edits, relative to its merge base (s249). One `PASS sNNN` or
+# `FAIL sNNN` line per script; CI runs all of them, this runs the ones the change can have broken.
+[suite.exit-scripts]
+command = "bash scripts/run-changed-exit-scripts.sh"
+parser = "regex"
+pass_regex = '^PASS (.+)$'
+fail_regex = '^FAIL (.+)$'
+min_tests = 1
+level = "unit"
+uses = { test-suite = 1 }
+
 [binding.unit]
 when = ["development", "test_step"]
 
@@ -103,6 +114,7 @@ when = ["development", "test_step"]
 "crates/**" = ["cargo-workspace"]
 "Cargo.*" = ["cargo-workspace"]
 "rust-toolchain.toml" = ["cargo-workspace"]
+"scripts/exit/**" = ["cargo-workspace", "exit-scripts"]
 "clients/swift/**" = ["swift-clients"]
 "clients/compose/**" = ["compose-clients"]
 "clients/features.toml" = ["cargo-workspace", "swift-clients", "compose-clients"]

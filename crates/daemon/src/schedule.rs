@@ -308,6 +308,30 @@ fn is_live(d: &Daemon, task: u64) -> bool {
         .is_some_and(|s| !matches!(s, State::Landed | State::Canceled | State::Failed))
 }
 
+/// The open task of the project whose title is `title` (as `file_low` cuts it), if any.
+fn open_task_titled(d: &Daemon, project: &ProjectCfg, title: &str) -> Option<TaskId> {
+    let pid = d.project_id_by_name(&project.id)?;
+    let w = d.world().ok()?;
+    same_open_title(
+        w.tasks
+            .values()
+            .filter(|t| t.project == pid && !t.state.is_terminal())
+            .map(|t| (t.id, t.title.as_str())),
+        title,
+    )
+}
+
+/// The id among `open` (id, title) whose title is `title` cut to the length a filed task keeps.
+pub fn same_open_title<'a>(
+    open: impl Iterator<Item = (TaskId, &'a str)>,
+    title: &str,
+) -> Option<TaskId> {
+    let cut: String = title.chars().take(120).collect();
+    open.filter(|(_, t)| *t == cut)
+        .map(|(id, _)| id)
+        .min_by_key(|id| id.0)
+}
+
 /// File a Low-priority task, unless the last one is still open. Returns its id.
 pub fn file_low(
     d: &Arc<Daemon>,
@@ -440,6 +464,11 @@ fn run_check(d: &Arc<Daemon>, project: &ProjectCfg, spec: &Spec, row: &mut Sched
             project.base_ref(),
             tail(&output, 30)
         );
+        // One task per failure: an open task already carrying this title is that failure's.
+        if let Some(open) = open_task_titled(d, project, &title) {
+            tracing::info!(task = open.0, %title, "not filed: a task for this failure is open");
+            continue;
+        }
         match file_low(d, project, &title, &body) {
             Ok(t) => filed.push(t.0),
             Err(e) => tracing::warn!(%e, "could not file the task for a new failure"),
@@ -581,6 +610,38 @@ paths = ["src/**", "Cargo.toml"]
         let c = i.ci.as_ref().unwrap();
         assert_eq!((c.paths.len(), c.max_tickets, c.at), (2, 6, None));
         assert!(s.iter().all(|s| s.kind == "ci"));
+    }
+
+    #[test]
+    fn a_failure_with_an_open_task_is_not_filed_again() {
+        let open = [
+            (
+                TaskId(7),
+                "exit-scripts is red on origin/develop: FAILED: scripts/exit/s166.sh",
+            ),
+            (TaskId(9), "something else"),
+        ];
+        assert_eq!(
+            same_open_title(
+                open.iter().copied(),
+                "exit-scripts is red on origin/develop: FAILED: scripts/exit/s166.sh"
+            ),
+            Some(TaskId(7))
+        );
+        assert_eq!(
+            same_open_title(
+                open.iter().copied(),
+                "exit-scripts is red on origin/develop: FAILED: scripts/exit/s12.sh"
+            ),
+            None
+        );
+        // A long title is compared as it is filed, cut to 120 characters.
+        let long = format!("x{}", "y".repeat(200));
+        let cut: String = long.chars().take(120).collect();
+        assert_eq!(
+            same_open_title([(TaskId(1), cut.as_str())].into_iter(), &long),
+            Some(TaskId(1))
+        );
     }
 
     #[test]
