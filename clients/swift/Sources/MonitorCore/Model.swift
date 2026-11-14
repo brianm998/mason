@@ -38,7 +38,7 @@ public final class LiveState: ObservableObject {
 @MainActor
 public final class MonitorModel: ObservableObject {
     // From the daemon.
-    @Published public var header: HeaderView?
+    @Published public var header: HeaderView? { didSet { prunePauseCollapse() } }
     @Published public var sidebar: SidebarView?
     @Published public var home: HomeView?
     /// The CPU shares, observed apart from the whole model: the CPU section watches only this.
@@ -259,6 +259,8 @@ public final class MonitorModel: ObservableObject {
         static let mute = "muted"
         static let sidebarWidth = "sidebarWidth"
         static func section(_ s: String) -> String { "section.\(s).expanded" }
+        static func pause(project: String, mode: String) -> String { "paused:\(project):\(mode)" }
+        static let pauseIndex = "paused.collapsed.keys"
     }
 
     public static let scaleRange: ClosedRange<Double> = 0.8...2.4
@@ -390,6 +392,56 @@ public final class MonitorModel: ObservableObject {
     public func setExpanded(_ state: String, _ open: Bool) {
         overrides[state] = open
         prefs.setBool(open, for: Keys.section(state))
+    }
+
+    // MARK: paused banners
+
+    private var collapsedPauseKeys: [String] {
+        (prefs.string(Keys.pauseIndex) ?? "").split(separator: "\n").map(String.init)
+    }
+
+    /// Whether this pause's banner is collapsed to its icon (kept per device, across launches).
+    public func isPauseCollapsed(project: String, mode: String) -> Bool {
+        prefs.bool(Keys.pause(project: project, mode: mode)) ?? false
+    }
+
+    public func setPauseCollapsed(project: String, mode: String, _ collapsed: Bool) {
+        let key = Keys.pause(project: project, mode: mode)
+        var keys = collapsedPauseKeys.filter { $0 != key }
+        if collapsed { keys.append(key) }
+        prefs.setBool(collapsed, for: key)
+        prefs.setString(keys.joined(separator: "\n"), for: Keys.pauseIndex)
+        objectWillChange.send()
+    }
+
+    /// One row of the pause group: banner indices. `collapsed` icons sit at the leading edge of the
+    /// row; `expanded` is the full banner in that row (nil: an icon-only row).
+    public struct PauseRow: Equatable {
+        public let collapsed: [Int]
+        public let expanded: Int?
+    }
+
+    /// The pause group's rows, in banner order: collapsed icons ride in the first expanded pause's
+    /// row, or share one icon-only row when every pause is collapsed.
+    public func pauseRows() -> [PauseRow] {
+        let all = (header?.banners ?? []).enumerated().filter { $0.element.kind == "paused" }
+        let isCollapsed = { (b: Mason_V1_Banner) in self.isPauseCollapsed(project: b.project, mode: b.mode) }
+        let collapsed = all.filter { isCollapsed($0.element) }.map(\.offset)
+        let expanded = all.filter { !isCollapsed($0.element) }.map(\.offset)
+        if expanded.isEmpty { return collapsed.isEmpty ? [] : [PauseRow(collapsed: collapsed, expanded: nil)] }
+        return expanded.enumerated().map { PauseRow(collapsed: $0.offset == 0 ? collapsed : [], expanded: $0.element) }
+    }
+
+    /// A pause that is no longer in the header (resumed or expired) forgets its collapse, so a
+    /// later pause on the same project and mode starts expanded and is noticed.
+    private func prunePauseCollapse() {
+        guard let h = header else { return }
+        let live = Set(h.banners.filter { $0.kind == "paused" }.map { Keys.pause(project: $0.project, mode: $0.mode) })
+        let keys = collapsedPauseKeys
+        let kept = keys.filter { live.contains($0) }
+        guard kept.count != keys.count else { return }
+        for k in keys where !live.contains(k) { prefs.setBool(false, for: k) }
+        prefs.setString(kept.joined(separator: "\n"), for: Keys.pauseIndex)
     }
 
     public func toggle(_ s: SidebarSection) { setExpanded(s.state, !isExpanded(s)) }
@@ -552,6 +604,10 @@ public final class MonitorModel: ObservableObject {
         command { $0.pause = .with { $0.project = project; $0.mode = mode; $0.forSeconds = seconds } }
     }
     public func resume() { command { $0.resume = .with { $0.project = project } } }
+    /// Lift exactly one pause: its project (empty for everything) and its mode.
+    public func resumePause(project: String, mode: String) {
+        command { $0.resume = .with { $0.project = project; $0.mode = mode } }
+    }
     /// Change a proposal's title, body or evidence while it waits for the owner (nil: unchanged).
     public func editProposal(_ task: UInt64, title: String?, body: String?, evidence: String?) {
         var o: [String: String] = [:]

@@ -562,12 +562,15 @@ impl<'a> Ctx<'a> {
                     },
                     p.owner
                 ),
+                project: p.project.clone(),
+                mode: p.mode.clone(),
             });
         }
         for (_, _, text) in crate::ssh_keys::alerts(self.d) {
             banners.push(Banner {
                 kind: "push_auth".into(),
                 text,
+                ..Default::default()
             });
         }
         for (pid, p) in &self.d.projects() {
@@ -578,6 +581,7 @@ impl<'a> Ctx<'a> {
                         "{}: the definition is refused; the last good one is running",
                         p.id
                     ),
+                    ..Default::default()
                 });
             }
         }
@@ -604,12 +608,14 @@ impl<'a> Ctx<'a> {
                         p.id,
                         pending.join(", ")
                     ),
+                    ..Default::default()
                 });
             }
             if let Some(e) = v["error"].as_str() {
                 banners.push(Banner {
                     kind: "ci_watch".into(),
                     text: format!("{}: the base-branch CI watch cannot look: {e}", p.id),
+                    ..Default::default()
                 });
             }
         }
@@ -628,11 +634,16 @@ impl<'a> Ctx<'a> {
                             f.project, f.reason
                         )
                     },
+                    ..Default::default()
                 });
             }
         }
         for (kind, text) in crate::holds::banners(self.d) {
-            banners.push(Banner { kind, text });
+            banners.push(Banner {
+                kind,
+                text,
+                ..Default::default()
+            });
         }
         HeaderView {
             attention,
