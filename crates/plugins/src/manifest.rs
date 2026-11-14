@@ -249,7 +249,9 @@ pub fn parse_manifest(text: &str) -> Result<Manifest, Vec<String>> {
         bad.push("`run` is required: the program to start, like \"./check.py\"".into());
     }
     match doc.get("protocol") {
-        None => bad.push("`protocol` is required (this version speaks protocols 1, 2 and 3)".into()),
+        None => {
+            bad.push("`protocol` is required (this version speaks protocols 1, 2 and 3)".into())
+        }
         Some(_) if m.protocol != 0 && !crate::SUPPORTED.contains(&m.protocol) => bad.push(format!(
             "protocol {} is not supported; this version speaks protocols 1, 2 and 3",
             m.protocol
@@ -317,7 +319,10 @@ categories = ["testing"]
                     .replace("step-type:migration-check", what)
                     .replace("protocol = 1", old);
                 let e = parse_manifest(&t).unwrap_err();
-                assert!(e.iter().any(|x| x.contains("needs protocol 3")), "{what}: {e:?}");
+                assert!(
+                    e.iter().any(|x| x.contains("needs protocol 3")),
+                    "{what}: {e:?}"
+                );
             }
             let t = OK
                 .replace("step-type:migration-check", what)

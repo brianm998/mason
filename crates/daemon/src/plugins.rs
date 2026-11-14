@@ -538,10 +538,7 @@ pub fn approved_types(p: &ProjectCfg) -> Vec<PluginType> {
 /// (`adapter:tracker:acme`, `parser:junit`, `environment:vm`), ready to start: its
 /// approved bytes are written out and its manifest read. `Err` says why not, and
 /// "needs approval" when the owner has not approved exactly these bytes. Nothing runs here.
-pub fn approved_provider(
-    p: &ProjectCfg,
-    what: &str,
-) -> Result<(Launch, Manifest), String> {
+pub fn approved_provider(p: &ProjectCfg, what: &str) -> Result<(Launch, Manifest), String> {
     if p.config_dir.as_os_str().is_empty() {
         return Err(format!(
             "`{what}` is a plugin, but this project was not loaded from a config dir, so there are no approvals to check"
@@ -553,17 +550,8 @@ pub fn approved_provider(
     let ext = scan
         .extensions
         .iter()
-        .find(|e| {
-            e.manifest
-                .as_ref()
-                .is_ok_and(|m| m.provides_extra(what))
-        })
-        .ok_or_else(|| {
-            format!(
-                "no extension on {} provides `{what}`",
-                p.base_ref()
-            )
-        })?;
+        .find(|e| e.manifest.as_ref().is_ok_and(|m| m.provides_extra(what)))
+        .ok_or_else(|| format!("no extension on {} provides `{what}`", p.base_ref()))?;
     if approved(&p.config_dir, &p.id, &ext.dir, &ext.hash).is_none() {
         let seen = approvals(&p.config_dir, &p.id)
             .iter()
@@ -628,7 +616,11 @@ pub fn parse_with_plugin(
 ) -> Result<mason_testing::Results, String> {
     with_provider(p, &format!("parser:{name}"), |plugin| {
         let v = plugin
-            .call("parser.parse", &json!({"text": text}), Duration::from_secs(60))
+            .call(
+                "parser.parse",
+                &json!({"text": text}),
+                Duration::from_secs(60),
+            )
             .map_err(|e| format!("parser plugin `{name}`: {e}"))?;
         mason_testing::parse::from_plugin(&v)
     })

@@ -193,7 +193,10 @@ pub fn plugin_kit(dir: &Path, timeout: Duration) -> Vec<Check> {
     // `step.run` to try; its methods are exercised by the adapter kits.
     if m.step_types.is_empty() {
         for n in ["run", "progress", "refuses bad config"] {
-            out.push(pass(n, "provides no step type; the adapter kits exercise it"));
+            out.push(pass(
+                n,
+                "provides no step type; the adapter kits exercise it",
+            ));
         }
         match p.shutdown(timeout) {
             Ok(()) => out.push(pass("shutdown", "answered and exited")),

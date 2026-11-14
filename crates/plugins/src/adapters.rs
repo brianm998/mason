@@ -341,7 +341,9 @@ impl GitHostAdapter for PluginHost {
         })
     }
     fn pr_status(&self, number: u64) -> Result<PrStatus, ApiError> {
-        let v = self.link.call("host.pr_status", json!({"number": number}))?;
+        let v = self
+            .link
+            .call("host.pr_status", json!({"number": number}))?;
         let state = match v["state"].as_str() {
             Some("open") => PrState::Open,
             Some("merged") => PrState::Merged,

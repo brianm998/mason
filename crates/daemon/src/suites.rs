@@ -583,12 +583,7 @@ fn judge_ran(suite: &Suite, ran: &Ran, cwd: &Path) -> Judged {
 
 /// [`judge_ran`], reading the output with `plugin` when the suite names a parser plugin
 /// (`Who::plugin_parser`). The verdict is judged from the cases exactly as for a built-in parser.
-fn judge_ran_with(
-    suite: &Suite,
-    ran: &Ran,
-    cwd: &Path,
-    plugin: Option<&PluginParse>,
-) -> Judged {
+fn judge_ran_with(suite: &Suite, ran: &Ran, cwd: &Path, plugin: Option<&PluginParse>) -> Judged {
     // A tree the stall watcher killed is red for that reason, whatever the partial
     // output parses to.
     if let Some(why) = &ran.stalled {

@@ -478,8 +478,8 @@ fn main() {
         // known too, so a plugin step validates offline.
         let plugins = match &project {
             Some(id) => {
-                let p = mason_daemon::config::load_project(&config_dir, id)
-                    .unwrap_or_else(|e| die(&e));
+                let p =
+                    mason_daemon::config::load_project(&config_dir, id).unwrap_or_else(|e| die(&e));
                 mason_daemon::plugins::approved_types(&p)
             }
             None => vec![],

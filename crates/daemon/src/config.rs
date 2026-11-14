@@ -716,9 +716,7 @@ pub struct CiCfg {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CiKind {
     /// An approved project extension that provides `adapter:ci:<name>` (`kind = "plugin:<name>"`).
-    Plugin {
-        name: String,
-    },
+    Plugin { name: String },
     GithubActions {
         api: String,
         repo: String,

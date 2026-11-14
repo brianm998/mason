@@ -24,7 +24,9 @@ fn git(dir: &Path, args: &[&str]) {
 }
 
 fn fixture(name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../plugins/tests/fixtures").join(name)
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../plugins/tests/fixtures")
+        .join(name)
 }
 
 /// A repo whose base branch holds the fixture extensions, a config dir, and a project
@@ -76,23 +78,35 @@ fn approve(repo: &Path, cfg: &Path, name: &str) {
 #[test]
 fn an_unapproved_or_changed_plugin_adapter_is_not_built() {
     let (repo, cfg, p) = setup();
-    let e = mason_daemon::services::tracker(&p).err().expect("unapproved");
+    let e = mason_daemon::services::tracker(&p)
+        .err()
+        .expect("unapproved");
     assert!(e.contains("needs approval"), "{e}");
-    assert!(mason_daemon::services::host(&p).err().unwrap().contains("needs approval"));
-    assert!(mason_daemon::services::ci(&p).err().unwrap().contains("needs approval"));
+    assert!(mason_daemon::services::host(&p)
+        .err()
+        .unwrap()
+        .contains("needs approval"));
+    assert!(mason_daemon::services::ci(&p)
+        .err()
+        .unwrap()
+        .contains("needs approval"));
 
     approve(repo.path(), cfg.path(), "fixture-adapters");
     assert!(mason_daemon::services::tracker(&p).is_ok());
 
     // Any change to the folder is a different hash, and needs a new approval.
     std::fs::write(
-        repo.path().join(".mason/extensions/fixture-adapters/adapters.py"),
+        repo.path()
+            .join(".mason/extensions/fixture-adapters/adapters.py"),
         "# changed\n",
     )
     .unwrap();
     git(repo.path(), &["commit", "-qam", "edit"]);
     let e = mason_daemon::services::tracker(&p).err().expect("changed");
-    assert!(e.contains("needs approval") && e.contains("changed since"), "{e}");
+    assert!(
+        e.contains("needs approval") && e.contains("changed since"),
+        "{e}"
+    );
 }
 
 #[test]
@@ -103,7 +117,10 @@ fn an_extension_that_provides_nothing_of_the_kind_is_not_found() {
         name: "nobody".into(),
     });
     let e = mason_daemon::services::host(&p).err().unwrap();
-    assert!(e.contains("no extension") && e.contains("adapter:host:nobody"), "{e}");
+    assert!(
+        e.contains("no extension") && e.contains("adapter:host:nobody"),
+        "{e}"
+    );
 }
 
 #[test]
@@ -130,7 +147,10 @@ fn approved_plugin_adapters_pass_the_conformance_kits() {
     assert_eq!(host_kit(host.as_ref(), &s), Vec::<String>::new());
 
     let (ci, _) = mason_daemon::services::ci(&p).unwrap().unwrap();
-    assert_eq!(build_kit(ci.as_ref(), "refs/mason/x", "abc"), Vec::<String>::new());
+    assert_eq!(
+        build_kit(ci.as_ref(), "refs/mason/x", "abc"),
+        Vec::<String>::new()
+    );
 }
 
 #[test]
@@ -148,8 +168,13 @@ fn a_parser_plugin_reads_results_and_an_environment_plugin_runs_its_lifecycle() 
     for phase in ["setup", "health", "teardown"] {
         environment_call(&p, "fixture-parser", phase, &c).unwrap();
     }
-    let e = environment_call(&p, "fixture-parser", "health", &serde_json::json!({"broken": true}))
-        .unwrap_err();
+    let e = environment_call(
+        &p,
+        "fixture-parser",
+        "health",
+        &serde_json::json!({"broken": true}),
+    )
+    .unwrap_err();
     assert!(e.contains("broken"), "{e}");
 }
 

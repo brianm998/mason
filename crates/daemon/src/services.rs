@@ -141,7 +141,13 @@ pub fn tracker(p: &ProjectCfg) -> Result<Option<Tracker>, String> {
             let name = t.plugin.as_deref().unwrap_or_default();
             let (l, m) = plugin_parts(p, "tracker", name)?;
             Some((
-                Arc::new(PluginTracker::new(l, &m.name, m.protocol, name, PLUGIN_CALL)),
+                Arc::new(PluginTracker::new(
+                    l,
+                    &m.name,
+                    m.protocol,
+                    name,
+                    PLUGIN_CALL,
+                )),
                 t.clone(),
             ))
         }

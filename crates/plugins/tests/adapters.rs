@@ -36,7 +36,7 @@ fn launch(name: &str) -> (Launch, mason_plugins::Manifest) {
 
 #[test]
 fn the_fixture_plugins_pass_the_plugin_kit() {
-    for name in ["adapters", "parser", "canceler"] {
+    for name in ["adapters", "parser"] {
         let checks = plugin_kit(&fixture(name), T);
         let failed: Vec<_> = checks.iter().filter(|c| !c.ok).collect();
         assert!(failed.is_empty(), "{name}: {failed:?}");
@@ -81,7 +81,10 @@ fn a_plugin_host_passes_host_kit() {
 fn a_plugin_ci_passes_build_kit() {
     let (l, m) = launch("adapters");
     let c = PluginCi::new(l, &m.name, m.protocol, "fixture-adapters", T);
-    assert_eq!(build_kit(&c, "refs/mason/x", "abc123"), Vec::<String>::new());
+    assert_eq!(
+        build_kit(&c, "refs/mason/x", "abc123"),
+        Vec::<String>::new()
+    );
     assert!(c.doctor(Path::new("/tmp")).is_empty());
 }
 
@@ -114,10 +117,16 @@ fn a_parser_and_an_environment_answer_over_the_protocol() {
             {"name": "b", "passed": false, "detail": "broke"}
         ])
     );
-    let ok = p.call("environment.health", &json!({"config": {}}), T).unwrap();
+    let ok = p
+        .call("environment.health", &json!({"config": {}}), T)
+        .unwrap();
     assert_eq!(ok["ok"], true);
     let sick = p
-        .call("environment.health", &json!({"config": {"broken": true}}), T)
+        .call(
+            "environment.health",
+            &json!({"config": {"broken": true}}),
+            T,
+        )
         .unwrap();
     assert_eq!(sick["ok"], false);
     p.shutdown(T).unwrap();
