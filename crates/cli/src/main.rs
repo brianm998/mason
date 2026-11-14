@@ -41,6 +41,7 @@ mod init;
 mod progress;
 mod remove;
 mod resources;
+mod service;
 mod testing;
 
 use client::{CallError, Daemon};
@@ -95,6 +96,8 @@ mason: command-line client for the MASON pipeline
   mason test parse <parser> <file> [--min N]   read a results file the way a suite would, and judge it
   mason logs <id> [--follow]
   mason status [--json] [--watch]     with --watch, follow every running step's progress
+  mason service install [--print] [--force] | uninstall | status
+                                      run masond --managed under launchd (macOS) or a systemd user unit
   mason doctor                        checks the setup, and that `mason` on PATH is this program
   mason init [--yes] [--workflow solo-fast|reviewed-pr|batched-ci|device-mobile|human-gated]
              [--tracker local|github] [--agent claude|codex] [--agent-bin P] [--sessions N]
@@ -419,6 +422,13 @@ fn main() {
     }
     if cmd == "adopt" {
         exit(adopt::run(std::mem::take(&mut a.rest), &config_dir));
+    }
+    if cmd == "service" {
+        exit(service::run(
+            std::mem::take(&mut a.rest),
+            &data_dir,
+            &config_dir,
+        ));
     }
     if cmd == "remove" {
         exit(remove::run(std::mem::take(&mut a.rest), &config_dir));
