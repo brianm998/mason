@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! `mason service install|uninstall|status`: run `masond --managed` under the platform's
-//! service manager (launchd on macOS, a systemd user unit on Linux).
+//! service manager (launchd on macOS, a systemd user unit on Linux, a per-user logon
+//! Scheduled Task on Windows).
 //!
 //! One function per platform per verb (`install_launchd`, `install_systemd`, ...) is the seam
 //! a Windows service can add a third to. Every call to `launchctl`/`systemctl` goes through a
@@ -19,7 +20,12 @@ pub const MARKER: &str = "Written by `mason service install`";
 pub enum Kind {
     Launchd,
     Systemd,
+    /// A Windows Scheduled Task for the current user, run at logon.
+    Task,
 }
+
+/// The Scheduled Task name.
+pub const TASK_NAME: &str = "MasonDaemon";
 
 impl Kind {
     pub fn current() -> Option<Kind> {
@@ -27,6 +33,8 @@ impl Kind {
             Some(Kind::Launchd)
         } else if cfg!(target_os = "linux") {
             Some(Kind::Systemd)
+        } else if cfg!(windows) {
+            Some(Kind::Task)
         } else {
             None
         }
@@ -66,7 +74,37 @@ pub fn unit_path(kind: Kind, home: &Path) -> PathBuf {
             .join("Library/LaunchAgents")
             .join(format!("{LABEL}.plist")),
         Kind::Systemd => home.join(".config/systemd/user").join(UNIT),
+        Kind::Task => home.join("AppData/Local/mason").join("masond-task.xml"),
     }
+}
+
+/// The Task Scheduler definition: at the current user's logon, run `masond --managed`
+/// with least privilege (no admin rights, no service account), restarting on failure.
+pub fn task_xml(o: &Opts) -> String {
+    // Arguments are one string; quote each path for the Windows command line.
+    let win_quote = |p: &Path| format!("\"{}\"", p.display());
+    let args = format!(
+        "--managed --data-dir {} --config-dir {}",
+        win_quote(&o.data_dir),
+        win_quote(&o.config_dir)
+    );
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+<Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\n\
+  <RegistrationInfo>\n    <Description>{MARKER}</Description>\n  </RegistrationInfo>\n\
+  <Triggers>\n    <LogonTrigger>\n      <Enabled>true</Enabled>\n    </LogonTrigger>\n  </Triggers>\n\
+  <Principals>\n    <Principal id=\"Author\">\n      <LogonType>InteractiveToken</LogonType>\n      <RunLevel>LeastPrivilege</RunLevel>\n    </Principal>\n  </Principals>\n\
+  <Settings>\n    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>\n\
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>\n\
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>\n\
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>\n\
+    <RestartOnFailure>\n      <Interval>PT1M</Interval>\n      <Count>999</Count>\n    </RestartOnFailure>\n\
+  </Settings>\n\
+  <Actions Context=\"Author\">\n    <Exec>\n      <Command>{}</Command>\n      <Arguments>{}</Arguments>\n    </Exec>\n  </Actions>\n\
+</Task>\n",
+        xml(&o.masond.display().to_string()),
+        xml(&args)
+    )
 }
 
 fn xml(s: &str) -> String {
@@ -121,6 +159,7 @@ pub fn render(kind: Kind, o: &Opts) -> String {
     match kind {
         Kind::Launchd => plist(o),
         Kind::Systemd => systemd_unit(o),
+        Kind::Task => task_xml(o),
     }
 }
 
@@ -195,6 +234,32 @@ pub fn install_systemd(o: &Opts, r: &dyn Runner) -> Result<Vec<String>, String> 
     )])
 }
 
+pub fn install_task(o: &Opts, r: &dyn Runner) -> Result<Vec<String>, String> {
+    let path = write_unit(Kind::Task, o)?;
+    check(
+        r.run(
+            "schtasks",
+            &[
+                "/Create".into(),
+                "/TN".into(),
+                TASK_NAME.into(),
+                "/XML".into(),
+                path.display().to_string(),
+                "/F".into(),
+            ],
+        ),
+        "schtasks /Create",
+    )?;
+    check(
+        r.run("schtasks", &s(&["/Run", "/TN", TASK_NAME])),
+        "schtasks /Run",
+    )?;
+    Ok(vec![format!(
+        "wrote {}, registered task {TASK_NAME} (runs at logon) and started it",
+        path.display()
+    )])
+}
+
 pub fn install(kind: Kind, o: &Opts, r: &dyn Runner) -> Result<Vec<String>, String> {
     if !o.masond.is_file() {
         return Err(format!(
@@ -205,6 +270,7 @@ pub fn install(kind: Kind, o: &Opts, r: &dyn Runner) -> Result<Vec<String>, Stri
     match kind {
         Kind::Launchd => install_launchd(o, r),
         Kind::Systemd => install_systemd(o, r),
+        Kind::Task => install_task(o, r),
     }
 }
 
@@ -245,10 +311,22 @@ pub fn uninstall_systemd(home: &Path, r: &dyn Runner) -> Result<Vec<String>, Str
     Ok(vec![format!("stopped and removed {}", path.display())])
 }
 
+pub fn uninstall_task(home: &Path, r: &dyn Runner) -> Result<Vec<String>, String> {
+    let path = unit_path(Kind::Task, home);
+    if !refuse_foreign(&path)? {
+        return Ok(vec!["nothing to uninstall".into()]);
+    }
+    let _ = r.run("schtasks", &s(&["/End", "/TN", TASK_NAME]));
+    let _ = r.run("schtasks", &s(&["/Delete", "/TN", TASK_NAME, "/F"]));
+    std::fs::remove_file(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(vec![format!("stopped and removed {}", path.display())])
+}
+
 pub fn uninstall(kind: Kind, home: &Path, r: &dyn Runner) -> Result<Vec<String>, String> {
     match kind {
         Kind::Launchd => uninstall_launchd(home, r),
         Kind::Systemd => uninstall_systemd(home, r),
+        Kind::Task => uninstall_task(home, r),
     }
 }
 
@@ -262,6 +340,10 @@ fn manager_state(kind: Kind, r: &dyn Runner) -> (bool, bool) {
                 _ => (false, false),
             }
         }
+        Kind::Task => match r.run("schtasks", &s(&["/Query", "/TN", TASK_NAME, "/FO", "LIST"])) {
+            Ok((0, out)) => (true, task_running(&out)),
+            _ => (false, false),
+        },
         Kind::Systemd => {
             let enabled = matches!(
                 r.run("systemctl", &s(&["--user", "is-enabled", UNIT])),
@@ -274,6 +356,14 @@ fn manager_state(kind: Kind, r: &dyn Runner) -> (bool, bool) {
             (enabled, active)
         }
     }
+}
+
+/// Does `schtasks /Query /FO LIST` output say the task is running? (`Status:  Running`)
+pub fn task_running(out: &str) -> bool {
+    out.lines().any(|l| {
+        l.split_once(':')
+            .is_some_and(|(k, v)| k.trim() == "Status" && v.trim() == "Running")
+    })
 }
 
 pub fn status(kind: Kind, home: &Path, data_dir: &Path, r: &dyn Runner) -> Vec<String> {
@@ -341,14 +431,14 @@ pub fn run(mut args: Vec<String>, data_dir: &Path, config_dir: &Path) -> i32 {
         return 2;
     }
     let Some(kind) = Kind::current() else {
-        eprintln!("error: mason service supports launchd (macOS) and systemd (Linux) only");
+        eprintln!("error: mason service supports launchd (macOS), systemd (Linux) and Task Scheduler (Windows) only");
         return 1;
     };
-    let home = std::env::var_os("HOME")
+    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
         .map(PathBuf::from)
         .unwrap_or_default();
     let masond = std::env::current_exe()
-        .map(|e| e.with_file_name("masond"))
+        .map(|e| e.with_file_name(format!("masond{}", std::env::consts::EXE_SUFFIX)))
         .unwrap_or_else(|_| PathBuf::from("masond"));
     let o = Opts {
         home: home.clone(),
@@ -540,5 +630,58 @@ mod tests {
         let mut o = opts(t.path());
         o.masond = t.path().join("nope");
         assert!(install(Kind::Launchd, &o, &Fake::default()).is_err());
+    }
+
+    #[test]
+    fn task_xml_runs_masond_at_logon_unprivileged() {
+        let t = tempfile::tempdir().unwrap();
+        let o = opts(t.path());
+        let x = task_xml(&o);
+        assert!(x.contains("<LogonTrigger>"));
+        assert!(x.contains("<RunLevel>LeastPrivilege</RunLevel>"));
+        assert!(x.contains(&format!("<Command>{}</Command>", o.masond.display())));
+        assert!(x.contains("--managed --data-dir &quot;") || x.contains("--managed --data-dir \""));
+        assert!(x.contains(MARKER));
+        assert_eq!(render(Kind::Task, &o), x);
+    }
+
+    #[test]
+    fn task_install_uninstall_and_foreign_refusal() {
+        let t = tempfile::tempdir().unwrap();
+        let mut o = opts(t.path());
+        let f = Fake::default();
+        install(Kind::Task, &o, &f).unwrap();
+        let calls = f.calls.borrow().join("\n");
+        assert!(
+            calls.contains("schtasks /Create /TN MasonDaemon /XML"),
+            "{calls}"
+        );
+        assert!(calls.contains("schtasks /Run /TN MasonDaemon"), "{calls}");
+        uninstall(Kind::Task, t.path(), &f).unwrap();
+        assert!(!unit_path(Kind::Task, t.path()).exists());
+        assert!(f
+            .calls
+            .borrow()
+            .iter()
+            .any(|c| c.contains("/Delete /TN MasonDaemon /F")));
+        let path = unit_path(Kind::Task, t.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "<Task/>").unwrap();
+        assert!(install(Kind::Task, &o, &Fake::default())
+            .unwrap_err()
+            .contains("--force"));
+        assert!(uninstall(Kind::Task, t.path(), &f).is_err());
+        o.force = true;
+        install(Kind::Task, &o, &f).unwrap();
+    }
+
+    #[test]
+    fn task_status_parses_schtasks_list_output() {
+        assert!(task_running(
+            "TaskName: \\MasonDaemon\nStatus:        Running\n"
+        ));
+        assert!(!task_running(
+            "TaskName: \\MasonDaemon\nStatus:        Ready\n"
+        ));
     }
 }
