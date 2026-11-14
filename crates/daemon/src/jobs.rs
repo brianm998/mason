@@ -867,6 +867,25 @@ pub(crate) fn acquire_needs_while(
     needs: mason_scheduler::Needs,
     wanted: &dyn Fn() -> bool,
 ) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
+    acquire_needs_as(c, needs, wanted, false)
+}
+
+/// [`acquire_needs_while`] for one of several leases the step holds at once (s345: suites
+/// run side by side). It never takes the step's own place in the broker.
+pub(crate) fn acquire_needs_beside(
+    c: &Ctx,
+    needs: mason_scheduler::Needs,
+    wanted: &dyn Fn() -> bool,
+) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
+    acquire_needs_as(c, needs, wanted, true)
+}
+
+fn acquire_needs_as(
+    c: &Ctx,
+    needs: mason_scheduler::Needs,
+    wanted: &dyn Fn() -> bool,
+    beside: bool,
+) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
     let d = &c.d;
     // Device pools are sized by what the provider lists, never by a default.
     if needs.amounts.keys().any(|n| n.starts_with("device:")) {
@@ -891,7 +910,13 @@ pub(crate) fn acquire_needs_while(
     };
     let mut waited = false;
     let asked = needs.clone();
-    let lease = d.broker.acquire(
+    let acquire = if beside {
+        crate::sched::Broker::acquire_beside
+    } else {
+        crate::sched::Broker::acquire
+    };
+    let lease = acquire(
+        &d.broker,
         c.task,
         &format!("#{}", c.task.0),
         rank,
