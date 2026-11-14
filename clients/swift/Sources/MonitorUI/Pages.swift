@@ -120,7 +120,7 @@ struct HomePage: View {
                         ForEach(st.rows, id: \.id) { r in
                             Button { model.go(.task(r.id)) } label: {
                                 HStack(spacing: theme.spacing) {
-                                    ProgressCells(model: model, cells: r.progress, slow: r.slow)
+                                    ProgressCells(clock: model.live, cells: r.progress, slow: r.slow)
                                     Text("\(r.project) \(r.key)").font(theme.body(.semibold))
                                     Text(r.title).font(theme.body())
                                     Text(r.whyWaiting.isEmpty ? Format.duration(ms: r.inStateMs) : "\(r.whyWaiting), \(Format.duration(ms: r.inStateMs))")
@@ -300,7 +300,7 @@ struct TaskDetailPage: View {
             }
 
             HStack(spacing: theme.spacing) {
-                ProgressCells(model: model, cells: r.progress, slow: r.slow)
+                ProgressCells(clock: model.live, cells: r.progress, slow: r.slow)
                 if !r.typical.isEmpty { Text(r.typical).font(theme.small()).foregroundStyle(theme.muted) }
             }
             if let c = r.progress.running { ProgressDetail(model: model, cell: c) }
@@ -404,15 +404,7 @@ struct TaskDetailPage: View {
             if !d.body.isEmpty {
                 section("Task", theme: theme) { Text(d.body).font(theme.body()).textSelection(.enabled) }
             }
-            if !model.liveLog.isEmpty {
-                section("Log", theme: theme) {
-                    Text(model.liveLog.joined(separator: "\n"))
-                        .font(theme.mono()).textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(theme.spacing)
-                        .background(RoundedRectangle(cornerRadius: theme.radius).fill(theme.surface))
-                }
-            }
+            LiveLogSection(live: model.live)
         }
         .padding(theme.spacingLarge)
     }
@@ -626,8 +618,7 @@ struct HealthPage: View {
         ScrollView {
             VStack(alignment: .leading, spacing: theme.spacingLarge) {
                 Text("Health").font(theme.title())
-                Text(model.connected ? "Connected to masond. Event log at #\(model.lastSeq)." : "Not connected.")
-                    .font(theme.body())
+                HealthConnectionLine(model: model)
                 if let h = model.health {
                     section("Resources", theme: theme) {
                         ForEach(h.resources, id: \.name) { r in
@@ -668,5 +659,40 @@ struct HealthPage: View {
                 }
             }.padding(theme.spacingLarge)
         }
+    }
+}
+
+/// The task page's log: observes only the live state, so a log line redraws this and nothing else.
+struct LiveLogSection: View {
+    @Environment(\.theme) var theme
+    @ObservedObject var live: LiveState
+
+    var body: some View {
+        if !live.liveLog.isEmpty {
+            section("Log", theme: theme) {
+                Text(live.liveLog.joined(separator: "\n"))
+                    .font(theme.mono()).textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(theme.spacing)
+                    .background(RoundedRectangle(cornerRadius: theme.radius).fill(theme.surface))
+            }
+        }
+    }
+}
+
+/// The Health page's connection line, which shows the sequence number.
+struct HealthConnectionLine: View {
+    @Environment(\.theme) var theme
+    @ObservedObject var model: MonitorModel
+    @ObservedObject var live: LiveState
+
+    init(model: MonitorModel) {
+        self.model = model
+        self.live = model.live
+    }
+
+    var body: some View {
+        Text(model.connected ? "Connected to masond. Event log at #\(live.lastSeq)." : "Not connected.")
+            .font(theme.body())
     }
 }
