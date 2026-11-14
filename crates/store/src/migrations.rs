@@ -585,7 +585,17 @@ const STEPS: &[&str] = &[
          at_ms INTEGER NOT NULL,
          PRIMARY KEY (task, run)
      );",
-    // 29: the quarantine table becomes the known-red ledger (s230, decision 0225). `source`
+    // 29: a test that failed on every run of a task's test step (s282), one row per task, test
+    // and suite (or step) name, so a test red across several different tasks can be told from
+    // one task's retries. Next to `flaky`. Additive.
+    "CREATE TABLE persistent_red (
+         suite TEXT NOT NULL,
+         test  TEXT NOT NULL,
+         task  INTEGER NOT NULL,
+         at    INTEGER NOT NULL,
+         PRIMARY KEY (suite, test, task)
+     );",
+    // 30: the quarantine table becomes the known-red ledger (s230, decision 0225). `source`
     // is owner (manual, with an expiry), base (seen red at the merge base) or exhausted;
     // an entry with a `fix_task` has no expiry (expires_at is the far future) because a
     // run that proves the test green lifts it. Additive.

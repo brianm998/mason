@@ -1392,6 +1392,44 @@ impl Store {
         })
     }
 
+    /// Note that `test` failed on every run of `task`'s test step. Once per task and test: a
+    /// retry of the same task adds nothing.
+    pub fn record_persistent_red(
+        &self,
+        suite: &str,
+        test: &str,
+        task: u64,
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
+        let (s, t) = (suite.to_string(), test.to_string());
+        self.write(move |c| {
+            c.execute(
+                "INSERT OR IGNORE INTO persistent_red(suite, test, task, at) VALUES (?1,?2,?3,?4)",
+                params![s, t, task as i64, now_ms as i64],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// The different tasks in which `test` failed on every run since `since_ms`.
+    pub fn persistent_red_tasks(
+        &self,
+        suite: &str,
+        test: &str,
+        since_ms: u64,
+    ) -> Result<Vec<u64>, StoreError> {
+        let (s, t) = (suite.to_string(), test.to_string());
+        self.read(move |c| {
+            let mut st = c.prepare(
+                "SELECT DISTINCT task FROM persistent_red WHERE suite = ?1 AND test = ?2 AND at >= ?3 ORDER BY task",
+            )?;
+            let rows = st.query_map(params![s, t, since_ms as i64], |r| {
+                Ok(r.get::<_, i64>(0)? as u64)
+            })?;
+            rows.collect()
+        })
+    }
+
     /// `(suite, test, at_ms)` for every flake since `since_ms`.
     pub fn flaky_since(&self, since_ms: u64) -> Result<Vec<(String, String, u64)>, StoreError> {
         self.read(move |c| {
