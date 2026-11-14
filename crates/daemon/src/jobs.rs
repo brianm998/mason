@@ -1340,6 +1340,9 @@ impl TestChecks {
                         if o.timed_out { " (timed out)" } else { "" },
                         o.output
                     ));
+                    if let Some(h) = known_header(&self.slots.d, &self.log_dir, &o.id, &name) {
+                        lines.push(format!("{name}: {h}"));
+                    }
                 }
                 Err(e) => {
                     failed = true;
@@ -1366,6 +1369,14 @@ impl TestChecks {
             summary: lines.join("\n"),
         }
     }
+}
+
+/// A header for `run_check`'s output naming the failing tests that are known red (not the
+/// agent's to fix) and their fixes: read from the whole log of the run `id`, `scope` being
+/// the suite or test step the ledger keeps them under.
+fn known_header(d: &Daemon, log_dir: &Path, id: &str, scope: &str) -> Option<String> {
+    let text = read_whole_log(&log_dir.join(format!("{id}.log")))?;
+    crate::knownred::header(&text, &crate::knownred::known_for(&d.store, scope))
 }
 
 /// A name from a validated scope (letters, digits, `_ : . - /`), quoted all the same.
@@ -1520,18 +1531,28 @@ impl TestChecks {
                 crate::cmdreuse::record_green(&self.slots.d, t, &key, &src);
             }
         }
+        let header = match &res {
+            Ok(o) if !o.passed => {
+                let step = self.slots.test_step.as_deref().unwrap_or("test");
+                known_header(&self.slots.d, &self.log_dir, &o.id, step)
+                    .map(|h| format!("{h}\n\n"))
+                    .unwrap_or_default()
+            }
+            _ => String::new(),
+        };
         match res {
             Ok(o) => CheckRun::Done {
                 passed: o.passed,
-                summary: if o.timed_out {
-                    format!(
+                summary: header
+                    + &if o.timed_out {
+                        format!(
                         "The tests did not finish within {} s and were stopped. Last output:\n{}",
                         self.timeout.as_secs(),
                         o.output
                     )
-                } else {
-                    format!("{whole}Last output:\n{}", o.output)
-                },
+                    } else {
+                        format!("{whole}Last output:\n{}", o.output)
+                    },
             },
             Err(e) => CheckRun::Done {
                 passed: false,
@@ -1651,9 +1672,17 @@ impl CheckSlots {
                 .broker
                 .declare(name, self.def.resources.get(name).copied().unwrap_or(1));
         }
-        let as_step = self.test_step.as_deref().unwrap_or(&self.step);
-        self.acquire(crate::sched::needs_of(uses, None), as_step)
-            .map(Some)
+        // Ranked as the agent's own step, not the test step: a task that has reached
+        // its test step is further along and goes first (s262). The check used to
+        // rank as the test step so that a long wait could not run the agent out of
+        // time; the wait is now added back to the agent's deadline (`extra`), and on
+        // 2026-11-13 develop checks tied with test steps and took every compile
+        // slot ahead of four tasks already in test.
+        self.acquire(
+            crate::sched::needs_of(uses, None),
+            check_rank_step(&self.step, self.test_step.as_deref()),
+        )
+        .map(Some)
     }
 
     /// Queue for the agent's slot again, before the agent is told the result.
@@ -1664,6 +1693,12 @@ impl CheckSlots {
             *self.lease.lock().unwrap_or_else(|e| e.into_inner()) = Some(l);
         }
     }
+}
+
+/// The step a `run_check` is ranked as: the agent's own, never the test step it
+/// runs the commands of (see `CheckSlots::swap_for`).
+fn check_rank_step<'a>(agent_step: &'a str, _test_step: Option<&'a str>) -> &'a str {
+    agent_step
 }
 
 /// Proof before acceptance: the submitted commit really is the tip of the
@@ -2687,6 +2722,7 @@ fn command_job(c: &Ctx) {
                 rerun: true,
             } => {
                 let names = crate::rerun::failing_names(&read_whole_log(&log).unwrap_or_default());
+                let last_names = names.clone();
                 if k == 0 {
                     if !names.is_empty() {
                         persistent = Some(names.clone());
@@ -2743,22 +2779,52 @@ fn command_job(c: &Ctx) {
                     }
                     continue;
                 }
-                // Red on every run: if every one of those tests also fails at the merge base,
-                // it is not this change's (s177).
+                // Red on every run: a test in the known-red ledger, or one that also fails at
+                // the merge base, is not this change's (s177, s281). Each is told apart on its
+                // own: only the others fail the step.
+                let mut not_yours: Vec<String> = vec![];
+                // Tests excused above (by the ledger or the base), and those that are left.
+                let mut excused_names: Vec<String> = vec![];
+                let mut rest_new: Vec<String> = vec![];
+                let mut exhausted_why: Option<String> = None;
                 if is_test {
                     if let Some(p) = persistent.as_ref().filter(|p| !p.is_empty()) {
-                        let base_cmd = if filter_off {
-                            cmd.clone()
-                        } else {
-                            crate::rerun::command(&cmd, filter, p)
-                        };
-                        if let Some(note) = crate::basecheck::excuse(
-                            c,
-                            suffix,
-                            builds_first(c).as_deref(),
-                            &base_cmd,
-                            p,
-                        ) {
+                        let known = crate::knownred::known_for(&c.d.store, &c.step.name);
+                        let (mut rest, hit) = crate::knownred::split(p, &known);
+                        not_yours.extend(crate::knownred::lines(&hit));
+                        excused_names.extend(hit.iter().map(|k| k.test.clone()));
+                        if !not_yours.is_empty() {
+                            let _ = std::fs::write(
+                                c.task_dir()
+                                    .join(format!("{suffix}-r{}-known.excused", c.run.0)),
+                                not_yours.join("\n"),
+                            );
+                        }
+                        if !rest.is_empty() {
+                            let base_cmd = if filter_off {
+                                cmd.clone()
+                            } else {
+                                crate::rerun::command(&cmd, filter, &rest)
+                            };
+                            if let Some(e) = crate::basecheck::excuse(
+                                c,
+                                suffix,
+                                builds_first(c).as_deref(),
+                                &base_cmd,
+                                &rest,
+                            ) {
+                                rest.retain(|t| !e.tests.contains(t));
+                                excused_names.extend(e.tests);
+                                not_yours.extend(e.lines);
+                            }
+                        }
+                        rest_new = rest.clone();
+                        if rest.is_empty() && !not_yours.is_empty() {
+                            let note = format!(
+                                "`{}` was red, but every test that failed on every run is not this change's (known red, or also failing at the merge base; excused):\n{}",
+                                c.step.name,
+                                not_yours.join("\n")
+                            );
                             record_flaky(c, &seen, p);
                             let _ = std::fs::remove_file(c.task_dir().join("feedback.txt"));
                             tracing::warn!(task = c.task.0, run = c.run.0, "{note}");
@@ -2767,6 +2833,55 @@ fn command_job(c: &Ctx) {
                                 let _ = writeln!(f, "\n== MASON: {note}");
                             }
                             return c.green();
+                        }
+                    }
+                }
+                // What failed on every run and is still the change's (s282): kept for the last
+                // round, counted across tasks, and on the last round run at the merge base.
+                if is_test && !rest_new.is_empty() {
+                    crate::exhausted::record_round(c, &rest_new);
+                    crate::exhausted::record_persistent(c, &c.step.name, &rest_new);
+                    if crate::exhausted::is_last_round(c) {
+                        let build = builds_first(c);
+                        let cmd_for = |t: &[String]| {
+                            if filter_off {
+                                cmd.clone()
+                            } else {
+                                crate::rerun::command(&cmd, filter, t)
+                            }
+                        };
+                        let ex = crate::exhausted::on_last_round(
+                            c,
+                            &c.step.name,
+                            build.as_deref(),
+                            &cmd_for,
+                            &rest_new,
+                        );
+                        exhausted_why = ex.why;
+                        if !ex.excused.is_empty() {
+                            excused_names.extend(ex.excused);
+                            not_yours.extend(ex.lines);
+                            let left: Vec<&String> = last_names
+                                .iter()
+                                .filter(|t| !excused_names.contains(t))
+                                .collect();
+                            if left.is_empty() && exhausted_why.is_none() {
+                                let note = format!(
+                                    "`{}` was still red on the last round, but what failed every time is red at the merge base too (now in the known-red ledger, fix filed); the step goes on:\n{}",
+                                    c.step.name,
+                                    not_yours.join("\n")
+                                );
+                                record_flaky(c, &seen, &excused_names);
+                                let _ = std::fs::remove_file(c.task_dir().join("feedback.txt"));
+                                tracing::warn!(task = c.task.0, run = c.run.0, "{note}");
+                                use std::io::Write as _;
+                                if let Ok(mut f) =
+                                    std::fs::OpenOptions::new().append(true).open(&log)
+                                {
+                                    let _ = writeln!(f, "\n== MASON: {note}");
+                                }
+                                return c.green();
+                            }
                         }
                     }
                 }
@@ -2796,6 +2911,22 @@ fn command_job(c: &Ctx) {
                         format!("{feedback}\n\nIt was red on all {} runs.", k + 1),
                     ),
                     _ => (reason, feedback),
+                };
+                let feedback = if not_yours.is_empty() {
+                    feedback
+                } else {
+                    format!(
+                        "{feedback}\n\nNot yours (do not work on these; the others above are yours):\n{}",
+                        not_yours.join("\n")
+                    )
+                };
+                let reason = match &exhausted_why {
+                    Some(w) => format!("{reason}; {w}"),
+                    None => reason,
+                };
+                let feedback = match &exhausted_why {
+                    Some(w) => format!("{feedback}\n\nChecked at the base: {w}"),
+                    None => feedback,
                 };
                 return c.conclude(Outcome::Red, reason, Some(feedback));
             }
@@ -3312,6 +3443,30 @@ pub fn cleanup(d: &Arc<Daemon>, task: TaskId, delete_branch: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_develop_check_ranks_behind_a_task_already_in_test() {
+        // On 2026-11-13 develop checks ranked as the test step tied with real test
+        // steps, so priority and filing age decided, and four tasks in test waited
+        // behind every older or higher-priority develop agent.
+        let def = mason_definition::parse::parse(
+            "schema = 1\nstart = \"develop\"\n\n[step.develop]\ntype = \"agent\"\n\
+             category = \"developing\"\nnext = \"test\"\n\n[step.test]\ntype = \"test\"\n\
+             category = \"testing\"\nnext = \"land\"\n\n[step.land]\ntype = \"landing\"\n\
+             category = \"landing\"\n",
+        )
+        .unwrap();
+        let steps = |s: &str| mason_definition::graph::steps_remaining(&def, s);
+        let check = check_rank_step("develop", Some("test"));
+        assert_eq!(check, "develop");
+        // A high-priority develop check filed long ago, against a normal test step filed later.
+        let develop_check = mason_scheduler::Rank::new(false, steps(check), 1, 100, 1, false);
+        let test_step = mason_scheduler::Rank::new(false, steps("test"), 2, 900, 2, false);
+        assert!(
+            test_step < develop_check,
+            "the task in test goes first: {test_step:?} vs {develop_check:?}"
+        );
+    }
 
     // ---- Task 180: the weakening scan at submit_change -----------------------------------
 
