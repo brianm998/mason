@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import MasonProtocol
+import Combine
 import XCTest
 
 @testable import MonitorCore
@@ -1183,6 +1184,58 @@ final class MonitorCoreTests: XCTestCase {
         m.apply(progress: q, local: at)
         XCTAssertEqual(m.liveLog.count, 40)
         XCTAssertEqual(m.liveLog.last, "l59")
+    }
+
+    func testAProgressPushForOneTaskLeavesOtherRowsEqualAndHighFrequencyStateOutOfTheSidebar() {
+        let m = model()
+        var c = cell(done: 1, total: 4, totalSrc: .sourceReported)
+        c.step = "develop"
+        m.sidebar?.sections[0].rows[0].progress = [c]
+        m.sidebar?.sections[0].rows[1].progress = [c]
+        let other = m.sidebar!.sections[0].rows[1]
+        var sidebarChanges = 0
+        let sub = m.$sidebar.dropFirst().sink { _ in sidebarChanges += 1 }
+        var liveChanges = 0
+        let liveSub = m.live.objectWillChange.sink { _ in liveChanges += 1 }
+        var p = Mason_V1_StepProgress()
+        p.task = 1
+        var n = c
+        n.done = 3
+        p.progress = n
+        p.nowMs = 5_000_000
+        m.apply(progress: p)
+        XCTAssertEqual(m.sidebar?.sections[0].rows[1], other, "task 2's row is untouched")
+        XCTAssertNotEqual(m.sidebar?.sections[0].rows[0].progress.first?.done, 1)
+        XCTAssertEqual(sidebarChanges, 1)
+        // A sequence bump and a log line change the live state and not the sidebar.
+        sidebarChanges = 0
+        m.lastSeq = 99
+        p.log = ["x"]
+        p.progress = Mason_V1_ProgressCell()
+        m.apply(progress: p)
+        XCTAssertEqual(sidebarChanges, 0)
+        XCTAssertGreaterThan(liveChanges, 0)
+        sub.cancel()
+        liveSub.cancel()
+    }
+
+    func testSidebarEntriesAreIdentifiedByWhatTheyAreNotWhereTheyAre() {
+        let m = model()
+        func ids() -> [String] { m.sidebarEntries.map(\.id) }
+        let before = ids()
+        XCTAssertEqual(Set(before).count, before.count)
+        XCTAssertTrue(before.contains("r:2"))
+        // Task 1 moves to another section: row 2 keeps its identity.
+        var s = m.sidebar!
+        let moved = s.sections[0].rows.remove(at: 0)
+        s.sections[1].rows.insert(moved, at: 0)
+        m.sidebar = s
+        let after = ids()
+        XCTAssertTrue(after.contains("r:2"))
+        XCTAssertFalse(after.contains("r:1"), "the failed section is collapsed")
+        m.reveal(state: "failed")
+        XCTAssertTrue(ids().contains("r:1"))
+        XCTAssertTrue(ids().contains("r:2"))
     }
 
     func testProgressItemsHaveNoClockText() {
