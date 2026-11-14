@@ -240,8 +240,8 @@ struct State {
     wait_class: HashMap<TaskId, String>,
     /// The build disk's responsiveness and the limit on it. `None`: no stall gate.
     stall: Option<(Arc<dyn StallSource>, u64)>,
-    /// When the last scheduling pass finished. A waiter runs a pass only if the
-    /// last one is about a tick old, so one pass serves every waiter.
+    /// When the last scheduling pass ran. A waiter skips its own pass while this is
+    /// younger than `PASS_EVERY` (see `acquire`).
     last_pass: Option<Instant>,
     /// A pass is reading lock files right now; waiters leave it to finish.
     pass_running: bool,
@@ -255,7 +255,8 @@ const PASS_EVERY: Duration = Duration::from_millis(100);
 
 /// Is a waiter's periodic pass due? Not while one ran less than `every` ago: that pass
 /// already granted whatever could be granted, and on 2026-11-13 forty waiters each
-/// passing ten times a second held the broker lock almost all the time.
+/// passing ten times a second held the broker lock almost all the time,
+/// so monitor views waited 20 s for it.
 fn pass_due_in(last: Option<Instant>, every: Duration) -> bool {
     last.is_none_or(|t| t.elapsed() >= every)
 }
