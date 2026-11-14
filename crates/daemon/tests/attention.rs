@@ -411,6 +411,10 @@ fn opening_a_session_finds_the_agents_session_and_says_whether_the_step_is_idle(
     wait_for("the job to end", 30, || d.job_count() == 0);
     let v = attention::session_for(&d, t).unwrap();
     assert_eq!(v["idle"], true);
+    assert_eq!(v["provider"], "claude");
+    let sid = v["session"].as_str().unwrap();
+    assert_eq!(v["argv"][1], "--resume");
+    assert_eq!(v["argv"][2], sid);
     assert!(v["session"].as_str().is_some_and(|s| !s.is_empty()), "{v}");
     assert!(
         v["worktree"]
@@ -467,4 +471,17 @@ fn a_frozen_base_raises_an_alert_naming_the_fix_task_until_the_freeze_clears() {
 
     d.store.clear_freeze("scratch").unwrap();
     assert!(find().is_none(), "the alert clears with the freeze");
+}
+
+#[test]
+fn the_resume_command_is_the_providers_own() {
+    assert_eq!(
+        attention::resume_argv("claude", "/b/claude", Some("s1")),
+        ["/b/claude", "--resume", "s1"]
+    );
+    assert_eq!(
+        attention::resume_argv("codex", "codex", Some("th-1")),
+        ["codex", "resume", "th-1"]
+    );
+    assert_eq!(attention::resume_argv("codex", "codex", None), ["codex"]);
 }
