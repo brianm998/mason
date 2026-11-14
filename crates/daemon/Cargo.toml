@@ -52,6 +52,9 @@ hyper = "1"
 tower-service = "0.3"
 
 # Signal handlers, the open-file limit, load average and the tests' own signalling.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_SystemInformation", "Win32_System_Threading"] }
+
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31.3", features = ["process", "signal", "resource"] }
 
