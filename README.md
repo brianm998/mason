@@ -306,5 +306,6 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s268**: A pushed `v*` tag now builds, signs, test-installs on fresh runners and drafts a GitHub release for every package (`.github/workflows/release.yml`), with a dry run by `workflow_dispatch`; a test keeps its asset list equal to docs/RELEASING.md.
 - **s269**: Home's Compilation section now reads `#294 (mason) - Known red ledger record a test failure... - for 5 min` for each task holding a `compile` slot, in both the Swift and Compose monitors.
 - **s273**: `SidebarFitTests` now builds `RowView` with its current by-value initializer, so the `swift-clients` suite compiles again.
+- **s274**: `release.yml` signs `SHA256SUMS` with minisign, and `scripts/install.sh` and the release update channel refuse an unsigned or badly signed release once the owner's public key is pinned (a placeholder until then).
 - **s275**: The release workflow now builds a static-CRT Windows zip and a per-user WiX MSI of the CLI and daemon, installs and smoke-tests both on a fresh windows-2022 runner, and publishes them only if that passed.
 <!-- status:end -->
