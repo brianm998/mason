@@ -49,9 +49,13 @@ min_tests = 3
 level = "unit"
 env = "android-phone"
 
+# `os` is a version prefix. `name` (a glob on the device name) and `exclude` (globs on name
+# or id) keep the environment to its own devices, so it never leases a simulator another
+# pipeline on the same Mac uses.
 [environment.simulator]
 type = "ios-simulator"
 os = "17"
+exclude = ["pipeline-slot-*"]
 
 [environment.iphone]
 type = "ios-device"
