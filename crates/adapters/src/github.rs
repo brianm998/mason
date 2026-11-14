@@ -577,6 +577,30 @@ impl TrackerAdapter for GitHub {
         )
         .map(|_| ())
     }
+
+    fn set_priority(&self, number: u64, priority: &str) -> Result<(), ApiError> {
+        for other in ["urgent", "high", "low"]
+            .into_iter()
+            .filter(|p| *p != priority)
+        {
+            match self.send(
+                Request::get(&self.url(&format!("/issues/{number}/labels/priority:{other}")))
+                    .method("DELETE"),
+            ) {
+                Ok(_) => {}
+                // The issue did not carry that label.
+                Err(e) if e.kind == ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+            }
+        }
+        if priority != "normal" {
+            self.send(Request::post(
+                &self.url(&format!("/issues/{number}/labels")),
+                &Self::body(json!({"labels": [format!("priority:{priority}")]})),
+            ))?;
+        }
+        Ok(())
+    }
 }
 
 fn item_of(v: &Value) -> Item {
