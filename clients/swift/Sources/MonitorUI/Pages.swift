@@ -109,6 +109,8 @@ struct HomePage: View {
                     }
                 }
 
+                CpuSection(model: model, cpu: model.cpu)
+
                 if let h = model.home, h.hasCompilation {
                     CompilationSection(model: model, c: h.compilation)
                 }
@@ -323,6 +325,8 @@ struct TaskDetailPage: View {
                 if !r.whyWaiting.isEmpty {
                     Text(r.whyWaiting).font(theme.body()).foregroundStyle(theme.text)
                 }
+                Text(Format.cpuTaskLine(permille: d.cpuPermille)).font(theme.body()).foregroundStyle(theme.muted)
+                    .accessibilityIdentifier("cpu")
                 HStack(spacing: theme.spacingLarge) {
                     CopyButton(label: r.key, value: r.key)
                     if !d.branch.isEmpty { CopyButton(label: "branch", value: d.branch) }
@@ -486,6 +490,13 @@ struct LandingPage: View {
                         if l.batches.isEmpty { Text("No batch has formed yet.").font(theme.body()).foregroundStyle(theme.muted) }
                         ForEach(l.batches, id: \.id) { b in
                             Text(batchText(b)).font(theme.body())
+                            if b.hasCi {
+                                HStack(spacing: theme.spacing) {
+                                    Text(batchCiText(b.ci)).font(theme.body())
+                                        .foregroundStyle(batchCiFailed(b.ci) ? theme.attention : theme.muted)
+                                    if let url = batchCiURL(b.ci) { Link("CI run", destination: url) }
+                                }
+                            }
                         }
                         if l.queueIdleMs > 0 {
                             Text("Queue idle: \(l.queueIdleMs / 1000) s with tasks waiting and nothing landing.")
@@ -513,6 +524,27 @@ func batchText(_ b: Mason_V1_BatchLine) -> String {
     if !b.parked.isEmpty { t += ", parked \(list(b.parked))" }
     if !b.note.isEmpty { t += ". \(b.note)" }
     return t
+}
+
+/// The CI line under a batch: per workflow "pr-gate: 11 jobs · 1 queued · 2 running · 7 passed",
+/// "· N failed" when any failed, and "queued for a runner" while no job has started.
+func batchCiText(_ ci: Mason_V1_BatchCi) -> String {
+    let parts = ci.workflows.map { w -> String in
+        let total = w.queued + w.running + w.passed + w.failed
+        if w.running + w.passed + w.failed == 0 { return "\(w.workflow): queued for a runner" }
+        var t = "\(w.workflow): \(total) jobs · \(w.queued) queued · \(w.running) running · \(w.passed) passed"
+        if w.failed > 0 { t += " · \(w.failed) failed" }
+        return t
+    }
+    return "CI: " + (parts.isEmpty ? "queued for a runner" : parts.joined(separator: "; "))
+}
+
+func batchCiFailed(_ ci: Mason_V1_BatchCi) -> Bool { ci.workflows.contains { $0.failed > 0 } }
+
+/// The run's address, only if it is http or https.
+func batchCiURL(_ ci: Mason_V1_BatchCi) -> URL? {
+    guard let u = URL(string: ci.url), ["http", "https"].contains(u.scheme?.lowercased() ?? "") else { return nil }
+    return u
 }
 
 struct UsagePage: View {
