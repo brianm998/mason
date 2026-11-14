@@ -225,3 +225,52 @@ fn retention_days_is_read_from_daemon_toml() {
         Some(9)
     );
 }
+
+fn fake_host(root: &std::path::Path, id: &str, journal: &str) {
+    let dir = root.join(id);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("host.kv"),
+        format!(
+            "id={id}\nhost_pid=1\nchild_pid=1\nsock=/nonexistent\nstarted_ms=1\nheartbeat_ms=1\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(dir.join("journal"), journal).unwrap();
+}
+
+#[test]
+fn log_signature_names_only_the_tasks_hosts_and_follows_its_journal() {
+    use mason_daemon::http::log_signature;
+    use std::os::unix::fs::PermissionsExt;
+    let s = Scratch::new("true", happy_script());
+    let d = s.start();
+    let live = d.cfg.hosts_dir();
+    fake_host(&live, "t7r0-1", "a");
+    fake_host(&live, "t70r0-1", "b");
+    fake_host(&live, "t700r0-1", "c");
+    let arch = d.cfg.archived_hosts_dir(7);
+    fake_host(&arch, "t7r1-1", "dd");
+
+    let ids = |t| -> Vec<String> { log_signature(&d, t).into_iter().map(|x| x.0).collect() };
+    assert_eq!(ids(7), vec!["t7r0-1", "t7r1-1"]);
+    assert_eq!(ids(70), vec!["t70r0-1"]);
+
+    // Another task's host that cannot be read is never opened.
+    let other = live.join("t8r0-1");
+    fake_host(&live, "t8r0-1", "x");
+    std::fs::set_permissions(&other, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let before = log_signature(&d, 7);
+    std::fs::set_permissions(&other, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(before.len(), 2);
+
+    // The journal growing changes the signature.
+    use std::io::Write;
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(live.join("t7r0-1/journal"))
+        .unwrap()
+        .write_all(b"more")
+        .unwrap();
+    assert_ne!(log_signature(&d, 7), before);
+}
