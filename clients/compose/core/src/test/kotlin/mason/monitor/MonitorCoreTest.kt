@@ -1038,6 +1038,12 @@ class MonitorCoreTest {
         assertEquals(330.0, MonitorModel.fit(300.0, 400.0, 2.0))
     }
 
+    @Test fun sidebarEntryKeysAreUniqueAndNotPositional() {
+        val keys = model().sidebarEntries().map { it.key }
+        assertEquals(keys.size, keys.toSet().size)
+        assertTrue(keys.any { it.startsWith("r:") })
+    }
+
     @Test fun homeAndSearchAreNotInTheScrollingEntries() {
         val m = model()
         assertEquals(listOf("sidebar:home", "search"), SIDEBAR_PINNED_IDS)

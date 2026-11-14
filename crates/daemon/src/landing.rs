@@ -108,6 +108,8 @@ impl State {
 pub struct Landing {
     m: Mutex<State>,
     cv: Condvar,
+    /// Each batch's live CI, for the landing view (records only).
+    pub ci: crate::batch_ci::CiBook,
 }
 
 impl Landing {
@@ -1593,7 +1595,7 @@ impl Runner {
                                     );
                                 }
                             }
-                            o.passed
+                            o.passed || self.known_red_only(&def, &log_dir, &o, batch_id)
                         }
                         Err(e) => {
                             tracing::warn!(batch = batch_id, "the re-test gave no result: {e}");
@@ -1793,6 +1795,41 @@ impl Runner {
         }
     }
 
+    /// A red re-test whose failing tests are all in the known-red ledger is green for the
+    /// batch (s281). A timeout, a red with no readable test names, or any test that is not in
+    /// the ledger stays red (and is bisected as before).
+    fn known_red_only(
+        &self,
+        def: &mason_definition::Definition,
+        log_dir: &Path,
+        o: &crate::hostedcheck::CheckOutcome,
+        batch_id: u64,
+    ) -> bool {
+        if o.timed_out {
+            return false;
+        }
+        let step = def
+            .steps
+            .iter()
+            .find(|s| s.kind == mason_definition::StepType::Test)
+            .map_or("test", |s| s.name.as_str());
+        let Ok(text) = std::fs::read_to_string(log_dir.join(format!("{}.log", o.id))) else {
+            return false;
+        };
+        let failing = crate::rerun::failing_names(&text);
+        let known = crate::knownred::known_for(&self.d.store, step);
+        if !crate::knownred::all_known(&failing, &known) {
+            return false;
+        }
+        let (_, hit) = crate::knownred::split(&failing, &known);
+        tracing::warn!(
+            batch = batch_id,
+            "the re-test is red only in known-red tests (green for the batch): {}",
+            crate::knownred::lines(&hit).join("; ")
+        );
+        true
+    }
+
     fn legacy_cmd(&self, def: &mason_definition::Definition) -> Option<crate::jobs::TestCommands> {
         crate::jobs::test_commands(&self.d, def, self.pid, None)
     }
@@ -1852,6 +1889,7 @@ impl Runner {
                     log_dir,
                     &format!("{prefix}-{n}"),
                     self.sink(),
+                    true,
                 );
                 stop.store(true, std::sync::atomic::Ordering::SeqCst);
                 r
@@ -2103,6 +2141,7 @@ impl Runner {
         let name = format!("mason/ci/{}-b{batch}-{}", self.project().id, self.next_n());
         let (sha, ref_id) = self.push_candidate(wt, "ci", &name)?;
         let started = Instant::now();
+        self.d.landing.ci.start(batch, &name, now_ms());
         self.say(&format!("waiting for CI on {name}"));
         let r = (|| {
             let run = self.ask("CI trigger", started, cfg.timeout_s, cfg.poll_s, || {
@@ -2110,11 +2149,22 @@ impl Runner {
             })?;
             self.ask("CI", started, cfg.timeout_s, cfg.poll_s, || {
                 Ok(match ci.status(&run)? {
-                    CiState::Pending => None,
+                    CiState::Pending => {
+                        // For the landing view only; a failed read changes nothing.
+                        if let Ok(p) = ci.progress(&run) {
+                            self.d.landing.ci.update(batch, &p);
+                        }
+                        None
+                    }
                     done => Some(done),
                 })
             })
         })();
+        match &r {
+            Ok(CiState::Green) => self.d.landing.ci.finish(batch, "green"),
+            Ok(CiState::Red { .. }) => self.d.landing.ci.finish(batch, "red"),
+            _ => {}
+        }
         self.point("ci_finished");
         self.drop_candidate(&name, ref_id);
         Ok(match r? {
@@ -2544,6 +2594,8 @@ impl Runner {
             log_dir,
             &format!("b{batch_id}-post"),
             None,
+            // `commit` is the tree under test: only a known-red test may excuse a red.
+            false,
         );
         {
             let _g = lock.lock().unwrap_or_else(|e| e.into_inner());

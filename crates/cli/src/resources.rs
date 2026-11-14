@@ -318,6 +318,41 @@ pub fn cpu_line(cpu: &Value, max: u64) -> String {
     }
 }
 
+/// One line of `mason cpu`: `#287  23.4%  Scheduler: ...`.
+pub fn share_line(s: &Value) -> String {
+    let pm = s["permille"].as_u64().unwrap_or(0);
+    let label = s["label"].as_str().unwrap_or("?");
+    let title = s["title"].as_str().unwrap_or("");
+    let line = format!("{label:<8} {:>5}.{}%  {title}", pm / 10, pm % 10);
+    line.trim_end().to_string()
+}
+
+pub fn cpu(d: &Daemon, json_out: bool) -> Result<(), String> {
+    let v = d.call("GET", "/cpu", None).map_err(say)?;
+    if json_out {
+        println!("{v:#}");
+        return Ok(());
+    }
+    // proto3 JSON leaves out a zero: no `busyPermille` in a reading means idle.
+    let busy = v["busyPermille"]
+        .as_i64()
+        .unwrap_or(if v["sampledMs"].is_null() { -1 } else { 0 });
+    if busy < 0 {
+        println!("CPU use is not being read");
+        return Ok(());
+    }
+    println!(
+        "CPU {}.{}% busy, {} cores",
+        busy / 10,
+        busy % 10,
+        v["cores"].as_u64().unwrap_or(0)
+    );
+    for s in v["shares"].as_array().into_iter().flatten() {
+        println!("{}", share_line(s));
+    }
+    Ok(())
+}
+
 pub fn show(d: &Daemon, json_out: bool) -> Result<(), String> {
     let v = d.call("GET", "/resources", None).map_err(say)?;
     if json_out {
@@ -541,6 +576,14 @@ fn shell_quote(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_share_reads_label_percent_and_title() {
+        let s = json!({"task": 287, "kind": "task", "label": "#287", "title": "Scheduler: x", "permille": 234});
+        assert_eq!(share_line(&s), "#287       23.4%  Scheduler: x");
+        let o = json!({"kind": "other", "label": "other", "permille": 5});
+        assert_eq!(share_line(&o), "other       0.5%");
+    }
 
     #[test]
     fn the_cpu_line_names_the_source_and_never_says_no_gate_for_a_fallback() {
