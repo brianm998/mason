@@ -31,6 +31,16 @@ fn describe(t: &Trace) -> String {
     format!("{}  =>  {end}", path.join(" > "))
 }
 
+/// One line for each agent step whose prompt file is not in `dir`.
+fn missing_prompts(def: &mason_definition::Definition, dir: &Path) -> Vec<String> {
+    def.steps
+        .iter()
+        .filter_map(|s| s.prompt.as_ref().map(|f| (&s.name, f)))
+        .filter(|(_, f)| !dir.join(f).is_file())
+        .map(|(n, f)| format!("step.{n}.prompt: no file .mason/prompts/{f}"))
+        .collect()
+}
+
 /// Validate a definition file: the language, then what this version can run,
 /// then a dry run of the default scenarios. Returns the exit status.
 pub fn check(path: &Path) -> i32 {
@@ -54,7 +64,11 @@ pub fn check(path: &Path) -> i32 {
     for p in runnable.iter().filter(|p| !language.contains(p)) {
         println!("cannot run yet  {p}");
     }
-    if !language.is_empty() || !runnable.is_empty() {
+    // A working-tree proxy: the daemon reads the file from the base commit.
+    let dir = path.parent().unwrap_or(Path::new(".")).join("prompts");
+    let missing = missing_prompts(&def, &dir);
+    missing.iter().for_each(|m| println!("error  {m}"));
+    if !language.is_empty() || !runnable.is_empty() || !missing.is_empty() {
         return 1;
     }
     println!(
@@ -114,5 +128,21 @@ pub fn dry(path: &Path, scenarios: Option<&Path>) -> i32 {
             eprintln!("error: {e}");
             1
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_missing_prompt_file_is_reported() {
+        let text = "schema = 1\nstart = \"s\"\n[step.s]\ntype = \"agent\"\ncategory = \"exploring\"\nprompt = \"sec.md\"\nnext = \"l\"\n[step.l]\ntype = \"landing\"\ncategory = \"landing\"\n";
+        let def = parse(text).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let m = missing_prompts(&def, dir.path());
+        assert_eq!(m, vec!["step.s.prompt: no file .mason/prompts/sec.md"]);
+        std::fs::write(dir.path().join("sec.md"), "x").unwrap();
+        assert!(missing_prompts(&def, dir.path()).is_empty());
     }
 }

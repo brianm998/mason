@@ -30,6 +30,7 @@ pub const STEP_KEYS: &[&str] = &[
     "on_red",
     "max_rounds",
     "agent",
+    "prompt",
     "model",
     "effort",
     "budget",
@@ -230,6 +231,14 @@ fn parse_step(
                 _ => out.push(Problem::new(&path, "must be a whole number, 1 or more")),
             },
             "agent" => step.agent = string(v, &path, out),
+            "prompt" => {
+                if let Some(s) = string(v, &path, out) {
+                    match prompt_file_problem(&s) {
+                        Some(why) => out.push(Problem::new(&path, why)),
+                        None => step.prompt = Some(s),
+                    }
+                }
+            }
             "model" => step.model = string(v, &path, out),
             "effort" => step.effort = string(v, &path, out),
             "budget" => {
@@ -308,6 +317,12 @@ fn parse_step(
     if category.is_none() && t.get("category").is_none() {
         out.push(Problem::new(format!("{base}.category"), "required"));
     }
+    if step.prompt.is_some() && kind.is_some_and(|k| k != StepType::Agent) {
+        out.push(Problem::new(
+            format!("{base}.prompt"),
+            "only an agent step has a prompt file",
+        ));
+    }
     match (kind, category) {
         (Some(k), Some(c)) => {
             step.kind = k;
@@ -315,6 +330,20 @@ fn parse_step(
             Some(step)
         }
         _ => None,
+    }
+}
+
+/// Why a step's prompt file name is not allowed: it names a file under `.mason/prompts/`.
+fn prompt_file_problem(s: &str) -> Option<&'static str> {
+    if s.trim().is_empty() {
+        Some("must name a file under .mason/prompts/")
+    } else if s.starts_with('/')
+        || s.contains('\\')
+        || s.split('/').any(|c| c == ".." || c.is_empty())
+    {
+        Some("must be a relative path under .mason/prompts/, without `..`")
+    } else {
+        None
     }
 }
 
@@ -565,6 +594,34 @@ mod tests {
         assert!(e[0].message.contains("did you mean `agreement`"), "{e:?}");
         let bad = format!("{OK}\n[watch.ci]\nred_ticket_after = \"soon\"\n");
         assert!(parse(&bad).is_err());
+    }
+
+    #[test]
+    fn a_prompt_file_is_for_agent_steps_and_stays_under_the_prompts_directory() {
+        let with = |old: &str, new: &str| OK.replacen(old, new, 1);
+        let ok = with(
+            "agent = \"fast\"\n",
+            "agent = \"fast\"\nprompt = \"sec/review.md\"\n",
+        );
+        let d = parse(&ok).unwrap();
+        assert_eq!(d.steps["explore"].prompt.as_deref(), Some("sec/review.md"));
+        for bad in ["/etc/passwd", "../x.md", "a/../x.md", "", "a\\\\b.md"] {
+            let t = with(
+                "agent = \"fast\"\n",
+                &format!("agent = \"fast\"\nprompt = \"{bad}\"\n"),
+            );
+            assert!(parse(&t).is_err(), "{bad:?} must be rejected");
+        }
+        let t = with("budget = \"4h\"\n", "budget = \"4h\"\n").replacen(
+            "[step.test]\n",
+            "[step.test]\nprompt = \"x.md\"\n",
+            1,
+        );
+        let e = parse(&t).unwrap_err();
+        assert!(
+            e.iter().any(|p| p.message.contains("only an agent step")),
+            "{e:?}"
+        );
     }
 
     const OK: &str = r#"
