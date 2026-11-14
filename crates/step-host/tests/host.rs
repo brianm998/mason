@@ -7,8 +7,8 @@ use mason_step_host::launcher::{
 };
 use mason_step_host::protocol::{self, Frame};
 use mason_step_host::registry::{
-    lost_report, pid_alive, proc_start, read_kv, reap_dir, reap_verified, write_kv, ExitRecord,
-    HostInfo, HostState, Registry,
+    lost_report, pid_alive, proc_pgid, proc_start, read_kv, reap_dir, reap_verified, write_kv,
+    ExitRecord, HostInfo, HostState, Registry,
 };
 use std::io::Write;
 use std::os::unix::net::UnixStream;
@@ -380,6 +380,62 @@ fn stop_terminates_the_whole_process_group() {
         }
     }
     wait_until("grandchild gone", || !pid_alive(grandchild));
+}
+
+/// Start a step whose child leaves a perl process in a process group of its own
+/// (as test runners do), stop it with `grace_ms`, and wait for that process to
+/// go. `perl` is extra code run before it sleeps.
+fn stop_with_escaped_descendant(perl: &str, grace_ms: u32) {
+    let (_d, r) = root();
+    let script = format!("perl -e '$|=1; setpgrp(0,0); {perl} print qq($$\\n); sleep 600' & wait");
+    let info = spawn_host(&opts(&r, "a", &script)).unwrap();
+    let mut c = connect(&info.sock);
+    c.attach(0).unwrap();
+    let mut out = vec![];
+    while !out.contains(&b'\n') {
+        if let Event::Data { bytes, .. } = c.next_event().unwrap() {
+            out.extend(bytes);
+        }
+    }
+    let escaped: u32 = String::from_utf8(out).unwrap().trim().parse().unwrap();
+    assert!(pid_alive(escaped));
+    assert_ne!(
+        proc_pgid(escaped),
+        Some(info.child_pid),
+        "it left the command's group"
+    );
+    c.stop(grace_ms).unwrap();
+    loop {
+        if let Event::Exit(_) = c.next_event().unwrap() {
+            break;
+        }
+    }
+    // Bounded by attempts, not by elapsed time.
+    let mut gone = false;
+    for _ in 0..2000 {
+        if !pid_alive(escaped) {
+            gone = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    if !gone {
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(escaped as i32),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+    }
+    assert!(gone, "the descendant in its own process group is gone");
+}
+
+#[test]
+fn stop_terminates_a_descendant_that_moved_to_its_own_process_group() {
+    stop_with_escaped_descendant("", 2000);
+}
+
+#[test]
+fn a_descendant_in_its_own_group_that_ignores_terminate_is_killed_too() {
+    stop_with_escaped_descendant("$SIG{TERM}='IGNORE';", 300);
 }
 
 #[test]
