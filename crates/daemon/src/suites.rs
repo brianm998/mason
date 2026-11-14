@@ -648,7 +648,7 @@ impl Who {
 }
 
 /// An open debt that skips this suite or its whole step.
-fn skip_for(d: &Daemon, task: TaskId, suite: &str, step: &str) -> Option<u64> {
+pub(crate) fn skip_for(d: &Daemon, task: TaskId, suite: &str, step: &str) -> Option<u64> {
     d.store
         .debts(Some(task.0), true)
         .ok()?
@@ -1306,6 +1306,39 @@ enum Built {
     Gone,
 }
 
+/// What waiting for a suite's slot came to.
+enum Leased {
+    Got,
+    /// The suite (or its step) was skipped by force before or while it waited: it holds
+    /// nothing, and its own run reports the skip at once.
+    Skipped,
+    Gone,
+}
+
+/// Wait for `needs` for one suite and hold them as the step's lease, unless the suite
+/// is skipped first: a skip ends the wait, so a skipped suite never takes a slot. On
+/// 2026-11-13 #288's test step was skipped while it waited for a compile slot, and it
+/// waited on until a slot came, built, and only then noticed.
+fn lease_suite(c: &Ctx, needs: Needs, check: &Check) -> Leased {
+    match check() {
+        Stop::Skipped => return Leased::Skipped,
+        Stop::Gone => return Leased::Gone,
+        Stop::No => {}
+    }
+    if !needs.exclusive && needs.amounts.is_empty() {
+        return Leased::Got;
+    }
+    let wanted = || check() == Stop::No;
+    match crate::jobs::acquire_needs_while(c, needs, &wanted) {
+        Ok(l) => {
+            *c.lease.lock().unwrap_or_else(|e| e.into_inner()) = Some(l);
+            Leased::Got
+        }
+        Err(_) if check() == Stop::Skipped => Leased::Skipped,
+        Err(_) => Leased::Gone,
+    }
+}
+
 /// Wait for `needs` and hold them as the step's lease. `false`: the task went away.
 fn lease(c: &Ctx, needs: Needs) -> bool {
     if !needs.exclusive && needs.amounts.is_empty() {
@@ -1551,50 +1584,55 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
             {
                 let needs = needs_of(&crate::jobs::build_uses(), None);
                 who.env = held_env(c, &needs);
-                if !lease(c, needs) {
-                    return;
-                }
-                let ran = run_build(&who, &suite, b, built.len(), &c.wt);
-                c.release_lease();
-                match ran {
-                    Built::Gone => return,
-                    Built::Red(feedback) => {
-                        let err = basered::first_error(base_red::output_of(&feedback));
-                        match base_red::gate(
-                            c,
-                            &who,
-                            &lock,
-                            &suite,
-                            &tree.base,
-                            RedKind::Build,
-                            &err,
-                            None,
-                        ) {
-                            base_red::Gate::Cleared => {
-                                again.set(true);
-                                return;
+                match lease_suite(c, needs, &who.check(&name)) {
+                    Leased::Gone => return,
+                    // Nothing is built; the suite's run below reports the skip.
+                    Leased::Skipped => {}
+                    Leased::Got => {
+                        let ran = run_build(&who, &suite, b, built.len(), &c.wt);
+                        c.release_lease();
+                        match ran {
+                            Built::Gone => return,
+                            Built::Red(feedback) => {
+                                let err = basered::first_error(base_red::output_of(&feedback));
+                                match base_red::gate(
+                                    c,
+                                    &who,
+                                    &lock,
+                                    &suite,
+                                    &tree.base,
+                                    RedKind::Build,
+                                    &err,
+                                    None,
+                                ) {
+                                    base_red::Gate::Cleared => {
+                                        again.set(true);
+                                        return;
+                                    }
+                                    base_red::Gate::Gone => return,
+                                    base_red::Gate::Skipped => {
+                                        let _ = record_skip_debt(d, c, &name);
+                                        notes.push(format!("{name}: skipped by force"));
+                                        outcomes.push((name, SuiteOutcome::Skipped));
+                                        continue;
+                                    }
+                                    base_red::Gate::NotBase => {}
+                                }
+                                outcomes.push((name.clone(), SuiteOutcome::Failed));
+                                let (v, note) = closing(&outcomes);
+                                let _ = d.store.set_closing(c.task.0, v.name(), &note, now_ms());
+                                let reason = format!("the build of suite `{name}` is red");
+                                return c.conclude(Outcome::Red, reason, Some(feedback));
                             }
-                            base_red::Gate::Gone => return,
-                            base_red::Gate::Skipped => {
-                                let _ = record_skip_debt(d, c, &name);
-                                notes.push(format!("{name}: skipped by force"));
-                                outcomes.push((name, SuiteOutcome::Skipped));
-                                continue;
-                            }
-                            base_red::Gate::NotBase => {}
+                            Built::Ok => built.push(b.clone()),
                         }
-                        outcomes.push((name.clone(), SuiteOutcome::Failed));
-                        let (v, note) = closing(&outcomes);
-                        let _ = d.store.set_closing(c.task.0, v.name(), &note, now_ms());
-                        let reason = format!("the build of suite `{name}` is red");
-                        return c.conclude(Outcome::Red, reason, Some(feedback));
                     }
-                    Built::Ok => built.push(b.clone()),
                 }
             }
             let needs = run_needs(&c.def, &c.step, &suite);
             who.env = held_env(c, &needs);
-            if !lease(c, needs) {
+            // A skipped suite holds nothing: `run_suite` sees the skip before it runs.
+            if let Leased::Gone = lease_suite(c, needs, &who.check(&name)) {
                 return;
             }
         }
