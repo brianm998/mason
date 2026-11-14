@@ -59,6 +59,19 @@ impl std::fmt::Display for StoreError {
 
 impl std::error::Error for StoreError {}
 
+/// A diagnosis of a failed task (s250).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DiagnosisRow {
+    pub id: u64,
+    pub task: u64,
+    pub at_ms: u64,
+    pub verdict: String,
+    /// The submitted arguments, as JSON text.
+    pub args: String,
+    pub status: String,
+    pub decided_ms: u64,
+}
+
 /// What a suite did at a base commit (s246): failing names and every name, the executed count,
 /// and why a base can be called red the same way as a branch.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1513,6 +1526,63 @@ impl Store {
         self.write(move |c| {
             c.execute("DELETE FROM base_red WHERE task = ?1", params![task as i64])
                 .map(|_| ())
+        })
+    }
+
+    /// A diagnosis was submitted for `task`. Returns its id.
+    pub fn add_diagnosis(
+        &self,
+        task: u64,
+        verdict: &str,
+        args: &str,
+        status: &str,
+        now_ms: u64,
+    ) -> Result<u64, StoreError> {
+        let (v, a, s) = (verdict.to_string(), args.to_string(), status.to_string());
+        self.write(move |c| {
+            c.execute(
+                "INSERT INTO diagnoses(task, at_ms, verdict, args, status) VALUES (?1,?2,?3,?4,?5)",
+                params![task as i64, now_ms as i64, v, a, s],
+            )?;
+            Ok(c.last_insert_rowid() as u64)
+        })
+    }
+
+    /// Every diagnosis of a task (or of all tasks, `None`), oldest first.
+    pub fn diagnoses(&self, task: Option<u64>) -> Result<Vec<DiagnosisRow>, StoreError> {
+        self.read(move |c| {
+            let mut st = c.prepare(
+                "SELECT id, task, at_ms, verdict, args, status, decided_ms FROM diagnoses \
+                 WHERE (?1 IS NULL OR task = ?1) ORDER BY id",
+            )?;
+            let rows = st.query_map(params![task.map(|t| t as i64)], |r| {
+                Ok(DiagnosisRow {
+                    id: r.get::<_, i64>(0)? as u64,
+                    task: r.get::<_, i64>(1)? as u64,
+                    at_ms: r.get::<_, i64>(2)? as u64,
+                    verdict: r.get(3)?,
+                    args: r.get(4)?,
+                    status: r.get(5)?,
+                    decided_ms: r.get::<_, i64>(6)? as u64,
+                })
+            })?;
+            rows.collect()
+        })
+    }
+
+    pub fn set_diagnosis_status(
+        &self,
+        id: u64,
+        status: &str,
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
+        let s = status.to_string();
+        self.write(move |c| {
+            c.execute(
+                "UPDATE diagnoses SET status = ?2, decided_ms = ?3 WHERE id = ?1",
+                params![id as i64, s, now_ms as i64],
+            )
+            .map(|_| ())
         })
     }
 
@@ -3190,6 +3260,37 @@ impl Store {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
+    /// An automatic quarantine of a repeat flake (s253): ledger source `flaky`, which the known-red
+    /// bypass honours like an owner's quarantine but the ledger's own rules (a run that proves the
+    /// test green, a fix task, the stale-entry alert) never touch. It lasts until `expires_at_ms`.
+    pub fn put_flaky_quarantine(
+        &self,
+        suite: &str,
+        test: &str,
+        owner: &str,
+        expires_at_ms: u64,
+        reason: &str,
+        note: &str,
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
+        let (s, t, o, r, n) = (
+            suite.to_string(),
+            test.to_string(),
+            owner.to_string(),
+            reason.to_string(),
+            note.to_string(),
+        );
+        self.write(move |c| {
+            c.execute(
+                "INSERT OR REPLACE INTO quarantine(suite, test, owner, expires_at, reason, at, source, note, last_seen_ms) \
+                 VALUES (?1,?2,?3,?4,?5,?6,'flaky',?7,?6)",
+                params![s, t, o, expires_at_ms as i64, r, now_ms as i64, n],
+            )
+            .map(|_| ())
+        })
+    }
+
     pub fn remove_quarantine(&self, suite: &str, test: &str) -> Result<usize, StoreError> {
         let (s, t) = (suite.to_string(), test.to_string());
         self.write(move |c| {
@@ -3208,7 +3309,7 @@ impl Store {
     ) -> Result<Vec<(String, String, String, u64, String)>, StoreError> {
         self.read(move |c| {
             let mut st = c.prepare(
-                "SELECT suite, test, owner, expires_at, reason FROM quarantine WHERE expires_at > ?1 AND source = 'owner' ORDER BY suite, test",
+                "SELECT suite, test, owner, expires_at, reason FROM quarantine WHERE expires_at > ?1 AND source IN ('owner', 'flaky') ORDER BY suite, test",
             )?;
             let rows = st.query_map(params![now_ms as i64], |r| {
                 Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get::<_, i64>(3)? as u64, r.get(4)?))
@@ -3255,7 +3356,7 @@ impl Store {
         let (s, t) = (suite.to_string(), test.to_string());
         self.write(move |c| {
             c.execute(
-                "UPDATE quarantine SET fix_task = ?3 WHERE suite = ?1 AND test = ?2 AND source != 'owner'",
+                "UPDATE quarantine SET fix_task = ?3 WHERE suite = ?1 AND test = ?2 AND source NOT IN ('owner', 'flaky')",
                 params![s, t, fix as i64],
             )
             .map(|_| ())
@@ -3273,7 +3374,7 @@ impl Store {
         let (s, t, n) = (suite.to_string(), test.to_string(), note.to_string());
         self.write(move |c| {
             c.execute(
-                "UPDATE quarantine SET note = ?3, last_seen_ms = ?4 WHERE suite = ?1 AND test = ?2 AND source != 'owner'",
+                "UPDATE quarantine SET note = ?3, last_seen_ms = ?4 WHERE suite = ?1 AND test = ?2 AND source NOT IN ('owner', 'flaky')",
                 params![s, t, n, now_ms as i64],
             )
             .map(|_| ())
@@ -3289,7 +3390,7 @@ impl Store {
             let mut lifted = vec![];
             for t in passed {
                 let n = c.execute(
-                    "DELETE FROM quarantine WHERE suite = ?1 AND test = ?2 AND source != 'owner'",
+                    "DELETE FROM quarantine WHERE suite = ?1 AND test = ?2 AND source NOT IN ('owner', 'flaky')",
                     params![s, t],
                 )?;
                 if n > 0 {

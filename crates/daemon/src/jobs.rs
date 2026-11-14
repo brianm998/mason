@@ -64,6 +64,49 @@ pub(crate) fn conflict_runs(task_dir: &Path) -> Vec<u64> {
     v
 }
 
+/// A note the owner (or a diagnosis) gave a retry, shown once in the next agent prompt (s250).
+pub(crate) const RETRY_NOTE: &str = "retry-note.txt";
+
+/// Read the retry note in `dir` and remove it, so the next round shows it once.
+pub(crate) fn take_retry_note(dir: &Path) -> Option<String> {
+    let p = dir.join(RETRY_NOTE);
+    let note = std::fs::read_to_string(&p).ok()?;
+    let _ = std::fs::remove_file(&p);
+    Some(note).filter(|n| !n.trim().is_empty())
+}
+
+/// `feedback` with a retry note put in front of it.
+pub(crate) fn with_retry_note(feedback: Option<String>, note: Option<String>) -> Option<String> {
+    let Some(note) = note else { return feedback };
+    let head = format!("A note for this retry: {}", note.trim());
+    Some(match feedback {
+        Some(f) if !f.trim().is_empty() => format!("{head}\n\n{f}"),
+        _ => head,
+    })
+}
+
+/// The names of the steps of a task's definition, in order.
+pub(crate) fn task_step_names(d: &Arc<Daemon>, task: TaskId) -> Vec<String> {
+    let Ok(w) = d.world() else { return vec![] };
+    let Some(t) = w.tasks.get(&task) else {
+        return vec![];
+    };
+    let def = d
+        .pinned_def(&t.def)
+        .filter(|_| !t.def.is_empty())
+        .unwrap_or_else(|| d.current_def(t.project));
+    def.steps.iter().map(|s| s.name.clone()).collect()
+}
+
+/// The name of the first step of `state`'s category in a task's definition.
+pub(crate) fn first_step_in(d: &Arc<Daemon>, t: &Task, state: State) -> Option<String> {
+    let def = d
+        .pinned_def(&t.def)
+        .filter(|_| !t.def.is_empty())
+        .unwrap_or_else(|| d.current_def(t.project));
+    def.first_in(state).map(|s| s.name.clone())
+}
+
 /// Every send-back's feedback, in order, for the escalated last round.
 const FEEDBACK_HISTORY: &str = "feedback-history.txt";
 
@@ -233,7 +276,9 @@ impl Ctx {
         feedback: Option<String>,
         round: u32,
     ) {
-        if outcome == Outcome::Red && self.step.kind == StepType::Test && self.rerun_on_current(&reason)
+        if outcome == Outcome::Red
+            && self.step.kind == StepType::Test
+            && self.rerun_on_current(&reason)
         {
             return;
         }
@@ -323,6 +368,10 @@ impl Ctx {
                     reason,
                     class,
                 });
+                // A failure about the code gets one look from a diagnosis session (s250).
+                if class == Some(FailClass::Code) {
+                    crate::diagnose::on_failed(&self.d, self.task, self.run);
+                }
             }
         }
         self.release_lease();
@@ -441,7 +490,7 @@ fn repin_for_send_back(
     }
 }
 
-fn ctx(d: &Arc<Daemon>, task: TaskId, run: StepRunId) -> Result<Ctx, String> {
+pub(crate) fn ctx(d: &Arc<Daemon>, task: TaskId, run: StepRunId) -> Result<Ctx, String> {
     let w = d.world().map_err(|e| e.to_string())?;
     let t = w.tasks.get(&task).ok_or("the task is gone")?;
     let r = w.step_runs.get(&run).ok_or("the step run is gone")?;
@@ -1830,6 +1879,30 @@ impl TestChecks {
     }
 }
 
+/// The agent session slot (`llm:<provider>` of the project's account) for a read-only session
+/// outside the graph, a diagnosis (s250): the same units an agent step of the same model takes,
+/// without `compile` or `test-suite`. It waits like any other request, and is given back when
+/// the lease is dropped.
+pub(crate) fn acquire_llm(c: &Ctx) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
+    let d = &c.d;
+    let t = d
+        .world()
+        .ok()
+        .and_then(|w| w.tasks.get(&c.task).cloned())
+        .ok_or(crate::sched::Cancelled)?;
+    let needs =
+        crate::sched::needs_of(&std::collections::BTreeMap::new(), Some(&c.project.account));
+    let rank = d.rank_for(&t, &c.def, &c.step.name);
+    d.broker.acquire(
+        c.task,
+        &format!("#{} diagnosis", c.task.0),
+        rank,
+        needs,
+        &|| true,
+        &mut |_why| {},
+    )
+}
+
 /// What `run_check` holds while it runs. The agent does nothing but wait for a
 /// check, so its LLM session slot goes to a task that can use it, and the check
 /// queues for what the test step `uses`, as the test step does. The time spent
@@ -2125,7 +2198,7 @@ struct WeakeningCheck {
 
 /// The agent CLI for this project's provider, under the step host and, if the
 /// project asks for one, an OS sandbox.
-fn adapter(c: &Ctx) -> Box<dyn AgentAdapter> {
+pub(crate) fn adapter(c: &Ctx) -> Box<dyn AgentAdapter> {
     let agent = c.project.agent();
     let host = HostLaunch {
         host_bin: c.d.cfg.host_bin.clone(),
@@ -2184,6 +2257,7 @@ fn agent_job(c: &Ctx) {
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok());
     let mut feedback = std::fs::read_to_string(dir.join("feedback.txt")).ok();
+    feedback = with_retry_note(feedback, take_retry_note(&dir));
     if let Some(files) = &conflicts {
         if kind == StepKind::Develop {
             let note = conflict_note(&c.project.base_ref(), files);
@@ -2222,6 +2296,8 @@ fn agent_job(c: &Ctx) {
         StepKind::Develop => "develop",
         StepKind::Review => "review",
         StepKind::Explore => "explore",
+        // A diagnosis session is run by `diagnose`, not as a step of the graph.
+        StepKind::Diagnose => "diagnose",
     };
     let prompt = if let Some(pack) = crate::prompts::load_pack(&c.project, pack_name) {
         crate::prompts::from_pack(
@@ -2258,6 +2334,7 @@ fn agent_job(c: &Ctx) {
             StepKind::Explore => {
                 crate::prompts::explore_prompt(c.task.0, &c.title, &c.body, c.trust, &c.project)
             }
+            StepKind::Diagnose => String::new(),
         }
     };
 
@@ -3829,6 +3906,27 @@ pub fn cleanup(d: &Arc<Daemon>, task: TaskId, delete_branch: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- s250: the retry note ------------------------------------------------------------
+
+    #[test]
+    fn a_retry_note_reaches_the_next_prompt_once() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(RETRY_NOTE), "use the fixture").unwrap();
+        let first = with_retry_note(Some("old feedback".into()), take_retry_note(dir.path()));
+        let first = first.unwrap();
+        assert!(
+            first.starts_with("A note for this retry: use the fixture"),
+            "{first}"
+        );
+        assert!(first.contains("old feedback"));
+        // The second round does not see it.
+        assert_eq!(
+            with_retry_note(Some("old feedback".into()), take_retry_note(dir.path())),
+            Some("old feedback".to_string())
+        );
+        assert_eq!(with_retry_note(None, None), None);
+    }
 
     // ---- s251: the last round -------------------------------------------------------------
 

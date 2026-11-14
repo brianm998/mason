@@ -66,7 +66,10 @@ mason: command-line client for the MASON pipeline
   mason task revive <id>              put a canceled task whose branch was kept back in the queue (owner only)
   mason task show <id> [--json] [--watch]   with --watch, follow the live step progress
   mason task cancel <id> [--delete-branch]
-  mason task retry <id> [--from STEP] [--restart]
+  mason task retry <id> [--from STEP] [--restart] [--message TEXT]
+                                      the message is shown once in the next round's prompt
+  mason task diagnosis <id> [apply|dismiss N]   what the diagnosis agent said about a task that
+                                      failed on its own code; apply or dismiss a pending one
   mason task approve <id>             let a proposed task start, or an approval step go on
   mason task reject <id> [--reason R] reject a proposed task or an approval step
   mason task explore-anyway <id>      explore after all, even if it skipped exploring
@@ -2814,6 +2817,7 @@ fn main() {
                     let id = task_id(&mut a);
                     let from = a.opt("--from");
                     let restart = a.flag("--restart");
+                    let message = a.opt("--message");
                     finish(&a);
                     // Without --from the daemon picks: the failed step when the
                     // failure was not about the code, otherwise developing. Say
@@ -2833,11 +2837,46 @@ fn main() {
                     if restart {
                         body["restart"] = json!(true);
                     }
+                    if let Some(m) = message {
+                        body["message"] = json!(m);
+                    }
                     let r = or_die(d.call("POST", &format!("/tasks/{id}/retry"), Some(&body)));
                     println!(
                         "Retrying task #{id} from {}",
                         r["to"].as_str().unwrap_or("developing")
                     );
+                }
+                "diagnosis" => {
+                    let id = task_id(&mut a);
+                    let what = a.pos();
+                    let n = a.pos();
+                    finish(&a);
+                    match (what.as_deref(), n.and_then(|n| n.parse::<u64>().ok())) {
+                        (None, _) => {
+                            let r = or_die(d.call("GET", &format!("/tasks/{id}/diagnoses"), None));
+                            let rows = r.as_array().cloned().unwrap_or_default();
+                            if rows.is_empty() {
+                                println!("Task #{id} has no diagnosis.");
+                            }
+                            for row in rows {
+                                println!(
+                                    "#{} [{}] {}",
+                                    row["id"],
+                                    row["status"].as_str().unwrap_or("?"),
+                                    row["text"].as_str().unwrap_or("")
+                                );
+                            }
+                        }
+                        (Some(w @ ("apply" | "dismiss")), Some(n)) => {
+                            let r = or_die(d.call(
+                                "POST",
+                                &format!("/tasks/{id}/diagnoses/{n}/{w}"),
+                                Some(&json!({})),
+                            ));
+                            println!("Diagnosis #{n}: {}", r["said"].as_str().unwrap_or("done"));
+                        }
+                        _ => die("usage: mason task diagnosis <id> [apply|dismiss N]"),
+                    }
                 }
                 "skip" => {
                     let id = task_id(&mut a);
@@ -3172,6 +3211,71 @@ fn print_health(r: &serde_json::Value) {
     );
 }
 
+/// The per-project numbers of the digest (s255): p90 beside the median, send-backs per landed
+/// task by class, retries by failure class, test-step run times, and what is not recorded.
+fn print_digest_projects(r: &serde_json::Value) {
+    let Some(m) = r["per_project"].as_object().filter(|m| !m.is_empty()) else {
+        return;
+    };
+    println!("By project:");
+    for (name, p) in m {
+        println!("  {name}: {} landed", p["landed"]);
+        let c = &p["claim_to_land"];
+        match (c["median_ms"].as_u64(), c["p90_ms"].as_u64()) {
+            (Some(med), Some(p90)) => println!(
+                "    claim to land: median {}, p90 {} ({} task(s))",
+                ms_text(med),
+                ms_text(p90),
+                c["samples"]
+            ),
+            _ => println!("    claim to land: no landed task in the window"),
+        }
+        let by = p["send_backs"]["by_class"]
+            .as_object()
+            .cloned()
+            .unwrap_or_default();
+        let per = p["send_backs"]["per_landed"]
+            .as_object()
+            .cloned()
+            .unwrap_or_default();
+        let parts: Vec<String> = by
+            .iter()
+            .map(|(k, n)| {
+                let rate = per[k]
+                    .as_f64()
+                    .map_or("n/a".to_string(), |v| format!("{v:.2}"));
+                format!("{k} {n} ({rate} per landed)")
+            })
+            .collect();
+        println!("    send-backs: {}", parts.join(", "));
+        let retries = p["retries_by_failure_class"]
+            .as_object()
+            .cloned()
+            .unwrap_or_default();
+        if retries.is_empty() {
+            println!("    retries: none");
+        } else {
+            let parts: Vec<String> = retries
+                .iter()
+                .map(|(k, v)| format!("{k}: {} by hand, {} automatic", v["manual"], v["auto"]))
+                .collect();
+            println!("    retries: {}", parts.join("; "));
+        }
+        let t = &p["test_step_run_ms"];
+        match (t["median"].as_u64(), t["p90"].as_u64()) {
+            (Some(med), Some(p90)) => println!(
+                "    test step run: median {}, p90 {} ({} run(s))",
+                ms_text(med),
+                ms_text(p90),
+                t["runs"]
+            ),
+            _ => println!("    test step run: none in the window"),
+        }
+        println!("    run time per suite: not recorded");
+        println!("    run_check calls per task: not recorded");
+    }
+}
+
 fn print_digest(r: &serde_json::Value) {
     let n = |k: &str| r[k].to_string();
     println!("Landed: {}", n("landed"));
@@ -3194,6 +3298,7 @@ fn print_digest(r: &serde_json::Value) {
         ),
     }
     println!("Tokens per landed task: not recorded");
+    print_digest_projects(r);
     println!("Time by state:");
     if let Some(m) = r["time_by_state_ms"].as_object() {
         for (k, v) in m {
