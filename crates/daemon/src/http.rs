@@ -2817,10 +2817,9 @@ fn render_agent(text: &str) -> String {
 pub type LogStamp = (String, u64, Option<std::time::SystemTime>);
 
 pub fn log_signature(d: &Daemon, task: u64) -> Vec<LogStamp> {
-    let reg = mason_step_host::registry::Registry::new(d.cfg.hosts_dir());
-    let mut v: Vec<LogStamp> = reg
-        .scan()
-        .unwrap_or_default()
+    // Same hosts as `render_logs` (live and moved), found by directory name: no other
+    // task's host is opened.
+    let mut v: Vec<LogStamp> = crate::hostarchive::task_hosts(&d.cfg, task)
         .into_iter()
         .filter(|h| crate::sweep::parse_host_id(&h.info.id).is_some_and(|(t, _)| t == task))
         .map(|h| {

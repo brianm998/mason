@@ -141,6 +141,26 @@ fn ci_red_names_the_failed_jobs_and_pending_is_pending() {
 }
 
 #[test]
+fn a_failed_checks_details_url_is_carried_into_its_job_failure() {
+    let g = gh("pr_red_urls.json");
+    let st = g.gh.pr_status(9).unwrap();
+    assert_eq!(
+        st.jobs.len(),
+        1,
+        "only the completed failure is a job: {:?}",
+        st.jobs
+    );
+    assert_eq!(st.jobs[0].job, "build");
+    assert_eq!(
+        st.jobs[0].url.as_deref(),
+        Some("https://github.com/o/r/actions/runs/9/job/not-a-number")
+    );
+    // A check run with no `details_url` has no URL.
+    let g = gh("pr_red.json");
+    assert_eq!(g.gh.pr_status(9).unwrap().jobs[0].url, None);
+}
+
+#[test]
 fn a_pr_waits_for_a_required_review_and_a_requested_change_is_not_a_review() {
     let g = gh("pr_review_required.json");
     let st = g.gh.pr_status(9).unwrap();
