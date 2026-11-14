@@ -906,6 +906,25 @@ impl BuildSystemAdapter for GitHub {
         self.finished(&runs).map(|s| (s, vec![]))
     }
 
+    fn progress(&self, run: &str) -> Result<CiProgress, ApiError> {
+        let v = self.json(Request::get(
+            &self.url(&format!("/actions/runs?head_sha={run}&per_page=20")),
+        ))?;
+        let mut out = CiProgress::default();
+        for r in v["workflow_runs"].as_array().into_iter().flatten() {
+            let Some(id) = r["id"].as_u64() else { continue };
+            let jobs = self.json(Request::get(&self.url(&format!(
+                "/actions/runs/{id}/jobs?filter=latest&per_page=100"
+            ))))?;
+            out.workflows.push(count_jobs(
+                r["name"].as_str().unwrap_or("?"),
+                r["html_url"].as_str().unwrap_or_default(),
+                jobs["jobs"].as_array().map_or(&[][..], Vec::as_slice),
+            ));
+        }
+        Ok(out)
+    }
+
     fn doctor(&self, repo: &Path) -> Vec<Problem> {
         workflow_problems(repo)
     }
@@ -966,29 +985,6 @@ impl GitHub {
             failed,
             jobs: judged,
         })
-    }
-
-    fn progress(&self, run: &str) -> Result<CiProgress, ApiError> {
-        let v = self.json(Request::get(
-            &self.url(&format!("/actions/runs?head_sha={run}&per_page=20")),
-        ))?;
-        let mut out = CiProgress::default();
-        for r in v["workflow_runs"].as_array().into_iter().flatten() {
-            let Some(id) = r["id"].as_u64() else { continue };
-            let jobs = self.json(Request::get(&self.url(&format!(
-                "/actions/runs/{id}/jobs?filter=latest&per_page=100"
-            ))))?;
-            out.workflows.push(count_jobs(
-                r["name"].as_str().unwrap_or("?"),
-                r["html_url"].as_str().unwrap_or_default(),
-                jobs["jobs"].as_array().map_or(&[][..], Vec::as_slice),
-            ));
-        }
-        Ok(out)
-    }
-
-    fn doctor(&self, repo: &Path) -> Vec<Problem> {
-        workflow_problems(repo)
     }
 }
 

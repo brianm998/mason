@@ -293,17 +293,21 @@ fn a_test_that_fails_in_both_runs_keeps_the_step_red_and_is_the_only_one_named()
         &s,
         // Only the change breaks it: at the merge base (no hello.txt) it passes, so nothing is
         // excused (decision 0172).
-        "[ -f hello.txt ] || exit 0; echo 'test alpha ... FAILED'; if [ \"$n\" = 0 ]; then echo 'test beta ... FAILED'; fi; exit 1",
+        "[ -f hello.txt ] || { echo 'test alpha ... ok'; exit 0; }; echo 'test alpha ... FAILED'; if [ \"$n\" = 0 ]; then echo 'test beta ... FAILED'; fi; exit 1",
     );
     s.write_project("scratch", &cmd, "max_test_rounds = 1\ntest_reruns = 1");
     let d = s.start();
     let t = file_task(&d, "Really broken");
     wait_state(&d, t, State::Failed, 120);
-    // Two runs on the branch, and one at the merge base, which passes (nothing excused).
-    assert_eq!(std::fs::read_to_string(&runs).unwrap().trim(), "3");
+    // Two runs on the branch, one at the merge base for the red (s177), and, as this is the
+    // last round, `alpha` three more times at the merge base (s282). It passes there every
+    // time, so nothing is excused.
+    assert_eq!(std::fs::read_to_string(&runs).unwrap().trim(), "6");
     let w = d.world().unwrap();
     let why = w.tasks[&t].failure.clone().unwrap_or_default();
     assert!(why.contains("failed every time: alpha"), "{why}");
+    assert!(why.contains("your change breaks `alpha`"), "{why}");
+    assert!(!why.contains("could not check"), "{why}");
     assert!(!why.contains("beta"), "{why}");
     // `beta` passed on the rerun: a flake. `alpha` is not one.
     assert_eq!(flaky_tests(&d), vec!["beta"]);
