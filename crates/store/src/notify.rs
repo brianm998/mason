@@ -134,6 +134,16 @@ impl Store {
                 "INSERT OR IGNORE INTO announcements(key, kind, sentence, sound, speech, created_at) VALUES (?1,?2,?3,?4,?5,?6)",
                 params![key, kind, sentence, i64::from(sound), i64::from(speech), now as i64],
             )?;
+            if n > 0 {
+                if let Some((group, _)) = alert_group(&key) {
+                    // Only the newest round of an alert waits: an earlier untaken one is old news.
+                    let prefix = format!("{group}:");
+                    c.execute(
+                        "UPDATE announcements SET taken_at = ?2, taken_by = 'expired' WHERE taken_at IS NULL AND key <> ?1 AND substr(key, 1, ?3) = ?4",
+                        params![key, now as i64, prefix.len() as i64, prefix],
+                    )?;
+                }
+            }
             Ok(n > 0)
         })
     }
@@ -153,7 +163,44 @@ impl Store {
                 "UPDATE announcements SET taken_at = ?1, taken_by = 'expired' WHERE taken_at IS NULL AND created_at < ?2",
                 params![now as i64, stale_before as i64],
             )?;
-            let rows = pending(c, limit)?;
+            // Backstop: a reminder is not replayed for an alert that already played once, and an
+            // alert is handed over at most once, by its newest announcement.
+            let all = pending(c, usize::MAX >> 1)?;
+            let mut played_groups = std::collections::HashSet::new();
+            {
+                let mut st = c.prepare(
+                    "SELECT key FROM announcements WHERE taken_at IS NOT NULL AND taken_by <> 'expired' AND key LIKE 'alert:%'",
+                )?;
+                for k in st.query_map([], |r| r.get::<_, String>(0))? {
+                    if let Some((g, _)) = alert_group(&k?) {
+                        played_groups.insert(g);
+                    }
+                }
+            }
+            let mut newest: std::collections::HashMap<String, u64> = Default::default();
+            for r in &all {
+                if let Some((g, _)) = alert_group(&r.key) {
+                    newest.insert(g, r.id);
+                }
+            }
+            let mut rows = Vec::new();
+            for r in all {
+                let drop = match alert_group(&r.key) {
+                    Some((g, label)) => {
+                        newest.get(&g) != Some(&r.id)
+                            || (label.starts_with("reminder") && played_groups.contains(&g))
+                    }
+                    None => false,
+                };
+                if drop {
+                    c.execute(
+                        "UPDATE announcements SET taken_at = ?2, taken_by = 'expired' WHERE id = ?1",
+                        params![r.id as i64, now as i64],
+                    )?;
+                } else if rows.len() < limit {
+                    rows.push(r);
+                }
+            }
             for r in &rows {
                 c.execute(
                     "UPDATE announcements SET taken_at = ?2, taken_by = ?3 WHERE id = ?1",
@@ -203,6 +250,19 @@ impl Store {
     }
 }
 
+/// An alert announcement's key is `alert:<alert key>:<since>:<label>:<flags>`. Returns the part
+/// that names the alert run (everything before the label) and the label.
+fn alert_group(key: &str) -> Option<(String, String)> {
+    if !key.starts_with("alert:") {
+        return None;
+    }
+    let mut it = key.rsplitn(3, ':');
+    let _flags = it.next()?;
+    let label = it.next()?;
+    let group = it.next()?;
+    Some((group.to_string(), label.to_string()))
+}
+
 fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<AnnouncementRow> {
     Ok(AnnouncementRow {
         id: r.get::<_, i64>(0)? as u64,
@@ -248,6 +308,47 @@ mod tests {
         s.sync_alerts(&a("failed:1"), 60).unwrap();
         let again = &s.alerts(true).unwrap()[0];
         assert_eq!((again.since, again.acked_at), (60, None));
+    }
+
+    #[test]
+    fn a_later_round_replaces_the_untaken_earlier_one_of_the_same_alert() {
+        let (_dir, s) = store();
+        s.enqueue_announcement(
+            "alert:failed:1:5:reminder1:11",
+            "failed",
+            "r1",
+            true,
+            true,
+            10,
+        )
+        .unwrap();
+        s.enqueue_announcement(
+            "alert:failed:1:5:reminder2:11",
+            "failed",
+            "r2",
+            true,
+            true,
+            20,
+        )
+        .unwrap();
+        s.enqueue_announcement(
+            "alert:failed:2:5:reminder1:11",
+            "failed",
+            "o",
+            true,
+            true,
+            20,
+        )
+        .unwrap();
+        let p = s.pending_announcements(10).unwrap();
+        let keys: Vec<_> = p.iter().map(|r| r.key.as_str()).collect();
+        assert_eq!(
+            keys,
+            [
+                "alert:failed:1:5:reminder2:11",
+                "alert:failed:2:5:reminder1:11"
+            ]
+        );
     }
 
     #[test]
