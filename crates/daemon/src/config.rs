@@ -491,6 +491,9 @@ pub struct ProjectCfg {
     /// The provider account this project's agent steps use (`account` in the
     /// overlay). Filled for real by `load_projects`, which knows the accounts.
     pub account: String,
+    /// The machine's config dir (where approvals are kept), filled by `load_project(s)`;
+    /// empty for a project parsed from text. A `plugin:<name>` service needs it.
+    pub config_dir: PathBuf,
 }
 
 /// Which agent CLI runs a project's agent steps.
@@ -684,6 +687,8 @@ pub enum HostCfg {
         repo: String,
         token: String,
     },
+    /// An approved project extension that provides `adapter:host:<name>` (`kind = "plugin:<name>"`).
+    Plugin { name: String },
     /// A bare repository and a directory of files standing in for a host (tests).
     Fake {
         dir: PathBuf,
@@ -710,6 +715,10 @@ pub struct CiCfg {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CiKind {
+    /// An approved project extension that provides `adapter:ci:<name>` (`kind = "plugin:<name>"`).
+    Plugin {
+        name: String,
+    },
     GithubActions {
         api: String,
         repo: String,
@@ -751,6 +760,9 @@ pub enum ImportAs {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TrackerCfg {
+    /// `kind = "plugin:<name>"`: an approved project extension that provides
+    /// `adapter:tracker:<name>`; `api`, `repo` and `token` are then empty.
+    pub plugin: Option<String>,
     pub api: String,
     pub repo: String,
     pub token: String,
@@ -764,6 +776,12 @@ pub struct TrackerCfg {
     /// When true an issue is imported only if it carries `label`, whoever filed it (a
     /// tracker shared with another pipeline). Default false: the owner's issues also import.
     pub require_label: bool,
+}
+
+/// The extension named by `kind = "plugin:<name>"`, if that is what `kind` says.
+fn plugin_name(kind: &str) -> Option<&str> {
+    kind.strip_prefix("plugin:")
+        .filter(|n| crate::config::valid_id(n))
 }
 
 fn parse_services(id: &str, doc: &DocumentMut) -> Result<ServicesCfg, String> {
@@ -812,9 +830,12 @@ fn parse_services(id: &str, doc: &DocumentMut) -> Result<ServicesCfg, String> {
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false),
             },
+            o if plugin_name(o).is_some() => HostCfg::Plugin {
+                name: plugin_name(o).unwrap_or_default().to_string(),
+            },
             o => {
                 return Err(format!(
-                    "{id}: `[host] kind` is `github` or `fake`, not {o:?}"
+                    "{id}: `[host] kind` is `github`, `fake` or `plugin:<name>`, not {o:?}"
                 ))
             }
         });
@@ -867,9 +888,12 @@ fn parse_services(id: &str, doc: &DocumentMut) -> Result<ServicesCfg, String> {
                     token: tok,
                 }
             }
+            o if plugin_name(o).is_some() => CiKind::Plugin {
+                name: plugin_name(o).unwrap_or_default().to_string(),
+            },
             o => {
                 return Err(format!(
-                    "{id}: `[ci] kind` is `github-actions`, `jenkins`, `generic` or `command`, not {o:?}"
+                    "{id}: `[ci] kind` is `github-actions`, `jenkins`, `generic`, `command` or `plugin:<name>`, not {o:?}"
                 ))
             }
         };
@@ -906,10 +930,11 @@ fn parse_services(id: &str, doc: &DocumentMut) -> Result<ServicesCfg, String> {
         });
     }
     if let Some(t) = table("tracker") {
-        match need(t, "tracker", "kind")?.as_str() {
-            "github" => {}
-            o => return Err(format!("{id}: `[tracker] kind` is `github` (the local tracker needs no section), not {o:?}")),
-        }
+        let tracker_plugin = match need(t, "tracker", "kind")?.as_str() {
+            "github" => None,
+            o if plugin_name(o).is_some() => plugin_name(o).map(String::from),
+            o => return Err(format!("{id}: `[tracker] kind` is `github` or `plugin:<name>` (the local tracker needs no section), not {o:?}")),
+        };
         let secret = get(t, "webhook_secret");
         if secret
             .as_ref()
@@ -939,10 +964,16 @@ fn parse_services(id: &str, doc: &DocumentMut) -> Result<ServicesCfg, String> {
                 .as_bool()
                 .ok_or_else(|| format!("{id}: `[tracker] require_label` is `true` or `false`"))?,
         };
+        let (api, repo, token) = if tracker_plugin.is_some() {
+            (String::new(), String::new(), String::new())
+        } else {
+            (api(t), need(t, "tracker", "repo")?, token(t, "tracker")?)
+        };
         out.tracker = Some(TrackerCfg {
-            api: api(t),
-            repo: need(t, "tracker", "repo")?,
-            token: token(t, "tracker")?,
+            plugin: tracker_plugin,
+            api,
+            repo,
+            token,
             label: get(t, "label").unwrap_or_else(|| "mason".into()),
             interval_s: int(t, "interval_s", 60),
             webhook_secret: secret,
@@ -1117,6 +1148,7 @@ pub fn parse_project(id: &str, text: &str) -> Result<ProjectCfg, String> {
             .get("priority_jumps_progress")
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
+        config_dir: PathBuf::new(),
         overlay_text: text.to_string(),
         services: parse_services(id, &doc)?,
         self_cfg: parse_self(id, &doc)?,
@@ -1152,6 +1184,7 @@ pub fn load_project(config_dir: &Path, id: &str) -> Result<ProjectCfg, String> {
     let file = config_dir.join("projects").join(format!("{id}.toml"));
     let text = std::fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
     let mut c = parse_project(id, &text)?;
+    c.config_dir = config_dir.to_path_buf();
     let accounts = crate::providers::load(config_dir)?;
     let a = c.agent();
     c.account = crate::providers::resolve_account(&accounts, a.provider, a.account.as_deref())
@@ -1185,6 +1218,7 @@ pub fn load_projects(config_dir: &Path) -> Result<Vec<ProjectCfg>, Vec<String>> 
         match std::fs::read_to_string(&p) {
             Ok(t) => match parse_project(&id, &t) {
                 Ok(mut c) => {
+                    c.config_dir = config_dir.to_path_buf();
                     let a = c.agent();
                     match crate::providers::resolve_account(
                         &accounts,
@@ -1359,6 +1393,45 @@ mod tests {
         ] {
             let e = parse_project("p", &format!("{base}{extra}\n")).unwrap_err();
             assert!(e.contains(want), "{e}");
+        }
+    }
+
+    #[test]
+    fn host_ci_and_tracker_can_be_a_plugin_and_other_kinds_name_the_choices() {
+        let base = "path=\"/r\"\nbase=\"m\"\ntest=\"t\"\n";
+        let p = parse_project(
+            "p",
+            &format!(
+                "{base}[host]\nkind=\"plugin:acme\"\n[ci]\nkind=\"plugin:acme-ci\"\n[tracker]\nkind=\"plugin:acme\"\n"
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            p.services.host,
+            Some(HostCfg::Plugin {
+                name: "acme".into()
+            })
+        );
+        assert_eq!(
+            p.services.ci.unwrap().kind,
+            CiKind::Plugin {
+                name: "acme-ci".into()
+            }
+        );
+        // A plugin tracker needs no repo or token.
+        let t = p.services.tracker.unwrap();
+        assert_eq!(t.plugin.as_deref(), Some("acme"));
+        assert!(t.repo.is_empty() && t.token.is_empty());
+        for (section, want) in [
+            ("host", "`github`, `fake` or `plugin:<name>`"),
+            ("ci", "`command` or `plugin:<name>`"),
+            ("tracker", "`github` or `plugin:<name>`"),
+        ] {
+            for kind in ["gitlab", "plugin:", "plugin:Bad Name"] {
+                let e = parse_project("p", &format!("{base}[{section}]\nkind=\"{kind}\"\n"))
+                    .unwrap_err();
+                assert!(e.contains(want), "{section} {kind}: {e}");
+            }
         }
     }
 

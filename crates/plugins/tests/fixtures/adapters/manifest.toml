@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+name = "fixture-adapters"
+version = "1.0.0"
+protocol = 3
+description = "A tracker, a git host and a CI system, all in memory (test fixture)."
+provides = ["adapter:tracker:fixture-adapters", "adapter:host:fixture-adapters", "adapter:ci:fixture-adapters"]
+run = "python3 adapters.py"

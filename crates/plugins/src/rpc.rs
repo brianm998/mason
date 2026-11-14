@@ -12,6 +12,28 @@
 //!
 //! Protocol 2 adds one notification, sent by the plugin while `step.run` is open:
 //! `step.progress {done?, total?, unit?, message?}` (no `id`, no answer).
+//!
+//! Protocol 3 adds one notification the other way: while `step.run` is open the host sends
+//! `step.cancel {}` (no `id`, no answer) when the task was canceled. The plugin stops what
+//! it is doing and answers `step.run` (with `passed: false`, say); it is killed at the
+//! step's timeout if it does not. And it adds what a plugin may `provide` (see below).
+//!
+//! Adapters, parsers and environments (protocol 3). The plugin is started once per use
+//! and told what it provides by `initialize`. Every method's params and result are JSON
+//! objects; an error answer's `code` says what kind of failure it was (see [`error_kind`]).
+//!
+//! * `adapter:tracker:<n>`: `tracker.capabilities {}`, `tracker.list {etag?}`,
+//!   `tracker.mirror {item, note}`, `tracker.close {item, note}`,
+//!   `tracker.blocked_by {number}`, `tracker.set_priority {number, priority}`.
+//! * `adapter:host:<n>`: `host.capabilities {}`, `host.open_pr {base, head, title, body}`,
+//!   `host.pr_status {number}`, `host.merge_pr {number}`, `host.enqueue {number}`,
+//!   `host.close_pr {number}`.
+//! * `adapter:ci:<n>`: `ci.capabilities {}`, `ci.trigger {ref, sha}`, `ci.status {run}`,
+//!   `ci.doctor {repo}`.
+//! * `parser:<n>`: `parser.parse {text}` -> `{tests: [{name, passed, detail?}]}`.
+//! * `environment:<n>`: `environment.setup {config}`, `environment.health {config}`,
+//!   `environment.teardown {config}`, each -> `{ok, detail?}`.
+//! * `adapter:agent:<n>` may be named in a manifest but nothing runs it yet.
 
 use serde_json::{json, Value};
 
@@ -140,6 +162,19 @@ pub fn read_initialized(v: &Value) -> Result<Initialized, String> {
             .cloned()
             .unwrap_or_else(|| json!({"type": "object"})),
     })
+}
+
+/// What kind of failure an error answer's code stands for (protocol 3 adapters):
+/// -32001 not found, -32002 invalid, -32003 auth, -32004 rate limited, -32005 unavailable.
+/// Any other code (and a plugin that gives none) is "unavailable": retry later.
+pub fn error_kind(code: i64) -> &'static str {
+    match code {
+        -32001 => "not_found",
+        -32002 | -32602 => "invalid",
+        -32003 => "auth",
+        -32004 => "rate_limited",
+        _ => "unavailable",
+    }
 }
 
 /// What `step.run` answers.

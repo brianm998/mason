@@ -189,6 +189,19 @@ pub fn plugin_kit(dir: &Path, timeout: Duration) -> Vec<Check> {
         ));
     }
 
+    // A plugin that provides adapters, a parser or an environment and no step type has no
+    // `step.run` to try; its methods are exercised by the adapter kits.
+    if m.step_types.is_empty() {
+        for n in ["run", "progress", "refuses bad config"] {
+            out.push(pass(n, "provides no step type; the adapter kits exercise it"));
+        }
+        match p.shutdown(timeout) {
+            Ok(()) => out.push(pass("shutdown", "answered and exited")),
+            Err(e) => out.push(fail("shutdown", e)),
+        }
+        return out;
+    }
+
     // run
     let req = |config: Value| StepRequest {
         step: "kit".into(),

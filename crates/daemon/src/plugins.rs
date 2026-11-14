@@ -519,6 +519,148 @@ pub fn approve(
     Ok(json!({"name": name, "hash": a.hash, "approved_by": a.by}))
 }
 
+/// The step types the project's extensions provide that the owner has approved, read from
+/// the base commit (nothing runs). For `mason definition check --project`.
+pub fn approved_types(p: &ProjectCfg) -> Vec<PluginType> {
+    let Ok(sha) = git::rev_parse(&p.path, &p.base_ref()) else {
+        return vec![];
+    };
+    let trusted = approvals(&p.config_dir, &p.id);
+    scan_commit(&p.path, &sha)
+        .extensions
+        .iter()
+        .filter(|e| trusted.iter().any(|a| a.name == e.dir && a.hash == e.hash))
+        .flat_map(Extension::types)
+        .collect()
+}
+
+/// An approved extension on the project's base commit that provides `what`
+/// (`adapter:tracker:acme`, `parser:junit`, `environment:vm`), ready to start: its
+/// approved bytes are written out and its manifest read. `Err` says why not, and
+/// "needs approval" when the owner has not approved exactly these bytes. Nothing runs here.
+pub fn approved_provider(
+    p: &ProjectCfg,
+    what: &str,
+) -> Result<(Launch, Manifest), String> {
+    if p.config_dir.as_os_str().is_empty() {
+        return Err(format!(
+            "`{what}` is a plugin, but this project was not loaded from a config dir, so there are no approvals to check"
+        ));
+    }
+    let sha = git::rev_parse(&p.path, &p.base_ref())
+        .map_err(|e| format!("cannot read {}: {e}", p.base_ref()))?;
+    let scan = scan_commit(&p.path, &sha);
+    let ext = scan
+        .extensions
+        .iter()
+        .find(|e| {
+            e.manifest
+                .as_ref()
+                .is_ok_and(|m| m.provides_extra(what))
+        })
+        .ok_or_else(|| {
+            format!(
+                "no extension on {} provides `{what}`",
+                p.base_ref()
+            )
+        })?;
+    if approved(&p.config_dir, &p.id, &ext.dir, &ext.hash).is_none() {
+        let seen = approvals(&p.config_dir, &p.id)
+            .iter()
+            .any(|a| a.name == ext.dir);
+        return Err(format!(
+            "needs approval: mason extension approve {} --project {} (extension `{}` {} has not been approved{})",
+            ext.dir,
+            p.id,
+            ext.dir,
+            &ext.hash[..12],
+            if seen { "; it changed since it was last approved" } else { "" }
+        ));
+    }
+    let dir = materialize(&p.config_dir, ext)
+        .map_err(|e| format!("cannot prepare extension `{}`: {e}", ext.dir))?;
+    let Ok(m) = &ext.manifest else {
+        unreachable!("only usable extensions are matched")
+    };
+    Ok((
+        Launch {
+            dir,
+            run: m.run.clone(),
+            log: Some(
+                p.config_dir
+                    .join("plugin-logs")
+                    .join(format!("{}-{}.log", p.id, ext.dir)),
+            ),
+        },
+        m.clone(),
+    ))
+}
+
+/// Start the approved extension that provides `what`, run `f` on it, shut it down.
+fn with_provider<T>(
+    p: &ProjectCfg,
+    what: &str,
+    f: impl FnOnce(&mut host::Plugin) -> Result<T, String>,
+) -> Result<T, String> {
+    let (launch, m) = approved_provider(p, what)?;
+    let t = Duration::from_secs(60);
+    let mut plugin =
+        host::Plugin::spawn(&launch).map_err(|e| format!("cannot start `{}`: {e}", m.name))?;
+    let init = host::initialize_as(&mut plugin, t, m.protocol)?;
+    if init.name != m.name || !init.provides.iter().any(|x| x == what) {
+        return Err(format!(
+            "plugin `{}` does not say it provides `{what}`",
+            m.name
+        ));
+    }
+    let out = f(&mut plugin);
+    if plugin.shutdown(t).is_err() {
+        plugin.kill();
+    }
+    out
+}
+
+/// A suite's output read by the parser plugin `name` (`parser = "plugin:<name>"`).
+pub fn parse_with_plugin(
+    p: &ProjectCfg,
+    name: &str,
+    text: &str,
+) -> Result<mason_testing::Results, String> {
+    with_provider(p, &format!("parser:{name}"), |plugin| {
+        let v = plugin
+            .call("parser.parse", &json!({"text": text}), Duration::from_secs(60))
+            .map_err(|e| format!("parser plugin `{name}`: {e}"))?;
+        mason_testing::parse::from_plugin(&v)
+    })
+}
+
+/// One lifecycle call (`setup`, `health` or `teardown`) of the environment plugin `name`.
+/// `Ok(())` when it says `ok`; otherwise what it said.
+pub fn environment_call(
+    p: &ProjectCfg,
+    name: &str,
+    phase: &str,
+    config: &Value,
+) -> Result<(), String> {
+    with_provider(p, &format!("environment:{name}"), |plugin| {
+        let v = plugin
+            .call(
+                &format!("environment.{phase}"),
+                &json!({"config": config}),
+                Duration::from_secs(600),
+            )
+            .map_err(|e| format!("environment plugin `{name}` {phase}: {e}"))?;
+        if v["ok"].as_bool() == Some(true) {
+            Ok(())
+        } else {
+            Err(format!(
+                "environment plugin `{name}` {phase}: {}",
+                v["detail"].as_str().unwrap_or("not ok")
+            ))
+        }
+    })
+}
+
 /// The settings and task facts a plugin's step gets.
 fn request(c: &crate::jobs::Ctx) -> StepRequest {
     StepRequest {
@@ -590,13 +732,24 @@ pub fn plugin_job(c: &crate::jobs::Ctx) {
         .map_or(Duration::from_secs(600), |a| a.value);
     let run = c.run;
     let d = c.d.clone();
+    let canceled = {
+        let d = c.d.clone();
+        let task = c.task;
+        move || {
+            d.world().is_ok_and(|w| {
+                w.tasks
+                    .get(&task)
+                    .is_some_and(|t| t.state == mason_core::State::Canceled)
+            })
+        }
+    };
     let mut note = |v: &Value| {
         // A malformed notification is ignored at run time (the kit flags it).
         if let Some(r) = crate::progress::parse_step_progress(v) {
             d.progress_report(run, |p, now| p.apply_report(&r, now));
         }
     };
-    match host::run_step(
+    let res = host::run_step(
         &launch,
         &name,
         &request(c),
@@ -604,7 +757,14 @@ pub fn plugin_job(c: &crate::jobs::Ctx) {
         Duration::from_secs(30),
         limit,
         &mut note,
-    ) {
+        &mut || canceled(),
+    );
+    // A canceled task's step run was ended as canceled by the cancel itself; whatever the
+    // plugin answered after `step.cancel` is not a verdict.
+    if canceled() {
+        return;
+    }
+    match res {
         Ok(r) if r.passed => {
             let _ = std::fs::remove_file(c.task_dir().join("feedback.txt"));
             let _ = std::fs::write(
