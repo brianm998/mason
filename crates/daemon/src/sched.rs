@@ -950,7 +950,9 @@ impl Broker {
                 .submit(rank, needs.clone(), label, crate::daemon::now_ms());
             st.meta.insert(id, Meta::Task);
             st.by_task.insert(task, id);
-            drop(self.pass(st));
+            // Granted in the same hold as the submit: admission reads the ledger
+            // and must never see a lease that is neither held nor waiting.
+            self.quick_pass(&mut st);
             id
         };
         let mut announced = false;
@@ -1362,7 +1364,8 @@ impl Broker {
                 pid: 0,
             },
         );
-        drop(self.pass(st));
+        self.quick_pass(&mut st);
+        drop(st);
         id
     }
 
