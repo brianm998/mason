@@ -963,6 +963,61 @@ mod tests {
     }
 
     #[test]
+    fn land_is_never_chosen_for_the_owner() {
+        let ok = |f: Flags, interactive| run(&f, &detected(), interactive).0;
+        // `--yes` and no terminal both mean no, even with a remote.
+        assert_eq!(
+            ok(
+                Flags {
+                    yes: true,
+                    ..Default::default()
+                },
+                false
+            )
+            .unwrap()
+            .land,
+            Land::No
+        );
+        assert_eq!(
+            ok(
+                Flags {
+                    tracker: Some("local".into()),
+                    agent: Some("claude".into()),
+                    sessions: Some("1".into()),
+                    workflow: Some("solo".into()),
+                    suites: Some("skip".into()),
+                    base: Some("main".into()),
+                    landing: Some("direct".into()),
+                    alerts: Some("none".into()),
+                    ..Default::default()
+                },
+                false
+            )
+            .unwrap()
+            .land,
+            Land::No
+        );
+        for (v, want) in [
+            ("merge", Land::Merge),
+            ("push", Land::Push),
+            ("no", Land::No),
+        ] {
+            let f = Flags {
+                yes: true,
+                land: Some(v.into()),
+                ..Default::default()
+            };
+            assert_eq!(ok(f, false).unwrap().land, want);
+        }
+        let f = Flags {
+            yes: true,
+            land: Some("sometimes".into()),
+            ..Default::default()
+        };
+        assert!(ok(f, false).unwrap_err().contains("--land takes"));
+    }
+
+    #[test]
     fn a_terminal_is_asked_in_part_21s_order_and_only_what_flags_leave() {
         let (r, asked) = run(&Flags::default(), &detected(), true);
         r.unwrap();

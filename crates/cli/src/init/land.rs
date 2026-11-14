@@ -125,6 +125,9 @@ pub fn apply(d: &Detected, a: &Answers) -> Landed {
         }
         if d.remote_name.is_none() {
             out.published = out.merged;
+            if out.merged {
+                println!("  No remote: masond cannot land onto a base branch that is checked out here, so switch to another branch (`git checkout -b my-work`) before the first task lands.");
+            }
             return Ok(());
         }
         match a.land {
