@@ -59,6 +59,17 @@ impl std::fmt::Display for StoreError {
 
 impl std::error::Error for StoreError {}
 
+/// An explorer's close waiting for its veto window to pass (s254).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExploreClose {
+    pub task: u64,
+    pub kind: String,
+    pub duplicate_of: Option<u64>,
+    pub evidence: String,
+    pub deadline_ms: u64,
+    pub at_ms: u64,
+}
+
 /// A diagnosis of a failed task (s250).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DiagnosisRow {
@@ -1526,6 +1537,58 @@ impl Store {
         self.write(move |c| {
             c.execute("DELETE FROM base_red WHERE task = ?1", params![task as i64])
                 .map(|_| ())
+        })
+    }
+
+    pub fn put_explore_close(&self, c: &ExploreClose) -> Result<(), StoreError> {
+        let c = c.clone();
+        self.write(move |db| {
+            db.execute(
+                "INSERT OR REPLACE INTO explore_closes(task, kind, duplicate_of, evidence, deadline_ms, at_ms) \
+                 VALUES (?1,?2,?3,?4,?5,?6)",
+                params![
+                    c.task as i64,
+                    c.kind,
+                    c.duplicate_of.map(|n| n as i64),
+                    c.evidence,
+                    c.deadline_ms as i64,
+                    c.at_ms as i64
+                ],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn explore_closes(&self) -> Result<Vec<ExploreClose>, StoreError> {
+        self.read(move |db| {
+            let mut st = db.prepare(
+                "SELECT task, kind, duplicate_of, evidence, deadline_ms, at_ms FROM explore_closes ORDER BY task",
+            )?;
+            let rows = st.query_map([], |r| {
+                Ok(ExploreClose {
+                    task: r.get::<_, i64>(0)? as u64,
+                    kind: r.get(1)?,
+                    duplicate_of: r.get::<_, Option<i64>>(2)?.map(|n| n as u64),
+                    evidence: r.get(3)?,
+                    deadline_ms: r.get::<_, i64>(4)? as u64,
+                    at_ms: r.get::<_, i64>(5)? as u64,
+                })
+            })?;
+            rows.collect()
+        })
+    }
+
+    pub fn explore_close(&self, task: u64) -> Result<Option<ExploreClose>, StoreError> {
+        Ok(self.explore_closes()?.into_iter().find(|c| c.task == task))
+    }
+
+    pub fn clear_explore_close(&self, task: u64) -> Result<(), StoreError> {
+        self.write(move |db| {
+            db.execute(
+                "DELETE FROM explore_closes WHERE task = ?1",
+                params![task as i64],
+            )
+            .map(|_| ())
         })
     }
 

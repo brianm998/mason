@@ -15,6 +15,7 @@ const TOP_KEYS: &[&str] = &[
     "step",
     "agent",
     "resource",
+    "admission",
     "suite",
     "environment",
     "binding",
@@ -382,6 +383,7 @@ pub fn parse_with(text: &str, plugins: Plugins<'_>) -> Result<Definition, Vec<Pr
     let mut agents = BTreeMap::new();
     let mut resources = BTreeMap::new();
     let mut watch_ci = None;
+    let mut max_check_queue = None;
 
     for (k, v) in doc.iter() {
         match k {
@@ -471,6 +473,25 @@ pub fn parse_with(text: &str, plugins: Plugins<'_>) -> Result<Definition, Vec<Pr
                     "must be a table, like [resource.phone]",
                 )),
             },
+            "admission" => match v.as_table_like() {
+                Some(t) => {
+                    for (key, item) in t.iter() {
+                        match (key, item.as_integer()) {
+                            ("max_check_queue", Some(n)) if n >= 0 => {
+                                max_check_queue = Some(n as u32)
+                            }
+                            ("max_check_queue", _) => out.push(Problem::new(
+                                "admission.max_check_queue",
+                                "must be a whole number from 0 (0 turns it off)",
+                            )),
+                            (other, _) => {
+                                out.push(unknown_key("admission", other, &["max_check_queue"]))
+                            }
+                        }
+                    }
+                }
+                None => out.push(Problem::new("admission", "must be a table, [admission]")),
+            },
             "watch" => watch_ci = crate::watch::parse(v, &mut out),
             // Read together below.
             "suite" | "environment" | "binding" | "impact" | "signature" => {}
@@ -500,6 +521,7 @@ pub fn parse_with(text: &str, plugins: Plugins<'_>) -> Result<Definition, Vec<Pr
         steps,
         agents,
         resources,
+        max_check_queue,
         testing,
         watch_ci,
         hash: hash(text),
@@ -510,6 +532,19 @@ pub fn parse_with(text: &str, plugins: Plugins<'_>) -> Result<Definition, Vec<Pr
 mod tests {
     use super::*;
     use mason_core::State;
+
+    #[test]
+    fn an_admission_table_sets_the_check_queue_limit() {
+        let base =
+            "schema = 1\nstart = \"s\"\n[step.s]\ntype = \"landing\"\ncategory = \"landing\"\n";
+        assert_eq!(parse(base).unwrap().max_check_queue, None);
+        let d = parse(&format!("{base}[admission]\nmax_check_queue = 6\n")).unwrap();
+        assert_eq!(d.max_check_queue, Some(6));
+        let off = parse(&format!("{base}[admission]\nmax_check_queue = 0\n")).unwrap();
+        assert_eq!(off.max_check_queue, Some(0));
+        assert!(parse(&format!("{base}[admission]\nmax_check_queue = -1\n")).is_err());
+        assert!(parse(&format!("{base}[admission]\nmax_queue = 1\n")).is_err());
+    }
 
     #[test]
     fn watch_ci_is_off_unless_enabled_and_keys_are_checked() {

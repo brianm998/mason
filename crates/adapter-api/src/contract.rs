@@ -27,7 +27,8 @@ pub enum StepKind {
     Diagnose,
 }
 
-pub const ALL_TOOLS: [&str; 9] = [
+pub const ALL_TOOLS: [&str; 10] = [
+    "submit_close",
     "submit_diagnosis",
     "submit_plan",
     "submit_change",
@@ -64,7 +65,13 @@ impl StepKind {
     /// the tree or runs long checks.
     pub fn tools(self) -> &'static [&'static str] {
         match self {
-            StepKind::Explore => &["submit_plan", "ask", "file_proposal", "report_progress"],
+            StepKind::Explore => &[
+                "submit_plan",
+                "submit_close",
+                "ask",
+                "file_proposal",
+                "report_progress",
+            ],
             StepKind::Develop => &[
                 "submit_change",
                 "run_check",
@@ -81,7 +88,7 @@ impl StepKind {
     /// Tools that end the step when accepted.
     pub fn terminal_tools(self) -> &'static [&'static str] {
         match self {
-            StepKind::Explore => &["submit_plan"],
+            StepKind::Explore => &["submit_plan", "submit_close"],
             StepKind::Develop => &["submit_change", "request_exploration"],
             StepKind::Review => &["submit_review"],
             StepKind::Diagnose => &["submit_diagnosis"],
@@ -152,6 +159,18 @@ pub fn tool_spec(tool: &str) -> Option<(String, Value)> {
                     "description": "Lines the base branch landed that your change removes on purpose, each with a reason. Landing sends a task back when a merge with the base dropped a landed line that is not listed here."}
             }),
             &["summary", "head"],
+        ),
+        "submit_close" => s(
+            "Close this task without a change, because exploring shows there is nothing to build: \
+             the work is already done, it duplicates another task, or the problem does not exist. \
+             Give the evidence. The owner can reopen it within a window; if nobody does, it closes. \
+             It replies 'accepted' or lists what to fix.",
+            json!({
+                "kind": {"type": "string", "enum": ["already_done", "duplicate", "not_a_problem"]},
+                "duplicate_of": {"type": "integer", "description": "duplicate: the other task's number"},
+                "evidence": {"type": "string", "description": "What shows it: a commit, a file and line, a test, the other task. Up to 2000 characters"}
+            }),
+            &["kind", "evidence"],
         ),
         "submit_diagnosis" => s(
             "End your diagnosis with exactly one of these verdicts: 'retry' (run again from a step, \
@@ -371,6 +390,23 @@ pub fn validate(tool: &str, a: &Value) -> Result<(), Vec<String>> {
                     }
                 }
                 Some(_) => p.push("removes: must be an array of {file, line, reason}".into()),
+            }
+        }
+        "submit_close" => {
+            text(a, "evidence", 2000, &mut p);
+            match a.get("kind").and_then(Value::as_str) {
+                Some("already_done" | "not_a_problem") => {}
+                Some("duplicate") => {
+                    if a.get("duplicate_of").and_then(Value::as_u64).is_none() {
+                        p.push(
+                            "duplicate_of: the other task's number is required for a duplicate"
+                                .into(),
+                        );
+                    }
+                }
+                _ => {
+                    p.push("kind: required, 'already_done', 'duplicate' or 'not_a_problem'".into())
+                }
             }
         }
         "submit_diagnosis" => {
@@ -1000,6 +1036,26 @@ impl Drop for Inner {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_close_needs_its_kind_and_evidence_and_is_an_explore_terminal() {
+        let ok = |v: Value| validate("submit_close", &v).is_ok();
+        assert!(ok(
+            json!({"kind": "already_done", "evidence": "landed in abc123"})
+        ));
+        assert!(ok(
+            json!({"kind": "not_a_problem", "evidence": "the file does not do that"})
+        ));
+        assert!(ok(
+            json!({"kind": "duplicate", "duplicate_of": 12, "evidence": "same change"})
+        ));
+        assert!(!ok(json!({"kind": "duplicate", "evidence": "same change"})));
+        assert!(!ok(json!({"kind": "already_done"})));
+        assert!(!ok(json!({"kind": "later", "evidence": "x"})));
+        assert!(StepKind::Explore.terminal_tools().contains(&"submit_close"));
+        assert!(StepKind::Explore.tools().contains(&"submit_close"));
+        assert!(!StepKind::Develop.tools().contains(&"submit_close"));
+    }
 
     #[test]
     fn a_diagnosis_needs_what_its_verdict_needs() {

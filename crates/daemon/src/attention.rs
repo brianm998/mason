@@ -130,10 +130,31 @@ pub fn answer(
     let def = d
         .pinned_def(&t.def)
         .unwrap_or_else(|| d.current_def(t.project));
-    let step = def
+    let mut step = def
         .first_in(State::Developing)
         .map(|s| s.name.clone())
         .unwrap_or_default();
+    // An explorer's close waiting for a veto (s254): "Close now" closes it; any other answer
+    // reopens it, back in exploring with the owner's words.
+    if let Ok(Some(close)) = d.store.explore_close(task.0) {
+        let _ = d.store.clear_explore_close(task.0);
+        if text.starts_with(crate::closer::CLOSE_NOW) {
+            d.emit(EventKind::ClosedNoChange {
+                task,
+                reason: crate::closer::reason(&close),
+            })
+            .map_err(|e| match e {
+                StoreError::Rejected(r) => (409, format!("not allowed: {r:?}")),
+                other => (500, other.to_string()),
+            })?;
+            intervene(d, "answer", Some(task), who, &text, "");
+            return Ok(text);
+        }
+        step = def
+            .first_in(State::Exploring)
+            .map(|s| s.name.clone())
+            .unwrap_or(step);
+    }
     let decision = t.decision.expect("checked by card_of");
     remember(d, task, &card.ask, &text);
     d.emit(EventKind::Answered {

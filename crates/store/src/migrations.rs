@@ -655,6 +655,17 @@ const STEPS: &[&str] = &[
          decided_ms INTEGER NOT NULL DEFAULT 0
      );
      CREATE INDEX diagnoses_task ON diagnoses(task);",
+    // 35: an explorer closed a task with no change and the owner may veto it (s254, decision
+    // 0249): one row per task until it is closed, reopened or the task is gone. `deadline_ms`
+    // is when it closes by itself. Additive.
+    "CREATE TABLE explore_closes (
+         task        INTEGER PRIMARY KEY,
+         kind        TEXT NOT NULL,
+         duplicate_of INTEGER,
+         evidence    TEXT NOT NULL,
+         deadline_ms INTEGER NOT NULL,
+         at_ms       INTEGER NOT NULL
+     );",
 ];
 
 pub const SCHEMA_VERSION: u32 = STEPS.len() as u32;
