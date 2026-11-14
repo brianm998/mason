@@ -120,3 +120,31 @@ fn another_workflow_or_no_run_excuses_nothing() {
         Verdict::Blame
     );
 }
+
+// s213: a mapped job red on the base too is held, not bisected.
+
+#[test]
+fn a_job_red_in_the_latest_base_run_that_has_it_is_named() {
+    let b = base("failure", "x");
+    let names = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    assert_eq!(
+        mason_daemon::ci_watch::base_red_jobs(&b, "develop", &names(&["static checks", "other"])),
+        names(&["static checks"])
+    );
+}
+
+#[test]
+fn a_job_green_missing_or_unreadable_on_the_base_is_not_named() {
+    let names = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let green = base("success", "");
+    assert!(
+        mason_daemon::ci_watch::base_red_jobs(&green, "develop", &names(&["static checks"]))
+            .is_empty()
+    );
+    let mut none = base("failure", "x");
+    none.runs.clear();
+    assert!(
+        mason_daemon::ci_watch::base_red_jobs(&none, "develop", &names(&["static checks"]))
+            .is_empty()
+    );
+}

@@ -1381,7 +1381,97 @@ impl Runner {
                 );
                 // The red ladder.
                 let mut resolved = false;
+                // s213: a red confined to CI jobs that map to local suites is searched for
+                // locally. CI still has the last word: the next round verifies the remaining
+                // union through it once.
+                let mut local_why: Option<String> = None;
+                if !self.real_ci_red.load(std::sync::atomic::Ordering::SeqCst) {
+                    if let Some(mapped) = self.local_suites(&def, &vr.failed) {
+                        let jobs: Vec<String> = vr.failed.iter().cloned().collect();
+                        let jobs_list = jobs.join(", ");
+                        let suites_list = mapped.join(", ");
+                        let base = self.project().base.clone();
+                        // The base's own CI first: a red it has is not this batch's to find.
+                        if let Ok((gh, _)) =
+                            crate::ci_watch::source(self.project(), "the landing CI comparison")
+                        {
+                            let held = crate::ci_watch::base_red_jobs(&gh, &base, &jobs);
+                            if !held.is_empty() {
+                                break 'outer Err(format!(
+                                    "{} red on {base} too: nobody is blamed and the batch is held under the freeze, not bisected",
+                                    held.join(", ")
+                                ));
+                            }
+                        }
+                        let whole = self.run_local(
+                            &def,
+                            &mapped,
+                            &int_wt,
+                            &asm.base_tip,
+                            &log_dir,
+                            &format!("b{batch_id}-r{rounds}-loc"),
+                        );
+                        if let Some(e) = self.take_service_error() {
+                            break 'outer Err(e);
+                        }
+                        if whole.green {
+                            let why = format!(
+                                "batch #{batch_id}: CI red in {jobs_list}, but {suites_list} is green here: environment difference; nobody is blamed and the batch waits for the owner"
+                            );
+                            self.d.landing.raise(
+                                self.pid,
+                                "redbase",
+                                "landing",
+                                &format!("{}: {why}", self.project().id),
+                            );
+                            self.d.poke();
+                            break 'outer Err(why);
+                        }
+                        if active.len() == 1 {
+                            let id = active[0].id;
+                            self.park(&mut parked, &mut active, &[id], batch_id, &vr);
+                            continue 'outer;
+                        }
+                        let ids: Vec<u64> = active.iter().map(|t| t.id).collect();
+                        let mut red = |subset: &[u64]| -> bool {
+                            let sub: Vec<BatchTask> = active
+                                .iter()
+                                .filter(|t| subset.contains(&t.id))
+                                .cloned()
+                                .collect();
+                            let a = {
+                                let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+                                batch.assemble(&sub, &|_| {})
+                            };
+                            let Ok(a) = a else { return false };
+                            !self
+                                .run_local(
+                                    &def,
+                                    &mapped,
+                                    &int_wt,
+                                    &a.base_tip,
+                                    &log_dir,
+                                    &format!("b{batch_id}-r{rounds}-locbis"),
+                                )
+                                .green
+                        };
+                        let found = plan::bisect(&ids, &mut red);
+                        if let Some(e) = self.take_service_error() {
+                            break 'outer Err(e);
+                        }
+                        if let Bisect::Culprit(id) = found {
+                            self.park(&mut parked, &mut active, &[id], batch_id, &vr);
+                            continue 'outer;
+                        }
+                        local_why = Some(format!(
+                            "batch #{batch_id} is red in {jobs_list}, {suites_list} reproduces it here, and the red cannot be pinned on one task"
+                        ));
+                    }
+                }
                 for rung in &self.cfg.ladder {
+                    if local_why.is_some() {
+                        break;
+                    }
                     // A red the CI judged a real failure is not rerun, blamed or bisected
                     // by guesswork: the tasks hear of it now.
                     if self.real_ci_red.load(std::sync::atomic::Ordering::SeqCst) {
@@ -1500,6 +1590,8 @@ impl Runner {
                                 .collect::<Vec<_>>()
                                 .join("; ")
                         )
+                    } else if let Some(w) = local_why.clone() {
+                        w
                     } else {
                         format!(
                             "batch #{batch_id} is red in {failed_list} and the red cannot be pinned on one task"
@@ -1831,6 +1923,30 @@ impl Runner {
         }
     }
 
+<<<<<<< HEAD
+    /// The local suites that cover every failed CI job (`[ci.local]`), or `None` when any
+    /// failed job has no mapping (or maps to a suite the project does not define): that red
+    /// is searched for through CI, as before.
+    fn local_suites(
+        &self,
+        def: &mason_definition::Definition,
+        failed: &BTreeSet<String>,
+    ) -> Option<Vec<String>> {
+        if failed.is_empty() {
+            return None;
+        }
+        let mut out: Vec<String> = vec![];
+        for job in failed {
+            let suites = self.cfg.ci_local.get(job)?;
+            for s in suites {
+                def.testing.suite(s)?;
+                if !out.contains(s) {
+                    out.push(s.clone());
+                }
+            }
+        }
+        Some(out)
+=======
     /// A red re-test whose failing tests are all in the known-red ledger is green for the
     /// batch (s281). A timeout, a red with no readable test names, or any test that is not in
     /// the ledger stays red (and is bisected as before).
@@ -1864,13 +1980,16 @@ impl Runner {
             crate::knownred::lines(&hit).join("; ")
         );
         true
+>>>>>>> origin/develop
     }
 
     fn legacy_cmd(&self, def: &mason_definition::Definition) -> Option<crate::jobs::TestCommands> {
         crate::jobs::test_commands(&self.d, def, self.pid, None)
     }
 
-    fn verify(
+    /// Run the named suites over the worktree, locally: names that are not suites (CI job
+    /// names) have nothing to run and are left out. No CI.
+    fn run_local(
         &self,
         def: &mason_definition::Definition,
         suites: &[String],
@@ -1884,10 +2003,6 @@ impl Runner {
             failed: BTreeSet::new(),
             notes: vec![],
         };
-        // Force lands past verification, CI included.
-        if self.kind == "force" {
-            return green();
-        }
         // Names that are not suites (CI job names) have nothing to run locally.
         let local: Vec<String> = suites
             .iter()
@@ -1897,7 +2012,7 @@ impl Runner {
             })
             .cloned()
             .collect();
-        let mut r = if local.is_empty() {
+        if local.is_empty() {
             green()
         } else {
             let _lease = match self.hold(def, suites_needs(def, &local), true) {
@@ -1930,7 +2045,28 @@ impl Runner {
                 stop.store(true, std::sync::atomic::Ordering::SeqCst);
                 r
             })
+        }
+    }
+
+    fn verify(
+        &self,
+        def: &mason_definition::Definition,
+        suites: &[String],
+        wt: &Path,
+        base: &str,
+        log_dir: &Path,
+        prefix: &str,
+    ) -> crate::suites::OverRun {
+        let green = || crate::suites::OverRun {
+            green: true,
+            failed: BTreeSet::new(),
+            notes: vec![],
         };
+        // Force lands past verification, CI included.
+        if self.kind == "force" {
+            return green();
+        }
+        let mut r = self.run_local(def, suites, wt, base, log_dir, prefix);
         if !r.green {
             return r;
         }

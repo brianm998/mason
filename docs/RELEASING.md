@@ -15,7 +15,7 @@ the `v`. Nothing else is published under a release.
 
 | Asset | Contents |
 |---|---|
-| `mason-<ver>-<target>.tar.gz`, target in `aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu` | `mason`, `masond`, `step-host`, `mason-mcp`, `mason-askpass.sh`, the LICENSE files, README |
+| `mason-<ver>-<target>.tar.gz`, target in `aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu` | `mason`, `masond`, `step-host`, `mason-mcp`, `fake-claude`, `mason-askpass.sh`, the LICENSE files, README |
 | `mason-<ver>-x86_64-pc-windows-msvc.zip` | CLI + daemon, Windows |
 | `mason-<ver>-x86_64-windows-setup.msi` | CLI + daemon, Windows installer |
 | `mason_<ver>_amd64.deb`, `mason_<ver>_arm64.deb` | CLI + daemon, Linux |
@@ -31,7 +31,7 @@ Built by `scripts/package/tarball.sh <target> [--out DIR]`, `deb.sh <target>` an
 `checksums.sh DIR`.
 
 - Tarball: one top-level folder `mason-<ver>-<target>/` holding `mason`, `masond`, `step-host`,
-  `mason-mcp`, `mason-askpass.sh`, `LICENSE`, `LICENSE-ADDITIONAL-PERMISSION` and `README.md`.
+  `mason-mcp`, `fake-claude` (the self-test of `mason update` needs it next to `masond`), `mason-askpass.sh`, `LICENSE`, `LICENSE-ADDITIONAL-PERMISSION` and `README.md`.
   Binaries are stripped; on macOS each is signed ad hoc, or with `MASON_CODESIGN_IDENTITY`.
 - `.deb`: the four binaries and `mason-askpass.sh` in `/usr/bin`, `Depends: git`,
   `/usr/share/doc/mason/copyright`; the postinst only prints `mason service install`.

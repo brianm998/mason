@@ -89,6 +89,31 @@ pub fn assess(
     rb::judge(&out)
 }
 
+/// Which of the named CI jobs are red in the base branch's latest finished run that has them
+/// (s213): the landing's red ladder does not search for a culprit of a red the base already
+/// has. A base that cannot be read, or has no such job, excuses nothing (the job is left out).
+pub fn base_red_jobs(src: &dyn Source, base: &str, names: &[String]) -> Vec<String> {
+    let Ok(runs) = src.runs(base) else {
+        return vec![];
+    };
+    let finished: Vec<&ActionsRun> = runs.iter().filter(|r| r.conclusion.is_some()).collect();
+    names
+        .iter()
+        .filter(|n| {
+            // Newest first: the first finished run that has the job says how it stands.
+            let state = finished.iter().take(10).find_map(|r| {
+                src.jobs(r.id).ok().and_then(|jobs| {
+                    jobs.iter()
+                        .find(|b| &b.name == *n)
+                        .map(|b| b.conclusion.as_deref() == Some("failure"))
+                })
+            });
+            state == Some(true)
+        })
+        .cloned()
+        .collect()
+}
+
 /// What is kept between passes, and what the status shows.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Saved {
