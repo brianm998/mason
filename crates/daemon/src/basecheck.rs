@@ -173,7 +173,6 @@ pub(crate) fn run_at_base(
             .stdin(Stdio::null())
             .stdout(out)
             .stderr(err);
-        mason_platform::process::group_leader(&mut command);
         for (k, v) in step_env_pairs(c) {
             let v = if k == "MASON_WORKTREE" {
                 wt.to_string_lossy().into_owned()
@@ -182,7 +181,7 @@ pub(crate) fn run_at_base(
             };
             command.env(k, v);
         }
-        let mut child = command.spawn().ok()?;
+        let mut child = mason_platform::process::spawn_group(&mut command).ok()?;
         let limit = c
             .res
             .budget
