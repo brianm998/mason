@@ -1991,12 +1991,13 @@ async fn debt_run(Shared(d): Shared<Arc<Daemon>>, Path(id): Path<u64>) -> Res {
 
 async fn quarantine_list(Shared(d): Shared<Arc<Daemon>>) -> Res {
     let d2 = d.clone();
-    let (rows, flaky) = d
+    let (rows, ledger, flaky) = d
         .pool
         .run(move || {
             let now = now_ms();
             (
                 d2.store.quarantined(now).unwrap_or_default(),
+                d2.store.ledger().unwrap_or_default(),
                 d2.store
                     .flaky_since(now.saturating_sub(7 * 86_400_000))
                     .unwrap_or_default(),
@@ -2008,6 +2009,10 @@ async fn quarantine_list(Shared(d): Shared<Arc<Daemon>>) -> Res {
         mason_testing::gates::quarantine_candidates(&flaky, now_ms(), 7 * 86_400_000, 3);
     Ok(Json(json!({
         "quarantined": rows.iter().map(|(s, t, o, e, r)| json!({"suite": s, "test": t, "owner": o, "expires_at": e, "reason": r})).collect::<Vec<_>>(),
+        "ledger": ledger.iter().filter(|r| r.source != "owner").map(|r| json!({
+            "suite": r.suite, "test": r.test, "source": r.source, "fix_task": r.fix_task,
+            "first_base": r.first_base, "since": r.at, "last_seen_ms": r.last_seen_ms, "note": r.note,
+        })).collect::<Vec<_>>(),
         "candidates": candidates.iter().map(|(s, t)| json!({"suite": s, "test": t})).collect::<Vec<_>>(),
     })))
 }
@@ -2812,10 +2817,9 @@ fn render_agent(text: &str) -> String {
 pub type LogStamp = (String, u64, Option<std::time::SystemTime>);
 
 pub fn log_signature(d: &Daemon, task: u64) -> Vec<LogStamp> {
-    let reg = mason_step_host::registry::Registry::new(d.cfg.hosts_dir());
-    let mut v: Vec<LogStamp> = reg
-        .scan()
-        .unwrap_or_default()
+    // Same hosts as `render_logs` (live and moved), found by directory name: no other
+    // task's host is opened.
+    let mut v: Vec<LogStamp> = crate::hostarchive::task_hosts(&d.cfg, task)
         .into_iter()
         .filter(|h| crate::sweep::parse_host_id(&h.info.id).is_some_and(|(t, _)| t == task))
         .map(|h| {

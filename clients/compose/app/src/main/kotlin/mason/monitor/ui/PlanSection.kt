@@ -19,6 +19,7 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.withStyle
+import mason.monitor.MonitorModel
 import mason.monitor.PlanText
 import mason.v1.PlanView
 import mason.v1.TaskDetailView
@@ -36,25 +37,25 @@ fun inlineMarkdown(s: String): AnnotatedString = buildAnnotatedString {
 
 /** A task's plan: summary, steps, files, criteria and any extra keys, as a document. */
 @Composable
-fun PlanSection(d: TaskDetailView) {
+fun PlanSection(model: MonitorModel, d: TaskDetailView) {
     val theme = LocalTheme.current
     val v = d.plan_view
     if (v == null) {
         // An older daemon: only the text.
-        SelectionContainer { Text(d.plan, style = theme.body()) }
+        LinkedText(model, d.plan, theme.body(), selectable = true)
     } else if (v.note.isNotEmpty()) {
         Text(v.note, style = theme.small())
         SelectionContainer { Text(v.raw, style = theme.mono(), modifier = Modifier.fillMaxWidth().testTag("plan-raw")) }
         CopyButton("Copy JSON", v.raw)
     } else {
-        ReadablePlan(v)
+        ReadablePlan(model, v)
     }
 }
 
 @Composable
-private fun PlanItem(text: String, modifier: Modifier = Modifier) {
+private fun PlanItem(model: MonitorModel, text: String, modifier: Modifier = Modifier) {
     val theme = LocalTheme.current
-    SelectionContainer { Text(inlineMarkdown(text), style = theme.body(), modifier = modifier) }
+    LinkedText(model, text, theme.body(), modifier, selectable = true, base = inlineMarkdown(text))
 }
 
 @Composable
@@ -76,7 +77,7 @@ private fun PlanGroup(title: String, open: Boolean, tag: String, content: @Compo
 }
 
 @Composable
-private fun ReadablePlan(v: PlanView) {
+private fun ReadablePlan(model: MonitorModel, v: PlanView) {
     val theme = LocalTheme.current
     val open = PlanText.expandedByDefault(v.steps.size)
     Column(verticalArrangement = Arrangement.spacedBy(theme.spacing), modifier = Modifier.fillMaxWidth()) {
@@ -85,15 +86,15 @@ private fun ReadablePlan(v: PlanView) {
                 modifier = Modifier.testTag("plan-copy-text").clickable { copyToClipboard(PlanText.copyAsText(v)) })
             CopyButton("Copy JSON", v.raw)
         }
-        v.summary_paragraphs.forEach { PlanItem(it) }
+        v.summary_paragraphs.forEach { PlanItem(model, it) }
         if (v.steps.isNotEmpty() || v.lead.isNotEmpty()) {
             PlanGroup(if (v.steps_are_list) "Steps (${v.steps.size})" else "Approach", open, "plan-steps") {
-                if (v.lead.isNotEmpty()) PlanItem(v.lead)
+                if (v.lead.isNotEmpty()) PlanItem(model, v.lead)
                 v.steps.forEachIndexed { i, step ->
                     val m = PlanText.marker(v, i)
-                    if (m == null) PlanItem(step) else Row(horizontalArrangement = Arrangement.spacedBy(theme.spacingSmall)) {
+                    if (m == null) PlanItem(model, step) else Row(horizontalArrangement = Arrangement.spacedBy(theme.spacingSmall)) {
                         Text(m, style = theme.body(color = theme.muted))
-                        PlanItem(step, Modifier.weight(1f))
+                        PlanItem(model, step, Modifier.weight(1f))
                     }
                 }
             }
@@ -110,14 +111,14 @@ private fun ReadablePlan(v: PlanView) {
             v.criteria.forEach { c ->
                 Row(horizontalArrangement = Arrangement.spacedBy(theme.spacingSmall)) {
                     Text("☐", style = theme.body(color = theme.muted))
-                    PlanItem(c, Modifier.weight(1f))
+                    PlanItem(model, c, Modifier.weight(1f))
                 }
             }
         }
         if (v.other.isNotEmpty()) PlanGroup("Other", true, "plan-other") {
             v.other.forEach { e ->
                 Text(e.label, style = theme.body(FontWeight.SemiBold))
-                PlanItem(e.value_)
+                PlanItem(model, e.value_)
             }
         }
     }

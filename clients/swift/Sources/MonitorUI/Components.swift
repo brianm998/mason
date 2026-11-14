@@ -355,10 +355,10 @@ struct DecisionCardView: View {
         VStack(alignment: .leading, spacing: theme.spacing) {
             HStack(alignment: .firstTextBaseline, spacing: theme.spacingSmall) {
                 StateIcon(state: "needs_attention")
-                Text(card.ask).font(theme.title()).foregroundStyle(theme.text).fixedSize(horizontal: false, vertical: true)
+                LinkedText(model: model, text: card.ask, font: theme.title()).fixedSize(horizontal: false, vertical: true)
             }
             if !card.why.isEmpty {
-                Text(card.why).font(theme.body()).foregroundStyle(theme.muted).fixedSize(horizontal: false, vertical: true)
+                LinkedText(model: model, text: card.why, color: theme.muted).fixedSize(horizontal: false, vertical: true)
             }
             VStack(alignment: .leading, spacing: theme.spacingSmall) {
                 ForEach(Array(card.options.enumerated()), id: \.offset) { i, o in
@@ -475,10 +475,10 @@ struct ApprovalView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: theme.spacing) {
-            Text(approval.waitingFor).font(theme.title()).foregroundStyle(theme.text)
+            LinkedText(model: model, text: approval.waitingFor, font: theme.title())
                 .fixedSize(horizontal: false, vertical: true)
             ForEach(Array(approval.lines.enumerated()), id: \.offset) { _, l in
-                Text("• \(l)").font(theme.body()).foregroundStyle(theme.text)
+                LinkedText(model: model, text: "• \(l)")
                     .fixedSize(horizontal: false, vertical: true)
             }
             if !approval.diffHash.isEmpty {
@@ -675,11 +675,11 @@ struct ProposalView: View {
                 .font(theme.body(.semibold)).foregroundStyle(theme.text)
                 .accessibilityIdentifier("proposal:\(row.id):tag")
             if info.filedBy != 0 {
-                Text("Filed by the agent of task #\(info.filedBy)").font(theme.small()).foregroundStyle(theme.muted)
+                LinkedText(model: model, text: "Filed by the agent of task #\(info.filedBy)", font: theme.small(), color: theme.muted)
             }
             if !info.evidence.isEmpty {
                 Text("Evidence").font(theme.body(.semibold)).foregroundStyle(theme.text)
-                Text(info.evidence).font(theme.mono()).foregroundStyle(theme.text).textSelection(.enabled)
+                LinkedText(model: model, text: info.evidence, font: theme.mono(), selectable: true)
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("proposal:\(row.id):evidence")
             }
@@ -853,6 +853,116 @@ struct SSHKeySheet: View {
         .padding(theme.spacingLarge)
         .frame(minWidth: 520)
         .accessibilityIdentifier("ssh-key-sheet")
+    }
+}
+
+/// Text whose task numbers and CI references are links (`Linkify`): a task opens its page in the
+/// monitor (so back and forward work), a CI reference opens in the default browser. Selection is
+/// kept when `selectable`.
+struct LinkedText: View {
+    @Environment(\.theme) var theme
+    @ObservedObject var model: MonitorModel
+    let text: String
+    var font: Font? = nil
+    var color: Color? = nil
+    var selectable = false
+    /// Already styled text (the plan's Markdown): its own styling is kept and links are added on top.
+    var base: AttributedString? = nil
+
+    static let taskScheme = "mason-task"
+
+    /// The text as an attributed string: one `link` run per task or URL segment.
+    static func attributed(_ segments: [LinkSegment], linkColor: Color) -> AttributedString {
+        var out = AttributedString()
+        for s in segments {
+            var a = AttributedString(s.text)
+            switch s {
+            case .text: break
+            case .task(let id, _):
+                a.link = URL(string: "\(taskScheme)://\(id)")
+                a.foregroundColor = linkColor
+            case .url(let u, _):
+                if let url = URL(string: u) {
+                    a.link = url
+                    a.foregroundColor = linkColor
+                }
+            }
+            out += a
+        }
+        return out
+    }
+
+    /// `base` with a `link` on the part of it each task or URL segment covers.
+    static func link(_ base: AttributedString, _ segments: [LinkSegment], linkColor: Color) -> AttributedString {
+        var out = base
+        var pos = 0
+        for s in segments {
+            let n = s.text.count
+            defer { pos += n }
+            var target: URL?
+            switch s {
+            case .text: continue
+            case .task(let id, _): target = URL(string: "\(taskScheme)://\(id)")
+            case .url(let u, _): target = URL(string: u)
+            }
+            guard let target else { continue }
+            let start = out.characters.index(out.startIndex, offsetBy: pos)
+            let end = out.characters.index(start, offsetBy: n)
+            out[start..<end].link = target
+            out[start..<end].foregroundColor = linkColor
+        }
+        return out
+    }
+
+    private var styled: Text {
+        if let base {
+            return Text(Self.link(base, model.linkify(String(base.characters)), linkColor: theme.accent))
+        }
+        return Text(Self.attributed(model.linkify(text), linkColor: theme.accent))
+    }
+
+    var body: some View {
+        let t = styled.font(font ?? theme.body()).foregroundStyle(color ?? theme.text)
+            .environment(\.openURL, OpenURLAction { url in
+                if url.scheme == Self.taskScheme, let n = UInt64(url.host ?? "") {
+                    model.go(.task(n))
+                    return .handled
+                }
+                guard let s = url.scheme?.lowercased(), s == "https" || s == "http" else { return .discarded }
+                return .systemAction
+            })
+        if selectable { t.textSelection(.enabled) } else { t.textSelection(.disabled) }
+    }
+}
+
+/// The "CI" line and the tracker issue of a task's page: each reference a link.
+struct CiLinksLine: View {
+    @Environment(\.theme) var theme
+    let links: [Mason_V1_CiLink]
+    let issue: UInt64
+    let issueURL: String
+
+    var body: some View {
+        HStack(spacing: theme.spacingSmall) {
+            if issue != 0 {
+                if Linkify.isWebURL(issueURL), let u = URL(string: issueURL) {
+                    Link("issue #\(issue)", destination: u).font(theme.body())
+                        .accessibilityIdentifier("detail:issue")
+                } else {
+                    Text("issue #\(issue)").font(theme.body()).foregroundStyle(theme.muted)
+                }
+            }
+            let shown = links.filter { Linkify.isWebURL($0.url) }
+            if !shown.isEmpty {
+                Text("CI").font(theme.body()).foregroundStyle(theme.muted)
+                ForEach(Array(shown.enumerated()), id: \.offset) { _, l in
+                    if let u = URL(string: l.url) {
+                        Link(l.label.isEmpty ? l.url : l.label, destination: u).font(theme.body())
+                    }
+                }
+            }
+        }
+        .accessibilityIdentifier("detail:ci")
     }
 }
 
