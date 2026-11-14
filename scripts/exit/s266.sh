@@ -4,4 +4,4 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 cargo test -q -p mason-platform shell::
-cargo test -q -p mason-cli doctor_reports_the_shell
+cargo test -q -p mason-pipeline doctor_reports_the_shell
