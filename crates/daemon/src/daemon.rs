@@ -470,6 +470,44 @@ impl Daemon {
         Ok(changed)
     }
 
+    /// Register a project masond did not start with, from `<config>/projects/<name>.toml`,
+    /// without a restart: the event, the registry entry and the first reading of its
+    /// definition. A name already known is answered with its id (use `reload_registration`
+    /// for edits). A file that does not load is refused and nothing changes.
+    pub fn register_project(self: &Arc<Self>, name: &str) -> Result<(ProjectId, bool), String> {
+        if let Some(pid) = self.project_id_by_name(name) {
+            return Ok((pid, false));
+        }
+        let cfg = crate::config::load_project(&self.cfg.config_dir, name)?;
+        let world = self.world().map_err(|e| e.to_string())?;
+        let pid = match world.projects.values().find(|x| x.name == name) {
+            Some(x) => x.id,
+            None => {
+                let next = world
+                    .projects
+                    .keys()
+                    .map(|p| p.0)
+                    .max()
+                    .map_or(1, |m| m + 1);
+                let pid = ProjectId(next);
+                self.emit(EventKind::ProjectRegistered {
+                    project: pid,
+                    name: name.to_string(),
+                })
+                .map_err(|e| e.to_string())?;
+                pid
+            }
+        };
+        let leaked: &'static ProjectCfg = Box::leak(Box::new(cfg));
+        self.registry
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(pid, leaked);
+        self.load_definition_of(pid, leaked);
+        tracing::info!(project = name, "project registered while running");
+        Ok((pid, true))
+    }
+
     pub fn project_id_by_name(&self, name: &str) -> Option<ProjectId> {
         self.projects()
             .iter()

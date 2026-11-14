@@ -67,6 +67,57 @@ impl Fixture {
             .output()
             .unwrap()
     }
+    /// Like `mason`, with environment variables set (and `GITHUB_TOKEN` otherwise unset).
+    fn mason_env(&self, args: &[&str], env: &[(&str, &str)]) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_mason"))
+            .args([
+                "--config-dir",
+                self.config.to_str().unwrap(),
+                "--data-dir",
+                self.data.to_str().unwrap(),
+            ])
+            .args(args)
+            .current_dir(&self.repo)
+            .stdin(std::process::Stdio::null())
+            .env_remove("GITHUB_TOKEN")
+            .env("MASON_NO_OPEN", "1")
+            .envs(env.iter().copied())
+            .output()
+            .unwrap()
+    }
+    /// A bare repository as `origin`, with `main` pushed. Returns its path.
+    fn with_origin(&self) -> PathBuf {
+        let bare = self._dir.path().join("origin.git");
+        std::fs::create_dir_all(&bare).unwrap();
+        git(&bare, &["init", "-q", "--bare", "-b", "main"]);
+        git(
+            &self.repo,
+            &["remote", "add", "origin", bare.to_str().unwrap()],
+        );
+        git(&self.repo, &["push", "-q", "origin", "main"]);
+        bare
+    }
+    /// The same, but the remote's URL says GitHub (so PR landing is on offer) while git
+    /// really talks to the bare repository.
+    fn with_github_origin(&self) -> PathBuf {
+        let bare = self._dir.path().join("origin.git");
+        std::fs::create_dir_all(&bare).unwrap();
+        git(&bare, &["init", "-q", "--bare", "-b", "main"]);
+        git(
+            &self.repo,
+            &["remote", "add", "origin", "https://github.com/o/r.git"],
+        );
+        git(
+            &self.repo,
+            &[
+                "config",
+                &format!("url.{}.pushInsteadOf", bare.display()),
+                "https://github.com/o/r.git",
+            ],
+        );
+        git(&self.repo, &["push", "-q", "origin", "main"]);
+        bare
+    }
     fn overlay(&self) -> PathBuf {
         self.config.join("projects/my-repo.toml")
     }
@@ -654,4 +705,249 @@ fn doctor_warns_when_mason_on_path_is_someone_elses() {
         "{}",
         text(&o)
     );
+}
+
+// ---- landing the setup (--land) -----------------------------------------------------------
+
+const BASIC: [&str; 7] = [
+    "init",
+    "--yes",
+    "--no-prove",
+    "--suites",
+    "skip",
+    "--workflow",
+    "solo",
+];
+
+fn with(extra: &[&str]) -> Vec<String> {
+    BASIC.iter().chain(extra).map(|s| s.to_string()).collect()
+}
+
+fn run_init(f: &Fixture, extra: &[&str], env: &[(&str, &str)]) -> Output {
+    let args = with(extra);
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    f.mason_env(&refs, env)
+}
+
+fn rev(dir: &Path, r: &str) -> String {
+    git(dir, &["rev-parse", r]).trim().to_string()
+}
+
+fn has_mason(dir: &Path, r: &str) -> bool {
+    Command::new("git")
+        .args(["cat-file", "-e", &format!("{r}:.mason/mason.toml")])
+        .current_dir(dir)
+        .status()
+        .unwrap()
+        .success()
+}
+
+#[test]
+fn yes_never_merges_or_pushes_even_with_a_remote() {
+    let f = fixture(&[]);
+    let bare = f.with_origin();
+    let (main, remote) = (rev(&f.repo, "main"), rev(&bare, "main"));
+    let out = ok(&run_init(&f, &[], &[]));
+    assert!(
+        out.contains("Nothing was merged or pushed")
+            && out.contains("git merge --ff-only mason/setup")
+            && out.contains("git push origin main"),
+        "{out}"
+    );
+    assert_eq!(rev(&f.repo, "main"), main);
+    assert_eq!(rev(&bare, "main"), remote);
+    assert!(!has_mason(&f.repo, "main") && has_mason(&f.repo, "mason/setup"));
+}
+
+#[test]
+fn land_no_writes_the_same_files_as_before() {
+    let a = fixture(&[]);
+    let b = fixture(&[]);
+    ok(&run_init(&a, &[], &[]));
+    ok(&run_init(&b, &["--land", "no"], &[]));
+    for file in [".mason/mason.toml", ".mason/landing.toml", "AGENTS.md"] {
+        assert_eq!(on_setup(&a, file), on_setup(&b, file), "{file}");
+    }
+    assert!(a.overlay().exists() && b.overlay().exists());
+}
+
+#[test]
+fn land_merge_fast_forwards_the_base_and_pushes_nothing() {
+    let f = fixture(&[]);
+    let bare = f.with_origin();
+    let remote = rev(&bare, "main");
+    let out = ok(&run_init(&f, &["--land", "merge"], &[]));
+    assert!(out.contains("Merged mason/setup into main"), "{out}");
+    assert!(has_mason(&f.repo, "main"));
+    assert_eq!(rev(&bare, "main"), remote, "merge never pushes");
+    assert!(
+        !out.contains("Next: review"),
+        "the by-hand instructions are for --land no: {out}"
+    );
+}
+
+#[test]
+fn land_merge_without_a_remote_leaves_nothing_to_push() {
+    let f = fixture(&[]);
+    let out = ok(&run_init(&f, &["--land", "merge"], &[]));
+    assert!(out.contains("Merged mason/setup into main") && has_mason(&f.repo, "main"));
+}
+
+#[test]
+fn land_merge_refuses_a_dirty_tree_and_changes_nothing() {
+    let f = fixture(&[]);
+    std::fs::write(f.repo.join("README.md"), "edited\n").unwrap();
+    let main = rev(&f.repo, "main");
+    let o = run_init(&f, &["--land", "merge"], &[]);
+    let out = text(&o);
+    assert!(!o.status.success(), "{out}");
+    assert!(
+        out.contains("uncommitted changes") && out.contains("git merge --ff-only mason/setup"),
+        "{out}"
+    );
+    assert_eq!(rev(&f.repo, "main"), main);
+    assert_eq!(
+        std::fs::read_to_string(f.repo.join("README.md")).unwrap(),
+        "edited\n"
+    );
+}
+
+#[test]
+fn land_merge_refuses_when_the_base_is_not_checked_out() {
+    let f = fixture(&[]);
+    git(&f.repo, &["checkout", "-q", "-b", "elsewhere"]);
+    let main = rev(&f.repo, "main");
+    let o = run_init(&f, &["--land", "merge", "--base", "main"], &[]);
+    let out = text(&o);
+    assert!(
+        !o.status.success() && out.contains("not the base main"),
+        "{out}"
+    );
+    assert_eq!(rev(&f.repo, "main"), main);
+}
+
+#[test]
+fn land_push_pushes_the_base_for_a_direct_mode() {
+    let f = fixture(&[]);
+    let bare = f.with_origin();
+    let out = ok(&run_init(&f, &["--land", "push"], &[]));
+    assert!(out.contains("Pushed main"), "{out}");
+    assert!(has_mason(&bare, "main"));
+}
+
+#[test]
+fn land_push_needs_a_remote() {
+    let f = fixture(&[]);
+    refused(&run_init(&f, &["--land", "push"], &[]), "needs a remote");
+    assert!(!f.overlay().exists(), "refused before anything is written");
+}
+
+#[test]
+fn land_push_in_pr_mode_pushes_the_branch_and_leaves_the_base() {
+    let f = fixture(&[]);
+    let bare = f.with_github_origin();
+    let remote = rev(&bare, "main");
+    let out = ok(&run_init(&f, &["--landing", "pr", "--land", "push"], &[]));
+    assert!(
+        out.contains("Pushed mason/setup") && out.contains("gh pr create"),
+        "{out}"
+    );
+    assert_eq!(rev(&bare, "main"), remote);
+    assert!(has_mason(&bare, "mason/setup") && !has_mason(&f.repo, "main"));
+}
+
+#[test]
+fn land_pr_without_a_token_prints_the_exact_command() {
+    let f = fixture(&[]);
+    let bare = f.with_github_origin();
+    let out = ok(&run_init(&f, &["--landing", "pr", "--land", "pr"], &[]));
+    assert!(
+        out.contains("GITHUB_TOKEN is not set")
+            && out.contains("gh pr create --base main --head mason/setup"),
+        "{out}"
+    );
+    assert!(has_mason(&bare, "mason/setup"));
+}
+
+#[test]
+fn land_pr_opens_the_pull_request_through_the_github_api() {
+    use std::io::{Read, Write};
+    let f = fixture(&[]);
+    f.with_github_origin();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        let (mut c, _) = listener.accept().unwrap();
+        let mut seen = vec![];
+        let mut buf = [0u8; 4096];
+        loop {
+            let n = c.read(&mut buf).unwrap();
+            seen.extend_from_slice(&buf[..n]);
+            let t = String::from_utf8_lossy(&seen).to_string();
+            if let Some(h) = t.find("\r\n\r\n") {
+                let want = t[..h]
+                    .lines()
+                    .find_map(|l| {
+                        l.to_lowercase()
+                            .strip_prefix("content-length:")
+                            .and_then(|v| v.trim().parse::<usize>().ok())
+                    })
+                    .unwrap_or(0);
+                if seen.len() >= h + 4 + want {
+                    break;
+                }
+            }
+            if n == 0 {
+                break;
+            }
+        }
+        let body = r#"{"number":7,"html_url":"http://example.test/o/r/pull/7"}"#;
+        write!(
+            c,
+            "HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+        String::from_utf8_lossy(&seen).to_string()
+    });
+    let api = format!("http://127.0.0.1:{port}");
+    let out = ok(&run_init(
+        &f,
+        &["--landing", "pr", "--land", "pr"],
+        &[("GITHUB_TOKEN", "t0ken"), ("MASON_GITHUB_API", &api)],
+    ));
+    assert!(out.contains("Opened pull request #7"), "{out}");
+    let request = server.join().unwrap();
+    assert!(
+        request.starts_with("POST /repos/o/r/pulls") && request.contains("mason/setup"),
+        "{request}"
+    );
+}
+
+#[test]
+fn land_pr_is_refused_for_a_mode_that_has_no_pull_requests() {
+    let f = fixture(&[]);
+    f.with_origin();
+    refused(
+        &run_init(&f, &["--land", "pr"], &[]),
+        "only the `pr` landing mode",
+    );
+}
+
+#[test]
+fn the_summary_says_where_each_choice_lives() {
+    let f = fixture(&[]);
+    let out = ok(&run_init(&f, &[], &[]));
+    for want in [
+        "definition",
+        ".mason/mason.toml",
+        "landing (direct)",
+        ".mason/landing.toml",
+        "alerts",
+        "notify.toml",
+        "providers",
+        "providers.toml",
+    ] {
+        assert!(out.contains(want), "{want:?} missing from {out}");
+    }
 }

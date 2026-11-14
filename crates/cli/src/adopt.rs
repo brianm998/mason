@@ -102,6 +102,7 @@ pub fn run(mut args: Vec<String>, config_dir: &Path) -> i32 {
         landing,
         alerts: None,
         ci_workflow: false,
+        land: Land::No,
         prove: false,
         notes: vec![],
     };
