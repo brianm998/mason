@@ -817,6 +817,7 @@ impl<'a> Ctx<'a> {
                 l + self.d.broker.limit(&r).unwrap_or(0),
             )
         });
+        let llm_holders = self.d.broker.llm_holders();
         HomeView {
             status: self.header(project).status,
             attention: attention
@@ -829,7 +830,7 @@ impl<'a> Ctx<'a> {
                 .collect(),
             active: tasks
                 .iter()
-                .filter(|t| self.d.broker.llm_held_by(t.id))
+                .filter(|t| llm_holders.contains(&t.id))
                 .map(|t| {
                     let r = self.row(t);
                     // A held session is never hidden: with no model on the
