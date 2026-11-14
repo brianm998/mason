@@ -59,6 +59,20 @@ fn a_test_that_flaked_in_three_tasks_is_quarantined_for_fourteen_days_with_one_t
         reason.starts_with("auto: flaky in 3 tasks since "),
         "{reason}"
     );
+    // The ledger row says what made it, and which tasks.
+    let row = d
+        .store
+        .ledger()
+        .unwrap()
+        .into_iter()
+        .find(|r| r.test == "flaky_one")
+        .unwrap();
+    assert_eq!(row.source, "flaky");
+    assert!(
+        row.note.contains("#1") && row.note.contains("#3"),
+        "{}",
+        row.note
+    );
     // 14 days: in force now and in 13 days, gone after 15.
     assert!(
         expires > now_ms() + 13 * DAY && expires <= now_ms() + 14 * DAY + 60_000,

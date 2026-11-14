@@ -337,7 +337,10 @@ pub const LEDGER_STALE_MS: u64 = 7 * 86_400_000;
 fn ledger_alerts(d: &Daemon, w: &mason_engine::World, now: u64) -> Vec<(String, String, String)> {
     let mut out = vec![];
     for r in d.store.ledger().unwrap_or_default() {
-        if r.source == "owner" || now.saturating_sub(r.at) < LEDGER_STALE_MS {
+        // An owner's quarantine and an automatic flake quarantine (which expires by itself) are
+        // not known-red entries waiting for a fix.
+        if r.source == "owner" || r.source == "flaky" || now.saturating_sub(r.at) < LEDGER_STALE_MS
+        {
             continue;
         }
         let state = r
@@ -727,6 +730,7 @@ pub fn alerts_now(d: &Daemon) -> Vec<(String, String, String)> {
             }
         }
     }
+    out.extend(crate::diagnose::alerts(d));
     out.extend(silent_alerts(d));
     for b in crate::autoretry::current_bursts(d, &w) {
         let key: u64 = b.reason.bytes().fold(0xcbf2_9ce4_8422_2325, |h, c| {

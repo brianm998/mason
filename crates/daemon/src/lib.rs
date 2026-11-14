@@ -24,6 +24,7 @@ pub mod crash;
 pub mod daemon;
 pub mod defs;
 pub mod demo;
+pub mod diagnose;
 pub mod disk;
 pub mod editor;
 pub mod exhausted;
