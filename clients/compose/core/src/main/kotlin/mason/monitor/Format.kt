@@ -2,6 +2,7 @@
 package mason.monitor
 
 import mason.v1.Compilation
+import mason.v1.JobCounts
 import mason.v1.ProgressCell
 import mason.v1.ProgressSource
 import mason.v1.TokenLine
@@ -48,6 +49,19 @@ object Format {
     }
 
     /** Each reported figure in full: "input 4", "output 988", "cache read 7,664", ..., "cost $0.0123". */
+    /** A CI workflow's jobs on one line: "macOS: 4 jobs · 1 queued · 1 running (build) · 2 passed". */
+    fun jobsText(name: String, j: JobCounts): String {
+        val total = j.queued + j.running + j.succeeded + j.failed
+        val parts = mutableListOf("$total ${if (total == 1) "job" else "jobs"}")
+        if (j.queued > 0) parts += "${j.queued} queued"
+        if (j.running > 0) {
+            parts += "${j.running} running" + if (j.running_names.isEmpty()) "" else " (${j.running_names.joinToString(", ")})"
+        }
+        if (j.succeeded > 0) parts += "${j.succeeded} passed"
+        if (j.failed > 0) parts += "${j.failed} failed"
+        return "$name: " + parts.joinToString(" · ")
+    }
+
     fun tokensDetail(t: TokenLine?): List<String> {
         if (t == null) return emptyList()
         val v = mutableListOf<String>()
@@ -202,6 +216,7 @@ fun ProgressCell.progressTexts(now: Long): List<String> {
     subs.forEach {
         t += "${it.name}: " + Format.countText(it.unit, it.done.toLong(), it.done_source, it.total.toLong(), it.total_source, 0)
     }
+    subs.forEach { s -> s.jobs?.let { t += Format.jobsText(s.name, it) } }
     todo.forEach { t += "${it.status}: ${it.text}" }
     if (isStale(now)) t += "silent"
     return t

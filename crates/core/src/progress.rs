@@ -152,6 +152,18 @@ pub struct SubProgress {
     pub unit: String,
     pub done: Figure,
     pub total: Figure,
+    /// The jobs of a CI told apart by state, when the sub-count is a CI workflow's.
+    pub jobs: Option<JobBreakdown>,
+}
+
+/// CI jobs by state (see `CiJobCounts` in the adapter API), as the monitor shows them.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct JobBreakdown {
+    pub queued: u64,
+    pub running: u64,
+    pub succeeded: u64,
+    pub failed: u64,
+    pub running_names: Vec<String>,
 }
 
 /// One item of an agent's todo list.
@@ -463,6 +475,19 @@ impl Progress {
         self.total = t;
         self.updated_at_ms = at_ms;
         Change::Urgent
+    }
+
+    /// A poll of the step's host got an answer and the work is still going: the step is
+    /// alive, so the quiet clock restarts. No figure changes. A step that is only polled
+    /// every `every_ms` is not called silent before three polls have gone unanswered.
+    pub fn heartbeat(&mut self, at_ms: u64, every_ms: u64) -> Change {
+        let stale = self.stale_after_ms.max(every_ms.saturating_mul(3));
+        if at_ms <= self.updated_at_ms && stale == self.stale_after_ms {
+            return Change::None;
+        }
+        self.stale_after_ms = stale;
+        self.updated_at_ms = self.updated_at_ms.max(at_ms);
+        Change::Output
     }
 
     pub fn set_message(&mut self, message: &str, at_ms: u64) -> Change {
@@ -1193,5 +1218,30 @@ b
         assert_eq!(p.message, "green");
         assert!(p.pending_log[1].contains('\u{1b}'));
         assert_eq!(p.output.bytes, 2 * raw.len() as u64);
+    }
+}
+
+#[cfg(test)]
+mod heartbeat_tests {
+    use super::*;
+
+    #[test]
+    fn answered_polls_keep_a_step_from_going_stale_and_silence_does_not() {
+        let mut p = Progress::new(1, "land", 1000);
+        p.stale_after_ms = 30_000;
+        p.updated_at_ms = 1000;
+        // Nothing moved for ten minutes, but every poll was answered.
+        let mut now = 1000;
+        for _ in 0..20 {
+            now += 30_000;
+            p.heartbeat(now, 30_000);
+            assert!(!is_stale(now + 1000, p.updated_at_ms, p.stale_after_ms));
+        }
+        // The host stops answering: the step goes stale as before.
+        assert!(is_stale(
+            now + p.stale_after_ms + 1,
+            p.updated_at_ms,
+            p.stale_after_ms
+        ));
     }
 }

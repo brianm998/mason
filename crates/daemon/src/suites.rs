@@ -1440,6 +1440,7 @@ pub fn run(c: &Ctx) {
             unit: "tests".into(),
             done: Figure::counted(0),
             total: expected_total(d, &c.project.id, &s.suite, &base),
+            ..SubProgress::default()
         })
         .collect();
     d.progress_report(c.run, |p, now| {

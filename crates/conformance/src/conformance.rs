@@ -221,6 +221,21 @@ pub fn progress_texts(c: &ProgressCell, now_ms: u64) -> Vec<String> {
             )
         ));
     }
+    for s in &c.subs {
+        if let Some(j) = &s.jobs {
+            t.push(mason_core::progress_text::jobs_text(
+                &s.name,
+                (j.queued + j.running + j.succeeded + j.failed) as u64,
+                (
+                    j.queued as u64,
+                    j.running as u64,
+                    j.succeeded as u64,
+                    j.failed as u64,
+                ),
+                &j.running_names,
+            ));
+        }
+    }
     for i in &c.todo {
         t.push(format!("{}: {}", i.status, i.text));
     }
