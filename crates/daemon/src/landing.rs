@@ -294,6 +294,9 @@ pub fn submit_and_wait(c: &Ctx) -> Option<Verdict> {
     if let Some(v) = check_numbers(c) {
         return Some(v);
     }
+    if let Some(v) = check_markers(c) {
+        return Some(v);
+    }
     if let Some(v) = check_dropped(c) {
         return Some(v);
     }
@@ -409,6 +412,28 @@ fn check_numbers(c: &Ctx) -> Option<Verdict> {
         reason,
         feedback: crate::numbers::feedback(&bad),
     })
+}
+
+/// A task whose branch adds unresolved merge conflict markers goes back, with the files and
+/// lines, before it joins the queue. On 2026-11-13 one landed in `landing.rs` because nothing
+/// read the text: testing was skipped and a batch that no suite verifies builds nothing.
+fn check_markers(c: &Ctx) -> Option<Verdict> {
+    let read = crate::jobs::wait_out_environment(
+        c,
+        "scanning the task's change for conflict markers",
+        || crate::markers::added_since(&c.project.path, &c.project.base_ref(), &c.branch),
+    );
+    match read {
+        Err(why) => Some(Verdict::Failed(why)),
+        Ok(found) if found.is_empty() => None,
+        Ok(found) => Some(Verdict::SentBack {
+            reason: format!(
+                "adds unresolved merge conflict markers: {}",
+                crate::markers::places(&found)
+            ),
+            feedback: crate::markers::refusal(&found),
+        }),
+    }
 }
 
 /// The lines a task's submission says it removes on purpose (`change.json`).
@@ -942,6 +967,7 @@ fn run_batch(
                     batch_id: Default::default(),
                     ci,
                     real_ci_red: std::sync::atomic::AtomicBool::new(false),
+                    floor_red: std::sync::atomic::AtomicBool::new(false),
                     host,
                     pr: Mutex::new(None),
                     service_error: Mutex::new(None),
@@ -1028,6 +1054,9 @@ struct Runner {
     /// Set by the last CI or PR verdict when a red job was judged a real failure (the
     /// judge is on): the red ladder then sends the batch back without a rerun.
     real_ci_red: std::sync::atomic::AtomicBool,
+    /// Set when the last verification's red came from the build floor (`build_floor`): the
+    /// ladder reruns that as a build, and looks at the base before it blames anyone.
+    floor_red: std::sync::atomic::AtomicBool,
     host: Option<Arc<dyn GitHostAdapter>>,
     /// The pull request the batch is about to merge (pr modes).
     pr: Mutex<Option<OpenPr>>,
@@ -1412,6 +1441,8 @@ impl Runner {
             );
             self.real_ci_red
                 .store(false, std::sync::atomic::Ordering::SeqCst);
+            self.floor_red
+                .store(false, std::sync::atomic::Ordering::SeqCst);
             let mut vr = self.verify(
                 &def,
                 &suites,
@@ -1439,6 +1470,37 @@ impl Runner {
                 );
                 // The red ladder.
                 let mut resolved = false;
+                // A build that fails may be the base's own. A base that does not build makes
+                // every batch red, and the ladder would blame the first task of each one in
+                // turn: look at the base alone first. If it does not build, nobody is blamed,
+                // nothing lands, and the owner is told.
+                let floor = self.floor_red.load(std::sync::atomic::Ordering::SeqCst);
+                if floor {
+                    let failed: Vec<String> = vr.failed.iter().cloned().collect();
+                    match self.base_builds(
+                        &def,
+                        &failed,
+                        &int_wt,
+                        &asm.base_tip,
+                        &asm.head,
+                        &log_dir,
+                        &format!("b{batch_id}-r{rounds}-base"),
+                    ) {
+                        Ok(Some(why)) => {
+                            let why = format!("batch #{batch_id}: {why}");
+                            self.d.landing.raise(
+                                self.pid,
+                                "redbase",
+                                "landing",
+                                &format!("{}: {why}", self.project().id),
+                            );
+                            self.d.poke();
+                            break 'outer Err(why);
+                        }
+                        Ok(None) => {}
+                        Err(e) => break 'outer Err(e),
+                    }
+                }
                 // s213: a red confined to CI jobs that map to local suites is searched for
                 // locally. CI still has the last word: the next round verifies the remaining
                 // union through it once.
@@ -1538,11 +1600,16 @@ impl Runner {
                     match rung {
                         Rung::RerunFailed => {
                             let again: Vec<String> = vr.failed.iter().cloned().collect();
+                            // A red floor is rerun as the floor, a build, not as the whole
+                            // runs of the suites it names: no names, no suites, the floor.
+                            let rerun = if floor { vec![] } else { again.clone() };
                             self.real_ci_red
+                                .store(false, std::sync::atomic::Ordering::SeqCst);
+                            self.floor_red
                                 .store(false, std::sync::atomic::Ordering::SeqCst);
                             let r2 = self.verify(
                                 &def,
-                                &again,
+                                &rerun,
                                 &int_wt,
                                 &asm.base_tip,
                                 &log_dir,
@@ -1682,6 +1749,8 @@ impl Runner {
                 }
             }
             self.point("batch_verified");
+            // A union that builds shows the base builds: an alert about it is over.
+            self.d.landing.clear(self.pid, "redbase");
 
             // -- promote
             self.record(
@@ -2132,6 +2201,17 @@ impl Runner {
         } else if self.cfg.mode.uses_pr() {
             self.pr_verify(wt)
         } else {
+            // No suites for the batch and no CI: nothing has built what is about to land.
+            if self.cfg.batch_suites().is_none() {
+                let f = self.build_floor(def, wt, base, log_dir, prefix);
+                if !f.green {
+                    self.floor_red
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+                r.green = f.green;
+                r.failed.extend(f.failed);
+                r.notes.extend(f.notes);
+            }
             return r;
         };
         match outside {
@@ -2153,6 +2233,207 @@ impl Runner {
             }
         }
         r
+    }
+
+    /// The build floor. A batch that no suite verifies (the project has no batch tier) and no
+    /// CI checks was, until 2026-11-13, promoted with nothing having built it: a task's own
+    /// test run covers the task, never the union, and when the owner skips testing it covers
+    /// nothing at all. Nine batches of that day stacked on a `landing.rs` that did not parse.
+    ///
+    /// The floor builds the union: the `build` of the test step's suites that the impact map
+    /// selects for the batch's diff, once each, unless this exact tree already passed the
+    /// suite. That compiles (and links) the tests without running them, which is what stops
+    /// code that does not build, for a fraction of a test run, and in the integration
+    /// worktree, whose build directory stays warm. A suite with no `build` has nothing to
+    /// run here.
+    fn build_floor(
+        &self,
+        def: &mason_definition::Definition,
+        wt: &Path,
+        base: &str,
+        log_dir: &Path,
+        prefix: &str,
+    ) -> crate::suites::OverRun {
+        let green = || crate::suites::OverRun {
+            green: true,
+            failed: BTreeSet::new(),
+            notes: vec![],
+        };
+        let paths: Vec<String> =
+            match git::run(wt, &["diff", "--name-only", &format!("{base}..HEAD")]) {
+                Ok(t) => t.lines().map(String::from).collect(),
+                Err(e) => {
+                    let why = format!("the build floor could not read the batch's diff: {e}");
+                    self.fail_service(why.clone());
+                    return crate::suites::OverRun {
+                        green: false,
+                        failed: BTreeSet::new(),
+                        notes: vec![why],
+                    };
+                }
+            };
+        let Some(step) = def
+            .steps
+            .iter()
+            .find(|s| s.kind == mason_definition::StepType::Test)
+        else {
+            return green();
+        };
+        if paths.is_empty() {
+            return green();
+        }
+        let names = match def.testing.impact.select(&paths, &step.suites) {
+            Selection::All => step.suites.clone(),
+            Selection::Some(v) => v,
+        };
+        self.build_suites(def, &names, wt, log_dir, prefix, "the batch")
+    }
+
+    /// Run the `build` of each named suite in `wt`, holding one `compile` slot for each. `what`
+    /// is what is being built, for the notes. A build that fails (or times out) is red for its
+    /// suite, with the end of its output; a build that cannot be run ends the batch, as any
+    /// service that cannot answer does.
+    fn build_suites(
+        &self,
+        def: &mason_definition::Definition,
+        names: &[String],
+        wt: &Path,
+        log_dir: &Path,
+        prefix: &str,
+        what: &str,
+    ) -> crate::suites::OverRun {
+        let d = &self.d;
+        let mut out = crate::suites::OverRun {
+            green: true,
+            failed: BTreeSet::new(),
+            notes: vec![],
+        };
+        let tree = git::run(wt, &["rev-parse", "HEAD^{tree}"])
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+        let project_test = self.legacy_cmd(def).map(|c| c.test);
+        for name in names {
+            let Some(suite) = def.testing.suite(name) else {
+                continue;
+            };
+            if suite.build.is_none() {
+                continue;
+            }
+            // Identical code never tests twice: a tree that passed the suite builds.
+            if !tree.is_empty() && matches!(d.store.evidence(&tree, name), Ok(Some(_))) {
+                out.notes.push(format!(
+                    "{name}: this exact tree already passed, not built again"
+                ));
+                continue;
+            }
+            let build = match crate::suites::with_project_test(suite, project_test.as_deref()) {
+                Ok(s) => s.build,
+                // A definition that cannot say what to build is not a red of the tree: the batch
+                // ends with the reason, nobody is blamed, and nothing lands.
+                Err(e) => {
+                    let why = format!("{name}: cannot build {what}: {e}");
+                    self.fail_service(why.clone());
+                    out.green = false;
+                    out.notes.push(why);
+                    return out;
+                }
+            };
+            let Some(build) = build else {
+                continue;
+            };
+            let _lease = match self.hold(
+                def,
+                crate::sched::needs_of(&crate::jobs::build_uses(), None),
+                true,
+            ) {
+                Ok(l) => l,
+                Err(e) => {
+                    self.fail_service(e.clone());
+                    out.green = false;
+                    out.notes.push(e);
+                    return out;
+                }
+            };
+            let spec = crate::hostedcheck::CheckSpec {
+                id_prefix: format!("{prefix}-floor-{name}"),
+                log_dir: log_dir.to_path_buf(),
+                cmd: build,
+                cwd: wt.to_path_buf(),
+                env: vec![],
+                limit: self.project().test_timeout,
+                tree: crate::hostedcheck::tree_key(wt),
+            };
+            match crate::hostedcheck::run(d, &spec) {
+                Ok(o) if o.passed => out.notes.push(format!("{name}: {what} builds")),
+                Ok(o) => {
+                    out.green = false;
+                    out.failed.insert(name.clone());
+                    out.notes.push(format!(
+                        "{name}: {what} does not build{}\n{}",
+                        if o.timed_out {
+                            " (the build timed out)"
+                        } else {
+                            ""
+                        },
+                        crate::jobs::tail(&o.output, 15)
+                    ));
+                }
+                Err(e) => {
+                    let why = format!("{name}: the build of {what} gave no result: {e}");
+                    self.fail_service(why.clone());
+                    out.green = false;
+                    out.notes.push(why);
+                    return out;
+                }
+            }
+        }
+        out
+    }
+
+    /// Does the base itself build the suites that failed? `Some(why)` says it does not. The
+    /// look is taken in the integration worktree, whose build directory is warm, and the
+    /// batch's tree is put back as it was before this returns.
+    #[allow(clippy::too_many_arguments)]
+    fn base_builds(
+        &self,
+        def: &mason_definition::Definition,
+        names: &[String],
+        wt: &Path,
+        base: &str,
+        head: &str,
+        log_dir: &Path,
+        prefix: &str,
+    ) -> Result<Option<String>, String> {
+        let branch = self.project().base.clone();
+        let lock = self.d.repo_lock(self.pid);
+        {
+            let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+            git::run(wt, &["checkout", "--force", "--detach", base]).map_err(|e| {
+                format!("could not check out {branch} to see whether it builds: {e}")
+            })?;
+        }
+        let r = self.build_suites(def, names, wt, log_dir, prefix, "the base");
+        {
+            let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+            git::run(wt, &["checkout", "--force", "--detach", head]).map_err(|e| {
+                format!("could not put the batch's tree back after building {branch}: {e}")
+            })?;
+        }
+        if let Some(e) = self.take_service_error() {
+            return Err(e);
+        }
+        if r.green {
+            return Ok(None);
+        }
+        let first = r
+            .notes
+            .iter()
+            .find(|n| n.contains("does not build"))
+            .and_then(|n| n.lines().next())
+            .unwrap_or("it does not build");
+        Ok(Some(format!(
+            "{branch} does not build ({first}), so the red is not this batch's: nobody is blamed and nothing lands until it does"
+        )))
     }
 
     /// Note why the batch cannot go on; it ends with this reason.
