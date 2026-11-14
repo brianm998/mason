@@ -1608,9 +1608,9 @@ mod tests {
 
     /// One project, one task that is sent back once for a red test, fails outside the code, is
     /// retried by the daemon, and lands.
-    fn numbers_log() -> Replay {
+    fn numbers_log(from: u64, to: u64) -> Replay {
         use mason_core::{FailClass, Next, Route};
-        let mut rp = Replayer::new(0, 100_000);
+        let mut rp = Replayer::new(from, to);
         let step = |at, to: State| {
             ev(
                 at,
@@ -1693,7 +1693,7 @@ mod tests {
 
     #[test]
     fn the_digest_counts_send_backs_retries_and_run_times_per_project_from_the_events() {
-        let r = numbers_log();
+        let r = numbers_log(0, 100_000);
         let v = per_project_numbers(&r, &|_| true, 0, 100_000);
         let p = &v["p"];
         assert_eq!(p["landed"], 1);
@@ -1715,6 +1715,7 @@ mod tests {
             .unwrap()
             .contains("not"));
         // Outside the window nothing is counted.
+        let r = numbers_log(50_000, 60_000);
         let none = per_project_numbers(&r, &|_| true, 50_000, 60_000);
         assert!(none["p"].is_null() || none["p"]["send_backs"]["by_class"]["test_red"] == 0);
     }

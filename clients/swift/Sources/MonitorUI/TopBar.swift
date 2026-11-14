@@ -160,6 +160,9 @@ struct BannersView: View {
                     updateRow(b.text, button: model.canAct ? "Choose SSH key…" : nil, id: "push-auth:\(project)", icon: BannerIcons.id(forDaemonKind: b.kind)) {
                         model.chooseSSHKey(project: project)
                     }
+                } else if b.kind == "paused" {
+                    // The whole pause group is drawn once, where the first pause is.
+                    if i == model.header?.banners.firstIndex(where: { $0.kind == "paused" }) { pauseGroup }
                 } else {
                     banner(b.text, id: "banner:\(i)", icon: BannerIcons.id(forDaemonKind: b.kind))
                 }
@@ -168,6 +171,51 @@ struct BannersView: View {
                 PendingIssueRow(issue: p)
             }
         }
+    }
+
+    /// The pauses: each expanded one is a full banner with Resume and a collapse button; collapsed
+    /// ones are icons, in the first expanded pause's row or alone in one compact row.
+    var pauseGroup: some View {
+        let banners = model.header?.banners ?? []
+        return ForEach(Array(model.pauseRows().enumerated()), id: \.offset) { _, row in
+            HStack(spacing: theme.spacing) {
+                ForEach(row.collapsed, id: \.self) { i in collapsedPauseIcon(banners[i], index: i) }
+                if let e = row.expanded { expandedPause(banners[e], index: e) } else { Spacer(minLength: 0) }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, theme.spacingLarge).padding(.vertical, theme.spacing)
+            .background(theme.slow.opacity(0.18))
+            .accessibilityIdentifier(row.expanded == nil ? "paused-collapsed-row" : "paused-row:\(row.expanded!)")
+        }
+    }
+
+    func collapsedPauseIcon(_ b: Mason_V1_Banner, index: Int) -> some View {
+        bannerImage(BannerIcons.id(forDaemonKind: b.kind), hidden: false)
+            .help(b.text)
+            .accessibilityLabel(b.text)
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAction(named: "Expand") { model.setPauseCollapsed(project: b.project, mode: b.mode, false) }
+            // A double click (double tap on touch) expands; one click does nothing, so the layout stays put.
+            .onTapGesture(count: 2) { model.setPauseCollapsed(project: b.project, mode: b.mode, false) }
+            .accessibilityIdentifier("paused-icon:\(index)")
+    }
+
+    func expandedPause(_ b: Mason_V1_Banner, index: Int) -> some View {
+        HStack(spacing: theme.spacing) {
+            bannerImage(BannerIcons.id(forDaemonKind: b.kind))
+            Text(b.text).font(theme.body(.medium))
+            Spacer()
+            if model.canAct {
+                Button("Resume") { model.resumePause(project: b.project, mode: b.mode) }
+                    .accessibilityIdentifier("resume-pause:\(index)")
+            }
+            Button { model.setPauseCollapsed(project: b.project, mode: b.mode, true) } label: { Image(systemName: "xmark") }
+                .buttonStyle(.borderless)
+                .help("Collapse")
+                .accessibilityLabel("Collapse")
+                .accessibilityIdentifier("collapse-pause:\(index)")
+        }
+        .accessibilityIdentifier("banner:\(index)")
     }
 
     /// What to say about this monitor's own version, if anything.
@@ -190,11 +238,11 @@ struct BannersView: View {
     }
 
     /// The decorative image at the start of a banner; nothing for an unknown id.
-    @ViewBuilder func bannerImage(_ id: String?) -> some View {
+    @ViewBuilder func bannerImage(_ id: String?, hidden: Bool = true) -> some View {
         if let id, let img = Mascot.bannerIcon(id) {
             img.resizable().interpolation(.high)
                 .frame(width: theme.mascotBannerIcon, height: theme.mascotBannerIcon)
-                .accessibilityHidden(true)
+                .accessibilityHidden(hidden)
         }
     }
 

@@ -658,7 +658,10 @@ mod tests {
     #[test]
     fn doctor_reports_the_shell_or_what_to_install() {
         let mut out = vec![];
-        super::check_shell(Ok("project commands run under C:/Git/bin/bash.exe".into()), &mut out);
+        super::check_shell(
+            Ok("project commands run under C:/Git/bin/bash.exe".into()),
+            &mut out,
+        );
         super::check_shell(Err(mason_platform::shell::MISSING.into()), &mut out);
         assert_eq!(out[0].level, super::Level::Ok);
         assert!(out[0].text.contains("bash.exe"));

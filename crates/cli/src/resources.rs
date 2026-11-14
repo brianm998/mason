@@ -322,7 +322,7 @@ pub fn share_line(s: &Value) -> String {
     let pm = s["permille"].as_u64().unwrap_or(0);
     let label = s["label"].as_str().unwrap_or("?");
     let title = s["title"].as_str().unwrap_or("");
-    let line = format!("{label:<8} {:>5}.{}%  {title}", pm / 10, pm % 10);
+    let line = format!("{label:<8} {:>4}.{}%  {title}", pm / 10, pm % 10);
     line.trim_end().to_string()
 }
 

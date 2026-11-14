@@ -5,7 +5,10 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.TooltipArea
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
@@ -16,6 +19,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -183,6 +187,9 @@ fun BannersView(model: MonitorModel) {
                 updateRow(b.text, if (model.canAct) "Choose SSH key…" else null, "push-auth:$project", theme, BannerIcons.forDaemonKind(b.kind)) {
                     model.chooseSshKey(project)
                 }
+            } else if (b.kind == "paused") {
+                // The whole pause group is drawn once, where the first pause is.
+                if (i == model.header?.banners?.indexOfFirst { it.kind == "paused" }) PauseGroup(model, theme)
             } else {
                 banner(b.text, "banner:$i", theme, BannerIcons.forDaemonKind(b.kind))
             }
@@ -225,6 +232,59 @@ private fun PendingTile(count: Int) {
     ) {
         Text(count.toString(), style = theme.count(theme.attention), maxLines = 1)
         Text("not imported", style = theme.small(), maxLines = 1, softWrap = false)
+    }
+}
+
+/**
+ * The pauses: an expanded one is a full banner with Resume and a collapse button; collapsed ones are
+ * icons, in the first expanded pause's row or alone in one compact row.
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun PauseGroup(model: MonitorModel, theme: Theme) {
+    val banners = model.header?.banners ?: return
+    model.pauseRows().forEach { row ->
+        Row(
+            modifier = Modifier.fillMaxWidth().background(theme.slow.copy(alpha = 0.18f))
+                .padding(horizontal = theme.spacingLarge, vertical = theme.spacing)
+                .testTag(if (row.expanded == null) "paused-collapsed-row" else "paused-row:${row.expanded}"),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            row.collapsed.forEach { i ->
+                val b = banners[i]
+                // A double click (double tap on touch) expands; one click does nothing, so the layout stays put.
+                TooltipArea(tooltip = {
+                    Text(b.text, style = theme.small(color = theme.text), modifier = Modifier.background(theme.surface).padding(theme.spacing))
+                }) {
+                    Box(
+                        modifier = Modifier.testTag("paused-icon:$i")
+                            .semantics { contentDescription = b.text; onClick(label = "Expand") { model.setPauseCollapsed(b.project, b.mode, false); true } }
+                            .combinedClickable(onClick = {}, onDoubleClick = { model.setPauseCollapsed(b.project, b.mode, false) }),
+                    ) {
+                        BannerImage(BannerIcons.forDaemonKind(b.kind), theme)
+                    }
+                }
+            }
+            val e = row.expanded
+            if (e != null) {
+                val b = banners[e]
+                Row(modifier = Modifier.weight(1f).testTag("banner:$e"), verticalAlignment = Alignment.CenterVertically) {
+                    BannerImage(BannerIcons.forDaemonKind(b.kind), theme)
+                    Text(b.text, style = theme.body(FontWeight.Medium), modifier = Modifier.weight(1f))
+                    if (model.canAct) {
+                        Button(onClick = { model.resumePause(b.project, b.mode) }, modifier = Modifier.testTag("resume-pause:$e")) { Text("Resume") }
+                    }
+                    TooltipArea(tooltip = {
+                        Text("Collapse", style = theme.small(color = theme.text), modifier = Modifier.background(theme.surface).padding(theme.spacing))
+                    }) {
+                        IconButton(
+                            onClick = { model.setPauseCollapsed(b.project, b.mode, true) },
+                            modifier = Modifier.testTag("collapse-pause:$e").semantics { contentDescription = "Collapse" },
+                        ) { Text("✕") }
+                    }
+                }
+            }
+        }
     }
 }
 

@@ -345,3 +345,8 @@ compose = "done"
 description = "On a task's page every task number (#N, for a task the monitor knows) opens that task's page, and every CI reference (the batch pull request, a failed check, a bare URL) and the tracker issue open in the default browser, in why-waiting, failure, tests, plan, body, log, step launches, proposal evidence, the decision card and approval text, debts and filed-by; a CI line lists every link; PR, pull request, Batch, debt and run numbers are never taken for tasks; selectable text stays selectable"
 swift = "done"
 compose = "done"
+
+[feature.paused-collapse]
+description = "Each paused banner has, at its trailing edge, a Resume text button (only when the monitor can act; it sends ResumeWork with that pause's project and mode, so it lifts exactly that pause) and an X icon button ('Collapse', tooltip and accessibility label) that collapses the banner to just its paused icon without lifting the pause; collapsed icons line up in banner order at the leading edge of the first expanded pause's row, or share one icon-only row when every pause is collapsed; each collapsed icon has the full banner text as tooltip and accessibility label, and a double click (double tap on touch) expands that one pause while a single click does nothing; the collapse is kept per device across launches, keyed paused:<project>:<mode>, and forgotten once the pause leaves the header; the item listing still lists every pause"
+swift = "done"
+compose = "done"

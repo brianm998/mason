@@ -521,6 +521,10 @@ message StateCount {
 message Banner {
   string kind = 1;
   string text = 2;
+  // For kind "paused": which pause this is, so a client can lift just that one.
+  // The project is empty for a pause on everything.
+  string project = 3;
+  string mode = 4;
 }
 
 message HeaderView {

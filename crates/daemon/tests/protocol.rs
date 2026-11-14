@@ -285,10 +285,13 @@ fn every_entity_carries_its_allowed_actions_why_waiting_and_progress() {
     c.hello(0, false).unwrap();
     c.subscribe(&[ViewKind::Sidebar, ViewKind::TaskDetail], "", 1)
         .unwrap();
+    // First views are built off the session loop, so they may arrive in either order: wait
+    // for both.
     let got = collect(&mut c, Duration::from_secs(5), |m| {
-        views_of(m)
-            .iter()
+        let v = views_of(m);
+        v.iter()
             .any(|v| matches!(v.body, Some(Body::TaskDetail(_))))
+            && v.iter().any(|v| matches!(v.body, Some(Body::Sidebar(_))))
     });
     let views = views_of(&got);
     let sidebar = views.iter().find_map(|v| match &v.body {

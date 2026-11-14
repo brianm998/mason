@@ -1682,6 +1682,12 @@ public nonisolated struct Mason_V1_Banner: Sendable {
 
   public var text: String = String()
 
+  /// For kind "paused": which pause this is, so a client can lift just that one.
+  /// The project is empty for a pause on everything.
+  public var project: String = String()
+
+  public var mode: String = String()
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -6035,7 +6041,7 @@ nonisolated extension Mason_V1_StateCount: SwiftProtobuf.Message, SwiftProtobuf.
 
 nonisolated extension Mason_V1_Banner: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".Banner"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}kind\0\u{1}text\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}kind\0\u{1}text\0\u{1}project\0\u{1}mode\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -6045,6 +6051,8 @@ nonisolated extension Mason_V1_Banner: SwiftProtobuf.Message, SwiftProtobuf._Mes
       switch fieldNumber {
       case 1: try { try decoder.decodeSingularStringField(value: &self.kind) }()
       case 2: try { try decoder.decodeSingularStringField(value: &self.text) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.project) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.mode) }()
       default: break
       }
     }
@@ -6057,12 +6065,20 @@ nonisolated extension Mason_V1_Banner: SwiftProtobuf.Message, SwiftProtobuf._Mes
     if !self.text.isEmpty {
       try visitor.visitSingularStringField(value: self.text, fieldNumber: 2)
     }
+    if !self.project.isEmpty {
+      try visitor.visitSingularStringField(value: self.project, fieldNumber: 3)
+    }
+    if !self.mode.isEmpty {
+      try visitor.visitSingularStringField(value: self.mode, fieldNumber: 4)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
   public static func ==(lhs: Mason_V1_Banner, rhs: Mason_V1_Banner) -> Bool {
     if lhs.kind != rhs.kind {return false}
     if lhs.text != rhs.text {return false}
+    if lhs.project != rhs.project {return false}
+    if lhs.mode != rhs.mode {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

@@ -17,7 +17,13 @@ import kotlin.math.roundToInt
  */
 class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     // From the daemon.
-    var header by mutableStateOf<HeaderView?>(null)
+    private var headerState by mutableStateOf<HeaderView?>(null)
+    var header: HeaderView?
+        get() = headerState
+        set(v) {
+            headerState = v
+            prunePauseCollapse()
+        }
     var sidebar by mutableStateOf<SidebarView?>(null)
     var home by mutableStateOf<HomeView?>(null)
     /** The CPU shares, apart from `home` so the CPU section reads only this. Null from an older daemon. */
@@ -334,6 +340,49 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
         prefs.setBool(sectionKey(state), open)
     }
 
+    // ---- paused banners ----
+
+    /** The pause keys whose banner is collapsed to its icon; kept per device, across launches. */
+    var collapsedPauses by mutableStateOf(
+        (prefs.string(PAUSE_INDEX) ?: "").split("\n").filter { it.isNotEmpty() }.toSet(),
+    )
+        private set
+
+    fun isPauseCollapsed(project: String, mode: String) = pauseKey(project, mode) in collapsedPauses
+
+    fun setPauseCollapsed(project: String, mode: String, collapsed: Boolean) {
+        val key = pauseKey(project, mode)
+        prefs.setBool(key, collapsed)
+        storeCollapsedPauses(if (collapsed) collapsedPauses + key else collapsedPauses - key)
+    }
+
+    private fun storeCollapsedPauses(keys: Set<String>) {
+        collapsedPauses = keys
+        prefs.setString(PAUSE_INDEX, keys.joinToString("\n"))
+    }
+
+    /** A pause no longer in the header (resumed or expired) forgets its collapse, so a later one starts expanded. */
+    private fun prunePauseCollapse() {
+        val h = headerState ?: return
+        val live = h.banners.filter { it.kind == "paused" }.map { pauseKey(it.project, it.mode) }.toSet()
+        val gone = collapsedPauses - live
+        if (gone.isEmpty()) return
+        gone.forEach { prefs.setBool(it, false) }
+        storeCollapsedPauses(collapsedPauses - gone)
+    }
+
+    /** One row of the pause group: banner indices. Collapsed icons lead the row; `expanded` null is an icon-only row. */
+    data class PauseRow(val collapsed: List<Int>, val expanded: Int?)
+
+    /** Collapsed icons ride in the first expanded pause's row, or share one icon-only row when all are collapsed. */
+    fun pauseRows(): List<PauseRow> {
+        val all = (header?.banners ?: emptyList()).withIndex().filter { it.value.kind == "paused" }
+        val (c, e) = all.partition { isPauseCollapsed(it.value.project, it.value.mode) }
+        val collapsed = c.map { it.index }
+        if (e.isEmpty()) return if (collapsed.isEmpty()) emptyList() else listOf(PauseRow(collapsed, null))
+        return e.mapIndexed { n, x -> PauseRow(if (n == 0) collapsed else emptyList(), x.index) }
+    }
+
     fun toggle(s: SidebarSection) = setExpanded(s.state, !isExpanded(s))
 
     /** Clicking a tile expands its section and scrolls to it. */
@@ -445,6 +494,9 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     fun pause(mode: String, seconds: Long) =
         send(Command(pause = PauseWork(project = project, mode = mode, for_seconds = seconds)))
     fun resume() = send(Command(resume = ResumeWork(project = project)))
+
+    /** Lift exactly one pause: its project (empty for everything) and its mode. */
+    fun resumePause(project: String, mode: String) = send(Command(resume = ResumeWork(project = project, mode = mode)))
     /** MASON's own repository's project, when one is registered: "Improve the pipeline" files there. */
     val selfProject: String get() = header?.self_project ?: ""
 
@@ -695,6 +747,9 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
         const val SCALE_MAX = 2.4
         const val SCALE_STEP = 0.1
         fun sectionKey(state: String) = "section.$state.expanded"
+        /** The identity attention.rs uses for a pause. */
+        fun pauseKey(project: String, mode: String) = "paused:$project:$mode"
+        const val PAUSE_INDEX = "paused.collapsed.keys"
     }
 }
 

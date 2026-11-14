@@ -1784,13 +1784,43 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
                             ),
                             None => suite.command.clone(),
                         };
-                        let ex = crate::exhausted::on_last_round(
-                            c,
-                            &name,
-                            suite.build.as_deref(),
-                            &cmd_for,
-                            &failing,
-                        );
+                        // The suite's own lease and device are gone by now: a suite with an
+                        // environment runs at the base on one too, brought up before the base
+                        // runs and torn down after, as its own attempts are.
+                        let dev = lease_dev(&who, &c.def, &suite);
+                        let up = match &dev {
+                            Ok(dv) => env_up(&who, &c.def, &suite, &c.wt, dv.as_ref()),
+                            Err(()) => Err("no device is free for it".to_string()),
+                        };
+                        let ex = match up {
+                            Ok(()) => {
+                                let id = dev
+                                    .as_ref()
+                                    .ok()
+                                    .and_then(|x| dev_id(x.as_ref()))
+                                    .map(str::to_string);
+                                let on_dev = |t: &[String]| {
+                                    lifecycle::with_device(&cmd_for(t), id.as_deref())
+                                };
+                                crate::exhausted::on_last_round(
+                                    c,
+                                    &name,
+                                    suite.build.as_deref(),
+                                    &on_dev,
+                                    &failing,
+                                )
+                            }
+                            Err(why) => crate::exhausted::Exhausted {
+                                why: Some(format!(
+                                    "could not check at the base: `{}` ({why})",
+                                    failing.join("`, `")
+                                )),
+                                ..Default::default()
+                            },
+                        };
+                        if let Ok(dv) = &dev {
+                            env_down(&who, &c.def, &suite, &c.wt, dv.as_ref());
+                        }
                         let left = failing.iter().any(|t| !ex.excused.contains(t));
                         if !ex.excused.is_empty() && !left && ex.why.is_none() {
                             // Red at the base too: in the ledger now, and the step goes on.

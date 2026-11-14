@@ -67,13 +67,21 @@ impl GitHub {
     /// Some run on the commit is still going. Read its jobs: one that has already failed (and
     /// is not judged infrastructure) makes the verdict red now, and the runs MASON started are
     /// cancelled so the runner is free. Otherwise it is still pending.
-    fn pending_or_red_early(&self, runs: &[Value]) -> Result<CiState, ApiError> {
+    fn pending_or_red_early(
+        &self,
+        runs: &[Value],
+        read: &mut std::collections::HashMap<u64, Value>,
+    ) -> Result<CiState, ApiError> {
         let mut run_names = vec![];
         let mut failed = vec![];
         let mut judged = vec![];
         for r in runs.iter().filter(|r| r["status"] != "completed") {
             let Some(id) = r["id"].as_u64() else { continue };
-            let jobs = self.json(Request::get(&self.url(&format!("/actions/runs/{id}/jobs"))))?;
+            // The latest attempt's jobs, read once: the progress detail reuses them.
+            let jobs = self.json(Request::get(&self.url(&format!(
+                "/actions/runs/{id}/jobs?filter=latest&per_page=100"
+            ))))?;
+            read.insert(id, jobs.clone());
             let mut hit = false;
             for j in jobs["jobs"].as_array().into_iter().flatten() {
                 if j["conclusion"].as_str() != Some("failure") {
@@ -868,7 +876,8 @@ impl BuildSystemAdapter for GitHub {
             return Ok((CiState::Pending, vec![])); // not started yet
         }
         if runs.iter().any(|r| r["status"] != "completed") {
-            let state = self.pending_or_red_early(&runs)?;
+            let mut read = std::collections::HashMap::new();
+            let state = self.pending_or_red_early(&runs, &mut read)?;
             if state != CiState::Pending {
                 return Ok((state, vec![]));
             }
@@ -876,8 +885,16 @@ impl BuildSystemAdapter for GitHub {
             for r in &runs {
                 let Some(id) = r["id"].as_u64() else { continue };
                 let mut jobs = CiJobCounts::default();
-                for j in self.run_jobs(id).unwrap_or_default() {
-                    jobs.add(&j.name, &j.status, j.conclusion.as_deref());
+                for j in read
+                    .get(&id)
+                    .into_iter()
+                    .flat_map(|v| v["jobs"].as_array().into_iter().flatten())
+                {
+                    jobs.add(
+                        j["name"].as_str().unwrap_or("?"),
+                        j["status"].as_str().unwrap_or_default(),
+                        j["conclusion"].as_str(),
+                    );
                 }
                 detail.push(CiRunJobs {
                     workflow: r["name"].as_str().unwrap_or("?").to_string(),
@@ -887,6 +904,25 @@ impl BuildSystemAdapter for GitHub {
             return Ok((state, detail));
         }
         self.finished(&runs).map(|s| (s, vec![]))
+    }
+
+    fn progress(&self, run: &str) -> Result<CiProgress, ApiError> {
+        let v = self.json(Request::get(
+            &self.url(&format!("/actions/runs?head_sha={run}&per_page=20")),
+        ))?;
+        let mut out = CiProgress::default();
+        for r in v["workflow_runs"].as_array().into_iter().flatten() {
+            let Some(id) = r["id"].as_u64() else { continue };
+            let jobs = self.json(Request::get(&self.url(&format!(
+                "/actions/runs/{id}/jobs?filter=latest&per_page=100"
+            ))))?;
+            out.workflows.push(count_jobs(
+                r["name"].as_str().unwrap_or("?"),
+                r["html_url"].as_str().unwrap_or_default(),
+                jobs["jobs"].as_array().map_or(&[][..], Vec::as_slice),
+            ));
+        }
+        Ok(out)
     }
 
     fn doctor(&self, repo: &Path) -> Vec<Problem> {
@@ -949,29 +985,6 @@ impl GitHub {
             failed,
             jobs: judged,
         })
-    }
-
-    fn progress(&self, run: &str) -> Result<CiProgress, ApiError> {
-        let v = self.json(Request::get(
-            &self.url(&format!("/actions/runs?head_sha={run}&per_page=20")),
-        ))?;
-        let mut out = CiProgress::default();
-        for r in v["workflow_runs"].as_array().into_iter().flatten() {
-            let Some(id) = r["id"].as_u64() else { continue };
-            let jobs = self.json(Request::get(&self.url(&format!(
-                "/actions/runs/{id}/jobs?filter=latest&per_page=100"
-            ))))?;
-            out.workflows.push(count_jobs(
-                r["name"].as_str().unwrap_or("?"),
-                r["html_url"].as_str().unwrap_or_default(),
-                jobs["jobs"].as_array().map_or(&[][..], Vec::as_slice),
-            ));
-        }
-        Ok(out)
-    }
-
-    fn doctor(&self, repo: &Path) -> Vec<Problem> {
-        workflow_problems(repo)
     }
 }
 
