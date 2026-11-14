@@ -248,6 +248,36 @@ impl Definition {
             _ => self.step(&self.start),
         }
     }
+
+    /// The command steps that prepare a fresh worktree before any agent changes it (s312):
+    /// from `start` and from `explored_entry`, past exploring agents, every `command` step
+    /// up to the first step of another kind. A checkout MASON makes for itself (a base
+    /// profile, a debt payment, the landing worktree) runs these first, the way a task's
+    /// worktree did, so gitignored artifacts a project links in are there too.
+    pub fn worktree_setup(&self) -> Vec<&Step> {
+        let mut out: Vec<&Step> = vec![];
+        let mut seen: Vec<&str> = vec![];
+        for first in std::iter::once(&self.start).chain(self.explored_entry.iter()) {
+            let mut at = self.step(first);
+            while let Some(s) = at {
+                if seen.contains(&s.name.as_str()) {
+                    break;
+                }
+                seen.push(&s.name);
+                match (s.kind, s.category) {
+                    (StepType::Agent, State::Exploring) => {}
+                    (StepType::Command, _) if s.command.is_some() => {
+                        if !out.iter().any(|o| o.name == s.name) {
+                            out.push(s);
+                        }
+                    }
+                    _ => break,
+                }
+                at = s.next.first().and_then(|n| self.step(n));
+            }
+        }
+        out
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -335,6 +365,36 @@ mod tests {
         assert_ne!(hash("a"), hash("b"));
         assert_ne!(hash("a "), hash("a"));
         assert_eq!(hash("").len(), 32);
+    }
+
+    #[test]
+    fn worktree_setup_is_the_command_steps_before_the_first_agent_change() {
+        let mut d = Definition::empty();
+        d.start = "explore".into();
+        d.explored_entry = Some("setup".into());
+        let mut explore = Step::new("explore", StepType::Agent, State::Exploring);
+        explore.next = vec!["setup".into()];
+        let mut setup = Step::new("setup", StepType::Command, State::Developing);
+        setup.command = Some("bash link.sh".into());
+        setup.next = vec!["develop".into()];
+        let mut develop = Step::new("develop", StepType::Agent, State::Developing);
+        develop.next = vec!["late".into()];
+        let mut late = Step::new("late", StepType::Command, State::Developing);
+        late.command = Some("echo after the change".into());
+        d.steps = vec![explore, setup, develop, late];
+        let names: Vec<&str> = d.worktree_setup().iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["setup"],
+            "once from start, once from explored_entry, never after develop"
+        );
+
+        d.start = "develop".into();
+        d.explored_entry = None;
+        assert!(
+            d.worktree_setup().is_empty(),
+            "a definition that starts at an agent has none"
+        );
     }
 
     #[test]

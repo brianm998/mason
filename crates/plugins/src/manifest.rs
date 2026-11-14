@@ -12,8 +12,10 @@
 //! categories = ["testing"]
 //! ```
 //!
-//! Unknown keys are mistakes. A plugin that provides something this version cannot
-//! run (a parser, an environment or an adapter) is refused, with that reason.
+//! Unknown keys are mistakes. Protocol 3 adds what else a plugin may provide:
+//! `adapter:tracker:<name>`, `adapter:host:<name>`, `adapter:ci:<name>`,
+//! `adapter:agent:<name>` (recorded, not yet run), `parser:<name>` and
+//! `environment:<name>`. A protocol 1 or 2 manifest that lists one is refused.
 
 use serde_json::Value;
 use toml_edit::DocumentMut;
@@ -30,6 +32,9 @@ const KEYS: &[&str] = &[
     "categories",
 ];
 /// The categories a plugin step may sit in.
+/// The adapter kinds a plugin may provide. `agent` is accepted in a manifest but nothing
+/// loads it yet (decision 0286).
+pub const ADAPTER_KINDS: &[&str] = &["tracker", "host", "ci", "agent"];
 pub const CATEGORIES: &[&str] = &["exploring", "developing", "testing", "review", "landing"];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -40,6 +45,9 @@ pub struct Manifest {
     pub description: String,
     /// The step types it provides (the names after `step-type:`).
     pub step_types: Vec<String>,
+    /// The other things it provides (protocol 3), as written: `adapter:tracker:<name>`,
+    /// `parser:<name>`, `environment:<name>` and so on.
+    pub extras: Vec<String>,
     /// The command line, program first, run in the extension's folder.
     pub run: Vec<String>,
     /// File name of the JSON Schema for the step's settings, if any.
@@ -53,7 +61,13 @@ impl Manifest {
         self.step_types
             .iter()
             .map(|t| format!("step-type:{t}"))
+            .chain(self.extras.iter().cloned())
             .collect()
+    }
+
+    /// Does it provide exactly this (`parser:junit`, `adapter:tracker:acme`)?
+    pub fn provides_extra(&self, what: &str) -> bool {
+        self.extras.iter().any(|e| e == what)
     }
 }
 
@@ -88,11 +102,13 @@ pub fn parse_manifest(text: &str) -> Result<Manifest, Vec<String>> {
         protocol: 0,
         description: String::new(),
         step_types: vec![],
+        extras: vec![],
         run: vec![],
         config_schema: None,
         categories: vec!["developing".into(), "testing".into()],
     };
     let mut provides_seen = false;
+    let mut extras: Vec<String> = vec![];
     for (k, v) in doc.iter() {
         let string = |bad: &mut Vec<String>| match v.as_str() {
             Some(s) => Some(s.to_string()),
@@ -176,12 +192,25 @@ pub fn parse_manifest(text: &str) -> Result<Manifest, Vec<String>> {
                                 Some(("step-type", _)) => bad.push(format!(
                                     "`{s}`: a step type's name is lowercase letters, digits, - and _"
                                 )),
-                                Some((kind @ ("parser" | "environment" | "adapter"), _)) => bad
-                                    .push(format!(
-                                    "`{s}`: providing a {kind} is not yet supported; only step-type plugins run in this version"
+                                Some(("parser" | "environment", n)) if valid_name(n) => {
+                                    extras.push(s.to_string())
+                                }
+                                Some(("adapter", rest))
+                                    if rest.split_once(':').is_some_and(|(k, n)| {
+                                        ADAPTER_KINDS.contains(&k) && valid_name(n)
+                                    }) =>
+                                {
+                                    extras.push(s.to_string())
+                                }
+                                Some(("adapter", _)) => bad.push(format!(
+                                    "`{s}`: an adapter is `adapter:<kind>:<name>` with kind one of {}",
+                                    ADAPTER_KINDS.join(", ")
+                                )),
+                                Some(("parser" | "environment", _)) => bad.push(format!(
+                                    "`{s}`: a name is lowercase letters, digits, - and _"
                                 )),
                                 _ => bad.push(format!(
-                                    "`{s}` is not something a plugin can provide; use \"step-type:<name>\""
+                                    "`{s}` is not something a plugin can provide; use \"step-type:<name>\", \"adapter:<kind>:<name>\", \"parser:<name>\" or \"environment:<name>\""
                                 )),
                             }
                         }
@@ -195,21 +224,36 @@ pub fn parse_manifest(text: &str) -> Result<Manifest, Vec<String>> {
             )),
         }
     }
+    let mut seen = std::collections::BTreeSet::new();
+    for e in &extras {
+        if !seen.insert(e.clone()) {
+            bad.push(format!("`provides` lists `{e}` twice"));
+        }
+    }
+    if !extras.is_empty() && m.protocol != 0 && m.protocol < 3 {
+        bad.push(format!(
+            "`{}`: providing an adapter, parser or environment needs protocol 3; the manifest says protocol {}",
+            extras[0], m.protocol
+        ));
+    }
+    m.extras = extras;
     if m.name.is_empty() && doc.get("name").is_none() {
         bad.push("`name` is required".into());
     }
     if !provides_seen {
         bad.push("`provides` is required".into());
-    } else if m.step_types.is_empty() && bad.is_empty() {
+    } else if m.step_types.is_empty() && m.extras.is_empty() && bad.is_empty() {
         bad.push("`provides` must list at least one thing".into());
     }
     if m.run.is_empty() && doc.get("run").is_none() {
         bad.push("`run` is required: the program to start, like \"./check.py\"".into());
     }
     match doc.get("protocol") {
-        None => bad.push("`protocol` is required (this version speaks protocols 1 and 2)".into()),
+        None => {
+            bad.push("`protocol` is required (this version speaks protocols 1, 2 and 3)".into())
+        }
         Some(_) if m.protocol != 0 && !crate::SUPPORTED.contains(&m.protocol) => bad.push(format!(
-            "protocol {} is not supported; this version speaks protocols 1 and 2",
+            "protocol {} is not supported; this version speaks protocols 1, 2 and 3",
             m.protocol
         )),
         _ => {}
@@ -248,10 +292,10 @@ categories = ["testing"]
 
     #[test]
     fn every_mistake_is_reported() {
-        let e = parse_manifest("nme = 1\nprotocol = 3\nprovides = []\n").unwrap_err();
+        let e = parse_manifest("nme = 1\nprotocol = 4\nprovides = []\n").unwrap_err();
         let has = |f: &str| e.iter().any(|x| x.contains(f));
         assert!(has("unknown key `nme`"), "{e:?}");
-        assert!(has("protocol 3 is not supported"), "{e:?}");
+        assert!(has("protocol 4 is not supported"), "{e:?}");
         assert!(has("`name` is required"), "{e:?}");
         assert!(has("`run` is required"), "{e:?}");
         let e = parse_manifest("{{").unwrap_err();
@@ -259,17 +303,53 @@ categories = ["testing"]
     }
 
     #[test]
-    fn parsers_environments_and_adapters_are_refused_as_not_yet_supported() {
-        for what in ["parser:junit", "environment:vm", "adapter:jira"] {
-            let t = OK.replace("step-type:migration-check", what);
-            let e = parse_manifest(&t).unwrap_err();
-            assert!(
-                e.iter().any(|x| x.contains("not yet supported")),
-                "{what}: {e:?}"
-            );
+    fn parsers_environments_and_adapters_need_protocol_3() {
+        let all = [
+            "parser:junit",
+            "environment:vm",
+            "adapter:tracker:jira",
+            "adapter:host:gitlab",
+            "adapter:ci:buildkite",
+            "adapter:agent:local",
+        ];
+        for what in all {
+            // Protocol 1 and 2 refuse each, with the reason.
+            for old in ["protocol = 1", "protocol = 2"] {
+                let t = OK
+                    .replace("step-type:migration-check", what)
+                    .replace("protocol = 1", old);
+                let e = parse_manifest(&t).unwrap_err();
+                assert!(
+                    e.iter().any(|x| x.contains("needs protocol 3")),
+                    "{what}: {e:?}"
+                );
+            }
+            let t = OK
+                .replace("step-type:migration-check", what)
+                .replace("protocol = 1", "protocol = 3");
+            let m = parse_manifest(&t).unwrap();
+            assert_eq!(m.provides(), [what]);
+            assert!(m.provides_extra(what));
+            assert!(m.step_types.is_empty());
         }
-        let e = parse_manifest(&OK.replace("step-type:migration-check", "magic:x")).unwrap_err();
+        let v3 = OK.replace("protocol = 1", "protocol = 3");
+        for bad in [
+            "magic:x",
+            "adapter:jira",
+            "adapter:storage:x",
+            "adapter:tracker:Bad",
+            "parser:",
+        ] {
+            let e = parse_manifest(&v3.replace("step-type:migration-check", bad)).unwrap_err();
+            assert!(!e.is_empty(), "{bad} must be refused");
+        }
+        let e = parse_manifest(&v3.replace("step-type:migration-check", "magic:x")).unwrap_err();
         assert!(e[0].contains("not something a plugin can provide"));
+        let two = v3.replace(
+            "[\"step-type:migration-check\"]",
+            "[\"parser:a\", \"parser:a\"]",
+        );
+        assert!(parse_manifest(&two).is_err());
     }
 
     #[test]

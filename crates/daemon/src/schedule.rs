@@ -435,6 +435,12 @@ fn run_check(d: &Arc<Daemon>, project: &ProjectCfg, spec: &Spec, row: &mut Sched
     ) {
         return format!("could not check out {}: {e}", project.base_ref());
     }
+    if let Some(pid) = d.project_id_by_name(&project.id) {
+        if let Err(e) = crate::jobs::setup_checkout(&d.current_def(pid), &wt) {
+            mason_landing::git::remove_worktree(&project.path, &wt);
+            return e;
+        }
+    }
     let ran = run_in(&wt, &cmd, spec.timeout);
     let results = spec
         .results_file

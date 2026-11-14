@@ -194,6 +194,14 @@ impl Daemon {
     /// is invalid starts on the last good one (or the built-in) and says why.
     pub(crate) fn load_definitions(&self) {
         for (pid, p) in &self.projects() {
+            self.load_definition_of(*pid, p);
+        }
+    }
+
+    /// The first reading of one project's definition (also used when a project is registered
+    /// while masond runs).
+    pub(crate) fn load_definition_of(&self, pid: ProjectId, p: &ProjectCfg) {
+        {
             // No network here: the port is not open yet. What is already fetched is
             // read; the watcher's first pass fetches.
             let fallback = self
@@ -213,7 +221,7 @@ impl Daemon {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .insert(
-                    *pid,
+                    pid,
                     ProjectDefs {
                         current: Current {
                             def: fallback,
@@ -224,7 +232,7 @@ impl Daemon {
                         error: None,
                     },
                 );
-            let r = self.reload_without_fetch(*pid);
+            let r = self.reload_without_fetch(pid);
             if let Reload::Refused(e) = r {
                 tracing::warn!(project = %p.id, problems = ?e, "the definition was refused at startup; using the last good one");
             }

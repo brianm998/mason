@@ -5,7 +5,8 @@
 
 use mason_definition::dryrun::{default_scenarios, dry_run, parse_scenarios, End, Trace};
 use mason_definition::graph::Outcome;
-use mason_definition::{parse, validate, Capabilities};
+use mason_definition::{parse, parse_with, validate, Capabilities, Plugins};
+use mason_plugins::PluginType;
 use std::path::Path;
 
 fn read(path: &Path) -> Result<String, String> {
@@ -43,7 +44,10 @@ fn missing_prompts(def: &mason_definition::Definition, dir: &Path) -> Vec<String
 
 /// Validate a definition file: the language, then what this version can run,
 /// then a dry run of the default scenarios. Returns the exit status.
-pub fn check(path: &Path) -> i32 {
+///
+/// `plugins` are the step types the project's approved extensions provide (`--project`);
+/// without it only the built-in step types are known.
+pub fn check(path: &Path, plugins: &[PluginType]) -> i32 {
     let text = match read(path) {
         Ok(t) => t,
         Err(e) => {
@@ -51,16 +55,20 @@ pub fn check(path: &Path) -> i32 {
             return 1;
         }
     };
-    let def = match parse(&text) {
+    let names: Vec<String> = plugins.iter().map(|p| p.name.clone()).collect();
+    let def = match parse_with(&text, Plugins::Named(&names)) {
         Ok(d) => d,
         Err(problems) => {
             problems.iter().for_each(|p| println!("error  {p}"));
             return 1;
         }
     };
-    let language = validate(&def, &Capabilities::everything());
+    let language = validate(
+        &def,
+        &Capabilities::everything().with_plugins(plugins.to_vec()),
+    );
     language.iter().for_each(|p| println!("error  {p}"));
-    let runnable = validate(&def, &Capabilities::now());
+    let runnable = validate(&def, &Capabilities::now().with_plugins(plugins.to_vec()));
     for p in runnable.iter().filter(|p| !language.contains(p)) {
         println!("cannot run yet  {p}");
     }
@@ -134,7 +142,7 @@ pub fn dry(path: &Path, scenarios: Option<&Path>) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
+    use serde_json::json;
     #[test]
     fn a_missing_prompt_file_is_reported() {
         let text = "schema = 1\nstart = \"s\"\n[step.s]\ntype = \"agent\"\ncategory = \"exploring\"\nprompt = \"sec.md\"\nnext = \"l\"\n[step.l]\ntype = \"landing\"\ncategory = \"landing\"\n";
@@ -144,5 +152,49 @@ mod tests {
         assert_eq!(m, vec!["step.s.prompt: no file .mason/prompts/sec.md"]);
         std::fs::write(dir.path().join("sec.md"), "x").unwrap();
         assert!(missing_prompts(&def, dir.path()).is_empty());
+    }
+
+    const TEXT: &str = r#"
+schema = 1
+start = "develop"
+
+[step.develop]
+type = "agent"
+category = "developing"
+next = "check"
+
+[step.check]
+type = "migration-check"
+category = "testing"
+on_red = "develop"
+max_rounds = 2
+next = "land"
+
+[step.land]
+type = "landing"
+category = "landing"
+"#;
+
+    fn plugin() -> PluginType {
+        PluginType {
+            name: "migration-check".into(),
+            plugin: "migration-check".into(),
+            categories: vec!["testing".into()],
+            config_schema: json!({"type": "object"}),
+            about: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_plugin_step_type_checks_offline_only_when_the_plugin_is_known() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("mason.toml");
+        std::fs::write(&file, TEXT).unwrap();
+        assert_eq!(check(&file, &[plugin()]), 0);
+        // Without the project's plugins, or with one that is not this step's, it is refused.
+        assert_eq!(check(&file, &[]), 1);
+        let mut other = plugin();
+        other.name = "something-else".into();
+        assert_eq!(check(&file, &[other]), 1);
     }
 }

@@ -1384,6 +1384,22 @@ async fn registration_reload(Shared(d): Shared<Arc<Daemon>>, Path(name): Path<St
     }))
 }
 
+/// Register a project that has a registration file but that masond did not start with.
+async fn project_register(Shared(d): Shared<Arc<Daemon>>, Path(name): Path<String>) -> Res {
+    let d2 = d.clone();
+    let r = d
+        .pool
+        .run(move || d2.register_project(&name))
+        .await
+        .map_err(pool_err)?;
+    match r {
+        Ok((pid, new)) => Ok(Json(
+            json!({"result": if new {"registered"} else {"known"}, "project": pid.0}),
+        )),
+        Err(e) => Ok(Json(json!({"result": "refused", "errors": [e]}))),
+    }
+}
+
 /// Every step's settings after the five layers, and where each came from.
 async fn project_config(Shared(d): Shared<Arc<Daemon>>, Path(name): Path<String>) -> Res {
     let pid = project_of(&d, &name)?;
@@ -3254,6 +3270,7 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/projects/{name}/editor/apply", post(editor_apply))
         .route("/projects/{name}/editor/{what}", post(editor_history))
         .route("/projects/{name}/reload", post(project_reload))
+        .route("/projects/{name}/register", post(project_register))
         .route(
             "/projects/{name}/registration/reload",
             post(registration_reload),

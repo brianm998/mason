@@ -232,6 +232,7 @@ mod tests {
             services: Default::default(),
             self_cfg: None,
             account: "claude".into(),
+            config_dir: PathBuf::new(),
         }
     }
 

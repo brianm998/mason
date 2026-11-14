@@ -11,6 +11,9 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
+/// How often a waiting call looks at its cancel flag.
+pub const CANCEL_SLICE: Duration = Duration::from_millis(50);
+
 /// How to start a plugin.
 #[derive(Clone, Debug)]
 pub struct Launch {
@@ -117,6 +120,22 @@ impl Plugin {
         timeout: Duration,
         note: &mut dyn FnMut(&Value),
     ) -> Result<Value, CallError> {
+        self.call_cancelable(method, params, timeout, note, &mut || false)
+    }
+
+    /// [`Plugin::call_noting`], asking `cancel` every [`CANCEL_SLICE`] while it waits. The
+    /// first time it says yes, the plugin gets one `step.cancel` notification (no `id`, no
+    /// answer) and the call goes on waiting: the plugin ends the step itself, and the
+    /// timeout still bounds how long it may take.
+    pub fn call_cancelable(
+        &mut self,
+        method: &str,
+        params: &Value,
+        timeout: Duration,
+        note: &mut dyn FnMut(&Value),
+        cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<Value, CallError> {
+        let mut cancel_sent = false;
         let id = self.next_id;
         self.next_id += 1;
         let line = rpc::request(id, method, params);
@@ -134,7 +153,12 @@ impl Plugin {
         let end = Instant::now() + timeout;
         loop {
             let left = end.saturating_duration_since(Instant::now());
-            match self.lines.recv_timeout(left) {
+            if !cancel_sent && cancel() {
+                cancel_sent = true;
+                // A plugin that is gone is found out by the read below.
+                let _ = self.notify("step.cancel", &json!({}));
+            }
+            match self.lines.recv_timeout(left.min(CANCEL_SLICE)) {
                 Ok(Ok(l)) if l.trim().is_empty() => {}
                 Ok(Ok(l)) if rpc::read_progress_line(&l).is_some() => {
                     if let Some(p) = rpc::read_progress_line(&l) {
@@ -157,8 +181,10 @@ impl Plugin {
                     )));
                 }
                 Err(RecvTimeoutError::Timeout) => {
-                    self.kill();
-                    return Err(CallError::Timeout(timeout));
+                    if Instant::now() >= end {
+                        self.kill();
+                        return Err(CallError::Timeout(timeout));
+                    }
                 }
                 Err(RecvTimeoutError::Disconnected) => {
                     self.kill();
@@ -167,6 +193,15 @@ impl Plugin {
                     )));
                 }
             }
+        }
+    }
+
+    /// Send a notification: a request without an `id`, which gets no answer.
+    pub fn notify(&mut self, method: &str, params: &Value) -> std::io::Result<()> {
+        let line = json!({"jsonrpc": "2.0", "method": method, "params": params}).to_string();
+        match self.stdin.as_mut() {
+            Some(s) => writeln!(s, "{line}").and_then(|()| s.flush()),
+            None => Err(std::io::Error::other("the plugin's input is closed")),
         }
     }
 
@@ -258,7 +293,18 @@ pub fn step_run_noting(
     timeout: Duration,
     note: &mut dyn FnMut(&Value),
 ) -> Result<StepResult, CallError> {
-    let v = p.call_noting(
+    step_run_cancelable(p, r, timeout, note, &mut || false)
+}
+
+/// [`step_run_noting`], sending `step.cancel` once `cancel` says the task was canceled.
+pub fn step_run_cancelable(
+    p: &mut Plugin,
+    r: &StepRequest,
+    timeout: Duration,
+    note: &mut dyn FnMut(&Value),
+    cancel: &mut dyn FnMut() -> bool,
+) -> Result<StepResult, CallError> {
+    let v = p.call_cancelable(
         "step.run",
         &json!({
             "step": r.step, "type": r.step_type, "config": r.config, "task": r.task,
@@ -266,11 +312,13 @@ pub fn step_run_noting(
         }),
         timeout,
         note,
+        cancel,
     )?;
     rpc::read_step_result(&v).map_err(CallError::Closed)
 }
 
 /// Start the plugin, check what it says it is, run the step, shut it down.
+#[allow(clippy::too_many_arguments)]
 pub fn run_step(
     l: &Launch,
     expect_name: &str,
@@ -279,6 +327,7 @@ pub fn run_step(
     init_timeout: Duration,
     run_timeout: Duration,
     note: &mut dyn FnMut(&Value),
+    cancel: &mut dyn FnMut() -> bool,
 ) -> Result<StepResult, String> {
     let mut p = Plugin::spawn(l).map_err(|e| format!("cannot start the plugin: {e}"))?;
     let init = initialize_as(&mut p, init_timeout, protocol)?;
@@ -295,11 +344,18 @@ pub fn run_step(
         ));
     }
     // Only a protocol 2 plugin may send progress; a protocol 1 plugin's is ignored.
-    let res = step_run_noting(&mut p, r, run_timeout, &mut |v| {
-        if protocol >= 2 {
-            note(v)
-        }
-    })
+    // Only a protocol 3 plugin is told of a cancel.
+    let res = step_run_cancelable(
+        &mut p,
+        r,
+        run_timeout,
+        &mut |v| {
+            if protocol >= 2 {
+                note(v)
+            }
+        },
+        &mut || protocol >= 3 && cancel(),
+    )
     .map_err(|e| format!("step.run: {e}"))?;
     // A plugin that will not shut down cleanly is stopped; the result stands.
     if p.shutdown(init_timeout).is_err() {
