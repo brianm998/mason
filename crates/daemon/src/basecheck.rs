@@ -165,6 +165,22 @@ fn file_fix(d: &std::sync::Arc<crate::daemon::Daemon>, s: &Seen, test: &str) -> 
     })
 }
 
+/// The fix for `test` failing at `base`: the one already open, or a new urgent task.
+#[allow(dead_code)]
+pub(crate) fn fix_for(c: &Ctx, test: &str, base: &str, cmd: &str, log_tail: &str) -> Option<Fix> {
+    let s = Seen {
+        project: c.project_id,
+        project_name: &c.project.id,
+        task: c.task.0,
+        step: &c.step.name,
+        base,
+        cmd,
+        log_tail,
+        follows: None,
+    };
+    file_fix(&c.d, &s, test)
+}
+
 /// The fix landed and `test` is still red: file a follow-up that links it and point the
 /// ledger entry at it. `None` if nothing could be filed.
 pub fn follow_up(
