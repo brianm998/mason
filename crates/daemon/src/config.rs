@@ -70,6 +70,16 @@ pub struct DaemonConfig {
     /// How often a task waiting because the base is red the same way looks at whether the base
     /// branch has moved (s246).
     pub base_red_poll: Duration,
+    /// Automatic retries of failures outside the code (s247): how long after the failure the
+    /// first and the second retry come (a third outside failure in `auto_retry_window` stays
+    /// failed), how often the loop looks, and the window the retries are counted in.
+    pub auto_retry_delays: Vec<Duration>,
+    pub auto_retry_window: Duration,
+    pub auto_retry_tick: Duration,
+    /// This many tasks failing outside the code with the same reason within `burst_window` are
+    /// one host-wide event: one alert, and their retries wait for a probe.
+    pub burst_min: usize,
+    pub burst_window: Duration,
     /// Identities whose answers count (Part 10). Default: the user running the
     /// daemon.
     pub owner_names: Vec<String>,
@@ -346,6 +356,11 @@ impl DaemonConfig {
             attention_interval: Duration::from_secs(5),
             env_retry: Duration::from_secs(30),
             base_red_poll: Duration::from_secs(60),
+            auto_retry_delays: vec![Duration::from_secs(600), Duration::from_secs(3600)],
+            auto_retry_window: Duration::from_secs(24 * 3600),
+            auto_retry_tick: Duration::from_secs(30),
+            burst_min: 3,
+            burst_window: Duration::from_secs(600),
             runtime_sha: None,
             exec_args: vec![],
             healthy_after: Duration::from_secs(30),
@@ -424,6 +439,8 @@ pub struct ProjectCfg {
     /// (`kill_after_s`, default 0 = off).
     pub kill_after: Duration,
     pub test_timeout: Duration,
+    /// Retry a failure outside the code by itself (`auto_retry`, default true; s247).
+    pub auto_retry: bool,
     /// Test rounds before the task fails, if the overlay sets one (layer 3).
     pub max_test_rounds: Option<u32>,
     /// How many times a red test command is run again before the round counts as
@@ -1008,6 +1025,10 @@ pub fn parse_project(id: &str, text: &str) -> Result<ProjectCfg, String> {
         cont_after: Duration::from_secs(secs("cont_after_s", 0)),
         kill_after: Duration::from_secs(secs("kill_after_s", 0)),
         test_timeout: Duration::from_secs(secs("test_timeout_s", 1800)),
+        auto_retry: doc
+            .get("auto_retry")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true),
         max_test_rounds: doc
             .get("max_test_rounds")
             .and_then(|v| v.as_integer())

@@ -1499,6 +1499,31 @@ impl Store {
         })
     }
 
+    /// The daemon retried `task` by itself (s247).
+    pub fn record_auto_retry(&self, task: u64, at_ms: u64, reason: &str) -> Result<(), StoreError> {
+        let r = reason.to_string();
+        self.write(move |c| {
+            c.execute(
+                "INSERT INTO auto_retries(task, at_ms, reason) VALUES (?1,?2,?3)",
+                params![task as i64, at_ms as i64, r],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// The times the daemon retried `task` by itself since `since_ms`, oldest first.
+    pub fn auto_retries_since(&self, task: u64, since_ms: u64) -> Result<Vec<u64>, StoreError> {
+        self.read(move |c| {
+            let mut st = c.prepare(
+                "SELECT at_ms FROM auto_retries WHERE task = ?1 AND at_ms >= ?2 ORDER BY at_ms",
+            )?;
+            let rows = st.query_map(params![task as i64, since_ms as i64], |r| {
+                Ok(r.get::<_, i64>(0)? as u64)
+            })?;
+            rows.collect()
+        })
+    }
+
     pub fn record_flaky(
         &self,
         suite: &str,

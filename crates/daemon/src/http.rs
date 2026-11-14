@@ -98,6 +98,10 @@ fn task_json(d: &Daemon, w: &World, t: &Task, detail: bool) -> Value {
     });
     if t.state == State::Failed {
         v["retry_to"] = json!(retry_default(&task_def(d, t), t));
+        if let Some((done, next)) = crate::autoretry::status(d, t) {
+            v["auto_retries"] = json!(done);
+            v["next_auto_retry_ms"] = json!(next);
+        }
     }
     if detail {
         v["body"] = json!(t.body);
@@ -694,79 +698,101 @@ pub fn latest_run(w: &World, id: TaskId) -> u64 {
 /// Check and emit happen under this, so two retries sent together cannot both pass.
 static RETRY_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// How a retry asks: where to, which run the caller saw, and whether the daemon itself asks.
+#[derive(Default, Clone)]
+pub struct RetryAsk {
+    pub to: Option<String>,
+    pub seen: Option<u64>,
+    pub restart: bool,
+    /// The daemon retries a failure outside the code by itself (s247).
+    pub auto: bool,
+}
+
+/// Re-enter a step of a task. The one place a `Retried` event is made: the HTTP endpoint and the
+/// automatic retry both come here, so both have the same guard against a retry that was already
+/// done (`seen`) and the same check-and-emit under one lock.
+pub fn retry_task(
+    d: &Arc<Daemon>,
+    id: u64,
+    ask: RetryAsk,
+) -> Result<(State, String), (StatusCode, Json<Value>)> {
+    let _gate = RETRY_GATE.lock().unwrap_or_else(|e| e.into_inner());
+    let w = d.world().map_err(store_err)?;
+    let t = w
+        .tasks
+        .get(&TaskId(id))
+        .ok_or_else(|| fail(StatusCode::NOT_FOUND, format!("no task #{id}")))?;
+    let latest = latest_run(&w, TaskId(id));
+    if let Some(seen) = ask.seen {
+        if seen != latest {
+            let now = if t.state.is_step() {
+                "running".to_string()
+            } else {
+                state_name(t.state).to_string()
+            };
+            return Err(fail(
+                StatusCode::CONFLICT,
+                format!("already retried (run {latest} is {now})"),
+            ));
+        }
+    } else if t.state.is_step() && !ask.restart {
+        return Err(fail(
+            StatusCode::CONFLICT,
+            format!(
+                "task #{id} is not failed (run {latest} is running); send \"restart\": true (`--restart`) to restart the step"
+            ),
+        ));
+    }
+    let def = task_def(d, t);
+    // `to` is a step in the task's definition, or a category (the first step in it).
+    let name = ask.to.unwrap_or_else(|| retry_default(&def, t));
+    let found = match def.step(&name) {
+        Some(s) => Some((s.category, s.name.clone())),
+        None => parse_state(&name).and_then(|c| def.first_in(c).map(|s| (c, s.name.clone()))),
+    };
+    let (to, step) = found.ok_or_else(|| {
+        let names: Vec<&str> = def.steps.iter().map(|s| s.name.as_str()).collect();
+        fail(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "unknown step {name:?}; this task's steps are {}",
+                names.join(", ")
+            ),
+        )
+    })?;
+    d.emit(EventKind::Retried {
+        task: TaskId(id),
+        to,
+        step: step.clone(),
+        auto: ask.auto,
+    })
+    .map_err(store_err)?;
+    Ok((to, step))
+}
+
 async fn retry(
     Shared(d): Shared<Arc<Daemon>>,
     Path(id): Path<u64>,
     body: Option<Json<Value>>,
 ) -> Res {
-    let want = body
-        .as_ref()
-        .and_then(|b| b["to"].as_str())
-        .map(String::from);
-    let seen = body.as_ref().and_then(|b| b["seen"].as_u64());
-    let restart = body
-        .as_ref()
-        .and_then(|b| b["restart"].as_bool())
-        .unwrap_or(false);
+    let ask = RetryAsk {
+        to: body
+            .as_ref()
+            .and_then(|b| b["to"].as_str())
+            .map(String::from),
+        seen: body.as_ref().and_then(|b| b["seen"].as_u64()),
+        restart: body
+            .as_ref()
+            .and_then(|b| b["restart"].as_bool())
+            .unwrap_or(false),
+        auto: false,
+    };
     let d2 = d.clone();
-    let (to, step) =
-        d.pool
-            .run(move || {
-                let _gate = RETRY_GATE.lock().unwrap_or_else(|e| e.into_inner());
-                let w = d2.world().map_err(store_err)?;
-                let t = w
-                    .tasks
-                    .get(&TaskId(id))
-                    .ok_or_else(|| fail(StatusCode::NOT_FOUND, format!("no task #{id}")))?;
-                let latest = latest_run(&w, TaskId(id));
-                if let Some(seen) = seen {
-                    if seen != latest {
-                        let now = if t.state.is_step() {
-                            "running".to_string()
-                        } else {
-                            state_name(t.state).to_string()
-                        };
-                        return Err(fail(
-                            StatusCode::CONFLICT,
-                            format!("already retried (run {latest} is {now})"),
-                        ));
-                    }
-                } else if t.state.is_step() && !restart {
-                    return Err(fail(
-                        StatusCode::CONFLICT,
-                        format!(
-                            "task #{id} is not failed (run {latest} is running); send \"restart\": true (`--restart`) to restart the step"
-                        ),
-                    ));
-                }
-                let def = task_def(&d2, t);
-                // `to` is a step in the task's definition, or a category (the first step in it).
-                let name = want.unwrap_or_else(|| retry_default(&def, t));
-                let found = match def.step(&name) {
-                    Some(s) => Some((s.category, s.name.clone())),
-                    None => parse_state(&name)
-                        .and_then(|c| def.first_in(c).map(|s| (c, s.name.clone()))),
-                };
-                let (to, step) = found.ok_or_else(|| {
-                    let names: Vec<&str> = def.steps.iter().map(|s| s.name.as_str()).collect();
-                    fail(
-                        StatusCode::BAD_REQUEST,
-                        format!(
-                            "unknown step {name:?}; this task's steps are {}",
-                            names.join(", ")
-                        ),
-                    )
-                })?;
-                d2.emit(EventKind::Retried {
-                    task: TaskId(id),
-                    to,
-                    step: step.clone(),
-                })
-                .map_err(store_err)?;
-                Ok::<_, (StatusCode, Json<Value>)>((to, step))
-            })
-            .await
-            .map_err(pool_err)??;
+    let (to, step) = d
+        .pool
+        .run(move || retry_task(&d2, id, ask))
+        .await
+        .map_err(pool_err)??;
     Ok(Json(
         json!({"ok": true, "to": state_name(to), "step": step}),
     ))

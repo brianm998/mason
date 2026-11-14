@@ -258,6 +258,7 @@ fn retry_goes_to_any_step_and_catches_up_with_base_first() {
             task: t,
             to,
             step: String::new(),
+            auto: false,
         });
         assert_eq!(sim.state(t), to);
         let catch = fx
@@ -277,6 +278,7 @@ fn retry_goes_to_any_step_and_catches_up_with_base_first() {
             task: t,
             to: S::Landed,
             step: String::new(),
+            auto: false,
         }),
         Err(ReduceError::BadRetryTarget(S::Landed))
     );
@@ -290,6 +292,7 @@ fn retry_of_running_step_stops_its_host() {
         task: t,
         to: S::Developing,
         step: String::new(),
+        auto: false,
     });
     assert!(fx.contains(&Effect::StopStepHost { task: t }));
 }
@@ -387,6 +390,7 @@ fn retry_while_waiting_for_owner_makes_the_old_answer_stale() {
         task: t,
         to: S::Developing,
         step: String::new(),
+        auto: false,
     });
     assert!(sim
         .try_ev(E::Answered {
@@ -595,6 +599,7 @@ fn random_events_never_break_invariants() {
                 task,
                 to: State::ALL[rnd(11) as usize],
                 step: String::new(),
+                auto: false,
             },
             16 => {
                 if rnd(2) == 0 {
@@ -1000,7 +1005,8 @@ fn retry_on_a_cancelled_task_is_refused() {
         sim.try_ev(E::Retried {
             task: t,
             to: State::Developing,
-            step: String::new()
+            step: String::new(),
+            auto: false,
         }),
         Err(ReduceError::Illegal { .. })
     ));

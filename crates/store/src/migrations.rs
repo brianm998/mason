@@ -604,6 +604,15 @@ const STEPS: &[&str] = &[
          text       TEXT NOT NULL,
          at_ms      INTEGER NOT NULL
      );",
+    // 30: the retries the daemon made by itself after a failure outside the code (s247), so a
+    // restart neither forgets nor repeats them. Additive.
+    "CREATE TABLE auto_retries (
+         id     INTEGER PRIMARY KEY AUTOINCREMENT,
+         task   INTEGER NOT NULL,
+         at_ms  INTEGER NOT NULL,
+         reason TEXT NOT NULL
+     );
+     CREATE INDEX auto_retries_task ON auto_retries(task, at_ms);",
 ];
 
 pub const SCHEMA_VERSION: u32 = STEPS.len() as u32;
