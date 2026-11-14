@@ -72,8 +72,60 @@ fn server(body: S) -> ServerMessage {
     ServerMessage { body: Some(body) }
 }
 
-async fn send(sock: &mut WebSocket, m: ServerMessage, e: Encoding) -> bool {
-    sock.send(frame(&m, e)).await.is_ok()
+/// How long one send to a client may take. A client that stops reading fills both
+/// socket buffers, and `send` then never completes: the session loop is parked in it
+/// and never reads the client's commands again. Past this the client is treated as
+/// gone (it reconnects and resumes from its last sequence number).
+const WS_SEND_TIMEOUT: Duration = Duration::from_secs(10);
+/// A progress push that took this long to send says the reader is slow: progress
+/// is dropped for as long again, as the next one carries the whole record anyway.
+const SLOW_SEND: Duration = Duration::from_millis(500);
+
+#[derive(Debug, PartialEq, Eq)]
+enum Sent {
+    Ok,
+    /// The socket failed or closed.
+    Failed,
+    /// The client did not take the frame within the limit.
+    TimedOut,
+}
+
+/// Run one send future under `limit`.
+async fn within<F>(limit: Duration, fut: F) -> Sent
+where
+    F: std::future::Future<Output = Result<(), axum::Error>>,
+{
+    match tokio::time::timeout(limit, fut).await {
+        Ok(Ok(())) => Sent::Ok,
+        Ok(Err(_)) => Sent::Failed,
+        Err(_) => Sent::TimedOut,
+    }
+}
+
+/// Send one frame; `false` means the session must end. A client that did not read
+/// within `WS_SEND_TIMEOUT` is logged and counted (`mason health`).
+async fn send(d: &Daemon, sock: &mut WebSocket, m: ServerMessage, e: Encoding) -> bool {
+    let what = match &m.body {
+        Some(S::StepProgress(_)) => "step progress",
+        Some(S::View(_)) => "view",
+        Some(S::Result(_)) => "command result",
+        Some(S::Snapshot(_)) => "snapshot",
+        Some(S::Events(_)) => "events",
+        _ => "message",
+    };
+    match within(WS_SEND_TIMEOUT, sock.send(frame(&m, e))).await {
+        Sent::Ok => true,
+        Sent::Failed => false,
+        Sent::TimedOut => {
+            d.ws_slow_closed
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            tracing::warn!(
+                "closing a monitor session: the client did not read a {what} within {}s",
+                WS_SEND_TIMEOUT.as_secs()
+            );
+            false
+        }
+    }
 }
 
 fn decode(msg: &Message) -> Option<(Encoding, Result<ClientMessage, String>)> {
@@ -131,6 +183,7 @@ async fn session(d: Arc<Daemon>, mut sock: WebSocket, peer: Option<crate::lan::P
         }) => h,
         Ok(_) => {
             let _ = send(
+                &d,
                 &mut sock,
                 server(S::Error(Error {
                     message: "say hello first".into(),
@@ -142,6 +195,7 @@ async fn session(d: Arc<Daemon>, mut sock: WebSocket, peer: Option<crate::lan::P
         }
         Err(e) => {
             let _ = send(
+                &d,
                 &mut sock,
                 server(S::Error(Error {
                     message: format!("not a message: {e}"),
@@ -172,8 +226,8 @@ async fn session(d: Arc<Daemon>, mut sock: WebSocket, peer: Option<crate::lan::P
             role: String::new(),
             now_ms: crate::daemon::now_ms(),
         };
-        let _ = send(&mut sock, server(S::Welcome(welcome)), enc).await;
-        let _ = send(&mut sock, server(S::Error(Error { message: msg })), enc).await;
+        let _ = send(&d, &mut sock, server(S::Welcome(welcome)), enc).await;
+        let _ = send(&d, &mut sock, server(S::Error(Error { message: msg })), enc).await;
         return;
     }
     // Subscribe to the bus before reading, so nothing slips between.
@@ -213,11 +267,12 @@ async fn session(d: Arc<Daemon>, mut sock: WebSocket, peer: Option<crate::lan::P
         role: peer.as_ref().map_or("", |p| p.role.as_str()).to_string(),
         now_ms: crate::daemon::now_ms(),
     };
-    if !send(&mut sock, server(S::Welcome(welcome)), enc).await {
+    if !send(&d, &mut sock, server(S::Welcome(welcome)), enc).await {
         return;
     }
     let mut sent = last;
     let mut owed = false;
+    let mut skip_progress_until = tokio::time::Instant::now();
     match resume {
         ResumeKind::Snapshot => {
             let (d2, sub_views) = (
@@ -235,7 +290,14 @@ async fn session(d: Arc<Daemon>, mut sock: WebSocket, peer: Option<crate::lan::P
                 return;
             };
             sent = seq.max(last);
-            if !send(&mut sock, server(S::Snapshot(Snapshot { seq, views })), enc).await {
+            if !send(
+                &d,
+                &mut sock,
+                server(S::Snapshot(Snapshot { seq, views })),
+                enc,
+            )
+            .await
+            {
                 return;
             }
         }
@@ -250,7 +312,7 @@ async fn session(d: Arc<Daemon>, mut sock: WebSocket, peer: Option<crate::lan::P
             if let Some(l) = events.last() {
                 sent = sent.max(l.seq);
             }
-            if !send(&mut sock, server(S::Events(Events { events })), enc).await {
+            if !send(&d, &mut sock, server(S::Events(Events { events })), enc).await {
                 return;
             }
             match push_views(&d, &mut sock, &sub, enc).await {
@@ -309,7 +371,7 @@ async fn session(d: Arc<Daemon>, mut sock: WebSocket, peer: Option<crate::lan::P
             Some(o) = out_rx.recv() => {
                 match o {
                     Out::Result(r) => {
-                        if !send(&mut sock, server(S::Result(r)), enc).await { return }
+                        if !send(&d, &mut sock, server(S::Result(r)), enc).await { return }
                     }
                     Out::Rebuilt { gen: g, res } => {
                         pending = false;
@@ -321,10 +383,10 @@ async fn session(d: Arc<Daemon>, mut sock: WebSocket, peer: Option<crate::lan::P
                             Ok((events, seq, views)) => {
                                 if !events.is_empty() {
                                     sent = events.last().map_or(sent, |r| r.seq);
-                                    if !send(&mut sock, server(S::Events(Events { events })), enc).await { return }
+                                    if !send(&d, &mut sock, server(S::Events(Events { events })), enc).await { return }
                                 }
                                 if g == gen {
-                                    if !send_views(&mut sock, seq, views, &mut shown, enc).await { return }
+                                    if !send_views(&d, &mut sock, seq, views, &mut shown, enc).await { return }
                                 } else {
                                     dirty = true;
                                 }
@@ -339,7 +401,7 @@ async fn session(d: Arc<Daemon>, mut sock: WebSocket, peer: Option<crate::lan::P
                         // subscription has changed since.
                         if g == gen {
                             if let Ok((_, seq, views)) = res {
-                                if !send_views(&mut sock, seq, views, &mut shown, enc).await { return }
+                                if !send_views(&d, &mut sock, seq, views, &mut shown, enc).await { return }
                             }
                         }
                     }
@@ -351,10 +413,10 @@ async fn session(d: Arc<Daemon>, mut sock: WebSocket, peer: Option<crate::lan::P
                 let Some((_, decoded)) = decode(&msg) else { continue };
                 match decoded {
                     Err(e) => {
-                        if !send(&mut sock, server(S::Error(Error { message: format!("not a message: {e}") })), enc).await { return }
+                        if !send(&d, &mut sock, server(S::Error(Error { message: format!("not a message: {e}") })), enc).await { return }
                     }
                     Ok(ClientMessage { body: Some(C::Ping(p)) }) => {
-                        if !send(&mut sock, server(S::Pong(Pong { nonce: p.nonce })), enc).await { return }
+                        if !send(&d, &mut sock, server(S::Pong(Pong { nonce: p.nonce })), enc).await { return }
                     }
                     Ok(ClientMessage { body: Some(C::Subscribe(s)) }) => {
                         let old = std::mem::replace(&mut sub, Sub {
@@ -381,7 +443,7 @@ async fn session(d: Arc<Daemon>, mut sock: WebSocket, peer: Option<crate::lan::P
                         if cmd_tx.send(c).is_err() { return }
                     }
                     Ok(_) => {
-                        if !send(&mut sock, server(S::Error(Error { message: "unexpected message".into() })), enc).await { return }
+                        if !send(&d, &mut sock, server(S::Error(Error { message: "unexpected message".into() })), enc).await { return }
                     }
                 }
             }
@@ -415,7 +477,11 @@ async fn session(d: Arc<Daemon>, mut sock: WebSocket, peer: Option<crate::lan::P
                     now_ms: u.now_ms,
                     log: u.log,
                 };
-                if !send(&mut sock, server(S::StepProgress(m)), enc).await { return }
+                // A slow reader gets no progress for a while: the next one is whole.
+                if tokio::time::Instant::now() < skip_progress_until { continue }
+                let began = tokio::time::Instant::now();
+                if !send(&d, &mut sock, server(S::StepProgress(m)), enc).await { return }
+                skip_progress_until = progress_pause(began, began.elapsed());
             }
             tick = bus.recv() => {
                 match tick {
@@ -428,6 +494,15 @@ async fn session(d: Arc<Daemon>, mut sock: WebSocket, peer: Option<crate::lan::P
                 rebuild!();
             }
         }
+    }
+}
+
+/// Until when progress pushes are dropped, after one that took `took` to send.
+fn progress_pause(began: tokio::time::Instant, took: Duration) -> tokio::time::Instant {
+    if took >= SLOW_SEND {
+        began + took * 2
+    } else {
+        began
     }
 }
 
@@ -540,6 +615,7 @@ fn spawn_first(d: &Arc<Daemon>, out: &tokio::sync::mpsc::UnboundedSender<Out>, s
 /// Send views, skipping any older than one of that kind already sent (two jobs can
 /// finish out of order).
 async fn send_views(
+    d: &Daemon,
     sock: &mut WebSocket,
     seq: u64,
     views: Vec<View>,
@@ -554,7 +630,14 @@ async fn send_views(
             continue;
         }
         shown.insert(kind, seq);
-        if !send(sock, server(S::View(ViewUpdate { seq, view: Some(v) })), e).await {
+        if !send(
+            d,
+            sock,
+            server(S::View(ViewUpdate { seq, view: Some(v) })),
+            e,
+        )
+        .await
+        {
             return false;
         }
     }
@@ -582,7 +665,14 @@ async fn push_views(d: &Arc<Daemon>, sock: &mut WebSocket, sub: &Sub, e: Encodin
         return Push::Busy;
     };
     for v in views {
-        if !send(sock, server(S::View(ViewUpdate { seq, view: Some(v) })), e).await {
+        if !send(
+            d,
+            sock,
+            server(S::View(ViewUpdate { seq, view: Some(v) })),
+            e,
+        )
+        .await
+        {
             return Push::Closed;
         }
     }
@@ -852,5 +942,33 @@ pub async fn run_command_as(
             .and_then(|v| v["error"].as_str().map(String::from))
             .unwrap_or_else(|| format!("HTTP {}", status.as_u16()));
         result(&id, false, u32::from(status.as_u16()), error, text)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn a_send_that_never_completes_times_out_in_virtual_time() {
+        let r = within(WS_SEND_TIMEOUT, std::future::pending()).await;
+        assert_eq!(r, Sent::TimedOut);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_prompt_send_and_a_failed_one_are_told_apart() {
+        assert_eq!(within(WS_SEND_TIMEOUT, async { Ok(()) }).await, Sent::Ok);
+        let failed = within(WS_SEND_TIMEOUT, async { Err(axum::Error::new("closed")) }).await;
+        assert_eq!(failed, Sent::Failed);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn progress_is_dropped_only_after_a_slow_send() {
+        let t = tokio::time::Instant::now();
+        assert_eq!(progress_pause(t, Duration::from_millis(1)), t);
+        let until = progress_pause(t, SLOW_SEND);
+        assert!(until > t);
+        tokio::time::advance(SLOW_SEND * 2).await;
+        assert!(tokio::time::Instant::now() >= until, "it drains again");
     }
 }

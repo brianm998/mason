@@ -892,11 +892,17 @@ fn demo_usage_has_accounts_in_several_states() {
     let codex = by("codex");
     assert!(!codex.has_snapshot && codex.windows.is_empty());
     assert!(codex.tokens_week.as_ref().unwrap().by_model.is_empty());
-    // The top bar: the most constrained window per account.
+    // The top bar: every main window per account, 5-hour then weekly.
+    let five = u
+        .top_bar
+        .iter()
+        .position(|l| l.starts_with("claude 5-hour 82%, resets 1 h"));
+    let week = u
+        .top_bar
+        .iter()
+        .position(|l| l.starts_with("claude Weekly"));
     assert!(
-        u.top_bar
-            .iter()
-            .any(|l| l.starts_with("claude 5-hour 82%, resets 1 h")),
+        matches!((five, week), (Some(f), Some(w)) if f < w),
         "{:?}",
         u.top_bar
     );

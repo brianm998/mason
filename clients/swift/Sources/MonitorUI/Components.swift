@@ -14,14 +14,14 @@ import SwiftUI
 /// typical time, or quiet past its usual gap, turns amber, never red: slow is not broken.
 struct ProgressCells: View {
     @Environment(\.theme) var theme
-    @ObservedObject var model: MonitorModel
+    let clock: LiveState
     let cells: [Mason_V1_ProgressCell]
     var slow: Bool = false
 
     var body: some View {
         HStack(spacing: theme.spacingSmall) {
             ForEach(Array(cells.enumerated()), id: \.offset) { _, c in
-                let quiet = c.state == .part && c.isStale(now: model.daemonNow())
+                let quiet = c.state == .part && c.isStale(now: clock.daemonNow())
                 Cell(state: c.state, fill: c.state == .part ? c.fill : .outline,
                      tint: (slow || quiet) && c.state == .part ? theme.slow : theme.accent)
                     .frame(width: theme.cell, height: theme.cell)
@@ -51,12 +51,13 @@ extension Array where Element == Mason_V1_ProgressCell {
 /// time is not announced every second.
 struct ProgressLine: View {
     @Environment(\.theme) var theme
-    @ObservedObject var model: MonitorModel
+    let clock: LiveState
     let cell: Mason_V1_ProgressCell
+    @ObservedObject private var ticker = SharedTick.shared
 
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 1)) { ctx in
-            let now = model.daemonNow(ctx.date)
+        Group {
+            let now = clock.daemonNow(ticker.now)
             let stale = cell.isStale(now: now)
             ViewThatFits(in: .horizontal) {
                 parts(now: now, stale: stale, message: true)
@@ -68,6 +69,8 @@ struct ProgressLine: View {
                 .filter { !$0.isEmpty }.joined(separator: ", "))
             .accessibilityIdentifier("progress-line:\(cell.step)")
         }
+        .onAppear { SharedTick.shared.join() }
+        .onDisappear { SharedTick.shared.leave() }
     }
 
     /// Last fallback, which cannot exceed the width: the count truncates, the time stays whole.
@@ -113,7 +116,7 @@ struct ProgressDetail: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: theme.spacingSmall) {
-            ProgressLine(model: model, cell: cell)
+            ProgressLine(clock: model.live, cell: cell)
             if !cell.message.isEmpty { Text(cell.message).font(theme.body()) }
             ForEach(Array(cell.subs.enumerated()), id: \.offset) { _, s in
                 let text = Format.countText(
@@ -238,6 +241,13 @@ struct StateIcon: View {
     }
 }
 
+/// The colour of a tile's number: the attention colour when the state wants the owner, gray
+/// when the count is zero, else the text colour. The dash shown while disconnected is plain text.
+func tileCountColor(_ theme: Theme, count: UInt32, wants: Bool, connected: Bool) -> Color {
+    if wants { return theme.attention }
+    return connected && count == 0 ? theme.muted : theme.text
+}
+
 /// A count tile: a large count over a one-line label, sized to its label so a
 /// narrow window squeezes other text and never a tile or label; tinted when
 /// the state wants the owner; a dash while disconnected.
@@ -249,7 +259,7 @@ struct CountTile: View {
     var body: some View {
         let wants = count.wantsYou && model.connected
         VStack(spacing: 0) {
-            Text(model.tileCount(count)).font(theme.count()).foregroundStyle(wants ? theme.attention : theme.text)
+            Text(model.tileCount(count)).font(theme.count()).foregroundStyle(tileCountColor(theme, count: count.count, wants: wants, connected: model.connected))
             Text(label).font(theme.small()).foregroundStyle(theme.muted).lineLimit(1).fixedSize()
         }
         .padding(.horizontal, theme.spacing)
@@ -839,5 +849,43 @@ struct SSHKeySheet: View {
         .padding(theme.spacingLarge)
         .frame(minWidth: 520)
         .accessibilityIdentifier("ssh-key-sheet")
+    }
+}
+
+/// One one-second tick for every progress line on the page, in place of a timer per row. It runs
+/// only while some line is on screen and the app is visible: hidden or minimised, it stops.
+@MainActor
+final class SharedTick: ObservableObject {
+    static let shared = SharedTick()
+    @Published private(set) var now = Date()
+    private var users = 0
+    private var visible = true
+    private var timer: Timer?
+
+    private init() {
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeOcclusionStateNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.visible = NSApp.occlusionState.contains(.visible)
+                self?.update()
+            }
+        }
+    }
+
+    func join() { users += 1; update() }
+    func leave() { users = max(0, users - 1); update() }
+
+    private func update() {
+        if users > 0 && visible {
+            guard timer == nil else { return }
+            now = Date()
+            timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated { self?.now = Date() }
+            }
+        } else {
+            timer?.invalidate()
+            timer = nil
+        }
     }
 }

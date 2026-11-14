@@ -51,6 +51,7 @@ pub const EXCLUSIVE: &str = "exclusive";
 /// stall_ms = 2000        # no further compile while the build disk is this slow (0: off)
 /// [order]    # who goes first when work waits for a resource
 /// priority_first = false # true: tracker priority before steps remaining
+/// max_wait_s = 1800      # a request waiting this long goes ahead of other pipeline work (0: never)
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResourceCfg {
@@ -77,7 +78,13 @@ pub struct ResourceCfg {
     /// Order waiting work by tracker priority before steps remaining. It applies to
     /// every project at once, since one queue serves them all.
     pub priority_first: bool,
+    /// Seconds after which a waiting request goes ahead of all other pipeline
+    /// work that is not a landing, oldest first (0: requests do not age).
+    pub max_wait_s: u64,
 }
+
+/// The default `order.max_wait_s`: half an hour.
+pub const DEFAULT_MAX_WAIT_S: u64 = 1800;
 
 /// The default `compile_cpu_max`: half the machine.
 pub const DEFAULT_COMPILE_CPU_MAX: u32 = 50;
@@ -110,6 +117,7 @@ impl Default for ResourceCfg {
             disk_floor_gb: crate::disk::DEFAULT_FLOOR_GB,
             disk_stall_ms: DEFAULT_DISK_STALL_MS,
             priority_first: false,
+            max_wait_s: DEFAULT_MAX_WAIT_S,
         }
     }
 }
@@ -126,6 +134,12 @@ pub fn parse_resource_cfg(text: &str) -> Result<ResourceCfg, String> {
                 c.priority_first = v.as_bool().ok_or_else(|| {
                     "resources.toml: order.priority_first must be true or false".to_string()
                 })?;
+                continue;
+            }
+            if key == "order" && name == "max_wait_s" {
+                c.max_wait_s = v.as_integer().filter(|n| *n >= 0).ok_or_else(|| {
+                    "resources.toml: order.max_wait_s must be a whole number".to_string()
+                })? as u64;
                 continue;
             }
             let n = v
@@ -211,6 +225,8 @@ struct State {
     ledger: Ledger,
     meta: HashMap<u64, Meta>,
     by_task: HashMap<TaskId, u64>,
+    /// The task a `mason run` lease was opened for, when it names one.
+    lease_tasks: HashMap<u64, TaskId>,
     /// Resources whose limit was set by the owner (config or live) and so are
     /// not changed by a definition that happens to declare the same name.
     fixed: HashSet<String>,
@@ -240,6 +256,23 @@ struct State {
     wait_class: HashMap<TaskId, String>,
     /// The build disk's responsiveness and the limit on it. `None`: no stall gate.
     stall: Option<(Arc<dyn StallSource>, u64)>,
+    /// When the last scheduling pass ran. A waiter skips its own pass while this is
+    /// younger than `PASS_EVERY` (see `acquire`).
+    last_pass: Option<Instant>,
+    /// Scheduling passes run since start, for tests and diagnosis.
+    passes: u64,
+}
+
+/// How often waiting jobs re-run the scheduling pass between them, at most. Releases
+/// and submits still pass at once; this only paces the waiters' periodic re-check.
+const PASS_EVERY: Duration = Duration::from_millis(100);
+
+/// Is a waiter's periodic pass due? Not while one ran less than `PASS_EVERY` ago:
+/// that pass already granted whatever could be granted, and on 2026-11-13 forty
+/// waiters each passing ten times a second held the broker lock almost all the time,
+/// so monitor views waited 20 s for it.
+fn pass_due(last: Option<Instant>) -> bool {
+    last.is_none_or(|t| t.elapsed() >= PASS_EVERY)
 }
 
 struct KernelWait {
@@ -322,6 +355,8 @@ impl Drop for Lease {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Standing {
     pub steps_remaining: u32,
+    /// Steps on the shortest start-to-landed path of the task's definition.
+    pub span: u32,
     pub priority: u8,
 }
 
@@ -354,6 +389,11 @@ fn lock<'a>(m: &'a Mutex<State>) -> MutexGuard<'a, State> {
     LOCKS_TAKEN.with(|c| c.set(c.get() + 1));
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
+
+/// How long a waiting request that never told us its pid may go without a poll
+/// before it is dropped. Generous: polls come every 150 ms, but they queue
+/// behind the broker's state lock, which a stalled disk can hold for a minute.
+pub const UNPOLLED_WAITER_REAP: Duration = Duration::from_secs(120);
 
 impl Broker {
     pub fn new(
@@ -406,6 +446,9 @@ impl Broker {
                 ledger.pace_compiles(u64::from(cfg.compile_settle_s) * 1000);
             }
         }
+        if cfg.max_wait_s > 0 {
+            ledger.set_max_wait(Some(cfg.max_wait_s.saturating_mul(1000)));
+        }
         let b = Broker {
             st: Mutex::new(State {
                 ledger,
@@ -420,6 +463,7 @@ impl Broker {
                 cpu,
                 cpu_busy: None,
                 priority_first: cfg.priority_first,
+                lease_tasks: HashMap::new(),
                 idle: HashMap::new(),
                 compile_idle_kill_s: cfg.compile_idle_kill_s,
                 notes: vec![],
@@ -433,6 +477,8 @@ impl Broker {
                 kernel_waits: HashMap::new(),
                 wait_class: HashMap::new(),
                 stall: None,
+                last_pass: None,
+                passes: 0,
             }),
             cv: Condvar::new(),
             locks,
@@ -611,6 +657,11 @@ impl Broker {
         })
     }
 
+    /// The overall CPU reading the compile gate uses, to read from outside the broker.
+    pub fn cpu_source(&self) -> Arc<dyn CpuSource> {
+        lock(&self.st).cpu.clone()
+    }
+
     /// How long the primary CPU reading has been missing (ms), once that is long
     /// enough to alert on. The gate is on its fallback meanwhile.
     pub fn cpu_missing_ms(&self) -> Option<(u64, &'static str)> {
@@ -648,11 +699,13 @@ impl Broker {
                 last_poll,
                 granted_at,
                 locked,
+                pid,
                 ..
             }) = st.meta.get_mut(&id)
             else {
                 continue;
             };
+            let mut silent_for = None;
             let dead = if st.ledger.holds(id) {
                 let alive = self.locks.alive(id);
                 if alive {
@@ -664,8 +717,38 @@ impl Broker {
                     *locked || granted_at.is_none_or(|g| g.elapsed() > Duration::from_secs(5))
                 }
             } else {
-                last_poll.elapsed() > Duration::from_secs(10) && opened.elapsed() > Duration::ZERO
+                let _ = opened;
+                if *pid > 0 {
+                    // The requester is known: it is gone only when its process
+                    // is. A late poll (a stalled disk holding the state lock)
+                    // costs it nothing.
+                    !mason_step_host::registry::pid_alive(*pid)
+                } else {
+                    let silent = last_poll.elapsed();
+                    if silent > UNPOLLED_WAITER_REAP {
+                        silent_for = Some(silent);
+                        true
+                    } else {
+                        false
+                    }
+                }
             };
+            if let Some(silent) = silent_for {
+                let label = st
+                    .ledger
+                    .snapshot()
+                    .waiting
+                    .iter()
+                    .find(|r| r.id == id)
+                    .map(|r| r.label.clone())
+                    .unwrap_or_default();
+                tracing::warn!(
+                    lease = id,
+                    label = %label,
+                    silent_s = silent.as_secs(),
+                    "dropping a waiting request that has not polled and has no pid"
+                );
+            }
             if dead {
                 st.ledger.release(id);
                 st.meta.remove(&id);
@@ -685,6 +768,8 @@ impl Broker {
             self.cv.notify_all();
         }
         self.publish_waits(st, now, free, floor, gate);
+        st.last_pass = Some(Instant::now());
+        st.passes += 1;
     }
 
     /// Store the wait explanation of every waiting task, for readers that must
@@ -831,9 +916,13 @@ impl Broker {
         let mut last_check = Instant::now();
         loop {
             // The check and the wait share one hold of the lock, so a release
-            // that happens in between cannot be missed (it needs the lock).
+            // that happens in between cannot be missed (it needs the lock). A pass
+            // that another waiter ran moments ago already granted what it could,
+            // and grants wake every waiter, so this one only checks its own lease.
             let mut st = lock(&self.st);
-            self.pass(&mut st);
+            if pass_due(st.last_pass) {
+                self.pass(&mut st);
+            }
             if st.ledger.holds(id) {
                 break;
             }
@@ -1078,6 +1167,7 @@ impl Broker {
         let mut st = lock(&self.st);
         st.ledger.release(id);
         st.meta.remove(&id);
+        st.lease_tasks.remove(&id);
         if let Some(t) = task {
             if st.by_task.get(&t) == Some(&id) {
                 st.by_task.remove(&t);
@@ -1106,6 +1196,24 @@ impl Broker {
                 .iter()
                 .any(|(k, n)| *n > 0 && k.starts_with("llm:"))
         })
+    }
+
+    /// The tasks holding an `llm:` lease right now, under one hold of the lock: the
+    /// home view used to call `llm_held_by` once per task, each queuing for the lock.
+    pub fn llm_holders(&self) -> HashSet<TaskId> {
+        let st = lock(&self.st);
+        st.by_task
+            .iter()
+            .filter(|(_, id)| {
+                st.ledger.holder(**id).is_some_and(|h| {
+                    h.needs
+                        .amounts
+                        .iter()
+                        .any(|(k, n)| *n > 0 && k.starts_with("llm:"))
+                })
+            })
+            .map(|(t, _)| *t)
+            .collect()
     }
 
     /// Units of a resource held right now.
@@ -1161,7 +1269,8 @@ impl Broker {
                     now,
                     st.rank_seq,
                     false,
-                ),
+                )
+                .with_span(s.span),
             ),
         })
     }
@@ -1219,6 +1328,42 @@ impl Broker {
         );
         self.pass(&mut st);
         id
+    }
+
+    /// Note which task a `mason run` lease was opened for, so that a change of
+    /// the task's priority reaches it.
+    pub fn lease_set_task(&self, id: u64, task: TaskId) {
+        let mut st = lock(&self.st);
+        if st.meta.contains_key(&id) {
+            st.lease_tasks.insert(id, task);
+        }
+    }
+
+    /// Give a task's waiting requests (its step's and those of its `mason run`
+    /// commands) a new tracker priority, in place: each keeps its arrival time,
+    /// progress and landing status. Returns how many were re-ranked.
+    pub fn set_task_priority(&self, task: TaskId, priority: u8) -> usize {
+        let mut st = lock(&self.st);
+        let mut ids: Vec<u64> = st.by_task.get(&task).copied().into_iter().collect();
+        ids.extend(
+            st.lease_tasks
+                .iter()
+                .filter(|(_, t)| **t == task)
+                .map(|(id, _)| *id),
+        );
+        let mut n = 0;
+        for id in ids {
+            if let Some(rank) = st.ledger.rank_of(id) {
+                st.ledger.rerank(id, rank.with_priority(priority));
+                n += 1;
+            }
+        }
+        if n > 0 {
+            self.pass(&mut st);
+            drop(st);
+            self.cv.notify_all();
+        }
+        n
     }
 
     /// Note which process asked for lease `id`.
@@ -1378,7 +1523,7 @@ impl Broker {
         let now = crate::daemon::now_ms();
         let gate = self.cpu_gate(&mut st);
         let waits = st.ledger.waits_gated(now, free, floor, gate);
-        let snap = st.ledger.snapshot();
+        let snap = st.ledger.snapshot_at(now);
         let task_of: HashMap<u64, u64> = st.by_task.iter().map(|(t, id)| (*id, t.0)).collect();
         let compiles = |n: &Needs| n.exclusive || n.amounts.contains_key(COMPILE);
         let limit = snap.capacity.get(COMPILE).map_or(0, |c| c.units);
@@ -1441,11 +1586,11 @@ impl Broker {
         }
         rules.push_str(if st.priority_first {
             ". A landing starts whatever the CPU reads. Line order: a person's command \
-             first, then a landing, then the most urgent task, then the one fewest steps \
+             first, then a landing, then a task that has waited past order.max_wait_s (oldest first), then the most urgent task, then the one fewest steps \
              from landing, then the oldest."
         } else {
             ". A landing starts whatever the CPU reads. Line order: a person's command \
-             first, then a landing, then the task fewest steps from landing, then \
+             first, then a landing, then a task that has waited past order.max_wait_s (oldest first), then the task fewest steps from landing, then \
              priority, then the oldest."
         });
         Compilation {
@@ -1476,7 +1621,13 @@ impl Broker {
         let now = crate::daemon::now_ms();
         let gate = self.cpu_gate(&mut st);
         let waits = st.ledger.waits_gated(now, free, floor, gate);
-        let snap = st.ledger.snapshot();
+        let snap = st.ledger.snapshot_at(now);
+        let task_of: HashMap<u64, u64> = st
+            .by_task
+            .iter()
+            .map(|(t, id)| (*id, t.0))
+            .chain(st.lease_tasks.iter().map(|(id, t)| (*id, t.0)))
+            .collect();
         let kind = |k: Kind| match k {
             Kind::Llm => "llm",
             Kind::Machine => "machine",
@@ -1538,6 +1689,9 @@ impl Broker {
                     "since_ms": r.since,
                     "interactive": r.rank.interactive(),
                     "steps_remaining": r.rank.steps(),
+                    "task": task_of.get(&r.id),
+                    "priority": (!r.rank.interactive()).then(|| r.rank.priority()),
+                    "aged": r.rank.is_aged() || waits.waits.get(&r.id).is_some_and(|w| w.aged_ms.is_some()),
                     "uses": r.needs.amounts,
                     "exclusive": r.needs.exclusive,
                     "explain": explain,
@@ -1712,6 +1866,99 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_waiters_pass_is_due_only_when_none_ran_lately() {
+        assert!(pass_due(None));
+        assert!(!pass_due(Some(Instant::now() + Duration::from_secs(60))));
+        if let Some(old) = Instant::now().checked_sub(PASS_EVERY * 2) {
+            assert!(pass_due(Some(old)));
+        }
+    }
+
+    #[test]
+    fn waiting_jobs_share_one_pass_and_all_get_their_turn() {
+        // On 2026-11-13 forty waiters each ran the whole pass ten times a second, so
+        // the broker lock was almost never free and the home view waited 20 s for it.
+        // Measured against the waiters' own liveness checks (each makes one per four
+        // or more wake-ups), not against the clock: the old shape ran at least four
+        // passes per check, the shared pass far fewer than one.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = ResourceCfg {
+            machine: BTreeMap::from([("compile".to_string(), 1)]),
+            ..Default::default()
+        };
+        let b = Broker::new(
+            dir.path().join("locks"),
+            dir.path().join("limits.kv"),
+            &cfg,
+            2,
+            crate::cpu::FakeCpu::new(0),
+            &[],
+        )
+        .unwrap();
+        let rank = |t: u64| Rank::new(false, 1, 2, t, t, false);
+        let first = b
+            .acquire(
+                TaskId(1),
+                "#1",
+                rank(1),
+                Needs::of(&[("compile", 1)]),
+                &|| true,
+                &mut |_| {},
+            )
+            .unwrap();
+        let checks = Arc::new(AtomicU64::new(0));
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let waiters: Vec<_> = (2..=31u64)
+            .map(|t| {
+                let (b, checks, tx) = (b.clone(), checks.clone(), tx.clone());
+                std::thread::spawn(move || {
+                    let alive = || {
+                        checks.fetch_add(1, Ordering::SeqCst);
+                        true
+                    };
+                    let lease = b.acquire(
+                        TaskId(t),
+                        &format!("#{t}"),
+                        rank(t),
+                        Needs::of(&[("compile", 1)]),
+                        &alive,
+                        &mut |_| {
+                            let _ = tx.send(());
+                        },
+                    );
+                    lease.is_ok()
+                })
+            })
+            .collect();
+        for _ in 0..30 {
+            rx.recv_timeout(Duration::from_secs(60))
+                .expect("every waiter says it waits");
+        }
+        let (p0, c0) = (lock(&b.st).passes, checks.load(Ordering::SeqCst));
+        // Bounded by attempts, not asserted on time.
+        for _ in 0..12_000 {
+            if checks.load(Ordering::SeqCst) - c0 >= 120 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let (p1, c1) = (lock(&b.st).passes, checks.load(Ordering::SeqCst));
+        assert!(c1 - c0 >= 120, "the waiters kept checking ({})", c1 - c0);
+        assert!(
+            p1 - p0 < c1 - c0,
+            "{} passes for {} liveness checks: each waiter is running its own pass",
+            p1 - p0,
+            c1 - c0
+        );
+        // Every waiter still gets the slot in turn once it is released.
+        drop(first);
+        for w in waiters {
+            assert!(w.join().unwrap(), "a waiter was never granted");
+        }
+    }
+
+    #[test]
     fn explain_task_reads_the_snapshot_without_the_broker_lock() {
         let dir = tempfile::tempdir().unwrap();
         let b = broker_with_waiting(dir.path(), 20);
@@ -1768,6 +2015,73 @@ mod tests {
         assert_eq!(parse_resource_cfg("").unwrap(), ResourceCfg::default());
     }
 
+    fn waiting_broker(dir: &std::path::Path) -> (Arc<Broker>, u64, u64) {
+        let cfg = ResourceCfg {
+            machine: BTreeMap::from([("compile".to_string(), 1)]),
+            ..Default::default()
+        };
+        let b = Broker::new(
+            dir.join("locks"),
+            dir.join("limits.kv"),
+            &cfg,
+            2,
+            crate::cpu::FakeCpu::new(0),
+            &[],
+        )
+        .unwrap();
+        let one = BTreeMap::from([("compile".to_string(), 1)]);
+        let first = b.lease_open("first", &one);
+        assert!(matches!(b.lease_poll(first), LeaseState::Granted { .. }));
+        let second = b.lease_open("second", &one);
+        assert!(matches!(b.lease_poll(second), LeaseState::Waiting { .. }));
+        (b, first, second)
+    }
+
+    fn age_poll(b: &Broker, id: u64, by: Duration) {
+        if let Some(Meta::External { last_poll, .. }) = lock(&b.st).meta.get_mut(&id) {
+            *last_poll = Instant::now().checked_sub(by).expect("uptime");
+        }
+    }
+
+    #[test]
+    fn a_waiter_with_a_live_pid_survives_a_long_gap_between_polls() {
+        let dir = tempfile::tempdir().unwrap();
+        let (b, _first, second) = waiting_broker(dir.path());
+        b.lease_set_pid(second, std::process::id());
+        age_poll(&b, second, Duration::from_secs(600));
+        assert!(matches!(b.lease_poll(second), LeaseState::Waiting { .. }));
+    }
+
+    #[test]
+    fn a_waiter_whose_pid_has_exited_is_reaped_at_the_next_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let (b, _first, second) = waiting_broker(dir.path());
+        let mut child = std::process::Command::new("/usr/bin/true").spawn().unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        b.lease_set_pid(second, pid);
+        assert!(matches!(b.lease_poll(second), LeaseState::Gone));
+    }
+
+    #[test]
+    fn a_waiter_without_a_pid_is_reaped_only_after_the_long_silence() {
+        let dir = tempfile::tempdir().unwrap();
+        let (b, _first, second) = waiting_broker(dir.path());
+        age_poll(&b, second, Duration::from_secs(60));
+        {
+            let mut st = lock(&b.st);
+            b.pass(&mut st);
+        }
+        assert!(lock(&b.st).meta.contains_key(&second), "60 s is not enough");
+        age_poll(&b, second, UNPOLLED_WAITER_REAP + Duration::from_secs(1));
+        {
+            let mut st = lock(&b.st);
+            b.pass(&mut st);
+        }
+        assert!(!lock(&b.st).meta.contains_key(&second));
+        assert!(matches!(b.lease_poll(second), LeaseState::Gone));
+    }
+
     #[test]
     fn a_slot_held_outside_the_broker_is_not_granted_again() {
         // A `mason run` that outlived a daemon restart still holds its slot, and
@@ -1816,8 +2130,19 @@ mod tests {
             "{shown}"
         );
         // The outside holder ends: the slot is free for the next waiter.
+        // The kernel frees a flock only when every fd copy is closed, and a child
+        // forked by a parallel test can hold one briefly. So the release is not
+        // synchronous with the drop: retry, bounded by attempts, not by time.
         drop(held);
-        assert!(matches!(b.lease_poll(second), LeaseState::Granted { .. }));
+        let mut granted = false;
+        for _ in 0..500 {
+            if matches!(b.lease_poll(second), LeaseState::Granted { .. }) {
+                granted = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(granted, "the slot is free once the outside holder ends");
     }
 
     #[test]

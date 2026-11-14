@@ -25,7 +25,7 @@
 //! mason run --needs compile[=N],... [--exclusive] [--label L] -- <cmd>...
 //! mason hold --needs R[,R...] [--exclusive] --pipeline NAME --label L [--pid P]
 //! mason targets list [--json]
-//! mason resources [--json] | mason resources limit <resource> <units>
+//! mason cpu [--json] | mason resources [--json] | mason resources limit <resource> <units>
 //! mason doctor
 //! mason init [--yes] [--tracker T] [--agent A] [--sessions N] [--workflow W] [--suites accept|skip] [--base B] [--landing L] [--alerts LIST|none] [--no-prove]
 //! mason adopt | mason remove [--yes]
@@ -33,6 +33,7 @@
 //! Global: `--data-dir D`, `--config-dir C` (or `MASON_DATA_DIR`, `MASON_CONFIG_DIR`).
 
 mod adopt;
+mod batch_ci;
 mod client;
 mod definition;
 mod doctor;
@@ -40,6 +41,7 @@ mod init;
 mod progress;
 mod remove;
 mod resources;
+mod service;
 mod testing;
 
 use client::{CallError, Daemon};
@@ -68,6 +70,7 @@ mason: command-line client for the MASON pipeline
   mason task reject <id> [--reason R] reject a proposed task or an approval step
   mason task explore-anyway <id>      explore after all, even if it skipped exploring
   mason task override <id> <key> <value>
+  mason task priority <id> urgent|high|normal|low   owner only; re-ranks its waiting requests
   mason task answer <id> <option number | text> [--card HASH] [--as NAME]
                                       answer the open question; the card's hash guards against a stale one
   mason task refresh <id>             ask the tracker now (what opening a task does)
@@ -93,6 +96,8 @@ mason: command-line client for the MASON pipeline
   mason test parse <parser> <file> [--min N]   read a results file the way a suite would, and judge it
   mason logs <id> [--follow]
   mason status [--json] [--watch]     with --watch, follow every running step's progress
+  mason service install [--print] [--force] | uninstall | status
+                                      run masond --managed under launchd (macOS) or a systemd user unit
   mason doctor                        checks the setup, and that `mason` on PATH is this program
   mason init [--yes] [--workflow solo-fast|reviewed-pr|batched-ci|device-mobile|human-gated]
              [--tracker local|github] [--agent claude|codex] [--agent-bin P] [--sessions N]
@@ -112,6 +117,7 @@ mason: command-line client for the MASON pipeline
                                       hold resources for a process's life: prints `granted`, then holds until
                                       stdin closes, --pid exits or it is signalled
   mason resources [--json]            limits, who holds what, and every wait explained
+  mason cpu [--json]                  where the machine's CPU goes, by task (share of all cores)
   mason targets list [--json]         simulators, emulators and phones, and who has each
   mason resources limit <resource> <units>   change a limit while things run (llm:claude, compile, ...)
   mason hook bash [--needs compile]   optional Claude Code PreToolUse hook: builds go through the queue
@@ -135,7 +141,7 @@ mason: command-line client for the MASON pipeline
   mason proposal publish <id> --preview | --confirm   send an improvement upstream, redacted
   mason proposal poll                 look at the upstream pull requests now
   mason improve \"<what to improve>\" [--project P]   ask MASON to change its own code
-  mason update [--channel stable|main|branch:X | --sha S] [--rollback] [--check] [--now]
+  mason update [--channel stable|main|release|branch:X | --sha S] [--rollback] [--check] [--now]
   mason update status | ack           the runtimes, a rollback alert, an update in progress
   mason config show [--project P]     every step's settings and where each came from
   mason config set <key> <value> --for 2h [--project P] [--owner O]
@@ -417,6 +423,13 @@ fn main() {
     if cmd == "adopt" {
         exit(adopt::run(std::mem::take(&mut a.rest), &config_dir));
     }
+    if cmd == "service" {
+        exit(service::run(
+            std::mem::take(&mut a.rest),
+            &data_dir,
+            &config_dir,
+        ));
+    }
     if cmd == "remove" {
         exit(remove::run(std::mem::take(&mut a.rest), &config_dir));
     }
@@ -544,6 +557,11 @@ fn main() {
             }
             Some(other) => die(&format!("unknown targets command {other:?}\n\n{HELP}")),
         }
+        return;
+    }
+    if cmd == "cpu" {
+        finish(&a);
+        resources::cpu(&d, json_out).unwrap_or_else(|e| die(&e));
         return;
     }
     if cmd == "resources" {
@@ -2077,6 +2095,12 @@ fn main() {
                     b["parked"].as_str().unwrap_or(""),
                     b["note"].as_str().unwrap_or("")
                 );
+                if b["ci"].is_object() {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |t| t.as_millis() as u64);
+                    println!("    {}", batch_ci::ci_line(&b["ci"], now));
+                }
             }
         }
         "debt" => match a.pos().as_deref() {
@@ -2983,6 +3007,22 @@ fn main() {
                     or_die(d.call("POST", &format!("/tasks/{id}/overrides"), Some(&json!({"key": key, "value": value, "owner": std::env::var("USER").unwrap_or_else(|_| "owner".into())}))));
                     println!("Task #{id}: {key} = {value}");
                 }
+                "priority" => {
+                    let id = task_id(&mut a);
+                    let level = a
+                        .pos()
+                        .unwrap_or_else(|| die("which priority? urgent, high, normal or low"));
+                    finish(&a);
+                    let r = or_die(d.call(
+                        "POST",
+                        &format!("/tasks/{id}/priority"),
+                        Some(&json!({"priority": level})),
+                    ));
+                    println!(
+                        "Task #{id}: priority {level} ({} waiting request(s) re-ranked)",
+                        r["reranked"]
+                    );
+                }
                 other => die(&format!("unknown task command {other:?}\n\n{HELP}")),
             }
         }
@@ -3048,6 +3088,12 @@ fn print_health(r: &serde_json::Value) {
     println!(
         "Stall watch: {} SIGCONT(s) sent to stopped processes, {} silent tree(s) killed",
         r["stall_watch"]["sigconts"], r["stall_watch"]["kills"]
+    );
+    println!(
+        "Monitor sessions closed for not reading: {}",
+        r["ws_sessions_closed_for_not_reading"]
+            .as_u64()
+            .unwrap_or(0)
     );
     let q = r["triage"]["queue"].as_array().map_or(0, Vec::len);
     println!(

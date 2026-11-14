@@ -4,8 +4,8 @@
 //!
 //! On Unix these call `nix` / `std::os::unix` exactly as the callers did
 //! before. On Windows there are no process groups or signals: the pieces that
-//! need a job object or `TerminateProcess` return `Unsupported` naming the
-//! process-tree port task, and `is_alive` is answered for real.
+//! need a job object or `TerminateProcess` use those: [`spawn_group`] puts the
+//! child in a named Job Object and [`signal_group`] terminates that job.
 
 use std::io;
 use std::process::{Command, ExitStatus};
@@ -44,7 +44,70 @@ pub fn group_leader(cmd: &mut Command) -> &mut Command {
     }
 }
 
-/// Signal every process in the group led by `pgid` (`killpg`).
+/// Make `cmd` start detached from our console and process group, so closing
+/// the terminal that started us, or our exit, does not reach it. Unix needs
+/// nothing here (the step host calls `setsid` itself). Windows: no console
+/// window of its own (children inherit the hidden one) and its own group.
+pub fn detached(cmd: &mut Command) -> &mut Command {
+    #[cfg(windows)]
+    {
+        /// `CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP`.
+        const FLAGS: u32 = 0x0800_0000 | 0x0000_0200;
+        std::os::windows::process::CommandExt::creation_flags(cmd, FLAGS)
+    }
+    #[cfg(unix)]
+    {
+        cmd
+    }
+}
+
+/// An opaque string that, with the pid, identifies one process even after the
+/// pid is reused: the creation time. Windows only; Unix callers use `ps`.
+pub fn start_time(pid: u32) -> Option<String> {
+    #[cfg(windows)]
+    {
+        windows_job::start_time(pid)
+    }
+    #[cfg(unix)]
+    {
+        let _ = pid;
+        None
+    }
+}
+
+/// The path of a process's executable. Windows only; Unix callers use `ps`.
+pub fn image_path(pid: u32) -> Option<String> {
+    #[cfg(windows)]
+    {
+        windows_job::image_path(pid)
+    }
+    #[cfg(unix)]
+    {
+        let _ = pid;
+        None
+    }
+}
+
+/// Start `cmd` as the leader of a new process tree that [`signal_group`] can
+/// stop as a whole. Unix: `process_group(0)` then spawn. Windows: spawn, then
+/// put the child in a Job Object named after its pid. The job does not kill on
+/// close, so a step host (and its tree) outlives the daemon that started it,
+/// as on Unix, and any process can find the job by pid to terminate it later.
+///
+/// On Windows a grandchild started in the instant between the spawn and the
+/// job assignment is not in the job. If the assignment fails the child still
+/// runs, and `signal_group` then terminates just that process.
+pub fn spawn_group(cmd: &mut Command) -> io::Result<std::process::Child> {
+    group_leader(cmd);
+    let child = cmd.spawn()?;
+    #[cfg(windows)]
+    windows_job::adopt(&child);
+    Ok(child)
+}
+
+/// Signal every process in the group led by `pgid` (`killpg`). On Windows the
+/// group is the job [`spawn_group`] made for `pgid`; there are no signals, so
+/// `Term` and `Kill` both terminate it, and `Cont` is `Unsupported`.
 pub fn signal_group(pgid: u32, sig: Signal) -> io::Result<()> {
     #[cfg(unix)]
     {
@@ -53,11 +116,13 @@ pub fn signal_group(pgid: u32, sig: Signal) -> io::Result<()> {
     }
     #[cfg(windows)]
     {
-        let _ = (pgid, sig);
-        Err(crate::unsupported(
-            "signalling a process group",
-            "process trees",
-        ))
+        if sig == Signal::Cont {
+            return Err(crate::unsupported(
+                "resuming a stopped process",
+                "process trees",
+            ));
+        }
+        windows_job::terminate_group(pgid)
     }
 }
 
@@ -70,8 +135,13 @@ pub fn signal_process(pid: u32, sig: Signal) -> io::Result<()> {
     }
     #[cfg(windows)]
     {
-        let _ = (pid, sig);
-        Err(crate::unsupported("signalling a process", "process trees"))
+        if sig == Signal::Cont {
+            return Err(crate::unsupported(
+                "resuming a stopped process",
+                "process trees",
+            ));
+        }
+        windows_job::terminate_process(pid)
     }
 }
 
@@ -85,6 +155,128 @@ pub fn is_alive(pid: u32) -> bool {
     #[cfg(windows)]
     {
         windows_alive(pid)
+    }
+}
+
+#[cfg(windows)]
+mod windows_job {
+    #![allow(unsafe_code)]
+    use std::io;
+    use std::os::windows::io::AsRawHandle;
+    use std::process::Child;
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, OpenJobObjectW, TerminateJobObject,
+    };
+    use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+
+    /// `JOB_OBJECT_TERMINATE`, which windows-sys does not define.
+    const JOB_OBJECT_TERMINATE: u32 = 0x0008;
+    /// The exit code of a process we terminated (like 128 + SIGKILL).
+    const KILLED: u32 = 137;
+
+    fn job_name(pid: u32) -> Vec<u16> {
+        format!("mason-job-{pid}\0").encode_utf16().collect()
+    }
+
+    /// Put `child` in the job named for its pid. Best effort: see `spawn_group`.
+    pub fn adopt(child: &Child) {
+        let name = job_name(child.id());
+        // SAFETY: `name` is NUL-terminated and outlives the calls; the handles
+        // are checked, and the job handle is closed. Closing it does not end
+        // the job while the child lives (a job lasts until its last handle is
+        // closed AND its processes have exited) and, with kill-on-close not
+        // set, does not kill the child.
+        unsafe {
+            let job = CreateJobObjectW(std::ptr::null(), name.as_ptr());
+            if job.is_null() {
+                return;
+            }
+            let _ = AssignProcessToJobObject(job, child.as_raw_handle() as HANDLE);
+            CloseHandle(job);
+        }
+    }
+
+    pub fn start_time(pid: u32) -> Option<String> {
+        use windows_sys::Win32::Foundation::FILETIME;
+        use windows_sys::Win32::System::Threading::{
+            GetProcessTimes, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        // SAFETY: plain values in; FILETIMEs are written by the call; the
+        // handle is checked and closed.
+        unsafe {
+            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if h.is_null() {
+                return None;
+            }
+            let z = FILETIME {
+                dwLowDateTime: 0,
+                dwHighDateTime: 0,
+            };
+            let (mut created, mut a, mut b, mut c) = (z, z, z, z);
+            let ok = GetProcessTimes(h, &mut created, &mut a, &mut b, &mut c);
+            CloseHandle(h);
+            (ok != 0).then(|| {
+                let t =
+                    (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime);
+                t.to_string()
+            })
+        }
+    }
+
+    pub fn image_path(pid: u32) -> Option<String> {
+        use windows_sys::Win32::System::Threading::{
+            QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        // SAFETY: the buffer and its length are ours; the handle is checked
+        // and closed.
+        unsafe {
+            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if h.is_null() {
+                return None;
+            }
+            let mut buf = [0u16; 1024];
+            let mut len = buf.len() as u32;
+            let ok = QueryFullProcessImageNameW(h, 0, buf.as_mut_ptr(), &mut len);
+            CloseHandle(h);
+            (ok != 0).then(|| String::from_utf16_lossy(&buf[..len as usize]))
+        }
+    }
+
+    pub fn terminate_group(pid: u32) -> io::Result<()> {
+        let name = job_name(pid);
+        // SAFETY: as in `adopt`.
+        unsafe {
+            let job = OpenJobObjectW(JOB_OBJECT_TERMINATE, 0, name.as_ptr());
+            if job.is_null() {
+                // No job: it was never made, or everything in it has exited.
+                return terminate_process(pid);
+            }
+            let ok = TerminateJobObject(job, KILLED);
+            let err = io::Error::last_os_error();
+            CloseHandle(job);
+            if ok == 0 {
+                return Err(err);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn terminate_process(pid: u32) -> io::Result<()> {
+        // SAFETY: plain values in; the handle is checked and closed.
+        unsafe {
+            let h = OpenProcess(PROCESS_TERMINATE, 0, pid);
+            if h.is_null() {
+                return Err(io::Error::last_os_error());
+            }
+            let ok = TerminateProcess(h, KILLED);
+            let err = io::Error::last_os_error();
+            CloseHandle(h);
+            if ok == 0 {
+                return Err(err);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -182,6 +374,157 @@ pub fn replace_process(cmd: &mut Command) -> io::Error {
     }
 }
 
+/// One row of the process table: enough to find a tree and to tell, later,
+/// whether a pid still names the same process.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProcEntry {
+    pub pid: u32,
+    pub ppid: u32,
+    pub pgid: u32,
+    /// The process start time as `ps` prints it (`lstart`). A reused pid has a
+    /// different one.
+    pub start: String,
+}
+
+/// Parse `ps -axo pid=,ppid=,pgid=,lstart=` output. `lstart` is five words
+/// (`Fri Nov 13 10:00:00 2026`); it is kept as one string. Unreadable lines are skipped.
+pub fn parse_table(text: &str) -> Vec<ProcEntry> {
+    text.lines()
+        .filter_map(|line| {
+            let mut w = line.split_whitespace();
+            let pid = w.next()?.parse().ok()?;
+            let ppid = w.next()?.parse().ok()?;
+            let pgid = w.next()?.parse().ok()?;
+            let start = w.collect::<Vec<_>>().join(" ");
+            (!start.is_empty()).then_some(ProcEntry {
+                pid,
+                ppid,
+                pgid,
+                start,
+            })
+        })
+        .collect()
+}
+
+/// The process table now. Empty if it cannot be read (and on Windows, which has
+/// no `ps`: stopping a step there keeps its current behaviour).
+pub fn read_table() -> Vec<ProcEntry> {
+    #[cfg(unix)]
+    {
+        Command::new("/bin/ps")
+            .args(["-axo", "pid=,ppid=,pgid=,lstart="])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| parse_table(&String::from_utf8_lossy(&o.stdout)))
+            .unwrap_or_default()
+    }
+    #[cfg(windows)]
+    {
+        Vec::new()
+    }
+}
+
+/// Everything under `root` by parent pid, plus the members of the process group
+/// of `root` and of every descendant that leads one. Walks to a fixed point, so
+/// a grandchild that moved to its own group is found by its parent, and that
+/// group's other members (reparented to init already) are found by the group.
+/// `root` itself is included when present. Pid 0, pid 1 and anything in
+/// `exclude` are never returned, and the walk does not pass through them.
+pub fn descendants(table: &[ProcEntry], root: u32, exclude: &[u32]) -> Vec<ProcEntry> {
+    use std::collections::HashSet;
+    let skip = |pid: u32| pid <= 1 || exclude.contains(&pid);
+    if skip(root) || !table.iter().any(|p| p.pid == root) {
+        return Vec::new();
+    }
+    let mut seen: HashSet<u32> = HashSet::from([root]);
+    let mut groups: HashSet<u32> = HashSet::new();
+    loop {
+        let before = seen.len();
+        for e in table {
+            if seen.contains(&e.pid) && e.pgid == e.pid {
+                groups.insert(e.pid);
+            }
+        }
+        for e in table {
+            if !skip(e.pid) && (seen.contains(&e.ppid) || groups.contains(&e.pgid)) {
+                seen.insert(e.pid);
+            }
+        }
+        if seen.len() == before {
+            break;
+        }
+    }
+    table
+        .iter()
+        .filter(|e| seen.contains(&e.pid))
+        .cloned()
+        .collect()
+}
+
+/// The entries of `snapshot` that are still the same process in `now`: same pid
+/// and same start time. A pid that was reused is not returned.
+pub fn still_running(snapshot: &[ProcEntry], now: &[ProcEntry]) -> Vec<ProcEntry> {
+    snapshot
+        .iter()
+        .filter(|s| now.iter().any(|n| n.pid == s.pid && n.start == s.start))
+        .cloned()
+        .collect()
+}
+
+/// A tree of processes noted before it was signalled, so it can still be found
+/// after its parent dies and the rest are reparented to init.
+#[derive(Clone, Debug, Default)]
+pub struct TreeSnapshot {
+    entries: Vec<ProcEntry>,
+    exclude: Vec<u32>,
+    root: u32,
+}
+
+impl TreeSnapshot {
+    /// Note `root` and all its descendants now. `exclude` pids (and this
+    /// process) are never part of it.
+    pub fn take(root: u32, exclude: &[u32]) -> Self {
+        let mut exclude = exclude.to_vec();
+        exclude.push(std::process::id());
+        let entries = descendants(&read_table(), root, &exclude);
+        TreeSnapshot {
+            entries,
+            exclude,
+            root,
+        }
+    }
+
+    /// Add whatever has appeared under the root since the last look.
+    pub fn refresh(&mut self) {
+        let table = read_table();
+        for e in descendants(&table, self.root, &self.exclude) {
+            if !self
+                .entries
+                .iter()
+                .any(|o| o.pid == e.pid && o.start == e.start)
+            {
+                self.entries.push(e);
+            }
+        }
+    }
+
+    /// Signal each member that is still the process it was (same start time),
+    /// and the process group of each member that leads one. Returns how many
+    /// were still running.
+    pub fn signal(&self, sig: Signal) -> usize {
+        let live = still_running(&self.entries, &read_table());
+        let own = own_group();
+        for e in &live {
+            if e.pgid == e.pid && e.pid != own && e.pid > 1 {
+                let _ = signal_group(e.pid, sig);
+            }
+            let _ = signal_process(e.pid, sig);
+        }
+        live.len()
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -200,6 +543,77 @@ mod tests {
         assert!(!is_alive(pid), "reaped, so gone");
     }
 
+    fn e(pid: u32, ppid: u32, pgid: u32) -> ProcEntry {
+        ProcEntry {
+            pid,
+            ppid,
+            pgid,
+            start: format!("start{pid}"),
+        }
+    }
+
+    #[test]
+    fn the_table_parses_with_multiword_start_times() {
+        let t = parse_table(
+            "  12   1  12 Fri Nov 13 10:00:00 2026\nbad line\n 13 12 12 Fri Nov 13 10:00:01 2026\n",
+        );
+        assert_eq!(t.len(), 2);
+        assert_eq!(t[1].ppid, 12);
+        assert_eq!(t[1].start, "Fri Nov 13 10:00:01 2026");
+    }
+
+    #[test]
+    fn descendants_include_a_grandchild_in_its_own_group_but_not_strangers() {
+        // 100 is the step command (group leader); 101 its child; 102 a grandchild
+        // that called setsid (own group) and 103 a member of that group already
+        // reparented to init; 200 is unrelated; 300 is in 100's group under init;
+        // 50 is the step host, excluded.
+        let table = vec![
+            e(1, 0, 1),
+            e(50, 1, 50),
+            e(100, 50, 100),
+            e(101, 100, 100),
+            e(102, 101, 102),
+            e(103, 1, 102),
+            e(200, 1, 200),
+            e(201, 200, 200),
+            e(300, 1, 100),
+        ];
+        let got: Vec<u32> = descendants(&table, 100, &[50])
+            .iter()
+            .map(|p| p.pid)
+            .collect();
+        assert_eq!(got, vec![100, 101, 102, 103, 300]);
+    }
+
+    #[test]
+    fn pid_one_and_excluded_pids_are_never_returned() {
+        let table = vec![
+            e(1, 0, 1),
+            e(100, 1, 100),
+            e(101, 100, 100),
+            e(102, 101, 100),
+        ];
+        let got: Vec<u32> = descendants(&table, 100, &[101])
+            .iter()
+            .map(|p| p.pid)
+            .collect();
+        assert!(!got.contains(&1) && !got.contains(&101));
+        assert_eq!(got, vec![100, 102]);
+        assert!(descendants(&table, 1, &[]).is_empty());
+        assert!(descendants(&table, 999, &[]).is_empty());
+    }
+
+    #[test]
+    fn a_reused_pid_with_a_different_start_is_not_still_running() {
+        let snap = vec![e(100, 1, 100), e(101, 100, 100)];
+        let mut now = vec![e(100, 1, 100), e(101, 1, 101)];
+        now[1].start = "later".into();
+        let live = still_running(&snap, &now);
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].pid, 100);
+    }
+
     #[test]
     fn replacing_a_missing_program_returns_the_error() {
         let e = replace_process(&mut Command::new("/no/such/program/anywhere"));
@@ -212,8 +626,21 @@ mod windows_tests {
     use super::*;
 
     #[test]
-    fn groups_are_unsupported_and_the_error_names_the_task() {
-        let e = signal_group(1, Signal::Kill).unwrap_err();
+    fn killing_the_group_kills_the_tree() {
+        // cmd starts a ping child; killing the job ends the whole tree.
+        let mut c = Command::new("cmd");
+        c.args(["/C", "ping -n 60 127.0.0.1 >NUL"]);
+        let mut child = spawn_group(&mut c).unwrap();
+        let pid = child.id();
+        assert!(is_alive(pid));
+        signal_group(pid, Signal::Kill).unwrap();
+        child.wait().unwrap();
+        assert!(!is_alive(pid));
+    }
+
+    #[test]
+    fn cont_is_unsupported_and_names_the_task() {
+        let e = signal_group(1, Signal::Cont).unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::Unsupported);
         assert!(e.to_string().contains("process trees"));
         assert!(is_alive(std::process::id()));

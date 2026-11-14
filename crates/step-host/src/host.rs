@@ -90,7 +90,6 @@ pub fn run(cfg: HostConfig) -> io::Result<()> {
         .stdin(stdin)
         .stdout(writer.try_clone()?)
         .stderr(writer);
-    process::group_leader(&mut cmd);
     if let Some(c) = &cfg.cwd {
         cmd.current_dir(c);
     }
@@ -98,7 +97,7 @@ pub fn run(cfg: HostConfig) -> io::Result<()> {
         cmd.env_clear();
     }
     cmd.envs(cfg.env.iter().map(|(k, v)| (k, v)));
-    let spawned = cmd.spawn();
+    let spawned = process::spawn_group(&mut cmd);
     drop(cmd); // closes our copies of the pipe's write end
 
     let mut initial_len = 0u64;
@@ -267,13 +266,22 @@ fn stop_child(s: &Shared, grace_ms: u32) {
         return;
     }
     let pg = s.child_pid;
+    // Note the tree before signalling: once the child dies its descendants are
+    // reparented to init and can no longer be found by parent pid, and one that
+    // moved to its own process group is not reached by the group signal.
+    let mut tree = process::TreeSnapshot::take(pg, &[]);
     let _ = process::signal_group(pg, Signal::Term);
+    tree.signal(Signal::Term);
     let deadline = Instant::now() + Duration::from_millis(u64::from(grace_ms));
     let mut g = lock(s);
     while g.exit.is_none() {
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
+            drop(g);
+            // The child is still there, so anything started meanwhile is findable.
+            tree.refresh();
             let _ = process::signal_group(pg, Signal::Kill);
+            tree.signal(Signal::Kill);
             return;
         }
         g =
@@ -281,8 +289,10 @@ fn stop_child(s: &Shared, grace_ms: u32) {
                 .unwrap_or_else(|e| e.into_inner())
                 .0;
     }
-    // The child is gone; clean up anything it left in its group.
+    drop(g);
+    // The child is gone; clean up anything it left in its group or that escaped it.
     let _ = process::signal_group(pg, Signal::Kill);
+    tree.signal(Signal::Kill);
 }
 
 fn serve(mut stream: UnixStream, s: &Arc<Shared>) -> Result<(), ProtoError> {

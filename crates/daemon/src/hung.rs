@@ -156,7 +156,16 @@ pub fn check(d: &Daemon, tracker: &mut Tracker, now: u64) {
         d.broker.set_idle(HashMap::new());
         return;
     }
-    let procs = read_ps();
+    // The sampling thread's latest table (one `ps` per period); our own only without it.
+    let shared = crate::cputasks::recent_table();
+    let own;
+    let procs: &[Proc] = match &shared {
+        Some(t) => &t.procs,
+        None => {
+            own = read_ps();
+            &own
+        }
+    };
     if procs.is_empty() {
         return;
     }
@@ -186,7 +195,7 @@ pub fn check(d: &Daemon, tracker: &mut Tracker, now: u64) {
         };
         let cpu: Option<u64> = roots
             .iter()
-            .filter_map(|(_, pid)| tree_cpu(&procs, *pid))
+            .filter_map(|(_, pid)| tree_cpu(procs, *pid))
             .reduce(|a, b| a + b);
         let Some(cpu) = cpu else { continue };
         let ids: Vec<&str> = roots.iter().map(|(i, _)| i.as_str()).collect();

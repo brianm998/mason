@@ -5,8 +5,8 @@
 //! A test step that runs a plain `command` (not suites) has no baseline. When a test failed
 //! on every run, including the targeted rerun, the same tests are run at the merge base,
 //! once per (base commit, command, test set), in a throwaway worktree. A failure is excused
-//! only when **every** test that failed on every run also fails there: those are not this
-//! change's. One task, "<test> fails on <base>", is filed for the base; a test already named
+//! per test (s281): each test that failed on every run and also fails there is not this
+//! change's; the others are. One task, "<test> fails on <base>", is filed for the base; a test already named
 //! by an open task or an open tracker issue files nothing, and the excuse points at it.
 //!
 //! The base results share the `baselines` table with the suites path (keyed by a hash of
@@ -21,8 +21,8 @@ use std::time::{Duration, Instant};
 
 /// One base run at a time, and one filing at a time: a second task with the same base
 /// waits, then finds the first one's result (or the first one's fix task).
-static BASE_RUN: Mutex<()> = Mutex::new(());
-static FILING: Mutex<()> = Mutex::new(());
+pub(crate) static BASE_RUN: Mutex<()> = Mutex::new(());
+pub(crate) static FILING: Mutex<()> = Mutex::new(());
 
 /// The name a command's base result is kept under in `baselines.suite`.
 pub fn key_of(cmd: &str) -> String {
@@ -76,12 +76,12 @@ pub fn is_fix_title(title: &str, test: &str) -> bool {
     title.contains(test) && title.contains(" fails on ")
 }
 
-fn short(sha: &str) -> &str {
+pub(crate) fn short(sha: &str) -> &str {
     &sha[..sha.len().min(10)]
 }
 
 /// The open task or tracker issue that already covers `test`, if any.
-fn existing_fix(c: &Ctx, test: &str) -> Option<Fix> {
+pub(crate) fn existing_fix(c: &Ctx, test: &str) -> Option<Fix> {
     if let Ok(w) = c.d.world() {
         let mut open: Vec<&Task> = w
             .tasks
@@ -103,7 +103,7 @@ fn existing_fix(c: &Ctx, test: &str) -> Option<Fix> {
 }
 
 /// The fix for `test` failing at `base`: the one already open, or a new urgent task.
-fn fix_for(c: &Ctx, test: &str, base: &str, cmd: &str, log_tail: &str) -> Option<Fix> {
+pub(crate) fn fix_for(c: &Ctx, test: &str, base: &str, cmd: &str, log_tail: &str) -> Option<Fix> {
     let _g = FILING.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(f) = existing_fix(c, test) {
         return Some(f);
@@ -136,12 +136,15 @@ fn fix_for(c: &Ctx, test: &str, base: &str, cmd: &str, log_tail: &str) -> Option
 
 /// Run `cmd` (after `build`, if any) in a throwaway worktree at `base`; the failing names.
 /// `None` if the worktree, the run or its time limit did not give a result.
-fn run_at_base(
+/// The third part says whether the output shows every test of `expect` ran (true when
+/// `expect` is empty): a run that ran none of them proves nothing about them.
+pub(crate) fn run_at_base(
     c: &Ctx,
     base: &str,
     build: Option<&str>,
     cmd: &str,
-) -> Option<(Vec<String>, String)> {
+    expect: &[String],
+) -> Option<(Vec<String>, String, bool)> {
     let repo = &c.project.path;
     let wt = c.task_dir().join(format!("base-r{}", c.run.0));
     let lock = c.d.repo_lock(c.project_id);
@@ -170,7 +173,6 @@ fn run_at_base(
             .stdin(Stdio::null())
             .stdout(out)
             .stderr(err);
-        mason_platform::process::group_leader(&mut command);
         for (k, v) in step_env_pairs(c) {
             let v = if k == "MASON_WORKTREE" {
                 wt.to_string_lossy().into_owned()
@@ -179,7 +181,7 @@ fn run_at_base(
             };
             command.env(k, v);
         }
-        let mut child = command.spawn().ok()?;
+        let mut child = mason_platform::process::spawn_group(&mut command).ok()?;
         let limit = c
             .res
             .budget
@@ -207,6 +209,7 @@ fn run_at_base(
         Some((
             crate::rerun::failing_names(&text),
             crate::jobs::tail(&text, 30),
+            crate::rerun::ran_them(&text, expect),
         ))
     })();
     {
@@ -217,7 +220,7 @@ fn run_at_base(
 }
 
 /// The merge base of the change and the project's base.
-fn merge_base(c: &Ctx) -> Option<String> {
+pub(crate) fn merge_base(c: &Ctx) -> Option<String> {
     let head = git::run(&c.wt, &["rev-parse", "HEAD"])
         .ok()?
         .trim()
@@ -228,17 +231,25 @@ fn merge_base(c: &Ctx) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// What the base check excused: the tests that also fail at the merge base (s281: per test,
+/// so one new failure beside a known one no longer sends both back), and a line for each.
+pub struct Excused {
+    pub tests: Vec<String>,
+    pub lines: Vec<String>,
+}
+
 /// The red step's tests (`persistent`: failed on every run) are checked at the merge base.
 /// `base_cmd` is the command to run there: the rerun filter's command with only those
-/// tests, or the whole command. `Some(note)` if every one also fails there: the step is
-/// excused, the note says so (and is also written next to the step's log for `task show`).
+/// tests, or the whole command. Each one that also fails there is excused (and its fix filed
+/// or found); the rest are the change's. `None` if there is no base result or nothing is
+/// excused. The lines are also written next to the step's log for `task show`.
 pub fn excuse(
     c: &Ctx,
     suffix: &str,
     build: Option<&str>,
     base_cmd: &str,
     persistent: &[String],
-) -> Option<String> {
+) -> Option<Excused> {
     if persistent.is_empty() {
         return None;
     }
@@ -251,18 +262,19 @@ pub fn excuse(
     let failing = {
         let _g = BASE_RUN.lock().unwrap_or_else(|e| e.into_inner());
         cached_failures(&c.d.store, &base, &key, &mut || {
-            let (names, t) = run_at_base(c, &base, build, base_cmd)?;
+            let (names, t, _) = run_at_base(c, &base, build, base_cmd, &[])?;
             tail = t;
             Some(names)
         })?
     };
-    if !all_excused(persistent, &failing) {
+    let tests = at_base(persistent, &failing);
+    if tests.is_empty() {
         return None;
     }
     let mut lines = vec![];
-    for t in persistent {
+    for t in &tests {
         let fix = fix_for(c, t, &base, base_cmd, &tail);
-        let line = format!(
+        lines.push(format!(
             "{t}: also fails at the merge base {}; {}",
             short(&base),
             fix.as_ref()
@@ -270,19 +282,22 @@ pub fn excuse(
                     "fix: {}",
                     f.text()
                 ))
-        );
-        lines.push(line);
+        ));
     }
-    let note = format!(
-        "`{}` was red, but every test that failed on every run also fails at the merge base, so none is this change's (excused):\n{}",
-        c.step.name,
-        lines.join("\n")
-    );
     let _ = std::fs::write(
         c.task_dir().join(format!("{suffix}-r{}.excused", c.run.0)),
         lines.join("\n"),
     );
-    Some(note)
+    Some(Excused { tests, lines })
+}
+
+/// The tests of `persistent` that also fail at the base.
+pub fn at_base(persistent: &[String], at_base: &[String]) -> Vec<String> {
+    persistent
+        .iter()
+        .filter(|t| at_base.contains(t))
+        .cloned()
+        .collect()
 }
 
 /// The excuse lines recorded for a task, for `mason task show`.
@@ -313,6 +328,13 @@ mod tests {
         assert!(!all_excused(&s(&["a", "b"]), &s(&["a"])));
         assert!(!all_excused(&s(&["a"]), &[]));
         assert!(!all_excused(&[], &s(&["a"])));
+    }
+
+    #[test]
+    fn each_test_is_excused_on_its_own() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert_eq!(at_base(&s(&["a", "b"]), &s(&["a", "z"])), s(&["a"]));
+        assert!(at_base(&s(&["b"]), &s(&["a"])).is_empty());
     }
 
     #[test]
