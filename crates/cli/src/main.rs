@@ -1109,6 +1109,19 @@ fn main() {
                             }
                         }
                     }
+                    // Settings of the project file itself (timeouts, idle rules, the stall
+                    // watcher): not part of the definition, so not in the steps above.
+                    let file = &r["project_file"];
+                    if let Some(list) = file["settings"].as_array() {
+                        println!("  project file ({})", file["path"].as_str().unwrap_or("?"));
+                        for s in list {
+                            println!(
+                                "      {:<19} {}",
+                                s["key"].as_str().unwrap_or("?"),
+                                s["value"].as_str().unwrap_or("?")
+                            );
+                        }
+                    }
                 }
                 "set" => {
                     let secs = a
