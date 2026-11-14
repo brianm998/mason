@@ -2123,6 +2123,7 @@ pub fn ledger_run(d: &Arc<Daemon>, task: TaskId) -> Result<String, String> {
         id_prefix: format!("ledger{}", task.0),
         sink: None,
         env: vec![],
+        trust_base: true,
     };
     let tree = Tree {
         tree: git::run(&wt, &["rev-parse", "HEAD^{tree}"])
@@ -2168,7 +2169,7 @@ pub fn ledger_run(d: &Arc<Daemon>, task: TaskId) -> Result<String, String> {
                 continue;
             }
             SuiteRun::Done { notes, .. } => notes.join("; "),
-            SuiteRun::Product { feedback } => feedback,
+            SuiteRun::Product { feedback, .. } => feedback,
             SuiteRun::Gone => {
                 report.push(format!("{name}: stopped"));
                 continue;
