@@ -15,6 +15,7 @@ pub mod fs;
 pub mod host;
 pub mod net;
 pub mod process;
+pub mod shell;
 
 use std::io;
 
