@@ -4,8 +4,8 @@
 
 //! The stall watcher (s152): a test run whose process tree goes silent has its stopped
 //! processes continued, and one that stays silent is killed and judged red as stalled,
-//! unless something in it waits on a lease. Thresholds are 1 s and the watcher reads every
-//! 100 ms; every wait is on the run's own state, never on a fixed sleep.
+//! unless something in it waits on a lease. Thresholds are 1 s (5 s for the lease test) and
+//! the watcher reads every 100 ms; every wait is on the run's own state, never on a fixed sleep.
 
 mod support;
 use mason_core::*;
@@ -96,7 +96,10 @@ fn a_tree_waiting_on_a_lease_is_never_killed_while_it_waits() {
             g = go_file.display(),
             s = sleep_file.display()
         ),
-        "kill_after_s = 1",
+        // Five seconds, not one: until `go` the script prints every 0.2 s, but on a loaded
+        // machine its output has reached the step log more than a second late, and the
+        // tree was killed before the waiter was in place (2026-11-14, load 30).
+        "kill_after_s = 5",
     );
     // Someone else holds the only `widget`; our request waits behind it.
     let one = [("widget".to_string(), 1)].into();
