@@ -811,6 +811,7 @@ class MonitorCoreTest {
         waitFor("a second socket") { r.sockets.size == 2 }
         assertEquals(9000, r.sockets[1].port)
         waitFor("not connected") { !r.model.connected }
+        waitFor("reconnecting") { r.model.reconnecting }
         assertTrue(r.model.reconnecting, "shown as reconnecting, not an error")
         r.sockets[1].events.onOpen()
         assertTrue(Regex("[lL]ast_?[sS]eq\"?:\"?7\\b").containsMatchIn(r.sockets[1].sent[0]), r.sockets[1].sent[0])
@@ -845,6 +846,10 @@ class MonitorCoreTest {
         assertTrue(r.sockets[0].sent.any { it.contains("ping") }, "it asked before giving up")
         waitFor("a second socket") { r.sockets.size == 2 }
         assertTrue(r.sockets[0].closed)
+<<<<<<< HEAD
+=======
+        assertTrue(r.sockets[0].sent.any { it.contains("ping") }, "it asked before giving up")
+>>>>>>> origin/develop
         waitFor("reconnecting") { r.model.reconnecting }
         assertTrue(r.model.reconnecting)
         assertNull(r.model.lastResult, "no error is shown")
@@ -1113,5 +1118,11 @@ class MonitorCoreTest {
             ),
         )
         assertEquals(listOf(12L), m.blockerCandidates(heldRow()).map { it.id })
+    }
+
+    @Test fun aWorkflowLineNamesEachStateThatHasJobsAndFailedIsKept() {
+        val j = JobCounts(queued = 1, running = 1, succeeded = 2, failed = 1, running_names = listOf("build"))
+        assertEquals("macOS: 5 jobs · 1 queued · 1 running (build) · 2 passed · 1 failed", Format.jobsText("macOS", j))
+        assertEquals("CI: 1 job · 1 passed", Format.jobsText("CI", JobCounts(succeeded = 1)))
     }
 }

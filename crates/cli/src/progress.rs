@@ -74,6 +74,26 @@ pub fn lines(r: &Value) -> String {
             ));
         }
         for s in p["subs"].as_array().into_iter().flatten() {
+            if let Some(j) = s["jobs"].as_object() {
+                let k = |n: &str| j.get(n).and_then(|v| v.as_u64()).unwrap_or(0);
+                let names: Vec<String> = j
+                    .get("running_names")
+                    .and_then(|v| v.as_array())
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect();
+                out.push(format!(
+                    "    {}",
+                    mason_core::progress_text::jobs_text(
+                        s["name"].as_str().unwrap_or("?"),
+                        k("queued") + k("running") + k("succeeded") + k("failed"),
+                        (k("queued"), k("running"), k("succeeded"), k("failed")),
+                        &names,
+                    )
+                ));
+                continue;
+            }
             out.push(format!(
                 "    {}: {}",
                 s["name"].as_str().unwrap_or("?"),
@@ -122,7 +142,11 @@ pub fn record_of(c: &ProgressCell) -> Value {
         "started_ms": c.started_ms, "updated_at_ms": c.updated_at_ms,
         "subs": c.subs.iter().map(|s| serde_json::json!({
             "name": s.name, "unit": s.unit,
-            "done": fig(s.done, s.done_source), "total": fig(s.total, s.total_source)})).collect::<Vec<_>>(),
+            "done": fig(s.done, s.done_source), "total": fig(s.total, s.total_source),
+            "jobs": s.jobs.as_ref().map(|j| serde_json::json!({
+                "queued": j.queued, "running": j.running,
+                "succeeded": j.succeeded, "failed": j.failed,
+                "running_names": j.running_names}))})).collect::<Vec<_>>(),
         "todo": c.todo.iter().map(|t| serde_json::json!({"text": t.text, "status": t.status})).collect::<Vec<_>>(),
     })
 }

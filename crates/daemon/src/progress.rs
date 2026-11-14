@@ -17,7 +17,7 @@ use mason_core::progress::{
 };
 use mason_core::*;
 use mason_protocol::{
-    CellState, ProgressCell, ProgressSource, ProgressSub, TodoItem as PbTodo, TokenLine,
+    CellState, JobCounts, ProgressCell, ProgressSource, ProgressSub, TodoItem as PbTodo, TokenLine,
 };
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
@@ -245,6 +245,13 @@ pub fn cell_of(p: &Progress, state: CellState, label: &str) -> ProgressCell {
                 total: n(s.total.value),
                 done_source: source(s.done.source) as i32,
                 total_source: source(s.total.source) as i32,
+                jobs: s.jobs.as_ref().map(|j| JobCounts {
+                    queued: n(j.queued),
+                    running: n(j.running),
+                    succeeded: n(j.succeeded),
+                    failed: n(j.failed),
+                    running_names: j.running_names.clone(),
+                }),
             })
             .collect(),
         todo: p

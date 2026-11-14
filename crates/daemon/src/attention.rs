@@ -330,6 +330,54 @@ pub fn host_loss_alerts(rows: &[mason_store::HostLossRow]) -> Vec<(String, Strin
 /// How old a measurement of the directories may be before it is made again.
 const DISK_SIZES_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(300);
 
+/// A known-red entry older than a week whose fix task is not moving (none, gone, failed,
+/// canceled, waiting, or landed with the test still red). One alert per entry.
+pub const LEDGER_STALE_MS: u64 = 7 * 86_400_000;
+
+fn ledger_alerts(d: &Daemon, w: &mason_engine::World, now: u64) -> Vec<(String, String, String)> {
+    let mut out = vec![];
+    for r in d.store.ledger().unwrap_or_default() {
+        if r.source == "owner" || now.saturating_sub(r.at) < LEDGER_STALE_MS {
+            continue;
+        }
+        let state = r
+            .fix_task
+            .and_then(|n| w.tasks.get(&TaskId(n)))
+            .map(|t| t.state);
+        let moving = matches!(
+            state,
+            Some(
+                State::Exploring
+                    | State::Developing
+                    | State::Testing
+                    | State::Review
+                    | State::Landing
+            )
+        );
+        if moving {
+            continue;
+        }
+        let fix = match r.fix_task {
+            Some(n) => format!(
+                "fix task #{n} is {}",
+                state.map_or("gone".to_string(), |s| format!("{s:?}").to_lowercase())
+            ),
+            None => "no fix task".to_string(),
+        };
+        out.push((
+            format!("known-red:{}:{}", r.suite, r.test),
+            "known_red".into(),
+            format!(
+                "{} :: {} has been red at the base for {} days and {fix}",
+                r.suite,
+                r.test,
+                now.saturating_sub(r.at) / 86_400_000
+            ),
+        ));
+    }
+    out
+}
+
 /// Free disk is below the floor, or a store write was just refused for want of it. Names the
 /// free space, the floor and what MASON knows takes room. Exists only while it is true.
 fn disk_alert(d: &Daemon, w: &mason_engine::World) -> Option<(String, String, String)> {
@@ -694,6 +742,7 @@ pub fn alerts_now(d: &Daemon) -> Vec<(String, String, String)> {
         out.push(("numbers".into(), "numbers".into(), text));
     }
     out.extend(disk_alert(d, &w));
+    out.extend(ledger_alerts(d, &w, now_ms()));
     out.extend(bug_alerts(
         &d.store
             .bugs_since(now_ms().saturating_sub(BUG_WINDOW_MS))

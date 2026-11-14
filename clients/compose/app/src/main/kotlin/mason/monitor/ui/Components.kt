@@ -155,6 +155,9 @@ fun ProgressDetail(model: MonitorModel, cell: ProgressCell) {
         if (cell.message.isNotEmpty()) Text(cell.message, style = theme.body())
         cell.subs.forEach { s ->
             Text("${s.name}: " + Format.countText(s.unit, s.done.toLong(), s.done_source, s.total.toLong(), s.total_source, 0), style = theme.body())
+            s.jobs?.let { j ->
+                Text(Format.jobsText(s.name, j), style = theme.body(color = if (j.failed > 0) theme.attention else theme.text))
+            }
         }
         cell.todo.forEach { t ->
             val mark = when (t.status) { "done" -> "✓"; "doing" -> "▶"; else -> "○" }
@@ -214,6 +217,13 @@ fun Cell(state: CellState, tint: Color, border: Color, modifier: Modifier = Modi
 }
 
 /**
+ * The colour of a tile's number: the attention colour when the state wants the owner, gray when
+ * the count is zero, else the text colour. The dash shown while disconnected is plain text.
+ */
+fun tileCountColor(theme: Theme, count: Int, wants: Boolean, connected: Boolean): Color =
+    if (wants) theme.attention else if (connected && count == 0) theme.muted else theme.text
+
+/**
  * A count tile: a large count over a one-line label, sized to its label so a narrow window
  * squeezes other text and never a tile or label; tinted when the state wants the owner;
  * a dash while disconnected.
@@ -259,7 +269,7 @@ fun CountTile(model: MonitorModel, count: StateCount) {
                 .semantics { contentDescription = "${model.tileCount(count)} $label" }
                 .padding(horizontal = theme.spacing),
         ) {
-            Text(model.tileCount(count), style = theme.count(if (wants) theme.attention else theme.text), maxLines = 1)
+            Text(model.tileCount(count), style = theme.count(tileCountColor(theme, count.count, wants, model.connected)), maxLines = 1)
             Text(label, style = theme.small(), maxLines = 1, softWrap = false)
         }
         // An overlay, not part of the layout: Part 17 sizes a tile by its label and text size

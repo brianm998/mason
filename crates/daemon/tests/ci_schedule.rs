@@ -30,6 +30,12 @@ fn job(id: u64, name: &str, c: &str) -> ActionsJob {
         id,
         name: name.into(),
         conclusion: (!c.is_empty()).then(|| c.to_string()),
+        status: if c.is_empty() {
+            "in_progress"
+        } else {
+            "completed"
+        }
+        .into(),
     }
 }
 

@@ -44,6 +44,7 @@ impl Base {
                     id: id * 10 + i as u64,
                     name: (*n).into(),
                     conclusion: Some((*c).into()),
+                    status: "completed".into(),
                 })
                 .collect(),
         );

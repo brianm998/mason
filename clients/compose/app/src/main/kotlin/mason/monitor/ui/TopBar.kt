@@ -12,6 +12,8 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -20,9 +22,9 @@ import androidx.compose.ui.unit.dp
 import mason.monitor.MonitorModel
 
 /**
- * The top bar, on every page: back, forward, home; the attention indicator (only while
- * something needs a look); the project filter; LLM usage; one count tile per state; add
- * task; mute.
+ * The top bar, on every page: home over back and forward; the attention indicator (only
+ * while something needs a look) over the project filter; LLM usage (5-hour over weekly); one
+ * count tile per state; a 2x2 grid of add task, improve, mute, voice.
  */
 @Composable
 fun TopBar(model: MonitorModel) {
@@ -35,30 +37,38 @@ fun TopBar(model: MonitorModel) {
         horizontalArrangement = Arrangement.spacedBy(theme.spacing),
         modifier = Modifier.fillMaxWidth().background(theme.surface).padding(theme.spacing),
     ) {
-        NavButton("←", "nav:back", model.canGoBack) { model.goBack() }
-        NavButton("→", "nav:forward", model.canGoForward) { model.goForward() }
-        NavButton("⌂ Home", "nav:home", true) { model.goHome() }
-
-        if (model.attention > 0) {
-            // Clicking it opens the first task that needs the owner.
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.clickable { model.openFirstNeedingYou() }.testTag("attention")) {
-                StateIcon("needs_attention")
-                Spacer(Modifier.width(theme.spacingSmall))
-                Text(
-                    "${model.attention} need${if (model.attention == 1) "s" else ""} you",
-                    style = theme.body(FontWeight.SemiBold, theme.attention), maxLines = 1, softWrap = false,
-                )
+        // Home on top; back and forward in a row under it.
+        Column(verticalArrangement = Arrangement.spacedBy(theme.spacingSmall)) {
+            NavButton("⌂ Home", "nav:home", true) { model.goHome() }
+            Row(horizontalArrangement = Arrangement.spacedBy(theme.spacingSmall)) {
+                NavButton("←", "nav:back", model.canGoBack) { model.goBack() }
+                NavButton("→", "nav:forward", model.canGoForward) { model.goForward() }
             }
         }
 
-        ProjectFilter(model)
+        // The indicator (only while something needs a look) over the project filter; the
+        // filter stands alone, centred, when nothing does.
+        Column(verticalArrangement = Arrangement.spacedBy(theme.spacingSmall, Alignment.CenterVertically)) {
+            if (model.attention > 0) {
+                // Clicking it opens the first task that needs the owner.
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.clickable { model.openFirstNeedingYou() }.testTag("attention")) {
+                    StateIcon("needs_attention")
+                    Spacer(Modifier.width(theme.spacingSmall))
+                    Text(
+                        "${model.attention} need${if (model.attention == 1) "s" else ""} you",
+                        style = theme.body(FontWeight.SemiBold, theme.attention), maxLines = 1, softWrap = false,
+                    )
+                }
+            }
+            ProjectFilter(model)
+        }
 
         Column(Modifier.weight(1f, fill = true)) {
             model.usage?.providers?.forEach { p ->
-                // The most constrained window ("claude 5-hour 82%, resets 1 h 10 m"), else the sessions.
-                val line = model.usage?.top_bar?.firstOrNull { it.startsWith("${p.name} ") }
-                    ?: "${p.name}: ${p.sessions_used} of ${p.sessions_limit} sessions"
-                Text(line, style = theme.small(), maxLines = 1, modifier = Modifier.testTag("topbar-usage:${p.name}"))
+                // 5-hour above weekly; the first line keeps the account's tag, the rest add a number.
+                topBarUsageLines(model.usage, p).forEachIndexed { i, line ->
+                    Text(line, style = theme.small(), maxLines = 1, modifier = Modifier.testTag(if (i == 0) "topbar-usage:${p.name}" else "topbar-usage:${p.name}:$i"))
+                }
             }
         }
 
@@ -68,10 +78,19 @@ fun TopBar(model: MonitorModel) {
             model.header?.pending_issues?.size?.takeIf { it > 0 }?.let { PendingTile(it) }
         }
 
-        NavButton("+", "add-task", true) { adding = true }
-        if (model.selfProject.isNotEmpty()) NavButton("✨", "improve-pipeline", true) { improving = true }
-        NavButton(if (model.muted) "🔇" else "🔊", "mute", true) { model.toggleMute() }
-        NavButton("〰", "voice-settings", true) { voices = true }
+        // A 2x2 grid: add task and improve on top, mute and voice under. With no self project
+        // the wand's cell stays empty so the others keep their places.
+        Column(verticalArrangement = Arrangement.spacedBy(theme.spacingSmall)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(theme.spacingSmall)) {
+                NavButton("+", "add-task", true) { adding = true }
+                if (model.selfProject.isNotEmpty()) NavButton("✨", "improve-pipeline", true) { improving = true }
+                else Box(Modifier.alpha(0f).clearAndSetSemantics {}) { NavButton("✨", "improve-pipeline-empty", false) {} }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(theme.spacingSmall)) {
+                NavButton(if (model.muted) "🔇" else "🔊", "mute", true) { model.toggleMute() }
+                NavButton("〰", "voice-settings", true) { voices = true }
+            }
+        }
     }
     if (voices) SpeechSettingsDialog(model) { voices = false }
     if (adding) AddTaskDialog(model) { adding = false }
@@ -140,7 +159,9 @@ fun BannersView(model: MonitorModel) {
         if (!model.connected) banner(if (model.reconnecting) "Daemon restarting, reconnecting…" else "Connection lost. Reconnecting…", "connection", theme, "connection_lost")
         model.readOnlyReason?.let { banner("Read-only: $it", "read-only", theme, "read_only") }
         if (model.daemonUpdateText.isNotEmpty()) {
-            updateRow(model.daemonUpdateText, if (model.canUpdateDaemon) "Update masond" else null, "daemon-update", theme) { model.updateDaemon() }
+            updateRow(model.daemonUpdateText, if (model.canUpdateDaemon) (if (model.downloadUrl.isEmpty()) "Update masond" else "Download") else null, "daemon-update", theme) {
+                if (model.downloadUrl.isEmpty()) model.updateDaemon() else model.openDownloadPage()
+            }
         }
         val monitorText = model.updating
             ?: model.updateError
@@ -386,3 +407,8 @@ internal fun SshKeyDialog(model: MonitorModel) {
         confirmButton = { TextButton(onClick = { model.closeSshKeys() }) { Text("Close") } },
     )
 }
+
+/** The top-bar lines for an account, in the order received (5-hour, then weekly); its sessions when it has none. */
+fun topBarUsageLines(usage: mason.v1.UsageView?, p: mason.v1.ProviderStatus): List<String> =
+    usage?.top_bar.orEmpty().filter { it.startsWith("${p.name} ") }
+        .ifEmpty { listOf("${p.name}: ${p.sessions_used} of ${p.sessions_limit} sessions") }
