@@ -647,7 +647,7 @@ impl Who {
 }
 
 /// An open debt that skips this suite or its whole step.
-fn skip_for(d: &Daemon, task: TaskId, suite: &str, step: &str) -> Option<u64> {
+pub(crate) fn skip_for(d: &Daemon, task: TaskId, suite: &str, step: &str) -> Option<u64> {
     d.store
         .debts(Some(task.0), true)
         .ok()?
