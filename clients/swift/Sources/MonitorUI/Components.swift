@@ -14,14 +14,14 @@ import SwiftUI
 /// typical time, or quiet past its usual gap, turns amber, never red: slow is not broken.
 struct ProgressCells: View {
     @Environment(\.theme) var theme
-    @ObservedObject var model: MonitorModel
+    let clock: LiveState
     let cells: [Mason_V1_ProgressCell]
     var slow: Bool = false
 
     var body: some View {
         HStack(spacing: theme.spacingSmall) {
             ForEach(Array(cells.enumerated()), id: \.offset) { _, c in
-                let quiet = c.state == .part && c.isStale(now: model.daemonNow())
+                let quiet = c.state == .part && c.isStale(now: clock.daemonNow())
                 Cell(state: c.state, fill: c.state == .part ? c.fill : .outline,
                      tint: (slow || quiet) && c.state == .part ? theme.slow : theme.accent)
                     .frame(width: theme.cell, height: theme.cell)
@@ -51,12 +51,13 @@ extension Array where Element == Mason_V1_ProgressCell {
 /// time is not announced every second.
 struct ProgressLine: View {
     @Environment(\.theme) var theme
-    @ObservedObject var model: MonitorModel
+    let clock: LiveState
     let cell: Mason_V1_ProgressCell
+    @ObservedObject private var ticker = SharedTick.shared
 
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 1)) { ctx in
-            let now = model.daemonNow(ctx.date)
+        Group {
+            let now = clock.daemonNow(ticker.now)
             let stale = cell.isStale(now: now)
             ViewThatFits(in: .horizontal) {
                 parts(now: now, stale: stale, message: true)
@@ -68,6 +69,8 @@ struct ProgressLine: View {
                 .filter { !$0.isEmpty }.joined(separator: ", "))
             .accessibilityIdentifier("progress-line:\(cell.step)")
         }
+        .onAppear { SharedTick.shared.join() }
+        .onDisappear { SharedTick.shared.leave() }
     }
 
     /// Last fallback, which cannot exceed the width: the count truncates, the time stays whole.
@@ -113,7 +116,7 @@ struct ProgressDetail: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: theme.spacingSmall) {
-            ProgressLine(model: model, cell: cell)
+            ProgressLine(clock: model.live, cell: cell)
             if !cell.message.isEmpty { Text(cell.message).font(theme.body()) }
             ForEach(Array(cell.subs.enumerated()), id: \.offset) { _, s in
                 let text = Format.countText(
@@ -843,5 +846,43 @@ struct SSHKeySheet: View {
         .padding(theme.spacingLarge)
         .frame(minWidth: 520)
         .accessibilityIdentifier("ssh-key-sheet")
+    }
+}
+
+/// One one-second tick for every progress line on the page, in place of a timer per row. It runs
+/// only while some line is on screen and the app is visible: hidden or minimised, it stops.
+@MainActor
+final class SharedTick: ObservableObject {
+    static let shared = SharedTick()
+    @Published private(set) var now = Date()
+    private var users = 0
+    private var visible = true
+    private var timer: Timer?
+
+    private init() {
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeOcclusionStateNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.visible = NSApp.occlusionState.contains(.visible)
+                self?.update()
+            }
+        }
+    }
+
+    func join() { users += 1; update() }
+    func leave() { users = max(0, users - 1); update() }
+
+    private func update() {
+        if users > 0 && visible {
+            guard timer == nil else { return }
+            now = Date()
+            timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated { self?.now = Date() }
+            }
+        } else {
+            timer?.invalidate()
+            timer = nil
+        }
     }
 }

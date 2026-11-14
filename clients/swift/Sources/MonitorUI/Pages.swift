@@ -109,6 +109,8 @@ struct HomePage: View {
                     }
                 }
 
+                CpuSection(model: model, cpu: model.cpu)
+
                 if let h = model.home, h.hasCompilation {
                     CompilationSection(model: model, c: h.compilation)
                 }
@@ -118,7 +120,7 @@ struct HomePage: View {
                         ForEach(st.rows, id: \.id) { r in
                             Button { model.go(.task(r.id)) } label: {
                                 HStack(spacing: theme.spacing) {
-                                    ProgressCells(model: model, cells: r.progress, slow: r.slow)
+                                    ProgressCells(clock: model.live, cells: r.progress, slow: r.slow)
                                     Text("\(r.project) \(r.key)").font(theme.body(.semibold))
                                     Text(r.title).font(theme.body())
                                     Text(r.whyWaiting.isEmpty ? Format.duration(ms: r.inStateMs) : "\(r.whyWaiting), \(Format.duration(ms: r.inStateMs))")
@@ -287,6 +289,8 @@ struct TaskDetailPage: View {
                 if !r.whyWaiting.isEmpty {
                     Text(r.whyWaiting).font(theme.body()).foregroundStyle(theme.text)
                 }
+                Text(Format.cpuTaskLine(permille: d.cpuPermille)).font(theme.body()).foregroundStyle(theme.muted)
+                    .accessibilityIdentifier("cpu")
                 HStack(spacing: theme.spacingLarge) {
                     CopyButton(label: r.key, value: r.key)
                     if !d.branch.isEmpty { CopyButton(label: "branch", value: d.branch) }
@@ -296,7 +300,7 @@ struct TaskDetailPage: View {
             }
 
             HStack(spacing: theme.spacing) {
-                ProgressCells(model: model, cells: r.progress, slow: r.slow)
+                ProgressCells(clock: model.live, cells: r.progress, slow: r.slow)
                 if !r.typical.isEmpty { Text(r.typical).font(theme.small()).foregroundStyle(theme.muted) }
             }
             if let c = r.progress.running { ProgressDetail(model: model, cell: c) }
@@ -400,15 +404,7 @@ struct TaskDetailPage: View {
             if !d.body.isEmpty {
                 section("Task", theme: theme) { Text(d.body).font(theme.body()).textSelection(.enabled) }
             }
-            if !model.liveLog.isEmpty {
-                section("Log", theme: theme) {
-                    Text(model.liveLog.joined(separator: "\n"))
-                        .font(theme.mono()).textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(theme.spacing)
-                        .background(RoundedRectangle(cornerRadius: theme.radius).fill(theme.surface))
-                }
-            }
+            LiveLogSection(live: model.live)
         }
         .padding(theme.spacingLarge)
     }
@@ -450,6 +446,13 @@ struct LandingPage: View {
                         if l.batches.isEmpty { Text("No batch has formed yet.").font(theme.body()).foregroundStyle(theme.muted) }
                         ForEach(l.batches, id: \.id) { b in
                             Text(batchText(b)).font(theme.body())
+                            if b.hasCi {
+                                HStack(spacing: theme.spacing) {
+                                    Text(batchCiText(b.ci)).font(theme.body())
+                                        .foregroundStyle(batchCiFailed(b.ci) ? theme.attention : theme.muted)
+                                    if let url = batchCiURL(b.ci) { Link("CI run", destination: url) }
+                                }
+                            }
                         }
                         if l.queueIdleMs > 0 {
                             Text("Queue idle: \(l.queueIdleMs / 1000) s with tasks waiting and nothing landing.")
@@ -477,6 +480,27 @@ func batchText(_ b: Mason_V1_BatchLine) -> String {
     if !b.parked.isEmpty { t += ", parked \(list(b.parked))" }
     if !b.note.isEmpty { t += ". \(b.note)" }
     return t
+}
+
+/// The CI line under a batch: per workflow "pr-gate: 11 jobs · 1 queued · 2 running · 7 passed",
+/// "· N failed" when any failed, and "queued for a runner" while no job has started.
+func batchCiText(_ ci: Mason_V1_BatchCi) -> String {
+    let parts = ci.workflows.map { w -> String in
+        let total = w.queued + w.running + w.passed + w.failed
+        if w.running + w.passed + w.failed == 0 { return "\(w.workflow): queued for a runner" }
+        var t = "\(w.workflow): \(total) jobs · \(w.queued) queued · \(w.running) running · \(w.passed) passed"
+        if w.failed > 0 { t += " · \(w.failed) failed" }
+        return t
+    }
+    return "CI: " + (parts.isEmpty ? "queued for a runner" : parts.joined(separator: "; "))
+}
+
+func batchCiFailed(_ ci: Mason_V1_BatchCi) -> Bool { ci.workflows.contains { $0.failed > 0 } }
+
+/// The run's address, only if it is http or https.
+func batchCiURL(_ ci: Mason_V1_BatchCi) -> URL? {
+    guard let u = URL(string: ci.url), ["http", "https"].contains(u.scheme?.lowercased() ?? "") else { return nil }
+    return u
 }
 
 struct UsagePage: View {
@@ -594,8 +618,7 @@ struct HealthPage: View {
         ScrollView {
             VStack(alignment: .leading, spacing: theme.spacingLarge) {
                 Text("Health").font(theme.title())
-                Text(model.connected ? "Connected to masond. Event log at #\(model.lastSeq)." : "Not connected.")
-                    .font(theme.body())
+                HealthConnectionLine(model: model)
                 if let h = model.health {
                     section("Resources", theme: theme) {
                         ForEach(h.resources, id: \.name) { r in
@@ -636,5 +659,40 @@ struct HealthPage: View {
                 }
             }.padding(theme.spacingLarge)
         }
+    }
+}
+
+/// The task page's log: observes only the live state, so a log line redraws this and nothing else.
+struct LiveLogSection: View {
+    @Environment(\.theme) var theme
+    @ObservedObject var live: LiveState
+
+    var body: some View {
+        if !live.liveLog.isEmpty {
+            section("Log", theme: theme) {
+                Text(live.liveLog.joined(separator: "\n"))
+                    .font(theme.mono()).textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(theme.spacing)
+                    .background(RoundedRectangle(cornerRadius: theme.radius).fill(theme.surface))
+            }
+        }
+    }
+}
+
+/// The Health page's connection line, which shows the sequence number.
+struct HealthConnectionLine: View {
+    @Environment(\.theme) var theme
+    @ObservedObject var model: MonitorModel
+    @ObservedObject var live: LiveState
+
+    init(model: MonitorModel) {
+        self.model = model
+        self.live = model.live
+    }
+
+    var body: some View {
+        Text(model.connected ? "Connected to masond. Event log at #\(live.lastSeq)." : "Not connected.")
+            .font(theme.body())
     }
 }

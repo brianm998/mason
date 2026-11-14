@@ -763,3 +763,114 @@ fn check_runs_give_the_same_breakdown() {
     );
     assert_eq!(j.running_names, ["c"]);
 }
+
+// ---- red as soon as a required job fails (cancel the rest) ------------------------------------
+
+fn live_script(branch: &str, jobs: serde_json::Value) -> serde_json::Value {
+    use serde_json::json;
+    json!([
+        {"method": "GET", "url": "/actions/runs?head_sha=sha1", "response": ok(json!({
+            "workflow_runs": [{"id": 5, "name": "pr-gate", "status": "in_progress", "conclusion": null,
+                               "head_branch": branch, "event": "workflow_dispatch"}]}))},
+        {"method": "GET", "url": "/actions/runs/5/jobs", "response": ok(json!({"jobs": jobs}))},
+        {"method": "POST", "url": "/actions/runs/5/cancel", "response": {"status": 202, "headers": {}, "body": "{}"}},
+    ])
+}
+
+fn cancels(g: &Gh) -> usize {
+    g.http
+        .requests()
+        .iter()
+        .filter(|r| r.method == "POST" && r.url.ends_with("/actions/runs/5/cancel"))
+        .count()
+}
+
+#[test]
+fn a_failed_job_makes_a_running_run_red_at_once_and_the_run_is_cancelled() {
+    use serde_json::json;
+    let g = judged_gh(
+        live_script(
+            "mason/ci/star-b1-1",
+            json!([
+                {"id": 1, "name": "static checks", "conclusion": "failure",
+                 "steps": [{"name": "ruff", "conclusion": "failure"}]},
+                {"id": 2, "name": "macOS", "conclusion": null, "steps": []},
+            ]),
+        ),
+        false,
+    );
+    let CiState::Red {
+        failed, summary, ..
+    } = g.gh.status("sha1").unwrap()
+    else {
+        panic!("expected red")
+    };
+    assert_eq!(failed, vec!["static checks".to_string()]);
+    assert!(summary.contains("cancelled by MASON after static checks failed"));
+    assert_eq!(cancels(&g), 1);
+}
+
+#[test]
+fn a_cancelled_job_with_no_step_run_is_not_red_while_the_run_is_going() {
+    use serde_json::json;
+    let g = judged_gh(
+        live_script(
+            "mason/ci/star-b1-1",
+            json!([{"id": 2, "name": "macOS", "conclusion": "cancelled", "steps": []}]),
+        ),
+        true,
+    );
+    assert_eq!(g.gh.status("sha1").unwrap(), CiState::Pending);
+    assert_eq!(cancels(&g), 0);
+}
+
+#[test]
+fn a_run_off_a_mason_ref_is_called_red_but_never_cancelled() {
+    use serde_json::json;
+    let g = judged_gh(
+        live_script(
+            "develop",
+            json!([{"id": 1, "name": "build", "conclusion": "failure",
+                    "steps": [{"name": "b", "conclusion": "failure"}]}]),
+        ),
+        false,
+    );
+    assert!(matches!(g.gh.status("sha1").unwrap(), CiState::Red { .. }));
+    assert_eq!(cancels(&g), 0);
+}
+
+#[test]
+fn running_and_passed_jobs_leave_a_run_pending() {
+    use serde_json::json;
+    let g = judged_gh(
+        live_script(
+            "mason/ci/star-b1-1",
+            json!([
+                {"id": 1, "name": "a", "conclusion": "success", "steps": []},
+                {"id": 2, "name": "b", "conclusion": null, "steps": []},
+            ]),
+        ),
+        false,
+    );
+    assert_eq!(g.gh.status("sha1").unwrap(), CiState::Pending);
+    assert_eq!(cancels(&g), 0);
+}
+
+#[test]
+fn jobs_are_counted_by_where_they_are() {
+    use serde_json::json;
+    let jobs = vec![
+        json!({"name": "a", "status": "queued", "conclusion": null}),
+        json!({"name": "b", "status": "in_progress", "conclusion": null}),
+        json!({"name": "c", "status": "completed", "conclusion": "success"}),
+        json!({"name": "d", "status": "completed", "conclusion": "skipped"}),
+        json!({"name": "e", "status": "completed", "conclusion": "failure"}),
+    ];
+    let c = mason_adapters::github::count_jobs("pr-gate", "https://x/1", &jobs);
+    assert_eq!(
+        (c.queued, c.running, c.passed, c.failed),
+        (1, 1, 2, 1),
+        "{c:?}"
+    );
+    assert_eq!(c.running_names, vec!["b".to_string()]);
+}

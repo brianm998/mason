@@ -298,7 +298,7 @@ impl CiJobCounts {
 
 /// The jobs of one workflow run that CI has not finished.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct CiWorkflowJobs {
+pub struct CiRunJobs {
     pub workflow: String,
     pub jobs: CiJobCounts,
 }
@@ -427,6 +427,26 @@ pub enum CiState {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Problem(pub String);
 
+/// One workflow's jobs, counted by where they are.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CiWorkflowJobs {
+    pub workflow: String,
+    pub queued: u32,
+    pub running: u32,
+    pub passed: u32,
+    pub failed: u32,
+    /// Names of the running jobs.
+    pub running_names: Vec<String>,
+    /// The run's address (`html_url`), when the system has one.
+    pub url: String,
+}
+
+/// Where a CI run is, per workflow. Read only for display: it never decides a verdict.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CiProgress {
+    pub workflows: Vec<CiWorkflowJobs>,
+}
+
 pub trait BuildSystemAdapter: Send + Sync {
     fn name(&self) -> &'static str;
     fn capabilities(&self) -> BuildCaps;
@@ -435,8 +455,12 @@ pub trait BuildSystemAdapter: Send + Sync {
     fn status(&self, run: &str) -> Result<CiState, ApiError>;
     /// The state, and while it is pending the jobs of each workflow told apart by state.
     /// Reporting only: the state is what `status` gives. A system that cannot say gives none.
-    fn status_detail(&self, run: &str) -> Result<(CiState, Vec<CiWorkflowJobs>), ApiError> {
+    fn status_detail(&self, run: &str) -> Result<(CiState, Vec<CiRunJobs>), ApiError> {
         Ok((self.status(run)?, vec![]))
+    }
+    /// Job counts per workflow, for display. Systems that cannot say answer empty.
+    fn progress(&self, _run: &str) -> Result<CiProgress, ApiError> {
+        Ok(CiProgress::default())
     }
     /// Does the repository at `repo` let CI run on a candidate ref?
     /// (`mason doctor` and, later, `mason init` use this.)

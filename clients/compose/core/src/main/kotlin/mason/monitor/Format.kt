@@ -21,6 +21,9 @@ object Format {
         }
     }
 
+    /** A share in permille as a percentage with one decimal: 234 is "23.4%", 5 is "0.5%". */
+    fun permille(p: Int): String = "${p / 10}.${p % 10}%"
+
     /**
      * A token count in few characters: "988", "12.2k", "1.2M". Whole-number arithmetic, so it rounds
      * exactly as the daemon's own reading (`mason_core::progress_text::compact`) does.
