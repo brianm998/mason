@@ -36,7 +36,7 @@ use mason_step_host::launcher::{spawn_host, SpawnOptions};
 use mason_step_host::protocol::{CURRENT, PREVIOUS};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};

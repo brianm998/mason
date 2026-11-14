@@ -329,7 +329,7 @@ struct State {
     /// The build disk's responsiveness and the limit on it. `None`: no stall gate.
     stall: Option<Arc<dyn StallSource>>,
     /// When the last scheduling pass ran. A waiter skips its own pass while this is
-    /// younger than `PASS_EVERY` (see `acquire`).
+    /// younger than the broker's tick (see `acquire`).
     last_pass: Option<Instant>,
     /// A pass is reading lock files right now; waiters leave it to finish.
     pass_running: bool,
@@ -337,8 +337,9 @@ struct State {
     passes: u64,
 }
 
-/// How often waiting jobs re-run the scheduling pass between them, at most. Releases
-/// and submits still pass at once; this only paces the waiters' periodic re-check.
+/// The pacing the tests of `pass_due` check against. The waiters themselves pace by the
+/// broker's tick (`tick_ms`, see `acquire`); releases and submits still pass at once.
+#[cfg(test)]
 const PASS_EVERY: Duration = Duration::from_millis(100);
 
 /// Is a waiter's periodic pass due? Not while one ran less than `every` ago: that pass
