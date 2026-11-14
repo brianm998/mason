@@ -3,7 +3,9 @@
 # Shared by tarball.sh and deb.sh (sourced, not run). The asset names and layout are the
 # contract in docs/RELEASING.md.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-BINS="mason masond step-host mason-mcp"
+# fake-claude is the scripted agent the new build's self-test (`masond selftest`) runs, which
+# looks for it next to masond; `mason update` from a release cannot pass without it.
+BINS="mason masond step-host mason-mcp fake-claude"
 
 pkg_die() { echo "package: $*" >&2; exit 1; }
 
@@ -23,7 +25,7 @@ pkg_build() {  # TARGET DEST
   tdir="${CARGO_TARGET_DIR:-$ROOT/target}/$target/release"
   if [ "${MASON_PACKAGE_NO_BUILD:-0}" != 1 ]; then
     (cd "$ROOT" && cargo build --release --target "$target" \
-      --bin mason --bin masond --bin step-host --bin mason-mcp) || pkg_die "cargo build failed for $target"
+      --bin mason --bin masond --bin step-host --bin mason-mcp --bin fake-claude) || pkg_die "cargo build failed for $target"
   fi
   mkdir -p "$dest"
   for b in $BINS; do

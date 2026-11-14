@@ -106,6 +106,7 @@ final class Session: ObservableObject {
 
     func start() {
         model.onInstall = { [weak self] in self?.install($0) }
+        model.onOpenURL = { NSWorkspace.shared.open($0) }
         guard connection == nil, finder == nil else { return }
         // The daemon may not be up yet: look for it until it is.
         finder = Task { @MainActor in
