@@ -13,6 +13,7 @@ public typealias LandingView = Mason_V1_LandingView
 public typealias UsageView = Mason_V1_UsageView
 public typealias EditorView = Mason_V1_EditorView
 public typealias StateCount = Mason_V1_StateCount
+public typealias CiLink = Mason_V1_CiLink
 
 /// What the monitor knows and what the user has done to it. The client draws
 /// this and sends commands; it never re-derives pipeline rules: counts,
@@ -264,6 +265,25 @@ public final class MonitorModel: ObservableObject {
     public var canGoBack: Bool { history.canGoBack }
     public var canGoForward: Bool { history.canGoForward }
 
+    /// Whether `n` is a task this monitor has heard of (in the sidebar, or named by the open
+    /// task's page), so a `#n` in text can be a link to its page.
+    public func isKnownTask(_ n: UInt64) -> Bool {
+        if sidebar?.sections.contains(where: { $0.rows.contains { $0.id == n } }) == true { return true }
+        if let d = taskDetail, d.hasRow {
+            let r = d.row
+            if r.id == n || r.blockers.contains(n) || r.blocks.contains(n) { return true }
+            if d.debts.contains(where: { $0.task == n }) { return true }
+            if d.hasProposal && d.proposal.filedBy == n { return true }
+        }
+        return false
+    }
+
+    /// `text` as plain text, task links and URL links, for the open task's page.
+    public func linkify(_ text: String) -> [LinkSegment] {
+        Linkify.segments(text, isKnownTask: { [unowned self] in self.isKnownTask($0) },
+                         ciLinks: taskDetail?.ciLinks ?? [])
+    }
+
     public func go(_ p: Page) { history.go(p); subscribe?() }
     public func goBack() { history.goBack(); subscribe?() }
     public func goForward() { history.goForward(); subscribe?() }
@@ -479,6 +499,21 @@ public final class MonitorModel: ObservableObject {
     /// How many compiles may run at once (the daemon refuses 0).
     public func setCompileLimit(_ units: UInt32) {
         command { $0.setLimit = .with { $0.resource = "compile"; $0.units = max(1, units) } }
+    }
+    /// The CPU gate's range in the monitor: a further compile starts below this percent.
+    public static let cpuGateRange = 10...100
+    /// The most seconds the settle stepper asks for.
+    public static let settleMax = 600
+    /// Start another compile only below `pct` percent CPU (kept to 10-100; the daemon holds 1-100
+    /// and refuses the rest, and says so in `lastResult`).
+    public func setCompileCpuGate(_ pct: Int) {
+        let v = min(max(pct, Self.cpuGateRange.lowerBound), Self.cpuGateRange.upperBound)
+        command { $0.setGate = .with { $0.name = "compile_cpu_max"; $0.value = Int64(v) } }
+    }
+    /// Seconds after one compile starts before the next may (0: no wait).
+    public func setCompileSettle(_ seconds: Int) {
+        let v = min(max(seconds, 0), Self.settleMax)
+        command { $0.setGate = .with { $0.name = "compile_settle_s"; $0.value = Int64(v) } }
     }
     public func pause(mode: String, seconds: UInt64) {
         command { $0.pause = .with { $0.project = project; $0.mode = mode; $0.forSeconds = seconds } }

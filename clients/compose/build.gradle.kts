@@ -10,3 +10,12 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose") version "2.1.0" apply false
     id("com.squareup.wire") version "5.2.1" apply false
 }
+
+// Gradle prints a line per test only when a test task actually runs. A task it skips as
+// up to date prints none, and the pipeline's gate then counts zero tests and fails. So the
+// test tasks always run.
+subprojects {
+    tasks.withType<Test>().configureEach {
+        outputs.upToDateWhen { false }
+    }
+}

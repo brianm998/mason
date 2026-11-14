@@ -404,6 +404,26 @@ final class MonitorCoreTests: XCTestCase {
         if case .setLimit(let l)? = sent[5].body { XCTAssertEqual(l.units, 1, "the stepper never asks for zero compiles") } else { XCTFail() }
     }
 
+    func testTheCpuGateStepperSendsASetGateAndStaysWithinTenToAHundred() {
+        let m = MonitorModel()
+        var sent: [Mason_V1_Command] = []
+        m.sender = { sent.append($0) }
+        m.setCompileCpuGate(70 + 5)
+        m.setCompileCpuGate(0)
+        m.setCompileCpuGate(500)
+        m.setCompileSettle(-5)
+        if case .setGate(let g)? = sent[0].body { XCTAssertEqual(g.name, "compile_cpu_max"); XCTAssertEqual(g.value, 75); XCTAssertFalse(g.reset) } else { XCTFail() }
+        if case .setGate(let g)? = sent[1].body { XCTAssertEqual(g.value, 10, "never below 10") } else { XCTFail() }
+        if case .setGate(let g)? = sent[2].body { XCTAssertEqual(g.value, 100, "never above 100") } else { XCTFail() }
+        if case .setGate(let g)? = sent[3].body { XCTAssertEqual(g.name, "compile_settle_s"); XCTAssertEqual(g.value, 0) } else { XCTFail() }
+    }
+
+    func testARefusedGateShowsInLastResult() {
+        let m = MonitorModel()
+        m.apply(result(id: "m1", ok: false, error: "compile_cpu_max must be from 1 to 100"))
+        XCTAssertEqual(m.lastResult, "compile_cpu_max must be from 1 to 100")
+    }
+
     // MARK: what the client shows (the conformance items)
 
     func testVisibleItemsFollowWhatTheViewsSayAndTheCollapseState() {

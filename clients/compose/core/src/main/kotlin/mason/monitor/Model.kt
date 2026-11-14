@@ -215,6 +215,18 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     val canGoForward get() = history.canGoForward
 
     fun go(p: Page) { history = history.go(p); subscribe?.invoke() }
+    /** Whether [n] is a task this monitor has heard of (in the sidebar, or named by the open task's page). */
+    fun isKnownTask(n: Long): Boolean {
+        if (sidebar?.sections?.any { sec -> sec.rows.any { it.id == n } } == true) return true
+        val d = taskDetail ?: return false
+        val r = d.row ?: return false
+        return r.id == n || n in r.blockers || n in r.blocks || d.debts.any { it.task == n } || d.proposal?.filed_by == n
+    }
+
+    /** [text] as plain text, task links and URL links, for the open task's page. */
+    fun linkify(text: String): List<LinkSegment> =
+        Linkify.segments(text, { isKnownTask(it) }, taskDetail?.ci_links ?: emptyList())
+
     fun goBack() { history = history.goBack(); subscribe?.invoke() }
     fun goForward() { history = history.goForward(); subscribe?.invoke() }
     fun goHome() { history = history.goHome(); subscribe?.invoke() }
@@ -393,6 +405,12 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     /** How many compiles may run at once (the daemon refuses 0). */
     fun setCompileLimit(units: Int) =
         send(Command(set_limit = SetLimit(resource = "compile", units = maxOf(1, units))))
+    /** Start another compile only below [pct] percent CPU (kept to 10-100; the daemon holds 1-100 and says if it refuses). */
+    fun setCompileCpuGate(pct: Int) =
+        send(Command(set_gate = SetGate(name = "compile_cpu_max", value_ = pct.coerceIn(CPU_GATE_MIN, CPU_GATE_MAX).toLong())))
+    /** Seconds after one compile starts before the next may (0: no wait). */
+    fun setCompileSettle(seconds: Int) =
+        send(Command(set_gate = SetGate(name = "compile_settle_s", value_ = seconds.coerceIn(0, SETTLE_MAX).toLong())))
     fun pause(mode: String, seconds: Long) =
         send(Command(pause = PauseWork(project = project, mode = mode, for_seconds = seconds)))
     fun resume() = send(Command(resume = ResumeWork(project = project)))
@@ -612,6 +630,11 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     }
 
     companion object {
+        /** The CPU gate's range in the monitor, and the most the settle stepper asks for. */
+        const val CPU_GATE_MIN = 10
+        const val CPU_GATE_MAX = 100
+        const val SETTLE_MAX = 600
+
         /** The project a `push_auth` banner is about: its text starts "<project>: ". */
         fun pushAuthProject(b: Banner): String = b.text.substringBefore(":")
 

@@ -595,7 +595,16 @@ const STEPS: &[&str] = &[
          at    INTEGER NOT NULL,
          PRIMARY KEY (suite, test, task)
      );",
-    // 30: what a suite did at a base commit beyond its failing names (s246, decision 0241): the
+    // 30: the quarantine table becomes the known-red ledger (s230, decision 0225). `source`
+    // is owner (manual, with an expiry), base (seen red at the merge base) or exhausted;
+    // an entry with a `fix_task` has no expiry (expires_at is the far future) because a
+    // run that proves the test green lifts it. Additive.
+    "ALTER TABLE quarantine ADD COLUMN source TEXT NOT NULL DEFAULT 'owner';
+     ALTER TABLE quarantine ADD COLUMN fix_task INTEGER;
+     ALTER TABLE quarantine ADD COLUMN first_base TEXT NOT NULL DEFAULT '';
+     ALTER TABLE quarantine ADD COLUMN last_seen_ms INTEGER NOT NULL DEFAULT 0;
+     ALTER TABLE quarantine ADD COLUMN note TEXT NOT NULL DEFAULT '';",
+    // 31: what a suite did at a base commit beyond its failing names (s246, decision 0241): the
     // build's first error, whether the run proved nothing, whether it was red, and the first
     // error line of a red run. `complete` 1 marks a row written with all of that; an older row
     // has 0 and is worked out again when a comparison needs it. And the base-red wait of a task
@@ -614,7 +623,7 @@ const STEPS: &[&str] = &[
          text       TEXT NOT NULL,
          at_ms      INTEGER NOT NULL
      );",
-    // 31: the retries the daemon made by itself after a failure outside the code (s247), so a
+    // 32: the retries the daemon made by itself after a failure outside the code (s247), so a
     // restart neither forgets nor repeats them. Additive.
     "CREATE TABLE auto_retries (
          id     INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -623,7 +632,7 @@ const STEPS: &[&str] = &[
          reason TEXT NOT NULL
      );
      CREATE INDEX auto_retries_task ON auto_retries(task, at_ms);",
-    // 32: the tests a suite has been seen to pass (s253, decision 0248), one row per suite and test,
+    // 33: the tests a suite has been seen to pass (s253, decision 0248), one row per suite and test,
     // so that a name a parser took from a log line, which never passes, cannot be quarantined.
     // Additive.
     "CREATE TABLE seen_passing (

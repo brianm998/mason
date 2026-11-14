@@ -2678,6 +2678,13 @@ fn transcript_gone(detail: &str) -> bool {
     .any(|m| d.contains(m))
 }
 
+/// The CLI was stopped from outside (SIGTERM, status 143; or SIGKILL, 137) before it
+/// gave a result: a restart or a reaper, not something the agent did.
+fn cli_was_signaled(detail: &str) -> bool {
+    detail.contains("the CLI exited with status 143 and no result")
+        || detail.contains("the CLI exited with status 137 and no result")
+}
+
 /// Holds, then lost hosts, until the step has an end that is neither. A lost host
 /// (or one that never came up) is not a failure: it is recorded, the lease taken
 /// again, and the step continued, with `resume` and a note when the journal gave a
@@ -2709,6 +2716,7 @@ fn settle_all(
     let mut resumed = false;
     let mut fresh_after_gone = false;
     let mut silent = false;
+    let mut signaled_retried = false;
     loop {
         let fresh = match &report.end {
             StepEnd::Failed(FailReason::HostLost { detail }) => {
@@ -2722,14 +2730,19 @@ fn settle_all(
                 };
                 // A host the daemon's own restart took is not the task's failure: it
                 // is recorded but not counted toward the restart budget.
+                // A host lost together with other tasks' hosts (a mass kill) is
+                // treated the same way. A hard cap still ends a run that keeps
+                // losing hosts.
                 let counted = lost
                     .iter()
                     .filter(|id| {
                         let r = mason_step_host::registry::lost_report(&root.join(id));
                         !r.is_ok_and(|r| hl::is_restart_loss(&root, r.last_heartbeat_ms, r.at_ms))
+                            && !mason_adapters::hosted::lost_with_others(&root, id)
                     })
                     .count();
-                let restart = counted <= hl::MAX_AGENT_RESTARTS;
+                let restart =
+                    counted <= hl::MAX_AGENT_RESTARTS && lost.len() <= hl::MAX_AGENT_RESTARTS * 4;
                 hl::record_as(&c.d, Some(c.run), &c.step.name, &newest, at, text, restart);
                 if !restart {
                     let all: Vec<String> = lost.iter().map(|id| describe(id).0).collect();
@@ -2754,6 +2767,12 @@ fn settle_all(
             {
                 fresh_after_gone = true;
                 true
+            }
+            StepEnd::Failed(FailReason::Crash { detail })
+                if !signaled_retried && cli_was_signaled(detail) =>
+            {
+                signaled_retried = true;
+                report.session_id.is_none()
             }
             _ => return Some(report),
         };
@@ -4097,5 +4116,20 @@ mod tests {
         ] {
             assert!(read_script_result(bad).is_err(), "{bad}");
         }
+    }
+}
+
+#[cfg(test)]
+mod signaled_tests {
+    use super::cli_was_signaled;
+
+    #[test]
+    fn a_sigterm_exit_is_signaled_and_a_plain_failure_is_not() {
+        assert!(cli_was_signaled(
+            "the CLI exited with status 143 and no result; stderr: "
+        ));
+        assert!(!cli_was_signaled(
+            "the CLI exited with status 2 and no result; stderr: boom"
+        ));
     }
 }

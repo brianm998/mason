@@ -1483,6 +1483,7 @@ fn override_kind(path: &str) -> Option<(&'static str, Option<u64>)> {
             Some((kind, id.parse().ok()))
         }
         ["pause"] => Some(("pause", None)),
+        ["resources", "gate"] => Some(("gate", None)),
         ["resume"] => Some(("resume", None)),
         ["projects", _, "overrides"] => Some(("override", None)),
         _ => None,
@@ -2017,12 +2018,13 @@ async fn debt_run(Shared(d): Shared<Arc<Daemon>>, Path(id): Path<u64>) -> Res {
 
 async fn quarantine_list(Shared(d): Shared<Arc<Daemon>>) -> Res {
     let d2 = d.clone();
-    let (rows, flaky) = d
+    let (rows, ledger, flaky) = d
         .pool
         .run(move || {
             let now = now_ms();
             (
                 d2.store.quarantined(now).unwrap_or_default(),
+                d2.store.ledger().unwrap_or_default(),
                 d2.store
                     .flaky_since(now.saturating_sub(7 * 86_400_000))
                     .unwrap_or_default(),
@@ -2034,6 +2036,10 @@ async fn quarantine_list(Shared(d): Shared<Arc<Daemon>>) -> Res {
         mason_testing::gates::quarantine_candidates(&flaky, now_ms(), 7 * 86_400_000, 3);
     Ok(Json(json!({
         "quarantined": rows.iter().map(|(s, t, o, e, r)| json!({"suite": s, "test": t, "owner": o, "expires_at": e, "reason": r})).collect::<Vec<_>>(),
+        "ledger": ledger.iter().filter(|r| r.source != "owner").map(|r| json!({
+            "suite": r.suite, "test": r.test, "source": r.source, "fix_task": r.fix_task,
+            "first_base": r.first_base, "since": r.at, "last_seen_ms": r.last_seen_ms, "note": r.note,
+        })).collect::<Vec<_>>(),
         "candidates": candidates.iter().map(|(s, t)| json!({"suite": s, "test": t})).collect::<Vec<_>>(),
     })))
 }
@@ -2675,6 +2681,45 @@ async fn resource_limit(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) ->
     Ok(Json(json!({"ok": true})))
 }
 
+/// Change a compile gate while masond runs (`value: null` goes back to resources.toml).
+/// Owner only. Kept across restarts.
+async fn resource_gate(
+    Shared(d): Shared<Arc<Daemon>>,
+    headers: axum::http::HeaderMap,
+    Json(b): Json<Value>,
+) -> Res {
+    owner_only(&d, &who_of(&headers), "change a compile gate")?;
+    let name = b["name"].as_str().unwrap_or_default().to_string();
+    let value = match &b["value"] {
+        Value::Null => None,
+        v => match v.as_i64() {
+            Some(n) => Some(n),
+            None => {
+                return Err(fail(
+                    StatusCode::BAD_REQUEST,
+                    "`value` must be a whole number, or null to go back to resources.toml",
+                ))
+            }
+        },
+    };
+    if name.is_empty() {
+        return Err(fail(StatusCode::BAD_REQUEST, "give a gate `name`"));
+    }
+    let d2 = d.clone();
+    d.pool
+        .run(move || {
+            let r = d2.broker.set_gate(&name, value);
+            // A looser gate may free a session for a task that is queued.
+            d2.admit();
+            d2.poke();
+            r
+        })
+        .await
+        .map_err(pool_err)?
+        .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
+    Ok(Json(json!({"ok": true})))
+}
+
 /// An interactive caller asks for resources (`mason run --needs`).
 async fn lease_open(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res {
     let mut uses = std::collections::BTreeMap::new();
@@ -2838,10 +2883,9 @@ fn render_agent(text: &str) -> String {
 pub type LogStamp = (String, u64, Option<std::time::SystemTime>);
 
 pub fn log_signature(d: &Daemon, task: u64) -> Vec<LogStamp> {
-    let reg = mason_step_host::registry::Registry::new(d.cfg.hosts_dir());
-    let mut v: Vec<LogStamp> = reg
-        .scan()
-        .unwrap_or_default()
+    // Same hosts as `render_logs` (live and moved), found by directory name: no other
+    // task's host is opened.
+    let mut v: Vec<LogStamp> = crate::hostarchive::task_hosts(&d.cfg, task)
         .into_iter()
         .filter(|h| crate::sweep::parse_host_id(&h.info.id).is_some_and(|(t, _)| t == task))
         .map(|h| {
@@ -3168,6 +3212,7 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/quarantine", get(quarantine_list).post(quarantine_add))
         .route("/quarantine/remove", post(quarantine_remove))
         .route("/resources/limit", post(resource_limit))
+        .route("/resources/gate", post(resource_gate))
         .route("/leases", post(lease_open))
         .route("/leases/{id}", get(lease_poll))
         .route("/stall/waiting", get(stall_waiting))

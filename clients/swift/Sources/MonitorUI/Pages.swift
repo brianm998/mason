@@ -213,6 +213,42 @@ struct CompilationSection: View {
             .help("Lowering the limit never stops a compile that is running; it holds back new ones until the count falls.")
             .accessibilityIdentifier("compile")
 
+            HStack(spacing: theme.spacing) {
+                Text("Start another compile below")
+                Button { model.setCompileCpuGate(Int(c.cpuMaxPct) - 5) } label: { Image(systemName: "minus") }
+                    .disabled(Int(c.cpuMaxPct) <= MonitorModel.cpuGateRange.lowerBound)
+                    .accessibilityIdentifier("compile:cpu:decrease")
+                Text("\(c.cpuMaxPct)% CPU").font(theme.body(.semibold))
+                Button { model.setCompileCpuGate(Int(c.cpuMaxPct) + 5) } label: { Image(systemName: "plus") }
+                    .disabled(Int(c.cpuMaxPct) >= MonitorModel.cpuGateRange.upperBound)
+                    .accessibilityIdentifier("compile:cpu:increase")
+            }
+            .font(theme.body())
+            .buttonStyle(.bordered)
+            .help("A compile starts only while CPU use is below this. Kept across restarts; resources.toml has the starting value.")
+            .accessibilityIdentifier("compile:cpu")
+
+            HStack(spacing: theme.spacing) {
+                Text("and wait")
+                Button { model.setCompileSettle(Int(c.settleS) - 5) } label: { Image(systemName: "minus") }
+                    .disabled(c.settleS == 0)
+                    .accessibilityIdentifier("compile:settle:decrease")
+                Text("\(c.settleS) s").font(theme.body(.semibold))
+                Button { model.setCompileSettle(Int(c.settleS) + 5) } label: { Image(systemName: "plus") }
+                    .disabled(Int(c.settleS) >= MonitorModel.settleMax)
+                    .accessibilityIdentifier("compile:settle:increase")
+                Text("after the last one started")
+            }
+            .font(theme.body())
+            .buttonStyle(.bordered)
+            .accessibilityIdentifier("compile:settle")
+
+            if let refused = model.lastResult {
+                Text(refused).font(theme.body()).foregroundStyle(theme.attention)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("compile:refused")
+            }
+
             if c.running.isEmpty {
                 Text("Nothing is compiling.").font(theme.body()).foregroundStyle(theme.muted)
             }
@@ -287,7 +323,10 @@ struct TaskDetailPage: View {
                 Text("\(r.project), \(r.state.replacingOccurrences(of: "_", with: " ")), \(Format.duration(ms: r.inStateMs)) in this state")
                     .font(theme.body()).foregroundStyle(theme.muted)
                 if !r.whyWaiting.isEmpty {
-                    Text(r.whyWaiting).font(theme.body()).foregroundStyle(theme.text)
+                    LinkedText(model: model, text: r.whyWaiting).accessibilityIdentifier("detail:why-waiting")
+                }
+                if r.issue != 0 || !d.ciLinks.isEmpty {
+                    CiLinksLine(links: d.ciLinks, issue: r.issue, issueURL: r.issueURL)
                 }
                 Text(Format.cpuTaskLine(permille: d.cpuPermille)).font(theme.body()).foregroundStyle(theme.muted)
                     .accessibilityIdentifier("cpu")
@@ -355,7 +394,8 @@ struct TaskDetailPage: View {
             if d.hasApproval { ApprovalView(model: model, task: r.id, approval: d.approval) }
             if d.hasProposal { ProposalView(model: model, row: r, info: d.proposal, title: r.title) }
             if !d.failure.isEmpty {
-                Text("Failed: \(d.failure)").font(theme.body()).foregroundStyle(theme.attention)
+                LinkedText(model: model, text: "Failed: \(d.failure)", color: theme.attention)
+                    .accessibilityIdentifier("detail:failure")
             }
 
             if !d.stepTokens.isEmpty {
@@ -381,30 +421,33 @@ struct TaskDetailPage: View {
                     .accessibilityIdentifier("step:\(s.run)")
                     // Every session this run started, so a retry up the ladder shows.
                     ForEach(Array(s.launches.enumerated()), id: \.offset) { _, l in
-                        Text("\(l.kind): \(l.display)").font(theme.small()).foregroundStyle(theme.muted)
+                        LinkedText(model: model, text: "\(l.kind): \(l.display)", font: theme.small(), color: theme.muted)
                             .padding(.leading, theme.spacingLarge)
                     }
                 }
             }
 
             if !d.closing.isEmpty {
-                section("Tests", theme: theme) { Text(d.closing).font(theme.body()) }
+                section("Tests", theme: theme) { LinkedText(model: model, text: d.closing).accessibilityIdentifier("detail:closing") }
             }
             if !d.debts.isEmpty {
                 section("Debts", theme: theme) {
                     ForEach(d.debts, id: \.id) { x in
-                        Text("#\(x.id) \(x.scope), \(x.status)\(x.deferred ? ", runs after landing" : "")")
-                            .font(theme.body())
+                        // The debt's own `#id` is not a task, so only the rest is linked.
+                        HStack(spacing: 0) {
+                            Text("#\(x.id) ").font(theme.body())
+                            LinkedText(model: model, text: "\(x.scope), \(x.status)\(x.deferred ? ", runs after landing" : "")")
+                        }
                     }
                 }
             }
             if !d.plan.isEmpty || d.hasPlanView {
-                section("Plan", theme: theme) { PlanSection(detail: d) }
+                section("Plan", theme: theme) { PlanSection(model: model, detail: d) }
             }
             if !d.body.isEmpty {
-                section("Task", theme: theme) { Text(d.body).font(theme.body()).textSelection(.enabled) }
+                section("Task", theme: theme) { LinkedText(model: model, text: d.body, selectable: true).accessibilityIdentifier("detail:body") }
             }
-            LiveLogSection(live: model.live)
+            LiveLogSection(model: model, live: model.live)
         }
         .padding(theme.spacingLarge)
     }
@@ -430,8 +473,8 @@ struct LandingPage: View {
                         Text(t).font(theme.body()).foregroundStyle(t.contains("stopped") || t.contains(" off;") ? theme.attention : theme.muted)
                     }
                     ForEach(l.freezes, id: \.project) { f in
-                        Text("Frozen: \(f.project): \(f.reason)\(f.fixTask > 0 ? " (fix: task #\(f.fixTask))" : "")")
-                            .font(theme.body()).foregroundStyle(theme.attention)
+                        LinkedText(model: model, text: "Frozen: \(f.project): \(f.reason)\(f.fixTask > 0 ? " (fix: task #\(f.fixTask))" : "")",
+                                   color: theme.attention)
                     }
                     section("Queue", theme: theme) {
                         if l.queue.isEmpty {
@@ -462,8 +505,10 @@ struct LandingPage: View {
                     section("Debts", theme: theme) {
                         if l.debts.isEmpty { Text("Nothing is owed.").font(theme.body()).foregroundStyle(theme.muted) }
                         ForEach(l.debts, id: \.id) { x in
-                            Text("#\(x.id) task #\(x.task) \(x.scope): \(x.reason.isEmpty ? "no reason given" : x.reason)")
-                                .font(theme.body())
+                            HStack(spacing: 0) {
+                                Text("#\(x.id) ").font(theme.body())
+                                LinkedText(model: model, text: "task #\(x.task) \(x.scope): \(x.reason.isEmpty ? "no reason given" : x.reason)")
+                            }
                         }
                     }
                 }
@@ -665,13 +710,13 @@ struct HealthPage: View {
 /// The task page's log: observes only the live state, so a log line redraws this and nothing else.
 struct LiveLogSection: View {
     @Environment(\.theme) var theme
+    let model: MonitorModel
     @ObservedObject var live: LiveState
 
     var body: some View {
         if !live.liveLog.isEmpty {
             section("Log", theme: theme) {
-                Text(live.liveLog.joined(separator: "\n"))
-                    .font(theme.mono()).textSelection(.enabled)
+                LinkedText(model: model, text: live.liveLog.joined(separator: "\n"), font: theme.mono(), selectable: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(theme.spacing)
                     .background(RoundedRectangle(cornerRadius: theme.radius).fill(theme.surface))

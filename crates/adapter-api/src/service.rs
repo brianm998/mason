@@ -328,6 +328,8 @@ pub struct JobFailure {
     pub infra: Option<String>,
     /// The end of the job's log (a few hundred lines), when the adapter could read it.
     pub log: Option<String>,
+    /// Where to read the job on the host (the check's `details_url`), when it has a page.
+    pub url: Option<String>,
 }
 
 pub trait GitHostAdapter: Send + Sync {
