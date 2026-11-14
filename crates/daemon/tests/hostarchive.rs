@@ -240,6 +240,8 @@ fn fake_host(root: &std::path::Path, id: &str, journal: &str) {
 }
 
 #[test]
+// Unix-only: it takes a host directory's permission bits away.
+#[cfg(unix)]
 fn log_signature_names_only_the_tasks_hosts_and_follows_its_journal() {
     use mason_daemon::http::log_signature;
     use std::os::unix::fs::PermissionsExt;
