@@ -180,7 +180,7 @@ fn expected(from: State, ev: &str) -> Option<State> {
         "Answered" if from == S::NeedsAttention => Some(S::Developing),
         "StepFailed" if step => Some(S::Failed),
         "Retried" if step || matches!(from, S::NeedsAttention | S::Failed) => Some(S::Testing),
-        "Canceled" if live || from == S::Proposed => Some(S::Canceled),
+        "Canceled" if live || matches!(from, S::Proposed | S::Failed) => Some(S::Canceled),
         "ClosedNoChange" if live => Some(S::Landed),
         "Paused" if live => Some(from),
         "ExploreAnyway" if from == S::Queued => Some(from), // before it starts; after a skip is tested separately
