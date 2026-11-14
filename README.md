@@ -304,5 +304,6 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s266**: Project commands now run through one shell function (`sh` on Unix, Git for Windows' bash on Windows with a clear error when absent), the Windows askpass helper is `mason-askpass.cmd`, and `mason doctor` reports the shell.
 - **s267**: `mason service` installs a per-user logon Scheduled Task for masond on Windows, and the CPU and memory gates read GetSystemTimes and GlobalMemoryStatusEx there, with the generators and arithmetic tested on every platform.
 - **s268**: A pushed `v*` tag now builds, signs, test-installs on fresh runners and drafts a GitHub release for every package (`.github/workflows/release.yml`), with a dry run by `workflow_dispatch`; a test keeps its asset list equal to docs/RELEASING.md.
+- **s269**: Home's Compilation section now reads `#294 (mason) - Known red ledger record a test failure... - for 5 min` for each task holding a `compile` slot, in both the Swift and Compose monitors.
 - **s273**: `SidebarFitTests` now builds `RowView` with its current by-value initializer, so the `swift-clients` suite compiles again.
 <!-- status:end -->
