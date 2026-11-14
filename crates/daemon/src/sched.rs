@@ -245,6 +245,24 @@ struct State {
     last_pass: Option<Instant>,
     /// A pass is reading lock files right now; waiters leave it to finish.
     pass_running: bool,
+    /// Scheduling passes run since start, for tests and diagnosis.
+    passes: u64,
+}
+
+/// How often waiting jobs re-run the scheduling pass between them, at most. Releases
+/// and submits still pass at once; this only paces the waiters' periodic re-check.
+const PASS_EVERY: Duration = Duration::from_millis(100);
+
+/// Is a waiter's periodic pass due? Not while one ran less than `every` ago: that pass
+/// already granted whatever could be granted, and on 2026-11-13 forty waiters each
+/// passing ten times a second held the broker lock almost all the time.
+fn pass_due_in(last: Option<Instant>, every: Duration) -> bool {
+    last.is_none_or(|t| t.elapsed() >= every)
+}
+
+#[cfg(test)]
+fn pass_due(last: Option<Instant>) -> bool {
+    pass_due_in(last, PASS_EVERY)
 }
 
 /// What the kernel said about lock files, read with the broker lock released.
@@ -459,6 +477,7 @@ impl Broker {
                 stall: None,
                 last_pass: None,
                 pass_running: false,
+                passes: 0,
             }),
             cv: Condvar::new(),
             locks,
@@ -678,6 +697,7 @@ impl Broker {
     fn pass<'a>(&'a self, mut st: MutexGuard<'a, State>) -> MutexGuard<'a, State> {
         use std::sync::atomic::Ordering::Relaxed;
         self.pass_count.fetch_add(1, Relaxed);
+        st.passes += 1;
         // Claimed now, so a waiter that wakes while the files are read does not
         // start a second pass.
         st.last_pass = Some(Instant::now());
@@ -733,6 +753,7 @@ impl Broker {
     fn quick_pass(&self, st: &mut State) {
         self.pass_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        st.passes += 1;
         self.refresh_disk(st);
         self.apply_pass(st, None);
     }
@@ -968,7 +989,7 @@ impl Broker {
             // One pass serves every waiter: run it only if none ran lately.
             let tick =
                 Duration::from_millis(self.tick_ms.load(std::sync::atomic::Ordering::Relaxed));
-            if !st.pass_running && st.last_pass.is_none_or(|t| t.elapsed() >= tick / 2) {
+            if !st.pass_running && pass_due_in(st.last_pass, tick) {
                 st = self.pass(st);
             }
             if st.ledger.holds(id) {
@@ -1872,7 +1893,7 @@ pub(crate) fn broker_with_waiting(dir: &Path, n: u64) -> Arc<Broker> {
             st.meta.insert(id, Meta::Task);
             st.by_task.insert(TaskId(t), id);
         }
-        st = b.pass(st);
+        drop(b.pass(st));
     }
     b
 }
