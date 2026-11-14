@@ -278,6 +278,12 @@ pub(crate) fn run_at_base(
         )
         .ok()?;
     }
+    if let Err(e) = crate::jobs::setup_checkout(&c.def, &wt) {
+        tracing::warn!(task = c.task.0, "base check at {base}: {e}");
+        let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+        git::remove_worktree(repo, &wt);
+        return None;
+    }
     let log = c.task_dir().join(format!("base-r{}.log", c.run.0));
     let result = (|| {
         let full = match build {

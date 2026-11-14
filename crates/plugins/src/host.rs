@@ -318,6 +318,7 @@ pub fn step_run_cancelable(
 }
 
 /// Start the plugin, check what it says it is, run the step, shut it down.
+#[allow(clippy::too_many_arguments)]
 pub fn run_step(
     l: &Launch,
     expect_name: &str,
