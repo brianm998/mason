@@ -13,6 +13,7 @@ public typealias LandingView = Mason_V1_LandingView
 public typealias UsageView = Mason_V1_UsageView
 public typealias EditorView = Mason_V1_EditorView
 public typealias StateCount = Mason_V1_StateCount
+public typealias CiLink = Mason_V1_CiLink
 
 /// What the monitor knows and what the user has done to it. The client draws
 /// this and sends commands; it never re-derives pipeline rules: counts,
@@ -263,6 +264,25 @@ public final class MonitorModel: ObservableObject {
     public var page: Page { history.current }
     public var canGoBack: Bool { history.canGoBack }
     public var canGoForward: Bool { history.canGoForward }
+
+    /// Whether `n` is a task this monitor has heard of (in the sidebar, or named by the open
+    /// task's page), so a `#n` in text can be a link to its page.
+    public func isKnownTask(_ n: UInt64) -> Bool {
+        if sidebar?.sections.contains(where: { $0.rows.contains { $0.id == n } }) == true { return true }
+        if let d = taskDetail, d.hasRow {
+            let r = d.row
+            if r.id == n || r.blockers.contains(n) || r.blocks.contains(n) { return true }
+            if d.debts.contains(where: { $0.task == n }) { return true }
+            if d.hasProposal && d.proposal.filedBy == n { return true }
+        }
+        return false
+    }
+
+    /// `text` as plain text, task links and URL links, for the open task's page.
+    public func linkify(_ text: String) -> [LinkSegment] {
+        Linkify.segments(text, isKnownTask: { [unowned self] in self.isKnownTask($0) },
+                         ciLinks: taskDetail?.ciLinks ?? [])
+    }
 
     public func go(_ p: Page) { history.go(p); subscribe?() }
     public func goBack() { history.goBack(); subscribe?() }

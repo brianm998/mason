@@ -335,3 +335,8 @@ compose = "done"
 description = "The task page shows the ticket's state as a 96 pt illustration (scaled with text zoom) left of the title block, chosen by the daemon's state and changing with it; the phone task screen shows it with the state name at the top; decorative, nothing for an unknown state"
 swift = "done"
 compose = "done"
+
+[feature.task-detail-links]
+description = "On a task's page every task number (#N, for a task the monitor knows) opens that task's page, and every CI reference (the batch pull request, a failed check, a bare URL) and the tracker issue open in the default browser, in why-waiting, failure, tests, plan, body, log, step launches, proposal evidence, the decision card and approval text, debts and filed-by; a CI line lists every link; PR, pull request, Batch, debt and run numbers are never taken for tasks; selectable text stays selectable"
+swift = "done"
+compose = "done"

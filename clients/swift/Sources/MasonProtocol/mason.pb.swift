@@ -2386,11 +2386,37 @@ public nonisolated struct Mason_V1_TaskDetailView: @unchecked Sendable {
     set {_uniqueStorage()._cpuPermille = newValue}
   }
 
+  /// Where CI can be read for this task's landing: the batch's pull request and each failed
+  /// check. Only http(s) URLs are sent. Additive; an older daemon sends none.
+  public var ciLinks: [Mason_V1_CiLink] {
+    get {_storage._ciLinks}
+    set {_uniqueStorage()._ciLinks = newValue}
+  }
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
 
   fileprivate var _storage = _StorageClass.defaultInstance
+}
+
+/// A page on the git host a client opens in the browser. `label` is exactly the text the
+/// task's notes use ("PR #123", a check's name), so a client can link that text.
+public nonisolated struct Mason_V1_CiLink: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var label: String = String()
+
+  public var url: String = String()
+
+  /// "pull_request", "check" or "run".
+  public var kind: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
 }
 
 /// What was noticed, by whom, with the proof; and for an improvement, where its branch is.
@@ -7152,7 +7178,7 @@ nonisolated extension Mason_V1_DebtLine: SwiftProtobuf.Message, SwiftProtobuf._M
 
 nonisolated extension Mason_V1_TaskDetailView: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".TaskDetailView"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}row\0\u{1}steps\0\u{1}plan\0\u{1}card\0\u{1}closing\0\u{1}debts\0\u{3}log_tail\0\u{1}branch\0\u{1}worktree\0\u{1}definition\0\u{1}failure\0\u{1}body\0\u{1}route\0\u{3}started_at\0\u{3}explore_returns\0\u{2}\u{2}approval\0\u{1}numbers\0\u{3}plan_view\0\u{1}proposal\0\u{3}step_tokens\0\u{3}cpu_permille\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}row\0\u{1}steps\0\u{1}plan\0\u{1}card\0\u{1}closing\0\u{1}debts\0\u{3}log_tail\0\u{1}branch\0\u{1}worktree\0\u{1}definition\0\u{1}failure\0\u{1}body\0\u{1}route\0\u{3}started_at\0\u{3}explore_returns\0\u{2}\u{2}approval\0\u{1}numbers\0\u{3}plan_view\0\u{1}proposal\0\u{3}step_tokens\0\u{3}cpu_permille\0\u{3}ci_links\0")
 
   fileprivate class _StorageClass {
     var _row: Mason_V1_TaskRow? = nil
@@ -7176,6 +7202,7 @@ nonisolated extension Mason_V1_TaskDetailView: SwiftProtobuf.Message, SwiftProto
     var _proposal: Mason_V1_ProposalInfo? = nil
     var _stepTokens: [Mason_V1_TokenLine] = []
     var _cpuPermille: Int32 = 0
+    var _ciLinks: [Mason_V1_CiLink] = []
 
       // This property is used as the initial default value for new instances of the type.
       // The type itself is protecting the reference to its storage via CoW semantics.
@@ -7207,6 +7234,7 @@ nonisolated extension Mason_V1_TaskDetailView: SwiftProtobuf.Message, SwiftProto
       _proposal = source._proposal
       _stepTokens = source._stepTokens
       _cpuPermille = source._cpuPermille
+      _ciLinks = source._ciLinks
     }
   }
 
@@ -7246,6 +7274,7 @@ nonisolated extension Mason_V1_TaskDetailView: SwiftProtobuf.Message, SwiftProto
         case 20: try { try decoder.decodeSingularMessageField(value: &_storage._proposal) }()
         case 21: try { try decoder.decodeRepeatedMessageField(value: &_storage._stepTokens) }()
         case 22: try { try decoder.decodeSingularInt32Field(value: &_storage._cpuPermille) }()
+        case 23: try { try decoder.decodeRepeatedMessageField(value: &_storage._ciLinks) }()
         default: break
         }
       }
@@ -7321,6 +7350,9 @@ nonisolated extension Mason_V1_TaskDetailView: SwiftProtobuf.Message, SwiftProto
       if _storage._cpuPermille != 0 {
         try visitor.visitSingularInt32Field(value: _storage._cpuPermille, fieldNumber: 22)
       }
+      if !_storage._ciLinks.isEmpty {
+        try visitor.visitRepeatedMessageField(value: _storage._ciLinks, fieldNumber: 23)
+      }
     }
     try unknownFields.traverse(visitor: &visitor)
   }
@@ -7351,10 +7383,51 @@ nonisolated extension Mason_V1_TaskDetailView: SwiftProtobuf.Message, SwiftProto
         if _storage._proposal != rhs_storage._proposal {return false}
         if _storage._stepTokens != rhs_storage._stepTokens {return false}
         if _storage._cpuPermille != rhs_storage._cpuPermille {return false}
+        if _storage._ciLinks != rhs_storage._ciLinks {return false}
         return true
       }
       if !storagesAreEqual {return false}
     }
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Mason_V1_CiLink: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".CiLink"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}label\0\u{1}url\0\u{1}kind\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.label) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.url) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.kind) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.label.isEmpty {
+      try visitor.visitSingularStringField(value: self.label, fieldNumber: 1)
+    }
+    if !self.url.isEmpty {
+      try visitor.visitSingularStringField(value: self.url, fieldNumber: 2)
+    }
+    if !self.kind.isEmpty {
+      try visitor.visitSingularStringField(value: self.kind, fieldNumber: 3)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Mason_V1_CiLink, rhs: Mason_V1_CiLink) -> Bool {
+    if lhs.label != rhs.label {return false}
+    if lhs.url != rhs.url {return false}
+    if lhs.kind != rhs.kind {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

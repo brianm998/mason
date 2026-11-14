@@ -222,6 +222,7 @@ impl GitHub {
         conclusion: &str,
         steps_run: bool,
         job_id: Option<u64>,
+        url: Option<&str>,
     ) -> JobFailure {
         let extra = self.infra.clone().unwrap_or_default();
         // The log is read for a failure whether or not infrastructure is being judged: the
@@ -240,6 +241,7 @@ impl GitHub {
                 None
             },
             log: log.map(|l| tail_lines(&l, KEEP_LOG_LINES)),
+            url: url.filter(|u| !u.is_empty()).map(String::from),
         }
     }
 }
@@ -340,6 +342,7 @@ impl GitHostAdapter for GitHub {
                     // A check run lists no steps: a cancelled one is judged as cancelled.
                     true,
                     r["details_url"].as_str().and_then(job_id_of),
+                    r["details_url"].as_str(),
                 ));
             }
         }
@@ -927,6 +930,7 @@ impl GitHub {
                                 j["conclusion"].as_str().unwrap_or(""),
                                 steps_run,
                                 j["id"].as_u64(),
+                                j["html_url"].as_str(),
                             ));
                         }
                     }
