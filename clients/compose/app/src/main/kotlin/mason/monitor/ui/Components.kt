@@ -155,6 +155,9 @@ fun ProgressDetail(model: MonitorModel, cell: ProgressCell) {
         if (cell.message.isNotEmpty()) Text(cell.message, style = theme.body())
         cell.subs.forEach { s ->
             Text("${s.name}: " + Format.countText(s.unit, s.done.toLong(), s.done_source, s.total.toLong(), s.total_source, 0), style = theme.body())
+            s.jobs?.let { j ->
+                Text(Format.jobsText(s.name, j), style = theme.body(color = if (j.failed > 0) theme.attention else theme.text))
+            }
         }
         cell.todo.forEach { t ->
             val mark = when (t.status) { "done" -> "✓"; "doing" -> "▶"; else -> "○" }

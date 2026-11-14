@@ -380,6 +380,18 @@ message ProgressSub {
   uint32 total = 4;
   ProgressSource done_source = 5;
   ProgressSource total_source = 6;
+  // For a CI workflow: its jobs told apart by state. Absent for any other count.
+  JobCounts jobs = 7;
+}
+
+// CI jobs by state. "Succeeded" is success, neutral and skipped.
+message JobCounts {
+  uint32 queued = 1;
+  uint32 running = 2;
+  uint32 succeeded = 3;
+  uint32 failed = 4;
+  // The names of the running jobs.
+  repeated string running_names = 5;
 }
 
 // One item of an agent's todo list.
