@@ -188,7 +188,7 @@ pub fn describe_with(h: &AccountHold, now_ms: u64, probe_owner: Option<u64>) -> 
             if h.kind == "credentials" {
                 match probe_owner {
                     Some(t) => format!(
-                        "{why}; checking now with task #{t}; `mason account release {}` lifts it now",
+                        "{why}; log in again (`claude /login`); checking now with task #{t}; `mason account release {}` lifts it now",
                         h.account
                     ),
                     None => format!(

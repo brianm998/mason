@@ -82,11 +82,20 @@ pub(crate) fn short(sha: &str) -> &str {
 
 /// The open task or tracker issue that already covers `test`, if any.
 pub(crate) fn existing_fix(c: &Ctx, test: &str) -> Option<Fix> {
-    if let Ok(w) = c.d.world() {
+    existing_fix_in(&c.d, c.project_id, &c.project.id, test)
+}
+
+fn existing_fix_in(
+    d: &std::sync::Arc<crate::daemon::Daemon>,
+    project: ProjectId,
+    project_name: &str,
+    test: &str,
+) -> Option<Fix> {
+    if let Ok(w) = d.world() {
         let mut open: Vec<&Task> = w
             .tasks
             .values()
-            .filter(|t| t.project == c.project_id && !t.state.is_terminal())
+            .filter(|t| t.project == project && !t.state.is_terminal())
             .filter(|t| is_fix_title(&t.title, test))
             .collect();
         open.sort_by_key(|t| t.id.0);
@@ -94,31 +103,53 @@ pub(crate) fn existing_fix(c: &Ctx, test: &str) -> Option<Fix> {
             return Some(Fix::Task(t.id.0));
         }
     }
-    c.d.store
-        .tracker_items(&c.project.id)
+    d.store
+        .tracker_items(project_name)
         .unwrap_or_default()
         .into_iter()
         .find(|it| it.open && (it.title.contains(test) || it.body.contains(test)))
         .map(|it| Fix::Issue(it.number))
 }
 
-/// The fix for `test` failing at `base`: the one already open, or a new urgent task.
-pub(crate) fn fix_for(c: &Ctx, test: &str, base: &str, cmd: &str, log_tail: &str) -> Option<Fix> {
+/// Where a base failure was seen: enough to file its fix task.
+pub struct Seen<'a> {
+    pub project: ProjectId,
+    pub project_name: &'a str,
+    /// The task whose run found it (0 for none: a landing or deferred run).
+    pub task: u64,
+    /// The step or suite that ran the test.
+    pub step: &'a str,
+    pub base: &'a str,
+    pub cmd: &'a str,
+    pub log_tail: &'a str,
+    /// A fix task that landed with the test still red: the new task links it.
+    pub follows: Option<u64>,
+}
+
+/// The fix for `test` failing at the base: the one already open, or a new urgent task.
+fn file_fix(d: &std::sync::Arc<crate::daemon::Daemon>, s: &Seen, test: &str) -> Option<Fix> {
     let _g = FILING.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(f) = existing_fix(c, test) {
+    if let Some(f) = existing_fix_in(d, s.project, s.project_name, test) {
         return Some(f);
     }
+    let found = if s.task == 0 {
+        "a run over the base".to_string()
+    } else {
+        format!("the merge base of task #{} in {}", s.task, s.project_name)
+    };
     let body = format!(
-        "`{test}` fails on `{base}` (the merge base of task #{} in {}), so it fails for every \
+        "`{test}` fails on `{}` ({found}), so it fails for every \
          task that runs `{}` there. Tasks that hit it are excused (it fails without their \
-         change) until this lands.\n\nCommand at the base:\n```\n{cmd}\n```\n\nOutput tail:\n```\n{log_tail}\n```\n\n\
-         Filed by the test step's base check.",
-        c.task.0, c.project.id, c.step.name
+         change) until this lands. This task's own test step is not excused for it: \
+         `{test}` must pass.\n\nCommand at the base:\n```\n{}\n```\n\nOutput tail:\n```\n{}\n```\n\n\
+         Filed by the known-red ledger (decision 0225).{}",
+        s.base, s.step, s.cmd, s.log_tail,
+        s.follows.map_or(String::new(), |n| format!("\n\nFollow-up to task #{n}, which landed while this test was still red."))
     );
-    let a =
-        c.d.emit(EventKind::TaskFiled {
-            project: c.project_id,
-            title: format!("{test} fails on {}", short(base)),
+    let a = d
+        .emit(EventKind::TaskFiled {
+            project: s.project,
+            title: format!("{test} fails on {}", short(s.base)),
             body,
             priority: Priority::Urgent,
             trust: TrustSource::Owner,
@@ -132,6 +163,96 @@ pub(crate) fn fix_for(c: &Ctx, test: &str, base: &str, cmd: &str, log_tail: &str
         Effect::TaskCreated { task } => Some(Fix::Task(task.0)),
         _ => None,
     })
+}
+
+/// The fix for `test` failing at `base`: the one already open, or a new urgent task.
+#[allow(dead_code)]
+pub(crate) fn fix_for(c: &Ctx, test: &str, base: &str, cmd: &str, log_tail: &str) -> Option<Fix> {
+    let s = Seen {
+        project: c.project_id,
+        project_name: &c.project.id,
+        task: c.task.0,
+        step: &c.step.name,
+        base,
+        cmd,
+        log_tail,
+        follows: None,
+    };
+    file_fix(&c.d, &s, test)
+}
+
+/// The fix landed and `test` is still red: file a follow-up that links it and point the
+/// ledger entry at it. `None` if nothing could be filed.
+pub fn follow_up(
+    d: &std::sync::Arc<crate::daemon::Daemon>,
+    ledger_suite: &str,
+    s: &Seen,
+    test: &str,
+) -> Option<u64> {
+    // The landed task is terminal, so it is not found as "already open".
+    if let Fix::Task(n) = file_fix(d, s, test)? {
+        let _ = d.store.ledger_set_fix(ledger_suite, test, n);
+        return Some(n);
+    }
+    None
+}
+
+/// The tests in `suite`'s ledger whose fix is task `task`.
+pub fn own_tests(store: &mason_store::Store, suite: &str, task: u64) -> Vec<String> {
+    if task == 0 {
+        return vec![];
+    }
+    store
+        .ledger()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|r| r.suite == suite && r.fix_task == Some(task))
+        .map(|r| r.test)
+        .collect()
+}
+
+/// Put the tests seen red at the base into the ledger and give each a fix: the first
+/// sighting adds the entry and files (or finds) one task, later sightings only refresh it.
+/// Names that are not test names are never added. Returns `(test, fix)` for every test.
+pub fn record_red(
+    d: &std::sync::Arc<crate::daemon::Daemon>,
+    ledger_suite: &str,
+    s: &Seen,
+    tests: &[String],
+) -> Vec<(String, Option<Fix>)> {
+    let now = crate::daemon::now_ms();
+    let mut out = vec![];
+    for t in tests {
+        if !mason_testing::gates::is_test_name(t) {
+            continue;
+        }
+        if d.store
+            .ledger_seen_red(ledger_suite, t, "base", s.base, now)
+            .is_err()
+        {
+            out.push((t.clone(), None));
+            continue;
+        }
+        let known = d
+            .store
+            .ledger()
+            .unwrap_or_default()
+            .into_iter()
+            .find(|r| r.suite == ledger_suite && &r.test == t)
+            .and_then(|r| r.fix_task);
+        let fix = match known {
+            Some(n) => Some(Fix::Task(n)),
+            None => {
+                let f = file_fix(d, s, t);
+                if let Some(Fix::Task(n)) = &f {
+                    let _ = d.store.ledger_set_fix(ledger_suite, t, *n);
+                }
+                f
+            }
+        };
+        out.push((t.clone(), fix));
+    }
+    out
 }
 
 /// Run `cmd` (after `build`, if any) in a throwaway worktree at `base`; the failing names.
@@ -253,6 +374,8 @@ pub fn excuse(
     if persistent.is_empty() {
         return None;
     }
+    // The fix task's own step is not excused for the tests it was filed for.
+    let own = own_tests(&c.d.store, &c.step.name, c.task.0);
     let base = merge_base(c)?;
     let key = key_of(&match build {
         Some(b) => format!("{b}\n{base_cmd}"),
@@ -267,13 +390,28 @@ pub fn excuse(
             Some(names)
         })?
     };
-    let tests = at_base(persistent, &failing);
+    let mut tests = at_base(persistent, &failing);
+    tests.retain(|t| !own.contains(t));
     if tests.is_empty() {
         return None;
     }
+    let seen = Seen {
+        project: c.project_id,
+        project_name: &c.project.id,
+        task: c.task.0,
+        step: &c.step.name,
+        base: &base,
+        cmd: base_cmd,
+        log_tail: &tail,
+        follows: None,
+    };
+    let fixes = record_red(&c.d, &c.step.name, &seen, &tests);
     let mut lines = vec![];
     for t in &tests {
-        let fix = fix_for(c, t, &base, base_cmd, &tail);
+        let fix = fixes
+            .iter()
+            .find(|(n, _)| n == t)
+            .and_then(|(_, f)| f.clone());
         lines.push(format!(
             "{t}: also fails at the merge base {}; {}",
             short(&base),
