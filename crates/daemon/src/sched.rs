@@ -2152,11 +2152,16 @@ fn kind_for(st: &State, name: &str) -> Kind {
 
 /// Free memory in MB, or `None` if it cannot be read. Never load average.
 pub fn measure_free_memory_mb() -> Option<u64> {
-    #[cfg(windows)]
-    {
-        return windows_free_memory_mb();
-    }
-    #[cfg(not(windows))]
+    free_memory_mb_here()
+}
+
+#[cfg(windows)]
+fn free_memory_mb_here() -> Option<u64> {
+    windows_free_memory_mb()
+}
+
+#[cfg(not(windows))]
+fn free_memory_mb_here() -> Option<u64> {
     unix_free_memory_mb()
 }
 
