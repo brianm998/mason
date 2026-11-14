@@ -604,7 +604,15 @@ mod tests {
             "agent = \"fast\"\nprompt = \"sec/review.md\"\n",
         );
         let d = parse(&ok).unwrap();
-        assert_eq!(d.steps["explore"].prompt.as_deref(), Some("sec/review.md"));
+        assert_eq!(
+            d.steps
+                .iter()
+                .find(|s| s.name == "explore")
+                .unwrap()
+                .prompt
+                .as_deref(),
+            Some("sec/review.md")
+        );
         for bad in ["/etc/passwd", "../x.md", "a/../x.md", "", "a\\\\b.md"] {
             let t = with(
                 "agent = \"fast\"\n",

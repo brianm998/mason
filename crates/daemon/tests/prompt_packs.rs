@@ -55,9 +55,9 @@ fn run(files: &[(&str, &str)]) -> (String, String, String) {
         "false",
         json!({"steps": {
             "develop": [
-                // Round one: red (no hello.txt). Also edits the step's prompt file in the worktree.
+                // Round one: red (no hello.txt). Also commits an edit of the step's prompt file on the task branch.
                 [record(r, "dev1"),
-                 {"sh": "echo edited-by-the-task > .mason/prompts/security-review.md; echo a > a.txt; git add a.txt"},
+                 {"sh": "echo edited-by-the-task > .mason/prompts/security-review.md; echo a > a.txt; git add -A"},
                  commit("true", "first"), submit()],
                 [record(r, "dev2"),
                  commit("echo hello > hello.txt && git add hello.txt", "second"), submit()],
