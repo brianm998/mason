@@ -124,6 +124,13 @@ pub fn steps_remaining(def: &Definition, from: &str) -> u32 {
     shortest.unwrap_or(def.steps.len() as u32)
 }
 
+/// The steps on the shortest start-to-landed path of a definition: what a
+/// task's [`steps_remaining`] is a share of when tasks of different projects
+/// are compared (never less than 1).
+pub fn route_length(def: &Definition) -> u32 {
+    steps_remaining(def, &def.start).max(1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

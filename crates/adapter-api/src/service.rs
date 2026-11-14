@@ -352,6 +352,13 @@ pub trait TrackerAdapter: Send + Sync {
     fn blocked_by(&self, _number: u64) -> Result<Vec<Blocker>, ApiError> {
         Ok(vec![])
     }
+    /// Make the tracker say `priority` (`urgent`, `high`, `normal`, `low`) for
+    /// issue `number`, so that its next listing agrees with a change the owner
+    /// made here. The default does nothing: a tracker without labels keeps
+    /// its own priority.
+    fn set_priority(&self, _number: u64, _priority: &str) -> Result<(), ApiError> {
+        Ok(())
+    }
 }
 
 // ---- build system ------------------------------------------------------------------
