@@ -447,7 +447,9 @@ fn charge(w: &World, from: u64, to: u64, a: u64, b: u64, r: &mut Replay) {
             continue;
         };
         let (state, wait): (&str, Option<String>) = match t.state {
-            State::Proposed | State::Landed | State::Failed | State::Canceled => continue,
+            State::Proposed | State::Deferred | State::Landed | State::Failed | State::Canceled => {
+                continue
+            }
             _ if t.paused => continue,
             State::Queued if !t.blockers.is_empty() => continue,
             State::Queued => ("queued", Some("queue".into())),

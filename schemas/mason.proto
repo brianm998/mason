@@ -83,7 +83,8 @@ message Command {
     AddTask add_task = 2;
     TaskRef cancel = 3;
     Retry retry = 4;
-    TaskRef approve = 5;
+    // Approve a proposed (or deferred) task, optionally choosing its priority.
+    ApproveTask approve = 5;
     Reject reject = 6;
     TaskRef explore_anyway = 7;
     Answer answer = 8;
@@ -102,6 +103,9 @@ message Command {
     TaskRef revive = 18;
     // Change a compile gate while masond runs, or go back to resources.toml.
     SetGate set_gate = 19;
+    // Proposed to deferred, and back. Owner decisions; no timer.
+    TaskRef defer = 20;
+    TaskRef undefer = 21;
     Raw raw = 30;
   }
   // Who is acting and, optionally, why (recorded with overrides).
@@ -111,6 +115,12 @@ message Command {
 
 message TaskRef {
   uint64 task = 1;
+}
+
+message ApproveTask {
+  uint64 task = 1;
+  // urgent, high, normal or low; empty keeps the task's own priority.
+  string priority = 2;
 }
 
 message Unblock {

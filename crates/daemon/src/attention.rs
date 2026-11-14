@@ -932,7 +932,7 @@ pub struct Stall {
 fn outstanding(t: &Task, now_ms: u64) -> bool {
     if matches!(
         t.state,
-        State::Proposed | State::NeedsAttention | State::Failed
+        State::Proposed | State::Deferred | State::NeedsAttention | State::Failed
     ) || t.state.is_terminal()
     {
         return false;
