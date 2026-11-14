@@ -42,6 +42,7 @@ pub mod knownred;
 pub mod lan;
 pub mod landing;
 pub mod launchview;
+pub mod markers;
 pub mod notify;
 pub mod numbers;
 pub mod outside;

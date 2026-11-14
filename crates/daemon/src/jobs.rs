@@ -1706,12 +1706,27 @@ impl TestChecks {
         crate::suites::skip_for(&self.slots.d, TaskId(self.task), "", step)
     }
 
+    /// Conflict markers the agent's work adds to the base, as a failed check. Read from the
+    /// text, so it needs no slot and answers even where testing is skipped.
+    fn markers_refusal(&self) -> Option<CheckRun> {
+        let (_, base) = self.base_fold.as_ref()?;
+        let found = crate::markers::added_in_worktree(&self.wt, base).ok()?;
+        (!found.is_empty()).then(|| CheckRun::Done {
+            passed: false,
+            summary: crate::markers::refusal(&found),
+        })
+    }
+
     fn check(&self, name: &str, scope: &CheckScope) -> CheckRun {
         // On 2026-11-13 the owner skipped testing for every active task to drain the queue,
         // but their agents kept queueing `run_check` for compile slots. A skip before the
         // check, or one that ends its wait for a slot (`CheckSlots::acquire`), is answered
-        // with what happened, not run.
+        // with what happened, not run. Conflict markers are answered first: with testing
+        // skipped, a merge the agent resolved badly is not built or read by anything else.
         if name == "tests" {
+            if let Some(refusal) = self.markers_refusal() {
+                return refusal;
+            }
             if let Some(debt) = self.skipped_by_owner() {
                 return not_run_skipped(debt);
             }
@@ -2057,9 +2072,12 @@ fn not_run_skipped(debt: u64) -> CheckRun {
     CheckRun::Done {
         passed: true,
         summary: format!(
-            "Not run: the owner skipped testing for this task (debt #{debt}); the tests run \
-             once on the base after it lands. Nothing was built or tested, so this says \
-             nothing about your change: finish it and submit."
+            "Not run: the owner skipped testing for this task (debt #{debt}). Nothing was \
+             built or tested, so this says nothing about your change, and you are the only \
+             check it gets before landing builds the batch. Reread each file where you \
+             merged or resolved a conflict (a conflict marker left in one is refused) and \
+             check that each call you touched still matches what it calls on the base. \
+             Then finish it and submit."
         ),
     }
 }
@@ -2122,6 +2140,13 @@ fn change_validator(
                         "your change edits .mason/mason.toml, and the new definition is invalid ({p}); it takes effect only after landing, so it must be valid first"
                     ));
                 }
+            }
+        }
+        // Raw conflict markers are never a valid change, whatever is tested (or not): the
+        // owner may have skipped testing, and then nothing else would look. Every project.
+        if let Ok(found) = crate::markers::added_since(&wt, &base_ref, "HEAD") {
+            if !found.is_empty() {
+                problems.push(crate::markers::refusal(&found));
             }
         }
         // The scan landing runs, now, before the test step. Where the project sends a
@@ -4076,6 +4101,31 @@ mod tests {
         assert!(r.is_ok(), "{r:?}");
         let text = std::fs::read_to_string(note).unwrap();
         assert!(text.contains("scripts/run.sh:2"), "{text}");
+    }
+
+    #[test]
+    fn submit_refuses_conflict_markers_whatever_the_project() {
+        // Built from repeated characters, so this file holds no marker line itself.
+        let text = format!(
+            "{} HEAD\nmine\n{}\ntheirs\n{} origin/develop",
+            "<".repeat(7),
+            "=".repeat(7),
+            ">".repeat(7)
+        );
+        // A project with no weakening scan is refused all the same, and so is one with it.
+        for holds in [None, Some(crate::config::Holds::Review)] {
+            let (r, _) = submit_with(&text, holds);
+            let problems = r.unwrap_err();
+            assert!(
+                problems
+                    .iter()
+                    .any(|p| p.contains("conflict markers") && p.contains("scripts/run.sh:2")),
+                "{problems:?}"
+            );
+        }
+        // Text that only mentions them, mid-line, is not a marker.
+        let (r, _) = submit_with("echo 'a <<<<<<< in the middle of a line'", None);
+        assert!(r.is_ok(), "{r:?}");
     }
 
     #[test]

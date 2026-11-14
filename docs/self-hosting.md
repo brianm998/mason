@@ -4,7 +4,17 @@ MASON can land its own changes. This page says what that means, what stops for y
 
 ## Turning it on
 
-Copy `docs/examples/mason-self.project.toml` to `<config dir>/projects/mason.toml`, point `path` at your checkout, and start (or restart) `masond`. The `[self]` section is what makes the project MASON's own. The repository's `.mason/mason.toml` is its pipeline and `.mason/landing.toml` how it lands (a batch at a time, straight to `develop`, after `cargo test --workspace`).
+Copy `docs/examples/mason-self.project.toml` to `<config dir>/projects/mason.toml`, point `path` at your checkout, and start (or restart) `masond`. The `[self]` section is what makes the project MASON's own. The repository's `.mason/mason.toml` is its pipeline and `.mason/landing.toml` how it lands (a batch at a time, straight to `develop`, after each task's own test run and a build of the batch's union; see "What landing checks").
+
+## What landing checks
+
+A task's test step runs its suites on the task's own tree. Landing then merges up to `max_size` tasks into one integration branch, and that union is a tree no test step has seen. MASON's own `.mason/landing.toml` has no batch tier, so no suite runs over it. Three things stand between that union and `develop`:
+
+- **Conflict markers are refused.** A branch whose diff against the base adds a line that starts with seven `<` or seven `>` is refused at `submit_change` (with the file and line), by `run_check` (even where the owner has skipped testing for the task) and, last, by the landing job, which sends the task back before it joins a batch. Lines the base already has do not count; a fixture or a document that has to quote a marker must not start it in column 1.
+- **The build floor.** When a project has no batch tier and no CI checks the batch, landing runs the `build` of the test step's suites that the impact map selects for the batch's diff (for MASON, `cargo test --workspace --no-run` in the integration worktree, whose build directory stays warm). It compiles and links every test without running one. A suite with no `build` has nothing to run, and a tree that already has green evidence for a suite (a task's own test run leaves it) is not built again. A red build goes down the red ladder like any red; its rerun rung builds again rather than running the whole suite.
+- **A red base is nobody's red.** When the floor is red, landing builds the base alone first. If the base does not build, nobody is blamed, nothing lands, the batch ends with a note saying so and the `redbase` alert is raised until a batch builds again. (Before this, a base that did not build made the ladder blame the first task of every batch in turn.)
+
+A force (`mason task force`) lands past the floor, as it does past every verification; the marker check still applies to it. Skipping a task's testing (a debt) does not skip the floor: the floor is the batch's, not the task's.
 
 ## Importing issues
 

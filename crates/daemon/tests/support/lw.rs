@@ -51,6 +51,25 @@ max_rounds = 3
     s
 }
 
+/// What each suite's `build` runs: red when a file `red.build.NAME` is anywhere in the tree,
+/// and red when `joint.a` and `joint.b` are both there (two changes that merge cleanly and
+/// do not build together).
+const BUILDS: &str = r#"#!/bin/sh
+n="$1"
+has() { [ -n "$(find . -name "$1" -not -path "./.git/*")" ]; }
+if has "red.build.$n"; then
+  echo "Compiling $n"
+  echo "error[E0061]: this function takes 6 arguments but 5 arguments were supplied"
+  exit 1
+fi
+if has joint.a && has joint.b; then
+  echo "Compiling $n"
+  echo "error[E0599]: the two changes do not build together"
+  exit 1
+fi
+echo "built $n"
+"#;
+
 pub struct W {
     pub s: Scratch,
     pub d: Arc<Daemon>,
@@ -103,6 +122,44 @@ pub fn world_full(
     sh(&s.repo, &["fetch", "-q", "origin"]);
     let d = s.start_with(|c| c.env_retry = Duration::from_millis(200));
     // Nothing is claimed by the scheduler: the test places tasks itself.
+    mason_daemon::attention::pause(&d, "", "claims", "test", 3600).unwrap();
+    W { s, d }
+}
+
+/// A world whose definition has a test step that runs the suites `alpha` and `beta`, each
+/// with a `build` (`sh build.sh NAME`, red when `red.build.NAME` is in the tree): what the
+/// landing build floor runs when the landing config has no batch tier.
+pub fn world_built(landing_toml: &str, files: &[(&str, &str)]) -> W {
+    let s = Scratch::new("true", json!({"steps": {}}));
+    s.write_project("scratch", "true", "");
+    let mut definition = def().replacen(
+        "category = \"developing\"\nnext = \"land\"",
+        "category = \"developing\"\nnext = \"test\"",
+        1,
+    );
+    for n in ["alpha", "beta"] {
+        let header = format!("[suite.{n}]\ncommand = \"sh checks.sh {n}\"\n");
+        assert!(definition.contains(&header), "suite {n} in the definition");
+        definition = definition.replacen(
+            &header,
+            &format!("[suite.{n}]\nbuild = \"sh build.sh {n}\"\ncommand = \"sh checks.sh {n}\"\n"),
+            1,
+        );
+    }
+    definition.push_str(
+        "\n[step.test]\ntype = \"test\"\ncategory = \"testing\"\nsuites = [\"alpha\", \"beta\"]\nuses = { compile = 1 }\nnext = \"land\"\non_red = \"develop\"\nmax_rounds = 3\n\n[resource.compile]\ncount = 1\n",
+    );
+    let mut all: Vec<(&str, &str)> = vec![
+        (".mason/mason.toml", &definition),
+        (".mason/landing.toml", landing_toml),
+        ("checks.sh", CHECKS),
+        ("build.sh", BUILDS),
+        ("shared.txt", "base\n"),
+    ];
+    all.extend_from_slice(files);
+    s.push_files(&all, "project setup");
+    sh(&s.repo, &["fetch", "-q", "origin"]);
+    let d = s.start_with(|c| c.env_retry = Duration::from_millis(200));
     mason_daemon::attention::pause(&d, "", "claims", "test", 3600).unwrap();
     W { s, d }
 }
