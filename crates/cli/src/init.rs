@@ -544,7 +544,7 @@ pub fn prove(d: &Detected, id: &str, base: &str, data_dir: &Path) -> Result<(), 
     {
         return Err(format!("{base} has no .mason/ yet, so a task would run the built-in pipeline rather than your workflow. Merge {SETUP_BRANCH} into {base} (and push it, if there is a remote), then run `mason init --prove-only`"));
     }
-    client::find(data_dir).map_err(|_| "masond is not running. Start it (`masond`), then run `mason init --prove-only` to file the first task".to_string())?;
+    let daemon = client::find(data_dir).map_err(|_| "masond is not running. Start it (`masond`), then run `mason init --prove-only` to file the first task".to_string())?;
     register(data_dir, id)?;
     let r = daemon
         .call("POST", "/tasks", Some(&json!({"project": id, "title": PROOF_TITLE, "body": PROOF_BODY, "priority": "normal", "proposed": false, "explored": true, "after": []})))
