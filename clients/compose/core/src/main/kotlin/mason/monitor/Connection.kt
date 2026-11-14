@@ -65,6 +65,9 @@ class MonitorConnection(
         val welcomed = java.util.concurrent.atomic.AtomicBoolean(false)
         val mine = java.util.concurrent.atomic.AtomicReference<MonitorSocket?>(null)
         val ready = CountDownLatch(1)
+        // Nothing but the hello may be first on the socket: OkHttp queues a send made before the
+        // open, so a ping from the loop would reach the daemon ahead of the hello.
+        val greeted = java.util.concurrent.atomic.AtomicBoolean(false)
         fun say(m: ClientMessage) { mine.get()?.send(Codec.encode(m)) }
         val events = object : SocketEvents {
             override fun onOpen() {
@@ -76,6 +79,7 @@ class MonitorConnection(
                     client_version = model.ownVersion,
                     actor = model.identity,
                 )))
+                greeted.set(true)
             }
 
             override fun onMessage(text: String) {
@@ -102,7 +106,7 @@ class MonitorConnection(
             val now = discover()
             if (now != null && now.replaces(info)) break  // restarted: start over from the last seq
             // Ask first, then give up: a late tick must not skip the ping that was due.
-            if ((System.nanoTime() - lastPing) / 1e9 >= timing.pingEverySeconds) {
+            if (greeted.get() && (System.nanoTime() - lastPing) / 1e9 >= timing.pingEverySeconds) {
                 lastPing = System.nanoTime()
                 say(ClientMessage(ping = Ping(nonce = ++pings)))
             }
