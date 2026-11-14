@@ -85,6 +85,42 @@ const NEAR: usize = 5;
 /// How far back a loop opener makes a sleep a poll.
 const LOOP_BACK: usize = 10;
 
+/// The line with the text of its string literals removed: a sleep or an assertion that is only
+/// text (test data, a message, a shell command) is not code that runs.
+fn without_strings(t: &str) -> String {
+    let mut out = String::new();
+    let mut in_str = false;
+    let mut esc = false;
+    for c in t.chars() {
+        if in_str {
+            if esc {
+                esc = false;
+            } else if c == '\\' {
+                esc = true;
+            } else if c == '"' {
+                in_str = false;
+                out.push('"');
+            }
+        } else {
+            if c == '"' {
+                in_str = true;
+            }
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// A deadline check: an elapsed-time assertion whose message says it is a timeout. Waiting for
+/// a condition under a deadline is the sanctioned pattern.
+fn is_deadline_check(t: &str) -> bool {
+    let low = t.to_ascii_lowercase();
+    (low.contains("elapsed") || low.contains("instant::now"))
+        && ["timed out", "timeout", "deadline", "gave up"]
+            .iter()
+            .any(|w| low.contains(w))
+}
+
 fn is_comment(t: &str) -> bool {
     t.starts_with("//") || t.starts_with('*') || t.starts_with("/*")
 }
@@ -151,6 +187,12 @@ fn fixed_millis(t: &str) -> Option<u64> {
         0 => Some(500),
         n => Some(n.saturating_mul(1000)),
     }
+}
+
+/// A pause of 10 ms or less between two actions, to give them different clock readings: it
+/// waits for nothing, and a slow machine cannot make it too short.
+fn separates_timestamps(t: &str) -> bool {
+    t.contains("sleep(") && fixed_millis(t).is_some_and(|ms| ms <= 10)
 }
 
 /// A sleep of a fixed length.
@@ -277,14 +319,25 @@ pub fn findings(
                 .is_some_and(|j| at[j] + k == at[i] && opens_loop(&added[j]))
         })
     };
+    // A deadline check just above a sleep makes the sleep a poll.
+    let polls = |i: usize| {
+        (1..=3).any(|k| {
+            i.checked_sub(k)
+                .is_some_and(|j| at[j] + k == at[i] && is_deadline_check(&added[j]))
+        })
+    };
     let mut out = vec![];
     for i in from..added.len() {
-        let t = added[i].trim();
+        let original = added[i].trim();
+        let stripped = without_strings(original);
+        let t = stripped.trim();
         let mut rule: Option<&'static str> = None;
-        if is_fixed_sleep(lang, t) && !in_loop(i) {
+        if is_fixed_sleep(lang, t) && !in_loop(i) && !polls(i) && !separates_timestamps(t) {
             let swift = lang == Lang::Swift;
-            let assert_after =
-                (1..=NEAR).any(|k| near(i, i + k) && has_assert(added[i + k].trim()));
+            // An assertion counts only in the same block: a closing brace ends the search.
+            let assert_after = (1..=NEAR)
+                .take_while(|k| near(i, i + k) && !added[i + k].trim_start().starts_with('}'))
+                .any(|k| has_assert(&without_strings(added[i + k].trim())));
             if swift || assert_after {
                 rule = Some(if swift {
                     "a fixed sleep in a test"
@@ -293,7 +346,7 @@ pub fn findings(
                 });
             }
         }
-        if rule.is_none() && asserts_on_elapsed(t) {
+        if rule.is_none() && asserts_on_elapsed(t) && !is_deadline_check(original) {
             rule = Some("asserts on elapsed time against a constant");
         }
         if rule.is_none() && !in_loop(i) {
@@ -458,7 +511,7 @@ mod tests {
     fn test_code_inside_a_source_file_counts_from_its_test_attribute() {
         let r = scan(
             "crates/x/src/lib.rs",
-            "fn real() {\n    std::thread::sleep(Duration::from_millis(10));\n    assert!(x);\n}\n#[test]\nfn t() {\n    std::thread::sleep(Duration::from_millis(10));\n    assert!(x);\n}\n",
+            "fn real() {\n    std::thread::sleep(Duration::from_millis(200));\n    assert!(x);\n}\n#[test]\nfn t() {\n    std::thread::sleep(Duration::from_millis(200));\n    assert!(x);\n}\n",
         );
         assert_eq!(r.len(), 1, "{r:?}");
         assert_eq!(r[0].0, 7);
@@ -482,5 +535,34 @@ mod tests {
         assert_eq!(scan("a/tests/t.rs", &bad).len(), 1);
         let bad2 = format!("// timing: owner brian expires soon\n{line}");
         assert_eq!(scan("a/tests/t.rs", &bad2).len(), 1);
+    }
+
+    #[test]
+    fn what_the_probe_over_the_whole_repository_found_to_be_false_positives_is_not_flagged() {
+        // Text that only looks like code (test data in a string).
+        assert!(scan(
+            "a/tests/t.rs",
+            "let src = \"std::thread::sleep(Duration::from_millis(200));\\nassert!(x);\";\n"
+        )
+        .is_empty());
+        // A deadline check beside a poll sleep, outside any loop opener in view.
+        let poll = "assert!(started.elapsed() < Duration::from_secs(150), \"timed out\");\nstd::thread::sleep(Duration::from_millis(5));\nassert!(x);\n";
+        assert!(
+            scan("a/tests/t.rs", poll).is_empty(),
+            "{:?}",
+            scan("a/tests/t.rs", poll)
+        );
+        // A pause of 10 ms or less only separates two clock readings.
+        assert!(scan("a/tests/t.rs", "emit(a);\nstd::thread::sleep(Duration::from_millis(5));\nemit(b);\nassert!(order());\n").is_empty());
+        assert_eq!(
+            scan(
+                "a/tests/t.rs",
+                "std::thread::sleep(Duration::from_millis(20));\nassert!(x);\n"
+            )
+            .len(),
+            1
+        );
+        // An assertion after the block that holds the sleep closes is not about it.
+        assert!(scan("a/tests/t.rs", "let t = spawn(move || {\n    std::thread::sleep(Duration::from_secs(3));\n});\nassert!(x);\n").is_empty());
     }
 }
