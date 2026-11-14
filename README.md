@@ -301,6 +301,7 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s263**: A suite (or its whole step) skipped by force while it waits for its build or run slot now stops waiting at once and takes no slot; its run reports "skipped by force" straight away. Before, the skip was only checked once the slot was granted and the build had started.
 - **s264**: When the owner skips a task's test step, the develop agent's `run_check` of the tests no longer builds or runs anything. A check called after the skip answers at once, and one already waiting for a slot stops waiting and answers the same: not run, the owner skipped testing, finish and submit.
 - **s265**: On Windows a daemon update hands over by spawning the new runtime and exiting, and `masond --managed` supervises a child instead of exec'ing, keeping the crash counting and rollback; Unix still execs.
+- **s266**: Project commands now run through one shell function (`sh` on Unix, Git for Windows' bash on Windows with a clear error when absent), the Windows askpass helper is `mason-askpass.cmd`, and `mason doctor` reports the shell.
 - **s268**: A pushed `v*` tag now builds, signs, test-installs on fresh runners and drafts a GitHub release for every package (`.github/workflows/release.yml`), with a dry run by `workflow_dispatch`; a test keeps its asset list equal to docs/RELEASING.md.
 - **s273**: `SidebarFitTests` now builds `RowView` with its current by-value initializer, so the `swift-clients` suite compiles again.
 <!-- status:end -->
