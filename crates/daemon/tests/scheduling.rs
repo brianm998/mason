@@ -974,6 +974,7 @@ fn home_compile_holders_carry_the_tasks_project_and_full_title() {
     d.broker.set_limit("llm:claude", 0).unwrap();
     let title = "A very long title that is certainly longer than the monitor will show in a row";
     let t = file_in(&d, "scratch", title);
+    d.broker.set_limit("compile", 3).unwrap();
     let (tid, held_task) = hold(&d, "#task", &[("compile", 1)]);
     d.broker.lease_set_task(tid, t);
     let (pid, held_person) = hold(&d, "interactive `cargo build`", &[("compile", 1)]);
