@@ -91,6 +91,7 @@ impl GitHub {
                     "failure",
                     steps_run,
                     j["id"].as_u64(),
+                    j["html_url"].as_str(),
                 );
                 if jf.infra.is_some() {
                     continue; // infrastructure: wait, the run may be retried
