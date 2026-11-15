@@ -687,7 +687,9 @@ dependencies = [
 name = "mason-adapter-api"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "mason-platform",
+ "ring",
  "serde_json",
 ]
 
@@ -724,6 +726,7 @@ name = "mason-daemon"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64",
  "hyper",
  "hyper-util",
  "mason-adapter-api",
@@ -745,6 +748,7 @@ dependencies = [
  "mdns-sd",
  "nix",
  "rcgen",
+ "ring",
  "rusqlite",
  "rustls",
  "serde_json",
