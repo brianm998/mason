@@ -820,6 +820,28 @@ final class MonitorCoreTests: XCTestCase {
         XCTAssertEqual(otherBoxKey(shift: true), .newline)
     }
 
+    func testSpaceTogglesAndReturnSendsTheCheckedSet() {
+        var s = MultiSelection(count: 4, recommended: 1)
+        XCTAssertNil(s.answer, "nothing is checked until Space")
+        s.toggle(); XCTAssertEqual(s.answer, "2", "Space checks the highlighted option")
+        s.down(); s.down(); s.toggle(); XCTAssertEqual(s.answer, "2,4")
+        s.toggle(0); XCTAssertEqual(s.answer, "1,2,4", "a click checks that option, in card order")
+        s.toggle(); XCTAssertEqual(s.answer, "2,4", "Space on a checked option unchecks it")
+        let before = s
+        s.toggle(9); XCTAssertEqual(s, before, "a box that is not there changes nothing")
+        var none = MultiSelection(count: 2)
+        none.toggle(); XCTAssertNil(none.answer, "no highlight, nothing to toggle")
+        XCTAssertNil(otherAnswer("  \n"), "a blank Other box sends nothing")
+    }
+
+    func testAMultiSelectCardOffersSendToTheOwnerOnly() {
+        var c = card()
+        c.multiSelect = true
+        XCTAssertEqual(c.item(task: 7).actions, ["option:1", "option:2", "other", "send"])
+        XCTAssertEqual(c.item(task: 7, owner: false).actions, [])
+        XCTAssertEqual(card().item(task: 7).actions, ["option:1", "option:2", "other"])
+    }
+
     func approval(hold: Bool) -> Mason_V1_Approval {
         .with {
             $0.kind = hold ? "hold" : "approval"

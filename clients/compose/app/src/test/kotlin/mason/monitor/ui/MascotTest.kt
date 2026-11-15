@@ -3,7 +3,9 @@ package mason.monitor.ui
 
 import mason.MascotManifest
 import kotlin.test.Test
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 
@@ -71,5 +73,41 @@ class MascotTest {
         assertEquals(0, alpha(1023, 1023))
         assertEquals(255, alpha(512, 512))
         assertNotNull(Mascot.squareAppIcon())
+    }
+
+    @Test
+    fun theDockIconIsTheMacShapedArtOnlyOnMac() {
+        val img = assertNotNull(Mascot.dockIcon("Mac OS X"))
+        assertEquals(1024, img.width)
+        assertEquals(1024, img.height)
+        assertNull(Mascot.dockIcon("Linux"))
+        assertNull(Mascot.dockIcon("Windows 11"))
+        assertEquals(1024, assertNotNull(Mascot.appIcon()).width)
+    }
+
+    private val brand = java.io.File("../../swift/Sources/MasonMascot/Art/brand")
+    private val packaging = java.io.File("../packaging/icons")
+
+    @Test
+    fun thePackagingIconsMatchTheBrandArt() {
+        assertContentEquals(
+            java.io.File(brand, "app_icon.png").readBytes(),
+            java.io.File(packaging, "mason-monitor.png").readBytes(),
+        )
+        // The .icns holds the macOS-shaped art as its one 1024 px entry.
+        val icns = java.io.File(packaging, "mason-monitor.icns").readBytes()
+        assertEquals("icns", String(icns, 0, 4))
+        assertEquals("ic10", String(icns, 8, 4))
+        assertContentEquals(java.io.File(brand, "app_icon_macos.png").readBytes(), icns.copyOfRange(16, icns.size))
+    }
+
+    @Test
+    fun theAndroidLauncherArtMatchesTheBrandArt() {
+        val res = java.io.File("../android/src/main/res")
+        assertContentEquals(
+            java.io.File(brand, "app_icon.png").readBytes(),
+            java.io.File(res, "drawable-nodpi/ic_launcher_art.png").readBytes(),
+        )
+        assertTrue(java.io.File(res, "mipmap-anydpi/ic_launcher.xml").exists())
     }
 }

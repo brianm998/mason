@@ -63,7 +63,7 @@ fun DecisionCard.item(task: Long, owner: Boolean = true): Item {
     val texts = mutableListOf(ask, why)
     options.forEachIndexed { i, o -> texts += "${i + 1}. ${o.label}${if (o.recommended) " (recommended)" else ""}" }
     texts += evidence
-    val actions = if (owner) options.indices.map { "option:${it + 1}" } + "other" else emptyList()
+    val actions = if (owner) options.indices.map { "option:${it + 1}" } + "other" + (if (multi_select) listOf("send") else emptyList()) else emptyList()
     return Item("card:$task", texts, actions)
 }
 

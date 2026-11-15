@@ -1897,6 +1897,9 @@ public nonisolated struct Mason_V1_DecisionCard: Sendable {
 
   public var origin: String = String()
 
+  /// Several answers are allowed (s297).
+  public var multiSelect: Bool = false
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -6475,7 +6478,7 @@ nonisolated extension Mason_V1_CardOption: SwiftProtobuf.Message, SwiftProtobuf.
 
 nonisolated extension Mason_V1_DecisionCard: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".DecisionCard"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}ask\0\u{1}why\0\u{1}options\0\u{1}evidence\0\u{1}hash\0\u{1}origin\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}ask\0\u{1}why\0\u{1}options\0\u{1}evidence\0\u{1}hash\0\u{1}origin\0\u{3}multi_select\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -6489,6 +6492,7 @@ nonisolated extension Mason_V1_DecisionCard: SwiftProtobuf.Message, SwiftProtobu
       case 4: try { try decoder.decodeRepeatedStringField(value: &self.evidence) }()
       case 5: try { try decoder.decodeSingularStringField(value: &self.hash) }()
       case 6: try { try decoder.decodeSingularStringField(value: &self.origin) }()
+      case 7: try { try decoder.decodeSingularBoolField(value: &self.multiSelect) }()
       default: break
       }
     }
@@ -6513,6 +6517,9 @@ nonisolated extension Mason_V1_DecisionCard: SwiftProtobuf.Message, SwiftProtobu
     if !self.origin.isEmpty {
       try visitor.visitSingularStringField(value: self.origin, fieldNumber: 6)
     }
+    if self.multiSelect != false {
+      try visitor.visitSingularBoolField(value: self.multiSelect, fieldNumber: 7)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -6523,6 +6530,7 @@ nonisolated extension Mason_V1_DecisionCard: SwiftProtobuf.Message, SwiftProtobu
     if lhs.evidence != rhs.evidence {return false}
     if lhs.hash != rhs.hash {return false}
     if lhs.origin != rhs.origin {return false}
+    if lhs.multiSelect != rhs.multiSelect {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
