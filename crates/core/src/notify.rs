@@ -475,7 +475,7 @@ pub fn sentence(kind: &str, subject: &str, detail: &str, reminder: bool) -> Stri
         "disk" if detail.is_empty() => "MASON is stopped: disk is nearly full".into(),
         "disk" => format!("MASON is stopped: disk is nearly full, {detail}"),
         "landed" => format!("{subject} landed"),
-        "daemon_down" => "MASON has lost its daemon; check that masond is running".into(),
+        "daemon_down" => "MASON has lost its daemon; check that mason D is running".into(),
         "credentials" => {
             format!("{subject}: the agent is not logged in; log in again (`claude /login`); work resumes at the next check, or `mason account release <name>` resumes it now")
         }
@@ -543,6 +543,13 @@ pub fn daemon_should_speak(enabled: bool, last_claim_ms: Option<u64>, now_ms: u6
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn daemon_down_is_spoken_as_mason_d() {
+        let s = sentence("daemon_down", "MASON", "", false);
+        assert!(s.contains("mason D"), "{s}");
+        assert!(!s.contains("masond"), "{s}");
+    }
 
     fn st(since: u64) -> AlertState {
         AlertState {

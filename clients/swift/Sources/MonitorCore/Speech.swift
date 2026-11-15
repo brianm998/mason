@@ -76,7 +76,7 @@ public struct SpeechSettings: Equatable, Sendable {
 /// How long the connection must be down before the monitor raises "daemon down" itself.
 public let daemonDownAfter: TimeInterval = 15
 
-public let daemonDownSentence = "MASON has lost its daemon; check that masond is running."
+public let daemonDownSentence = "MASON has lost its daemon; check that mason D is running."
 
 @MainActor
 public final class Announcer {

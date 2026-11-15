@@ -71,7 +71,7 @@ data class SpeechSettings(
 
 /** How long the connection must be down before the monitor raises "daemon down" itself. */
 const val DAEMON_DOWN_AFTER_MS = 15_000L
-const val DAEMON_DOWN_SENTENCE = "MASON has lost its daemon; check that masond is running."
+const val DAEMON_DOWN_SENTENCE = "MASON has lost its daemon; check that mason D is running."
 
 class Announcer(
     /** What makes the noise. The app replaces the silent default with a real one. */
