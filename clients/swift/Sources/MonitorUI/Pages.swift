@@ -870,7 +870,7 @@ func landingItemText(_ i: Mason_V1_TaskLanding) -> String {
 }
 
 /// A detail page for one section of home (`mason://section/<name>`): only that section, with
-/// the room to show a task's progress, step, attempt, why it waits, time in state, CPU share
+/// the room to show a task's progress, step, why it waits, time in state, CPU share
 /// and model on one wide row. The rows are the sidebar's, so they come in its order.
 struct SectionPage: View {
     @Environment(\.theme) var theme
@@ -953,7 +953,6 @@ struct StageRows: View {
 
     @ViewBuilder func detail(_ r: TaskRow) -> some View {
         let parts = [r.step.isEmpty ? "" : r.step,
-                     r.attempt > 1 ? "attempt \(r.attempt)" : "",
                      MonitorModel.suiteProgress(r),
                      r.whyWaiting,
                      Format.duration(ms: r.inStateMs),

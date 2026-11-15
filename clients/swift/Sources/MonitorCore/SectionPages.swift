@@ -32,7 +32,7 @@ extension MonitorModel {
 
     /// "12 of 40 suites" for a task whose running step counts, else "".
     public static func suiteProgress(_ row: TaskRow) -> String {
-        guard let c = row.progress.running, c.hasRealTotal else { return "" }
+        guard let c = row.progress.first(where: { $0.state == .part && $0.run != 0 }), c.hasRealTotal else { return "" }
         return "\(c.done) of \(c.total) \(c.unit.isEmpty ? "suites" : c.unit)"
     }
 
