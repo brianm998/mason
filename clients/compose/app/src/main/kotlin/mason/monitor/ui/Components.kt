@@ -59,6 +59,7 @@ import androidx.compose.ui.input.key.type
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
 import mason.monitor.OpenSession
+import mason.monitor.MultiSelection
 import mason.monitor.OptionSelection
 import mason.monitor.OtherKey
 import mason.monitor.otherAnswer
@@ -322,6 +323,9 @@ fun DecisionCardView(model: MonitorModel, task: Long, card: DecisionCard) {
     var selection by remember(card.hash) {
         mutableStateOf(OptionSelection.starting(card.options.size, card.options.indexOfFirst { it.recommended }.takeIf { it >= 0 }))
     }
+    var multi by remember(card.hash) {
+        mutableStateOf(MultiSelection.starting(card.options.size, card.options.indexOfFirst { it.recommended }.takeIf { it >= 0 }))
+    }
     val shape = RoundedCornerShape(theme.radius)
     val focus = remember { FocusRequester() }
     fun sendOther() {
@@ -341,10 +345,11 @@ fun DecisionCardView(model: MonitorModel, task: Long, card: DecisionCard) {
             .onPreviewKeyEvent { e ->
                 if (!model.canAct || e.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
                 when (e.key) {
-                    Key.DirectionDown -> { selection = selection.down(); true }
-                    Key.DirectionUp -> { selection = selection.up(); true }
+                    Key.DirectionDown -> { if (card.multi_select) multi = multi.down() else selection = selection.down(); true }
+                    Key.DirectionUp -> { if (card.multi_select) multi = multi.up() else selection = selection.up(); true }
+                    Key.Spacebar -> if (card.multi_select) { multi = multi.toggle(); true } else false
                     Key.Enter, Key.NumPadEnter -> {
-                        val a = selection.answer
+                        val a = if (card.multi_select) multi.answer else selection.answer
                         if (a != null) { model.answer(task, a, card.hash); true } else false
                     }
                     else -> false
@@ -360,7 +365,19 @@ fun DecisionCardView(model: MonitorModel, task: Long, card: DecisionCard) {
         Column(verticalArrangement = Arrangement.spacedBy(theme.spacingSmall)) {
             card.options.forEachIndexed { i, o ->
                 val label = "${i + 1}.  ${o.label}${if (o.recommended) "   recommended" else ""}"
-                if (model.canAct) {
+                if (model.canAct && card.multi_select) {
+                    // Several answers: a checkbox per option; Send sends the checked ones.
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
+                            .border(BorderStroke(if (multi.index == i) 2.dp else 0.dp, theme.text), shape)
+                            .clickable { multi = multi.toggle(i) }
+                            .testTag("card:$task:option:${i + 1}"),
+                    ) {
+                        androidx.compose.material3.Checkbox(checked = i in multi.checked, onCheckedChange = { multi = multi.toggle(i) })
+                        Text(label, style = theme.body())
+                    }
+                } else if (model.canAct) {
                     Pill(
                         label,
                         prominent = o.recommended,
@@ -370,6 +387,11 @@ fun DecisionCardView(model: MonitorModel, task: Long, card: DecisionCard) {
                     ) { model.answer(task, (i + 1).toString(), card.hash) }
                 } else {
                     Text(label, style = theme.body())
+                }
+            }
+            if (model.canAct && card.multi_select) {
+                Pill("Send the checked options", modifier = Modifier.testTag("card:$task:send-checked")) {
+                    multi.answer?.let { model.answer(task, it, card.hash) }
                 }
             }
             if (model.canAct) Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing), verticalAlignment = Alignment.Top) {
