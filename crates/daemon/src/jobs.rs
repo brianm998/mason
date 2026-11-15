@@ -171,7 +171,13 @@ impl Ctx {
             .ok()
             .and_then(|w| w.step_runs.get(&self.run).map(|r| r.started_at.0));
         let elapsed = started.map(|s| now_ms().saturating_sub(s)).unwrap_or(0);
-        let waited = wait_total(self.run.0);
+        // After a daemon restart the in-memory total starts again at zero; the credit kept
+        // in the task folder (s417) still holds the queue time before it.
+        let kept = std::fs::read_to_string(self.task_dir().join(credit_file_name(self.run.0)))
+            .ok()
+            .and_then(|t| t.trim().parse::<u64>().ok())
+            .unwrap_or(0);
+        let waited = wait_total(self.run.0).max(kept);
         timeout_text(waited, elapsed)
     }
 
@@ -473,6 +479,11 @@ fn wait_total(run: u64) -> u64 {
         Some((t, open)) => t + open.map(|s| now.saturating_sub(s)).unwrap_or(0),
         None => 0,
     }
+}
+
+/// The file in the task's folder that keeps a run's queue-wait credit (s417).
+fn credit_file_name(run: u64) -> String {
+    format!("deadline-credit-r{run}.txt")
 }
 
 /// The text of a timeout after `waited` ms of `elapsed` ms spent waiting.
@@ -1057,6 +1068,35 @@ pub(crate) fn held_needs_text(needs: &mason_scheduler::Needs) -> String {
         text.push_str("exclusive");
     }
     text
+}
+
+/// Whether `build` already passed on this exact tree in this worktree, so it need not run
+/// (and need not queue for a `compile` slot) again.
+fn build_reused(
+    d: &crate::daemon::Daemon,
+    tree: Option<&str>,
+    build: &str,
+    wt: &std::path::Path,
+) -> bool {
+    tree.is_some_and(|t| {
+        crate::cmdreuse::build_green_for(d, t, &crate::cmdreuse::build_key(build), wt)
+    })
+}
+
+fn reuse_build(c: &Ctx, build: &str) -> bool {
+    if started(c, "build", 0) {
+        return false;
+    }
+    let tree = crate::cmdreuse::content_tree(&c.wt);
+    let yes = build_reused(&c.d, tree.as_deref(), build, &c.wt);
+    if yes {
+        tracing::info!(
+            task = c.task.0,
+            run = c.run.0,
+            "build already passed for this tree; reused"
+        );
+    }
+    yes
 }
 
 /// A test step's build, when it has one: its command runs in two phases.
@@ -1985,6 +2025,10 @@ impl TestChecks {
         // rest of what the test step uses.
         let uses = match &cmds.build {
             None => self.slots.test_uses.clone(),
+            Some(build) if build_reused(&self.slots.d, ctree.as_deref(), build, &self.wt) => {
+                tracing::info!(wt = %self.wt.display(), "build already passed for this tree; reused");
+                tests_uses(&self.slots.test_uses)
+            }
             Some(build) => {
                 let bspec = spec(format!("{}build", self.id_prefix), build, &build_uses());
                 let queue = !crate::hostedcheck::pending(&self.slots.d, &bspec);
@@ -1996,6 +2040,15 @@ impl TestChecks {
                 };
                 let res = crate::hostedcheck::run(&self.slots.d, &bspec);
                 drop(lease);
+                if let Some(t) = ctree.as_deref() {
+                    let bk = crate::cmdreuse::build_key(build);
+                    match &res {
+                        Ok(o) if o.passed => {
+                            crate::cmdreuse::record_build_green(&self.slots.d, t, &bk, &self.wt)
+                        }
+                        _ => crate::cmdreuse::record_build_red(&self.slots.d, t, &bk, &self.wt),
+                    }
+                }
                 match res {
                     Ok(o) if o.passed => {}
                     Ok(o) => {
@@ -2688,7 +2741,7 @@ fn agent_job(c: &Ctx) {
     // was credited before it (s417).
     let deadline_extra = mason_adapter_api::DeadlineExtra::kept_in(
         c.task_dir()
-            .join(format!("deadline-credit-r{}.txt", c.run.0)),
+            .join(credit_file_name(c.run.0)),
     );
     // The agent's own `mason run` commands that wait in the queue add to it too (s363),
     // until this step ends.
@@ -3380,24 +3433,42 @@ fn command_job(c: &Ctx) {
         None => c.step.uses.clone(),
         Some(build) => {
             let uses = build_uses();
-            if !started(c, "build", 0) {
+            let reused = reuse_build(c, &build);
+            if !reused && !started(c, "build", 0) {
                 match acquire_needs(c, crate::sched::needs_of(&uses, None)) {
                     Ok(l) => *c.lease.lock().unwrap_or_else(|e| e.into_inner()) = Some(l),
                     Err(_) => return,
                 }
             }
-            let built = run_command_once(c, &build, "build", 0, &uses, &format!("{what}'s build"));
-            c.release_lease();
-            match built {
-                Err(why) => return c.fail(why),
-                Ok(CommandRun {
-                    verdict:
-                        RunVerdict::Red {
-                            reason, feedback, ..
-                        },
-                    ..
-                }) => return c.conclude(Outcome::Red, reason, Some(feedback)),
-                Ok(_) => {}
+            if !reused {
+                let built =
+                    run_command_once(c, &build, "build", 0, &uses, &format!("{what}'s build"));
+                c.release_lease();
+                if let Some(t) = crate::cmdreuse::content_tree(&c.wt) {
+                    let bk = crate::cmdreuse::build_key(&build);
+                    if matches!(
+                        &built,
+                        Ok(CommandRun {
+                            verdict: RunVerdict::Green,
+                            ..
+                        })
+                    ) {
+                        crate::cmdreuse::record_build_green(&c.d, &t, &bk, &c.wt);
+                    } else {
+                        crate::cmdreuse::record_build_red(&c.d, &t, &bk, &c.wt);
+                    }
+                }
+                match built {
+                    Err(why) => return c.fail(why),
+                    Ok(CommandRun {
+                        verdict:
+                            RunVerdict::Red {
+                                reason, feedback, ..
+                            },
+                        ..
+                    }) => return c.conclude(Outcome::Red, reason, Some(feedback)),
+                    Ok(_) => {}
+                }
             }
             let uses = tests_uses(&c.step.uses);
             let needs = crate::sched::needs_of(&uses, None);
@@ -3907,7 +3978,22 @@ fn run_command_on(
             linger: Duration::from_secs(600),
             heartbeat: c.d.cfg.heartbeat,
         };
-        if let Err(e) = spawn_host(&o) {
+        let started = crate::hostloss::spawn_retrying(
+            || spawn_host(&o),
+            |e| {
+                crate::hostloss::record_as(
+                    &c.d,
+                    Some(c.run),
+                    &c.step.name,
+                    &id,
+                    crate::daemon::now_ms(),
+                    format!("host {id} never came up: {e}"),
+                    true,
+                )
+            },
+            Duration::from_secs(30),
+        );
+        if let Err(e) = started {
             return Err(format!("cannot start the command: {e}").into());
         }
     }
