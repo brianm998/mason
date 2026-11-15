@@ -23,6 +23,7 @@ pub mod cpu;
 pub mod cputasks;
 pub mod crash;
 pub mod daemon;
+pub mod deadline;
 pub mod defs;
 pub mod demo;
 pub mod diagnose;

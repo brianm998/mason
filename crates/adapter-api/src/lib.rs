@@ -47,18 +47,37 @@ impl SubmissionFlag {
     }
 }
 
-/// Time added to a session's deadline while the agent could not work: it was
-/// waiting in the queue for a `run_check`. Shared with whoever grants it.
+/// Time added to a session's deadline: queue time the agent could not work in (a
+/// `run_check` or `mason run` waiting), and time granted because it kept making
+/// progress. Shared with whoever grants it.
 #[derive(Clone, Default)]
-pub struct DeadlineExtra(Arc<std::sync::atomic::AtomicU64>);
+pub struct DeadlineExtra(
+    Arc<std::sync::atomic::AtomicU64>,
+    Arc<std::sync::atomic::AtomicU64>,
+);
 
 impl DeadlineExtra {
+    /// Queue time credited.
     pub fn add(&self, d: Duration) {
         let ms = u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
         self.0.fetch_add(ms, Ordering::SeqCst);
     }
-    pub fn get(&self) -> Duration {
+    /// Time granted for progress (commits or output).
+    pub fn add_progress(&self, d: Duration) {
+        let ms = u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
+        self.1.fetch_add(ms, Ordering::SeqCst);
+    }
+    /// Queue time credited so far.
+    pub fn waited(&self) -> Duration {
         Duration::from_millis(self.0.load(Ordering::SeqCst))
+    }
+    /// Time granted for progress so far.
+    pub fn progressed(&self) -> Duration {
+        Duration::from_millis(self.1.load(Ordering::SeqCst))
+    }
+    /// Everything added to the deadline.
+    pub fn get(&self) -> Duration {
+        self.waited() + self.progressed()
     }
 }
 

@@ -2651,12 +2651,45 @@ fn agent_job(c: &Ctx) {
         crate::taskcache::own_dir(&c.d, c.task.0),
     ));
     spec.tool_timeout = tool_timeout_for(kind, &c.project);
-    spec.deadline = Some(
-        c.res
-            .budget
-            .as_ref()
-            .map_or(c.project.step_timeout, |a| a.value),
-    );
+    let budget = c
+        .res
+        .budget
+        .as_ref()
+        .map_or(c.project.step_timeout, |a| a.value);
+    spec.deadline = Some(budget);
+    // A develop agent that keeps committing or producing output gets more time, up to
+    // twice the budget (s401); it ends with the step.
+    let seen = Arc::new(Seen::default());
+    let started = Instant::now();
+    let _extender = (kind == StepKind::Develop).then(|| {
+        let stop = Arc::new(AtomicBool::new(false));
+        let (stop2, seen2, extra, wt) = (
+            stop.clone(),
+            seen.clone(),
+            spec.deadline_extra.clone(),
+            c.wt.clone(),
+        );
+        let head = move || git::run(&wt, &["rev-parse", "HEAD"]).unwrap_or_default();
+        let mut ext = crate::deadline::Extender::new(
+            budget,
+            Duration::from_secs(120).min(budget / 4),
+            head(),
+            seen.count(),
+        );
+        std::thread::spawn(move || {
+            while !stop2.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_secs(1));
+                ext.tick(started.elapsed(), &extra, &head, seen2.count());
+            }
+        });
+        struct StopExtending(Arc<AtomicBool>);
+        impl Drop for StopExtending {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        StopExtending(stop)
+    });
     // A `run_check` may queue for a long time before it runs, so no tool call is
     // cut off before the step's own deadline would have ended it.
     if kind == StepKind::Develop {
@@ -2691,7 +2724,9 @@ fn agent_job(c: &Ctx) {
     });
     {
         let (d, run) = (c.d.clone(), c.run);
+        let seen = seen.clone();
         spec.progress = Some(Arc::new(move |stream, off, bytes| {
+            seen.touch();
             d.progress_observe(run, stream, off, bytes)
         }));
     }
@@ -2724,7 +2759,11 @@ fn agent_job(c: &Ctx) {
         let (d, run) = (c.d.clone(), c.run);
         contract.set_on_progress(Arc::new(move |r| d.progress_agent_report(run, r)));
         let (d, run) = (c.d.clone(), c.run);
-        spec.on_agent_event = Some(Arc::new(move |ev| d.progress_agent_event(run, ev)));
+        let seen = seen.clone();
+        spec.on_agent_event = Some(Arc::new(move |ev| {
+            seen.touch();
+            d.progress_agent_event(run, ev)
+        }));
     }
     // Wired before any reattach, so a session found again sees what was already accepted.
     spec.accepted = contract.flag();
@@ -2784,7 +2823,56 @@ fn agent_job(c: &Ctx) {
         report = r;
     }
     contract.shutdown();
+    if matches!(report.end, StepEnd::Failed(FailReason::Timeout)) {
+        let commits = git::run(
+            &c.wt,
+            &[
+                "rev-list",
+                "--count",
+                &format!("{}..HEAD", c.project.base_ref()),
+            ],
+        )
+        .ok()
+        .and_then(|n| n.trim().parse().ok())
+        .unwrap_or(0);
+        let note = crate::deadline::timeout_note(
+            budget,
+            started.elapsed(),
+            &spec.deadline_extra,
+            seen.silent_for(),
+            commits,
+        );
+        tracing::warn!(task = c.task.0, run = c.run.0, "{note}");
+        return c.fail(note);
+    }
     finish_agent(c, report, &dir);
+}
+
+/// What the agent has produced: a count of chunks and events, and when the last came.
+#[derive(Default)]
+struct Seen {
+    n: AtomicU64,
+    last_ms: AtomicU64,
+    first_ms: AtomicU64,
+}
+
+impl Seen {
+    fn touch(&self) {
+        self.n.fetch_add(1, Ordering::SeqCst);
+        self.last_ms.store(now_ms(), Ordering::SeqCst);
+    }
+    fn count(&self) -> u64 {
+        self.n.load(Ordering::SeqCst)
+    }
+    fn silent_for(&self) -> Duration {
+        let last = self.last_ms.load(Ordering::SeqCst);
+        let from = if last == 0 {
+            self.first_ms.load(Ordering::SeqCst)
+        } else {
+            last
+        };
+        Duration::from_millis(now_ms().saturating_sub(from))
+    }
 }
 
 /// What the daemon writes down each time an agent step starts a session.
