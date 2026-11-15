@@ -212,7 +212,11 @@ pub fn tool_spec(tool: &str) -> Option<(String, Value)> {
                 "verdict": {"type": "string", "enum": ["approve", "changes"]},
                 "summary": {"type": "string"},
                 "findings": {"type": "array", "items": {"type": "object", "properties": {
-                    "issue": {"type": "string"}, "file": {"type": "string"}}, "required": ["issue"]}}
+                    "issue": {"type": "string"}, "file": {"type": "string"}}, "required": ["issue"]}},
+                "removes": {"type": "array", "items": {"type": "object", "properties": {
+                    "file": {"type": "string"}, "line": {"type": "string"}, "reason": {"type": "string"}},
+                    "required": ["file", "line", "reason"]},
+                    "description": "With 'approve': base lines the change replaced on purpose that you were shown as pairs, each with your reason"}
             }),
             &["verdict", "summary"],
         ),
@@ -390,22 +394,7 @@ pub fn validate(tool: &str, a: &Value) -> Result<(), Vec<String>> {
                     ));
                 }
             }
-            match a.get("removes") {
-                None | Some(Value::Null) => {}
-                Some(Value::Array(rs)) => {
-                    for (i, r) in rs.iter().enumerate() {
-                        for k in ["file", "line", "reason"] {
-                            match r.get(k) {
-                                Some(Value::String(s)) if !s.trim().is_empty() => {}
-                                _ => p.push(format!(
-                                    "removes[{i}].{k}: required, a non-empty string"
-                                )),
-                            }
-                        }
-                    }
-                }
-                Some(_) => p.push("removes: must be an array of {file, line, reason}".into()),
-            }
+            removes(a, &mut p);
         }
         "submit_close" => {
             text(a, "evidence", 2000, &mut p);
@@ -470,6 +459,7 @@ pub fn validate(tool: &str, a: &Value) -> Result<(), Vec<String>> {
                 Some(v) => p.push(format!("verdict: {v:?} must be 'approve' or 'changes'")),
                 None => p.push("verdict: required, 'approve' or 'changes'".into()),
             }
+            removes(a, &mut p);
             if let Some(Value::Array(fs)) = a.get("findings") {
                 for (i, f) in fs.iter().enumerate() {
                     if f.get("issue")
@@ -1045,6 +1035,24 @@ impl Drop for Inner {
         {
             let _ = std::fs::remove_file(p);
         }
+    }
+}
+
+/// The optional `removes` list of a submission: `{file, line, reason}` entries.
+fn removes(a: &Value, p: &mut Vec<String>) {
+    match a.get("removes") {
+        None | Some(Value::Null) => {}
+        Some(Value::Array(rs)) => {
+            for (i, r) in rs.iter().enumerate() {
+                for k in ["file", "line", "reason"] {
+                    match r.get(k) {
+                        Some(Value::String(s)) if !s.trim().is_empty() => {}
+                        _ => p.push(format!("removes[{i}].{k}: required, a non-empty string")),
+                    }
+                }
+            }
+        }
+        Some(_) => p.push("removes: must be an array of {file, line, reason}".into()),
     }
 }
 

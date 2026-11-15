@@ -676,7 +676,13 @@ const STEPS: &[&str] = &[
          at_ms   INTEGER NOT NULL
      );
      CREATE INDEX suite_times_key ON suite_times(project, suite, phase, at_ms);",
-    // 37: the owner's chat sessions with an agent (s364, decision 0357) and their messages.
+    // 37: how a debt was paid and what it waits on (s393): `how` is the proof text of a paid
+    // debt, `landed` the commit its task landed (empty: not known, so it never closes by itself),
+    // `tried_at` when the idle run last tried it (0: never). Additive.
+    "ALTER TABLE debts ADD COLUMN how TEXT NOT NULL DEFAULT '';
+     ALTER TABLE debts ADD COLUMN landed TEXT NOT NULL DEFAULT '';
+     ALTER TABLE debts ADD COLUMN tried_at INTEGER NOT NULL DEFAULT 0;",
+    // 38: the owner's chat sessions with an agent (s364, decision 0357) and their messages.
     // `task` is NULL for a session about no task. `state` is open, working or ended. Additive.
     "CREATE TABLE owner_sessions (
          id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -700,7 +706,6 @@ const STEPS: &[&str] = &[
          at_ms   INTEGER NOT NULL
      );
      CREATE INDEX owner_messages_session ON owner_messages(session, id);",
-
 ];
 
 pub const SCHEMA_VERSION: u32 = STEPS.len() as u32;
