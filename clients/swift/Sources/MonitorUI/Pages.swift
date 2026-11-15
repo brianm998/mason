@@ -207,7 +207,8 @@ struct CompilationSection: View {
         if task > 0 {
             TaskLink(title: "#\(task)") { model.go(.task(task)) }
         } else if !command.isEmpty {
-            TaskLink(title: label) { model.openCommand(label: label, command: command) }
+            Button(label) { model.openCommand(label: label, command: command) }
+                .buttonStyle(.plain).linkStyle()
                 .lineLimit(1).help("Show the whole command")
                 .accessibilityIdentifier("compile:command")
         } else {
