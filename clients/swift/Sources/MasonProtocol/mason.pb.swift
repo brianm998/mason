@@ -2696,6 +2696,52 @@ public nonisolated struct Mason_V1_LandingView: Sendable {
   /// One line per project: tracker off, polling (with counts), or stopped (with why).
   public var trackers: [String] = []
 
+  /// What each task in the landing queue is doing: queued, or in a batch and its phase.
+  public var items: [Mason_V1_TaskLanding] = []
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// One landing task: either queued (with a position and why) or in a running batch.
+public nonisolated struct Mason_V1_TaskLanding: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var task: UInt64 = 0
+
+  public var key: String = String()
+
+  public var title: String = String()
+
+  public var project: String = String()
+
+  /// "queued" | "in_batch"
+  public var status: String = String()
+
+  /// Queued: 1-based position among the project's queued tasks.
+  public var position: UInt32 = 0
+
+  /// Queued: why it waits, e.g. "behind 1 batch", "frozen until #12 lands".
+  public var why: String = String()
+
+  public var batch: UInt64 = 0
+
+  /// Batch phase name ("integrating", "running suites", ...) and its place among `phase_total`.
+  public var phase: String = String()
+
+  public var phaseIndex: UInt32 = 0
+
+  public var phaseTotal: UInt32 = 0
+
+  /// Milliseconds since the batch formed (the store keeps no per-phase start).
+  public var phaseMs: UInt64 = 0
+
+  /// The batch CI's state: queued, running, green, red; empty when none.
+  public var ciState: String = String()
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -7964,7 +8010,7 @@ nonisolated extension Mason_V1_FreezeLine: SwiftProtobuf.Message, SwiftProtobuf.
 
 nonisolated extension Mason_V1_LandingView: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".LandingView"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}debts\0\u{1}frozen\0\u{1}note\0\u{1}queue\0\u{1}modes\0\u{1}batches\0\u{1}freezes\0\u{3}queue_idle_ms\0\u{1}trackers\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}debts\0\u{1}frozen\0\u{1}note\0\u{1}queue\0\u{1}modes\0\u{1}batches\0\u{1}freezes\0\u{3}queue_idle_ms\0\u{1}trackers\0\u{1}items\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -7981,6 +8027,7 @@ nonisolated extension Mason_V1_LandingView: SwiftProtobuf.Message, SwiftProtobuf
       case 7: try { try decoder.decodeRepeatedMessageField(value: &self.freezes) }()
       case 8: try { try decoder.decodeSingularUInt64Field(value: &self.queueIdleMs) }()
       case 9: try { try decoder.decodeRepeatedStringField(value: &self.trackers) }()
+      case 10: try { try decoder.decodeRepeatedMessageField(value: &self.items) }()
       default: break
       }
     }
@@ -8014,6 +8061,9 @@ nonisolated extension Mason_V1_LandingView: SwiftProtobuf.Message, SwiftProtobuf
     if !self.trackers.isEmpty {
       try visitor.visitRepeatedStringField(value: self.trackers, fieldNumber: 9)
     }
+    if !self.items.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.items, fieldNumber: 10)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -8027,6 +8077,97 @@ nonisolated extension Mason_V1_LandingView: SwiftProtobuf.Message, SwiftProtobuf
     if lhs.freezes != rhs.freezes {return false}
     if lhs.queueIdleMs != rhs.queueIdleMs {return false}
     if lhs.trackers != rhs.trackers {return false}
+    if lhs.items != rhs.items {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Mason_V1_TaskLanding: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".TaskLanding"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}task\0\u{1}key\0\u{1}title\0\u{1}project\0\u{1}status\0\u{1}position\0\u{1}why\0\u{1}batch\0\u{1}phase\0\u{3}phase_index\0\u{3}phase_total\0\u{3}phase_ms\0\u{3}ci_state\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularUInt64Field(value: &self.task) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.key) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.title) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.project) }()
+      case 5: try { try decoder.decodeSingularStringField(value: &self.status) }()
+      case 6: try { try decoder.decodeSingularUInt32Field(value: &self.position) }()
+      case 7: try { try decoder.decodeSingularStringField(value: &self.why) }()
+      case 8: try { try decoder.decodeSingularUInt64Field(value: &self.batch) }()
+      case 9: try { try decoder.decodeSingularStringField(value: &self.phase) }()
+      case 10: try { try decoder.decodeSingularUInt32Field(value: &self.phaseIndex) }()
+      case 11: try { try decoder.decodeSingularUInt32Field(value: &self.phaseTotal) }()
+      case 12: try { try decoder.decodeSingularUInt64Field(value: &self.phaseMs) }()
+      case 13: try { try decoder.decodeSingularStringField(value: &self.ciState) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if self.task != 0 {
+      try visitor.visitSingularUInt64Field(value: self.task, fieldNumber: 1)
+    }
+    if !self.key.isEmpty {
+      try visitor.visitSingularStringField(value: self.key, fieldNumber: 2)
+    }
+    if !self.title.isEmpty {
+      try visitor.visitSingularStringField(value: self.title, fieldNumber: 3)
+    }
+    if !self.project.isEmpty {
+      try visitor.visitSingularStringField(value: self.project, fieldNumber: 4)
+    }
+    if !self.status.isEmpty {
+      try visitor.visitSingularStringField(value: self.status, fieldNumber: 5)
+    }
+    if self.position != 0 {
+      try visitor.visitSingularUInt32Field(value: self.position, fieldNumber: 6)
+    }
+    if !self.why.isEmpty {
+      try visitor.visitSingularStringField(value: self.why, fieldNumber: 7)
+    }
+    if self.batch != 0 {
+      try visitor.visitSingularUInt64Field(value: self.batch, fieldNumber: 8)
+    }
+    if !self.phase.isEmpty {
+      try visitor.visitSingularStringField(value: self.phase, fieldNumber: 9)
+    }
+    if self.phaseIndex != 0 {
+      try visitor.visitSingularUInt32Field(value: self.phaseIndex, fieldNumber: 10)
+    }
+    if self.phaseTotal != 0 {
+      try visitor.visitSingularUInt32Field(value: self.phaseTotal, fieldNumber: 11)
+    }
+    if self.phaseMs != 0 {
+      try visitor.visitSingularUInt64Field(value: self.phaseMs, fieldNumber: 12)
+    }
+    if !self.ciState.isEmpty {
+      try visitor.visitSingularStringField(value: self.ciState, fieldNumber: 13)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Mason_V1_TaskLanding, rhs: Mason_V1_TaskLanding) -> Bool {
+    if lhs.task != rhs.task {return false}
+    if lhs.key != rhs.key {return false}
+    if lhs.title != rhs.title {return false}
+    if lhs.project != rhs.project {return false}
+    if lhs.status != rhs.status {return false}
+    if lhs.position != rhs.position {return false}
+    if lhs.why != rhs.why {return false}
+    if lhs.batch != rhs.batch {return false}
+    if lhs.phase != rhs.phase {return false}
+    if lhs.phaseIndex != rhs.phaseIndex {return false}
+    if lhs.phaseTotal != rhs.phaseTotal {return false}
+    if lhs.phaseMs != rhs.phaseMs {return false}
+    if lhs.ciState != rhs.ciState {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
