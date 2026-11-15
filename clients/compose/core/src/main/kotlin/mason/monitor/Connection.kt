@@ -3,6 +3,7 @@ package mason.monitor
 
 import mason.v1.*
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executor
 import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
 
@@ -12,12 +13,18 @@ import kotlin.concurrent.thread
  * itself: 1, 2, 4, 8 seconds, then every 10, re-reading `daemon.json` each time,
  * so a restarted daemon is found on its new port. A changed pid or start time,
  * or 15 seconds of silence, also reconnects. The protocol is the JSON encoding.
+ *
+ * Frames are decoded on the socket's own thread ([decode]); only the finished message goes to
+ * [ui], an executor that runs on the UI thread, which is where the model's state is written.
+ * The default [ui] runs at once, for headless tools and tests with no UI thread.
  */
 class MonitorConnection(
     private val model: MonitorModel,
     private val discover: () -> DaemonInfo?,
     private val timing: ConnectionTiming = ConnectionTiming(),
     private val factory: SocketFactory = OkHttpSocketFactory(),
+    private val decode: (String) -> ServerMessage? = Codec::decode,
+    private val ui: Executor = Executor { it.run() },
 ) {
     /** A fixed port, for callers that were given one. */
     constructor(model: MonitorModel, port: Int) : this(model, { DaemonInfo(port) })
@@ -48,10 +55,10 @@ class MonitorConnection(
         while (running) {
             val info = discover()
             if (info == null) {
-                model.disconnected()
+                ui.execute { model.disconnected() }
             } else {
                 if (session(info)) policy.reset()
-                model.disconnected()
+                ui.execute { model.disconnected() }
             }
             if (!running) break
             Thread.sleep((policy.nextPauseSeconds() * 1000).toLong().coerceAtLeast(1))
@@ -80,13 +87,15 @@ class MonitorConnection(
 
             override fun onMessage(text: String) {
                 heard.set(System.nanoTime())
-                val msg = Codec.decode(text) ?: return
+                val msg = decode(text) ?: return  // decoded here, on the socket's thread
                 if (msg.welcome != null) {
                     welcomed.set(true)
-                    model.apply(msg)
-                    say(subscriptionMessage())
+                    ui.execute {
+                        model.apply(msg)
+                        say(subscriptionMessage())
+                    }
                 } else {
-                    model.apply(msg)
+                    ui.execute { model.apply(msg) }
                 }
             }
 

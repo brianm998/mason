@@ -34,33 +34,39 @@ final class Session: ObservableObject {
                 model?.sessionNotice = OpenSession.copiedNotice(line)
             }
         }
+        #if DEBUG
+        MainThreadWatchdog.shared.start()
+        #endif
         pulse = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak model] _ in
             Task { @MainActor in model?.pulse() }
         }
     }
 
-    /// A Terminal window running `argv`: a temporary .command file, which Terminal opens. False
-    /// when the file could not be written or Terminal is missing; the caller copies the command
-    /// then. Opening is asynchronous, so a later refusal calls `failed` on the main queue with
-    /// the command line instead.
+    /// A Terminal window running `argv`: a temporary .command file, which Terminal opens. The file
+    /// is written and Terminal opened off the main thread, so this returns at once with true; when
+    /// the file cannot be written, Terminal is missing or it refuses the file, `failed` is called
+    /// on the main queue with the command line, and the caller copies it then.
     static func openTerminal(running argv: [String], failed: @escaping @MainActor (String) -> Void) -> Bool {
         let line = argv.map { "'" + $0.replacingOccurrences(of: "'", with: "'\\''") + "'" }.joined(separator: " ")
-        let dir = FileManager.default.temporaryDirectory
-        let file = dir.appendingPathComponent("mason-open-\(UUID().uuidString).command")
-        let script = "#!/bin/bash\nrm -f \"$0\"\n\(line)\n"
-        do {
-            try script.write(to: file, atomically: true, encoding: .utf8)
-            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: file.path)
-        } catch { return false }
-        let terminal = URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app")
-        guard FileManager.default.fileExists(atPath: terminal.path) else {
-            try? FileManager.default.removeItem(at: file)
-            return false
-        }
-        NSWorkspace.shared.open([file], withApplicationAt: terminal, configuration: NSWorkspace.OpenConfiguration()) { _, error in
-            guard error != nil else { return }
-            try? FileManager.default.removeItem(at: file)
-            DispatchQueue.main.async { MainActor.assumeIsolated { failed(line) } }
+        let fail: @Sendable () -> Void = { DispatchQueue.main.async { MainActor.assumeIsolated { failed(line) } } }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let dir = FileManager.default.temporaryDirectory
+            let file = dir.appendingPathComponent("mason-open-\(UUID().uuidString).command")
+            let script = "#!/bin/bash\nrm -f \"$0\"\n\(line)\n"
+            do {
+                try script.write(to: file, atomically: true, encoding: .utf8)
+                try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: file.path)
+            } catch { return fail() }
+            let terminal = URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app")
+            guard FileManager.default.fileExists(atPath: terminal.path) else {
+                try? FileManager.default.removeItem(at: file)
+                return fail()
+            }
+            NSWorkspace.shared.open([file], withApplicationAt: terminal, configuration: NSWorkspace.OpenConfiguration()) { _, error in
+                guard error != nil else { return }
+                try? FileManager.default.removeItem(at: file)
+                fail()
+            }
         }
         return true
     }
@@ -111,7 +117,9 @@ final class Session: ObservableObject {
         // The daemon may not be up yet: look for it until it is.
         finder = Task { @MainActor in
             while !Task.isCancelled {
-                if Discovery.info(arguments: CommandLine.arguments) != nil {
+                // daemon.json is read off the main actor.
+                let args = CommandLine.arguments
+                if await Task.detached(operation: { Discovery.info(arguments: args) }).value != nil {
                     let c = MonitorConnection(model: model, discover: { Discovery.info(arguments: CommandLine.arguments) })
                     connection = c
                     c.start()

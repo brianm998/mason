@@ -587,11 +587,45 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
         if (daemonNow > 0) clockOffsetMs = daemonNow - local
     }
 
+    /**
+     * How held progress is put off to the next frame: `flush` is to run once, later, on the UI thread.
+     * Null (headless tools, tests) applies each progress message at once.
+     */
+    var scheduleProgressFlush: ((() -> Unit) -> Unit)? = null
+    private val pendingProgress = ArrayList<StepProgress>()
+    private var flushScheduled = false
+
+    /** A progress message from the stream: held until the next frame, so a burst costs one sidebar publish. */
+    internal fun enqueue(p: StepProgress) {
+        val schedule = scheduleProgressFlush
+        if (schedule == null) {
+            apply(p)
+            return
+        }
+        pendingProgress += p
+        if (flushScheduled) return
+        flushScheduled = true
+        schedule { flushProgress() }
+    }
+
+    /** Apply what was held, in order, as one batch. Every other message flushes first, so order is kept. */
+    fun flushProgress() {
+        flushScheduled = false
+        if (pendingProgress.isEmpty()) return
+        val batch = pendingProgress.toList()
+        pendingProgress.clear()
+        applyAll(batch)
+    }
+
     /** A step's progress arrived without a view: put it into the task page and the rows, and follow the log. */
-    fun apply(p: StepProgress, local: Long = System.currentTimeMillis()) {
-        anchor(p.now_ms, local)
-        val cell = p.progress ?: return
-        fun merged(old: List<ProgressCell>): List<ProgressCell>? {
+    fun apply(p: StepProgress, local: Long = System.currentTimeMillis()) = applyAll(listOf(p), local)
+
+    /** Several progress messages at once: one write to the task page, one to the sidebar, one pass over its rows. */
+    private fun applyAll(ps: List<StepProgress>, local: Long = System.currentTimeMillis()) {
+        ps.lastOrNull { it.now_ms > 0 }?.let { anchor(it.now_ms, local) }
+        val withCell = ps.filter { it.progress != null }
+        if (withCell.isEmpty()) return
+        fun merged(old: List<ProgressCell>, cell: ProgressCell): List<ProgressCell>? {
             val i = old.indexOfFirst { it.step == cell.step }
             if (i < 0) return null
             // A finished or stopped run says what it ended as on the next view; until then, no "running".
@@ -599,18 +633,34 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
             return old.toMutableList().also { it[i] = c }
         }
         taskDetail?.let { d ->
-            val r = d.row
-            if (r != null && r.id == p.task) {
-                merged(r.progress)?.let { taskDetail = d.copy(row = r.copy(progress = it)) }
-                appendLog(p.log)
+            var row = d.row
+            if (row != null) {
+                var changed = false
+                val lines = ArrayList<String>()
+                for (p in withCell) {
+                    val cur = row ?: break
+                    if (cur.id != p.task) continue
+                    val cells = merged(cur.progress, p.progress!!)
+                    if (cells != null) { row = cur.copy(progress = cells); changed = true }
+                    lines += p.log
+                }
+                if (changed) taskDetail = d.copy(row = row)
+                appendLog(lines)
             }
         }
         sidebar?.let { s ->
+            val latest = HashMap<Long, MutableList<ProgressCell>>()
+            for (p in withCell) latest.getOrPut(p.task) { ArrayList() } += p.progress!!
             var changed = false
             val sections = s.sections.map { sec ->
                 sec.copy(rows = sec.rows.map { row ->
-                    val cells = if (row.id == p.task) merged(row.progress) else null
-                    if (cells != null) { changed = true; row.copy(progress = cells) } else row
+                    val cells = latest[row.id]
+                    if (cells == null) row else {
+                        var progress = row.progress
+                        var hit = false
+                        for (c in cells) merged(progress, c)?.let { progress = it; hit = true }
+                        if (hit) { changed = true; row.copy(progress = progress) } else row
+                    }
                 })
             }
             if (changed) sidebar = s.copy(sections = sections)
@@ -625,6 +675,8 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     // ---- updates from the daemon ----
 
     fun apply(m: ServerMessage) {
+        m.step_progress?.let { enqueue(it); return }
+        flushProgress()
         m.welcome?.let { w ->
             connected = true
             reconnecting = false
@@ -649,7 +701,6 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
             lastSeq = max(lastSeq, u.seq)
             u.view?.let(::apply)
         }
-        m.step_progress?.let { apply(it) }
         m.result?.let { r ->
             lastResult = if (r.ok) null else r.error
             if (r.id.startsWith("session:")) r.id.removePrefix("session:").toLongOrNull()?.let { task ->
