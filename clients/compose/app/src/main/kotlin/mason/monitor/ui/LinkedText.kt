@@ -91,7 +91,7 @@ fun LinkedText(
     val theme = LocalTheme.current
     val actions = rememberActions(model)
     val plain = base ?: AnnotatedString(text)
-    val shown = linkedString(plain, model.linkify(plain.text), theme.accent, actions)
+    val shown = linkedString(plain, model.linkify(plain.text), theme.link, actions)
     if (selectable) SelectionContainer { Text(shown, style = style, modifier = modifier) }
     else Text(shown, style = style, modifier = modifier)
 }
@@ -108,8 +108,7 @@ fun CiLinksLine(links: List<CiLink>, issue: Long, issueUrl: String) {
     ) {
         if (issue != 0L) {
             if (Linkify.isWebUrl(issueUrl)) {
-                Text("issue #$issue", style = theme.body(color = theme.accent),
-                    modifier = Modifier.testTag("detail:issue").clickable { runCatching { uri.openUri(issueUrl) } })
+                Link("issue #$issue", modifier = Modifier.testTag("detail:issue")) { runCatching { uri.openUri(issueUrl) } }
             } else {
                 Text("issue #$issue", style = theme.body(color = theme.muted))
             }
@@ -117,8 +116,7 @@ fun CiLinksLine(links: List<CiLink>, issue: Long, issueUrl: String) {
         if (shown.isNotEmpty()) {
             Text("CI", style = theme.body(color = theme.muted))
             shown.forEach { l ->
-                Text(l.label.ifEmpty { l.url }, style = theme.body(color = theme.accent),
-                    modifier = Modifier.testTag("ci:${l.label}").clickable { runCatching { uri.openUri(l.url) } })
+                Link(l.label.ifEmpty { l.url }, modifier = Modifier.testTag("ci:${l.label}")) { runCatching { uri.openUri(l.url) } }
             }
         }
     }

@@ -161,7 +161,7 @@ struct BannersView: View {
     var bannerStack: some View {
         VStack(spacing: 0) {
             if !model.connected {
-                banner(model.reconnecting ? "Daemon restarting, reconnecting…" : "Connection lost. Reconnecting…", id: "connection", icon: "connection_lost")
+                banner(model.linkStatus ?? (model.reconnecting ? "Daemon restarting, reconnecting…" : "Connection lost. Reconnecting…"), id: "connection", icon: "connection_lost")
             }
             if model.daemonDown {
                 banner("Daemon down: MASON has lost its daemon. Check that masond is running.", id: "daemon-down", icon: "daemon_down")
@@ -353,7 +353,7 @@ struct PendingIssueRow: View {
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: theme.spacing) {
             if let url = URL(string: issue.url), !issue.url.isEmpty {
-                Link("#\(issue.number)", destination: url)
+                WebLink(title: "#\(issue.number)", url: url)
             } else {
                 Text("#\(issue.number)")
             }
