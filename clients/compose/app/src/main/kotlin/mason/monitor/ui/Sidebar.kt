@@ -171,6 +171,12 @@ private fun SectionHeader(model: MonitorModel, s: SidebarSection) {
             count,
             style = theme.body(FontWeight.SemiBold, if (s.state == "needs_attention" && s.count > 0) theme.attention else theme.muted),
         )
+        val page = Page.sectionPage(s.state)
+        if (page != null) {
+            Text("›", style = theme.body(FontWeight.SemiBold, theme.muted),
+                modifier = Modifier.clickable { model.go(page) }.padding(start = theme.spacing)
+                    .testTag("section-open:${s.state}").semantics { contentDescription = "Open ${s.title}" })
+        }
     }
 }
 

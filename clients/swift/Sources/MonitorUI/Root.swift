@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#if canImport(AppKit)
 import AppKit
+#else
+import UIKit
+#endif
 import MasonTokens
 import MasonMascot
 import MonitorCore
@@ -11,6 +15,9 @@ import SwiftUI
 public struct RootView: View {
     @ObservedObject var model: MonitorModel
     @Environment(\.colorScheme) private var scheme
+    #if !canImport(AppKit)
+    @Environment(\.scenePhase) private var scenePhase
+    #endif
 
     public init(model: MonitorModel) { self.model = model }
 
@@ -27,6 +34,9 @@ public struct RootView: View {
         .foregroundStyle(theme.text)
         .background(theme.background)
         .onOpenURL { model.open(url: $0) }
+        #if !canImport(AppKit)
+        .onChange(of: scenePhase, initial: true) { _, phase in SharedTick.shared.setVisible(phase == .active) }
+        #endif
     }
 
     private var mainLayout: some View {
@@ -92,12 +102,14 @@ struct SidebarHandle: View {
             .frame(width: CGFloat(MasonTokens.sizeSidebarHandle))
             .overlay(Divider())
             .contentShape(Rectangle())
+            #if canImport(AppKit)
             .onHover { over in
                 if over && !inside { NSCursor.resizeLeftRight.push() }
                 if !over && inside { NSCursor.pop() }
                 inside = over
             }
             .onDisappear { if inside { NSCursor.pop(); inside = false } }
+            #endif
             .gesture(
                 DragGesture(minimumDistance: 0, coordinateSpace: .named(Self.space))
                     .onChanged { v in
