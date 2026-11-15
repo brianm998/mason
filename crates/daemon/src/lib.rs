@@ -47,6 +47,7 @@ pub mod markers;
 pub mod notify;
 pub mod numbers;
 pub mod outside;
+pub mod file_hold;
 pub mod plan_view;
 pub mod plugins;
 pub mod pool;
