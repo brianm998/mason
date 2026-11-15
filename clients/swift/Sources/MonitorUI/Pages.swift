@@ -52,6 +52,14 @@ struct HomePage: View {
             .accessibilityIdentifier("status")
     }
 
+    @ViewBuilder var versionLine: some View {
+        if !model.versionLine.isEmpty {
+            Text(model.versionLine).font(theme.small()).foregroundStyle(theme.muted)
+                .textSelection(.enabled).help(model.versionTip)
+                .accessibilityIdentifier("home:version")
+        }
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: theme.spacingLarge) {
@@ -69,6 +77,7 @@ struct HomePage: View {
                         statusLine
                     }
                 }
+                versionLine
 
                 if let attention = model.home?.attention, !attention.isEmpty {
                     section("Needs you", theme: theme) {
@@ -101,7 +110,7 @@ struct HomePage: View {
                         SessionStepper(model: model)
                     }
                     section("Landing queue", theme: theme) {
-                        let queue = model.landing?.queue ?? model.home?.stages.first { $0.state == "landing" }?.rows ?? []
+                        let queue = model.home?.stages.first { $0.state == "landing" }?.rows ?? []
                         if queue.isEmpty { Text("Nothing is landing.").font(theme.body()).foregroundStyle(theme.muted) }
                         ForEach(queue, id: \.id) { r in
                             Button("\(r.key) \(r.title)") { model.go(.task(r.id)) }.buttonStyle(.link).font(theme.body())
@@ -162,7 +171,7 @@ struct SessionStepper: View {
         let used = model.home?.sessionsUsed ?? 0
         let limit = model.home?.sessionsLimit ?? 0
         HStack(spacing: theme.spacing) {
-            Text("Sessions: \(used) of")
+            Text("Sessions (all projects): \(used) of")
             Button { model.setSessionLimit(limit > 0 ? limit - 1 : 0) } label: { Image(systemName: "minus") }
                 .accessibilityIdentifier("sessions:decrease")
             Text("\(limit)").font(theme.body(.semibold))
@@ -197,7 +206,7 @@ struct CompilationSection: View {
     }
 
     var body: some View {
-        section("Compilation", theme: theme) {
+        section("Compilation (all projects)", theme: theme) {
             HStack(spacing: theme.spacing) {
                 Text("Compiling: \(c.used) of at most")
                 Button { model.setCompileLimit(c.limit > 1 ? c.limit - 1 : 1) } label: { Image(systemName: "minus") }
@@ -336,8 +345,9 @@ struct TaskDetailPage: View {
                     .accessibilityIdentifier("cpu")
                 HStack(spacing: theme.spacingLarge) {
                     CopyButton(label: r.key, value: r.key)
-                    if !d.branch.isEmpty { CopyButton(label: "branch", value: d.branch) }
-                    if !d.worktree.isEmpty { CopyButton(label: "worktree", value: d.worktree) }
+                    ForEach(CopyTarget.detail(branch: d.branch, worktree: d.worktree), id: \.label) { t in
+                        CopyValueButton(target: t) { (model.copier ?? copyToPasteboard)($0) }
+                    }
                 }
             }
             }

@@ -360,3 +360,8 @@ compose = "done"
 description = "At the left of the top bar, the task page's illustration for the active state (queued, exploring, developing, testing, review, landing, needs attention, failed, proposed; never landed or canceled) holding the most tasks in the header's counts (so it follows the project filter), a tie going to the later stage, at 85% of the illustration size or the bar's height if less; the idle art (all_clear) with no tasks, nothing while disconnected; tooltip 'Most tasks: testing (7)'; clicking reveals that state's sidebar section"
 swift = "done"
 compose = "done"
+
+[feature.home-daemon-version]
+description = "Home shows a small selectable line under the status, 'masond 64b3068a · monitor abcdef01': the short (8 character) commit of the running masond from the welcome version and of this monitor (ownVersion), with both full hashes in the tooltip; a version of 'dev' reads 'masond (unversioned build)' (likewise 'monitor (unversioned build)'); when the update banner's daemon text says N commits behind develop, '(N commits behind develop)' follows masond's hash; nothing before the welcome"
+swift = "done"
+compose = "done"

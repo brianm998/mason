@@ -103,6 +103,7 @@ pub fn improve(d: &Arc<Daemon>, project: &str, text: &str) -> Result<(TaskId, St
             pr: None,
             pr_state: String::new(),
             at: now_ms(),
+            decided_by: String::new(),
         })
         .map_err(|e| bad(500, e.to_string()))?;
     Ok((task, branch))
@@ -479,6 +480,7 @@ fn ask_about_carrying(d: &Arc<Daemon>, pid: ProjectId, row: &ProposalRow, why: &
             pr: None,
             pr_state: String::new(),
             at: now_ms(),
+            decided_by: String::new(),
         });
     }
 }

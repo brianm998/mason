@@ -78,6 +78,8 @@ pub struct Policy {
     pub agent_blocks: Disposition,
     pub outside_normal: Disposition,
     pub outside_blocks: Disposition,
+    /// Findings of the introspection detectors and the analyst.
+    pub introspection: IntrospectionPolicy,
 }
 
 impl Default for Policy {
@@ -87,6 +89,7 @@ impl Default for Policy {
             agent_blocks: Disposition::Queued,
             outside_normal: Disposition::Proposed,
             outside_blocks: Disposition::Proposed,
+            introspection: IntrospectionPolicy::default(),
         }
     }
 }
@@ -108,6 +111,101 @@ pub fn parse_disposition(s: &str) -> Option<Disposition> {
         "proposed" => Some(Disposition::Proposed),
         "queued" => Some(Disposition::Queued),
         _ => None,
+    }
+}
+
+/// How much an introspection finding matters, as its finder estimates it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Impact {
+    Low,
+    High,
+}
+
+impl Impact {
+    pub fn name(self) -> &'static str {
+        match self {
+            Impact::Low => "low",
+            Impact::High => "high",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Impact> {
+        match s {
+            "low" => Some(Impact::Low),
+            "high" => Some(Impact::High),
+            _ => None,
+        }
+    }
+}
+
+/// How much work the fix looks like, as its finder estimates it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Cost {
+    Small,
+    Large,
+}
+
+impl Cost {
+    pub fn name(self) -> &'static str {
+        match self {
+            Cost::Small => "small",
+            Cost::Large => "large",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Cost> {
+        match s {
+            "small" => Some(Cost::Small),
+            "large" => Some(Cost::Large),
+            _ => None,
+        }
+    }
+}
+
+/// What the owner's `[proposals.introspection]` table decides for findings, one
+/// disposition per severity and cost. Every key defaults to proposed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IntrospectionPolicy {
+    pub low_small: Disposition,
+    pub low_large: Disposition,
+    pub high_small: Disposition,
+    pub high_large: Disposition,
+}
+
+impl Default for IntrospectionPolicy {
+    fn default() -> IntrospectionPolicy {
+        IntrospectionPolicy {
+            low_small: Disposition::Proposed,
+            low_large: Disposition::Proposed,
+            high_small: Disposition::Proposed,
+            high_large: Disposition::Proposed,
+        }
+    }
+}
+
+impl IntrospectionPolicy {
+    /// The config key for an impact and cost, such as `low_small`.
+    pub fn key(impact: Impact, cost: Cost) -> String {
+        format!("{}_{}", impact.name(), cost.name())
+    }
+
+    pub fn decide(&self, impact: Impact, cost: Cost) -> Disposition {
+        match (impact, cost) {
+            (Impact::Low, Cost::Small) => self.low_small,
+            (Impact::Low, Cost::Large) => self.low_large,
+            (Impact::High, Cost::Small) => self.high_small,
+            (Impact::High, Cost::Large) => self.high_large,
+        }
+    }
+
+    /// Set the disposition for a config key; `false` if the key is not one of the four.
+    pub fn set(&mut self, key: &str, d: Disposition) -> bool {
+        match key {
+            "low_small" => self.low_small = d,
+            "low_large" => self.low_large = d,
+            "high_small" => self.high_small = d,
+            "high_large" => self.high_large = d,
+            _ => return false,
+        }
+        true
     }
 }
 
@@ -440,6 +538,37 @@ mod tests {
         assert_eq!(
             q.decide(Source::Agent, Severity::Normal),
             Disposition::Queued
+        );
+    }
+
+    #[test]
+    fn introspection_defaults_to_proposed_and_each_key_sets_one_cell() {
+        let mut p = IntrospectionPolicy::default();
+        for i in [Impact::Low, Impact::High] {
+            for c in [Cost::Small, Cost::Large] {
+                assert_eq!(p.decide(i, c), Disposition::Proposed);
+            }
+        }
+        assert!(p.set("low_small", Disposition::Queued));
+        assert_eq!(p.decide(Impact::Low, Cost::Small), Disposition::Queued);
+        assert_eq!(p.decide(Impact::Low, Cost::Large), Disposition::Proposed);
+        assert_eq!(p.decide(Impact::High, Cost::Small), Disposition::Proposed);
+        assert!(p.set("high_large", Disposition::Queued));
+        assert_eq!(p.decide(Impact::High, Cost::Large), Disposition::Queued);
+        assert!(!p.set("medium_small", Disposition::Queued));
+    }
+
+    #[test]
+    fn impact_cost_and_keys_parse() {
+        assert_eq!(Impact::parse("low"), Some(Impact::Low));
+        assert_eq!(Impact::parse("high"), Some(Impact::High));
+        assert_eq!(Impact::parse("normal"), None);
+        assert_eq!(Cost::parse("small"), Some(Cost::Small));
+        assert_eq!(Cost::parse("large"), Some(Cost::Large));
+        assert_eq!(Cost::parse("huge"), None);
+        assert_eq!(
+            IntrospectionPolicy::key(Impact::High, Cost::Small),
+            "high_small"
         );
     }
 

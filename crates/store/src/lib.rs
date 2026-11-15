@@ -319,6 +319,9 @@ pub struct ProposalRow {
     pub pr: Option<u64>,
     /// `open`, `merged`, `closed` or `conflict` once a pull request exists.
     pub pr_state: String,
+    /// The rule that chose proposed or queued, such as `proposals.introspection.low_small`.
+    /// Empty for rows filed before it was recorded.
+    pub decided_by: String,
     pub at: u64,
 }
 
@@ -2365,13 +2368,13 @@ impl Store {
         let p = p.clone();
         self.write(move |c| {
             c.execute(
-                "INSERT OR REPLACE INTO proposals(task, project, source, severity, route, filed_by, title, body, evidence, key, status, reject_reason, publish_state, access, branch, pr, pr_state, at)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
+                "INSERT OR REPLACE INTO proposals(task, project, source, severity, route, filed_by, title, body, evidence, key, status, reject_reason, publish_state, access, branch, pr, pr_state, at, decided_by)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
                 params![
                     p.task as i64, p.project, p.source, p.severity, p.route,
                     p.filed_by.map(|x| x as i64), p.title, p.body, p.evidence, p.key, p.status,
                     p.reject_reason, p.publish_state, p.access, p.branch,
-                    p.pr.map(|x| x as i64), p.pr_state, p.at as i64
+                    p.pr.map(|x| x as i64), p.pr_state, p.at as i64, p.decided_by
                 ],
             )
             .map(|_| ())
@@ -2398,7 +2401,7 @@ impl Store {
 
     fn proposals_where(&self, cond: &str, arg: i64) -> Result<Vec<ProposalRow>, StoreError> {
         let sql = format!(
-            "SELECT task, project, source, severity, route, filed_by, title, body, evidence, key, status, reject_reason, publish_state, access, branch, pr, pr_state, at FROM proposals {cond} ORDER BY task"
+            "SELECT task, project, source, severity, route, filed_by, title, body, evidence, key, status, reject_reason, publish_state, access, branch, pr, pr_state, at, decided_by FROM proposals {cond} ORDER BY task"
         );
         self.read(move |c| {
             let mut st = c.prepare(&sql)?;
@@ -2422,6 +2425,7 @@ impl Store {
                     pr: r.get::<_, Option<i64>>(15)?.map(|x| x as u64),
                     pr_state: r.get(16)?,
                     at: r.get::<_, i64>(17)? as u64,
+                    decided_by: r.get(18)?,
                 })
             })?;
             rows.collect()

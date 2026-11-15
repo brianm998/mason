@@ -207,6 +207,52 @@ impl Args {
     }
 }
 
+/// Run the session command the daemon gave (`argv`) in the task's worktree and return its exit
+/// code. An older daemon gives no `argv`; then it is Claude's, as before.
+fn run_session(s: &Value) -> i32 {
+    let wt = s["worktree"].as_str().unwrap_or(".").to_string();
+    let provider = s["provider"].as_str().unwrap_or("claude").to_string();
+    let sid = s["session"].as_str();
+    let argv: Vec<String> = match s["argv"].as_array() {
+        Some(a) if !a.is_empty() => a
+            .iter()
+            .filter_map(|x| x.as_str().map(String::from))
+            .collect(),
+        _ => {
+            let mut v = vec![s["claude"].as_str().unwrap_or("claude").to_string()];
+            if let Some(i) = sid {
+                v.extend(["--resume".to_string(), i.to_string()]);
+            }
+            v
+        }
+    };
+    match sid {
+        Some(i) => println!("Resuming the {provider} session {i} in {wt}"),
+        None => println!("No session to resume; starting a fresh {provider} one in {wt}"),
+    }
+    let mut cmd = std::process::Command::new(&argv[0]);
+    cmd.args(&argv[1..]).current_dir(&wt);
+    match cmd.status() {
+        Ok(st) => {
+            let code = st.code().unwrap_or(1);
+            if code != 0 && sid.is_some() {
+                eprintln!(
+                    "`{}` ended with status {code}. If it said the session was not found, it was \
+                     recorded under another working directory or config dir than this shell's: \
+                     the agent ran in {wt}, and {provider} keeps sessions under its own config \
+                     dir (for Claude `~/.claude`, or $CLAUDE_CONFIG_DIR).",
+                    argv.join(" ")
+                );
+            }
+            code
+        }
+        Err(e) => {
+            eprintln!("cannot run `{}`: {e}", argv[0]);
+            127
+        }
+    }
+}
+
 fn die(msg: &str) -> ! {
     eprintln!("error: {msg}");
     exit(1)
@@ -1873,6 +1919,9 @@ fn main() {
                         p["state"].as_str().unwrap_or(""),
                         p["publish_state"].as_str().unwrap_or("")
                     );
+                    if let Some(rule) = p["decided_by"].as_str().filter(|r| !r.is_empty()) {
+                        println!("decided by: {rule}");
+                    }
                     println!(
                         "\n{}\n\nEvidence:\n{}",
                         p["body"].as_str().unwrap_or(""),
@@ -3021,21 +3070,7 @@ fn main() {
                     if !s["idle"].as_bool().unwrap_or(true) && !anyway {
                         die("the step is running; a second session would collide with it. Wait for it to be idle, or pass --anyway");
                     }
-                    let bin = s["claude"].as_str().unwrap_or("claude").to_string();
-                    let wt = s["worktree"].as_str().unwrap_or(".").to_string();
-                    let mut cmd = std::process::Command::new(&bin);
-                    cmd.current_dir(&wt);
-                    match s["session"].as_str() {
-                        Some(sid) => {
-                            println!("Resuming the agent's session {sid} in {wt}");
-                            cmd.args(["--resume", sid]);
-                        }
-                        None => println!("No session to resume; starting a fresh one in {wt}"),
-                    }
-                    match cmd.status() {
-                        Ok(st) => exit(st.code().unwrap_or(1)),
-                        Err(e) => die(&format!("cannot run `{bin}`: {e}")),
-                    }
+                    exit(run_session(&s));
                 }
                 "approve" => {
                     let id = task_id(&mut a);
@@ -3624,6 +3659,62 @@ fn print_ci_watch(project: &str, w: &Value) {
                 ""
             },
         );
+    }
+}
+
+#[cfg(test)]
+mod open_session_tests {
+    use super::*;
+    use serde_json::json;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// A fake provider binary that records its cwd and arguments.
+    fn fake(dir: &std::path::Path, name: &str) -> String {
+        let p = dir.join(name);
+        std::fs::write(
+            &p,
+            format!(
+                "#!/bin/sh\npwd -P > '{d}/{name}.cwd'\necho \"$@\" > '{d}/{name}.args'\n",
+                d = dir.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p.display().to_string()
+    }
+
+    fn check(provider: &str, resume: &str) {
+        let d = tempfile::tempdir().unwrap();
+        let wt = d.path().join("wt");
+        std::fs::create_dir(&wt).unwrap();
+        let bin = fake(d.path(), provider);
+        let s = json!({"worktree": wt, "provider": provider, "session": "sid-1",
+            "argv": [bin, resume, "sid-1"]});
+        assert_eq!(run_session(&s), 0);
+        let cwd = std::fs::read_to_string(d.path().join(format!("{provider}.cwd"))).unwrap();
+        assert_eq!(cwd.trim(), wt.canonicalize().unwrap().display().to_string());
+        let args = std::fs::read_to_string(d.path().join(format!("{provider}.args"))).unwrap();
+        assert_eq!(args.trim(), format!("{resume} sid-1"));
+    }
+
+    #[test]
+    fn open_resumes_a_claude_session_in_the_worktree() {
+        check("claude", "--resume");
+    }
+
+    #[test]
+    fn open_resumes_a_codex_session_in_the_worktree() {
+        check("codex", "resume");
+    }
+
+    #[test]
+    fn open_without_a_session_starts_a_fresh_one() {
+        let d = tempfile::tempdir().unwrap();
+        let bin = fake(d.path(), "codex");
+        let s = json!({"worktree": d.path(), "provider": "codex", "session": null, "argv": [bin]});
+        assert_eq!(run_session(&s), 0);
+        let args = std::fs::read_to_string(d.path().join("codex.args")).unwrap();
+        assert_eq!(args.trim(), "");
     }
 }
 
