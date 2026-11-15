@@ -597,7 +597,7 @@ fn random_events_never_break_invariants() {
             },
             15 => E::Retried {
                 task,
-                to: State::ALL[rnd(11) as usize],
+                to: State::ALL[rnd(State::ALL.len() as u64) as usize],
                 step: String::new(),
                 auto: false,
             },
@@ -1150,5 +1150,51 @@ fn replaying_blockers_changed_and_revived_gives_the_same_world() {
     assert_eq!(
         w.tasks.values().filter(|t| !t.blockers.is_empty()).count(),
         1
+    );
+}
+
+#[test]
+fn deferred_is_not_admitted_and_comes_back_only_by_hand() {
+    let mut sim = Sim::new();
+    let t = sim.file(false, true);
+    sim.ok(E::Deferred { task: t });
+    assert_eq!((sim.state(t), sim.activity(t)), (S::Deferred, Activity::Idle));
+    assert!(matches!(
+        sim.try_ev(E::Admitted {
+            task: t,
+            entry: None
+        }),
+        Err(ReduceError::Illegal { .. })
+    ));
+    // Only a proposed task is deferred, and only a deferred one is moved back.
+    assert!(sim.try_ev(E::Deferred { task: t }).is_err());
+    sim.ok(E::Undeferred { task: t });
+    assert_eq!(sim.state(t), S::Proposed);
+    assert!(sim.try_ev(E::Undeferred { task: t }).is_err());
+    // Approved from Deferred queues it; Rejected cancels it.
+    sim.ok(E::Deferred { task: t });
+    sim.ok(E::Approved { task: t });
+    assert_eq!(sim.state(t), S::Queued);
+    let u = sim.file(false, true);
+    sim.ok(E::Deferred { task: u });
+    sim.ok(E::Rejected { task: u });
+    assert_eq!(sim.state(u), S::Canceled);
+}
+
+#[test]
+fn a_priority_chosen_at_approval_ranks_the_queued_task() {
+    let mut sim = Sim::new();
+    let t = sim.file(false, true);
+    sim.ok(E::Deferred { task: t });
+    sim.ok(E::Approved { task: t });
+    sim.ok(E::TrackerEdited {
+        task: t,
+        title: "t".into(),
+        body: String::new(),
+        priority: Priority::High,
+    });
+    assert_eq!(
+        (sim.state(t), sim.w.tasks[&t].priority),
+        (S::Queued, Priority::High)
     );
 }

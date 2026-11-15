@@ -161,6 +161,7 @@ pub fn state_name(s: State) -> &'static str {
         State::Failed => "failed",
         State::Canceled => "canceled",
         State::Landed => "landed",
+        State::Deferred => "deferred",
     }
 }
 
@@ -249,6 +250,14 @@ pub fn encode(k: &EventKind) -> (&'static str, String) {
         Rejected { task } => {
             w.n(task.0);
             "rejected"
+        }
+        Deferred { task } => {
+            w.n(task.0);
+            "deferred"
+        }
+        Undeferred { task } => {
+            w.n(task.0);
+            "undeferred"
         }
         Admitted { task, entry } => {
             w.n(task.0);
@@ -415,6 +424,8 @@ pub fn decode(kind: &str, payload: &str) -> Result<EventKind, CodecError> {
         },
         "approved" => Approved { task: t(&mut r)? },
         "rejected" => Rejected { task: t(&mut r)? },
+        "deferred" => Deferred { task: t(&mut r)? },
+        "undeferred" => Undeferred { task: t(&mut r)? },
         "admitted" => {
             let task = t(&mut r)?;
             let entry = if r.more() {
@@ -575,6 +586,8 @@ mod tests {
             },
             Approved { task: t },
             Rejected { task: t },
+            Deferred { task: t },
+            Undeferred { task: t },
             Admitted {
                 task: t,
                 entry: None,

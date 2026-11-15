@@ -615,7 +615,14 @@ public final class MonitorModel: ObservableObject {
 
     public func cancel(_ task: UInt64) { command { $0.cancel = .with { $0.task = task } } }
     public func retry(_ task: UInt64, from: String = "", seen: UInt64 = 0) { command { $0.retry = .with { $0.task = task; $0.from = from; $0.seen = seen } } }
-    public func approve(_ task: UInt64) { command { $0.approve = .with { $0.task = task } } }
+    public func approve(_ task: UInt64, priority: String = "") { command { $0.approve = .with { $0.task = task; $0.priority = priority } } }
+    /// Put a proposed task aside; it comes back only by hand.
+    public func deferTask(_ task: UInt64) { command { $0.defer = .with { $0.task = task } } }
+    /// Move a deferred task back to proposed.
+    public func undefer(_ task: UInt64) { command { $0.undefer = .with { $0.task = task } } }
+    /// The priorities the approval picker offers; it starts at `defaultApprovalPriority`.
+    public static let approvalPriorities = ["urgent", "high", "normal", "low"]
+    public static let defaultApprovalPriority = "normal"
     /// The tasks the Add blocker picker offers for `row`: any task in the sidebar that is not
     /// itself, not already a blocker, and could still land (not landed, canceled or failed).
     public func blockerCandidates(for row: TaskRow) -> [TaskRow] {
@@ -655,8 +662,8 @@ public final class MonitorModel: ObservableObject {
     }
 
     /// What Approve sends for an approval: the held diff's hash when there is one, else a plain approve.
-    public func approve(_ task: UInt64, _ a: Mason_V1_Approval) {
-        if a.diffHash.isEmpty { approve(task) } else { approveHold(task, diffHash: a.diffHash) }
+    public func approve(_ task: UInt64, _ a: Mason_V1_Approval, priority: String = MonitorModel.defaultApprovalPriority) {
+        if a.diffHash.isEmpty { approve(task, priority: priority) } else { approveHold(task, diffHash: a.diffHash) }
     }
 
     /// The first task that needs the owner, in the Home queue's order.

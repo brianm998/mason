@@ -523,6 +523,34 @@ fn a_frozen_base_raises_an_alert_naming_the_fix_task_until_the_freeze_clears() {
 }
 
 #[test]
+fn a_deferred_task_raises_no_alert_and_is_not_admitted_until_approved_with_a_priority() {
+    let s = world(vec![develop_turn()]);
+    let d = start(&s);
+    let t = file_task_as(&d, "Later", "Please do it.", true, TrustSource::Owner, true);
+    let key = format!("proposed:{}", t.0);
+    let has = |d: &Arc<Daemon>| attention::alerts_now(d).iter().any(|a| a.0 == key);
+    assert!(has(&d), "a proposal waits for the owner");
+    d.emit(EventKind::Deferred { task: t }).unwrap();
+    assert!(!has(&d), "a deferred task raises no alert");
+    std::thread::sleep(Duration::from_millis(600));
+    assert_eq!(state_of(&d, t), State::Deferred, "nothing admits it");
+    d.emit(EventKind::Undeferred { task: t }).unwrap();
+    assert!(has(&d), "the approval alert returns");
+    d.emit(EventKind::Deferred { task: t }).unwrap();
+    d.emit(EventKind::Approved { task: t }).unwrap();
+    let w = d.world().unwrap();
+    let task = &w.tasks[&t];
+    d.emit(EventKind::TrackerEdited {
+        task: t,
+        title: task.title.clone(),
+        body: task.body.clone(),
+        priority: Priority::High,
+    })
+    .unwrap();
+    assert_eq!(d.world().unwrap().tasks[&t].priority, Priority::High);
+}
+
+#[test]
 fn the_resume_command_is_the_providers_own() {
     assert_eq!(
         attention::resume_argv("claude", "/b/claude", Some("s1")),

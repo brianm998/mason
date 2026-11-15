@@ -193,7 +193,7 @@ private fun RowView(model: MonitorModel, row: TaskRow) {
                     Text("issue #${row.issue}", style = theme.small())
                 }
                 if (row.state == "proposed" && model.canAct && "approve" in row.allowed_actions) {
-                    Pill("Approve", prominent = true, modifier = Modifier.testTag("row:${row.id}:approve")) { model.approve(row.id) }
+                    Pill("Approve", prominent = true, modifier = Modifier.testTag("row:${row.id}:approve")) { model.approve(row.id, MonitorModel.DEFAULT_APPROVAL_PRIORITY) }
                 }
             }
         }

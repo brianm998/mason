@@ -421,10 +421,11 @@ public nonisolated struct Mason_V1_Command: Sendable {
     set {body = .retry(newValue)}
   }
 
-  public var approve: Mason_V1_TaskRef {
+  /// Approve a proposed (or deferred) task, optionally choosing its priority.
+  public var approve: Mason_V1_ApproveTask {
     get {
       if case .approve(let v)? = body {return v}
-      return Mason_V1_TaskRef()
+      return Mason_V1_ApproveTask()
     }
     set {body = .approve(newValue)}
   }
@@ -545,6 +546,23 @@ public nonisolated struct Mason_V1_Command: Sendable {
     set {body = .setGate(newValue)}
   }
 
+  /// Proposed to deferred, and back. Owner decisions; no timer.
+  public var `defer`: Mason_V1_TaskRef {
+    get {
+      if case .defer(let v)? = body {return v}
+      return Mason_V1_TaskRef()
+    }
+    set {body = .defer(newValue)}
+  }
+
+  public var undefer: Mason_V1_TaskRef {
+    get {
+      if case .undefer(let v)? = body {return v}
+      return Mason_V1_TaskRef()
+    }
+    set {body = .undefer(newValue)}
+  }
+
   public var raw: Mason_V1_Raw {
     get {
       if case .raw(let v)? = body {return v}
@@ -564,7 +582,8 @@ public nonisolated struct Mason_V1_Command: Sendable {
     case addTask(Mason_V1_AddTask)
     case cancel(Mason_V1_TaskRef)
     case retry(Mason_V1_Retry)
-    case approve(Mason_V1_TaskRef)
+    /// Approve a proposed (or deferred) task, optionally choosing its priority.
+    case approve(Mason_V1_ApproveTask)
     case reject(Mason_V1_Reject)
     case exploreAnyway(Mason_V1_TaskRef)
     case answer(Mason_V1_Answer)
@@ -583,6 +602,9 @@ public nonisolated struct Mason_V1_Command: Sendable {
     case revive(Mason_V1_TaskRef)
     /// Change a compile gate while masond runs, or go back to resources.toml.
     case setGate(Mason_V1_SetGate)
+    /// Proposed to deferred, and back. Owner decisions; no timer.
+    case `defer`(Mason_V1_TaskRef)
+    case undefer(Mason_V1_TaskRef)
     case raw(Mason_V1_Raw)
 
   }
@@ -596,6 +618,21 @@ public nonisolated struct Mason_V1_TaskRef: Sendable {
   // methods supported on all messages.
 
   public var task: UInt64 = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public nonisolated struct Mason_V1_ApproveTask: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var task: UInt64 = 0
+
+  /// urgent, high, normal or low; empty keeps the task's own priority.
+  public var priority: String = String()
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -3617,7 +3654,7 @@ nonisolated extension Mason_V1_Ping: SwiftProtobuf.Message, SwiftProtobuf._Messa
 
 nonisolated extension Mason_V1_Command: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".Command"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{3}add_task\0\u{1}cancel\0\u{1}retry\0\u{1}approve\0\u{1}reject\0\u{3}explore_anyway\0\u{1}answer\0\u{1}skip\0\u{3}land_now\0\u{1}force\0\u{1}pause\0\u{1}resume\0\u{3}set_limit\0\u{3}approve_hold\0\u{1}unblock\0\u{1}block\0\u{1}revive\0\u{3}set_gate\0\u{2}\u{b}raw\0\u{2}\u{a}actor\0\u{1}reason\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{3}add_task\0\u{1}cancel\0\u{1}retry\0\u{1}approve\0\u{1}reject\0\u{3}explore_anyway\0\u{1}answer\0\u{1}skip\0\u{3}land_now\0\u{1}force\0\u{1}pause\0\u{1}resume\0\u{3}set_limit\0\u{3}approve_hold\0\u{1}unblock\0\u{1}block\0\u{1}revive\0\u{3}set_gate\0\u{1}defer\0\u{1}undefer\0\u{2}\u{9}raw\0\u{2}\u{a}actor\0\u{1}reason\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -3666,7 +3703,7 @@ nonisolated extension Mason_V1_Command: SwiftProtobuf.Message, SwiftProtobuf._Me
         }
       }()
       case 5: try {
-        var v: Mason_V1_TaskRef?
+        var v: Mason_V1_ApproveTask?
         var hadOneofValue = false
         if let current = self.body {
           hadOneofValue = true
@@ -3860,6 +3897,32 @@ nonisolated extension Mason_V1_Command: SwiftProtobuf.Message, SwiftProtobuf._Me
           self.body = .setGate(v)
         }
       }()
+      case 20: try {
+        var v: Mason_V1_TaskRef?
+        var hadOneofValue = false
+        if let current = self.body {
+          hadOneofValue = true
+          if case .defer(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.body = .defer(v)
+        }
+      }()
+      case 21: try {
+        var v: Mason_V1_TaskRef?
+        var hadOneofValue = false
+        if let current = self.body {
+          hadOneofValue = true
+          if case .undefer(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.body = .undefer(v)
+        }
+      }()
       case 30: try {
         var v: Mason_V1_Raw?
         var hadOneofValue = false
@@ -3961,6 +4024,14 @@ nonisolated extension Mason_V1_Command: SwiftProtobuf.Message, SwiftProtobuf._Me
       guard case .setGate(let v)? = self.body else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 19)
     }()
+    case .defer?: try {
+      guard case .defer(let v)? = self.body else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 20)
+    }()
+    case .undefer?: try {
+      guard case .undefer(let v)? = self.body else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 21)
+    }()
     case .raw?: try {
       guard case .raw(let v)? = self.body else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 30)
@@ -4011,6 +4082,41 @@ nonisolated extension Mason_V1_TaskRef: SwiftProtobuf.Message, SwiftProtobuf._Me
 
   public static func ==(lhs: Mason_V1_TaskRef, rhs: Mason_V1_TaskRef) -> Bool {
     if lhs.task != rhs.task {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Mason_V1_ApproveTask: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".ApproveTask"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}task\0\u{1}priority\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularUInt64Field(value: &self.task) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.priority) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if self.task != 0 {
+      try visitor.visitSingularUInt64Field(value: self.task, fieldNumber: 1)
+    }
+    if !self.priority.isEmpty {
+      try visitor.visitSingularStringField(value: self.priority, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Mason_V1_ApproveTask, rhs: Mason_V1_ApproveTask) -> Bool {
+    if lhs.task != rhs.task {return false}
+    if lhs.priority != rhs.priority {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

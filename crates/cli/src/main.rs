@@ -70,7 +70,11 @@ mason: command-line client for the MASON pipeline
                                       the message is shown once in the next round's prompt
   mason task diagnosis <id> [apply|dismiss N]   what the diagnosis agent said about a task that
                                       failed on its own code; apply or dismiss a pending one
-  mason task approve <id>             let a proposed task start, or an approval step go on
+  mason task approve <id> [--priority P]   let a proposed or deferred task start (queued at P: urgent,
+                                      high, normal or low), or an approval step go on
+  mason task defer <id>               put a proposed task aside (state deferred); it comes back only
+                                      by hand: approve, reject or undefer
+  mason task undefer <id>             move a deferred task back to proposed
   mason task reject <id> [--reason R] reject a proposed task or an approval step
   mason task explore-anyway <id>      explore after all, even if it skipped exploring
   mason task override <id> <key> <value>
@@ -3231,8 +3235,18 @@ fn main() {
                     }
                     exit(run_session(&s));
                 }
+                "defer" | "undefer" => {
+                    let id = task_id(&mut a);
+                    finish(&a);
+                    or_die(d.call("POST", &format!("/tasks/{id}/{sub}"), None));
+                    println!(
+                        "Task #{id} {}",
+                        if sub == "defer" { "deferred" } else { "back in Proposed" }
+                    );
+                }
                 "approve" => {
                     let id = task_id(&mut a);
+                    let priority = a.opt("--priority");
                     finish(&a);
                     // A change to MASON's own rules is approved by the owner's identity: this
                     // user's, unless `--as` said otherwise.
@@ -3241,8 +3255,12 @@ fn main() {
                             std::env::set_var("MASON_AS", u);
                         }
                     }
-                    or_die(d.call("POST", &format!("/tasks/{id}/approve"), None));
-                    println!("Approved task #{id}");
+                    let body = priority.as_ref().map(|p| json!({"priority": p}));
+                    or_die(d.call("POST", &format!("/tasks/{id}/approve"), body.as_ref()));
+                    match priority {
+                        Some(p) => println!("Approved task #{id} at priority {p}"),
+                        None => println!("Approved task #{id}"),
+                    }
                 }
                 "unblock" | "block" | "revive" => {
                     let id = task_id(&mut a);

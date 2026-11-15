@@ -54,7 +54,7 @@ impl World {
     /// event, so state and activity always change together.
     fn derive_activity(&self, t: &Task) -> Activity {
         match t.state {
-            State::Proposed | State::Failed | State::Canceled | State::Landed => Activity::Idle,
+            State::Proposed | State::Deferred | State::Failed | State::Canceled | State::Landed => Activity::Idle,
             _ if t.paused => Activity::Paused,
             State::Queued if !t.blockers.is_empty() => Activity::Held(t.blockers.clone()),
             State::Queued => match t.not_before {

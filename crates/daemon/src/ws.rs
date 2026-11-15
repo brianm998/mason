@@ -733,8 +733,18 @@ fn call_for(c: &Command) -> Result<Call, String> {
         ),
         Cmd::Approve(t) => post(
             format!("/tasks/{}/approve", t.task),
-            None,
+            (!t.priority.is_empty()).then(|| json!({"priority": t.priority})),
             Some((t.task, "approve")),
+        ),
+        Cmd::Defer(t) => post(
+            format!("/tasks/{}/defer", t.task),
+            None,
+            Some((t.task, "defer")),
+        ),
+        Cmd::Undefer(t) => post(
+            format!("/tasks/{}/undefer", t.task),
+            None,
+            Some((t.task, "undefer")),
         ),
         Cmd::ApproveHold(h) => post(
             format!("/tasks/{}/approve", h.task),
