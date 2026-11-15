@@ -123,7 +123,7 @@ extension TopBar {
         if let choice = model.topBarMascot, let img = Mascot.illustration(choice.id) {
             let side = topBarMascotSide(illustration: theme.illustration, bar: theme.tileHeight * 2 + theme.spacingSmall)
             Button { model.topBarMascotClicked() } label: {
-                img.resizable().aspectRatio(contentMode: .fit).interpolation(.high)
+                img.resizable().interpolation(.high).aspectRatio(contentMode: .fit)
                     .frame(width: side, height: side)
             }
             .buttonStyle(.plain)
