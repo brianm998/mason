@@ -716,7 +716,7 @@ fun landingItemText(i: mason.v1.TaskLanding): String {
 @Composable
 fun SettingsPage(model: MonitorModel) {
     val theme = LocalTheme.current
-    Scrolling {
+    Scrolling(model) {
         Text("Settings", style = theme.title())
         model.settingsNotice?.let { Text(it, style = theme.body(color = theme.muted), modifier = Modifier.testTag("settings:notice")) }
         val s = model.settings
