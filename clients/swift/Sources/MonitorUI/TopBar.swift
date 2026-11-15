@@ -124,8 +124,9 @@ extension TopBar {
             let side = topBarMascotSide(illustration: theme.illustration, bar: theme.tileHeight * 2 + theme.spacingSmall)
             Button { model.topBarMascotClicked() } label: {
                 img.resizable().interpolation(.high).aspectRatio(contentMode: .fit)
-                    .frame(width: side, height: side)
+                    .frame(minWidth: 0, idealWidth: side, maxWidth: side, minHeight: 0, idealHeight: side, maxHeight: side)
             }
+            .layoutPriority(-2)
             .buttonStyle(.plain)
             .help(model.topBarMascotTooltip)
             .accessibilityLabel(model.topBarMascotTooltip)
