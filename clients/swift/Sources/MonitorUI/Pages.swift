@@ -345,8 +345,9 @@ struct TaskDetailPage: View {
                     .accessibilityIdentifier("cpu")
                 HStack(spacing: theme.spacingLarge) {
                     CopyButton(label: r.key, value: r.key)
-                    if !d.branch.isEmpty { CopyButton(label: "branch", value: d.branch) }
-                    if !d.worktree.isEmpty { CopyButton(label: "worktree", value: d.worktree) }
+                    ForEach(CopyTarget.detail(branch: d.branch, worktree: d.worktree), id: \.label) { t in
+                        CopyValueButton(target: t) { (model.copier ?? copyToPasteboard)($0) }
+                    }
                 }
             }
             }
