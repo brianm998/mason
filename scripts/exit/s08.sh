@@ -35,7 +35,7 @@ wait_waiting() {  # TASK SECONDS: prints the task's wait sentence
   while :; do
     # Only the compile-slot sentence counts: a task also waits on LLM sessions and, on a busy
     # machine, on the CPU gate, and those come first or instead.
-    w=$(m task show "$1" 2>/dev/null | sed -n 's/^  waiting   //p' | grep '^Waiting for compile slot' || true)
+    w=$(m task show "$1" 2>/dev/null | sed -n 's/^  waiting   //p' | grep '^Waiting for compile slot' || :)
     [ -n "$w" ] && { echo "$w"; return; }
     [ $SECONDS -lt $end ] || { echo "task $1 never showed a wait" >&2; m task show "$1" >&2 || true; exit 1; }
     sleep 0.2
