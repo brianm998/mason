@@ -462,7 +462,14 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     /** What a tile click does: reveal on every click; the second click of a double also opens the lone task. */
     fun tileClicked(state: String, clickCount: Int) {
         reveal(state)
-        if (clickCount == 2) revealAndOpenIfOne(state)
+        if (clickCount == 2) tileDoubleClicked(state)
+    }
+
+    /** A double click: the lone task when the stage holds exactly one, else the stage's page (if it has one). */
+    fun tileDoubleClicked(state: String) {
+        if (!connected) return
+        val n = sidebar?.sections?.firstOrNull { it.state == state }?.rows?.size ?: 0
+        if (n == 1) revealAndOpenIfOne(state) else Page.sectionPage(state)?.let { go(it) }
     }
 
     /** Reveal the section and, if it holds exactly one task right now (search ignored), open it. Nothing while disconnected. */

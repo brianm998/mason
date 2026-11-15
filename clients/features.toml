@@ -390,3 +390,8 @@ compose = "done"
 description = "Settings has a Devices section: whether LAN access is on (and how to turn it on when it is off), the paired devices with role and last seen, revoked ones apart, and Revoke after a confirmation. 'Pair a device…' (owner or viewer) shows the mason://pair URL as a QR code, the 8-digit code in large type, the hosts and a countdown to expiry that then offers a new code; the list refreshes every few seconds while the sheet is open"
 swift = "done"
 compose = "done"
+
+[feature.section-detail-pages]
+description = "Each home section has a detail page, mason://section/<name> for active_models, queued, cpu, compilation, exploring, developing, testing and review (landing is the Landing page): only that section with more room. The home section title and a > icon (chevron.right) to its right open it, as does a > at the trailing end of the sidebar section header. A double click on a count tile opens the stage page, or the task when the stage holds exactly one; a single click still reveals the sidebar section. The Testing page lists tasks in the sidebar order, shows suites done of total and has Skip testing per row and for all, sending the sidebar skip command"
+swift = "done"
+compose = "done"

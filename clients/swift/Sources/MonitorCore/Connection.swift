@@ -183,7 +183,7 @@ public final class MonitorConnection {
         switch model.page {
         case .task(let id): views.append(.taskDetail); taskId = id
         case .landing: views.append(.landing)
-        case .home: views.append(.cpuHistory)
+        case .home, .section("cpu"): views.append(.cpuHistory)
         case .pipeline: views.append(.editor)
         case .health:
             model.raw("GET", "/resources")

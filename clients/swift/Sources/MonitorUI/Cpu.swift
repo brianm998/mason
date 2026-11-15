@@ -12,12 +12,14 @@ struct CpuSection: View {
     @Environment(\.theme) var theme
     let model: MonitorModel
     @ObservedObject var cpu: CpuModel
+    /// Set on home: the title and its '>' open the CPU page.
+    var open: (() -> Void)? = nil
     @State private var expanded = false
     @State private var tip: String?
 
     var body: some View {
         if let layout = cpuLayout(cpu.usage, nowMs: model.daemonNow(), colors: cpu.colors) {
-            CpuSectionBody(model: model, layout: layout, chart: cpu.chart, span: cpu.span, expanded: $expanded, tip: $tip)
+            CpuSectionBody(model: model, layout: layout, chart: cpu.chart, span: cpu.span, open: open, expanded: $expanded, tip: $tip)
         }
     }
 }
@@ -29,11 +31,12 @@ struct CpuSectionBody: View {
     let layout: CpuLayout
     var chart: CpuChart?
     var span: CpuSpan = .hour
+    var open: (() -> Void)? = nil
     @Binding var expanded: Bool
     @Binding var tip: String?
 
     var body: some View {
-        section("CPU (all projects)", theme: theme) {
+        section("CPU (all projects)", theme: theme, open: open) {
             Text(layout.header).font(theme.body()).foregroundStyle(theme.muted)
             if let hidden = layout.hidden {
                 Text(hidden).font(theme.body()).foregroundStyle(theme.muted)

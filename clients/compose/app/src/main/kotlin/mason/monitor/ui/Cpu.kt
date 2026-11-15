@@ -30,12 +30,12 @@ import mason.monitor.*
  * A segment shows its tip when tapped.
  */
 @Composable
-fun CpuSection(model: MonitorModel) {
+fun CpuSection(model: MonitorModel, open: (() -> Unit)? = null) {
     val theme = LocalTheme.current
     val layout = cpuLayout(model.cpu, model.daemonNow(), model.cpuColors) ?: return
     var expanded by remember { mutableStateOf(false) }
     var tip by remember { mutableStateOf<String?>(null) }
-    Section("CPU (all projects)") {
+    Section("CPU (all projects)", open = open) {
         Text(layout.header, style = theme.body(color = theme.muted))
         val hidden = layout.hidden
         if (hidden != null) {

@@ -132,6 +132,7 @@ struct SectionHeader: View {
 
     var body: some View {
         let open = model.isExpanded(section)
+        HStack(spacing: 0) {
         Button { model.toggle(section) } label: {
             HStack(spacing: theme.spacingSmall) {
                 Image(systemName: open ? "chevron.down" : "chevron.right").frame(width: theme.cell)
@@ -142,13 +143,26 @@ struct SectionHeader: View {
                     .font(theme.body(.semibold)).lineLimit(1).fixedSize().layoutPriority(1)
                     .foregroundStyle(section.state == "needs_attention" && section.count > 0 ? theme.attention : theme.muted)
             }
-            .padding(.horizontal, theme.spacing).padding(.vertical, theme.spacingSmall + 2)
+            .padding(.leading, theme.spacing).padding(.vertical, theme.spacingSmall + 2)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(section.title), \(model.countText(section)), \(open ? "expanded" : "collapsed")")
         .accessibilityIdentifier("section:\(section.state)")
+        if let page = Page.sectionPage(section.state) {
+            Button { model.go(page) } label: {
+                Image(systemName: "chevron.right").font(theme.body(.semibold)).foregroundStyle(theme.muted)
+                    .padding(.horizontal, theme.spacing).padding(.vertical, theme.spacingSmall + 2)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain).help("Open the \(section.title) page")
+            .accessibilityLabel("Open \(section.title)")
+            .accessibilityIdentifier("section-open:\(section.state)")
+        } else {
+            Color.clear.frame(width: theme.spacing)
+        }
+        }
     }
 }
 

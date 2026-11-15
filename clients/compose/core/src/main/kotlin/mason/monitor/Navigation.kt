@@ -12,6 +12,8 @@ sealed class Page {
     data object Pipeline : Page()
     data object Health : Page()
     data object Settings : Page()
+    /** A detail page for one section of home: see [sectionNames]. */
+    data class Section(val name: String) : Page()
 
     /** The `mason://` address of a page, for deep links from notifications. */
     val url: String
@@ -23,9 +25,21 @@ sealed class Page {
             Pipeline -> "mason://pipeline"
             Health -> "mason://health"
             Settings -> "mason://settings"
+            is Section -> "mason://section/$name"
         }
 
     companion object {
+        /** The sections that have a page of their own (`mason://section/<name>`). */
+        val sectionNames = listOf("active_models", "landing", "queued", "cpu", "compilation",
+            "exploring", "developing", "testing", "review")
+
+        /** The page for a section of home; `landing` is the existing Landing page. */
+        fun sectionPage(name: String): Page? = when {
+            name !in sectionNames -> null
+            name == "landing" -> Landing
+            else -> Section(name)
+        }
+
         /** `mason://task/12`, `mason://landing`, ... `null` for anything else. */
         fun from(url: String): Page? {
             val u = runCatching { URI(url) }.getOrNull() ?: return null
@@ -40,6 +54,7 @@ sealed class Page {
                 "pipeline" -> if (rest.isEmpty()) Pipeline else null
                 "health" -> if (rest.isEmpty()) Health else null
                 "settings" -> if (rest.isEmpty()) Settings else null
+                "section" -> rest.singleOrNull()?.let(::sectionPage)
                 else -> null
             }
         }
