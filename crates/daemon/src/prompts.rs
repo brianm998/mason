@@ -111,13 +111,23 @@ const MAX_PACK: usize = 32 * 1024;
 /// `review`), if it has one. Never read from a worktree: a task's change cannot
 /// rewrite the instructions it is given.
 pub fn load_pack(p: &ProjectCfg, kind: &str) -> Option<String> {
-    let sha = mason_landing::git::rev_parse(&p.path, &p.base_ref()).ok()?;
-    let text = mason_landing::git::run(
-        &p.path,
-        &["show", &format!("{sha}:.mason/prompts/{kind}.md")],
-    )
-    .ok()?;
-    (!text.trim().is_empty() && text.len() <= MAX_PACK).then_some(text)
+    load_pack_file(p, &format!("{kind}.md")).ok()
+}
+
+/// `.mason/prompts/<file>` on the base commit, or why there is none: missing, empty or
+/// over the size cap. The base commit, never the worktree, as for [`load_pack`].
+pub fn load_pack_file(p: &ProjectCfg, file: &str) -> Result<String, String> {
+    let sha = mason_landing::git::rev_parse(&p.path, &p.base_ref())
+        .map_err(|e| format!("the base commit could not be read: {e}"))?;
+    let text = mason_landing::git::run(&p.path, &["show", &format!("{sha}:.mason/prompts/{file}")])
+        .map_err(|_| "no such file on the base commit".to_string())?;
+    if text.trim().is_empty() {
+        Err("the file is empty".into())
+    } else if text.len() > MAX_PACK {
+        Err(format!("the file is over {MAX_PACK} bytes"))
+    } else {
+        Ok(text)
+    }
 }
 
 /// What a pack's placeholders stand for.
@@ -342,5 +352,12 @@ mod tests {
         );
         assert_eq!(load_pack(&p, "review"), None);
         assert_eq!(load_pack(&p, "explore"), None);
+        assert!(load_pack_file(&p, "review.md")
+            .unwrap_err()
+            .contains("no such file"));
+        assert_eq!(
+            load_pack_file(&p, "develop.md").unwrap(),
+            "Committed rules."
+        );
     }
 }
