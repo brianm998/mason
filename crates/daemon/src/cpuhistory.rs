@@ -226,8 +226,9 @@ mod tests {
     fn minute_buckets_keep_totals_within_rounding() {
         let mut r = CpuRing::default();
         // Three hours of readings, alternating 100 and 201 for task 3.
+        // Start at 0 so the first minute holds 12 readings, 6 of each value, like every other.
         let total = 3 * 3600 / 5;
-        for i in 1..=total as u64 {
+        for i in 0..total as u64 {
             let p = if i % 2 == 0 { 100 } else { 201 };
             r.push(
                 i * FINE_STEP_MS,
@@ -245,7 +246,10 @@ mod tests {
         let full: Vec<&CpuPoint> = h
             .points
             .iter()
-            .filter(|p| p.at_ms % MINUTE_MS == 0 && p.shares.len() == 2)
+            // The first minute is partial (11 readings, not 12), so its mean is off.
+            .filter(|p| {
+                p.at_ms >= MINUTE_MS && p.at_ms % MINUTE_MS == 0 && p.shares.len() == 2
+            })
             .collect();
         assert!(full.len() > 100);
         for p in full.iter().take(100) {

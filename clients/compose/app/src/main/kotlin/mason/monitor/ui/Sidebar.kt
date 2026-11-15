@@ -72,6 +72,35 @@ fun SidebarPane(model: MonitorModel, width: Dp) {
                 }
             }
         }
+        ActiveSessionsPanel(model)
+    }
+}
+
+/**
+ * Pinned at the bottom of the sidebar, under the list: every open owner session the owner is part
+ * of (a task's, the pipeline's health), each with a marker while it is replying or waits for the
+ * owner. Hidden when there are none. Clicking one opens its dialog.
+ */
+@Composable
+fun ActiveSessionsPanel(model: MonitorModel) {
+    val theme = LocalTheme.current
+    val sessions = model.header?.active_sessions ?: emptyList()
+    val title = ActiveSessions.title(sessions) ?: return
+    Column(Modifier.fillMaxWidth().padding(bottom = theme.spacing)) {
+        HorizontalDivider(color = theme.border)
+        Text(title, style = theme.small(FontWeight.SemiBold, color = theme.muted),
+            modifier = Modifier.padding(horizontal = theme.spacing).padding(top = theme.spacing).testTag("active-sessions-title"))
+        sessions.forEach { s ->
+            Row(
+                Modifier.fillMaxWidth().clickable { model.openOwnerSession(s.id) }
+                    .padding(horizontal = theme.spacing, vertical = theme.spacing / 2).testTag("active-session:${s.id}"),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(s.label, style = theme.body(), maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                val marker = ActiveSessions.marker(s)
+                if (marker.isNotEmpty()) Text(marker, style = theme.small(color = if (s.working) theme.accent else theme.attention))
+            }
+        }
     }
 }
 
@@ -142,6 +171,12 @@ private fun SectionHeader(model: MonitorModel, s: SidebarSection) {
             count,
             style = theme.body(FontWeight.SemiBold, if (s.state == "needs_attention" && s.count > 0) theme.attention else theme.muted),
         )
+        val page = Page.sectionPage(s.state)
+        if (page != null) {
+            Text("›", style = theme.body(FontWeight.SemiBold, theme.muted),
+                modifier = Modifier.clickable { model.go(page) }.padding(start = theme.spacing)
+                    .testTag("section-open:${s.state}").semantics { contentDescription = "Open ${s.title}" })
+        }
     }
 }
 

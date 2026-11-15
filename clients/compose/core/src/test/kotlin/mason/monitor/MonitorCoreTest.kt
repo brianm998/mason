@@ -114,8 +114,50 @@ class MonitorCoreTest {
         assertEquals(h, h.go(h.current))
     }
 
+    @Test fun backAndForwardRestoreEachEntrysScroll() {
+        var h = NavHistory().go(Page.Task(5), 300)
+        assertEquals(0, h.restore, "a new selection starts at the top")
+        h = h.goBack(40)
+        assertEquals(Page.Home, h.current)
+        assertEquals(300, h.restore)
+        h = h.goForward(300)
+        assertEquals(Page.Task(5), h.current)
+        assertEquals(40, h.restore)
+    }
+
+    @Test fun theSamePageTwiceKeepsTwoPositions() {
+        var h = NavHistory().go(Page.Task(5), 100).go(Page.Home, 10).go(Page.Task(9), 700)
+        h = h.goBack(1)
+        assertEquals(700, h.restore)
+        h = h.goBack(2)
+        assertEquals(Page.Task(5), h.current)
+        assertEquals(10, h.restore)
+        h = h.goBack(3)
+        assertEquals(Page.Home, h.current)
+        assertEquals(100, h.restore)
+    }
+
+    @Test fun goHomeFromHomeKeepsItsPositionAndSelectingClearsForward() {
+        var h = NavHistory().go(Page.Landing, 5).goBack(9)
+        assertEquals(5, h.restore)
+        assertEquals(h, h.goHome(77), "going where you already are changes nothing")
+        h = h.go(Page.Usage, 77)
+        assertFalse(h.canGoForward)
+        assertTrue(h.forwardScroll.isEmpty())
+        assertEquals(77, h.goBack().restore)
+    }
+
+    @Test fun modelSavesTheLiveScrollWhenLeaving() {
+        val m = model()
+        m.reportScroll(250)
+        m.go(Page.Task(3))
+        m.goBack()
+        assertEquals(250, m.liveScroll)
+        assertEquals(250, m.history.restore)
+    }
+
     @Test fun deepLinksRoundTripAndRefuseOtherThings() {
-        for (p in listOf(Page.Home, Page.Task(204), Page.Landing, Page.Usage, Page.Pipeline, Page.Health, Page.Settings)) {
+        for (p in listOf(Page.Home, Page.Task(204), Page.Landing, Page.Usage, Page.Pipeline, Page.Health, Page.Settings, Page.Section("cpu"), Page.Section("testing"))) {
             assertEquals(p, Page.from(p.url), "$p")
         }
         assertNull(Page.from("https://example.com/task/1"))
@@ -212,12 +254,68 @@ class MonitorCoreTest {
         assertEquals(Page.Task(3), m.page)
     }
 
-    @Test fun doubleClickWithSeveralTasksExpandsAndScrollsButKeepsThePage() {
+    @Test fun doubleClickWithSeveralTasksExpandsAndScrollsAndOpensTheStagePage() {
         val m = model()
+        m.tileClicked("queued", 1)
+        assertEquals(Page.Home, m.page)
         m.tileClicked("queued", 2)
         assertTrue(m.isExpanded(m.sidebar!!.sections[0]))
         assertEquals("queued", m.scrollTarget)
-        assertEquals(Page.Home, m.page)
+        assertEquals(Page.Section("queued"), m.page)
+    }
+
+    @Test fun doubleClickOnAStageWithThreeTasksOpensItsPageAndOneTaskOpensTheTask() {
+        val m = model()
+        m.sidebar = m.sidebar!!.copy(sections = m.sidebar!!.sections + listOf(
+            section("testing", rows = listOf(row(10, "testing"), row(11, "testing"), row(12, "testing"))),
+            section("review", rows = listOf(row(20, "review"))),
+            section("landing", rows = listOf(row(30, "landing"), row(31, "landing"))),
+        ))
+        m.tileClicked("testing", 2)
+        assertEquals(Page.Section("testing"), m.page)
+        m.tileClicked("review", 2)
+        assertEquals(Page.Task(20), m.page)
+        m.tileClicked("landing", 2)
+        assertEquals(Page.Landing, m.page)
+    }
+
+    @Test fun sectionUrlsRoundTripToTheirPages() {
+        for (name in Page.sectionNames) {
+            val page = Page.sectionPage(name)
+            assertNotNull(page, name)
+            assertEquals(page, Page.from("mason://section/$name"), name)
+            assertEquals(page, Page.from(page.url), name)
+        }
+        assertEquals(Page.Landing, Page.sectionPage("landing"))
+        assertEquals("mason://section/testing", Page.Section("testing").url)
+        assertNull(Page.from("mason://section/nonsense"))
+        assertNull(Page.from("mason://section"))
+        var h = NavHistory().go(Page.Section("cpu")).goBack()
+        assertEquals(Page.Home, h.current)
+        h = h.goForward()
+        assertEquals(Page.Section("cpu"), h.current)
+    }
+
+    @Test fun testingPageRowsKeepTheSidebarOrderAndSkipSendsTheSidebarCommand() {
+        val m = model()
+        m.isOwner = true
+        val a = row(10, "testing", actions = listOf("skip_test")).copy(
+            step = "test",
+            progress = listOf(ProgressCell(state = CellState.PART, run = 1, done = 3, total = 8, unit = "suites", total_source = ProgressSource.SOURCE_REPORTED)),
+        )
+        val b = row(11, "testing", actions = listOf("cancel")).copy(step = "test")
+        val c = row(12, "testing", actions = listOf("skip_test")).copy(step = "test")
+        m.sidebar = m.sidebar!!.copy(sections = m.sidebar!!.sections + section("testing", rows = listOf(b, a, c)))
+        assertEquals(listOf(11L, 10L, 12L), m.sectionRows("testing").map { it.id })
+        assertEquals(listOf(10L, 12L), m.skippableRows(m.sectionRows("testing")).map { it.id })
+        val sent = mutableListOf<Command>()
+        m.sender = { sent += it }
+        m.skipAllTests(m.sectionRows("testing"))
+        assertEquals(listOf(10L, 12L), sent.map { it.skip?.task })
+        m.skipTest(10, "test")
+        assertEquals(10L, sent.last().skip?.task)
+        assertEquals("3 of 8 suites", SectionPages.suiteProgress(a))
+        assertEquals("", SectionPages.suiteProgress(b))
     }
 
     @Test fun doubleClickOnAnEmptyStateChangesNothingBeyondTheReveal() {

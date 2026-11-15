@@ -137,7 +137,7 @@ class MonitorConnection(
         when (val p = model.page) {
             is Page.Task -> { views += ViewKind.TASK_DETAIL; task = p.id }
             Page.Landing -> views += ViewKind.LANDING
-            Page.Home -> views += ViewKind.CPU_HISTORY
+            Page.Home, Page.Section("cpu") -> views += ViewKind.CPU_HISTORY
             Page.Pipeline -> views += ViewKind.EDITOR
             Page.Health -> {
                 model.raw("GET", "/resources", id = "health")

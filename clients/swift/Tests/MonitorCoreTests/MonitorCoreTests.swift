@@ -151,8 +151,47 @@ final class MonitorCoreTests: XCTestCase {
         XCTAssertEqual(h, before)
     }
 
+    func testBackAndForwardRestoreEachEntrysScroll() {
+        var h = NavHistory()
+        h.go(.task(5), scroll: 300)           // left Home at 300
+        XCTAssertEqual(h.restore, 0, "a new selection starts at the top")
+        h.goBack(scroll: 40)                  // left task 5 at 40
+        XCTAssertEqual(h.current, .home)
+        XCTAssertEqual(h.restore, 300)
+        h.goForward(scroll: 300)
+        XCTAssertEqual(h.current, .task(5))
+        XCTAssertEqual(h.restore, 40)
+    }
+
+    func testTheSamePageTwiceKeepsTwoPositions() {
+        var h = NavHistory()
+        h.go(.task(5), scroll: 100); h.go(.home, scroll: 10); h.go(.task(9), scroll: 700)
+        h.goBack(scroll: 1)
+        XCTAssertEqual(h.restore, 700)
+        h.goBack(scroll: 2)
+        XCTAssertEqual(h.current, .task(5))
+        XCTAssertEqual(h.restore, 10)
+        h.goBack(scroll: 3)
+        XCTAssertEqual(h.current, .home)
+        XCTAssertEqual(h.restore, 100)
+    }
+
+    func testGoHomeFromHomeKeepsItsPositionAndSelectingClearsForward() {
+        var h = NavHistory()
+        h.go(.landing, scroll: 5); h.goBack(scroll: 9)
+        XCTAssertEqual(h.restore, 5)
+        let before = h
+        h.goHome(scroll: 77)
+        XCTAssertEqual(h, before, "going where you already are changes nothing")
+        h.go(.usage, scroll: 77)
+        XCTAssertFalse(h.canGoForward)
+        XCTAssertTrue(h.forwardScroll.isEmpty)
+        h.goBack()
+        XCTAssertEqual(h.restore, 77)
+    }
+
     func testDeepLinksRoundTripAndRefuseOtherThings() {
-        for p in [Page.home, .task(204), .landing, .usage, .pipeline, .health, .settings] {
+        for p in [Page.home, .task(204), .landing, .usage, .pipeline, .health, .settings, .section("cpu"), .section("testing")] {
             XCTAssertEqual(Page.from(url: p.url), p, "\(p)")
         }
         XCTAssertNil(Page.from(url: URL(string: "https://example.com/task/1")!))
@@ -258,12 +297,71 @@ final class MonitorCoreTests: XCTestCase {
         XCTAssertEqual(m.page, .task(3))
     }
 
-    func testDoubleClickWithSeveralTasksExpandsAndScrollsButKeepsThePage() {
+    func testDoubleClickWithSeveralTasksExpandsAndScrollsAndOpensTheStagePage() {
         let m = model()
+        m.tileClicked(state: "queued", clickCount: 1)
+        XCTAssertEqual(m.page, .home, "a single click only reveals")
         m.tileClicked(state: "queued", clickCount: 2)
         XCTAssertTrue(m.isExpanded(m.sidebar!.sections[0]))
         XCTAssertEqual(m.scrollTarget, "queued")
-        XCTAssertEqual(m.page, .home)
+        XCTAssertEqual(m.page, .section("queued"))
+    }
+
+    func testDoubleClickOnAStageWithThreeTasksOpensItsPageAndOneTaskOpensTheTask() {
+        let m = model()
+        m.sidebar!.sections.append(section("testing", rows: [row(10, state: "testing"), row(11, state: "testing"), row(12, state: "testing")]))
+        m.sidebar!.sections.append(section("review", rows: [row(20, state: "review")]))
+        m.tileClicked(state: "testing", clickCount: 2)
+        XCTAssertEqual(m.page, .section("testing"))
+        m.tileClicked(state: "review", clickCount: 2)
+        XCTAssertEqual(m.page, .task(20))
+        m.sidebar!.sections.append(section("landing", rows: [row(30, state: "landing"), row(31, state: "landing")]))
+        m.tileClicked(state: "landing", clickCount: 2)
+        XCTAssertEqual(m.page, .landing)
+    }
+
+    func testSectionUrlsRoundTripToTheirPages() {
+        for name in Page.sectionNames {
+            let page = Page.sectionPage(name)
+            XCTAssertNotNil(page, name)
+            XCTAssertEqual(Page.from(url: URL(string: "mason://section/\(name)")!), page, name)
+            XCTAssertEqual(Page.from(url: page!.url), page, name)
+        }
+        XCTAssertEqual(Page.sectionPage("landing"), .landing)
+        XCTAssertEqual(Page.section("testing").url.absoluteString, "mason://section/testing")
+        XCTAssertNil(Page.from(url: URL(string: "mason://section/nonsense")!))
+        XCTAssertNil(Page.from(url: URL(string: "mason://section")!))
+        var h = NavHistory()
+        h.go(.section("cpu"))
+        h.goBack()
+        XCTAssertEqual(h.current, .home)
+        h.goForward()
+        XCTAssertEqual(h.current, .section("cpu"))
+    }
+
+    func testTestingPageRowsKeepTheSidebarOrderAndSkipSendsTheSidebarCommand() {
+        let m = model()
+        m.isOwner = true
+        var a = row(10, state: "testing", actions: ["skip_test"]); a.step = "test"
+        var b = row(11, state: "testing", actions: ["cancel"])
+        var c = row(12, state: "testing", actions: ["skip_test"]); c.step = "test"
+        var cell = Mason_V1_ProgressCell()
+        cell.state = .part; cell.run = 1; cell.done = 3; cell.total = 8; cell.unit = "suites"
+        cell.totalSource = .sourceReported
+        a.progress = [cell]
+        b.step = "test"
+        m.sidebar!.sections.append(section("testing", rows: [b, a, c]))
+        XCTAssertEqual(m.sectionRows("testing").map(\.id), [11, 10, 12], "the sidebar's order, not re-sorted")
+        XCTAssertEqual(m.skippableRows(m.sectionRows("testing")).map(\.id), [10, 12])
+        var sent: [Mason_V1_Command] = []
+        m.sender = { sent.append($0) }
+        m.skipAllTests(m.sectionRows("testing"))
+        XCTAssertEqual(sent.map { $0.skip.task }, [10, 12])
+        XCTAssertEqual(sent.map { $0.skip.step }, ["test", "test"])
+        m.skipTest(10, step: "test")
+        XCTAssertEqual(sent.last?.skip.task, 10, "one row's button sends the same command")
+        XCTAssertEqual(MonitorModel.suiteProgress(a), "3 of 8 suites")
+        XCTAssertEqual(MonitorModel.suiteProgress(b), "")
     }
 
     func testDoubleClickOnAnEmptyStateChangesNothingBeyondTheReveal() {
@@ -552,8 +650,8 @@ final class MonitorCoreTests: XCTestCase {
         m.apply(update(latest: "bbb222"))
         m.updateMonitor()
         m.apply(result(id: "update-monitor", ok: true))
-        XCTAssertTrue(m.canCancelMonitorUpdate)
         m.apply(building { $0.step = "fetching" })
+        XCTAssertTrue(m.canCancelMonitorUpdate)
         XCTAssertEqual(m.updating, "Fetching the new source…")
         m.apply(building { $0.step = "compiling"; $0.done = 12; $0.total = 48; $0.lastLine = "[12/48] Compiling Model.swift" })
         XCTAssertEqual(m.updating, "Compiling 12 of 48… [12/48] Compiling Model.swift")
@@ -648,7 +746,11 @@ final class MonitorCoreTests: XCTestCase {
         m.apply(update(latest: "bbb222", phase: "failed", error: "an earlier try"))
         m.updateMonitor()
         XCTAssertEqual(sent.last?.raw.path, "/update/monitor")
-        XCTAssertEqual(sent.last?.raw.json, "{\"kind\":\"swift\"}")
+        let body = (sent.last?.raw.json.data(using: .utf8))
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: String] }
+        XCTAssertEqual(body?["kind"], "swift")
+        XCTAssertEqual(body?["own_version"], "aaa111")
+        XCTAssertEqual(body?["own_path"], "")
         XCTAssertNotNil(m.updating)
         m.apply(update(latest: "bbb222", phase: "failed", error: "an earlier try"))
         XCTAssertNotNil(m.updating, "a header from before the daemon answered is not the answer")

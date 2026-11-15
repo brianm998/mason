@@ -4,6 +4,7 @@ package mason.monitor.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -24,11 +25,17 @@ import androidx.compose.ui.input.key.type
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
+<<<<<<< HEAD
 import androidx.compose.ui.text.TextStyle
+=======
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+>>>>>>> origin/develop
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.flow.first
 import mason.monitor.*
 import mason.v1.CellState
 import mason.v1.Compilation
@@ -47,17 +54,25 @@ fun MainPane(model: MonitorModel, modifier: Modifier = Modifier) {
             Page.Pipeline -> EditorPage(model)
             Page.Health -> HealthPage(model)
             Page.Settings -> SettingsPage(model)
+            is Page.Section -> SectionPage(model, p.name)
         }
     }
 }
 
 @Composable
-internal fun Section(title: String, state: String? = null, content: @Composable ColumnScope.() -> Unit) {
+internal fun Section(title: String, state: String? = null, open: (() -> Unit)? = null, content: @Composable ColumnScope.() -> Unit) {
     val theme = LocalTheme.current
     Column(verticalArrangement = Arrangement.spacedBy(theme.spacing)) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(theme.spacingSmall)) {
-            Text(title, style = theme.title())
+            // The title and the '>' next to it both open the section's page.
+            Text(title, style = theme.title(),
+                modifier = if (open != null) Modifier.clickable(onClick = open).testTag("section-title:$title") else Modifier)
             if (state != null) StateIcon(state)
+            if (open != null) {
+                Text("›", style = theme.title(color = theme.muted),
+                    modifier = Modifier.clickable(onClick = open).testTag("section-open:$title")
+                        .semantics { contentDescription = "Open $title" })
+            }
         }
         content()
     }
@@ -77,18 +92,41 @@ internal fun Link(text: String, style: TextStyle? = null, modifier: Modifier = M
     )
 }
 
+<<<<<<< HEAD
 /** [base] as link text: the link colour and an underline. For the title inside a row that is clickable as a whole. */
 internal fun Theme.linked(base: TextStyle): TextStyle = base.copy(color = link, textDecoration = TextDecoration.Underline)
 
 /** The pointing hand on hover, for a row that is clickable as a whole. */
 internal fun Modifier.pointingHand(): Modifier = pointerHoverIcon(PointerIcon.Hand)
 
+=======
+/**
+ * A vertically scrolling page. Its position is put back to what the history saved when this
+ * entry was left, once, when [ready] (the content has arrived) and only if the owner has not
+ * scrolled meanwhile; a page that has shrunk clamps. Later updates never move it again.
+ */
+>>>>>>> origin/develop
 @Composable
-private fun Scrolling(content: @Composable ColumnScope.() -> Unit) {
+private fun Scrolling(model: MonitorModel, ready: Boolean = true, content: @Composable ColumnScope.() -> Unit) {
     val theme = LocalTheme.current
+    val visit = model.history.visit
+    val target = model.history.restore
+    val state = remember(visit) { ScrollState(0) }
+    var settled by remember(visit) { mutableStateOf(target == 0) }
+    LaunchedEffect(visit, ready) {
+        if (ready && !settled) {
+            // Wait for the content to be measured (or for the owner to scroll), then put it back.
+            snapshotFlow { state.maxValue > 0 || state.value > 0 }.first { it }
+            if (state.value == 0) state.scrollTo(target)
+            settled = true
+        }
+    }
+    LaunchedEffect(visit) {
+        snapshotFlow { state.value }.collect { if (settled) model.reportScroll(it) }
+    }
     Column(
         verticalArrangement = Arrangement.spacedBy(theme.spacingLarge),
-        modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(theme.spacingLarge),
+        modifier = Modifier.fillMaxSize().verticalScroll(state).padding(theme.spacingLarge),
         content = content,
     )
 }
@@ -102,7 +140,7 @@ private fun Scrolling(content: @Composable ColumnScope.() -> Unit) {
 @Composable
 fun HomePage(model: MonitorModel) {
     val theme = LocalTheme.current
-    Scrolling {
+    Scrolling(model, ready = model.home != null) {
         val h = model.home
         var adding by remember { mutableStateOf(false) }
         val pic = model.homeMascot
@@ -150,7 +188,7 @@ fun HomePage(model: MonitorModel) {
             }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(theme.spacingLarge * 2)) {
-            Section("Active models") {
+            Section("Active models", open = { model.go(Page.Section("active_models")) }) {
                 val active = h?.active.orEmpty()
                 if (active.isEmpty()) Text("Nothing is running.", style = theme.body(color = theme.muted))
                 active.forEach { a ->
@@ -162,7 +200,7 @@ fun HomePage(model: MonitorModel) {
                 }
                 SessionStepper(model)
             }
-            Section("Landing queue") {
+            Section("Landing queue", open = { model.go(Page.Landing) }) {
                 val items = model.landing?.items.orEmpty()
                 if (items.isNotEmpty()) {
                     LandingItems(model, items)
@@ -173,10 +211,10 @@ fun HomePage(model: MonitorModel) {
                 }
             }
         }
-        CpuSection(model)
-        h?.compilation?.let { CompilationSection(model, it) }
+        CpuSection(model, open = { model.go(Page.Section("cpu")) })
+        h?.compilation?.let { CompilationSection(model, it, open = { model.go(Page.Section("compilation")) }) }
         h?.stages?.forEach { st ->
-            Section(st.title, st.state) {
+            Section(st.title, st.state, open = Page.sectionPage(st.state)?.let { p -> { model.go(p) } }) {
                 st.rows.forEach { r ->
                     Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing), verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier.pointingHand().clickable { model.go(Page.Task(r.id)) }) {
@@ -214,7 +252,7 @@ fun SessionStepper(model: MonitorModel) {
  * (in line order), the CPU reading, and the limit's stepper.
  */
 @Composable
-fun CompilationSection(model: MonitorModel, c: Compilation) {
+fun CompilationSection(model: MonitorModel, c: Compilation, open: (() -> Unit)? = null) {
     val theme = LocalTheme.current
     val now = model.daemonNow()
     val age = { since: Long -> Format.duration(maxOf(0L, now - since)) }
@@ -224,7 +262,7 @@ fun CompilationSection(model: MonitorModel, c: Compilation) {
         else Text(label, style = theme.body(), maxLines = 1, overflow = TextOverflow.Ellipsis,
             modifier = Modifier.widthIn(max = 480.dp))
     }
-    Section("Compilation (all projects)") {
+    Section("Compilation (all projects)", open = open) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(theme.spacing),
             modifier = Modifier.testTag("compile")) {
             Text("Compiling: ${c.used} of at most", style = theme.body())
@@ -322,7 +360,7 @@ fun TaskDetailPage(model: MonitorModel, id: Long) {
             modifier = Modifier.padding(theme.spacingLarge))
         return
     }
-    Scrolling { TaskDetail(model, d) }
+    Scrolling(model) { TaskDetail(model, d) }
 }
 
 @Composable
@@ -433,7 +471,7 @@ private fun TaskDetail(model: MonitorModel, d: TaskDetailView) {
 @Composable
 fun LandingPage(model: MonitorModel) {
     val theme = LocalTheme.current
-    Scrolling {
+    Scrolling(model) {
         Text("Landing", style = theme.title())
         model.landing?.let { l ->
             if (l.note.isNotEmpty()) Text(l.note, style = theme.body(color = if (l.frozen) theme.attention else theme.muted))
@@ -524,7 +562,7 @@ fun batchCiUrl(ci: mason.v1.BatchCi): String? =
 @Composable
 fun UsagePage(model: MonitorModel) {
     val theme = LocalTheme.current
-    Scrolling {
+    Scrolling(model) {
         Text("LLM usage", style = theme.title())
         model.usage?.providers?.forEach { UsageAccount(it) }
         model.usage?.note?.let { Text(it, style = theme.body(color = theme.muted)) }
@@ -622,7 +660,7 @@ fun UsageAccount(p: mason.v1.ProviderStatus) {
 @Composable
 fun HealthPage(model: MonitorModel) {
     val theme = LocalTheme.current
-    Scrolling {
+    Scrolling(model) {
         Text("Health", style = theme.title())
         Text(if (model.connected) "Connected to masond. Event log at #${model.lastSeq}." else "Not connected.", style = theme.body())
         model.health?.let { h ->
@@ -705,7 +743,7 @@ fun landingItemText(i: mason.v1.TaskLanding): String {
 @Composable
 fun SettingsPage(model: MonitorModel) {
     val theme = LocalTheme.current
-    Scrolling {
+    Scrolling(model) {
         Text("Settings", style = theme.title())
         model.settingsNotice?.let { Text(it, style = theme.body(color = theme.muted), modifier = Modifier.testTag("settings:notice")) }
         val s = model.settings
@@ -811,5 +849,66 @@ private fun ScheduleRow(model: MonitorModel, job: SettingsSnapshot.Schedule) {
             modifier = Modifier.width(90.dp).testTag("settings:every:${job.name}"),
         )
         androidx.compose.material3.TextButton(onClick = { model.runSchedule(job.name) }, modifier = Modifier.testTag("settings:run:${job.name}")) { Text("Run now") }
+    }
+}
+
+/**
+ * A detail page for one section of home (`mason://section/<name>`): only that section, with
+ * room for a task's progress, step, why it waits, time in state and model on one wide row.
+ * The rows are the sidebar's, so they come in its order.
+ */
+@Composable
+fun SectionPage(model: MonitorModel, name: String) {
+    val theme = LocalTheme.current
+    Scrolling(model) {
+        when (name) {
+            "active_models" -> Section(SectionPages.title(name)) {
+                val active = model.home?.active.orEmpty()
+                if (active.isEmpty()) Text("Nothing is running.", style = theme.body(color = theme.muted))
+                active.forEach { a ->
+                    Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing), modifier = Modifier.testTag("active:${a.task}")) {
+                        Text(a.display.ifEmpty { a.model }, style = theme.body(FontWeight.SemiBold))
+                        Link("${a.project} #${a.task}") { model.go(Page.Task(a.task)) }
+                        Text(a.step, style = theme.body(color = theme.muted))
+                    }
+                }
+                SessionStepper(model)
+            }
+            "cpu" -> CpuSection(model)
+            "compilation" -> {
+                val c = model.home?.compilation
+                if (c != null) CompilationSection(model, c)
+                else Section(SectionPages.title(name)) { Text("Nothing is compiling.", style = theme.body(color = theme.muted)) }
+            }
+            else -> StageRows(model, name)
+        }
+    }
+}
+
+/** The wide task rows of a stage page. Testing adds suite progress and Skip testing. */
+@Composable
+private fun StageRows(model: MonitorModel, name: String) {
+    val theme = LocalTheme.current
+    val rows = model.sectionRows(name)
+    Section(SectionPages.title(name), name) {
+        if (name == "testing" && model.canAct && model.skippableRows(rows).isNotEmpty()) {
+            Pill("Skip testing for all", modifier = Modifier.testTag("testing:skip-all")) { model.skipAllTests(rows) }
+        }
+        if (rows.isEmpty()) Text("Nothing here.", style = theme.body(color = theme.muted))
+        rows.forEach { r ->
+            Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing), verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth().testTag("stage-row:$name:${r.id}")) {
+                ProgressCells(model, r.progress, r.slow)
+                Text("${r.project} ${r.key}  ${r.title}", style = theme.body(), modifier = Modifier.weight(1f).clickable { model.go(Page.Task(r.id)) })
+                Text(
+                    listOf(r.step, SectionPages.suiteProgress(r), r.why_waiting, Format.duration(r.in_state_ms), r.display.ifEmpty { r.model })
+                        .filter { it.isNotEmpty() }.joinToString(" · "),
+                    style = theme.small(color = if (r.slow) theme.slow else theme.muted),
+                )
+                if (name == "testing" && model.canAct && "skip_test" in r.allowed_actions) {
+                    Pill("Skip testing", modifier = Modifier.testTag("testing:skip:${r.id}")) { model.skipTest(r.id, r.step) }
+                }
+            }
+        }
     }
 }

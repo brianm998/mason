@@ -124,8 +124,9 @@ extension TopBar {
             let side = topBarMascotSide(illustration: theme.illustration, bar: theme.tileHeight * 2 + theme.spacingSmall)
             Button { model.topBarMascotClicked() } label: {
                 img.resizable().interpolation(.high).aspectRatio(contentMode: .fit)
-                    .frame(width: side, height: side)
+                    .frame(minWidth: 0, idealWidth: side, maxWidth: side, minHeight: 0, idealHeight: side, maxHeight: side)
             }
+            .layoutPriority(-2)
             .buttonStyle(.plain)
             .help(model.topBarMascotTooltip)
             .accessibilityLabel(model.topBarMascotTooltip)
@@ -145,6 +146,9 @@ struct BannersView: View {
         bannerStack
             .sheet(isPresented: Binding(get: { model.sshKeyProject != nil }, set: { if !$0 { model.closeSSHKeys() } })) {
                 SSHKeySheet(model: model)
+            }
+            .sheet(isPresented: Binding(get: { model.ownerSessionDialog != nil }, set: { if !$0 { model.closeOwnerSession() } })) {
+                OwnerSessionSheet(model: model)
             }
             .alert("Update masond now?", isPresented: Binding(get: { model.confirmingDaemonUpdate }, set: { if !$0 { model.cancelDaemonUpdate() } })) {
                 Button("Update now") { model.confirmDaemonUpdate() }
@@ -181,6 +185,11 @@ struct BannersView: View {
                     let project = MonitorModel.pushAuthProject(b)
                     updateRow(b.text, button: model.canAct ? "Choose SSH key…" : nil, id: "push-auth:\(project)", icon: BannerIcons.id(forDaemonKind: b.kind)) {
                         model.chooseSSHKey(project: project)
+                    }
+                } else if b.kind == "health" {
+                    // The pipeline's health session needs the owner: the button opens its dialog.
+                    updateRow(b.text, button: "Open session", id: "health-session:\(b.session)", icon: BannerIcons.id(forDaemonKind: b.kind)) {
+                        model.openOwnerSession(b.session)
                     }
                 } else if b.kind == "paused" {
                     // The whole pause group is drawn once, where the first pause is.

@@ -41,6 +41,16 @@ description = "New version, provider outage, landing frozen, connection lost, pa
 swift = "done"
 compose = "done"
 
+[feature.health-session-banner]
+description = "While the pipeline's health session needs the owner (or has replied and waits), a banner of kind health with a one-line summary and an Open session button that opens the owner-session dialog on that session; it goes when the session ends"
+swift = "done"
+compose = "done"
+
+[feature.active-sessions-panel]
+description = "A section pinned at the bottom of the sidebar, titled Active sessions (N), listing every open owner session (a task's, the pipeline's health) with its task or Pipeline health and a marker while it is replying or waiting for the owner; clicking one opens the dialog; hidden when N is 0"
+swift = "done"
+compose = "done"
+
 [feature.sidebar-sections]
 description = "A section per state, needs-you first, collapsible, collapse choices remembered per device"
 swift = "done"
@@ -361,6 +371,11 @@ description = "Each paused banner has, at its trailing edge, a Resume text butto
 swift = "done"
 compose = "done"
 
+[feature.back-restores-scroll]
+description = "Back and forward put each page in the history back where it was scrolled when it was left (Home, a task, Landing, LLM usage, Health); the same page twice in the history keeps two positions; a new selection starts at the top; restored once, after the page's content has arrived, never over the owner's own scrolling"
+swift = "done"
+compose = "done"
+
 [feature.topbar-busiest-mascot]
 description = "At the left of the top bar, the task page's illustration for the active state (queued, exploring, developing, testing, review, landing, needs attention, failed, proposed; never landed or canceled) holding the most tasks in the header's counts (so it follows the project filter), a tie going to the later stage, at 85% of the illustration size or the bar's height if less; the idle art (all_clear) with no tasks, nothing while disconnected; tooltip 'Most tasks: testing (7)'; clicking reveals that state's sidebar section"
 swift = "done"
@@ -373,5 +388,10 @@ compose = "done"
 
 [feature.settings-devices]
 description = "Settings has a Devices section: whether LAN access is on (and how to turn it on when it is off), the paired devices with role and last seen, revoked ones apart, and Revoke after a confirmation. 'Pair a device…' (owner or viewer) shows the mason://pair URL as a QR code, the 8-digit code in large type, the hosts and a countdown to expiry that then offers a new code; the list refreshes every few seconds while the sheet is open"
+swift = "done"
+compose = "done"
+
+[feature.section-detail-pages]
+description = "Each home section has a detail page, mason://section/<name> for active_models, queued, cpu, compilation, exploring, developing, testing and review (landing is the Landing page): only that section with more room. The home section title and a > icon (chevron.right) to its right open it, as does a > at the trailing end of the sidebar section header. A double click on a count tile opens the stage page, or the task when the stage holds exactly one; a single click still reveals the sidebar section. The Testing page lists tasks in the sidebar order, shows suites done of total and has Skip testing per row and for all, sending the sidebar skip command"
 swift = "done"
 compose = "done"

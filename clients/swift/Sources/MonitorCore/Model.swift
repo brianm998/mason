@@ -346,6 +346,10 @@ public final class MonitorModel: ObservableObject {
     @Published public var sshKeys: SSHKeyList?
     @Published public var sshKeyResult: String?
     @Published public var sshKeyBusy = false
+    /// The owner session whose dialog is open, and what the daemon last said of it (s364, s432).
+    @Published public var ownerSessionDialog: UInt64?
+    @Published public var ownerSession: OwnerSessionTranscript?
+    @Published public var ownerSessionError: String?
     /// The step selected in the pipeline editor (for its inspector).
     @Published public private(set) var editorStep = ""
     /// Called with every command result (the tools read them; the app shows errors).
@@ -420,12 +424,24 @@ public final class MonitorModel: ObservableObject {
                          ciLinks: taskDetail?.ciLinks ?? [])
     }
 
-    public func go(_ p: Page) { history.go(p); subscribe?() }
+    /// Where the shown page is scrolled now. Not published: it changes every frame of a scroll,
+    /// and is saved into the history only when the page is left.
+    public private(set) var liveScroll: Double = 0
+    public func reportScroll(_ y: Double) { liveScroll = max(0, y) }
+
+    private func navigate(_ f: (inout NavHistory, Double) -> Void) {
+        let before = history.visit
+        f(&history, liveScroll)
+        if history.visit != before { liveScroll = history.restore }
+        subscribe?()
+    }
+
+    public func go(_ p: Page) { navigate { $0.go(p, scroll: $1) } }
+    public func goBack() { navigate { $0.goBack(scroll: $1) } }
+    public func goForward() { navigate { $0.goForward(scroll: $1) } }
+    public func goHome() { navigate { $0.goHome(scroll: $1) } }
     /// Pick the CPU graph's span and ask the daemon for that range.
     public func setCpuSpan(_ s: CpuSpan) { cpu.setSpan(s); subscribe?() }
-    public func goBack() { history.goBack(); subscribe?() }
-    public func goForward() { history.goForward(); subscribe?() }
-    public func goHome() { history.goHome(); subscribe?() }
 
     public func open(url: URL) {
         if let p = Page.from(url: url) { go(p) }
@@ -560,7 +576,16 @@ public final class MonitorModel: ObservableObject {
     /// the lone task.
     public func tileClicked(state: String, clickCount: Int) {
         reveal(state: state)
-        if clickCount == 2 { revealAndOpenIfOne(state: state) }
+        if clickCount == 2 { tileDoubleClicked(state: state) }
+    }
+
+    /// A double click: the lone task when the stage holds exactly one, else the stage's page
+    /// (for a state that has one). Nothing while disconnected.
+    public func tileDoubleClicked(state: String) {
+        guard connected else { return }
+        let n = sidebar?.sections.first(where: { $0.state == state })?.rows.count ?? 0
+        if n == 1 { revealAndOpenIfOne(state: state) }
+        else if let p = Page.sectionPage(state) { go(p) }
     }
 
     /// Reveal the state's section and, if it holds exactly one task right now
@@ -795,6 +820,44 @@ public final class MonitorModel: ObservableObject {
     }
 
     public func closeCommand() { commandDialog = nil }
+
+    /// Open the owner-session dialog on a session (the health banner's and the sidebar's button).
+    public func openOwnerSession(_ id: UInt64) {
+        ownerSessionDialog = id
+        ownerSession = nil
+        ownerSessionError = nil
+        refreshOwnerSession()
+    }
+
+    public func closeOwnerSession() {
+        ownerSessionDialog = nil
+        ownerSession = nil
+        ownerSessionError = nil
+    }
+
+    func refreshOwnerSession() {
+        guard let id = ownerSessionDialog else { return }
+        var c = Mason_V1_Command()
+        c.id = "osession:\(id)"
+        c.raw = .with { $0.method = "GET"; $0.path = "/sessions/\(id)" }
+        send(c)
+    }
+
+    public func sendOwnerMessage(_ text: String) {
+        guard let id = ownerSessionDialog, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        var c = Mason_V1_Command()
+        c.id = "osession-send:\(id)"
+        c.raw = .with { $0.method = "POST"; $0.path = "/sessions/\(id)/messages"; $0.json = "{\"text\":\(Self.jsonString(text))}" }
+        send(c)
+    }
+
+    public func endOwnerSession() {
+        guard let id = ownerSessionDialog else { return }
+        var c = Mason_V1_Command()
+        c.id = "osession-end:\(id)"
+        c.raw = .with { $0.method = "POST"; $0.path = "/sessions/\(id)/end"; $0.json = "{}" }
+        send(c)
+    }
 
     public func closeSSHKeys() {
         sshKeyProject = nil
@@ -1041,6 +1104,8 @@ public final class MonitorModel: ObservableObject {
         case .header(let x)?:
             header = x
             noteMonitorBuild()
+            // An open dialog follows the session: a reply arrives as a new header.
+            if ownerSessionDialog != nil { refreshOwnerSession() }
         case .sidebar(let x)?:
             sidebar = x
             noteAttention(x)
@@ -1079,6 +1144,10 @@ public final class MonitorModel: ObservableObject {
             case .failed(let why): sessionNotice = why
             }
         }
+        if r.id.hasPrefix("osession:"), r.ok { ownerSession = OwnerSessionTranscript(json: r.json) }
+        if r.id.hasPrefix("osession:") || r.id.hasPrefix("osession-send:"), !r.ok { ownerSessionError = r.error }
+        if r.id.hasPrefix("osession-send:"), r.ok { refreshOwnerSession() }
+        if r.id.hasPrefix("osession-end:"), r.ok { closeOwnerSession() }
         if r.id.hasPrefix("ssh-keys:"), r.ok { sshKeys = SSHKeyList(json: r.json) }
         if r.id.hasPrefix("ssh-keys:"), !r.ok { sshKeyResult = r.error }
         if r.id.hasPrefix("ssh-key:") {
