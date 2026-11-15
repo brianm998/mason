@@ -229,6 +229,55 @@ fn free_text_is_the_other_box() {
 }
 
 #[test]
+fn a_multi_select_question_takes_several_answers_and_the_agent_gets_them_all() {
+    let mut c = json!({
+        "ask": "Which of these suites should be skipped?",
+        "why": "The ticket names no suites and the owner knows which are flaky.",
+        "options": [
+            {"label": "Skip the unit suite", "recommended": true},
+            {"label": "Skip the slow suite"},
+            {"label": "Skip the flaky suite"}
+        ],
+        "multi_select": true
+    });
+    c["key"] = json!("skips");
+    let s = world(vec![ask_turn(c), develop_turn()]);
+    let d = start(&s);
+    let t = file_it(&d, "Asks for several");
+    wait_state(&d, t, State::NeedsAttention, 60);
+    let (c, h) = card_of(&d, t);
+    assert!(c.multi_select, "the flag survives storing the card");
+    // Bad lists are refused before anything is recorded.
+    for bad in ["0", "4", "1,1", ","] {
+        let e = attention::answer(&d, t, bad, &h, "brian").unwrap_err();
+        assert_eq!(e.0, 400, "{bad:?}: {}", e.1);
+    }
+    assert_eq!(task_of(&d, t).state, State::NeedsAttention);
+    let said = attention::answer(&d, t, "3,1", &h, "brian").unwrap();
+    assert_eq!(said, "Skip the unit suite; Skip the flaky suite");
+    wait_state(&d, t, State::Landed, 90);
+    let notes = std::fs::read_to_string(d.cfg.task_dir(t.0).join("decisions.txt")).unwrap();
+    assert!(
+        notes.contains("The owner answered: Skip the unit suite; Skip the flaky suite"),
+        "{notes}"
+    );
+}
+
+#[test]
+fn a_multi_select_card_still_has_the_other_box() {
+    let mut c = good_card("");
+    c["multi_select"] = json!(true);
+    let s = world(vec![ask_turn(c), develop_turn()]);
+    let d = start(&s);
+    let t = file_it(&d, "Several, or other");
+    wait_state(&d, t, State::NeedsAttention, 60);
+    let (_, h) = card_of(&d, t);
+    let said = attention::answer(&d, t, "Neither, wait a day", &h, "brian").unwrap();
+    assert_eq!(said, "Other: Neither, wait a day");
+    wait_state(&d, t, State::Landed, 90);
+}
+
+#[test]
 fn the_same_gate_failing_again_after_an_answer_is_acknowledged_not_asked_again() {
     // The agent asks about `gate-x`, is answered, asks about it again (the gate
     // failed again), and the second time is acknowledged without bothering anyone.
