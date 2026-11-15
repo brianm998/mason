@@ -1158,3 +1158,35 @@ fn a_burst_of_ticks_queues_at_most_one_rebuild_for_a_session() {
     );
     drop(held);
 }
+
+#[test]
+fn fake_cpu_readings_come_back_in_order_and_task_shares_carry_their_project() {
+    use mason_daemon::cputasks::{build_reading, Bucket};
+    let (d, _port, _dir) = demo();
+    for _ in 0..5 {
+        d.demo_next().unwrap();
+    }
+    let t0 = mason_daemon::daemon::now_ms() - 40_000;
+    for i in 0..4u64 {
+        let mut b = std::collections::BTreeMap::new();
+        b.insert(Bucket::Task(1), 100 + 10 * i as u32);
+        b.insert(Bucket::Masond, 20);
+        d.record_cpu(build_reading(&b, Some(30), 4, t0 + i * 5_000));
+    }
+    let h = d.cpu_history(mason_daemon::daemon::now_ms(), 300_000);
+    assert_eq!(h.points.len(), 4);
+    assert!(h.points.windows(2).all(|w| w[0].at_ms < w[1].at_ms));
+    let task: Vec<u32> = h
+        .points
+        .iter()
+        .map(|p| p.shares.iter().find(|s| s.kind == "task").unwrap().permille)
+        .collect();
+    assert_eq!(task, vec![100, 110, 120, 130]);
+    assert!(h.points[0].shares.iter().any(|s| s.kind == "masond" && s.permille == 20));
+
+    let w = d.world().unwrap();
+    let u = Ctx::new(&d, &w).cpu_usage();
+    let t = u.shares.iter().find(|s| s.kind == "task").unwrap();
+    assert!(!t.project.is_empty(), "a task share names its project");
+    assert!(u.shares.iter().filter(|s| s.kind != "task").all(|s| s.project.is_empty()));
+}

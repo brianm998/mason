@@ -20,6 +20,7 @@ pub mod closer;
 pub mod cmdreuse;
 pub mod config;
 pub mod cpu;
+pub mod cpuhistory;
 pub mod cputasks;
 pub mod crash;
 pub mod daemon;

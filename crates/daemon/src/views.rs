@@ -804,6 +804,7 @@ impl<'a> Ctx<'a> {
         for s in u.shares.iter_mut().filter(|s| s.kind == "task") {
             if let Some(t) = self.w.tasks.get(&TaskId(s.task)) {
                 s.title = t.title.clone();
+                s.project = self.project_name(t);
             }
         }
         u
@@ -1266,7 +1267,7 @@ impl<'a> Ctx<'a> {
         }
     }
 
-    pub fn view(&self, kind: ViewKind, project: &str, task: u64, step: &str) -> Option<View> {
+    pub fn view(&self, kind: ViewKind, project: &str, task: u64, step: &str, cpu_span_ms: u64) -> Option<View> {
         use mason_protocol::view::Body;
         let body = match kind {
             ViewKind::Header => Body::Header(self.header(project)),
@@ -1276,6 +1277,10 @@ impl<'a> Ctx<'a> {
             ViewKind::Landing => Body::Landing(self.landing(project)),
             ViewKind::Usage => Body::Usage(self.usage()),
             ViewKind::Editor => Body::Editor(self.editor(project, step)),
+            ViewKind::CpuHistory => Body::CpuHistory(self.d.cpu_history(
+                self.now,
+                if cpu_span_ms == 0 { 3_600_000 } else { cpu_span_ms },
+            )),
             _ => return None,
         };
         Some(View { body: Some(body) })

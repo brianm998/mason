@@ -57,6 +57,8 @@ enum ViewKind {
   LANDING = 5;
   USAGE = 6;
   EDITOR = 7;
+  // The CPU readings over `Subscribe.cpu_span_ms`; asked for only while the graph shows.
+  CPU_HISTORY = 8;
 }
 
 // Which views to keep sending. Replaces any earlier subscription.
@@ -68,6 +70,8 @@ message Subscribe {
   uint64 task = 3;
   // The step selected in the editor, for EDITOR's inspector (empty: none).
   string editor_step = 4;
+  // The span for CPU_HISTORY, in ms (0: an hour).
+  uint64 cpu_span_ms = 5;
 }
 
 message Ping {
@@ -327,6 +331,7 @@ message View {
     LandingView landing = 5;
     UsageView usage = 6;
     EditorView editor = 7;
+    CpuHistory cpu_history = 8;
   }
 }
 
@@ -673,6 +678,8 @@ message CpuShare {
   string title = 4;
   // Of the whole machine: 1000 is every core busy.
   uint32 permille = 5;
+  // The task's project name (empty for a fixed bucket).
+  string project = 6;
 }
 
 // Where the machine's CPU went over the last sampling period.
@@ -684,6 +691,23 @@ message CpuUsage {
   uint64 sampled_ms = 3;
   // Highest first; ties by task id, then kind. Under 1 permille is left out.
   repeated CpuShare shares = 4;
+}
+
+// One reading in the CPU history: each share by key (kind, task) with its
+// permille. Title and project are not repeated here; they come from `CpuUsage`.
+message CpuPoint {
+  uint64 at_ms = 1;
+  int32 busy_permille = 2;
+  repeated CpuShare shares = 3;
+}
+
+// The CPU readings over a span, oldest first, served by `GET /cpu/history?span=`.
+// Served on request, never pushed with the home view.
+message CpuHistory {
+  uint64 span_ms = 1;
+  // The gap between points: the sampling period, or a minute for old data.
+  uint64 step_ms = 2;
+  repeated CpuPoint points = 3;
 }
 
 // Who holds a `compile` slot.

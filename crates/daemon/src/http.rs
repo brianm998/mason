@@ -2734,6 +2734,23 @@ async fn cpu_usage(Shared(d): Shared<Arc<Daemon>>) -> Res {
     Ok(Json(v))
 }
 
+/// The CPU readings over `?span=` (ms, or 5m / 1h / 6h / 24h; default 1h), oldest
+/// first, as proto3 JSON. The monitors ask while the graph is on screen.
+async fn cpu_history(
+    Shared(d): Shared<Arc<Daemon>>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Res {
+    let span = match q.get("span") {
+        None => 3_600_000,
+        Some(s) => crate::cpuhistory::parse_span(s)
+            .ok_or_else(|| fail(StatusCode::BAD_REQUEST, format!("span {s:?} is not a span")))?,
+    };
+    let h = d.cpu_history(crate::daemon::now_ms(), span);
+    serde_json::to_value(&h)
+        .map(Json)
+        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
 /// The home view, as the monitors get it (proto3 JSON).
 async fn home_view(
     Shared(d): Shared<Arc<Daemon>>,
@@ -3285,6 +3302,7 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/tasks/{id}/progress", get(task_progress))
         .route("/resources", get(resources))
         .route("/cpu", get(cpu_usage))
+        .route("/cpu/history", get(cpu_history))
         .route("/views/home", get(home_view))
         .route("/targets", get(targets))
         .route("/health", get(health))
