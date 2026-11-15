@@ -670,6 +670,7 @@ fn stats_from(d: &Daemon, rep: &Replay, project: Option<&str>, from: u64, to: u6
             by
         },
         active_ms: sumo(&rep.state_ms),
+        compile_cap: d.broker.compile_capacity(),
     }
 }
 
