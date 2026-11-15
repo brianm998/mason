@@ -552,6 +552,7 @@ final class MonitorCoreTests: XCTestCase {
         m.apply(update(latest: "bbb222"))
         m.updateMonitor()
         m.apply(result(id: "update-monitor", ok: true))
+        m.apply(building { $0.step = "fetching" })
         XCTAssertTrue(m.canCancelMonitorUpdate)
         m.apply(building { $0.step = "fetching" })
         XCTAssertEqual(m.updating, "Fetching the new source…")
