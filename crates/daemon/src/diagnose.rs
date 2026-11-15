@@ -399,13 +399,25 @@ pub fn dismiss(d: &Arc<Daemon>, row: &DiagnosisRow) -> Result<(), String> {
     Ok(())
 }
 
-/// The alerts for pending diagnoses: one each, until applied or dismissed.
+/// Whether a pending diagnosis still needs the owner (s359): its task is failed, and has been
+/// since before the diagnosis was written. A task that was retried, landed, was canceled or
+/// failed again since has moved on, and the diagnosis speaks of a failure that is gone.
+fn still_needs_you(task: Option<&Task>, diagnosed_ms: u64) -> bool {
+    task.is_some_and(|t| t.state == State::Failed && t.state_entered_at.0 <= diagnosed_ms)
+}
+
+/// The alerts for pending diagnoses: one each, until applied or dismissed, or until the
+/// task has moved on from the failure it diagnosed.
 pub fn alerts(d: &Daemon) -> Vec<(String, String, String)> {
+    let Ok(w) = d.world() else {
+        return vec![];
+    };
     d.store
         .diagnoses(None)
         .unwrap_or_default()
         .into_iter()
         .filter(|r| r.status == "pending")
+        .filter(|r| still_needs_you(w.tasks.get(&TaskId(r.task)), r.at_ms))
         .map(|r| {
             let a: Value = serde_json::from_str(&r.args).unwrap_or(json!({}));
             (
@@ -425,6 +437,52 @@ pub fn alerts(d: &Daemon) -> Vec<(String, String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_diagnosis_needs_you_only_while_its_task_is_still_in_the_failure_it_diagnosed() {
+        // 2026-11-14: the monitor kept speaking diagnoses of tasks that had been retried,
+        // landed or canceled since (#197, #211, #213...) (s359).
+        let mut t = Task {
+            id: TaskId(197),
+            project: ProjectId(1),
+            title: String::new(),
+            body: String::new(),
+            priority: Priority::Normal,
+            trust: TrustSource::Owner,
+            enqueued_at: Timestamp(0),
+            state_entered_at: Timestamp(1_000),
+            state: State::Failed,
+            activity: Activity::Idle,
+            landed: None,
+            explored: false,
+            blockers: Default::default(),
+            not_before: None,
+            paused: false,
+            failures: 1,
+            attempts: Default::default(),
+            decision: None,
+            cancel_keeps_branch: false,
+            failure: None,
+            failure_class: None,
+            def: String::new(),
+            step: String::new(),
+            step_attempts: Default::default(),
+            route: None,
+            explore_returns: 0,
+            approved: false,
+            force_explore: false,
+        };
+        assert!(still_needs_you(Some(&t), 2_000), "failed, diagnosed after");
+        assert!(
+            !still_needs_you(Some(&t), 500),
+            "failed again since the diagnosis"
+        );
+        t.state = State::Testing;
+        assert!(!still_needs_you(Some(&t), 2_000), "retried");
+        t.state = State::Landed;
+        assert!(!still_needs_you(Some(&t), 2_000), "landed");
+        assert!(!still_needs_you(None, 2_000), "no such task");
+    }
 
     #[test]
     fn only_the_self_projects_retry_is_applied_by_itself_and_once_a_day() {
