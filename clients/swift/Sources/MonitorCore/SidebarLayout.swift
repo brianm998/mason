@@ -22,6 +22,14 @@ public enum SidebarEntry: Identifiable {
     }
 }
 
+/// What `sidebarEntries` depends on: the same key gives the same entries, so a redraw that
+/// changed none of these reuses the last build instead of filtering every row again.
+struct SidebarEntriesKey: Equatable {
+    let revision: UInt64
+    let search: SearchState
+    let expanded: [Bool]
+}
+
 extension MonitorModel {
     /// The accessibility identifiers of the pinned area, in reading order (the search box's
     /// own toggles follow `search` as `search:name`, `search:title`, `search:body`).
@@ -29,6 +37,15 @@ extension MonitorModel {
 
     /// The scrolling part, in reading order: sections with their rows, then the page links.
     public var sidebarEntries: [SidebarEntry] {
+        let sections = sidebar?.sections ?? []
+        let key = SidebarEntriesKey(revision: sidebarRevision, search: search, expanded: sections.map { isExpanded($0) })
+        if let c = sidebarEntriesCache, c.key == key { return c.entries }
+        let entries = buildSidebarEntries()
+        sidebarEntriesCache = (key, entries)
+        return entries
+    }
+
+    private func buildSidebarEntries() -> [SidebarEntry] {
         var out: [SidebarEntry] = []
         for sec in sidebar?.sections ?? [] {
             out.append(.header(sec))
@@ -39,6 +56,7 @@ extension MonitorModel {
         out.append(.pageLink(title: "LLM usage", page: .usage))
         out.append(.pageLink(title: "Pipeline", page: .pipeline))
         out.append(.pageLink(title: "Health", page: .health))
+        out.append(.pageLink(title: "Settings", page: .settings))
         return out
     }
 

@@ -39,7 +39,10 @@ public final class LiveState: ObservableObject {
 public final class MonitorModel: ObservableObject {
     // From the daemon.
     @Published public var header: HeaderView? { didSet { prunePauseCollapse() } }
-    @Published public var sidebar: SidebarView?
+    @Published public var sidebar: SidebarView? { didSet { sidebarRevision &+= 1 } }
+    /// Bumped on every new sidebar, so derived layouts know when to be rebuilt.
+    var sidebarRevision: UInt64 = 0
+    var sidebarEntriesCache: (key: SidebarEntriesKey, entries: [SidebarEntry])?
     @Published public var home: HomeView?
     /// The CPU shares, observed apart from the whole model: the CPU section watches only this.
     public let cpu = CpuModel()
@@ -49,6 +52,11 @@ public final class MonitorModel: ObservableObject {
     @Published public var editor: EditorView?
     @Published public var health: HealthSnapshot?
     @Published public var introspection: IntrospectionSnapshot?
+    /// The Settings page (s430): the picked project's settings, the global notification routes,
+    /// and what the last change or test said.
+    @Published public var settings: SettingsSnapshot?
+    @Published public var notifySettings: NotifySettings?
+    @Published public var settingsNotice: String?
     /// The high-frequency state (last sequence number, live log, clock offset) lives in its own
     /// object, so a change to it redraws only the views that show it, never the sidebar rows.
     public let live = LiveState()
@@ -313,6 +321,8 @@ public final class MonitorModel: ObservableObject {
     /// Where the sidebar should scroll to (a tile was clicked).
     @Published public var scrollTarget: String?
     @Published public var lastResult: String?
+    /// A long command opened from a Compilation row; nil: the dialog is closed.
+    @Published public var commandDialog: CommandDialog?
     /// Open session found the step running: the task to ask about. Answer with `answerSessionPrompt`.
     @Published public var sessionPrompt: UInt64?
     /// What Open session did or could not do, in words, until the next click.
@@ -777,6 +787,13 @@ public final class MonitorModel: ObservableObject {
         send(c)
     }
 
+    /// Open the dialog for a row's command (nothing when the row has none).
+    public func openCommand(label: String, command: String) {
+        if let d = Format.commandDialog(label: label, command: command) { commandDialog = d }
+    }
+
+    public func closeCommand() { commandDialog = nil }
+
     public func closeSSHKeys() {
         sshKeyProject = nil
         sshKeys = nil
@@ -789,8 +806,35 @@ public final class MonitorModel: ObservableObject {
         return String(t.dropFirst().dropLast())
     }
 
-    public func raw(_ method: String, _ path: String, json: String = "") {
-        command { $0.raw = .with { $0.method = method; $0.path = path; $0.json = json } }
+    /// Ask for the Settings page's data: the project's settings and the notification routes.
+    public func loadSettings() {
+        let p = editorProject
+        if !p.isEmpty { raw("GET", SettingsPayload.settingsPath(project: p), id: "settings") }
+        raw("GET", "/notify/settings", id: "notify-settings")
+    }
+    /// Change one project setting (a body from `SettingsPayload`); the page reloads on the answer.
+    public func changeProjectSetting(_ body: String) {
+        settingsNotice = nil
+        raw("POST", SettingsPayload.settingsPath(project: editorProject), json: body, id: "settings-save")
+    }
+    public func changeNotifySetting(_ body: String) {
+        settingsNotice = nil
+        raw("POST", "/notify/settings", json: body, id: "notify-save")
+    }
+    public func testNotification(channel: String) {
+        settingsNotice = nil
+        raw("POST", "/notify/test", json: SettingsPayload.testNotification(channel: channel), id: "notify-test")
+    }
+    public func runSchedule(_ name: String) {
+        settingsNotice = nil
+        raw("POST", "/schedules/run", json: SettingsPayload.runSchedule(project: editorProject, name: name), id: "schedule-run")
+    }
+
+    public func raw(_ method: String, _ path: String, json: String = "", id: String = "") {
+        command {
+            if !id.isEmpty { $0.id = id }
+            $0.raw = .with { $0.method = method; $0.path = path; $0.json = json }
+        }
     }
 
     // MARK: the pipeline editor (Part 18)
@@ -827,12 +871,42 @@ public final class MonitorModel: ObservableObject {
         clockOffsetMs = Int64(ms) - Int64(local.timeIntervalSince1970 * 1000)
     }
 
+    /// How progress messages are put off to the next frame: `flush` is run once, later, on the main actor.
+    /// The app's default waits one frame (1/30 s); tests replace it to hold the model "busy".
+    public var scheduleProgressFlush: (@escaping @MainActor () -> Void) -> Void = { flush in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0 / 30) { MainActor.assumeIsolated { flush() } }
+    }
+    private var pendingProgress: [Mason_V1_StepProgress] = []
+    private var flushScheduled = false
+
+    /// A progress message from the stream: held until the next frame, so a burst costs one sidebar publish.
+    func enqueue(progress p: Mason_V1_StepProgress) {
+        pendingProgress.append(p)
+        guard !flushScheduled else { return }
+        flushScheduled = true
+        scheduleProgressFlush { [weak self] in self?.flushProgress() }
+    }
+
+    /// Apply what was held, in order, as one batch. Every other message flushes first, so order is kept.
+    public func flushProgress() {
+        flushScheduled = false
+        guard !pendingProgress.isEmpty else { return }
+        let batch = pendingProgress
+        pendingProgress = []
+        apply(progresses: batch)
+    }
+
     /// A step's progress arrived without a view: put it into the task page and the rows, and follow the log.
     public func apply(progress p: Mason_V1_StepProgress, local: Date = Date()) {
-        anchor(daemonNow: p.nowMs, local: local)
-        guard p.hasProgress else { return }
-        let cell = p.progress
-        func merged(_ old: [ProgressCell]) -> [ProgressCell]? {
+        apply(progresses: [p], local: local)
+    }
+
+    /// Several progress messages at once: one write to the task page, one to the sidebar, one pass over its rows.
+    func apply(progresses ps: [Mason_V1_StepProgress], local: Date = Date()) {
+        if let last = ps.last(where: { $0.nowMs > 0 }) { anchor(daemonNow: last.nowMs, local: local) }
+        let withCell = ps.filter { $0.hasProgress }
+        guard !withCell.isEmpty else { return }
+        func merged(_ old: [ProgressCell], _ cell: ProgressCell) -> [ProgressCell]? {
             guard let i = old.firstIndex(where: { $0.step == cell.step }) else { return nil }
             var c = cell
             // A finished or stopped run says what it ended as on the next view; until then, no "running".
@@ -841,19 +915,33 @@ public final class MonitorModel: ObservableObject {
             out[i] = c
             return out
         }
-        if var d = taskDetail, d.hasRow, d.row.id == p.task {
-            if let cells = merged(d.row.progress) {
-                d.row.progress = cells
-                taskDetail = d
+        if var d = taskDetail, d.hasRow {
+            var changed = false
+            var lines: [String] = []
+            for p in withCell where d.row.id == p.task {
+                if let cells = merged(d.row.progress, p.progress) {
+                    d.row.progress = cells
+                    changed = true
+                }
+                lines += p.log
             }
-            appendLog(p.log)
+            if changed { taskDetail = d }
+            appendLog(lines)
         }
         if var s = sidebar {
+            var latest: [UInt64: [Mason_V1_ProgressCell]] = [:]
+            for p in withCell { latest[p.task, default: []].append(p.progress) }
             var changed = false
             for si in s.sections.indices {
-                for ri in s.sections[si].rows.indices where s.sections[si].rows[ri].id == p.task {
-                    if let cells = merged(s.sections[si].rows[ri].progress) {
-                        s.sections[si].rows[ri].progress = cells
+                for ri in s.sections[si].rows.indices {
+                    guard let cells = latest[s.sections[si].rows[ri].id] else { continue }
+                    var progress = s.sections[si].rows[ri].progress
+                    var hit = false
+                    for cell in cells {
+                        if let next = merged(progress, cell) { progress = next; hit = true }
+                    }
+                    if hit {
+                        s.sections[si].rows[ri].progress = progress
                         changed = true
                     }
                 }
@@ -870,6 +958,11 @@ public final class MonitorModel: ObservableObject {
     // MARK: updates from the daemon
 
     public func apply(_ m: Mason_V1_ServerMessage) {
+        if case .stepProgress(let p)? = m.body {
+            enqueue(progress: p)
+            return
+        }
+        flushProgress()
         switch m.body {
         case .welcome(let w)?:
             connected = true
@@ -893,8 +986,6 @@ public final class MonitorModel: ObservableObject {
         case .view(let u)?:
             lastSeq = max(lastSeq, u.seq)
             apply(u.view)
-        case .stepProgress(let p)?:
-            apply(progress: p)
         case .result(let r)?:
             lastResult = r.ok ? nil : r.error
             handle(result: r)
@@ -951,6 +1042,14 @@ public final class MonitorModel: ObservableObject {
         }
     }
 
+    static func settingsDone(_ id: String) -> String {
+        switch id {
+        case "notify-test": return "Test notification sent."
+        case "schedule-run": return "Started."
+        default: return "Saved. It applies now, with no restart."
+        }
+    }
+
     func handle(result r: Mason_V1_CommandResult) {
         if r.id.hasPrefix("publish:"), r.ok { publishPreview = PublishPreview(json: r.json) }
         if r.id.hasPrefix("session:"), let task = UInt64(r.id.dropFirst("session:".count)) {
@@ -974,6 +1073,12 @@ public final class MonitorModel: ObservableObject {
         }
         if r.id == "health", r.ok { health = HealthSnapshot(json: r.json) }
         if r.id == "introspection", r.ok { introspection = IntrospectionSnapshot(json: r.json) }
+        if r.id == "settings", r.ok { settings = SettingsSnapshot(json: r.json) }
+        if r.id == "notify-settings", r.ok { notifySettings = NotifySettings(json: r.json) }
+        if ["settings-save", "notify-save", "notify-test", "schedule-run"].contains(r.id) {
+            settingsNotice = r.ok ? Self.settingsDone(r.id) : r.error
+            if r.ok, r.id == "settings-save" || r.id == "notify-save" { loadSettings() }
+        }
     }
 
     public func disconnected(now: Date = Date()) {

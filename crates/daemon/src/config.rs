@@ -92,6 +92,9 @@ pub struct DaemonConfig {
     /// Identities whose answers count (Part 10). Default: the user running the
     /// daemon.
     pub owner_names: Vec<String>,
+    /// An owner session with no message for this many hours ends by itself (`[sessions]
+    /// idle_end_h` in `daemon.toml`; 0: never).
+    pub idle_end_h: u64,
     /// The commit of the runtime this process is (set when started from
     /// `runtimes/<sha>/`); `None` when run from a build directory.
     pub runtime_sha: Option<String>,
@@ -112,11 +115,16 @@ pub struct DaemonConfig {
 
 /// `[lan]` in `daemon.toml`. Loopback stays the default: nothing listens beyond it unless
 /// `enabled = true` (or `masond --lan`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LanCfg {
     pub enabled: bool,
     /// 0 asks the OS for a free port.
     pub port: u16,
+    /// Extra names or addresses a phone may reach the daemon at (a Tailscale name, say). They go
+    /// in the pairing URL after `<host>.local`; they do not change who may connect.
+    pub hosts: Vec<String>,
+    /// The addresses to listen on, one listener each. Default `0.0.0.0`, as before.
+    pub bind: Vec<std::net::IpAddr>,
 }
 
 impl Default for LanCfg {
@@ -124,6 +132,8 @@ impl Default for LanCfg {
         LanCfg {
             enabled: false,
             port: crate::lan::DEFAULT_LAN_PORT,
+            hosts: Vec::new(),
+            bind: vec![std::net::IpAddr::from([0, 0, 0, 0])],
         }
     }
 }
@@ -150,6 +160,44 @@ pub fn parse_lan(text: &str) -> Result<LanCfg, String> {
                     .as_integer()
                     .and_then(|n| u16::try_from(n).ok())
                     .ok_or("daemon.toml: lan.port must be a whole number from 0 to 65535")?
+            }
+            "hosts" => {
+                let bad = "daemon.toml: lan.hosts must be a list of host names or addresses, e.g. [\"mac.tailnet.ts.net\", \"100.64.0.1\"]";
+                let arr = v.as_array().ok_or(bad)?;
+                lan.hosts.clear();
+                for e in arr.iter() {
+                    let h = e.as_str().ok_or(bad)?;
+                    let ok = !h.is_empty()
+                        && h.len() <= 253
+                        && h.chars()
+                            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-');
+                    if !ok {
+                        return Err(format!(
+                            "daemon.toml: lan.hosts entry {h:?} is not a host name or IPv4 address (letters, digits, `.` and `-` only)"
+                        ));
+                    }
+                    if !lan.hosts.iter().any(|x| x == h) {
+                        lan.hosts.push(h.to_string());
+                    }
+                }
+            }
+            "bind" => {
+                let bad = "daemon.toml: lan.bind must be a non-empty list of IP addresses, e.g. [\"0.0.0.0\"]";
+                let arr = v.as_array().ok_or(bad)?;
+                let mut out: Vec<std::net::IpAddr> = Vec::new();
+                for e in arr.iter() {
+                    let a: std::net::IpAddr =
+                        e.as_str().and_then(|t| t.parse().ok()).ok_or_else(|| {
+                            format!("daemon.toml: lan.bind entry {e} is not an IP address")
+                        })?;
+                    if !out.contains(&a) {
+                        out.push(a);
+                    }
+                }
+                if out.is_empty() {
+                    return Err(bad.into());
+                }
+                lan.bind = out;
             }
             other => return Err(format!("daemon.toml: unknown setting lan.{other}")),
         }
@@ -289,11 +337,39 @@ pub fn load_retention_days(config_dir: &std::path::Path) -> Result<Option<u64>, 
     }
 }
 
+/// Hours without a message after which an owner session ends by itself, unless `daemon.toml`
+/// says otherwise.
+pub const DEFAULT_IDLE_END_H: u64 = 24;
+
+/// `idle_end_h` from `[sessions]` in `daemon.toml`, if set.
+pub fn parse_idle_end_h(text: &str) -> Result<Option<u64>, String> {
+    let doc: toml_edit::DocumentMut = text.parse().map_err(|e| format!("daemon.toml: {e}"))?;
+    match doc.get("sessions").and_then(|d| d.get("idle_end_h")) {
+        None => Ok(None),
+        Some(v) => v
+            .as_integer()
+            .and_then(|n| u64::try_from(n).ok())
+            .map(Some)
+            .ok_or_else(|| {
+                "daemon.toml: sessions.idle_end_h must be a whole number of hours (0: never)"
+                    .to_string()
+            }),
+    }
+}
+
+pub fn load_idle_end_h(config_dir: &std::path::Path) -> Result<Option<u64>, String> {
+    match std::fs::read_to_string(config_dir.join("daemon.toml")) {
+        Ok(t) => parse_idle_end_h(&t),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("daemon.toml: {e}")),
+    }
+}
+
 pub fn parse_daemon_port(text: &str) -> Result<Option<u16>, String> {
     let doc: toml_edit::DocumentMut = text.parse().map_err(|e| format!("daemon.toml: {e}"))?;
     let mut port = None;
     for (key, item) in doc.iter() {
-        if key == "lan" || key == "targets" {
+        if key == "lan" || key == "targets" || key == "sessions" {
             continue; // read by `parse_lan` and `parse_targets`
         }
         let table = item
@@ -388,6 +464,7 @@ impl DaemonConfig {
             owner_names: vec![std::env::var("USER")
                 .or_else(|_| std::env::var("LOGNAME"))
                 .unwrap_or_else(|_| "owner".into())],
+            idle_end_h: DEFAULT_IDLE_END_H,
         }
     }
 
@@ -481,6 +558,12 @@ pub struct ProjectCfg {
     /// Opt in to letting top-priority tasks jump the "fewest steps remaining"
     /// term of the scheduling rank (Part 7). Off by default.
     pub priority_jump: bool,
+    /// Seconds a queued task is held back for an in-flight task that changes the same files
+    /// (`hold_back_secs`, default 7200; 0 turns the hold off) (s398).
+    pub hold_back_secs: u64,
+    /// Globs of shared files that are expected to change often; they never hold a task back
+    /// (`hold_back_ignore`) (s398).
+    pub hold_back_ignore: Vec<String>,
     /// A cheap command that rewrites a decision card that does not fit: it reads
     /// `{"card": ..., "problems": [...]}` on stdin and prints a card as JSON.
     /// Optional; without it (or if it fails) a deterministic fallback is used.
@@ -1146,6 +1229,20 @@ pub fn parse_project(id: &str, text: &str) -> Result<ProjectCfg, String> {
         },
         clarity_classifier: s("clarity_classifier").filter(|c| !c.trim().is_empty()),
         card_rewriter: s("card_rewriter").filter(|c| !c.trim().is_empty()),
+        hold_back_secs: doc
+            .get("hold_back_secs")
+            .and_then(|v| v.as_integer())
+            .map_or(7200, |n| n.max(0) as u64),
+        hold_back_ignore: doc
+            .get("hold_back_ignore")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str())
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_default(),
         priority_jump: doc
             .get("priority_jumps_progress")
             .and_then(|v| v.as_bool())
@@ -1582,11 +1679,30 @@ mod tests {
             "[lan]\nenabled = \"yes\"\n",
             "[lan]\nport = 70000\n",
             "[lan]\nhost = \"x\"\n",
+            "[lan]\nhosts = \"x\"\n",
+            "[lan]\nhosts = [1]\n",
+            "[lan]\nhosts = [\"a b\"]\n",
+            "[lan]\nhosts = [\"a&alt=b\"]\n",
+            "[lan]\nhosts = [\"\"]\n",
+            "[lan]\nbind = []\n",
+            "[lan]\nbind = \"0.0.0.0\"\n",
+            "[lan]\nbind = [\"not-an-ip\"]\n",
             "lan = 3\n",
         ] {
             let e = parse_lan(bad).unwrap_err();
             assert!(e.starts_with("daemon.toml: "), "{e}");
         }
+        let l = parse_lan(
+            "[lan]\nhosts = [\"mac.tail.ts.net\", \"100.64.0.1\", \"100.64.0.1\"]\nbind = [\"127.0.0.1\", \"::1\"]\n",
+        )
+        .unwrap();
+        assert_eq!(l.hosts, ["mac.tail.ts.net", "100.64.0.1"]);
+        assert_eq!(l.bind.len(), 2);
+        assert_eq!(
+            LanCfg::default().bind,
+            vec![std::net::IpAddr::from([0, 0, 0, 0])]
+        );
+        assert!(LanCfg::default().hosts.is_empty());
         // The port parser leaves the table alone.
         assert_eq!(
             super::parse_daemon_port("[lan]\nenabled = true\n").unwrap(),

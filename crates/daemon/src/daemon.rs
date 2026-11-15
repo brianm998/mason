@@ -58,6 +58,8 @@ pub struct Daemon {
     emit_lock: Mutex<()>,
     admitting: AtomicBool,
     admit_again: AtomicBool,
+    /// When each queued task was first held back for a shared file (s398); the hold's clock.
+    pub(crate) file_held: Mutex<HashMap<TaskId, Instant>>,
     fetch_locks: Mutex<HashMap<PathBuf, Arc<Mutex<Option<std::time::Instant>>>>>,
     /// Per project: when its fetches began failing (ms) and the last error. A success removes it.
     fetch_failures: Mutex<HashMap<ProjectId, (u64, String)>>,
@@ -106,6 +108,8 @@ pub struct Daemon {
     pub update_check: Mutex<crate::update::Check>,
     /// One fetch into the source mirror at a time.
     pub update_fetch: Mutex<()>,
+    /// The cancellers of the owner-session turns in flight, by session id (s364).
+    pub owner_turns: Mutex<std::collections::HashMap<u64, mason_adapter_api::Canceller>>,
     /// Monitor builds, by kind.
     pub monitor_builds: Mutex<std::collections::HashMap<String, crate::update::MonitorState>>,
     pub(crate) drafts: crate::editor::Drafts,
@@ -283,6 +287,7 @@ impl Daemon {
             emit_lock: Mutex::default(),
             admitting: AtomicBool::new(false),
             admit_again: AtomicBool::new(false),
+            file_held: Mutex::default(),
             repo_locks: Mutex::default(),
             fetch_locks: Mutex::default(),
             fetch_failures: Mutex::default(),
@@ -326,6 +331,7 @@ impl Daemon {
             update_now: AtomicBool::new(false),
             update_check: Default::default(),
             update_fetch: Mutex::new(()),
+            owner_turns: Default::default(),
             monitor_builds: Default::default(),
             cfg,
         });
@@ -340,6 +346,7 @@ impl Daemon {
             d.spawn_progress_ticker();
             d.spawn_sweeper();
             d.spawn_compile_watch();
+            crate::usersession::on_start(&d);
             // A daemon whose CPU reading is injected is a test's: it would add a
             // thread running `ps` every few seconds, to no use.
             if d.cfg.cpu.is_none() && std::env::var_os("MASON_CPU_FILE").is_none()
@@ -397,6 +404,11 @@ impl Daemon {
     /// Open issues the tracker has not imported (or whose task was canceled), with why.
     pub fn tracker_pending(&self, p: ProjectId) -> Vec<crate::tracker::Waiting> {
         self.tracker.pending(p)
+    }
+
+    /// How often the project's tracker is asked, as the running poller has it.
+    pub fn tracker_interval(&self, p: ProjectId) -> Option<u64> {
+        self.tracker.interval(p)
     }
 
     /// Ask the project's tracker again at once.
@@ -461,6 +473,9 @@ impl Daemon {
             )]);
         }
         if !changed.is_empty() {
+            if let Some(t) = &new.services.tracker {
+                self.tracker.set_interval(pid, t.interval_s);
+            }
             let leaked: &'static ProjectCfg = Box::leak(Box::new(new));
             self.registry
                 .write()
@@ -1021,6 +1036,9 @@ impl Daemon {
             })
             // A project whose check queue is long starts nothing new (s256).
             .filter(|t| self.check_hold(w, t).is_none())
+            // A task that changes the same files as one in testing, review or landing waits
+            // for it to land (s398).
+            .filter(|t| self.file_hold(w, t).is_none())
             .min_by_key(|t| self.queued_rank(t))
             .map(|t| t.id)
     }

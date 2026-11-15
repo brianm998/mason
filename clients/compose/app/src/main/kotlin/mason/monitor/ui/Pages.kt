@@ -14,6 +14,14 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.PointerIcon
+import androidx.compose.ui.input.pointer.pointerHoverIcon
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -37,6 +45,7 @@ fun MainPane(model: MonitorModel, modifier: Modifier = Modifier) {
             Page.Usage -> UsagePage(model)
             Page.Pipeline -> EditorPage(model)
             Page.Health -> HealthPage(model)
+            Page.Settings -> SettingsPage(model)
         }
     }
 }
@@ -54,9 +63,10 @@ internal fun Section(title: String, state: String? = null, content: @Composable 
 }
 
 @Composable
-internal fun Link(text: String, onClick: () -> Unit) {
+internal fun Link(text: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
     val theme = LocalTheme.current
-    Text(text, style = theme.body(color = theme.accent), modifier = Modifier.clickable(onClick = onClick))
+    Text(text, style = theme.body(color = theme.accent), maxLines = 1, overflow = TextOverflow.Ellipsis,
+        modifier = modifier.pointerHoverIcon(PointerIcon(java.awt.Cursor(java.awt.Cursor.HAND_CURSOR))).clickable(onClick = onClick))
 }
 
 /**
@@ -213,8 +223,9 @@ fun CompilationSection(model: MonitorModel, c: Compilation) {
     val theme = LocalTheme.current
     val now = model.daemonNow()
     val age = { since: Long -> Format.duration(maxOf(0L, now - since)) }
-    val who: @Composable (String, Long) -> Unit = { label, task ->
+    val who: @Composable (String, Long, String) -> Unit = { label, task, command ->
         if (task > 0) Link("#$task") { model.go(Page.Task(task)) }
+        else if (command.isNotEmpty()) Link(label, modifier = Modifier.widthIn(max = 480.dp).testTag("compile:command")) { model.openCommand(label, command) }
         else Text(label, style = theme.body(), maxLines = 1, overflow = TextOverflow.Ellipsis,
             modifier = Modifier.widthIn(max = 480.dp))
     }
@@ -248,7 +259,7 @@ fun CompilationSection(model: MonitorModel, c: Compilation) {
         if (c.running.isEmpty()) Text("Nothing is compiling.", style = theme.body(color = theme.muted))
         c.running.forEachIndexed { i, r ->
             Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing), modifier = Modifier.testTag("compile:running:$i")) {
-                who(r.label, r.task)
+                who(r.label, r.task, r.command)
                 val detail = Format.compileHolder(r.project, r.title)
                 if (r.task > 0 && detail.isNotEmpty()) Text(detail, style = theme.body(), maxLines = 1, overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.widthIn(max = 480.dp))
@@ -262,7 +273,7 @@ fun CompilationSection(model: MonitorModel, c: Compilation) {
             Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing), verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.testTag("compile:pending:${w.position}")) {
                 Text("${w.position}.", style = theme.body(color = theme.muted))
-                who(w.label, w.task)
+                who(w.label, w.task, w.command)
                 Text(w.reason, style = theme.body())
                 Text(
                     when {
@@ -279,6 +290,27 @@ fun CompilationSection(model: MonitorModel, c: Compilation) {
         }
         Text(c.rules, style = theme.small(color = theme.muted))
     }
+    model.commandDialog?.let { CommandDialogView(it) { model.closeCommand() } }
+}
+
+/** A command shown whole: scrollable, monospaced, selectable, with Copy and Close; Escape closes it. */
+@Composable
+fun CommandDialogView(d: CommandDialog, close: () -> Unit) {
+    val theme = LocalTheme.current
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = close,
+        modifier = Modifier.onPreviewKeyEvent { e ->
+            if (e.type == KeyEventType.KeyDown && e.key == Key.Escape) { close(); true } else false
+        },
+        title = { Text(d.title, style = theme.body(FontWeight.SemiBold), maxLines = 2) },
+        text = {
+            Box(Modifier.heightIn(max = 400.dp).verticalScroll(rememberScrollState()).horizontalScroll(rememberScrollState())) {
+                SelectionContainer { Text(d.command, style = theme.mono(), modifier = Modifier.testTag("command:text")) }
+            }
+        },
+        confirmButton = { androidx.compose.material3.Button(onClick = { copyToClipboard(d.command) }, modifier = Modifier.testTag("command:copy")) { Text("Copy") } },
+        dismissButton = { androidx.compose.material3.Button(onClick = close, modifier = Modifier.testTag("command:close")) { Text("Close") } },
+    )
 }
 
 /**
@@ -633,4 +665,120 @@ fun HealthPage(model: MonitorModel) {
 fun MascotPicture(id: String, size: androidx.compose.ui.unit.Dp, modifier: Modifier = Modifier) {
     val bmp = remember(id) { Mascot.illustration(id) } ?: return
     androidx.compose.foundation.Image(bmp, contentDescription = null, modifier = modifier.size(size))
+}
+
+/**
+ * Settings (s430): proposal policy, notification routes with a Test button, schedules with Run now,
+ * and the tracker. Every control sends one small change to the daemon, which writes it to the file
+ * and applies it without a restart. A secret is never shown or typed here.
+ */
+@Composable
+fun SettingsPage(model: MonitorModel) {
+    val theme = LocalTheme.current
+    Scrolling {
+        Text("Settings", style = theme.title())
+        model.settingsNotice?.let { Text(it, style = theme.body(color = theme.muted), modifier = Modifier.testTag("settings:notice")) }
+        val s = model.settings
+        if (s == null) {
+            Text("Loading the project's settings.", style = theme.body(color = theme.muted))
+        } else {
+            Section("Proposal policy (${s.project})") {
+                SettingsSnapshot.DISPOSITION_KEYS.forEach { k ->
+                    SettingChoice(k, "settings:$k", s.dispositions[k] ?: "proposed") { model.changeProjectSetting(SettingsPayload.disposition(k, it)) }
+                }
+                Text("Introspection findings, by severity and cost", style = theme.small(color = theme.muted))
+                SettingsSnapshot.INTROSPECTION_KEYS.forEach { k ->
+                    SettingChoice(k, "settings:introspection:$k", s.introspection[k] ?: "proposed") { model.changeProjectSetting(SettingsPayload.introspection(k, it)) }
+                }
+                SettingStepper("At most ${s.perTask} per task", s.perTask, 1, 50, "settings:per_task") { model.changeProjectSetting(SettingsPayload.cap("per_task", it)) }
+                SettingStepper("At most ${s.perDay} per day", s.perDay, 1, 500, "settings:per_day") { model.changeProjectSetting(SettingsPayload.cap("per_day", it)) }
+            }
+            Section("Recurring jobs") {
+                if (s.schedules.isEmpty()) Text("None. Add one to the project file.", style = theme.body(color = theme.muted))
+                s.schedules.forEach { j -> ScheduleRow(model, j) }
+            }
+            Section("Issue tracker") {
+                val t = s.tracker
+                if (t == null) {
+                    Text("No tracker is configured for this project.", style = theme.body(color = theme.muted))
+                } else {
+                    SettingStepper("Look every ${t.intervalS} s", t.intervalS, 5, 3600, "settings:tracker:interval_s", step = 5) { model.changeProjectSetting(SettingsPayload.tracker("interval_s", it)) }
+                    SettingChoice("import as", "settings:tracker:import_as", t.importAs) { model.changeProjectSetting(SettingsPayload.tracker("import_as", it)) }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        androidx.compose.material3.Checkbox(
+                            checked = t.requireLabel,
+                            onCheckedChange = { model.changeProjectSetting(SettingsPayload.tracker("require_label", it)) },
+                            modifier = Modifier.testTag("settings:tracker:require_label"),
+                        )
+                        Text("Only issues with the label \"${t.label}\"", style = theme.body())
+                    }
+                    if (t.token.isNotEmpty()) Text("Token: ${t.token}", style = theme.small(color = theme.muted))
+                }
+            }
+        }
+        model.notifySettings?.let { n ->
+            Section("Notifications") {
+                n.routes.forEach { r ->
+                    Text(r.condition, style = theme.body())
+                    Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing), verticalAlignment = Alignment.CenterVertically) {
+                        n.channels.forEach { ch ->
+                            androidx.compose.material3.Checkbox(
+                                checked = n.sends(r.condition, ch),
+                                onCheckedChange = { on -> model.changeNotifySetting(SettingsPayload.route(r.condition, ch, if (on) "0" else null)) },
+                                modifier = Modifier.testTag("settings:route:${r.condition}:$ch"),
+                            )
+                            Text(ch, style = theme.small())
+                        }
+                    }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing)) {
+                    n.channels.filter { it != "monitor" }.forEach { ch ->
+                        androidx.compose.material3.TextButton(onClick = { model.testNotification(ch) }, modifier = Modifier.testTag("settings:test:$ch")) { Text("Test $ch") }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SettingChoice(title: String, tag: String, value: String, pick: (String) -> Unit) {
+    val theme = LocalTheme.current
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(theme.spacing)) {
+        Text(title, style = theme.body())
+        SettingsSnapshot.DISPOSITIONS.forEach { o ->
+            androidx.compose.material3.TextButton(onClick = { if (o != value) pick(o) }, modifier = Modifier.testTag("$tag:$o")) {
+                Text(if (o == value) "[$o]" else o, style = theme.body())
+            }
+        }
+    }
+}
+
+@Composable
+private fun SettingStepper(label: String, value: Int, min: Int, max: Int, tag: String, step: Int = 1, set: (Int) -> Unit) {
+    val theme = LocalTheme.current
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(theme.spacing)) {
+        Text(label, style = theme.body())
+        androidx.compose.material3.TextButton(onClick = { set((value - step).coerceAtLeast(min)) }, modifier = Modifier.testTag("$tag:less")) { Text("-") }
+        androidx.compose.material3.TextButton(onClick = { set((value + step).coerceAtMost(max)) }, modifier = Modifier.testTag("$tag:more")) { Text("+") }
+    }
+}
+
+@Composable
+private fun ScheduleRow(model: MonitorModel, job: SettingsSnapshot.Schedule) {
+    val theme = LocalTheme.current
+    var every by remember(job.every) { mutableStateOf(job.every) }
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(theme.spacing)) {
+        Text("${job.name} (${job.kind}) every", style = theme.body())
+        androidx.compose.foundation.text.BasicTextField(
+            value = every,
+            onValueChange = { every = it },
+            singleLine = true,
+            textStyle = theme.body(),
+            keyboardActions = androidx.compose.foundation.text.KeyboardActions(onDone = { model.changeProjectSetting(SettingsPayload.schedule(job.name, every)) }),
+            keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(imeAction = androidx.compose.ui.text.input.ImeAction.Done),
+            modifier = Modifier.width(90.dp).testTag("settings:every:${job.name}"),
+        )
+        androidx.compose.material3.TextButton(onClick = { model.runSchedule(job.name) }, modifier = Modifier.testTag("settings:run:${job.name}")) { Text("Run now") }
+    }
 }

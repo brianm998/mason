@@ -15,7 +15,10 @@ mod ledger;
 mod plan;
 mod rank;
 
-pub use explain::{explain, ordinal, since, Wait, WaitCause};
+pub use explain::{
+    cause_class, describe_command, explain, label_parts, ordinal, since, Wait, WaitCause,
+    DESCRIPTION_LIMIT,
+};
 pub use ledger::{Ledger, Snapshot, Stall};
 pub use plan::{
     plan, Capacity, CompilePace, CpuGate, DiskGate, Holder, Kind, Needs, Plan, Request, StallGate,

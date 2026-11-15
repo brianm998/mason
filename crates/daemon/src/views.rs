@@ -86,6 +86,8 @@ pub struct Ctx<'a> {
     pub now: u64,
     /// Task to the tracker issue it was imported from.
     issues: std::collections::HashMap<u64, u64>,
+    /// The open owner sessions: by task for the rows, and all of them for the header (s364).
+    owner_sessions: Vec<mason_store::owner_sessions::OwnerSessionRow>,
     /// Built once: every step run by task, and the typical span per step.
     runs: RunIndex,
     /// Task to the tasks it blocks, in id order.
@@ -183,6 +185,7 @@ impl<'a> Ctx<'a> {
             w,
             now: now_ms(),
             issues,
+            owner_sessions: d.store.open_owner_sessions().unwrap_or_default(),
             runs: RunIndex::build(w.step_runs.values()),
             blocks,
             waits: d.broker.waits_snapshot(),
@@ -464,6 +467,18 @@ impl<'a> Ctx<'a> {
             allowed_actions: self.allowed_actions(t),
             blockers: t.blockers.iter().map(|b| b.0).collect(),
             last_run: crate::http::latest_run(self.w, t.id),
+            owner_session: self
+                .owner_sessions
+                .iter()
+                .find(|s| s.task == Some(t.id.0))
+                .map(|s| OwnerSessionInfo {
+                    id: s.id,
+                    opened_ms: s.opened_ms,
+                    last_activity_ms: s.last_ms,
+                    turns: s.turns,
+                    working: s.state == "working",
+                    kind: s.kind.clone(),
+                }),
             blocker_links: crate::blockers::links(self.d, self.w, t)
                 .into_iter()
                 .map(|l| BlockerLink {
@@ -662,6 +677,7 @@ impl<'a> Ctx<'a> {
                 .collect(),
             banners,
             update: crate::update::info(self.d),
+            open_owner_sessions: self.owner_sessions.len() as u32,
             projects: self.w.projects.values().map(|p| p.name.clone()).collect(),
             pending_issues: self
                 .d

@@ -37,6 +37,10 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     var editor by mutableStateOf<EditorView?>(null)
     var health by mutableStateOf<HealthSnapshot?>(null)
     var introspection by mutableStateOf<IntrospectionSnapshot?>(null)
+    /** The Settings page (s430): the picked project's settings, the notification routes, and what the last change said. */
+    var settings by mutableStateOf<SettingsSnapshot?>(null)
+    var notifySettings by mutableStateOf<NotifySettings?>(null)
+    var settingsNotice by mutableStateOf<String?>(null)
     var lastSeq by mutableStateOf(0L)
     var connected by mutableStateOf(false)
     /** Down and being retried: the daemon is restarting or has not answered. Shown as "reconnecting", never as an error. */
@@ -230,6 +234,13 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     /** Where the sidebar should scroll to (a tile was clicked). */
     var scrollTarget by mutableStateOf<String?>(null)
     var lastResult by mutableStateOf<String?>(null)
+    /** A long command opened from a Compilation row; null: the dialog is closed. */
+    var commandDialog by mutableStateOf<CommandDialog?>(null)
+        private set
+    fun openCommand(label: String, command: String) {
+        Format.commandDialog(label, command)?.let { commandDialog = it }
+    }
+    fun closeCommand() { commandDialog = null }
     /** Open session found the step running: the task to ask about. Answer with [answerSessionPrompt]. */
     var sessionPrompt by mutableStateOf<Long?>(null)
         private set
@@ -598,6 +609,36 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     fun raw(method: String, path: String, id: String = "", json: String = "") =
         send(Command(id = id, raw = Raw(method = method, path = path, json = json)))
 
+    // ---- settings (s430) ----
+
+    /** Ask for the Settings page's data: the project's settings and the notification routes. */
+    fun loadSettings() {
+        val p = editorProject
+        if (p.isNotEmpty()) raw("GET", SettingsPayload.path(p), id = "settings")
+        raw("GET", "/notify/settings", id = "notify-settings")
+    }
+
+    /** Change one project setting (a body from [SettingsPayload]); the page reloads on the answer. */
+    fun changeProjectSetting(body: String) {
+        settingsNotice = null
+        raw("POST", SettingsPayload.path(editorProject), id = "settings-save", json = body)
+    }
+
+    fun changeNotifySetting(body: String) {
+        settingsNotice = null
+        raw("POST", "/notify/settings", id = "notify-save", json = body)
+    }
+
+    fun testNotification(channel: String) {
+        settingsNotice = null
+        raw("POST", "/notify/test", id = "notify-test", json = SettingsPayload.test(channel))
+    }
+
+    fun runSchedule(name: String) {
+        settingsNotice = null
+        raw("POST", "/schedules/run", id = "schedule-run", json = SettingsPayload.runSchedule(editorProject, name))
+    }
+
     // ---- the pipeline editor (Part 18) ----
 
     /** The project the editor is about: the one picked, else the first there is. */
@@ -624,11 +665,45 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
         if (daemonNow > 0) clockOffsetMs = daemonNow - local
     }
 
+    /**
+     * How held progress is put off to the next frame: `flush` is to run once, later, on the UI thread.
+     * Null (headless tools, tests) applies each progress message at once.
+     */
+    var scheduleProgressFlush: ((() -> Unit) -> Unit)? = null
+    private val pendingProgress = ArrayList<StepProgress>()
+    private var flushScheduled = false
+
+    /** A progress message from the stream: held until the next frame, so a burst costs one sidebar publish. */
+    internal fun enqueue(p: StepProgress) {
+        val schedule = scheduleProgressFlush
+        if (schedule == null) {
+            apply(p)
+            return
+        }
+        pendingProgress += p
+        if (flushScheduled) return
+        flushScheduled = true
+        schedule { flushProgress() }
+    }
+
+    /** Apply what was held, in order, as one batch. Every other message flushes first, so order is kept. */
+    fun flushProgress() {
+        flushScheduled = false
+        if (pendingProgress.isEmpty()) return
+        val batch = pendingProgress.toList()
+        pendingProgress.clear()
+        applyAll(batch)
+    }
+
     /** A step's progress arrived without a view: put it into the task page and the rows, and follow the log. */
-    fun apply(p: StepProgress, local: Long = System.currentTimeMillis()) {
-        anchor(p.now_ms, local)
-        val cell = p.progress ?: return
-        fun merged(old: List<ProgressCell>): List<ProgressCell>? {
+    fun apply(p: StepProgress, local: Long = System.currentTimeMillis()) = applyAll(listOf(p), local)
+
+    /** Several progress messages at once: one write to the task page, one to the sidebar, one pass over its rows. */
+    private fun applyAll(ps: List<StepProgress>, local: Long = System.currentTimeMillis()) {
+        ps.lastOrNull { it.now_ms > 0 }?.let { anchor(it.now_ms, local) }
+        val withCell = ps.filter { it.progress != null }
+        if (withCell.isEmpty()) return
+        fun merged(old: List<ProgressCell>, cell: ProgressCell): List<ProgressCell>? {
             val i = old.indexOfFirst { it.step == cell.step }
             if (i < 0) return null
             // A finished or stopped run says what it ended as on the next view; until then, no "running".
@@ -636,18 +711,34 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
             return old.toMutableList().also { it[i] = c }
         }
         taskDetail?.let { d ->
-            val r = d.row
-            if (r != null && r.id == p.task) {
-                merged(r.progress)?.let { taskDetail = d.copy(row = r.copy(progress = it)) }
-                appendLog(p.log)
+            var row = d.row
+            if (row != null) {
+                var changed = false
+                val lines = ArrayList<String>()
+                for (p in withCell) {
+                    val cur = row ?: break
+                    if (cur.id != p.task) continue
+                    val cells = merged(cur.progress, p.progress!!)
+                    if (cells != null) { row = cur.copy(progress = cells); changed = true }
+                    lines += p.log
+                }
+                if (changed) taskDetail = d.copy(row = row)
+                appendLog(lines)
             }
         }
         sidebar?.let { s ->
+            val latest = HashMap<Long, MutableList<ProgressCell>>()
+            for (p in withCell) latest.getOrPut(p.task) { ArrayList() }.add(p.progress!!)
             var changed = false
             val sections = s.sections.map { sec ->
                 sec.copy(rows = sec.rows.map { row ->
-                    val cells = if (row.id == p.task) merged(row.progress) else null
-                    if (cells != null) { changed = true; row.copy(progress = cells) } else row
+                    val cells = latest[row.id]
+                    if (cells == null) row else {
+                        var progress = row.progress
+                        var hit = false
+                        for (c in cells) merged(progress, c)?.let { progress = it; hit = true }
+                        if (hit) { changed = true; row.copy(progress = progress) } else row
+                    }
                 })
             }
             if (changed) sidebar = s.copy(sections = sections)
@@ -662,6 +753,8 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     // ---- updates from the daemon ----
 
     fun apply(m: ServerMessage) {
+        m.step_progress?.let { enqueue(it); return }
+        flushProgress()
         m.welcome?.let { w ->
             connected = true
             reconnecting = false
@@ -686,7 +779,6 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
             lastSeq = max(lastSeq, u.seq)
             u.view?.let(::apply)
         }
-        m.step_progress?.let { apply(it) }
         m.result?.let { r ->
             lastResult = if (r.ok) null else r.error
             if (r.id.startsWith("session:")) r.id.removePrefix("session:").toLongOrNull()?.let { task ->
@@ -708,6 +800,12 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
             }
             if (r.id == "health" && r.ok) health = HealthSnapshot.parse(r.json)
             if (r.id == "introspection" && r.ok) introspection = IntrospectionSnapshot.parse(r.json)
+            if (r.id == "settings" && r.ok) settings = SettingsSnapshot.parse(r.json)
+            if (r.id == "notify-settings" && r.ok) notifySettings = NotifySettings.parse(r.json)
+            if (r.id in SETTINGS_RESULTS) {
+                settingsNotice = if (r.ok) SettingsPayload.done(r.id) else r.error
+                if (r.ok && (r.id == "settings-save" || r.id == "notify-save")) loadSettings()
+            }
             if (r.id.startsWith("publish:") && r.ok) publishPreview = PublishPreview.parse(r.json)
             onResult?.invoke(r)
         }

@@ -474,6 +474,31 @@ mod tests {
     }
 
     #[test]
+    fn a_cpu_wait_and_a_test_suite_wait_are_classed_by_their_cause() {
+        let mut l = Ledger::new();
+        l.set_capacity("compile", 2, Kind::Machine);
+        l.submit(rank(1, 1, 1), Needs::of(&[("compile", 1)]), "#1", 0);
+        l.schedule(0, None, None);
+        let c = l.submit(rank(1, 2, 2), Needs::of(&[("compile", 1)]), "#2", 1);
+        let p = l.waits_gated(
+            1,
+            None,
+            None,
+            Some(CpuGate {
+                busy_pct: 90,
+                max_pct: 50,
+            }),
+        );
+        assert_eq!(p.waits[&c].class(), "cpu");
+        let mut l = Ledger::new();
+        l.set_capacity("test-suite", 1, Kind::Machine);
+        l.submit(rank(1, 1, 1), Needs::of(&[("test-suite", 1)]), "#1", 0);
+        let t = l.submit(rank(1, 2, 2), Needs::of(&[("test-suite", 1)]), "#2", 1);
+        let p = l.schedule(2, None, None);
+        assert_eq!(p.waits[&t].class(), "test-suite");
+    }
+
+    #[test]
     fn at_the_disk_floor_work_is_granted() {
         let mut l = disk_ledger();
         l.set_disk(gate(20));

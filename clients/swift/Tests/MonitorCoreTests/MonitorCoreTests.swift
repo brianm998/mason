@@ -191,7 +191,7 @@ final class MonitorCoreTests: XCTestCase {
     }
 
     func testDeepLinksRoundTripAndRefuseOtherThings() {
-        for p in [Page.home, .task(204), .landing, .usage, .pipeline, .health] {
+        for p in [Page.home, .task(204), .landing, .usage, .pipeline, .health, .settings] {
             XCTAssertEqual(Page.from(url: p.url), p, "\(p)")
         }
         XCTAssertNil(Page.from(url: URL(string: "https://example.com/task/1")!))
@@ -1093,6 +1093,72 @@ final class MonitorCoreTests: XCTestCase {
 
     final class Box<T> { var value: T; init(_ v: T) { value = v } }
 
+    func testFramesAreDecodedOffTheMainThreadAndAppliedInOrder() async throws {
+        final class Log: @unchecked Sendable {
+            private let lock = NSLock()
+            private var onMain: [Bool] = []
+            func note(_ b: Bool) { lock.lock(); onMain.append(b); lock.unlock() }
+            var all: [Bool] { lock.lock(); defer { lock.unlock() }; return onMain }
+        }
+        let log = Log()
+        let model = MonitorModel()
+        var seen: [String] = []
+        model.onResult = { seen.append($0.id) }
+        let sockets = Box<[FakeSocket]>([])
+        var t = ConnectionTiming()
+        t.policy = ReconnectPolicy(scale: 0.01)
+        t.watchEvery = 0.02
+        t.pingEvery = 0.05
+        let c = MonitorConnection(model: model, discover: { DaemonInfo(port: 7423, pid: 1, startedMs: 10) }, timing: t, makeSocket: {
+            let s = FakeSocket()
+            sockets.value.append(s)
+            return s
+        }, decode: { text in
+            log.note(Thread.isMainThread)
+            return MonitorConnection.jsonDecoder(text)
+        })
+        c.start()
+        await waitUntil("the socket") { sockets.value.count == 1 }
+        for i in 1...20 {
+            var r = Mason_V1_CommandResult()
+            r.id = "r\(i)"
+            r.ok = true
+            var m = Mason_V1_ServerMessage()
+            m.result = r
+            sockets.value[0].push(try m.jsonString())
+        }
+        await waitUntil("all results") { seen.count == 20 }
+        c.stop()
+        XCTAssertEqual(seen, (1...20).map { "r\($0)" })
+        XCTAssertEqual(log.all.count, 20)
+        XCTAssertFalse(log.all.contains(true), "decoding never runs on the main thread")
+    }
+
+    func testAHundredProgressUpdatesWhileBusyPublishTheSidebarOnce() {
+        let m = model()
+        var c = cell(done: 1, total: 400, totalSrc: .sourceReported)
+        c.step = "develop"
+        m.sidebar?.sections[0].rows[0].progress = [c]
+        var scheduled: [@MainActor () -> Void] = []
+        m.scheduleProgressFlush = { scheduled.append($0) }
+        var publishes = 0
+        let sub = m.$sidebar.dropFirst().sink { _ in publishes += 1 }
+        for i in 1...100 {
+            var p = Mason_V1_StepProgress()
+            p.task = 1
+            var n = c
+            n.done = UInt32(i)
+            p.progress = n
+            m.apply(.with { $0.stepProgress = p })
+        }
+        XCTAssertEqual(publishes, 0, "nothing is published while the frame is not due")
+        XCTAssertEqual(scheduled.count, 1, "one flush is asked for, not one per message")
+        scheduled[0]()
+        XCTAssertEqual(publishes, 1)
+        XCTAssertEqual(m.sidebar?.sections[0].rows[0].progress.first?.done, 100)
+        sub.cancel()
+    }
+
     func testDropThenChangedDaemonJsonReconnectsWithoutARelaunch() async throws {
         let model = MonitorModel()
         let sockets = Box<[FakeSocket]>([])
@@ -1466,8 +1532,8 @@ final class MonitorCoreTests: XCTestCase {
         XCTAssertGreaterThan(es.count, 4)
         if case .header = es.first! {} else { XCTFail("sections come first") }
         let links = es.compactMap { e -> String? in if case .pageLink(let t, _) = e { return t } else { return nil } }
-        XCTAssertEqual(links, ["Landing", "LLM usage", "Pipeline", "Health"])
-        XCTAssertEqual(es.suffix(4).count, 4)
+        XCTAssertEqual(links, ["Landing", "LLM usage", "Pipeline", "Health", "Settings"])
+        XCTAssertEqual(es.suffix(5).count, 5)
     }
 
     func testATileTargetResolvesToASectionInTheScrollingEntries() {

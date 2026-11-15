@@ -670,6 +670,10 @@ fn execute(c: &Ctx, step: State) {
     if let Err(()) = wait_while_paused(c) {
         return;
     }
+    // An agent step does not launch while the owner's session about this task is replying.
+    if c.step.kind == StepType::Agent && wait_while_owner_replies(c).is_err() {
+        return;
+    }
     // Everything the step needs, acquired at once, in rank order across every
     // project. Time spent waiting is outside every timeout below: they all
     // start after this returns. An approval waits for a person, not for the
@@ -825,6 +829,33 @@ fn wait_while_paused(c: &Ctx) -> Result<(), ()> {
                 .map(|w| w.open_run(c.task) == Some(c.run))
                 .unwrap_or(true);
         if !alive {
+            return Err(());
+        }
+    }
+    if announced {
+        c.emit(EventKind::WaitEnded { task: c.task });
+    }
+    Ok(())
+}
+
+/// Hold an agent step back while an owner session about the task has a turn in flight (s364).
+/// The wait is shown on the task; an open session that is idle holds nothing. `Err` means the
+/// task went away meanwhile.
+fn wait_while_owner_replies(c: &Ctx) -> Result<(), ()> {
+    let mut announced = false;
+    while crate::usersession::replying(&c.d, c.task) {
+        if !announced {
+            announced = true;
+            if !c.emit(EventKind::WaitStarted {
+                task: c.task,
+                on: crate::usersession::HOLD_REASON.into(),
+                class: Some("owner-session".into()),
+            }) {
+                return Err(());
+            }
+        }
+        std::thread::sleep(Duration::from_millis(200));
+        if !still_open(c) {
             return Err(());
         }
     }
@@ -2495,15 +2526,24 @@ struct WeakeningCheck {
 /// The agent CLI for this project's provider, under the step host and, if the
 /// project asks for one, an OS sandbox.
 pub(crate) fn adapter(c: &Ctx) -> Box<dyn AgentAdapter> {
-    let agent = c.project.agent();
+    adapter_for(&c.d, &c.project, &c.wt)
+}
+
+/// The same for a session that is not a step of the graph (an owner session, s364).
+pub(crate) fn adapter_for(
+    d: &Daemon,
+    project: &ProjectCfg,
+    wt: &std::path::Path,
+) -> Box<dyn AgentAdapter> {
+    let agent = project.agent();
     let host = HostLaunch {
-        host_bin: c.d.cfg.host_bin.clone(),
-        root: c.d.cfg.hosts_dir(),
-        heartbeat: c.d.cfg.heartbeat,
+        host_bin: d.cfg.host_bin.clone(),
+        root: d.cfg.hosts_dir(),
+        heartbeat: d.cfg.heartbeat,
         linger: Duration::from_secs(600),
     };
     let sandbox = (agent.sandbox != SandboxKind::None).then(|| {
-        let mut p = SandboxPolicy::new(agent.sandbox, &c.wt, &c.d.cfg.agent_state_dir());
+        let mut p = SandboxPolicy::new(agent.sandbox, wt, &d.cfg.agent_state_dir());
         if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
             p.extra = [".claude", ".claude.json", ".codex"]
                 .iter()
@@ -2511,24 +2551,23 @@ pub(crate) fn adapter(c: &Ctx) -> Box<dyn AgentAdapter> {
                 .collect();
         }
         // A worktree's commits are written into the main repository's `.git`.
-        p.extra.push(c.project.path.join(".git"));
+        p.extra.push(project.path.join(".git"));
         p
     });
     match agent.provider {
         Provider::Claude => {
-            let bin = c
-                .project
+            let bin = project
                 .claude_bin
                 .clone()
                 .unwrap_or_else(|| PathBuf::from("claude"));
-            let mut a = ClaudeAdapter::new(bin, c.d.cfg.mcp_bin.clone(), c.d.cfg.agent_state_dir())
+            let mut a = ClaudeAdapter::new(bin, d.cfg.mcp_bin.clone(), d.cfg.agent_state_dir())
                 .with_host(host);
             a.sandbox = sandbox;
             Box::new(a)
         }
         Provider::Codex => {
             let bin = agent.codex_bin.unwrap_or_else(|| PathBuf::from("codex"));
-            let mut a = CodexAdapter::new(bin, c.d.cfg.mcp_bin.clone(), c.d.cfg.agent_state_dir())
+            let mut a = CodexAdapter::new(bin, d.cfg.mcp_bin.clone(), d.cfg.agent_state_dir())
                 .with_host(host);
             a.sandbox = sandbox;
             Box::new(a)
@@ -2614,6 +2653,7 @@ fn agent_job(c: &Ctx) {
         StepKind::Explore => "explore",
         // A diagnosis session is run by `diagnose`, not as a step of the graph.
         StepKind::Diagnose => "diagnose",
+        StepKind::Chat => "chat",
     };
     // Only while the feedback it was written with is still there.
     let round_reason = if conflicts.is_some() {
@@ -2677,7 +2717,7 @@ fn agent_job(c: &Ctx) {
             StepKind::Explore => {
                 crate::prompts::explore_prompt(c.task.0, &c.title, &c.body, c.trust, &c.project)
             }
-            StepKind::Diagnose => String::new(),
+            StepKind::Diagnose | StepKind::Chat => String::new(),
         }
     };
 
@@ -2744,10 +2784,8 @@ fn agent_job(c: &Ctx) {
         .map(|t| crate::cmdreuse::command_key(t.build.as_deref(), &t.test));
     // Kept in the task's folder per run, so a re-attach after a daemon restart keeps what
     // was credited before it (s417).
-    let deadline_extra = mason_adapter_api::DeadlineExtra::kept_in(
-        c.task_dir()
-            .join(credit_file_name(c.run.0)),
-    );
+    let deadline_extra =
+        mason_adapter_api::DeadlineExtra::kept_in(c.task_dir().join(credit_file_name(c.run.0)));
     // The agent's own `mason run` commands that wait in the queue add to it too (s363),
     // until this step ends.
     c.d.broker.credit_waits_to(c.task, deadline_extra.clone());
@@ -2878,12 +2916,56 @@ fn agent_job(c: &Ctx) {
         crate::taskcache::own_dir(&c.d, c.task.0),
     ));
     spec.tool_timeout = tool_timeout_for(kind, &c.project);
-    spec.deadline = Some(
-        c.res
-            .budget
-            .as_ref()
-            .map_or(c.project.step_timeout, |a| a.value),
-    );
+    let budget = c
+        .res
+        .budget
+        .as_ref()
+        .map_or(c.project.step_timeout, |a| a.value);
+    spec.deadline = Some(budget);
+    // The host counts the limit from when it started, so what was credited and granted
+    // before a daemon restart is read back and kept on disk (s401).
+    let extra_file = dir.join(format!("deadline-extra-r{}.kv", c.run.0));
+    let on_disk = crate::deadline::load(&spec.deadline_extra, &extra_file);
+    // A develop agent that keeps committing or producing output gets more time, up to
+    // twice the budget (s401); it ends with the step.
+    let seen = Arc::new(Seen::default());
+    let started = Instant::now();
+    let _extender = Some(()).map(|()| {
+        let stop = Arc::new(AtomicBool::new(false));
+        let (stop2, seen2, extra, wt) = (
+            stop.clone(),
+            seen.clone(),
+            spec.deadline_extra.clone(),
+            c.wt.clone(),
+        );
+        let head = move || git::run(&wt, &["rev-parse", "HEAD"]).unwrap_or_default();
+        let mut ext = (kind == StepKind::Develop).then(|| {
+            crate::deadline::Extender::new(
+                budget,
+                Duration::from_secs(120).min(budget / 4),
+                head(),
+                seen.count(),
+            )
+            .resume(Duration::from_millis(on_disk.1))
+        });
+        let mut last = on_disk;
+        std::thread::spawn(move || {
+            while !stop2.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_secs(1));
+                if let Some(e) = ext.as_mut() {
+                    e.tick(started.elapsed(), &extra, &head, seen2.count());
+                }
+                last = crate::deadline::save(&extra, &extra_file, last);
+            }
+        });
+        struct StopExtending(Arc<AtomicBool>);
+        impl Drop for StopExtending {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        StopExtending(stop)
+    });
     // A `run_check` may queue for a long time before it runs, so no tool call is
     // cut off before the step's own deadline would have ended it.
     if kind == StepKind::Develop {
@@ -2918,7 +3000,9 @@ fn agent_job(c: &Ctx) {
     });
     {
         let (d, run) = (c.d.clone(), c.run);
+        let seen = seen.clone();
         spec.progress = Some(Arc::new(move |stream, off, bytes| {
+            seen.touch();
             d.progress_observe(run, stream, off, bytes)
         }));
     }
@@ -2951,7 +3035,11 @@ fn agent_job(c: &Ctx) {
         let (d, run) = (c.d.clone(), c.run);
         contract.set_on_progress(Arc::new(move |r| d.progress_agent_report(run, r)));
         let (d, run) = (c.d.clone(), c.run);
-        spec.on_agent_event = Some(Arc::new(move |ev| d.progress_agent_event(run, ev)));
+        let seen = seen.clone();
+        spec.on_agent_event = Some(Arc::new(move |ev| {
+            seen.touch();
+            d.progress_agent_event(run, ev)
+        }));
     }
     // Wired before any reattach, so a session found again sees what was already accepted.
     spec.accepted = contract.flag();
@@ -3011,7 +3099,56 @@ fn agent_job(c: &Ctx) {
         report = r;
     }
     contract.shutdown();
+    if matches!(report.end, StepEnd::Failed(FailReason::Timeout)) {
+        let commits = git::run(
+            &c.wt,
+            &[
+                "rev-list",
+                "--count",
+                &format!("{}..HEAD", c.project.base_ref()),
+            ],
+        )
+        .ok()
+        .and_then(|n| n.trim().parse().ok())
+        .unwrap_or(0);
+        let note = crate::deadline::timeout_note(
+            budget,
+            started.elapsed(),
+            &spec.deadline_extra,
+            seen.silent_for(),
+            commits,
+        );
+        tracing::warn!(task = c.task.0, run = c.run.0, "{note}");
+        return c.fail(note);
+    }
     finish_agent(c, report, &dir);
+}
+
+/// What the agent has produced: a count of chunks and events, and when the last came.
+#[derive(Default)]
+struct Seen {
+    n: AtomicU64,
+    last_ms: AtomicU64,
+    first_ms: AtomicU64,
+}
+
+impl Seen {
+    fn touch(&self) {
+        self.n.fetch_add(1, Ordering::SeqCst);
+        self.last_ms.store(now_ms(), Ordering::SeqCst);
+    }
+    fn count(&self) -> u64 {
+        self.n.load(Ordering::SeqCst)
+    }
+    fn silent_for(&self) -> Duration {
+        let last = self.last_ms.load(Ordering::SeqCst);
+        let from = if last == 0 {
+            self.first_ms.load(Ordering::SeqCst)
+        } else {
+            last
+        };
+        Duration::from_millis(now_ms().saturating_sub(from))
+    }
 }
 
 /// What the daemon writes down each time an agent step starts a session.
