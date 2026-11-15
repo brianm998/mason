@@ -7,6 +7,9 @@ import mason.v1.ProgressCell
 import mason.v1.ProgressSource
 import mason.v1.TokenLine
 
+/** A command shown whole in a dialog; a copy, so it outlives the row it came from. */
+data class CommandDialog(val title: String, val command: String)
+
 object Format {
     /** The longest title a compile row shows before it is cut (same in the Swift core). */
     const val COMPILE_TITLE_LIMIT = 40
@@ -29,6 +32,10 @@ object Format {
         if (t.isNotEmpty()) parts.add("- $t -")
         return parts.joinToString(" ")
     }
+
+    /** What a clicked command opens: the description as title and the whole command; null when there is none. */
+    fun commandDialog(label: String, command: String): CommandDialog? =
+        if (command.isEmpty()) null else CommandDialog(label, command)
 
     /** Time in state: "42 s", "9 min", "3h10". Always shown, never hidden. */
     fun duration(ms: Long): String {

@@ -14,6 +14,14 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.PointerIcon
+import androidx.compose.ui.input.pointer.pointerHoverIcon
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -53,9 +61,10 @@ internal fun Section(title: String, state: String? = null, content: @Composable 
 }
 
 @Composable
-internal fun Link(text: String, onClick: () -> Unit) {
+internal fun Link(text: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
     val theme = LocalTheme.current
-    Text(text, style = theme.body(color = theme.accent), modifier = Modifier.clickable(onClick = onClick))
+    Text(text, style = theme.body(color = theme.accent), maxLines = 1, overflow = TextOverflow.Ellipsis,
+        modifier = modifier.pointerHoverIcon(PointerIcon(java.awt.Cursor(java.awt.Cursor.HAND_CURSOR))).clickable(onClick = onClick))
 }
 
 @Composable
@@ -192,8 +201,9 @@ fun CompilationSection(model: MonitorModel, c: Compilation) {
     val theme = LocalTheme.current
     val now = model.daemonNow()
     val age = { since: Long -> Format.duration(maxOf(0L, now - since)) }
-    val who: @Composable (String, Long) -> Unit = { label, task ->
+    val who: @Composable (String, Long, String) -> Unit = { label, task, command ->
         if (task > 0) Link("#$task") { model.go(Page.Task(task)) }
+        else if (command.isNotEmpty()) Link(label, modifier = Modifier.widthIn(max = 480.dp).testTag("compile:command")) { model.openCommand(label, command) }
         else Text(label, style = theme.body(), maxLines = 1, overflow = TextOverflow.Ellipsis,
             modifier = Modifier.widthIn(max = 480.dp))
     }
@@ -227,7 +237,7 @@ fun CompilationSection(model: MonitorModel, c: Compilation) {
         if (c.running.isEmpty()) Text("Nothing is compiling.", style = theme.body(color = theme.muted))
         c.running.forEachIndexed { i, r ->
             Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing), modifier = Modifier.testTag("compile:running:$i")) {
-                who(r.label, r.task)
+                who(r.label, r.task, r.command)
                 val detail = Format.compileHolder(r.project, r.title)
                 if (r.task > 0 && detail.isNotEmpty()) Text(detail, style = theme.body(), maxLines = 1, overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.widthIn(max = 480.dp))
@@ -241,7 +251,7 @@ fun CompilationSection(model: MonitorModel, c: Compilation) {
             Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing), verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.testTag("compile:pending:${w.position}")) {
                 Text("${w.position}.", style = theme.body(color = theme.muted))
-                who(w.label, w.task)
+                who(w.label, w.task, w.command)
                 Text(w.reason, style = theme.body())
                 Text(
                     when {
@@ -258,6 +268,27 @@ fun CompilationSection(model: MonitorModel, c: Compilation) {
         }
         Text(c.rules, style = theme.small(color = theme.muted))
     }
+    model.commandDialog?.let { CommandDialogView(it) { model.closeCommand() } }
+}
+
+/** A command shown whole: scrollable, monospaced, selectable, with Copy and Close; Escape closes it. */
+@Composable
+fun CommandDialogView(d: CommandDialog, close: () -> Unit) {
+    val theme = LocalTheme.current
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = close,
+        modifier = Modifier.onPreviewKeyEvent { e ->
+            if (e.type == KeyEventType.KeyDown && e.key == Key.Escape) { close(); true } else false
+        },
+        title = { Text(d.title, style = theme.body(FontWeight.SemiBold), maxLines = 2) },
+        text = {
+            Box(Modifier.heightIn(max = 400.dp).verticalScroll(rememberScrollState()).horizontalScroll(rememberScrollState())) {
+                SelectionContainer { Text(d.command, style = theme.mono(), modifier = Modifier.testTag("command:text")) }
+            }
+        },
+        confirmButton = { androidx.compose.material3.Button(onClick = { copyToClipboard(d.command) }, modifier = Modifier.testTag("command:copy")) { Text("Copy") } },
+        dismissButton = { androidx.compose.material3.Button(onClick = close, modifier = Modifier.testTag("command:close")) { Text("Close") } },
+    )
 }
 
 /**
