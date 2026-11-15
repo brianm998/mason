@@ -85,12 +85,18 @@ fn is_fetch(reason: &str) -> bool {
     reason.contains("fetch")
 }
 
+/// The class of a failed task; one logged without a class is classified from its reason.
+fn class_of(t: &Task) -> Option<FailClass> {
+    t.failure_class
+        .or_else(|| Some(FailClass::classify(t.state, t.failure.as_deref()?)))
+}
+
 /// The tasks that failed outside the code, newest state: class `outside`, in a project that has
 /// not turned automatic retries off.
 fn candidates(d: &Daemon, w: &World) -> Vec<(Failed, bool)> {
     w.tasks
         .values()
-        .filter(|t| t.state == State::Failed && t.failure_class == Some(FailClass::Outside))
+        .filter(|t| t.state == State::Failed && class_of(t) == Some(FailClass::Outside))
         .filter_map(|t| {
             let on = d
                 .project(t.project)
@@ -117,7 +123,7 @@ pub fn current_bursts(d: &Daemon, w: &World) -> Vec<Burst> {
 /// What `mason task show` says about a failed task: retries made in the window, and when the
 /// next one is due (`None`: none will be made).
 pub fn status(d: &Daemon, t: &Task) -> Option<(usize, Option<u64>)> {
-    if t.state != State::Failed || t.failure_class != Some(FailClass::Outside) {
+    if t.state != State::Failed || class_of(t) != Some(FailClass::Outside) {
         return None;
     }
     let on = d.project(t.project).is_some_and(|p| p.auto_retry);
