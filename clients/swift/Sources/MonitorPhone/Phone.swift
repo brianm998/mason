@@ -55,6 +55,7 @@ struct PhoneStartView: View {
     }
 
     private var status: String {
+        if let link = model.linkStatus { return link }
         if model.connected { return "Connecting…" }
         return model.reconnecting ? "Daemon restarting, reconnecting…" : "Looking for the daemon…"
     }

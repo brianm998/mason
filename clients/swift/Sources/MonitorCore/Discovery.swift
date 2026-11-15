@@ -85,3 +85,77 @@ public final class BonjourBrowser: @unchecked Sendable {
     public func stop() { browser.cancel() }
 }
 #endif
+
+#if canImport(Network)
+/// The real `ServiceSource`: browses `_mason._tcp` and resolves each record to an address by
+/// opening a connection to the service and reading where it landed. Resolution is cached; a
+/// record that disappears is dropped. Results are read from other threads, so they sit behind a lock.
+public final class BonjourServiceSource: ServiceSource, @unchecked Sendable {
+    private var browser: BonjourBrowser?
+    private let lock = NSLock()
+    private var resolved: [String: ResolvedService] = [:]
+    private var pending: [String: NWConnection] = [:]
+
+    public init() {}
+
+    public func start() {
+        // An NWBrowser cannot be started again after it is cancelled, so each start makes a new one.
+        browser?.stop()
+        let b = BonjourBrowser()
+        b.onChange = { [weak self] found in self?.update(found) }
+        browser = b
+        b.start()
+    }
+
+    public func stop() {
+        browser?.stop()
+        browser = nil
+        lock.lock()
+        for c in pending.values { c.cancel() }
+        pending = [:]
+        resolved = [:]
+        lock.unlock()
+    }
+
+    public func services() -> [ResolvedService] {
+        lock.lock(); defer { lock.unlock() }
+        return Array(resolved.values)
+    }
+
+    private func update(_ found: [(record: ServiceRecord, endpoint: NWEndpoint)]) {
+        lock.lock()
+        let names = Set(found.map(\.record.instance))
+        resolved = resolved.filter { names.contains($0.key) }
+        let todo = found.filter { resolved[$0.record.instance] == nil && pending[$0.record.instance] == nil }
+        lock.unlock()
+        for f in todo { resolve(f.record, f.endpoint) }
+    }
+
+    private func resolve(_ record: ServiceRecord, _ endpoint: NWEndpoint) {
+        let c = NWConnection(to: endpoint, using: .tcp)
+        lock.lock(); pending[record.instance] = c; lock.unlock()
+        c.stateUpdateHandler = { [weak self, weak c] state in
+            guard let self, let c else { return }
+            switch state {
+            case .ready:
+                if case let .hostPort(host, port)? = c.currentPath?.remoteEndpoint {
+                    var h = "\(host)"
+                    if let i = h.firstIndex(of: "%") { h = String(h[..<i]) }  // drop an interface scope
+                    self.lock.lock()
+                    self.resolved[record.instance] = ResolvedService(record: record, host: h, port: port.rawValue)
+                    self.lock.unlock()
+                }
+                self.finish(record.instance, c)
+            case .failed, .cancelled: self.finish(record.instance, c)
+            default: break
+            }
+        }
+        c.start(queue: .global())
+    }
+
+    private func finish(_ instance: String, _ c: NWConnection) {
+        lock.lock(); pending[instance] = nil; lock.unlock()
+        c.cancel()
+    }
+}
+#endif

@@ -60,7 +60,8 @@ public struct RootView: View {
 }
 
 /// What the start view says, from the connection alone (never an estimate of progress).
-func startStatus(connected: Bool, reconnecting: Bool) -> String {
+func startStatus(connected: Bool, reconnecting: Bool, link: String? = nil) -> String {
+    if let link { return link }
     if connected { return "Connecting…" }
     return reconnecting ? "Daemon restarting, reconnecting…" : "Looking for the daemon…"
 }
@@ -78,7 +79,7 @@ struct StartView: View {
                     .frame(maxWidth: CGFloat(MasonTokens.sizeMascotStartWidth) * CGFloat(theme.scale))
                     .accessibilityHidden(true)
             }
-            Text(startStatus(connected: model.connected, reconnecting: model.reconnecting))
+            Text(startStatus(connected: model.connected, reconnecting: model.reconnecting, link: model.linkStatus))
                 .accessibilityIdentifier("start-status")
         }
         .padding(CGFloat(MasonTokens.sizeSpacingLarge) * CGFloat(theme.scale))
