@@ -46,20 +46,27 @@ enum EditorActions {
 /// pipeline rule: a step's form is built from the JSON Schema the daemon sends.
 struct EditorPage: View {
     @Environment(\.theme) var theme
+    @Environment(\.features) var features
     @ObservedObject var model: MonitorModel
     @State private var tab = Tab.graph
     @State private var message = ""
 
     enum Tab: String, CaseIterable { case graph = "Graph", tests = "Tests", landing = "Landing", preview = "Preview" }
 
+    /// The tabs a platform shows. Without graph editing only the read-only graph is left: the
+    /// other tabs are forms and a simulator that change or apply the draft.
+    static func tabs(_ features: PlatformFeatures) -> [Tab] { features.graphEditing ? Tab.allCases : [.graph] }
+
     var body: some View {
         VStack(alignment: .leading, spacing: theme.spacing) {
             if let e = model.editor, !e.project.isEmpty {
                 toolbar(e)
-                Picker("", selection: $tab) {
-                    ForEach(Tab.allCases, id: \.self) { Text($0.rawValue).tag($0) }
-                }.pickerStyle(.segmented).frame(maxWidth: 420).accessibilityIdentifier("editor-tabs")
-                switch tab {
+                if features.graphEditing {
+                    Picker("", selection: $tab) {
+                        ForEach(Self.tabs(features), id: \.self) { Text($0.rawValue).tag($0) }
+                    }.pickerStyle(.segmented).frame(maxWidth: 420).accessibilityIdentifier("editor-tabs")
+                }
+                switch features.graphEditing ? tab : .graph {
                 case .graph: GraphTab(model: model, e: e)
                 case .tests: TestsTab(model: model, e: e)
                 case .landing: LandingTab(model: model, e: e)
@@ -79,6 +86,7 @@ struct EditorPage: View {
                 Text("Pipeline: \(e.project)").font(theme.title())
                 if e.protected { Text("MASON's own: .mason/ is protected").font(theme.body()).foregroundStyle(theme.muted) }
                 Spacer()
+                if features.graphEditing {
                 Button("Undo") { EditorActions.undo(model) }.disabled(!e.canUndo).accessibilityIdentifier("undo")
                 Button("Redo") { EditorActions.redo(model) }.disabled(!e.canRedo).accessibilityIdentifier("redo")
                 Button("Discard") { model.editorCall("discard") }.disabled(!e.dirty).accessibilityIdentifier("discard")
@@ -86,8 +94,9 @@ struct EditorPage: View {
                 TextField("Message", text: $message).frame(width: 220)
                 Button("Apply") { model.editorCall("apply", ["message": message]); message = "" }
                     .disabled(!e.dirty).accessibilityIdentifier("apply")
+                }
             }
-            Text(e.dirty ? "Draft changed" : "Draft is the base").font(theme.body()).foregroundStyle(theme.muted)
+            if features.graphEditing { Text(e.dirty ? "Draft changed" : "Draft is the base").font(theme.body()).foregroundStyle(theme.muted) }
             ForEach(e.lastError, id: \.self) { Text("Refused: \($0)").font(theme.body()).foregroundStyle(theme.attention) }
             if let r = model.lastResult { Text(r).font(theme.body()).foregroundStyle(theme.attention) }
             ForEach(Array(e.problems.enumerated()), id: \.offset) { i, p in
@@ -101,6 +110,7 @@ struct EditorPage: View {
 
 private struct GraphTab: View {
     @Environment(\.theme) var theme
+    @Environment(\.features) var features
     @ObservedObject var model: MonitorModel
     let e: Mason_V1_EditorView
     static let nodeW: CGFloat = 170
@@ -114,13 +124,15 @@ private struct GraphTab: View {
             }
             .frame(minWidth: 520, maxWidth: .infinity, minHeight: 360, maxHeight: .infinity)
             .background(theme.surface)
-            ScrollView {
-                VStack(alignment: .leading, spacing: theme.spacingLarge) {
-                    Palette(model: model, e: e)
-                    if e.hasInspector { Inspector(model: model, e: e) }
-                    else { Text("Select a step to edit it.").font(theme.body()).foregroundStyle(theme.muted) }
-                }
-            }.frame(width: 340)
+            if features.graphEditing {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: theme.spacingLarge) {
+                        Palette(model: model, e: e)
+                        if e.hasInspector { Inspector(model: model, e: e) }
+                        else { Text("Select a step to edit it.").font(theme.body()).foregroundStyle(theme.muted) }
+                    }
+                }.frame(width: 340)
+            }
         }
     }
 
@@ -185,7 +197,7 @@ private struct GraphTab: View {
 
     func node(_ n: Mason_V1_EditorNode, dx: CGFloat) -> some View {
         let selected = e.selected == n.name
-        return NodeView(model: model, n: n, selected: selected)
+        return NodeView(model: model, n: n, selected: selected, editable: features.graphEditing)
             .offset(x: CGFloat(n.x) + dx, y: CGFloat(n.y))
     }
 }
@@ -195,6 +207,7 @@ private struct NodeView: View {
     @ObservedObject var model: MonitorModel
     let n: Mason_V1_EditorNode
     let selected: Bool
+    var editable = true
     @State private var drag = CGSize.zero
 
     var body: some View {
@@ -215,15 +228,32 @@ private struct NodeView: View {
         .background(theme.background)
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(selected ? theme.accent : (n.problems.isEmpty ? theme.muted.opacity(0.5) : theme.attention), lineWidth: selected ? 3 : 1.5))
         .offset(drag)
-        .onTapGesture { model.selectStep(n.name) }
-        .gesture(DragGesture(minimumDistance: 6)
-            .onChanged { drag = $0.translation }
-            .onEnded { v in
-                drag = .zero
-                model.editorOp(["op": "move", "step": n.name, "x": Int(CGFloat(n.x) + v.translation.width), "y": Int(CGFloat(n.y) + v.translation.height)])
-            })
+        .modifier(NodeEditing(enabled: editable, model: model, n: n, drag: $drag))
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("node:\(n.name)")
+    }
+}
+
+/// Selecting and dragging a step: only where the graph is editable.
+private struct NodeEditing: ViewModifier {
+    let enabled: Bool
+    let model: MonitorModel
+    let n: Mason_V1_EditorNode
+    @Binding var drag: CGSize
+
+    func body(content: Content) -> some View {
+        if enabled {
+            content
+                .onTapGesture { model.selectStep(n.name) }
+                .gesture(DragGesture(minimumDistance: 6)
+                    .onChanged { drag = $0.translation }
+                    .onEnded { v in
+                        drag = .zero
+                        model.editorOp(["op": "move", "step": n.name, "x": Int(CGFloat(n.x) + v.translation.width), "y": Int(CGFloat(n.y) + v.translation.height)])
+                    })
+        } else {
+            content
+        }
     }
 }
 

@@ -77,7 +77,7 @@ struct CpuSectionBody: View {
                 ForEach(layout.segments, id: \.label) { s in
                     Rectangle().fill(theme.cpu(s.color))
                         .frame(width: g.size.width * CGFloat(s.permille) / 1000)
-                        .help(s.tip)
+                        .hint(s.tip)
                         .onTapGesture { tip = tip == s.tip ? nil : s.tip }
                         .accessibilityLabel(s.tip)
                         .accessibilityIdentifier("cpu-segment:\(s.label)")
