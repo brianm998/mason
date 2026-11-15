@@ -353,6 +353,7 @@ impl Daemon {
             crate::ci_watch::spawn(&d);
             crate::autoretry::spawn(&d);
             crate::closer::spawn(&d);
+            crate::suites::spawn_debts(&d);
             crate::introspect::spawn(&d);
             crate::selfguard::on_start(&d);
         }
