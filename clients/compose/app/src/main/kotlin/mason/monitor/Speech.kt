@@ -36,23 +36,24 @@ class SystemSink : SpeechSink {
         System.getenv("PATH").orEmpty().split(java.io.File.pathSeparator).any { java.io.File(it, n).canExecute() }
     }
 
-    override fun play(sound: String, then: () -> Unit) {
+    override fun play(sound: String, volume: Double, then: () -> Unit) {
         val file = "/System/Library/Sounds/$sound.aiff"
-        if (mac && java.io.File(file).exists()) run(listOf("afplay", file), then)
+        if (mac && java.io.File(file).exists()) run(listOf("afplay", "-v", volume.coerceIn(0.0, 1.0).toString(), file), then)
         else { java.awt.Toolkit.getDefaultToolkit().beep(); then() }
     }
 
-    override fun speak(sentence: String, voice: String, then: () -> Unit) {
+    override fun speak(sentence: String, voice: String, volume: Double, then: () -> Unit) {
+        val v = volume.coerceIn(0.0, 1.0)
         val cmd: List<String>? = when {
-            mac -> listOf("say") + (if (voice.isNotEmpty()) listOf("-v", voice) else emptyList()) + listOf("--", sentence)
+            mac -> listOf("say") + (if (voice.isNotEmpty()) listOf("-v", voice) else emptyList()) + listOf("--", (if (v < 1.0) "[[volm $v]] " else "") + sentence)
             windows -> listOf(
                 "powershell", "-NoProfile", "-Command",
-                "Add-Type -AssemblyName System.Speech; \$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; " +
+                "Add-Type -AssemblyName System.Speech; \$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; \$s.Volume = ${Math.round(v * 100)}; " +
                     (if (voice.isNotEmpty()) "\$s.SelectVoice(\$args[1]); " else "") + "\$s.Speak(\$args[0])",
                 sentence, voice,
             )
-            else -> which("espeak-ng", "espeak")?.let { listOf(it) + (if (voice.isNotEmpty()) listOf("-v", voice) else emptyList()) + listOf("--", sentence) }
-                ?: which("spd-say")?.let { listOf(it, "--wait", sentence) }
+            else -> which("espeak-ng", "espeak")?.let { listOf(it) + listOf("-a", Math.round(v * 200).toString()) + (if (voice.isNotEmpty()) listOf("-v", voice) else emptyList()) + listOf("--", sentence) }
+                ?: which("spd-say")?.let { listOf(it, "--wait", "-i", Math.round(v * 200 - 100).toString(), sentence) }
         }
         if (cmd == null) then() else run(cmd, then)
     }
