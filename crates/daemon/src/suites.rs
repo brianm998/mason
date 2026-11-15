@@ -525,7 +525,10 @@ fn run_hosted_once(
             3 => Stop::Gone,
             _ => Stop::No,
         },
-        timed_out: why.load(Ordering::SeqCst) == 1,
+        // The timer may fire for a run that ended on its own before its limit: a restarted
+        // daemon re-attaching to a finished host counts the limit from the host's start (s355).
+        timed_out: why.load(Ordering::SeqCst) == 1
+            && mason_step_host::registry::ran_past(limit, &dir),
         stalled: stall.as_ref().and_then(|w| w.stalled()),
     })
 }
