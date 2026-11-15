@@ -184,15 +184,14 @@ pub fn run(
     progress(p.clone());
     let swift_dir = job.work.join("clients/swift");
     let mut child = {
-        use std::os::unix::process::CommandExt;
-        Command::new("sh")
-            .args(["-c", "exec \"$0\" build -c release 2>&1"])
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "exec \"$0\" build -c release 2>&1"])
             .arg(job.swift)
             .current_dir(&swift_dir)
             .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .process_group(0)
-            .spawn()
+            .stdout(Stdio::piped());
+        // The platform helper: its own process group on Unix, a job object on Windows.
+        mason_platform::process::spawn_group(&mut cmd)
             .map_err(|e| format!("could not start {}: {e}", job.swift))?
     };
     let out = child.stdout.take().expect("piped");
@@ -208,9 +207,10 @@ pub fn run(
     let mut tail: Vec<String> = Vec::new();
     let stop = |child: &mut std::process::Child| {
         // The whole group: swift build starts compilers of its own.
-        let _ = Command::new("kill")
-            .args(["-TERM", "--", &format!("-{}", child.id())])
-            .status();
+        let _ = mason_platform::process::signal_group(
+            child.id(),
+            mason_platform::process::Signal::Term,
+        );
         let _ = child.kill();
         let _ = child.wait();
     };
@@ -474,10 +474,16 @@ pub fn start(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
+
+    /// Make a file executable. These tests run `sh` scripts, so the whole module is
+    /// `#[cfg(unix)]`; the helper keeps the permission call in one gated place.
+    fn make_executable(p: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
 
     fn sh(dir: &Path, cmd: &str) {
         let s = Command::new("sh")
@@ -511,7 +517,7 @@ mod tests {
         std::fs::write(co.join("clients/swift/Package.swift"), "").unwrap();
         let binary = bin_dir.join("MasonMonitor");
         std::fs::write(&binary, "old\n").unwrap();
-        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        make_executable(&binary);
         locate(&binary).expect("a bare binary in a checkout")
     }
 
@@ -525,7 +531,7 @@ mod tests {
             "echo '[1/3] Compiling MonitorCore Model.swift'\necho 'error: boom'\nexit 1\n"
         };
         std::fs::write(&p, format!("#!/bin/sh\n{body}")).unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        make_executable(&p);
         // Anything copied that may run is signed ad hoc (CLAUDE.md); a script has no signature
         // to give, so this only matters when a Mach-O is used in its place.
         let _ = Command::new("codesign").args(["-s", "-"]).arg(&p).output();
