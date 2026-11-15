@@ -2,6 +2,7 @@
 
 import AppKit
 import MasonProtocol
+import MasonMascot
 import MonitorCore
 import SwiftUI
 import XCTest
@@ -98,5 +99,39 @@ final class TopBarFitTests: XCTestCase {
             XCTAssertNotNil(png)
             try png?.write(to: dir.appendingPathComponent("topbar-\(name).png"))
         }
+    }
+
+    // s334: the picture at the left of the bar is the busiest active state's.
+    private func countsModel(_ pairs: [(String, UInt32)]) -> MonitorModel {
+        let model = MonitorModel()
+        model.connected = true
+        var h = HeaderView()
+        h.counts = pairs.map { p -> StateCount in
+            var c = StateCount()
+            c.state = p.0
+            c.label = p.0
+            c.count = p.1
+            return c
+        }
+        model.header = h
+        return model
+    }
+
+    func testBusiestStateIgnoresHistoryAndBreaksTiesLate() {
+        XCTAssertEqual(countsModel([("testing", 7), ("developing", 3), ("landed", 40)]).busiestState?.state, "testing")
+        XCTAssertEqual(countsModel([("developing", 3), ("testing", 3)]).busiestState?.state, "testing")
+        XCTAssertNil(countsModel([("testing", 0), ("landed", 9), ("canceled", 4)]).busiestState)
+        XCTAssertEqual(countsModel([("testing", 0)]).topBarMascot?.id, "all_clear")
+        XCTAssertEqual(countsModel([("testing", 7)]).topBarMascotTooltip, "Most tasks: testing (7)")
+    }
+
+    func testTopBarDrawsTheBusiestStatesIllustration() {
+        let model = countsModel([("testing", 7), ("developing", 3), ("landed", 40)])
+        XCTAssertEqual(model.topBarMascot?.id, "testing")
+        XCTAssertNotNil(Mascot.illustration("testing"))
+        let theme = Theme(dark: false, scale: 1)
+        let side = topBarMascotSide(illustration: theme.illustration, bar: 1000)
+        XCTAssertEqual(side, theme.illustration * 0.85, accuracy: 0.001)
+        XCTAssertEqual(topBarMascotSide(illustration: 96, bar: 50), 50)
     }
 }
