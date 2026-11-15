@@ -526,6 +526,12 @@ pub struct ProjectCfg {
     /// Opt in to letting top-priority tasks jump the "fewest steps remaining"
     /// term of the scheduling rank (Part 7). Off by default.
     pub priority_jump: bool,
+    /// Seconds a queued task is held back for an in-flight task that changes the same files
+    /// (`hold_back_secs`, default 7200; 0 turns the hold off) (s398).
+    pub hold_back_secs: u64,
+    /// Globs of shared files that are expected to change often; they never hold a task back
+    /// (`hold_back_ignore`) (s398).
+    pub hold_back_ignore: Vec<String>,
     /// A cheap command that rewrites a decision card that does not fit: it reads
     /// `{"card": ..., "problems": [...]}` on stdin and prints a card as JSON.
     /// Optional; without it (or if it fails) a deterministic fallback is used.
@@ -1191,6 +1197,20 @@ pub fn parse_project(id: &str, text: &str) -> Result<ProjectCfg, String> {
         },
         clarity_classifier: s("clarity_classifier").filter(|c| !c.trim().is_empty()),
         card_rewriter: s("card_rewriter").filter(|c| !c.trim().is_empty()),
+        hold_back_secs: doc
+            .get("hold_back_secs")
+            .and_then(|v| v.as_integer())
+            .map_or(7200, |n| n.max(0) as u64),
+        hold_back_ignore: doc
+            .get("hold_back_ignore")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str())
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_default(),
         priority_jump: doc
             .get("priority_jumps_progress")
             .and_then(|v| v.as_bool())
