@@ -432,8 +432,14 @@ mod tests {
     #[test]
     fn a_line_rewritten_in_place_pairs_with_its_replacement() {
         let diff = "diff --git a/f.rs b/f.rs\n--- a/f.rs\n+++ b/f.rs\n@@ -3 +3 @@\n-old line\n+new line\n@@ -9 +9,0 @@\n-gone line\n";
-        let d = |l: &str| Dropped { file: "f.rs".into(), line: l.into() };
-        let r = replaced_in(&[d("old line"), d("gone line"), d("other")], &parse_hunks(diff));
+        let d = |l: &str| Dropped {
+            file: "f.rs".into(),
+            line: l.into(),
+        };
+        let r = replaced_in(
+            &[d("old line"), d("gone line"), d("other")],
+            &parse_hunks(diff),
+        );
         assert_eq!(
             r,
             vec![Replaced {

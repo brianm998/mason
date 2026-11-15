@@ -149,7 +149,10 @@ fn pairs(base: &str, result: &str) -> (Vec<String>, Vec<mason_landing::audit::Re
     let r = commit(p, "f.rs", result);
     let d = audit(p, &mb, &b, &t, None, &r, &[]).unwrap();
     let names = d.iter().map(|x| x.line.clone()).collect();
-    (names, mason_landing::audit::replacements(p, &b, &r, &d).unwrap())
+    (
+        names,
+        mason_landing::audit::replacements(p, &b, &r, &d).unwrap(),
+    )
 }
 
 #[test]

@@ -584,8 +584,13 @@ pub fn replaced_for_review(c: &Ctx) -> Option<String> {
     for d in &dropped {
         // The merge's diff against the base the line came from is read per line's merge,
         // so a pair is taken against the base tip: that is what the task would land on.
-        let one = audit::replacements(repo, &c.project.base_ref(), &c.branch, std::slice::from_ref(d))
-            .ok()?;
+        let one = audit::replacements(
+            repo,
+            &c.project.base_ref(),
+            &c.branch,
+            std::slice::from_ref(d),
+        )
+        .ok()?;
         pairs.extend(one);
     }
     (!pairs.is_empty()).then(|| audit::review_block(&pairs))
