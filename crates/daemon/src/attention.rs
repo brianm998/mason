@@ -866,12 +866,19 @@ pub fn alerts_now(d: &Daemon) -> Vec<(String, String, String)> {
     }
     // A provider event is one item, whatever number of tasks wait on it.
     out.extend(crate::holds::alerts(d));
-    let owed = d.store.debts(None, true).unwrap_or_default().len();
+    // A debt is owed once a run has tried it and its suite was still red (s393).
+    let owed = d
+        .store
+        .debts(None, true)
+        .unwrap_or_default()
+        .iter()
+        .filter(|x| x.tried_at > 0)
+        .count();
     if owed > 0 {
         out.push((
             "debts".into(),
             "debt".into(),
-            format!("{owed} skipped check(s) still owed"),
+            format!("{owed} skipped check(s) still red when run"),
         ));
     }
     out
