@@ -6,15 +6,19 @@ name: CI
 on:
   push:
     branches: [develop, "stage/**"]
+    # The landing's status-block commit touches only README.md; it must not
+    # cancel the run of the batch it follows (decision 0447).
+    paths-ignore: ["README.md"]
   pull_request:
   # The macOS legs of exit-scripts and monitor-compose run here, not on every push
   # (decision 0204): GitHub caps an account's concurrent macOS jobs.
   schedule:
     - cron: "17 3 * * *"
 
-# A newer push to the same ref cancels the older run.
+# A newer push to the same ref cancels the older run. The nightly run has its
+# own group, so a landing never cancels it (decision 0447).
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.ref }}-${{ github.event_name == 'schedule' && 'nightly' || 'push' }}
   cancel-in-progress: true
 
 permissions:
