@@ -843,7 +843,7 @@ private fun ScheduleRow(model: MonitorModel, job: SettingsSnapshot.Schedule) {
 @Composable
 fun SectionPage(model: MonitorModel, name: String) {
     val theme = LocalTheme.current
-    Scrolling {
+    Scrolling(model) {
         when (name) {
             "active_models" -> Section(SectionPages.title(name)) {
                 val active = model.home?.active.orEmpty()
