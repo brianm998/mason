@@ -225,7 +225,13 @@ pub fn wait_class(d: &Daemon, needs: &Needs, task: mason_core::TaskId) -> String
         if needs.exclusive {
             "exclusive".into()
         } else {
-            needs.amounts.keys().next().cloned().unwrap_or_default()
+            needs
+                .amounts
+                .keys()
+                .next()
+                .cloned()
+                .filter(|r| !r.trim().is_empty())
+                .unwrap_or_else(|| "other".into())
         }
     })
 }

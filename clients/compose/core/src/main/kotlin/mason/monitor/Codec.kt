@@ -19,6 +19,9 @@ object Codec {
     fun decode(text: String): ServerMessage? = runCatching { server.fromJson(text) }.getOrNull()
     fun encode(m: ClientMessage): String = client.toJson(m)
     fun json(text: String): Map<String, Any?>? = runCatching { map.fromJson(text) }.getOrNull()
+
+    /** A request body; a null value is written (the daemon reads `null` as "remove"). */
+    fun body(m: Map<String, Any?>): String = map.serializeNulls().toJson(m)
 }
 
 /** The Health page: resources and who holds them, from the daemon's own report. */

@@ -80,6 +80,8 @@ mason: command-line client for the MASON pipeline
   mason task refresh <id>             ask the tracker now (what opening a task does)
   mason task land-now <id> | force <id> [--reason R]   marks the task and records an override and a debt
   mason task open <id> [--anyway]     open an interactive agent in the task's worktree, resuming its session
+  mason session list | open <task> [--confirm] | show <id> [--after N] | send <id> <text|-> [--no-wait] | end <id>
+                                      the owner's chat sessions with an agent (what the monitor's dialog does)
   mason pause [--project P] [--mode all|claims|landing] --for 2h   hold work back (all stops at the next step)
   mason resume [--project P] [--mode M] | mason pause list
   mason account hold <name> [--for 2h] [--reason R] | mason account release <name>
@@ -90,6 +92,7 @@ mason: command-line client for the MASON pipeline
   mason notify test CHANNEL           send a test through sound, speech, push, email or webhook
   mason metrics [--days N]            interventions per landed task
   mason health                        the detectors' findings, verdicts on fixes, recurring jobs, triage review queue
+  mason report [--days N] [--project P]   throughput, send-backs, waits, interventions, host losses, flakes, debts
   mason digest [--days N] [--project P]   landed, interventions, time by state, skips, forced landings (recorded data only)
   mason schedule list | run <name>    recurring jobs (introspect, analyst:<project>, <project>/<schedule>); run one now
   mason triage list | review <id> (--agree | --disagree)   the triage agent's sampled suggestions; it never answers
@@ -1512,6 +1515,136 @@ fn main() {
                 Some(other) => die(&format!("unknown notify command {other:?}\n\n{HELP}")),
             }
         }
+        "session" => {
+            // The owner's identity, as `approve` takes it: this user's, unless MASON_AS says otherwise.
+            if std::env::var("MASON_AS").is_err() {
+                if let Ok(u) = std::env::var("USER") {
+                    std::env::set_var("MASON_AS", u);
+                }
+            }
+            let sub = a.pos().unwrap_or_else(|| "list".into());
+            let sid = |a: &mut Args| -> u64 {
+                let s = a.pos().unwrap_or_else(|| die("which session? give its number"));
+                s.trim_start_matches('#')
+                    .parse()
+                    .unwrap_or_else(|_| die(&format!("{s:?} is not a session number")))
+            };
+            let line = |m: &Value| {
+                let who = match m["role"].as_str().unwrap_or("?") {
+                    "owner" => "you",
+                    "agent" => "agent",
+                    _ => "  ·",
+                };
+                println!("{who}: {}", m["text"].as_str().unwrap_or(""));
+            };
+            match sub.as_str() {
+                "list" => {
+                    finish(&a);
+                    let r = or_die(d.call("GET", "/sessions", None));
+                    if json_out {
+                        return println!("{r:#}");
+                    }
+                    let list = r["sessions"].as_array().cloned().unwrap_or_default();
+                    if list.is_empty() {
+                        println!("no open sessions");
+                    }
+                    for s in list {
+                        println!(
+                            "#{:<4} {:<8} task {} · {} turns · {}",
+                            s["id"],
+                            s["state"].as_str().unwrap_or("?"),
+                            s["task"],
+                            s["turns"],
+                            s["kind"].as_str().unwrap_or("?")
+                        );
+                    }
+                }
+                "open" => {
+                    let task = task_id(&mut a);
+                    let confirm = a.flag("--confirm");
+                    finish(&a);
+                    let r = or_die(d.call(
+                        "POST",
+                        &format!("/tasks/{task}/owner-session"),
+                        Some(&json!({"confirm": confirm})),
+                    ));
+                    if json_out {
+                        return println!("{r:#}");
+                    }
+                    println!("session #{}", r["session"]["id"]);
+                    if let Some(t) = r["session"]["draft"].as_str() {
+                        println!("--- drafted first message ---\n{t}");
+                    }
+                }
+                "show" => {
+                    let id = sid(&mut a);
+                    let after = a.opt("--after").unwrap_or_else(|| "0".into());
+                    finish(&a);
+                    let r = or_die(d.call("GET", &format!("/sessions/{id}?after={after}"), None));
+                    if json_out {
+                        return println!("{r:#}");
+                    }
+                    let s = &r["session"];
+                    println!(
+                        "session #{id} ({}) task {} · {} turns",
+                        s["state"].as_str().unwrap_or("?"),
+                        s["task"],
+                        s["turns"]
+                    );
+                    for m in s["messages"].as_array().cloned().unwrap_or_default() {
+                        line(&m);
+                    }
+                }
+                "send" => {
+                    let id = sid(&mut a);
+                    let wait = !a.flag("--no-wait");
+                    let text = a.pos().unwrap_or_else(|| die("send what? text, or - for stdin"));
+                    finish(&a);
+                    let text = if text == "-" {
+                        let mut t = String::new();
+                        let _ = std::io::Read::read_to_string(&mut std::io::stdin(), &mut t);
+                        t
+                    } else {
+                        text
+                    };
+                    let before = or_die(d.call("GET", &format!("/sessions/{id}"), None));
+                    let seen = before["session"]["messages"]
+                        .as_array()
+                        .and_then(|m| m.last())
+                        .and_then(|m| m["id"].as_u64())
+                        .unwrap_or(0);
+                    or_die(d.call(
+                        "POST",
+                        &format!("/sessions/{id}/messages"),
+                        Some(&json!({"text": text})),
+                    ));
+                    if !wait {
+                        return println!("sent");
+                    }
+                    let mut last = seen;
+                    loop {
+                        std::thread::sleep(std::time::Duration::from_millis(300));
+                        let r = or_die(d.call("GET", &format!("/sessions/{id}?after={last}"), None));
+                        for m in r["session"]["messages"].as_array().cloned().unwrap_or_default() {
+                            last = m["id"].as_u64().unwrap_or(last);
+                            if m["role"] != "owner" {
+                                line(&m);
+                            }
+                        }
+                        if r["session"]["state"] != "working" {
+                            break;
+                        }
+                    }
+                }
+                "end" => {
+                    let id = sid(&mut a);
+                    finish(&a);
+                    or_die(d.call("POST", &format!("/sessions/{id}/end"), Some(&json!({}))));
+                    println!("ended session #{id}");
+                }
+                other => die(&format!("mason session {other:?}: list, open, show, send or end")),
+            }
+        }
         "alerts" => {
             if a.peek_pos() == Some("ack") {
                 a.pos();
@@ -1573,6 +1706,20 @@ fn main() {
                 return println!("{r:#}");
             }
             print_digest(&r);
+        }
+        "report" => {
+            let days = a.opt("--days").unwrap_or_else(|| "7".into());
+            let project = a.opt("--project");
+            finish(&a);
+            let mut path = format!("/report?days={days}");
+            if let Some(p) = project {
+                path.push_str(&format!("&project={p}"));
+            }
+            let r = or_die(d.call("GET", &path, None));
+            if json_out {
+                return println!("{r:#}");
+            }
+            print_report(&r);
         }
         "schedule" => {
             let sub = a.pos().unwrap_or_default();
@@ -3299,6 +3446,80 @@ fn print_health(r: &serde_json::Value) {
         },
         q,
         r["triage"]["reviewed"]
+    );
+}
+
+/// `mason report` as text: one block per section, from the daemon's `/report`.
+fn print_report(r: &serde_json::Value) {
+    let ms = |v: &serde_json::Value| {
+        v.as_u64()
+            .map_or("-".to_string(), |m| format!("{}s", m / 1000))
+    };
+    println!(
+        "landed {}  failed {}",
+        r["landed"]["total"], r["failed"]["total"]
+    );
+    for (title, key) in [("landed", "landed"), ("failed", "failed")] {
+        if let Some(days) = r[key]["per_day"].as_object() {
+            for (day, ps) in days {
+                println!("  {title} {day}: {ps}");
+            }
+        }
+    }
+    let l = &r["lead_time_ms"];
+    println!(
+        "lead time (admitted to landed): median {}  p90 {}  ({} tasks)",
+        ms(&l["median"]),
+        ms(&l["p90"]),
+        l["samples"]
+    );
+    println!("send-backs: {}", r["send_backs"]["total"]);
+    for (k, v) in r["send_backs"]["by_reason"]
+        .as_object()
+        .into_iter()
+        .flatten()
+    {
+        println!("  {v:>4}  {k}");
+    }
+    for (k, v) in r["send_backs"]["by_suite"]
+        .as_object()
+        .into_iter()
+        .flatten()
+    {
+        println!("  suite {k}: {v}");
+    }
+    println!("task failures:");
+    for f in r["failures"].as_array().into_iter().flatten() {
+        println!(
+            "  {:>4}  [{}] {}",
+            f["count"],
+            f["class"].as_str().unwrap_or(""),
+            f["reason"].as_str().unwrap_or("")
+        );
+    }
+    println!("waits:");
+    for w in r["waits"].as_array().into_iter().flatten() {
+        println!(
+            "  {:<16} count {:>4}  total {:>8}  median {}",
+            w["class"].as_str().unwrap_or(""),
+            w["count"],
+            ms(&w["total_ms"]),
+            ms(&w["median_ms"])
+        );
+    }
+    println!("owner interventions: {}", r["interventions"]["total"]);
+    for (k, v) in r["interventions"]["by_kind"]
+        .as_object()
+        .into_iter()
+        .flatten()
+    {
+        println!("  {v:>4}  {k}");
+    }
+    println!(
+        "host losses {}  flaky sightings {}  open debts {}",
+        r["host_losses"],
+        r["flaky"]["sightings"],
+        r["open_debts"].as_array().map_or(0, Vec::len)
     );
 }
 

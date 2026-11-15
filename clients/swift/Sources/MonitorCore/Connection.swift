@@ -187,6 +187,8 @@ public final class MonitorConnection {
         case .health:
             model.raw("GET", "/resources")
             model.raw("GET", "/health")
+        case .settings:
+            model.loadSettings()
         default: break
         }
         var s = Mason_V1_Subscribe()

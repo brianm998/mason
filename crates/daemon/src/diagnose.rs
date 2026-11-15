@@ -118,7 +118,7 @@ pub fn card_text(task: u64, id: u64, verdict: &str, a: &Value) -> String {
 }
 
 /// The tail of each of the newest log files under a task's directory.
-fn log_tails(dir: &std::path::Path, files: usize, lines: usize) -> String {
+pub(crate) fn log_tails(dir: &std::path::Path, files: usize, lines: usize) -> String {
     let mut logs: Vec<(std::time::SystemTime, std::path::PathBuf)> = vec![];
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {

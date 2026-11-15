@@ -92,6 +92,9 @@ pub struct DaemonConfig {
     /// Identities whose answers count (Part 10). Default: the user running the
     /// daemon.
     pub owner_names: Vec<String>,
+    /// An owner session with no message for this many hours ends by itself (`[sessions]
+    /// idle_end_h` in `daemon.toml`; 0: never).
+    pub idle_end_h: u64,
     /// The commit of the runtime this process is (set when started from
     /// `runtimes/<sha>/`); `None` when run from a build directory.
     pub runtime_sha: Option<String>,
@@ -334,11 +337,39 @@ pub fn load_retention_days(config_dir: &std::path::Path) -> Result<Option<u64>, 
     }
 }
 
+/// Hours without a message after which an owner session ends by itself, unless `daemon.toml`
+/// says otherwise.
+pub const DEFAULT_IDLE_END_H: u64 = 24;
+
+/// `idle_end_h` from `[sessions]` in `daemon.toml`, if set.
+pub fn parse_idle_end_h(text: &str) -> Result<Option<u64>, String> {
+    let doc: toml_edit::DocumentMut = text.parse().map_err(|e| format!("daemon.toml: {e}"))?;
+    match doc.get("sessions").and_then(|d| d.get("idle_end_h")) {
+        None => Ok(None),
+        Some(v) => v
+            .as_integer()
+            .and_then(|n| u64::try_from(n).ok())
+            .map(Some)
+            .ok_or_else(|| {
+                "daemon.toml: sessions.idle_end_h must be a whole number of hours (0: never)"
+                    .to_string()
+            }),
+    }
+}
+
+pub fn load_idle_end_h(config_dir: &std::path::Path) -> Result<Option<u64>, String> {
+    match std::fs::read_to_string(config_dir.join("daemon.toml")) {
+        Ok(t) => parse_idle_end_h(&t),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("daemon.toml: {e}")),
+    }
+}
+
 pub fn parse_daemon_port(text: &str) -> Result<Option<u16>, String> {
     let doc: toml_edit::DocumentMut = text.parse().map_err(|e| format!("daemon.toml: {e}"))?;
     let mut port = None;
     for (key, item) in doc.iter() {
-        if key == "lan" || key == "targets" {
+        if key == "lan" || key == "targets" || key == "sessions" {
             continue; // read by `parse_lan` and `parse_targets`
         }
         let table = item
@@ -433,6 +464,7 @@ impl DaemonConfig {
             owner_names: vec![std::env::var("USER")
                 .or_else(|_| std::env::var("LOGNAME"))
                 .unwrap_or_else(|_| "owner".into())],
+            idle_end_h: DEFAULT_IDLE_END_H,
         }
     }
 

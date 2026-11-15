@@ -8,3 +8,12 @@ clients/compose/.gradle/
 clients/compose/**/build/
 clients/compose/.kotlin/
 __pycache__/
+
+# Backups left by in-place sed edits on macOS (BSD sed -i -e)
+*.rs-e
+*.swift-e
+*.kt-e
+*.toml-e
+*.md-e
+*.sh-e
+*.py-e

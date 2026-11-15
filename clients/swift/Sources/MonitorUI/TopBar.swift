@@ -17,6 +17,7 @@ struct TopBar: View {
 
     var body: some View {
         HStack(spacing: theme.spacing) {
+            topBarMascot
             // Home on top; back and forward in a row under it.
             VStack(alignment: .leading, spacing: theme.spacingSmall) {
                 Button { model.goHome() } label: { Label("Home", systemImage: "house") }
@@ -114,6 +115,27 @@ struct TopBar: View {
         .sheet(isPresented: $improving) { ImproveSheet(model: model, isPresented: $improving) }
     }
 }
+
+extension TopBar {
+    /// The picture for the state holding the most tasks: the task page's art at 85% of its
+    /// size (never taller than the bar's tile row pair), aspect kept. Decorative, but a button.
+    @ViewBuilder var topBarMascot: some View {
+        if let choice = model.topBarMascot, let img = Mascot.illustration(choice.id) {
+            let side = topBarMascotSide(illustration: theme.illustration, bar: theme.tileHeight * 2 + theme.spacingSmall)
+            Button { model.topBarMascotClicked() } label: {
+                img.resizable().interpolation(.high).aspectRatio(contentMode: .fit)
+                    .frame(width: side, height: side)
+            }
+            .buttonStyle(.plain)
+            .help(model.topBarMascotTooltip)
+            .accessibilityLabel(model.topBarMascotTooltip)
+            .accessibilityIdentifier("topbar-mascot:\(choice.id)")
+        }
+    }
+}
+
+/// 85% of the illustration size, or the bar's height if that is less.
+func topBarMascotSide(illustration: CGFloat, bar: CGFloat) -> CGFloat { min(illustration * 0.85, bar) }
 
 struct BannersView: View {
     @Environment(\.theme) var theme

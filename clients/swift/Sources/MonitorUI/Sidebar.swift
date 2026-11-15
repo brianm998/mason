@@ -67,6 +67,7 @@ struct SidebarPane: View {
         case .landing: return "arrow.down.to.line"
         case .usage: return "gauge"
         case .pipeline: return "point.3.connected.trianglepath.dotted"
+        case .settings: return "gearshape"
         default: return "heart.text.square"
         }
     }

@@ -52,6 +52,11 @@ public final class MonitorModel: ObservableObject {
     @Published public var editor: EditorView?
     @Published public var health: HealthSnapshot?
     @Published public var introspection: IntrospectionSnapshot?
+    /// The Settings page (s430): the picked project's settings, the global notification routes,
+    /// and what the last change or test said.
+    @Published public var settings: SettingsSnapshot?
+    @Published public var notifySettings: NotifySettings?
+    @Published public var settingsNotice: String?
     /// The high-frequency state (last sequence number, live log, clock offset) lives in its own
     /// object, so a change to it redraws only the views that show it, never the sidebar rows.
     public let live = LiveState()
@@ -789,8 +794,35 @@ public final class MonitorModel: ObservableObject {
         return String(t.dropFirst().dropLast())
     }
 
-    public func raw(_ method: String, _ path: String, json: String = "") {
-        command { $0.raw = .with { $0.method = method; $0.path = path; $0.json = json } }
+    /// Ask for the Settings page's data: the project's settings and the notification routes.
+    public func loadSettings() {
+        let p = editorProject
+        if !p.isEmpty { raw("GET", SettingsPayload.settingsPath(project: p), id: "settings") }
+        raw("GET", "/notify/settings", id: "notify-settings")
+    }
+    /// Change one project setting (a body from `SettingsPayload`); the page reloads on the answer.
+    public func changeProjectSetting(_ body: String) {
+        settingsNotice = nil
+        raw("POST", SettingsPayload.settingsPath(project: editorProject), json: body, id: "settings-save")
+    }
+    public func changeNotifySetting(_ body: String) {
+        settingsNotice = nil
+        raw("POST", "/notify/settings", json: body, id: "notify-save")
+    }
+    public func testNotification(channel: String) {
+        settingsNotice = nil
+        raw("POST", "/notify/test", json: SettingsPayload.testNotification(channel: channel), id: "notify-test")
+    }
+    public func runSchedule(_ name: String) {
+        settingsNotice = nil
+        raw("POST", "/schedules/run", json: SettingsPayload.runSchedule(project: editorProject, name: name), id: "schedule-run")
+    }
+
+    public func raw(_ method: String, _ path: String, json: String = "", id: String = "") {
+        command {
+            if !id.isEmpty { $0.id = id }
+            $0.raw = .with { $0.method = method; $0.path = path; $0.json = json }
+        }
     }
 
     // MARK: the pipeline editor (Part 18)
@@ -998,6 +1030,14 @@ public final class MonitorModel: ObservableObject {
         }
     }
 
+    static func settingsDone(_ id: String) -> String {
+        switch id {
+        case "notify-test": return "Test notification sent."
+        case "schedule-run": return "Started."
+        default: return "Saved. It applies now, with no restart."
+        }
+    }
+
     func handle(result r: Mason_V1_CommandResult) {
         if r.id.hasPrefix("publish:"), r.ok { publishPreview = PublishPreview(json: r.json) }
         if r.id.hasPrefix("session:"), let task = UInt64(r.id.dropFirst("session:".count)) {
@@ -1021,6 +1061,12 @@ public final class MonitorModel: ObservableObject {
         }
         if r.id == "health", r.ok { health = HealthSnapshot(json: r.json) }
         if r.id == "introspection", r.ok { introspection = IntrospectionSnapshot(json: r.json) }
+        if r.id == "settings", r.ok { settings = SettingsSnapshot(json: r.json) }
+        if r.id == "notify-settings", r.ok { notifySettings = NotifySettings(json: r.json) }
+        if ["settings-save", "notify-save", "notify-test", "schedule-run"].contains(r.id) {
+            settingsNotice = r.ok ? Self.settingsDone(r.id) : r.error
+            if r.ok, r.id == "settings-save" || r.id == "notify-save" { loadSettings() }
+        }
     }
 
     public func disconnected(now: Date = Date()) {
