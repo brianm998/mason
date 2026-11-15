@@ -20,6 +20,7 @@ struct MainPane: View {
             case .usage: UsagePage(model: model)
             case .pipeline: EditorPage(model: model)
             case .health: HealthPage(model: model)
+            case .settings: SettingsPage(model: model)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
