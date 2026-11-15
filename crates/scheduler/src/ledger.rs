@@ -477,7 +477,9 @@ mod tests {
     fn a_cpu_wait_and_a_test_suite_wait_are_classed_by_their_cause() {
         let mut l = Ledger::new();
         l.set_capacity("compile", 2, Kind::Machine);
-        let c = l.submit(rank(1, 1, 1), Needs::of(&[("compile", 1)]), "#1", 0);
+        l.submit(rank(1, 1, 1), Needs::of(&[("compile", 1)]), "#1", 0);
+        l.schedule(0, None, None);
+        let c = l.submit(rank(1, 2, 2), Needs::of(&[("compile", 1)]), "#2", 1);
         let p = l.waits_gated(
             1,
             None,
