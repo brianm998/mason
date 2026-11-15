@@ -14,7 +14,11 @@ use std::time::{Duration, Instant};
 pub fn paths_in_body(body: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for w in body.split(|c: char| {
-        c.is_whitespace() || matches!(c, '`' | '"' | '\'' | '(' | ')' | '[' | ']' | ',' | ';' | '*')
+        c.is_whitespace()
+            || matches!(
+                c,
+                '`' | '"' | '\'' | '(' | ')' | '[' | ']' | ',' | ';' | '*'
+            )
     }) {
         let w = w.trim_end_matches(['.', ':']);
         let w = match w.rsplit_once(':') {
@@ -28,7 +32,9 @@ pub fn paths_in_body(body: &str) -> Vec<String> {
             && !w.starts_with('/')
             && !w.contains("..")
             && last.rsplit_once('.').is_some_and(|(stem, ext)| {
-                !stem.is_empty() && !ext.is_empty() && ext.chars().all(|c| c.is_ascii_alphanumeric())
+                !stem.is_empty()
+                    && !ext.is_empty()
+                    && ext.chars().all(|c| c.is_ascii_alphanumeric())
             });
         if ok && !out.iter().any(|o| o == w) {
             out.push(w.to_string());
@@ -86,7 +92,11 @@ impl Daemon {
         if p.hold_back_secs == 0 {
             return None;
         }
-        let ignored = |f: &str| p.hold_back_ignore.iter().any(|g| crate::protect::glob(g, f));
+        let ignored = |f: &str| {
+            p.hold_back_ignore
+                .iter()
+                .any(|g| crate::protect::glob(g, f))
+        };
         let mut mine = std::fs::read_to_string(self.task_dir(t.id).join("plan.json"))
             .map(|s| plan_files(&s))
             .unwrap_or_default();
@@ -107,19 +117,32 @@ impl Daemon {
             })
             .filter_map(|o| {
                 let range = format!("{}...{}", p.base_ref(), p.branch(o.id.0));
-                let out = mason_landing::git::run(&p.path, &["diff", "--name-only", &range]).ok()?;
+                let out =
+                    mason_landing::git::run(&p.path, &["diff", "--name-only", &range]).ok()?;
                 Some((o.id, out.lines().map(String::from).collect()))
             })
             .collect();
         // Check for an overlap first, so the clock starts only when a hold would apply.
-        decide(&mine, &in_flight, &p.hold_back_ignore, Duration::ZERO, u64::MAX)?;
+        decide(
+            &mine,
+            &in_flight,
+            &p.hold_back_ignore,
+            Duration::ZERO,
+            u64::MAX,
+        )?;
         let since = *self
             .file_held
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .entry(t.id)
             .or_insert_with(Instant::now);
-        decide(&mine, &in_flight, &p.hold_back_ignore, since.elapsed(), p.hold_back_secs)
+        decide(
+            &mine,
+            &in_flight,
+            &p.hold_back_ignore,
+            since.elapsed(),
+            p.hold_back_secs,
+        )
     }
 }
 
@@ -136,9 +159,15 @@ mod tests {
         let b = "Fix `crates/daemon/src/daemon.rs:884` and (gui/starTests/starTests.swift).\nSee https://x.io/a/b.html.";
         assert_eq!(
             paths_in_body(b),
-            s(&["crates/daemon/src/daemon.rs", "gui/starTests/starTests.swift"])
+            s(&[
+                "crates/daemon/src/daemon.rs",
+                "gui/starTests/starTests.swift"
+            ])
         );
-        assert_eq!(plan_files(r#"{"files":["a/b.rs (new)","c/d.rs"]}"#), s(&["a/b.rs", "c/d.rs"]));
+        assert_eq!(
+            plan_files(r#"{"files":["a/b.rs (new)","c/d.rs"]}"#),
+            s(&["a/b.rs", "c/d.rs"])
+        );
     }
 
     #[test]
@@ -148,7 +177,10 @@ mod tests {
         assert_eq!(d(&["c/z.rs", "b/y.rs"]), Some((TaskId(7), "b/y.rs".into())));
         assert_eq!(d(&["c/z.rs"]), None);
         // Once that task has landed it is no longer in flight.
-        assert_eq!(decide(&s(&["b/y.rs"]), &[], &[], Duration::ZERO, 7200), None);
+        assert_eq!(
+            decide(&s(&["b/y.rs"]), &[], &[], Duration::ZERO, 7200),
+            None
+        );
     }
 
     #[test]

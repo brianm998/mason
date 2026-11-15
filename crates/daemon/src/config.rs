@@ -1155,7 +1155,12 @@ pub fn parse_project(id: &str, text: &str) -> Result<ProjectCfg, String> {
         hold_back_ignore: doc
             .get("hold_back_ignore")
             .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|x| x.as_str()).map(String::from).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str())
+                    .map(String::from)
+                    .collect()
+            })
             .unwrap_or_default(),
         priority_jump: doc
             .get("priority_jumps_progress")
