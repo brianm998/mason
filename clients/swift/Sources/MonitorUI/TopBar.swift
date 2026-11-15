@@ -43,7 +43,7 @@ struct TopBar: View {
                             StateIcon(state: "needs_attention")
                             Text("\(model.attention) need\(model.attention == 1 ? "s" : "") you")
                                 .font(theme.body(.semibold)).foregroundStyle(theme.attention)
-                                .lineLimit(1).fixedSize()
+                                .multilineTextAlignment(.leading).fixedSize(horizontal: false, vertical: true)
                         }
                     }
                     .buttonStyle(.plain)
