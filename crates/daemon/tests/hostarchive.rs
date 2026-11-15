@@ -226,6 +226,8 @@ fn retention_days_is_read_from_daemon_toml() {
     );
 }
 
+// Used only by the Unix-only tests below.
+#[cfg(unix)]
 fn fake_host(root: &std::path::Path, id: &str, journal: &str) {
     let dir = root.join(id);
     std::fs::create_dir_all(&dir).unwrap();

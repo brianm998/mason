@@ -38,8 +38,8 @@ public struct Announcement: Equatable, Sendable {
 /// the sentence has ended; the queue never starts the next thing before that.
 @MainActor
 public protocol SpeechSink: AnyObject {
-    func play(sound: String, then: @escaping () -> Void)
-    func speak(_ sentence: String, voice: String, then: @escaping () -> Void)
+    func play(sound: String, volume: Double, then: @escaping () -> Void)
+    func speak(_ sentence: String, voice: String, volume: Double, then: @escaping () -> Void)
     /// Cut off whatever is playing (the user muted).
     func stop()
     /// The voices the OS offers, by name.
@@ -54,6 +54,8 @@ public struct SpeechSettings: Equatable, Sendable {
     public var sounds: [String: String]
     /// An OS voice name; empty for the system default.
     public var voice: String
+    /// How loud announcements are, 0...1.
+    public var volume: Double
 
     /// Kinds added after the first release. A saved list gains them once (see `Announcer.load`).
     public static let addedKinds: Set<String> = [
@@ -64,10 +66,11 @@ public struct SpeechSettings: Equatable, Sendable {
         "needs_you", "failed", "landing", "daemon_down", "credentials", "provider_outage", "stalled", "landed",
     ]).union(addedKinds)
 
-    public init(kinds: Set<String> = SpeechSettings.defaultKinds, sounds: [String: String]? = nil, voice: String = "") {
+    public init(kinds: Set<String> = SpeechSettings.defaultKinds, sounds: [String: String]? = nil, voice: String = "", volume: Double = 1.0) {
         self.kinds = kinds
         self.sounds = sounds ?? ["decision": "Glass", "broke": "Basso", "info": "Tink"]
         self.voice = voice
+        self.volume = volume
     }
 
     public func sound(for a: Announcement) -> String { sounds[a.family] ?? "Tink" }
@@ -133,10 +136,10 @@ public final class Announcer {
         let speakIt = { [weak self] in
             guard let self else { return }
             guard a.speech, !a.sentence.isEmpty else { return self.finish(a) }
-            self.sink.speak(a.sentence, voice: self.settings.voice) { [weak self] in self?.finish(a) }
+            self.sink.speak(a.sentence, voice: self.settings.voice, volume: self.settings.volume) { [weak self] in self?.finish(a) }
         }
         if a.sound {
-            sink.play(sound: settings.sound(for: a)) { speakIt() }
+            sink.play(sound: settings.sound(for: a), volume: settings.volume) { speakIt() }
         } else {
             speakIt()
         }
@@ -146,6 +149,13 @@ public final class Announcer {
         guard speaking == a else { return }
         speaking = nil
         pump()
+    }
+
+    /// The Test button: say "test" now, in the chosen voice and volume. Outside the queue, so it
+    /// speaks even when muted and leaves the queue, `speaking` and the seen ids alone.
+    public func test() {
+        sink.stop()
+        sink.speak("test", voice: settings.voice, volume: settings.volume) {}
     }
 
     /// The user muted: stop what is playing and forget what was waiting.
@@ -210,6 +220,7 @@ public final class Announcer {
     /// Set once a saved list has been given `addedKinds`; after that an untick sticks.
     static let kindsMigratedKey = "speech.kinds.added"
     static let voiceKey = "speech.voice"
+    static let volumeKey = "speech.volume"
     static func soundKey(_ f: String) -> String { "speech.sound.\(f)" }
 
     static func load(_ p: Preferences) -> SpeechSettings {
@@ -223,6 +234,7 @@ public final class Announcer {
         }
         p.setString("1", for: kindsMigratedKey)
         s.voice = p.string(voiceKey) ?? ""
+        if let v = p.string(volumeKey).flatMap(Double.init), v.isFinite { s.volume = min(1, max(0, v)) }
         for f in ["decision", "broke", "info"] {
             if let n = p.string(soundKey(f)) { s.sounds[f] = n }
         }
@@ -233,6 +245,7 @@ public final class Announcer {
         guard let p = prefs else { return }
         p.setString(settings.kinds.sorted().joined(separator: ","), for: Announcer.kindsKey)
         p.setString(settings.voice, for: Announcer.voiceKey)
+        p.setString(String(settings.volume), for: Announcer.volumeKey)
         for (f, n) in settings.sounds { p.setString(n, for: Announcer.soundKey(f)) }
     }
 
@@ -244,8 +257,8 @@ public final class Announcer {
 @MainActor
 public final class SilentSink: SpeechSink {
     public init() {}
-    public func play(sound: String, then: @escaping () -> Void) { then() }
-    public func speak(_ sentence: String, voice: String, then: @escaping () -> Void) { then() }
+    public func play(sound: String, volume: Double, then: @escaping () -> Void) { then() }
+    public func speak(_ sentence: String, voice: String, volume: Double, then: @escaping () -> Void) { then() }
     public func stop() {}
     public func voices() -> [String] { [] }
 }
