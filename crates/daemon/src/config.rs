@@ -95,6 +95,8 @@ pub struct DaemonConfig {
     /// An owner session with no message for this many hours ends by itself (`[sessions]
     /// idle_end_h` in `daemon.toml`; 0: never).
     pub idle_end_h: u64,
+    /// The pipeline health check (`[health]` in `daemon.toml`, s432).
+    pub health: HealthCfg,
     /// The commit of the runtime this process is (set when started from
     /// `runtimes/<sha>/`); `None` when run from a build directory.
     pub runtime_sha: Option<String>,
@@ -357,6 +359,77 @@ pub fn parse_idle_end_h(text: &str) -> Result<Option<u64>, String> {
     }
 }
 
+/// `[health]` in `daemon.toml`: how often the pipeline checks itself and its thresholds.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HealthCfg {
+    /// Minutes between checks; 0 turns the loop off (`mason health` still works).
+    pub interval_m: u64,
+    pub limits: mason_core::health::Limits,
+}
+
+impl Default for HealthCfg {
+    fn default() -> HealthCfg {
+        HealthCfg {
+            interval_m: 30,
+            limits: Default::default(),
+        }
+    }
+}
+
+/// `[health]`: `interval_m` and the thresholds, each a whole number in the unit its name says.
+pub fn parse_health(text: &str) -> Result<Option<HealthCfg>, String> {
+    let doc: toml_edit::DocumentMut = text.parse().map_err(|e| format!("daemon.toml: {e}"))?;
+    let Some(t) = doc.get("health") else {
+        return Ok(None);
+    };
+    let t = t
+        .as_table_like()
+        .ok_or("daemon.toml: [health] must be a table")?;
+    let mut c = HealthCfg::default();
+    let l = &mut c.limits;
+    const M: u64 = 60_000;
+    const H: u64 = 3_600_000;
+    for (k, v) in t.iter() {
+        let n = v
+            .as_integer()
+            .and_then(|n| u64::try_from(n).ok())
+            .ok_or_else(|| format!("daemon.toml: health.{k} must be a whole number"))?;
+        match k {
+            "interval_m" => c.interval_m = n,
+            "stuck_factor" => l.stuck_factor = n,
+            "stuck_min_m" => l.stuck_min_ms = n * M,
+            "wait_m" => l.wait_ms = n * M,
+            "queue_idle_m" => l.queue_idle_ms = n * M,
+            "host_silent_m" => l.host_silent_ms = n * M,
+            "slot_wait_m" => l.slot_wait_ms = n * M,
+            "load_pct" => l.load_pct = n as u32,
+            "stall_ms" => l.stall_ms = n,
+            "frozen_launch_s" => l.frozen_launch_ms = n * 1000,
+            "mem_free_mb" => l.mem_free_mb = n,
+            "cpu_gate_m" => l.cpu_gate_ms = n * M,
+            "undiagnosed_m" => l.undiagnosed_ms = n * M,
+            "pending_diagnosis_h" => l.pending_diagnosis_ms = n * H,
+            "same_failure" => l.same_failure = n as usize,
+            "red_h" => l.red_ms = n * H,
+            "update_failures" => l.update_failures = n as u32,
+            "restarts" => l.restarts = n as u32,
+            "late_loops" => l.late_loops = n as u32,
+            "cannot_land" => l.cannot_land = n as u32,
+            "cooldown_h" => l.cooldown_ms = n * H,
+            other => return Err(format!("daemon.toml: health.{other} is not a known key")),
+        }
+    }
+    Ok(Some(c))
+}
+
+pub fn load_health(config_dir: &std::path::Path) -> Result<Option<HealthCfg>, String> {
+    match std::fs::read_to_string(config_dir.join("daemon.toml")) {
+        Ok(t) => parse_health(&t),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("daemon.toml: {e}")),
+    }
+}
+
 pub fn load_idle_end_h(config_dir: &std::path::Path) -> Result<Option<u64>, String> {
     match std::fs::read_to_string(config_dir.join("daemon.toml")) {
         Ok(t) => parse_idle_end_h(&t),
@@ -465,6 +538,7 @@ impl DaemonConfig {
                 .or_else(|_| std::env::var("LOGNAME"))
                 .unwrap_or_else(|_| "owner".into())],
             idle_end_h: DEFAULT_IDLE_END_H,
+            health: HealthCfg::default(),
         }
     }
 

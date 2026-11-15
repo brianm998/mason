@@ -28,9 +28,16 @@ pub enum StepKind {
     /// A conversation the owner has with the agent in a task's worktree (s364): no contract tool,
     /// the owner is present, and the agent may change files when asked to.
     Chat,
+    /// A session about the pipeline's health, in a checkout of MASON's own project (s432). It
+    /// ends with `submit_health`; the daemon does what the verdicts allow.
+    Health,
 }
 
-pub const ALL_TOOLS: [&str; 10] = [
+/// The operational actions a health session may take, each one the owner can already take.
+pub const HEALTH_ACTIONS: [&str; 4] = ["retry", "unblock", "release_holder", "rerun_diagnosis"];
+
+pub const ALL_TOOLS: [&str; 11] = [
+    "submit_health",
     "submit_close",
     "submit_diagnosis",
     "submit_plan",
@@ -51,6 +58,7 @@ impl StepKind {
             StepKind::Review => "review",
             StepKind::Diagnose => "diagnose",
             StepKind::Chat => "chat",
+            StepKind::Health => "health",
         }
     }
 
@@ -61,6 +69,7 @@ impl StepKind {
             StepKind::Review,
             StepKind::Diagnose,
             StepKind::Chat,
+            StepKind::Health,
         ]
         .into_iter()
         .find(|k| k.name() == s)
@@ -88,6 +97,7 @@ impl StepKind {
             StepKind::Review => &["submit_review", "ask", "file_proposal", "report_progress"],
             StepKind::Diagnose => &["submit_diagnosis", "report_progress"],
             StepKind::Chat => &[],
+            StepKind::Health => &["submit_health", "report_progress"],
         }
     }
 
@@ -99,11 +109,18 @@ impl StepKind {
             StepKind::Review => &["submit_review"],
             StepKind::Diagnose => &["submit_diagnosis"],
             StepKind::Chat => &[],
+            StepKind::Health => &["submit_health"],
         }
     }
 
     pub fn read_only(self) -> bool {
         !matches!(self, StepKind::Develop | StepKind::Chat)
+    }
+
+    /// Whether the session may ask `submit_health` for a direct fix: no, in the read-only kind;
+    /// the daemon decides separately whether a writable checkout is given.
+    pub fn is_health(self) -> bool {
+        self == StepKind::Health
     }
 }
 
@@ -135,8 +152,13 @@ pub fn preamble(step: StepKind) -> String {
          You finish this {name} step only by calling {terminal}. If the tool replies with a \
          rejection, read the reasons, fix them and call it again. Ending your turn without an \
          accepted submission is a failure and you will be asked to continue. If you truly need \
-         the owner's decision, call ask and then end your turn; you will be resumed with the answer. \
+         the owner's decision, {decision} \
          If a check is long, run_check will tell you to end your turn; do so.",
+        decision = if step == StepKind::Health {
+            "choose needs_owner in submit_health, recommendation first."
+        } else {
+            "call ask and then end your turn; you will be resumed with the answer."
+        },
         name = step.name()
     )
 }
@@ -185,6 +207,43 @@ pub fn tool_spec(tool: &str) -> Option<(String, Value)> {
                 "evidence": {"type": "string", "description": "What shows it: a commit, a file and line, a test, the other task. Up to 2000 characters"}
             }),
             &["kind", "evidence"],
+        ),
+        "submit_health" => s(
+            "End your health check with one or more outcomes. Fill each one you choose and leave \
+             the rest out. `false_alarm`: why a finding was wrong (and, if a threshold is wrong, \
+             a `threshold_proposal`). `acted`: operational fixes through MASON's owner-safe \
+             actions only (retry, unblock, release_holder, rerun_diagnosis), each on a task. \
+             `proposed`: every possible solution, one entry each, filed as a proposal; this is \
+             the default for anything that needs a code change. `needs_owner`: only the owner can \
+             decide, recommendation first. `direct_fix`: only when MASON's own pipeline cannot \
+             land anything and the daemon says so; you then get a writable checkout. You may not \
+             change files otherwise.",
+            json!({
+                "summary": {"type": "string", "description": "What you found, up to 2000 characters"},
+                "false_alarm": {"type": "object", "properties": {
+                    "finding": {"type": "string", "description": "The finding's key"},
+                    "why": {"type": "string"},
+                    "threshold_proposal": {"type": "object", "properties": {
+                        "title": {"type": "string"}, "body": {"type": "string"}, "evidence": {"type": "string"}}}}},
+                "acted": {"type": "array", "items": {"type": "object", "properties": {
+                    "action": {"type": "string", "enum": HEALTH_ACTIONS},
+                    "task": {"type": "integer"},
+                    "reason": {"type": "string"}}, "required": ["action", "task", "reason"]}},
+                "proposed": {"type": "array", "items": {"type": "object", "properties": {
+                    "finding": {"type": "string", "description": "The finding's key; it is the dedupe key"},
+                    "title": {"type": "string", "description": "Up to 120 characters"},
+                    "body": {"type": "string"},
+                    "evidence": {"type": "string"}}, "required": ["finding", "title", "body", "evidence"]}},
+                "needs_owner": {"type": "object", "properties": {
+                    "question": {"type": "string"},
+                    "recommendation": {"type": "string"},
+                    "alternatives": {"type": "array", "items": {"type": "string"}}},
+                    "required": ["question", "recommendation"]},
+                "direct_fix": {"type": "object", "properties": {
+                    "summary": {"type": "string"}, "branch": {"type": "string"}},
+                    "required": ["summary"]}
+            }),
+            &["summary"],
         ),
         "submit_diagnosis" => s(
             "End your diagnosis with exactly one of these verdicts: 'retry' (run again from a step, \
@@ -367,6 +426,84 @@ fn strings(a: &Value, key: &str, out: &mut Vec<String>) -> Vec<String> {
     vec![]
 }
 
+fn health_problems(a: &Value, p: &mut Vec<String>) {
+    text(a, "summary", 2000, p);
+    let chosen = [
+        "false_alarm",
+        "acted",
+        "proposed",
+        "needs_owner",
+        "direct_fix",
+    ]
+    .iter()
+    .filter(|k| a.get(**k).is_some_and(|v| !v.is_null()))
+    .count();
+    if chosen == 0 {
+        p.push(
+            "choose at least one of false_alarm, acted, proposed, needs_owner, direct_fix".into(),
+        );
+    }
+    if let Some(fa) = a.get("false_alarm").filter(|v| !v.is_null()) {
+        if fa.is_object() {
+            text(fa, "why", 2000, p);
+            if let Some(t) = fa.get("threshold_proposal").filter(|v| !v.is_null()) {
+                text(t, "title", 120, p);
+                text(t, "body", 20000, p);
+                text(t, "evidence", 20000, p);
+            }
+        } else {
+            p.push("false_alarm: must be an object".into());
+        }
+    }
+    if let Some(v) = a.get("acted").filter(|v| !v.is_null()) {
+        match v.as_array() {
+            Some(list) if !list.is_empty() => {
+                for (i, x) in list.iter().enumerate() {
+                    match x.get("action").and_then(Value::as_str) {
+                        Some(act) if HEALTH_ACTIONS.contains(&act) => {}
+                        other => p.push(format!(
+                            "acted[{i}].action: {other:?} is not allowed; the owner-safe actions are {}",
+                            HEALTH_ACTIONS.join(", ")
+                        )),
+                    }
+                    if x.get("task").and_then(Value::as_u64).is_none() {
+                        p.push(format!("acted[{i}].task: the task number is required"));
+                    }
+                    if x.get("reason")
+                        .and_then(Value::as_str)
+                        .is_none_or(|r| r.trim().is_empty())
+                    {
+                        p.push(format!("acted[{i}].reason: required"));
+                    }
+                }
+            }
+            _ => p.push("acted: must be a non-empty list".into()),
+        }
+    }
+    if let Some(v) = a.get("proposed").filter(|v| !v.is_null()) {
+        match v.as_array() {
+            Some(list) if !list.is_empty() => {
+                for (i, x) in list.iter().enumerate() {
+                    let mut q = vec![];
+                    text(x, "finding", 200, &mut q);
+                    text(x, "title", 120, &mut q);
+                    text(x, "body", 20000, &mut q);
+                    text(x, "evidence", 20000, &mut q);
+                    p.extend(q.into_iter().map(|m| format!("proposed[{i}].{m}")));
+                }
+            }
+            _ => p.push("proposed: must be a non-empty list".into()),
+        }
+    }
+    if let Some(n) = a.get("needs_owner").filter(|v| !v.is_null()) {
+        text(n, "question", 400, p);
+        text(n, "recommendation", 600, p);
+    }
+    if let Some(d) = a.get("direct_fix").filter(|v| !v.is_null()) {
+        text(d, "summary", 2000, p);
+    }
+}
+
 /// Every problem with `args` for `tool`, or `Ok(())`. Pure.
 pub fn validate(tool: &str, a: &Value) -> Result<(), Vec<String>> {
     let mut p = vec![];
@@ -414,6 +551,7 @@ pub fn validate(tool: &str, a: &Value) -> Result<(), Vec<String>> {
                 }
             }
         }
+        "submit_health" => health_problems(a, &mut p),
         "submit_diagnosis" => {
             text(a, "summary", 2000, &mut p);
             match a.get("verdict").and_then(Value::as_str) {
@@ -1119,6 +1257,34 @@ mod tests {
         assert!(!StepKind::Explore.tools().contains(&"submit_diagnosis"));
     }
 
+    #[test]
+    fn a_health_verdict_needs_an_outcome_and_only_owner_safe_actions() {
+        let ok = |v: Value| validate("submit_health", &v).is_ok();
+        assert!(!ok(json!({"summary": "s"})));
+        assert!(ok(
+            json!({"summary": "s", "false_alarm": {"why": "the limit is low"}})
+        ));
+        assert!(ok(json!({"summary": "s", "acted": [
+            {"action": "retry", "task": 4, "reason": "flaky"}]})));
+        assert!(!ok(json!({"summary": "s", "acted": [
+            {"action": "rm_rf", "task": 4, "reason": "x"}]})));
+        assert!(!ok(json!({"summary": "s", "acted": [
+            {"action": "retry", "reason": "x"}]})));
+        assert!(ok(json!({"summary": "s", "proposed": [
+            {"finding": "k", "title": "t", "body": "b", "evidence": "e"}]})));
+        assert!(!ok(
+            json!({"summary": "s", "proposed": [{"finding": "k", "title": "t"}]})
+        ));
+        assert!(ok(
+            json!({"summary": "s", "needs_owner": {"question": "q", "recommendation": "r"}})
+        ));
+        assert!(!ok(
+            json!({"summary": "s", "needs_owner": {"question": "q"}})
+        ));
+        assert_eq!(StepKind::Health.terminal_tools(), &["submit_health"]);
+        assert!(!StepKind::Explore.tools().contains(&"submit_health"));
+    }
+
     fn plan() -> Value {
         json!({"summary": "s", "files": ["src/a.rs"], "approach": "a", "acceptance_criteria": ["c"]})
     }
@@ -1133,7 +1299,8 @@ mod tests {
                     StepKind::Develop,
                     StepKind::Review,
                     StepKind::Diagnose,
-                    StepKind::Chat
+                    StepKind::Chat,
+                    StepKind::Health
                 ]
                 .iter()
                 .any(|s| s.tools().contains(&t)),

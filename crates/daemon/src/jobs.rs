@@ -2654,6 +2654,7 @@ fn agent_job(c: &Ctx) {
         // A diagnosis session is run by `diagnose`, not as a step of the graph.
         StepKind::Diagnose => "diagnose",
         StepKind::Chat => "chat",
+        StepKind::Health => "health",
     };
     // Only while the feedback it was written with is still there.
     let round_reason = if conflicts.is_some() {
@@ -2717,7 +2718,7 @@ fn agent_job(c: &Ctx) {
             StepKind::Explore => {
                 crate::prompts::explore_prompt(c.task.0, &c.title, &c.body, c.trust, &c.project)
             }
-            StepKind::Diagnose | StepKind::Chat => String::new(),
+            StepKind::Diagnose | StepKind::Chat | StepKind::Health => String::new(),
         }
     };
 
