@@ -60,11 +60,11 @@ class LinkedTextTest {
     /** Grep-style guard: the hand-made accent text with a click handler is gone from the ui package. */
     @Test fun noNavigationSiteDrawsItsOwnAccentLink() {
         val dir = listOf("src/main/kotlin/mason/monitor/ui", "app/src/main/kotlin/mason/monitor/ui")
-            .map(java.io.File::new).first { it.isDirectory }
+            .map { java.io.File(it) }.first { it.isDirectory }
         // Not navigation: the CPU "more" toggle and the plan's copy button keep a plain button look.
         val allowed = listOf("cpu-more", "Copy plan")
         val bad = mutableListOf<String>()
-        for (f in dir.listFiles { x -> x.name.endsWith(".kt") }!!) {
+        for (f in dir.listFiles()!!.filter { it.name.endsWith(".kt") }) {
             val lines = f.readLines()
             lines.forEachIndexed { i, line ->
                 if (line.contains("color = theme.accent")) {
