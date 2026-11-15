@@ -133,6 +133,7 @@ class MonitorConnection(
                 model.raw("GET", "/resources", id = "health")
                 model.raw("GET", "/health", id = "introspection")
             }
+            Page.Settings -> model.loadSettings()
             else -> {}
         }
         return ClientMessage(subscribe = Subscribe(views = views, project = model.project, task = task, editor_step = model.editorStep))

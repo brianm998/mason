@@ -152,7 +152,7 @@ final class MonitorCoreTests: XCTestCase {
     }
 
     func testDeepLinksRoundTripAndRefuseOtherThings() {
-        for p in [Page.home, .task(204), .landing, .usage, .pipeline, .health] {
+        for p in [Page.home, .task(204), .landing, .usage, .pipeline, .health, .settings] {
             XCTAssertEqual(Page.from(url: p.url), p, "\(p)")
         }
         XCTAssertNil(Page.from(url: URL(string: "https://example.com/task/1")!))
@@ -1376,8 +1376,8 @@ final class MonitorCoreTests: XCTestCase {
         XCTAssertGreaterThan(es.count, 4)
         if case .header = es.first! {} else { XCTFail("sections come first") }
         let links = es.compactMap { e -> String? in if case .pageLink(let t, _) = e { return t } else { return nil } }
-        XCTAssertEqual(links, ["Landing", "LLM usage", "Pipeline", "Health"])
-        XCTAssertEqual(es.suffix(4).count, 4)
+        XCTAssertEqual(links, ["Landing", "LLM usage", "Pipeline", "Health", "Settings"])
+        XCTAssertEqual(es.suffix(5).count, 5)
     }
 
     func testATileTargetResolvesToASectionInTheScrollingEntries() {

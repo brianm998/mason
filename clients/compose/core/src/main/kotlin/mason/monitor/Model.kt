@@ -37,6 +37,10 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     var editor by mutableStateOf<EditorView?>(null)
     var health by mutableStateOf<HealthSnapshot?>(null)
     var introspection by mutableStateOf<IntrospectionSnapshot?>(null)
+    /** The Settings page (s430): the picked project's settings, the notification routes, and what the last change said. */
+    var settings by mutableStateOf<SettingsSnapshot?>(null)
+    var notifySettings by mutableStateOf<NotifySettings?>(null)
+    var settingsNotice by mutableStateOf<String?>(null)
     var lastSeq by mutableStateOf(0L)
     var connected by mutableStateOf(false)
     /** Down and being retried: the daemon is restarting or has not answered. Shown as "reconnecting", never as an error. */
@@ -561,6 +565,36 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     fun raw(method: String, path: String, id: String = "", json: String = "") =
         send(Command(id = id, raw = Raw(method = method, path = path, json = json)))
 
+    // ---- settings (s430) ----
+
+    /** Ask for the Settings page's data: the project's settings and the notification routes. */
+    fun loadSettings() {
+        val p = editorProject
+        if (p.isNotEmpty()) raw("GET", SettingsPayload.path(p), id = "settings")
+        raw("GET", "/notify/settings", id = "notify-settings")
+    }
+
+    /** Change one project setting (a body from [SettingsPayload]); the page reloads on the answer. */
+    fun changeProjectSetting(body: String) {
+        settingsNotice = null
+        raw("POST", SettingsPayload.path(editorProject), id = "settings-save", json = body)
+    }
+
+    fun changeNotifySetting(body: String) {
+        settingsNotice = null
+        raw("POST", "/notify/settings", id = "notify-save", json = body)
+    }
+
+    fun testNotification(channel: String) {
+        settingsNotice = null
+        raw("POST", "/notify/test", id = "notify-test", json = SettingsPayload.test(channel))
+    }
+
+    fun runSchedule(name: String) {
+        settingsNotice = null
+        raw("POST", "/schedules/run", id = "schedule-run", json = SettingsPayload.runSchedule(editorProject, name))
+    }
+
     // ---- the pipeline editor (Part 18) ----
 
     /** The project the editor is about: the one picked, else the first there is. */
@@ -671,6 +705,12 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
             }
             if (r.id == "health" && r.ok) health = HealthSnapshot.parse(r.json)
             if (r.id == "introspection" && r.ok) introspection = IntrospectionSnapshot.parse(r.json)
+            if (r.id == "settings" && r.ok) settings = SettingsSnapshot.parse(r.json)
+            if (r.id == "notify-settings" && r.ok) notifySettings = NotifySettings.parse(r.json)
+            if (r.id in SETTINGS_RESULTS) {
+                settingsNotice = if (r.ok) SettingsPayload.done(r.id) else r.error
+                if (r.ok && (r.id == "settings-save" || r.id == "notify-save")) loadSettings()
+            }
             if (r.id.startsWith("publish:") && r.ok) publishPreview = PublishPreview.parse(r.json)
             onResult?.invoke(r)
         }

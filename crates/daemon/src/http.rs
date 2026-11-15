@@ -2575,6 +2575,63 @@ async fn notify_status(Shared(d): Shared<Arc<Daemon>>) -> Res {
     Ok(Json(v))
 }
 
+/// The notification settings the Settings page edits (routes, quiet hours, reminders, speech, stall).
+async fn notify_settings_get(Shared(d): Shared<Arc<Daemon>>) -> Res {
+    let d2 = d.clone();
+    let v = d
+        .pool
+        .run(move || crate::settings::get_notify(&d2))
+        .await
+        .map_err(pool_err)?;
+    Ok(Json(v))
+}
+
+/// Change `notify.toml` in place. Owner only; the next notify tick uses it.
+async fn notify_settings_set(
+    Shared(d): Shared<Arc<Daemon>>,
+    headers: axum::http::HeaderMap,
+    Json(b): Json<Value>,
+) -> Res {
+    owner_only(&d, &who_of(&headers), "change notification settings")?;
+    let d2 = d.clone();
+    let r = d
+        .pool
+        .run(move || crate::settings::set_notify(&d2, &b))
+        .await
+        .map_err(pool_err)?;
+    r.map(Json).map_err(|(c, m)| fail(code(c), m))
+}
+
+async fn project_settings_get(Shared(d): Shared<Arc<Daemon>>, Path(name): Path<String>) -> Res {
+    project_of(&d, &name)?;
+    let d2 = d.clone();
+    let r = d
+        .pool
+        .run(move || crate::settings::get_project(&d2, &name))
+        .await
+        .map_err(pool_err)?;
+    r.map(Json).map_err(|(c, m)| fail(code(c), m))
+}
+
+/// Change a project's proposal policy, schedule cadence or tracker settings in its
+/// registration file, and apply them without a restart. Owner only.
+async fn project_settings_set(
+    Shared(d): Shared<Arc<Daemon>>,
+    headers: axum::http::HeaderMap,
+    Path(name): Path<String>,
+    Json(b): Json<Value>,
+) -> Res {
+    owner_only(&d, &who_of(&headers), "change project settings")?;
+    project_of(&d, &name)?;
+    let d2 = d.clone();
+    let r = d
+        .pool
+        .run(move || crate::settings::set_project(&d2, &name, &b))
+        .await
+        .map_err(pool_err)?;
+    r.map(Json).map_err(|(c, m)| fail(code(c), m))
+}
+
 async fn notify_test(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res {
     owner_only(
         &d,
@@ -3359,6 +3416,14 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/announce/claim", post(announce_claim))
         .route("/notify", get(notify_status))
         .route("/notify/test", post(notify_test))
+        .route(
+            "/notify/settings",
+            get(notify_settings_get).post(notify_settings_set),
+        )
+        .route(
+            "/projects/{name}/settings",
+            get(project_settings_get).post(project_settings_set),
+        )
         .route("/metrics", get(metrics))
         .route("/demo", get(demo_status))
         .route("/demo/next", post(demo_next))

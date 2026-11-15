@@ -115,7 +115,7 @@ class MonitorCoreTest {
     }
 
     @Test fun deepLinksRoundTripAndRefuseOtherThings() {
-        for (p in listOf(Page.Home, Page.Task(204), Page.Landing, Page.Usage, Page.Pipeline, Page.Health)) {
+        for (p in listOf(Page.Home, Page.Task(204), Page.Landing, Page.Usage, Page.Pipeline, Page.Health, Page.Settings)) {
             assertEquals(p, Page.from(p.url), "$p")
         }
         assertNull(Page.from("https://example.com/task/1"))
@@ -1138,7 +1138,7 @@ class MonitorCoreTest {
         assertEquals(listOf("sidebar:home", "search"), SIDEBAR_PINNED_IDS)
         val es = m.sidebarEntries()
         assertTrue(es.first() is SidebarEntry.Header)
-        assertEquals(listOf("Landing", "LLM usage", "Pipeline", "Health"), es.filterIsInstance<SidebarEntry.PageLink>().map { it.title })
+        assertEquals(listOf("Landing", "LLM usage", "Pipeline", "Health", "Settings"), es.filterIsInstance<SidebarEntry.PageLink>().map { it.title })
     }
 
     @Test fun aTileTargetResolvesToASectionInTheScrollingEntries() {

@@ -39,6 +39,7 @@ extension MonitorModel {
         out.append(.pageLink(title: "LLM usage", page: .usage))
         out.append(.pageLink(title: "Pipeline", page: .pipeline))
         out.append(.pageLink(title: "Health", page: .health))
+        out.append(.pageLink(title: "Settings", page: .settings))
         return out
     }
 
