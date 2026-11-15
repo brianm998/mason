@@ -350,3 +350,8 @@ compose = "done"
 description = "Each paused banner has, at its trailing edge, a Resume text button (only when the monitor can act; it sends ResumeWork with that pause's project and mode, so it lifts exactly that pause) and an X icon button ('Collapse', tooltip and accessibility label) that collapses the banner to just its paused icon without lifting the pause; collapsed icons line up in banner order at the leading edge of the first expanded pause's row, or share one icon-only row when every pause is collapsed; each collapsed icon has the full banner text as tooltip and accessibility label, and a double click (double tap on touch) expands that one pause while a single click does nothing; the collapse is kept per device across launches, keyed paused:<project>:<mode>, and forgotten once the pause leaves the header; the item listing still lists every pause"
 swift = "done"
 compose = "done"
+
+[feature.back-restores-scroll]
+description = "Back and forward put each page in the history back where it was scrolled when it was left (Home, a task, Landing, LLM usage, Health); the same page twice in the history keeps two positions; a new selection starts at the top; restored once, after the page's content has arrived, never over the owner's own scrolling"
+swift = "done"
+compose = "done"

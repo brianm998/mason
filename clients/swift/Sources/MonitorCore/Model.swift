@@ -319,10 +319,22 @@ public final class MonitorModel: ObservableObject {
                          ciLinks: taskDetail?.ciLinks ?? [])
     }
 
-    public func go(_ p: Page) { history.go(p); subscribe?() }
-    public func goBack() { history.goBack(); subscribe?() }
-    public func goForward() { history.goForward(); subscribe?() }
-    public func goHome() { history.goHome(); subscribe?() }
+    /// Where the shown page is scrolled now. Not published: it changes every frame of a scroll,
+    /// and is saved into the history only when the page is left.
+    public private(set) var liveScroll: Double = 0
+    public func reportScroll(_ y: Double) { liveScroll = max(0, y) }
+
+    private func navigate(_ f: (inout NavHistory, Double) -> Void) {
+        let before = history.visit
+        f(&history, liveScroll)
+        if history.visit != before { liveScroll = history.restore }
+        subscribe?()
+    }
+
+    public func go(_ p: Page) { navigate { $0.go(p, scroll: $1) } }
+    public func goBack() { navigate { $0.goBack(scroll: $1) } }
+    public func goForward() { navigate { $0.goForward(scroll: $1) } }
+    public func goHome() { navigate { $0.goHome(scroll: $1) } }
 
     public func open(url: URL) {
         if let p = Page.from(url: url) { go(p) }
