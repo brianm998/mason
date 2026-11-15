@@ -2766,11 +2766,15 @@ fn agent_job(c: &Ctx) {
         .as_ref()
         .map_or(c.project.step_timeout, |a| a.value);
     spec.deadline = Some(budget);
+    // The host counts the limit from when it started, so what was credited and granted
+    // before a daemon restart is read back and kept on disk (s401).
+    let extra_file = dir.join(format!("deadline-extra-r{}.kv", c.run.0));
+    let on_disk = crate::deadline::load(&spec.deadline_extra, &extra_file);
     // A develop agent that keeps committing or producing output gets more time, up to
     // twice the budget (s401); it ends with the step.
     let seen = Arc::new(Seen::default());
     let started = Instant::now();
-    let _extender = (kind == StepKind::Develop).then(|| {
+    let _extender = Some(()).map(|()| {
         let stop = Arc::new(AtomicBool::new(false));
         let (stop2, seen2, extra, wt) = (
             stop.clone(),
@@ -2779,16 +2783,23 @@ fn agent_job(c: &Ctx) {
             c.wt.clone(),
         );
         let head = move || git::run(&wt, &["rev-parse", "HEAD"]).unwrap_or_default();
-        let mut ext = crate::deadline::Extender::new(
-            budget,
-            Duration::from_secs(120).min(budget / 4),
-            head(),
-            seen.count(),
-        );
+        let mut ext = (kind == StepKind::Develop).then(|| {
+            crate::deadline::Extender::new(
+                budget,
+                Duration::from_secs(120).min(budget / 4),
+                head(),
+                seen.count(),
+            )
+            .resume(Duration::from_millis(on_disk.1))
+        });
+        let mut last = on_disk;
         std::thread::spawn(move || {
             while !stop2.load(Ordering::SeqCst) {
                 std::thread::sleep(Duration::from_secs(1));
-                ext.tick(started.elapsed(), &extra, &head, seen2.count());
+                if let Some(e) = ext.as_mut() {
+                    e.tick(started.elapsed(), &extra, &head, seen2.count());
+                }
+                last = crate::deadline::save(&extra, &extra_file, last);
             }
         });
         struct StopExtending(Arc<AtomicBool>);

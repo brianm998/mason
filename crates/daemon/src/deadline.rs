@@ -33,6 +33,12 @@ impl Extender {
         }
     }
 
+    /// Carry on from what an earlier daemon had already granted.
+    pub fn resume(mut self, granted: Duration) -> Self {
+        self.granted = granted.min(self.cap);
+        self
+    }
+
     /// Called now and then. When the deadline is near and the agent committed or
     /// produced output since the last grant, adds time to `extra`; returns what it added.
     pub fn tick(
@@ -57,6 +63,35 @@ impl Extender {
         extra.add_progress(g);
         g
     }
+}
+
+/// Write the credit and grants to `path` if they changed since `last`; returns what is
+/// now on disk. The host counts its limit from when it started, so a restarted daemon
+/// that forgot the credit would stop a re-attached agent that had only been queueing.
+pub fn save(extra: &DeadlineExtra, path: &std::path::Path, last: (u64, u64)) -> (u64, u64) {
+    let now = (
+        u64::try_from(extra.waited().as_millis()).unwrap_or(u64::MAX),
+        u64::try_from(extra.progressed().as_millis()).unwrap_or(u64::MAX),
+    );
+    if now != last {
+        let tmp = path.with_extension("tmp");
+        if std::fs::write(&tmp, format!("{} {}\n", now.0, now.1)).is_ok() {
+            let _ = std::fs::rename(&tmp, path);
+        }
+    }
+    now
+}
+
+/// Read what [`save`] wrote into `extra`; returns it. Nothing there leaves `extra` as it is.
+pub fn load(extra: &DeadlineExtra, path: &std::path::Path) -> (u64, u64) {
+    let Some((w, p)) = std::fs::read_to_string(path).ok().and_then(|t| {
+        let mut it = t.split_whitespace().map(|x| x.parse::<u64>().ok());
+        Some((it.next()??, it.next()??))
+    }) else {
+        return (0, 0);
+    };
+    extra.restore(Duration::from_millis(w), Duration::from_millis(p));
+    (w, p)
 }
 
 fn secs(d: Duration) -> String {
@@ -127,6 +162,34 @@ mod tests {
         extra.add(H);
         let mut e = Extender::new(4 * H, Duration::from_secs(60), "c0".into(), 0);
         assert!(e.tick(4 * H, &extra, || "c1".into(), 0).is_zero());
+    }
+
+    #[test]
+    fn credit_survives_a_restart() {
+        let dir = std::env::temp_dir().join(format!("mason-dl-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("x.kv");
+        let a = DeadlineExtra::default();
+        a.add(Duration::from_secs(7200));
+        a.add_progress(H);
+        save(&a, &f, (0, 0));
+        let b = DeadlineExtra::default();
+        assert_eq!(load(&b, &f).0, 7_200_000);
+        assert_eq!(b.waited(), 2 * H);
+        assert_eq!(b.progressed(), H);
+        // The extender resumes at what was granted, so the cap still holds.
+        let mut e =
+            Extender::new(4 * H, Duration::from_secs(60), "c0".into(), 0).resume(b.progressed());
+        let mut n = 0;
+        loop {
+            n += 1;
+            let g = e.tick(4 * H + b.get(), &b, || format!("c{n}"), 0);
+            if g.is_zero() {
+                break;
+            }
+        }
+        assert_eq!(b.progressed(), 4 * H);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

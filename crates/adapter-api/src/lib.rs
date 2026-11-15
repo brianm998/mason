@@ -67,6 +67,13 @@ impl DeadlineExtra {
         let ms = u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
         self.1.fetch_add(ms, Ordering::SeqCst);
     }
+    /// Put back what an earlier daemon had credited and granted for this step, so a
+    /// restart does not lose it (s401).
+    pub fn restore(&self, waited: Duration, progressed: Duration) {
+        let ms = |d: Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
+        self.0.store(ms(waited), Ordering::SeqCst);
+        self.1.store(ms(progressed), Ordering::SeqCst);
+    }
     /// Queue time credited so far.
     pub fn waited(&self) -> Duration {
         Duration::from_millis(self.0.load(Ordering::SeqCst))
