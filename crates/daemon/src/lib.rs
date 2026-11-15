@@ -58,6 +58,7 @@ pub mod providers;
 pub mod release;
 pub mod report;
 pub mod rerun;
+pub mod runtimes;
 pub mod sched;
 pub mod schedule;
 pub mod scope;
