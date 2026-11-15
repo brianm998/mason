@@ -745,7 +745,7 @@ struct BlockersView: View {
             VStack(alignment: .leading, spacing: theme.spacingSmall) {
                 ForEach(row.blockerLinks, id: \.task) { l in
                     HStack(spacing: theme.spacing) {
-                        Button("#\(l.task)") { model.go(.task(l.task)) }.buttonStyle(.link).font(theme.body())
+                        TaskLink(title: "#\(l.task)", font: theme.body()) { model.go(.task(l.task)) }
                         Text("\(l.state), \(l.origin)").font(theme.small()).foregroundStyle(theme.muted)
                         if model.canAct {
                             ForEach(l.actions, id: \.self) { a in
@@ -988,6 +988,83 @@ struct SSHKeySheet: View {
     }
 }
 
+/// The pointing hand over a view, pushed on hover and popped on leaving or disappearing, balanced
+/// the way the split-bar handle's cursor is (`Root.swift`). There is no hover on touch screens.
+struct PointingHand: ViewModifier {
+    @State private var inside = false
+
+    func body(content: Content) -> some View {
+        #if canImport(AppKit)
+        content
+            .onHover { over in
+                if over && !inside { NSCursor.pointingHand.push() }
+                if !over && inside { NSCursor.pop() }
+                inside = over
+            }
+            .onDisappear { if inside { NSCursor.pop(); inside = false } }
+        #else
+        content
+        #endif
+    }
+}
+
+/// The one look of a link: the link colour (`theme.link`), underlined, and the pointing hand on
+/// hover. Everything that opens a task's page or the tracker uses this, so a new link cannot forget
+/// a part of it.
+struct LinkStyle: ViewModifier {
+    @Environment(\.theme) var theme
+
+    func body(content: Content) -> some View {
+        content.foregroundStyle(theme.link).underline().modifier(PointingHand())
+    }
+}
+
+/// Only the colour and underline, for the title inside a row that is clickable as a whole (the row
+/// itself takes `pointingHand()`).
+struct LinkLook: ViewModifier {
+    @Environment(\.theme) var theme
+
+    func body(content: Content) -> some View {
+        content.foregroundStyle(theme.link).underline()
+    }
+}
+
+extension View {
+    /// Link colour, underline and pointing hand.
+    func linkStyle() -> some View { modifier(LinkStyle()) }
+    /// Link colour and underline, no cursor of its own.
+    func linkLook() -> some View { modifier(LinkLook()) }
+    /// The pointing hand on hover.
+    func pointingHand() -> some View { modifier(PointingHand()) }
+}
+
+/// A reference that opens a task's page in the monitor.
+struct TaskLink: View {
+    let title: String
+    var font: Font? = nil
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) { Text(title).linkStyle() }
+            .buttonStyle(.plain)
+            .font(font)
+    }
+}
+
+/// A reference that opens a web page (the tracker, a CI run) in the default browser.
+struct WebLink: View {
+    @Environment(\.openURL) private var openURL
+    let title: String
+    let url: URL
+    var font: Font? = nil
+
+    var body: some View {
+        Button { openURL(url) } label: { Text(title).linkStyle() }
+            .buttonStyle(.plain)
+            .font(font)
+    }
+}
+
 /// Text whose task numbers and CI references are links (`Linkify`): a task opens its page in the
 /// monitor (so back and forward work), a CI reference opens in the default browser. Selection is
 /// kept when `selectable`.
@@ -1013,10 +1090,12 @@ struct LinkedText: View {
             case .task(let id, _):
                 a.link = URL(string: "\(taskScheme)://\(id)")
                 a.foregroundColor = linkColor
+                a.underlineStyle = .single
             case .url(let u, _):
                 if let url = URL(string: u) {
                     a.link = url
                     a.foregroundColor = linkColor
+                    a.underlineStyle = .single
                 }
             }
             out += a
@@ -1042,15 +1121,16 @@ struct LinkedText: View {
             let end = out.characters.index(start, offsetBy: n)
             out[start..<end].link = target
             out[start..<end].foregroundColor = linkColor
+            out[start..<end].underlineStyle = .single
         }
         return out
     }
 
     private var styled: Text {
         if let base {
-            return Text(Self.link(base, model.linkify(String(base.characters)), linkColor: theme.accent))
+            return Text(Self.link(base, model.linkify(String(base.characters)), linkColor: theme.link))
         }
-        return Text(Self.attributed(model.linkify(text), linkColor: theme.accent))
+        return Text(Self.attributed(model.linkify(text), linkColor: theme.link))
     }
 
     var body: some View {
@@ -1078,7 +1158,7 @@ struct CiLinksLine: View {
         HStack(spacing: theme.spacingSmall) {
             if issue != 0 {
                 if Linkify.isWebURL(issueURL), let u = URL(string: issueURL) {
-                    Link("issue #\(issue)", destination: u).font(theme.body())
+                    WebLink(title: "issue #\(issue)", url: u, font: theme.body())
                         .accessibilityIdentifier("detail:issue")
                 } else {
                     Text("issue #\(issue)").font(theme.body()).foregroundStyle(theme.muted)
@@ -1089,7 +1169,7 @@ struct CiLinksLine: View {
                 Text("CI").font(theme.body()).foregroundStyle(theme.muted)
                 ForEach(Array(shown.enumerated()), id: \.offset) { _, l in
                     if let u = URL(string: l.url) {
-                        Link(l.label.isEmpty ? l.url : l.label, destination: u).font(theme.body())
+                        WebLink(title: l.label.isEmpty ? l.url : l.label, url: u, font: theme.body())
                     }
                 }
             }
