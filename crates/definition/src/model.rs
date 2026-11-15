@@ -121,6 +121,8 @@ pub struct Step {
     pub on_red: Option<String>,
     pub max_rounds: Option<u32>,
     pub agent: Option<String>,
+    /// An agent step's own instructions: a file under `.mason/prompts/`, read from the base commit.
+    pub prompt: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
     pub budget: Option<Duration>,
@@ -162,6 +164,7 @@ impl Step {
             on_red: None,
             max_rounds: None,
             agent: None,
+            prompt: None,
             model: None,
             effort: None,
             budget: None,
