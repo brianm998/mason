@@ -2686,7 +2686,9 @@ pub fn after_landing(d: &Arc<Daemon>, task: TaskId) {
     let Ok(rows) = d.store.debts(Some(task.0), true) else {
         return;
     };
-    for r in rows.into_iter().filter(|r| r.deferred) {
+    // Every open debt of the landed task is paid, not only the deferred ones: a skipped
+    // check is run once at the new base, so a skip never stays owed for good (s426).
+    for r in rows {
         let d = d.clone();
         let _ = std::thread::Builder::new()
             .name(format!("debt-{}", r.id))
