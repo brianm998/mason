@@ -490,7 +490,7 @@ fn the_sidebar_is_in_queue_order_and_the_rest_newest_entry_first() {
         .collect();
     assert_eq!(
         collapsed,
-        ["failed", "landed", "canceled"],
+        ["deferred", "failed", "landed", "canceled"],
         "history starts collapsed"
     );
 
