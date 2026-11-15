@@ -554,7 +554,6 @@ final class MonitorCoreTests: XCTestCase {
         m.apply(result(id: "update-monitor", ok: true))
         m.apply(building { $0.step = "fetching" })
         XCTAssertTrue(m.canCancelMonitorUpdate)
-        m.apply(building { $0.step = "fetching" })
         XCTAssertEqual(m.updating, "Fetching the new source…")
         m.apply(building { $0.step = "compiling"; $0.done = 12; $0.total = 48; $0.lastLine = "[12/48] Compiling Model.swift" })
         XCTAssertEqual(m.updating, "Compiling 12 of 48… [12/48] Compiling Model.swift")
