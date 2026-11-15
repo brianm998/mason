@@ -90,6 +90,7 @@ mason: command-line client for the MASON pipeline
   mason notify test CHANNEL           send a test through sound, speech, push, email or webhook
   mason metrics [--days N]            interventions per landed task
   mason health                        the detectors' findings, verdicts on fixes, recurring jobs, triage review queue
+  mason report [--days N] [--project P]   throughput, send-backs, waits, interventions, host losses, flakes, debts
   mason digest [--days N] [--project P]   landed, interventions, time by state, skips, forced landings (recorded data only)
   mason schedule list | run <name>    recurring jobs (introspect, analyst:<project>, <project>/<schedule>); run one now
   mason triage list | review <id> (--agree | --disagree)   the triage agent's sampled suggestions; it never answers
@@ -1509,6 +1510,20 @@ fn main() {
                 return println!("{r:#}");
             }
             print_digest(&r);
+        }
+        "report" => {
+            let days = a.opt("--days").unwrap_or_else(|| "7".into());
+            let project = a.opt("--project");
+            finish(&a);
+            let mut path = format!("/report?days={days}");
+            if let Some(p) = project {
+                path.push_str(&format!("&project={p}"));
+            }
+            let r = or_die(d.call("GET", &path, None));
+            if json_out {
+                return println!("{r:#}");
+            }
+            print_report(&r);
         }
         "schedule" => {
             let sub = a.pos().unwrap_or_default();
@@ -3243,6 +3258,80 @@ fn print_health(r: &serde_json::Value) {
         },
         q,
         r["triage"]["reviewed"]
+    );
+}
+
+/// `mason report` as text: one block per section, from the daemon's `/report`.
+fn print_report(r: &serde_json::Value) {
+    let ms = |v: &serde_json::Value| {
+        v.as_u64()
+            .map_or("-".to_string(), |m| format!("{}s", m / 1000))
+    };
+    println!(
+        "landed {}  failed {}",
+        r["landed"]["total"], r["failed"]["total"]
+    );
+    for (title, key) in [("landed", "landed"), ("failed", "failed")] {
+        if let Some(days) = r[key]["per_day"].as_object() {
+            for (day, ps) in days {
+                println!("  {title} {day}: {ps}");
+            }
+        }
+    }
+    let l = &r["lead_time_ms"];
+    println!(
+        "lead time (admitted to landed): median {}  p90 {}  ({} tasks)",
+        ms(&l["median"]),
+        ms(&l["p90"]),
+        l["samples"]
+    );
+    println!("send-backs: {}", r["send_backs"]["total"]);
+    for (k, v) in r["send_backs"]["by_reason"]
+        .as_object()
+        .into_iter()
+        .flatten()
+    {
+        println!("  {v:>4}  {k}");
+    }
+    for (k, v) in r["send_backs"]["by_suite"]
+        .as_object()
+        .into_iter()
+        .flatten()
+    {
+        println!("  suite {k}: {v}");
+    }
+    println!("task failures:");
+    for f in r["failures"].as_array().into_iter().flatten() {
+        println!(
+            "  {:>4}  [{}] {}",
+            f["count"],
+            f["class"].as_str().unwrap_or(""),
+            f["reason"].as_str().unwrap_or("")
+        );
+    }
+    println!("waits:");
+    for w in r["waits"].as_array().into_iter().flatten() {
+        println!(
+            "  {:<16} count {:>4}  total {:>8}  median {}",
+            w["class"].as_str().unwrap_or(""),
+            w["count"],
+            ms(&w["total_ms"]),
+            ms(&w["median_ms"])
+        );
+    }
+    println!("owner interventions: {}", r["interventions"]["total"]);
+    for (k, v) in r["interventions"]["by_kind"]
+        .as_object()
+        .into_iter()
+        .flatten()
+    {
+        println!("  {v:>4}  {k}");
+    }
+    println!(
+        "host losses {}  flaky sightings {}  open debts {}",
+        r["host_losses"],
+        r["flaky"]["sightings"],
+        r["open_debts"].as_array().map_or(0, Vec::len)
     );
 }
 
