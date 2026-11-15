@@ -35,8 +35,8 @@ data class Announcement(
  * the sentence has ended; the queue never starts the next thing before that.
  */
 interface SpeechSink {
-    fun play(sound: String, then: () -> Unit)
-    fun speak(sentence: String, voice: String, then: () -> Unit)
+    fun play(sound: String, volume: Double, then: () -> Unit)
+    fun speak(sentence: String, voice: String, volume: Double, then: () -> Unit)
     /** Cut off whatever is playing (the user muted). */
     fun stop()
     /** The voices the OS offers, by name. */
@@ -45,8 +45,8 @@ interface SpeechSink {
 
 /** Makes no noise and completes at once (the default until the app supplies a sink). */
 class SilentSink : SpeechSink {
-    override fun play(sound: String, then: () -> Unit) = then()
-    override fun speak(sentence: String, voice: String, then: () -> Unit) = then()
+    override fun play(sound: String, volume: Double, then: () -> Unit) = then()
+    override fun speak(sentence: String, voice: String, volume: Double, then: () -> Unit) = then()
     override fun stop() {}
     override fun voices(): List<String> = emptyList()
 }
@@ -59,6 +59,8 @@ data class SpeechSettings(
     val sounds: Map<String, String> = mapOf("decision" to "Glass", "broke" to "Basso", "info" to "Tink"),
     /** An OS voice name; empty for the system default. */
     val voice: String = "",
+    /** How loud announcements are, 0.0 to 1.0. */
+    val volume: Double = 1.0,
 ) {
     fun sound(a: Announcement): String = sounds[a.family] ?: "Tink"
 
@@ -129,9 +131,9 @@ class Announcer(
         speaking = a
         val speakIt = {
             if (!a.speech || a.sentence.isEmpty()) finish(a)
-            else sink.speak(a.sentence, settings.voice) { finish(a) }
+            else sink.speak(a.sentence, settings.voice, settings.volume) { finish(a) }
         }
-        if (a.sound) sink.play(settings.sound(a)) { speakIt() } else speakIt()
+        if (a.sound) sink.play(settings.sound(a), settings.volume) { speakIt() } else speakIt()
     }
 
     @Synchronized
@@ -139,6 +141,14 @@ class Announcer(
         if (speaking != a) return
         speaking = null
         pump()
+    }
+
+    /** The Test button: say "test" now, in the chosen voice and volume. Outside the queue, so it
+     *  speaks even when muted and leaves the queue, `speaking` and `seen` alone. */
+    fun test() {
+        sink.stop()
+        val s = settings
+        sink.speak("test", s.voice, s.volume) {}
     }
 
     /** The user muted: stop what is playing and forget what was waiting. */
@@ -214,12 +224,14 @@ class Announcer(
         }
         p.setString("speech.kinds.added", "1")
         val sounds = d.sounds.mapValues { (f, v) -> p.string("speech.sound.$f") ?: v }
-        return SpeechSettings(kinds, sounds, p.string("speech.voice") ?: "")
+        val volume = p.string("speech.volume")?.toDoubleOrNull()?.takeIf { it.isFinite() }?.coerceIn(0.0, 1.0) ?: 1.0
+        return SpeechSettings(kinds, sounds, p.string("speech.voice") ?: "", volume)
     }
 
     private fun save(p: Preferences, s: SpeechSettings) {
         p.setString("speech.kinds", s.kinds.sorted().joinToString(","))
         p.setString("speech.voice", s.voice)
+        p.setString("speech.volume", s.volume.toString())
         s.sounds.forEach { (f, n) -> p.setString("speech.sound.$f", n) }
     }
 }
