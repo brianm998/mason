@@ -1595,6 +1595,21 @@ struct TestChecks {
     /// A develop step's project and base: before a check the base is folded in when that is
     /// safe (`basefold`). `None` for other steps.
     base_fold: Option<(ProjectId, String)>,
+    /// The project's name, for the suites' recorded run times.
+    project: String,
+}
+
+impl TestChecks {
+    /// How long a build or run of `suite` is expected to take at most, from the test step's
+    /// recorded times (s422). A check's build is incremental, so this errs long.
+    fn estimate(&self, suite: &str, phase: &str) -> Option<u64> {
+        self.slots
+            .d
+            .store
+            .suite_estimate(&self.project, suite, phase)
+            .ok()
+            .flatten()
+    }
 }
 
 /// What `run_check` needs to pick suites: the test step, and where the base is.
@@ -1745,7 +1760,8 @@ impl TestChecks {
                         );
                         let queue = !crate::hostedcheck::pending(&self.slots.d, &bspec);
                         let swapped = credit_wait(&self.extra, crate::sched::CREDIT_EVERY, || {
-                            self.slots.swap_for(queue, &build_uses())
+                            self.slots
+                                .swap_for(queue, &build_uses(), self.estimate(&name, "build"))
                         });
                         let Ok(lease) = swapped else {
                             return over();
@@ -1796,7 +1812,8 @@ impl TestChecks {
             );
             let queue = !crate::hostedcheck::pending(&self.slots.d, &rspec);
             let swapped = credit_wait(&self.extra, crate::sched::CREDIT_EVERY, || {
-                self.slots.swap_for(queue, &uses)
+                self.slots
+                    .swap_for(queue, &uses, self.estimate(&name, "run"))
             });
             let Ok(lease) = swapped else {
                 return over();
@@ -2005,7 +2022,7 @@ impl TestChecks {
                 let bspec = spec(format!("{}build", self.id_prefix), build, &build_uses());
                 let queue = !crate::hostedcheck::pending(&self.slots.d, &bspec);
                 let swapped = credit_wait(&self.extra, crate::sched::CREDIT_EVERY, || {
-                    self.slots.swap_for(queue, &build_uses())
+                    self.slots.swap_for(queue, &build_uses(), None)
                 });
                 let Ok(lease) = swapped else {
                     return over();
@@ -2055,7 +2072,7 @@ impl TestChecks {
         // queue behind other work for a slot the run it joins already took.
         let queue = !crate::hostedcheck::pending(&self.slots.d, &spec);
         let swapped = credit_wait(&self.extra, crate::sched::CREDIT_EVERY, || {
-            self.slots.swap_for(queue, &uses)
+            self.slots.swap_for(queue, &uses, None)
         });
         let Ok(test_lease) = swapped else {
             return over();
@@ -2203,6 +2220,7 @@ impl CheckSlots {
         needs: mason_scheduler::Needs,
         as_step: &str,
         end_on_skip: bool,
+        expected_ms: Option<u64>,
     ) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
         let d = &self.d;
         let t = d
@@ -2226,7 +2244,9 @@ impl CheckSlots {
         // used to leave the task reading "running" for hours.
         let asked = needs.clone();
         let mut waited = false;
-        let lease = d.broker.acquire(
+        // With how long it is expected to hold the slots, a check may run while the machine
+        // drains for an exclusive request, if it will be done in time (s385, s422).
+        let lease = d.broker.acquire_expecting(
             self.task,
             &format!("#{}", self.task.0),
             rank,
@@ -2243,6 +2263,8 @@ impl CheckSlots {
                     },
                 );
             },
+            false,
+            expected_ms,
         );
         if waited {
             d.emit_for_run(task, run, EventKind::WaitEnded { task });
@@ -2256,6 +2278,7 @@ impl CheckSlots {
         &self,
         queue: bool,
         uses: &std::collections::BTreeMap<String, u32>,
+        expected_ms: Option<u64>,
     ) -> Result<Option<crate::sched::Lease>, crate::sched::Cancelled> {
         let held = self.lease.lock().unwrap_or_else(|e| e.into_inner()).take();
         if held.is_some() {
@@ -2280,6 +2303,7 @@ impl CheckSlots {
             crate::sched::needs_of(uses, None),
             check_rank_step(&self.step, self.test_step.as_deref()),
             true,
+            expected_ms,
         )
         .map(Some)
     }
@@ -2288,7 +2312,7 @@ impl CheckSlots {
     fn take_agent_slot_back(&self) {
         self.d.admit();
         let needs = crate::sched::needs_of(&self.agent_uses, Some(&self.account));
-        if let Ok(l) = self.acquire(needs, &self.step, false) {
+        if let Ok(l) = self.acquire(needs, &self.step, false, None) {
             *self.lease.lock().unwrap_or_else(|e| e.into_inner()) = Some(l);
         }
     }
@@ -2730,6 +2754,7 @@ fn agent_job(c: &Ctx) {
         task: c.task.0,
         run: c.run.0,
         base_fold: (kind == StepKind::Develop).then(|| (c.project_id, c.project.base_ref())),
+        project: c.project.id.clone(),
     });
     let validator = (kind == StepKind::Develop).then(|| {
         change_validator(
