@@ -63,12 +63,14 @@ pub struct Card {
     pub origin: Origin,
     /// What was wrong with the agent's card, if it was replaced.
     pub problems: Vec<String>,
+    /// The owner may pick any number of options (s297).
+    pub multi_select: bool,
 }
 
 impl Card {
     /// The canonical JSON form: what is stored, shown and hashed.
     pub fn to_json(&self) -> Value {
-        json!({
+        let mut v = json!({
             "ask": self.ask,
             "why": self.why,
             "options": self.options.iter().map(|o| json!({"label": o.label, "recommended": o.recommended})).collect::<Vec<_>>(),
@@ -77,7 +79,11 @@ impl Card {
             "key": self.key,
             "origin": self.origin.name(),
             "problems": self.problems,
-        })
+        });
+        if self.multi_select {
+            v["multi_select"] = json!(true);
+        }
+        v
     }
 
     /// Read a stored card back. `None` for text that is not one (older logs
@@ -117,11 +123,38 @@ impl Card {
                 _ => Origin::Agent,
             },
             problems: list("problems"),
+            multi_select: v.get("multi_select").and_then(Value::as_bool) == Some(true),
         })
     }
 
     pub fn to_text(&self) -> String {
         self.to_json().to_string()
+    }
+
+    /// The options a multi-select answer picks: 1-based numbers separated by
+    /// commas or spaces, each used once. Returned in the card's order.
+    pub fn pick_many(&self, answer: &str) -> Result<Vec<&CardOption>, String> {
+        let mut seen: Vec<usize> = vec![];
+        for tok in answer.split(|c: char| c == ',' || c.is_whitespace()) {
+            if tok.is_empty() {
+                continue;
+            }
+            let n: usize = tok
+                .parse()
+                .map_err(|_| format!("{tok:?} is not an option number"))?;
+            if n == 0 || n > self.options.len() {
+                return Err(format!("there is no option {n}"));
+            }
+            if seen.contains(&n) {
+                return Err(format!("option {n} is listed twice"));
+            }
+            seen.push(n);
+        }
+        if seen.is_empty() {
+            return Err("an answer needs at least one option".into());
+        }
+        seen.sort_unstable();
+        Ok(seen.into_iter().map(|n| &self.options[n - 1]).collect())
     }
 
     /// The option an answer of `n` (1-based) or a label picks, if any.
@@ -287,6 +320,14 @@ pub fn parse(a: &Value) -> Result<Card, Vec<String>> {
     if key.chars().count() > 80 {
         p.push("key: longer than 80 characters".into());
     }
+    let multi_select = match a.get("multi_select") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => {
+            p.push("multi_select: must be true or false".into());
+            false
+        }
+    };
     if p.is_empty() {
         Ok(Card {
             ask,
@@ -297,6 +338,7 @@ pub fn parse(a: &Value) -> Result<Card, Vec<String>> {
             key,
             origin: Origin::Agent,
             problems: vec![],
+            multi_select,
         })
     } else {
         Err(p)
@@ -429,6 +471,7 @@ pub fn fallback(a: &Value, problems: &[String]) -> Card {
         key: truncate(a.get("key").and_then(Value::as_str).unwrap_or(""), 80),
         origin: Origin::Fallback,
         problems: probs,
+        multi_select: a.get("multi_select").and_then(Value::as_bool) == Some(true),
     }
 }
 
@@ -634,5 +677,59 @@ mod tests {
             "One day, no refresh tokens"
         );
         assert!(c.pick("3").is_none() && c.pick("0").is_none() && c.pick("whatever").is_none());
+    }
+
+    fn three() -> Value {
+        let mut v = good();
+        v["options"] = json!([
+            {"label": "Skip the unit suite", "recommended": true},
+            {"label": "Skip the slow suite"},
+            {"label": "Skip the flaky suite"}
+        ]);
+        v
+    }
+
+    #[test]
+    fn multi_select_is_read_stored_and_part_of_the_hash() {
+        let plain = parse(&three()).unwrap();
+        assert!(!plain.multi_select);
+        assert!(
+            plain.to_json().get("multi_select").is_none(),
+            "old cards are byte-identical"
+        );
+        let mut v = three();
+        v["multi_select"] = json!(true);
+        let many = parse(&v).unwrap();
+        assert!(many.multi_select);
+        assert_eq!(Card::from_json(&many.to_json()).unwrap(), many);
+        assert_ne!(hash(&plain.to_text()), hash(&many.to_text()));
+        v["multi_select"] = json!("yes");
+        assert!(parse(&v)
+            .unwrap_err()
+            .iter()
+            .any(|p| p.starts_with("multi_select")));
+        // A card that needs rewriting keeps the flag.
+        let mut bad = json!({"ask": "x", "multi_select": true});
+        assert!(fallback(&bad, &[]).multi_select);
+        bad["multi_select"] = json!(false);
+        assert!(!fallback(&bad, &[]).multi_select);
+    }
+
+    #[test]
+    fn pick_many_returns_options_in_card_order_and_refuses_bad_lists() {
+        let c = parse(&three()).unwrap();
+        let labels = |a: &str| -> Result<Vec<String>, String> {
+            c.pick_many(a)
+                .map(|v| v.iter().map(|o| o.label.clone()).collect())
+        };
+        assert_eq!(
+            labels("3,1").unwrap(),
+            vec!["Skip the unit suite", "Skip the flaky suite"]
+        );
+        assert_eq!(labels(" 2 ").unwrap(), vec!["Skip the slow suite"]);
+        assert_eq!(labels("1 2, 3").unwrap().len(), 3);
+        for bad in ["", " , ", "0", "4", "1,1", "a", "1,-2"] {
+            assert!(labels(bad).is_err(), "{bad:?} should be refused");
+        }
     }
 }
