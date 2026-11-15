@@ -12,6 +12,7 @@ import SwiftUI
 ///
 ///     monitor-tool conformance --port P --out DIR   dump what the client shows at every demo checkpoint
 ///     monitor-tool snapshot --port P --out DIR      render screenshots from `masond --demo-manual`
+///     monitor-tool snapshot --ipad --port P --out DIR   the same at iPad landscape sizes (1366x1024, 1180x820), light and dark, via ImageRenderer
 ///     monitor-tool editor --port P --project NAME [--step S] --out DIR   dump what the pipeline editor shows
 ///     monitor-tool answer --port P --task N [--option 1 | --text WORDS] [--hash H]   answer a task's open question as the monitor does
 ///     monitor-tool approve --port P --task N [--diff HASH]   what the Approve button sends (the hold's diff hash, as shown)
@@ -47,7 +48,7 @@ struct Tool {
         switch cmd {
         case "conformance": await conformance(model, out)
         case "editor": await editor(model, args, out)
-        case "snapshot": await snapshots(model, out)
+        case "snapshot": args.contains("--ipad") ? await ipadSnapshots(model, out) : await snapshots(model, out)
         case "task-page": await taskPage(model, args, out)
         case "answer": await answer(model, args)
         case "approve", "reject": await approval(model, cmd, args)
@@ -288,6 +289,21 @@ struct Tool {
         model.goHome()
         await settle(model)
         shot(model, out, "home-larger-text", size: CGSize(width: 1440, height: 900), dark: false)
+    }
+
+    /// Home and a task's page at both iPad sizes, light and dark: four images per size.
+    @MainActor
+    static func ipadSnapshots(_ model: MonitorModel, _ out: URL) async {
+        for _ in 0..<4 { _ = await step(model) }
+        model.setExpanded("needs_attention", true)
+        await settle(model)
+        do {
+            for n in try IPadSnapshot.write(model, page: "home", to: out) { print("wrote \(n)") }
+            model.go(.task(1))
+            await until("task #1") { model.taskDetail?.row.id == 1 }
+            await settle(model)
+            for n in try IPadSnapshot.write(model, page: "task", to: out) { print("wrote \(n)") }
+        } catch { fail("cannot render: \(error)") }
     }
 
     /// A task's page as the owner sees it, rendered to a PNG, plus a check that the plan parts the
