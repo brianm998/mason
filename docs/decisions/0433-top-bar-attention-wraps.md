@@ -1,3 +1,3 @@
-# 0433: the top bar's attention label wraps
+# 0433: the top bar's picture gives way first
 
-The "N need(s) you" label wraps onto two lines rather than forcing the bar wider. The 1000 pt main window minimum and the TopBarFitTests thresholds stay as they are.
+When the top bar is squeezed, the busiest-state picture shrinks before anything else; tiles and buttons keep their size and the 1000 pt main window minimum stays. (The file name is the slug MASON assigned.)

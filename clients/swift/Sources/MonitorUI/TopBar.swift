@@ -43,7 +43,7 @@ struct TopBar: View {
                             StateIcon(state: "needs_attention")
                             Text("\(model.attention) need\(model.attention == 1 ? "s" : "") you")
                                 .font(theme.body(.semibold)).foregroundStyle(theme.attention)
-                                .multilineTextAlignment(.leading).fixedSize(horizontal: false, vertical: true)
+                                .lineLimit(1).fixedSize()
                         }
                     }
                     .buttonStyle(.plain)
@@ -124,9 +124,11 @@ extension TopBar {
             let side = topBarMascotSide(illustration: theme.illustration, bar: theme.tileHeight * 2 + theme.spacingSmall)
             Button { model.topBarMascotClicked() } label: {
                 img.resizable().interpolation(.high).aspectRatio(contentMode: .fit)
-                    .frame(width: side, height: side)
+                    .frame(minWidth: 0, idealWidth: side, maxWidth: side, minHeight: side, maxHeight: side)
             }
             .buttonStyle(.plain)
+            // The picture gives way first in a narrow window: the tiles and buttons never do.
+            .layoutPriority(-2)
             .help(model.topBarMascotTooltip)
             .accessibilityLabel(model.topBarMascotTooltip)
             .accessibilityIdentifier("topbar-mascot:\(choice.id)")
