@@ -107,7 +107,7 @@ private fun CpuHistoryGraph(model: MonitorModel) {
                 sp.label,
                 style = theme.body(if (sp == model.cpuSpan) FontWeight.Bold else FontWeight.Normal,
                     if (sp == model.cpuSpan) theme.text else theme.accent),
-                modifier = Modifier.clickable { model.setCpuSpan(sp) }.testTag("cpu-span:${sp.label}"),
+                modifier = Modifier.clickable { model.pickCpuSpan(sp) }.testTag("cpu-span:${sp.label}"),
             )
         }
     }

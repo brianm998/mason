@@ -268,7 +268,7 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
         Linkify.segments(text, { isKnownTask(it) }, taskDetail?.ci_links ?: emptyList())
 
     /** Pick the CPU graph's span and ask the daemon for that range. */
-    fun setCpuSpan(s: CpuSpan) {
+    fun pickCpuSpan(s: CpuSpan) {
         if (s == cpuSpan) return
         cpuSpan = s
         cpuHistory = null
