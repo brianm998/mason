@@ -246,9 +246,7 @@ mod tests {
             .points
             .iter()
             // The first minute is partial (11 readings, not 12), so its mean is off.
-            .filter(|p| {
-                p.at_ms >= MINUTE_MS && p.at_ms % MINUTE_MS == 0 && p.shares.len() == 2
-            })
+            .filter(|p| p.at_ms >= MINUTE_MS && p.at_ms % MINUTE_MS == 0 && p.shares.len() == 2)
             .collect();
         assert!(full.len() > 100);
         for p in full.iter().take(100) {
