@@ -881,6 +881,7 @@ pub fn step_schema(kind: StepType, def: &Definition) -> Value {
                 "agent".into(),
                 json!({"type": "string", "title": "Agent profile", "enum": profiles}),
             );
+            props.insert("prompt".into(), json!({"type": "string", "title": "Prompt file", "description": "A file under .mason/prompts/ with this step's own instructions, read from the base commit."}));
             props.insert("model".into(), json!({"type": "string", "title": "Model", "description": "Overrides the profile's model."}));
             props.insert(
                 "effort".into(),
@@ -922,6 +923,7 @@ pub fn step_schema(kind: StepType, def: &Definition) -> Value {
         [
             "category",
             "agent",
+            "prompt",
             "model",
             "effort",
             "budget",
@@ -1758,6 +1760,8 @@ count = 1
             .unwrap()
             .contains(&json!("deep")));
         assert!(a["properties"]["budget"].is_object());
+        assert!(a["properties"]["prompt"].is_object());
+        assert!(s["properties"]["prompt"].is_null());
         assert!(step_schema(StepType::Landing, &d)["properties"]["suites"].is_null());
         let v = step_values(TEXT, "test");
         assert_eq!(

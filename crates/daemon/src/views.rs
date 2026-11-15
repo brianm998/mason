@@ -729,21 +729,11 @@ impl<'a> Ctx<'a> {
         // Queued is the real queue: what the daemon would admit first is on
         // top (tasks that can go, then held/paused/not_before ones, each by
         // `queued_rank`). Every other section has the task that entered it
-        // most recently on top.
+        // most recently on top, tasks that are not waiting above those that are.
         if s == State::Queued {
-            tasks.sort_by_cached_key(|t| {
-                (
-                    t.activity != Activity::Waiting(WaitReason::Slot),
-                    self.d.queued_rank(t),
-                )
-            });
+            sort_queued(&mut tasks, |t| self.d.queued_rank(t));
         } else {
-            tasks.sort_by_key(|t| {
-                (
-                    std::cmp::Reverse(t.state_entered_at),
-                    std::cmp::Reverse(t.id),
-                )
-            });
+            sort_unqueued(&mut tasks);
         }
         SidebarSection {
             state: state_name(s).into(),
@@ -799,6 +789,7 @@ impl<'a> Ctx<'a> {
             evidence: c.evidence,
             hash,
             origin: c.origin.name().into(),
+            multi_select: c.multi_select,
         })
     }
 
@@ -1378,6 +1369,100 @@ pub fn summarize(kind: &EventKind) -> (String, String, u64) {
     };
     let _ = card::ASK_MAX;
     (name, summary, task)
+}
+
+/// Whether a task is waiting: the same activities `why_waiting` explains.
+fn is_waiting(t: &Task) -> bool {
+    matches!(
+        t.activity,
+        Activity::Waiting(_) | Activity::Held(_) | Activity::Paused
+    )
+}
+
+/// Order of the Queued section: tasks waiting for a slot first, then by rank.
+fn sort_queued<R: Ord>(tasks: &mut [&Task], rank: impl Fn(&Task) -> R) {
+    tasks.sort_by_cached_key(|t| (t.activity != Activity::Waiting(WaitReason::Slot), rank(t)));
+}
+
+/// Order of every section but Queued: tasks that are not waiting first, then
+/// the one that entered the state most recently, then the higher id.
+fn sort_unqueued(tasks: &mut [&Task]) {
+    tasks.sort_by_key(|t| {
+        (
+            is_waiting(t),
+            std::cmp::Reverse(t.state_entered_at),
+            std::cmp::Reverse(t.id),
+        )
+    });
+}
+
+#[cfg(test)]
+mod section_order_tests {
+    use super::*;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    fn task(id: u64, at: u64, activity: Activity) -> Task {
+        Task {
+            id: TaskId(id),
+            project: ProjectId(1),
+            title: String::new(),
+            body: String::new(),
+            priority: Priority::Normal,
+            trust: TrustSource::Owner,
+            enqueued_at: Timestamp(0),
+            state_entered_at: Timestamp(at),
+            state: State::Testing,
+            activity,
+            landed: None,
+            explored: false,
+            blockers: BTreeSet::new(),
+            not_before: None,
+            paused: false,
+            failures: 0,
+            attempts: BTreeMap::new(),
+            decision: None,
+            cancel_keeps_branch: false,
+            failure: None,
+            failure_class: None,
+            def: String::new(),
+            step: String::new(),
+            step_attempts: BTreeMap::new(),
+            route: None,
+            explore_returns: 0,
+            approved: false,
+            force_explore: false,
+        }
+    }
+
+    #[test]
+    fn tasks_that_are_not_waiting_come_first_then_newest_first() {
+        let a = task(1, 10, Activity::Running);
+        let b = task(
+            2,
+            30,
+            Activity::Waiting(WaitReason::On("a test slot".into())),
+        );
+        let c = task(3, 30, Activity::Running);
+        let d = task(4, 20, Activity::Paused);
+        let e = task(5, 25, Activity::Held(BTreeSet::from([TaskId(9)])));
+        let mut v = vec![&a, &b, &c, &d, &e];
+        sort_unqueued(&mut v);
+        let ids: Vec<u64> = v.iter().map(|t| t.id.0).collect();
+        assert_eq!(ids, vec![3, 1, 2, 5, 4]);
+    }
+
+    #[test]
+    fn queued_keeps_slot_waiters_first_then_rank_order() {
+        let a = task(1, 50, Activity::Paused);
+        let b = task(2, 10, Activity::Waiting(WaitReason::Slot));
+        let c = task(3, 40, Activity::Running);
+        let d = task(4, 20, Activity::Waiting(WaitReason::Slot));
+        let mut v = vec![&a, &b, &c, &d];
+        // Rank is the id here: neither the activity order nor age enters it.
+        sort_queued(&mut v, |t| t.id.0);
+        let ids: Vec<u64> = v.iter().map(|t| t.id.0).collect();
+        assert_eq!(ids, vec![2, 4, 1, 3]);
+    }
 }
 
 #[cfg(test)]

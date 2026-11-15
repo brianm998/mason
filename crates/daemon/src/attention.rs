@@ -68,6 +68,7 @@ pub fn card_of(d: &Daemon, t: &Task) -> Option<(Card, String)> {
             key: String::new(),
             origin: card::Origin::Agent,
             problems: vec![],
+            multi_select: false,
         });
     Some((card, card::hash(text)))
 }
@@ -119,13 +120,36 @@ pub fn answer(
             "stale: that card has changed since you looked (it was answered, replaced or asked again). Look at the current one.".into(),
         ));
     }
-    let text = match card.pick(answer) {
-        Some(o) => o.label.clone(),
-        None if answer.trim().is_empty() => return Err((400, "an answer needs text".into())),
-        None if answer.trim().parse::<usize>().is_ok() => {
-            return Err((400, format!("there is no option {}", answer.trim())))
+    let multi = if card.multi_select {
+        let a = answer.trim();
+        let is_list = !a.is_empty()
+            && a.chars()
+                .all(|c| c.is_ascii_digit() || c == ',' || c.is_whitespace());
+        if is_list {
+            let picked = card.pick_many(a).map_err(|e| (400, e))?;
+            Some(
+                picked
+                    .iter()
+                    .map(|o| o.label.as_str())
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            )
+        } else {
+            None
         }
-        None => format!("Other: {}", answer.trim()),
+    } else {
+        None
+    };
+    let text = match multi {
+        Some(t) => t,
+        None => match card.pick(answer) {
+            Some(o) => o.label.clone(),
+            None if answer.trim().is_empty() => return Err((400, "an answer needs text".into())),
+            None if answer.trim().parse::<usize>().is_ok() => {
+                return Err((400, format!("there is no option {}", answer.trim())))
+            }
+            None => format!("Other: {}", answer.trim()),
+        },
     };
     let def = d
         .pinned_def(&t.def)

@@ -241,6 +241,7 @@ impl FailClass {
             || r.contains("the command was lost")
             || r.contains("the step host was lost")
             || r.contains("step host did not start")
+            || (r.starts_with("the step ran out of time") && r.contains("mostly waiting"))
             || r.starts_with("fetching the remote failed")
             || (r.contains("git fetch") && r.contains("timed out"))
             || (r.starts_with("the agent failed: the CLI exited with status")
