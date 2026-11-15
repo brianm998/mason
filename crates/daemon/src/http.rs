@@ -2881,12 +2881,23 @@ async fn lease_open(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res
             .map_err(pool_err)?;
         return Ok(Json(json!({"id": id})));
     }
+    let cmd = run_command(&b);
     let d2 = d.clone();
     let (id, th) = d
         .pool
         .run(move || {
             let standing = task.and_then(|t| d2.lease_standing(TaskId(t)));
-            let id = d2.broker.lease_open_as(&label, &uses, standing);
+            // How long this command took before (s400), so a drain it holds can be passed.
+            let expected = cmd.as_ref().and_then(|(c, cwd)| {
+                let (project, key) = run_key(&d2, task, c, cwd);
+                d2.store
+                    .suite_estimate(&project, &key, crate::runtimes::PHASE)
+                    .ok()
+                    .flatten()
+            });
+            let id = d2
+                .broker
+                .lease_open_expecting(&label, &uses, standing, expected);
             d2.broker.lease_set_pid(id, pid);
             if let (Some(t), Some(_)) = (task, standing) {
                 d2.broker.lease_set_task(id, TaskId(t));
@@ -2944,11 +2955,47 @@ async fn lease_poll(Shared(d): Shared<Arc<Daemon>>, Path(id): Path<u64>) -> Res 
     }))
 }
 
-async fn lease_release(Shared(d): Shared<Arc<Daemon>>, Path(id): Path<u64>) -> Res {
+/// The command and working directory a `mason run` request or release names.
+fn run_command(b: &Value) -> Option<(Vec<String>, String)> {
+    let cmd: Vec<String> = b["cmd"]
+        .as_array()?
+        .iter()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect();
+    (!cmd.is_empty()).then(|| (cmd, b["cwd"].as_str().unwrap_or_default().to_string()))
+}
+
+/// The project and normalized command a `mason run` time is kept under (s400).
+fn run_key(d: &Daemon, task: Option<u64>, cmd: &[String], cwd: &str) -> (String, String) {
+    let project = task
+        .and_then(|t| d.task_project_name(TaskId(t)))
+        .unwrap_or_else(|| "-".to_string());
+    (project, crate::runtimes::normalize(cmd, cwd))
+}
+
+async fn lease_release(
+    Shared(d): Shared<Arc<Daemon>>,
+    Path(id): Path<u64>,
+    body: Option<Json<Value>>,
+) -> Res {
+    let b = body.map(|Json(v)| v).unwrap_or(Value::Null);
     let d2 = d.clone();
     let had = d
         .pool
-        .run(move || d2.broker.lease_close(id))
+        .run(move || {
+            // A command that ran to the end on its own says how long it took (s400).
+            if let (Some((cmd, cwd)), Some(ms)) = (run_command(&b), b["ran_ms"].as_u64()) {
+                let (project, key) = run_key(&d2, b["task"].as_u64(), &cmd, &cwd);
+                let _ = d2.store.record_suite_time(
+                    &project,
+                    &key,
+                    crate::runtimes::PHASE,
+                    ms,
+                    crate::daemon::now_ms(),
+                );
+            }
+            d2.broker.lease_close(id)
+        })
         .await
         .map_err(pool_err)?;
     Ok(Json(json!({"released": had})))
