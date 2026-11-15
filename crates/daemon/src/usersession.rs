@@ -401,16 +401,7 @@ mod tests {
 
     #[test]
     fn the_draft_names_the_task_its_failure_and_what_is_expected() {
-        let t = draft_prompt(
-            7,
-            "Fix it",
-            "The body",
-            "failed",
-            "tests red",
-            "",
-            None,
-            "",
-        );
+        let t = draft_prompt(7, "Fix it", "The body", "failed", "tests red", "", None, "");
         assert!(t.contains("task #7") && t.contains("Fix it") && t.contains("The body"));
         assert!(t.contains("State: failed") && t.contains("tests red"));
         assert!(t.contains("(nothing was recorded)") && t.contains("(no logs)"));

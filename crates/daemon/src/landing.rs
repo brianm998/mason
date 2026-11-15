@@ -1816,6 +1816,20 @@ impl Runner {
             };
             let legacy = self.legacy_cmd(&def);
             let wt_for_cmd = int_wt.clone();
+            // Every task in the batch had its test step skipped by the owner: when the base
+            // moves, the batch is rebuilt but not re-tested (s429). Its tests were never run
+            // for it, so the re-test was the only full run, and it held the queue for half
+            // an hour each time anyone pushed to the base during a backlog.
+            let tests_skipped = def
+                .steps
+                .iter()
+                .find(|s| s.kind == mason_definition::StepType::Test)
+                .is_some_and(|st| {
+                    !active.is_empty()
+                        && active.iter().all(|t| {
+                            crate::suites::skip_for(&self.d, TaskId(t.id), "", &st.name).is_some()
+                        })
+                });
             let mut reverify = |moved: &[String]| -> bool {
                 if force {
                     return true;
@@ -1851,6 +1865,14 @@ impl Runner {
                             }
                         };
                         match crate::hostedcheck::run(d, &spec("rebuild", build)) {
+                            Ok(o) if o.passed && tests_skipped => {
+                                tracing::info!(
+                                    batch = batch_id,
+                                    "the base moved: rebuilt; not re-tested, every task's \
+                                     testing was skipped"
+                                );
+                                return true;
+                            }
                             Ok(o) if o.passed => {}
                             Ok(_) => return false,
                             Err(e) => {

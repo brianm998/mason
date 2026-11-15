@@ -1528,7 +1528,9 @@ fn main() {
             }
             let sub = a.pos().unwrap_or_else(|| "list".into());
             let sid = |a: &mut Args| -> u64 {
-                let s = a.pos().unwrap_or_else(|| die("which session? give its number"));
+                let s = a
+                    .pos()
+                    .unwrap_or_else(|| die("which session? give its number"));
                 s.trim_start_matches('#')
                     .parse()
                     .unwrap_or_else(|_| die(&format!("{s:?} is not a session number")))
@@ -1602,7 +1604,9 @@ fn main() {
                 "send" => {
                     let id = sid(&mut a);
                     let wait = !a.flag("--no-wait");
-                    let text = a.pos().unwrap_or_else(|| die("send what? text, or - for stdin"));
+                    let text = a
+                        .pos()
+                        .unwrap_or_else(|| die("send what? text, or - for stdin"));
                     finish(&a);
                     let text = if text == "-" {
                         let mut t = String::new();
@@ -1628,8 +1632,13 @@ fn main() {
                     let mut last = seen;
                     loop {
                         std::thread::sleep(std::time::Duration::from_millis(300));
-                        let r = or_die(d.call("GET", &format!("/sessions/{id}?after={last}"), None));
-                        for m in r["session"]["messages"].as_array().cloned().unwrap_or_default() {
+                        let r =
+                            or_die(d.call("GET", &format!("/sessions/{id}?after={last}"), None));
+                        for m in r["session"]["messages"]
+                            .as_array()
+                            .cloned()
+                            .unwrap_or_default()
+                        {
                             last = m["id"].as_u64().unwrap_or(last);
                             if m["role"] != "owner" {
                                 line(&m);
@@ -1646,7 +1655,9 @@ fn main() {
                     or_die(d.call("POST", &format!("/sessions/{id}/end"), Some(&json!({}))));
                     println!("ended session #{id}");
                 }
-                other => die(&format!("mason session {other:?}: list, open, show, send or end")),
+                other => die(&format!(
+                    "mason session {other:?}: list, open, show, send or end"
+                )),
             }
         }
         "alerts" => {
@@ -3241,7 +3252,11 @@ fn main() {
                     or_die(d.call("POST", &format!("/tasks/{id}/{sub}"), None));
                     println!(
                         "Task #{id} {}",
-                        if sub == "defer" { "deferred" } else { "back in Proposed" }
+                        if sub == "defer" {
+                            "deferred"
+                        } else {
+                            "back in Proposed"
+                        }
                     );
                 }
                 "approve" => {

@@ -8,6 +8,8 @@ mode     = "direct"
 # per task for 1.4 tasks per batch). 30s still lets tasks that finish together
 # share a batch.
 window   = "30s"
-# 10 while the owner lands the MASON backlog untested, then tests it in one run (2026-11-15).
+# Up to 10 tasks per batch (owner, 2026-11-15). Tasks arrive tested, so a red batch is rare and
+# is split to find the culprit (s394); a larger batch means fewer build cycles when several
+# tasks finish together.
 max_size = 10
 parallel = 1

@@ -112,10 +112,15 @@ struct HomePage: View {
                         SessionStepper(model: model)
                     }
                     section("Landing queue", theme: theme) {
-                        let queue = model.home?.stages.first { $0.state == "landing" }?.rows ?? []
-                        if queue.isEmpty { Text("Nothing is landing.").font(theme.body()).foregroundStyle(theme.muted) }
-                        ForEach(queue, id: \.id) { r in
-                            Button("\(r.key) \(r.title)") { model.go(.task(r.id)) }.buttonStyle(.link).font(theme.body())
+                        let items = model.landing?.items ?? []
+                        if !items.isEmpty {
+                            LandingItems(model: model, items: items)
+                        } else {
+                            let queue = model.home?.stages.first { $0.state == "landing" }?.rows ?? []
+                            if queue.isEmpty { Text("Nothing is landing.").font(theme.body()).foregroundStyle(theme.muted) }
+                            ForEach(queue, id: \.id) { r in
+                                Button("\(r.key) \(r.title)") { model.go(.task(r.id)) }.buttonStyle(.link).font(theme.body())
+                            }
                         }
                     }
                 }
@@ -541,6 +546,9 @@ struct LandingPage: View {
                             Button("\(r.key) \(r.title)") { model.go(.task(r.id)) }.buttonStyle(.link)
                         }
                     }
+                    if !l.items.isEmpty {
+                        section("Landing tasks", theme: theme) { LandingItems(model: model, items: l.items) }
+                    }
                     section("Batches", theme: theme) {
                         if l.batches.isEmpty { Text("No batch has formed yet.").font(theme.body()).foregroundStyle(theme.muted) }
                         ForEach(l.batches, id: \.id) { b in
@@ -796,4 +804,52 @@ struct HealthConnectionLine: View {
         Text(model.connected ? "Connected to masond. Event log at #\(live.lastSeq)." : "Not connected.")
             .font(theme.body())
     }
+}
+
+/// "Landing now" (in a batch) above "Queued", one line per task.
+struct LandingItems: View {
+    @ObservedObject var model: MonitorModel
+    let items: [Mason_V1_TaskLanding]
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        let g = landingGroups(items)
+        VStack(alignment: .leading, spacing: theme.spacing) {
+            if !g.landing.isEmpty {
+                Text("Landing now").font(theme.body()).foregroundStyle(theme.muted)
+                ForEach(g.landing, id: \.task) { i in
+                    Button(landingItemText(i)) { model.go(.task(i.task)) }.buttonStyle(.link).font(theme.body())
+                }
+            }
+            if !g.queued.isEmpty {
+                Text("Queued").font(theme.body()).foregroundStyle(theme.muted)
+                ForEach(g.queued, id: \.task) { i in
+                    Button(landingItemText(i)) { model.go(.task(i.task)) }.buttonStyle(.link).font(theme.body())
+                }
+            }
+        }
+    }
+}
+
+/// Tasks in a batch, then tasks still queued (in queue order).
+func landingGroups(_ items: [Mason_V1_TaskLanding]) -> (landing: [Mason_V1_TaskLanding], queued: [Mason_V1_TaskLanding]) {
+    (items.filter { $0.status == "in_batch" },
+     items.filter { $0.status != "in_batch" }.sorted { $0.position < $1.position })
+}
+
+/// "▰▰▱▱" for phase 2 of 4.
+func phaseBar(_ index: UInt32, _ total: UInt32) -> String {
+    let n = Int(min(index, total))
+    return String(repeating: "▰", count: n) + String(repeating: "▱", count: Int(total) - n)
+}
+
+/// "#5 Title: batch #3, running suites, phase 2 of 4 ▰▰▱▱, CI green, 4 min" or
+/// "#6 Title: queued #1, behind 1 batch".
+func landingItemText(_ i: Mason_V1_TaskLanding) -> String {
+    if i.status == "in_batch" {
+        var t = "\(i.key) \(i.title): batch #\(i.batch), \(i.phase), phase \(i.phaseIndex) of \(i.phaseTotal) \(phaseBar(i.phaseIndex, i.phaseTotal))"
+        if !i.ciState.isEmpty { t += ", CI \(i.ciState)" }
+        return t + ", \(i.phaseMs / 60000) min"
+    }
+    return "\(i.key) \(i.title): queued #\(i.position), \(i.why)"
 }

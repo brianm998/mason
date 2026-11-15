@@ -427,3 +427,51 @@ fn the_retest_builds_holding_compile_then_tests_without_it() {
     wait_for("the batch to land", 90, || w.landed(t));
     assert!(w.on_main("x/m.txt") && w.on_main("other.txt"));
 }
+
+#[test]
+fn a_batch_whose_testing_was_skipped_is_rebuilt_but_not_retested_when_the_base_moves() {
+    // s429: the owner skipped every task's test step to land a backlog. A base move used to
+    // re-test such a batch in full, the only full run it got, holding the queue for half an
+    // hour; now it is rebuilt and lands.
+    let gen_started;
+    let built;
+    let tested;
+    {
+        let probe = tempfile::tempdir().unwrap();
+        gen_started = probe.path().join("started");
+        built = probe.path().join("built");
+        tested = probe.path().join("tested");
+        std::mem::forget(probe);
+    }
+    let gen = format!("touch {}\nsleep 2\n", gen_started.display());
+    let build = format!("build = \"touch {}\"\n", built.display());
+    let test_cmd = format!("touch {}", tested.display());
+    let w = world_full(
+        "window = \"1s\"\n",
+        &|_| build.clone(),
+        &[("scripts/gen-status.sh", &gen)],
+        &test_cmd,
+        true,
+    );
+    let t = w.task("skipped", &[("x/s.txt", "1")]);
+    w.d.store
+        .add_debt(
+            t.0,
+            "scratch",
+            "step:test",
+            "owner skipped",
+            "brian",
+            false,
+            0,
+        )
+        .unwrap();
+    wait_for("the batch to be assembled", 90, || gen_started.exists());
+    w.s.push_files(&[("other.txt", "o")], "the base moves");
+    wait_for("the batch to land", 90, || w.landed(t));
+    assert!(w.on_main("x/s.txt") && w.on_main("other.txt"));
+    assert!(built.exists(), "the moved base was rebuilt");
+    assert!(
+        !tested.exists(),
+        "a batch with its testing skipped was re-tested"
+    );
+}

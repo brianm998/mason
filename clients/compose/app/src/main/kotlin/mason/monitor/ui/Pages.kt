@@ -173,9 +173,14 @@ fun HomePage(model: MonitorModel) {
                 SessionStepper(model)
             }
             Section("Landing queue") {
-                val queue = h?.stages?.firstOrNull { it.state == "landing" }?.rows.orEmpty()
-                if (queue.isEmpty()) Text("Nothing is landing.", style = theme.body(color = theme.muted))
-                queue.forEach { r -> Link("${r.key} ${r.title}") { model.go(Page.Task(r.id)) } }
+                val items = model.landing?.items.orEmpty()
+                if (items.isNotEmpty()) {
+                    LandingItems(model, items)
+                } else {
+                    val queue = h?.stages?.firstOrNull { it.state == "landing" }?.rows.orEmpty()
+                    if (queue.isEmpty()) Text("Nothing is landing.", style = theme.body(color = theme.muted))
+                    queue.forEach { r -> Link("${r.key} ${r.title}") { model.go(Page.Task(r.id)) } }
+                }
             }
         }
         CpuSection(model)
@@ -460,6 +465,7 @@ fun LandingPage(model: MonitorModel) {
                 }
                 l.queue.forEach { r -> Link("${r.key} ${r.title}") { model.go(Page.Task(r.id)) } }
             }
+            if (l.items.isNotEmpty()) Section("Landing tasks") { LandingItems(model, l.items) }
             Section("Batches") {
                 if (l.batches.isEmpty()) Text("No batch has formed yet.", style = theme.body(color = theme.muted))
                 l.batches.forEach { b ->
@@ -667,6 +673,40 @@ fun MascotPicture(id: String, size: androidx.compose.ui.unit.Dp, modifier: Modif
     androidx.compose.foundation.Image(bmp, contentDescription = null, modifier = modifier.size(size))
 }
 
+/** "Landing now" (in a batch) above "Queued", one line per task. */
+@Composable
+internal fun LandingItems(model: MonitorModel, items: List<mason.v1.TaskLanding>) {
+    val theme = LocalTheme.current
+    val g = landingGroups(items)
+    if (g.first.isNotEmpty()) {
+        Text("Landing now", style = theme.body(color = theme.muted))
+        g.first.forEach { i -> Link(landingItemText(i)) { model.go(Page.Task(i.task)) } }
+    }
+    if (g.second.isNotEmpty()) {
+        Text("Queued", style = theme.body(color = theme.muted))
+        g.second.forEach { i -> Link(landingItemText(i)) { model.go(Page.Task(i.task)) } }
+    }
+}
+
+/** Tasks in a batch, then tasks still queued (in queue order). */
+fun landingGroups(items: List<mason.v1.TaskLanding>): Pair<List<mason.v1.TaskLanding>, List<mason.v1.TaskLanding>> =
+    items.filter { it.status == "in_batch" } to items.filter { it.status != "in_batch" }.sortedBy { it.position }
+
+/** "▰▰▱▱" for phase 2 of 4. */
+fun phaseBar(index: Int, total: Int): String {
+    val n = index.coerceIn(0, total)
+    return "▰".repeat(n) + "▱".repeat(total - n)
+}
+
+fun landingItemText(i: mason.v1.TaskLanding): String {
+    if (i.status == "in_batch") {
+        var t = "${i.key} ${i.title}: batch #${i.batch}, ${i.phase}, phase ${i.phase_index} of ${i.phase_total} ${phaseBar(i.phase_index, i.phase_total)}"
+        if (i.ci_state.isNotEmpty()) t += ", CI ${i.ci_state}"
+        return t + ", ${i.phase_ms / 60000} min"
+    }
+    return "${i.key} ${i.title}: queued #${i.position}, ${i.why}"
+}
+
 /**
  * Settings (s430): proposal policy, notification routes with a Test button, schedules with Run now,
  * and the tracker. Every control sends one small change to the daemon, which writes it to the file
@@ -738,6 +778,7 @@ fun SettingsPage(model: MonitorModel) {
                 }
             }
         }
+        DevicesSection(model)
     }
 }
 

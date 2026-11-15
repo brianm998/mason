@@ -44,6 +44,11 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     var settings by mutableStateOf<SettingsSnapshot?>(null)
     var notifySettings by mutableStateOf<NotifySettings?>(null)
     var settingsNotice by mutableStateOf<String?>(null)
+    /** The Devices section (s433): LAN state, paired devices, the code on show, and what the last action said. */
+    var lanStatus by mutableStateOf<LanStatus?>(null)
+    var devices by mutableStateOf<DeviceList?>(null)
+    var pairOffer by mutableStateOf<PairOffer?>(null)
+    var devicesNotice by mutableStateOf<String?>(null)
     var lastSeq by mutableStateOf(0L)
     var connected by mutableStateOf(false)
     /** Down and being retried: the daemon is restarting or has not answered. Shown as "reconnecting", never as an error. */
@@ -648,6 +653,25 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
         raw("POST", "/notify/test", id = "notify-test", json = SettingsPayload.test(channel))
     }
 
+    /** Ask for the LAN state and the paired devices. */
+    fun loadDevices() {
+        raw("GET", "/lan", id = "lan")
+        raw("GET", "/devices", id = "devices")
+    }
+
+    /** Make a pairing code for a new device; [role] is "owner" or "viewer". */
+    fun issuePairCode(role: String) {
+        devicesNotice = null
+        raw("POST", "/pair/codes", id = "pair-code", json = Codec.body(mapOf("role" to role)))
+    }
+
+    fun closePairing() { pairOffer = null }
+
+    fun revokeDevice(id: Long) {
+        devicesNotice = null
+        raw("POST", "/devices/$id/revoke", id = "device-revoke:$id", json = "{}")
+    }
+
     fun runSchedule(name: String) {
         settingsNotice = null
         raw("POST", "/schedules/run", id = "schedule-run", json = SettingsPayload.runSchedule(editorProject, name))
@@ -815,6 +839,17 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
             if (r.id == "health" && r.ok) health = HealthSnapshot.parse(r.json)
             if (r.id == "introspection" && r.ok) introspection = IntrospectionSnapshot.parse(r.json)
             if (r.id == "settings" && r.ok) settings = SettingsSnapshot.parse(r.json)
+            if (r.id == "lan" && r.ok) lanStatus = LanStatus.parse(r.json)
+            if (r.id == "devices" && r.ok) devices = DeviceList.parse(r.json)
+            if (r.id == "pair-code") {
+                if (r.ok) {
+                    pairOffer = PairOffer.parse(r.json, System.currentTimeMillis())
+                    if (pairOffer == null) devicesNotice = "The daemon sent a pairing code this monitor could not read."
+                } else devicesNotice = r.error
+            }
+            if (r.id.startsWith("device-revoke:")) {
+                if (r.ok) { devicesNotice = "Revoked."; loadDevices() } else devicesNotice = r.error
+            }
             if (r.id == "notify-settings" && r.ok) notifySettings = NotifySettings.parse(r.json)
             if (r.id in SETTINGS_RESULTS) {
                 settingsNotice = if (r.ok) SettingsPayload.done(r.id) else r.error
