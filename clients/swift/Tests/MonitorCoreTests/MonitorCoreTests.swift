@@ -648,7 +648,11 @@ final class MonitorCoreTests: XCTestCase {
         m.apply(update(latest: "bbb222", phase: "failed", error: "an earlier try"))
         m.updateMonitor()
         XCTAssertEqual(sent.last?.raw.path, "/update/monitor")
-        XCTAssertEqual(sent.last?.raw.json, "{\"kind\":\"swift\"}")
+        let body = (sent.last?.raw.json.data(using: .utf8))
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: String] }
+        XCTAssertEqual(body?["kind"], "swift")
+        XCTAssertEqual(body?["own_version"], "aaa111")
+        XCTAssertEqual(body?["own_path"], "")
         XCTAssertNotNil(m.updating)
         m.apply(update(latest: "bbb222", phase: "failed", error: "an earlier try"))
         XCTAssertNotNil(m.updating, "a header from before the daemon answered is not the answer")
