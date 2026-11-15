@@ -151,6 +151,45 @@ final class MonitorCoreTests: XCTestCase {
         XCTAssertEqual(h, before)
     }
 
+    func testBackAndForwardRestoreEachEntrysScroll() {
+        var h = NavHistory()
+        h.go(.task(5), scroll: 300)           // left Home at 300
+        XCTAssertEqual(h.restore, 0, "a new selection starts at the top")
+        h.goBack(scroll: 40)                  // left task 5 at 40
+        XCTAssertEqual(h.current, .home)
+        XCTAssertEqual(h.restore, 300)
+        h.goForward(scroll: 300)
+        XCTAssertEqual(h.current, .task(5))
+        XCTAssertEqual(h.restore, 40)
+    }
+
+    func testTheSamePageTwiceKeepsTwoPositions() {
+        var h = NavHistory()
+        h.go(.task(5), scroll: 100); h.go(.home, scroll: 10); h.go(.task(9), scroll: 700)
+        h.goBack(scroll: 1)
+        XCTAssertEqual(h.restore, 700)
+        h.goBack(scroll: 2)
+        XCTAssertEqual(h.current, .task(5))
+        XCTAssertEqual(h.restore, 10)
+        h.goBack(scroll: 3)
+        XCTAssertEqual(h.current, .home)
+        XCTAssertEqual(h.restore, 100)
+    }
+
+    func testGoHomeFromHomeKeepsItsPositionAndSelectingClearsForward() {
+        var h = NavHistory()
+        h.go(.landing, scroll: 5); h.goBack(scroll: 9)
+        XCTAssertEqual(h.restore, 5)
+        let before = h
+        h.goHome(scroll: 77)
+        XCTAssertEqual(h, before, "going where you already are changes nothing")
+        h.go(.usage, scroll: 77)
+        XCTAssertFalse(h.canGoForward)
+        XCTAssertTrue(h.forwardScroll.isEmpty)
+        h.goBack()
+        XCTAssertEqual(h.restore, 77)
+    }
+
     func testDeepLinksRoundTripAndRefuseOtherThings() {
         for p in [Page.home, .task(204), .landing, .usage, .pipeline, .health, .settings] {
             XCTAssertEqual(Page.from(url: p.url), p, "\(p)")

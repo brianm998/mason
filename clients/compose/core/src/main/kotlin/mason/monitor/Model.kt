@@ -297,7 +297,22 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     val canGoBack get() = history.canGoBack
     val canGoForward get() = history.canGoForward
 
-    fun go(p: Page) { history = history.go(p); subscribe?.invoke() }
+    /**
+     * Where the shown page is scrolled now. Plain, not state: it changes every frame of a
+     * scroll, and is saved into the history only when the page is left.
+     */
+    var liveScroll: Int = 0
+        private set
+    fun reportScroll(y: Int) { liveScroll = maxOf(0, y) }
+
+    private fun navigate(f: (NavHistory, Int) -> NavHistory) {
+        val before = history.visit
+        history = f(history, liveScroll)
+        if (history.visit != before) liveScroll = history.restore
+        subscribe?.invoke()
+    }
+
+    fun go(p: Page) = navigate { h, s -> h.go(p, s) }
     /** Whether [n] is a task this monitor has heard of (in the sidebar, or named by the open task's page). */
     fun isKnownTask(n: Long): Boolean {
         if (sidebar?.sections?.any { sec -> sec.rows.any { it.id == n } } == true) return true
@@ -317,9 +332,9 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
         cpuHistory = null
         subscribe?.invoke()
     }
-    fun goBack() { history = history.goBack(); subscribe?.invoke() }
-    fun goForward() { history = history.goForward(); subscribe?.invoke() }
-    fun goHome() { history = history.goHome(); subscribe?.invoke() }
+    fun goBack() = navigate { h, s -> h.goBack(s) }
+    fun goForward() = navigate { h, s -> h.goForward(s) }
+    fun goHome() = navigate { h, s -> h.goHome(s) }
     fun open(url: String) { Page.from(url)?.let(::go) }
 
     // ---- text scale ----
