@@ -226,23 +226,6 @@ fn answer_text(words: &[String]) -> String {
     words.join(" ")
 }
 
-#[cfg(test)]
-mod answer_tests {
-    use super::answer_text;
-
-    #[test]
-    fn a_list_of_options_is_one_answer() {
-        assert_eq!(answer_text(&["1,3".to_string()]), "1,3");
-        assert_eq!(answer_text(&["1".to_string(), "3".to_string()]), "1 3");
-        let mut a = super::Args {
-            rest: vec!["12".into(), "1,3".into(), "--as".into(), "me".into()],
-        };
-        assert_eq!(super::task_id(&mut a), 12);
-        assert_eq!(a.opt("--as").as_deref(), Some("me"));
-        assert_eq!(answer_text(&a.rest), "1,3");
-    }
-}
-
 fn task_id(a: &mut Args) -> u64 {
     let s = a
         .pos()
@@ -3656,5 +3639,22 @@ fn print_ci_watch(project: &str, w: &Value) {
                 ""
             },
         );
+    }
+}
+
+#[cfg(test)]
+mod answer_tests {
+    use super::answer_text;
+
+    #[test]
+    fn a_list_of_options_is_one_answer() {
+        assert_eq!(answer_text(&["1,3".to_string()]), "1,3");
+        assert_eq!(answer_text(&["1".to_string(), "3".to_string()]), "1 3");
+        let mut a = super::Args {
+            rest: vec!["12".into(), "1,3".into(), "--as".into(), "me".into()],
+        };
+        assert_eq!(super::task_id(&mut a), 12);
+        assert_eq!(a.opt("--as").as_deref(), Some("me"));
+        assert_eq!(answer_text(&a.rest), "1,3");
     }
 }
