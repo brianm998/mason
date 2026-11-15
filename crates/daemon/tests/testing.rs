@@ -732,3 +732,46 @@ fn paying_a_debt_runs_the_worktree_setup_first() {
         "the payment's checkout had no linked.flag: {paid:?}"
     );
 }
+
+#[test]
+fn a_task_test_step_runs_only_the_tests_its_change_needs_and_proves_nothing_for_the_tree() {
+    // s386: star #216 ran all 808 desktop tests for a 48-line change. A suite with narrow keys
+    // runs only the test units the change touches in a task's test step.
+    let runs = tempfile::tempdir().unwrap();
+    let log = runs.path().join("ran");
+    let definition = def(
+        &format!(
+            "narrow_command = \"echo narrowed {{tests}} >> {l}; echo 1..1; echo ok 1 - picked\"\n\
+             narrow_tests = \"tests/*_test.sh\"\n\
+             narrow_root = \"tests/\"",
+            l = log.display()
+        ),
+        "",
+        "",
+    );
+    let s = Scratch::new(
+        "sh checks.sh",
+        json!({"steps": {"develop": [commit(&format!("{HELLO} && echo '# changed' >> tests/a_test.sh"), "change a")]}}),
+    );
+    s.push_files(
+        &[
+            (".mason/mason.toml", &definition),
+            ("checks.sh", CHECKS),
+            ("tests/a_test.sh", "# a\n"),
+            ("tests/b_test.sh", "# b\n"),
+            ("tests/c_test.sh", "# c\n"),
+        ],
+        "project setup",
+    );
+    let d = start(&s);
+    let t = file_it(&d, "Narrowed");
+    wait_state(&d, t, State::Landed, 120);
+    let ran = std::fs::read_to_string(&log).unwrap_or_default();
+    assert_eq!(
+        ran.trim(),
+        "narrowed a_test",
+        "only the edited test unit ran: {ran:?}"
+    );
+    let (_, note) = closing(&d, t);
+    assert!(note.contains("narrowed to 1 of 3 test units"), "{note}");
+}

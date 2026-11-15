@@ -143,17 +143,31 @@ pub(crate) fn suite_uses(
     uses
 }
 
-/// Whether the step queues suite by suite (some selected suite builds first), instead of
-/// holding everything for the whole step.
+/// Whether the step queues suite by suite instead of holding everything for the whole step:
+/// some selected suite builds first, or needs the whole machine (s340), or two or more only
+/// build and can run side by side (s345). A step-wide lease with `exclusive` in it would keep
+/// every other build and test off the machine for the whole step, though only the exclusive
+/// suites need that.
 pub fn builds_per_suite(
     project: &crate::config::ProjectCfg,
     def: &Definition,
     step: &Step,
     branch: &str,
 ) -> bool {
-    plan(project, def, step, branch)
+    let chosen: Vec<Suite> = plan(project, def, step, branch)
+        .into_iter()
+        .filter(|s| s.selected)
+        .map(|s| s.suite)
+        .collect();
+    queues_per_suite(def, step, &chosen)
+}
+
+/// [`builds_per_suite`] over the selected suites.
+fn queues_per_suite(def: &Definition, step: &Step, chosen: &[Suite]) -> bool {
+    chosen
         .iter()
-        .any(|s| s.selected && s.suite.build.is_some())
+        .any(|s| s.build.is_some() || run_needs(def, step, s).exclusive)
+        || chosen.iter().filter(|s| compile_only(def, step, s)).count() > 1
 }
 
 /// What one suite's run holds in a step that queues suite by suite: the step's `uses`
@@ -299,6 +313,34 @@ struct Ran {
     timed_out: bool,
     /// The stall watcher killed the tree: why.
     stalled: Option<String>,
+    /// How long the command ran, from its host's own records (so a run collected late, after
+    /// a daemon restart, is not counted as instant). `None` when they cannot be read.
+    ran_ms: Option<u64>,
+    /// It ran only some of the suite's tests (s386): its time is not the suite's.
+    narrowed: bool,
+}
+
+/// Record how long a suite's build or run took, when it finished on its own (s385): the
+/// scheduler's estimates come from these.
+fn record_time(who: &Who, suite: &str, phase: &str, ran: &Ran) {
+    if ran.stop != Stop::No || ran.timed_out || ran.stalled.is_some() || ran.narrowed {
+        return;
+    }
+    if let Some(ms) = ran.ran_ms {
+        let _ = who
+            .d
+            .store
+            .record_suite_time(&who.project, suite, phase, ms, now_ms());
+    }
+}
+
+/// What a build or run of `suite` is expected to take at most, from its recorded times (s385).
+fn estimate(who: &Who, suite: &str, phase: &str) -> Option<u64> {
+    who.d
+        .store
+        .suite_estimate(&who.project, suite, phase)
+        .ok()
+        .flatten()
 }
 
 type Check = Arc<dyn Fn() -> Stop + Send + Sync>;
@@ -511,8 +553,19 @@ fn run_hosted_once(
             3 => Stop::Gone,
             _ => Stop::No,
         },
-        timed_out: why.load(Ordering::SeqCst) == 1,
+        // The timer may fire for a run that ended on its own before its limit: a restarted
+        // daemon re-attaching to a finished host counts the limit from the host's start (s355).
+        timed_out: why.load(Ordering::SeqCst) == 1
+            && mason_step_host::registry::ran_past(limit, &dir),
         stalled: stall.as_ref().and_then(|w| w.stalled()),
+        ran_ms: match (
+            mason_step_host::registry::HostInfo::read(&dir),
+            mason_step_host::registry::ExitRecord::read(&dir),
+        ) {
+            (Ok(h), Ok(e)) => Some(e.ended_ms.saturating_sub(h.started_ms)),
+            _ => None,
+        },
+        narrowed: false,
     })
 }
 
@@ -953,7 +1006,11 @@ fn baseline(
     lock: &crate::daemon::RepoLock,
     dev: Option<&Dev>,
 ) -> Option<(Vec<String>, Vec<String>)> {
-    if let Ok(Some(b)) = who.d.store.baseline(base, &suite.name) {
+    // A narrowed run's tests are this change's pick, not the suite's: never cached (s386).
+    if let Some(b) = (!suite.narrowed)
+        .then(|| who.d.store.baseline(base, &suite.name).ok().flatten())
+        .flatten()
+    {
         return Some(b);
     }
     let wt = who.log_dir.join(format!("base-{}", suite.name));
@@ -1011,10 +1068,12 @@ fn baseline(
         git::remove_worktree(c_repo, &wt);
     }
     let (failing, names, executed) = outcome?;
-    let _ = who
-        .d
-        .store
-        .put_baseline(base, &suite.name, &failing, &names, executed, now_ms());
+    if !suite.narrowed {
+        let _ = who
+            .d
+            .store
+            .put_baseline(base, &suite.name, &failing, &names, executed, now_ms());
+    }
     Some((failing, names))
 }
 
@@ -1187,6 +1246,11 @@ fn run_suite(
                 };
             }
         };
+        let ran = Ran {
+            narrowed: suite.narrowed,
+            ..ran
+        };
+        record_time(who, &suite.name, "run", &ran);
         match ran.stop {
             Stop::Skipped => {
                 env_down(who, def, suite, cwd, dev.as_ref());
@@ -1230,21 +1294,25 @@ fn run_suite(
                 let _ = d
                     .store
                     .note_passing(&suite.name, &j.results.names(), now_ms());
-                let _ = d.store.put_suite_green(
-                    &who.project,
-                    &suite.name,
-                    &tree.base,
-                    j.results.executed(),
-                    now_ms(),
-                );
-                let _ = d.store.put_evidence(
-                    &tree.tree,
-                    &suite.name,
-                    j.results.executed(),
-                    j.results.passed(),
-                    who.task.map_or(0, |t| t.0 .0),
-                    now_ms(),
-                );
+                // A narrowed run proves only the tests it ran: no evidence for the tree, and no
+                // record that the suite is green at its base (s386).
+                if !suite.narrowed {
+                    let _ = d.store.put_suite_green(
+                        &who.project,
+                        &suite.name,
+                        &tree.base,
+                        j.results.executed(),
+                        now_ms(),
+                    );
+                    let _ = d.store.put_evidence(
+                        &tree.tree,
+                        &suite.name,
+                        j.results.executed(),
+                        j.results.passed(),
+                        who.task.map_or(0, |t| t.0 .0),
+                        now_ms(),
+                    );
+                }
                 SuiteRun::Done {
                     outcome: SuiteOutcome::Proven,
                     results: Some(j.results.clone()),
@@ -1565,7 +1633,7 @@ enum Leased {
 /// is skipped first: a skip ends the wait, so a skipped suite never takes a slot. On
 /// 2026-11-13 #288's test step was skipped while it waited for a compile slot, and it
 /// waited on until a slot came, built, and only then noticed.
-fn lease_suite(c: &Ctx, needs: Needs, check: &Check) -> Leased {
+fn lease_suite(c: &Ctx, needs: Needs, check: &Check, expected_ms: Option<u64>) -> Leased {
     match check() {
         Stop::Skipped => return Leased::Skipped,
         Stop::Gone => return Leased::Gone,
@@ -1575,7 +1643,7 @@ fn lease_suite(c: &Ctx, needs: Needs, check: &Check) -> Leased {
         return Leased::Got;
     }
     let wanted = || check() == Stop::No;
-    match crate::jobs::acquire_needs_while(c, needs, &wanted) {
+    match crate::jobs::acquire_needs_expecting(c, needs, &wanted, false, expected_ms) {
         Ok(l) => {
             *c.lease.lock().unwrap_or_else(|e| e.into_inner()) = Some(l);
             Leased::Got
@@ -1601,6 +1669,141 @@ fn lease(c: &Ctx, needs: Needs) -> bool {
 
 /// The step's `MASON_*` variables, with `MASON_HELD` naming what is leased for the
 /// command about to run (not just the step's own `uses`).
+/// The narrowed copy of `suite` for this task's test step (s386), with a note naming what it
+/// runs, or `None` to run it whole: no `narrow_*` keys, the change unreadable, or
+/// [`mason_testing::narrow::select`] picks nothing or most of it.
+fn narrow_for_step(c: &Ctx, suite: &Suite) -> Option<(Suite, String)> {
+    let n = suite.narrow.as_ref()?;
+    let base = git::run(&c.wt, &["merge-base", &c.project.base_ref(), "HEAD"]).ok()?;
+    let base = base.trim();
+    let paths = worktree_paths(&c.wt, &c.project.base_ref())?;
+    let listed = git::run(&c.wt, &["ls-files"]).ok()?;
+    let files: std::collections::BTreeMap<String, String> = listed
+        .lines()
+        .filter(|p| mason_testing::glob::matches(&n.tests, p))
+        .filter_map(|p| Some((p.to_string(), std::fs::read_to_string(c.wt.join(p)).ok()?)))
+        .collect();
+    let mut added: std::collections::BTreeMap<String, Vec<u32>> = Default::default();
+    for p in paths.iter().filter(|p| files.contains_key(*p)) {
+        let diff = git::run(&c.wt, &["diff", "-U0", base, "--", p]).unwrap_or_default();
+        added.insert(p.clone(), added_lines(&diff));
+    }
+    let change = mason_testing::narrow::Change {
+        paths: &paths,
+        added: &added,
+    };
+    let picked = mason_testing::narrow::select(n, &files, &change)?;
+    let total = mason_testing::narrow::units(n, &files).len();
+    let mut s = suite.clone();
+    s.command = mason_testing::narrow::command(n, &picked);
+    s.min_tests = 1;
+    s.narrowed = true;
+    let names: Vec<&str> = picked.iter().take(8).map(|u| u.name.as_str()).collect();
+    let more = picked.len().saturating_sub(names.len());
+    let note = format!(
+        "{}: narrowed to {} of {} test units ({}{}); the landing batch runs it whole",
+        suite.name,
+        picked.len(),
+        total,
+        names.join(", "),
+        if more > 0 {
+            format!(" and {more} more")
+        } else {
+            String::new()
+        }
+    );
+    Some((s, note))
+}
+
+/// The new-file line numbers a `git diff -U0` adds or changes (`@@ -a,b +c,d @@`).
+fn added_lines(diff: &str) -> Vec<u32> {
+    let mut out = vec![];
+    for l in diff.lines().filter(|l| l.starts_with("@@")) {
+        let Some(plus) = l.split_whitespace().find(|w| w.starts_with('+')) else {
+            continue;
+        };
+        let mut it = plus[1..].split(',');
+        let start: u32 = it.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+        let count: u32 = it.next().and_then(|v| v.parse().ok()).unwrap_or(1);
+        out.extend(start..start + count);
+    }
+    out
+}
+
+/// Is `suite` already green for this exact tree? Then `run_suite` reuses that result without
+/// running anything, so it needs no lease (s380).
+fn proven(d: &Daemon, tree: &Tree, suite: &str) -> bool {
+    matches!(d.store.evidence(&tree.tree, suite), Ok(Some(_)))
+}
+
+/// A suite whose run needs `compile` and nothing else, with no build of its own: a build
+/// that can run beside others of its kind (s345).
+fn compile_only(def: &Definition, step: &Step, suite: &Suite) -> bool {
+    let n = run_needs(def, step, suite);
+    suite.build.is_none()
+        && !n.exclusive
+        && !n.amounts.is_empty()
+        && n.amounts.keys().all(|k| k == "compile")
+}
+
+/// Run `suites` side by side, each in its own thread on its own lease, as [`lease_suite`]
+/// and the step's loop would one at a time. The broker decides how many run at once.
+fn run_side_by_side(
+    c: &Ctx,
+    who: &Who,
+    lock: &crate::daemon::RepoLock,
+    suites: &[Suite],
+    tree: &Tree,
+) -> std::collections::HashMap<String, SuiteRun> {
+    std::thread::scope(|sc| {
+        let runs: Vec<_> = suites
+            .iter()
+            .map(|suite| {
+                sc.spawn(move || {
+                    let needs = run_needs(&c.def, &c.step, suite);
+                    let mut who = who.clone();
+                    who.env = held_env(c, &needs);
+                    let check = who.check(&suite.name);
+                    // A skipped suite holds nothing: `run_suite` sees the skip before it runs.
+                    // Nor does one already green for this tree: `run_suite` reuses it (s380).
+                    let lease = match check() {
+                        Stop::Gone => return (suite.name.clone(), SuiteRun::Gone),
+                        Stop::Skipped => None,
+                        Stop::No if proven(&c.d, tree, &suite.name) => None,
+                        Stop::No => {
+                            let wanted = || check() == Stop::No;
+                            let expected = estimate(&who, &suite.name, "run");
+                            match crate::jobs::acquire_needs_expecting(
+                                c, needs, &wanted, true, expected,
+                            ) {
+                                Ok(l) => Some(l),
+                                Err(_) if check() == Stop::Skipped => None,
+                                Err(_) => return (suite.name.clone(), SuiteRun::Gone),
+                            }
+                        }
+                    };
+                    let ran = run_suite(
+                        &who,
+                        &c.project.path,
+                        lock,
+                        &c.def,
+                        suite,
+                        &c.wt,
+                        tree,
+                        &mut |_| {},
+                    );
+                    if lease.is_some() {
+                        drop(lease);
+                        c.d.admit();
+                    }
+                    (suite.name.clone(), ran)
+                })
+            })
+            .collect();
+        runs.into_iter().filter_map(|h| h.join().ok()).collect()
+    })
+}
+
 fn held_env(c: &Ctx, held: &Needs) -> Vec<(String, String)> {
     let mut env = crate::jobs::step_env_pairs(c);
     for (k, v) in env.iter_mut() {
@@ -1631,6 +1834,7 @@ fn run_build(who: &Who, suite: &Suite, build: &str, n: usize, cwd: &Path) -> Bui
         Ok(r) => r,
         Err(e) => return Built::Red(format!("Building `{}` could not run: {e}", suite.name)),
     };
+    record_time(who, &suite.name, "build", &ran);
     match ran.stop {
         Stop::Gone => return Built::Gone,
         // A skip is the suite's own run to notice; nothing was built, nothing is blamed.
@@ -1769,7 +1973,16 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
 
     // A suite that builds first queues phase by phase: its build holds one `compile` slot and
     // gives it back, then its run holds the rest. The step then holds nothing between suites.
-    let per_suite = sels.iter().any(|s| s.selected && s.suite.build.is_some());
+    // So does a step with a suite that needs the whole machine (s340): only that suite's run
+    // holds `exclusive`; and one with two or more suites that only build (s345), which run
+    // side by side below. Base-red checks still go with builds, as before.
+    let builds = sels.iter().any(|s| s.selected && s.suite.build.is_some());
+    let chosen: Vec<Suite> = sels
+        .iter()
+        .filter(|s| s.selected)
+        .map(|s| s.suite.clone())
+        .collect();
+    let per_suite = queues_per_suite(&c.def, &c.step, &chosen);
     if !per_suite {
         // The step holds one lease for all its suites (see `jobs::acquire`).
         let mut needs = needs_of(&c.step.uses, None);
@@ -1785,7 +1998,7 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
         crate::jobs::test_commands(d, &c.def, c.project_id, Some(c.task)).map(|t| t.test);
     let mut built: Vec<String> = vec![];
     // A restarted daemon finds the wait it was in: no second run of the suite to learn the same.
-    if per_suite {
+    if builds {
         if let Ok(Some(w)) = d.store.base_red(c.task.0) {
             let suite = c
                 .def
@@ -1810,6 +2023,21 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
             }
         }
     }
+    // Suites whose run needs nothing but `compile` (star's `build-*`) run side by side first,
+    // each on its own lease (s345): as many at once as the broker grants `compile` slots. The
+    // loop below then takes their results in order, so reds, debts and notes are as before.
+    let mut side: std::collections::HashMap<String, SuiteRun> = Default::default();
+    if per_suite {
+        let builds_only: Vec<Suite> = sels
+            .iter()
+            .filter(|s| s.selected)
+            .filter_map(|s| with_project_test(&s.suite, project_test.as_deref()).ok())
+            .filter(|s| compile_only(&c.def, &c.step, s))
+            .collect();
+        if builds_only.len() > 1 {
+            side = run_side_by_side(c, &who, &lock, &builds_only, &tree);
+        }
+    }
     for sel in &sels {
         let name = sel.suite.name.clone();
         if !sel.selected {
@@ -1821,7 +2049,19 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
             Ok(s) => s,
             Err(why) => return c.fail(why),
         };
-        if per_suite {
+        // Only the tests this change needs, when the suite says how (s386). The landing batch
+        // runs it whole.
+        let suite = match narrow_for_step(c, &suite) {
+            Some((narrowed, note)) => {
+                // Said in the closing note too: a narrowed green is not the whole suite's.
+                details.push(note.clone());
+                notes.push(note);
+                narrowed
+            }
+            None => suite,
+        };
+        let ran_beside = side.remove(&name);
+        if per_suite && ran_beside.is_none() {
             c.release_lease();
             let reused = matches!(d.store.evidence(&tree.tree, &suite.name), Ok(Some(_)));
             if let Some(b) = suite
@@ -1831,7 +2071,7 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
             {
                 let needs = needs_of(&crate::jobs::build_uses(), None);
                 who.env = held_env(c, &needs);
-                match lease_suite(c, needs, &who.check(&name)) {
+                match lease_suite(c, needs, &who.check(&name), estimate(&who, &name, "build")) {
                     Leased::Gone => return,
                     // Nothing is built; the suite's run below reports the skip.
                     Leased::Skipped => {}
@@ -1878,21 +2118,30 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
             }
             let needs = run_needs(&c.def, &c.step, &suite);
             who.env = held_env(c, &needs);
-            // A skipped suite holds nothing: `run_suite` sees the skip before it runs.
-            if let Leased::Gone = lease_suite(c, needs, &who.check(&name)) {
-                return;
+            // A skipped suite holds nothing: `run_suite` sees the skip before it runs. Nor does
+            // one already green for this exact tree, which `run_suite` reuses without running
+            // (s380): it must not wait in the queue to learn that.
+            if !proven(d, &tree, &name) {
+                if let Leased::Gone =
+                    lease_suite(c, needs, &who.check(&name), estimate(&who, &name, "run"))
+                {
+                    return;
+                }
             }
         }
-        let ran = run_suite(
-            &who,
-            &c.project.path,
-            &lock,
-            &c.def,
-            &suite,
-            &c.wt,
-            &tree,
-            &mut on_wait,
-        );
+        let ran = match ran_beside {
+            Some(r) => r,
+            None => run_suite(
+                &who,
+                &c.project.path,
+                &lock,
+                &c.def,
+                &suite,
+                &c.wt,
+                &tree,
+                &mut on_wait,
+            ),
+        };
         if per_suite {
             c.release_lease();
         }
@@ -1920,7 +2169,7 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
                 failing,
                 red,
             } => {
-                if let (true, Some((kind, err))) = (per_suite, red) {
+                if let (true, Some((kind, err))) = (builds, red) {
                     match base_red::gate(c, &who, &lock, &suite, &tree.base, kind, &err, None) {
                         base_red::Gate::Cleared => {
                             again.set(true);
@@ -2683,6 +2932,8 @@ mod lossy_tests {
             stop: Stop::No,
             timed_out: false,
             stalled: None,
+            ran_ms: None,
+            narrowed: false,
         };
         (ran, dir)
     }
