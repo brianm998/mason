@@ -887,7 +887,7 @@ struct SectionPage: View {
                         ForEach(active, id: \.task) { a in
                             HStack(spacing: theme.spacing) {
                                 Text(a.display.isEmpty ? a.model : a.display).font(theme.body(.semibold))
-                                Button("\(a.project) #\(a.task)") { model.go(.task(a.task)) }.buttonStyle(.link)
+                                TaskLink(title: "\(a.project) #\(a.task)") { model.go(.task(a.task)) }
                                 Text(a.step).foregroundStyle(theme.muted)
                             }
                             .font(theme.body())

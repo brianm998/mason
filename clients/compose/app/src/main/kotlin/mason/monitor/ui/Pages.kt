@@ -25,12 +25,9 @@ import androidx.compose.ui.input.key.type
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
-<<<<<<< HEAD
 import androidx.compose.ui.text.TextStyle
-=======
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
->>>>>>> origin/develop
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
@@ -92,20 +89,17 @@ internal fun Link(text: String, style: TextStyle? = null, modifier: Modifier = M
     )
 }
 
-<<<<<<< HEAD
 /** [base] as link text: the link colour and an underline. For the title inside a row that is clickable as a whole. */
 internal fun Theme.linked(base: TextStyle): TextStyle = base.copy(color = link, textDecoration = TextDecoration.Underline)
 
 /** The pointing hand on hover, for a row that is clickable as a whole. */
 internal fun Modifier.pointingHand(): Modifier = pointerHoverIcon(PointerIcon.Hand)
 
-=======
 /**
  * A vertically scrolling page. Its position is put back to what the history saved when this
  * entry was left, once, when [ready] (the content has arrived) and only if the owner has not
  * scrolled meanwhile; a page that has shrunk clamps. Later updates never move it again.
  */
->>>>>>> origin/develop
 @Composable
 private fun Scrolling(model: MonitorModel, ready: Boolean = true, content: @Composable ColumnScope.() -> Unit) {
     val theme = LocalTheme.current
