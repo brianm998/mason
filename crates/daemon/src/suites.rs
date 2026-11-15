@@ -1618,6 +1618,12 @@ fn lease(c: &Ctx, needs: Needs) -> bool {
 
 /// The step's `MASON_*` variables, with `MASON_HELD` naming what is leased for the
 /// command about to run (not just the step's own `uses`).
+/// Is `suite` already green for this exact tree? Then `run_suite` reuses that result without
+/// running anything, so it needs no lease (s380).
+fn proven(d: &Daemon, tree: &Tree, suite: &str) -> bool {
+    matches!(d.store.evidence(&tree.tree, suite), Ok(Some(_)))
+}
+
 /// A suite whose run needs `compile` and nothing else, with no build of its own: a build
 /// that can run beside others of its kind (s345).
 fn compile_only(def: &Definition, step: &Step, suite: &Suite) -> bool {
@@ -1647,9 +1653,11 @@ fn run_side_by_side(
                     who.env = held_env(c, &needs);
                     let check = who.check(&suite.name);
                     // A skipped suite holds nothing: `run_suite` sees the skip before it runs.
+                    // Nor does one already green for this tree: `run_suite` reuses it (s380).
                     let lease = match check() {
                         Stop::Gone => return (suite.name.clone(), SuiteRun::Gone),
                         Stop::Skipped => None,
+                        Stop::No if proven(&c.d, tree, &suite.name) => None,
                         Stop::No => {
                             let wanted = || check() == Stop::No;
                             match crate::jobs::acquire_needs_beside(c, needs, &wanted) {
@@ -1983,9 +1991,13 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
             }
             let needs = run_needs(&c.def, &c.step, &suite);
             who.env = held_env(c, &needs);
-            // A skipped suite holds nothing: `run_suite` sees the skip before it runs.
-            if let Leased::Gone = lease_suite(c, needs, &who.check(&name)) {
-                return;
+            // A skipped suite holds nothing: `run_suite` sees the skip before it runs. Nor does
+            // one already green for this exact tree, which `run_suite` reuses without running
+            // (s380): it must not wait in the queue to learn that.
+            if !proven(d, &tree, &name) {
+                if let Leased::Gone = lease_suite(c, needs, &who.check(&name)) {
+                    return;
+                }
             }
         }
         let ran = match ran_beside {
