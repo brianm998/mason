@@ -63,25 +63,46 @@ sealed class Page {
 
 /**
  * Browser-style history: back, forward, home. Selecting anything replaces what
- * was shown and clears what could be gone forward to.
+ * was shown and clears what could be gone forward to. Each entry carries the
+ * vertical scroll position it was left at, so back and forward put a page where
+ * it was (the same page twice in the stack keeps two positions).
  */
 data class NavHistory(
     val current: Page = Page.Home,
     val back: List<Page> = emptyList(),
     val forward: List<Page> = emptyList(),
+    /** Saved positions, in step with [back] and [forward]. */
+    val backScroll: List<Int> = emptyList(),
+    val forwardScroll: List<Int> = emptyList(),
+    /** Where the current entry should open: what was saved when it was left, 0 after [go]. */
+    val restore: Int = 0,
+    /** Counts arrivals, so a view can tell one visit from the next. */
+    val visit: Int = 0,
 ) {
     val canGoBack get() = back.isNotEmpty()
     val canGoForward get() = forward.isNotEmpty()
 
-    fun go(p: Page): NavHistory =
-        if (p == current) this else copy(current = p, back = back + current, forward = emptyList())
+    /** [scroll] is where the current page is scrolled now; it is saved on its entry as it is left. */
+    fun go(p: Page, scroll: Int = 0): NavHistory =
+        if (p == current) this else copy(
+            current = p, back = back + current, backScroll = backScroll + scroll,
+            forward = emptyList(), forwardScroll = emptyList(), restore = 0, visit = visit + 1,
+        )
 
-    fun goBack(): NavHistory =
-        if (back.isEmpty()) this else copy(current = back.last(), back = back.dropLast(1), forward = forward + current)
+    fun goBack(scroll: Int = 0): NavHistory =
+        if (back.isEmpty()) this else copy(
+            current = back.last(), back = back.dropLast(1), restore = backScroll.last(),
+            backScroll = backScroll.dropLast(1), forward = forward + current,
+            forwardScroll = forwardScroll + scroll, visit = visit + 1,
+        )
 
-    fun goForward(): NavHistory =
-        if (forward.isEmpty()) this else copy(current = forward.last(), forward = forward.dropLast(1), back = back + current)
+    fun goForward(scroll: Int = 0): NavHistory =
+        if (forward.isEmpty()) this else copy(
+            current = forward.last(), forward = forward.dropLast(1), restore = forwardScroll.last(),
+            forwardScroll = forwardScroll.dropLast(1), back = back + current,
+            backScroll = backScroll + scroll, visit = visit + 1,
+        )
 
     /** Home clears the selection, and is itself a step in the history. */
-    fun goHome(): NavHistory = go(Page.Home)
+    fun goHome(scroll: Int = 0): NavHistory = go(Page.Home, scroll)
 }

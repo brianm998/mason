@@ -114,6 +114,48 @@ class MonitorCoreTest {
         assertEquals(h, h.go(h.current))
     }
 
+    @Test fun backAndForwardRestoreEachEntrysScroll() {
+        var h = NavHistory().go(Page.Task(5), 300)
+        assertEquals(0, h.restore, "a new selection starts at the top")
+        h = h.goBack(40)
+        assertEquals(Page.Home, h.current)
+        assertEquals(300, h.restore)
+        h = h.goForward(300)
+        assertEquals(Page.Task(5), h.current)
+        assertEquals(40, h.restore)
+    }
+
+    @Test fun theSamePageTwiceKeepsTwoPositions() {
+        var h = NavHistory().go(Page.Task(5), 100).go(Page.Home, 10).go(Page.Task(9), 700)
+        h = h.goBack(1)
+        assertEquals(700, h.restore)
+        h = h.goBack(2)
+        assertEquals(Page.Task(5), h.current)
+        assertEquals(10, h.restore)
+        h = h.goBack(3)
+        assertEquals(Page.Home, h.current)
+        assertEquals(100, h.restore)
+    }
+
+    @Test fun goHomeFromHomeKeepsItsPositionAndSelectingClearsForward() {
+        var h = NavHistory().go(Page.Landing, 5).goBack(9)
+        assertEquals(5, h.restore)
+        assertEquals(h, h.goHome(77), "going where you already are changes nothing")
+        h = h.go(Page.Usage, 77)
+        assertFalse(h.canGoForward)
+        assertTrue(h.forwardScroll.isEmpty())
+        assertEquals(77, h.goBack().restore)
+    }
+
+    @Test fun modelSavesTheLiveScrollWhenLeaving() {
+        val m = model()
+        m.reportScroll(250)
+        m.go(Page.Task(3))
+        m.goBack()
+        assertEquals(250, m.liveScroll)
+        assertEquals(250, m.history.restore)
+    }
+
     @Test fun deepLinksRoundTripAndRefuseOtherThings() {
         for (p in listOf(Page.Home, Page.Task(204), Page.Landing, Page.Usage, Page.Pipeline, Page.Health, Page.Settings, Page.Section("cpu"), Page.Section("testing"))) {
             assertEquals(p, Page.from(p.url), "$p")

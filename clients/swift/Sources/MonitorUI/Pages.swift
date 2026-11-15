@@ -24,6 +24,7 @@ struct MainPane: View {
             case .section(let name): SectionPage(model: model, name: name)
             }
         }
+        .id(model.history.visit)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(theme.background)
     }
@@ -76,7 +77,7 @@ struct HomePage: View {
     }
 
     var body: some View {
-        ScrollView {
+        RestoringScroll(model: model, ready: model.home != nil) {
             VStack(alignment: .leading, spacing: theme.spacingLarge) {
                 let pic = model.homeMascot
                 if pic.large {
@@ -374,7 +375,7 @@ struct TaskDetailPage: View {
     let id: UInt64
 
     var body: some View {
-        ScrollView {
+        RestoringScroll(model: model, ready: model.taskDetail?.hasRow == true && model.taskDetail?.row.id == id) {
             if let d = model.taskDetail, d.hasRow, d.row.id == id {
                 content(d)
             } else {
@@ -534,7 +535,7 @@ struct LandingPage: View {
     @ObservedObject var model: MonitorModel
 
     var body: some View {
-        ScrollView {
+        RestoringScroll(model: model) {
             VStack(alignment: .leading, spacing: theme.spacingLarge) {
                 Text("Landing").font(theme.title())
                 if let l = model.landing {
@@ -632,7 +633,7 @@ struct UsagePage: View {
     @ObservedObject var model: MonitorModel
 
     var body: some View {
-        ScrollView {
+        RestoringScroll(model: model) {
             VStack(alignment: .leading, spacing: theme.spacingLarge) {
                 Text("LLM usage").font(theme.title())
                 ForEach(model.usage?.providers ?? [], id: \.name) { p in
@@ -739,7 +740,7 @@ struct HealthPage: View {
     @ObservedObject var model: MonitorModel
 
     var body: some View {
-        ScrollView {
+        RestoringScroll(model: model) {
             VStack(alignment: .leading, spacing: theme.spacingLarge) {
                 Text("Health").font(theme.title())
                 HealthConnectionLine(model: model)

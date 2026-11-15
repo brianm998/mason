@@ -4,6 +4,7 @@ package mason.monitor.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -29,6 +30,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.flow.first
 import mason.monitor.*
 import mason.v1.CellState
 import mason.v1.Compilation
@@ -78,12 +80,32 @@ internal fun Link(text: String, modifier: Modifier = Modifier, onClick: () -> Un
         modifier = modifier.pointerHoverIcon(PointerIcon(java.awt.Cursor(java.awt.Cursor.HAND_CURSOR))).clickable(onClick = onClick))
 }
 
+/**
+ * A vertically scrolling page. Its position is put back to what the history saved when this
+ * entry was left, once, when [ready] (the content has arrived) and only if the owner has not
+ * scrolled meanwhile; a page that has shrunk clamps. Later updates never move it again.
+ */
 @Composable
-private fun Scrolling(content: @Composable ColumnScope.() -> Unit) {
+private fun Scrolling(model: MonitorModel, ready: Boolean = true, content: @Composable ColumnScope.() -> Unit) {
     val theme = LocalTheme.current
+    val visit = model.history.visit
+    val target = model.history.restore
+    val state = remember(visit) { ScrollState(0) }
+    var settled by remember(visit) { mutableStateOf(target == 0) }
+    LaunchedEffect(visit, ready) {
+        if (ready && !settled) {
+            // Wait for the content to be measured (or for the owner to scroll), then put it back.
+            snapshotFlow { state.maxValue > 0 || state.value > 0 }.first { it }
+            if (state.value == 0) state.scrollTo(target)
+            settled = true
+        }
+    }
+    LaunchedEffect(visit) {
+        snapshotFlow { state.value }.collect { if (settled) model.reportScroll(it) }
+    }
     Column(
         verticalArrangement = Arrangement.spacedBy(theme.spacingLarge),
-        modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(theme.spacingLarge),
+        modifier = Modifier.fillMaxSize().verticalScroll(state).padding(theme.spacingLarge),
         content = content,
     )
 }
@@ -97,7 +119,7 @@ private fun Scrolling(content: @Composable ColumnScope.() -> Unit) {
 @Composable
 fun HomePage(model: MonitorModel) {
     val theme = LocalTheme.current
-    Scrolling {
+    Scrolling(model, ready = model.home != null) {
         val h = model.home
         var adding by remember { mutableStateOf(false) }
         val pic = model.homeMascot
@@ -321,7 +343,7 @@ fun TaskDetailPage(model: MonitorModel, id: Long) {
             modifier = Modifier.padding(theme.spacingLarge))
         return
     }
-    Scrolling { TaskDetail(model, d) }
+    Scrolling(model) { TaskDetail(model, d) }
 }
 
 @Composable
@@ -432,7 +454,7 @@ private fun TaskDetail(model: MonitorModel, d: TaskDetailView) {
 @Composable
 fun LandingPage(model: MonitorModel) {
     val theme = LocalTheme.current
-    Scrolling {
+    Scrolling(model) {
         Text("Landing", style = theme.title())
         model.landing?.let { l ->
             if (l.note.isNotEmpty()) Text(l.note, style = theme.body(color = if (l.frozen) theme.attention else theme.muted))
@@ -523,7 +545,7 @@ fun batchCiUrl(ci: mason.v1.BatchCi): String? =
 @Composable
 fun UsagePage(model: MonitorModel) {
     val theme = LocalTheme.current
-    Scrolling {
+    Scrolling(model) {
         Text("LLM usage", style = theme.title())
         model.usage?.providers?.forEach { UsageAccount(it) }
         model.usage?.note?.let { Text(it, style = theme.body(color = theme.muted)) }
@@ -621,7 +643,7 @@ fun UsageAccount(p: mason.v1.ProviderStatus) {
 @Composable
 fun HealthPage(model: MonitorModel) {
     val theme = LocalTheme.current
-    Scrolling {
+    Scrolling(model) {
         Text("Health", style = theme.title())
         Text(if (model.connected) "Connected to masond. Event log at #${model.lastSeq}." else "Not connected.", style = theme.body())
         model.health?.let { h ->
@@ -704,7 +726,7 @@ fun landingItemText(i: mason.v1.TaskLanding): String {
 @Composable
 fun SettingsPage(model: MonitorModel) {
     val theme = LocalTheme.current
-    Scrolling {
+    Scrolling(model) {
         Text("Settings", style = theme.title())
         model.settingsNotice?.let { Text(it, style = theme.body(color = theme.muted), modifier = Modifier.testTag("settings:notice")) }
         val s = model.settings

@@ -371,6 +371,11 @@ description = "Each paused banner has, at its trailing edge, a Resume text butto
 swift = "done"
 compose = "done"
 
+[feature.back-restores-scroll]
+description = "Back and forward put each page in the history back where it was scrolled when it was left (Home, a task, Landing, LLM usage, Health); the same page twice in the history keeps two positions; a new selection starts at the top; restored once, after the page's content has arrived, never over the owner's own scrolling"
+swift = "done"
+compose = "done"
+
 [feature.topbar-busiest-mascot]
 description = "At the left of the top bar, the task page's illustration for the active state (queued, exploring, developing, testing, review, landing, needs attention, failed, proposed; never landed or canceled) holding the most tasks in the header's counts (so it follows the project filter), a tie going to the later stage, at 85% of the illustration size or the bar's height if less; the idle art (all_clear) with no tasks, nothing while disconnected; tooltip 'Most tasks: testing (7)'; clicking reveals that state's sidebar section"
 swift = "done"
