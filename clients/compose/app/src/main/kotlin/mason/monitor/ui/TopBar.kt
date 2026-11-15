@@ -238,10 +238,8 @@ fun BannersView(model: MonitorModel) {
                 modifier = Modifier.fillMaxWidth().background(theme.slow.copy(alpha = 0.12f))
                     .padding(horizontal = theme.spacingLarge, vertical = theme.spacingSmall).testTag("pending:${p.project}:${p.number}"),
             ) {
-                Text(
-                    "#${p.number}", style = theme.small(color = if (p.url.isNotEmpty()) theme.accent else theme.text),
-                    modifier = Modifier.clickable(enabled = p.url.isNotEmpty()) { runCatching { uri.openUri(p.url) } },
-                )
+                if (p.url.isNotEmpty()) Link("#${p.number}", theme.small()) { runCatching { uri.openUri(p.url) } }
+                else Text("#${p.number}", style = theme.small(color = theme.text))
                 Text(p.title, style = theme.small(), maxLines = 1)
                 Text(p.reason, style = theme.small(color = theme.muted))
             }

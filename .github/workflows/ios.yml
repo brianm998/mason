@@ -1,0 +1,36 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+name: iOS
+
+# Builds the universal iOS app for the simulator, unsigned, when the Swift client changes.
+# A workflow of its own so the path filter is possible (ci.yml must run on every change);
+# macOS runners are scarce, so nothing else triggers it and a newer push cancels the older run.
+on:
+  pull_request:
+    paths:
+      - "clients/swift/**"
+      - ".github/workflows/ios.yml"
+      - ".github/actions/ios-setup/**"
+  push:
+    branches: [develop]
+    paths:
+      - "clients/swift/**"
+      - ".github/workflows/ios.yml"
+      - ".github/actions/ios-setup/**"
+
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  monitor-ios:
+    runs-on: macos-15
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/ios-setup
+      # xcodebuild build only: no tests, no signing, nothing on a screen.
+      - run: make ios
+        working-directory: clients/swift
