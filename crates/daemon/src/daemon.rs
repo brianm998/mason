@@ -1054,6 +1054,13 @@ impl Daemon {
             .unwrap_or_default()
     }
 
+    /// The name of the project a task belongs to.
+    pub fn task_project_name(&self, task: TaskId) -> Option<String> {
+        let w = self.world().ok()?;
+        let t = w.tasks.get(&task)?;
+        self.project(t.project).map(|p| p.id.clone())
+    }
+
     pub fn lease_standing(&self, task: TaskId) -> Option<crate::sched::Standing> {
         let w = self.world().ok()?;
         let t = w.tasks.get(&task)?;

@@ -340,7 +340,7 @@ fn turn(d: &Arc<Daemon>, id: u64, text: &str) -> Option<String> {
             _ => {}
         }
     }
-    handle.session_id().or(sid).map(|x| x.0)
+    handle.session_id().or(sid)
 }
 
 /// A tool call as one line.

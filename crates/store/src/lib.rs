@@ -1269,6 +1269,58 @@ impl Store {
     }
 
     /// `(executed, passed, task)` if this tree already passed this suite.
+    /// How long one finished build or run of a suite took (s385). The last ten are kept per
+    /// project, suite and phase (`build` or `run`).
+    pub fn record_suite_time(
+        &self,
+        project: &str,
+        suite: &str,
+        phase: &str,
+        ms: u64,
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
+        let (p, s, ph) = (project.to_string(), suite.to_string(), phase.to_string());
+        self.write(move |c| {
+            c.execute(
+                "INSERT INTO suite_times(project, suite, phase, ms, at_ms) VALUES (?1,?2,?3,?4,?5)",
+                params![p, s, ph, ms as i64, now_ms as i64],
+            )?;
+            c.execute(
+                "DELETE FROM suite_times WHERE project = ?1 AND suite = ?2 AND phase = ?3 AND rowid NOT IN \
+                 (SELECT rowid FROM suite_times WHERE project = ?1 AND suite = ?2 AND phase = ?3 \
+                  ORDER BY at_ms DESC LIMIT 10)",
+                params![p, s, ph],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// What a build or run of a suite is expected to take at most (s385): the longest of its
+    /// last five, plus a quarter. `None` with fewer than two on record.
+    pub fn suite_estimate(
+        &self,
+        project: &str,
+        suite: &str,
+        phase: &str,
+    ) -> Result<Option<u64>, StoreError> {
+        let (p, s, ph) = (project.to_string(), suite.to_string(), phase.to_string());
+        self.read(move |c| {
+            let mut st = c.prepare(
+                "SELECT ms FROM suite_times WHERE project = ?1 AND suite = ?2 AND phase = ?3 \
+                 ORDER BY at_ms DESC LIMIT 5",
+            )?;
+            let ms: Vec<u64> = st
+                .query_map(params![p, s, ph], |r| r.get::<_, i64>(0))?
+                .filter_map(Result::ok)
+                .map(|v| v.max(0) as u64)
+                .collect();
+            Ok((ms.len() >= 2).then(|| {
+                let longest = ms.iter().copied().max().unwrap_or(0);
+                longest.saturating_add(longest / 4)
+            }))
+        })
+    }
+
     pub fn evidence(
         &self,
         tree: &str,
