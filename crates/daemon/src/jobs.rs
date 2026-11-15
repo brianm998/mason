@@ -171,7 +171,13 @@ impl Ctx {
             .ok()
             .and_then(|w| w.step_runs.get(&self.run).map(|r| r.started_at.0));
         let elapsed = started.map(|s| now_ms().saturating_sub(s)).unwrap_or(0);
-        let waited = wait_total(self.run.0);
+        // After a daemon restart the in-memory total starts again at zero; the credit kept
+        // in the task folder (s417) still holds the queue time before it.
+        let kept = std::fs::read_to_string(self.task_dir().join(credit_file_name(self.run.0)))
+            .ok()
+            .and_then(|t| t.trim().parse::<u64>().ok())
+            .unwrap_or(0);
+        let waited = wait_total(self.run.0).max(kept);
         timeout_text(waited, elapsed)
     }
 
@@ -473,6 +479,11 @@ fn wait_total(run: u64) -> u64 {
         Some((t, open)) => t + open.map(|s| now.saturating_sub(s)).unwrap_or(0),
         None => 0,
     }
+}
+
+/// The file in the task's folder that keeps a run's queue-wait credit (s417).
+fn credit_file_name(run: u64) -> String {
+    format!("deadline-credit-r{run}.txt")
 }
 
 /// The text of a timeout after `waited` ms of `elapsed` ms spent waiting.
@@ -2664,7 +2675,7 @@ fn agent_job(c: &Ctx) {
     // was credited before it (s417).
     let deadline_extra = mason_adapter_api::DeadlineExtra::kept_in(
         c.task_dir()
-            .join(format!("deadline-credit-r{}.txt", c.run.0)),
+            .join(credit_file_name(c.run.0)),
     );
     // The agent's own `mason run` commands that wait in the queue add to it too (s363),
     // until this step ends.
