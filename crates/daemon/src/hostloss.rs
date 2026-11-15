@@ -83,6 +83,35 @@ pub fn restart_loss_in(starts: &str, t: u64) -> bool {
         .any(|s| t + RESTART_WINDOW_MS >= s && t <= s)
 }
 
+/// How many times a command host that did not come up is started again in place.
+pub const SPAWN_ATTEMPTS: usize = 3;
+
+/// Start a command's host with `spawn`, trying again when it did not come up (a
+/// launch frozen by the operating system, or a host that exited at once). The
+/// command never ran, so nothing was judged and a failed start is not the step's
+/// failure; `failed` is told of each one (to record it). Only the last error is
+/// returned, after [`SPAWN_ATTEMPTS`] tries, with `pause` between them.
+pub fn spawn_retrying<T>(
+    mut spawn: impl FnMut() -> std::io::Result<T>,
+    mut failed: impl FnMut(&std::io::Error),
+    pause: std::time::Duration,
+) -> std::io::Result<T> {
+    let mut n = 0;
+    loop {
+        n += 1;
+        match spawn() {
+            Ok(v) => return Ok(v),
+            Err(e) => {
+                failed(&e);
+                if n >= SPAWN_ATTEMPTS {
+                    return Err(e);
+                }
+                std::thread::sleep(pause);
+            }
+        }
+    }
+}
+
 /// What failed an agent step that lost its host more often than it may be restarted.
 pub fn agent_lost(reports: &[String]) -> String {
     format!(
@@ -223,6 +252,37 @@ mod tests {
 
     use super::*;
     use mason_core::FailClass;
+
+    #[test]
+    fn a_host_that_did_not_come_up_is_started_again() {
+        let mut calls = 0;
+        let mut seen = 0;
+        let r = spawn_retrying(
+            || {
+                calls += 1;
+                if calls < 3 {
+                    Err(std::io::Error::from(std::io::ErrorKind::TimedOut))
+                } else {
+                    Ok(calls)
+                }
+            },
+            |_| seen += 1,
+            std::time::Duration::ZERO,
+        );
+        assert_eq!(r.unwrap(), 3);
+        assert_eq!(seen, 2);
+        let mut calls = 0;
+        let r: std::io::Result<()> = spawn_retrying(
+            || {
+                calls += 1;
+                Err(std::io::Error::other("x"))
+            },
+            |_| {},
+            std::time::Duration::ZERO,
+        );
+        assert!(r.is_err());
+        assert_eq!(calls, SPAWN_ATTEMPTS);
+    }
 
     #[test]
     fn a_retry_after_a_lost_command_stays_on_its_step() {

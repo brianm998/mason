@@ -1050,7 +1050,7 @@ pub fn check_release_move(
 }
 
 /// One fetch into the mirror at a time: the periodic check and an update share it.
-fn fetch_locked(d: &Daemon, cfg: &UpdateCfg, rt: &Runtimes) -> Result<(), String> {
+pub(crate) fn fetch_locked(d: &Daemon, cfg: &UpdateCfg, rt: &Runtimes) -> Result<(), String> {
     let _one = d.update_fetch.lock().unwrap_or_else(|e| e.into_inner());
     fetch_source(cfg, rt)
 }
@@ -1174,7 +1174,7 @@ pub fn assess_release(
 }
 
 /// The newest commit at or before `tip` that changed this monitor.
-fn latest_of(m: MonitorKind, mirror: &Path, tip: &str) -> Result<String, String> {
+pub(crate) fn latest_of(m: MonitorKind, mirror: &Path, tip: &str) -> Result<String, String> {
     let mut args = vec!["rev-list", "-1", tip, "--"];
     args.extend(m.paths);
     git::run(mirror, &args).map_err(|e| e.to_string())
@@ -1289,6 +1289,11 @@ pub fn info(d: &Daemon) -> Option<mason_protocol::UpdateInfo> {
                 phase: b.phase,
                 error: b.error,
                 path: b.path,
+                step: b.step,
+                done: b.done,
+                total: b.total,
+                last_line: b.last_line,
+                log: b.log,
             }
         })
         .collect();
@@ -1458,6 +1463,13 @@ pub struct MonitorState {
     pub phase: String,
     pub error: String,
     pub path: String,
+    /// While building in place (`monitor_inplace`): what the build is doing, how far it is,
+    /// its last line and its log. Empty for the daemon's own bundle builds.
+    pub step: String,
+    pub done: u32,
+    pub total: u32,
+    pub last_line: String,
+    pub log: String,
 }
 
 /// Build the monitor at `sha` into `runtimes/monitors/<kind>-<sha>/`, in a clean
@@ -1544,7 +1556,7 @@ fn prune_monitors(rt: &Runtimes, kind: MonitorKind, keep: &str) {
     }
 }
 
-fn set_monitor(d: &Daemon, kind: &str, state: MonitorState) {
+pub(crate) fn set_monitor(d: &Daemon, kind: &str, state: MonitorState) {
     d.monitor_builds
         .lock()
         .unwrap_or_else(|e| e.into_inner())

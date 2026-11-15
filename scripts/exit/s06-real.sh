@@ -69,3 +69,4 @@ echo "=== goodbye.txt on main ==="; git -C "$root/origin.git" show main:goodbye.
 echo "=== logs ==="; m logs 0
 echo "=== status ==="; m status
 echo "s06-real OK"
+echo "RESULT s06-real: a scratch daemon landed a task against a local bare remote, passed $(date +%F)"

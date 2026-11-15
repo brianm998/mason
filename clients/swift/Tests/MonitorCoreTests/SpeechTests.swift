@@ -193,6 +193,11 @@ final class SpeechTests: XCTestCase {
         XCTAssertEqual(again.settings.sounds["decision"], "Ping")
     }
 
+    func testDaemonDownSentenceIsSpokenAsMasonD() {
+        XCTAssertTrue(daemonDownSentence.contains("mason D"))
+        XCTAssertFalse(daemonDownSentence.contains("masond"))
+    }
+
     func testDaemonDownIsRaisedAfterFifteenSecondsOnceAndRearms() {
         let sink = FakeSink()
         let a = announcer(sink)

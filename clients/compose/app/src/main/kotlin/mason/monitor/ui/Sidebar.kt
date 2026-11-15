@@ -32,7 +32,11 @@ import mason.v1.TaskRow
 @Composable
 fun SidebarPane(model: MonitorModel, width: Dp) {
     val theme = LocalTheme.current
-    val entries = model.sidebarEntries()
+    // Rebuilt only when its inputs change, not on every recomposition.
+    val sidebar = model.sidebar
+    val search = model.search
+    val expanded = sidebar?.sections?.map { model.isExpanded(it) }
+    val entries = remember(sidebar, search, expanded) { model.sidebarEntries() }
     val state = rememberLazyListState()
     // A tile was clicked: scroll to its section. The pinned area is outside the list, so
     // index 0 of the list is just below it.

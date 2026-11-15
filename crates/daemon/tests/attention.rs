@@ -460,6 +460,10 @@ fn opening_a_session_finds_the_agents_session_and_says_whether_the_step_is_idle(
     wait_for("the job to end", 30, || d.job_count() == 0);
     let v = attention::session_for(&d, t).unwrap();
     assert_eq!(v["idle"], true);
+    assert_eq!(v["provider"], "claude");
+    let sid = v["session"].as_str().unwrap();
+    assert_eq!(v["argv"][1], "--resume");
+    assert_eq!(v["argv"][2], sid);
     assert!(v["session"].as_str().is_some_and(|s| !s.is_empty()), "{v}");
     assert!(
         v["worktree"]
@@ -544,4 +548,17 @@ fn a_deferred_task_raises_no_alert_and_is_not_admitted_until_approved_with_a_pri
     })
     .unwrap();
     assert_eq!(d.world().unwrap().tasks[&t].priority, Priority::High);
+}
+
+#[test]
+fn the_resume_command_is_the_providers_own() {
+    assert_eq!(
+        attention::resume_argv("claude", "/b/claude", Some("s1")),
+        ["/b/claude", "--resume", "s1"]
+    );
+    assert_eq!(
+        attention::resume_argv("codex", "codex", Some("th-1")),
+        ["codex", "resume", "th-1"]
+    );
+    assert_eq!(attention::resume_argv("codex", "codex", None), ["codex"]);
 }

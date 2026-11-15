@@ -109,6 +109,9 @@ pub struct Suite {
     /// Set by the test step on the copy it runs narrowed: such a run is no proof the suite is
     /// green for the tree, so it records no evidence (never read from a definition).
     pub narrowed: bool,
+    /// In a task's test step, run `dev_command` for the changed crates and their dependents
+    /// (s396), as `run_check` does. The landing batch runs `command` whole.
+    pub narrow_packages: bool,
 }
 
 /// The `narrow_*` keys of a suite (s386): where its tests live, how one is named, and the
@@ -157,6 +160,7 @@ impl Suite {
             pty: false,
             narrow: None,
             narrowed: false,
+            narrow_packages: false,
         }
     }
 }

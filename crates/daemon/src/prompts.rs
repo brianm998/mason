@@ -227,6 +227,8 @@ mod tests {
             task_cache_keep_days: None,
             clarity_classifier: None,
             priority_jump: false,
+            hold_back_secs: 7200,
+            hold_back_ignore: Vec::new(),
             card_rewriter: None,
             overlay_text: String::new(),
             services: Default::default(),

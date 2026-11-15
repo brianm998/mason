@@ -153,3 +153,4 @@ wait_state 3 canceled 60
 echo "task #3 was canceled by Reject"
 m metrics | head -3
 echo "s40-real OK"
+echo "RESULT s40-real: approve and reject on a scratch daemon, passed $(date +%F)"

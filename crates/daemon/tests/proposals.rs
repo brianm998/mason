@@ -126,6 +126,7 @@ fn filing(
         evidence: evidence.into(),
         blocks_task: blocks,
         explored: false,
+        estimate: None,
     }
 }
 

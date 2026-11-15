@@ -6,6 +6,21 @@ import SwiftProtobuf
 
 final class WelcomeBox { var value = false }
 
+/// Turns one text frame into a message. Runs off the main thread, so it must not touch the model.
+public typealias MessageDecoder = @Sendable (String) -> Mason_V1_ServerMessage?
+
+/// Carries a value that is only ever used from one place at a time across a task boundary.
+struct UncheckedBox<T>: @unchecked Sendable { let value: T }
+
+extension MonitorConnection {
+    /// The JSON (proto3 mapping) decoder, tolerant of fields this build does not know.
+    public static let jsonDecoder: MessageDecoder = { text in
+        var opts = JSONDecodingOptions()
+        opts.ignoreUnknownFields = true
+        return try? Mason_V1_ServerMessage(jsonString: text, options: opts)
+    }
+}
+
 /// The monitor's one WebSocket to `masond`. It says hello with the last
 /// sequence number it saw, so a reconnect costs only what was missed, and it
 /// reconnects by itself: 1, 2, 4, 8 seconds, then every 10, re-reading
@@ -19,6 +34,7 @@ public final class MonitorConnection {
     private let model: MonitorModel
     private let discover: () -> DaemonInfo?
     private let makeSocket: () -> MonitorSocket
+    private let decode: MessageDecoder
     private var timing: ConnectionTiming
     private var socket: MonitorSocket?
     private var running = false
@@ -32,8 +48,10 @@ public final class MonitorConnection {
         model: MonitorModel,
         discover: @escaping () -> DaemonInfo?,
         timing: ConnectionTiming = ConnectionTiming(),
-        makeSocket: (() -> MonitorSocket)? = nil
+        makeSocket: (() -> MonitorSocket)? = nil,
+        decode: MessageDecoder? = nil
     ) {
+        self.decode = decode ?? MonitorConnection.jsonDecoder
         self.model = model
         self.discover = discover
         self.timing = timing
@@ -76,7 +94,7 @@ public final class MonitorConnection {
 
     /// One connection, from open to the first failure. Returns by throwing.
     private func session(welcomed: inout Bool) async throws {
-        guard let info = discover() else { throw Down.noDaemon }
+        guard let info = await findDaemon() else { throw Down.noDaemon }
         let s = makeSocket()
         socket = s
         s.open(port: info.port)
@@ -85,37 +103,27 @@ public final class MonitorConnection {
         sendSubscription()
         heard = Date()
         let box = WelcomeBox()
+        let decode = self.decode
+        let timing = self.timing
         do {
             try await withThrowingTaskGroup(of: Void.self) { g in
-                g.addTask { @MainActor in
+                // Reading and decoding run off the main actor; only the finished message comes back.
+                g.addTask {
                     while true {
                         let text = try await s.receive()
-                        self.heard = Date()
-                        var opts = JSONDecodingOptions()
-                        opts.ignoreUnknownFields = true
-                        if let msg = try? Mason_V1_ServerMessage(jsonString: text, options: opts) {
-                            if case .welcome? = msg.body { box.value = true }
-                            self.model.apply(msg)
-                        }
+                        await self.deliver(decode(text), welcome: box)
                     }
                 }
-                g.addTask { @MainActor in
+                // The daemon.json read is file I/O, so it also runs off the main actor.
+                g.addTask {
                     var lastPing = Date()
-                    let tick = min(self.timing.watchEvery, self.timing.pingEvery)
+                    let tick = min(timing.watchEvery, timing.pingEvery)
                     while true {
                         try await Task.sleep(nanoseconds: UInt64(tick * 1_000_000_000))
-                        if let now = self.discover(), info.pid != nil || info.startedMs != nil, now.replaces(info) {
-                            throw Down.restarted
-                        }
-                        if Date().timeIntervalSince(self.heard) > self.timing.stallAfter { throw Down.stalled }
-                        if Date().timeIntervalSince(lastPing) >= self.timing.pingEvery {
+                        let now = await self.findDaemon()
+                        if let ping = try await self.watch(info: info, now: now, lastPing: lastPing) {
                             lastPing = Date()
-                            self.pings += 1
-                            var p = Mason_V1_Ping()
-                            p.nonce = self.pings
-                            var m = Mason_V1_ClientMessage()
-                            m.ping = p
-                            try await s.send(try m.jsonString())
+                            try await s.send(ping)
                         }
                     }
                 }
@@ -126,6 +134,34 @@ public final class MonitorConnection {
             welcomed = box.value
             throw error
         }
+    }
+
+    /// `discover` on a background thread: it reads `daemon.json`.
+    private func findDaemon() async -> DaemonInfo? {
+        let d = UncheckedBox(value: discover)
+        return await Task.detached { d.value() }.value
+    }
+
+    /// A decoded message (nil when the frame did not decode) arrives on the main actor, in order.
+    private func deliver(_ msg: Mason_V1_ServerMessage?, welcome: WelcomeBox) {
+        heard = Date()
+        guard let msg else { return }
+        if case .welcome? = msg.body { welcome.value = true }
+        model.apply(msg)
+    }
+
+    /// One watch tick on the main actor: throws when the daemon restarted or went quiet;
+    /// returns the text of a ping when one is due.
+    private func watch(info: DaemonInfo, now: DaemonInfo?, lastPing: Date) throws -> String? {
+        if let now, info.pid != nil || info.startedMs != nil, now.replaces(info) { throw Down.restarted }
+        if Date().timeIntervalSince(heard) > timing.stallAfter { throw Down.stalled }
+        guard Date().timeIntervalSince(lastPing) >= timing.pingEvery else { return nil }
+        pings += 1
+        var p = Mason_V1_Ping()
+        p.nonce = pings
+        var m = Mason_V1_ClientMessage()
+        m.ping = p
+        return try m.jsonString()
     }
 
     private func hello(_ t: MonitorSocket) async throws {

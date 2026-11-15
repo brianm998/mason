@@ -173,6 +173,8 @@ pub struct Stats {
     /// `wait_ms` by what was waited on ("a slot", "the owner", a resource), largest first is
     /// worked out where it is shown.
     pub wait_by: std::collections::BTreeMap<String, u64>,
+    /// The `compile` slot count in force now, if known.
+    pub compile_cap: Option<u64>,
 }
 
 /// `a slot 70%, the owner 20%, ...`, largest first, at most five.
@@ -188,6 +190,19 @@ pub fn wait_breakdown(by: &std::collections::BTreeMap<String, u64>) -> String {
         .map(|(k, n)| format!("{k} {:.0}%", **n as f64 * 100.0 / total as f64))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// The resource with the longest wait and the compile count in force.
+pub fn wait_longest(s: &Stats) -> String {
+    let top = s
+        .wait_by
+        .iter()
+        .max_by(|a, b| a.1.cmp(b.1).then(b.0.cmp(a.0)))
+        .map_or("none".to_string(), |(k, ms)| format!("{k} ({ms} ms)"));
+    let cap = s
+        .compile_cap
+        .map_or("unknown".to_string(), |n| n.to_string());
+    format!("longest wait: {top}; compile slots in force: {cap}")
 }
 
 /// A metric's value over `stats`, if it can be measured over a window of recorded data.
@@ -299,6 +314,17 @@ pub struct Finding {
     pub metric: String,
     /// The metric as it stood when found.
     pub before: Option<Measure>,
+    /// How much it matters and how big the fix looks, which with the owner's
+    /// `[proposals.introspection]` table decide proposed or queued.
+    pub impact: crate::proposal::Impact,
+    pub cost: crate::proposal::Cost,
+}
+
+/// What a detector's rule estimates for its findings. Until a rule has a basis for a cheaper
+/// estimate every one is high and large, so a table that queues only the small, low ones
+/// reaches analyst findings alone.
+pub fn estimate(_rule: &str) -> (crate::proposal::Impact, crate::proposal::Cost) {
+    (crate::proposal::Impact::High, crate::proposal::Cost::Large)
 }
 
 impl Finding {
@@ -374,6 +400,8 @@ pub fn detect(project: &str, s: &Stats, f: &Facts, t: &Thresholds) -> Vec<Findin
         evidence: format!("{evidence}; look at {}", pointer(rule)),
         metric: metric.into(),
         before,
+        impact: estimate(rule).0,
+        cost: estimate(rule).1,
     };
 
     // A retry loop on a permanent error: the same permanent failure retried again and again.
@@ -489,10 +517,11 @@ pub fn detect(project: &str, s: &Stats, f: &Facts, t: &Thresholds) -> Vec<Findin
                     s.wait_ms, s.active_ms, t.wait_share * 100.0
                 ),
                 format!(
-                    "wait events in the event log: {} ms waiting of {} ms; by what was waited on: {}",
+                    "wait events in the event log: {} ms waiting of {} ms; by what was waited on: {}; {}",
                     s.wait_ms,
                     s.active_ms,
-                    wait_breakdown(&s.wait_by)
+                    wait_breakdown(&s.wait_by),
+                    wait_longest(s)
                 ),
                 "wait_share",
                 Some(m),
@@ -745,6 +774,10 @@ pub struct Draft {
     pub body: String,
     pub evidence: String,
     pub metric: String,
+    /// `low` or `high`; empty means high.
+    pub severity: String,
+    /// `small` or `large`; empty means large.
+    pub cost: String,
 }
 
 /// Turn the analyst's drafts into findings; every one that fails its check is refused, with
@@ -752,6 +785,33 @@ pub struct Draft {
 pub fn accept_drafts(project: &str, drafts: &[Draft]) -> (Vec<Finding>, Vec<(String, String)>) {
     let (mut ok, mut refused) = (vec![], vec![]);
     for d in drafts {
+        use crate::proposal::{Cost, Impact};
+        let impact = match d.severity.trim() {
+            "" => Impact::High,
+            o => match Impact::parse(o) {
+                Some(i) => i,
+                None => {
+                    refused.push((
+                        d.title.clone(),
+                        format!("severity {o:?} is not known: use low or high"),
+                    ));
+                    continue;
+                }
+            },
+        };
+        let cost = match d.cost.trim() {
+            "" => Cost::Large,
+            o => match Cost::parse(o) {
+                Some(c) => c,
+                None => {
+                    refused.push((
+                        d.title.clone(),
+                        format!("cost {o:?} is not known: use small or large"),
+                    ));
+                    continue;
+                }
+            },
+        };
         let f = Finding {
             rule: "analyst".into(),
             subject: crate::proposal::normalise(&d.title),
@@ -761,6 +821,8 @@ pub fn accept_drafts(project: &str, drafts: &[Draft]) -> (Vec<Finding>, Vec<(Str
             evidence: d.evidence.trim().into(),
             metric: d.metric.trim().into(),
             before: None,
+            impact,
+            cost,
         };
         match f.check() {
             Ok(()) => ok.push(f),
@@ -928,6 +990,20 @@ mod tests {
     }
 
     #[test]
+    fn the_wait_evidence_names_the_longest_wait_and_the_compile_count() {
+        let mut s = Stats::default();
+        s.wait_by.insert("compile".into(), 900);
+        s.wait_by.insert("test-suite".into(), 400);
+        s.compile_cap = Some(3);
+        let t = wait_longest(&s);
+        assert!(
+            t.contains("compile (900 ms)") && t.contains("in force: 3"),
+            "{t}"
+        );
+        assert!(wait_longest(&Stats::default()).contains("none"));
+    }
+
+    #[test]
     fn findings_need_evidence_and_a_known_metric() {
         let mut f = detect(
             "p",
@@ -1048,6 +1124,7 @@ mod tests {
             body: "Review steps queue behind develop.".into(),
             evidence: "crates/daemon/src/sched.rs:120 ranks review below develop".into(),
             metric: "wait_share".into(),
+            ..Default::default()
         };
         let no_evidence = Draft {
             evidence: "I think so".into(),
@@ -1061,6 +1138,33 @@ mod tests {
         assert_eq!(ok.len(), 1);
         assert_eq!(refused.len(), 2);
         assert!(refused[1].1.contains("unknown metric"));
+    }
+
+    #[test]
+    fn a_draft_gives_severity_and_cost_and_absent_means_high_and_large() {
+        use crate::proposal::{Cost, Impact};
+        let d = |sev: &str, cost: &str| Draft {
+            title: "Reviews wait for a slot".into(),
+            body: "Review steps queue behind develop.".into(),
+            evidence: "crates/daemon/src/sched.rs:120 ranks review below develop".into(),
+            metric: "wait_share".into(),
+            severity: sev.into(),
+            cost: cost.into(),
+        };
+        let (ok, refused) = accept_drafts("p", &[d("", ""), d("low", "small")]);
+        assert!(refused.is_empty());
+        assert_eq!((ok[0].impact, ok[0].cost), (Impact::High, Cost::Large));
+        assert_eq!((ok[1].impact, ok[1].cost), (Impact::Low, Cost::Small));
+        let (ok, refused) = accept_drafts("p", &[d("urgent", ""), d("", "tiny")]);
+        assert!(ok.is_empty());
+        assert!(refused[0].1.contains("severity"), "{refused:?}");
+        assert!(refused[1].1.contains("cost"), "{refused:?}");
+    }
+
+    #[test]
+    fn detector_findings_are_estimated_high_and_large() {
+        use crate::proposal::{Cost, Impact};
+        assert_eq!(estimate("retry_loop"), (Impact::High, Cost::Large));
     }
 
     #[test]
