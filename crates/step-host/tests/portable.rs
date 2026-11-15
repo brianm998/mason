@@ -92,9 +92,11 @@ fn a_controller_connects_and_gets_output_and_the_exit() {
 fn a_new_controller_reattaches_by_the_endpoint_on_disk_after_the_first_is_gone() {
     let (_d, r) = root();
     let info = start(&r, "a", &print_then_wait());
-    let mut first = connect(&info.sock);
-    let seen = read_until(&mut first, 0, "first");
-    drop(first); // the controller goes away; the host and its child keep running
+    let seen = {
+        let mut first = connect(&info.sock);
+        read_until(&mut first, 0, "first")
+        // the controller goes away here; the host and its child keep running
+    };
     assert!(pid_alive(info.host_pid) && pid_alive(info.child_pid));
 
     // A new daemon finds the host from its record, not from anything in memory.

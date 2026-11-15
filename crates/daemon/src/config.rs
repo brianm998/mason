@@ -366,7 +366,7 @@ impl DaemonConfig {
             attention_interval: Duration::from_secs(5),
             env_retry: Duration::from_secs(30),
             base_red_poll: Duration::from_secs(60),
-            auto_retry_delays: vec![Duration::from_secs(600), Duration::from_secs(3600)],
+            auto_retry_delays: vec![Duration::from_secs(120), Duration::from_secs(600)],
             auto_retry_window: Duration::from_secs(24 * 3600),
             auto_retry_tick: Duration::from_secs(30),
             close_window_owner: Duration::from_secs(24 * 3600),
