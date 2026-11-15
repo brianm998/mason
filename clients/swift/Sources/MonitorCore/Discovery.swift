@@ -6,7 +6,11 @@ import Foundation
 /// announces in `daemon.json` in its data directory.
 public enum Discovery {
     public static var defaultDataDir: URL {
+        #if os(macOS)
         let home = FileManager.default.homeDirectoryForCurrentUser
+        #else
+        let home = URL(fileURLWithPath: NSHomeDirectory())
+        #endif
         return home.appendingPathComponent("Library/Application Support/mason")
     }
 
