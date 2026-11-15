@@ -708,6 +708,17 @@ const STEPS: &[&str] = &[
          at_ms   INTEGER NOT NULL
      );
      CREATE INDEX owner_messages_session ON owner_messages(session, id);",
+    // 40: what pipeline self-correction did (s432, decision 0425): daemon starts, each health
+    // check, each session and its verdict, one row each. Additive.
+    "CREATE TABLE health_log (
+         id      INTEGER PRIMARY KEY AUTOINCREMENT,
+         at_ms   INTEGER NOT NULL,
+         kind    TEXT NOT NULL,
+         key     TEXT NOT NULL DEFAULT '',
+         session INTEGER,
+         detail  TEXT NOT NULL DEFAULT ''
+     );
+     CREATE INDEX health_log_kind ON health_log(kind, at_ms);",
 ];
 
 pub const SCHEMA_VERSION: u32 = STEPS.len() as u32;

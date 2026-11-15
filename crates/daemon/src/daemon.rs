@@ -350,6 +350,7 @@ impl Daemon {
             d.spawn_sweeper();
             d.spawn_compile_watch();
             crate::usersession::on_start(&d);
+            crate::health::on_start(&d);
             // A daemon whose CPU reading is injected is a test's: it would add a
             // thread running `ps` every few seconds, to no use.
             if d.cfg.cpu.is_none() && std::env::var_os("MASON_CPU_FILE").is_none()

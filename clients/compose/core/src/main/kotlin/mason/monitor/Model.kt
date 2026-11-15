@@ -270,6 +270,11 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     var sshKeyResult by mutableStateOf<String?>(null)
     var sshKeyBusy by mutableStateOf(false)
 
+    /** The owner session whose dialog is open (null: closed) and what the daemon last said of it (s364, s432). */
+    var ownerSessionDialog by mutableStateOf<Long?>(null)
+    var ownerSession by mutableStateOf<OwnerSessionTranscript?>(null)
+    var ownerSessionError by mutableStateOf<String?>(null)
+
     /** The step selected in the pipeline editor (for its inspector). */
     var editorStep by mutableStateOf("")
         private set
@@ -610,6 +615,36 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
         raw("POST", "/projects/$project/ssh-key", id = "ssh-key:$project", json = EditorJson.text(mapOf("path" to path)))
     }
 
+    /** Open the owner-session dialog on a session (the health banner's and the sidebar's button). */
+    fun openOwnerSession(id: Long) {
+        ownerSessionDialog = id
+        ownerSession = null
+        ownerSessionError = null
+        refreshOwnerSession()
+    }
+
+    fun closeOwnerSession() {
+        ownerSessionDialog = null
+        ownerSession = null
+        ownerSessionError = null
+    }
+
+    private fun refreshOwnerSession() {
+        val id = ownerSessionDialog ?: return
+        raw("GET", "/sessions/$id", id = "osession:$id")
+    }
+
+    fun sendOwnerMessage(text: String) {
+        val id = ownerSessionDialog ?: return
+        if (text.isBlank()) return
+        raw("POST", "/sessions/$id/messages", id = "osession-send:$id", json = EditorJson.text(mapOf("text" to text)))
+    }
+
+    fun endOwnerSession() {
+        val id = ownerSessionDialog ?: return
+        raw("POST", "/sessions/$id/end", id = "osession-end:$id", json = "{}")
+    }
+
     fun closeSshKeys() {
         sshKeyProject = null
         sshKeys = null
@@ -818,6 +853,10 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
                     is OpenSession.Decision.Failed -> sessionNotice = d.why
                 }
             }
+            if (r.id.startsWith("osession:") && r.ok) ownerSession = OwnerSessionTranscript.parse(r.json)
+            if ((r.id.startsWith("osession:") || r.id.startsWith("osession-send:")) && !r.ok) ownerSessionError = r.error
+            if (r.id.startsWith("osession-send:") && r.ok) refreshOwnerSession()
+            if (r.id.startsWith("osession-end:") && r.ok) closeOwnerSession()
             if (r.id.startsWith("ssh-keys:")) { if (r.ok) sshKeys = SshKeyList.parse(r.json) else sshKeyResult = r.error }
             if (r.id.startsWith("ssh-key:")) {
                 sshKeyBusy = false
@@ -880,6 +919,8 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
         v.header_?.let {
             header = it
             noteMonitorBuild()
+            // An open dialog follows the session: a reply arrives as a new header.
+            if (ownerSessionDialog != null) refreshOwnerSession()
         }
         v.sidebar?.let { sidebar = it; noteAttention(it) }
         v.home?.let {
