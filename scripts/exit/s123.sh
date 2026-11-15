@@ -11,7 +11,7 @@ for f in Components TopBar Sidebar Pages; do
   need "$c/swift/Sources/MonitorUI/$f.swift" 'StateIcon('
   need "$c/compose/app/src/main/kotlin/mason/monitor/ui/$f.kt" 'StateIcon('
 done
-need "$c/swift/Sources/MonitorPhone/Phone.swift" 'PhoneStateIcon('
+need "$c/swift/Sources/MonitorUI/Phone.swift" 'PhoneStateIcon('
 need "$c/swift/Sources/MonitorUI/Components.swift" 'accessibilityHidden(true)'
 need "$c/compose/app/src/main/kotlin/mason/monitor/ui/Mascot.kt" 'contentDescription = null'
 need "$c/swift/Sources/MonitorUI/Components.swift" 'overlay(alignment: .topLeading)'
