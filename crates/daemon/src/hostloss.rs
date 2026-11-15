@@ -221,6 +221,7 @@ mod tests {
         assert!(!restart_loss_in("", 5));
     }
 
+    use super::*;
     use mason_core::FailClass;
 
     #[test]
@@ -253,8 +254,8 @@ mod tests {
     #[test]
     fn the_note_names_the_time_of_the_loss() {
         assert_eq!(utc_text(0), "1970-01-01 00:00:00 UTC");
-        assert_eq!(utc_text(1_794_657_600_000), "2026-11-14 10:40:00 UTC");
-        let n = interrupted_note(1_794_657_600_000);
+        assert_eq!(utc_text(1_794_652_800_000), "2026-11-14 10:40:00 UTC");
+        let n = interrupted_note(1_794_652_800_000);
         assert!(n.contains("lost at 2026-11-14 10:40:00 UTC"), "{n}");
         assert!(n.contains("git status"), "{n}");
     }
