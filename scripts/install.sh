@@ -166,8 +166,12 @@ maybe_profile() {
       # MASON_INSTALL_PROMPT=1 asks even when stdin is not a terminal (the tests answer on stdin).
       if [ -t 0 ] || [ "${MASON_INSTALL_PROMPT:-}" = 1 ]; then
         printf 'install: Add a `mason` shell function to %s so `mason` always runs the current runtime? [Y/n] ' "$f"
-        answer=""; read -r answer || true
-        case "$answer" in ""|y|Y|yes|YES|Yes) install_profile_block "$f" ;; *) say "left $f alone" ;; esac
+        # End of input without an answer is a no, never a default yes.
+        if read -r answer; then
+          case "$answer" in ""|y|Y|yes|YES|Yes) install_profile_block "$f" ;; *) say "left $f alone" ;; esac
+        else
+          echo; say "no answer; left $f alone"
+        fi
       fi ;;
   esac
 }
