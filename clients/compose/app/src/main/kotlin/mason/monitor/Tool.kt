@@ -117,7 +117,7 @@ fun main(argv: Array<String>) {
 
 private fun answer(model: MonitorModel, args: List<String>) {
     val t = args.opt("--task")?.toLongOrNull() ?: fail("--task N")
-    // An option number, or text for the Other box (sent as free text, as the CLI does).
+    // An option number ("1,3" for several on a multi-select card), or text for the Other box (sent as free text, as the CLI does).
     val text = args.opt("--text")
     val option = text ?: args.opt("--option") ?: "1"
     until("task #$t's decision card") { model.home?.attention?.any { it.task?.id == t && it.card != null } == true }
