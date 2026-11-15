@@ -63,7 +63,7 @@ internal fun Section(title: String, state: String? = null, content: @Composable 
 internal fun Link(text: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
     val theme = LocalTheme.current
     Text(text, style = theme.body(color = theme.accent), maxLines = 1, overflow = TextOverflow.Ellipsis,
-        modifier = modifier.pointerHoverIcon(PointerIcon.Hand).clickable(onClick = onClick))
+        modifier = modifier.pointerHoverIcon(PointerIcon(java.awt.Cursor(java.awt.Cursor.HAND_CURSOR))).clickable(onClick = onClick))
 }
 
 @Composable
