@@ -165,6 +165,8 @@ struct HomeScreen: View {
 struct TaskScreen: View {
     @ObservedObject var model: MonitorModel
     let id: UInt64
+    /// The ticked options of a multi-select card (a card has at most 4 options).
+    @State private var multi = MultiSelection(count: 4)
     /// The state picture, scaled with the user's text size.
     @ScaledMetric private var illustrationSize = CGFloat(MasonTokens.sizeMascotIllustration)
 
@@ -189,9 +191,24 @@ struct TaskScreen: View {
             if let card = t?.card, !card.ask.isEmpty {
                 Section("Decision") {
                     Text(card.ask)
-                    ForEach(card.options, id: \.label) { o in
-                        Button(o.label) { model.answer(task: id, o.label, cardHash: card.hash) }
+                    if card.multiSelect {
+                        // Several answers: tick options, then send their numbers ("1,3").
+                        ForEach(Array(card.options.enumerated()), id: \.offset) { i, o in
+                            Button { multi.toggle(i) } label: {
+                                Label(o.label, systemImage: multi.checked.contains(i) ? "checkmark.square.fill" : "square")
+                            }
                             .disabled(!model.canAct)
+                        }
+                        Button("Send") {
+                            if let a = multi.answer { model.answer(task: id, a, cardHash: card.hash) }
+                        }
+                        .disabled(!model.canAct || multi.answer == nil)
+                        .onChange(of: card.hash) { _, _ in multi = MultiSelection(count: 4) }
+                    } else {
+                        ForEach(card.options, id: \.label) { o in
+                            Button(o.label) { model.answer(task: id, o.label, cardHash: card.hash) }
+                                .disabled(!model.canAct)
+                        }
                     }
                 }
             }

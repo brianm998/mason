@@ -614,6 +614,8 @@ message DecisionCard {
   repeated string evidence = 4;
   string hash = 5;
   string origin = 6;
+  // Several answers are allowed (s297).
+  bool multi_select = 7;
 }
 
 // What a task waiting for the owner's approval is waiting on, in full.
