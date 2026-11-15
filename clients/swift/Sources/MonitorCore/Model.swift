@@ -39,7 +39,10 @@ public final class LiveState: ObservableObject {
 public final class MonitorModel: ObservableObject {
     // From the daemon.
     @Published public var header: HeaderView? { didSet { prunePauseCollapse() } }
-    @Published public var sidebar: SidebarView?
+    @Published public var sidebar: SidebarView? { didSet { sidebarRevision &+= 1 } }
+    /// Bumped on every new sidebar, so derived layouts know when to be rebuilt.
+    var sidebarRevision: UInt64 = 0
+    var sidebarEntriesCache: (key: SidebarEntriesKey, entries: [SidebarEntry])?
     @Published public var home: HomeView?
     /// The CPU shares, observed apart from the whole model: the CPU section watches only this.
     public let cpu = CpuModel()
@@ -85,7 +88,12 @@ public final class MonitorModel: ObservableObject {
     /// The protocol this monitor speaks.
     public static let protocolVersion: UInt32 = 1
     /// This monitor's own build: a commit, or "dev" for a build nobody versioned.
-    public var ownVersion: String = ProcessInfo.processInfo.environment["MASON_MONITOR_VERSION"] ?? "dev"
+    /// The commit comes from the environment, else from `BuildStamp`, which every build made by
+    /// the daemon or `make` stamps; a build nobody stamped stays "dev" and does not nag.
+    public var ownVersion: String = ProcessInfo.processInfo.environment["MASON_MONITOR_VERSION"]
+        ?? (BuildStamp.commit.isEmpty ? "dev" : BuildStamp.commit)
+    /// Where this monitor's executable is, so the daemon can rebuild a bare binary in place.
+    public var ownPath: String = ""
     /// The daemon's build, from its welcome.
     @Published public var daemonVersion = ""
     /// Set when the daemon needs a newer protocol than this monitor speaks: nothing
@@ -115,6 +123,29 @@ public final class MonitorModel: ObservableObject {
     }
     /// The commit a monitor update would go to.
     public var latestMonitor: String { monitorBuild?.latest ?? "" }
+
+    /// How many commits behind develop the daemon says it is (parsed from the daemon's own
+    /// sentence, "masond is 3 commits behind develop"); nil when it does not say.
+    public var daemonCommitsBehind: Int? {
+        let t = daemonUpdateText
+        guard let r = t.range(of: #"(\d+) commits? behind"#, options: .regularExpression) else { return nil }
+        return Int(t[r].prefix { $0.isNumber })
+    }
+    private static func shortCommit(_ v: String) -> String { String(v.prefix(8)) }
+    /// Home's version line: the running masond's short commit (or "unversioned build"), how far
+    /// behind develop it is, and this monitor's own commit. Empty before a welcome.
+    public var versionLine: String {
+        if daemonVersion.isEmpty { return "" }
+        var d = daemonVersion == "dev" ? "masond (unversioned build)" : "masond \(Self.shortCommit(daemonVersion))"
+        if let n = daemonCommitsBehind { d += " (\(n) commit\(n == 1 ? "" : "s") behind develop)" }
+        let o = ownVersion == "dev" ? "monitor (unversioned build)" : "monitor \(Self.shortCommit(ownVersion))"
+        return "\(d) · \(o)"
+    }
+    /// The full hashes, for the tooltip.
+    public var versionTip: String {
+        if daemonVersion.isEmpty { return "" }
+        return "masond \(daemonVersion)\nmonitor \(ownVersion)"
+    }
 
     /// What to say about the daemon's own version; empty when there is nothing to say.
     public var daemonUpdateText: String { updateInfo?.daemonText ?? "" }
@@ -170,8 +201,36 @@ public final class MonitorModel: ObservableObject {
         updating = "Building the new monitor…"
         var c = Mason_V1_Command()
         c.id = "update-monitor"
-        c.raw = .with { $0.method = "POST"; $0.path = "/update/monitor"; $0.json = "{\"kind\":\"\(Self.monitorKind)\"}" }
+        let body: [String: String] = ["kind": Self.monitorKind, "own_path": ownPath, "own_version": ownVersion]
+        let json = (try? JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+        c.raw = .with { $0.method = "POST"; $0.path = "/update/monitor"; $0.json = json }
         send(c)
+    }
+
+    /// The build can be stopped: it is running and the daemon is the one doing it.
+    public var canCancelMonitorUpdate: Bool { monitorAsked && monitorBuild?.phase == "building" }
+
+    /// The owner's Cancel while the new monitor builds; this one keeps running.
+    public func cancelMonitorUpdate() {
+        var c = Mason_V1_Command()
+        c.id = "update-monitor-cancel"
+        c.raw = .with { $0.method = "POST"; $0.path = "/update/monitor/cancel"; $0.json = "{\"kind\":\"\(Self.monitorKind)\"}" }
+        send(c)
+    }
+
+    /// What the build is doing, in words: "Compiling 12 of 48", then the build's last line.
+    public static func buildText(_ b: Mason_V1_MonitorBuild) -> String {
+        var head: String
+        switch b.step {
+        case "fetching": head = "Fetching the new source…"
+        case "waiting": head = "Waiting for a build slot…"
+        case "compiling": head = b.total > 0 ? "Compiling \(b.done) of \(b.total)…" : "Compiling…"
+        case "linking": head = "Linking…"
+        case "installing": head = "Installing the new monitor…"
+        default: return "Building the new monitor…"
+        }
+        if !b.lastLine.isEmpty, b.step == "compiling" || b.step == "linking" { head += " " + String(b.lastLine.prefix(90)) }
+        return head
     }
 
     /// The update of this monitor stopped; this one keeps running.
@@ -181,18 +240,25 @@ public final class MonitorModel: ObservableObject {
         updateError = why
     }
 
+    /// Why the build stopped, with where its log is.
+    public static func failureText(_ b: Mason_V1_MonitorBuild?) -> String {
+        var t = "The new monitor did not build: \(b?.error ?? "")"
+        if let log = b?.log, !log.isEmpty { t += " (log: \(log))" }
+        return t
+    }
+
     /// Follow the build the owner asked for, from each new header.
     private func noteMonitorBuild() {
         guard monitorAsked else { return }
         switch monitorBuild?.phase {
         case "building":
-            break
+            if let b = monitorBuild { updating = Self.buildText(b) }
         case "ready":
             monitorAsked = false
             updating = "Starting the new monitor…"
             onInstall?(monitorBuild?.path ?? "")
         case "failed":
-            monitorUpdateFailed("The new monitor did not build: \(monitorBuild?.error ?? "")")
+            monitorUpdateFailed(Self.failureText(monitorBuild))
         default:
             monitorUpdateFailed("The daemon restarted during the build. Press Update to start it again.")
         }
@@ -219,7 +285,30 @@ public final class MonitorModel: ObservableObject {
     @Published public private(set) var daemonDown = false
     /// This monitor's name when it asks to speak; one per launch.
     public let clientId = UUID().uuidString
-    @Published public var project = "" { didSet { attentionSeen = nil } }
+    /// The selected project filter ("" is all projects). Everything the daemon computes for a
+    /// project is stamped with it; a change clears what was computed for the old one, and
+    /// `apply` drops any view stamped for another.
+    @Published public var project = "" {
+        didSet {
+            attentionSeen = nil
+            if oldValue != project { clearProjectScoped() }
+        }
+    }
+
+    /// Forget every number computed for the previous selection, so it never shows under the new
+    /// name. The header keeps its project list and banners (the picker needs them); its counts go.
+    func clearProjectScoped() {
+        if var h = header {
+            h.counts = []
+            h.attention = 0
+            h.status = ""
+            h.project = project
+            header = h
+        }
+        sidebar = nil
+        home = nil
+        landing = nil
+    }
     /// Called (on the main actor) when something new needs the owner and the monitor is not
     /// muted: a task asked a question, waits for approval, was proposed, or failed. The app
     /// plays its sound here; the model only decides when.
@@ -232,6 +321,8 @@ public final class MonitorModel: ObservableObject {
     /// Where the sidebar should scroll to (a tile was clicked).
     @Published public var scrollTarget: String?
     @Published public var lastResult: String?
+    /// A long command opened from a Compilation row; nil: the dialog is closed.
+    @Published public var commandDialog: CommandDialog?
     /// Open session found the step running: the task to ask about. Answer with `answerSessionPrompt`.
     @Published public var sessionPrompt: UInt64?
     /// What Open session did or could not do, in words, until the next click.
@@ -684,6 +775,13 @@ public final class MonitorModel: ObservableObject {
         send(c)
     }
 
+    /// Open the dialog for a row's command (nothing when the row has none).
+    public func openCommand(label: String, command: String) {
+        if let d = Format.commandDialog(label: label, command: command) { commandDialog = d }
+    }
+
+    public func closeCommand() { commandDialog = nil }
+
     public func closeSSHKeys() {
         sshKeyProject = nil
         sshKeys = nil
@@ -761,12 +859,42 @@ public final class MonitorModel: ObservableObject {
         clockOffsetMs = Int64(ms) - Int64(local.timeIntervalSince1970 * 1000)
     }
 
+    /// How progress messages are put off to the next frame: `flush` is run once, later, on the main actor.
+    /// The app's default waits one frame (1/30 s); tests replace it to hold the model "busy".
+    public var scheduleProgressFlush: (@escaping @MainActor () -> Void) -> Void = { flush in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0 / 30) { MainActor.assumeIsolated { flush() } }
+    }
+    private var pendingProgress: [Mason_V1_StepProgress] = []
+    private var flushScheduled = false
+
+    /// A progress message from the stream: held until the next frame, so a burst costs one sidebar publish.
+    func enqueue(progress p: Mason_V1_StepProgress) {
+        pendingProgress.append(p)
+        guard !flushScheduled else { return }
+        flushScheduled = true
+        scheduleProgressFlush { [weak self] in self?.flushProgress() }
+    }
+
+    /// Apply what was held, in order, as one batch. Every other message flushes first, so order is kept.
+    public func flushProgress() {
+        flushScheduled = false
+        guard !pendingProgress.isEmpty else { return }
+        let batch = pendingProgress
+        pendingProgress = []
+        apply(progresses: batch)
+    }
+
     /// A step's progress arrived without a view: put it into the task page and the rows, and follow the log.
     public func apply(progress p: Mason_V1_StepProgress, local: Date = Date()) {
-        anchor(daemonNow: p.nowMs, local: local)
-        guard p.hasProgress else { return }
-        let cell = p.progress
-        func merged(_ old: [ProgressCell]) -> [ProgressCell]? {
+        apply(progresses: [p], local: local)
+    }
+
+    /// Several progress messages at once: one write to the task page, one to the sidebar, one pass over its rows.
+    func apply(progresses ps: [Mason_V1_StepProgress], local: Date = Date()) {
+        if let last = ps.last(where: { $0.nowMs > 0 }) { anchor(daemonNow: last.nowMs, local: local) }
+        let withCell = ps.filter { $0.hasProgress }
+        guard !withCell.isEmpty else { return }
+        func merged(_ old: [ProgressCell], _ cell: ProgressCell) -> [ProgressCell]? {
             guard let i = old.firstIndex(where: { $0.step == cell.step }) else { return nil }
             var c = cell
             // A finished or stopped run says what it ended as on the next view; until then, no "running".
@@ -775,19 +903,33 @@ public final class MonitorModel: ObservableObject {
             out[i] = c
             return out
         }
-        if var d = taskDetail, d.hasRow, d.row.id == p.task {
-            if let cells = merged(d.row.progress) {
-                d.row.progress = cells
-                taskDetail = d
+        if var d = taskDetail, d.hasRow {
+            var changed = false
+            var lines: [String] = []
+            for p in withCell where d.row.id == p.task {
+                if let cells = merged(d.row.progress, p.progress) {
+                    d.row.progress = cells
+                    changed = true
+                }
+                lines += p.log
             }
-            appendLog(p.log)
+            if changed { taskDetail = d }
+            appendLog(lines)
         }
         if var s = sidebar {
+            var latest: [UInt64: [Mason_V1_ProgressCell]] = [:]
+            for p in withCell { latest[p.task, default: []].append(p.progress) }
             var changed = false
             for si in s.sections.indices {
-                for ri in s.sections[si].rows.indices where s.sections[si].rows[ri].id == p.task {
-                    if let cells = merged(s.sections[si].rows[ri].progress) {
-                        s.sections[si].rows[ri].progress = cells
+                for ri in s.sections[si].rows.indices {
+                    guard let cells = latest[s.sections[si].rows[ri].id] else { continue }
+                    var progress = s.sections[si].rows[ri].progress
+                    var hit = false
+                    for cell in cells {
+                        if let next = merged(progress, cell) { progress = next; hit = true }
+                    }
+                    if hit {
+                        s.sections[si].rows[ri].progress = progress
                         changed = true
                     }
                 }
@@ -804,6 +946,11 @@ public final class MonitorModel: ObservableObject {
     // MARK: updates from the daemon
 
     public func apply(_ m: Mason_V1_ServerMessage) {
+        if case .stepProgress(let p)? = m.body {
+            enqueue(progress: p)
+            return
+        }
+        flushProgress()
         switch m.body {
         case .welcome(let w)?:
             connected = true
@@ -827,8 +974,6 @@ public final class MonitorModel: ObservableObject {
         case .view(let u)?:
             lastSeq = max(lastSeq, u.seq)
             apply(u.view)
-        case .stepProgress(let p)?:
-            apply(progress: p)
         case .result(let r)?:
             lastResult = r.ok ? nil : r.error
             handle(result: r)
@@ -847,7 +992,21 @@ public final class MonitorModel: ObservableObject {
         if !ids.subtracting(seen).isEmpty { onAttention?() }
     }
 
+    /// The project a view was computed for, when it is one of the project-scoped views.
+    static func scope(of v: Mason_V1_View) -> String? {
+        switch v.body {
+        case .header(let x)?: return x.project
+        case .sidebar(let x)?: return x.project
+        case .home(let x)?: return x.project
+        case .landing(let x)?: return x.project
+        default: return nil
+        }
+    }
+
     func apply(_ v: Mason_V1_View) {
+        // A view computed for another filter (a rebuild that was in flight when the picker
+        // changed, or one resumed after a reconnect) is dropped.
+        if let p = Self.scope(of: v), p != project { return }
         switch v.body {
         case .header(let x)?:
             header = x

@@ -9,18 +9,21 @@ import Security
 #endif
 
 /// What `mason pair` shows as a QR code (or types as a short code):
-/// `mason://pair?host=H&port=P&fp=SHA256HEX&code=12345678`.
+/// `mason://pair?host=H&port=P&fp=SHA256HEX&code=12345678[&alt=H2&alt=H3]`. `host` is the
+/// `.local` name; each `alt` is another name the daemon can be reached at (a Tailscale name).
 public struct PairURL: Equatable, Sendable {
     public var host: String
     public var port: UInt16
     public var fingerprint: String
     public var code: String
+    public var alternates: [String]
 
-    public init(host: String, port: UInt16, fingerprint: String, code: String) {
+    public init(host: String, port: UInt16, fingerprint: String, code: String, alternates: [String] = []) {
         self.host = host
         self.port = port
         self.fingerprint = fingerprint
         self.code = code
+        self.alternates = alternates
     }
 
     /// nil for anything that is not a well-formed pairing address.
@@ -33,7 +36,8 @@ public struct PairURL: Equatable, Sendable {
               let p = q["port"].flatMap({ UInt16($0) }), p > 0,
               let fp = q["fp"]?.lowercased(), Pin.isFingerprint(fp),
               let code = q["code"], Pin.isCode(code) else { return nil }
-        return PairURL(host: host, port: p, fingerprint: fp, code: code)
+        let alts = (c.queryItems ?? []).filter { $0.name == "alt" }.compactMap { $0.value }.filter { !$0.isEmpty }
+        return PairURL(host: host, port: p, fingerprint: fp, code: code, alternates: alts)
     }
 }
 
@@ -67,8 +71,24 @@ public struct PairedDaemon: Equatable, Sendable {
     public var fingerprint: String
     public var token: String
     public var role: String
-    public init(host: String, port: UInt16, fingerprint: String, token: String, role: String) {
+    /// Other names the daemon answers to, after `host`.
+    public var alternates: [String]
+    public init(host: String, port: UInt16, fingerprint: String, token: String, role: String, alternates: [String] = []) {
         self.host = host; self.port = port; self.fingerprint = fingerprint; self.token = token; self.role = role
+        self.alternates = alternates
+    }
+    /// Every name, `host` first.
+    public var hosts: [String] { [host] + alternates }
+}
+
+/// The order to try a paired daemon's addresses in. Pure.
+public enum Reach {
+    /// The mDNS-resolved endpoint first (when there is one), then the `.local` name, then each
+    /// extra host. No name appears twice.
+    public static func order(paired: PairedDaemon, bonjour: String?) -> [String] {
+        var out: [String] = []
+        for h in ([bonjour].compactMap { $0 } + paired.hosts) where !h.isEmpty && !out.contains(h) { out.append(h) }
+        return out
     }
 }
 
@@ -166,7 +186,7 @@ public enum Pairing {
         guard status == 200 else { throw PairingError.refused(status, obj["error"] as? String ?? "refused") }
         guard let token = obj["token"] as? String, let role = obj["role"] as? String else { throw PairingError.badAnswer }
         store.setToken(token, forFingerprint: url.fingerprint)
-        return PairedDaemon(host: url.host, port: url.port, fingerprint: url.fingerprint, token: token, role: role)
+        return PairedDaemon(host: url.host, port: url.port, fingerprint: url.fingerprint, token: token, role: role, alternates: url.alternates)
     }
 }
 

@@ -182,6 +182,7 @@ pub fn tool_spec(tool: &str) -> Option<(String, Value)> {
                 "summary": {"type": "string", "description": "What went wrong and why, up to 2000 characters"},
                 "step": {"type": "string", "description": "retry: the step to run again from (default: the step that failed)"},
                 "note": {"type": "string", "description": "retry: what the next agent must know, up to 2000 characters"},
+                "no_code_change": {"type": "boolean", "description": "retry: true only if the task's code needs no change and running it again is expected to pass (a flaky or environment failure); the daemon then retries by itself"},
                 "reason": {"type": "string", "description": "explore: why the plan does not hold"},
                 "kind": {"type": "string", "enum": ["already_done", "duplicate"], "description": "close: which"},
                 "duplicate_of": {"type": "integer", "description": "close, duplicate: the other task's number"},

@@ -53,6 +53,14 @@ struct HomePage: View {
             .accessibilityIdentifier("status")
     }
 
+    @ViewBuilder var versionLine: some View {
+        if !model.versionLine.isEmpty {
+            Text(model.versionLine).font(theme.small()).foregroundStyle(theme.muted)
+                .textSelection(.enabled).help(model.versionTip)
+                .accessibilityIdentifier("home:version")
+        }
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: theme.spacingLarge) {
@@ -70,6 +78,7 @@ struct HomePage: View {
                         statusLine
                     }
                 }
+                versionLine
 
                 if let attention = model.home?.attention, !attention.isEmpty {
                     section("Needs you", theme: theme) {
@@ -102,7 +111,7 @@ struct HomePage: View {
                         SessionStepper(model: model)
                     }
                     section("Landing queue", theme: theme) {
-                        let queue = model.landing?.queue ?? model.home?.stages.first { $0.state == "landing" }?.rows ?? []
+                        let queue = model.home?.stages.first { $0.state == "landing" }?.rows ?? []
                         if queue.isEmpty { Text("Nothing is landing.").font(theme.body()).foregroundStyle(theme.muted) }
                         ForEach(queue, id: \.id) { r in
                             Button("\(r.key) \(r.title)") { model.go(.task(r.id)) }.buttonStyle(.link).font(theme.body())
@@ -163,7 +172,7 @@ struct SessionStepper: View {
         let used = model.home?.sessionsUsed ?? 0
         let limit = model.home?.sessionsLimit ?? 0
         HStack(spacing: theme.spacing) {
-            Text("Sessions: \(used) of")
+            Text("Sessions (all projects): \(used) of")
             Button { model.setSessionLimit(limit > 0 ? limit - 1 : 0) } label: { Image(systemName: "minus") }
                 .accessibilityIdentifier("sessions:decrease")
             Text("\(limit)").font(theme.body(.semibold))
@@ -189,16 +198,21 @@ struct CompilationSection: View {
         return Format.duration(ms: now > since ? now - since : 0)
     }
 
-    @ViewBuilder private func who(_ label: String, task: UInt64) -> some View {
+    @ViewBuilder private func who(_ label: String, task: UInt64, command: String = "") -> some View {
         if task > 0 {
             Button("#\(task)") { model.go(.task(task)) }.buttonStyle(.link)
+        } else if !command.isEmpty {
+            Button(label) { model.openCommand(label: label, command: command) }
+                .buttonStyle(.link).lineLimit(1).help("Show the whole command")
+                .onHover { inside in if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() } }
+                .accessibilityIdentifier("compile:command")
         } else {
             Text(label).lineLimit(1).truncationMode(.middle).help(label)
         }
     }
 
     var body: some View {
-        section("Compilation", theme: theme) {
+        section("Compilation (all projects)", theme: theme) {
             HStack(spacing: theme.spacing) {
                 Text("Compiling: \(c.used) of at most")
                 Button { model.setCompileLimit(c.limit > 1 ? c.limit - 1 : 1) } label: { Image(systemName: "minus") }
@@ -255,7 +269,7 @@ struct CompilationSection: View {
             }
             ForEach(Array(c.running.enumerated()), id: \.offset) { i, r in
                 HStack(spacing: theme.spacing) {
-                    who(r.label, task: r.task)
+                    who(r.label, task: r.task, command: r.command)
                     let detail = Format.compileHolder(project: r.project, title: r.title)
                     if r.task > 0 && !detail.isEmpty {
                         Text(detail).help(r.title.isEmpty ? r.project : "\(r.project) - \(r.title)")
@@ -276,7 +290,7 @@ struct CompilationSection: View {
             ForEach(c.pending, id: \.position) { w in
                 HStack(alignment: .firstTextBaseline, spacing: theme.spacing) {
                     Text("\(w.position).").foregroundStyle(theme.muted)
-                    who(w.label, task: w.task)
+                    who(w.label, task: w.task, command: w.command)
                     Text(w.reason)
                     Text(w.interactive ? "interactive, \(age(w.sinceMs))" : w.landing ? "landing, \(age(w.sinceMs))" : "\(w.stepsRemaining) steps from landing, \(age(w.sinceMs))")
                         .font(theme.small()).foregroundStyle(theme.muted)
@@ -293,6 +307,41 @@ struct CompilationSection: View {
             Text(c.rules).font(theme.small()).foregroundStyle(theme.muted)
                 .fixedSize(horizontal: false, vertical: true)
         }
+        .sheet(item: Binding(get: { model.commandDialog.map(CommandSheetItem.init) }, set: { if $0 == nil { model.closeCommand() } })) { item in
+            CommandSheet(dialog: item.dialog) { model.closeCommand() }
+        }
+    }
+}
+
+private struct CommandSheetItem: Identifiable {
+    let dialog: CommandDialog
+    var id: String { dialog.title + "\u{0}" + dialog.command }
+    init(_ d: CommandDialog) { dialog = d }
+}
+
+/// A command shown whole: scrollable, monospaced, selectable, with Copy and Close.
+struct CommandSheet: View {
+    @Environment(\.theme) var theme
+    let dialog: CommandDialog
+    let close: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: theme.spacing) {
+            Text(dialog.title).font(theme.body(.semibold)).lineLimit(2)
+            ScrollView([.vertical, .horizontal]) {
+                Text(dialog.command).font(.system(.body, design: .monospaced)).textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityIdentifier("command:text")
+            }
+            .frame(minWidth: 480, minHeight: 200)
+            HStack {
+                Spacer()
+                Button("Copy") { copyToPasteboard(dialog.command) }.accessibilityIdentifier("command:copy")
+                Button("Close", action: close).keyboardShortcut(.cancelAction).accessibilityIdentifier("command:close")
+            }
+        }
+        .padding()
+        .frame(minWidth: 520, minHeight: 300)
     }
 }
 
@@ -337,8 +386,9 @@ struct TaskDetailPage: View {
                     .accessibilityIdentifier("cpu")
                 HStack(spacing: theme.spacingLarge) {
                     CopyButton(label: r.key, value: r.key)
-                    if !d.branch.isEmpty { CopyButton(label: "branch", value: d.branch) }
-                    if !d.worktree.isEmpty { CopyButton(label: "worktree", value: d.worktree) }
+                    ForEach(CopyTarget.detail(branch: d.branch, worktree: d.worktree), id: \.label) { t in
+                        CopyValueButton(target: t) { (model.copier ?? copyToPasteboard)($0) }
+                    }
                 }
             }
             }

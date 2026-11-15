@@ -9,10 +9,19 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.TooltipArea
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.PointerIcon
+import androidx.compose.ui.input.pointer.pointerHoverIcon
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -53,9 +62,10 @@ internal fun Section(title: String, state: String? = null, content: @Composable 
 }
 
 @Composable
-internal fun Link(text: String, onClick: () -> Unit) {
+internal fun Link(text: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
     val theme = LocalTheme.current
-    Text(text, style = theme.body(color = theme.accent), modifier = Modifier.clickable(onClick = onClick))
+    Text(text, style = theme.body(color = theme.accent), maxLines = 1, overflow = TextOverflow.Ellipsis,
+        modifier = modifier.pointerHoverIcon(PointerIcon(java.awt.Cursor(java.awt.Cursor.HAND_CURSOR))).clickable(onClick = onClick))
 }
 
 @Composable
@@ -73,6 +83,7 @@ private fun Scrolling(content: @Composable ColumnScope.() -> Unit) {
  * step, the session-limit stepper, the landing queue, and detail for the tasks in each
  * stage. (Counts and task lists live in the top bar and the sidebar, not here.)
  */
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 fun HomePage(model: MonitorModel) {
     val theme = LocalTheme.current
@@ -98,6 +109,15 @@ fun HomePage(model: MonitorModel) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(theme.spacingLarge)) {
                 MascotPicture(pic.id, theme.mascotStatus)
                 statusLine()
+            }
+        }
+        if (model.versionLine.isNotEmpty()) {
+            TooltipArea(tooltip = {
+                Text(model.versionTip, style = theme.small(color = theme.text), modifier = Modifier.background(theme.surface).padding(theme.spacing))
+            }) {
+                SelectionContainer {
+                    Text(model.versionLine, style = theme.small(), modifier = Modifier.testTag("home:version"))
+                }
             }
         }
         if (adding) AddTaskDialog(model) { adding = false }
@@ -132,7 +152,7 @@ fun HomePage(model: MonitorModel) {
                 SessionStepper(model)
             }
             Section("Landing queue") {
-                val queue = model.landing?.queue ?: h?.stages?.firstOrNull { it.state == "landing" }?.rows.orEmpty()
+                val queue = h?.stages?.firstOrNull { it.state == "landing" }?.rows.orEmpty()
                 if (queue.isEmpty()) Text("Nothing is landing.", style = theme.body(color = theme.muted))
                 queue.forEach { r -> Link("${r.key} ${r.title}") { model.go(Page.Task(r.id)) } }
             }
@@ -166,7 +186,7 @@ fun SessionStepper(model: MonitorModel) {
     val limit = model.home?.sessions_limit ?: 0
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(theme.spacing),
         modifier = Modifier.testTag("sessions")) {
-        Text("Sessions: $used of", style = theme.body())
+        Text("Sessions (all projects): $used of", style = theme.body())
         Pill("−", modifier = Modifier.testTag("sessions:decrease")) { model.setSessionLimit(if (limit > 0) limit - 1 else 0) }
         Text("$limit", style = theme.body(FontWeight.SemiBold))
         Pill("+", modifier = Modifier.testTag("sessions:increase")) { model.setSessionLimit(limit + 1) }
@@ -182,12 +202,13 @@ fun CompilationSection(model: MonitorModel, c: Compilation) {
     val theme = LocalTheme.current
     val now = model.daemonNow()
     val age = { since: Long -> Format.duration(maxOf(0L, now - since)) }
-    val who: @Composable (String, Long) -> Unit = { label, task ->
+    val who: @Composable (String, Long, String) -> Unit = { label, task, command ->
         if (task > 0) Link("#$task") { model.go(Page.Task(task)) }
+        else if (command.isNotEmpty()) Link(label, modifier = Modifier.widthIn(max = 480.dp).testTag("compile:command")) { model.openCommand(label, command) }
         else Text(label, style = theme.body(), maxLines = 1, overflow = TextOverflow.Ellipsis,
             modifier = Modifier.widthIn(max = 480.dp))
     }
-    Section("Compilation") {
+    Section("Compilation (all projects)") {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(theme.spacing),
             modifier = Modifier.testTag("compile")) {
             Text("Compiling: ${c.used} of at most", style = theme.body())
@@ -217,7 +238,7 @@ fun CompilationSection(model: MonitorModel, c: Compilation) {
         if (c.running.isEmpty()) Text("Nothing is compiling.", style = theme.body(color = theme.muted))
         c.running.forEachIndexed { i, r ->
             Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing), modifier = Modifier.testTag("compile:running:$i")) {
-                who(r.label, r.task)
+                who(r.label, r.task, r.command)
                 val detail = Format.compileHolder(r.project, r.title)
                 if (r.task > 0 && detail.isNotEmpty()) Text(detail, style = theme.body(), maxLines = 1, overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.widthIn(max = 480.dp))
@@ -231,7 +252,7 @@ fun CompilationSection(model: MonitorModel, c: Compilation) {
             Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing), verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.testTag("compile:pending:${w.position}")) {
                 Text("${w.position}.", style = theme.body(color = theme.muted))
-                who(w.label, w.task)
+                who(w.label, w.task, w.command)
                 Text(w.reason, style = theme.body())
                 Text(
                     when {
@@ -248,6 +269,27 @@ fun CompilationSection(model: MonitorModel, c: Compilation) {
         }
         Text(c.rules, style = theme.small(color = theme.muted))
     }
+    model.commandDialog?.let { CommandDialogView(it) { model.closeCommand() } }
+}
+
+/** A command shown whole: scrollable, monospaced, selectable, with Copy and Close; Escape closes it. */
+@Composable
+fun CommandDialogView(d: CommandDialog, close: () -> Unit) {
+    val theme = LocalTheme.current
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = close,
+        modifier = Modifier.onPreviewKeyEvent { e ->
+            if (e.type == KeyEventType.KeyDown && e.key == Key.Escape) { close(); true } else false
+        },
+        title = { Text(d.title, style = theme.body(FontWeight.SemiBold), maxLines = 2) },
+        text = {
+            Box(Modifier.heightIn(max = 400.dp).verticalScroll(rememberScrollState()).horizontalScroll(rememberScrollState())) {
+                SelectionContainer { Text(d.command, style = theme.mono(), modifier = Modifier.testTag("command:text")) }
+            }
+        },
+        confirmButton = { androidx.compose.material3.Button(onClick = { copyToClipboard(d.command) }, modifier = Modifier.testTag("command:copy")) { Text("Copy") } },
+        dismissButton = { androidx.compose.material3.Button(onClick = close, modifier = Modifier.testTag("command:close")) { Text("Close") } },
+    )
 }
 
 /**
@@ -284,8 +326,9 @@ private fun TaskDetail(model: MonitorModel, d: TaskDetailView) {
         Text(cpuTaskLine(d.cpu_permille), style = theme.body(color = theme.muted), modifier = Modifier.testTag("cpu"))
         Row(horizontalArrangement = Arrangement.spacedBy(theme.spacingLarge)) {
             CopyButton(r.key, r.key)
-            if (d.branch.isNotEmpty()) CopyButton("branch", d.branch)
-            if (d.worktree.isNotEmpty()) CopyButton("worktree", d.worktree)
+            CopyTarget.detail(d.branch, d.worktree).forEach { t ->
+                CopyValueButton(t) { (model.copier ?: ::copyToClipboard)(it) }
+            }
         }
     }
     }

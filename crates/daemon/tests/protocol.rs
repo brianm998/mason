@@ -1158,3 +1158,46 @@ fn a_burst_of_ticks_queues_at_most_one_rebuild_for_a_session() {
     );
     drop(held);
 }
+
+/// s321: every project-scoped view says which filter it was computed for, and once a view for
+/// the new filter has arrived, none for the old one follows.
+#[test]
+fn views_are_stamped_and_none_for_the_old_project_follows_the_new_one() {
+    fn stamps(m: &[ServerMessage]) -> Vec<String> {
+        views_of(m)
+            .iter()
+            .filter_map(|v| match &v.body {
+                Some(Body::Header(h)) => Some(h.project.clone()),
+                Some(Body::Sidebar(s)) => Some(s.project.clone()),
+                Some(Body::Home(h)) => Some(h.project.clone()),
+                Some(Body::Landing(l)) => Some(l.project.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+    let (d, port, _dir) = demo();
+    let mut c = Client::connect(port, Encoding::Protobuf).unwrap();
+    c.hello(0, false).unwrap();
+    collect(&mut c, Duration::from_secs(2), |m| !m.is_empty());
+    let kinds = [
+        ViewKind::Header,
+        ViewKind::Sidebar,
+        ViewKind::Home,
+        ViewKind::Landing,
+    ];
+    c.subscribe(&kinds, "alpha", 0).unwrap();
+    c.subscribe(&kinds, "beta", 0).unwrap();
+    d.demo_next().unwrap();
+    d.demo_next().unwrap(); // rebuilds in flight for the old filter
+    let mut seen = vec![];
+    let got = collect(&mut c, Duration::from_secs(5), |m| {
+        seen = stamps(m);
+        seen.iter().filter(|p| *p == "beta").count() >= 4
+    });
+    let seen = stamps(&got);
+    let first_beta = seen.iter().position(|p| p == "beta").expect("beta views");
+    assert!(
+        seen[first_beta..].iter().all(|p| p == "beta"),
+        "an old-project view followed the new one: {seen:?}"
+    );
+}
