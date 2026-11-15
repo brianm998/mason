@@ -814,13 +814,13 @@ struct LandingItems: View {
             if !g.landing.isEmpty {
                 Text("Landing now").font(theme.body()).foregroundStyle(theme.muted)
                 ForEach(g.landing, id: \.task) { i in
-                    Button(landingItemText(i)) { model.go(.task(i.task)) }.buttonStyle(.link).font(theme.body())
+                    TaskLink(title: landingItemText(i), font: theme.body()) { model.go(.task(i.task)) }
                 }
             }
             if !g.queued.isEmpty {
                 Text("Queued").font(theme.body()).foregroundStyle(theme.muted)
                 ForEach(g.queued, id: \.task) { i in
-                    Button(landingItemText(i)) { model.go(.task(i.task)) }.buttonStyle(.link).font(theme.body())
+                    TaskLink(title: landingItemText(i), font: theme.body()) { model.go(.task(i.task)) }
                 }
             }
         }
