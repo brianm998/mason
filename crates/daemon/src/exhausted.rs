@@ -8,8 +8,9 @@
 //! task is filed, and the step goes on without it. Green every time: the change broke it, and
 //! the failure says so. No result: nothing is recorded, and the failure says it could not
 //! check. A test that fails on every run in the test steps of 3 different tasks within 7 days
-//! is added the same way, without a base run. The pure parts are first; the rest uses the
-//! daemon.
+//! is run at the merge base the same way, and added only if it is red there too (s416): failing
+//! in many tasks is not proof, since each task's own change can break it (a format check fails
+//! on each task's own unformatted code). The pure parts are first; the rest uses the daemon.
 
 use crate::basecheck;
 use crate::jobs::Ctx;
@@ -139,10 +140,11 @@ fn rounds_so_far(c: &Ctx) -> Vec<Option<Vec<String>>> {
         .collect()
 }
 
-/// Note the tests that failed on every run of this task's test step. A test that did so in
-/// 3 or more different tasks within 7 days is added to the ledger, with a fix task, the same
-/// as one proved red at the base (s282). A retry of the same task counts once.
-pub fn record_persistent(c: &Ctx, scope: &str, tests: &[String]) {
+/// Note the tests that failed on every run of this task's test step, and return those that,
+/// not yet known red, have now done so in [`MIN_TASKS`] or more different tasks within 7 days.
+/// The caller runs those at the merge base ([`repeated_at_base`]); failing in many tasks alone
+/// does not make a test known red (s416). A retry of the same task counts once.
+pub fn record_persistent(c: &Ctx, scope: &str, tests: &[String]) -> Vec<String> {
     let now = crate::daemon::now_ms();
     for t in tests {
         let _ = c.d.store.record_persistent_red(scope, t, c.task.0, now);
@@ -153,19 +155,7 @@ pub fn record_persistent(c: &Ctx, scope: &str, tests: &[String]) {
         .filter(|t| !known.iter().any(|k| &k.test == *t))
         .cloned()
         .collect();
-    for t in across_tasks(&c.d.store, scope, &fresh, now) {
-        let base = basecheck::merge_base(c).unwrap_or_default();
-        let body = format!(
-            "`{t}` failed on every run in the `{scope}` step of {MIN_TASKS} or more different tasks \
-             within 7 days, so it is red for reasons that are not any one task's. It is now known \
-             red (tasks that fail only on it are excused) until a run proves it green.\n\n\
-             Filed by the test step's repeat check (task #{} was the latest).",
-            c.task.0
-        );
-        if let Some(fix) = file_fix(c, &t, &base, &body) {
-            crate::knownred::add(&c.d.store, scope, &t, &fix.text());
-        }
-    }
+    across_tasks(&c.d.store, scope, &fresh, now)
 }
 
 /// The open fix for `test` (an open task or issue naming it), or a new urgent task.
@@ -193,6 +183,9 @@ fn file_fix(c: &Ctx, test: &str, base: &str, body: &str) -> Option<basecheck::Fi
     })
 }
 
+/// A check run at the base, given the command that runs only the tests it is given.
+pub type BaseCheck<'a> = &'a dyn Fn(&dyn Fn(&[String]) -> String) -> Exhausted;
+
 /// What the last-round check found.
 #[derive(Debug, Default)]
 pub struct Exhausted {
@@ -214,13 +207,53 @@ pub fn on_last_round(
     cmd_for: &dyn Fn(&[String]) -> String,
     candidates: &[String],
 ) -> Exhausted {
-    let mut out = Exhausted::default();
     let every = persistent_across(&rounds_so_far(c));
     let tests: Vec<String> = candidates
         .iter()
         .filter(|t| every.contains(t))
         .cloned()
         .collect();
+    check_at_base(c, scope, build, cmd_for, &tests, Origin::LastRound)
+}
+
+/// Tests the repeat check found failing in [`MIN_TASKS`] tasks: run at the merge base, and
+/// added to the ledger, with a fix task, only if red there (s416). This task's step is not
+/// changed by it.
+pub fn repeated_at_base(
+    c: &Ctx,
+    scope: &str,
+    build: Option<&str>,
+    cmd_for: &dyn Fn(&[String]) -> String,
+    tests: &[String],
+) -> Exhausted {
+    let ex = check_at_base(c, scope, build, cmd_for, tests, Origin::Repeat);
+    if let Some(why) = &ex.why {
+        tracing::info!(
+            task = c.task.0,
+            scope,
+            "repeat check: not added to the ledger: {why}"
+        );
+    }
+    ex
+}
+
+/// Which check asked for the base run: it changes only the fix task's text.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Origin {
+    LastRound,
+    Repeat,
+}
+
+fn check_at_base(
+    c: &Ctx,
+    scope: &str,
+    build: Option<&str>,
+    cmd_for: &dyn Fn(&[String]) -> String,
+    tests: &[String],
+    origin: Origin,
+) -> Exhausted {
+    let mut out = Exhausted::default();
+    let tests = tests.to_vec();
     if tests.is_empty() {
         return out;
     }
@@ -256,12 +289,25 @@ pub fn on_last_round(
     }
     let j = judge(&tests, &runs);
     for t in &j.red {
+        let (what, by) = match origin {
+            Origin::LastRound => (
+                format!("failed on every run of every round of task #{}", c.task.0),
+                "last-round check",
+            ),
+            Origin::Repeat => (
+                format!(
+                    "failed on every run in {MIN_TASKS} or more different tasks within 7 days \
+                     (task #{} was the latest)",
+                    c.task.0
+                ),
+                "repeat check",
+            ),
+        };
         let body = format!(
-            "`{t}` failed on every run of every round of task #{} in `{scope}`, and also fails at \
-             `{base}` (the merge base), so it fails without the task's change. It is now known \
-             red (tasks that fail only on it are excused) until a run proves it green.\n\n\
-             Output tail:\n```\n{tail}\n```\n\nFiled by the test step's last-round check.",
-            c.task.0
+            "`{t}` {what} in `{scope}`, and also fails at `{base}` (the merge base), so it fails \
+             without the task's change. It is now known red (tasks that fail only on it are \
+             excused) until a run proves it green.\n\n\
+             Output tail:\n```\n{tail}\n```\n\nFiled by the test step's {by}."
         );
         let fix = file_fix(c, t, &base, &body);
         if let Some(f) = &fix {
