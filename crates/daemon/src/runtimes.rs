@@ -45,8 +45,28 @@ mod tests {
 
     #[test]
     fn worktree_paths_and_numbers_are_taken_out() {
-        let a = normalize(&c(&["cargo", "build", "-j", "8", "--manifest-path", "/w/t412/Cargo.toml"]), "/w/t412");
-        let b = normalize(&c(&["cargo", "build", "-j", "16", "--manifest-path", "/w/t977/Cargo.toml"]), "/w/t977");
+        let a = normalize(
+            &c(&[
+                "cargo",
+                "build",
+                "-j",
+                "8",
+                "--manifest-path",
+                "/w/t412/Cargo.toml",
+            ]),
+            "/w/t412",
+        );
+        let b = normalize(
+            &c(&[
+                "cargo",
+                "build",
+                "-j",
+                "16",
+                "--manifest-path",
+                "/w/t977/Cargo.toml",
+            ]),
+            "/w/t977",
+        );
         assert_eq!(a, b);
         assert_eq!(a, "cargo build -j # --manifest-path <w>/Cargo.toml");
         assert_ne!(a, normalize(&c(&["cargo", "test"]), "/w/t412"));

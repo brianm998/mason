@@ -2894,7 +2894,9 @@ async fn lease_open(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res
                     .ok()
                     .flatten()
             });
-            let id = d2.broker.lease_open_expecting(&label, &uses, standing, expected);
+            let id = d2
+                .broker
+                .lease_open_expecting(&label, &uses, standing, expected);
             d2.broker.lease_set_pid(id, pid);
             if let (Some(t), Some(_)) = (task, standing) {
                 d2.broker.lease_set_task(id, TaskId(t));
