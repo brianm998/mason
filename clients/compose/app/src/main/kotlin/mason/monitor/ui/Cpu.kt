@@ -62,12 +62,12 @@ fun CpuSection(model: MonitorModel, open: (() -> Unit)? = null) {
         val legend: @Composable (CpuRow) -> Unit = { r ->
             Row(
                 Modifier.fillMaxWidth().testTag("cpu-legend:${r.label}")
-                    .then(if (r.task > 0) Modifier.clickable { model.go(Page.Task(r.task)) } else Modifier),
+                    .then(if (r.task > 0) Modifier.pointingHand().clickable { model.go(Page.Task(r.task)) } else Modifier),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(theme.spacing),
             ) {
                 Box(Modifier.size(theme.cell).background(theme.cpu(r.color), RoundedCornerShape(theme.radius / 2)))
-                Text(r.heading, style = theme.body(FontWeight.SemiBold, if (r.task > 0) theme.accent else theme.text))
+                Text(r.heading, style = if (r.task > 0) theme.linked(theme.body(FontWeight.SemiBold)) else theme.body(FontWeight.SemiBold))
                 Text(r.title, style = theme.body(color = theme.muted), maxLines = 1, overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f))
                 Text(Format.permille(r.permille), style = theme.body())

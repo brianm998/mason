@@ -41,6 +41,10 @@ public final class MonitorConnection {
     private var nextId = 1
     private var heard = Date()
     private var pings: UInt64 = 0
+    /// Bumped by every `start`, so a loop left over from before a `stop` ends instead of racing the new one.
+    private var generation = 0
+    private let onAttemptEnd: ((Bool) -> Void)?
+    private let onRefused: ((Int) -> Void)?
 
     /// `discover` is asked again after every failure and while connected, so a
     /// restarted daemon is found wherever it now listens.
@@ -49,8 +53,12 @@ public final class MonitorConnection {
         discover: @escaping () -> DaemonInfo?,
         timing: ConnectionTiming = ConnectionTiming(),
         makeSocket: (() -> MonitorSocket)? = nil,
-        decode: MessageDecoder? = nil
+        decode: MessageDecoder? = nil,
+        onAttemptEnd: ((Bool) -> Void)? = nil,
+        onRefused: ((Int) -> Void)? = nil
     ) {
+        self.onAttemptEnd = onAttemptEnd
+        self.onRefused = onRefused
         self.decode = decode ?? MonitorConnection.jsonDecoder
         self.model = model
         self.discover = discover
@@ -68,7 +76,9 @@ public final class MonitorConnection {
     public func start() {
         guard !running else { return }
         running = true
-        Task { await self.loop() }
+        generation += 1
+        let g = generation
+        Task { await self.loop(g) }
     }
 
     public func stop() {
@@ -76,16 +86,31 @@ public final class MonitorConnection {
         socket?.close()
     }
 
-    private func loop() async {
-        while running {
+    /// The app went to the background: drop the socket (iOS would anyway) and show it as down.
+    /// `start()` on return says hello with the last sequence number again.
+    public func suspend() {
+        stop()
+        model.connected = false
+        model.reconnecting = true
+    }
+
+    private func loop(_ g: Int) async {
+        while running, g == generation {
             var welcomed = false
             do {
                 try await session(welcomed: &welcomed)
             } catch {
                 // Down for any reason: show "reconnecting", not an error.
-                model.disconnected()
+                if g == generation, running { model.disconnected() }
             }
-            guard running else { break }
+            guard running, g == generation else { break }
+            onAttemptEnd?(welcomed)
+            if let code = socket?.refusal, code == 401 {
+                // The daemon no longer knows this token: stop retrying and say so.
+                running = false
+                onRefused?(code)
+                break
+            }
             if welcomed { timing.policy.reset() }
             let pause = timing.policy.nextPause()
             try? await Task.sleep(nanoseconds: UInt64(pause * 1_000_000_000))
@@ -97,7 +122,7 @@ public final class MonitorConnection {
         guard let info = await findDaemon() else { throw Down.noDaemon }
         let s = makeSocket()
         socket = s
-        s.open(port: info.port)
+        s.open(info: info)
         defer { s.close() }
         try await hello(s)
         sendSubscription()

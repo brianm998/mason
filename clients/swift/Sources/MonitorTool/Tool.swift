@@ -12,6 +12,7 @@ import SwiftUI
 ///
 ///     monitor-tool conformance --port P --out DIR   dump what the client shows at every demo checkpoint
 ///     monitor-tool snapshot --port P --out DIR      render screenshots from `masond --demo-manual`
+///     monitor-tool snapshot --ipad --port P --out DIR   the same at iPad landscape sizes (1366x1024, 1180x820), light and dark, via ImageRenderer
 ///     monitor-tool editor --port P --project NAME [--step S] --out DIR   dump what the pipeline editor shows
 ///     monitor-tool answer --port P --task N [--option 1 | --text WORDS] [--hash H]   answer a task's open question as the monitor does
 ///     monitor-tool approve --port P --task N [--diff HASH]   what the Approve button sends (the hold's diff hash, as shown)
@@ -20,10 +21,30 @@ import SwiftUI
 ///     monitor-tool dump --port P --out DIR          write what the home page shows now (a real daemon), as items
 ///     monitor-tool mascot-check                     load every mascot image; exit 1 if one is missing
 ///     monitor-tool usage --port P --out DIR         write what the LLM usage page shows (the demo daemon), as items
+///     monitor-tool remote --host H --port P --fp HEX --token T   connect through PinnedSocket and RemoteDiscovery, print the snapshot
 ///     monitor-tool cancel --port P --task N         cancel a task as the Cancel button does
 ///     monitor-tool skip --port P --task N [--step S]  skip a test step as the Skip button does
 @main
 struct Tool {
+    /// Connects as the iOS app does to a paired daemon (no Bonjour source: the address is the
+    /// pairing's), waits for a snapshot and exits 0, or exits 1 when none arrives.
+    @MainActor
+    static func remote(_ args: [String]) async -> Never {
+        func opt(_ n: String) -> String? { args.firstIndex(of: n).flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil } }
+        guard let host = opt("--host"), let port = opt("--port").flatMap({ UInt16($0) }),
+              let fp = opt("--fp"), let token = opt("--token") else { fail("--host H --port P --fp HEX --token T") }
+        let tokens = MemoryTokenStore()
+        tokens.setToken(token, forFingerprint: fp)
+        let model = MonitorModel()
+        let session = RemoteSession(
+            model: model, store: MemoryPairedStore(PairedRecord(host: host, port: port, fingerprint: fp, role: "owner")),
+            tokens: tokens, source: nil)
+        session.activate()
+        await until("a snapshot over the pinned socket") { model.connected && model.header != nil }
+        print("remote snapshot received via \(model.linkStatus ?? "?")")
+        exit(0)
+    }
+
     @MainActor
     static func main() async {
         _ = NSApplication.shared
@@ -31,6 +52,7 @@ struct Tool {
         if args.first == "mascot-check" { exit(Mascot.selfCheck() ? 0 : 1) }
         guard !args.isEmpty else { fail("usage: monitor-tool conformance|snapshot --port P --out DIR") }
         let cmd = args.removeFirst()
+        if cmd == "remote" { await remote(args) }
         guard let port = Discovery.port(arguments: args) else { fail("--port P (or --data-dir D)") }
         var out = URL(fileURLWithPath: "/tmp")
         if !["answer", "cancel", "skip", "approve", "reject"].contains(cmd) {
@@ -47,7 +69,7 @@ struct Tool {
         switch cmd {
         case "conformance": await conformance(model, out)
         case "editor": await editor(model, args, out)
-        case "snapshot": await snapshots(model, out)
+        case "snapshot": args.contains("--ipad") ? await ipadSnapshots(model, out) : await snapshots(model, out)
         case "task-page": await taskPage(model, args, out)
         case "answer": await answer(model, args)
         case "approve", "reject": await approval(model, cmd, args)
@@ -288,6 +310,21 @@ struct Tool {
         model.goHome()
         await settle(model)
         shot(model, out, "home-larger-text", size: CGSize(width: 1440, height: 900), dark: false)
+    }
+
+    /// Home and a task's page at both iPad sizes, light and dark: four images per size.
+    @MainActor
+    static func ipadSnapshots(_ model: MonitorModel, _ out: URL) async {
+        for _ in 0..<4 { _ = await step(model) }
+        model.setExpanded("needs_attention", true)
+        await settle(model)
+        do {
+            for n in try IPadSnapshot.write(model, page: "home", to: out) { print("wrote \(n)") }
+            model.go(.task(1))
+            await until("task #1") { model.taskDetail?.row.id == 1 }
+            await settle(model)
+            for n in try IPadSnapshot.write(model, page: "task", to: out) { print("wrote \(n)") }
+        } catch { fail("cannot render: \(error)") }
     }
 
     /// A task's page as the owner sees it, rendered to a PNG, plus a check that the plan parts the

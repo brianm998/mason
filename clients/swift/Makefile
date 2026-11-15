@@ -4,6 +4,7 @@
 #
 #   make build   compile every product (-c release)
 #   make run     build and start the macOS monitor window
+#   make ios     generate the Xcode project (XcodeGen) and build the iOS app for the simulator
 #   make clean   remove the build products
 #   make version the commit `make run` reports (dev with local changes)
 #
@@ -22,7 +23,19 @@ VERSION_PATHS := clients/swift scripts/bundle-monitor.sh
 REPO          := $(shell git rev-parse --show-toplevel 2>/dev/null)
 BUILD_SHA     ?= $(if $(REPO),$(shell cd "$(REPO)" && git diff --quiet HEAD -- $(VERSION_PATHS) && git rev-list -1 HEAD -- $(VERSION_PATHS)))
 
-.PHONY: build run clean version
+.PHONY: build run clean version ios
+
+# The universal iOS app: XcodeGen makes ios/MasonIOS.xcodeproj from ios/project.yml, then
+# the project is built unsigned for the simulator. Extra build settings (the bundle id and
+# team) go in IOS_SETTINGS, e.g. make ios IOS_SETTINGS="MASON_IOS_BUNDLE_ID=com.example.mason".
+IOS_SETTINGS ?=
+ios:
+	@command -v xcodegen >/dev/null 2>&1 || { echo "make ios: XcodeGen is not installed; run: brew install xcodegen" >&2; exit 1; }
+	@command -v xcodebuild >/dev/null 2>&1 || { echo "make ios: xcodebuild not found; install Xcode" >&2; exit 1; }
+	cd ios && xcodegen generate --spec project.yml
+	xcodebuild build -project ios/MasonIOS.xcodeproj -scheme MasonIOS \
+	  -destination 'generic/platform=iOS Simulator' -derivedDataPath ios/build \
+	  CODE_SIGNING_ALLOWED=NO $(IOS_SETTINGS)
 
 # The commit that last changed the monitor goes into BuildStamp.swift for the build, so the
 # binary knows it is out of date; the checked-in file is put back afterwards. A tree with

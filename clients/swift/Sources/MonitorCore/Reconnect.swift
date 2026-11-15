@@ -8,11 +8,15 @@ public struct DaemonInfo: Equatable, Sendable {
     public var port: UInt16
     public var pid: Int?
     public var startedMs: Int?
+    /// Where to connect when it is not loopback: the host chosen for this attempt (remote
+    /// connections only). It never counts toward `replaces`.
+    public var host: String?
 
-    public init(port: UInt16, pid: Int? = nil, startedMs: Int? = nil) {
+    public init(port: UInt16, pid: Int? = nil, startedMs: Int? = nil, host: String? = nil) {
         self.port = port
         self.pid = pid
         self.startedMs = startedMs
+        self.host = host
     }
 
     /// A different daemon (or a restarted one) than `old`. A hand-given port has no
@@ -63,10 +67,19 @@ public struct ConnectionTiming: Sendable {
 @MainActor
 public protocol MonitorSocket: AnyObject {
     func open(port: UInt16)
+    /// Open to the endpoint chosen for this attempt. The default ignores the host.
+    func open(info: DaemonInfo)
+    /// The HTTP status the daemon refused the upgrade with, once known (401: the token was revoked).
+    var refusal: Int? { get }
     func send(_ text: String) async throws
     /// The next text frame; throws when the socket fails or is closed.
     func receive() async throws -> String
     func close()
+}
+
+extension MonitorSocket {
+    public func open(info: DaemonInfo) { open(port: info.port) }
+    public var refusal: Int? { nil }
 }
 
 /// The largest message a monitor socket accepts: well past any view the daemon sends.
