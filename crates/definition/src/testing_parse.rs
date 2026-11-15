@@ -37,6 +37,7 @@ pub const SUITE_KEYS: &[&str] = &[
     "narrow_split",
     "narrow_each",
     "narrow_never",
+    "narrow_packages",
 ];
 const ENV_KEYS: &[&str] = &[
     "type",
@@ -257,6 +258,10 @@ pub fn parse(doc: &DocumentMut, out: &mut Vec<Problem>) -> Testing {
                     Some(b) => s.pty = b,
                     None => out.push(Problem::new(&path, "must be true or false")),
                 },
+                "narrow_packages" => match v.as_bool() {
+                    Some(b) => s.narrow_packages = b,
+                    None => out.push(Problem::new(&path, "must be true or false")),
+                },
                 "narrow_command" => nw[0] = string(v, &path, out),
                 "narrow_tests" => nw[1] = string(v, &path, out),
                 "narrow_root" => nw[2] = string(v, &path, out),
@@ -276,6 +281,12 @@ pub fn parse(doc: &DocumentMut, out: &mut Vec<Problem>) -> Testing {
             ));
         }
         s.narrow = narrow(&base, nw, never, out);
+        if s.narrow_packages && s.dev_command.is_none() {
+            out.push(Problem::new(
+                format!("{base}.narrow_packages"),
+                "needs `dev_command`, the command that takes `{packages}`",
+            ));
+        }
         t.suites.push(s);
     }
 

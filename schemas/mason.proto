@@ -470,6 +470,20 @@ message TaskRow {
   repeated BlockerLink blocker_links = 24;
   // The task's latest step run (0: none yet). A retry sends it back as `Retry.seen`. Additive.
   uint64 last_run = 25;
+  // The owner's open chat session about this task, when there is one (s364). Additive.
+  OwnerSessionInfo owner_session = 26;
+}
+
+// An owner session as a task row, the task page and the sidebar show it (s364).
+message OwnerSessionInfo {
+  uint64 id = 1;
+  uint64 opened_ms = 2;
+  uint64 last_activity_ms = 3;
+  uint32 turns = 4;
+  // A turn is in flight: the agent is replying.
+  bool working = 5;
+  // "task" now; a session with no task has another kind.
+  string kind = 6;
 }
 
 message BlockerLink {
@@ -541,6 +555,11 @@ message HeaderView {
   // Whether MASON itself is behind its update channel, and any update under way
   // (additive). Absent when the daemon has no update.toml.
   UpdateInfo update = 8;
+  // The project filter this view was computed for (empty: all projects). A client drops a view
+  // whose project is not its current selection.
+  string project = 9;
+  // How many owner chat sessions are open (s364). Additive.
+  uint32 open_owner_sessions = 10;
 }
 
 // What the daemon found the last time it looked at its update channel.
@@ -573,8 +592,18 @@ message MonitorBuild {
   // "" (nothing asked for), "building", "ready" or "failed".
   string phase = 3;
   string error = 4;
-  // When ready: the finished build, on the daemon's own disk.
+  // When ready: the finished build, on the daemon's own disk. For a bare binary built in
+  // place, the path of the binary that now holds the new build (the one the monitor runs from).
   string path = 5;
+  // While building: "fetching", "waiting" (for a compile slot), "compiling", "linking" or
+  // "installing" (additive).
+  string step = 6;
+  // Compile progress, `done` of `total` build steps, when the build tool says (additive).
+  uint32 done = 7;
+  uint32 total = 8;
+  // The build's last log line, and the log file (additive).
+  string last_line = 9;
+  string log = 10;
 }
 
 message PendingIssue {
@@ -600,6 +629,9 @@ message SidebarSection {
 message SidebarView {
   repeated SidebarSection sections = 1;
   repeated string pages = 2;
+  // The project filter this view was computed for (empty: all projects). A client drops a view
+  // whose project is not its current selection.
+  string project = 3;
 }
 
 message CardOption {
@@ -661,6 +693,9 @@ message HomeView {
   Compilation compilation = 7;
   // Each task's share of the machine's CPU, and the fixed buckets.
   CpuUsage cpu = 8;
+  // The project filter this view was computed for (empty: all projects). A client drops a view
+  // whose project is not its current selection.
+  string project = 9;
 }
 
 // One bucket's share of the machine's CPU.
@@ -703,6 +738,9 @@ message CompileHolder {
   // command, a slot held outside the queue, or a task the store no longer has.
   string project = 6;
   string title = 7;
+  // The whole command of an interactive caller (`label` is then a one-line description of
+  // at most 50 characters); empty for a task's own label like `#88`.
+  string command = 8;
 }
 
 // A request waiting for a `compile` slot, in line order.
@@ -722,6 +760,9 @@ message CompileWaiter {
   uint32 steps_remaining = 8;
   // A landing's verification: first among pipeline work, and not held by the CPU.
   bool landing = 9;
+  // The whole command of an interactive caller (`label` and `reason` carry only its
+  // description); empty for a task's own label.
+  string command = 10;
 }
 
 message Compilation {
@@ -936,6 +977,9 @@ message LandingView {
   uint64 queue_idle_ms = 8;
   // One line per project: tracker off, polling (with counts), or stopped (with why).
   repeated string trackers = 9;
+  // The project filter this view was computed for (empty: all projects). A client drops a view
+  // whose project is not its current selection.
+  string project = 10;
 }
 
 message ProviderStatus {

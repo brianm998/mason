@@ -91,6 +91,12 @@ fn task_json(d: &Daemon, w: &World, t: &Task, detail: bool) -> Value {
             (State::Queued, Activity::Waiting(WaitReason::Slot), Some((n, limit))) => {
                 format!("held: {n} checks are waiting (limit {limit})")
             }
+            (State::Queued, Activity::Waiting(WaitReason::Slot), None) => {
+                match d.file_hold(w, t) {
+                    Some((other, file)) => format!("waits for #{} (both change {file})", other.0),
+                    None => activity_text(&t.activity),
+                }
+            }
             _ => activity_text(&t.activity),
         },
         "landed": t.landed.map(|l| match l { LandedOutcome::Merged => "merged", LandedOutcome::ClosedNoChange => "closed with no change" }),
@@ -530,6 +536,7 @@ async fn proposal_file(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> 
                 evidence: text("evidence"),
                 blocks_task: b["blocks_task"].as_bool().unwrap_or(false),
                 explored: b["explored"].as_bool().unwrap_or(false),
+                           estimate: None,
             };
             match crate::proposals::file(&d2, &f) {
                 Ok(done) => Ok(json!({"task": done.task.0, "route": done.route, "proposed": done.proposed, "project": done.project})),
@@ -1584,7 +1591,7 @@ fn debt_json(x: &mason_store::DebtRow) -> Value {
     json!({
         "id": x.id, "task": x.task, "project": x.project, "scope": x.scope,
         "reason": x.reason, "owner": x.owner, "deferred": x.deferred,
-        "status": x.status, "at": x.at,
+        "status": x.status, "at": x.at, "how": x.how, "landed": x.landed,
     })
 }
 
@@ -1712,8 +1719,27 @@ async fn monitor_update_start(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Valu
                 "a monitor kind is `swift` or `compose`",
             )
         })?;
+    // A monitor that is a bare binary in a checkout is rebuilt in place; any other (the
+    // bundled app) gets the bundle the daemon builds.
+    if let Some(target) = (kind.name == "swift")
+        .then(|| b["own_path"].as_str())
+        .flatten()
+        .and_then(|p| crate::monitor_inplace::locate(std::path::Path::new(p)))
+    {
+        let own = b["own_version"].as_str().unwrap_or_default().to_string();
+        crate::monitor_inplace::start(&d, kind, target, own)
+            .map_err(|e| fail(StatusCode::CONFLICT, e))?;
+        return Ok(Json(json!({"started": true, "in_place": true})));
+    }
     crate::update::start_monitor_build(&d, kind).map_err(|e| fail(StatusCode::CONFLICT, e))?;
     Ok(Json(json!({"started": true})))
+}
+
+/// The owner's Cancel while a monitor is being built in place.
+async fn monitor_update_cancel(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res {
+    let kind = b["kind"].as_str().unwrap_or_default().to_string();
+    let stopped = crate::monitor_inplace::cancel(&d, &kind);
+    Ok(Json(json!({"cancelled": stopped})))
 }
 
 /// The owner's "Update now": an update waiting for landing batches stops waiting and takes
@@ -2321,6 +2347,118 @@ async fn open_session(Shared(d): Shared<Arc<Daemon>>, Path(id): Path<u64>) -> Re
     Ok(Json(v))
 }
 
+/// Open the owner's chat session about a task, or return the open one, with the drafted first
+/// message while the owner has not written yet (s364). With the step running it asks first: 409
+/// and `step_running`, then again with `{"confirm": true}`.
+async fn owner_session_open(
+    Shared(d): Shared<Arc<Daemon>>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<u64>,
+    body: Option<Json<Value>>,
+) -> Res {
+    let who = who_of(&headers);
+    owner_only(&d, &who, "open a session")?;
+    let confirm = body.is_some_and(|b| b.0["confirm"].as_bool() == Some(true));
+    let d2 = d.clone();
+    let r = d
+        .pool
+        .run(move || crate::usersession::open_for_task(&d2, TaskId(id), &who, confirm))
+        .await
+        .map_err(pool_err)?;
+    match r {
+        Ok(o) => {
+            let mut v = crate::usersession::session_json(&o.session);
+            v["draft"] = json!(o.draft);
+            v["created"] = json!(o.created);
+            Ok(Json(json!({"session": v})))
+        }
+        Err(crate::usersession::OpenError::StepRunning) => Err((
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": "the task's step is running; opening a session beside it needs a confirm",
+                "step_running": true,
+            })),
+        )),
+        Err(crate::usersession::OpenError::Other(e)) => Err(fail(StatusCode::NOT_FOUND, e)),
+    }
+}
+
+async fn owner_sessions_list(Shared(d): Shared<Arc<Daemon>>) -> Res {
+    let d2 = d.clone();
+    let rows = d
+        .pool
+        .run(move || d2.store.open_owner_sessions())
+        .await
+        .map_err(pool_err)?
+        .map_err(store_err)?;
+    Ok(Json(json!({
+        "sessions": rows.iter().map(crate::usersession::session_json).collect::<Vec<_>>(),
+    })))
+}
+
+/// A session and its messages after `?after=<message id>` (default: all).
+async fn owner_session_show(
+    Shared(d): Shared<Arc<Daemon>>,
+    Path(id): Path<u64>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Res {
+    let after: u64 = q.get("after").and_then(|a| a.parse().ok()).unwrap_or(0);
+    let d2 = d.clone();
+    let r = d
+        .pool
+        .run(move || {
+            let s = d2.store.owner_session(id)?;
+            let m = d2.store.owner_messages(id, after)?;
+            Ok::<_, mason_store::StoreError>((s, m))
+        })
+        .await
+        .map_err(pool_err)?
+        .map_err(store_err)?;
+    let (Some(s), m) = r else {
+        return Err(fail(StatusCode::NOT_FOUND, "no such session"));
+    };
+    let mut v = crate::usersession::session_json(&s);
+    v["messages"] = json!(m
+        .iter()
+        .map(crate::usersession::message_json)
+        .collect::<Vec<_>>());
+    Ok(Json(json!({"session": v})))
+}
+
+async fn owner_session_post(
+    Shared(d): Shared<Arc<Daemon>>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<u64>,
+    Json(b): Json<Value>,
+) -> Res {
+    let who = who_of(&headers);
+    owner_only(&d, &who, "write in a session")?;
+    let text = b["text"].as_str().unwrap_or_default().to_string();
+    let d2 = d.clone();
+    d.pool
+        .run(move || crate::usersession::post(&d2, id, &text, &who))
+        .await
+        .map_err(pool_err)?
+        .map_err(|e| fail(StatusCode::CONFLICT, e))?;
+    Ok(Json(json!({"accepted": true})))
+}
+
+async fn owner_session_end(
+    Shared(d): Shared<Arc<Daemon>>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<u64>,
+) -> Res {
+    let who = who_of(&headers);
+    owner_only(&d, &who, "end a session")?;
+    let d2 = d.clone();
+    d.pool
+        .run(move || crate::usersession::end(&d2, id, &who))
+        .await
+        .map_err(pool_err)?
+        .map_err(|e| fail(StatusCode::NOT_FOUND, e))?;
+    Ok(Json(json!({"ended": true})))
+}
+
 /// The keys that could be used for the project's remote (owner only).
 async fn ssh_keys_list(
     Shared(d): Shared<Arc<Daemon>>,
@@ -2638,6 +2776,22 @@ async fn digest(Shared(d): Shared<Arc<Daemon>>, Query(q): Query<HashMap<String, 
                 now,
             )
         })
+        .await
+        .map_err(pool_err)?;
+    Ok(Json(v))
+}
+
+async fn report(Shared(d): Shared<Arc<Daemon>>, Query(q): Query<HashMap<String, String>>) -> Res {
+    let days: u64 = q
+        .get("days")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(7)
+        .max(1);
+    let project = q.get("project").cloned();
+    let d2 = d.clone();
+    let v = d
+        .pool
+        .run(move || crate::report::report(&d2, project.as_deref(), days))
         .await
         .map_err(pool_err)?;
     Ok(Json(v))
@@ -3336,6 +3490,7 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/targets", get(targets))
         .route("/health", get(health))
         .route("/digest", get(digest))
+        .route("/report", get(report))
         .route("/schedules", get(schedules_list))
         .route("/schedules/run", post(schedule_run))
         .route("/triage", get(triage_list))
@@ -3343,6 +3498,11 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/tasks/{id}/skip", post(skip_task))
         .route("/tasks/{id}/answer", post(answer_task))
         .route("/tasks/{id}/session", get(open_session))
+        .route("/tasks/{id}/owner-session", post(owner_session_open))
+        .route("/sessions", get(owner_sessions_list))
+        .route("/sessions/{id}", get(owner_session_show))
+        .route("/sessions/{id}/messages", post(owner_session_post))
+        .route("/sessions/{id}/end", post(owner_session_end))
         .route("/tasks/{id}/{kind}", post(land_override))
         .route("/account/hold", post(account_hold))
         .route("/account/release", post(account_release))
@@ -3368,6 +3528,7 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/update/ack", post(update_ack))
         .route("/update/now", post(update_now))
         .route("/update/monitor", post(monitor_update_start))
+        .route("/update/monitor/cancel", post(monitor_update_cancel))
         .route("/tasks/{id}/refresh", post(refresh_tracker))
         .route("/tasks/{id}/relink", post(relink_task))
         .route("/tasks/{id}/unblock", post(unblock_task))

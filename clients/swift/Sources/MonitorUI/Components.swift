@@ -332,6 +332,50 @@ struct CopyButton: View {
     }
 }
 
+/// One labelled copy button on the task detail page.
+struct CopyTarget: Equatable {
+    let label: String
+    let value: String
+
+    /// Branch name then worktree, each only when the daemon sent a value.
+    static func detail(branch: String, worktree: String) -> [CopyTarget] {
+        var t: [CopyTarget] = []
+        if !branch.isEmpty { t.append(CopyTarget(label: "Copy branch name", value: branch)) }
+        if !worktree.isEmpty { t.append(CopyTarget(label: "Copy worktree", value: worktree)) }
+        return t
+    }
+
+    /// What the button reads: its label, or "Copied" for a moment after a click.
+    func shown(copied: Bool) -> String { copied ? "Copied" : label }
+}
+
+/// A bordered, labelled button that copies its value and says "Copied" for a moment.
+struct CopyValueButton: View {
+    @Environment(\.theme) var theme
+    let target: CopyTarget
+    let copy: (String) -> Void
+    @State private var copied = false
+    var body: some View {
+        Button {
+            copy(target.value)
+            copied = true
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                copied = false
+            }
+        } label: {
+            HStack(spacing: theme.spacingSmall) {
+                Image(systemName: "doc.on.doc")
+                Text(target.shown(copied: copied))
+            }
+            .font(theme.small())
+        }
+        .buttonStyle(.bordered)
+        .help(target.value)
+        .accessibilityIdentifier("copy:\(target.label)")
+    }
+}
+
 /// The decision card (Part 10): the ask, why only the owner can settle it, 2 to
 /// 4 options with one recommended, "Other" with a text box, and the evidence.
 /// An answer carries the card's hash, so a late click on a stale card is refused.

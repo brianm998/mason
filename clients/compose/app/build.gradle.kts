@@ -12,6 +12,8 @@ dependencies {
     implementation(compose.material3)
     implementation("org.json:json:20240303")
     testImplementation(kotlin("test"))
+    @OptIn(org.jetbrains.compose.ExperimentalComposeLibrary::class)
+    testImplementation(compose.uiTest)
 }
 
 // The mascot art is one copy, in the SwiftPM target; Compose reads the same directory as

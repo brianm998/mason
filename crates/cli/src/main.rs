@@ -80,6 +80,8 @@ mason: command-line client for the MASON pipeline
   mason task refresh <id>             ask the tracker now (what opening a task does)
   mason task land-now <id> | force <id> [--reason R]   marks the task and records an override and a debt
   mason task open <id> [--anyway]     open an interactive agent in the task's worktree, resuming its session
+  mason session list | open <task> [--confirm] | show <id> [--after N] | send <id> <text|-> [--no-wait] | end <id>
+                                      the owner's chat sessions with an agent (what the monitor's dialog does)
   mason pause [--project P] [--mode all|claims|landing] --for 2h   hold work back (all stops at the next step)
   mason resume [--project P] [--mode M] | mason pause list
   mason account hold <name> [--for 2h] [--reason R] | mason account release <name>
@@ -90,6 +92,7 @@ mason: command-line client for the MASON pipeline
   mason notify test CHANNEL           send a test through sound, speech, push, email or webhook
   mason metrics [--days N]            interventions per landed task
   mason health                        the detectors' findings, verdicts on fixes, recurring jobs, triage review queue
+  mason report [--days N] [--project P]   throughput, send-backs, waits, interventions, host losses, flakes, debts
   mason digest [--days N] [--project P]   landed, interventions, time by state, skips, forced landings (recorded data only)
   mason schedule list | run <name>    recurring jobs (introspect, analyst:<project>, <project>/<schedule>); run one now
   mason triage list | review <id> (--agree | --disagree)   the triage agent's sampled suggestions; it never answers
@@ -203,6 +206,52 @@ impl Args {
             None
         } else {
             Some(self.rest.remove(0))
+        }
+    }
+}
+
+/// Run the session command the daemon gave (`argv`) in the task's worktree and return its exit
+/// code. An older daemon gives no `argv`; then it is Claude's, as before.
+fn run_session(s: &Value) -> i32 {
+    let wt = s["worktree"].as_str().unwrap_or(".").to_string();
+    let provider = s["provider"].as_str().unwrap_or("claude").to_string();
+    let sid = s["session"].as_str();
+    let argv: Vec<String> = match s["argv"].as_array() {
+        Some(a) if !a.is_empty() => a
+            .iter()
+            .filter_map(|x| x.as_str().map(String::from))
+            .collect(),
+        _ => {
+            let mut v = vec![s["claude"].as_str().unwrap_or("claude").to_string()];
+            if let Some(i) = sid {
+                v.extend(["--resume".to_string(), i.to_string()]);
+            }
+            v
+        }
+    };
+    match sid {
+        Some(i) => println!("Resuming the {provider} session {i} in {wt}"),
+        None => println!("No session to resume; starting a fresh {provider} one in {wt}"),
+    }
+    let mut cmd = std::process::Command::new(&argv[0]);
+    cmd.args(&argv[1..]).current_dir(&wt);
+    match cmd.status() {
+        Ok(st) => {
+            let code = st.code().unwrap_or(1);
+            if code != 0 && sid.is_some() {
+                eprintln!(
+                    "`{}` ended with status {code}. If it said the session was not found, it was \
+                     recorded under another working directory or config dir than this shell's: \
+                     the agent ran in {wt}, and {provider} keeps sessions under its own config \
+                     dir (for Claude `~/.claude`, or $CLAUDE_CONFIG_DIR).",
+                    argv.join(" ")
+                );
+            }
+            code
+        }
+        Err(e) => {
+            eprintln!("cannot run `{}`: {e}", argv[0]);
+            127
         }
     }
 }
@@ -1333,6 +1382,18 @@ fn main() {
                     r["port"],
                     r["fingerprint"].as_str().unwrap_or("?")
                 );
+                let list = |k: &str| {
+                    r[k].as_array()
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|v| v.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        })
+                        .unwrap_or_default()
+                };
+                println!("  hosts: {}", list("hosts"));
+                println!("  listening on: {}", list("bind"));
             } else {
                 println!("LAN access is off (loopback only). Turn it on with `[lan] enabled = true` in daemon.toml, or `masond --lan`.");
             }
@@ -1454,6 +1515,136 @@ fn main() {
                 Some(other) => die(&format!("unknown notify command {other:?}\n\n{HELP}")),
             }
         }
+        "session" => {
+            // The owner's identity, as `approve` takes it: this user's, unless MASON_AS says otherwise.
+            if std::env::var("MASON_AS").is_err() {
+                if let Ok(u) = std::env::var("USER") {
+                    std::env::set_var("MASON_AS", u);
+                }
+            }
+            let sub = a.pos().unwrap_or_else(|| "list".into());
+            let sid = |a: &mut Args| -> u64 {
+                let s = a.pos().unwrap_or_else(|| die("which session? give its number"));
+                s.trim_start_matches('#')
+                    .parse()
+                    .unwrap_or_else(|_| die(&format!("{s:?} is not a session number")))
+            };
+            let line = |m: &Value| {
+                let who = match m["role"].as_str().unwrap_or("?") {
+                    "owner" => "you",
+                    "agent" => "agent",
+                    _ => "  ·",
+                };
+                println!("{who}: {}", m["text"].as_str().unwrap_or(""));
+            };
+            match sub.as_str() {
+                "list" => {
+                    finish(&a);
+                    let r = or_die(d.call("GET", "/sessions", None));
+                    if json_out {
+                        return println!("{r:#}");
+                    }
+                    let list = r["sessions"].as_array().cloned().unwrap_or_default();
+                    if list.is_empty() {
+                        println!("no open sessions");
+                    }
+                    for s in list {
+                        println!(
+                            "#{:<4} {:<8} task {} · {} turns · {}",
+                            s["id"],
+                            s["state"].as_str().unwrap_or("?"),
+                            s["task"],
+                            s["turns"],
+                            s["kind"].as_str().unwrap_or("?")
+                        );
+                    }
+                }
+                "open" => {
+                    let task = task_id(&mut a);
+                    let confirm = a.flag("--confirm");
+                    finish(&a);
+                    let r = or_die(d.call(
+                        "POST",
+                        &format!("/tasks/{task}/owner-session"),
+                        Some(&json!({"confirm": confirm})),
+                    ));
+                    if json_out {
+                        return println!("{r:#}");
+                    }
+                    println!("session #{}", r["session"]["id"]);
+                    if let Some(t) = r["session"]["draft"].as_str() {
+                        println!("--- drafted first message ---\n{t}");
+                    }
+                }
+                "show" => {
+                    let id = sid(&mut a);
+                    let after = a.opt("--after").unwrap_or_else(|| "0".into());
+                    finish(&a);
+                    let r = or_die(d.call("GET", &format!("/sessions/{id}?after={after}"), None));
+                    if json_out {
+                        return println!("{r:#}");
+                    }
+                    let s = &r["session"];
+                    println!(
+                        "session #{id} ({}) task {} · {} turns",
+                        s["state"].as_str().unwrap_or("?"),
+                        s["task"],
+                        s["turns"]
+                    );
+                    for m in s["messages"].as_array().cloned().unwrap_or_default() {
+                        line(&m);
+                    }
+                }
+                "send" => {
+                    let id = sid(&mut a);
+                    let wait = !a.flag("--no-wait");
+                    let text = a.pos().unwrap_or_else(|| die("send what? text, or - for stdin"));
+                    finish(&a);
+                    let text = if text == "-" {
+                        let mut t = String::new();
+                        let _ = std::io::Read::read_to_string(&mut std::io::stdin(), &mut t);
+                        t
+                    } else {
+                        text
+                    };
+                    let before = or_die(d.call("GET", &format!("/sessions/{id}"), None));
+                    let seen = before["session"]["messages"]
+                        .as_array()
+                        .and_then(|m| m.last())
+                        .and_then(|m| m["id"].as_u64())
+                        .unwrap_or(0);
+                    or_die(d.call(
+                        "POST",
+                        &format!("/sessions/{id}/messages"),
+                        Some(&json!({"text": text})),
+                    ));
+                    if !wait {
+                        return println!("sent");
+                    }
+                    let mut last = seen;
+                    loop {
+                        std::thread::sleep(std::time::Duration::from_millis(300));
+                        let r = or_die(d.call("GET", &format!("/sessions/{id}?after={last}"), None));
+                        for m in r["session"]["messages"].as_array().cloned().unwrap_or_default() {
+                            last = m["id"].as_u64().unwrap_or(last);
+                            if m["role"] != "owner" {
+                                line(&m);
+                            }
+                        }
+                        if r["session"]["state"] != "working" {
+                            break;
+                        }
+                    }
+                }
+                "end" => {
+                    let id = sid(&mut a);
+                    finish(&a);
+                    or_die(d.call("POST", &format!("/sessions/{id}/end"), Some(&json!({}))));
+                    println!("ended session #{id}");
+                }
+                other => die(&format!("mason session {other:?}: list, open, show, send or end")),
+            }
+        }
         "alerts" => {
             if a.peek_pos() == Some("ack") {
                 a.pos();
@@ -1515,6 +1706,20 @@ fn main() {
                 return println!("{r:#}");
             }
             print_digest(&r);
+        }
+        "report" => {
+            let days = a.opt("--days").unwrap_or_else(|| "7".into());
+            let project = a.opt("--project");
+            finish(&a);
+            let mut path = format!("/report?days={days}");
+            if let Some(p) = project {
+                path.push_str(&format!("&project={p}"));
+            }
+            let r = or_die(d.call("GET", &path, None));
+            if json_out {
+                return println!("{r:#}");
+            }
+            print_report(&r);
         }
         "schedule" => {
             let sub = a.pos().unwrap_or_default();
@@ -1873,6 +2078,9 @@ fn main() {
                         p["state"].as_str().unwrap_or(""),
                         p["publish_state"].as_str().unwrap_or("")
                     );
+                    if let Some(rule) = p["decided_by"].as_str().filter(|r| !r.is_empty()) {
+                        println!("decided by: {rule}");
+                    }
                     println!(
                         "\n{}\n\nEvidence:\n{}",
                         p["body"].as_str().unwrap_or(""),
@@ -2197,6 +2405,9 @@ fn main() {
                         },
                         x["reason"].as_str().unwrap_or("")
                     );
+                    if let Some(how) = x["how"].as_str().filter(|h| !h.is_empty()) {
+                        println!("      paid: {how}");
+                    }
                 }
             }
             Some("run") => {
@@ -3018,21 +3229,7 @@ fn main() {
                     if !s["idle"].as_bool().unwrap_or(true) && !anyway {
                         die("the step is running; a second session would collide with it. Wait for it to be idle, or pass --anyway");
                     }
-                    let bin = s["claude"].as_str().unwrap_or("claude").to_string();
-                    let wt = s["worktree"].as_str().unwrap_or(".").to_string();
-                    let mut cmd = std::process::Command::new(&bin);
-                    cmd.current_dir(&wt);
-                    match s["session"].as_str() {
-                        Some(sid) => {
-                            println!("Resuming the agent's session {sid} in {wt}");
-                            cmd.args(["--resume", sid]);
-                        }
-                        None => println!("No session to resume; starting a fresh one in {wt}"),
-                    }
-                    match cmd.status() {
-                        Ok(st) => exit(st.code().unwrap_or(1)),
-                        Err(e) => die(&format!("cannot run `{bin}`: {e}")),
-                    }
+                    exit(run_session(&s));
                 }
                 "approve" => {
                     let id = task_id(&mut a);
@@ -3249,6 +3446,80 @@ fn print_health(r: &serde_json::Value) {
         },
         q,
         r["triage"]["reviewed"]
+    );
+}
+
+/// `mason report` as text: one block per section, from the daemon's `/report`.
+fn print_report(r: &serde_json::Value) {
+    let ms = |v: &serde_json::Value| {
+        v.as_u64()
+            .map_or("-".to_string(), |m| format!("{}s", m / 1000))
+    };
+    println!(
+        "landed {}  failed {}",
+        r["landed"]["total"], r["failed"]["total"]
+    );
+    for (title, key) in [("landed", "landed"), ("failed", "failed")] {
+        if let Some(days) = r[key]["per_day"].as_object() {
+            for (day, ps) in days {
+                println!("  {title} {day}: {ps}");
+            }
+        }
+    }
+    let l = &r["lead_time_ms"];
+    println!(
+        "lead time (admitted to landed): median {}  p90 {}  ({} tasks)",
+        ms(&l["median"]),
+        ms(&l["p90"]),
+        l["samples"]
+    );
+    println!("send-backs: {}", r["send_backs"]["total"]);
+    for (k, v) in r["send_backs"]["by_reason"]
+        .as_object()
+        .into_iter()
+        .flatten()
+    {
+        println!("  {v:>4}  {k}");
+    }
+    for (k, v) in r["send_backs"]["by_suite"]
+        .as_object()
+        .into_iter()
+        .flatten()
+    {
+        println!("  suite {k}: {v}");
+    }
+    println!("task failures:");
+    for f in r["failures"].as_array().into_iter().flatten() {
+        println!(
+            "  {:>4}  [{}] {}",
+            f["count"],
+            f["class"].as_str().unwrap_or(""),
+            f["reason"].as_str().unwrap_or("")
+        );
+    }
+    println!("waits:");
+    for w in r["waits"].as_array().into_iter().flatten() {
+        println!(
+            "  {:<16} count {:>4}  total {:>8}  median {}",
+            w["class"].as_str().unwrap_or(""),
+            w["count"],
+            ms(&w["total_ms"]),
+            ms(&w["median_ms"])
+        );
+    }
+    println!("owner interventions: {}", r["interventions"]["total"]);
+    for (k, v) in r["interventions"]["by_kind"]
+        .as_object()
+        .into_iter()
+        .flatten()
+    {
+        println!("  {v:>4}  {k}");
+    }
+    println!(
+        "host losses {}  flaky sightings {}  open debts {}",
+        r["host_losses"],
+        r["flaky"]["sightings"],
+        r["open_debts"].as_array().map_or(0, Vec::len)
     );
 }
 
@@ -3621,6 +3892,62 @@ fn print_ci_watch(project: &str, w: &Value) {
                 ""
             },
         );
+    }
+}
+
+#[cfg(test)]
+mod open_session_tests {
+    use super::*;
+    use serde_json::json;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// A fake provider binary that records its cwd and arguments.
+    fn fake(dir: &std::path::Path, name: &str) -> String {
+        let p = dir.join(name);
+        std::fs::write(
+            &p,
+            format!(
+                "#!/bin/sh\npwd -P > '{d}/{name}.cwd'\necho \"$@\" > '{d}/{name}.args'\n",
+                d = dir.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p.display().to_string()
+    }
+
+    fn check(provider: &str, resume: &str) {
+        let d = tempfile::tempdir().unwrap();
+        let wt = d.path().join("wt");
+        std::fs::create_dir(&wt).unwrap();
+        let bin = fake(d.path(), provider);
+        let s = json!({"worktree": wt, "provider": provider, "session": "sid-1",
+            "argv": [bin, resume, "sid-1"]});
+        assert_eq!(run_session(&s), 0);
+        let cwd = std::fs::read_to_string(d.path().join(format!("{provider}.cwd"))).unwrap();
+        assert_eq!(cwd.trim(), wt.canonicalize().unwrap().display().to_string());
+        let args = std::fs::read_to_string(d.path().join(format!("{provider}.args"))).unwrap();
+        assert_eq!(args.trim(), format!("{resume} sid-1"));
+    }
+
+    #[test]
+    fn open_resumes_a_claude_session_in_the_worktree() {
+        check("claude", "--resume");
+    }
+
+    #[test]
+    fn open_resumes_a_codex_session_in_the_worktree() {
+        check("codex", "resume");
+    }
+
+    #[test]
+    fn open_without_a_session_starts_a_fresh_one() {
+        let d = tempfile::tempdir().unwrap();
+        let bin = fake(d.path(), "codex");
+        let s = json!({"worktree": d.path(), "provider": "codex", "session": null, "argv": [bin]});
+        assert_eq!(run_session(&s), 0);
+        let args = std::fs::read_to_string(d.path().join("codex.args")).unwrap();
+        assert_eq!(args.trim(), "");
     }
 }
 

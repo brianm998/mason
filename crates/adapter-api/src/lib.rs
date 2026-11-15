@@ -47,12 +47,14 @@ impl SubmissionFlag {
     }
 }
 
-/// Time added to a session's deadline while the agent could not work: it was
-/// waiting in the queue for a `run_check`. Shared with whoever grants it.
+/// Time added to a session's deadline: queue time the agent could not work in (a
+/// `run_check` or `mason run` waiting), and time granted because it kept making
+/// progress. Shared with whoever grants it.
 #[derive(Clone, Default)]
 pub struct DeadlineExtra(
     Arc<std::sync::atomic::AtomicU64>,
     Option<Arc<std::path::PathBuf>>,
+    Arc<std::sync::atomic::AtomicU64>,
 );
 
 impl DeadlineExtra {
@@ -67,8 +69,10 @@ impl DeadlineExtra {
         DeadlineExtra(
             Arc::new(std::sync::atomic::AtomicU64::new(ms)),
             Some(Arc::new(path)),
+            Arc::new(std::sync::atomic::AtomicU64::new(0)),
         )
     }
+    /// Queue time credited.
     pub fn add(&self, d: Duration) {
         let ms = u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
         let total = self.0.fetch_add(ms, Ordering::SeqCst).saturating_add(ms);
@@ -76,8 +80,29 @@ impl DeadlineExtra {
             let _ = std::fs::write(p.as_path(), total.to_string());
         }
     }
-    pub fn get(&self) -> Duration {
+    /// Time granted for progress (commits or output).
+    pub fn add_progress(&self, d: Duration) {
+        let ms = u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
+        self.2.fetch_add(ms, Ordering::SeqCst);
+    }
+    /// Put back what an earlier daemon had credited and granted for this step, so a
+    /// restart does not lose it (s401).
+    pub fn restore(&self, waited: Duration, progressed: Duration) {
+        let ms = |d: Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
+        self.0.store(ms(waited), Ordering::SeqCst);
+        self.2.store(ms(progressed), Ordering::SeqCst);
+    }
+    /// Queue time credited so far.
+    pub fn waited(&self) -> Duration {
         Duration::from_millis(self.0.load(Ordering::SeqCst))
+    }
+    /// Time granted for progress so far.
+    pub fn progressed(&self) -> Duration {
+        Duration::from_millis(self.2.load(Ordering::SeqCst))
+    }
+    /// Everything added to the deadline.
+    pub fn get(&self) -> Duration {
+        self.waited() + self.progressed()
     }
 }
 

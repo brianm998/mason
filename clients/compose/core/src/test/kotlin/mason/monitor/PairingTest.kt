@@ -11,6 +11,21 @@ class PairingTest {
             PairUrl.parse("mason://pair?host=studio.local&port=7424&fp=$fp&code=12345678"))
     }
 
+    @Test fun pairUrlReadsAltHosts() {
+        val u = PairUrl.parse("mason://pair?host=studio.local&port=7424&fp=$fp&code=12345678&alt=mac.ts.net&alt=100.64.0.1")
+        assertEquals(listOf("mac.ts.net", "100.64.0.1"), u?.alternates)
+        assertEquals("studio.local", u?.host)
+        assertEquals(emptyList(), PairUrl.parse("mason://pair?host=h&port=1&fp=$fp&code=12345678")?.alternates)
+    }
+
+    @Test fun reachOrder() {
+        val d = PairedDaemon("m.local", 1, fp, "t", "owner", listOf("m.ts.net", "100.1.1.1"))
+        assertEquals(listOf("192.168.1.5", "m.local", "m.ts.net", "100.1.1.1"), Reach.order(d, "192.168.1.5"))
+        assertEquals(listOf("m.local", "m.ts.net", "100.1.1.1"), Reach.order(d, null))
+        assertEquals(listOf("m.local", "m.ts.net", "100.1.1.1"), Reach.order(d, "m.local"))
+        assertEquals(listOf("m.local"), Reach.order(PairedDaemon("m.local", 1, fp, "t", "owner"), null))
+    }
+
     @Test fun badPairUrlsAreRefused() {
         listOf(
             "https://pair?host=h&port=1&fp=$fp&code=12345678",

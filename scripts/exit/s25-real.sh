@@ -26,3 +26,4 @@ until m status >/dev/null 2>&1; do kill -0 "$daemon" 2>/dev/null || { cat "$root
 sleep 3
 m targets list
 echo "(copy this output into docs/stages/s25.md under 'Manual run')"
+echo "RESULT s25-real: the device inventory was read, paste the output into docs/stages/s25.md $(date +%F)"
