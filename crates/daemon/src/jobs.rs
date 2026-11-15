@@ -2684,10 +2684,15 @@ fn agent_job(c: &Ctx) {
     // The numbers MASON reserved for this task (a task claimed before numbers existed gets
     // them now), stated as facts in every explore and develop prompt.
     let prompt = if kind == StepKind::Review {
-        format!(
+        let prompt = format!(
             "{prompt}\n\n{}",
             review_diff_block(&c.wt, &c.project.base_ref())
-        )
+        );
+        // Base lines the merge replaced in place are the reviewer's to settle (s395).
+        match crate::landing::replaced_for_review(c) {
+            Some(block) => format!("{prompt}\n\n{block}"),
+            None => prompt,
+        }
     } else {
         // A base that cannot be read right now is waited for; it must not look like
         // a base with no numbered files.
@@ -3275,6 +3280,25 @@ fn finish_agent(c: &Ctx, report: StepReport, dir: &Path) {
     c.release_lease();
 }
 
+/// Add the reviewer's `removes` to the developer's, which landing's audit reads.
+fn add_removals(dir: &Path, extra: &serde_json::Value) {
+    let Some(extra) = extra.as_array().filter(|a| !a.is_empty()) else {
+        return;
+    };
+    let mut v: serde_json::Value = std::fs::read_to_string(dir.join("change.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    let Some(obj) = v.as_object_mut() else { return };
+    let list = obj
+        .entry("removes")
+        .or_insert_with(|| serde_json::json!([]));
+    if let Some(list) = list.as_array_mut() {
+        list.extend(extra.iter().cloned());
+        let _ = std::fs::write(dir.join("change.json"), v.to_string());
+    }
+}
+
 fn finish_agent_inner(c: &Ctx, report: StepReport, dir: &Path) {
     let task = c.task;
     match report.end {
@@ -3293,6 +3317,10 @@ fn finish_agent_inner(c: &Ctx, report: StepReport, dir: &Path) {
                     let _ = std::fs::remove_file(dir.join("feedback.txt"));
                 }
                 _ => {}
+            }
+            // An approval that settles replaced base lines declares them as the task's removals.
+            if c.state == State::Review && submission["verdict"] == "approve" {
+                add_removals(dir, &submission["removes"]);
             }
             // A reviewer who asks for changes is red, not an error.
             if c.state == State::Review && submission["verdict"] == "changes" {
