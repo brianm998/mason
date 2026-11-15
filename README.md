@@ -400,4 +400,5 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s456**: The iOS app now connects to its one paired daemon through `RemoteSession`, trying a matching Bonjour record first and then each paired host, connecting when the scene is active, closing in the background, resuming from the last sequence number, and clearing the pairing on a 401.
 - **s457**: The iOS app shows a pairing screen when nothing is paired (QR scan with VisionKit, or a Bonjour list plus the 8-digit code), opens `mason://pair` links, and has a Settings sheet with Forget.
 - **s459**: the iPhone root is a navigation stack (sidebar first, a row pushes its page) over the Mac monitor's own pages in one narrow column, with a status line, banners, the session-limit stepper and tile taps, and speech stays off.
+- **s460**: The daemon can now push alerts straight to paired iPhones and iPads through Apple's push service with the owner's own key (new `apns` channel, per-device tokens a device registers for itself, dead tokens cleared), on by default for needs-attention, failed, landing, stalled and daemon-down once `[apns]` is set up.
 <!-- status:end -->
