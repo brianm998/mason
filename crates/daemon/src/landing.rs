@@ -1330,6 +1330,7 @@ impl Runner {
         let mut rounds = 0usize;
         let limit = self.cfg.max_fold as usize + ids.len() + 3;
         let mut note = String::new();
+        let mut split_note = String::new();
         let mut commit = String::new();
         let force = self.kind == "force";
         // How long to wait before assembling again when the remote cannot be fetched.
@@ -1471,6 +1472,14 @@ impl Runner {
             if vr.green && !vr.notes.is_empty() {
                 note = vr.notes.join("; ");
             }
+            // What splitting a red found stays in the closing note through later rounds.
+            if !split_note.is_empty() && !note.contains(&split_note) {
+                note = if note.is_empty() {
+                    split_note.clone()
+                } else {
+                    format!("{split_note}; {note}")
+                };
+            }
             if !vr.green {
                 self.point("batch_red");
                 self.record(
@@ -1582,6 +1591,7 @@ impl Runner {
                         match self.settle_pin(found, &runs, &mut parked, &mut active, batch_id, &vr)
                         {
                             Settled::Parked(n) => {
+                                split_note = n.clone();
                                 note = n;
                                 continue 'outer;
                             }
@@ -1681,6 +1691,7 @@ impl Runner {
                                 &vr,
                             ) {
                                 Settled::Parked(n) => {
+                                    split_note = n.clone();
                                     note = n;
                                     continue 'outer;
                                 }
