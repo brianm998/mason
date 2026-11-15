@@ -33,6 +33,8 @@ fn name(k: &EventKind) -> &'static str {
         TaskFiled { .. } => "TaskFiled",
         Approved { .. } => "Approved",
         Rejected { .. } => "Rejected",
+        Deferred { .. } => "Deferred",
+        Undeferred { .. } => "Undeferred",
         Admitted { .. } => "Admitted",
         StepSucceeded { .. } => "StepSucceeded",
         SentBack { .. } => "SentBack",
@@ -127,6 +129,8 @@ fn task_of(k: &EventKind) -> Option<TaskId> {
         ProjectRegistered { .. } | TaskFiled { .. } | Tick => None,
         Approved { task }
         | Rejected { task }
+        | Deferred { task }
+        | Undeferred { task }
         | Admitted { task, .. }
         | StepSucceeded { task, .. }
         | SentBack { task, .. }
@@ -279,7 +283,7 @@ fn apply(w: &mut World, k: &EventKind, fx: &mut Vec<Effect>) -> Result<(), Reduc
         }
         E::Approved { task } => {
             let from = get(w, *task)?.state;
-            if from != S::Proposed {
+            if !matches!(from, S::Proposed | S::Deferred) {
                 return Err(illegal(from, k));
             }
             let t = w.tasks.get_mut(task).expect("exists");
@@ -288,10 +292,24 @@ fn apply(w: &mut World, k: &EventKind, fx: &mut Vec<Effect>) -> Result<(), Reduc
         }
         E::Rejected { task } => {
             let from = get(w, *task)?.state;
-            if from != S::Proposed {
+            if !matches!(from, S::Proposed | S::Deferred) {
                 return Err(illegal(from, k));
             }
             w.tasks.get_mut(task).expect("exists").state = S::Canceled;
+        }
+        E::Deferred { task } => {
+            let from = get(w, *task)?.state;
+            if from != S::Proposed {
+                return Err(illegal(from, k));
+            }
+            w.tasks.get_mut(task).expect("exists").state = S::Deferred;
+        }
+        E::Undeferred { task } => {
+            let from = get(w, *task)?.state;
+            if from != S::Deferred {
+                return Err(illegal(from, k));
+            }
+            w.tasks.get_mut(task).expect("exists").state = S::Proposed;
         }
         E::Admitted { task, entry } => {
             let t = get(w, *task)?;
@@ -491,7 +509,7 @@ fn apply(w: &mut World, k: &EventKind, fx: &mut Vec<Effect>) -> Result<(), Reduc
             // (s337): a task made obsolete while it sat failed is closed, not left failed.
             if !(matches!(
                 from,
-                S::Proposed | S::Queued | S::NeedsAttention | S::Failed
+                S::Proposed | S::Deferred | S::Queued | S::NeedsAttention | S::Failed
             ) || from.is_step())
             {
                 return Err(illegal(from, k));
@@ -629,7 +647,7 @@ fn apply(w: &mut World, k: &EventKind, fx: &mut Vec<Effect>) -> Result<(), Reduc
             priority,
         } => {
             let from = get(w, *task)?.state;
-            if !(from.is_step() || matches!(from, S::Proposed | S::Queued | S::NeedsAttention)) {
+            if !(from.is_step() || matches!(from, S::Proposed | S::Deferred | S::Queued | S::NeedsAttention)) {
                 return Err(illegal(from, k));
             }
             let t = w.tasks.get_mut(task).expect("exists");

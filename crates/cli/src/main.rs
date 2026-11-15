@@ -72,7 +72,7 @@ mason: command-line client for the MASON pipeline
                                       failed on its own code; apply or dismiss a pending one
   mason task approve <id> [--priority P]   let a proposed or deferred task start (queued at P: urgent,
                                       high, normal or low), or an approval step go on
-  mason task defer <id>               put a proposed task aside (state "deferred"); it comes back only
+  mason task defer <id>               put a proposed task aside (state deferred); it comes back only
                                       by hand: approve, reject or undefer
   mason task undefer <id>             move a deferred task back to proposed
   mason task reject <id> [--reason R] reject a proposed task or an approval step

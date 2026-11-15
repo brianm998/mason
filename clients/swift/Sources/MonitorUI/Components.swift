@@ -472,6 +472,7 @@ struct ApprovalView: View {
     let approval: Mason_V1_Approval
     @State private var reason = ""
     @State private var rejecting = false
+    @State private var priority = MonitorModel.defaultApprovalPriority
 
     var body: some View {
         VStack(alignment: .leading, spacing: theme.spacing) {
@@ -499,9 +500,19 @@ struct ApprovalView: View {
             }
             if model.canAct {
                 HStack(spacing: theme.spacing) {
-                    Button { model.approve(task, approval) } label: { Text("Approve").pill(prominent: true) }
+                    Button { model.approve(task, approval, priority: priority) } label: { Text("Approve").pill(prominent: true) }
                         .buttonStyle(.plain)
                         .accessibilityIdentifier("approval:\(task):approve")
+                    if approval.diffHash.isEmpty {
+                        Picker("Priority", selection: $priority) {
+                            ForEach(MonitorModel.approvalPriorities, id: \.self) { Text($0).tag($0) }
+                        }
+                        .pickerStyle(.menu).fixedSize()
+                        .accessibilityIdentifier("approval:\(task):priority")
+                        Button { model.deferTask(task) } label: { Text("Defer").pill(prominent: false) }
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("approval:\(task):defer")
+                    }
                     Button { rejecting.toggle() } label: { Text("Reject").pill(prominent: false) }
                         .buttonStyle(.plain)
                         .accessibilityIdentifier("approval:\(task):reject")
@@ -586,9 +597,11 @@ struct ActionButtons: View {
         switch a {
         case "cancel": model.cancel(row.id)
         case "retry": model.retry(row.id, seen: row.lastRun)
-        case "approve": model.approve(row.id)
+        case "approve": model.approve(row.id, priority: MonitorModel.defaultApprovalPriority)
         case "revive": model.revive(row.id)
         case "reject": model.reject(row.id)
+        case "defer": model.deferTask(row.id)
+        case "undefer": model.undefer(row.id)
         case "explore_anyway": model.exploreAnyway(row.id)
         case "land_now": model.landNow(row.id)
         case "force": model.force(row.id)

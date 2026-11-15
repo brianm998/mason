@@ -3,7 +3,7 @@
 use crate::{DecisionId, ProjectId, TaskId, Timestamp};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// The eleven fixed state categories (Part 4). `Landed` carries its outcome
+/// The twelve fixed state categories (Part 4). `Landed` carries its outcome
 /// in [`Task::landed`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum State {
@@ -18,10 +18,12 @@ pub enum State {
     Failed,
     Canceled,
     Landed,
+    /// Put aside by the owner; it comes back only by hand (approve, reject, undefer).
+    Deferred,
 }
 
 impl State {
-    pub const ALL: [State; 11] = [
+    pub const ALL: [State; 12] = [
         State::Proposed,
         State::Queued,
         State::Exploring,
@@ -33,6 +35,7 @@ impl State {
         State::Failed,
         State::Canceled,
         State::Landed,
+        State::Deferred,
     ];
 
     /// States in which a step is running (or may run) for the task.

@@ -151,7 +151,7 @@ private fun approval(model: MonitorModel, cmd: String, args: List<String>) {
         val d = args.opt("--diff")
         when {
             d != null -> Command(approve_hold = mason.v1.ApproveHold(task = t, diff_hash = d), actor = model.identity)
-            a.diff_hash.isEmpty() -> Command(approve = mason.v1.TaskRef(task = t), actor = model.identity)
+            a.diff_hash.isEmpty() -> Command(approve = mason.v1.ApproveTask(task = t), actor = model.identity)
             else -> Command(approve_hold = mason.v1.ApproveHold(task = t, diff_hash = a.diff_hash), actor = model.identity)
         }
     } else {
