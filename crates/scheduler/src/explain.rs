@@ -115,6 +115,9 @@ fn short_label(label: &str) -> String {
 /// What the resource is called in totals: its own name (`compile`, `test-suite`, `llm:claude`,
 /// `device:ios-simulator`).
 pub fn resource_class(resource: &str) -> String {
+    if resource.trim().is_empty() {
+        return "other".into();
+    }
     resource.to_string()
 }
 
@@ -123,17 +126,23 @@ impl Wait {
     /// (`compile`, `llm:claude`, `exclusive`, ...) or the gate (`cpu`, `disk-stall`, `disk-floor`,
     /// `memory`).
     pub fn class(&self) -> String {
-        match &self.cause {
-            WaitCause::Full { resource }
-            | WaitCause::Behind { resource }
-            | WaitCause::TooBig { resource, .. }
-            | WaitCause::Unknown { resource } => resource_class(resource),
-            WaitCause::Exclusive => "exclusive".into(),
-            WaitCause::Memory { .. } => "memory".into(),
-            WaitCause::Disk { .. } => "disk-floor".into(),
-            WaitCause::Cpu { .. } | WaitCause::Settling { .. } => "cpu".into(),
-            WaitCause::DiskStall { .. } => "disk-stall".into(),
-        }
+        cause_class(&self.cause)
+    }
+}
+
+/// The one function from a wait's cause to its class. Never empty: a resource with no name is
+/// `other`. A settling compile is waiting on CPU use, so it totals under `cpu`.
+pub fn cause_class(cause: &WaitCause) -> String {
+    match cause {
+        WaitCause::Full { resource }
+        | WaitCause::Behind { resource }
+        | WaitCause::TooBig { resource, .. }
+        | WaitCause::Unknown { resource } => resource_class(resource),
+        WaitCause::Exclusive => "exclusive".into(),
+        WaitCause::Memory { .. } => "memory".into(),
+        WaitCause::Disk { .. } => "disk-floor".into(),
+        WaitCause::Cpu { .. } | WaitCause::Settling { .. } => "cpu".into(),
+        WaitCause::DiskStall { .. } => "disk-stall".into(),
     }
 }
 
@@ -239,6 +248,56 @@ fn explain_cause(w: &Wait, now_ms: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_wait_cause_has_a_class() {
+        let r = |n: &str| n.to_string();
+        let causes = [
+            WaitCause::Full {
+                resource: r("compile"),
+            },
+            WaitCause::Full { resource: r("") },
+            WaitCause::Behind {
+                resource: r("test-suite"),
+            },
+            WaitCause::Behind {
+                resource: r("llm:claude"),
+            },
+            WaitCause::Exclusive,
+            WaitCause::Memory {
+                free_mb: 1,
+                floor_mb: 2,
+            },
+            WaitCause::Disk {
+                free_mb: 1,
+                floor_mb: 2,
+            },
+            WaitCause::Cpu {
+                busy_pct: 90,
+                max_pct: 50,
+            },
+            WaitCause::Settling { until: 5 },
+            WaitCause::DiskStall {
+                slow_ms: 3000,
+                max_ms: 1000,
+            },
+            WaitCause::TooBig {
+                resource: r("compile"),
+                need: 5,
+                limit: 2,
+            },
+            WaitCause::TooBig {
+                resource: r(" "),
+                need: 5,
+                limit: 2,
+            },
+            WaitCause::Unknown { resource: r("") },
+        ];
+        for c in causes {
+            assert!(!cause_class(&c).is_empty(), "{c:?}");
+        }
+        assert_eq!(cause_class(&WaitCause::Settling { until: 1 }), "cpu");
+    }
 
     #[test]
     fn ordinals() {
