@@ -25,7 +25,7 @@ final class EditorSnapshotTests: XCTestCase {
         }
     }
 
-    final class FakeDaemon {
+    @MainActor final class FakeDaemon {
         var draft = Draft()
         var history: [Draft] = []
         var ops: [[String: Any]] = []
