@@ -10,7 +10,7 @@ cd "$(dirname "$0")/../.."
 
 cargo test -q -p mason-daemon --test pause_banners
 
-if [ "$(uname)" = Darwin ] && command -v swift >/dev/null; then
+if [ "$(uname)" = Darwin ] && command -v swift >/dev/null && [ -z "${MASON_SKIP_SWIFT:-}" ]; then
   (cd clients/swift && swift test --filter PauseCollapseTests)
 else
   echo "s270: swift not available; Swift tests skipped" >&2
