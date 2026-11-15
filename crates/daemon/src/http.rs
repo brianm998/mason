@@ -2781,6 +2781,22 @@ async fn digest(Shared(d): Shared<Arc<Daemon>>, Query(q): Query<HashMap<String, 
     Ok(Json(v))
 }
 
+async fn report(Shared(d): Shared<Arc<Daemon>>, Query(q): Query<HashMap<String, String>>) -> Res {
+    let days: u64 = q
+        .get("days")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(7)
+        .max(1);
+    let project = q.get("project").cloned();
+    let d2 = d.clone();
+    let v = d
+        .pool
+        .run(move || crate::report::report(&d2, project.as_deref(), days))
+        .await
+        .map_err(pool_err)?;
+    Ok(Json(v))
+}
+
 async fn schedules_list(Shared(d): Shared<Arc<Daemon>>) -> Res {
     let d2 = d.clone();
     let v = d
@@ -3474,6 +3490,7 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/targets", get(targets))
         .route("/health", get(health))
         .route("/digest", get(digest))
+        .route("/report", get(report))
         .route("/schedules", get(schedules_list))
         .route("/schedules/run", post(schedule_run))
         .route("/triage", get(triage_list))
