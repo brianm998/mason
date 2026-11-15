@@ -802,7 +802,10 @@ fn a_task_test_step_runs_only_the_crates_its_change_touches_and_their_dependents
         &[
             (".mason/mason.toml", &definition),
             ("checks.sh", CHECKS),
-            ("Cargo.toml", "[workspace]\nresolver = \"2\"\nmembers = [\"crates/*\"]\n"),
+            (
+                "Cargo.toml",
+                "[workspace]\nresolver = \"2\"\nmembers = [\"crates/*\"]\n",
+            ),
             ("crates/base/Cargo.toml", &krate("base", "")),
             ("crates/base/src/lib.rs", "\n"),
             (
@@ -817,7 +820,11 @@ fn a_task_test_step_runs_only_the_crates_its_change_touches_and_their_dependents
     let t = file_it(&d, "Packages");
     wait_state(&d, t, State::Landed, 120);
     let ran = std::fs::read_to_string(&log).unwrap_or_default();
-    assert_eq!(ran.trim(), "dev -p leaf", "only the leaf crate ran: {ran:?}");
+    assert_eq!(
+        ran.trim(),
+        "dev -p leaf",
+        "only the leaf crate ran: {ran:?}"
+    );
     let (_, note) = closing(&d, t);
     assert!(note.contains("narrowed to 1 packages (leaf)"), "{note}");
 }

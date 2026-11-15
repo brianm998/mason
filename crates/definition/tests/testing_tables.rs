@@ -542,9 +542,16 @@ narrow_never = ["Cargo.toml"]"#;
 fn narrow_packages_parses_and_needs_a_dev_command() {
     // s396: package-mode narrowing for a task's test step.
     let both = "dev_command = \"cargo test {packages}\"\nnarrow_packages = true";
-    let d = parse(&with(r#"parser = "playwright""#, &format!("parser = \"playwright\"\n{both}"))).unwrap();
+    let d = parse(&with(
+        r#"parser = "playwright""#,
+        &format!("parser = \"playwright\"\n{both}"),
+    ))
+    .unwrap();
     assert!(d.testing.suite("e2e").is_some_and(|s| s.narrow_packages));
-    let text = with(r#"parser = "playwright""#, "parser = \"playwright\"\nnarrow_packages = true");
+    let text = with(
+        r#"parser = "playwright""#,
+        "parser = \"playwright\"\nnarrow_packages = true",
+    );
     let p = problems(&text);
     assert!(p.iter().any(|x| x.contains("needs `dev_command`")), "{p:?}");
 }
