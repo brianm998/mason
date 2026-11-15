@@ -1126,7 +1126,10 @@ impl<'a> Ctx<'a> {
                 .iter()
                 .filter(|b| b.project == p.id && b.finished_at.is_none())
                 .collect();
-            let frozen = freezes.iter().find(|f| f.project == p.id).map(|f| f.fix_task);
+            let frozen = freezes
+                .iter()
+                .find(|f| f.project == p.id)
+                .map(|f| f.fix_task);
             let cfg = crate::landing::load_config(self.d, *pid).ok();
             let mut seen = std::collections::BTreeSet::new();
             for b in &live {
@@ -1140,7 +1143,9 @@ impl<'a> Ctx<'a> {
                     .unwrap_or_default();
                 let done: Vec<u64> = ids(&b.landed).into_iter().chain(ids(&b.parked)).collect();
                 for id in ids(&b.tasks).into_iter().filter(|i| !done.contains(i)) {
-                    let Some(t) = self.w.tasks.get(&TaskId(id)) else { continue };
+                    let Some(t) = self.w.tasks.get(&TaskId(id)) else {
+                        continue;
+                    };
                     seen.insert(id);
                     out.push(TaskLanding {
                         task: id,
@@ -1160,7 +1165,9 @@ impl<'a> Ctx<'a> {
             }
             let mut position = 0;
             for id in self.d.landing().queued(*pid) {
-                let Some(t) = self.w.tasks.get(&id) else { continue };
+                let Some(t) = self.w.tasks.get(&id) else {
+                    continue;
+                };
                 if !seen.insert(id.0) {
                     continue;
                 }
