@@ -91,6 +91,22 @@ pub fn remaining_limit(limit: std::time::Duration, dir: &Path) -> std::time::Dur
     }
 }
 
+/// Whether the command of the host in `dir` really ran past `limit` (s355). A deadline
+/// timer can fire after the command has already ended on its own: a restarted daemon
+/// re-attaches to a host that finished long ago, counts the limit from when the host
+/// started, and finds it spent. The command ran past its limit only if it was ended by a
+/// signal (the timer's stop) or ended later than `limit` after it started. With no
+/// records to go by, it did.
+pub fn ran_past(limit: std::time::Duration, dir: &Path) -> bool {
+    match (HostInfo::read(dir), ExitRecord::read(dir)) {
+        (Ok(h), Ok(e)) => {
+            e.signal != 0
+                || u128::from(e.ended_ms.saturating_sub(h.started_ms)) >= limit.as_millis()
+        }
+        _ => true,
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExitRecord {
     /// -1 when killed by a signal.
@@ -482,5 +498,55 @@ mod limit_tests {
         assert_eq!(remaining_at(D::from_secs(3), 1000, 3000), D::from_secs(1));
         assert_eq!(remaining_at(D::from_secs(3), 1000, 9000), D::ZERO);
         assert_eq!(remaining_at(D::from_secs(3), 5000, 1000), D::from_secs(3));
+    }
+}
+
+#[cfg(test)]
+mod ran_past_tests {
+    use super::{ran_past, write_kv, ExitRecord};
+    use std::time::Duration as D;
+
+    fn host(dir: &std::path::Path, started_ms: u64, ended_ms: u64, signal: i32) {
+        write_kv(
+            &dir.join("host.kv"),
+            &[
+                ("id", "h".into()),
+                ("host_pid", "1".into()),
+                ("child_pid", "2".into()),
+                ("sock", dir.join("sock").display().to_string()),
+                ("started_ms", started_ms.to_string()),
+                ("heartbeat_ms", "1000".into()),
+            ],
+        )
+        .unwrap();
+        ExitRecord {
+            code: if signal == 0 { 0 } else { -1 },
+            signal,
+            output_len: 0,
+            ended_ms,
+        }
+        .write(dir)
+        .unwrap();
+    }
+
+    #[test]
+    fn a_command_that_ended_within_its_limit_did_not_run_past_it() {
+        // #197, 2026-11-14: exited 0 after 88 s; a restarted daemon re-attached 50 min later
+        // with a 30 min limit and called it timed out (s355).
+        let t = tempfile::tempdir().unwrap();
+        host(t.path(), 1_000, 89_000, 0);
+        assert!(!ran_past(D::from_secs(1800), t.path()));
+        host(t.path(), 1_000, 1_000 + 1_800_000, 0);
+        assert!(ran_past(D::from_secs(1800), t.path()), "ended at the limit");
+        host(t.path(), 1_000, 5_000, 9);
+        assert!(
+            ran_past(D::from_secs(1800), t.path()),
+            "stopped by a signal"
+        );
+        let none = tempfile::tempdir().unwrap();
+        assert!(
+            ran_past(D::from_secs(1800), none.path()),
+            "no records: it did"
+        );
     }
 }

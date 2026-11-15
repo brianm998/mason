@@ -406,6 +406,17 @@ private fun SpeechSettingsDialog(model: MonitorModel, onClose: () -> Unit) {
                     if (a.isSpeaker) "This monitor is the one that speaks." else "Another monitor speaks, or none is needed.",
                     style = theme.small(),
                 )
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(theme.spacing)) {
+                    Text("Volume", style = theme.body())
+                    Slider(
+                        value = s.volume.toFloat(),
+                        onValueChange = { a.update(s.copy(volume = it.toDouble().coerceIn(0.0, 1.0))) },
+                        valueRange = 0f..1f,
+                        modifier = Modifier.weight(1f).testTag("speech-volume"),
+                    )
+                    Text("${Math.round(s.volume * 100)}%", style = theme.small())
+                    OutlinedButton(onClick = { a.test() }, modifier = Modifier.testTag("speech-test")) { Text("Test") }
+                }
             }
         },
         confirmButton = { TextButton(onClick = onClose) { Text("Done") } },

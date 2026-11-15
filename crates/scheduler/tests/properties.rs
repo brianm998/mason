@@ -540,8 +540,9 @@ proptest! {
 
     /// With aging on and holders that keep releasing, every request is
     /// granted (no starvation), and while a pipeline request that has aged
-    /// and wants the whole machine waits, no other pipeline request that uses
-    /// the machine is granted (the machine drains for it).
+    /// and wants the whole machine waits, no pipeline request ranked behind it
+    /// that uses the machine is granted (the machine drains for it). Work
+    /// further along still goes first (s349).
     #[test]
     fn with_aging_every_request_is_eventually_granted(
         jobs in prop::collection::vec(job(), 1..30),
@@ -559,6 +560,7 @@ proptest! {
         let mut needs_of: BTreeMap<u64, Needs> = BTreeMap::new();
         let mut inter_of: BTreeMap<u64, bool> = BTreeMap::new();
         let mut since_of: BTreeMap<u64, u64> = BTreeMap::new();
+        let mut rank_of: BTreeMap<u64, Rank> = BTreeMap::new();
         let mut now = 0u64;
         let mut finished = 0usize;
         let mut guard = 0;
@@ -569,6 +571,7 @@ proptest! {
                 let n = needs(j, &caps);
                 let rank = Rank::new(j.interactive, j.steps, j.priority, j.arrive, i as u64, false);
                 let id = l.submit(rank, n.clone(), &format!("#{i}"), now);
+                rank_of.insert(id, rank);
                 needs_of.insert(id, n);
                 inter_of.insert(id, j.interactive);
                 since_of.insert(id, now);
@@ -593,14 +596,18 @@ proptest! {
                     let aged_exclusive = needs_of[&w.id].exclusive
                         && !inter_of[&w.id]
                         && now.saturating_sub(since_of[&w.id]) >= MAX_WAIT;
+                    // A rank as the planner sees it now: aged once it has waited MAX_WAIT.
+                    let eff = |id: u64| {
+                        let r = rank_of[&id];
+                        if now.saturating_sub(since_of[&id]) >= MAX_WAIT { r.aged(since_of[&id]) } else { r }
+                    };
                     if w.id != *g
                         && aged_exclusive
                         && !p.grants.contains(&w.id)
                         && !inter_of[g]
                         && machine_needs(&needs_of[g])
-                        // An aged request that has waited longer goes first.
-                        && !(now.saturating_sub(since_of[g]) >= MAX_WAIT
-                            && since_of[g] <= since_of[&w.id])
+                        // Only a request ranked ahead of it may pass: further along, or aged longer.
+                        && eff(*g) > eff(w.id)
                     {
                         prop_assert!(
                             false,
@@ -638,13 +645,14 @@ fn an_exclusive_request_at_the_back_is_first_once_it_has_waited_max_wait() {
     l.set_max_wait(Some(1_000));
     l.set_capacity("compile", 2, Kind::Machine);
     l.set_capacity("test-suite", 2, Kind::Machine);
-    // The other project's route is shorter, so its requests outrank the exclusive one.
-    let mine = |id: u64| Rank::new(false, 2, 2, id, id, false);
+    // As far along, but the other project's work is of higher priority, so its requests
+    // outrank the exclusive one until that one has waited max_wait.
+    let mine = |id: u64| Rank::new(false, 2, 1, id, id, false);
     let h1 = l.submit(mine(1), Needs::of(&[("test-suite", 1)]), "m#1", 0);
     let h2 = l.submit(mine(2), Needs::of(&[("test-suite", 1)]), "m#2", 0);
     assert_eq!(l.schedule(0, None, None).grants, vec![h1, h2]);
     let star = l.submit(
-        Rank::new(false, 3, 2, 3, 3, false),
+        Rank::new(false, 2, 2, 3, 3, false),
         Needs {
             exclusive: true,
             amounts: Needs::of(&[("compile", 1)]).amounts,
@@ -676,7 +684,7 @@ fn an_exclusive_request_at_the_back_is_first_once_it_has_waited_max_wait() {
     let w = &p.waits[&star];
     assert_eq!(w.position, 1);
     assert_eq!(w.aged_ms, Some(1_000));
-    assert!(explain(w, 1_000).contains("waited 1 s: first in line once the machine is free"));
+    assert!(explain(w, 1_000).contains("waited 1 s: ahead of work as far along"));
     assert!(p.waits[&late].position > 1);
     // The holders release; it is granted, then the others follow.
     l.release(h1);
@@ -721,8 +729,8 @@ fn aging_is_off_without_a_max_wait_and_a_landing_keeps_its_place() {
     let order: Vec<u64> = l.snapshot_at(10_000).waiting.iter().map(|r| r.id).collect();
     assert_eq!(
         order,
-        vec![land, old, near],
-        "a landing first, then the aged, oldest first"
+        vec![land, near, old],
+        "a landing first, then work further along: both have aged, and aging never passes progress (s349)"
     );
 }
 
@@ -876,4 +884,84 @@ fn a_request_behind_a_paused_one_names_it_and_the_reason_not_a_holder() {
         explain(&p.waits[&c], 0),
         "Waiting for compile slot: 2nd in line, behind #2 (memory is low)"
     );
+}
+
+// ---- backfill while the machine drains (s385) --------------------------------------------
+
+/// A holder expected to be done at 1_000, and an exclusive request waiting for the machine.
+fn draining(holder_estimate: Option<u64>) -> (Ledger, u64) {
+    let mut l = Ledger::new();
+    l.set_capacity("compile", 3, Kind::Machine);
+    l.set_capacity("test-suite", 2, Kind::Machine);
+    let h = l.submit(
+        Rank::new(false, 1, 2, 0, 0, false),
+        Needs::of(&[("test-suite", 1)]),
+        "holder",
+        0,
+    );
+    l.set_expected(h, holder_estimate);
+    assert_eq!(l.schedule(0, None, None).grants, vec![h]);
+    let x = l.submit(
+        Rank::new(false, 2, 2, 1, 1, false),
+        Needs {
+            exclusive: true,
+            amounts: BTreeMap::new(),
+        },
+        "exclusive",
+        50,
+    );
+    (l, x)
+}
+
+#[test]
+fn short_work_runs_while_the_machine_drains_and_long_or_unknown_work_waits() {
+    let (mut l, x) = draining(Some(1_000));
+    let later = |l: &mut Ledger, id: u64, e: Option<u64>| {
+        let r = l.submit(
+            Rank::new(false, 3, 2, id, id, false),
+            Needs::of(&[("compile", 1)]),
+            &format!("c{id}"),
+            100,
+        );
+        l.set_expected(r, e);
+        r
+    };
+    let short = later(&mut l, 2, Some(500));
+    let long = later(&mut l, 3, Some(2_000));
+    let unknown = later(&mut l, 4, None);
+    let p = l.schedule(100, None, None);
+    assert_eq!(
+        p.grants,
+        vec![short],
+        "done by 600, before the drain ends at 1_000"
+    );
+    assert!(p.waits.contains_key(&x));
+    assert_eq!(
+        p.waits[&long].cause,
+        WaitCause::Exclusive,
+        "would run past the drain"
+    );
+    assert_eq!(p.waits[&unknown].cause, WaitCause::Exclusive, "no estimate");
+    // Once the holders are done, the exclusive request goes first, as before.
+    let held: Vec<u64> = l.snapshot().holders.iter().map(|h| h.id).collect();
+    for id in held {
+        l.release(id);
+    }
+    assert_eq!(l.schedule(1_000, None, None).grants, vec![x]);
+}
+
+#[test]
+fn nothing_passes_a_waiting_exclusive_request_when_a_holder_has_no_estimate() {
+    let (mut l, x) = draining(None);
+    let c = l.submit(
+        Rank::new(false, 3, 2, 2, 2, false),
+        Needs::of(&[("compile", 1)]),
+        "c",
+        100,
+    );
+    l.set_expected(c, Some(10));
+    let p = l.schedule(100, None, None);
+    assert!(p.grants.is_empty(), "{p:?}");
+    assert_eq!(p.waits[&c].cause, WaitCause::Exclusive);
+    assert!(p.waits.contains_key(&x));
 }

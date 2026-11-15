@@ -152,7 +152,26 @@ impl Ctx {
     }
 
     pub(crate) fn emit(&self, kind: EventKind) -> bool {
+        match &kind {
+            EventKind::WaitStarted { .. } => wait_note(self.run.0, true),
+            EventKind::WaitEnded { .. } => wait_note(self.run.0, false),
+            _ => {}
+        }
         self.d.emit_for_run(self.task, self.run, kind)
+    }
+
+    /// The reason for a step that ran out of time. When more than half of the run was spent
+    /// waiting (for a slot, a pause, a hold) the time was not the step's own: the reason says
+    /// so, and the failure counts as outside the code (s392).
+    pub(crate) fn timeout_reason(&self) -> String {
+        let started = self
+            .d
+            .world()
+            .ok()
+            .and_then(|w| w.step_runs.get(&self.run).map(|r| r.started_at.0));
+        let elapsed = started.map(|s| now_ms().saturating_sub(s)).unwrap_or(0);
+        let waited = wait_total(self.run.0);
+        timeout_text(waited, elapsed)
     }
 
     /// End the step and let the graph say what follows.
@@ -426,6 +445,44 @@ impl Ctx {
     }
 }
 
+/// Per run: (total ms waited, start of the open wait).
+static WAITS: std::sync::Mutex<std::collections::BTreeMap<u64, (u64, Option<u64>)>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+fn wait_note(run: u64, start: bool) {
+    let now = now_ms();
+    let mut m = WAITS.lock().unwrap_or_else(|e| e.into_inner());
+    let e = m.entry(run).or_insert((0, None));
+    if start {
+        e.1.get_or_insert(now);
+    } else if let Some(s) = e.1.take() {
+        e.0 += now.saturating_sub(s);
+    }
+}
+
+/// Time the run has spent waiting so far, an open wait included. The entry is dropped.
+fn wait_total(run: u64) -> u64 {
+    let now = now_ms();
+    let mut m = WAITS.lock().unwrap_or_else(|e| e.into_inner());
+    match m.remove(&run) {
+        Some((t, open)) => t + open.map(|s| now.saturating_sub(s)).unwrap_or(0),
+        None => 0,
+    }
+}
+
+/// The text of a timeout after `waited` ms of `elapsed` ms spent waiting.
+pub(crate) fn timeout_text(waited: u64, elapsed: u64) -> String {
+    if elapsed > 0 && waited * 2 > elapsed {
+        format!(
+            "the step ran out of time, mostly waiting in the queue ({} s of {} s)",
+            waited / 1000,
+            elapsed / 1000
+        )
+    } else {
+        "the step ran out of time".to_string()
+    }
+}
+
 /// The note for a develop prompt when the branch changes `.mason/`.
 pub const PIPELINE_DEFINITION_NOTE: &str = "Note: your branch changes files under `.mason/`. \
 This project's pipeline runs the definition on the base branch, not the one on your branch, so \
@@ -613,7 +670,7 @@ fn execute(c: &Ctx, step: State) {
             && crate::suites::builds_per_suite(&c.project, &c.def, &c.step, &c.branch))
     {
         // A test step with a build queues phase by phase in `command_job`, and one whose
-        // suites build, suite by suite in `suites::run`.
+        // suites build or need the whole machine, suite by suite in `suites::run`.
         match acquire(c) {
             Ok(l) => *c.lease.lock().unwrap_or_else(|e| e.into_inner()) = Some(l),
             Err(_) => return, // the task was cancelled or retried while it waited
@@ -862,6 +919,29 @@ pub(crate) fn acquire_needs_while(
     needs: mason_scheduler::Needs,
     wanted: &dyn Fn() -> bool,
 ) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
+    acquire_needs_as(c, needs, wanted, false, None)
+}
+
+/// [`acquire_needs_while`] with how long the work is expected to hold the lease (s385);
+/// `beside`: one of several leases the step holds at once (s345), recorded beside the
+/// step's own so it never takes the step's place in the broker.
+pub(crate) fn acquire_needs_expecting(
+    c: &Ctx,
+    needs: mason_scheduler::Needs,
+    wanted: &dyn Fn() -> bool,
+    beside: bool,
+    expected_ms: Option<u64>,
+) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
+    acquire_needs_as(c, needs, wanted, beside, expected_ms)
+}
+
+fn acquire_needs_as(
+    c: &Ctx,
+    needs: mason_scheduler::Needs,
+    wanted: &dyn Fn() -> bool,
+    beside: bool,
+    expected_ms: Option<u64>,
+) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
     let d = &c.d;
     // Device pools are sized by what the provider lists, never by a default.
     if needs.amounts.keys().any(|n| n.starts_with("device:")) {
@@ -886,7 +966,7 @@ pub(crate) fn acquire_needs_while(
     };
     let mut waited = false;
     let asked = needs.clone();
-    let lease = d.broker.acquire(
+    let lease = d.broker.acquire_expecting(
         c.task,
         &format!("#{}", c.task.0),
         rank,
@@ -899,6 +979,8 @@ pub(crate) fn acquire_needs_while(
                 class: Some(crate::targets::wait_class(d, &asked, c.task)),
             });
         },
+        beside,
+        expected_ms,
     )?;
     if waited {
         c.emit(EventKind::WaitEnded { task: c.task });
@@ -2497,6 +2579,16 @@ fn agent_job(c: &Ctx) {
         .as_ref()
         .map(|t| crate::cmdreuse::command_key(t.build.as_deref(), &t.test));
     let deadline_extra = mason_adapter_api::DeadlineExtra::default();
+    // The agent's own `mason run` commands that wait in the queue add to it too (s363),
+    // until this step ends.
+    c.d.broker.credit_waits_to(c.task, deadline_extra.clone());
+    struct StopCrediting<'a>(&'a Ctx);
+    impl Drop for StopCrediting<'_> {
+        fn drop(&mut self) {
+            self.0.d.broker.stop_crediting_waits(self.0.task);
+        }
+    }
+    let _credit = StopCrediting(c);
     let checks = Box::new(TestChecks {
         cmd: tests_cmd,
         wt: c.wt.clone(),
@@ -3076,7 +3168,7 @@ fn finish_agent_inner(c: &Ctx, report: StepReport, dir: &Path) {
         StepEnd::Failed(why) => {
             let reason = match why {
                 FailReason::NoResult { nudges } => format!("the agent ended its turn {} times without submitting", nudges + 1),
-                FailReason::Timeout => "the step ran out of time".to_string(),
+                FailReason::Timeout => c.timeout_reason(),
                 FailReason::Crash { detail } => format!("the agent failed: {detail}"),
                 // Restarted until it could not be (see `settle_all`); the text names the losses.
                 FailReason::HostLost { detail } => detail,

@@ -22,6 +22,7 @@ pub mod gates;
 pub mod glob;
 pub mod live;
 pub mod model;
+pub mod narrow;
 pub mod parse;
 pub mod results;
 pub mod signatures;
@@ -29,8 +30,8 @@ pub mod verdict;
 
 pub use live::{Counts, LiveCount};
 pub use model::{
-    Binding, DeviceType, EnvKind, Environment, ImpactMap, ParserKind, Selection, Signature, Suite,
-    Testing, When,
+    Binding, DeviceType, EnvKind, Environment, ImpactMap, Narrow, ParserKind, Selection, Signature,
+    Suite, Testing, When,
 };
 pub use results::{Case, Results, Status};
 pub use verdict::{

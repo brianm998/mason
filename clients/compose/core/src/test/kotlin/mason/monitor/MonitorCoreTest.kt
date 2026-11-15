@@ -728,6 +728,25 @@ class MonitorCoreTest {
         assertEquals(OtherKey.NEWLINE, otherBoxKey(shift = true))
     }
 
+    @Test fun spaceTogglesAndReturnSendsTheCheckedSet() {
+        var s = MultiSelection.starting(4, 1)
+        assertNull(s.answer, "nothing is checked until Space")
+        s = s.toggle(); assertEquals("2", s.answer, "Space checks the highlighted option")
+        s = s.down().down().toggle(); assertEquals("2,4", s.answer)
+        s = s.toggle(0); assertEquals("1,2,4", s.answer, "a click checks that option, in card order")
+        s = s.toggle(); assertEquals("2,4", s.answer, "Space on a checked option unchecks it")
+        assertEquals(s, s.toggle(9), "a box that is not there changes nothing")
+        assertNull(MultiSelection.starting(2, null).toggle().answer, "no highlight, nothing to toggle")
+        assertNull(otherAnswer("  \n"), "a blank Other box sends nothing")
+    }
+
+    @Test fun aMultiSelectCardOffersSendToTheOwnerOnly() {
+        val c = card().copy(multi_select = true)
+        assertEquals(listOf("option:1", "option:2", "other", "send"), c.item(7).actions)
+        assertEquals(emptyList(), c.item(7, owner = false).actions)
+        assertEquals(listOf("option:1", "option:2", "other"), card().item(7).actions)
+    }
+
     @Test fun approveSendsTheDiffHashShownForAHoldAndAPlainApproveOtherwise() {
         val (m, sent) = ownerModel()
         m.approve(3, approval(hold = true))
@@ -833,8 +852,10 @@ class MonitorCoreTest {
 
     private class Rig(val model: MonitorModel, stallAfter: Double = 15.0, var info: DaemonInfo? = DaemonInfo(7423, 1, 10)) {
         val sockets = java.util.concurrent.CopyOnWriteArrayList<FakeSocket>()
+        /** How many times the connection read daemon.json: once a session, then once a tick. */
+        val discovered = java.util.concurrent.atomic.AtomicInteger()
         val conn = MonitorConnection(
-            model, { info },
+            model, { discovered.incrementAndGet(); info },
             ConnectionTiming(pingEverySeconds = 0.05, stallAfterSeconds = stallAfter, watchEverySeconds = 0.02, pauseScale = 0.01),
             { port, ev -> FakeSocket(port, ev).also { sockets += it } },
         )
@@ -873,6 +894,20 @@ class MonitorCoreTest {
         r.conn.stop()
     }
 
+    @Test fun nothingIsSentBeforeTheSocketOpensAndTheHelloIsFirst() {
+        // s220 failed one run in five: a ping went out on the new socket before the hello.
+        val r = Rig(MonitorModel(MemoryPreferences()))
+        r.conn.start()
+        waitFor("a socket") { r.sockets.size == 1 }
+        val ticks = r.discovered.get()
+        // Ten ticks of 0.02 s are more than one ping interval (0.05 s): a ping would be due.
+        waitFor("ten ticks") { r.discovered.get() >= ticks + 10 }
+        assertTrue(r.sockets[0].sent.isEmpty(), "sent before the open: ${r.sockets[0].sent}")
+        r.sockets[0].events.onOpen()
+        assertTrue(r.sockets[0].sent[0].contains("hello"), r.sockets[0].sent[0])
+        r.conn.stop()
+    }
+
     @Test fun aChangedPidWhileConnectedReconnectsFromTheLastSeq() {
         val r = Rig(MonitorModel(MemoryPreferences()))
         r.conn.start()
@@ -892,6 +927,7 @@ class MonitorCoreTest {
         val r = Rig(MonitorModel(MemoryPreferences()), stallAfter = 1.0)
         r.conn.start()
         waitFor("a socket") { r.sockets.size == 1 }
+        r.sockets[0].events.onOpen()
         r.sockets[0].events.onMessage(welcome)
         waitFor("connected") { r.model.connected }
         waitFor("a ping") { r.sockets[0].sent.any { it.contains("ping") } }
