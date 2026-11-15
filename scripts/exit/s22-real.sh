@@ -67,3 +67,4 @@ fi
 m schedule list
 trap - EXIT; cleanup
 echo "s22-real finished: read the lines above; a survivor in the second run that the first did not have is a regression"
+echo "RESULT s22-real: the scheduled jobs ran twice, read the output above $(date +%F)"

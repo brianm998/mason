@@ -33,3 +33,4 @@ echo "$out"
 url=$(echo "$out" | grep '^mason://')
 if command -v qrencode >/dev/null; then qrencode -t ANSIUTF8 "$url"; fi
 read -r -p "Press Return to stop " _
+echo "RESULT s24-real: the daemon paired a device over the LAN, confirm the phone connected $(date +%F)"
