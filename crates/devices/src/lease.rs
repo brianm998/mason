@@ -22,6 +22,10 @@ pub struct DeviceLease {
 
 impl Drop for DeviceLease {
     fn drop(&mut self) {
+        // flock belongs to the open file description, so a dup or a forked
+        // child still holding the fd would keep the device locked after our
+        // close. LOCK_UN releases it for every copy.
+        let _ = self._lock.unlock();
         self.leases
             .held
             .lock()
@@ -112,5 +116,17 @@ mod tests {
         let two = Leases::new(dir.path()).unwrap();
         let _a = one.try_take("x/y", "#1").unwrap();
         assert!(two.try_take("x/y", "#2").is_none(), "the kernel lock holds");
+    }
+
+    #[test]
+    fn a_dup_of_the_lock_fd_does_not_keep_the_device_after_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let l = Leases::new(dir.path()).unwrap();
+        let a = l.try_take("emu-5554", "#1").unwrap();
+        let copy = a._lock.try_clone().unwrap();
+        drop(a);
+        assert!(!l.is_held("emu-5554"));
+        assert!(l.try_take("emu-5554", "#2").is_some());
+        drop(copy);
     }
 }
