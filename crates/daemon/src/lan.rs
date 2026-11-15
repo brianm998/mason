@@ -196,13 +196,50 @@ fn advertise(info: &Info) -> Result<mdns_sd::ServiceDaemon, String> {
     Ok(mdns)
 }
 
-/// Bind the LAN listener and serve it in the background. Returns the port it got.
+/// Accept TLS connections on one listener and serve the shared router on them.
+async fn serve(
+    listener: tokio::net::TcpListener,
+    acceptor: tokio_rustls::TlsAcceptor,
+    app: Router,
+) {
+    use hyper_util::rt::{TokioExecutor, TokioIo};
+    use hyper_util::server::conn::auto::Builder;
+    use hyper_util::service::TowerToHyperService;
+    loop {
+        let tcp = match listener.accept().await {
+            Ok((t, _)) => t,
+            Err(_) => {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                continue;
+            }
+        };
+        let (acceptor, app) = (acceptor.clone(), app.clone());
+        tokio::spawn(async move {
+            let Ok(Ok(tls)) =
+                tokio::time::timeout(Duration::from_secs(10), acceptor.accept(tcp)).await
+            else {
+                return;
+            };
+            let _ = Builder::new(TokioExecutor::new())
+                .serve_connection_with_upgrades(TokioIo::new(tls), TowerToHyperService::new(app))
+                .await;
+        });
+    }
+}
+
+/// Bind the LAN listener(s) and serve them in the background. Returns the port it got.
 pub async fn start(d: Arc<Daemon>) -> std::io::Result<u16> {
     let (cert, key) = load_or_create_identity(&d.cfg.data_dir)?;
     let fingerprint = sha256_hex(&cert);
     let acceptor = tokio_rustls::TlsAcceptor::from(tls_config(cert, key)?);
-    let listener = tokio::net::TcpListener::bind(("0.0.0.0", d.cfg.lan.port)).await?;
-    let port = listener.local_addr()?.port();
+    // One listener per bind address. With port 0 the first one picks the port, the rest use it.
+    let mut listeners = Vec::new();
+    let mut port = d.cfg.lan.port;
+    for addr in &d.cfg.lan.bind {
+        let l = tokio::net::TcpListener::bind((*addr, port)).await?;
+        port = l.local_addr()?.port();
+        listeners.push(l);
+    }
     let info = Info {
         port,
         fingerprint: fingerprint.clone(),
@@ -220,36 +257,12 @@ pub async fn start(d: Arc<Daemon>) -> std::io::Result<u16> {
     let app = router(d.clone());
     tracing::info!(
         port,
+        bind = ?d.cfg.lan.bind,
         "masond listening on the LAN (TLS, paired devices only)"
     );
-    tokio::spawn(async move {
-        use hyper_util::rt::{TokioExecutor, TokioIo};
-        use hyper_util::server::conn::auto::Builder;
-        use hyper_util::service::TowerToHyperService;
-        loop {
-            let tcp = match listener.accept().await {
-                Ok((t, _)) => t,
-                Err(_) => {
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                    continue;
-                }
-            };
-            let (acceptor, app) = (acceptor.clone(), app.clone());
-            tokio::spawn(async move {
-                let Ok(Ok(tls)) =
-                    tokio::time::timeout(Duration::from_secs(10), acceptor.accept(tcp)).await
-                else {
-                    return;
-                };
-                let _ = Builder::new(TokioExecutor::new())
-                    .serve_connection_with_upgrades(
-                        TokioIo::new(tls),
-                        TowerToHyperService::new(app),
-                    )
-                    .await;
-            });
-        }
-    });
+    for listener in listeners {
+        tokio::spawn(serve(listener, acceptor.clone(), app.clone()));
+    }
     Ok(port)
 }
 
@@ -372,6 +385,27 @@ async fn pair(State(d): State<Arc<Daemon>>, Json(b): Json<Value>) -> Res {
 
 // ---- routes of the main API (loopback, or an owner token) ---------------------------------
 
+/// The names the phone may use: `<host>.local` first, then the configured extras.
+pub fn reach_hosts(extra: &[String]) -> Vec<String> {
+    let mut v = vec![format!("{}.local", hostname())];
+    v.extend(extra.iter().cloned());
+    v
+}
+
+/// The `mason://pair` URL: `host=` is the first name (older clients read only it), then one
+/// `alt=` for each other.
+pub fn pair_url(hosts: &[String], port: u16, fingerprint: &str, code: &str) -> String {
+    let mut url = format!(
+        "mason://pair?host={}&port={port}&fp={fingerprint}&code={code}",
+        hosts[0]
+    );
+    for h in &hosts[1..] {
+        url.push_str("&alt=");
+        url.push_str(h);
+    }
+    url
+}
+
 /// `GET /lan`: whether the listener is up, and what it advertises.
 pub async fn status(State(d): State<Arc<Daemon>>) -> Res {
     Ok(Json(match d.lan.info() {
@@ -379,6 +413,8 @@ pub async fn status(State(d): State<Arc<Daemon>>) -> Res {
         Some(i) => json!({
             "enabled": true, "port": i.port, "fingerprint": i.fingerprint,
             "instance": i.instance, "service": SERVICE_TYPE, "txt": i.txt,
+            "hosts": reach_hosts(&d.cfg.lan.hosts),
+            "bind": d.cfg.lan.bind.iter().map(|a| a.to_string()).collect::<Vec<_>>(),
         }),
     }))
 }
@@ -406,14 +442,12 @@ pub async fn issue_code(State(d): State<Arc<Daemon>>, body: Option<Json<Value>>)
         .lock()
         .map_err(|_| fail(500, "internal error"))?
         .issue(code.clone(), role, now_ms());
-    let host = format!("{}.local", hostname());
-    let url = format!(
-        "mason://pair?host={host}&port={}&fp={}&code={code}",
-        info.port, info.fingerprint
-    );
+    let hosts = reach_hosts(&d.cfg.lan.hosts);
+    let host = hosts[0].clone();
+    let url = pair_url(&hosts, info.port, &info.fingerprint, &code);
     Ok(Json(json!({
         "code": code, "role": role.as_str(), "expires_in_s": mason_core::access::CODE_TTL_MS / 1000,
-        "host": host, "port": info.port, "fingerprint": info.fingerprint, "url": url,
+        "host": host, "hosts": hosts, "port": info.port, "fingerprint": info.fingerprint, "url": url,
     })))
 }
 
@@ -467,6 +501,20 @@ mod tests {
             assert_eq!(mode & 0o777, 0o600);
         }
         assert_eq!(sha256_hex(&c1).len(), 64);
+    }
+
+    #[test]
+    fn the_pairing_url_has_an_alt_for_each_extra_host() {
+        let hosts = vec!["a.local".to_string(), "m.ts.net".into(), "100.1.2.3".into()];
+        let u = pair_url(&hosts, 7424, "ff", "12345678");
+        assert_eq!(
+            u,
+            "mason://pair?host=a.local&port=7424&fp=ff&code=12345678&alt=m.ts.net&alt=100.1.2.3"
+        );
+        let one = pair_url(&hosts[..1], 1, "ff", "12345678");
+        assert!(!one.contains("alt="));
+        let r = reach_hosts(&["x.ts.net".into()]);
+        assert!(r[0].ends_with(".local") && r[1] == "x.ts.net");
     }
 
     #[test]

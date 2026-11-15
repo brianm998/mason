@@ -112,11 +112,16 @@ pub struct DaemonConfig {
 
 /// `[lan]` in `daemon.toml`. Loopback stays the default: nothing listens beyond it unless
 /// `enabled = true` (or `masond --lan`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LanCfg {
     pub enabled: bool,
     /// 0 asks the OS for a free port.
     pub port: u16,
+    /// Extra names or addresses a phone may reach the daemon at (a Tailscale name, say). They go
+    /// in the pairing URL after `<host>.local`; they do not change who may connect.
+    pub hosts: Vec<String>,
+    /// The addresses to listen on, one listener each. Default `0.0.0.0`, as before.
+    pub bind: Vec<std::net::IpAddr>,
 }
 
 impl Default for LanCfg {
@@ -124,6 +129,8 @@ impl Default for LanCfg {
         LanCfg {
             enabled: false,
             port: crate::lan::DEFAULT_LAN_PORT,
+            hosts: Vec::new(),
+            bind: vec![std::net::IpAddr::from([0, 0, 0, 0])],
         }
     }
 }
@@ -150,6 +157,44 @@ pub fn parse_lan(text: &str) -> Result<LanCfg, String> {
                     .as_integer()
                     .and_then(|n| u16::try_from(n).ok())
                     .ok_or("daemon.toml: lan.port must be a whole number from 0 to 65535")?
+            }
+            "hosts" => {
+                let bad = "daemon.toml: lan.hosts must be a list of host names or addresses, e.g. [\"mac.tailnet.ts.net\", \"100.64.0.1\"]";
+                let arr = v.as_array().ok_or(bad)?;
+                lan.hosts.clear();
+                for e in arr.iter() {
+                    let h = e.as_str().ok_or(bad)?;
+                    let ok = !h.is_empty()
+                        && h.len() <= 253
+                        && h.chars()
+                            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-');
+                    if !ok {
+                        return Err(format!(
+                            "daemon.toml: lan.hosts entry {h:?} is not a host name or IPv4 address (letters, digits, `.` and `-` only)"
+                        ));
+                    }
+                    if !lan.hosts.iter().any(|x| x == h) {
+                        lan.hosts.push(h.to_string());
+                    }
+                }
+            }
+            "bind" => {
+                let bad = "daemon.toml: lan.bind must be a non-empty list of IP addresses, e.g. [\"0.0.0.0\"]";
+                let arr = v.as_array().ok_or(bad)?;
+                let mut out: Vec<std::net::IpAddr> = Vec::new();
+                for e in arr.iter() {
+                    let a: std::net::IpAddr =
+                        e.as_str().and_then(|t| t.parse().ok()).ok_or_else(|| {
+                            format!("daemon.toml: lan.bind entry {e} is not an IP address")
+                        })?;
+                    if !out.contains(&a) {
+                        out.push(a);
+                    }
+                }
+                if out.is_empty() {
+                    return Err(bad.into());
+                }
+                lan.bind = out;
             }
             other => return Err(format!("daemon.toml: unknown setting lan.{other}")),
         }
@@ -1582,11 +1627,30 @@ mod tests {
             "[lan]\nenabled = \"yes\"\n",
             "[lan]\nport = 70000\n",
             "[lan]\nhost = \"x\"\n",
+            "[lan]\nhosts = \"x\"\n",
+            "[lan]\nhosts = [1]\n",
+            "[lan]\nhosts = [\"a b\"]\n",
+            "[lan]\nhosts = [\"a&alt=b\"]\n",
+            "[lan]\nhosts = [\"\"]\n",
+            "[lan]\nbind = []\n",
+            "[lan]\nbind = \"0.0.0.0\"\n",
+            "[lan]\nbind = [\"not-an-ip\"]\n",
             "lan = 3\n",
         ] {
             let e = parse_lan(bad).unwrap_err();
             assert!(e.starts_with("daemon.toml: "), "{e}");
         }
+        let l = parse_lan(
+            "[lan]\nhosts = [\"mac.tail.ts.net\", \"100.64.0.1\", \"100.64.0.1\"]\nbind = [\"127.0.0.1\", \"::1\"]\n",
+        )
+        .unwrap();
+        assert_eq!(l.hosts, ["mac.tail.ts.net", "100.64.0.1"]);
+        assert_eq!(l.bind.len(), 2);
+        assert_eq!(
+            LanCfg::default().bind,
+            vec![std::net::IpAddr::from([0, 0, 0, 0])]
+        );
+        assert!(LanCfg::default().hosts.is_empty());
         // The port parser leaves the table alone.
         assert_eq!(
             super::parse_daemon_port("[lan]\nenabled = true\n").unwrap(),

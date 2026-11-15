@@ -1379,6 +1379,18 @@ fn main() {
                     r["port"],
                     r["fingerprint"].as_str().unwrap_or("?")
                 );
+                let list = |k: &str| {
+                    r[k].as_array()
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|v| v.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        })
+                        .unwrap_or_default()
+                };
+                println!("  hosts: {}", list("hosts"));
+                println!("  listening on: {}", list("bind"));
             } else {
                 println!("LAN access is off (loopback only). Turn it on with `[lan] enabled = true` in daemon.toml, or `masond --lan`.");
             }
