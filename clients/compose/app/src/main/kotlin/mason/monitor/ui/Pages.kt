@@ -9,6 +9,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.TooltipArea
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -72,6 +73,7 @@ private fun Scrolling(content: @Composable ColumnScope.() -> Unit) {
  * step, the session-limit stepper, the landing queue, and detail for the tasks in each
  * stage. (Counts and task lists live in the top bar and the sidebar, not here.)
  */
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 fun HomePage(model: MonitorModel) {
     val theme = LocalTheme.current
@@ -97,6 +99,15 @@ fun HomePage(model: MonitorModel) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(theme.spacingLarge)) {
                 MascotPicture(pic.id, theme.mascotStatus)
                 statusLine()
+            }
+        }
+        if (model.versionLine.isNotEmpty()) {
+            TooltipArea(tooltip = {
+                Text(model.versionTip, style = theme.small(color = theme.text), modifier = Modifier.background(theme.surface).padding(theme.spacing))
+            }) {
+                SelectionContainer {
+                    Text(model.versionLine, style = theme.small(), modifier = Modifier.testTag("home:version"))
+                }
             }
         }
         if (adding) AddTaskDialog(model) { adding = false }

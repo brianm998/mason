@@ -116,6 +116,29 @@ public final class MonitorModel: ObservableObject {
     /// The commit a monitor update would go to.
     public var latestMonitor: String { monitorBuild?.latest ?? "" }
 
+    /// How many commits behind develop the daemon says it is (parsed from the daemon's own
+    /// sentence, "masond is 3 commits behind develop"); nil when it does not say.
+    public var daemonCommitsBehind: Int? {
+        let t = daemonUpdateText
+        guard let r = t.range(of: #"(\d+) commits? behind"#, options: .regularExpression) else { return nil }
+        return Int(t[r].prefix { $0.isNumber })
+    }
+    private static func shortCommit(_ v: String) -> String { String(v.prefix(8)) }
+    /// Home's version line: the running masond's short commit (or "unversioned build"), how far
+    /// behind develop it is, and this monitor's own commit. Empty before a welcome.
+    public var versionLine: String {
+        if daemonVersion.isEmpty { return "" }
+        var d = daemonVersion == "dev" ? "masond (unversioned build)" : "masond \(Self.shortCommit(daemonVersion))"
+        if let n = daemonCommitsBehind { d += " (\(n) commit\(n == 1 ? "" : "s") behind develop)" }
+        let o = ownVersion == "dev" ? "monitor (unversioned build)" : "monitor \(Self.shortCommit(ownVersion))"
+        return "\(d) · \(o)"
+    }
+    /// The full hashes, for the tooltip.
+    public var versionTip: String {
+        if daemonVersion.isEmpty { return "" }
+        return "masond \(daemonVersion)\nmonitor \(ownVersion)"
+    }
+
     /// What to say about the daemon's own version; empty when there is nothing to say.
     public var daemonUpdateText: String { updateInfo?.daemonText ?? "" }
     public var canUpdateDaemon: Bool { canAct && updateInfo?.daemonCanUpdate == true }

@@ -355,3 +355,8 @@ compose = "done"
 description = "Each paused banner has, at its trailing edge, a Resume text button (only when the monitor can act; it sends ResumeWork with that pause's project and mode, so it lifts exactly that pause) and an X icon button ('Collapse', tooltip and accessibility label) that collapses the banner to just its paused icon without lifting the pause; collapsed icons line up in banner order at the leading edge of the first expanded pause's row, or share one icon-only row when every pause is collapsed; each collapsed icon has the full banner text as tooltip and accessibility label, and a double click (double tap on touch) expands that one pause while a single click does nothing; the collapse is kept per device across launches, keyed paused:<project>:<mode>, and forgotten once the pause leaves the header; the item listing still lists every pause"
 swift = "done"
 compose = "done"
+
+[feature.home-daemon-version]
+description = "Home shows a small selectable line under the status, 'masond 64b3068a · monitor abcdef01': the short (8 character) commit of the running masond from the welcome version and of this monitor (ownVersion), with both full hashes in the tooltip; a version of 'dev' reads 'masond (unversioned build)' (likewise 'monitor (unversioned build)'); when the update banner's daemon text says N commits behind develop, '(N commits behind develop)' follows masond's hash; nothing before the welcome"
+swift = "done"
+compose = "done"
