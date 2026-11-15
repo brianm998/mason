@@ -16,7 +16,7 @@ that line into the Results section at the bottom, with anything you saw that the
 
 - **What was never run:** the Codex adapter's flags and parser against the real `codex` binary
   (`docs/stages/s20.md`, "Nothing here proves it works with the real CLI").
-- **Run:** `MASON_REAL_APPROVED=yes MASON_REAL_LIVE=yes bash scripts/exit/s20-real.sh`
+- **Run:** `MASON_REAL_APPROVED=yes MASON_REAL_LIVE=yes bash scripts/exit/s299-real.sh`
 - **Costs:** one `codex exec` call with a one-line prompt: a few tokens on your Codex/OpenAI
   account. Needs `codex`, signed in. Nothing is pushed or sent.
 - **Look at:** the printed event types against `crates/adapters/fixtures/codex`; if they differ,

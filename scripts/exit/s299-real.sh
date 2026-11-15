@@ -38,4 +38,4 @@ for line in open(sys.argv[1]):
 print("event types:", ", ".join(sorted(set(kinds))))
 PY
 fi
-echo "RESULT s20-real: codex exec --json ran once and printed $lines JSON lines $(date +%F)"
+echo "RESULT s299-real: codex exec --json ran once and printed $lines JSON lines $(date +%F)"

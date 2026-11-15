@@ -4,4 +4,4 @@
 
 **Why.** Features built against fakes counted as done with nothing to say when a real run was owed. A SwiftUI `Button` cannot be tapped without a new dependency; moving the action out keeps the closure the button runs the one the test runs, with no new dependency. The owner may prefer ViewInspector later.
 
-**Trust.** `scripts/exit/**` and `.github/workflows/**` are protected: `s299.sh`, `s20-real.sh`, the RESULT lines and the CI jobs await the owner's approval. Nothing is weakened.
+**Trust.** `scripts/exit/**` and `.github/workflows/**` are protected: `s299.sh`, `s299-real.sh`, the RESULT lines and the CI jobs await the owner's approval. Nothing is weakened.
