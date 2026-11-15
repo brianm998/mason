@@ -1247,7 +1247,34 @@ impl Broker {
         alive: &dyn Fn() -> bool,
         on_wait: &mut dyn FnMut(&str),
     ) -> Result<Lease, Cancelled> {
-        self.acquire_as(task, label, rank, needs, alive, on_wait, false)
+        self.acquire_as(task, label, rank, needs, alive, on_wait, false, None)
+    }
+
+    /// [`Broker::acquire`] with how long the work is expected to hold it (s385), so it may
+    /// run while the machine drains for an exclusive request if it will be done in time.
+    /// `beside` as in [`Broker::acquire_beside`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn acquire_expecting(
+        self: &Arc<Self>,
+        task: TaskId,
+        label: &str,
+        rank: Rank,
+        needs: Needs,
+        alive: &dyn Fn() -> bool,
+        on_wait: &mut dyn FnMut(&str),
+        beside: bool,
+        expected_ms: Option<u64>,
+    ) -> Result<Lease, Cancelled> {
+        self.acquire_as(
+            task,
+            label,
+            rank,
+            needs,
+            alive,
+            on_wait,
+            beside,
+            expected_ms,
+        )
     }
 
     /// [`Broker::acquire`] for one of several requests a step makes at once (s345: suites run
@@ -1262,7 +1289,7 @@ impl Broker {
         alive: &dyn Fn() -> bool,
         on_wait: &mut dyn FnMut(&str),
     ) -> Result<Lease, Cancelled> {
-        self.acquire_as(task, label, rank, needs, alive, on_wait, true)
+        self.acquire_as(task, label, rank, needs, alive, on_wait, true, None)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1275,6 +1302,7 @@ impl Broker {
         alive: &dyn Fn() -> bool,
         on_wait: &mut dyn FnMut(&str),
         beside: bool,
+        expected_ms: Option<u64>,
     ) -> Result<Lease, Cancelled> {
         let id = {
             let mut st = lock(&self.st);
@@ -1282,6 +1310,7 @@ impl Broker {
             let id = st
                 .ledger
                 .submit(rank, needs.clone(), label, crate::daemon::now_ms());
+            st.ledger.set_expected(id, expected_ms);
             st.meta.insert(id, Meta::Task);
             if beside {
                 st.lease_tasks.insert(id, task);
