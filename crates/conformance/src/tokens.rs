@@ -166,10 +166,17 @@ mod tests {
                     && link[1..].chars().all(|c| c.is_ascii_hexdigit()),
                 "color.{mode}.link is not #RRGGBB: {link}"
             );
-            assert_ne!(link, token(&doc, mode, "accent"), "a link is not the accent");
+            assert_ne!(
+                link,
+                token(&doc, mode, "accent"),
+                "a link is not the accent"
+            );
             for ground in ["background", "surface"] {
                 let r = contrast(&link, &token(&doc, mode, ground));
-                assert!(r >= 4.5, "link on {ground} ({mode}) is {r:.2}:1, below 4.5:1");
+                assert!(
+                    r >= 4.5,
+                    "link on {ground} ({mode}) is {r:.2}:1, below 4.5:1"
+                );
             }
         }
     }
