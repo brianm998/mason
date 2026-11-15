@@ -45,6 +45,22 @@ pub struct Batch<'a> {
 pub struct Ejected {
     pub id: u64,
     pub files: String,
+    /// The base's commits since the task branched that touched those files, one per line
+    /// (`<short hash> <subject>`), so the agent sees what it conflicts with.
+    pub base_changes: String,
+}
+
+/// The base's commits between the merge base with `branch` and `base_tip` that touched
+/// `files` (newline-separated), at most ten, as `<short hash> <subject>` lines. Empty when
+/// git cannot say.
+fn base_changes_in(wt: &Path, branch: &str, base_tip: &str, files: &str) -> String {
+    let Ok(mb) = git::run(wt, &["merge-base", branch, base_tip]) else {
+        return String::new();
+    };
+    let range = format!("{}..{base_tip}", mb.trim());
+    let mut args = vec!["log", "--oneline", "-n", "10", range.as_str(), "--"];
+    args.extend(files.lines().map(str::trim).filter(|f| !f.is_empty()));
+    git::run(wt, &args).unwrap_or_default().trim().to_string()
 }
 
 /// A task that merges onto the base alone but conflicts with batch-mates merged before it:
@@ -232,9 +248,11 @@ impl Batch<'_> {
                                 files: files.trim().replace('\n', ", "),
                             });
                         } else {
+                            let base_changes = base_changes_in(wt, &t.branch, &base_tip, &files);
                             out.ejected.push(Ejected {
                                 id: t.id,
                                 files: files.trim().replace('\n', ", "),
+                                base_changes,
                             });
                         }
                     }
