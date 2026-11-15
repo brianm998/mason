@@ -1094,6 +1094,7 @@ impl<'a> Ctx<'a> {
                 .filter(|t| t.state == State::Landing && self.matches(t, project))
                 .map(|t| self.row(t))
                 .collect(),
+            items: self.landing_items(project),
             modes,
             trackers,
             batches: self
@@ -1124,6 +1125,87 @@ impl<'a> Ctx<'a> {
             freezes,
             queue_idle_ms: idle,
         }
+    }
+
+    /// Each landing task's status: in a running batch (phase, CI, time) or queued (position and
+    /// why). Read through existing accessors; nothing is changed.
+    fn landing_items(&self, project: &str) -> Vec<TaskLanding> {
+        let batches = self.d.store.batches(None, 200).unwrap_or_default();
+        let freezes = self.d.store.freezes().unwrap_or_default();
+        let ids = |s: &str| -> Vec<u64> { s.split(',').filter_map(|x| x.parse().ok()).collect() };
+        let mut out = vec![];
+        for (pid, p) in &self.d.projects() {
+            if !project.is_empty() && p.id != project {
+                continue;
+            }
+            let live: Vec<_> = batches
+                .iter()
+                .filter(|b| b.project == p.id && b.finished_at.is_none())
+                .collect();
+            let frozen = freezes
+                .iter()
+                .find(|f| f.project == p.id)
+                .map(|f| f.fix_task);
+            let cfg = crate::landing::load_config(self.d, *pid).ok();
+            let mut seen = std::collections::BTreeSet::new();
+            for b in &live {
+                let (index, phase) = batch_phase(&b.phase);
+                let ci = self
+                    .d
+                    .landing
+                    .ci
+                    .get(b.id)
+                    .map(|c| crate::batch_ci::to_proto(&c).state)
+                    .unwrap_or_default();
+                let done: Vec<u64> = ids(&b.landed).into_iter().chain(ids(&b.parked)).collect();
+                for id in ids(&b.tasks).into_iter().filter(|i| !done.contains(i)) {
+                    let Some(t) = self.w.tasks.get(&TaskId(id)) else {
+                        continue;
+                    };
+                    seen.insert(id);
+                    out.push(TaskLanding {
+                        task: id,
+                        key: format!("#{id}"),
+                        title: t.title.clone(),
+                        project: p.id.clone(),
+                        status: "in_batch".into(),
+                        batch: b.id,
+                        phase: phase.into(),
+                        phase_index: index,
+                        phase_total: LANDING_PHASES,
+                        phase_ms: self.now.saturating_sub(b.at),
+                        ci_state: ci.clone(),
+                        ..Default::default()
+                    });
+                }
+            }
+            let mut position = 0;
+            for id in self.d.landing().queued(*pid) {
+                let Some(t) = self.w.tasks.get(&id) else {
+                    continue;
+                };
+                if !seen.insert(id.0) {
+                    continue;
+                }
+                position += 1;
+                out.push(TaskLanding {
+                    task: id.0,
+                    key: format!("#{}", id.0),
+                    title: t.title.clone(),
+                    project: p.id.clone(),
+                    status: "queued".into(),
+                    position,
+                    why: queued_why(
+                        frozen,
+                        self.d.landing().draining(),
+                        live.len(),
+                        cfg.as_ref().map(|c| (c.parallel, c.window.as_secs())),
+                    ),
+                    ..Default::default()
+                });
+            }
+        }
+        out
     }
 
     pub fn usage(&self) -> UsageView {
@@ -1405,6 +1487,77 @@ pub fn summarize(kind: &EventKind) -> (String, String, u64) {
     };
     let _ = card::ASK_MAX;
     (name, summary, task)
+}
+
+/// Phases a batch goes through while landing: forming, integrating, running suites, landing.
+const LANDING_PHASES: u32 = 4;
+
+/// The batch row's phase as (index, words), matching the progress cells in landing.rs.
+fn batch_phase(phase: &str) -> (u32, &'static str) {
+    match phase {
+        "merged" => (1, "integrating"),
+        "verifying" | "red" => (2, "running suites"),
+        "promoting" => (3, "landing"),
+        "landed" => (LANDING_PHASES, "landed"),
+        _ => (0, "forming"),
+    }
+}
+
+/// Why a queued task waits. `frozen` is the freeze's fix task when the project is frozen;
+/// `config` is (batches at once, window seconds), absent when landing.toml is unreadable.
+fn queued_why(
+    frozen: Option<Option<u64>>,
+    paused: bool,
+    live: usize,
+    config: Option<(usize, u64)>,
+) -> String {
+    if let Some(fix) = frozen {
+        return match fix {
+            Some(n) => format!("frozen until #{n} lands"),
+            None => "frozen".into(),
+        };
+    }
+    if paused {
+        return "paused".into();
+    }
+    if live > 0 && config.is_none_or(|(par, _)| live >= par.max(1)) {
+        return format!("behind {live} batch{}", if live == 1 { "" } else { "es" });
+    }
+    match config {
+        Some((_, w)) if w > 0 => format!("waiting for the {w}s window to close"),
+        _ => "waiting for the next batch".into(),
+    }
+}
+
+#[cfg(test)]
+mod batch_phase_tests {
+    use super::*;
+
+    #[test]
+    fn suites_are_phase_two_of_four() {
+        assert_eq!(batch_phase("verifying"), (2, "running suites"));
+        assert_eq!(batch_phase("forming"), (0, "forming"));
+        assert_eq!(batch_phase("promoting").0, 3);
+    }
+
+    #[test]
+    fn a_queued_task_says_why_it_waits() {
+        assert_eq!(queued_why(None, false, 1, Some((1, 30))), "behind 1 batch");
+        assert_eq!(queued_why(None, false, 2, Some((2, 0))), "behind 2 batches");
+        assert_eq!(
+            queued_why(Some(Some(12)), false, 1, Some((1, 0))),
+            "frozen until #12 lands"
+        );
+        assert_eq!(queued_why(None, true, 0, None), "paused");
+        assert_eq!(
+            queued_why(None, false, 0, Some((1, 30))),
+            "waiting for the 30s window to close"
+        );
+        assert_eq!(
+            queued_why(None, false, 1, Some((2, 30))),
+            "waiting for the 30s window to close"
+        );
+    }
 }
 
 /// Whether a task is waiting: the same activities `why_waiting` explains.
