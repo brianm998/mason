@@ -646,6 +646,7 @@ impl<'a> Ctx<'a> {
             });
         }
         HeaderView {
+            project: project.to_string(),
             attention,
             counts: ORDER
                 .iter()
@@ -772,6 +773,7 @@ impl<'a> Ctx<'a> {
         }
         sections.push(self.section(State::Canceled, project));
         SidebarView {
+            project: project.to_string(),
             sections,
             pages: ["landing", "usage", "pipeline", "health"]
                 .map(String::from)
@@ -843,6 +845,7 @@ impl<'a> Ctx<'a> {
         });
         let llm_holders = self.d.broker.llm_holders();
         HomeView {
+            project: project.to_string(),
             status: self.header(project).status,
             attention: attention
                 .iter()
@@ -1053,6 +1056,7 @@ impl<'a> Ctx<'a> {
             .collect();
         let ids = |s: &str| -> Vec<u64> { s.split(',').filter_map(|x| x.parse().ok()).collect() };
         LandingView {
+            project: project.to_string(),
             debts: self
                 .d
                 .store

@@ -214,7 +214,30 @@ public final class MonitorModel: ObservableObject {
     @Published public private(set) var daemonDown = false
     /// This monitor's name when it asks to speak; one per launch.
     public let clientId = UUID().uuidString
-    @Published public var project = "" { didSet { attentionSeen = nil } }
+    /// The selected project filter ("" is all projects). Everything the daemon computes for a
+    /// project is stamped with it; a change clears what was computed for the old one, and
+    /// `apply` drops any view stamped for another.
+    @Published public var project = "" {
+        didSet {
+            attentionSeen = nil
+            if oldValue != project { clearProjectScoped() }
+        }
+    }
+
+    /// Forget every number computed for the previous selection, so it never shows under the new
+    /// name. The header keeps its project list and banners (the picker needs them); its counts go.
+    func clearProjectScoped() {
+        if var h = header {
+            h.counts = []
+            h.attention = 0
+            h.status = ""
+            h.project = project
+            header = h
+        }
+        sidebar = nil
+        home = nil
+        landing = nil
+    }
     /// Called (on the main actor) when something new needs the owner and the monitor is not
     /// muted: a task asked a question, waits for approval, was proposed, or failed. The app
     /// plays its sound here; the model only decides when.
@@ -815,7 +838,21 @@ public final class MonitorModel: ObservableObject {
         if !ids.subtracting(seen).isEmpty { onAttention?() }
     }
 
+    /// The project a view was computed for, when it is one of the project-scoped views.
+    static func scope(of v: Mason_V1_View) -> String? {
+        switch v.body {
+        case .header(let x)?: return x.project
+        case .sidebar(let x)?: return x.project
+        case .home(let x)?: return x.project
+        case .landing(let x)?: return x.project
+        default: return nil
+        }
+    }
+
     func apply(_ v: Mason_V1_View) {
+        // A view computed for another filter (a rebuild that was in flight when the picker
+        // changed, or one resumed after a reconnect) is dropped.
+        if let p = Self.scope(of: v), p != project { return }
         switch v.body {
         case .header(let x)?:
             header = x

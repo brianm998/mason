@@ -195,7 +195,12 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
         private set
     var project: String
         get() = projectState
-        set(v) { projectState = v; attentionSeen = null }
+        set(v) {
+            val changed = v != projectState
+            projectState = v
+            attentionSeen = null
+            if (changed) clearProjectScoped()
+        }
     private var projectState by mutableStateOf("")
     /** Called when something new needs the owner and the monitor is not muted: a task asked a
      *  question, waits for approval, was proposed, or failed. The app plays its sound here. */
@@ -676,6 +681,19 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
         }
     }
 
+    /** Forget every number computed for the previous selection, so it never shows under the new
+     *  name. The header keeps its project list and banners (the picker needs them); its counts go. */
+    internal fun clearProjectScoped() {
+        header = header?.copy(counts = emptyList(), attention = 0, status = "", project = projectState)
+        sidebar = null
+        home = null
+        landing = null
+    }
+
+    /** The project a view was computed for, when it is one of the project-scoped views. */
+    private fun scopeOf(v: View): String? =
+        v.header_?.project ?: v.sidebar?.project ?: v.home?.project ?: v.landing?.project
+
     /** Chime once when a task that needs the owner appears that was not there before. */
     internal fun noteAttention(s: SidebarView) {
         val ids = s.sections.filter { it.state in WANTING }.flatMap { it.rows.map { r -> r.id } }.toSet()
@@ -685,6 +703,9 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     }
 
     fun apply(v: View) {
+        // A view computed for another filter (a rebuild in flight when the picker changed, or
+        // one resumed after a reconnect) is dropped.
+        scopeOf(v)?.let { if (it != projectState) return }
         v.header_?.let {
             header = it
             noteMonitorBuild()
