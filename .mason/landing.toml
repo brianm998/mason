@@ -8,5 +8,6 @@ mode     = "direct"
 # per task for 1.4 tasks per batch). 30s still lets tasks that finish together
 # share a batch.
 window   = "30s"
-max_size = 3
+# 10 while the owner lands the MASON backlog untested, then tests it in one run (2026-11-15).
+max_size = 10
 parallel = 1
