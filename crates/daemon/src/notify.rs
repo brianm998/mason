@@ -879,7 +879,7 @@ fn daemon_speech(d: &Daemon, s: &Settings, now: u64) {
     }
     let rows = d
         .store
-        .take_announcements("daemon", now.saturating_sub(s.stale_ms), 20, now)
+        .take_announcements("daemon", now.saturating_sub(s.stale_ms), 20, now, false)
         .unwrap_or_default();
     record_played(
         d,
@@ -962,6 +962,25 @@ fn announcement_json(r: &AnnouncementRow) -> Value {
     })
 }
 
+/// Whether an announcement key is for an alert's reminder round.
+fn is_reminder_key(key: &str) -> bool {
+    key.starts_with("alert:")
+        && key
+            .rsplit(':')
+            .nth(1)
+            .is_some_and(|l| l.starts_with("reminder"))
+}
+
+/// How many reminder announcements are waiting to be taken.
+fn reminder_alerts(d: &Daemon) -> usize {
+    d.store
+        .pending_announcements(1000)
+        .unwrap_or_default()
+        .iter()
+        .filter(|r| is_reminder_key(&r.key))
+        .count()
+}
+
 /// A monitor asks whether it is the one that speaks. If it is, it is given what is waiting, in
 /// order; if not, nothing, and the announcements wait for the one that is. A muted monitor is
 /// counted as present (the daemon stays quiet too) but never speaks.
@@ -977,6 +996,10 @@ pub fn claim_at(d: &Daemon, client: &str, muted: bool, now: u64) -> Value {
         .lock()
         .unwrap_or_else(|e| e.into_inner()) = Some(now);
     let mut claims = d.notify.claims.lock().unwrap_or_else(|e| e.into_inner());
+    // Nobody was listening if no unmuted claim is recent: what queued meanwhile is a backlog.
+    let backlog = !claims
+        .iter()
+        .any(|c| now.saturating_sub(c.at_ms) < n::TAKEOVER_MS * 4);
     claims.retain(|c| c.client != client && now.saturating_sub(c.at_ms) < n::TAKEOVER_MS * 4);
     if !muted {
         claims.push(Claim {
@@ -994,9 +1017,42 @@ pub fn claim_at(d: &Daemon, client: &str, muted: bool, now: u64) -> Value {
     let me = !muted && speaker.as_deref() == Some(client);
     let rows = if me {
         catch_up(d, &settings, now);
-        d.store
-            .take_announcements(client, now.saturating_sub(settings.stale_ms), 20, now)
-            .unwrap_or_default()
+        let waiting = reminder_alerts(d);
+        let mut rows = d
+            .store
+            .take_announcements(
+                client,
+                now.saturating_sub(settings.stale_ms),
+                20,
+                now,
+                backlog,
+            )
+            .unwrap_or_default();
+        // Reminders for alerts already heard are dropped by the store, not replayed. Say once
+        // that they are still there.
+        let kept = rows.iter().filter(|r| is_reminder_key(&r.key)).count();
+        let dropped = waiting.saturating_sub(kept);
+        if backlog && dropped >= 2 {
+            let line = format!("{dropped} alerts are still waiting.");
+            let key = format!("summary:{now}");
+            if d.store
+                .enqueue_announcement(&key, "info", &line, true, true, now)
+                .unwrap_or(false)
+            {
+                rows.extend(
+                    d.store
+                        .take_announcements(
+                            client,
+                            now.saturating_sub(settings.stale_ms),
+                            1,
+                            now,
+                            false,
+                        )
+                        .unwrap_or_default(),
+                );
+            }
+        }
+        rows
     } else {
         vec![]
     };

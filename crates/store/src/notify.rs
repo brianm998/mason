@@ -150,12 +150,15 @@ impl Store {
 
     /// Hand the waiting announcements, oldest first, to `client`; anything older than
     /// `stale_before` is dropped instead (nobody was there to hear it, and it is old news).
+    /// `backlog` is true when nobody was listening until now (a monitor just unmuted): reminders
+    /// for alerts that already played are then dropped, not replayed.
     pub fn take_announcements(
         &self,
         client: &str,
         stale_before: u64,
         limit: usize,
         now: u64,
+        backlog: bool,
     ) -> Result<Vec<AnnouncementRow>, StoreError> {
         let client = client.to_string();
         self.write(move |c| {
@@ -188,7 +191,7 @@ impl Store {
                 let drop = match alert_group(&r.key) {
                     Some((g, label)) => {
                         newest.get(&g) != Some(&r.id)
-                            || (label.starts_with("reminder") && played_groups.contains(&g))
+                            || (backlog && label.starts_with("reminder") && played_groups.contains(&g))
                     }
                     None => false,
                 };
@@ -362,12 +365,15 @@ mod tests {
             .unwrap());
         s.enqueue_announcement("k2", "needs_you", "two.", true, true, 300)
             .unwrap();
-        let got = s.take_announcements("a", 150, 10, 400).unwrap();
+        let got = s.take_announcements("a", 150, 10, 400, false).unwrap();
         assert_eq!(
             got.iter().map(|r| r.key.as_str()).collect::<Vec<_>>(),
             vec!["k2"]
         );
-        assert!(s.take_announcements("a", 0, 10, 500).unwrap().is_empty());
+        assert!(s
+            .take_announcements("a", 0, 10, 500, false)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -380,7 +386,7 @@ mod tests {
         s.enqueue_announcement("wait", "failed", "wait.", true, true, 900)
             .unwrap();
         assert_eq!(s.last_played().unwrap(), None);
-        s.take_announcements("a", 200, 1, 400).unwrap();
+        s.take_announcements("a", 200, 1, 400, false).unwrap();
         let all = s.announcements(10).unwrap();
         let by = |k: &str| all.iter().find(|r| r.key == k).unwrap().clone();
         assert!(!by("old").played(), "expired unheard");
