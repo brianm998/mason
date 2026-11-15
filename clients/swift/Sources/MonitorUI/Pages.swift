@@ -226,7 +226,9 @@ struct CompilationSection: View {
         } else if !command.isEmpty {
             Button(label) { model.openCommand(label: label, command: command) }
                 .buttonStyle(.link).lineLimit(1).help("Show the whole command")
+                #if canImport(AppKit)
                 .onHover { inside in if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() } }
+                #endif
                 .accessibilityIdentifier("compile:command")
         } else {
             Text(label).lineLimit(1).truncationMode(.middle).help(label)

@@ -15,6 +15,7 @@ let package = Package(
         .executable(name: "MasonMonitor", targets: ["MasonMonitor"]),
         .executable(name: "monitor-tool", targets: ["MonitorTool"]),
         .library(name: "MonitorPhone", targets: ["MonitorPhone"]),
+        .library(name: "MonitorUI", targets: ["MonitorUI"]),
         .library(name: "MonitorCore", targets: ["MonitorCore"]),
     ],
     dependencies: [

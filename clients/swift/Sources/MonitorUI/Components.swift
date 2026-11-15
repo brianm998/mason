@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#if canImport(AppKit)
 import AppKit
+#else
+import UIKit
+#endif
 import MasonMascot
 import MasonProtocol
 import MasonTokens
@@ -279,7 +283,7 @@ struct CountTile: View {
                 .allowsHitTesting(false)
         }
         .contentShape(Rectangle())
-        .onTapGesture { model.tileClicked(state: count.state, clickCount: NSApp.currentEvent?.clickCount ?? 1) }
+        .modifier(TileTap(model: model, state: count.state))
         .help(model.tileTooltip(count))
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(model.tileCount(count)) \(label)")
@@ -309,8 +313,38 @@ extension View {
 }
 
 public func copyToPasteboard(_ s: String) {
+    #if canImport(AppKit)
     NSPasteboard.general.clearContents()
     NSPasteboard.general.setString(s, forType: .string)
+    #else
+    UIPasteboard.general.string = s
+    #endif
+}
+
+/// What a tile does with a click or tap that landed `clicks` times in a row (1 single, 2 double).
+/// Both platforms go through this, so the click counts reaching `tileClicked` are the same.
+@MainActor
+func tileTapped(model: MonitorModel, state: String, clicks: Int) {
+    model.tileClicked(state: state, clickCount: clicks)
+}
+
+/// Mac: one tap handler, the click count read from the current event. iOS: a double tap
+/// (taking priority) and a single tap.
+struct TileTap: ViewModifier {
+    let model: MonitorModel
+    let state: String
+
+    func body(content: Content) -> some View {
+        #if canImport(AppKit)
+        content.onTapGesture {
+            tileTapped(model: model, state: state, clicks: NSApp.currentEvent?.clickCount ?? 1)
+        }
+        #else
+        content
+            .gesture(TapGesture(count: 2).onEnded { tileTapped(model: model, state: state, clicks: 2) })
+            .simultaneousGesture(TapGesture(count: 1).onEnded { tileTapped(model: model, state: state, clicks: 1) })
+        #endif
+    }
 }
 
 /// A small button that copies something and says what.
@@ -1075,6 +1109,7 @@ final class SharedTick: ObservableObject {
     private var timer: Timer?
 
     private init() {
+        #if canImport(AppKit)
         NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeOcclusionStateNotification, object: nil, queue: .main
         ) { [weak self] _ in
@@ -1083,6 +1118,14 @@ final class SharedTick: ObservableObject {
                 self?.update()
             }
         }
+        #endif
+    }
+
+    /// iOS: the root view reports the scene phase here (active means visible).
+    func setVisible(_ v: Bool) {
+        guard visible != v else { return }
+        visible = v
+        update()
     }
 
     func join() { users += 1; update() }
