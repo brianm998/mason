@@ -464,6 +464,33 @@ category = "landing"
 }
 
 #[test]
+fn a_suites_run_time_is_recorded_and_gives_an_estimate_after_two_runs() {
+    // The scheduler lets short work run while the machine drains for an exclusive request
+    // only with an estimate of how long it takes, from the times recorded here (s385).
+    let runs = tempfile::tempdir().unwrap();
+    let log = runs.path().join("held");
+    let def = suite_def("", "uses = { test-suite = 1 }", &log);
+    let s = Scratch::new("false", unique_script());
+    s.push_files(&[(".mason/mason.toml", &def)], "definition");
+    let d = s.start();
+    let first = file_task(&d, "First run");
+    wait_state(&d, first, State::Landed, 90);
+    assert_eq!(
+        d.store.suite_estimate("scratch", "checks", "run").unwrap(),
+        None
+    );
+    let second = file_task(&d, "Second run");
+    wait_state(&d, second, State::Landed, 90);
+    assert!(
+        d.store
+            .suite_estimate("scratch", "checks", "run")
+            .unwrap()
+            .is_some(),
+        "two finished runs of `checks` give an estimate"
+    );
+}
+
+#[test]
 fn run_check_queues_like_the_test_step_and_frees_the_agents_slot() {
     // An agent waiting for its tests holds no LLM session slot, and the check waits
     // for the test step's `compile` like the test step does.
