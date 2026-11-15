@@ -1725,7 +1725,16 @@ fn narrow_for_step(c: &Ctx, suite: &Suite) -> Option<(Suite, String)> {
 fn narrow_packages_for_step(c: &Ctx, suite: &Suite) -> Option<(Suite, String)> {
     let dc = suite.dev_command.as_ref()?;
     let paths = worktree_paths(&c.wt, &c.project.base_ref())?;
-    let pk = crate::scope::changed_packages(&c.wt, &paths).filter(|p| !p.is_empty())?;
+    let pk = crate::scope::changed_packages(&c.wt, &paths).filter(|p| !p.is_empty());
+    let Some(pk) = pk else {
+        // A path outside every package (a root file) or no cargo means the suite runs whole.
+        eprintln!(
+            "suite {}: package narrowing found no package list for {} changed paths; running whole",
+            suite.name,
+            paths.len()
+        );
+        return None;
+    };
     let flags = crate::scope::flags(&pk);
     let mut s = suite.clone();
     s.command = dc.replace("{packages}", &flags);

@@ -793,7 +793,7 @@ fn a_task_test_step_runs_only_the_crates_its_change_touches_and_their_dependents
     );
     let s = Scratch::new(
         "sh checks.sh",
-        json!({"steps": {"develop": [commit(&format!("{HELLO} && echo '// c' >> crates/leaf/src/lib.rs"), "change leaf")]}}),
+        json!({"steps": {"develop": [commit("echo '// c' >> crates/leaf/src/lib.rs", "change leaf")]}}),
     );
     let krate = |name: &str, dep: &str| {
         format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n{dep}")
