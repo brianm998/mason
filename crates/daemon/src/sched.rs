@@ -293,6 +293,9 @@ struct State {
     by_task: HashMap<TaskId, u64>,
     /// The task a `mason run` lease was opened for, when it names one.
     lease_tasks: HashMap<u64, TaskId>,
+    /// An agent step's deadline, by task, while it runs: a `mason run` of that task's
+    /// waits in the queue are added to it when granted (s363).
+    wait_credit: HashMap<TaskId, mason_adapter_api::DeadlineExtra>,
     /// Resources whose limit was set by the owner (config or live) and so are
     /// not changed by a definition that happens to declare the same name.
     fixed: HashSet<String>,
@@ -604,6 +607,7 @@ impl Broker {
                 cpu_busy: None,
                 priority_first: cfg.priority_first,
                 lease_tasks: HashMap::new(),
+                wait_credit: HashMap::new(),
                 idle: HashMap::new(),
                 compile_idle_kill_s: cfg.compile_idle_kill_s,
                 notes: vec![],
@@ -1083,8 +1087,20 @@ impl Broker {
         let gate = self.cpu_gate(st);
         let p = st.ledger.schedule_gated(now, free, floor, gate);
         for g in &p.grants {
-            if let Some(Meta::External { granted_at, .. }) = st.meta.get_mut(g) {
+            let mut waited = None;
+            if let Some(Meta::External {
+                granted_at, opened, ..
+            }) = st.meta.get_mut(g)
+            {
                 *granted_at = Some(Instant::now());
+                waited = Some(opened.elapsed());
+            }
+            // An agent waiting for its own `mason run` is not working: its deadline grows
+            // by the wait, as it does for a `run_check` (s363).
+            if let (Some(w), Some(t)) = (waited, st.lease_tasks.get(g)) {
+                if let Some(extra) = st.wait_credit.get(t) {
+                    extra.add(w);
+                }
             }
         }
         if changed || !p.grants.is_empty() {
@@ -1715,6 +1731,17 @@ impl Broker {
 
     /// Note which task a `mason run` lease was opened for, so that a change of
     /// the task's priority reaches it.
+    /// While an agent step of `task` runs, add the time its `mason run` commands wait in
+    /// the queue to its deadline (s363). [`Broker::stop_crediting_waits`] ends it.
+    pub fn credit_waits_to(&self, task: TaskId, extra: mason_adapter_api::DeadlineExtra) {
+        lock(&self.st).wait_credit.insert(task, extra);
+    }
+
+    /// The agent step of `task` ended: its `mason run` waits no longer count for it.
+    pub fn stop_crediting_waits(&self, task: TaskId) {
+        lock(&self.st).wait_credit.remove(&task);
+    }
+
     pub fn lease_set_task(&self, id: u64, task: TaskId) {
         let mut st = lock(&self.st);
         if st.meta.contains_key(&id) {
@@ -2620,6 +2647,41 @@ mod tests {
         if let Some(Meta::External { last_poll, .. }) = lock(&b.st).meta.get_mut(&id) {
             *last_poll = Instant::now().checked_sub(by).expect("uptime");
         }
+    }
+
+    #[test]
+    fn an_agents_mason_run_wait_is_added_to_its_deadline_when_granted() {
+        // 2026-11-14: star #242's develop agent ran out of its 4 h budget while its own
+        // `mason run` jobs (a release build, a 19-frame run needing the whole machine) waited
+        // in the queue; only a `run_check`'s wait was added to the deadline (s363).
+        let dir = tempfile::tempdir().unwrap();
+        let (b, first, second) = waiting_broker(dir.path());
+        b.lease_set_task(second, TaskId(242));
+        let extra = mason_adapter_api::DeadlineExtra::default();
+        let other = mason_adapter_api::DeadlineExtra::default();
+        b.credit_waits_to(TaskId(242), extra.clone());
+        b.credit_waits_to(TaskId(7), other.clone());
+        if let Some(Meta::External { opened, .. }) = lock(&b.st).meta.get_mut(&second) {
+            *opened = Instant::now()
+                .checked_sub(Duration::from_secs(600))
+                .expect("uptime");
+        }
+        b.lease_close(first);
+        assert!(matches!(b.lease_poll(second), LeaseState::Granted { .. }));
+        assert!(extra.get() >= Duration::from_secs(600), "{:?}", extra.get());
+        assert_eq!(
+            other.get(),
+            Duration::ZERO,
+            "another task's deadline is untouched"
+        );
+        // Once the agent step ends, nothing more is added.
+        b.stop_crediting_waits(TaskId(242));
+        let before = extra.get();
+        b.lease_close(second);
+        let third = b.lease_open("third", &BTreeMap::from([("compile".to_string(), 1)]));
+        b.lease_set_task(third, TaskId(242));
+        assert!(matches!(b.lease_poll(third), LeaseState::Granted { .. }));
+        assert_eq!(extra.get(), before);
     }
 
     #[test]
