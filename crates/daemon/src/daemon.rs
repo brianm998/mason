@@ -406,6 +406,11 @@ impl Daemon {
         self.tracker.pending(p)
     }
 
+    /// How often the project's tracker is asked, as the running poller has it.
+    pub fn tracker_interval(&self, p: ProjectId) -> Option<u64> {
+        self.tracker.interval(p)
+    }
+
     /// Ask the project's tracker again at once.
     pub fn tracker_refresh(&self, p: ProjectId) {
         self.tracker.refresh(p);
@@ -468,6 +473,9 @@ impl Daemon {
             )]);
         }
         if !changed.is_empty() {
+            if let Some(t) = &new.services.tracker {
+                self.tracker.set_interval(pid, t.interval_s);
+            }
             let leaked: &'static ProjectCfg = Box::leak(Box::new(new));
             self.registry
                 .write()

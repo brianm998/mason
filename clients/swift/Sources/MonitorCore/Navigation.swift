@@ -10,6 +10,7 @@ public enum Page: Hashable, Sendable {
     case usage
     case pipeline
     case health
+    case settings
 
     /// The `mason://` address of a page, for deep links from notifications.
     public var url: URL {
@@ -20,6 +21,7 @@ public enum Page: Hashable, Sendable {
         case .usage: return URL(string: "mason://usage")!
         case .pipeline: return URL(string: "mason://pipeline")!
         case .health: return URL(string: "mason://health")!
+        case .settings: return URL(string: "mason://settings")!
         }
     }
 
@@ -34,6 +36,7 @@ public enum Page: Hashable, Sendable {
         case ("usage", nil): return .usage
         case ("pipeline", nil): return .pipeline
         case ("health", nil): return .health
+        case ("settings", nil): return .settings
         default: return nil
         }
     }
