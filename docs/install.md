@@ -59,3 +59,21 @@ merge it when you have read it. See `mason --help` for every flag; each question
 git branches and machine-wide settings alone.
 
 The example workflows are in `templates/` (MIT licensed, so copying them creates no obligation).
+
+## Reaching the daemon away from home (Tailscale)
+
+A phone paired on the home Wi-Fi finds the daemon as `<host>.local` (mDNS), which works only on that network. To check from elsewhere, put the Mac and the phone on a private overlay network such as Tailscale. Nothing is forwarded from your router and the daemon is never on the internet.
+
+1. Install Tailscale on the Mac and on the phone and sign both in to the same tailnet.
+2. In `daemon.toml`, turn on the LAN listener and name the Mac's tailnet name (or its `100.x.y.z` address):
+
+   ```toml
+   [lan]
+   enabled = true
+   hosts = ["mac.your-tailnet.ts.net", "100.101.102.103"]
+   # bind = ["0.0.0.0"]   # the default; list addresses to listen on only those
+   ```
+
+3. Restart `masond`, run `mason lan status` to see the hosts and listening addresses, and pair the phone again with `mason pair`. The pairing URL now carries `host=<host>.local` and one `alt=` for each extra host, and the phone tries the local name first, then the others.
+
+To listen on the Tailscale interface and loopback only, set `bind = ["127.0.0.1", "100.101.102.103"]`. The listener serves paired devices only, whichever address it is on.
