@@ -308,6 +308,120 @@ pub fn audit(
     ))
 }
 
+/// A base line the task's merge changed in place: the line is gone and the same hunk of
+/// the merge's diff against the base added `replacement` instead.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Replaced {
+    pub file: String,
+    pub line: String,
+    pub replacement: String,
+}
+
+/// One hunk of a `git diff -U0`: the lines it removed and the lines it added.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Hunk {
+    pub removed: Vec<String>,
+    pub added: Vec<String>,
+}
+
+/// Parse the text of `git diff -U0 --no-renames` into hunks, by file.
+pub fn parse_hunks(diff: &str) -> BTreeMap<String, Vec<Hunk>> {
+    let mut out: BTreeMap<String, Vec<Hunk>> = BTreeMap::new();
+    let mut file: Option<String> = None;
+    let mut in_hunk = false;
+    let mut old_name: Option<String> = None;
+    for l in diff.split('\n') {
+        if l.starts_with("diff --git ") {
+            in_hunk = false;
+            file = None;
+            old_name = None;
+        } else if !in_hunk {
+            if let Some(n) = l.strip_prefix("--- ") {
+                old_name = n.strip_prefix("a/").map(String::from);
+            } else if let Some(n) = l.strip_prefix("+++ ") {
+                file = match n.strip_prefix("b/") {
+                    Some(n) => Some(n.to_string()),
+                    None => old_name.clone(),
+                };
+            } else if l.starts_with("@@") {
+                in_hunk = true;
+                if let Some(f) = &file {
+                    out.entry(f.clone()).or_default().push(Hunk::default());
+                }
+            }
+        } else if l.starts_with("@@") {
+            if let Some(f) = &file {
+                out.entry(f.clone()).or_default().push(Hunk::default());
+            }
+        } else if let Some(h) = file.as_ref().and_then(|f| out.get_mut(f)?.last_mut()) {
+            if let Some(t) = l.strip_prefix('+') {
+                h.added.push(t.to_string());
+            } else if let Some(t) = l.strip_prefix('-') {
+                h.removed.push(t.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// Of the dropped lines, those the merge replaced in place. `merge_diff` is the hunks of
+/// the merge's diff against the base. A line with no hunk that both removes it and adds
+/// something is not here: it was lost, not rewritten.
+pub fn replaced_in(dropped: &[Dropped], merge_diff: &BTreeMap<String, Vec<Hunk>>) -> Vec<Replaced> {
+    dropped
+        .iter()
+        .filter_map(|d| {
+            let h = merge_diff
+                .get(&d.file)?
+                .iter()
+                .find(|h| !h.added.is_empty() && h.removed.iter().any(|r| r == &d.line))?;
+            Some(Replaced {
+                file: d.file.clone(),
+                line: d.line.clone(),
+                replacement: h.added.join("\n"),
+            })
+        })
+        .collect()
+}
+
+/// [`replaced_in`] for a merge in a repository: `base` is the base commit the lines came
+/// from and `result` the task's tree.
+pub fn replacements(
+    repo: &Path,
+    base: &str,
+    result: &str,
+    dropped: &[Dropped],
+) -> Result<Vec<Replaced>, GitError> {
+    if dropped.is_empty() {
+        return Ok(vec![]);
+    }
+    let hunks = parse_hunks(&diff_text(repo, &format!("{base}..{result}"))?);
+    Ok(replaced_in(dropped, &hunks))
+}
+
+/// What the reviewer is shown: each pair, and how to settle it.
+pub fn review_block(pairs: &[Replaced]) -> String {
+    let mut s = String::from(
+        "Lines the base had landed that this change's merge with the base replaced. For each \
+         pair, decide whether the task's own purpose calls for the rewrite. If every one does, \
+         approve and list each pair under `removes` ({file, line, reason}) with your reason, \
+         where `line` is the base line. If any is a mistake, answer \"changes\" and name it in \
+         a finding.\n",
+    );
+    for p in pairs.iter().take(MAX_LISTED) {
+        s.push_str(&format!(
+            "\n{}:\n  base:        {}\n  replaced by: {}",
+            p.file,
+            p.line.trim_end(),
+            p.replacement.replace('\n', "\n               ").trim_end()
+        ));
+    }
+    if pairs.len() > MAX_LISTED {
+        s.push_str(&format!("\n... and {} more", pairs.len() - MAX_LISTED));
+    }
+    s
+}
+
 /// The one-line reason for a send-back.
 pub fn reason(d: &[Dropped]) -> String {
     let files: BTreeSet<&str> = d.iter().map(|x| x.file.as_str()).collect();
@@ -352,6 +466,28 @@ mod tests {
         .into_iter()
         .map(|d| d.line)
         .collect()
+    }
+
+    #[test]
+    fn a_line_rewritten_in_place_pairs_with_its_replacement() {
+        let diff = "diff --git a/f.rs b/f.rs\n--- a/f.rs\n+++ b/f.rs\n@@ -3 +3 @@\n-old line\n+new line\n@@ -9 +9,0 @@\n-gone line\n";
+        let d = |l: &str| Dropped {
+            file: "f.rs".into(),
+            line: l.into(),
+        };
+        let r = replaced_in(
+            &[d("old line"), d("gone line"), d("other")],
+            &parse_hunks(diff),
+        );
+        assert_eq!(
+            r,
+            vec![Replaced {
+                file: "f.rs".into(),
+                line: "old line".into(),
+                replacement: "new line".into()
+            }]
+        );
+        assert!(review_block(&r).contains("replaced by: new line"));
     }
 
     #[test]

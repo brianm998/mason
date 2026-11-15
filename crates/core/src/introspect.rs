@@ -173,6 +173,8 @@ pub struct Stats {
     /// `wait_ms` by what was waited on ("a slot", "the owner", a resource), largest first is
     /// worked out where it is shown.
     pub wait_by: std::collections::BTreeMap<String, u64>,
+    /// The `compile` slot count in force now, if known.
+    pub compile_cap: Option<u64>,
 }
 
 /// `a slot 70%, the owner 20%, ...`, largest first, at most five.
@@ -188,6 +190,19 @@ pub fn wait_breakdown(by: &std::collections::BTreeMap<String, u64>) -> String {
         .map(|(k, n)| format!("{k} {:.0}%", **n as f64 * 100.0 / total as f64))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// The resource with the longest wait and the compile count in force.
+pub fn wait_longest(s: &Stats) -> String {
+    let top = s
+        .wait_by
+        .iter()
+        .max_by(|a, b| a.1.cmp(b.1).then(b.0.cmp(a.0)))
+        .map_or("none".to_string(), |(k, ms)| format!("{k} ({ms} ms)"));
+    let cap = s
+        .compile_cap
+        .map_or("unknown".to_string(), |n| n.to_string());
+    format!("longest wait: {top}; compile slots in force: {cap}")
 }
 
 /// A metric's value over `stats`, if it can be measured over a window of recorded data.
@@ -489,10 +504,11 @@ pub fn detect(project: &str, s: &Stats, f: &Facts, t: &Thresholds) -> Vec<Findin
                     s.wait_ms, s.active_ms, t.wait_share * 100.0
                 ),
                 format!(
-                    "wait events in the event log: {} ms waiting of {} ms; by what was waited on: {}",
+                    "wait events in the event log: {} ms waiting of {} ms; by what was waited on: {}; {}",
                     s.wait_ms,
                     s.active_ms,
-                    wait_breakdown(&s.wait_by)
+                    wait_breakdown(&s.wait_by),
+                    wait_longest(s)
                 ),
                 "wait_share",
                 Some(m),
@@ -925,6 +941,20 @@ mod tests {
             &Thresholds::default(),
         );
         assert!(looped.iter().any(|f| f.rule == "retry_loop"));
+    }
+
+    #[test]
+    fn the_wait_evidence_names_the_longest_wait_and_the_compile_count() {
+        let mut s = Stats::default();
+        s.wait_by.insert("compile".into(), 900);
+        s.wait_by.insert("test-suite".into(), 400);
+        s.compile_cap = Some(3);
+        let t = wait_longest(&s);
+        assert!(
+            t.contains("compile (900 ms)") && t.contains("in force: 3"),
+            "{t}"
+        );
+        assert!(wait_longest(&Stats::default()).contains("none"));
     }
 
     #[test]

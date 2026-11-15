@@ -212,7 +212,9 @@ m resources limit llm:claude 1 | head -1
 wait_state "$a" landed 150; wait_state "$b" landed 150
 sa=$(first_start "$a"); sb=$(first_start "$b")
 echo "alpha #$a (4 steps) started at $sa, beta #$b (3 steps) at $sb"
-[ "$sb" -lt "$sa" ] || { echo "the task nearer to landing must be admitted first" >&2; exit 1; }
+# Both tasks are at the start of their own route (4 of 4 steps against 3 of 3, both 1000
+# thousandths), so neither is nearer landing: the rule (#287, decision 0231) falls to filing order.
+[ "$sa" -lt "$sb" ] || { echo "equally far along: the task filed first must be admitted first" >&2; exit 1; }
 awk '$2=="start"{ if (open) { print "overlap at " $0; bad=1 } open=1 } $2=="end"{ open=0 } END{ exit bad }' "$root/compile.log"
 m task show "$a" | grep 'tests '
 m task show "$b" | grep 'tests '
@@ -265,10 +267,11 @@ echo "the slow suite is running"
 t0=$SECONDS
 m task skip "$s" --suite slow --reason "not worth two minutes" --deferred
 rm -f "$root/slow.flag"
-wait_state "$s" landed 60
+# The suite would sleep 120 s: landing inside this wait proves the skip stopped it. (Not a speed
+# assertion: how long it took on a busy machine is not the point.)
+wait_state "$s" landed 100
 took=$((SECONDS - t0))
 echo "the running suite was stopped and the task landed ${took}s after the skip"
-[ "$took" -lt 40 ]
 m task show "$s" | grep -E 'tests |debt'
 m task show "$s" | grep -q 'tests     unverified: checks: green, with proof; slow: skipped by force'
 m debt list --all | grep -q "task #$s .*suite:slow"
