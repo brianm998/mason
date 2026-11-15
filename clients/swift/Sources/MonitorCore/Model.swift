@@ -374,9 +374,9 @@ public final class MonitorModel: ObservableObject {
     public static let scaleRange: ClosedRange<Double> = 0.8...2.4
     public static let scaleStep = 0.1
 
-    public init(preferences: Preferences = MemoryPreferences()) {
+    public init(preferences: Preferences = MemoryPreferences(), defaultTextScale: Double = 1.0) {
         prefs = preferences
-        textScale = preferences.double(Keys.scale) ?? 1.0
+        textScale = preferences.double(Keys.scale) ?? defaultTextScale
         muted = preferences.bool(Keys.mute) ?? false
         sidebarWidth = Self.clampSidebar(preferences.double(Keys.sidebarWidth) ?? Double(MasonTokens.sizeSidebarWidth))
         let box = MuteBox()

@@ -29,7 +29,7 @@ struct ProgressCells: View {
                 Cell(state: c.state, fill: c.state == .part ? c.fill : .outline,
                      tint: (slow || quiet) && c.state == .part ? theme.slow : theme.accent)
                     .frame(width: theme.cell, height: theme.cell)
-                    .help(helpText(c))
+                    .hint(helpText(c))
                     .accessibilityLabel(c.spokenLabel)
             }
         }
@@ -284,7 +284,7 @@ struct CountTile: View {
         }
         .contentShape(Rectangle())
         .modifier(TileTap(model: model, state: count.state))
-        .help(model.tileTooltip(count))
+        .hint(model.tileTooltip(count))
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(model.tileCount(count)) \(label)")
         .accessibilityIdentifier("tile:\(count.state)")
@@ -305,6 +305,7 @@ struct Pill: ViewModifier {
             .background(RoundedRectangle(cornerRadius: theme.radius).fill(prominent ? theme.accent : theme.surface))
             .foregroundStyle(prominent ? Color.white : theme.text)
             .overlay(RoundedRectangle(cornerRadius: theme.radius).stroke(theme.border, lineWidth: prominent ? 0 : 1))
+            .touchTarget()
     }
 }
 
@@ -360,9 +361,9 @@ struct CopyButton: View {
             }
             .font(theme.small())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.plain).touchTarget()
         .foregroundStyle(theme.muted)
-        .help("Copy \(value)")
+        .hint("Copy \(value)")
     }
 }
 
@@ -405,7 +406,7 @@ struct CopyValueButton: View {
             .font(theme.small())
         }
         .buttonStyle(.bordered)
-        .help(target.value)
+        .hint(target.value)
         .accessibilityIdentifier("copy:\(target.label)")
     }
 }
@@ -667,17 +668,23 @@ struct ApprovalView: View {
 /// The actions a task offers now: exactly the daemon's `allowed_actions`.
 struct ActionButtons: View {
     @Environment(\.theme) var theme
+    @Environment(\.features) var features
     @ObservedObject var model: MonitorModel
     let row: TaskRow
     var hasApprovalView = false
+
+    /// The daemon's actions this platform may show: with agent sessions off there is no Open session.
+    static func offered(_ actions: [String], features: PlatformFeatures) -> [String] {
+        actions.filter { features.allows(action: $0) }
+    }
 
     var body: some View {
         HStack(spacing: theme.spacing) {
             // Approve and Reject have their own view (ApprovalView) wherever there is one; a
             // non-owner sees no buttons at all for what only the owner may do.
-            ForEach(row.allowedActions.filter { shown($0) }, id: \.self) { a in
+            ForEach(Self.offered(row.allowedActions, features: features).filter { shown($0) }, id: \.self) { a in
                 Button { run(a) } label: { Text(label(a)).pill(prominent: a == "approve") }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.plain).touchTarget()
                     .accessibilityIdentifier("action:\(row.id):\(a)")
             }
             if let notice = model.sessionNotice {

@@ -19,7 +19,13 @@ public struct RootView: View {
     @Environment(\.scenePhase) private var scenePhase
     #endif
 
-    public init(model: MonitorModel) { self.model = model }
+    let features: PlatformFeatures
+
+    /// `features` is what the platform offers: the Mac's everything, or the iPad's subset.
+    public init(model: MonitorModel, features: PlatformFeatures = .mac) {
+        self.model = model
+        self.features = features
+    }
 
     public var body: some View {
         let theme = Theme(dark: scheme == .dark, scale: model.textScale)
@@ -31,6 +37,7 @@ public struct RootView: View {
             }
         }
         .environment(\.theme, theme)
+        .environment(\.features, features)
         .foregroundStyle(theme.text)
         .background(theme.background)
         .onOpenURL { model.open(url: $0) }
@@ -50,7 +57,7 @@ public struct RootView: View {
                     desired: model.panelWidth(scale: model.textScale), available: geo.size.width, scale: model.textScale)
                 HStack(spacing: 0) {
                     SidebarPane(model: model, width: width)
-                    SidebarHandle(model: model, factor: factor, width: width)
+                    SidebarHandle(model: model, factor: factor, width: width).zIndex(1)
                     MainPane(model: model)
                 }
                 .coordinateSpace(name: SidebarHandle.space)
@@ -103,6 +110,15 @@ struct SidebarHandle: View {
             .frame(width: CGFloat(MasonTokens.sizeSidebarHandle))
             .overlay(Divider())
             .contentShape(Rectangle())
+            #if !canImport(AppKit)
+            // Touch: a 44 pt strip centred on the line (an overlay, so the layout width is unchanged).
+            .overlay(
+                Color.clear
+                    .frame(width: CGFloat(PlatformFeatures.minTouchTarget))
+                    .contentShape(Rectangle())
+                    .gesture(drag)
+            )
+            #endif
             #if canImport(AppKit)
             .onHover { over in
                 if over && !inside { NSCursor.resizeLeftRight.push() }
@@ -111,13 +127,15 @@ struct SidebarHandle: View {
             }
             .onDisappear { if inside { NSCursor.pop(); inside = false } }
             #endif
-            .gesture(
-                DragGesture(minimumDistance: 0, coordinateSpace: .named(Self.space))
-                    .onChanged { v in
-                        // The handle is `handle` wide: the line sits at its middle.
-                        let x = Double(v.location.x) - Double(MasonTokens.sizeSidebarHandle) / 2
-                        model.setSidebarWidth(x / factor)
-                    }
-            )
+            .gesture(drag)
+    }
+
+    private var drag: some Gesture {
+        DragGesture(minimumDistance: 0, coordinateSpace: .named(Self.space))
+            .onChanged { v in
+                // The handle is `handle` wide: the line sits at its middle.
+                let x = Double(v.location.x) - Double(MasonTokens.sizeSidebarHandle) / 2
+                model.setSidebarWidth(x / factor)
+            }
     }
 }

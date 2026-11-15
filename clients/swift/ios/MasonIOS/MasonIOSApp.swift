@@ -9,7 +9,7 @@ import SwiftUI
 /// `ios/project.yml` by XcodeGen (`make ios`); it is not committed.
 @main
 struct MasonIOSApp: App {
-    @StateObject private var model = MonitorModel(preferences: DefaultsPreferences())
+    @StateObject private var model = MonitorModel(preferences: DefaultsPreferences(), defaultTextScale: PlatformFeatures.iPadTextScale)
 
     var body: some Scene {
         WindowGroup { AppRoot(model: model) }
@@ -24,7 +24,7 @@ struct AppRoot: View {
 
     var body: some View {
         switch RootChoice.choose(regularWidth: sizeClass.map { $0 == .regular }) {
-        case .pad: RootView(model: model)
+        case .pad: RootView(model: model, features: .iPad)
         case .phone: PhoneRootView(model: model)
         }
     }

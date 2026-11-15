@@ -36,7 +36,7 @@ func section<Content: View>(_ title: String, theme: Theme, state: String? = nil,
             if let open {
                 // The title and the '>' next to it both open the section's page.
                 Button(action: open) { Text(title).font(theme.title()).foregroundStyle(theme.text) }
-                    .buttonStyle(.plain).help("Open the \(title) page")
+                    .buttonStyle(.plain).touchTarget().hint("Open the \(title) page")
                     .accessibilityIdentifier("section-title:\(title)")
             } else {
                 Text(title).font(theme.title()).foregroundStyle(theme.text)
@@ -44,7 +44,7 @@ func section<Content: View>(_ title: String, theme: Theme, state: String? = nil,
             if let state { StateIcon(state: state) }
             if let open {
                 Button(action: open) { Image(systemName: "chevron.right").font(theme.body(.semibold)).foregroundStyle(theme.muted) }
-                    .buttonStyle(.plain).help("Open the \(title) page")
+                    .buttonStyle(.plain).touchTarget().hint("Open the \(title) page")
                     .accessibilityLabel("Open \(title)")
                     .accessibilityIdentifier("section-open:\(title)")
             }
@@ -71,7 +71,7 @@ struct HomePage: View {
     @ViewBuilder var versionLine: some View {
         if !model.versionLine.isEmpty {
             Text(model.versionLine).font(theme.small()).foregroundStyle(theme.muted)
-                .textSelection(.enabled).help(model.versionTip)
+                .textSelection(.enabled).hint(model.versionTip)
                 .accessibilityIdentifier("home:version")
         }
     }
@@ -193,15 +193,15 @@ struct SessionStepper: View {
         let limit = model.home?.sessionsLimit ?? 0
         HStack(spacing: theme.spacing) {
             Text("Sessions (all projects): \(used) of")
-            Button { model.setSessionLimit(limit > 0 ? limit - 1 : 0) } label: { Image(systemName: "minus") }
+            Button { model.setSessionLimit(limit > 0 ? limit - 1 : 0) } label: { Image(systemName: "minus") }.touchTarget()
                 .accessibilityIdentifier("sessions:decrease")
             Text("\(limit)").font(theme.body(.semibold))
-            Button { model.setSessionLimit(limit + 1) } label: { Image(systemName: "plus") }
+            Button { model.setSessionLimit(limit + 1) } label: { Image(systemName: "plus") }.touchTarget()
                 .accessibilityIdentifier("sessions:increase")
         }
         .font(theme.body())
         .buttonStyle(.bordered)
-        .help("Lowering the limit never stops anything running; it holds back new work until the count falls.")
+        .hint("Lowering the limit never stops anything running; it holds back new work until the count falls.")
         .accessibilityIdentifier("sessions")
     }
 }
@@ -226,10 +226,10 @@ struct CompilationSection: View {
         } else if !command.isEmpty {
             Button(label) { model.openCommand(label: label, command: command) }
                 .buttonStyle(.plain).linkStyle()
-                .lineLimit(1).help("Show the whole command")
+                .lineLimit(1).hint("Show the whole command")
                 .accessibilityIdentifier("compile:command")
         } else {
-            Text(label).lineLimit(1).truncationMode(.middle).help(label)
+            Text(label).lineLimit(1).truncationMode(.middle).hint(label)
         }
     }
 
@@ -237,41 +237,41 @@ struct CompilationSection: View {
         section("Compilation (all projects)", theme: theme, open: open) {
             HStack(spacing: theme.spacing) {
                 Text("Compiling: \(c.used) of at most")
-                Button { model.setCompileLimit(c.limit > 1 ? c.limit - 1 : 1) } label: { Image(systemName: "minus") }
+                Button { model.setCompileLimit(c.limit > 1 ? c.limit - 1 : 1) } label: { Image(systemName: "minus") }.touchTarget()
                     .disabled(c.limit <= 1)
                     .accessibilityIdentifier("compile:decrease")
                 Text("\(c.limit)").font(theme.body(.semibold))
-                Button { model.setCompileLimit(c.limit + 1) } label: { Image(systemName: "plus") }
+                Button { model.setCompileLimit(c.limit + 1) } label: { Image(systemName: "plus") }.touchTarget()
                     .accessibilityIdentifier("compile:increase")
                 Text(c.cpuLine).foregroundStyle(theme.muted)
             }
             .font(theme.body())
             .buttonStyle(.bordered)
-            .help("Lowering the limit never stops a compile that is running; it holds back new ones until the count falls.")
+            .hint("Lowering the limit never stops a compile that is running; it holds back new ones until the count falls.")
             .accessibilityIdentifier("compile")
 
             HStack(spacing: theme.spacing) {
                 Text("Start another compile below")
-                Button { model.setCompileCpuGate(Int(c.cpuMaxPct) - 5) } label: { Image(systemName: "minus") }
+                Button { model.setCompileCpuGate(Int(c.cpuMaxPct) - 5) } label: { Image(systemName: "minus") }.touchTarget()
                     .disabled(Int(c.cpuMaxPct) <= MonitorModel.cpuGateRange.lowerBound)
                     .accessibilityIdentifier("compile:cpu:decrease")
                 Text("\(c.cpuMaxPct)% CPU").font(theme.body(.semibold))
-                Button { model.setCompileCpuGate(Int(c.cpuMaxPct) + 5) } label: { Image(systemName: "plus") }
+                Button { model.setCompileCpuGate(Int(c.cpuMaxPct) + 5) } label: { Image(systemName: "plus") }.touchTarget()
                     .disabled(Int(c.cpuMaxPct) >= MonitorModel.cpuGateRange.upperBound)
                     .accessibilityIdentifier("compile:cpu:increase")
             }
             .font(theme.body())
             .buttonStyle(.bordered)
-            .help("A compile starts only while CPU use is below this. Kept across restarts; resources.toml has the starting value.")
+            .hint("A compile starts only while CPU use is below this. Kept across restarts; resources.toml has the starting value.")
             .accessibilityIdentifier("compile:cpu")
 
             HStack(spacing: theme.spacing) {
                 Text("and wait")
-                Button { model.setCompileSettle(Int(c.settleS) - 5) } label: { Image(systemName: "minus") }
+                Button { model.setCompileSettle(Int(c.settleS) - 5) } label: { Image(systemName: "minus") }.touchTarget()
                     .disabled(c.settleS == 0)
                     .accessibilityIdentifier("compile:settle:decrease")
                 Text("\(c.settleS) s").font(theme.body(.semibold))
-                Button { model.setCompileSettle(Int(c.settleS) + 5) } label: { Image(systemName: "plus") }
+                Button { model.setCompileSettle(Int(c.settleS) + 5) } label: { Image(systemName: "plus") }.touchTarget()
                     .disabled(Int(c.settleS) >= MonitorModel.settleMax)
                     .accessibilityIdentifier("compile:settle:increase")
                 Text("after the last one started")
@@ -294,7 +294,7 @@ struct CompilationSection: View {
                     who(r.label, task: r.task, command: r.command)
                     let detail = Format.compileHolder(project: r.project, title: r.title)
                     if r.task > 0 && !detail.isEmpty {
-                        Text(detail).help(r.title.isEmpty ? r.project : "\(r.project) - \(r.title)")
+                        Text(detail).hint(r.title.isEmpty ? r.project : "\(r.project) - \(r.title)")
                     }
                     if r.interactive { Text("interactive").foregroundStyle(theme.muted) }
                     Text("for \(age(r.sinceMs))").foregroundStyle(theme.muted)
