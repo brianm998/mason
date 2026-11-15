@@ -1392,8 +1392,16 @@ impl Runner {
                     task: e.id,
                     reason: format!("conflicts with the rest of its batch in {}", e.files),
                     feedback: format!(
-                        "Your change conflicts with other changes landing at the same time (batch #{batch_id}) in: {}. Bring in the latest base branch and resolve it.",
-                        e.files
+                        "Your change conflicts with other changes landing at the same time (batch #{batch_id}) in: {}. Bring in the latest base branch and resolve it.{}",
+                        e.files,
+                        if e.base_changes.is_empty() {
+                            String::new()
+                        } else {
+                            format!(
+                                "\n\nThe base changed these files since you branched:\n{}",
+                                e.base_changes
+                            )
+                        }
                     ),
                     conflict: true,
                 });
