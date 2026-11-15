@@ -34,6 +34,13 @@ object Mascot {
     fun appIcon(): ImageBitmap? =
         if (System.getProperty("os.name").orEmpty().startsWith("Mac")) macAppIcon() else squareAppIcon()
 
+    /**
+     * The picture for the macOS Dock and app switcher, or null elsewhere (Windows and Linux take
+     * the window's `icon`). Compose's `Window(icon)` does not change the Dock icon on macOS.
+     */
+    fun dockIcon(os: String = System.getProperty("os.name").orEmpty()): ImageBitmap? =
+        if (os.startsWith("Mac")) macAppIcon() else null
+
     /** The full-bleed square icon, for desktops that do not shape it. */
     fun squareAppIcon(): ImageBitmap? = bitmap("brand/app_icon.png")
 
