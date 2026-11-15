@@ -87,8 +87,11 @@ fn is_fetch(reason: &str) -> bool {
 
 /// The class of a failed task; one logged without a class is classified from its reason.
 fn class_of(t: &Task) -> Option<FailClass> {
-    t.failure_class
-        .or_else(|| Some(FailClass::classify(t.state, t.failure.as_deref()?)))
+    class_from(t.state, t.failure_class, t.failure.as_deref())
+}
+
+fn class_from(state: State, class: Option<FailClass>, reason: Option<&str>) -> Option<FailClass> {
+    class.or_else(|| Some(FailClass::classify(state, reason?)))
 }
 
 /// The tasks that failed outside the code, newest state: class `outside`, in a project that has
@@ -216,6 +219,16 @@ pub fn spawn(d: &Arc<Daemon>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failure_logged_without_a_class_is_classified_from_its_reason() {
+        let f = State::Failed;
+        let lost = Some("the step host was lost 3 times");
+        assert_eq!(class_from(f, None, lost), Some(FailClass::Outside));
+        let red = Some("still red after 3 rounds");
+        assert_eq!(class_from(f, None, red), Some(FailClass::Code));
+        assert_eq!(class_from(f, None, None), None);
+    }
 
     fn secs(s: &[u64]) -> Vec<Duration> {
         s.iter().map(|n| Duration::from_secs(*n)).collect()
