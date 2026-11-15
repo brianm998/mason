@@ -446,7 +446,7 @@ impl Ctx {
 }
 
 /// Per run: (total ms waited, start of the open wait).
-static WAITS: std::sync::Mutex<BTreeMap<u64, (u64, Option<u64>)>> =
+static WAITS: std::sync::Mutex<std::collections::BTreeMap<u64, (u64, Option<u64>)>> =
     std::sync::Mutex::new(std::collections::BTreeMap::new());
 
 fn wait_note(run: u64, start: bool) {
