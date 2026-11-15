@@ -31,7 +31,7 @@ struct CpuSectionBody: View {
     @Binding var tip: String?
 
     var body: some View {
-        section("CPU", theme: theme) {
+        section("CPU (all projects)", theme: theme) {
             Text(layout.header).font(theme.body()).foregroundStyle(theme.muted)
             if let hidden = layout.hidden {
                 Text(hidden).font(theme.body()).foregroundStyle(theme.muted)

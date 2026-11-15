@@ -131,7 +131,7 @@ fun HomePage(model: MonitorModel) {
                 SessionStepper(model)
             }
             Section("Landing queue") {
-                val queue = model.landing?.queue ?: h?.stages?.firstOrNull { it.state == "landing" }?.rows.orEmpty()
+                val queue = h?.stages?.firstOrNull { it.state == "landing" }?.rows.orEmpty()
                 if (queue.isEmpty()) Text("Nothing is landing.", style = theme.body(color = theme.muted))
                 queue.forEach { r -> Link("${r.key} ${r.title}") { model.go(Page.Task(r.id)) } }
             }
@@ -165,7 +165,7 @@ fun SessionStepper(model: MonitorModel) {
     val limit = model.home?.sessions_limit ?: 0
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(theme.spacing),
         modifier = Modifier.testTag("sessions")) {
-        Text("Sessions: $used of", style = theme.body())
+        Text("Sessions (all projects): $used of", style = theme.body())
         Pill("−", modifier = Modifier.testTag("sessions:decrease")) { model.setSessionLimit(if (limit > 0) limit - 1 else 0) }
         Text("$limit", style = theme.body(FontWeight.SemiBold))
         Pill("+", modifier = Modifier.testTag("sessions:increase")) { model.setSessionLimit(limit + 1) }
@@ -186,7 +186,7 @@ fun CompilationSection(model: MonitorModel, c: Compilation) {
         else Text(label, style = theme.body(), maxLines = 1, overflow = TextOverflow.Ellipsis,
             modifier = Modifier.widthIn(max = 480.dp))
     }
-    Section("Compilation") {
+    Section("Compilation (all projects)") {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(theme.spacing),
             modifier = Modifier.testTag("compile")) {
             Text("Compiling: ${c.used} of at most", style = theme.body())
