@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 package mason.monitor
 
+import mason.v1.*
+
 /**
  * What the section detail pages ([Page.Section]) read. They draw the same view-model rows as
  * the sidebar (project-scoped, in the daemon's order: not waiting first, then age).
