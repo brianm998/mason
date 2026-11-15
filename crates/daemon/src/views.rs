@@ -785,6 +785,7 @@ impl<'a> Ctx<'a> {
             evidence: c.evidence,
             hash,
             origin: c.origin.name().into(),
+            multi_select: c.multi_select,
         })
     }
 
