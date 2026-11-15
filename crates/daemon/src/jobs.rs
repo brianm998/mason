@@ -3967,7 +3967,22 @@ fn run_command_on(
             linger: Duration::from_secs(600),
             heartbeat: c.d.cfg.heartbeat,
         };
-        if let Err(e) = spawn_host(&o) {
+        let started = crate::hostloss::spawn_retrying(
+            || spawn_host(&o),
+            |e| {
+                crate::hostloss::record_as(
+                    &c.d,
+                    Some(c.run),
+                    &c.step.name,
+                    &id,
+                    crate::daemon::now_ms(),
+                    format!("host {id} never came up: {e}"),
+                    true,
+                )
+            },
+            Duration::from_secs(30),
+        );
+        if let Err(e) = started {
             return Err(format!("cannot start the command: {e}").into());
         }
     }
