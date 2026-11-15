@@ -122,6 +122,8 @@ pub struct Daemon {
     pub targets: crate::targets::Targets,
     /// Each task's share of the machine's CPU, as the sampling thread last read it.
     cpu_reading: std::sync::RwLock<Arc<crate::cputasks::Reading>>,
+    /// The readings over the last 24 hours, for the monitors' graph (not persisted).
+    cpu_history: std::sync::Mutex<crate::cpuhistory::CpuRing>,
 }
 
 fn kind_name(k: &EventKind) -> String {
@@ -324,6 +326,7 @@ impl Daemon {
             lan: crate::lan::LanState::new(),
             targets,
             cpu_reading: std::sync::RwLock::new(Arc::new(crate::cputasks::Reading::none())),
+            cpu_history: std::sync::Mutex::new(crate::cpuhistory::CpuRing::default()),
             update_status: Mutex::new(crate::update::Status {
                 phase: "idle".into(),
                 ..Default::default()
@@ -379,6 +382,24 @@ impl Daemon {
 
     pub fn set_cpu_reading(&self, r: crate::cputasks::Reading) {
         *self.cpu_reading.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(r);
+    }
+
+    /// Publish a reading and add it to the history, stamped with its own time.
+    pub fn record_cpu(&self, r: crate::cputasks::Reading) {
+        let at = r.usage.sampled_ms;
+        self.cpu_history
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(at, &r.usage);
+        self.set_cpu_reading(r);
+    }
+
+    /// The readings in the `span_ms` before `now_ms`, oldest first.
+    pub fn cpu_history(&self, now_ms: u64, span_ms: u64) -> mason_protocol::CpuHistory {
+        self.cpu_history
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .query(now_ms, span_ms)
     }
 
     pub fn poke(&self) {

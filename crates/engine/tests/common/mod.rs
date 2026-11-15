@@ -93,7 +93,7 @@ impl Sim {
     /// Reach `target` by legal events from a fresh, unflagged task.
     pub fn task_in(&mut self, target: State) -> TaskId {
         use EventKind as E;
-        let proposed = target == State::Proposed;
+        let proposed = matches!(target, State::Proposed | State::Deferred);
         let t = self.file(false, proposed);
         let succeed = |s: &mut Sim, n: usize| {
             for _ in 0..n {
@@ -104,6 +104,10 @@ impl Sim {
             }
         };
         if matches!(target, State::Proposed | State::Queued) {
+            return t;
+        }
+        if target == State::Deferred {
+            self.ok(E::Deferred { task: t });
             return t;
         }
         if target == State::Canceled {
