@@ -217,6 +217,11 @@ fun BannersView(model: MonitorModel) {
                 updateRow(b.text, if (model.canAct) "Choose SSH key…" else null, "push-auth:$project", theme, BannerIcons.forDaemonKind(b.kind)) {
                     model.chooseSshKey(project)
                 }
+            } else if (b.kind == "health") {
+                // The pipeline's health session needs the owner: the button opens its dialog.
+                updateRow(b.text, "Open session", "health-session:${b.session}", theme, BannerIcons.forDaemonKind(b.kind)) {
+                    model.openOwnerSession(b.session)
+                }
             } else if (b.kind == "paused") {
                 // The whole pause group is drawn once, where the first pause is.
                 if (i == model.header?.banners?.indexOfFirst { it.kind == "paused" }) PauseGroup(model, theme)
@@ -225,6 +230,7 @@ fun BannersView(model: MonitorModel) {
             }
         }
         if (model.sshKeyProject != null) SshKeyDialog(model)
+        if (model.ownerSessionDialog != null) OwnerSessionDialog(model)
         model.header?.pending_issues?.forEach { p ->
             val uri = androidx.compose.ui.platform.LocalUriHandler.current
             Row(
@@ -520,3 +526,33 @@ internal fun SshKeyDialog(model: MonitorModel) {
 fun topBarUsageLines(usage: mason.v1.UsageView?, p: mason.v1.ProviderStatus): List<String> =
     usage?.top_bar.orEmpty().filter { it.startsWith("${p.name} ") }
         .ifEmpty { listOf("${p.name}: ${p.sessions_used} of ${p.sessions_limit} sessions") }
+
+/** The owner-session dialog (s364): the transcript, a field to write in and the End button. */
+@Composable
+internal fun OwnerSessionDialog(model: MonitorModel) {
+    val theme = LocalTheme.current
+    var draft by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = { model.closeOwnerSession() },
+        modifier = Modifier.testTag("owner-session-sheet"),
+        title = { Text(if (model.ownerSession?.kind == "health") "Pipeline health" else "Session", style = theme.title()) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(theme.spacing)) {
+                model.ownerSession?.messages?.forEach { m ->
+                    val who = when (m.role) { "owner" -> "you"; "agent" -> "agent"; else -> "·" }
+                    Text("$who: ${m.text}", style = if (m.role == "tool") theme.small(color = theme.muted) else theme.body())
+                }
+                model.ownerSessionError?.let { Text(it, style = theme.small(color = theme.attention)) }
+                OutlinedTextField(value = draft, onValueChange = { draft = it }, modifier = Modifier.testTag("session-input"),
+                    label = { Text("Write to the agent") })
+            }
+        },
+        confirmButton = {
+            Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing)) {
+                TextButton(enabled = model.ownerSession?.working != true, onClick = { model.sendOwnerMessage(draft); draft = "" }) { Text("Send") }
+                TextButton(onClick = { model.endOwnerSession() }) { Text("End session") }
+                TextButton(onClick = { model.closeOwnerSession() }) { Text("Close") }
+            }
+        },
+    )
+}

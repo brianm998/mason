@@ -11,6 +11,7 @@
 
 mod codec;
 pub mod devices;
+pub mod health_log;
 pub mod introspect;
 pub mod migrations;
 pub mod notify;

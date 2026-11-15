@@ -279,23 +279,34 @@ fn turn(d: &Arc<Daemon>, id: u64, text: &str) -> Option<String> {
     let Ok(Some(s)) = d.store.owner_session(id) else {
         return None;
     };
-    let Some(task) = s.task.map(TaskId) else {
-        say("tool", "this session has no task to work in");
-        return None;
+    let task = s.task.map(TaskId);
+    let found = match task {
+        Some(task) => d.world().ok().and_then(|w| {
+            let t = w.tasks.get(&task)?;
+            let p = d.project(t.project)?.clone();
+            let wt = p.worktree(&d.cfg, task.0);
+            let before = if s.adapter_session.is_empty() {
+                crate::attention::session_for(d, task)
+                    .ok()
+                    .and_then(|v| v["session"].as_str().map(String::from))
+            } else {
+                Some(s.adapter_session.clone())
+            };
+            Some((p, wt, before))
+        }),
+        // A health session works in its own checkout of MASON's project (s432).
+        None if s.kind == crate::health::KIND => crate::proposals::self_project(d).map(|(_, p)| {
+            let dir = crate::health::checkout_dir(d, id);
+            let wt = if dir.exists() { dir } else { p.path.clone() };
+            (
+                p.clone(),
+                wt,
+                Some(s.adapter_session.clone()).filter(|a| !a.is_empty()),
+            )
+        }),
+        None => None,
     };
-    let Some((project, wt, before)) = d.world().ok().and_then(|w| {
-        let t = w.tasks.get(&task)?;
-        let p = d.project(t.project)?.clone();
-        let wt = p.worktree(&d.cfg, task.0);
-        let before = if s.adapter_session.is_empty() {
-            crate::attention::session_for(d, task)
-                .ok()
-                .and_then(|v| v["session"].as_str().map(String::from))
-        } else {
-            Some(s.adapter_session.clone())
-        };
-        Some((p, wt, before))
-    }) else {
+    let Some((project, wt, before)) = found else {
         say("tool", "the task or its project is gone");
         return None;
     };
@@ -303,10 +314,17 @@ fn turn(d: &Arc<Daemon>, id: u64, text: &str) -> Option<String> {
     let mut spec = SessionSpec::new(StepKind::Chat, text, &wt);
     spec.env = project.agent_env.clone();
     spec.env.retain(|(k, _)| k != "MASON_TASK");
-    spec.env.push(("MASON_TASK".into(), task.0.to_string()));
+    if let Some(task) = task {
+        spec.env.push(("MASON_TASK".into(), task.0.to_string()));
+    }
     spec.tool_timeout = Duration::from_secs(120);
     spec.deadline = Some(TURN_DEADLINE);
-    spec.run_key = Some(format!("t{}r0chat{}x{}", task.0, id, s.turns));
+    spec.run_key = Some(format!(
+        "t{}r0chat{}x{}",
+        task.map_or(0, |t| t.0),
+        id,
+        s.turns
+    ));
     let started = match &before {
         Some(sid) => adapter.resume(sid, text.to_string(), spec),
         None => adapter.start(spec),
@@ -363,6 +381,7 @@ pub fn end(d: &Arc<Daemon>, id: u64, _who: &str) -> Result<(), String> {
     d.store
         .set_owner_session_state(id, "ended", now_ms())
         .map_err(|e| e.to_string())?;
+    crate::health::remove_checkout(d, id);
     if let Some(c) = d
         .owner_turns
         .lock()
