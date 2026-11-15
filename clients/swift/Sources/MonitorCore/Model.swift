@@ -719,6 +719,12 @@ public final class MonitorModel: ObservableObject {
         let name = usage?.providers.first?.name ?? "claude"
         command { $0.setLimit = .with { $0.resource = "llm:\(name)"; $0.units = units } }
     }
+    /// The session stepper's minus (`by: -1`) and plus (`by: 1`), the one rule for the Mac and the
+    /// phone: the limit moves by `delta` and never goes below 0.
+    public func stepSessionLimit(by delta: Int) {
+        let limit = Int(home?.sessionsLimit ?? 0)
+        setSessionLimit(UInt32(max(0, limit + delta)))
+    }
     /// How many compiles may run at once (the daemon refuses 0).
     public func setCompileLimit(_ units: UInt32) {
         command { $0.setLimit = .with { $0.resource = "compile"; $0.units = max(1, units) } }

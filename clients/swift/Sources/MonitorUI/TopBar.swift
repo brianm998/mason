@@ -320,7 +320,7 @@ struct AddTaskSheet: View {
             }
         }
         .padding(theme.spacingLarge)
-        .frame(width: 460)
+        .sheetWidth(460)
     }
 }
 
