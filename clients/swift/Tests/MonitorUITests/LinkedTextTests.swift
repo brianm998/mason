@@ -72,4 +72,56 @@ final class LinkedTextTests: XCTestCase {
         let size = host.sizeThatFits(in: CGSize(width: 600, height: 10_000))
         XCTAssertGreaterThan(size.height, 0)
     }
+
+    private func underlined(_ a: AttributedString) -> [(String, Bool, Bool)] {
+        a.runs.map { run in
+            (String(a[run.range].characters), run.underlineStyle == .single, run.foregroundColor == .blue)
+        }
+    }
+
+    func testEveryLinkRunIsUnderlinedAndInTheLinkColourAndPlainRunsAreNeither() {
+        let model = MonitorModel()
+        model.taskDetail = detail()
+        let a = LinkedText.attributed(model.linkify("see #12, PR #7 and #99"), linkColor: .blue)
+        for (text, under, blue) in underlined(a) {
+            let isLink = ["#12", "PR #7"].contains(text)
+            XCTAssertEqual(under, isLink, "underline on '\(text)'")
+            XCTAssertEqual(blue, isLink, "link colour on '\(text)'")
+        }
+        XCTAssertTrue(a.runs.contains { String(a[$0.range].characters).contains("#99") && $0.link == nil },
+                      "an unknown #N stays plain")
+        let styled = LinkedText.link(inlineMarkdown("run **#12** now"), model.linkify("run #12 now"), linkColor: .blue)
+        XCTAssertTrue(underlined(styled).contains { $0.0 == "#12" && $0.1 && $0.2 })
+    }
+
+    func testTheLinkColourIsNotTheAccent() {
+        for dark in [false, true] {
+            let t = Theme(dark: dark, scale: 1)
+            XCTAssertNotEqual(t.link, t.accent)
+        }
+    }
+
+    /// Grep-style guard: no `.buttonStyle(.link)` (accent colour, no underline) remains in MonitorUI.
+    func testNoButtonUsesTheSystemLinkStyle() throws {
+        let dir = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().appendingPathComponent("Sources/MonitorUI")
+        let files = try FileManager.default.contentsOfDirectory(atPath: dir.path).filter { $0.hasSuffix(".swift") }
+        XCTAssertFalse(files.isEmpty)
+        for f in files {
+            let text = try String(contentsOf: dir.appendingPathComponent(f), encoding: .utf8)
+            XCTAssertFalse(text.contains("buttonStyle(.link)"), "\(f) uses buttonStyle(.link): use TaskLink or WebLink")
+        }
+    }
+
+    /// Offscreen render of the shared link look: it draws (the cursor itself cannot be unit tested).
+    func testALinkRendersOffscreen() {
+        let view = VStack(alignment: .leading) {
+            TaskLink(title: "#12") {}
+            Text("#12").linkLook()
+        }
+        .padding().background(Color.white)
+        .environment(\.theme, Theme(dark: false, scale: 1))
+        let r = ImageRenderer(content: view)
+        XCTAssertNotNil(r.cgImage)
+    }
 }
