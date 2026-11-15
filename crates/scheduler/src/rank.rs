@@ -3,16 +3,17 @@
 /// The ordering rule, as a tuple:
 ///
 /// ```text
-/// (interactive caller first, band, progress remaining, tracker priority,
-///  earliest enqueue time, task id)
+/// (interactive caller first, band, progress remaining, aged first,
+///  tracker priority, earliest enqueue time, task id)
 /// ```
 ///
 /// The band is 0 for a landing (a batch's verification unblocks every task in
-/// it, so it goes ahead of all other pipeline work), 1 for a request that has
-/// waited past `order.max_wait_s` (see [`Rank::aged`]) and 2 for everything
-/// else, unless the machine orders by priority first ([`Rank::priority_first`]):
+/// it, so it goes ahead of all other pipeline work) and 2 for everything else,
+/// unless the machine orders by priority first ([`Rank::priority_first`]):
 /// then it is 2 + the tracker priority, so urgent work goes ahead of work
-/// nearer landing.
+/// nearer landing. A request that has waited past `order.max_wait_s` (see
+/// [`Rank::aged`]) keeps its progress and goes first among requests as far
+/// along as it, oldest first; it never passes work further along (s349).
 ///
 /// Progress remaining is steps remaining as a share of the shortest
 /// start-to-landed path of the task's own definition, in thousandths
@@ -29,11 +30,13 @@
 pub struct Rank {
     /// `false` sorts first: an interactive caller goes ahead of pipeline work.
     not_interactive: bool,
-    /// 0 for a landing, 1 when aged, else 2 (or 2 + priority when ordering by priority first).
+    /// 0 for a landing, else 2 (or 2 + priority when ordering by priority first, 2 when aged).
     band: u8,
-    /// Thousandths of the definition's shortest path still to run (0 when aged).
+    /// Thousandths of the definition's shortest path still to run.
     remaining: u32,
-    /// Lower is more urgent (0 = urgent); 0 when aged, so the oldest goes first.
+    /// `false` sorts first: among requests as far along, an aged one goes first (s349).
+    not_aged: bool,
+    /// Lower is more urgent (0 = urgent); 0 when aged, so the oldest of equal progress goes first.
     priority_key: u8,
     enqueued: u64,
     id: u64,
@@ -64,6 +67,7 @@ impl Rank {
             not_interactive: !interactive,
             band: 2,
             remaining: 0,
+            not_aged: true,
             priority_key: priority,
             enqueued,
             id,
@@ -90,15 +94,19 @@ impl Rank {
         self.remaining = steps.saturating_mul(1000) / self.span.max(1);
         self.priority_key = self.priority;
         self.enqueued = self.arrived;
+        self.not_aged = true;
         self.band = if interactive {
             2
         } else if self.landing {
             0
         } else if self.aged {
-            self.remaining = 0;
+            // Progress still decides (s349): the pipeline's rule is that work further along
+            // goes first. Aging only lifts a request over issue priority and arrival among
+            // requests as far along as it.
+            self.not_aged = false;
             self.priority_key = 0;
             self.enqueued = self.waiting_since;
-            1
+            2
         } else if self.by_priority {
             2u8.saturating_add(self.priority)
         } else {
@@ -143,9 +151,10 @@ impl Rank {
     }
 
     /// The same rank for a request that has waited past `order.max_wait_s`: it
-    /// goes ahead of all other pipeline work that is not a landing, oldest
-    /// first (by `since`, when the request began to wait). A landing and an
-    /// interactive caller keep their place.
+    /// goes ahead of all other pipeline work as far along as it, whatever their
+    /// priority, oldest first (by `since`, when the request began to wait). Work
+    /// further along still goes first (s349). A landing and an interactive caller
+    /// keep their place.
     pub fn aged(mut self, since: u64) -> Rank {
         self.aged = true;
         self.waiting_since = since;
@@ -260,12 +269,20 @@ mod tests {
 
     #[test]
     fn an_aged_request_goes_ahead_of_pipeline_work_oldest_first_but_not_ahead_of_a_landing() {
+        // Among requests as far along, an aged one goes first whatever their priority.
+        let low_aged = Rank::new(false, 3, 3, 50, 1, false).aged(100);
+        let urgent_as_far = Rank::new(false, 3, 0, 1, 2, false);
+        assert!(low_aged.is_aged() && low_aged < urgent_as_far);
+        assert!(low_aged.priority_first() < urgent_as_far.priority_first());
+        // Work further along still goes first (s349).
         let far = Rank::new(false, 5, 3, 50, 1, false).aged(100);
-        let near_urgent = Rank::new(false, 1, 0, 1, 2, false);
-        assert!(far.is_aged() && far < near_urgent);
-        assert!(far.priority_first() < near_urgent.priority_first());
+        let near = Rank::new(false, 1, 2, 1, 2, false);
+        assert!(
+            near < far,
+            "an aged request never passes work further along"
+        );
         // Oldest first is by when the request began to wait, not by the task's enqueue time.
-        let older = Rank::new(false, 9, 3, 90, 3, false).aged(40);
+        let older = Rank::new(false, 5, 3, 90, 3, false).aged(40);
         assert!(older < far, "oldest first");
         let land = Rank::new(false, 1, 4, 99, 9, false).landing().aged(100);
         assert!(land.is_landing() && !land.is_aged() && land < older);
