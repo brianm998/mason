@@ -106,3 +106,28 @@ pub fn known_red(d: &crate::daemon::Daemon, tree: &str, key: &str) -> Option<Str
         _ => None,
     }
 }
+
+/// The key of a build alone, for the build memo.
+pub fn build_key(build: &str) -> String {
+    command_key(Some(build), "\u{0}build-only")
+}
+
+/// `true` if this build already passed on this tree in this very worktree. The worktree is
+/// part of the answer because the build's output lives there: the same tree built elsewhere
+/// leaves nothing here for the tests to run.
+pub fn build_green_for(d: &crate::daemon::Daemon, tree: &str, key: &str, wt: &Path) -> bool {
+    matches!(
+        d.store.command_run(tree, key),
+        Ok(Some((true, source, _))) if source == wt.to_string_lossy()
+    )
+}
+
+/// Remember that the build passed on `tree` in `wt`.
+pub fn record_build_green(d: &crate::daemon::Daemon, tree: &str, key: &str, wt: &Path) {
+    record_green(d, tree, key, &wt.to_string_lossy());
+}
+
+/// Forget a build that failed, so a stale pass is not reused.
+pub fn record_build_red(d: &crate::daemon::Daemon, tree: &str, key: &str, wt: &Path) {
+    record_red(d, tree, key, &wt.to_string_lossy(), &[]);
+}

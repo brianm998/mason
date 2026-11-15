@@ -655,3 +655,41 @@ fn a_muted_claim_gets_nothing_and_records_nothing() {
     assert_eq!(count(&m), 0);
     assert!(played(&d).is_empty());
 }
+
+// ---- reminders do not pile up while nobody listens ------------------------------------
+
+/// Tick through many reminder rounds, with a muted monitor claiming after each one.
+fn rounds_while_muted(d: &Arc<Daemon>, since: u64, rounds: u64) -> u64 {
+    let mut t = since + 1000;
+    notify::tick_at(d, t);
+    for _ in 0..rounds {
+        t += HOUR;
+        notify::tick_at(d, t);
+        let m = notify::claim_at(d, "quiet", true, t + 1);
+        assert_eq!(count(&m), 0);
+    }
+    t + 2
+}
+
+#[test]
+fn reminders_queued_while_muted_do_not_replay_when_unmuted() {
+    let s = world();
+    let d = audible_pause(&s);
+    let since = d.store.alerts(true).unwrap()[0].since;
+    // The initial announcement was heard before the monitor was muted.
+    notify::tick_at(&d, since + 1000);
+    assert_eq!(count(&notify::claim_at(&d, "mon", false, since + 1500)), 1);
+    let t = rounds_while_muted(&d, since + 1500, 3);
+    let got = notify::claim_at(&d, "mon", false, t);
+    assert_eq!(count(&got), 0, "{got}");
+}
+
+#[test]
+fn a_never_heard_alert_plays_at_most_once_after_unmute_however_many_rounds_passed() {
+    let s = world();
+    let d = audible_pause(&s);
+    let since = d.store.alerts(true).unwrap()[0].since;
+    let t = rounds_while_muted(&d, since, 3);
+    let got = notify::claim_at(&d, "mon", false, t);
+    assert!(count(&got) <= 1, "{got}");
+}
