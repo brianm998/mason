@@ -672,18 +672,10 @@ struct ActionButtons: View {
     var hasApprovalView = false
 
     var body: some View {
-        HStack(spacing: theme.spacing) {
-            // Approve and Reject have their own view (ApprovalView) wherever there is one; a
-            // non-owner sees no buttons at all for what only the owner may do.
-            ForEach(row.allowedActions.filter { shown($0) }, id: \.self) { a in
-                Button { run(a) } label: { Text(label(a)).pill(prominent: a == "approve") }
-                    .buttonStyle(.plain)
-                    .accessibilityIdentifier("action:\(row.id):\(a)")
-            }
-            if let notice = model.sessionNotice {
-                Text(notice).font(theme.small()).foregroundStyle(theme.attention)
-                    .accessibilityIdentifier("action:\(row.id):open_session:notice")
-            }
+        // One row when it fits; on a phone, too many buttons for the width stack in a column.
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: theme.spacing) { buttons }
+            VStack(alignment: .leading, spacing: theme.spacing) { buttons }
         }
         .alert(OpenSession.confirmQuestion, isPresented: Binding(
             get: { model.sessionPrompt == row.id },
@@ -691,6 +683,20 @@ struct ActionButtons: View {
         )) {
             Button("Open anyway") { model.answerSessionPrompt(true) }
             Button("Cancel", role: .cancel) {}
+        }
+    }
+
+    /// Approve and Reject have their own view (ApprovalView) wherever there is one; a
+    /// non-owner sees no buttons at all for what only the owner may do.
+    @ViewBuilder var buttons: some View {
+        ForEach(row.allowedActions.filter { shown($0) }, id: \.self) { a in
+            Button { run(a) } label: { Text(label(a)).pill(prominent: a == "approve") }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("action:\(row.id):\(a)")
+        }
+        if let notice = model.sessionNotice {
+            Text(notice).font(theme.small()).foregroundStyle(theme.attention)
+                .accessibilityIdentifier("action:\(row.id):open_session:notice")
         }
     }
 
@@ -906,7 +912,7 @@ struct EditProposalSheet: View {
             }
         }
         .padding(theme.spacingLarge)
-        .frame(width: 520)
+        .sheetWidth(520)
     }
 }
 
@@ -938,7 +944,7 @@ struct ImproveSheet: View {
             }
         }
         .padding(theme.spacingLarge)
-        .frame(width: 480)
+        .sheetWidth(480)
     }
 }
 
@@ -1222,5 +1228,17 @@ final class SharedTick: ObservableObject {
             timer?.invalidate()
             timer = nil
         }
+    }
+}
+
+extension View {
+    /// A sheet's width: fixed on the Mac, where a sheet is as wide as its content says; on iOS it
+    /// is at most this wide and never wider than the screen (a phone is narrower than 460 pt).
+    @ViewBuilder func sheetWidth(_ width: CGFloat) -> some View {
+        #if os(macOS)
+        frame(width: width)
+        #else
+        frame(maxWidth: width)
+        #endif
     }
 }
