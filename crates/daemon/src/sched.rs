@@ -1247,7 +1247,34 @@ impl Broker {
         alive: &dyn Fn() -> bool,
         on_wait: &mut dyn FnMut(&str),
     ) -> Result<Lease, Cancelled> {
-        self.acquire_as(task, label, rank, needs, alive, on_wait, false)
+        self.acquire_as(task, label, rank, needs, alive, on_wait, false, None)
+    }
+
+    /// [`Broker::acquire`] with how long the work is expected to hold it (s385), so it may
+    /// run while the machine drains for an exclusive request if it will be done in time.
+    /// `beside` as in [`Broker::acquire_beside`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn acquire_expecting(
+        self: &Arc<Self>,
+        task: TaskId,
+        label: &str,
+        rank: Rank,
+        needs: Needs,
+        alive: &dyn Fn() -> bool,
+        on_wait: &mut dyn FnMut(&str),
+        beside: bool,
+        expected_ms: Option<u64>,
+    ) -> Result<Lease, Cancelled> {
+        self.acquire_as(
+            task,
+            label,
+            rank,
+            needs,
+            alive,
+            on_wait,
+            beside,
+            expected_ms,
+        )
     }
 
     /// [`Broker::acquire`] for one of several requests a step makes at once (s345: suites run
@@ -1262,7 +1289,7 @@ impl Broker {
         alive: &dyn Fn() -> bool,
         on_wait: &mut dyn FnMut(&str),
     ) -> Result<Lease, Cancelled> {
-        self.acquire_as(task, label, rank, needs, alive, on_wait, true)
+        self.acquire_as(task, label, rank, needs, alive, on_wait, true, None)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1275,6 +1302,7 @@ impl Broker {
         alive: &dyn Fn() -> bool,
         on_wait: &mut dyn FnMut(&str),
         beside: bool,
+        expected_ms: Option<u64>,
     ) -> Result<Lease, Cancelled> {
         let id = {
             let mut st = lock(&self.st);
@@ -1282,6 +1310,7 @@ impl Broker {
             let id = st
                 .ledger
                 .submit(rank, needs.clone(), label, crate::daemon::now_ms());
+            st.ledger.set_expected(id, expected_ms);
             st.meta.insert(id, Meta::Task);
             if beside {
                 st.lease_tasks.insert(id, task);
@@ -1656,7 +1685,20 @@ impl Broker {
         uses: &BTreeMap<String, u32>,
         standing: Option<Standing>,
     ) -> u64 {
-        self.open_lease(label, uses, None, |st, now| match standing {
+        self.lease_open_expecting(label, uses, standing, None)
+    }
+
+    /// [`Broker::lease_open_as`] with how long the command is expected to hold what it takes
+    /// (s400), from the times of its earlier runs, so a drain it holds can be passed by short
+    /// work. `None`: unknown, as before.
+    pub fn lease_open_expecting(
+        &self,
+        label: &str,
+        uses: &BTreeMap<String, u32>,
+        standing: Option<Standing>,
+        expected_ms: Option<u64>,
+    ) -> u64 {
+        self.open_lease(label, uses, None, expected_ms, |st, now| match standing {
             None => Rank::new(true, 0, 0, now, st.rank_seq, false),
             Some(s) => order(
                 st,
@@ -1684,7 +1726,7 @@ impl Broker {
         o: &crate::outside::Outside,
     ) -> u64 {
         let shown = crate::outside::display_label(&o.pipeline, label);
-        self.open_lease(&shown, uses, Some(o.pipeline.clone()), |st, now| {
+        self.open_lease(&shown, uses, Some(o.pipeline.clone()), None, |st, now| {
             order(
                 st,
                 Rank::new(false, o.steps, o.priority, now, st.rank_seq, false),
@@ -1697,6 +1739,7 @@ impl Broker {
         label: &str,
         uses: &BTreeMap<String, u32>,
         pipeline: Option<String>,
+        expected_ms: Option<u64>,
         rank_of: impl FnOnce(&State, u64) -> Rank,
     ) -> u64 {
         let mut st = lock(&self.st);
@@ -1713,6 +1756,7 @@ impl Broker {
             }
         }
         let id = st.ledger.submit(rank, needs, label, now);
+        st.ledger.set_expected(id, expected_ms);
         st.meta.insert(
             id,
             Meta::External {
@@ -2212,11 +2256,16 @@ fn kind_for(st: &State, name: &str) -> Kind {
 
 /// Free memory in MB, or `None` if it cannot be read. Never load average.
 pub fn measure_free_memory_mb() -> Option<u64> {
-    #[cfg(windows)]
-    {
-        return windows_free_memory_mb();
-    }
-    #[cfg(not(windows))]
+    free_memory_mb_here()
+}
+
+#[cfg(windows)]
+fn free_memory_mb_here() -> Option<u64> {
+    windows_free_memory_mb()
+}
+
+#[cfg(not(windows))]
+fn free_memory_mb_here() -> Option<u64> {
     unix_free_memory_mb()
 }
 
