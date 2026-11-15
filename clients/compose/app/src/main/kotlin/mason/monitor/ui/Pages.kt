@@ -717,6 +717,7 @@ fun SettingsPage(model: MonitorModel) {
                 }
             }
         }
+        DevicesSection(model)
     }
 }
 

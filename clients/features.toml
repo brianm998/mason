@@ -370,3 +370,8 @@ compose = "done"
 description = "Home shows a small selectable line under the status, 'masond 64b3068a · monitor abcdef01': the short (8 character) commit of the running masond from the welcome version and of this monitor (ownVersion), with both full hashes in the tooltip; a version of 'dev' reads 'masond (unversioned build)' (likewise 'monitor (unversioned build)'); when the update banner's daemon text says N commits behind develop, '(N commits behind develop)' follows masond's hash; nothing before the welcome"
 swift = "done"
 compose = "done"
+
+[feature.settings-devices]
+description = "Settings has a Devices section: whether LAN access is on (and how to turn it on when it is off), the paired devices with role and last seen, revoked ones apart, and Revoke after a confirmation. 'Pair a device…' (owner or viewer) shows the mason://pair URL as a QR code, the 8-digit code in large type, the hosts and a countdown to expiry that then offers a new code; the list refreshes every few seconds while the sheet is open"
+swift = "done"
+compose = "done"

@@ -57,6 +57,11 @@ public final class MonitorModel: ObservableObject {
     @Published public var settings: SettingsSnapshot?
     @Published public var notifySettings: NotifySettings?
     @Published public var settingsNotice: String?
+    /// The Devices section (s433): LAN state, paired devices, the code on show, and what the last action said.
+    @Published public var lanStatus: LanStatus?
+    @Published public var devices: DeviceList?
+    @Published public var pairOffer: PairOffer?
+    @Published public var devicesNotice: String?
     /// The high-frequency state (last sequence number, live log, clock offset) lives in its own
     /// object, so a change to it redraws only the views that show it, never the sidebar rows.
     public let live = LiveState()
@@ -827,6 +832,22 @@ public final class MonitorModel: ObservableObject {
         raw("POST", "/schedules/run", json: SettingsPayload.runSchedule(project: editorProject, name: name), id: "schedule-run")
     }
 
+    /// Ask for the LAN state and the paired devices.
+    public func loadDevices() {
+        raw("GET", "/lan", id: "lan")
+        raw("GET", "/devices", id: "devices")
+    }
+    /// Make a pairing code for a new device; `role` is "owner" or "viewer".
+    public func issuePairCode(role: String) {
+        devicesNotice = nil
+        raw("POST", "/pair/codes", json: "{\"role\":\"\(role)\"}", id: "pair-code")
+    }
+    public func closePairing() { pairOffer = nil }
+    public func revokeDevice(_ id: UInt64) {
+        devicesNotice = nil
+        raw("POST", "/devices/\(id)/revoke", json: "{}", id: "device-revoke:\(id)")
+    }
+
     public func raw(_ method: String, _ path: String, json: String = "", id: String = "") {
         command {
             if !id.isEmpty { $0.id = id }
@@ -1073,6 +1094,17 @@ public final class MonitorModel: ObservableObject {
         if r.id == "health", r.ok { health = HealthSnapshot(json: r.json) }
         if r.id == "introspection", r.ok { introspection = IntrospectionSnapshot(json: r.json) }
         if r.id == "settings", r.ok { settings = SettingsSnapshot(json: r.json) }
+        if r.id == "lan", r.ok { lanStatus = LanStatus(json: r.json) }
+        if r.id == "devices", r.ok { devices = DeviceList(json: r.json) }
+        if r.id == "pair-code" {
+            if r.ok {
+                pairOffer = PairOffer(json: r.json, nowMs: UInt64(Date().timeIntervalSince1970 * 1000))
+                if pairOffer == nil { devicesNotice = "The daemon sent a pairing code this monitor could not read." }
+            } else { devicesNotice = r.error }
+        }
+        if r.id.hasPrefix("device-revoke:") {
+            if r.ok { devicesNotice = "Revoked."; loadDevices() } else { devicesNotice = r.error }
+        }
         if r.id == "notify-settings", r.ok { notifySettings = NotifySettings(json: r.json) }
         if ["settings-save", "notify-save", "notify-test", "schedule-run"].contains(r.id) {
             settingsNotice = r.ok ? Self.settingsDone(r.id) : r.error
