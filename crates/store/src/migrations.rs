@@ -666,8 +666,19 @@ const STEPS: &[&str] = &[
          deadline_ms INTEGER NOT NULL,
          at_ms       INTEGER NOT NULL
      );",
-    // 36: which rule chose a proposal's disposition (s295, decision 0289). Additive.
+    // 36: how long a suite's build and run took, the last few of each (s385), so the scheduler
+    // can let short work run while the machine drains for an exclusive request. Additive.
+    "CREATE TABLE suite_times (
+         project TEXT NOT NULL,
+         suite   TEXT NOT NULL,
+         phase   TEXT NOT NULL,
+         ms      INTEGER NOT NULL,
+         at_ms   INTEGER NOT NULL
+     );
+     CREATE INDEX suite_times_key ON suite_times(project, suite, phase, at_ms);",
+    // 37: which rule chose a proposal's disposition (s295, decision 0289). Additive.
     "ALTER TABLE proposals ADD COLUMN decided_by TEXT NOT NULL DEFAULT '';",
+
 ];
 
 pub const SCHEMA_VERSION: u32 = STEPS.len() as u32;
