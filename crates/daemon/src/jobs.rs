@@ -862,17 +862,20 @@ pub(crate) fn acquire_needs_while(
     needs: mason_scheduler::Needs,
     wanted: &dyn Fn() -> bool,
 ) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
-    acquire_needs_as(c, needs, wanted, false)
+    acquire_needs_as(c, needs, wanted, false, None)
 }
 
-/// [`acquire_needs_while`] for one of several leases the step holds at once (s345: suites
-/// run side by side). It never takes the step's own place in the broker.
-pub(crate) fn acquire_needs_beside(
+/// [`acquire_needs_while`] with how long the work is expected to hold the lease (s385);
+/// `beside`: one of several leases the step holds at once (s345), recorded beside the
+/// step's own so it never takes the step's place in the broker.
+pub(crate) fn acquire_needs_expecting(
     c: &Ctx,
     needs: mason_scheduler::Needs,
     wanted: &dyn Fn() -> bool,
+    beside: bool,
+    expected_ms: Option<u64>,
 ) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
-    acquire_needs_as(c, needs, wanted, true)
+    acquire_needs_as(c, needs, wanted, beside, expected_ms)
 }
 
 fn acquire_needs_as(
@@ -880,6 +883,7 @@ fn acquire_needs_as(
     needs: mason_scheduler::Needs,
     wanted: &dyn Fn() -> bool,
     beside: bool,
+    expected_ms: Option<u64>,
 ) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
     let d = &c.d;
     // Device pools are sized by what the provider lists, never by a default.
@@ -905,13 +909,7 @@ fn acquire_needs_as(
     };
     let mut waited = false;
     let asked = needs.clone();
-    let acquire = if beside {
-        crate::sched::Broker::acquire_beside
-    } else {
-        crate::sched::Broker::acquire
-    };
-    let lease = acquire(
-        &d.broker,
+    let lease = d.broker.acquire_expecting(
         c.task,
         &format!("#{}", c.task.0),
         rank,
@@ -924,6 +922,8 @@ fn acquire_needs_as(
                 class: Some(crate::targets::wait_class(d, &asked, c.task)),
             });
         },
+        beside,
+        expected_ms,
     )?;
     if waited {
         c.emit(EventKind::WaitEnded { task: c.task });
