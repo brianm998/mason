@@ -1244,7 +1244,7 @@ fn a_long_interactive_script_is_one_short_line_with_the_whole_command_beside_it(
     assert_eq!(w.command, script);
     assert!(w.label.chars().count() <= 50 && !w.label.contains('\n'));
     assert!(
-        !w.reason.contains('\n') && w.reason.starts_with("behind "),
+        !w.reason.contains('\n') && w.reason.chars().count() <= 50,
         "{}",
         w.reason
     );

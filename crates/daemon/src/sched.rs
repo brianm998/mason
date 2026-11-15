@@ -2185,10 +2185,17 @@ fn compile_reason(w: &mason_scheduler::Wait, now: u64, limit: u32) -> (&'static 
         WaitCause::Behind { .. } => (
             "behind",
             match w.behind.first() {
-                Some(a) => format!(
-                    "behind {} in line",
-                    mason_scheduler::label_parts(&a.label).0
-                ),
+                Some(a) => {
+                    // "behind " + " in line" take 15 of the 50 characters a reason may use.
+                    let d = mason_scheduler::label_parts(&a.label).0;
+                    let d = if d.chars().count() > 35 {
+                        let cut: String = d.chars().take(34).collect();
+                        format!("{}…", cut.trim_end())
+                    } else {
+                        d
+                    };
+                    format!("behind {d} in line")
+                }
                 None => "behind an earlier request".into(),
             },
         ),
