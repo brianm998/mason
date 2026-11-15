@@ -14,7 +14,7 @@ use mason_store::state_name;
 
 /// The sections of the sidebar, in order. Needs-you comes first and is not a
 /// state of its own: it is `needs_attention`.
-const ORDER: [State; 10] = [
+const ORDER: [State; 11] = [
     State::NeedsAttention,
     State::Queued,
     State::Exploring,
@@ -23,6 +23,7 @@ const ORDER: [State; 10] = [
     State::Review,
     State::Landing,
     State::Proposed,
+    State::Deferred,
     State::Failed,
     State::Landed,
 ];
@@ -43,6 +44,7 @@ fn title_of(s: State) -> &'static str {
         State::Review => "Review",
         State::Landing => "Landing",
         State::Proposed => "Proposed",
+        State::Deferred => "Deferred",
         State::Failed => "Failed",
         State::Canceled => "Canceled",
         State::Landed => "Landed",
@@ -70,6 +72,7 @@ fn tooltip_of(s: State) -> &'static str {
         State::Review => "A reviewer is looking at the change.",
         State::Landing => "The change is being merged.",
         State::Proposed => "Filed by an agent or a tracker, waiting for your approval.",
+        State::Deferred => "Put aside by you. It comes back only when you approve, reject or move it back to Proposed.",
         State::Failed => "Stopped, and needs a decision: retry or cancel.",
         State::Landed => "Merged.",
         State::Canceled => "Stopped on purpose.",
@@ -215,7 +218,8 @@ impl<'a> Ctx<'a> {
     /// it are refused, and every client draws exactly these buttons.
     pub fn allowed_actions(&self, t: &Task) -> Vec<String> {
         let mut a: Vec<&str> = match t.state {
-            State::Proposed => vec!["approve", "reject", "edit"],
+            State::Proposed => vec!["approve", "defer", "reject", "edit"],
+            State::Deferred => vec!["approve", "reject", "undefer"],
             State::Queued => vec!["cancel"],
             State::Exploring | State::Developing | State::Review => {
                 vec!["cancel", "retry", "open_session"]
@@ -752,7 +756,7 @@ impl<'a> Ctx<'a> {
             state: state_name(s).into(),
             title: title_of(s).into(),
             count: tasks.len() as u32,
-            collapsed: is_history(s),
+            collapsed: is_history(s) || s == State::Deferred,
             rows: tasks
                 .iter()
                 .take(if is_history(s) {
@@ -813,6 +817,7 @@ impl<'a> Ctx<'a> {
         for s in u.shares.iter_mut().filter(|s| s.kind == "task") {
             if let Some(t) = self.w.tasks.get(&TaskId(s.task)) {
                 s.title = t.title.clone();
+                s.project = self.project_name(t);
             }
         }
         u
@@ -1277,7 +1282,14 @@ impl<'a> Ctx<'a> {
         }
     }
 
-    pub fn view(&self, kind: ViewKind, project: &str, task: u64, step: &str) -> Option<View> {
+    pub fn view(
+        &self,
+        kind: ViewKind,
+        project: &str,
+        task: u64,
+        step: &str,
+        cpu_span_ms: u64,
+    ) -> Option<View> {
         use mason_protocol::view::Body;
         let body = match kind {
             ViewKind::Header => Body::Header(self.header(project)),
@@ -1287,6 +1299,14 @@ impl<'a> Ctx<'a> {
             ViewKind::Landing => Body::Landing(self.landing(project)),
             ViewKind::Usage => Body::Usage(self.usage()),
             ViewKind::Editor => Body::Editor(self.editor(project, step)),
+            ViewKind::CpuHistory => Body::CpuHistory(self.d.cpu_history(
+                self.now,
+                if cpu_span_ms == 0 {
+                    3_600_000
+                } else {
+                    cpu_span_ms
+                },
+            )),
             _ => return None,
         };
         Some(View { body: Some(body) })

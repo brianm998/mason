@@ -137,6 +137,7 @@ class MonitorConnection(
         when (val p = model.page) {
             is Page.Task -> { views += ViewKind.TASK_DETAIL; task = p.id }
             Page.Landing -> views += ViewKind.LANDING
+            Page.Home -> views += ViewKind.CPU_HISTORY
             Page.Pipeline -> views += ViewKind.EDITOR
             Page.Health -> {
                 model.raw("GET", "/resources", id = "health")
@@ -145,7 +146,7 @@ class MonitorConnection(
             Page.Settings -> model.loadSettings()
             else -> {}
         }
-        return ClientMessage(subscribe = Subscribe(views = views, project = model.project, task = task, editor_step = model.editorStep))
+        return ClientMessage(subscribe = Subscribe(views = views, project = model.project, task = task, editor_step = model.editorStep, cpu_span_ms = model.cpuSpan.ms))
     }
 
     private fun send(c: Command) {

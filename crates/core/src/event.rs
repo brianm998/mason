@@ -53,6 +53,14 @@ pub enum EventKind {
     Rejected {
         task: TaskId,
     },
+    /// The owner put a proposed task aside (Proposed to Deferred).
+    Deferred {
+        task: TaskId,
+    },
+    /// The owner moved a deferred task back to Proposed.
+    Undeferred {
+        task: TaskId,
+    },
     /// A queued task was claimed. `entry` says where it starts, under which
     /// definition, and why exploring was or was not skipped. `None` is the
     /// older fixed behaviour: `exploring`, or `developing` when flagged explored.

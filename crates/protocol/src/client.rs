@@ -133,6 +133,7 @@ impl Client {
                 project: project.into(),
                 task,
                 editor_step: editor_step.into(),
+                cpu_span_ms: 0,
             })),
         })
     }

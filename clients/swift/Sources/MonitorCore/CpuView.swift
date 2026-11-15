@@ -32,11 +32,16 @@ public struct CpuRow: Equatable, Sendable {
     public let name: String
     public let task: UInt64
     public let title: String
+    /// The task's project; empty for a fixed bucket.
+    public let project: String
     public let permille: UInt32
     public let color: String
 
-    /// "#287 Scheduler: … 23.4%", for a hover or a tap.
-    public var tip: String { (title.isEmpty ? name : "\(name) \(title)") + " " + Format.permille(permille) }
+    /// "#287 (star)" for a task, the fixed name otherwise: what the legend and tips lead with.
+    public var heading: String { project.isEmpty ? name : "\(name) (\(project))" }
+
+    /// "#287 (star) Scheduler: … 23.4%", for a hover or a tap.
+    public var tip: String { (title.isEmpty ? heading : "\(heading) \(title)") + " " + Format.permille(permille) }
 }
 
 public struct CpuLayout: Equatable, Sendable {
@@ -102,7 +107,7 @@ public func cpuLayout(_ u: Mason_V1_CpuUsage?, nowMs: UInt64, colors: [UInt64: I
         let colour = isTask ? (colors[s.task] ?? Int(s.task % UInt64(Cpu.taskColours))) + 1 : 0
         return CpuRow(
             label: s.label, name: isTask ? s.label : fixedName(s.kind), task: isTask ? s.task : 0,
-            title: isTask ? s.title : "", permille: s.permille, color: isTask ? String(colour) : s.kind)
+            title: isTask ? s.title : "", project: isTask ? s.project : "", permille: s.permille, color: isTask ? String(colour) : s.kind)
     }
     let total = all.reduce(0) { $0 + $1.permille }
     return CpuLayout(
@@ -118,9 +123,35 @@ public func cpuLayout(_ u: Mason_V1_CpuUsage?, nowMs: UInt64, colors: [UInt64: I
 public final class CpuModel: ObservableObject {
     @Published public private(set) var usage: Mason_V1_CpuUsage?
     @Published public private(set) var colors: [UInt64: Int] = [:]
+    /// The graph, prepared off the main thread; nil until the first history arrives.
+    @Published public private(set) var chart: CpuChart?
+    /// The span the graph shows; a change resubscribes (see `Connection.sendSubscription`).
+    @Published public private(set) var span: CpuSpan = .hour
     private var palette = CpuColors()
+    private var generation = 0
 
     public init() {}
+
+    public func setSpan(_ s: CpuSpan) {
+        guard s != span else { return }
+        span = s
+        chart = nil
+    }
+
+    /// Take a history view. The chart is built on a background task; a newer history
+    /// arriving first makes this one's result be dropped, so updates coalesce.
+    public func update(history h: Mason_V1_CpuHistory) {
+        generation += 1
+        let gen = generation
+        let usage = usage, colors = colors, span = span
+        Task.detached(priority: .utility) {
+            let c = cpuChart(h, usage: usage, colors: colors)
+            await MainActor.run { [weak self] in
+                guard let self, self.generation == gen, self.span == span else { return }
+                if self.chart != c { self.chart = c }
+            }
+        }
+    }
 
     /// Take the CPU data from a home view (nil from a daemon that sends none).
     public func update(_ home: Mason_V1_HomeView?) {
@@ -129,4 +160,94 @@ public final class CpuModel: ObservableObject {
         usage = u
         colors = palette.assign((u?.shares ?? []).filter { $0.kind == "task" }.map(\.task))
     }
+}
+
+/// The spans the graph offers.
+public enum CpuSpan: CaseIterable, Sendable {
+    case fiveMinutes, hour, sixHours, day
+
+    public var ms: UInt64 {
+        switch self {
+        case .fiveMinutes: return 300_000
+        case .hour: return 3_600_000
+        case .sixHours: return 21_600_000
+        case .day: return 86_400_000
+        }
+    }
+    public var label: String {
+        switch self {
+        case .fiveMinutes: return "5 min"
+        case .hour: return "1 h"
+        case .sixHours: return "6 h"
+        case .day: return "24 h"
+        }
+    }
+}
+
+/// One series of the graph: a share's permille at each time, in the same colour as its bar segment.
+public struct CpuSeries: Equatable, Sendable {
+    public let key: String
+    public let heading: String
+    public let title: String
+    public let color: String
+    /// One value per entry of `CpuChart.times` (0 where the share was absent).
+    public let values: [UInt32]
+
+    /// "#287 (star) Scheduler: … 23.4%" at `index`.
+    public func tip(at index: Int) -> String {
+        (title.isEmpty ? heading : "\(heading) \(title)") + " " + Format.permille(values[index])
+    }
+}
+
+/// The CPU history, ready to draw: points in time order and a series per share, biggest total first
+/// (that one at the bottom of the stack).
+public struct CpuChart: Equatable, Sendable {
+    public let spanMs: UInt64
+    public let times: [UInt64]
+    public let series: [CpuSeries]
+    /// The tallest stack, in permille (at least 1).
+    public let maxStack: UInt32
+}
+
+/// The chart for `h`. Titles and projects come from `usage` (the history carries neither); a task
+/// in `colors` keeps the colour its bar segment has, any other the id-based fallback the bar uses.
+public func cpuChart(_ h: Mason_V1_CpuHistory, usage: Mason_V1_CpuUsage?, colors: [UInt64: Int]) -> CpuChart {
+    var info: [String: Mason_V1_CpuShare] = [:]
+    for s in usage?.shares ?? [] { info[s.kind == "task" ? "task:\(s.task)" : s.kind] = s }
+    var order: [String] = []
+    var seen: [String: Mason_V1_CpuShare] = [:]
+    var totals: [String: UInt64] = [:]
+    for p in h.points {
+        for s in p.shares {
+            let k = s.kind == "task" ? "task:\(s.task)" : s.kind
+            if seen[k] == nil { order.append(k); seen[k] = s }
+            totals[k, default: 0] += UInt64(s.permille)
+        }
+    }
+    order.sort { (totals[$0]!, $1) > (totals[$1]!, $0) }
+    var stack = [UInt32](repeating: 0, count: h.points.count)
+    let series = order.map { k -> CpuSeries in
+        let s = seen[k]!
+        let isTask = s.kind == "task"
+        let now = info[k]
+        let colour = isTask ? String((colors[s.task] ?? Int(s.task % UInt64(Cpu.taskColours))) + 1) : s.kind
+        let values = h.points.enumerated().map { (i, p) -> UInt32 in
+            let v = p.shares.first { ($0.kind == "task" ? "task:\($0.task)" : $0.kind) == k }?.permille ?? 0
+            stack[i] += v
+            return v
+        }
+        let name = isTask ? s.label : fixedName(s.kind)
+        let project = isTask ? (now?.project ?? "") : ""
+        return CpuSeries(
+            key: k, heading: project.isEmpty ? name : "\(name) (\(project))",
+            title: isTask ? (now?.title ?? "") : "", color: colour, values: values)
+    }
+    return CpuChart(spanMs: h.spanMs, times: h.points.map(\.atMs), series: series, maxStack: max(1, stack.max() ?? 1))
+}
+
+/// The index of the point nearest to `fraction` (0...1) of the chart's width; nil for an empty chart.
+public func cpuChartIndex(_ c: CpuChart, fraction: Double) -> Int? {
+    guard let first = c.times.first, let last = c.times.last, c.times.count > 0 else { return nil }
+    let at = Double(first) + min(max(fraction, 0), 1) * Double(last - first)
+    return c.times.indices.min { abs(Double(c.times[$0]) - at) < abs(Double(c.times[$1]) - at) }
 }

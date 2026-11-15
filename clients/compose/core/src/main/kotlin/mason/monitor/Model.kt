@@ -31,6 +31,9 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     /** Each task's colour in the CPU bar while it is among the shares. */
     var cpuColors by mutableStateOf<Map<Long, Int>>(emptyMap())
     private val cpuPalette = CpuColors()
+    /** The latest CPU history for [cpuSpan]; the graph is built from it off the main thread. */
+    var cpuHistory by mutableStateOf<mason.v1.CpuHistory?>(null)
+    var cpuSpan by mutableStateOf(CpuSpan.Hour)
     var taskDetail by mutableStateOf<TaskDetailView?>(null)
     var landing by mutableStateOf<LandingView?>(null)
     var usage by mutableStateOf<UsageView?>(null)
@@ -302,6 +305,13 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     fun linkify(text: String): List<LinkSegment> =
         Linkify.segments(text, { isKnownTask(it) }, taskDetail?.ci_links ?: emptyList())
 
+    /** Pick the CPU graph's span and ask the daemon for that range. */
+    fun pickCpuSpan(s: CpuSpan) {
+        if (s == cpuSpan) return
+        cpuSpan = s
+        cpuHistory = null
+        subscribe?.invoke()
+    }
     fun goBack() { history = history.goBack(); subscribe?.invoke() }
     fun goForward() { history = history.goForward(); subscribe?.invoke() }
     fun goHome() { history = history.goHome(); subscribe?.invoke() }
@@ -474,7 +484,11 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
 
     fun cancel(task: Long) = send(Command(cancel = TaskRef(task = task)))
     fun retry(task: Long, from: String = "", seen: Long = 0) = send(Command(retry = Retry(task = task, from = from, seen = seen)))
-    fun approve(task: Long) = send(Command(approve = TaskRef(task = task)))
+    fun approve(task: Long, priority: String = "") = send(Command(approve = ApproveTask(task = task, priority = priority)))
+    /** Put a proposed task aside; it comes back only by hand. */
+    fun deferTask(task: Long) = send(Command(defer = TaskRef(task = task)))
+    /** Move a deferred task back to proposed. */
+    fun undefer(task: Long) = send(Command(undefer = TaskRef(task = task)))
     /**
      * The tasks the Add blocker picker offers for [row]: any task in the sidebar that is not itself,
      * not already a blocker, and could still land (not landed, canceled or failed).
@@ -496,7 +510,7 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
         send(Command(approve_hold = ApproveHold(task = task, diff_hash = diffHash)))
 
     /** What Approve sends for an approval: the held diff's hash when there is one, else a plain approve. */
-    fun approve(task: Long, a: Approval) = if (a.diff_hash.isEmpty()) approve(task) else approveHold(task, a.diff_hash)
+    fun approve(task: Long, a: Approval, priority: String = MonitorModel.DEFAULT_APPROVAL_PRIORITY) = if (a.diff_hash.isEmpty()) approve(task, priority) else approveHold(task, a.diff_hash)
 
     /** The first task that needs the owner, in the Home queue's order. */
     val firstNeedingYou: Long? get() = if (connected) home?.attention?.firstOrNull()?.task?.id else null
@@ -873,6 +887,7 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
             taskDetail = d
             liveLog = d.log_tail.split("\n").dropLastWhile { it.isEmpty() }.takeLast(LOG_KEEP)
         }
+        v.cpu_history?.let { cpuHistory = it }
         v.landing?.let { landing = it }
         v.usage?.let { usage = it }
         v.editor?.let { editor = it }
@@ -885,6 +900,9 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     }
 
     companion object {
+        /** The priorities the approval picker offers, and the one it starts at. */
+        val APPROVAL_PRIORITIES = listOf("urgent", "high", "normal", "low")
+        const val DEFAULT_APPROVAL_PRIORITY = "normal"
         /** The CPU gate's range in the monitor, and the most the settle stepper asks for. */
         const val CPU_GATE_MIN = 10
         const val CPU_GATE_MAX = 100
