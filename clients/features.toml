@@ -81,6 +81,11 @@ description = "Home's CPU section: one bar for the whole machine split by task a
 swift = "done"
 compose = "done"
 
+[feature.cpu-history]
+description = "Home's CPU section graphs every share over time as a stacked area chart in the bar's colours, with a span picker (5 min, 1 h, 6 h, 24 h) and the time and value on hover or tap; legend rows name the task's project, e.g. '#200 (star) Title'"
+swift = "done"
+compose = "done"
+
 [feature.task-detail]
 description = "Steps, activity, live log, plan, checks, tests, history, decision card, actions"
 swift = "done"

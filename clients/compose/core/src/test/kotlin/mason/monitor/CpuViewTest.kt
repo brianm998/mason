@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 package mason.monitor
 
+import mason.v1.CpuHistory
+import mason.v1.CpuPoint
 import mason.v1.CpuShare
 import mason.v1.CpuUsage
 import mason.v1.HomeView
@@ -107,5 +109,37 @@ class CpuViewTest {
         assertEquals(1, m.cpuColors[2L])
         assertEquals(2, m.cpuColors[3L])
         assertEquals(true, TaskDetailView(cpu_permille = 12).cpu_permille == 12)
+    }
+
+    @Test
+    fun legendTextNamesTheProject() {
+        val t = task(200, 300).copy(project = "star")
+        val l = cpuLayout(usage(t, fixed("masond", 40)), 101_000, mapOf(200L to 0))!!
+        assertEquals("#200 (star)", l.rows[0].heading)
+        assertEquals("#200 (star) Title 200 30.0%", l.rows[0].tip)
+        assertEquals("MASON daemon", l.rows[1].heading)
+    }
+
+    @Test
+    fun chartSeriesUseTheBarsColoursAndKeepTimeOrder() {
+        val t = task(200, 300).copy(project = "star")
+        val u = usage(t, fixed("masond", 40))
+        val colors = mapOf(200L to 3)
+        val h = CpuHistory(
+            span_ms = 300_000,
+            points = listOf(
+                CpuPoint(at_ms = 1000, shares = listOf(task(200, 100), fixed("masond", 10))),
+                CpuPoint(at_ms = 6000, shares = listOf(task(200, 200))),
+            ),
+        )
+        val c = cpuChart(h, u, colors)
+        assertEquals(listOf(1000L, 6000L), c.times)
+        val bar = cpuLayout(u, 101_000, colors)!!.segments
+        assertEquals(listOf(bar[0].color, "masond"), c.series.map { it.color })
+        assertEquals("#200 (star)", c.series[0].heading)
+        assertEquals(listOf(100, 200), c.series[0].values)
+        assertEquals(listOf(10, 0), c.series[1].values)
+        assertEquals(200, c.maxStack)
+        assertEquals(1, cpuChartIndex(c, 0.9))
     }
 }

@@ -488,6 +488,7 @@ fun ApprovalView(model: MonitorModel, task: Long, approval: Approval) {
     val theme = LocalTheme.current
     var reason by remember { mutableStateOf("") }
     var rejecting by remember { mutableStateOf(false) }
+    var priority by remember { mutableStateOf(MonitorModel.DEFAULT_APPROVAL_PRIORITY) }
     val shape = RoundedCornerShape(theme.radius)
     fun reject() { model.reject(task, reason); reason = ""; rejecting = false }
     Column(
@@ -510,7 +511,13 @@ fun ApprovalView(model: MonitorModel, task: Long, approval: Approval) {
         }
         if (model.canAct) {
             Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing)) {
-                Pill("Approve", prominent = true, modifier = Modifier.testTag("approval:$task:approve")) { model.approve(task, approval) }
+                Pill("Approve", prominent = true, modifier = Modifier.testTag("approval:$task:approve")) { model.approve(task, approval, priority) }
+                if (approval.diff_hash.isEmpty()) {
+                    MonitorModel.APPROVAL_PRIORITIES.forEach { p ->
+                        Pill(p, prominent = p == priority, modifier = Modifier.testTag("approval:$task:priority:$p")) { priority = p }
+                    }
+                    Pill("Defer", modifier = Modifier.testTag("approval:$task:defer")) { model.deferTask(task) }
+                }
                 Pill("Reject", modifier = Modifier.testTag("approval:$task:reject")) { rejecting = !rejecting }
             }
             if (rejecting) Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing), verticalAlignment = Alignment.CenterVertically) {
@@ -586,6 +593,8 @@ private fun run(model: MonitorModel, row: TaskRow, a: String) {
         "approve" -> model.approve(row.id)
         "revive" -> model.revive(row.id)
         "reject" -> model.reject(row.id)
+        "defer" -> model.deferTask(row.id)
+        "undefer" -> model.undefer(row.id)
         "explore_anyway" -> model.exploreAnyway(row.id)
         "land_now" -> model.landNow(row.id)
         "force" -> model.force(row.id)

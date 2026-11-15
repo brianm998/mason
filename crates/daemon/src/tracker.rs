@@ -985,7 +985,10 @@ pub fn sync_with_rule(
         }
         let task = TaskId(row.task);
         let state = w.as_ref().and_then(|w| w.tasks.get(&task).map(|t| t.state));
-        if !matches!(state, Some(State::Proposed | State::Queued)) {
+        if !matches!(
+            state,
+            Some(State::Proposed | State::Deferred | State::Queued)
+        ) {
             alerts.push(format!(
                 "the dependencies of issue #{} changed on the tracker (now {}) but task #{} is already {}, so it is not pulled back; the change is not applied",
                 it.number,
