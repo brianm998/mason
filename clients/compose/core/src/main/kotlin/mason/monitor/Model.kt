@@ -208,6 +208,13 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     /** Where the sidebar should scroll to (a tile was clicked). */
     var scrollTarget by mutableStateOf<String?>(null)
     var lastResult by mutableStateOf<String?>(null)
+    /** A long command opened from a Compilation row; null: the dialog is closed. */
+    var commandDialog by mutableStateOf<CommandDialog?>(null)
+        private set
+    fun openCommand(label: String, command: String) {
+        Format.commandDialog(label, command)?.let { commandDialog = it }
+    }
+    fun closeCommand() { commandDialog = null }
     /** Open session found the step running: the task to ask about. Answer with [answerSessionPrompt]. */
     var sessionPrompt by mutableStateOf<Long?>(null)
         private set

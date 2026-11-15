@@ -2140,6 +2140,10 @@ public nonisolated struct Mason_V1_CompileHolder: Sendable {
 
   public var title: String = String()
 
+  /// The whole command of an interactive caller (`label` is then a one-line description of
+  /// at most 50 characters); empty for a task's own label like `#88`.
+  public var command: String = String()
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -2174,6 +2178,10 @@ public nonisolated struct Mason_V1_CompileWaiter: Sendable {
 
   /// A landing's verification: first among pipeline work, and not held by the CPU.
   public var landing: Bool = false
+
+  /// The whole command of an interactive caller (`label` and `reason` carry only its
+  /// description); empty for a task's own label.
+  public var command: String = String()
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -6908,7 +6916,7 @@ nonisolated extension Mason_V1_CpuUsage: SwiftProtobuf.Message, SwiftProtobuf._M
 
 nonisolated extension Mason_V1_CompileHolder: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".CompileHolder"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}label\0\u{1}task\0\u{3}since_ms\0\u{1}interactive\0\u{3}idle_ms\0\u{1}project\0\u{1}title\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}label\0\u{1}task\0\u{3}since_ms\0\u{1}interactive\0\u{3}idle_ms\0\u{1}project\0\u{1}title\0\u{1}command\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -6923,6 +6931,7 @@ nonisolated extension Mason_V1_CompileHolder: SwiftProtobuf.Message, SwiftProtob
       case 5: try { try decoder.decodeSingularUInt64Field(value: &self.idleMs) }()
       case 6: try { try decoder.decodeSingularStringField(value: &self.project) }()
       case 7: try { try decoder.decodeSingularStringField(value: &self.title) }()
+      case 8: try { try decoder.decodeSingularStringField(value: &self.command) }()
       default: break
       }
     }
@@ -6950,6 +6959,9 @@ nonisolated extension Mason_V1_CompileHolder: SwiftProtobuf.Message, SwiftProtob
     if !self.title.isEmpty {
       try visitor.visitSingularStringField(value: self.title, fieldNumber: 7)
     }
+    if !self.command.isEmpty {
+      try visitor.visitSingularStringField(value: self.command, fieldNumber: 8)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -6961,6 +6973,7 @@ nonisolated extension Mason_V1_CompileHolder: SwiftProtobuf.Message, SwiftProtob
     if lhs.idleMs != rhs.idleMs {return false}
     if lhs.project != rhs.project {return false}
     if lhs.title != rhs.title {return false}
+    if lhs.command != rhs.command {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -6968,7 +6981,7 @@ nonisolated extension Mason_V1_CompileHolder: SwiftProtobuf.Message, SwiftProtob
 
 nonisolated extension Mason_V1_CompileWaiter: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".CompileWaiter"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}label\0\u{1}task\0\u{3}since_ms\0\u{1}position\0\u{1}reason\0\u{1}cause\0\u{1}interactive\0\u{3}steps_remaining\0\u{1}landing\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}label\0\u{1}task\0\u{3}since_ms\0\u{1}position\0\u{1}reason\0\u{1}cause\0\u{1}interactive\0\u{3}steps_remaining\0\u{1}landing\0\u{1}command\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -6985,6 +6998,7 @@ nonisolated extension Mason_V1_CompileWaiter: SwiftProtobuf.Message, SwiftProtob
       case 7: try { try decoder.decodeSingularBoolField(value: &self.interactive) }()
       case 8: try { try decoder.decodeSingularUInt32Field(value: &self.stepsRemaining) }()
       case 9: try { try decoder.decodeSingularBoolField(value: &self.landing) }()
+      case 10: try { try decoder.decodeSingularStringField(value: &self.command) }()
       default: break
       }
     }
@@ -7018,6 +7032,9 @@ nonisolated extension Mason_V1_CompileWaiter: SwiftProtobuf.Message, SwiftProtob
     if self.landing != false {
       try visitor.visitSingularBoolField(value: self.landing, fieldNumber: 9)
     }
+    if !self.command.isEmpty {
+      try visitor.visitSingularStringField(value: self.command, fieldNumber: 10)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -7031,6 +7048,7 @@ nonisolated extension Mason_V1_CompileWaiter: SwiftProtobuf.Message, SwiftProtob
     if lhs.interactive != rhs.interactive {return false}
     if lhs.stepsRemaining != rhs.stepsRemaining {return false}
     if lhs.landing != rhs.landing {return false}
+    if lhs.command != rhs.command {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

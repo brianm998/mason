@@ -701,6 +701,9 @@ message CompileHolder {
   // command, a slot held outside the queue, or a task the store no longer has.
   string project = 6;
   string title = 7;
+  // The whole command of an interactive caller (`label` is then a one-line description of
+  // at most 50 characters); empty for a task's own label like `#88`.
+  string command = 8;
 }
 
 // A request waiting for a `compile` slot, in line order.
@@ -720,6 +723,9 @@ message CompileWaiter {
   uint32 steps_remaining = 8;
   // A landing's verification: first among pipeline work, and not held by the CPU.
   bool landing = 9;
+  // The whole command of an interactive caller (`label` and `reason` carry only its
+  // description); empty for a task's own label.
+  string command = 10;
 }
 
 message Compilation {

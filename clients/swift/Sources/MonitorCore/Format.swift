@@ -6,6 +6,13 @@ import MasonProtocol
 public typealias ProgressCell = Mason_V1_ProgressCell
 public typealias ProgressSource = Mason_V1_ProgressSource
 
+/// A command shown whole in a dialog. It is a copy: the dialog keeps what it was opened with
+/// even when the row leaves the queue.
+public struct CommandDialog: Equatable {
+    public let title: String
+    public let command: String
+}
+
 public enum Format {
     /// The longest title a compile row shows before it is cut (same in the Compose core).
     public static let compileTitleLimit = 40
@@ -32,6 +39,12 @@ public enum Format {
         let t = shortTitle(title)
         if !t.isEmpty { parts.append("- \(t) -") }
         return parts.joined(separator: " ")
+    }
+
+    /// What a clicked command opens: the dialog's title (the description the row showed) and
+    /// the whole command. nil when the daemon sent no command (a task's own label like `#88`).
+    public static func commandDialog(label: String, command: String) -> CommandDialog? {
+        command.isEmpty ? nil : CommandDialog(title: label, command: command)
     }
 
     /// Time in state: "42 s", "9 min", "3h10". Always shown, never hidden.

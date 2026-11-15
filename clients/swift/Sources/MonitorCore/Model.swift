@@ -227,6 +227,8 @@ public final class MonitorModel: ObservableObject {
     /// Where the sidebar should scroll to (a tile was clicked).
     @Published public var scrollTarget: String?
     @Published public var lastResult: String?
+    /// A long command opened from a Compilation row; nil: the dialog is closed.
+    @Published public var commandDialog: CommandDialog?
     /// Open session found the step running: the task to ask about. Answer with `answerSessionPrompt`.
     @Published public var sessionPrompt: UInt64?
     /// What Open session did or could not do, in words, until the next click.
@@ -678,6 +680,13 @@ public final class MonitorModel: ObservableObject {
         c.raw = .with { $0.method = "POST"; $0.path = "/projects/\(project)/ssh-key"; $0.json = "{\"path\":\(Self.jsonString(path))}" }
         send(c)
     }
+
+    /// Open the dialog for a row's command (nothing when the row has none).
+    public func openCommand(label: String, command: String) {
+        if let d = Format.commandDialog(label: label, command: command) { commandDialog = d }
+    }
+
+    public func closeCommand() { commandDialog = nil }
 
     public func closeSSHKeys() {
         sshKeyProject = nil

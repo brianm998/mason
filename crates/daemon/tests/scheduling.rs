@@ -1105,3 +1105,45 @@ fn home_compile_holders_carry_the_tasks_project_and_full_title() {
     drop(held_person);
     d.broker.lease_close(pid);
 }
+
+#[test]
+fn a_long_interactive_script_is_one_short_line_with_the_whole_command_beside_it() {
+    let s = Scratch::new("test -f hello.txt", unique_script());
+    let d = s.start_with(|c| c.max_concurrent = 1);
+    d.broker.set_limit("compile", 1).unwrap();
+    let script = format!(
+        "bash -c python3 - <<'EOF'\np=\"crates/adapters/src/hosted.rs\"\n{}\nEOF",
+        "x = 1  # ".repeat(60)
+    );
+    let label = format!("interactive `{script}`");
+    let (first, held) = hold(&d, &label, &[("compile", 1)]);
+    let map = [("compile".to_string(), 1u32)].into_iter().collect();
+    let second = d.broker.lease_open(&label, &map);
+    let v = d.broker.snapshot();
+    let mut seen = 0;
+    for list in ["holders", "waiting"] {
+        for e in v[list].as_array().unwrap() {
+            let l = e["label"].as_str().unwrap();
+            assert!(!l.contains('\n') && l.chars().count() <= 50, "{l}");
+            assert_eq!(e["command"].as_str().unwrap(), script);
+            if let Some(x) = e["explain"].as_str() {
+                assert!(!x.contains('\n'), "{x}");
+            }
+            seen += 1;
+        }
+    }
+    assert_eq!(seen, 2);
+    let c = d.broker.compilation();
+    let w = &c.pending[0];
+    assert_eq!(w.command, script);
+    assert!(w.label.chars().count() <= 50 && !w.label.contains('\n'));
+    assert!(
+        !w.reason.contains('\n') && w.reason.starts_with("behind "),
+        "{}",
+        w.reason
+    );
+    assert_eq!(c.running[0].command, script);
+    drop(held);
+    d.broker.lease_close(first);
+    d.broker.lease_close(second);
+}
