@@ -398,4 +398,6 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s447**: `monitor-tool snapshot --ipad` renders the monitor offscreen at 1366×1024 and 1180×820 (scale 2, light and dark), and tests can check the top bar fits an iPad width.
 - **s455**: A new `iOS` workflow (`monitor-ios`, macos-15, 25 min) runs `make ios` on pull requests and develop pushes that touch `clients/swift/**`, cancelling superseded runs.
 - **s456**: The iOS app now connects to its one paired daemon through `RemoteSession`, trying a matching Bonjour record first and then each paired host, connecting when the scene is active, closing in the background, resuming from the last sequence number, and clearing the pairing on a 401.
+- **s457**: The iOS app shows a pairing screen when nothing is paired (QR scan with VisionKit, or a Bonjour list plus the 8-digit code), opens `mason://pair` links, and has a Settings sheet with Forget.
+- **s459**: the iPhone root is a navigation stack (sidebar first, a row pushes its page) over the Mac monitor's own pages in one narrow column, with a status line, banners, the session-limit stepper and tile taps, and speech stays off.
 <!-- status:end -->
