@@ -858,6 +858,7 @@ pub fn file_finding(
             evidence: f.evidence.clone(),
             blocks_task: false,
             explored: true,
+            estimate: Some((f.impact, f.cost)),
         },
     )?;
     let b = f.before.unwrap_or(Measure {
@@ -1002,8 +1003,8 @@ pub fn file_analyst_task(d: &Arc<Daemon>, pid: ProjectId) -> Result<TaskId, Stri
     let body = format!(
         "You are the analyst. Read the digest below and the event history (`mason digest`, `mason metrics`) and find what the daily rules cannot: a pattern in how this pipeline spends its time, fails, or makes the owner step in.\n\n\
          Write your findings as JSON in a file called `{ANALYST_FILE}` in the root of your worktree, and do not commit it:\n\n\
-         ```json\n{{\"findings\": [{{\"title\": \"...\", \"body\": \"what is wrong and why it matters\", \"evidence\": \"a file and line or recorded output that shows it, e.g. crates/daemon/src/sched.rs:120\", \"metric\": \"one of: {}\"}}]}}\n```\n\n\
-         A finding with no evidence naming a file, or naming a metric that is not in that list, is refused. Do not change any code. Then finish with a summary.\n\n## Digest (last 7 days, computed from recorded data)\n```json\n{digest_text}\n```",
+         ```json\n{{\"findings\": [{{\"title\": \"...\", \"body\": \"what is wrong and why it matters\", \"evidence\": \"a file and line or recorded output that shows it, e.g. crates/daemon/src/sched.rs:120\", \"metric\": \"one of: {}\", \"severity\": \"low or high\", \"cost\": \"small or large\"}}]}}\n```\n\n\
+         `severity` is how much the finding matters and `cost` how big the fix looks; leave them out and it counts as high and large. A finding with no evidence naming a file, or naming a metric that is not in that list, is refused. Do not change any code. Then finish with a summary.\n\n## Digest (last 7 days, computed from recorded data)\n```json\n{digest_text}\n```",
         METRICS.join(", ")
     );
     let t = crate::schedule::file_low(d, p, ANALYST_TITLE, &body)?;
@@ -1015,15 +1016,15 @@ pub fn file_analyst_task(d: &Arc<Daemon>, pid: ProjectId) -> Result<TaskId, Stri
 
 /// After an agent step of an analyst task: read the file it wrote, check every finding, and
 /// file the good ones. Refusals are written beside the step's logs.
-pub fn ingest_analyst(
-    d: &Arc<Daemon>,
-    task: TaskId,
-    project: &str,
-    title: &str,
-    wt: &Path,
-    dir: &Path,
-) {
-    if title != ANALYST_TITLE {
+pub fn ingest_analyst(d: &Arc<Daemon>, task: TaskId, project: &str, wt: &Path, dir: &Path) {
+    // The analyst's task is known by the schedule row that recorded it, not by its title.
+    let is_analyst = d
+        .store
+        .schedule(&format!("analyst:{project}"))
+        .ok()
+        .flatten()
+        .is_some_and(|r| r.last_task == Some(task.0));
+    if !is_analyst {
         return;
     }
     let file = wt.join(ANALYST_FILE);
@@ -1101,6 +1102,8 @@ fn parse_drafts(text: &str) -> Result<Vec<Draft>, String> {
             body: s(x, "body"),
             evidence: s(x, "evidence"),
             metric: s(x, "metric"),
+            severity: s(x, "severity"),
+            cost: s(x, "cost"),
         })
         .collect())
 }

@@ -682,6 +682,10 @@ const STEPS: &[&str] = &[
     "ALTER TABLE debts ADD COLUMN how TEXT NOT NULL DEFAULT '';
      ALTER TABLE debts ADD COLUMN landed TEXT NOT NULL DEFAULT '';
      ALTER TABLE debts ADD COLUMN tried_at INTEGER NOT NULL DEFAULT 0;",
+
+    // 38: which rule chose a proposal's disposition (s295, decision 0289). Additive.
+    "ALTER TABLE proposals ADD COLUMN decided_by TEXT NOT NULL DEFAULT '';",
+
 ];
 
 pub const SCHEMA_VERSION: u32 = STEPS.len() as u32;

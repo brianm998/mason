@@ -530,6 +530,7 @@ async fn proposal_file(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> 
                 evidence: text("evidence"),
                 blocks_task: b["blocks_task"].as_bool().unwrap_or(false),
                 explored: b["explored"].as_bool().unwrap_or(false),
+                           estimate: None,
             };
             match crate::proposals::file(&d2, &f) {
                 Ok(done) => Ok(json!({"task": done.task.0, "route": done.route, "proposed": done.proposed, "project": done.project})),

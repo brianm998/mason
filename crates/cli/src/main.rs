@@ -1873,6 +1873,9 @@ fn main() {
                         p["state"].as_str().unwrap_or(""),
                         p["publish_state"].as_str().unwrap_or("")
                     );
+                    if let Some(rule) = p["decided_by"].as_str().filter(|r| !r.is_empty()) {
+                        println!("decided by: {rule}");
+                    }
                     println!(
                         "\n{}\n\nEvidence:\n{}",
                         p["body"].as_str().unwrap_or(""),
