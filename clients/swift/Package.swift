@@ -35,7 +35,7 @@ let package = Package(
         .target(name: "MonitorUI", dependencies: ["MonitorCore", "MasonTokens", "MasonMascot"]),
         .executableTarget(name: "MasonMonitor", dependencies: ["MonitorUI", "MonitorCore", "MasonMascot"]),
         .executableTarget(name: "MonitorTool", dependencies: ["MonitorUI", "MonitorCore", "MasonMascot"]),
-        .testTarget(name: "MonitorCoreTests", dependencies: ["MonitorCore"]),
+        .testTarget(name: "MonitorCoreTests", dependencies: ["MonitorCore", "MasonProtocol"]),
         .testTarget(name: "MasonMascotTests", dependencies: ["MasonMascot"]),
         .testTarget(name: "MonitorUITests", dependencies: ["MonitorUI", "MonitorCore", "MasonProtocol"]),
     ],

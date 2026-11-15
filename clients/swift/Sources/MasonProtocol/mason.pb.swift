@@ -1789,8 +1789,23 @@ public nonisolated struct Mason_V1_MonitorBuild: Sendable {
 
   public var error: String = String()
 
-  /// When ready: the finished build, on the daemon's own disk.
+  /// When ready: the finished build, on the daemon's own disk. For a bare binary built in
+  /// place, the path of the binary that now holds the new build (the one the monitor runs from).
   public var path: String = String()
+
+  /// While building: "fetching", "waiting" (for a compile slot), "compiling", "linking" or
+  /// "installing" (additive).
+  public var step: String = String()
+
+  /// Compile progress, `done` of `total` build steps, when the build tool says (additive).
+  public var done: UInt32 = 0
+
+  public var total: UInt32 = 0
+
+  /// The build's last log line, and the log file (additive).
+  public var lastLine: String = String()
+
+  public var log: String = String()
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -6242,7 +6257,7 @@ nonisolated extension Mason_V1_UpdateInfo: SwiftProtobuf.Message, SwiftProtobuf.
 
 nonisolated extension Mason_V1_MonitorBuild: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".MonitorBuild"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}kind\0\u{1}latest\0\u{1}phase\0\u{1}error\0\u{1}path\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}kind\0\u{1}latest\0\u{1}phase\0\u{1}error\0\u{1}path\0\u{1}step\0\u{1}done\0\u{1}total\0\u{3}last_line\0\u{1}log\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -6255,6 +6270,11 @@ nonisolated extension Mason_V1_MonitorBuild: SwiftProtobuf.Message, SwiftProtobu
       case 3: try { try decoder.decodeSingularStringField(value: &self.phase) }()
       case 4: try { try decoder.decodeSingularStringField(value: &self.error) }()
       case 5: try { try decoder.decodeSingularStringField(value: &self.path) }()
+      case 6: try { try decoder.decodeSingularStringField(value: &self.step) }()
+      case 7: try { try decoder.decodeSingularUInt32Field(value: &self.done) }()
+      case 8: try { try decoder.decodeSingularUInt32Field(value: &self.total) }()
+      case 9: try { try decoder.decodeSingularStringField(value: &self.lastLine) }()
+      case 10: try { try decoder.decodeSingularStringField(value: &self.log) }()
       default: break
       }
     }
@@ -6276,6 +6296,21 @@ nonisolated extension Mason_V1_MonitorBuild: SwiftProtobuf.Message, SwiftProtobu
     if !self.path.isEmpty {
       try visitor.visitSingularStringField(value: self.path, fieldNumber: 5)
     }
+    if !self.step.isEmpty {
+      try visitor.visitSingularStringField(value: self.step, fieldNumber: 6)
+    }
+    if self.done != 0 {
+      try visitor.visitSingularUInt32Field(value: self.done, fieldNumber: 7)
+    }
+    if self.total != 0 {
+      try visitor.visitSingularUInt32Field(value: self.total, fieldNumber: 8)
+    }
+    if !self.lastLine.isEmpty {
+      try visitor.visitSingularStringField(value: self.lastLine, fieldNumber: 9)
+    }
+    if !self.log.isEmpty {
+      try visitor.visitSingularStringField(value: self.log, fieldNumber: 10)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -6285,6 +6320,11 @@ nonisolated extension Mason_V1_MonitorBuild: SwiftProtobuf.Message, SwiftProtobu
     if lhs.phase != rhs.phase {return false}
     if lhs.error != rhs.error {return false}
     if lhs.path != rhs.path {return false}
+    if lhs.step != rhs.step {return false}
+    if lhs.done != rhs.done {return false}
+    if lhs.total != rhs.total {return false}
+    if lhs.lastLine != rhs.lastLine {return false}
+    if lhs.log != rhs.log {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
