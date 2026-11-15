@@ -18,9 +18,10 @@ final class SystemSink: NSObject, SpeechSink, NSSoundDelegate, AVSpeechSynthesiz
         synth.delegate = self
     }
 
-    func play(sound name: String, then: @escaping () -> Void) {
+    func play(sound name: String, volume: Double, then: @escaping () -> Void) {
         guard let s = NSSound(named: NSSound.Name(name)) else { NSSound.beep(); return then() }
         sound = s
+        s.volume = Float(volume)
         soundDone = then
         s.delegate = self
         if !s.play() { soundDone = nil; then() }
@@ -34,8 +35,9 @@ final class SystemSink: NSObject, SpeechSink, NSSoundDelegate, AVSpeechSynthesiz
         }
     }
 
-    func speak(_ sentence: String, voice: String, then: @escaping () -> Void) {
+    func speak(_ sentence: String, voice: String, volume: Double, then: @escaping () -> Void) {
         let u = AVSpeechUtterance(string: sentence)
+        u.volume = Float(volume)
         if !voice.isEmpty {
             u.voice = AVSpeechSynthesisVoice.speechVoices().first { $0.name == voice }
         }
