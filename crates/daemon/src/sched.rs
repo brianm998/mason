@@ -1968,6 +1968,16 @@ impl Broker {
             .collect()
     }
 
+    /// The `compile` count in force now.
+    pub fn compile_capacity(&self) -> Option<u64> {
+        let st = lock(&self.st);
+        st.ledger
+            .snapshot()
+            .capacity
+            .get(COMPILE)
+            .map(|c| u64::from(c.units))
+    }
+
     /// The idle check's latest reading, by lease.
     pub fn set_idle(&self, idle: HashMap<u64, u64>) {
         lock(&self.st).idle = idle;

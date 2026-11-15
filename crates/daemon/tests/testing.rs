@@ -822,3 +822,35 @@ fn a_test_red_in_three_tasks_but_green_at_the_base_is_not_made_known_red() {
         .count();
     assert_eq!(fixes, 0);
 }
+
+#[test]
+fn a_passed_build_is_remembered_per_tree_and_worktree_and_a_failed_one_is_not() {
+    // A build that passed on an unchanged tree takes no `compile` slot again (s428): the test
+    // step and run_check ask this memo before they queue for one.
+    use mason_daemon::cmdreuse::*;
+    let s = world(vec![], &[], &def("", "", ""));
+    let d = start(&s);
+    let wt = std::path::Path::new("/w/one");
+    let other = std::path::Path::new("/w/two");
+    let key = build_key("make all");
+    assert!(!build_green_for(&d, "tree-a", &key, wt), "nothing yet");
+    record_build_green(&d, "tree-a", &key, wt);
+    assert!(build_green_for(&d, "tree-a", &key, wt));
+    assert!(
+        !build_green_for(&d, "tree-b", &key, wt),
+        "a changed tree builds"
+    );
+    assert!(
+        !build_green_for(&d, "tree-a", &key, other),
+        "another worktree builds"
+    );
+    assert!(
+        !build_green_for(&d, "tree-a", &build_key("make"), wt),
+        "another command builds"
+    );
+    record_build_red(&d, "tree-a", &key, wt);
+    assert!(
+        !build_green_for(&d, "tree-a", &key, wt),
+        "a failed build is not reused"
+    );
+}
