@@ -57,6 +57,7 @@ pub mod protect;
 pub mod providers;
 pub mod release;
 pub mod rerun;
+pub mod runtimes;
 pub mod sched;
 pub mod schedule;
 pub mod scope;

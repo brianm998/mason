@@ -386,6 +386,7 @@ struct DecisionCardView: View {
     let card: Mason_V1_DecisionCard
     @State private var other = ""
     @State private var selection = OptionSelection(count: 0)
+    @State private var multi = MultiSelection(count: 0)
     @FocusState private var cardFocused: Bool
     @FocusState private var otherFocused: Bool
 
@@ -393,6 +394,17 @@ struct DecisionCardView: View {
         guard let text = otherAnswer(other) else { return }
         model.answer(task: task, text, cardHash: card.hash)
         other = ""
+    }
+
+    private func sendMulti() {
+        guard let a = multi.answer else { return }
+        model.answer(task: task, a, cardHash: card.hash)
+    }
+
+    private func resetSelection() {
+        let rec = card.options.firstIndex { $0.recommended }
+        selection = OptionSelection(count: card.options.count, recommended: rec)
+        multi = MultiSelection(count: card.options.count, recommended: rec)
     }
 
     var body: some View {
@@ -406,7 +418,20 @@ struct DecisionCardView: View {
             }
             VStack(alignment: .leading, spacing: theme.spacingSmall) {
                 ForEach(Array(card.options.enumerated()), id: \.offset) { i, o in
-                    if model.canAct {
+                    if model.canAct && card.multiSelect {
+                        // Several answers: a checkbox per option; Send sends the checked ones.
+                        Button { multi.toggle(i) } label: {
+                            HStack {
+                                Image(systemName: multi.checked.contains(i) ? "checkmark.square.fill" : "square")
+                                optionLabel(i, o)
+                            }
+                            .pill(prominent: o.recommended)
+                            .overlay(RoundedRectangle(cornerRadius: theme.radius)
+                                .stroke(theme.text, lineWidth: multi.index == i ? 2 : 0))
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityIdentifier("card:\(task):option:\(i + 1)")
+                    } else if model.canAct {
                         Button { model.answer(task: task, String(i + 1), cardHash: card.hash) } label: {
                             optionLabel(i, o)
                                 .pill(prominent: o.recommended)
@@ -418,6 +443,11 @@ struct DecisionCardView: View {
                     } else {
                         optionLabel(i, o).font(theme.body()).foregroundStyle(theme.text)
                     }
+                }
+                if model.canAct && card.multiSelect {
+                    Button("Send the checked options") { sendMulti() }
+                        .disabled(multi.answer == nil)
+                        .accessibilityIdentifier("card:\(task):send-checked")
                 }
                 if model.canAct {
                     HStack(alignment: .top) {
@@ -479,19 +509,30 @@ struct DecisionCardView: View {
         // Arrow keys move the selection and Return answers with it, as in Claude Code's prompts.
         .focusable()
         .focused($cardFocused)
-        .onKeyPress(.upArrow) { guard model.canAct else { return .ignored }; selection.up(); return .handled }
-        .onKeyPress(.downArrow) { guard model.canAct else { return .ignored }; selection.down(); return .handled }
+        .onKeyPress(.upArrow) {
+            guard model.canAct else { return .ignored }
+            if card.multiSelect { multi.up() } else { selection.up() }
+            return .handled
+        }
+        .onKeyPress(.downArrow) {
+            guard model.canAct else { return .ignored }
+            if card.multiSelect { multi.down() } else { selection.down() }
+            return .handled
+        }
+        .onKeyPress(.space) {
+            guard model.canAct, card.multiSelect else { return .ignored }
+            multi.toggle()
+            return .handled
+        }
         .onKeyPress(.return) {
-            guard model.canAct, let a = selection.answer else { return .ignored }
+            guard model.canAct else { return .ignored }
+            if card.multiSelect { sendMulti(); return multi.answer == nil ? .ignored : .handled }
+            guard let a = selection.answer else { return .ignored }
             model.answer(task: task, a, cardHash: card.hash)
             return .handled
         }
-        .onAppear {
-            selection = OptionSelection(count: card.options.count, recommended: card.options.firstIndex { $0.recommended })
-        }
-        .onChange(of: card.hash) { _, _ in
-            selection = OptionSelection(count: card.options.count, recommended: card.options.firstIndex { $0.recommended })
-        }
+        .onAppear { resetSelection() }
+        .onChange(of: card.hash) { _, _ in resetSelection() }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("card:\(task)")
     }
