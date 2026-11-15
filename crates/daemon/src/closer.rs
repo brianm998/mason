@@ -73,6 +73,7 @@ pub fn card(task: u64, c: &ExploreClose, hours: u64) -> Card {
         key: "explore-close".into(),
         origin: Origin::Agent,
         problems: vec![],
+        multi_select: false,
     }
 }
 

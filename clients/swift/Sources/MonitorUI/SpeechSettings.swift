@@ -48,6 +48,19 @@ struct SpeechSettingsView: View {
             }
             Text(a.isSpeaker ? "This monitor is the one that speaks." : "Another monitor speaks, or none is needed.")
                 .font(theme.small()).foregroundStyle(theme.muted)
+            HStack(spacing: theme.spacing) {
+                Text("Volume")
+                Slider(value: Binding(
+                    get: { a.settings.volume },
+                    set: { a.settings.volume = min(1, max(0, $0)); model.objectWillChange.send() }
+                ), in: 0...1)
+                .accessibilityIdentifier("speech-volume")
+                Text("\(Int((a.settings.volume * 100).rounded()))%")
+                    .font(theme.small()).foregroundStyle(theme.muted)
+                    .frame(width: 36, alignment: .trailing)
+                Button("Test") { a.test() }
+                    .accessibilityIdentifier("speech-test")
+            }
         }
         .padding(theme.spacingLarge)
         .frame(width: 320)
