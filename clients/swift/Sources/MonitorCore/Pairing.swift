@@ -83,6 +83,11 @@ public struct PairedDaemon: Equatable, Sendable {
 
 /// The order to try a paired daemon's addresses in. Pure.
 public enum Reach {
+    /// A host as it goes in a URL: an IPv6 literal is bracketed.
+    public static func urlHost(_ h: String) -> String {
+        h.contains(":") && !h.hasPrefix("[") ? "[\(h)]" : h
+    }
+
     /// The mDNS-resolved endpoint first (when there is one), then the `.local` name, then each
     /// extra host. No name appears twice.
     public static func order(paired: PairedDaemon, bonjour: String?) -> [String] {
@@ -204,8 +209,15 @@ public final class PinnedSocket: MonitorSocket {
         session = URLSession(configuration: .ephemeral, delegate: delegate, delegateQueue: nil)
     }
 
-    public func open(port: UInt16) {
-        var req = URLRequest(url: URL(string: "wss://\(daemon.host):\(daemon.port)/ws")!)
+    public func open(port: UInt16) { open(info: DaemonInfo(port: daemon.port, host: daemon.host)) }
+
+    /// The HTTP status of a refused upgrade (401 when the token was revoked).
+    public var refusal: Int? { (task?.response as? HTTPURLResponse)?.statusCode }
+
+    /// Connects to the host and port chosen for this attempt; the certificate must still match the pin.
+    public func open(info: DaemonInfo) {
+        let host = Reach.urlHost(info.host ?? daemon.host)
+        var req = URLRequest(url: URL(string: "wss://\(host):\(info.port)/ws")!)
         req.setValue("Bearer \(daemon.token)", forHTTPHeaderField: "Authorization")
         let t = session.webSocketTask(with: req)
         // URLSession refuses a message over 1 MiB by default; the daemon's first view of a busy
