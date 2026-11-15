@@ -727,12 +727,7 @@ impl<'a> Ctx<'a> {
         // `queued_rank`). Every other section has the task that entered it
         // most recently on top, tasks that are not waiting above those that are.
         if s == State::Queued {
-            tasks.sort_by_cached_key(|t| {
-                (
-                    t.activity != Activity::Waiting(WaitReason::Slot),
-                    self.d.queued_rank(t),
-                )
-            });
+            sort_queued(&mut tasks, |t| self.d.queued_rank(t));
         } else {
             sort_unqueued(&mut tasks);
         }
@@ -1379,6 +1374,11 @@ fn is_waiting(t: &Task) -> bool {
     )
 }
 
+/// Order of the Queued section: tasks waiting for a slot first, then by rank.
+fn sort_queued<R: Ord>(tasks: &mut [&Task], rank: impl Fn(&Task) -> R) {
+    tasks.sort_by_cached_key(|t| (t.activity != Activity::Waiting(WaitReason::Slot), rank(t)));
+}
+
 /// Order of every section but Queued: tasks that are not waiting first, then
 /// the one that entered the state most recently, then the higher id.
 fn sort_unqueued(tasks: &mut [&Task]) {
@@ -1444,6 +1444,19 @@ mod section_order_tests {
         sort_unqueued(&mut v);
         let ids: Vec<u64> = v.iter().map(|t| t.id.0).collect();
         assert_eq!(ids, vec![3, 1, 2, 5, 4]);
+    }
+
+    #[test]
+    fn queued_keeps_slot_waiters_first_then_rank_order() {
+        let a = task(1, 50, Activity::Paused);
+        let b = task(2, 10, Activity::Waiting(WaitReason::Slot));
+        let c = task(3, 40, Activity::Running);
+        let d = task(4, 20, Activity::Waiting(WaitReason::Slot));
+        let mut v = vec![&a, &b, &c, &d];
+        // Rank is the id here: neither the activity order nor age enters it.
+        sort_queued(&mut v, |t| t.id.0);
+        let ids: Vec<u64> = v.iter().map(|t| t.id.0).collect();
+        assert_eq!(ids, vec![2, 4, 1, 3]);
     }
 }
 
