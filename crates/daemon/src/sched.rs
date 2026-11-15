@@ -105,6 +105,10 @@ pub const DEFAULT_COMPILE_JOBS: u32 = 3;
 /// the machine loaded; the stalls this exists for lasted 20 seconds and more.
 pub const DEFAULT_DISK_STALL_MS: u64 = 2000;
 
+/// How often an open `mason run` wait is added to its task's deadline while it waits (s417).
+/// Anything longer than this of a wait in progress is lost if the daemon restarts.
+pub const CREDIT_EVERY: Duration = Duration::from_secs(30);
+
 impl Default for ResourceCfg {
     fn default() -> Self {
         ResourceCfg {
@@ -270,6 +274,9 @@ enum Meta {
         /// Another pipeline's name, when this is its work.
         pipeline: Option<String>,
         opened: Instant,
+        /// How far this wait has been added to its task's deadline (s417): open waits are
+        /// credited as they go, so a daemon restart loses at most [`CREDIT_EVERY`] of one.
+        credited: Instant,
         last_poll: Instant,
         granted_at: Option<Instant>,
         /// Seen holding its marker lock at least once.
@@ -1086,21 +1093,36 @@ impl Broker {
         let (floor, free) = (st.floor_mb, self.free_memory(st));
         let gate = self.cpu_gate(st);
         let p = st.ledger.schedule_gated(now, free, floor, gate);
-        for g in &p.grants {
-            let mut waited = None;
-            if let Some(Meta::External {
-                granted_at, opened, ..
-            }) = st.meta.get_mut(g)
-            {
-                *granted_at = Some(Instant::now());
-                waited = Some(opened.elapsed());
+        // An agent waiting for its own `mason run` is not working: its deadline grows by the
+        // wait, as it does for a `run_check` (s363). Open waits are added as they go, every
+        // [`CREDIT_EVERY`], and the rest when granted (s417).
+        let granted: HashSet<u64> = p.grants.iter().copied().collect();
+        let State {
+            meta,
+            lease_tasks,
+            wait_credit,
+            ..
+        } = &mut *st;
+        for (id, m) in meta.iter_mut() {
+            let Meta::External {
+                credited,
+                granted_at,
+                ..
+            } = m
+            else {
+                continue;
+            };
+            let grant = granted.contains(id);
+            if granted_at.is_some() || !(grant || credited.elapsed() >= CREDIT_EVERY) {
+                continue;
             }
-            // An agent waiting for its own `mason run` is not working: its deadline grows
-            // by the wait, as it does for a `run_check` (s363).
-            if let (Some(w), Some(t)) = (waited, st.lease_tasks.get(g)) {
-                if let Some(extra) = st.wait_credit.get(t) {
-                    extra.add(w);
-                }
+            if grant {
+                *granted_at = Some(Instant::now());
+            }
+            let w = credited.elapsed();
+            *credited = Instant::now();
+            if let Some(extra) = lease_tasks.get(id).and_then(|t| wait_credit.get(t)) {
+                extra.add(w);
             }
         }
         if changed || !p.grants.is_empty() {
@@ -1685,7 +1707,20 @@ impl Broker {
         uses: &BTreeMap<String, u32>,
         standing: Option<Standing>,
     ) -> u64 {
-        self.open_lease(label, uses, None, |st, now| match standing {
+        self.lease_open_expecting(label, uses, standing, None)
+    }
+
+    /// [`Broker::lease_open_as`] with how long the command is expected to hold what it takes
+    /// (s400), from the times of its earlier runs, so a drain it holds can be passed by short
+    /// work. `None`: unknown, as before.
+    pub fn lease_open_expecting(
+        &self,
+        label: &str,
+        uses: &BTreeMap<String, u32>,
+        standing: Option<Standing>,
+        expected_ms: Option<u64>,
+    ) -> u64 {
+        self.open_lease(label, uses, None, expected_ms, |st, now| match standing {
             None => Rank::new(true, 0, 0, now, st.rank_seq, false),
             Some(s) => order(
                 st,
@@ -1713,7 +1748,7 @@ impl Broker {
         o: &crate::outside::Outside,
     ) -> u64 {
         let shown = crate::outside::display_label(&o.pipeline, label);
-        self.open_lease(&shown, uses, Some(o.pipeline.clone()), |st, now| {
+        self.open_lease(&shown, uses, Some(o.pipeline.clone()), None, |st, now| {
             order(
                 st,
                 Rank::new(false, o.steps, o.priority, now, st.rank_seq, false),
@@ -1726,6 +1761,7 @@ impl Broker {
         label: &str,
         uses: &BTreeMap<String, u32>,
         pipeline: Option<String>,
+        expected_ms: Option<u64>,
         rank_of: impl FnOnce(&State, u64) -> Rank,
     ) -> u64 {
         let mut st = lock(&self.st);
@@ -1742,11 +1778,13 @@ impl Broker {
             }
         }
         let id = st.ledger.submit(rank, needs, label, now);
+        st.ledger.set_expected(id, expected_ms);
         st.meta.insert(
             id,
             Meta::External {
                 pipeline,
                 opened: Instant::now(),
+                credited: Instant::now(),
                 last_poll: Instant::now(),
                 granted_at: None,
                 locked: false,
@@ -2241,11 +2279,16 @@ fn kind_for(st: &State, name: &str) -> Kind {
 
 /// Free memory in MB, or `None` if it cannot be read. Never load average.
 pub fn measure_free_memory_mb() -> Option<u64> {
-    #[cfg(windows)]
-    {
-        return windows_free_memory_mb();
-    }
-    #[cfg(not(windows))]
+    free_memory_mb_here()
+}
+
+#[cfg(windows)]
+fn free_memory_mb_here() -> Option<u64> {
+    windows_free_memory_mb()
+}
+
+#[cfg(not(windows))]
+fn free_memory_mb_here() -> Option<u64> {
     unix_free_memory_mb()
 }
 
@@ -2681,10 +2724,14 @@ mod tests {
         let other = mason_adapter_api::DeadlineExtra::default();
         b.credit_waits_to(TaskId(242), extra.clone());
         b.credit_waits_to(TaskId(7), other.clone());
-        if let Some(Meta::External { opened, .. }) = lock(&b.st).meta.get_mut(&second) {
+        if let Some(Meta::External {
+            opened, credited, ..
+        }) = lock(&b.st).meta.get_mut(&second)
+        {
             *opened = Instant::now()
                 .checked_sub(Duration::from_secs(600))
                 .expect("uptime");
+            *credited = *opened;
         }
         b.lease_close(first);
         assert!(matches!(b.lease_poll(second), LeaseState::Granted { .. }));
@@ -2702,6 +2749,28 @@ mod tests {
         b.lease_set_task(third, TaskId(242));
         assert!(matches!(b.lease_poll(third), LeaseState::Granted { .. }));
         assert_eq!(extra.get(), before);
+    }
+
+    #[test]
+    fn an_open_mason_run_wait_is_added_to_the_deadline_before_it_is_granted() {
+        // 2026-11-15: a daemon takeover dropped every open wait's credit, and 29 develop
+        // agents that had waited up to 2 h for the machine timed out on re-attach (s417).
+        let dir = tempfile::tempdir().unwrap();
+        let (b, _first, second) = waiting_broker(dir.path());
+        b.lease_set_task(second, TaskId(345));
+        let extra = mason_adapter_api::DeadlineExtra::default();
+        b.credit_waits_to(TaskId(345), extra.clone());
+        if let Some(Meta::External { credited, .. }) = lock(&b.st).meta.get_mut(&second) {
+            *credited = Instant::now()
+                .checked_sub(Duration::from_secs(300))
+                .expect("uptime");
+        }
+        assert!(!matches!(b.lease_poll(second), LeaseState::Granted { .. }));
+        let after = extra.get();
+        assert!(after >= Duration::from_secs(300), "{after:?}");
+        // Credited once: another pass right away adds nothing more of it.
+        assert!(!matches!(b.lease_poll(second), LeaseState::Granted { .. }));
+        assert!(extra.get() < after + CREDIT_EVERY, "{:?}", extra.get());
     }
 
     #[test]

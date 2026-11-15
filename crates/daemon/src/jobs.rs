@@ -108,6 +108,7 @@ pub(crate) fn first_step_in(d: &Arc<Daemon>, t: &Task, state: State) -> Option<S
 }
 
 /// Every send-back's feedback, in order, for the escalated last round.
+const ROUND_REASON: &str = "round-reason.txt";
 const FEEDBACK_HISTORY: &str = "feedback-history.txt";
 
 /// Is the next test round the last one the test step will give (another red would fail the
@@ -152,13 +153,32 @@ impl Ctx {
     }
 
     pub(crate) fn emit(&self, kind: EventKind) -> bool {
+        match &kind {
+            EventKind::WaitStarted { .. } => wait_note(self.run.0, true),
+            EventKind::WaitEnded { .. } => wait_note(self.run.0, false),
+            _ => {}
+        }
         self.d.emit_for_run(self.task, self.run, kind)
+    }
+
+    /// The reason for a step that ran out of time. When more than half of the run was spent
+    /// waiting (for a slot, a pause, a hold) the time was not the step's own: the reason says
+    /// so, and the failure counts as outside the code (s392).
+    pub(crate) fn timeout_reason(&self) -> String {
+        let started = self
+            .d
+            .world()
+            .ok()
+            .and_then(|w| w.step_runs.get(&self.run).map(|r| r.started_at.0));
+        let elapsed = started.map(|s| now_ms().saturating_sub(s)).unwrap_or(0);
+        let waited = wait_total(self.run.0);
+        timeout_text(waited, elapsed)
     }
 
     /// End the step and let the graph say what follows.
     pub(crate) fn conclude(&self, outcome: Outcome, reason: String, feedback: Option<String>) {
         let round = self.round();
-        self.conclude_round(outcome, reason, feedback, round)
+        self.conclude_round(outcome, reason, feedback, round, "fix")
     }
 
     /// Which round of this step this run is, as `max_rounds` counts them: its
@@ -261,7 +281,7 @@ impl Ctx {
             past.push(self.run.0);
         }
         // Round 0 is under every limit: a conflict always goes back while there is an `on_red`.
-        self.conclude_round(Outcome::Red, reason, Some(note), 0)
+        self.conclude_round(Outcome::Red, reason, Some(note), 0, "conflict")
     }
 
     /// The step runs that ended in a conflict send-back ([`Ctx::conflict`]).
@@ -275,6 +295,7 @@ impl Ctx {
         reason: String,
         feedback: Option<String>,
         round: u32,
+        round_reason: &str,
     ) {
         if outcome == Outcome::Red
             && self.step.kind == StepType::Test
@@ -326,6 +347,9 @@ impl Ctx {
             Transition::SendBack { step } => {
                 if let Some(f) = feedback {
                     let _ = std::fs::write(self.task_dir().join("feedback.txt"), &f);
+                    // Why the next develop round happens, written with its feedback so the
+                    // two cannot get out of step: it picks the `fix` or `conflict` pack.
+                    let _ = std::fs::write(self.task_dir().join(ROUND_REASON), round_reason);
                     // Every round's feedback is kept for the last round's fresh session (s251).
                     let entry = format!(
                         "## After run {} ({}): {}\n{}\n\n",
@@ -423,6 +447,44 @@ impl Ctx {
         let p = self.d.task_dir(self.task);
         let _ = std::fs::create_dir_all(&p);
         p
+    }
+}
+
+/// Per run: (total ms waited, start of the open wait).
+static WAITS: std::sync::Mutex<std::collections::BTreeMap<u64, (u64, Option<u64>)>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+fn wait_note(run: u64, start: bool) {
+    let now = now_ms();
+    let mut m = WAITS.lock().unwrap_or_else(|e| e.into_inner());
+    let e = m.entry(run).or_insert((0, None));
+    if start {
+        e.1.get_or_insert(now);
+    } else if let Some(s) = e.1.take() {
+        e.0 += now.saturating_sub(s);
+    }
+}
+
+/// Time the run has spent waiting so far, an open wait included. The entry is dropped.
+fn wait_total(run: u64) -> u64 {
+    let now = now_ms();
+    let mut m = WAITS.lock().unwrap_or_else(|e| e.into_inner());
+    match m.remove(&run) {
+        Some((t, open)) => t + open.map(|s| now.saturating_sub(s)).unwrap_or(0),
+        None => 0,
+    }
+}
+
+/// The text of a timeout after `waited` ms of `elapsed` ms spent waiting.
+pub(crate) fn timeout_text(waited: u64, elapsed: u64) -> String {
+    if elapsed > 0 && waited * 2 > elapsed {
+        format!(
+            "the step ran out of time, mostly waiting in the queue ({} s of {} s)",
+            waited / 1000,
+            elapsed / 1000
+        )
+    } else {
+        "the step ran out of time".to_string()
     }
 }
 
@@ -1504,6 +1566,21 @@ struct TestChecks {
     /// A develop step's project and base: before a check the base is folded in when that is
     /// safe (`basefold`). `None` for other steps.
     base_fold: Option<(ProjectId, String)>,
+    /// The project's name, for the suites' recorded run times.
+    project: String,
+}
+
+impl TestChecks {
+    /// How long a build or run of `suite` is expected to take at most, from the test step's
+    /// recorded times (s422). A check's build is incremental, so this errs long.
+    fn estimate(&self, suite: &str, phase: &str) -> Option<u64> {
+        self.slots
+            .d
+            .store
+            .suite_estimate(&self.project, suite, phase)
+            .ok()
+            .flatten()
+    }
 }
 
 /// What `run_check` needs to pick suites: the test step, and where the base is.
@@ -1653,9 +1730,10 @@ impl TestChecks {
                             limit,
                         );
                         let queue = !crate::hostedcheck::pending(&self.slots.d, &bspec);
-                        let queued = Instant::now();
-                        let swapped = self.slots.swap_for(queue, &build_uses());
-                        self.extra.add(queued.elapsed());
+                        let swapped = credit_wait(&self.extra, crate::sched::CREDIT_EVERY, || {
+                            self.slots
+                                .swap_for(queue, &build_uses(), self.estimate(&name, "build"))
+                        });
                         let Ok(lease) = swapped else {
                             return over();
                         };
@@ -1704,9 +1782,10 @@ impl TestChecks {
                 limit,
             );
             let queue = !crate::hostedcheck::pending(&self.slots.d, &rspec);
-            let queued = Instant::now();
-            let swapped = self.slots.swap_for(queue, &uses);
-            self.extra.add(queued.elapsed());
+            let swapped = credit_wait(&self.extra, crate::sched::CREDIT_EVERY, || {
+                self.slots
+                    .swap_for(queue, &uses, self.estimate(&name, "run"))
+            });
             let Ok(lease) = swapped else {
                 return over();
             };
@@ -1909,9 +1988,9 @@ impl TestChecks {
             Some(build) => {
                 let bspec = spec(format!("{}build", self.id_prefix), build, &build_uses());
                 let queue = !crate::hostedcheck::pending(&self.slots.d, &bspec);
-                let queued = Instant::now();
-                let swapped = self.slots.swap_for(queue, &build_uses());
-                self.extra.add(queued.elapsed());
+                let swapped = credit_wait(&self.extra, crate::sched::CREDIT_EVERY, || {
+                    self.slots.swap_for(queue, &build_uses(), None)
+                });
                 let Ok(lease) = swapped else {
                     return over();
                 };
@@ -1950,9 +2029,9 @@ impl TestChecks {
         // going (or takes its result) at once: it starts nothing, so it does not
         // queue behind other work for a slot the run it joins already took.
         let queue = !crate::hostedcheck::pending(&self.slots.d, &spec);
-        let queued = Instant::now();
-        let swapped = self.slots.swap_for(queue, &uses);
-        self.extra.add(queued.elapsed());
+        let swapped = credit_wait(&self.extra, crate::sched::CREDIT_EVERY, || {
+            self.slots.swap_for(queue, &uses, None)
+        });
         let Ok(test_lease) = swapped else {
             return over();
         };
@@ -2024,6 +2103,36 @@ pub(crate) fn acquire_llm(c: &Ctx) -> Result<crate::sched::Lease, crate::sched::
 /// check, so its LLM session slot goes to a task that can use it, and the check
 /// queues for what the test step `uses`, as the test step does. The time spent
 /// in that queue is outside the check's timeout.
+/// Run `wait` (a `run_check` queueing for its slots), adding the time it takes to `extra`
+/// every `every` while it waits and the rest when it returns (s417). Before, the whole wait
+/// was added at the end, so a daemon restart during a long wait lost all of it.
+fn credit_wait<T>(
+    extra: &mason_adapter_api::DeadlineExtra,
+    every: Duration,
+    wait: impl FnOnce() -> T,
+) -> T {
+    let done = std::sync::atomic::AtomicBool::new(false);
+    std::thread::scope(|s| {
+        let ticker = s.spawn(|| {
+            let mut last = Instant::now();
+            let nap = every.clamp(Duration::from_millis(10), Duration::from_millis(500));
+            while !done.load(std::sync::atomic::Ordering::SeqCst) {
+                std::thread::sleep(nap);
+                if last.elapsed() >= every {
+                    extra.add(last.elapsed());
+                    last = Instant::now();
+                }
+            }
+            last
+        });
+        let out = wait();
+        done.store(true, std::sync::atomic::Ordering::SeqCst);
+        let last = ticker.join().unwrap_or_else(|_| Instant::now());
+        extra.add(last.elapsed());
+        out
+    })
+}
+
 struct CheckSlots {
     d: Arc<Daemon>,
     task: TaskId,
@@ -2069,6 +2178,7 @@ impl CheckSlots {
         needs: mason_scheduler::Needs,
         as_step: &str,
         end_on_skip: bool,
+        expected_ms: Option<u64>,
     ) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
         let d = &self.d;
         let t = d
@@ -2092,7 +2202,9 @@ impl CheckSlots {
         // used to leave the task reading "running" for hours.
         let asked = needs.clone();
         let mut waited = false;
-        let lease = d.broker.acquire(
+        // With how long it is expected to hold the slots, a check may run while the machine
+        // drains for an exclusive request, if it will be done in time (s385, s422).
+        let lease = d.broker.acquire_expecting(
             self.task,
             &format!("#{}", self.task.0),
             rank,
@@ -2109,6 +2221,8 @@ impl CheckSlots {
                     },
                 );
             },
+            false,
+            expected_ms,
         );
         if waited {
             d.emit_for_run(task, run, EventKind::WaitEnded { task });
@@ -2122,6 +2236,7 @@ impl CheckSlots {
         &self,
         queue: bool,
         uses: &std::collections::BTreeMap<String, u32>,
+        expected_ms: Option<u64>,
     ) -> Result<Option<crate::sched::Lease>, crate::sched::Cancelled> {
         let held = self.lease.lock().unwrap_or_else(|e| e.into_inner()).take();
         if held.is_some() {
@@ -2146,6 +2261,7 @@ impl CheckSlots {
             crate::sched::needs_of(uses, None),
             check_rank_step(&self.step, self.test_step.as_deref()),
             true,
+            expected_ms,
         )
         .map(Some)
     }
@@ -2154,7 +2270,7 @@ impl CheckSlots {
     fn take_agent_slot_back(&self) {
         self.d.admit();
         let needs = crate::sched::needs_of(&self.agent_uses, Some(&self.account));
-        if let Ok(l) = self.acquire(needs, &self.step, false) {
+        if let Ok(l) = self.acquire(needs, &self.step, false, None) {
             *self.lease.lock().unwrap_or_else(|e| e.into_inner()) = Some(l);
         }
     }
@@ -2367,6 +2483,26 @@ pub(crate) fn adapter(c: &Ctx) -> Box<dyn AgentAdapter> {
     }
 }
 
+/// The pack files to try, in order, for an agent step: its own `prompt` file (no fallback
+/// past it), else for a develop round sent back for a reason that reason's pack
+/// (`fix`, `conflict`, `ci-fix`) and then `develop`, else the kind's pack.
+fn pack_candidates(step_prompt: Option<&str>, kind: &str, reason: Option<&str>) -> Vec<String> {
+    if let Some(f) = step_prompt {
+        return vec![f.to_string()];
+    }
+    let mut v = vec![];
+    if kind == "develop" {
+        if let Some(r) = reason
+            .map(str::trim)
+            .filter(|r| matches!(*r, "fix" | "conflict" | "ci-fix"))
+        {
+            v.push(format!("{r}.md"));
+        }
+    }
+    v.push(format!("{kind}.md"));
+    v
+}
+
 fn agent_job(c: &Ctx) {
     let Some(kind) = contract_kind(c.state) else {
         return c.fail(format!(
@@ -2426,7 +2562,34 @@ fn agent_job(c: &Ctx) {
         // A diagnosis session is run by `diagnose`, not as a step of the graph.
         StepKind::Diagnose => "diagnose",
     };
-    let prompt = if let Some(pack) = crate::prompts::load_pack(&c.project, pack_name) {
+    // Only while the feedback it was written with is still there.
+    let round_reason = if conflicts.is_some() {
+        Some("conflict".to_string())
+    } else if dir.join("feedback.txt").exists() {
+        std::fs::read_to_string(dir.join(ROUND_REASON)).ok()
+    } else {
+        None
+    };
+    let candidates = pack_candidates(c.step.prompt.as_deref(), pack_name, round_reason.as_deref());
+    let mut found: Option<String> = None;
+    for (i, name) in candidates.iter().enumerate() {
+        match crate::prompts::load_pack_file(&c.project, name) {
+            Ok(text) => {
+                found = Some(text);
+                break;
+            }
+            // The step's own file is required: running the built-in prompt instead would
+            // be a different job.
+            Err(why) if i == 0 && c.step.prompt.is_some() => {
+                return c.fail(format!(
+                    "step `{}` prompt file .mason/prompts/{name}: {why}",
+                    c.step.name
+                ));
+            }
+            Err(_) => {}
+        }
+    }
+    let prompt = if let Some(pack) = found {
         crate::prompts::from_pack(
             &pack,
             &crate::prompts::PackVars {
@@ -2521,7 +2684,12 @@ fn agent_job(c: &Ctx) {
     let reuse_key = tests_cmd
         .as_ref()
         .map(|t| crate::cmdreuse::command_key(t.build.as_deref(), &t.test));
-    let deadline_extra = mason_adapter_api::DeadlineExtra::default();
+    // Kept in the task's folder per run, so a re-attach after a daemon restart keeps what
+    // was credited before it (s417).
+    let deadline_extra = mason_adapter_api::DeadlineExtra::kept_in(
+        c.task_dir()
+            .join(format!("deadline-credit-r{}.txt", c.run.0)),
+    );
     // The agent's own `mason run` commands that wait in the queue add to it too (s363),
     // until this step ends.
     c.d.broker.credit_waits_to(c.task, deadline_extra.clone());
@@ -2544,6 +2712,7 @@ fn agent_job(c: &Ctx) {
         task: c.task.0,
         run: c.run.0,
         base_fold: (kind == StepKind::Develop).then(|| (c.project_id, c.project.base_ref())),
+        project: c.project.id.clone(),
     });
     let validator = (kind == StepKind::Develop).then(|| {
         change_validator(
@@ -2939,12 +3108,17 @@ fn settle_all(
     let mut fresh_after_gone = false;
     let mut silent = false;
     let mut signaled_retried = false;
+    // Lost invocations before a resumed session that reached its own end: they are
+    // not counted toward the restart budget again (s399).
+    let mut forgiven = 0usize;
+    let mut lost_at = now_ms();
     loop {
         let fresh = match &report.end {
             StepEnd::Failed(FailReason::HostLost { detail }) => {
                 let lost = mason_adapters::hosted::lost_invocations(&root, &base);
                 let newest = lost.last().cloned().unwrap_or_else(|| base.clone());
                 let (text, at) = describe(&newest);
+                lost_at = at;
                 let text = if lost.is_empty() {
                     detail.clone()
                 } else {
@@ -2957,6 +3131,7 @@ fn settle_all(
                 // losing hosts.
                 let counted = lost
                     .iter()
+                    .skip(forgiven)
                     .filter(|id| {
                         let r = mason_step_host::registry::lost_report(&root.join(id));
                         !r.is_ok_and(|r| hl::is_restart_loss(&root, r.last_heartbeat_ms, r.at_ms))
@@ -3010,12 +3185,15 @@ fn settle_all(
             let note = if std::mem::take(&mut silent) {
                 hl::silent_note()
             } else {
-                hl::interrupted_note()
+                hl::interrupted_note(lost_at)
             };
             report = runner.resume(report, note, spec.clone(), contract);
             resumed = true;
         }
         report = settle_holds(c, runner, report, spec, contract, rec)?;
+        if resumed && !matches!(report.end, StepEnd::Failed(FailReason::HostLost { .. })) {
+            forgiven = mason_adapters::hosted::lost_invocations(&root, &base).len();
+        }
     }
 }
 
@@ -3111,7 +3289,7 @@ fn finish_agent_inner(c: &Ctx, report: StepReport, dir: &Path) {
         StepEnd::Failed(why) => {
             let reason = match why {
                 FailReason::NoResult { nudges } => format!("the agent ended its turn {} times without submitting", nudges + 1),
-                FailReason::Timeout => "the step ran out of time".to_string(),
+                FailReason::Timeout => c.timeout_reason(),
                 FailReason::Crash { detail } => format!("the agent failed: {detail}"),
                 // Restarted until it could not be (see `settle_all`); the text names the losses.
                 FailReason::HostLost { detail } => detail,
@@ -3425,16 +3603,27 @@ fn command_job(c: &Ctx) {
                 // round, counted across tasks, and on the last round run at the merge base.
                 if is_test && !rest_new.is_empty() {
                     crate::exhausted::record_round(c, &rest_new);
-                    crate::exhausted::record_persistent(c, &c.step.name, &rest_new);
+                    let repeated = crate::exhausted::record_persistent(c, &c.step.name, &rest_new);
+                    let build = builds_first(c);
+                    let cmd_for = |t: &[String]| {
+                        if filter_off {
+                            cmd.clone()
+                        } else {
+                            crate::rerun::command(&cmd, filter, t)
+                        }
+                    };
+                    if !crate::exhausted::is_last_round(c) && !repeated.is_empty() {
+                        // Failing in many tasks is not proof: known red only if red at the
+                        // base too (s416).
+                        crate::exhausted::repeated_at_base(
+                            c,
+                            &c.step.name,
+                            build.as_deref(),
+                            &cmd_for,
+                            &repeated,
+                        );
+                    }
                     if crate::exhausted::is_last_round(c) {
-                        let build = builds_first(c);
-                        let cmd_for = |t: &[String]| {
-                            if filter_off {
-                                cmd.clone()
-                            } else {
-                                crate::rerun::command(&cmd, filter, t)
-                            }
-                        };
                         let ex = crate::exhausted::on_last_round(
                             c,
                             &c.step.name,
@@ -4049,6 +4238,27 @@ pub fn cleanup(d: &Arc<Daemon>, task: TaskId, delete_branch: bool) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pack_candidates_prefer_the_step_file_then_the_round_then_the_kind() {
+        use super::pack_candidates as pc;
+        assert_eq!(pc(Some("sec.md"), "develop", Some("fix")), vec!["sec.md"]);
+        assert_eq!(
+            pc(None, "develop", Some("fix")),
+            vec!["fix.md", "develop.md"]
+        );
+        assert_eq!(
+            pc(None, "develop", Some("conflict\n")),
+            vec!["conflict.md", "develop.md"]
+        );
+        assert_eq!(
+            pc(None, "develop", Some("ci-fix")),
+            vec!["ci-fix.md", "develop.md"]
+        );
+        assert_eq!(pc(None, "develop", Some("other")), vec!["develop.md"]);
+        assert_eq!(pc(None, "develop", None), vec!["develop.md"]);
+        assert_eq!(pc(None, "review", Some("fix")), vec!["review.md"]);
+    }
+
     use super::*;
 
     // ---- s250: the retry note ------------------------------------------------------------
@@ -4092,6 +4302,20 @@ mod tests {
 
     fn uses_of(pairs: &[(&str, u32)]) -> std::collections::BTreeMap<String, u32> {
         pairs.iter().map(|(k, n)| (k.to_string(), *n)).collect()
+    }
+
+    #[test]
+    fn a_check_wait_is_credited_while_it_waits() {
+        // s417: credit reaches the deadline before the wait ends, not only after it.
+        let extra = mason_adapter_api::DeadlineExtra::default();
+        let seen = credit_wait(&extra, Duration::ZERO, || {
+            while extra.get().is_zero() {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            extra.get()
+        });
+        assert!(!seen.is_zero());
+        assert!(extra.get() >= seen);
     }
 
     fn def_with(extra: &str) -> Definition {
