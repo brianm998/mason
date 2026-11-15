@@ -103,6 +103,32 @@ pub struct Suite {
     /// Run the command with stdout and stderr on a pseudo-terminal, so a test runner
     /// that block-buffers to a pipe writes line by line. Only how output is captured.
     pub pty: bool,
+    /// How to run only the tests a change needs, in a task's test step (s386). The landing
+    /// batch always runs `command` whole.
+    pub narrow: Option<Narrow>,
+    /// Set by the test step on the copy it runs narrowed: such a run is no proof the suite is
+    /// green for the tree, so it records no evidence (never read from a definition).
+    pub narrowed: bool,
+}
+
+/// The `narrow_*` keys of a suite (s386): where its tests live, how one is named, and the
+/// command that runs only some of them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Narrow {
+    /// The test files (a glob, relative to the worktree).
+    pub tests: String,
+    /// For a test file that is one unit: the prefix taken off its path before the path becomes
+    /// its name (`/` to `.`, extension dropped).
+    pub root: Option<String>,
+    /// For a file holding many units: a regex whose matches start one each, named by its first
+    /// capture group (an XCTest file's `class (\w+): XCTestCase`).
+    pub split: Option<String>,
+    /// The command with `{tests}`, which becomes `each` once per picked unit.
+    pub command: String,
+    /// One unit's part of `{tests}`, with `{}` its name (`--tests {}`).
+    pub each: String,
+    /// A changed path matching one of these runs the suite whole (build files, shared code).
+    pub never: Vec<String>,
 }
 
 impl Suite {
@@ -129,6 +155,8 @@ impl Suite {
             progress: None,
             test_paths: vec![],
             pty: false,
+            narrow: None,
+            narrowed: false,
         }
     }
 }
