@@ -10,6 +10,7 @@ pub mod ci_schedule;
 pub mod ci_watch;
 mod entities;
 mod event;
+pub mod health;
 mod ids;
 pub mod introspect;
 pub mod notify;
