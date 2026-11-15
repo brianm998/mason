@@ -56,6 +56,11 @@ compose.desktop {
                 menuGroup = "Development"
                 appCategory = "Development"
             }
+            macOS {
+                // Used if a macOS package is ever built (Dmg is off); the Dock icon of a plain
+                // run is set in code (setDockIcon in Main.kt).
+                iconFile.set(project.file("../packaging/icons/mason-monitor.icns"))
+            }
             windows {
                 // NEVER CHANGE: Windows uses this to treat a new .msi as an upgrade of the old.
                 upgradeUuid = "6f0c5b8e-3d9a-4c47-9a52-7e1b8d2f4a61"
