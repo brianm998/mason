@@ -393,5 +393,6 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s439**: the Swift top bar's mascot picture no longer counts toward the bar's minimum width, so TopBarFitTests passes again at the 1000 pt window minimum.
 - **s440**: the Swift top bar's busiest-state picture shrinks in a narrow window, so the bar fits the 1000 pt main window minimum again (it needed 1079.6 pt).
 - **s443**: MonitorUI's AppKit calls (click count, pasteboard, occlusion, cursors) are behind `#if canImport(AppKit)` with iOS equivalents, and `MonitorUI` is now a library product.
+- **s446**: an XcodeGen spec builds one universal iPhone and iPad app from `clients/swift` with `make ios`, picking the phone or iPad root by size class, after the first real iOS compile fixes.
 - **s447**: `monitor-tool snapshot --ipad` renders the monitor offscreen at 1366×1024 and 1180×820 (scale 2, light and dark), and tests can check the top bar fits an iPad width.
 <!-- status:end -->
