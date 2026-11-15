@@ -98,12 +98,36 @@ pub fn agent_lost(reports: &[String]) -> String {
     )
 }
 
+/// `YYYY-MM-DD HH:MM:SS UTC` of a time in ms since the epoch.
+pub fn utc_text(ms: u64) -> String {
+    let secs = ms / 1000;
+    let (days, rem) = ((secs / 86_400) as i64, secs % 86_400);
+    // Civil-from-days (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!(
+        "{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02} UTC",
+        rem / 3600,
+        rem % 3600 / 60,
+        rem % 60
+    )
+}
+
 /// What an agent is told when it is continued after a lost host.
-pub fn interrupted_note() -> String {
-    "Your session was interrupted: the machine running it was lost (a restart, or the process was killed). \
-     Nothing you committed is gone, but work in progress may be. Verify the current state of the tree \
-     first (look at the files and run git status and git log), then continue and finish the step."
-        .into()
+pub fn interrupted_note(at_ms: u64) -> String {
+    format!(
+        "Your process was lost at {} (a restart, or the process was killed). \
+         Nothing you committed is gone, but work in progress may be. Check the worktree \
+         first (look at the files and run git status and git log), then continue and finish the step.",
+        utc_text(at_ms)
+    )
 }
 
 /// What an agent is told when its session was stopped for going silent.
@@ -224,5 +248,14 @@ mod tests {
         assert_eq!(retry_step(red, Some(FailClass::Code), "test"), None);
         // Recorded without a class: the text rule only.
         assert_eq!(retry_step(push, None, "land"), None);
+    }
+
+    #[test]
+    fn the_note_names_the_time_of_the_loss() {
+        assert_eq!(utc_text(0), "1970-01-01 00:00:00 UTC");
+        assert_eq!(utc_text(1_794_657_600_000), "2026-11-14 10:40:00 UTC");
+        let n = interrupted_note(1_794_657_600_000);
+        assert!(n.contains("lost at 2026-11-14 10:40:00 UTC"), "{n}");
+        assert!(n.contains("git status"), "{n}");
     }
 }

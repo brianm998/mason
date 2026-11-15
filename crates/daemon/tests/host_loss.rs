@@ -312,6 +312,7 @@ fn a_killed_agent_host_is_resumed_and_the_task_lands() {
             .any(|l| l.contains("--resume fake-claude-session")),
         "{argv}"
     );
+    assert_eq!(j["restarts"].as_u64().unwrap_or(0), 0, "{j:#}");
     let alerts = s.mason_ok(&["alerts"]);
     assert!(!alerts.contains("failed"), "{alerts}");
     drop(m);

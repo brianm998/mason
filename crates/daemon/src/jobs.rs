@@ -2939,12 +2939,17 @@ fn settle_all(
     let mut fresh_after_gone = false;
     let mut silent = false;
     let mut signaled_retried = false;
+    // Lost invocations before a resumed session that reached its own end: they are
+    // not counted toward the restart budget again (s399).
+    let mut forgiven = 0usize;
+    let mut lost_at = now_ms();
     loop {
         let fresh = match &report.end {
             StepEnd::Failed(FailReason::HostLost { detail }) => {
                 let lost = mason_adapters::hosted::lost_invocations(&root, &base);
                 let newest = lost.last().cloned().unwrap_or_else(|| base.clone());
                 let (text, at) = describe(&newest);
+                lost_at = at;
                 let text = if lost.is_empty() {
                     detail.clone()
                 } else {
@@ -2957,6 +2962,7 @@ fn settle_all(
                 // losing hosts.
                 let counted = lost
                     .iter()
+                    .skip(forgiven)
                     .filter(|id| {
                         let r = mason_step_host::registry::lost_report(&root.join(id));
                         !r.is_ok_and(|r| hl::is_restart_loss(&root, r.last_heartbeat_ms, r.at_ms))
@@ -3010,12 +3016,15 @@ fn settle_all(
             let note = if std::mem::take(&mut silent) {
                 hl::silent_note()
             } else {
-                hl::interrupted_note()
+                hl::interrupted_note(lost_at)
             };
             report = runner.resume(report, note, spec.clone(), contract);
             resumed = true;
         }
         report = settle_holds(c, runner, report, spec, contract, rec)?;
+        if resumed && !matches!(report.end, StepEnd::Failed(FailReason::HostLost { .. })) {
+            forgiven = mason_adapters::hosted::lost_invocations(&root, &base).len();
+        }
     }
 }
 
