@@ -62,13 +62,10 @@ build = "{project_test} --no-run"
 command = "{project_test}"
 rerun = "{project_test} {tests}"
 # `run_check` while developing, asked for with `changed: true`: only the crates the diff touches
-# and their dependents. The test step of a task runs it too (s396, `narrow_packages`); the landing batch runs `command` whole. Enabled by the owner
+# and their dependents. The test step runs `command` whole (decision 0205). Enabled by the owner
 # on 2026-11-13, once the running daemon knew the keys (s210, #265).
 dev_command = "{project_test} {packages}"
 dev_build = "{project_test} {packages} --no-run"
-# The test step of a task runs `dev_command` for the changed crates and their dependents too
-# (s396); the landing batch runs `command` whole.
-narrow_packages = true
 parser = "regex"
 pass_regex = '^test (.+) \.\.\. ok$'
 fail_regex = '^test (.+) \.\.\. FAILED$'
