@@ -18,6 +18,7 @@ n="$1"
 [ -n "$(find . -name "slow.$n" -not -path "./.git/*")" ] && sleep 3
 echo "1..1"
 if [ -n "$(find . -name "red.$n" -not -path "./.git/*")" ]; then echo "not ok 1 - $n"; exit 1; fi
+if [ "$n" = integration ] && [ -n "$(find . -name joint.a -not -path "./.git/*")" ] && [ -n "$(find . -name joint.b -not -path "./.git/*")" ]; then echo "not ok 1 - $n (joint)"; exit 1; fi
 echo "ok 1 - $n"
 "#;
 
