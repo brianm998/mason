@@ -59,6 +59,7 @@ pub mod release;
 pub mod rerun;
 pub mod sched;
 pub mod schedule;
+pub mod runtimes;
 pub mod scope;
 pub mod selfguard;
 pub mod selftest;
