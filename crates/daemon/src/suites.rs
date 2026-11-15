@@ -2659,7 +2659,8 @@ pub fn run_idle_debts(d: &Arc<Daemon>) {
     loop {
         settle_debts(d);
         let c = d.broker.compilation();
-        if !c.pending.is_empty() || c.used >= c.limit {
+        // A limit of 0 means no `compile` pool is declared: nothing to wait for.
+        if !c.pending.is_empty() || (c.limit > 0 && c.used >= c.limit) {
             return;
         }
         let Ok(rows) = d.store.debts(None, true) else {
