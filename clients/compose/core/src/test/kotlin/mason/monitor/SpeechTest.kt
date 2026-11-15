@@ -9,8 +9,10 @@ class FakeSink : SpeechSink {
     val log = mutableListOf<String>()
     private val pending = ArrayDeque<() -> Unit>()
     var stopped = 0
-    override fun play(sound: String, then: () -> Unit) { log += "sound:$sound"; pending.addLast(then) }
-    override fun speak(sentence: String, voice: String, then: () -> Unit) { log += "say:$sentence|$voice"; pending.addLast(then) }
+    /** The volume of each play/speak call, in order. */
+    val volumes = mutableListOf<Double>()
+    override fun play(sound: String, volume: Double, then: () -> Unit) { log += "sound:$sound"; volumes += volume; pending.addLast(then) }
+    override fun speak(sentence: String, voice: String, volume: Double, then: () -> Unit) { log += "say:$sentence|$voice"; volumes += volume; pending.addLast(then) }
     override fun stop() { stopped++; pending.clear() }
     override fun voices() = listOf("Samantha", "Daniel")
     /** The current sound or sentence ends. */
@@ -39,6 +41,47 @@ class SpeechTest {
         sink.finish()
         assertNull(a.speaking)
         assertTrue(a.queue.isEmpty())
+    }
+
+    @Test fun volumeDefaultsToFullSavesAndClamps() {
+        assertEquals(1.0, SpeechSettings().volume)
+        val prefs = MemoryPreferences()
+        val a = announcer(FakeSink(), prefs = prefs)
+        assertEquals(1.0, a.settings.volume)
+        a.update(a.settings.copy(volume = 0.4))
+        assertEquals(0.4, announcer(FakeSink(), prefs = prefs).settings.volume)
+        prefs.setString("speech.volume", "7")
+        assertEquals(1.0, announcer(FakeSink(), prefs = prefs).settings.volume)
+        prefs.setString("speech.volume", "-2")
+        assertEquals(0.0, announcer(FakeSink(), prefs = prefs).settings.volume)
+        prefs.setString("speech.volume", "loud")
+        assertEquals(1.0, announcer(FakeSink(), prefs = prefs).settings.volume)
+    }
+
+    @Test fun anAnnouncementUsesTheChosenVolumeForSoundAndSentence() {
+        val sink = FakeSink()
+        val a = announcer(sink)
+        a.update(a.settings.copy(volume = 0.3))
+        a.enqueue(ann("1", "failed", "Task 7 failed."))
+        sink.finish()
+        assertEquals(listOf(0.3, 0.3), sink.volumes)
+    }
+
+    @Test fun testSpeaksTestEvenMutedAndLeavesTheQueueAlone() {
+        val sink = FakeSink()
+        var muted = true
+        val a = announcer(sink, muted = { muted })
+        a.update(a.settings.copy(voice = "Daniel", volume = 0.5))
+        a.test()
+        assertEquals(listOf("say:test|Daniel"), sink.log)
+        assertEquals(listOf(0.5), sink.volumes)
+        assertEquals(1, sink.stopped)
+        assertNull(a.speaking)
+        assertTrue(a.queue.isEmpty())
+        muted = false
+        a.enqueue(ann("1", "failed", "Task 7 failed."))
+        assertEquals("sound:Basso", sink.log.last())
+        assertEquals("1", a.speaking?.id)
     }
 
     @Test fun decisionAndBrokeSoundDifferent() {

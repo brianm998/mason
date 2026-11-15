@@ -82,6 +82,7 @@ extension Mason_V1_DecisionCard {
         if owner {
             actions = (1...max(options.count, 1)).prefix(options.count).map { "option:\($0)" }
             actions.append("other")
+            if multiSelect { actions.append("send") }
         }
         return Item(id: "card:\(task)", texts: texts, actions: actions)
     }

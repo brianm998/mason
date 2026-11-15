@@ -12,12 +12,16 @@ final class FakeSink: SpeechSink {
     var log: [String] = []
     var pending: [() -> Void] = []
     var stopped = 0
-    func play(sound: String, then: @escaping () -> Void) {
+    /// The volume of each play/speak call, in order.
+    var volumes: [Double] = []
+    func play(sound: String, volume: Double, then: @escaping () -> Void) {
         log.append("sound:\(sound)")
+        volumes.append(volume)
         pending.append(then)
     }
-    func speak(_ sentence: String, voice: String, then: @escaping () -> Void) {
+    func speak(_ sentence: String, voice: String, volume: Double, then: @escaping () -> Void) {
         log.append("say:\(sentence)|\(voice)")
+        volumes.append(volume)
         pending.append(then)
     }
     func stop() { stopped += 1; pending.removeAll() }
@@ -53,6 +57,48 @@ final class SpeechTests: XCTestCase {
         sink.finish()
         XCTAssertNil(a.speaking)
         XCTAssertTrue(a.queue.isEmpty)
+    }
+
+    func testVolumeDefaultsToFullSavesAndClamps() {
+        XCTAssertEqual(SpeechSettings().volume, 1.0)
+        let prefs = MemoryPreferences()
+        let a = Announcer(sink: FakeSink(), preferences: prefs)
+        XCTAssertEqual(a.settings.volume, 1.0)
+        a.settings.volume = 0.4
+        XCTAssertEqual(Announcer(sink: FakeSink(), preferences: prefs).settings.volume, 0.4)
+        prefs.setString("7", for: "speech.volume")
+        XCTAssertEqual(Announcer(sink: FakeSink(), preferences: prefs).settings.volume, 1.0)
+        prefs.setString("-2", for: "speech.volume")
+        XCTAssertEqual(Announcer(sink: FakeSink(), preferences: prefs).settings.volume, 0.0)
+        prefs.setString("loud", for: "speech.volume")
+        XCTAssertEqual(Announcer(sink: FakeSink(), preferences: prefs).settings.volume, 1.0)
+    }
+
+    func testAnAnnouncementUsesTheChosenVolumeForSoundAndSentence() {
+        let sink = FakeSink()
+        let a = announcer(sink)
+        a.settings.volume = 0.3
+        a.enqueue(ann("1", "failed", "Task 7 failed."))
+        sink.finish()
+        XCTAssertEqual(sink.volumes, [0.3, 0.3])
+    }
+
+    func testTestSpeaksTestEvenMutedAndLeavesTheQueueAlone() {
+        let sink = FakeSink()
+        var muted = true
+        let a = announcer(sink, muted: { muted })
+        a.settings.voice = "Daniel"
+        a.settings.volume = 0.5
+        a.test()
+        XCTAssertEqual(sink.log, ["say:test|Daniel"])
+        XCTAssertEqual(sink.volumes, [0.5])
+        XCTAssertEqual(sink.stopped, 1)
+        XCTAssertNil(a.speaking)
+        XCTAssertTrue(a.queue.isEmpty)
+        muted = false
+        a.enqueue(ann("1", "failed", "Task 7 failed."))
+        XCTAssertEqual(sink.log.last, "sound:Basso")
+        XCTAssertEqual(a.speaking?.id, "1")
     }
 
     func testDecisionAndBrokeSoundDifferent() {
