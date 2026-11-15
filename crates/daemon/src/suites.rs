@@ -2191,18 +2191,18 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
                 // last round run at the merge base (s282).
                 if !failing.is_empty() {
                     crate::exhausted::record_round(c, &failing);
-                    crate::exhausted::record_persistent(c, &name, &failing);
-                    if crate::exhausted::is_last_round(c) {
-                        let cmd_for = |t: &[String]| match &suite.rerun {
-                            Some(tpl) => tpl.replace(
-                                "{tests}",
-                                &t.iter().map(|x| quote(x)).collect::<Vec<_>>().join(" "),
-                            ),
-                            None => suite.command.clone(),
-                        };
-                        // The suite's own lease and device are gone by now: a suite with an
-                        // environment runs at the base on one too, brought up before the base
-                        // runs and torn down after, as its own attempts are.
+                    let repeated = crate::exhausted::record_persistent(c, &name, &failing);
+                    let cmd_for = |t: &[String]| match &suite.rerun {
+                        Some(tpl) => tpl.replace(
+                            "{tests}",
+                            &t.iter().map(|x| quote(x)).collect::<Vec<_>>().join(" "),
+                        ),
+                        None => suite.command.clone(),
+                    };
+                    // The suite's own lease and device are gone by now: a suite with an
+                    // environment runs at the base on one too, brought up before the base
+                    // runs and torn down after, as its own attempts are.
+                    let at_base = |tests: &[String], check: crate::exhausted::BaseCheck| {
                         let dev = lease_dev(&who, &c.def, &suite);
                         let up = match &dev {
                             Ok(dv) => env_up(&who, &c.def, &suite, &c.wt, dv.as_ref()),
@@ -2218,18 +2218,12 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
                                 let on_dev = |t: &[String]| {
                                     lifecycle::with_device(&cmd_for(t), id.as_deref())
                                 };
-                                crate::exhausted::on_last_round(
-                                    c,
-                                    &name,
-                                    suite.build.as_deref(),
-                                    &on_dev,
-                                    &failing,
-                                )
+                                check(&on_dev)
                             }
                             Err(why) => crate::exhausted::Exhausted {
                                 why: Some(format!(
                                     "could not check at the base: `{}` ({why})",
-                                    failing.join("`, `")
+                                    tests.join("`, `")
                                 )),
                                 ..Default::default()
                             },
@@ -2237,6 +2231,31 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
                         if let Ok(dv) = &dev {
                             env_down(&who, &c.def, &suite, &c.wt, dv.as_ref());
                         }
+                        ex
+                    };
+                    if !crate::exhausted::is_last_round(c) && !repeated.is_empty() {
+                        // Failing in many tasks is not proof: known red only if red at the
+                        // base too (s416).
+                        at_base(&repeated, &|on_dev| {
+                            crate::exhausted::repeated_at_base(
+                                c,
+                                &name,
+                                suite.build.as_deref(),
+                                on_dev,
+                                &repeated,
+                            )
+                        });
+                    }
+                    if crate::exhausted::is_last_round(c) {
+                        let ex = at_base(&failing, &|on_dev| {
+                            crate::exhausted::on_last_round(
+                                c,
+                                &name,
+                                suite.build.as_deref(),
+                                on_dev,
+                                &failing,
+                            )
+                        });
                         let left = failing.iter().any(|t| !ex.excused.contains(t));
                         if !ex.excused.is_empty() && !left && ex.why.is_none() {
                             // Red at the base too: in the ledger now, and the step goes on.

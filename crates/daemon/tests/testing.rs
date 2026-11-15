@@ -838,3 +838,50 @@ fn a_debt_whose_suite_is_still_red_stays_open_and_is_run_once_when_idle() {
     let again = d.store.debts(Some(t.0), false).unwrap().remove(0);
     assert_eq!(again.tried_at, row.tried_at);
 }
+
+#[test]
+fn a_test_red_in_three_tasks_but_green_at_the_base_is_not_made_known_red() {
+    // `mine` already failed on every run in two other tasks; this task's first attempt breaks
+    // it too, which makes three. It passes at the merge base, so each task broke it with its
+    // own change (s416): no ledger entry and no fix task.
+    let s = world(
+        vec![
+            commit(
+                &format!("{HELLO} && echo x > mine.broken"),
+                "add hello (and break mine)",
+            ),
+            commit(
+                "rm mine.broken && echo y > u2-$(basename \"$PWD\").txt",
+                "fix mine",
+            ),
+        ],
+        &[],
+        &def("", "", ""),
+    );
+    let d = start(&s);
+    let now = mason_daemon::daemon::now_ms();
+    for other in [9001, 9002] {
+        d.store
+            .record_persistent_red("checks", "mine", other, now)
+            .unwrap();
+    }
+    let t = file_it(&d, "Repeat");
+    wait_state(&d, t, State::Landed, 90);
+    assert_eq!(
+        steps_run(&d, t),
+        vec!["develop", "test", "develop", "test", "land"]
+    );
+    let ledger = d.store.ledger().unwrap();
+    assert!(
+        !ledger.iter().any(|e| e.test == "mine"),
+        "green at the base, yet known red: {ledger:?}"
+    );
+    let fixes = d
+        .world()
+        .unwrap()
+        .tasks
+        .values()
+        .filter(|t| t.title.starts_with("mine fails on "))
+        .count();
+    assert_eq!(fixes, 0);
+}
