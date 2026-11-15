@@ -775,3 +775,49 @@ fn a_task_test_step_runs_only_the_tests_its_change_needs_and_proves_nothing_for_
     let (_, note) = closing(&d, t);
     assert!(note.contains("narrowed to 1 of 3 test units"), "{note}");
 }
+
+#[test]
+fn a_task_test_step_runs_only_the_crates_its_change_touches_and_their_dependents() {
+    // s396: with `narrow_packages`, the test step runs `dev_command` for the changed crates
+    // and their dependents, and records no evidence for the tree.
+    let runs = tempfile::tempdir().unwrap();
+    let log = runs.path().join("ran");
+    let definition = def(
+        &format!(
+            "dev_command = \"echo dev {{packages}} >> {l}; sh checks.sh\"\n\
+             narrow_packages = true",
+            l = log.display()
+        ),
+        "",
+        "",
+    );
+    let s = Scratch::new(
+        "sh checks.sh",
+        json!({"steps": {"develop": [commit(&format!("{HELLO} && echo '// c' >> crates/leaf/src/lib.rs"), "change leaf")]}}),
+    );
+    let krate = |name: &str, dep: &str| {
+        format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n{dep}")
+    };
+    s.push_files(
+        &[
+            (".mason/mason.toml", &definition),
+            ("checks.sh", CHECKS),
+            ("Cargo.toml", "[workspace]\nresolver = \"2\"\nmembers = [\"crates/*\"]\n"),
+            ("crates/base/Cargo.toml", &krate("base", "")),
+            ("crates/base/src/lib.rs", "\n"),
+            (
+                "crates/leaf/Cargo.toml",
+                &krate("leaf", "[dependencies]\nbase = { path = \"../base\" }\n"),
+            ),
+            ("crates/leaf/src/lib.rs", "\n"),
+        ],
+        "project setup",
+    );
+    let d = start(&s);
+    let t = file_it(&d, "Packages");
+    wait_state(&d, t, State::Landed, 120);
+    let ran = std::fs::read_to_string(&log).unwrap_or_default();
+    assert_eq!(ran.trim(), "dev -p leaf", "only the leaf crate ran: {ran:?}");
+    let (_, note) = closing(&d, t);
+    assert!(note.contains("narrowed to 1 packages (leaf)"), "{note}");
+}

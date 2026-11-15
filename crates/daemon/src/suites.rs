@@ -1673,6 +1673,9 @@ fn lease(c: &Ctx, needs: Needs) -> bool {
 /// runs, or `None` to run it whole: no `narrow_*` keys, the change unreadable, or
 /// [`mason_testing::narrow::select`] picks nothing or most of it.
 fn narrow_for_step(c: &Ctx, suite: &Suite) -> Option<(Suite, String)> {
+    if suite.narrow_packages {
+        return narrow_packages_for_step(c, suite);
+    }
     let n = suite.narrow.as_ref()?;
     let base = git::run(&c.wt, &["merge-base", &c.project.base_ref(), "HEAD"]).ok()?;
     let base = base.trim();
@@ -1711,6 +1714,31 @@ fn narrow_for_step(c: &Ctx, suite: &Suite) -> Option<(Suite, String)> {
         } else {
             String::new()
         }
+    );
+    Some((s, note))
+}
+
+/// The package-mode narrowing of `suite` for a task's test step (s396): its `dev_command`
+/// (and `dev_build`) with `{packages}` for the crates the change touches and their dependents,
+/// as `run_check` does. `None` (runs whole) when the suite has no `dev_command`, or no package
+/// list can be found. Like a test-unit narrowing, it records no evidence.
+fn narrow_packages_for_step(c: &Ctx, suite: &Suite) -> Option<(Suite, String)> {
+    let dc = suite.dev_command.as_ref()?;
+    let paths = worktree_paths(&c.wt, &c.project.base_ref())?;
+    let pk = crate::scope::changed_packages(&c.wt, &paths).filter(|p| !p.is_empty())?;
+    let flags = crate::scope::flags(&pk);
+    let mut s = suite.clone();
+    s.command = dc.replace("{packages}", &flags);
+    if let Some(db) = &suite.dev_build {
+        s.build = Some(db.replace("{packages}", &flags));
+    }
+    s.min_tests = 1;
+    s.narrowed = true;
+    let note = format!(
+        "{}: narrowed to {} packages ({}); the landing batch runs it whole",
+        suite.name,
+        pk.len(),
+        pk.join(", ")
     );
     Some((s, note))
 }
