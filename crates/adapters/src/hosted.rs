@@ -331,6 +331,8 @@ pub fn attach_as(
         });
     }
 
+    // For the end: whether a fired deadline really cut the session short (s355).
+    let (budget, budget_extra) = (spec.deadline, spec.deadline_extra.clone());
     let seen = Arc::new(AtomicU64::new(0));
     let idled = Arc::new(AtomicBool::new(false));
     if let Some(p) = spec
@@ -377,7 +379,13 @@ pub fn attach_as(
             let exit = follow(&dir, &sock, &mut feed);
             feed.flush();
             done.store(true, Ordering::SeqCst);
-            let outcome = if timed_out.load(Ordering::SeqCst) {
+            // A re-attached session that had ended on its own within its budget did not time
+            // out, though the timer fired at once (s355).
+            let timed_out = timed_out.load(Ordering::SeqCst)
+                && budget.is_none_or(|d| {
+                    mason_step_host::registry::ran_past(d + budget_extra.get(), &dir)
+                });
+            let outcome = if timed_out {
                 Outcome::Timeout
             } else if cancelled.load(Ordering::SeqCst) {
                 Outcome::NoResult
