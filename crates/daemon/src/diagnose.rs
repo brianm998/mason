@@ -12,8 +12,9 @@
 //! * `close`: already done or a duplicate, with evidence;
 //! * `ask`: only the owner can decide, recommendation first.
 //!
-//! For MASON's own project a `retry` is applied by itself, at most once per task per day. Every
-//! other verdict waits as a pending diagnosis: the alert says what it suggests, and the owner
+//! A `retry` is applied by itself when the failure was not the code (any project), or when the
+//! diagnosis says no code change is needed (MASON's own project: always), at most once per task
+//! per day. Every other verdict waits as a pending diagnosis: the alert says what it suggests, and the owner
 //! applies or dismisses it (`mason task diagnosis`). A failed task cannot hold a question in the
 //! engine, so the card is that alert and these two actions, not a `QuestionAsked`.
 
@@ -40,13 +41,35 @@ pub enum Action {
     Card,
 }
 
-/// `is_self`: the project is MASON's own (`[self]`). `applied_recently`: an automatic retry of
-/// this task was applied within a day.
-pub fn decide(is_self: bool, verdict: &str, applied_recently: bool) -> Action {
-    if is_self && verdict == "retry" && !applied_recently {
-        Action::Apply
-    } else {
-        Action::Card
+/// What `decide` looks at.
+#[derive(Clone, Copy, Debug)]
+pub struct Facts<'a> {
+    /// The project is MASON's own (`[self]`).
+    pub is_self: bool,
+    /// The task's failure class.
+    pub class: FailClass,
+    pub verdict: &'a str,
+    /// The diagnosis says the code needs no change (`no_code_change`).
+    pub no_code_change: bool,
+    /// An automatic retry of this task was applied within a day.
+    pub applied_recently: bool,
+    /// The automatic retry loop already has a retry coming for this failure (`autoretry::pending`).
+    pub auto_retry_pending: bool,
+}
+
+/// Only a `retry` is applied by itself, and then only when the failure was not the task's code
+/// (any project), or when it was and the diagnosis says no code change is needed (and for MASON's
+/// own project, whatever it says), once per task per day. Everything else is a card.
+pub fn decide(f: Facts) -> Action {
+    if f.verdict != "retry" {
+        return Action::Card;
+    }
+    match f.class {
+        // The retry loop makes this one; a second here would be two for one failure.
+        FailClass::Outside if f.auto_retry_pending => Action::Card,
+        FailClass::Outside => Action::Apply,
+        FailClass::Code if (f.is_self || f.no_code_change) && !f.applied_recently => Action::Apply,
+        FailClass::Code => Action::Card,
     }
 }
 
@@ -148,7 +171,8 @@ pub fn prompt(
          look at the worktree you are in (you may not change any file) and say what should \
          happen next. End with exactly one call of `submit_diagnosis`.\n\n\
          Verdicts: `retry` (run again from one of the steps {steps}; give a note for the next \
-         agent: what went wrong and what to do differently), `explore` (the plan does not hold: \
+         agent: what went wrong and what to do differently; set `no_code_change` only if the code is \
+         right and running it again is expected to pass, and MASON then retries by itself), `explore` (the plan does not hold: \
          give the reason), `close` (the work is already done, or a duplicate of another task: \
          give the evidence, and `duplicate_of` for a duplicate) or `ask` (only the owner can \
          decide: one question and your recommendation).\n\n\
@@ -285,16 +309,31 @@ fn diagnose(d: &Arc<Daemon>, task: TaskId, run: StepRunId) {
 
 /// Store a submitted diagnosis, and apply it or leave it as a card.
 fn record(d: &Arc<Daemon>, c: &crate::jobs::Ctx, a: Value) {
+    record_verdict(d, c.task, a);
+}
+
+/// The same for a task by number: looks up its project and failure class.
+pub fn record_verdict(d: &Arc<Daemon>, task: TaskId, a: Value) {
     let verdict = a["verdict"].as_str().unwrap_or("none").to_string();
-    let task = c.task.0;
     let now = now_ms();
+    let Ok(w) = d.world() else { return };
+    let Some(t) = w.tasks.get(&task) else { return };
     let recent = d
         .store
-        .diagnoses(Some(task))
+        .diagnoses(Some(task.0))
         .unwrap_or_default()
         .iter()
         .any(|r| r.status == "applied" && now.saturating_sub(r.decided_ms) < AUTO_WINDOW_MS);
-    let action = decide(c.project.self_cfg.is_some(), &verdict, recent);
+    let action = decide(Facts {
+        is_self: d.project(t.project).is_some_and(|p| p.self_cfg.is_some()),
+        class: t.failure_class.unwrap_or(FailClass::Code),
+        verdict: &verdict,
+        no_code_change: a["no_code_change"].as_bool().unwrap_or(false),
+        applied_recently: recent,
+        auto_retry_pending: crate::autoretry::pending(d, t),
+    });
+    drop(w);
+    let task = task.0;
     let status = if action == Action::Apply {
         "applied"
     } else {
@@ -308,9 +347,12 @@ fn record(d: &Arc<Daemon>, c: &crate::jobs::Ctx, a: Value) {
     };
     if action == Action::Apply {
         let _ = d.store.set_diagnosis_status(id, "applied", now);
-        if let Err(e) = apply_args(d, task, &verdict, &a, true) {
-            tracing::warn!(task, "the diagnosis could not be applied: {e}");
-            let _ = d.store.set_diagnosis_status(id, "pending", 0);
+        match apply_args(d, task, &verdict, &a, true) {
+            Ok(what) => tracing::info!(task, "diagnosis #{id} applied by itself: {what}"),
+            Err(e) => {
+                tracing::warn!(task, "the diagnosis could not be applied: {e}");
+                let _ = d.store.set_diagnosis_status(id, "pending", 0);
+            }
         }
     }
     d.poke();
@@ -431,6 +473,32 @@ pub fn alerts(d: &Daemon) -> Vec<(String, String, String)> {
                 ),
             )
         })
+        .chain(applied_alerts(d))
+        .collect()
+}
+
+/// How long an alert says what a diagnosis applied by itself.
+const APPLIED_ALERT_MS: u64 = 3_600_000;
+
+/// One alert for each diagnosis the daemon applied by itself in the last hour, naming what it did.
+fn applied_alerts(d: &Daemon) -> Vec<(String, String, String)> {
+    let now = now_ms();
+    d.store
+        .diagnoses(None)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|r| r.status == "applied" && now.saturating_sub(r.decided_ms) < APPLIED_ALERT_MS)
+        .map(|r| {
+            let a: Value = serde_json::from_str(&r.args).unwrap_or(json!({}));
+            (
+                format!("diagnosis-applied:{}", r.id),
+                "environment".to_string(),
+                format!(
+                    "Applied by itself: {}",
+                    card_text(r.task, r.id, &r.verdict, &a)
+                ),
+            )
+        })
         .collect()
 }
 
@@ -484,14 +552,50 @@ mod tests {
         assert!(!still_needs_you(None, 2_000), "no such task");
     }
 
-    #[test]
-    fn only_the_self_projects_retry_is_applied_by_itself_and_once_a_day() {
-        assert_eq!(decide(true, "retry", false), Action::Apply);
-        assert_eq!(decide(true, "retry", true), Action::Card);
-        for v in ["explore", "close", "ask", "none"] {
-            assert_eq!(decide(true, v, false), Action::Card, "{v}");
+    fn facts(is_self: bool, class: FailClass, verdict: &str) -> Facts<'_> {
+        Facts {
+            is_self,
+            class,
+            verdict,
+            no_code_change: false,
+            applied_recently: false,
+            auto_retry_pending: false,
         }
-        assert_eq!(decide(false, "retry", false), Action::Card);
+    }
+
+    #[test]
+    fn a_retry_is_applied_by_itself_when_the_failure_was_not_the_code() {
+        for is_self in [true, false] {
+            assert_eq!(
+                decide(facts(is_self, FailClass::Outside, "retry")),
+                Action::Apply
+            );
+            // The retry loop has one coming: not a second.
+            let mut f = facts(is_self, FailClass::Outside, "retry");
+            f.auto_retry_pending = true;
+            assert_eq!(decide(f), Action::Card);
+            for v in ["explore", "close", "ask", "none"] {
+                assert_eq!(decide(facts(is_self, FailClass::Outside, v)), Action::Card);
+            }
+        }
+    }
+
+    #[test]
+    fn a_code_failure_retry_is_applied_only_for_self_or_when_no_code_change_is_needed() {
+        assert_eq!(decide(facts(true, FailClass::Code, "retry")), Action::Apply);
+        assert_eq!(decide(facts(false, FailClass::Code, "retry")), Action::Card);
+        for is_self in [true, false] {
+            let mut f = facts(is_self, FailClass::Code, "retry");
+            f.no_code_change = true;
+            assert_eq!(decide(f), Action::Apply);
+            f.applied_recently = true;
+            assert_eq!(decide(f), Action::Card, "once a day");
+            for v in ["explore", "close", "ask", "none"] {
+                let mut f = facts(is_self, FailClass::Code, v);
+                f.no_code_change = true;
+                assert_eq!(decide(f), Action::Card, "{v}");
+            }
+        }
     }
 
     #[test]
