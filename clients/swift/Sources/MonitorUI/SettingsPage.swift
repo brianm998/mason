@@ -26,9 +26,10 @@ struct SettingsPage: View {
                     Text("Loading the project's settings.").font(theme.body()).foregroundStyle(theme.muted)
                 }
                 if let n = model.notifySettings { routes(n) }
+                DevicesSection(model: model)
             }.padding(theme.spacingLarge)
         }
-        .onAppear { model.loadSettings() }
+        .onAppear { model.loadSettings(); model.loadDevices() }
     }
 
     func choice(_ title: String, _ id: String, value: String, options: [String], _ pick: @escaping (String) -> Void) -> some View {

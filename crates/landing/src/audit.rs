@@ -166,24 +166,24 @@ pub fn unkept(
     deliberate: &[Removal],
     read: &dyn Fn(&str) -> Option<String>,
 ) -> Vec<Dropped> {
-    unkept_or_moved(base_added, task_removed, deliberate, read, &[])
+    unkept_or_moved(base_added, task_removed, deliberate, read, &Vec::new)
 }
 
 /// [`unkept`], where a line missing from its own file is also kept when it is, trimmed, a
-/// whole line of one of `moved_to`: the texts, in the result, of the other files the task
-/// changed. That accepts a line the task moved to another file (a file split in two) and
-/// nothing looser: the line must be there exactly, and only in a file the task wrote.
+/// whole line of another file the task changed: `moved_to` names those files, and `read`
+/// gives their text in the result. That accepts a line the task moved to another file (a
+/// file split in two) and nothing looser: the line must be there exactly, and only in a file
+/// the task wrote. `moved_to` is called, and those files read, only once a line is missing
+/// from its own file, which is rare: reading every changed file for every merge of the base
+/// took minutes per task on a long-lived branch (s429).
 pub fn unkept_or_moved(
     base_added: &BTreeMap<String, Vec<String>>,
     task_removed: &BTreeMap<String, BTreeSet<String>>,
     deliberate: &[Removal],
     read: &dyn Fn(&str) -> Option<String>,
-    moved_to: &[(String, String)],
+    moved_to: &dyn Fn() -> Vec<String>,
 ) -> Vec<Dropped> {
-    let moved: Vec<(&str, HashSet<&str>)> = moved_to
-        .iter()
-        .map(|(f, text)| (f.as_str(), text.lines().map(str::trim).collect()))
-        .collect();
+    let mut moved: Option<Vec<(String, HashSet<String>)>> = None;
     let mut out = vec![];
     for (file, lines) in base_added {
         let mut hay: Option<Haystack> = None;
@@ -202,12 +202,23 @@ pub fn unkept_or_moved(
                 continue;
             }
             let h = hay.get_or_insert_with(|| Haystack::new(&read(file).unwrap_or_default()));
-            let elsewhere = || {
-                moved
-                    .iter()
-                    .any(|(f, set)| *f != file.as_str() && set.contains(line.trim()))
-            };
-            if !h.has(line) && !elsewhere() {
+            if h.has(line) {
+                continue;
+            }
+            let others = moved.get_or_insert_with(|| {
+                moved_to()
+                    .into_iter()
+                    .filter_map(|f| {
+                        let text = read(&f)?;
+                        let set = text.lines().map(|l| l.trim().to_string()).collect();
+                        Some((f, set))
+                    })
+                    .collect()
+            });
+            let elsewhere = others
+                .iter()
+                .any(|(f, set)| f != file && set.contains(line.trim()));
+            if !elsewhere {
                 out.push(Dropped {
                     file: file.clone(),
                     line: line.clone(),
@@ -289,16 +300,12 @@ pub fn audit(
         }
     }
     // The files the task's side changed beyond this base commit: where it may have moved a
-    // line the base added (a file split in two).
-    let mut moved_to = vec![];
-    for f in parse_diff(&diff_text(repo, &format!("{base}..{result}"))?)
-        .added
-        .into_keys()
-    {
-        if let Some(text) = file_at(repo, result, &f) {
-            moved_to.push((f, text));
-        }
-    }
+    // line the base added (a file split in two). Listed only if a line is missing.
+    let moved_to = || {
+        diff_text(repo, &format!("{base}..{result}"))
+            .map(|d| parse_diff(&d).added.into_keys().collect())
+            .unwrap_or_default()
+    };
     Ok(unkept_or_moved(
         &added,
         &removed,
@@ -610,8 +617,41 @@ mod tests {
     }
 
     fn moved(base: &BTreeMap<String, Vec<String>>, file: &str, text: &str) -> usize {
-        let to = [(file.to_string(), text.to_string())];
-        unkept_or_moved(base, &BTreeMap::new(), &[], &|_| Some(String::new()), &to).len()
+        // The line's own file is empty in the result; `file`, when another one, holds `text`.
+        let own = base.keys().next().cloned().unwrap_or_default();
+        let read = |f: &str| {
+            Some(if f == file && f != own {
+                text.to_string()
+            } else {
+                String::new()
+            })
+        };
+        unkept_or_moved(base, &BTreeMap::new(), &[], &read, &|| {
+            vec![file.to_string()]
+        })
+        .len()
+    }
+
+    #[test]
+    fn other_files_are_not_listed_or_read_while_every_line_is_in_its_own() {
+        let base = one("f.rs", &["let a = compute(x, y);"]);
+        let listed = std::cell::Cell::new(0);
+        let r = unkept_or_moved(
+            &base,
+            &BTreeMap::new(),
+            &[],
+            &|_| Some("let a = compute(x, y);\n".to_string()),
+            &|| {
+                listed.set(listed.get() + 1);
+                vec!["g.rs".to_string()]
+            },
+        );
+        assert!(r.is_empty());
+        assert_eq!(
+            listed.get(),
+            0,
+            "nothing was missing, so nothing else was read"
+        );
     }
 
     #[test]

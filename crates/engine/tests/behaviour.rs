@@ -1158,7 +1158,10 @@ fn deferred_is_not_admitted_and_comes_back_only_by_hand() {
     let mut sim = Sim::new();
     let t = sim.file(false, true);
     sim.ok(E::Deferred { task: t });
-    assert_eq!((sim.state(t), sim.activity(t)), (S::Deferred, Activity::Idle));
+    assert_eq!(
+        (sim.state(t), sim.activity(t)),
+        (S::Deferred, Activity::Idle)
+    );
     assert!(matches!(
         sim.try_ev(E::Admitted {
             task: t,

@@ -96,14 +96,24 @@ fn a_session_keeps_its_transcript_resumes_the_agent_and_ends() {
                          "chat": chat_turns(&gate)}}),
     );
     let d = start(&s);
-    let t = file_task_as(&d, "Asks", "Please do it.", true, mason_core::TrustSource::Owner, false);
+    let t = file_task_as(
+        &d,
+        "Asks",
+        "Please do it.",
+        true,
+        mason_core::TrustSource::Owner,
+        false,
+    );
     wait_state(&d, t, mason_core::State::NeedsAttention, 60);
     let before = argv(&s).len();
 
     let o = open(&d, t);
     assert!(o.created);
     let draft = o.draft.clone().expect("a draft");
-    assert!(draft.contains("Asks") && draft.contains("Please do it."), "{draft}");
+    assert!(
+        draft.contains("Asks") && draft.contains("Please do it."),
+        "{draft}"
+    );
     let id = o.session.id;
     // Opening again returns the same session.
     assert_eq!(open(&d, t).session.id, id);
@@ -173,7 +183,14 @@ fn the_next_step_waits_while_a_turn_is_in_flight_and_goes_on_when_it_finishes() 
                          "chat": [gated(&gate)]}}),
     );
     let d = start(&s);
-    let t = file_task_as(&d, "Asks", "Please do it.", true, mason_core::TrustSource::Owner, false);
+    let t = file_task_as(
+        &d,
+        "Asks",
+        "Please do it.",
+        true,
+        mason_core::TrustSource::Owner,
+        false,
+    );
     wait_state(&d, t, mason_core::State::NeedsAttention, 60);
     let id = open(&d, t).session.id;
     us::post(&d, id, "look at this", "brian").unwrap();
@@ -187,9 +204,8 @@ fn the_next_step_waits_while_a_turn_is_in_flight_and_goes_on_when_it_finishes() 
         Ctx::new(&d, &w).row(&w.tasks[&t]).why_waiting == us::HOLD_REASON
     });
     let launched = argv(&s).len();
-    assert_eq!(
+    assert!(
         us::replying(&d, t),
-        true,
         "the turn is still in flight at the hold"
     );
     // The turn finishes (the gate opens): the step launches and the task lands.
@@ -224,7 +240,14 @@ fn provider_flow(codex: bool) {
     }
     let d = start(&s);
     // A task that has run no agent yet: nothing to resume.
-    let t = file_task_as(&d, "Quiet", "Body.", false, mason_core::TrustSource::Owner, true);
+    let t = file_task_as(
+        &d,
+        "Quiet",
+        "Body.",
+        false,
+        mason_core::TrustSource::Owner,
+        true,
+    );
     let pid = d.project_id_by_name("scratch").unwrap();
     let wt = d.project(pid).unwrap().worktree(&d.cfg, t.0);
     std::fs::create_dir_all(&wt).unwrap();
@@ -240,7 +263,10 @@ fn provider_flow(codex: bool) {
     assert_eq!(m[3].1, format!("second from {name}"));
     let a = argv(&s);
     assert_eq!(a.len(), 2, "{a:?}");
-    assert!(!a[0].contains("resume"), "a fresh session was started: {a:?}");
+    assert!(
+        !a[0].contains("resume"),
+        "a fresh session was started: {a:?}"
+    );
     assert!(a[1].contains("resume"), "the second turn resumed it: {a:?}");
     us::end(&d, id, "brian").unwrap();
     assert!(d.store.open_owner_sessions().unwrap().is_empty());
