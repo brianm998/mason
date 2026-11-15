@@ -416,6 +416,8 @@ public final class MonitorModel: ObservableObject {
     }
 
     public func go(_ p: Page) { history.go(p); subscribe?() }
+    /// Pick the CPU graph's span and ask the daemon for that range.
+    public func setCpuSpan(_ s: CpuSpan) { cpu.setSpan(s); subscribe?() }
     public func goBack() { history.goBack(); subscribe?() }
     public func goForward() { history.goForward(); subscribe?() }
     public func goHome() { history.goHome(); subscribe?() }
@@ -1024,6 +1026,8 @@ public final class MonitorModel: ObservableObject {
         case .home(let x)?:
             home = x
             cpu.update(x)
+        case .cpuHistory(let x)?:
+            cpu.update(history: x)
         case .taskDetail(let x)?:
             // A different task's page starts its log over; the same task's view carries the tail again.
             taskDetail = x

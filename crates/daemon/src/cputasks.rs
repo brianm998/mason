@@ -303,6 +303,7 @@ fn share(task: u64, kind: &str, label: String, permille: u32) -> CpuShare {
         kind: kind.into(),
         label,
         title: String::new(),
+        project: String::new(),
         permille,
     }
 }
@@ -470,7 +471,7 @@ pub fn spawn(d: &Arc<Daemon>) {
         if push {
             pushed = Some(reading.usage.clone());
         }
-        d.set_cpu_reading(reading);
+        d.record_cpu(reading);
         if push {
             d.poke();
         }

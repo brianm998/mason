@@ -31,6 +31,9 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     /** Each task's colour in the CPU bar while it is among the shares. */
     var cpuColors by mutableStateOf<Map<Long, Int>>(emptyMap())
     private val cpuPalette = CpuColors()
+    /** The latest CPU history for [cpuSpan]; the graph is built from it off the main thread. */
+    var cpuHistory by mutableStateOf<mason.v1.CpuHistory?>(null)
+    var cpuSpan by mutableStateOf(CpuSpan.Hour)
     var taskDetail by mutableStateOf<TaskDetailView?>(null)
     var landing by mutableStateOf<LandingView?>(null)
     var usage by mutableStateOf<UsageView?>(null)
@@ -297,6 +300,13 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     fun linkify(text: String): List<LinkSegment> =
         Linkify.segments(text, { isKnownTask(it) }, taskDetail?.ci_links ?: emptyList())
 
+    /** Pick the CPU graph's span and ask the daemon for that range. */
+    fun pickCpuSpan(s: CpuSpan) {
+        if (s == cpuSpan) return
+        cpuSpan = s
+        cpuHistory = null
+        subscribe?.invoke()
+    }
     fun goBack() { history = history.goBack(); subscribe?.invoke() }
     fun goForward() { history = history.goForward(); subscribe?.invoke() }
     fun goHome() { history = history.goHome(); subscribe?.invoke() }
@@ -842,6 +852,7 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
             taskDetail = d
             liveLog = d.log_tail.split("\n").dropLastWhile { it.isEmpty() }.takeLast(LOG_KEEP)
         }
+        v.cpu_history?.let { cpuHistory = it }
         v.landing?.let { landing = it }
         v.usage?.let { usage = it }
         v.editor?.let { editor = it }
