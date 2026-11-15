@@ -42,7 +42,7 @@ struct CpuSectionBody: View {
                 ForEach(layout.rows, id: \.label) { legend($0) }
                 if !layout.more.isEmpty {
                     Button((expanded ? "Hide: " : "") + layout.moreText) { expanded.toggle() }
-                        .buttonStyle(.link).font(theme.body())
+                        .buttonStyle(.plain).foregroundStyle(theme.accent).font(theme.body())
                         .accessibilityIdentifier("cpu-more")
                     if expanded { ForEach(layout.more, id: \.label) { legend($0) } }
                 }
@@ -75,7 +75,7 @@ struct CpuSectionBody: View {
             RoundedRectangle(cornerRadius: theme.radius / 2).fill(theme.cpu(r.color))
                 .frame(width: theme.cell, height: theme.cell)
             if r.task > 0 {
-                Button(r.name) { model.go(.task(r.task)) }.buttonStyle(.link).font(theme.body(.semibold))
+                TaskLink(title: r.name, font: theme.body(.semibold)) { model.go(.task(r.task)) }
             } else {
                 Text(r.name).font(theme.body(.semibold))
             }

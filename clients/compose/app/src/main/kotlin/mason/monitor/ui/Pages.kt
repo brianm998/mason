@@ -13,9 +13,13 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.PointerIcon
+import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import mason.monitor.*
@@ -51,11 +55,25 @@ internal fun Section(title: String, state: String? = null, content: @Composable 
     }
 }
 
+/**
+ * The one look of a link: the link colour (`theme.link`), underlined, and the pointing hand on hover
+ * (a touch screen ignores the cursor). Everything that opens a task's page or the tracker is drawn
+ * with this, so a new link cannot forget a part of it.
+ */
 @Composable
-internal fun Link(text: String, onClick: () -> Unit) {
+internal fun Link(text: String, style: TextStyle? = null, modifier: Modifier = Modifier, onClick: () -> Unit) {
     val theme = LocalTheme.current
-    Text(text, style = theme.body(color = theme.accent), modifier = Modifier.clickable(onClick = onClick))
+    Text(
+        text, style = theme.linked(style ?: theme.body()),
+        modifier = modifier.pointerHoverIcon(PointerIcon.Hand).clickable(onClick = onClick),
+    )
 }
+
+/** [base] as link text: the link colour and an underline. For the title inside a row that is clickable as a whole. */
+internal fun Theme.linked(base: TextStyle): TextStyle = base.copy(color = link, textDecoration = TextDecoration.Underline)
+
+/** The pointing hand on hover, for a row that is clickable as a whole. */
+internal fun Modifier.pointingHand(): Modifier = pointerHoverIcon(PointerIcon.Hand)
 
 @Composable
 private fun Scrolling(content: @Composable ColumnScope.() -> Unit) {
@@ -106,11 +124,7 @@ fun HomePage(model: MonitorModel) {
                 attention.forEach { a ->
                     val t = a.task ?: return@forEach
                     Column(verticalArrangement = Arrangement.spacedBy(theme.spacingSmall)) {
-                        Text(
-                            "${t.project} ${t.key}: ${t.title}",
-                            style = theme.body(FontWeight.SemiBold, theme.muted),
-                            modifier = Modifier.clickable { model.go(Page.Task(t.id)) },
-                        )
+                        Link("${t.project} ${t.key}: ${t.title}", theme.body(FontWeight.SemiBold)) { model.go(Page.Task(t.id)) }
                         a.card?.let { DecisionCardView(model, t.id, it) }
                         a.approval?.let { ApprovalView(model, t.id, it) }
                     }
@@ -142,10 +156,10 @@ fun HomePage(model: MonitorModel) {
             Section(st.title, st.state) {
                 st.rows.forEach { r ->
                     Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing), verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.clickable { model.go(Page.Task(r.id)) }) {
+                        modifier = Modifier.pointingHand().clickable { model.go(Page.Task(r.id)) }) {
                         ProgressCells(model, r.progress, r.slow)
-                        Text("${r.project} ${r.key}", style = theme.body(FontWeight.SemiBold))
-                        Text(r.title, style = theme.body())
+                        Text("${r.project} ${r.key}", style = theme.linked(theme.body(FontWeight.SemiBold)))
+                        Text(r.title, style = theme.linked(theme.body()))
                         Text(
                             if (r.why_waiting.isEmpty()) Format.duration(r.in_state_ms) else "${r.why_waiting}, ${Format.duration(r.in_state_ms)}",
                             style = theme.small(color = if (r.slow) theme.slow else theme.muted),
@@ -298,7 +312,7 @@ private fun TaskDetail(model: MonitorModel, d: TaskDetailView) {
         Row(horizontalArrangement = Arrangement.spacedBy(theme.spacingSmall), modifier = Modifier.testTag("waiting-for")) {
             Text("waiting for", style = theme.body(color = theme.muted))
             r.blockers.forEach { b ->
-                Text("#$b", style = theme.body(color = theme.accent), modifier = Modifier.clickable { model.go(Page.Task(b)) })
+                Link("#$b") { model.go(Page.Task(b)) }
             }
         }
     }
@@ -307,7 +321,7 @@ private fun TaskDetail(model: MonitorModel, d: TaskDetailView) {
         Row(horizontalArrangement = Arrangement.spacedBy(theme.spacingSmall), modifier = Modifier.testTag("blocks")) {
             Text("blocks", style = theme.body(color = theme.muted))
             r.blocks.forEach { b ->
-                Text("#$b", style = theme.body(color = theme.accent), modifier = Modifier.clickable { model.go(Page.Task(b)) })
+                Link("#$b") { model.go(Page.Task(b)) }
             }
         }
     }

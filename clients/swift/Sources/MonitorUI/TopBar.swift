@@ -322,7 +322,7 @@ struct PendingIssueRow: View {
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: theme.spacing) {
             if let url = URL(string: issue.url), !issue.url.isEmpty {
-                Link("#\(issue.number)", destination: url)
+                WebLink(title: "#\(issue.number)", url: url)
             } else {
                 Text("#\(issue.number)")
             }

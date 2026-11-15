@@ -92,7 +92,7 @@ struct HomePage: View {
                         ForEach(active, id: \.task) { a in
                             HStack(spacing: theme.spacing) {
                                 Text(a.display.isEmpty ? a.model : a.display).font(theme.body(.semibold))
-                                Button("\(a.project) #\(a.task)") { model.go(.task(a.task)) }.buttonStyle(.link)
+                                TaskLink(title: "\(a.project) #\(a.task)") { model.go(.task(a.task)) }
                                 Text(a.step).foregroundStyle(theme.muted)
                             }
                             .font(theme.body())
@@ -104,7 +104,7 @@ struct HomePage: View {
                         let queue = model.landing?.queue ?? model.home?.stages.first { $0.state == "landing" }?.rows ?? []
                         if queue.isEmpty { Text("Nothing is landing.").font(theme.body()).foregroundStyle(theme.muted) }
                         ForEach(queue, id: \.id) { r in
-                            Button("\(r.key) \(r.title)") { model.go(.task(r.id)) }.buttonStyle(.link).font(theme.body())
+                            TaskLink(title: "\(r.key) \(r.title)", font: theme.body()) { model.go(.task(r.id)) }
                         }
                     }
                 }
@@ -190,7 +190,7 @@ struct CompilationSection: View {
 
     @ViewBuilder private func who(_ label: String, task: UInt64) -> some View {
         if task > 0 {
-            Button("#\(task)") { model.go(.task(task)) }.buttonStyle(.link)
+            TaskLink(title: "#\(task)") { model.go(.task(task)) }
         } else {
             Text(label).lineLimit(1).truncationMode(.middle).help(label)
         }
@@ -354,8 +354,7 @@ struct TaskDetailPage: View {
                 HStack(spacing: theme.spacingSmall) {
                     Text("waiting for").font(theme.body()).foregroundStyle(theme.muted)
                     ForEach(r.blockers, id: \.self) { b in
-                        Button("#\(b)") { model.go(.task(b)) }
-                            .buttonStyle(.link).font(theme.body())
+                        TaskLink(title: "#\(b)", font: theme.body()) { model.go(.task(b)) }
                     }
                 }
                 .accessibilityElement(children: .combine)
@@ -367,8 +366,7 @@ struct TaskDetailPage: View {
                 HStack(spacing: theme.spacingSmall) {
                     Text("blocks").font(theme.body()).foregroundStyle(theme.muted)
                     ForEach(r.blocks, id: \.self) { b in
-                        Button("#\(b)") { model.go(.task(b)) }
-                            .buttonStyle(.link).font(theme.body())
+                        TaskLink(title: "#\(b)", font: theme.body()) { model.go(.task(b)) }
                     }
                 }
                 .accessibilityElement(children: .combine)
@@ -486,7 +484,7 @@ struct LandingPage: View {
                             Text("Nothing is landing.").font(theme.body()).foregroundStyle(theme.muted)
                         }
                         ForEach(l.queue, id: \.id) { r in
-                            Button("\(r.key) \(r.title)") { model.go(.task(r.id)) }.buttonStyle(.link)
+                            TaskLink(title: "\(r.key) \(r.title)") { model.go(.task(r.id)) }
                         }
                     }
                     section("Batches", theme: theme) {
@@ -497,7 +495,7 @@ struct LandingPage: View {
                                 HStack(spacing: theme.spacing) {
                                     Text(batchCiText(b.ci)).font(theme.body())
                                         .foregroundStyle(batchCiFailed(b.ci) ? theme.attention : theme.muted)
-                                    if let url = batchCiURL(b.ci) { Link("CI run", destination: url) }
+                                    if let url = batchCiURL(b.ci) { WebLink(title: "CI run", url: url) }
                                 }
                             }
                         }

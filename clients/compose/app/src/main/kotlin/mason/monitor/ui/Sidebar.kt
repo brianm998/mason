@@ -157,10 +157,10 @@ private fun RowView(model: MonitorModel, row: TaskRow) {
             .testTag("row:${row.state}:${row.id}")
             .semantics { contentDescription = "${row.key} ${row.title}, ${row.project}, ${row.state}" },
     ) {
-        Column(Modifier.clickable { model.go(Page.Task(row.id)) }, verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Column(Modifier.pointingHand().clickable { model.go(Page.Task(row.id)) }, verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Row(horizontalArrangement = Arrangement.spacedBy(theme.spacingSmall)) {
-                Text(row.key, style = theme.body(FontWeight.SemiBold, theme.muted), maxLines = 1, softWrap = false)
-                Text(row.title, style = theme.body(), maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+                Text(row.key, style = theme.linked(theme.body(FontWeight.SemiBold)), maxLines = 1, softWrap = false)
+                Text(row.title, style = theme.linked(theme.body()), maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
             }
             Text("${row.project}, ${row.why_waiting.ifEmpty { row.activity }}", style = theme.small(), maxLines = 2, overflow = TextOverflow.Ellipsis)
             if (row.proposal.isNotEmpty()) Text(row.proposal, style = theme.small(), modifier = Modifier.testTag("row:${row.id}:proposal"))
@@ -181,10 +181,10 @@ private fun RowView(model: MonitorModel, row: TaskRow) {
             val uri = androidx.compose.ui.platform.LocalUriHandler.current
             Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing), verticalAlignment = Alignment.CenterVertically) {
                 if (row.issue_url.isNotEmpty()) {
-                    Text(
-                        "issue #${row.issue}", style = theme.small(color = theme.accent),
-                        modifier = Modifier.testTag("issue:${row.id}").clickable { runCatching { uri.openUri(row.issue_url) } },
-                    )
+                    Link(
+                        "issue #${row.issue}", theme.small(),
+                        Modifier.testTag("issue:${row.id}"),
+                    ) { runCatching { uri.openUri(row.issue_url) } }
                 } else {
                     Text("issue #${row.issue}", style = theme.small())
                 }
@@ -197,7 +197,7 @@ private fun RowView(model: MonitorModel, row: TaskRow) {
             Row(horizontalArrangement = Arrangement.spacedBy(theme.spacingSmall)) {
                 Text("blocked by", style = theme.small())
                 row.blockers.forEach { b ->
-                    Text("#$b", style = theme.small(color = theme.accent), modifier = Modifier.clickable { model.go(Page.Task(b)) })
+                    Link("#$b", theme.small()) { model.go(Page.Task(b)) }
                 }
             }
         }
