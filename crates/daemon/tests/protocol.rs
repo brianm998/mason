@@ -350,7 +350,7 @@ fn every_entity_carries_its_allowed_actions_why_waiting_and_progress() {
     // started; a finished task offers nothing.
     assert_eq!(
         row(4).allowed_actions,
-        vec!["approve", "reject", "edit", "block"]
+        vec!["approve", "defer", "reject", "edit", "block"]
     );
 }
 
@@ -475,6 +475,7 @@ fn the_sidebar_is_in_queue_order_and_the_rest_newest_entry_first() {
             "review",
             "landing",
             "proposed",
+            "deferred",
             "failed",
             "landed",
             "canceled"
