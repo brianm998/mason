@@ -108,6 +108,7 @@ pub(crate) fn first_step_in(d: &Arc<Daemon>, t: &Task, state: State) -> Option<S
 }
 
 /// Every send-back's feedback, in order, for the escalated last round.
+const ROUND_REASON: &str = "round-reason.txt";
 const FEEDBACK_HISTORY: &str = "feedback-history.txt";
 
 /// Is the next test round the last one the test step will give (another red would fail the
@@ -152,13 +153,32 @@ impl Ctx {
     }
 
     pub(crate) fn emit(&self, kind: EventKind) -> bool {
+        match &kind {
+            EventKind::WaitStarted { .. } => wait_note(self.run.0, true),
+            EventKind::WaitEnded { .. } => wait_note(self.run.0, false),
+            _ => {}
+        }
         self.d.emit_for_run(self.task, self.run, kind)
+    }
+
+    /// The reason for a step that ran out of time. When more than half of the run was spent
+    /// waiting (for a slot, a pause, a hold) the time was not the step's own: the reason says
+    /// so, and the failure counts as outside the code (s392).
+    pub(crate) fn timeout_reason(&self) -> String {
+        let started = self
+            .d
+            .world()
+            .ok()
+            .and_then(|w| w.step_runs.get(&self.run).map(|r| r.started_at.0));
+        let elapsed = started.map(|s| now_ms().saturating_sub(s)).unwrap_or(0);
+        let waited = wait_total(self.run.0);
+        timeout_text(waited, elapsed)
     }
 
     /// End the step and let the graph say what follows.
     pub(crate) fn conclude(&self, outcome: Outcome, reason: String, feedback: Option<String>) {
         let round = self.round();
-        self.conclude_round(outcome, reason, feedback, round)
+        self.conclude_round(outcome, reason, feedback, round, "fix")
     }
 
     /// Which round of this step this run is, as `max_rounds` counts them: its
@@ -261,7 +281,7 @@ impl Ctx {
             past.push(self.run.0);
         }
         // Round 0 is under every limit: a conflict always goes back while there is an `on_red`.
-        self.conclude_round(Outcome::Red, reason, Some(note), 0)
+        self.conclude_round(Outcome::Red, reason, Some(note), 0, "conflict")
     }
 
     /// The step runs that ended in a conflict send-back ([`Ctx::conflict`]).
@@ -275,6 +295,7 @@ impl Ctx {
         reason: String,
         feedback: Option<String>,
         round: u32,
+        round_reason: &str,
     ) {
         if outcome == Outcome::Red
             && self.step.kind == StepType::Test
@@ -326,6 +347,9 @@ impl Ctx {
             Transition::SendBack { step } => {
                 if let Some(f) = feedback {
                     let _ = std::fs::write(self.task_dir().join("feedback.txt"), &f);
+                    // Why the next develop round happens, written with its feedback so the
+                    // two cannot get out of step: it picks the `fix` or `conflict` pack.
+                    let _ = std::fs::write(self.task_dir().join(ROUND_REASON), round_reason);
                     // Every round's feedback is kept for the last round's fresh session (s251).
                     let entry = format!(
                         "## After run {} ({}): {}\n{}\n\n",
@@ -423,6 +447,44 @@ impl Ctx {
         let p = self.d.task_dir(self.task);
         let _ = std::fs::create_dir_all(&p);
         p
+    }
+}
+
+/// Per run: (total ms waited, start of the open wait).
+static WAITS: std::sync::Mutex<std::collections::BTreeMap<u64, (u64, Option<u64>)>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+fn wait_note(run: u64, start: bool) {
+    let now = now_ms();
+    let mut m = WAITS.lock().unwrap_or_else(|e| e.into_inner());
+    let e = m.entry(run).or_insert((0, None));
+    if start {
+        e.1.get_or_insert(now);
+    } else if let Some(s) = e.1.take() {
+        e.0 += now.saturating_sub(s);
+    }
+}
+
+/// Time the run has spent waiting so far, an open wait included. The entry is dropped.
+fn wait_total(run: u64) -> u64 {
+    let now = now_ms();
+    let mut m = WAITS.lock().unwrap_or_else(|e| e.into_inner());
+    match m.remove(&run) {
+        Some((t, open)) => t + open.map(|s| now.saturating_sub(s)).unwrap_or(0),
+        None => 0,
+    }
+}
+
+/// The text of a timeout after `waited` ms of `elapsed` ms spent waiting.
+pub(crate) fn timeout_text(waited: u64, elapsed: u64) -> String {
+    if elapsed > 0 && waited * 2 > elapsed {
+        format!(
+            "the step ran out of time, mostly waiting in the queue ({} s of {} s)",
+            waited / 1000,
+            elapsed / 1000
+        )
+    } else {
+        "the step ran out of time".to_string()
     }
 }
 
@@ -2367,6 +2429,26 @@ pub(crate) fn adapter(c: &Ctx) -> Box<dyn AgentAdapter> {
     }
 }
 
+/// The pack files to try, in order, for an agent step: its own `prompt` file (no fallback
+/// past it), else for a develop round sent back for a reason that reason's pack
+/// (`fix`, `conflict`, `ci-fix`) and then `develop`, else the kind's pack.
+fn pack_candidates(step_prompt: Option<&str>, kind: &str, reason: Option<&str>) -> Vec<String> {
+    if let Some(f) = step_prompt {
+        return vec![f.to_string()];
+    }
+    let mut v = vec![];
+    if kind == "develop" {
+        if let Some(r) = reason
+            .map(str::trim)
+            .filter(|r| matches!(*r, "fix" | "conflict" | "ci-fix"))
+        {
+            v.push(format!("{r}.md"));
+        }
+    }
+    v.push(format!("{kind}.md"));
+    v
+}
+
 fn agent_job(c: &Ctx) {
     let Some(kind) = contract_kind(c.state) else {
         return c.fail(format!(
@@ -2426,7 +2508,34 @@ fn agent_job(c: &Ctx) {
         // A diagnosis session is run by `diagnose`, not as a step of the graph.
         StepKind::Diagnose => "diagnose",
     };
-    let prompt = if let Some(pack) = crate::prompts::load_pack(&c.project, pack_name) {
+    // Only while the feedback it was written with is still there.
+    let round_reason = if conflicts.is_some() {
+        Some("conflict".to_string())
+    } else if dir.join("feedback.txt").exists() {
+        std::fs::read_to_string(dir.join(ROUND_REASON)).ok()
+    } else {
+        None
+    };
+    let candidates = pack_candidates(c.step.prompt.as_deref(), pack_name, round_reason.as_deref());
+    let mut found: Option<String> = None;
+    for (i, name) in candidates.iter().enumerate() {
+        match crate::prompts::load_pack_file(&c.project, name) {
+            Ok(text) => {
+                found = Some(text);
+                break;
+            }
+            // The step's own file is required: running the built-in prompt instead would
+            // be a different job.
+            Err(why) if i == 0 && c.step.prompt.is_some() => {
+                return c.fail(format!(
+                    "step `{}` prompt file .mason/prompts/{name}: {why}",
+                    c.step.name
+                ));
+            }
+            Err(_) => {}
+        }
+    }
+    let prompt = if let Some(pack) = found {
         crate::prompts::from_pack(
             &pack,
             &crate::prompts::PackVars {
@@ -2944,12 +3053,17 @@ fn settle_all(
     let mut fresh_after_gone = false;
     let mut silent = false;
     let mut signaled_retried = false;
+    // Lost invocations before a resumed session that reached its own end: they are
+    // not counted toward the restart budget again (s399).
+    let mut forgiven = 0usize;
+    let mut lost_at = now_ms();
     loop {
         let fresh = match &report.end {
             StepEnd::Failed(FailReason::HostLost { detail }) => {
                 let lost = mason_adapters::hosted::lost_invocations(&root, &base);
                 let newest = lost.last().cloned().unwrap_or_else(|| base.clone());
                 let (text, at) = describe(&newest);
+                lost_at = at;
                 let text = if lost.is_empty() {
                     detail.clone()
                 } else {
@@ -2962,6 +3076,7 @@ fn settle_all(
                 // losing hosts.
                 let counted = lost
                     .iter()
+                    .skip(forgiven)
                     .filter(|id| {
                         let r = mason_step_host::registry::lost_report(&root.join(id));
                         !r.is_ok_and(|r| hl::is_restart_loss(&root, r.last_heartbeat_ms, r.at_ms))
@@ -3015,12 +3130,15 @@ fn settle_all(
             let note = if std::mem::take(&mut silent) {
                 hl::silent_note()
             } else {
-                hl::interrupted_note()
+                hl::interrupted_note(lost_at)
             };
             report = runner.resume(report, note, spec.clone(), contract);
             resumed = true;
         }
         report = settle_holds(c, runner, report, spec, contract, rec)?;
+        if resumed && !matches!(report.end, StepEnd::Failed(FailReason::HostLost { .. })) {
+            forgiven = mason_adapters::hosted::lost_invocations(&root, &base).len();
+        }
     }
 }
 
@@ -3139,7 +3257,7 @@ fn finish_agent_inner(c: &Ctx, report: StepReport, dir: &Path) {
         StepEnd::Failed(why) => {
             let reason = match why {
                 FailReason::NoResult { nudges } => format!("the agent ended its turn {} times without submitting", nudges + 1),
-                FailReason::Timeout => "the step ran out of time".to_string(),
+                FailReason::Timeout => c.timeout_reason(),
                 FailReason::Crash { detail } => format!("the agent failed: {detail}"),
                 // Restarted until it could not be (see `settle_all`); the text names the losses.
                 FailReason::HostLost { detail } => detail,
@@ -4077,6 +4195,27 @@ pub fn cleanup(d: &Arc<Daemon>, task: TaskId, delete_branch: bool) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pack_candidates_prefer_the_step_file_then_the_round_then_the_kind() {
+        use super::pack_candidates as pc;
+        assert_eq!(pc(Some("sec.md"), "develop", Some("fix")), vec!["sec.md"]);
+        assert_eq!(
+            pc(None, "develop", Some("fix")),
+            vec!["fix.md", "develop.md"]
+        );
+        assert_eq!(
+            pc(None, "develop", Some("conflict\n")),
+            vec!["conflict.md", "develop.md"]
+        );
+        assert_eq!(
+            pc(None, "develop", Some("ci-fix")),
+            vec!["ci-fix.md", "develop.md"]
+        );
+        assert_eq!(pc(None, "develop", Some("other")), vec!["develop.md"]);
+        assert_eq!(pc(None, "develop", None), vec!["develop.md"]);
+        assert_eq!(pc(None, "review", Some("fix")), vec!["review.md"]);
+    }
+
     use super::*;
 
     // ---- s250: the retry note ------------------------------------------------------------

@@ -9,6 +9,7 @@ import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
 import androidx.compose.ui.graphics.painter.BitmapPainter
+import androidx.compose.ui.graphics.toAwtImage
 import mason.monitor.ui.Mascot
 import mason.monitor.ui.RootView
 
@@ -31,6 +32,7 @@ fun main(args: Array<String>) = application {
             model.pulse()
         }
     }
+    remember { setDockIcon(); 0 }
     val state = rememberWindowState(width = 1360.dp, height = 860.dp)
     remember { model.onInstall = { installMonitor(model, it) }; 0 }
     remember {
@@ -57,6 +59,16 @@ fun main(args: Array<String>) = application {
         onPreviewKeyEvent = { e -> shortcut(model, e) },
     ) {
         RootView(model)
+    }
+}
+
+/** Put the MASON icon in the macOS Dock and app switcher; a no-op where the platform has none. */
+internal fun setDockIcon() {
+    runCatching {
+        val icon = Mascot.dockIcon() ?: return
+        if (!java.awt.Taskbar.isTaskbarSupported()) return
+        val bar = java.awt.Taskbar.getTaskbar()
+        if (bar.isSupported(java.awt.Taskbar.Feature.ICON_IMAGE)) bar.iconImage = icon.toAwtImage()
     }
 }
 
