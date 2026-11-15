@@ -41,6 +41,16 @@ description = "New version, provider outage, landing frozen, connection lost, pa
 swift = "done"
 compose = "done"
 
+[feature.health-session-banner]
+description = "While the pipeline's health session needs the owner (or has replied and waits), a banner of kind health with a one-line summary and an Open session button that opens the owner-session dialog on that session; it goes when the session ends"
+swift = "done"
+compose = "done"
+
+[feature.active-sessions-panel]
+description = "A section pinned at the bottom of the sidebar, titled Active sessions (N), listing every open owner session (a task's, the pipeline's health) with its task or Pipeline health and a marker while it is replying or waiting for the owner; clicking one opens the dialog; hidden when N is 0"
+swift = "done"
+compose = "done"
+
 [feature.sidebar-sections]
 description = "A section per state, needs-you first, collapsible, collapse choices remembered per device"
 swift = "done"

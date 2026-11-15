@@ -43,6 +43,7 @@ struct SidebarPane: View {
                     DispatchQueue.main.async { withAnimation { proxy.scrollTo(t, anchor: .top) } }
                 }
             }
+            ActiveSessionsPanel(model: model)
         }
         .frame(width: width)
         .background(theme.surface.opacity(0.6))
@@ -268,4 +269,80 @@ struct RowView: View, Equatable {
     }
 
     var activity: String { row.whyWaiting.isEmpty ? row.activity : row.whyWaiting }
+}
+
+/// Pinned at the bottom of the sidebar, under the list: every open owner session the owner is
+/// part of (a task's, the pipeline's health), each with a marker while it is replying or waits
+/// for the owner. Hidden when there are none. Clicking one opens its dialog.
+struct ActiveSessionsPanel: View {
+    @Environment(\.theme) var theme
+    @ObservedObject var model: MonitorModel
+
+    var body: some View {
+        let sessions = model.header?.activeSessions ?? []
+        if let title = ActiveSessions.title(sessions) {
+            VStack(alignment: .leading, spacing: 0) {
+                Divider()
+                Text(title).font(theme.small(.semibold)).foregroundStyle(theme.muted)
+                    .padding(.horizontal, theme.spacing).padding(.top, theme.spacing)
+                    .accessibilityIdentifier("active-sessions-title")
+                ForEach(sessions, id: \.id) { s in
+                    Button { model.openOwnerSession(s.id) } label: {
+                        HStack(spacing: theme.spacing) {
+                            Text(s.label).font(theme.body()).lineLimit(1)
+                            Spacer(minLength: 0)
+                            let marker = ActiveSessions.marker(s)
+                            if !marker.isEmpty {
+                                Text(marker).font(theme.small()).foregroundStyle(s.working ? theme.accent : theme.attention)
+                            }
+                        }
+                        .padding(.horizontal, theme.spacing).padding(.vertical, theme.spacing / 2)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("active-session:\(s.id)")
+                }
+            }
+            .padding(.bottom, theme.spacing)
+        }
+    }
+}
+
+/// The owner-session dialog (s364): the transcript, a field to write in and the End button.
+struct OwnerSessionSheet: View {
+    @Environment(\.theme) var theme
+    @ObservedObject var model: MonitorModel
+    @State private var draft = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: theme.spacing) {
+            Text(model.ownerSession?.kind == "health" ? "Pipeline health" : "Session").font(theme.title())
+            ScrollView {
+                VStack(alignment: .leading, spacing: theme.spacing / 2) {
+                    ForEach(model.ownerSession?.messages ?? []) { m in
+                        Text("\(m.role == "owner" ? "you" : (m.role == "agent" ? "agent" : "·")): \(m.text)")
+                            .font(m.role == "tool" ? theme.small() : theme.body())
+                            .foregroundStyle(m.role == "tool" ? theme.muted : Color.primary)
+                            .textSelection(.enabled)
+                    }
+                }.frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(minHeight: 240)
+            if let e = model.ownerSessionError { Text(e).font(theme.small()).foregroundStyle(theme.attention) }
+            HStack {
+                TextField("Write to the agent", text: $draft).onSubmit(send).accessibilityIdentifier("session-input")
+                Button("Send", action: send).disabled(model.ownerSession?.working == true)
+                Button("End session") { model.endOwnerSession() }
+                Button("Close") { model.closeOwnerSession() }.keyboardShortcut(.cancelAction)
+            }
+        }
+        .padding(theme.spacingLarge)
+        .frame(minWidth: 560)
+        .accessibilityIdentifier("owner-session-sheet")
+    }
+
+    private func send() {
+        model.sendOwnerMessage(draft)
+        draft = ""
+    }
 }
