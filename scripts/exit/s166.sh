@@ -44,6 +44,8 @@ git -C "$root/repo" push -q origin main
 git -C "$root/repo" checkout -q -b owner-work
 
 cat > "$root/agent.sh" <<'AGENT'
+# The daemon gives the agent a clean environment, so it builds the text itself.
+OT='|''| true'
 g() { git -c user.name=t -c user.email=t@t "$@"; }
 case $(basename "$PWD") in
   0) echo "run(&$OT, 1);" >> src/main.rs
@@ -84,7 +86,8 @@ until grep -rqs 'scripts/other.sh:3: broadened-skip' "$root/d"; do
   [ $SECONDS -lt $end ] || { echo "no refusal naming scripts/other.sh:3" >&2; exit 1; }
   sleep 0.3
 done
-grep -rhs -o 'scripts/other.sh:3: broadened-skip[^"]*' "$root/d" | sed -n 1p
+# grep exits 2 when the daemon removes a file mid-scan; the wait above is the assertion.
+{ grep -rhs -o 'scripts/other.sh:3: broadened-skip[^"]*' "$root/d" || :; } | sed -n 1p
 if git -C "$root/origin.git" show main:scripts/other.sh | grep -qF "cargo test $OT"; then
   echo "the weakening landed" >&2; exit 1
 fi
