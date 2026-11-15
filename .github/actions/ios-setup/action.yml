@@ -1,0 +1,37 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+name: iOS setup
+description: Pin Xcode, install XcodeGen and cache XcodeGen and SwiftPM for the iOS app in clients/swift.
+runs:
+  using: composite
+  steps:
+    # One Xcode, installed on the macos-15 runner image; fails loudly if the image drops it.
+    - name: Select Xcode
+      shell: bash
+      run: |
+        set -euo pipefail
+        xcode=/Applications/Xcode_16.4.app
+        test -d "$xcode" || { echo "$xcode is not on this runner image" >&2; ls /Applications | grep -i xcode >&2 || true; exit 1; }
+        sudo xcode-select -s "$xcode/Contents/Developer"
+        xcodebuild -version
+    - name: Cache XcodeGen
+      uses: actions/cache@v4
+      with:
+        path: ~/xcodegen-bin
+        key: xcodegen-${{ runner.os }}-${{ runner.arch }}-v1
+    - name: Install XcodeGen
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [ ! -x "$HOME/xcodegen-bin/bin/xcodegen" ]; then
+          brew install xcodegen
+          mkdir -p "$HOME/xcodegen-bin/bin" "$HOME/xcodegen-bin/share"
+          cp "$(brew --prefix xcodegen)/bin/xcodegen" "$HOME/xcodegen-bin/bin/xcodegen"
+          cp -R "$(brew --prefix xcodegen)/share/xcodegen" "$HOME/xcodegen-bin/share/" 2>/dev/null || true
+        fi
+        echo "$HOME/xcodegen-bin/bin" >> "$GITHUB_PATH"
+    - name: Cache SwiftPM
+      uses: actions/cache@v4
+      with:
+        path: clients/swift/.build
+        key: swiftpm-${{ runner.os }}-${{ hashFiles('clients/swift/Package.resolved') }}
+        restore-keys: swiftpm-${{ runner.os }}-
