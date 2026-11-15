@@ -39,7 +39,10 @@ public final class LiveState: ObservableObject {
 public final class MonitorModel: ObservableObject {
     // From the daemon.
     @Published public var header: HeaderView? { didSet { prunePauseCollapse() } }
-    @Published public var sidebar: SidebarView?
+    @Published public var sidebar: SidebarView? { didSet { sidebarRevision &+= 1 } }
+    /// Bumped on every new sidebar, so derived layouts know when to be rebuilt.
+    var sidebarRevision: UInt64 = 0
+    var sidebarEntriesCache: (key: SidebarEntriesKey, entries: [SidebarEntry])?
     @Published public var home: HomeView?
     /// The CPU shares, observed apart from the whole model: the CPU section watches only this.
     public let cpu = CpuModel()
@@ -815,12 +818,42 @@ public final class MonitorModel: ObservableObject {
         clockOffsetMs = Int64(ms) - Int64(local.timeIntervalSince1970 * 1000)
     }
 
+    /// How progress messages are put off to the next frame: `flush` is run once, later, on the main actor.
+    /// The app's default waits one frame (1/30 s); tests replace it to hold the model "busy".
+    public var scheduleProgressFlush: (@escaping @MainActor () -> Void) -> Void = { flush in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0 / 30) { MainActor.assumeIsolated { flush() } }
+    }
+    private var pendingProgress: [Mason_V1_StepProgress] = []
+    private var flushScheduled = false
+
+    /// A progress message from the stream: held until the next frame, so a burst costs one sidebar publish.
+    func enqueue(progress p: Mason_V1_StepProgress) {
+        pendingProgress.append(p)
+        guard !flushScheduled else { return }
+        flushScheduled = true
+        scheduleProgressFlush { [weak self] in self?.flushProgress() }
+    }
+
+    /// Apply what was held, in order, as one batch. Every other message flushes first, so order is kept.
+    public func flushProgress() {
+        flushScheduled = false
+        guard !pendingProgress.isEmpty else { return }
+        let batch = pendingProgress
+        pendingProgress = []
+        apply(progresses: batch)
+    }
+
     /// A step's progress arrived without a view: put it into the task page and the rows, and follow the log.
     public func apply(progress p: Mason_V1_StepProgress, local: Date = Date()) {
-        anchor(daemonNow: p.nowMs, local: local)
-        guard p.hasProgress else { return }
-        let cell = p.progress
-        func merged(_ old: [ProgressCell]) -> [ProgressCell]? {
+        apply(progresses: [p], local: local)
+    }
+
+    /// Several progress messages at once: one write to the task page, one to the sidebar, one pass over its rows.
+    func apply(progresses ps: [Mason_V1_StepProgress], local: Date = Date()) {
+        if let last = ps.last(where: { $0.nowMs > 0 }) { anchor(daemonNow: last.nowMs, local: local) }
+        let withCell = ps.filter { $0.hasProgress }
+        guard !withCell.isEmpty else { return }
+        func merged(_ old: [ProgressCell], _ cell: ProgressCell) -> [ProgressCell]? {
             guard let i = old.firstIndex(where: { $0.step == cell.step }) else { return nil }
             var c = cell
             // A finished or stopped run says what it ended as on the next view; until then, no "running".
@@ -829,19 +862,33 @@ public final class MonitorModel: ObservableObject {
             out[i] = c
             return out
         }
-        if var d = taskDetail, d.hasRow, d.row.id == p.task {
-            if let cells = merged(d.row.progress) {
-                d.row.progress = cells
-                taskDetail = d
+        if var d = taskDetail, d.hasRow {
+            var changed = false
+            var lines: [String] = []
+            for p in withCell where d.row.id == p.task {
+                if let cells = merged(d.row.progress, p.progress) {
+                    d.row.progress = cells
+                    changed = true
+                }
+                lines += p.log
             }
-            appendLog(p.log)
+            if changed { taskDetail = d }
+            appendLog(lines)
         }
         if var s = sidebar {
+            var latest: [UInt64: [Mason_V1_ProgressCell]] = [:]
+            for p in withCell { latest[p.task, default: []].append(p.progress) }
             var changed = false
             for si in s.sections.indices {
-                for ri in s.sections[si].rows.indices where s.sections[si].rows[ri].id == p.task {
-                    if let cells = merged(s.sections[si].rows[ri].progress) {
-                        s.sections[si].rows[ri].progress = cells
+                for ri in s.sections[si].rows.indices {
+                    guard let cells = latest[s.sections[si].rows[ri].id] else { continue }
+                    var progress = s.sections[si].rows[ri].progress
+                    var hit = false
+                    for cell in cells {
+                        if let next = merged(progress, cell) { progress = next; hit = true }
+                    }
+                    if hit {
+                        s.sections[si].rows[ri].progress = progress
                         changed = true
                     }
                 }
@@ -858,6 +905,11 @@ public final class MonitorModel: ObservableObject {
     // MARK: updates from the daemon
 
     public func apply(_ m: Mason_V1_ServerMessage) {
+        if case .stepProgress(let p)? = m.body {
+            enqueue(progress: p)
+            return
+        }
+        flushProgress()
         switch m.body {
         case .welcome(let w)?:
             connected = true
@@ -881,8 +933,6 @@ public final class MonitorModel: ObservableObject {
         case .view(let u)?:
             lastSeq = max(lastSeq, u.seq)
             apply(u.view)
-        case .stepProgress(let p)?:
-            apply(progress: p)
         case .result(let r)?:
             lastResult = r.ok ? nil : r.error
             handle(result: r)
