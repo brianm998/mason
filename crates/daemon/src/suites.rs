@@ -313,6 +313,32 @@ struct Ran {
     timed_out: bool,
     /// The stall watcher killed the tree: why.
     stalled: Option<String>,
+    /// How long the command ran, from its host's own records (so a run collected late, after
+    /// a daemon restart, is not counted as instant). `None` when they cannot be read.
+    ran_ms: Option<u64>,
+}
+
+/// Record how long a suite's build or run took, when it finished on its own (s385): the
+/// scheduler's estimates come from these.
+fn record_time(who: &Who, suite: &str, phase: &str, ran: &Ran) {
+    if ran.stop != Stop::No || ran.timed_out || ran.stalled.is_some() {
+        return;
+    }
+    if let Some(ms) = ran.ran_ms {
+        let _ = who
+            .d
+            .store
+            .record_suite_time(&who.project, suite, phase, ms, now_ms());
+    }
+}
+
+/// What a build or run of `suite` is expected to take at most, from its recorded times (s385).
+fn estimate(who: &Who, suite: &str, phase: &str) -> Option<u64> {
+    who.d
+        .store
+        .suite_estimate(&who.project, suite, phase)
+        .ok()
+        .flatten()
 }
 
 type Check = Arc<dyn Fn() -> Stop + Send + Sync>;
@@ -530,6 +556,13 @@ fn run_hosted_once(
         timed_out: why.load(Ordering::SeqCst) == 1
             && mason_step_host::registry::ran_past(limit, &dir),
         stalled: stall.as_ref().and_then(|w| w.stalled()),
+        ran_ms: match (
+            mason_step_host::registry::HostInfo::read(&dir),
+            mason_step_host::registry::ExitRecord::read(&dir),
+        ) {
+            (Ok(h), Ok(e)) => Some(e.ended_ms.saturating_sub(h.started_ms)),
+            _ => None,
+        },
     })
 }
 
@@ -1204,6 +1237,7 @@ fn run_suite(
                 };
             }
         };
+        record_time(who, &suite.name, "run", &ran);
         match ran.stop {
             Stop::Skipped => {
                 env_down(who, def, suite, cwd, dev.as_ref());
@@ -1582,7 +1616,7 @@ enum Leased {
 /// is skipped first: a skip ends the wait, so a skipped suite never takes a slot. On
 /// 2026-11-13 #288's test step was skipped while it waited for a compile slot, and it
 /// waited on until a slot came, built, and only then noticed.
-fn lease_suite(c: &Ctx, needs: Needs, check: &Check) -> Leased {
+fn lease_suite(c: &Ctx, needs: Needs, check: &Check, expected_ms: Option<u64>) -> Leased {
     match check() {
         Stop::Skipped => return Leased::Skipped,
         Stop::Gone => return Leased::Gone,
@@ -1592,7 +1626,7 @@ fn lease_suite(c: &Ctx, needs: Needs, check: &Check) -> Leased {
         return Leased::Got;
     }
     let wanted = || check() == Stop::No;
-    match crate::jobs::acquire_needs_while(c, needs, &wanted) {
+    match crate::jobs::acquire_needs_expecting(c, needs, &wanted, false, expected_ms) {
         Ok(l) => {
             *c.lease.lock().unwrap_or_else(|e| e.into_inner()) = Some(l);
             Leased::Got
@@ -1660,7 +1694,10 @@ fn run_side_by_side(
                         Stop::No if proven(&c.d, tree, &suite.name) => None,
                         Stop::No => {
                             let wanted = || check() == Stop::No;
-                            match crate::jobs::acquire_needs_beside(c, needs, &wanted) {
+                            let expected = estimate(&who, &suite.name, "run");
+                            match crate::jobs::acquire_needs_expecting(
+                                c, needs, &wanted, true, expected,
+                            ) {
                                 Ok(l) => Some(l),
                                 Err(_) if check() == Stop::Skipped => None,
                                 Err(_) => return (suite.name.clone(), SuiteRun::Gone),
@@ -1719,6 +1756,7 @@ fn run_build(who: &Who, suite: &Suite, build: &str, n: usize, cwd: &Path) -> Bui
         Ok(r) => r,
         Err(e) => return Built::Red(format!("Building `{}` could not run: {e}", suite.name)),
     };
+    record_time(who, &suite.name, "build", &ran);
     match ran.stop {
         Stop::Gone => return Built::Gone,
         // A skip is the suite's own run to notice; nothing was built, nothing is blamed.
@@ -1944,7 +1982,7 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
             {
                 let needs = needs_of(&crate::jobs::build_uses(), None);
                 who.env = held_env(c, &needs);
-                match lease_suite(c, needs, &who.check(&name)) {
+                match lease_suite(c, needs, &who.check(&name), estimate(&who, &name, "build")) {
                     Leased::Gone => return,
                     // Nothing is built; the suite's run below reports the skip.
                     Leased::Skipped => {}
@@ -1995,7 +2033,9 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
             // one already green for this exact tree, which `run_suite` reuses without running
             // (s380): it must not wait in the queue to learn that.
             if !proven(d, &tree, &name) {
-                if let Leased::Gone = lease_suite(c, needs, &who.check(&name)) {
+                if let Leased::Gone =
+                    lease_suite(c, needs, &who.check(&name), estimate(&who, &name, "run"))
+                {
                     return;
                 }
             }
@@ -2803,6 +2843,7 @@ mod lossy_tests {
             stop: Stop::No,
             timed_out: false,
             stalled: None,
+            ran_ms: None,
         };
         (ran, dir)
     }
