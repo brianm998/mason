@@ -21,6 +21,7 @@ struct MainPane: View {
             case .pipeline: EditorPage(model: model)
             case .health: HealthPage(model: model)
             case .settings: SettingsPage(model: model)
+            case .section(let name): SectionPage(model: model, name: name)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -28,11 +29,24 @@ struct MainPane: View {
     }
 }
 
-func section<Content: View>(_ title: String, theme: Theme, state: String? = nil, @ViewBuilder _ content: () -> Content) -> some View {
+func section<Content: View>(_ title: String, theme: Theme, state: String? = nil, open: (() -> Void)? = nil, @ViewBuilder _ content: () -> Content) -> some View {
     VStack(alignment: .leading, spacing: theme.spacing) {
         HStack(spacing: theme.spacingSmall) {
-            Text(title).font(theme.title()).foregroundStyle(theme.text)
+            if let open {
+                // The title and the '>' next to it both open the section's page.
+                Button(action: open) { Text(title).font(theme.title()).foregroundStyle(theme.text) }
+                    .buttonStyle(.plain).help("Open the \(title) page")
+                    .accessibilityIdentifier("section-title:\(title)")
+            } else {
+                Text(title).font(theme.title()).foregroundStyle(theme.text)
+            }
             if let state { StateIcon(state: state) }
+            if let open {
+                Button(action: open) { Image(systemName: "chevron.right").font(theme.body(.semibold)).foregroundStyle(theme.muted) }
+                    .buttonStyle(.plain).help("Open the \(title) page")
+                    .accessibilityLabel("Open \(title)")
+                    .accessibilityIdentifier("section-open:\(title)")
+            }
         }
         content()
     }
@@ -96,7 +110,7 @@ struct HomePage: View {
                 }
 
                 HStack(alignment: .top, spacing: theme.spacingLarge * 2) {
-                    section("Active models", theme: theme) {
+                    section("Active models", theme: theme, open: { model.go(.section("active_models")) }) {
                         let active = model.home?.active ?? []
                         if active.isEmpty { Text("Nothing is running.").font(theme.body()).foregroundStyle(theme.muted) }
                         ForEach(active, id: \.task) { a in
@@ -110,7 +124,7 @@ struct HomePage: View {
                         }
                         SessionStepper(model: model)
                     }
-                    section("Landing queue", theme: theme) {
+                    section("Landing queue", theme: theme, open: { model.go(.landing) }) {
                         let items = model.landing?.items ?? []
                         if !items.isEmpty {
                             LandingItems(model: model, items: items)
@@ -124,14 +138,14 @@ struct HomePage: View {
                     }
                 }
 
-                CpuSection(model: model, cpu: model.cpu)
+                CpuSection(model: model, cpu: model.cpu, open: { model.go(.section("cpu")) })
 
                 if let h = model.home, h.hasCompilation {
-                    CompilationSection(model: model, c: h.compilation)
+                    CompilationSection(model: model, c: h.compilation, open: { model.go(.section("compilation")) })
                 }
 
                 ForEach(model.home?.stages ?? [], id: \.state) { st in
-                    section(st.title, theme: theme, state: st.state) {
+                    section(st.title, theme: theme, state: st.state, open: Page.sectionPage(st.state).map { p in { model.go(p) } }) {
                         ForEach(st.rows, id: \.id) { r in
                             Button { model.go(.task(r.id)) } label: {
                                 HStack(spacing: theme.spacing) {
@@ -197,6 +211,8 @@ struct CompilationSection: View {
     @Environment(\.theme) var theme
     @ObservedObject var model: MonitorModel
     let c: Mason_V1_Compilation
+    /// Set on home: the title and its '>' open the Compilation page.
+    var open: (() -> Void)? = nil
 
     private func age(_ since: UInt64) -> String {
         let now = model.daemonNow()
@@ -217,7 +233,7 @@ struct CompilationSection: View {
     }
 
     var body: some View {
-        section("Compilation (all projects)", theme: theme) {
+        section("Compilation (all projects)", theme: theme, open: open) {
             HStack(spacing: theme.spacing) {
                 Text("Compiling: \(c.used) of at most")
                 Button { model.setCompileLimit(c.limit > 1 ? c.limit - 1 : 1) } label: { Image(systemName: "minus") }
@@ -851,4 +867,99 @@ func landingItemText(_ i: Mason_V1_TaskLanding) -> String {
         return t + ", \(i.phaseMs / 60000) min"
     }
     return "\(i.key) \(i.title): queued #\(i.position), \(i.why)"
+}
+
+/// A detail page for one section of home (`mason://section/<name>`): only that section, with
+/// the room to show a task's progress, step, attempt, why it waits, time in state, CPU share
+/// and model on one wide row. The rows are the sidebar's, so they come in its order.
+struct SectionPage: View {
+    @Environment(\.theme) var theme
+    @ObservedObject var model: MonitorModel
+    let name: String
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: theme.spacingLarge) {
+                switch name {
+                case "active_models":
+                    section(MonitorModel.sectionTitle(name), theme: theme) {
+                        let active = model.home?.active ?? []
+                        if active.isEmpty { Text("Nothing is running.").font(theme.body()).foregroundStyle(theme.muted) }
+                        ForEach(active, id: \.task) { a in
+                            HStack(spacing: theme.spacing) {
+                                Text(a.display.isEmpty ? a.model : a.display).font(theme.body(.semibold))
+                                Button("\(a.project) #\(a.task)") { model.go(.task(a.task)) }.buttonStyle(.link)
+                                Text(a.step).foregroundStyle(theme.muted)
+                            }
+                            .font(theme.body())
+                            .accessibilityIdentifier("active:\(a.task)")
+                        }
+                        SessionStepper(model: model)
+                    }
+                case "cpu":
+                    CpuSection(model: model, cpu: model.cpu)
+                case "compilation":
+                    if let h = model.home, h.hasCompilation {
+                        CompilationSection(model: model, c: h.compilation)
+                    } else {
+                        section(MonitorModel.sectionTitle(name), theme: theme) {
+                            Text("Nothing is compiling.").font(theme.body()).foregroundStyle(theme.muted)
+                        }
+                    }
+                default:
+                    StageRows(model: model, name: name)
+                }
+            }
+            .padding(theme.spacingLarge)
+        }
+        .accessibilityIdentifier("section-page:\(name)")
+    }
+}
+
+/// The wide task rows of a stage page. Testing adds suite progress and Skip testing.
+struct StageRows: View {
+    @Environment(\.theme) var theme
+    @ObservedObject var model: MonitorModel
+    let name: String
+
+    var body: some View {
+        let rows = model.sectionRows(name)
+        section(MonitorModel.sectionTitle(name), theme: theme, state: name) {
+            if name == "testing", model.canAct, model.skippableRows(rows).count > 0 {
+                Button("Skip testing for all") { model.skipAllTests(rows) }
+                    .buttonStyle(.bordered).accessibilityIdentifier("testing:skip-all")
+            }
+            if rows.isEmpty { Text("Nothing here.").font(theme.body()).foregroundStyle(theme.muted) }
+            ForEach(rows, id: \.id) { r in row(r) }
+        }
+    }
+
+    @ViewBuilder func row(_ r: TaskRow) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: theme.spacing) {
+            ProgressCells(clock: model.live, cells: r.progress, slow: r.slow)
+            Button { model.go(.task(r.id)) } label: {
+                Text("\(r.project) \(r.key)  \(r.title)").font(theme.body()).lineLimit(3)
+                    .multilineTextAlignment(.leading)
+            }.buttonStyle(.plain)
+            Spacer(minLength: 0)
+            detail(r)
+            if name == "testing", model.canAct, r.allowedActions.contains("skip_test") {
+                Button("Skip testing") { model.skipTest(r.id, step: r.step) }
+                    .buttonStyle(.bordered).accessibilityIdentifier("testing:skip:\(r.id)")
+            }
+        }
+        .accessibilityIdentifier("stage-row:\(name):\(r.id)")
+    }
+
+    @ViewBuilder func detail(_ r: TaskRow) -> some View {
+        let parts = [r.step.isEmpty ? "" : r.step,
+                     r.attempt > 1 ? "attempt \(r.attempt)" : "",
+                     MonitorModel.suiteProgress(r),
+                     r.whyWaiting,
+                     Format.duration(ms: r.inStateMs),
+                     r.display.isEmpty ? r.model : r.display]
+            .filter { !$0.isEmpty }
+        Text(parts.joined(separator: " · ")).font(theme.small())
+            .foregroundStyle(r.slow ? theme.slow : theme.muted).lineLimit(2)
+    }
 }

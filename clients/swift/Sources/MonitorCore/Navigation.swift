@@ -11,6 +11,19 @@ public enum Page: Hashable, Sendable {
     case pipeline
     case health
     case settings
+    /// A detail page for one section of home: see `Page.sectionNames`.
+    case section(String)
+
+    /// The sections that have a page of their own (`mason://section/<name>`). `landing` is the
+    /// existing Landing page, so it parses to `.landing`, not to `.section`.
+    public static let sectionNames = ["active_models", "landing", "queued", "cpu", "compilation",
+                                      "exploring", "developing", "testing", "review"]
+
+    /// The page for a section of home, by name.
+    public static func sectionPage(_ name: String) -> Page? {
+        guard sectionNames.contains(name) else { return nil }
+        return name == "landing" ? .landing : .section(name)
+    }
 
     /// The `mason://` address of a page, for deep links from notifications.
     public var url: URL {
@@ -22,6 +35,7 @@ public enum Page: Hashable, Sendable {
         case .pipeline: return URL(string: "mason://pipeline")!
         case .health: return URL(string: "mason://health")!
         case .settings: return URL(string: "mason://settings")!
+        case .section(let name): return URL(string: "mason://section/\(name)")!
         }
     }
 
@@ -37,6 +51,7 @@ public enum Page: Hashable, Sendable {
         case ("pipeline", nil): return .pipeline
         case ("health", nil): return .health
         case ("settings", nil): return .settings
+        case ("section", let name?) where rest.count == 1: return sectionPage(name)
         default: return nil
         }
     }

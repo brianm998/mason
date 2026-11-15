@@ -152,7 +152,7 @@ final class MonitorCoreTests: XCTestCase {
     }
 
     func testDeepLinksRoundTripAndRefuseOtherThings() {
-        for p in [Page.home, .task(204), .landing, .usage, .pipeline, .health, .settings] {
+        for p in [Page.home, .task(204), .landing, .usage, .pipeline, .health, .settings, .section("cpu"), .section("testing")] {
             XCTAssertEqual(Page.from(url: p.url), p, "\(p)")
         }
         XCTAssertNil(Page.from(url: URL(string: "https://example.com/task/1")!))
@@ -258,12 +258,71 @@ final class MonitorCoreTests: XCTestCase {
         XCTAssertEqual(m.page, .task(3))
     }
 
-    func testDoubleClickWithSeveralTasksExpandsAndScrollsButKeepsThePage() {
+    func testDoubleClickWithSeveralTasksExpandsAndScrollsAndOpensTheStagePage() {
         let m = model()
+        m.tileClicked(state: "queued", clickCount: 1)
+        XCTAssertEqual(m.page, .home, "a single click only reveals")
         m.tileClicked(state: "queued", clickCount: 2)
         XCTAssertTrue(m.isExpanded(m.sidebar!.sections[0]))
         XCTAssertEqual(m.scrollTarget, "queued")
-        XCTAssertEqual(m.page, .home)
+        XCTAssertEqual(m.page, .section("queued"))
+    }
+
+    func testDoubleClickOnAStageWithThreeTasksOpensItsPageAndOneTaskOpensTheTask() {
+        let m = model()
+        m.sidebar!.sections.append(section("testing", rows: [row(10, state: "testing"), row(11, state: "testing"), row(12, state: "testing")]))
+        m.sidebar!.sections.append(section("review", rows: [row(20, state: "review")]))
+        m.tileClicked(state: "testing", clickCount: 2)
+        XCTAssertEqual(m.page, .section("testing"))
+        m.tileClicked(state: "review", clickCount: 2)
+        XCTAssertEqual(m.page, .task(20))
+        m.sidebar!.sections.append(section("landing", rows: [row(30, state: "landing"), row(31, state: "landing")]))
+        m.tileClicked(state: "landing", clickCount: 2)
+        XCTAssertEqual(m.page, .landing)
+    }
+
+    func testSectionUrlsRoundTripToTheirPages() {
+        for name in Page.sectionNames {
+            let page = Page.sectionPage(name)
+            XCTAssertNotNil(page, name)
+            XCTAssertEqual(Page.from(url: URL(string: "mason://section/\(name)")!), page, name)
+            XCTAssertEqual(Page.from(url: page!.url), page, name)
+        }
+        XCTAssertEqual(Page.sectionPage("landing"), .landing)
+        XCTAssertEqual(Page.section("testing").url.absoluteString, "mason://section/testing")
+        XCTAssertNil(Page.from(url: URL(string: "mason://section/nonsense")!))
+        XCTAssertNil(Page.from(url: URL(string: "mason://section")!))
+        var h = NavHistory()
+        h.go(.section("cpu"))
+        h.goBack()
+        XCTAssertEqual(h.current, .home)
+        h.goForward()
+        XCTAssertEqual(h.current, .section("cpu"))
+    }
+
+    func testTestingPageRowsKeepTheSidebarOrderAndSkipSendsTheSidebarCommand() {
+        let m = model()
+        m.isOwner = true
+        var a = row(10, state: "testing", actions: ["skip_test"]); a.step = "test"
+        var b = row(11, state: "testing", actions: ["cancel"])
+        var c = row(12, state: "testing", actions: ["skip_test"]); c.step = "test"
+        var cell = Mason_V1_ProgressCell()
+        cell.state = .part; cell.run = 1; cell.done = 3; cell.total = 8; cell.unit = "suites"
+        cell.totalSource = .sourceReported
+        a.progress = [cell]
+        b.step = "test"
+        m.sidebar!.sections.append(section("testing", rows: [b, a, c]))
+        XCTAssertEqual(m.sectionRows("testing").map(\.id), [11, 10, 12], "the sidebar's order, not re-sorted")
+        XCTAssertEqual(m.skippableRows(m.sectionRows("testing")).map(\.id), [10, 12])
+        var sent: [Mason_V1_Command] = []
+        m.sender = { sent.append($0) }
+        m.skipAllTests(m.sectionRows("testing"))
+        XCTAssertEqual(sent.map { $0.skip.task }, [10, 12])
+        XCTAssertEqual(sent.map { $0.skip.step }, ["test", "test"])
+        m.skipTest(10, step: "test")
+        XCTAssertEqual(sent.last?.skip.task, 10, "one row's button sends the same command")
+        XCTAssertEqual(MonitorModel.suiteProgress(a), "3 of 8 suites")
+        XCTAssertEqual(MonitorModel.suiteProgress(b), "")
     }
 
     func testDoubleClickOnAnEmptyStateChangesNothingBeyondTheReveal() {

@@ -560,7 +560,16 @@ public final class MonitorModel: ObservableObject {
     /// the lone task.
     public func tileClicked(state: String, clickCount: Int) {
         reveal(state: state)
-        if clickCount == 2 { revealAndOpenIfOne(state: state) }
+        if clickCount == 2 { tileDoubleClicked(state: state) }
+    }
+
+    /// A double click: the lone task when the stage holds exactly one, else the stage's page
+    /// (for a state that has one). Nothing while disconnected.
+    public func tileDoubleClicked(state: String) {
+        guard connected else { return }
+        let n = sidebar?.sections.first(where: { $0.state == state })?.rows.count ?? 0
+        if n == 1 { revealAndOpenIfOne(state: state) }
+        else if let p = Page.sectionPage(state) { go(p) }
     }
 
     /// Reveal the state's section and, if it holds exactly one task right now
