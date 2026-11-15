@@ -2443,6 +2443,48 @@ async fn owner_session_post(
     Ok(Json(json!({"accepted": true})))
 }
 
+/// The pipeline's health as it is now (s432).
+async fn health_report(Shared(d): Shared<Arc<Daemon>>) -> Res {
+    let d2 = d.clone();
+    let v = d
+        .pool
+        .run(move || crate::health::report_json(&d2, crate::daemon::now_ms()))
+        .await
+        .map_err(pool_err)?;
+    Ok(Json(v))
+}
+
+/// Run one health check now; it may start a health session (owner only).
+async fn health_check(Shared(d): Shared<Arc<Daemon>>, headers: axum::http::HeaderMap) -> Res {
+    owner_only(&d, &who_of(&headers), "run a health check")?;
+    let d2 = d.clone();
+    let t = d
+        .pool
+        .run(move || crate::health::tick(&d2, crate::daemon::now_ms()))
+        .await
+        .map_err(pool_err)?;
+    Ok(Json(json!({
+        "findings": t.findings.iter().map(crate::health::finding_json).collect::<Vec<_>>(),
+        "fresh": t.fresh,
+        "session": t.session,
+        "held_back": t.held_back,
+    })))
+}
+
+async fn health_history(
+    Shared(d): Shared<Arc<Daemon>>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Res {
+    let n: usize = q.get("limit").and_then(|a| a.parse().ok()).unwrap_or(30);
+    let d2 = d.clone();
+    let v = d
+        .pool
+        .run(move || crate::health::history_json(&d2, n))
+        .await
+        .map_err(pool_err)?;
+    Ok(Json(v))
+}
+
 async fn owner_session_end(
     Shared(d): Shared<Arc<Daemon>>,
     headers: axum::http::HeaderMap,
@@ -2751,7 +2793,11 @@ async fn health(Shared(d): Shared<Arc<Daemon>>) -> Res {
     let d2 = d.clone();
     let v = d
         .pool
-        .run(move || crate::introspect::health(&d2))
+        .run(move || {
+            let mut v = crate::introspect::health(&d2);
+            v["pipeline"] = crate::health::report_json(&d2, now_ms());
+            v
+        })
         .await
         .map_err(pool_err)?;
     Ok(Json(v))
@@ -3503,6 +3549,9 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/sessions/{id}", get(owner_session_show))
         .route("/sessions/{id}/messages", post(owner_session_post))
         .route("/sessions/{id}/end", post(owner_session_end))
+        .route("/health/pipeline", get(health_report))
+        .route("/health/check", post(health_check))
+        .route("/health/history", get(health_history))
         .route("/tasks/{id}/{kind}", post(land_override))
         .route("/account/hold", post(account_hold))
         .route("/account/release", post(account_release))

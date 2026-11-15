@@ -151,6 +151,16 @@ impl RunIndex {
         ix
     }
 
+    /// The upper end of the typical time for a step name, when there are enough runs.
+    pub fn typical_hi(&self, step: &str) -> Option<u64> {
+        self.typical.get(step).map(|(_, hi)| *hi)
+    }
+
+    /// When the task's latest step run started (0: none).
+    pub fn last_start_of(&self, t: TaskId) -> u64 {
+        self.last_start.get(&t).copied().unwrap_or(0)
+    }
+
     fn of_task(&self, t: TaskId) -> &[StepRun] {
         self.by_task.get(&t).map_or(&[], |v| v.as_slice())
     }
@@ -579,6 +589,7 @@ impl<'a> Ctx<'a> {
                 ),
                 project: p.project.clone(),
                 mode: p.mode.clone(),
+                ..Default::default()
             });
         }
         for (_, _, text) in crate::ssh_keys::alerts(self.d) {
@@ -660,6 +671,14 @@ impl<'a> Ctx<'a> {
                 ..Default::default()
             });
         }
+        if let Some((session, text)) = crate::health::banner(self.d, &self.owner_sessions) {
+            banners.push(Banner {
+                kind: "health".into(),
+                text,
+                session,
+                ..Default::default()
+            });
+        }
         HeaderView {
             project: project.to_string(),
             attention,
@@ -678,6 +697,25 @@ impl<'a> Ctx<'a> {
             banners,
             update: crate::update::info(self.d),
             open_owner_sessions: self.owner_sessions.len() as u32,
+            active_sessions: self
+                .owner_sessions
+                .iter()
+                .map(|s| ActiveSession {
+                    id: s.id,
+                    task: s.task.unwrap_or(0),
+                    kind: s.kind.clone(),
+                    label: match s.task {
+                        Some(t) => self
+                            .w
+                            .tasks
+                            .get(&TaskId(t))
+                            .map_or_else(|| format!("#{t}"), |x| format!("#{t} {}", x.title)),
+                        None => "Pipeline health".to_string(),
+                    },
+                    working: s.state == "working",
+                    waiting: s.state == "open" && (s.turns > 0 || s.kind == "health"),
+                })
+                .collect(),
             projects: self.w.projects.values().map(|p| p.name.clone()).collect(),
             pending_issues: self
                 .d

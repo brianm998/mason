@@ -2654,6 +2654,7 @@ fn agent_job(c: &Ctx) {
         // A diagnosis session is run by `diagnose`, not as a step of the graph.
         StepKind::Diagnose => "diagnose",
         StepKind::Chat => "chat",
+        StepKind::Health => "health",
     };
     // Only while the feedback it was written with is still there.
     let round_reason = if conflicts.is_some() {
@@ -2717,7 +2718,7 @@ fn agent_job(c: &Ctx) {
             StepKind::Explore => {
                 crate::prompts::explore_prompt(c.task.0, &c.title, &c.body, c.trust, &c.project)
             }
-            StepKind::Diagnose | StepKind::Chat => String::new(),
+            StepKind::Diagnose | StepKind::Chat | StepKind::Health => String::new(),
         }
     };
 
@@ -2784,10 +2785,8 @@ fn agent_job(c: &Ctx) {
         .map(|t| crate::cmdreuse::command_key(t.build.as_deref(), &t.test));
     // Kept in the task's folder per run, so a re-attach after a daemon restart keeps what
     // was credited before it (s417).
-    let deadline_extra = mason_adapter_api::DeadlineExtra::kept_in(
-        c.task_dir()
-            .join(credit_file_name(c.run.0)),
-    );
+    let deadline_extra =
+        mason_adapter_api::DeadlineExtra::kept_in(c.task_dir().join(credit_file_name(c.run.0)));
     // The agent's own `mason run` commands that wait in the queue add to it too (s363),
     // until this step ends.
     c.d.broker.credit_waits_to(c.task, deadline_extra.clone());

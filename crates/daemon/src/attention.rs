@@ -480,7 +480,7 @@ fn launch_task(id: &str) -> Option<u64> {
 
 /// Whether `syspolicyd` is running, asked of `/usr/bin/pgrep` (Apple's tools do not freeze with
 /// it) for at most 2 seconds. None off macOS or when the answer did not come.
-fn syspolicyd_running() -> Option<bool> {
+pub(crate) fn syspolicyd_running() -> Option<bool> {
     if !cfg!(target_os = "macos") {
         return None;
     }

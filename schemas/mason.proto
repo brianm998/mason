@@ -539,6 +539,8 @@ message Banner {
   // The project is empty for a pause on everything.
   string project = 3;
   string mode = 4;
+  // For kind "health": the owner session the banner's Open session button opens (s432).
+  uint64 session = 5;
 }
 
 message HeaderView {
@@ -560,6 +562,24 @@ message HeaderView {
   string project = 9;
   // How many owner chat sessions are open (s364). Additive.
   uint32 open_owner_sessions = 10;
+  // Every open owner session the owner is part of, for the sidebar's "Active sessions (N)"
+  // panel (s432). Additive.
+  repeated ActiveSession active_sessions = 11;
+}
+
+// One open owner session in the sidebar's Active sessions panel.
+message ActiveSession {
+  uint64 id = 1;
+  // The task, or 0 for a session about no task.
+  uint64 task = 2;
+  // "task" or "health".
+  string kind = 3;
+  // What to show: the task's title, or "Pipeline health".
+  string label = 4;
+  // The agent is replying.
+  bool working = 5;
+  // The agent has said its piece and waits for the owner.
+  bool waiting = 6;
 }
 
 // What the daemon found the last time it looked at its update channel.

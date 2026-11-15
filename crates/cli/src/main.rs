@@ -82,6 +82,9 @@ mason: command-line client for the MASON pipeline
   mason task open <id> [--anyway]     open an interactive agent in the task's worktree, resuming its session
   mason session list | open <task> [--confirm] | show <id> [--after N] | send <id> <text|-> [--no-wait] | end <id>
                                       the owner's chat sessions with an agent (what the monitor's dialog does)
+  mason health pipeline [--json] | health check | health history [--limit N]
+                                      the pipeline's own health check: what looks wrong now, run a check (it may start a health
+                                      session), and what self-correction did and why (plain `mason health` is the report below)
   mason pause [--project P] [--mode all|claims|landing] --for 2h   hold work back (all stops at the next step)
   mason resume [--project P] [--mode M] | mason pause list
   mason account hold <name> [--for 2h] [--reason R] | mason account release <name>
@@ -1524,7 +1527,9 @@ fn main() {
             }
             let sub = a.pos().unwrap_or_else(|| "list".into());
             let sid = |a: &mut Args| -> u64 {
-                let s = a.pos().unwrap_or_else(|| die("which session? give its number"));
+                let s = a
+                    .pos()
+                    .unwrap_or_else(|| die("which session? give its number"));
                 s.trim_start_matches('#')
                     .parse()
                     .unwrap_or_else(|_| die(&format!("{s:?} is not a session number")))
@@ -1598,7 +1603,9 @@ fn main() {
                 "send" => {
                     let id = sid(&mut a);
                     let wait = !a.flag("--no-wait");
-                    let text = a.pos().unwrap_or_else(|| die("send what? text, or - for stdin"));
+                    let text = a
+                        .pos()
+                        .unwrap_or_else(|| die("send what? text, or - for stdin"));
                     finish(&a);
                     let text = if text == "-" {
                         let mut t = String::new();
@@ -1624,8 +1631,13 @@ fn main() {
                     let mut last = seen;
                     loop {
                         std::thread::sleep(std::time::Duration::from_millis(300));
-                        let r = or_die(d.call("GET", &format!("/sessions/{id}?after={last}"), None));
-                        for m in r["session"]["messages"].as_array().cloned().unwrap_or_default() {
+                        let r =
+                            or_die(d.call("GET", &format!("/sessions/{id}?after={last}"), None));
+                        for m in r["session"]["messages"]
+                            .as_array()
+                            .cloned()
+                            .unwrap_or_default()
+                        {
                             last = m["id"].as_u64().unwrap_or(last);
                             if m["role"] != "owner" {
                                 line(&m);
@@ -1642,7 +1654,82 @@ fn main() {
                     or_die(d.call("POST", &format!("/sessions/{id}/end"), Some(&json!({}))));
                     println!("ended session #{id}");
                 }
-                other => die(&format!("mason session {other:?}: list, open, show, send or end")),
+                other => die(&format!(
+                    "mason session {other:?}: list, open, show, send or end"
+                )),
+            }
+        }
+        "health" => {
+            let sub = a.pos().unwrap_or_default();
+            match sub.as_str() {
+                "" => {
+                    finish(&a);
+                    let r = or_die(d.call("GET", "/health", None));
+                    if json_out {
+                        return println!("{r:#}");
+                    }
+                    print_health(&r);
+                }
+                "pipeline" => {
+                    finish(&a);
+                    let r = or_die(d.call("GET", "/health/pipeline", None));
+                    if json_out {
+                        return println!("{r:#}");
+                    }
+                    let list = r["findings"].as_array().cloned().unwrap_or_default();
+                    if list.is_empty() {
+                        println!("healthy: no findings");
+                    }
+                    for f in list {
+                        println!(
+                            "[{}] {} ({}): {}",
+                            f["severity"].as_str().unwrap_or("?"),
+                            f["key"].as_str().unwrap_or("?"),
+                            f["category"].as_str().unwrap_or("?"),
+                            f["summary"].as_str().unwrap_or("")
+                        );
+                        for e in f["evidence"].as_array().into_iter().flatten() {
+                            println!("    {}", e.as_str().unwrap_or(""));
+                        }
+                    }
+                    if let Some(s) = r["session"].as_u64() {
+                        println!("health session #{s} is open (mason session show {s})");
+                    }
+                }
+                "check" => {
+                    finish(&a);
+                    let r = or_die(d.call("POST", "/health/check", Some(&json!({}))));
+                    if json_out {
+                        return println!("{r:#}");
+                    }
+                    match r["session"].as_u64() {
+                        Some(s) => println!("started health session #{s}"),
+                        None if r["fresh"].as_array().is_some_and(|f| !f.is_empty()) => {
+                            println!("no session: {}", r["held_back"].as_str().unwrap_or("?"))
+                        }
+                        None => println!("nothing new to look at"),
+                    }
+                }
+                "history" => {
+                    let limit: usize = a.opt("--limit").and_then(|v| v.parse().ok()).unwrap_or(30);
+                    finish(&a);
+                    let r = or_die(d.call("GET", &format!("/health/history?limit={limit}"), None));
+                    if json_out {
+                        return println!("{r:#}");
+                    }
+                    for h in r["history"].as_array().into_iter().flatten() {
+                        println!(
+                            "{} {:<9} {} {}",
+                            h["at_ms"],
+                            h["kind"].as_str().unwrap_or("?"),
+                            h["key"].as_str().unwrap_or(""),
+                            h["detail"].as_str().unwrap_or("")
+                        );
+                    }
+                }
+                other => die(&format!(
+                    "mason health {other:?}: pipeline, check or history"
+                )),
             }
         }
         "alerts" => {
@@ -1684,14 +1771,6 @@ fn main() {
                     x["key"].as_str().unwrap_or("")
                 );
             }
-        }
-        "health" => {
-            finish(&a);
-            let r = or_die(d.call("GET", "/health", None));
-            if json_out {
-                return println!("{r:#}");
-            }
-            print_health(&r);
         }
         "digest" => {
             let days = a.opt("--days").unwrap_or_else(|| "7".into());
@@ -3415,6 +3494,17 @@ fn print_health(r: &serde_json::Value) {
     }
     for (name, n) in flaky {
         println!("  {name} ({n} time(s))");
+    }
+    if let Some(p) = r["pipeline"].as_object() {
+        let n = p["findings"].as_array().map_or(0, Vec::len);
+        println!(
+            "Pipeline checks: {}",
+            if n == 0 {
+                "healthy".to_string()
+            } else {
+                format!("{n} finding(s); `mason health pipeline`")
+            }
+        );
     }
     println!("Recurring jobs");
     for s in r["schedules"].as_array().cloned().unwrap_or_default() {

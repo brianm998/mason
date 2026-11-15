@@ -142,7 +142,7 @@ impl Tracker {
 }
 
 /// A step host's id that is an agent session (`t95r799-1`), not a command.
-fn is_agent_host(id: &str) -> bool {
+pub(crate) fn is_agent_host(id: &str) -> bool {
     id.rsplit_once('-')
         .is_some_and(|(_, n)| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
 }

@@ -127,7 +127,7 @@ impl Collector {
                 .w
                 .waits
                 .iter()
-                .filter(|(task, wait)| !next.waits.get(task).is_some_and(|n| n.since == wait.since))
+                .filter(|(task, wait)| next.waits.get(task).is_none_or(|n| n.since != wait.since))
                 .map(|(_, wait)| wait.clone())
                 .collect();
             for wait in &ended {
