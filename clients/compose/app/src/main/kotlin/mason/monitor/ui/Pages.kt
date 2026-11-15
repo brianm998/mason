@@ -73,6 +73,7 @@ private fun Scrolling(content: @Composable ColumnScope.() -> Unit) {
  * step, the session-limit stepper, the landing queue, and detail for the tasks in each
  * stage. (Counts and task lists live in the top bar and the sidebar, not here.)
  */
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 fun HomePage(model: MonitorModel) {
     val theme = LocalTheme.current
