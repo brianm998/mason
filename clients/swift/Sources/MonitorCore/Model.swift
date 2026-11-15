@@ -84,6 +84,9 @@ public final class MonitorModel: ObservableObject {
     /// The connection is down and being retried: the daemon is restarting or has
     /// not answered. Shown as "reconnecting", never as a hard error.
     @Published public var reconnecting = false
+    /// What the remote link is doing ("Looking for MASON on studio…", "Reached through studio.local"),
+    /// or nil for the loopback connection. The start and banner views say it when set.
+    @Published public var linkStatus: String?
     /// Whether the daemon took this connection's identity for the owner's (its welcome says).
     /// Only then are the answer, approve and reject buttons drawn: anyone else sees the card.
     @Published public var isOwner = false

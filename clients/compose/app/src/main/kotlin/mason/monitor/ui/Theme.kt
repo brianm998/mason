@@ -35,6 +35,8 @@ class Theme(val dark: Boolean, val scale: Double) {
     val text get() = c(T.colorLightText, T.colorDarkText)
     val muted get() = c(T.colorLightTextMuted, T.colorDarkTextMuted)
     val accent get() = c(T.colorLightAccent, T.colorDarkAccent)
+    /** A link: a task or issue reference that opens a page. Not the accent, which also tints selected rows. */
+    val link get() = c(T.colorLightLink, T.colorDarkLink)
     val attention get() = c(T.colorLightAttention, T.colorDarkAttention)
     val attentionTint get() = c(T.colorLightAttentionTint, T.colorDarkAttentionTint)
     val slow get() = c(T.colorLightSlow, T.colorDarkSlow)

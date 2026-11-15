@@ -36,6 +36,8 @@ public struct Theme {
     public var text: Color { c(MasonTokens.colorLightText, MasonTokens.colorDarkText) }
     public var muted: Color { c(MasonTokens.colorLightTextMuted, MasonTokens.colorDarkTextMuted) }
     public var accent: Color { c(MasonTokens.colorLightAccent, MasonTokens.colorDarkAccent) }
+    /// A link: a task or issue reference that opens a page. Not the accent, which also tints selected rows.
+    public var link: Color { c(MasonTokens.colorLightLink, MasonTokens.colorDarkLink) }
     public var attention: Color { c(MasonTokens.colorLightAttention, MasonTokens.colorDarkAttention) }
     public var attentionTint: Color { c(MasonTokens.colorLightAttentionTint, MasonTokens.colorDarkAttentionTint) }
     public var slow: Color { c(MasonTokens.colorLightSlow, MasonTokens.colorDarkSlow) }
