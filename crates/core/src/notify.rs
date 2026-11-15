@@ -20,6 +20,8 @@ pub enum Channel {
     Push,
     Email,
     Webhook,
+    /// A push straight to the paired iPhones and iPads through Apple's push service.
+    Apns,
 }
 
 pub const CHANNELS: &[Channel] = &[
@@ -29,6 +31,7 @@ pub const CHANNELS: &[Channel] = &[
     Channel::Push,
     Channel::Email,
     Channel::Webhook,
+    Channel::Apns,
 ];
 
 impl Channel {
@@ -40,6 +43,7 @@ impl Channel {
             Channel::Push => "push",
             Channel::Email => "email",
             Channel::Webhook => "webhook",
+            Channel::Apns => "apns",
         }
     }
     pub fn parse(s: &str) -> Option<Channel> {
@@ -47,7 +51,10 @@ impl Channel {
     }
     /// Channels that leave the machine.
     pub fn remote(self) -> bool {
-        matches!(self, Channel::Push | Channel::Email | Channel::Webhook)
+        matches!(
+            self,
+            Channel::Push | Channel::Email | Channel::Webhook | Channel::Apns
+        )
     }
     /// Channels played by a monitor (or the daemon in its place).
     pub fn audible(self) -> bool {
@@ -210,6 +217,7 @@ impl Routing {
                 rule(Speech, 0),
                 rule(Push, 10),
                 rule(Email, 60),
+                rule(Apns, 0),
             ],
         );
         let broke = vec![
@@ -218,7 +226,11 @@ impl Routing {
             rule(Speech, 0),
             rule(Push, 10),
         ];
-        put("failed", broke.clone());
+        // The phone is told at once, since the owner is away from the monitor; it costs nothing
+        // when no `[apns]` is set up (the channel is skipped like any channel not configured).
+        let mut phone = broke.clone();
+        phone.push(rule(Apns, 0));
+        put("failed", phone.clone());
         // Conditions that stop work, or the pipeline: the same as `failed`.
         for k in [
             "disk",
@@ -236,7 +248,7 @@ impl Routing {
         ] {
             put(k, broke.clone());
         }
-        put("landing", broke); // the base branch is frozen, or a landing is stuck
+        put("landing", phone); // the base branch is frozen, or a landing is stuck
                                // `paused`, `debt` and `provider_hold` (see `MONITOR_ONLY`) are left unrouted on purpose:
                                // the owner did them, or they stop nothing. `rules` gives them the monitor alone.
         let everything = vec![
@@ -248,7 +260,12 @@ impl Routing {
             rule(Webhook, 0),
         ];
         for k in ["daemon_down", "credentials", "provider_outage", "stalled"] {
-            put(k, everything.clone());
+            let mut r = everything.clone();
+            // The pipeline stopped: the phone is told too.
+            if matches!(k, "daemon_down" | "stalled") {
+                r.push(rule(Apns, 0));
+            }
+            put(k, r);
         }
         put("landed", vec![rule(Monitor, 0), rule(Speech, 0)]);
         Routing {
@@ -701,20 +718,28 @@ mod tests {
                 (Sound, 0),
                 (Speech, 0),
                 (Push, 10),
-                (Email, 60)
+                (Email, 60),
+                (Apns, 0)
             ]
         );
         for k in ["failed", "landing"] {
             assert_eq!(
                 channels(k),
-                vec![(Monitor, 0), (Sound, 0), (Speech, 0), (Push, 10)]
+                vec![(Monitor, 0), (Sound, 0), (Speech, 0), (Push, 10), (Apns, 0)]
             );
         }
         for k in ["daemon_down", "credentials", "provider_outage", "stalled"] {
             let c: Vec<Channel> = channels(k).into_iter().map(|x| x.0).collect();
-            assert_eq!(c, vec![Monitor, Sound, Speech, Push, Email, Webhook]);
+            let phone = matches!(k, "daemon_down" | "stalled");
+            let mut want = vec![Monitor, Sound, Speech, Push, Email, Webhook];
+            if phone {
+                want.push(Apns);
+            }
+            assert_eq!(c, want, "{k}");
             assert!(channels(k).iter().all(|x| x.1 == 0));
         }
+        // Conditions that only stop one thing do not wake the phone.
+        assert!(channels("disk").iter().all(|x| x.0 != Apns));
         assert_eq!(channels("landed"), vec![(Monitor, 0), (Speech, 0)]);
         assert_eq!(channels("something_else"), vec![(Monitor, 0)]);
     }
@@ -728,12 +753,14 @@ mod tests {
             d,
             vec![
                 (Channel::Sound, Delivery::Initial),
-                (Channel::Speech, Delivery::Initial)
+                (Channel::Speech, Delivery::Initial),
+                (Channel::Apns, Delivery::Initial)
             ]
         );
         let done = vec![
             attempt(Channel::Sound, Delivery::Initial, true, now),
             attempt(Channel::Speech, Delivery::Initial, true, now),
+            attempt(Channel::Apns, Delivery::Initial, true, now),
         ];
         assert!(due(&r, "needs_you", st(now), &done, now + 5 * MINUTE_MS, 0).is_empty());
         // Push follows after ten minutes, email after an hour.
@@ -747,6 +774,7 @@ mod tests {
         let mut done = vec![
             attempt(Channel::Sound, Delivery::Initial, true, 0),
             attempt(Channel::Speech, Delivery::Initial, true, 0),
+            attempt(Channel::Apns, Delivery::Initial, true, 0),
             attempt(Channel::Push, Delivery::Initial, true, 10 * MINUTE_MS),
         ];
         assert!(due(&r, "needs_you", st(0), &done, r.reminder_ms - 1, 0).is_empty());
@@ -757,7 +785,8 @@ mod tests {
             vec![
                 (Channel::Sound, Delivery::Reminder),
                 (Channel::Speech, Delivery::Reminder),
-                (Channel::Push, Delivery::Reminder)
+                (Channel::Push, Delivery::Reminder),
+                (Channel::Apns, Delivery::Reminder)
             ]
         );
         for (c, _) in &d {
@@ -902,7 +931,13 @@ mod tests {
         );
         assert!(!r.is_quiet(Channel::Monitor, 100));
         let night = due(&r, "needs_you", st(0), &[], 0, 23 * 60);
-        assert_eq!(night, vec![(Channel::Speech, Delivery::Initial)]);
+        assert_eq!(
+            night,
+            vec![
+                (Channel::Speech, Delivery::Initial),
+                (Channel::Apns, Delivery::Initial)
+            ]
+        );
         let morning = due(&r, "needs_you", st(0), &[], 8 * MINUTE_MS * 60, 8 * 60);
         assert!(morning.contains(&(Channel::Sound, Delivery::Initial)));
     }
