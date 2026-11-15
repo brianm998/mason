@@ -35,7 +35,7 @@ build:
 	  printf '// SPDX-License-Identifier: GPL-3.0-or-later\n\npublic enum BuildStamp {\n    public static let commit = "%s"\n}\n' "$(SHA)" > $(STAMP); \
 	fi; \
 	$(SWIFT) build -c $(CONFIG); status=$$?; \
-	git checkout -- $(STAMP) 2>/dev/null || true; \
+	git checkout -- $(STAMP); \
 	exit $$status
 
 run: build
