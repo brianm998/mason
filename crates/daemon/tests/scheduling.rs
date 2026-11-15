@@ -385,6 +385,112 @@ category = "landing"
 }
 
 #[test]
+fn a_suite_already_green_for_the_tree_takes_no_lease_when_its_step_runs_again() {
+    // 2026-11-14: star #216's test step restarted after a daemon update and waited 25 min for
+    // compile slots to rebuild two suites already green for its exact tree, which it then
+    // reused without running (s380). Here the only compile slot is held elsewhere when the
+    // step runs again: it must finish anyway, and run neither build a second time.
+    let runs = tempfile::tempdir().unwrap();
+    let log = runs.path().join("ran");
+    let suite = |me: &str| {
+        format!(
+            r#"
+[suite.build-{me}]
+command = "echo {me} >> {log}; echo 1..1; echo ok 1 - {me}"
+parser = "tap"
+min_tests = 1
+level = "unit"
+uses = {{ compile = 1 }}
+"#,
+            log = log.display()
+        )
+    };
+    let def = format!(
+        r#"schema = 1
+start = "develop"
+
+[resource.compile]
+count = 1
+
+[step.develop]
+type = "agent"
+category = "developing"
+next = "test"
+
+[step.test]
+type = "test"
+category = "testing"
+suites = ["build-a", "build-b"]
+max_rounds = 2
+on_red = "develop"
+next = "sign-off"
+
+[step.sign-off]
+type = "approval"
+category = "review"
+next = "land"
+
+[step.land]
+type = "landing"
+category = "landing"
+{}{}"#,
+        suite("a"),
+        suite("b")
+    );
+    let s = Scratch::new("false", unique_script());
+    s.push_files(&[(".mason/mason.toml", &def)], "definition");
+    let d = s.start();
+    let t = file_task(&d, "Proven builds");
+    wait_state(&d, t, State::Review, 120);
+    assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), 2);
+    let (c, held) = hold(&d, "someone else's build", &[("compile", 1)]);
+    d.emit(EventKind::Retried {
+        task: t,
+        to: State::Testing,
+        step: String::new(),
+        auto: false,
+    })
+    .unwrap();
+    wait_for("the task to leave testing", 60, || {
+        d.world().unwrap().tasks[&t].state == State::Review
+    });
+    assert_eq!(
+        std::fs::read_to_string(&log).unwrap().lines().count(),
+        2,
+        "a proven build ran again"
+    );
+    drop(held);
+    d.broker.lease_close(c);
+}
+
+#[test]
+fn a_suites_run_time_is_recorded_and_gives_an_estimate_after_two_runs() {
+    // The scheduler lets short work run while the machine drains for an exclusive request
+    // only with an estimate of how long it takes, from the times recorded here (s385).
+    let runs = tempfile::tempdir().unwrap();
+    let log = runs.path().join("held");
+    let def = suite_def("", "uses = { test-suite = 1 }", &log);
+    let s = Scratch::new("false", unique_script());
+    s.push_files(&[(".mason/mason.toml", &def)], "definition");
+    let d = s.start();
+    let first = file_task(&d, "First run");
+    wait_state(&d, first, State::Landed, 90);
+    assert_eq!(
+        d.store.suite_estimate("scratch", "checks", "run").unwrap(),
+        None
+    );
+    let second = file_task(&d, "Second run");
+    wait_state(&d, second, State::Landed, 90);
+    assert!(
+        d.store
+            .suite_estimate("scratch", "checks", "run")
+            .unwrap()
+            .is_some(),
+        "two finished runs of `checks` give an estimate"
+    );
+}
+
+#[test]
 fn run_check_queues_like_the_test_step_and_frees_the_agents_slot() {
     // An agent waiting for its tests holds no LLM session slot, and the check waits
     // for the test step's `compile` like the test step does.

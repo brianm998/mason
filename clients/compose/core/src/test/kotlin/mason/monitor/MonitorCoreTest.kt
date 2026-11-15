@@ -770,6 +770,25 @@ class MonitorCoreTest {
         assertEquals(OtherKey.NEWLINE, otherBoxKey(shift = true))
     }
 
+    @Test fun spaceTogglesAndReturnSendsTheCheckedSet() {
+        var s = MultiSelection.starting(4, 1)
+        assertNull(s.answer, "nothing is checked until Space")
+        s = s.toggle(); assertEquals("2", s.answer, "Space checks the highlighted option")
+        s = s.down().down().toggle(); assertEquals("2,4", s.answer)
+        s = s.toggle(0); assertEquals("1,2,4", s.answer, "a click checks that option, in card order")
+        s = s.toggle(); assertEquals("2,4", s.answer, "Space on a checked option unchecks it")
+        assertEquals(s, s.toggle(9), "a box that is not there changes nothing")
+        assertNull(MultiSelection.starting(2, null).toggle().answer, "no highlight, nothing to toggle")
+        assertNull(otherAnswer("  \n"), "a blank Other box sends nothing")
+    }
+
+    @Test fun aMultiSelectCardOffersSendToTheOwnerOnly() {
+        val c = card().copy(multi_select = true)
+        assertEquals(listOf("option:1", "option:2", "other", "send"), c.item(7).actions)
+        assertEquals(emptyList(), c.item(7, owner = false).actions)
+        assertEquals(listOf("option:1", "option:2", "other"), card().item(7).actions)
+    }
+
     @Test fun approveSendsTheDiffHashShownForAHoldAndAPlainApproveOtherwise() {
         val (m, sent) = ownerModel()
         m.approve(3, approval(hold = true))

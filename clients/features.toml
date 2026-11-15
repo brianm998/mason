@@ -201,6 +201,11 @@ description = "Arrow keys move the selection and Return answers; Other has a mul
 swift = "done"
 compose = "done"
 
+[feature.decision-card-multi-select]
+description = "A card that takes several answers shows a checkbox per option; Space toggles the highlighted one, Return sends the checked set (\"1,3\"), Other keeps its box; monitor tools take the same list"
+swift = "done"
+compose = "done"
+
 [feature.approval-view]
 description = "A task waiting on a proposal, an approval step or a self-hosting hold shows what it waits on in full, with Approve (the diff hash shown) and Reject with a reason, for the owner only"
 swift = "done"

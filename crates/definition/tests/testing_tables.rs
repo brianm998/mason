@@ -486,3 +486,54 @@ fn masons_own_impact_map_selects_suites_by_path() {
     assert_eq!(d.testing.bound(When::Development).len(), 4);
     assert_eq!(d.testing.bound(When::TestStep).len(), 4);
 }
+
+#[test]
+fn the_narrow_keys_parse_into_one_narrow_and_their_mistakes_are_named() {
+    // s386: a suite may say how to run only the tests a change needs, in a task's test step.
+    let keys = r#"rerun = "cargo nextest run {tests}"
+narrow_command = "cargo nextest run {tests}"
+narrow_tests = "src/**/tests/*.rs"
+narrow_root = "src/"
+narrow_each = "-E 'test({})'"
+narrow_never = ["Cargo.toml"]"#;
+    let d = parse(&with(r#"rerun = "cargo nextest run {tests}""#, keys)).unwrap();
+    assert!(validate(&d, &Capabilities::now()).is_empty());
+    let n = d
+        .testing
+        .suite("unit")
+        .unwrap()
+        .narrow
+        .clone()
+        .expect("narrow");
+    assert_eq!(n.command, "cargo nextest run {tests}");
+    assert_eq!(n.tests, "src/**/tests/*.rs");
+    assert_eq!(n.root.as_deref(), Some("src/"));
+    assert_eq!(n.each, "-E 'test({})'");
+    assert_eq!(n.never, ["Cargo.toml"]);
+    assert!(d.testing.suite("e2e").unwrap().narrow.is_none());
+    for (extra, want) in [
+        (
+            r#"narrow_tests = "t/*.rs""#,
+            "needs both `narrow_command` and `narrow_tests`",
+        ),
+        (
+            "narrow_command = \"cargo nextest run\"\nnarrow_tests = \"t/*.rs\"",
+            "must contain `{tests}`",
+        ),
+        (
+            "narrow_command = \"x {tests}\"\nnarrow_tests = \"t/*.rs\"\nnarrow_each = \"--tests\"",
+            "must contain `{}`",
+        ),
+        (
+            "narrow_command = \"x {tests}\"\nnarrow_tests = \"t/*.rs\"\nnarrow_split = \"(\"",
+            "narrow_split",
+        ),
+    ] {
+        let text = with(
+            r#"rerun = "cargo nextest run {tests}""#,
+            &format!("rerun = \"cargo nextest run {{tests}}\"\n{extra}"),
+        );
+        let p = problems(&text);
+        assert!(p.iter().any(|x| x.contains(want)), "{extra}: {p:?}");
+    }
+}

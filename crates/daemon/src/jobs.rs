@@ -152,7 +152,26 @@ impl Ctx {
     }
 
     pub(crate) fn emit(&self, kind: EventKind) -> bool {
+        match &kind {
+            EventKind::WaitStarted { .. } => wait_note(self.run.0, true),
+            EventKind::WaitEnded { .. } => wait_note(self.run.0, false),
+            _ => {}
+        }
         self.d.emit_for_run(self.task, self.run, kind)
+    }
+
+    /// The reason for a step that ran out of time. When more than half of the run was spent
+    /// waiting (for a slot, a pause, a hold) the time was not the step's own: the reason says
+    /// so, and the failure counts as outside the code (s392).
+    pub(crate) fn timeout_reason(&self) -> String {
+        let started = self
+            .d
+            .world()
+            .ok()
+            .and_then(|w| w.step_runs.get(&self.run).map(|r| r.started_at.0));
+        let elapsed = started.map(|s| now_ms().saturating_sub(s)).unwrap_or(0);
+        let waited = wait_total(self.run.0);
+        timeout_text(waited, elapsed)
     }
 
     /// End the step and let the graph say what follows.
@@ -423,6 +442,44 @@ impl Ctx {
         let p = self.d.task_dir(self.task);
         let _ = std::fs::create_dir_all(&p);
         p
+    }
+}
+
+/// Per run: (total ms waited, start of the open wait).
+static WAITS: std::sync::Mutex<std::collections::BTreeMap<u64, (u64, Option<u64>)>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+fn wait_note(run: u64, start: bool) {
+    let now = now_ms();
+    let mut m = WAITS.lock().unwrap_or_else(|e| e.into_inner());
+    let e = m.entry(run).or_insert((0, None));
+    if start {
+        e.1.get_or_insert(now);
+    } else if let Some(s) = e.1.take() {
+        e.0 += now.saturating_sub(s);
+    }
+}
+
+/// Time the run has spent waiting so far, an open wait included. The entry is dropped.
+fn wait_total(run: u64) -> u64 {
+    let now = now_ms();
+    let mut m = WAITS.lock().unwrap_or_else(|e| e.into_inner());
+    match m.remove(&run) {
+        Some((t, open)) => t + open.map(|s| now.saturating_sub(s)).unwrap_or(0),
+        None => 0,
+    }
+}
+
+/// The text of a timeout after `waited` ms of `elapsed` ms spent waiting.
+pub(crate) fn timeout_text(waited: u64, elapsed: u64) -> String {
+    if elapsed > 0 && waited * 2 > elapsed {
+        format!(
+            "the step ran out of time, mostly waiting in the queue ({} s of {} s)",
+            waited / 1000,
+            elapsed / 1000
+        )
+    } else {
+        "the step ran out of time".to_string()
     }
 }
 
@@ -862,17 +919,20 @@ pub(crate) fn acquire_needs_while(
     needs: mason_scheduler::Needs,
     wanted: &dyn Fn() -> bool,
 ) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
-    acquire_needs_as(c, needs, wanted, false)
+    acquire_needs_as(c, needs, wanted, false, None)
 }
 
-/// [`acquire_needs_while`] for one of several leases the step holds at once (s345: suites
-/// run side by side). It never takes the step's own place in the broker.
-pub(crate) fn acquire_needs_beside(
+/// [`acquire_needs_while`] with how long the work is expected to hold the lease (s385);
+/// `beside`: one of several leases the step holds at once (s345), recorded beside the
+/// step's own so it never takes the step's place in the broker.
+pub(crate) fn acquire_needs_expecting(
     c: &Ctx,
     needs: mason_scheduler::Needs,
     wanted: &dyn Fn() -> bool,
+    beside: bool,
+    expected_ms: Option<u64>,
 ) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
-    acquire_needs_as(c, needs, wanted, true)
+    acquire_needs_as(c, needs, wanted, beside, expected_ms)
 }
 
 fn acquire_needs_as(
@@ -880,6 +940,7 @@ fn acquire_needs_as(
     needs: mason_scheduler::Needs,
     wanted: &dyn Fn() -> bool,
     beside: bool,
+    expected_ms: Option<u64>,
 ) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
     let d = &c.d;
     // Device pools are sized by what the provider lists, never by a default.
@@ -905,13 +966,7 @@ fn acquire_needs_as(
     };
     let mut waited = false;
     let asked = needs.clone();
-    let acquire = if beside {
-        crate::sched::Broker::acquire_beside
-    } else {
-        crate::sched::Broker::acquire
-    };
-    let lease = acquire(
-        &d.broker,
+    let lease = d.broker.acquire_expecting(
         c.task,
         &format!("#{}", c.task.0),
         rank,
@@ -924,6 +979,8 @@ fn acquire_needs_as(
                 class: Some(crate::targets::wait_class(d, &asked, c.task)),
             });
         },
+        beside,
+        expected_ms,
     )?;
     if waited {
         c.emit(EventKind::WaitEnded { task: c.task });
@@ -2522,6 +2579,16 @@ fn agent_job(c: &Ctx) {
         .as_ref()
         .map(|t| crate::cmdreuse::command_key(t.build.as_deref(), &t.test));
     let deadline_extra = mason_adapter_api::DeadlineExtra::default();
+    // The agent's own `mason run` commands that wait in the queue add to it too (s363),
+    // until this step ends.
+    c.d.broker.credit_waits_to(c.task, deadline_extra.clone());
+    struct StopCrediting<'a>(&'a Ctx);
+    impl Drop for StopCrediting<'_> {
+        fn drop(&mut self) {
+            self.0.d.broker.stop_crediting_waits(self.0.task);
+        }
+    }
+    let _credit = StopCrediting(c);
     let checks = Box::new(TestChecks {
         cmd: tests_cmd,
         wt: c.wt.clone(),
@@ -2929,12 +2996,17 @@ fn settle_all(
     let mut fresh_after_gone = false;
     let mut silent = false;
     let mut signaled_retried = false;
+    // Lost invocations before a resumed session that reached its own end: they are
+    // not counted toward the restart budget again (s399).
+    let mut forgiven = 0usize;
+    let mut lost_at = now_ms();
     loop {
         let fresh = match &report.end {
             StepEnd::Failed(FailReason::HostLost { detail }) => {
                 let lost = mason_adapters::hosted::lost_invocations(&root, &base);
                 let newest = lost.last().cloned().unwrap_or_else(|| base.clone());
                 let (text, at) = describe(&newest);
+                lost_at = at;
                 let text = if lost.is_empty() {
                     detail.clone()
                 } else {
@@ -2947,6 +3019,7 @@ fn settle_all(
                 // losing hosts.
                 let counted = lost
                     .iter()
+                    .skip(forgiven)
                     .filter(|id| {
                         let r = mason_step_host::registry::lost_report(&root.join(id));
                         !r.is_ok_and(|r| hl::is_restart_loss(&root, r.last_heartbeat_ms, r.at_ms))
@@ -3000,12 +3073,15 @@ fn settle_all(
             let note = if std::mem::take(&mut silent) {
                 hl::silent_note()
             } else {
-                hl::interrupted_note()
+                hl::interrupted_note(lost_at)
             };
             report = runner.resume(report, note, spec.clone(), contract);
             resumed = true;
         }
         report = settle_holds(c, runner, report, spec, contract, rec)?;
+        if resumed && !matches!(report.end, StepEnd::Failed(FailReason::HostLost { .. })) {
+            forgiven = mason_adapters::hosted::lost_invocations(&root, &base).len();
+        }
     }
 }
 
@@ -3101,7 +3177,7 @@ fn finish_agent_inner(c: &Ctx, report: StepReport, dir: &Path) {
         StepEnd::Failed(why) => {
             let reason = match why {
                 FailReason::NoResult { nudges } => format!("the agent ended its turn {} times without submitting", nudges + 1),
-                FailReason::Timeout => "the step ran out of time".to_string(),
+                FailReason::Timeout => c.timeout_reason(),
                 FailReason::Crash { detail } => format!("the agent failed: {detail}"),
                 // Restarted until it could not be (see `settle_all`); the text names the losses.
                 FailReason::HostLost { detail } => detail,

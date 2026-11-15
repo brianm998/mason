@@ -285,6 +285,9 @@ fn card_item(task: u64, c: &DecisionCard, owner: bool) -> Item {
             .map(|i| format!("option:{i}"))
             .collect();
         actions.push("other".into());
+        if c.multi_select {
+            actions.push("send".into());
+        }
     }
     Item::new(format!("card:{task}"), texts, actions, 0)
 }
@@ -845,9 +848,18 @@ mod tests {
             evidence: vec![],
             hash: "h".into(),
             origin: "agent".into(),
+            multi_select: false,
         };
         let owner = card_item(7, &card, true);
         assert_eq!(owner.actions, vec!["option:1", "option:2", "other"]);
+        let many = DecisionCard {
+            multi_select: true,
+            ..card.clone()
+        };
+        assert_eq!(
+            card_item(7, &many, true).actions,
+            vec!["option:1", "option:2", "other", "send"]
+        );
         assert!(owner.texts.contains(&"1. A (recommended)".to_string()));
         let other = card_item(7, &card, false);
         assert!(other.actions.is_empty(), "a non-owner sees the card only");
