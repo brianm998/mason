@@ -170,6 +170,11 @@ class SpeechTest {
         assertEquals("Ping", again.settings.sounds["decision"])
     }
 
+    @Test fun daemonDownSentenceIsSpokenAsMasonD() {
+        assertTrue(DAEMON_DOWN_SENTENCE.contains("mason D"))
+        assertFalse(DAEMON_DOWN_SENTENCE.contains("masond"))
+    }
+
     @Test fun daemonDownIsRaisedAfterFifteenSecondsOnceAndRearms() {
         val sink = FakeSink()
         val a = announcer(sink)
