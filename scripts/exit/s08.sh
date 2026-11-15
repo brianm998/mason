@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Stage 8 exit test: two projects at once with a contended machine class.
-#  1. Admission follows the rank rule across projects (fewest steps remaining first).
+#  1. Admission follows the rank rule across projects (share of the route left; filing order breaks a tie).
 #  2. The shared `compile` class is never held by two steps at once.
 #  3. Waits explain themselves, in the form from the design.
 #  4. An interactive `mason run --needs compile` goes ahead of pipeline work.
@@ -33,7 +33,9 @@ wait_state() {  # TASK STATE SECONDS
 wait_waiting() {  # TASK SECONDS: prints the task's wait sentence
   local end=$((SECONDS + $2)) w=""
   while :; do
-    w=$(m task show "$1" 2>/dev/null | sed -n 's/^  waiting   //p')
+    # Only the compile-slot sentence counts: a task also waits on LLM sessions and, on a busy
+    # machine, on the CPU gate, and those come first or instead.
+    w=$(m task show "$1" 2>/dev/null | sed -n 's/^  waiting   //p' | grep '^Waiting for compile slot' || :)
     [ -n "$w" ] && { echo "$w"; return; }
     [ $SECONDS -lt $end ] || { echo "task $1 never showed a wait" >&2; m task show "$1" >&2 || true; exit 1; }
     sleep 0.2
@@ -147,6 +149,11 @@ TOML
 "$bin/masond" --port 0 --data-dir "$root/d" --config-dir "$root/c" --heartbeat-ms 100 --sweep-ms 3600000 --max-concurrent 2 2>>"$root/masond.log" &
 daemon=$!
 until m status >/dev/null 2>&1; do kill -0 "$daemon" || { cat "$root/masond.log" >&2; exit 1; }; sleep 0.1; done
+# The real machine's CPU and the settle pause after a compile must not decide who waits for what.
+m resources gate compile_cpu_max 100 >/dev/null
+m resources gate compile_settle_s 0 >/dev/null
+# One compile at a time: the script's own `count = 1`, which compile_jobs (default 3) caps from above.
+m resources gate compile_jobs 1 >/dev/null
 
 echo "== 1. admission follows the rank rule across projects"
 m resources limit llm:claude 0 | head -1
@@ -161,7 +168,9 @@ m resources limit llm:claude 1 | head -1
 wait_state "$a" landed 120; wait_state "$b" landed 120
 sa=$(first_start "$a"); sb=$(first_start "$b")
 echo "alpha #$a (4 steps) started at $sa, beta #$b (3 steps) at $sb"
-[ "$sb" -lt "$sa" ] || { echo "the task nearer to landing must be admitted first" >&2; exit 1; }
+# Both tasks are at the start of their own route (4 of 4 steps against 3 of 3, both 1000
+# thousandths), so neither is nearer landing: the rule (#287, decision 0231) falls to filing order.
+[ "$sa" -lt "$sb" ] || { echo "equally far along: the task filed first must be admitted first" >&2; exit 1; }
 
 echo "== 2. the compile class is never held twice at once"
 # start/end must strictly alternate in the log.
