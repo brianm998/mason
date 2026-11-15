@@ -290,13 +290,18 @@ pub fn base_paths(p: &ProjectCfg) -> Result<Vec<String>, git::GitError> {
     .map(|s| s.lines().map(String::from).collect())
 }
 
-/// Files a branch adds against its base (since the merge base).
+/// Files a branch adds against its base: added since the merge base, and still different
+/// from the base tip. A file the branch carries unchanged from the tip is not its own: a task
+/// that merged another task's branch to fix a red they made together (batch #283, 2026-11-15)
+/// carries that task's stage note, and once that task lands the file is on the tip as it is.
+/// With several merge bases git picks one, which may predate the other task, so the
+/// three-dot diff alone blamed #349 for #366's numbers and told it to rename them.
 pub fn added_files(
     repo: &Path,
     base_ref: &str,
     branch: &str,
 ) -> Result<Vec<String>, git::GitError> {
-    git::run(
+    let since_fork = git::run(
         repo,
         &[
             "diff",
@@ -304,8 +309,14 @@ pub fn added_files(
             "--diff-filter=A",
             &format!("{base_ref}...{branch}"),
         ],
-    )
-    .map(|s| s.lines().map(String::from).collect())
+    )?;
+    let differs = git::run(repo, &["diff", "--name-only", base_ref, branch])?;
+    let differs: std::collections::HashSet<&str> = differs.lines().collect();
+    Ok(since_fork
+        .lines()
+        .filter(|p| differs.contains(p))
+        .map(String::from)
+        .collect())
 }
 
 fn mine_from(task: &Task, rows: &[ReservationRow]) -> Mine {
@@ -469,6 +480,45 @@ mod tests {
         );
         let w = exit_warning(EXIT_CEILING).expect("none left");
         assert!(w.starts_with("0 stage and exit-script numbers left"), "{w}");
+    }
+
+    #[test]
+    fn a_file_the_branch_carries_unchanged_from_the_tip_is_not_added_by_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        let sh = |c: &str| {
+            let ok = std::process::Command::new("sh")
+                .args(["-c", c])
+                .current_dir(r)
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "{c}");
+        };
+        sh(
+            "git init -q -b main && git config user.email a@b && git config user.name n \
+            && git config commit.gpgsign false && echo a > a && git add -A && git commit -q -m one",
+        );
+        // Another task's branch adds its stage note; this task merges it, then adds its own.
+        sh(
+            "git checkout -q -b other && mkdir -p docs/stages && echo o > docs/stages/s361.md \
+            && git add -A && git commit -q -m other",
+        );
+        sh(
+            "git checkout -q -b mine main && git merge -q --no-edit other \
+            && echo m > docs/stages/s435.md && git add -A && git commit -q -m mine",
+        );
+        // The other task lands on main with a fresh commit, so the branch's merge base is old.
+        sh(
+            "git checkout -q main && mkdir -p docs/stages && echo o > docs/stages/s361.md \
+            && git add -A && git commit -q -m landed",
+        );
+        let added = added_files(r, "main", "mine").unwrap();
+        assert_eq!(added, vec!["docs/stages/s435.md".to_string()]);
+        // A file under the same name with different content is still the branch's own.
+        sh("git checkout -q mine && echo changed > docs/stages/s361.md && git commit -qam edit");
+        let added = added_files(r, "main", "mine").unwrap();
+        assert_eq!(added, vec!["docs/stages/s361.md", "docs/stages/s435.md"]);
     }
 
     #[test]
