@@ -346,6 +346,10 @@ public final class MonitorModel: ObservableObject {
     @Published public var sshKeys: SSHKeyList?
     @Published public var sshKeyResult: String?
     @Published public var sshKeyBusy = false
+    /// The owner session whose dialog is open, and what the daemon last said of it (s364, s432).
+    @Published public var ownerSessionDialog: UInt64?
+    @Published public var ownerSession: OwnerSessionTranscript?
+    @Published public var ownerSessionError: String?
     /// The step selected in the pipeline editor (for its inspector).
     @Published public private(set) var editorStep = ""
     /// Called with every command result (the tools read them; the app shows errors).
@@ -796,6 +800,44 @@ public final class MonitorModel: ObservableObject {
 
     public func closeCommand() { commandDialog = nil }
 
+    /// Open the owner-session dialog on a session (the health banner's and the sidebar's button).
+    public func openOwnerSession(_ id: UInt64) {
+        ownerSessionDialog = id
+        ownerSession = nil
+        ownerSessionError = nil
+        refreshOwnerSession()
+    }
+
+    public func closeOwnerSession() {
+        ownerSessionDialog = nil
+        ownerSession = nil
+        ownerSessionError = nil
+    }
+
+    func refreshOwnerSession() {
+        guard let id = ownerSessionDialog else { return }
+        var c = Mason_V1_Command()
+        c.id = "osession:\(id)"
+        c.raw = .with { $0.method = "GET"; $0.path = "/sessions/\(id)" }
+        send(c)
+    }
+
+    public func sendOwnerMessage(_ text: String) {
+        guard let id = ownerSessionDialog, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        var c = Mason_V1_Command()
+        c.id = "osession-send:\(id)"
+        c.raw = .with { $0.method = "POST"; $0.path = "/sessions/\(id)/messages"; $0.json = "{\"text\":\(Self.jsonString(text))}" }
+        send(c)
+    }
+
+    public func endOwnerSession() {
+        guard let id = ownerSessionDialog else { return }
+        var c = Mason_V1_Command()
+        c.id = "osession-end:\(id)"
+        c.raw = .with { $0.method = "POST"; $0.path = "/sessions/\(id)/end"; $0.json = "{}" }
+        send(c)
+    }
+
     public func closeSSHKeys() {
         sshKeyProject = nil
         sshKeys = nil
@@ -1041,6 +1083,8 @@ public final class MonitorModel: ObservableObject {
         case .header(let x)?:
             header = x
             noteMonitorBuild()
+            // An open dialog follows the session: a reply arrives as a new header.
+            if ownerSessionDialog != nil { refreshOwnerSession() }
         case .sidebar(let x)?:
             sidebar = x
             noteAttention(x)
@@ -1079,6 +1123,10 @@ public final class MonitorModel: ObservableObject {
             case .failed(let why): sessionNotice = why
             }
         }
+        if r.id.hasPrefix("osession:"), r.ok { ownerSession = OwnerSessionTranscript(json: r.json) }
+        if r.id.hasPrefix("osession:") || r.id.hasPrefix("osession-send:"), !r.ok { ownerSessionError = r.error }
+        if r.id.hasPrefix("osession-send:"), r.ok { refreshOwnerSession() }
+        if r.id.hasPrefix("osession-end:"), r.ok { closeOwnerSession() }
         if r.id.hasPrefix("ssh-keys:"), r.ok { sshKeys = SSHKeyList(json: r.json) }
         if r.id.hasPrefix("ssh-keys:"), !r.ok { sshKeyResult = r.error }
         if r.id.hasPrefix("ssh-key:") {

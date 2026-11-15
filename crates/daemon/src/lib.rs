@@ -33,6 +33,7 @@ pub mod editor;
 pub mod exhausted;
 pub mod fdlimit;
 pub mod file_hold;
+pub mod health;
 pub mod holds;
 pub mod hostarchive;
 pub mod hostedcheck;
