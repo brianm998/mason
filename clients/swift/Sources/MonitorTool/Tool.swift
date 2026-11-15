@@ -153,7 +153,7 @@ struct Tool {
             args.firstIndex(of: n).flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil }
         }
         guard let t = opt("--task").flatMap(UInt64.init) else { fail("--task N") }
-        // An option number, or text for the Other box (sent as free text, as the CLI does).
+        // An option number ("1,3" for several on a multi-select card), or text for the Other box (sent as free text, as the CLI does).
         let option = opt("--text") ?? opt("--option") ?? "1"
         await until("task #\(t)'s decision card") {
             model.home?.attention.contains { $0.task.id == t && $0.hasCard } ?? false
