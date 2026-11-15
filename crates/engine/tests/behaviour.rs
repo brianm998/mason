@@ -300,7 +300,7 @@ fn retry_of_running_step_stops_its_host() {
 #[test]
 fn cancel_from_every_non_terminal_state_stops_and_releases() {
     for from in State::ALL {
-        if matches!(from, S::Landed | S::Canceled | S::Failed) {
+        if matches!(from, S::Landed | S::Canceled) {
             continue;
         }
         let mut sim = Sim::new();
@@ -1101,6 +1101,29 @@ fn revived_puts_a_cancelled_task_back_in_the_queue_only_if_its_branch_is_kept() 
         sim.try_ev(E::Revived { task: gone }),
         Err(ReduceError::Illegal { .. })
     ));
+}
+
+#[test]
+fn a_failed_task_made_obsolete_is_canceled_and_can_still_be_revived() {
+    // On 2026-11-14 three failed tasks whose fixes were already on develop (#255, #306,
+    // #310) could not be closed: the reducer refused Failed -> Canceled (s337).
+    let mut sim = Sim::new();
+    let t = sim.task_in(State::Failed);
+    let fx = sim.ok(E::Canceled {
+        task: t,
+        delete_branch: false,
+    });
+    assert_eq!(sim.state(t), State::Canceled);
+    assert!(
+        !fx.contains(&Effect::StopStepHost { task: t }),
+        "nothing was running"
+    );
+    sim.ok(E::Revived { task: t });
+    assert_eq!(
+        sim.state(t),
+        State::Queued,
+        "the kept branch lets it come back"
+    );
 }
 
 #[test]

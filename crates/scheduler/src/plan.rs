@@ -62,6 +62,9 @@ pub struct Request {
     /// How the owner sees it: `#88`, or a command line.
     pub label: String,
     pub since: u64,
+    /// How long it is expected to hold what it asks for, at most (s385): known for a suite's
+    /// build or run from its recorded times. `None`: unknown.
+    pub expected_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -70,6 +73,8 @@ pub struct Holder {
     pub needs: Needs,
     pub label: String,
     pub since: u64,
+    /// When it is expected to be done, from its request's `expected_ms`. `None`: unknown.
+    pub expected_ms: Option<u64>,
 }
 
 /// What the plan is made against.
@@ -206,15 +211,20 @@ struct Blocked {
     machine_all: bool,
     /// Some machine-class request waits: an exclusive one may not pass it.
     machine_any: bool,
+    /// When the first waiting exclusive request can start at the earliest: the latest
+    /// expected end of the machine-class holders when it began to wait (s385). Work sure to be
+    /// done by then may pass it, since it delays nothing. `None`: unknown, nothing passes.
+    drain_end: Option<u64>,
 }
 
 impl Blocked {
-    fn add(&mut self, capacity: &BTreeMap<String, Capacity>, n: &Needs) {
+    fn add(&mut self, capacity: &BTreeMap<String, Capacity>, n: &Needs, holders: &[Holder]) {
         for (r, a) in &n.amounts {
             *self.reserved.entry(r.clone()).or_insert(0) += a;
         }
-        if n.exclusive {
+        if n.exclusive && !self.machine_all {
             self.machine_all = true;
+            self.drain_end = drain_end(capacity, holders);
         }
         if uses_machine(capacity, n) {
             self.machine_any = true;
@@ -228,6 +238,8 @@ impl Blocked {
         capacity: &BTreeMap<String, Capacity>,
         usage: &Usage,
         n: &Needs,
+        now: u64,
+        expected_ms: Option<u64>,
     ) -> Option<Touch> {
         let short = n.amounts.iter().find(|(r, a)| {
             let reserved = self.reserved.get(*r).copied().unwrap_or(0);
@@ -241,11 +253,29 @@ impl Blocked {
         if let Some((r, _)) = short {
             return Some(Touch::Name(r.clone()));
         }
-        if (self.machine_all && uses_machine(capacity, n)) || (n.exclusive && self.machine_any) {
+        // Backfill (s385): work that will be done before the machine has drained for the
+        // waiting exclusive request delays nothing, so it may run in the meantime.
+        let done_in_time = matches!(
+            (self.drain_end, expected_ms),
+            (Some(end), Some(e)) if !n.exclusive && now.saturating_add(e) <= end
+        );
+        if (self.machine_all && uses_machine(capacity, n) && !done_in_time)
+            || (n.exclusive && self.machine_any)
+        {
             return Some(Touch::Machine);
         }
         None
     }
+}
+
+/// When the machine-class holders are expected to be done, the latest of them: `None` when
+/// any of them has no estimate, since then the drain's end is unknown (s385).
+fn drain_end(capacity: &BTreeMap<String, Capacity>, holders: &[Holder]) -> Option<u64> {
+    let mut end = 0u64;
+    for h in holders.iter().filter(|h| uses_machine(capacity, &h.needs)) {
+        end = end.max(h.since.saturating_add(h.expected_ms?));
+    }
+    Some(end)
 }
 
 enum Touch {
@@ -319,7 +349,7 @@ pub fn plan(world: &World, waiting: &[Request]) -> Plan {
 
     for r in order {
         let compiles = r.needs.amounts.contains_key(COMPILE);
-        let touch = blocked.touches(capacity, &usage, &r.needs);
+        let touch = blocked.touches(capacity, &usage, &r.needs, world.now, r.expected_ms);
         let fitted = fit(capacity, &usage, &r.needs);
         let low_memory = match (world.free_memory_mb, world.memory_floor_mb) {
             (Some(free), Some(floor)) if usage.any && free < floor => Some((free, floor)),
@@ -405,6 +435,7 @@ pub fn plan(world: &World, waiting: &[Request]) -> Plan {
                     needs: r.needs.clone(),
                     label: r.label.clone(),
                     since: world.now,
+                    expected_ms: r.expected_ms,
                 });
                 out.grants.push(r.id);
                 if compiles {
@@ -419,7 +450,7 @@ pub fn plan(world: &World, waiting: &[Request]) -> Plan {
                 out.waits.insert(r.id, wait);
                 // A request that can never fit must not hold up the others.
                 if !matches!(fitted, Fit::Never(_)) {
-                    blocked.add(capacity, &r.needs);
+                    blocked.add(capacity, &r.needs, &holders);
                     ahead.push((r, cause));
                 }
             }
