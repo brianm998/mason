@@ -22,7 +22,13 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.layout.ContentScale
+import mason.monitor.busiestState
+import mason.monitor.topBarMascot
+import mason.monitor.topBarMascotTooltip
+import mason.monitor.topBarMascotClicked
 import mason.monitor.MonitorModel
 
 /**
@@ -41,6 +47,7 @@ fun TopBar(model: MonitorModel) {
         horizontalArrangement = Arrangement.spacedBy(theme.spacing),
         modifier = Modifier.fillMaxWidth().background(theme.surface).padding(theme.spacing),
     ) {
+        TopBarMascot(model)
         // Home on top; back and forward in a row under it.
         Column(verticalArrangement = Arrangement.spacedBy(theme.spacingSmall)) {
             NavButton("⌂ Home", "nav:home", true) { model.goHome() }
@@ -99,6 +106,29 @@ fun TopBar(model: MonitorModel) {
     if (voices) SpeechSettingsDialog(model) { voices = false }
     if (adding) AddTaskDialog(model) { adding = false }
     if (improving) ImproveDialog(model) { improving = false }
+}
+
+/** 85% of the illustration size, or the bar's height if that is less. */
+fun topBarMascotSide(illustration: Dp, bar: Dp): Dp = minOf(illustration * 0.85f, bar)
+
+/** The picture for the state holding the most tasks; click reveals its sidebar section. */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun TopBarMascot(model: MonitorModel) {
+    val theme = LocalTheme.current
+    val choice = model.topBarMascot ?: return
+    val bmp = remember(choice.id) { Mascot.illustration(choice.id) } ?: return
+    val tip = model.topBarMascotTooltip
+    val side = topBarMascotSide(theme.illustration, theme.tileHeight * 2 + theme.spacingSmall)
+    TooltipArea(tooltip = {
+        Text(tip, style = theme.small(color = theme.text), modifier = Modifier.background(theme.surface).padding(theme.spacing))
+    }) {
+        Image(
+            bmp, contentDescription = null, contentScale = ContentScale.Fit,
+            modifier = Modifier.size(side).clickable { model.topBarMascotClicked() }
+                .testTag("topbar-mascot:${choice.id}").semantics { contentDescription = tip },
+        )
+    }
 }
 
 @Composable

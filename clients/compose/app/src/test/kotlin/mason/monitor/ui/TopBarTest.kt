@@ -4,6 +4,15 @@ package mason.monitor.ui
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotEquals
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
+import androidx.compose.ui.unit.dp
+import mason.monitor.MonitorModel
+import mason.monitor.busiestState
+import mason.monitor.topBarMascot
+import mason.monitor.topBarMascotTooltip
+import mason.v1.HeaderView
+import mason.v1.StateCount
 import mason.v1.ProviderStatus
 import mason.v1.UsageView
 
@@ -27,5 +36,28 @@ class TopBarTest {
             listOf("codex: 1 of 4 sessions"),
             topBarUsageLines(u, ProviderStatus(name = "codex", sessions_used = 1, sessions_limit = 4)),
         )
+    }
+
+    private fun model(vararg counts: Pair<String, Int>) = MonitorModel().also { m ->
+        m.connected = true
+        m.header = HeaderView(counts = counts.map { StateCount(state = it.first, label = it.first, count = it.second) })
+    }
+
+    @Test
+    fun busiestActiveStateWinsAndTiesGoLate() {
+        assertEquals("testing", model("testing" to 7, "developing" to 3, "landed" to 40).busiestState?.first)
+        assertEquals("testing", model("developing" to 3, "testing" to 3).busiestState?.first)
+        assertNull(model("testing" to 0, "landed" to 9, "canceled" to 4).busiestState)
+        assertEquals("all_clear", model("testing" to 0).topBarMascot?.id)
+        assertEquals("Most tasks: testing (7)", model("testing" to 7).topBarMascotTooltip)
+    }
+
+    @Test
+    fun topBarDrawsTheBusiestStatesIllustration() {
+        val m = model("testing" to 7, "developing" to 3, "landed" to 40)
+        assertEquals("testing", m.topBarMascot?.id)
+        assertNotNull(Mascot.illustration("testing"))
+        assertEquals(85.dp, topBarMascotSide(100.dp, 1000.dp))
+        assertEquals(50.dp, topBarMascotSide(96.dp, 50.dp))
     }
 }
