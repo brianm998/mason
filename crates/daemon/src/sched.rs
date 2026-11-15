@@ -1968,6 +1968,16 @@ impl Broker {
             .collect()
     }
 
+    /// The `compile` count in force now.
+    pub fn compile_capacity(&self) -> Option<u64> {
+        let st = lock(&self.st);
+        st.ledger
+            .snapshot()
+            .capacity
+            .get(COMPILE)
+            .map(|c| u64::from(c.units))
+    }
+
     /// The idle check's latest reading, by lease.
     pub fn set_idle(&self, idle: HashMap<u64, u64>) {
         lock(&self.st).idle = idle;
@@ -2009,7 +2019,8 @@ impl Broker {
             .iter()
             .filter(|h| compiles(&h.needs))
             .map(|h| CompileHolder {
-                label: h.label.clone(),
+                label: mason_scheduler::label_parts(&h.label).0,
+                command: mason_scheduler::label_parts(&h.label).1,
                 task: task_of.get(&h.id).copied().unwrap_or(0),
                 since_ms: h.since,
                 interactive: is_person(&st, h.id),
@@ -2029,7 +2040,8 @@ impl Broker {
                     None => ("", "starting".to_string()),
                 };
                 CompileWaiter {
-                    label: r.label.clone(),
+                    label: mason_scheduler::label_parts(&r.label).0,
+                    command: mason_scheduler::label_parts(&r.label).1,
                     task: task_of.get(&r.id).copied().unwrap_or(0),
                     since_ms: r.since,
                     position: i as u32 + 1,
@@ -2141,8 +2153,10 @@ impl Broker {
             .holders
             .iter()
             .map(|h| {
+                let (label, command) = mason_scheduler::label_parts(&h.label);
                 json!({
-                    "label": h.label,
+                    "label": label,
+                    "command": command,
                     "pipeline": pipeline_of(&st, h.id),
                     "since_ms": h.since,
                     "uses": h.needs.amounts,
@@ -2162,8 +2176,10 @@ impl Broker {
                     }),
                     (_, w) => w.map(|w| explain(w, now)),
                 };
+                let (label, command) = mason_scheduler::label_parts(&r.label);
                 json!({
-                    "label": r.label,
+                    "label": label,
+                    "command": command,
                     "pipeline": pipeline,
                     "since_ms": r.since,
                     "interactive": r.rank.interactive(),
@@ -2202,7 +2218,17 @@ fn compile_reason(w: &mason_scheduler::Wait, now: u64, limit: u32) -> (&'static 
         WaitCause::Behind { .. } => (
             "behind",
             match w.behind.first() {
-                Some(a) => format!("behind {} in line", a.label),
+                Some(a) => {
+                    // "behind " + " in line" take 15 of the 50 characters a reason may use.
+                    let d = mason_scheduler::label_parts(&a.label).0;
+                    let d = if d.chars().count() > 35 {
+                        let cut: String = d.chars().take(34).collect();
+                        format!("{}…", cut.trim_end())
+                    } else {
+                        d
+                    };
+                    format!("behind {d} in line")
+                }
                 None => "behind an earlier request".into(),
             },
         ),
@@ -2846,6 +2872,17 @@ mod tests {
             .unwrap();
         let first = b.lease_open("first", &one);
         assert!(matches!(b.lease_poll(first), LeaseState::Granted { .. }));
+        // The pass that grants `first` changes the holder set while the lock files
+        // are read, so it leaves the adoption of the outside holder to the next
+        // pass. Poll (each poll runs a pass) until the ledger counts it: wait on
+        // the state, bounded by attempts, not by time.
+        for _ in 0..2000 {
+            if b.used("compile") == 2 {
+                break;
+            }
+            assert!(matches!(b.lease_poll(first), LeaseState::Granted { .. }));
+            std::thread::yield_now();
+        }
         assert_eq!(b.used("compile"), 2, "the outside holder counts");
         let second = b.lease_open("second", &one);
         assert!(

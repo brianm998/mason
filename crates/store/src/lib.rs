@@ -225,6 +225,12 @@ pub struct DebtRow {
     pub deferred: bool,
     /// `open` or `paid`.
     pub status: String,
+    /// How it was paid: the proof text. Empty while open.
+    pub how: String,
+    /// The commit its task landed, once known.
+    pub landed: String,
+    /// When a run last tried it and found the suite red (0: never tried).
+    pub tried_at: u64,
 }
 
 /// A batch the landing engine formed.
@@ -313,6 +319,9 @@ pub struct ProposalRow {
     pub pr: Option<u64>,
     /// `open`, `merged`, `closed` or `conflict` once a pull request exists.
     pub pr_state: String,
+    /// The rule that chose proposed or queued, such as `proposals.introspection.low_small`.
+    /// Empty for rows filed before it was recorded.
+    pub decided_by: String,
     pub at: u64,
 }
 
@@ -1898,7 +1907,7 @@ impl Store {
     pub fn debts(&self, task: Option<u64>, open_only: bool) -> Result<Vec<DebtRow>, StoreError> {
         self.read(move |c| {
             let mut st = c.prepare(
-                "SELECT id, at, task, project, scope, reason, owner, deferred, status FROM debts
+                "SELECT id, at, task, project, scope, reason, owner, deferred, status, how, landed, tried_at FROM debts
                  WHERE (?1 IS NULL OR task = ?1) AND (?2 = 0 OR status = 'open') ORDER BY id",
             )?;
             let rows =
@@ -1913,6 +1922,9 @@ impl Store {
                         owner: r.get(6)?,
                         deferred: r.get::<_, i64>(7)? != 0,
                         status: r.get(8)?,
+                        how: r.get(9)?,
+                        landed: r.get(10)?,
+                        tried_at: r.get::<_, i64>(11)? as u64,
                     })
                 })?;
             rows.collect()
@@ -2356,13 +2368,13 @@ impl Store {
         let p = p.clone();
         self.write(move |c| {
             c.execute(
-                "INSERT OR REPLACE INTO proposals(task, project, source, severity, route, filed_by, title, body, evidence, key, status, reject_reason, publish_state, access, branch, pr, pr_state, at)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
+                "INSERT OR REPLACE INTO proposals(task, project, source, severity, route, filed_by, title, body, evidence, key, status, reject_reason, publish_state, access, branch, pr, pr_state, at, decided_by)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
                 params![
                     p.task as i64, p.project, p.source, p.severity, p.route,
                     p.filed_by.map(|x| x as i64), p.title, p.body, p.evidence, p.key, p.status,
                     p.reject_reason, p.publish_state, p.access, p.branch,
-                    p.pr.map(|x| x as i64), p.pr_state, p.at as i64
+                    p.pr.map(|x| x as i64), p.pr_state, p.at as i64, p.decided_by
                 ],
             )
             .map(|_| ())
@@ -2389,7 +2401,7 @@ impl Store {
 
     fn proposals_where(&self, cond: &str, arg: i64) -> Result<Vec<ProposalRow>, StoreError> {
         let sql = format!(
-            "SELECT task, project, source, severity, route, filed_by, title, body, evidence, key, status, reject_reason, publish_state, access, branch, pr, pr_state, at FROM proposals {cond} ORDER BY task"
+            "SELECT task, project, source, severity, route, filed_by, title, body, evidence, key, status, reject_reason, publish_state, access, branch, pr, pr_state, at, decided_by FROM proposals {cond} ORDER BY task"
         );
         self.read(move |c| {
             let mut st = c.prepare(&sql)?;
@@ -2413,6 +2425,7 @@ impl Store {
                     pr: r.get::<_, Option<i64>>(15)?.map(|x| x as u64),
                     pr_state: r.get(16)?,
                     at: r.get::<_, i64>(17)? as u64,
+                    decided_by: r.get(18)?,
                 })
             })?;
             rows.collect()
@@ -3341,13 +3354,57 @@ impl Store {
         })
     }
 
-    pub fn pay_debt(&self, id: u64, now_ms: u64) -> Result<bool, StoreError> {
+    /// Close an open debt, saying how it was paid.
+    pub fn pay_debt(&self, id: u64, now_ms: u64, how: &str) -> Result<bool, StoreError> {
+        let how = how.to_string();
         self.write(move |c| {
             c.execute(
-                "UPDATE debts SET status = 'paid', paid_at = ?2 WHERE id = ?1 AND status = 'open'",
-                params![id as i64, now_ms as i64],
+                "UPDATE debts SET status = 'paid', paid_at = ?2, how = ?3 WHERE id = ?1 AND status = 'open'",
+                params![id as i64, now_ms as i64, how],
             )
             .map(|n| n > 0)
+        })
+    }
+
+    /// The commit a debt's task landed. Kept once set.
+    pub fn set_debt_landed(&self, id: u64, commit: &str) -> Result<(), StoreError> {
+        let commit = commit.to_string();
+        self.write(move |c| {
+            c.execute(
+                "UPDATE debts SET landed = ?2 WHERE id = ?1 AND landed = ''",
+                params![id as i64, commit],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// A run tried an open debt and its suite was red.
+    pub fn debt_tried(&self, id: u64, now_ms: u64) -> Result<(), StoreError> {
+        self.write(move |c| {
+            c.execute(
+                "UPDATE debts SET tried_at = ?2 WHERE id = ?1",
+                params![id as i64, now_ms as i64],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// Every base a suite was recorded green at, newest first.
+    pub fn suite_green_bases(
+        &self,
+        project: &str,
+        suite: &str,
+    ) -> Result<Vec<(String, u64)>, StoreError> {
+        let (p, s) = (project.to_string(), suite.to_string());
+        self.read(move |c| {
+            let mut st = c.prepare(
+                "SELECT base, at_ms FROM suite_green WHERE project = ?1 AND suite = ?2
+                 ORDER BY at_ms DESC",
+            )?;
+            let rows = st.query_map(params![p, s], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64))
+            })?;
+            rows.collect()
         })
     }
 

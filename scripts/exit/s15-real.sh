@@ -123,3 +123,4 @@ TOML
   kill -9 "$daemon" 2>/dev/null || true; daemon=""
 done
 echo "s15-real finished: read the output above; the repository $MASON_REAL_REPO holds what it did"
+echo "RESULT s15-real: the landing modes ran against $MASON_REAL_REPO, read the output above $(date +%F)"

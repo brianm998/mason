@@ -96,20 +96,87 @@ fn noun(resource: &str, kind: Option<Kind>) -> String {
 /// Most characters of an interactive command the sentence shows.
 pub const COMMAND_LIMIT: usize = 40;
 
+/// Most characters of a command's description the monitor shows before the ellipsis.
+pub const DESCRIPTION_LIMIT: usize = 49;
+
+/// A short, one-line description of a command: its first meaningful line with whitespace
+/// collapsed, a leading `bash -c`/`sh -c` wrapper and its quotes dropped, ` …` after a first line
+/// that has more lines behind it, and at most `limit` characters (counted as characters) before
+/// an ellipsis when cut. It never contains a newline.
+pub fn describe_command(cmd: &str, limit: usize) -> String {
+    let mut text = cmd.trim();
+    loop {
+        let mut next = text;
+        for shell in ["bash", "sh", "zsh"] {
+            if let Some(rest) = text.strip_prefix(shell) {
+                let rest = rest.trim_start();
+                for flag in ["-lc", "-c"] {
+                    if let Some(r) = rest.strip_prefix(flag) {
+                        if r.starts_with(char::is_whitespace) {
+                            next = r.trim_start();
+                        }
+                    }
+                }
+            }
+        }
+        if next.len() == text.len() {
+            break;
+        }
+        text = next;
+    }
+    let wrapped = text.starts_with(['\'', '"']);
+    let text = if wrapped {
+        let q = &text[..1];
+        let inner = &text[1..];
+        inner.strip_suffix(q).unwrap_or(inner).trim()
+    } else {
+        text
+    };
+    let mut lines = text.lines().map(str::trim).filter(|l| !l.is_empty());
+    let first = lines.next().unwrap_or("");
+    let mut one = first.split_whitespace().collect::<Vec<_>>().join(" ");
+    if lines.next().is_some() {
+        one.push_str(" …");
+    }
+    if one.chars().count() <= limit {
+        return one;
+    }
+    let cut: String = one.chars().take(limit).collect();
+    format!("{}…", cut.trim_end())
+}
+
+/// A label split for the monitor: what to show (at most `DESCRIPTION_LIMIT` characters plus an
+/// ellipsis, one line) and the full command (empty for a task's own label like `#88`).
+/// `interactive `<cmd>`` shows the description of the command; `task N `<cmd>`` shows
+/// `task N <description>`.
+pub fn label_parts(label: &str) -> (String, String) {
+    if let Some(cmd) = label
+        .strip_prefix("interactive `")
+        .map(|r| r.strip_suffix('`').unwrap_or(r))
+    {
+        return (describe_command(cmd, DESCRIPTION_LIMIT), cmd.to_string());
+    }
+    if let Some(rest) = label.strip_prefix("task ") {
+        if let Some((n, cmd)) = rest.split_once(" `") {
+            if !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) {
+                let cmd = cmd.strip_suffix('`').unwrap_or(cmd);
+                let d = describe_command(cmd, DESCRIPTION_LIMIT - 6 - n.len());
+                return (format!("task {n} {d}"), cmd.to_string());
+            }
+        }
+    }
+    (label.to_string(), String::new())
+}
+
 /// A holder's label as the sentence shows it. An interactive label is
-/// "interactive `<whole command>`"; it is cut so the command takes at most
-/// `COMMAND_LIMIT` characters, with an ellipsis when cut. Other labels (#88)
-/// are shown whole.
+/// "interactive `<command>`" with the command described in at most `COMMAND_LIMIT`
+/// characters, with an ellipsis when cut. Other labels (#88) are shown whole.
 fn short_label(label: &str) -> String {
     let Some(rest) = label.strip_prefix("interactive `") else {
         return label.to_string();
     };
     let cmd = rest.strip_suffix('`').unwrap_or(rest);
-    if cmd.chars().count() <= COMMAND_LIMIT {
-        return label.to_string();
-    }
-    let cut: String = cmd.chars().take(COMMAND_LIMIT).collect();
-    format!("interactive `{}…`", cut.trim_end())
+    format!("interactive `{}`", describe_command(cmd, COMMAND_LIMIT))
 }
 
 /// What the resource is called in totals: its own name (`compile`, `test-suite`, `llm:claude`,
@@ -192,7 +259,7 @@ fn explain_cause(w: &Wait, now_ms: u64) -> String {
             parts.push(s);
         } else if let Some(first) = w.behind.first() {
             // No holder: the queue waits behind a paused request, not for a slot.
-            let mut s = format!("behind {}", first.label);
+            let mut s = format!("behind {}", short_label(&first.label));
             if let Some(reason) = first.cause.as_ref().and_then(|c| reason(c, now_ms)) {
                 s.push_str(&format!(" ({reason})"));
             }
@@ -420,5 +487,35 @@ mod tests {
             s.ends_with("held by interactive `cargo build` for 4 min"),
             "{s}"
         );
+    }
+
+    #[test]
+    fn describe_command_cases() {
+        let script = "bash -c python3 - <<'EOF'\np=\"crates/a.rs\"\nprint(p)\nEOF";
+        let d = describe_command(script, DESCRIPTION_LIMIT);
+        assert_eq!(d, "python3 - <<'EOF' …");
+        assert!(!d.contains('\n'));
+        assert_eq!(describe_command("cargo  build", 49), "cargo build");
+        let long = "y".repeat(500);
+        let d = describe_command(&long, 49);
+        assert!(d.chars().count() <= 50 && d.ends_with('…'), "{d}");
+        assert_eq!(
+            describe_command("bash -c 'cargo test -p x'", 49),
+            "cargo test -p x"
+        );
+        assert_eq!(describe_command("sh -c \"ls -l\"", 49), "ls -l");
+        let multi = "é".repeat(100);
+        let d = describe_command(&multi, 49);
+        assert_eq!(d.chars().count(), 50);
+        assert_eq!(describe_command(&"é".repeat(49), 49), "é".repeat(49));
+    }
+
+    #[test]
+    fn label_parts_split_commands_from_task_labels() {
+        assert_eq!(label_parts("#88"), ("#88".into(), String::new()));
+        let (l, c) = label_parts("interactive `cargo build`");
+        assert_eq!((l.as_str(), c.as_str()), ("cargo build", "cargo build"));
+        let (l, c) = label_parts("task 5 `a\nb`");
+        assert_eq!((l.as_str(), c.as_str()), ("task 5 a …", "a\nb"));
     }
 }

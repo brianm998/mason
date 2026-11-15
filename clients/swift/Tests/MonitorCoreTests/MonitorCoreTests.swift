@@ -531,6 +531,40 @@ final class MonitorCoreTests: XCTestCase {
         XCTAssertFalse(m.updateAvailable, "a development monitor does not nag")
     }
 
+    func testABuildInPlaceShowsItsProgressAndCanBeCancelled() {
+        func building(_ f: (inout Mason_V1_MonitorBuild) -> Void) -> Mason_V1_ServerMessage {
+            var v = Mason_V1_View()
+            v.header = .with {
+                $0.update = .with {
+                    $0.monitors = [.with { b in b.kind = "swift"; b.latest = "bbb222"; b.phase = "building"; f(&b) }]
+                }
+            }
+            var u = Mason_V1_ViewUpdate()
+            u.view = v
+            var m = Mason_V1_ServerMessage()
+            m.view = u
+            return m
+        }
+        let m = MonitorModel()
+        m.onInstall = { _ in }
+        m.ownVersion = "aaa111"
+        m.apply(owner())
+        m.apply(update(latest: "bbb222"))
+        m.updateMonitor()
+        m.apply(result(id: "update-monitor", ok: true))
+        XCTAssertTrue(m.canCancelMonitorUpdate)
+        m.apply(building { $0.step = "fetching" })
+        XCTAssertEqual(m.updating, "Fetching the new source…")
+        m.apply(building { $0.step = "compiling"; $0.done = 12; $0.total = 48; $0.lastLine = "[12/48] Compiling Model.swift" })
+        XCTAssertEqual(m.updating, "Compiling 12 of 48… [12/48] Compiling Model.swift")
+        m.apply(building { $0.step = "installing" })
+        XCTAssertEqual(m.updating, "Installing the new monitor…")
+        var failed = Mason_V1_MonitorBuild()
+        failed.error = "boom"
+        failed.log = "/tmp/x.log"
+        XCTAssertEqual(MonitorModel.failureText(failed), "The new monitor did not build: boom (log: /tmp/x.log)")
+    }
+
     func testOnlyTheOwnersDesktopMonitorOnTheSameMachineIsOffered() {
         let m = MonitorModel()
         m.ownVersion = "aaa111"
@@ -544,6 +578,23 @@ final class MonitorCoreTests: XCTestCase {
         w.welcome.owner = false
         m.apply(w)
         XCTAssertFalse(m.updateAvailable, "not the owner")
+    }
+
+    func testHomeShowsTheDaemonsShortCommit() {
+        let m = MonitorModel()
+        m.ownVersion = "dev"
+        XCTAssertEqual(m.versionLine, "")
+        m.apply(welcome(version: "64b3068a5c0ffee1234"))
+        XCTAssertTrue(m.versionLine.contains("masond 64b3068a"))
+        XCTAssertFalse(m.versionLine.contains("64b3068a5"))
+        XCTAssertTrue(m.versionTip.contains("64b3068a5c0ffee1234"))
+        XCTAssertTrue(m.versionLine.contains("monitor (unversioned build)"))
+        m.ownVersion = "abcdef0123456"
+        XCTAssertTrue(m.versionLine.contains("monitor abcdef01"))
+        m.apply(update(latest: "x", daemon: "masond is 3 commits behind develop"))
+        XCTAssertTrue(m.versionLine.contains("3 commits behind develop"))
+        m.apply(welcome(version: "dev"))
+        XCTAssertTrue(m.versionLine.contains("masond (unversioned build)"))
     }
 
     func testTheDaemonButtonIsTheOwnersAndSendsTheUpdate() {
@@ -1002,6 +1053,72 @@ final class MonitorCoreTests: XCTestCase {
     }
 
     final class Box<T> { var value: T; init(_ v: T) { value = v } }
+
+    func testFramesAreDecodedOffTheMainThreadAndAppliedInOrder() async throws {
+        final class Log: @unchecked Sendable {
+            private let lock = NSLock()
+            private var onMain: [Bool] = []
+            func note(_ b: Bool) { lock.lock(); onMain.append(b); lock.unlock() }
+            var all: [Bool] { lock.lock(); defer { lock.unlock() }; return onMain }
+        }
+        let log = Log()
+        let model = MonitorModel()
+        var seen: [String] = []
+        model.onResult = { seen.append($0.id) }
+        let sockets = Box<[FakeSocket]>([])
+        var t = ConnectionTiming()
+        t.policy = ReconnectPolicy(scale: 0.01)
+        t.watchEvery = 0.02
+        t.pingEvery = 0.05
+        let c = MonitorConnection(model: model, discover: { DaemonInfo(port: 7423, pid: 1, startedMs: 10) }, timing: t, makeSocket: {
+            let s = FakeSocket()
+            sockets.value.append(s)
+            return s
+        }, decode: { text in
+            log.note(Thread.isMainThread)
+            return MonitorConnection.jsonDecoder(text)
+        })
+        c.start()
+        await waitUntil("the socket") { sockets.value.count == 1 }
+        for i in 1...20 {
+            var r = Mason_V1_CommandResult()
+            r.id = "r\(i)"
+            r.ok = true
+            var m = Mason_V1_ServerMessage()
+            m.result = r
+            sockets.value[0].push(try m.jsonString())
+        }
+        await waitUntil("all results") { seen.count == 20 }
+        c.stop()
+        XCTAssertEqual(seen, (1...20).map { "r\($0)" })
+        XCTAssertEqual(log.all.count, 20)
+        XCTAssertFalse(log.all.contains(true), "decoding never runs on the main thread")
+    }
+
+    func testAHundredProgressUpdatesWhileBusyPublishTheSidebarOnce() {
+        let m = model()
+        var c = cell(done: 1, total: 400, totalSrc: .sourceReported)
+        c.step = "develop"
+        m.sidebar?.sections[0].rows[0].progress = [c]
+        var scheduled: [@MainActor () -> Void] = []
+        m.scheduleProgressFlush = { scheduled.append($0) }
+        var publishes = 0
+        let sub = m.$sidebar.dropFirst().sink { _ in publishes += 1 }
+        for i in 1...100 {
+            var p = Mason_V1_StepProgress()
+            p.task = 1
+            var n = c
+            n.done = UInt32(i)
+            p.progress = n
+            m.apply(.with { $0.stepProgress = p })
+        }
+        XCTAssertEqual(publishes, 0, "nothing is published while the frame is not due")
+        XCTAssertEqual(scheduled.count, 1, "one flush is asked for, not one per message")
+        scheduled[0]()
+        XCTAssertEqual(publishes, 1)
+        XCTAssertEqual(m.sidebar?.sections[0].rows[0].progress.first?.done, 100)
+        sub.cancel()
+    }
 
     func testDropThenChangedDaemonJsonReconnectsWithoutARelaunch() async throws {
         let model = MonitorModel()

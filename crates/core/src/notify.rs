@@ -454,35 +454,87 @@ fn one_line(s: &str, max: usize) -> String {
     }
 }
 
-/// The one sentence: the task, what is wrong, what to do.
-/// `subject` is how the task is named ("Web API 204"); `detail` is the question
-/// or the reason.
+/// The first few words of a title, for speaking: cut at a word boundary, with any tail after a
+/// colon, dash or parenthesis dropped, and backticks and `#` removed.
+pub fn short_title(title: &str) -> String {
+    let mut t = title.replace(['`', '#'], "");
+    for sep in [": ", " - ", " \u{2014} ", "("] {
+        if let Some(i) = t.find(sep) {
+            t.truncate(i);
+        }
+    }
+    let words: Vec<&str> = t.split_whitespace().take(5).collect();
+    words
+        .join(" ")
+        .trim_end_matches(['.', ':', ';', ',', '-', '?', '!'])
+        .to_string()
+}
+
+/// How a task is named aloud: `<project> issue <n>, <short title>`.
+pub fn spoken_subject(project: &str, id: u64, title: &str) -> String {
+    let short = short_title(title);
+    if short.is_empty() {
+        format!("{project} issue {id}")
+    } else {
+        format!("{project} issue {id}, {short}")
+    }
+}
+
+/// Lower-case every all-capitals word of two or more letters, so the voice reads it as a word and
+/// never spells it out. Mixed case and single letters stay as they are.
+pub fn speakable(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut run = String::new();
+    let flush = |run: &mut String, out: &mut String| {
+        if run.chars().count() >= 2 && run.chars().all(|c| c.is_uppercase()) {
+            out.push_str(&run.to_lowercase());
+        } else {
+            out.push_str(run);
+        }
+        run.clear();
+    };
+    for c in s.chars() {
+        if c.is_alphabetic() {
+            run.push(c);
+        } else {
+            flush(&mut run, &mut out);
+            out.push(c);
+        }
+    }
+    flush(&mut run, &mut out);
+    out
+}
+
+/// The one sentence: the task, what happened or is wrong, what to do. `subject` is how the task
+/// is named aloud (see `spoken_subject`); `detail` is the question or the reason. The verb
+/// follows the short subject, and nothing in the result is all capitals.
 pub fn sentence(kind: &str, subject: &str, detail: &str, reminder: bool) -> String {
-    let subject = one_line(subject, 60);
+    let subject = one_line(subject, 80);
     let detail = one_line(detail, 100);
     let text = match kind {
         "needs_you" if detail.is_empty() => {
-            format!("{subject} needs a decision; open the card and answer it")
+            format!("{subject}, needs a decision; open the card and answer it")
         }
-        "needs_you" => format!("{subject} needs a decision on {detail}"),
-        "approval" => format!("{subject} is waiting for your approval; approve or reject it"),
+        "needs_you" => format!("{subject}, needs a decision on {detail}"),
+        "approval" => format!("{subject}, is waiting for your approval; approve or reject it"),
         "proposal" => {
-            format!("{subject} is proposed and waiting for your approval; approve or reject it")
+            format!("{subject}, is proposed and waiting for your approval; approve or reject it")
         }
-        "failed" if detail.is_empty() => format!("{subject} failed; open it to retry or cancel"),
-        "failed" => format!("{subject} failed because {detail}; open it to retry or cancel"),
-        "landing" => format!("{subject}: {detail}; open the landing queue to see why"),
+        "failed" if detail.is_empty() => format!("{subject}, failed; open it to retry or cancel"),
+        "failed" => format!("{subject}, failed because {detail}; open it to retry or cancel"),
+        "landing" => format!("{subject}, {detail}; open the landing queue to see why"),
         "disk" if detail.is_empty() => "MASON is stopped: disk is nearly full".into(),
         "disk" => format!("MASON is stopped: disk is nearly full, {detail}"),
-        "landed" => format!("{subject} landed"),
-        "daemon_down" => "MASON has lost its daemon; check that masond is running".into(),
+        "landed" => format!("{subject}, has landed"),
+        "daemon_down" => "MASON has lost its daemon; check that mason D is running".into(),
         "credentials" => {
-            format!("{subject}: the agent is not logged in; log in again (`claude /login`); work resumes at the next check, or `mason account release <name>` resumes it now")
+            format!("{subject}, the agent is not logged in; log in again (`claude /login`); work resumes at the next check, or `mason account release <name>` resumes it now")
         }
-        "provider_outage" => format!("{subject}: the provider is down; work resumes by itself"),
-        _ if detail.is_empty() => format!("{subject} needs a look"),
-        _ => format!("{subject}: {detail}; open it to look"),
+        "provider_outage" => format!("{subject}, the provider is down; work resumes by itself"),
+        _ if detail.is_empty() => format!("{subject}, needs a look"),
+        _ => format!("{subject}, {detail}; open it to look"),
     };
+    let text = speakable(&text);
     let text = if reminder {
         format!("Reminder: {text}")
     } else {
@@ -543,6 +595,13 @@ pub fn daemon_should_speak(enabled: bool, last_claim_ms: Option<u64>, now_ms: u6
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn daemon_down_is_spoken_as_mason_d() {
+        let s = sentence("daemon_down", "MASON", "", false);
+        assert!(s.contains("mason D"), "{s}");
+        assert!(!s.contains("masond"), "{s}");
+    }
 
     fn st(since: u64) -> AlertState {
         AlertState {
@@ -918,11 +977,40 @@ mod tests {
     fn an_approval_is_worded_as_waiting_for_approval_not_for_an_answer() {
         assert_eq!(
             sentence("approval", "Web API 204", "", false),
-            "Web API 204 is waiting for your approval; approve or reject it."
+            "Web api 204, is waiting for your approval; approve or reject it."
         );
         assert_eq!(
             sentence("proposal", "Web API 204", "", true),
-            "Reminder: Web API 204 is proposed and waiting for your approval; approve or reject it."
+            "Reminder: Web api 204, is proposed and waiting for your approval; approve or reject it."
+        );
+    }
+
+    #[test]
+    fn spoken_subject_is_project_issue_number_and_a_short_title() {
+        let t = "Welcome screen and onboarding flow for new users (phase 2)";
+        assert_eq!(
+            sentence("landed", &spoken_subject("star", 343, t), "", false),
+            "star issue 343, Welcome screen and onboarding flow, has landed."
+        );
+        assert_eq!(short_title("Fix `x`: a long tail here"), "Fix x");
+        assert_eq!(short_title("Do #12 thing - more words"), "Do 12 thing");
+    }
+
+    #[test]
+    fn no_all_capitals_word_survives() {
+        let subj = spoken_subject("mason", 9, "Fix LLC APPS crash");
+        for kind in ["landed", "failed", "needs_you"] {
+            let s = sentence(kind, &subj, "the CI is RED on API", false);
+            assert!(
+                !s.split(|c: char| !c.is_alphabetic())
+                    .any(|w| { w.chars().count() >= 2 && w.chars().all(|c| c.is_uppercase()) }),
+                "{s}"
+            );
+            assert!(s.chars().count() < 250);
+        }
+        assert_eq!(
+            speakable("Fix LLC APPS, A Mixed iOS"),
+            "Fix llc apps, A Mixed iOS"
         );
     }
 
@@ -930,14 +1018,17 @@ mod tests {
     fn the_sentence_names_the_task_the_trouble_and_the_next_step() {
         assert_eq!(
             sentence("needs_you", "Web API 204", "token format?", false),
-            "Web API 204 needs a decision on token format."
+            "Web api 204, needs a decision on token format."
         );
         let s = sentence("failed", "Task 7", "the build is red", false);
         assert_eq!(
             s,
-            "Task 7 failed because the build is red; open it to retry or cancel."
+            "Task 7, failed because the build is red; open it to retry or cancel."
         );
-        assert_eq!(sentence("landed", "Task 7", "", false), "Task 7 landed.");
+        assert_eq!(
+            sentence("landed", "Task 7", "", false),
+            "Task 7, has landed."
+        );
         assert!(sentence("needs_you", "Task 7", "x", true).starts_with("Reminder: "));
         let long = "word ".repeat(100);
         assert!(sentence("needs_you", "T", &long, false).chars().count() < 200);
@@ -1004,7 +1095,7 @@ mod tests {
         assert!(channels.contains(&Channel::Sound) && channels.contains(&Channel::Speech));
         assert_eq!(
             sentence("disk", "MASON", "9 tasks waiting", false),
-            "MASON is stopped: disk is nearly full, 9 tasks waiting."
+            "mason is stopped: disk is nearly full, 9 tasks waiting."
         );
     }
 }
