@@ -59,8 +59,12 @@ fn acquire(
     label: &str,
     task: Option<u64>,
     outside: Option<&OutsideArgs>,
+    cmd: &[String],
 ) -> Result<(u64, mason_resources::Held, mason_daemon::watch::Thresholds), String> {
     let mut body = json!({"uses": uses, "label": label, "task": task, "pid": std::process::id()});
+    // The command and where it runs, so the daemon can estimate it from earlier runs (s400).
+    body["cmd"] = json!(cmd);
+    body["cwd"] = json!(cwd());
     if let Some(o) = outside {
         body["pipeline"] = json!(o.pipeline);
         body["priority"] = json!(o.priority);
@@ -134,6 +138,12 @@ fn release_lease(d: &Daemon, id: u64) {
     let _ = d.call("POST", &format!("/leases/{id}/release"), Some(&json!({})));
 }
 
+fn cwd() -> String {
+    std::env::current_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default()
+}
+
 /// The label an outside request shows in the kernel's slot files.
 fn held_label(label: &str, outside: Option<&OutsideArgs>) -> String {
     match outside {
@@ -160,10 +170,20 @@ pub fn run(
         Some(t) => format!("task {t} `{}`", cmd.join(" ")),
         None => format!("interactive `{}`", cmd.join(" ")),
     });
-    let (id, held, th) = acquire(d, &uses, &label, task, outside)?;
+    let (id, held, th) = acquire(d, &uses, &label, task, outside, cmd)?;
+    let began = Instant::now();
     let status = run_watched(d, &cmd[0], &cmd[1..], th, task.is_some());
     drop(held);
-    release_lease(d, id);
+    // A command that finished and succeeded tells the daemon how long it took (s400).
+    if status.as_ref().is_ok_and(|s| s.success()) {
+        let body = json!({
+            "cmd": cmd, "cwd": cwd(), "task": task,
+            "ran_ms": began.elapsed().as_millis() as u64,
+        });
+        let _ = d.call("POST", &format!("/leases/{id}/release"), Some(&body));
+    } else {
+        release_lease(d, id);
+    }
     match status {
         Ok(s) => Ok(s.code().unwrap_or(128 + signal_of(&s))),
         Err(e) => Err(format!("cannot run `{}`: {e}", cmd[0])),
@@ -253,7 +273,7 @@ pub fn hold(
     outside: &OutsideArgs,
 ) -> Result<(), String> {
     use std::io::{Read, Write};
-    let (id, held, _) = acquire(d, &uses, label, None, Some(outside))?;
+    let (id, held, _) = acquire(d, &uses, label, None, Some(outside), &[])?;
     println!("granted");
     let _ = std::io::stdout().flush();
     let (tx, rx) = std::sync::mpsc::channel::<()>();
