@@ -74,6 +74,7 @@ pub mod tiermap;
 pub mod tracker;
 pub mod update;
 pub mod usage;
+pub mod usersession;
 pub mod version;
 pub mod views;
 pub mod watch;
