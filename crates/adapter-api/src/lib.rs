@@ -54,13 +54,31 @@ impl SubmissionFlag {
 pub struct DeadlineExtra(
     Arc<std::sync::atomic::AtomicU64>,
     Arc<std::sync::atomic::AtomicU64>,
+    Option<Arc<std::path::PathBuf>>,
 );
 
 impl DeadlineExtra {
+    /// Queue time is kept in `path` as well (s417): a restarted daemon that re-attaches to
+    /// the same session reads back what was added before, instead of counting the whole
+    /// wait as the agent's working time. A file that cannot be read starts at zero.
+    pub fn kept_in(path: std::path::PathBuf) -> DeadlineExtra {
+        let ms = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|t| t.trim().parse::<u64>().ok())
+            .unwrap_or(0);
+        DeadlineExtra(
+            Arc::new(std::sync::atomic::AtomicU64::new(ms)),
+            Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            Some(Arc::new(path)),
+        )
+    }
     /// Queue time credited.
     pub fn add(&self, d: Duration) {
         let ms = u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
-        self.0.fetch_add(ms, Ordering::SeqCst);
+        let total = self.0.fetch_add(ms, Ordering::SeqCst).saturating_add(ms);
+        if let Some(p) = &self.2 {
+            let _ = std::fs::write(p.as_path(), total.to_string());
+        }
     }
     /// Time granted for progress (commits or output).
     pub fn add_progress(&self, d: Duration) {
@@ -359,5 +377,26 @@ pub trait SessionHandle: Send {
     fn canceller(&self) -> Canceller;
     fn cancel(&mut self) {
         (self.canceller())()
+    }
+}
+
+#[cfg(test)]
+mod deadline_extra_tests {
+    use super::*;
+
+    #[test]
+    fn credit_kept_in_a_file_is_read_back_by_a_new_handle() {
+        let dir = std::env::temp_dir().join(format!("mason-credit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("credit.txt");
+        let a = DeadlineExtra::kept_in(path.clone());
+        a.add(Duration::from_secs(90));
+        a.add(Duration::from_secs(30));
+        // What a restarted daemon re-attaching to the session builds.
+        let b = DeadlineExtra::kept_in(path);
+        assert_eq!(b.get(), Duration::from_secs(120));
+        let none = DeadlineExtra::kept_in(dir.join("missing.txt"));
+        assert_eq!(none.get(), Duration::ZERO);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
