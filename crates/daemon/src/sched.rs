@@ -2846,6 +2846,17 @@ mod tests {
             .unwrap();
         let first = b.lease_open("first", &one);
         assert!(matches!(b.lease_poll(first), LeaseState::Granted { .. }));
+        // The pass that grants `first` changes the holder set while the lock files
+        // are read, so it leaves the adoption of the outside holder to the next
+        // pass. Poll (each poll runs a pass) until the ledger counts it: wait on
+        // the state, bounded by attempts, not by time.
+        for _ in 0..2000 {
+            if b.used("compile") == 2 {
+                break;
+            }
+            assert!(matches!(b.lease_poll(first), LeaseState::Granted { .. }));
+            std::thread::yield_now();
+        }
         assert_eq!(b.used("compile"), 2, "the outside holder counts");
         let second = b.lease_open("second", &one);
         assert!(
