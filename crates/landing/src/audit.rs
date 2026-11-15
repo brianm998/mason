@@ -7,7 +7,8 @@
 //! A line is kept when it is there exactly, or, for a line of at least [`MIN_TOKENS`]
 //! identifier or number tokens, when all its tokens appear together within [`WINDOW`]
 //! adjacent lines of the result: that accepts a line both sides edited or one that was
-//! re-wrapped. Blank lines, lines with no word character and `source-hash:` lines
+//! re-wrapped. A line is also kept when it is, exactly, a line of another file the task
+//! changed: the task moved it there (a file split in two). Blank lines, lines with no word character and `source-hash:` lines
 //! (regeneration rewrites them) are ignored.
 //!
 //! The rules are pure ([`unkept`]); [`audit`] gathers the diffs and file contents from git.
@@ -165,6 +166,24 @@ pub fn unkept(
     deliberate: &[Removal],
     read: &dyn Fn(&str) -> Option<String>,
 ) -> Vec<Dropped> {
+    unkept_or_moved(base_added, task_removed, deliberate, read, &[])
+}
+
+/// [`unkept`], where a line missing from its own file is also kept when it is, trimmed, a
+/// whole line of one of `moved_to`: the texts, in the result, of the other files the task
+/// changed. That accepts a line the task moved to another file (a file split in two) and
+/// nothing looser: the line must be there exactly, and only in a file the task wrote.
+pub fn unkept_or_moved(
+    base_added: &BTreeMap<String, Vec<String>>,
+    task_removed: &BTreeMap<String, BTreeSet<String>>,
+    deliberate: &[Removal],
+    read: &dyn Fn(&str) -> Option<String>,
+    moved_to: &[(String, String)],
+) -> Vec<Dropped> {
+    let moved: Vec<(&str, HashSet<&str>)> = moved_to
+        .iter()
+        .map(|(f, text)| (f.as_str(), text.lines().map(str::trim).collect()))
+        .collect();
     let mut out = vec![];
     for (file, lines) in base_added {
         let mut hay: Option<Haystack> = None;
@@ -183,7 +202,12 @@ pub fn unkept(
                 continue;
             }
             let h = hay.get_or_insert_with(|| Haystack::new(&read(file).unwrap_or_default()));
-            if !h.has(line) {
+            let elsewhere = || {
+                moved
+                    .iter()
+                    .any(|(f, set)| *f != file.as_str() && set.contains(line.trim()))
+            };
+            if !h.has(line) && !elsewhere() {
                 out.push(Dropped {
                     file: file.clone(),
                     line: line.clone(),
@@ -264,9 +288,24 @@ pub fn audit(
             removed.entry(f).or_default().extend(s);
         }
     }
-    Ok(unkept(&added, &removed, deliberate, &|f| {
-        file_at(repo, result, f)
-    }))
+    // The files the task's side changed beyond this base commit: where it may have moved a
+    // line the base added (a file split in two).
+    let mut moved_to = vec![];
+    for f in parse_diff(&diff_text(repo, &format!("{base}..{result}"))?)
+        .added
+        .into_keys()
+    {
+        if let Some(text) = file_at(repo, result, &f) {
+            moved_to.push((f, text));
+        }
+    }
+    Ok(unkept_or_moved(
+        &added,
+        &removed,
+        deliberate,
+        &|f| file_at(repo, result, f),
+        &moved_to,
+    ))
 }
 
 /// A base line the task's merge changed in place: the line is gone and the same hunk of
@@ -568,5 +607,21 @@ mod tests {
         assert!(f.contains("a: line 19") && !f.contains("a: line 20"));
         assert!(f.contains("and 5 more"));
         assert!(reason(&d).contains("25 landed line(s) in: a"));
+    }
+
+    fn moved(base: &BTreeMap<String, Vec<String>>, file: &str, text: &str) -> usize {
+        let to = [(file.to_string(), text.to_string())];
+        unkept_or_moved(base, &BTreeMap::new(), &[], &|_| Some(String::new()), &to).len()
+    }
+
+    #[test]
+    fn a_moved_line_must_be_whole_and_in_another_file() {
+        let base = one("f.rs", &["let a = compute(x, y);"]);
+        assert_eq!(moved(&base, "g.rs", "    let a = compute(x, y);\n"), 0);
+        // Tokens spread over lines, or the line inside a longer one, are not a move.
+        assert_eq!(moved(&base, "g.rs", "let a =\n    compute(x, y);\n"), 1);
+        assert_eq!(moved(&base, "g.rs", "let a = compute(x, y); extra();\n"), 1);
+        // The line's own file is never "another file".
+        assert_eq!(moved(&base, "f.rs", "let a = compute(x, y);\n"), 1);
     }
 }

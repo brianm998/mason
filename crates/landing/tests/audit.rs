@@ -184,3 +184,49 @@ fn a_landed_line_simply_lost_has_no_replacement() {
     assert_eq!(dropped.len(), 1);
     assert!(pairs.is_empty());
 }
+
+#[test]
+fn a_line_the_task_moved_to_a_file_it_split_off_is_kept() {
+    // The base adds a test to f.rs; the task splits f.rs, moving everything, the new test
+    // too, into g.rs.
+    let p = Repo::new();
+    let mb = commit(&p.path, "f.rs", START);
+    let b = commit(
+        &p.path,
+        "f.rs",
+        "fn run() {\n    setup();\n    audit_me(1, 2);\n    finish();\n}\n",
+    );
+    sh(&p.path, &["checkout", "-q", "-b", "task", &mb]);
+    let t = commit(&p.path, "f.rs", "// moved to g.rs\n");
+    std::fs::write(
+        p.path.join("g.rs"),
+        "fn run() {\n    setup();\n    audit_me(1, 2);\n    finish();\n}\n",
+    )
+    .unwrap();
+    sh(&p.path, &["add", "-A"]);
+    sh(&p.path, &["commit", "-q", "-m", "split"]);
+    let r = sh(&p.path, &["rev-parse", "HEAD"]);
+    let d = audit(&p.path, &mb, &b, &t, None, &r, &[]).unwrap();
+    assert!(d.is_empty(), "{d:?}");
+}
+
+#[test]
+fn a_dropped_line_found_only_in_a_file_the_task_did_not_change_is_still_dropped() {
+    // h.rs holds the same line from the start; the task never touches it.
+    let p = Repo::new();
+    std::fs::write(p.path.join("h.rs"), "    audit_me(1, 2);\n").unwrap();
+    let mb = commit(&p.path, "f.rs", START);
+    let b = commit(
+        &p.path,
+        "f.rs",
+        "fn run() {\n    setup();\n    audit_me(1, 2);\n    finish();\n}\n",
+    );
+    sh(&p.path, &["checkout", "-q", "-b", "task", &mb]);
+    let t = commit(&p.path, "f.rs", "fn run() {\n    own();\n}\n");
+    std::fs::write(p.path.join("g.rs"), "unrelated(1, 2, 3);\n").unwrap();
+    sh(&p.path, &["add", "-A"]);
+    sh(&p.path, &["commit", "-q", "-m", "more"]);
+    let r = sh(&p.path, &["rev-parse", "HEAD"]);
+    let d = audit(&p.path, &mb, &b, &t, None, &r, &[]).unwrap();
+    assert_eq!(lines(&d), ["    audit_me(1, 2);"]);
+}
