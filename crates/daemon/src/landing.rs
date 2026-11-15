@@ -533,6 +533,9 @@ pub fn removals_view(dir: &Path) -> String {
     s
 }
 
+/// One run of a split batch's search: the tasks it held and what failed (s394).
+type SplitRun = (Vec<u64>, Vec<String>);
+
 /// The lines the base landed that each merge of it into the task's branch lost, less what
 /// the task declares under `removes` (decision 0117).
 fn dropped_in_merges(c: &Ctx, removes: &[Removal]) -> Result<Vec<audit::Dropped>, String> {
@@ -3135,9 +3138,9 @@ impl Runner {
         batch_id: u64,
         rounds: usize,
         mapped: Option<&[String]>,
-    ) -> (plan::Pin, Vec<(Vec<u64>, Vec<String>)>) {
+    ) -> (plan::Pin, Vec<SplitRun>) {
         let ids: Vec<u64> = active.iter().map(|t| t.id).collect();
-        let mut runs: Vec<(Vec<u64>, Vec<String>)> = vec![];
+        let mut runs: Vec<SplitRun> = vec![];
         let mut tried = 0usize;
         let mut red = |subset: &[u64]| -> bool {
             let sub: Vec<BatchTask> = active
