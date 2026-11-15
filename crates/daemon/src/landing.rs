@@ -533,45 +533,69 @@ pub fn removals_view(dir: &Path) -> String {
     s
 }
 
-/// A merge of the base in the task's own branch must have kept every line the base had
-/// landed (decision 0117). Each merge of a base commit is audited against the branch's head.
-fn check_dropped(c: &Ctx) -> Option<Verdict> {
+/// The lines the base landed that each merge of it into the task's branch lost, less what
+/// the task declares under `removes` (decision 0117).
+fn dropped_in_merges(c: &Ctx, removes: &[Removal]) -> Result<Vec<audit::Dropped>, String> {
     let repo = &c.project.path;
     let base_ref = c.project.base_ref();
-    let removes = removals_in(&c.d.task_dir(c.task));
-    let read =
-        crate::jobs::wait_out_environment(c, "auditing the task's merges with the base", || {
-            let revs = git::run(
-                repo,
-                &[
-                    "rev-list",
-                    "--merges",
-                    "--first-parent",
-                    "--parents",
-                    &format!("{base_ref}..{}", c.branch),
-                ],
-            )?;
-            let mut found: Vec<audit::Dropped> = vec![];
-            for line in revs.lines() {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                let Some((&p1, others)) = parts.get(1..).and_then(<[&str]>::split_first) else {
+    crate::jobs::wait_out_environment(c, "auditing the task's merges with the base", || {
+        let revs = git::run(
+            repo,
+            &[
+                "rev-list",
+                "--merges",
+                "--first-parent",
+                "--parents",
+                &format!("{base_ref}..{}", c.branch),
+            ],
+        )?;
+        let mut found: Vec<audit::Dropped> = vec![];
+        for line in revs.lines() {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            let Some((&p1, others)) = parts.get(1..).and_then(<[&str]>::split_first) else {
+                continue;
+            };
+            for b in others {
+                if !git::is_ancestor(repo, b, &base_ref) {
                     continue;
-                };
-                for b in others {
-                    if !git::is_ancestor(repo, b, &base_ref) {
-                        continue;
-                    }
-                    let mb = git::run(repo, &["merge-base", p1, b])?;
-                    for d in audit::audit(repo, &mb, b, p1, Some(&base_ref), &c.branch, &removes)? {
-                        if !found.contains(&d) {
-                            found.push(d);
-                        }
+                }
+                let mb = git::run(repo, &["merge-base", p1, b])?;
+                for d in audit::audit(repo, &mb, b, p1, Some(&base_ref), &c.branch, removes)? {
+                    if !found.contains(&d) {
+                        found.push(d);
                     }
                 }
             }
-            Ok(found)
-        });
-    let dropped = match read {
+        }
+        Ok(found)
+    })
+}
+
+/// Undeclared dropped lines that the task's merge replaced in place, as a block for the
+/// review step to settle; `None` when there are none (or they cannot be read now: the
+/// landing audit still sends a task back for them).
+pub fn replaced_for_review(c: &Ctx) -> Option<String> {
+    let repo = &c.project.path;
+    let dropped = dropped_in_merges(c, &removals_in(&c.d.task_dir(c.task))).ok()?;
+    if dropped.is_empty() {
+        return None;
+    }
+    let mut pairs = vec![];
+    for d in &dropped {
+        // The merge's diff against the base the line came from is read per line's merge,
+        // so a pair is taken against the base tip: that is what the task would land on.
+        let one = audit::replacements(repo, &c.project.base_ref(), &c.branch, std::slice::from_ref(d))
+            .ok()?;
+        pairs.extend(one);
+    }
+    (!pairs.is_empty()).then(|| audit::review_block(&pairs))
+}
+
+/// A merge of the base in the task's own branch must have kept every line the base had
+/// landed (decision 0117). Each merge of a base commit is audited against the branch's head.
+fn check_dropped(c: &Ctx) -> Option<Verdict> {
+    let removes = removals_in(&c.d.task_dir(c.task));
+    let dropped = match dropped_in_merges(c, &removes) {
         Ok(v) => v,
         Err(why) => return Some(Verdict::Failed(why)),
     };
