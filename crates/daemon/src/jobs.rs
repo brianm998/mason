@@ -1715,9 +1715,9 @@ impl TestChecks {
                             limit,
                         );
                         let queue = !crate::hostedcheck::pending(&self.slots.d, &bspec);
-                        let queued = Instant::now();
-                        let swapped = self.slots.swap_for(queue, &build_uses());
-                        self.extra.add(queued.elapsed());
+                        let swapped = credit_wait(&self.extra, crate::sched::CREDIT_EVERY, || {
+                            self.slots.swap_for(queue, &build_uses())
+                        });
                         let Ok(lease) = swapped else {
                             return over();
                         };
@@ -1766,9 +1766,9 @@ impl TestChecks {
                 limit,
             );
             let queue = !crate::hostedcheck::pending(&self.slots.d, &rspec);
-            let queued = Instant::now();
-            let swapped = self.slots.swap_for(queue, &uses);
-            self.extra.add(queued.elapsed());
+            let swapped = credit_wait(&self.extra, crate::sched::CREDIT_EVERY, || {
+                self.slots.swap_for(queue, &uses)
+            });
             let Ok(lease) = swapped else {
                 return over();
             };
@@ -1971,9 +1971,9 @@ impl TestChecks {
             Some(build) => {
                 let bspec = spec(format!("{}build", self.id_prefix), build, &build_uses());
                 let queue = !crate::hostedcheck::pending(&self.slots.d, &bspec);
-                let queued = Instant::now();
-                let swapped = self.slots.swap_for(queue, &build_uses());
-                self.extra.add(queued.elapsed());
+                let swapped = credit_wait(&self.extra, crate::sched::CREDIT_EVERY, || {
+                    self.slots.swap_for(queue, &build_uses())
+                });
                 let Ok(lease) = swapped else {
                     return over();
                 };
@@ -2012,9 +2012,9 @@ impl TestChecks {
         // going (or takes its result) at once: it starts nothing, so it does not
         // queue behind other work for a slot the run it joins already took.
         let queue = !crate::hostedcheck::pending(&self.slots.d, &spec);
-        let queued = Instant::now();
-        let swapped = self.slots.swap_for(queue, &uses);
-        self.extra.add(queued.elapsed());
+        let swapped = credit_wait(&self.extra, crate::sched::CREDIT_EVERY, || {
+            self.slots.swap_for(queue, &uses)
+        });
         let Ok(test_lease) = swapped else {
             return over();
         };
@@ -2086,6 +2086,36 @@ pub(crate) fn acquire_llm(c: &Ctx) -> Result<crate::sched::Lease, crate::sched::
 /// check, so its LLM session slot goes to a task that can use it, and the check
 /// queues for what the test step `uses`, as the test step does. The time spent
 /// in that queue is outside the check's timeout.
+/// Run `wait` (a `run_check` queueing for its slots), adding the time it takes to `extra`
+/// every `every` while it waits and the rest when it returns (s417). Before, the whole wait
+/// was added at the end, so a daemon restart during a long wait lost all of it.
+fn credit_wait<T>(
+    extra: &mason_adapter_api::DeadlineExtra,
+    every: Duration,
+    wait: impl FnOnce() -> T,
+) -> T {
+    let done = std::sync::atomic::AtomicBool::new(false);
+    std::thread::scope(|s| {
+        let ticker = s.spawn(|| {
+            let mut last = Instant::now();
+            let nap = every.clamp(Duration::from_millis(10), Duration::from_millis(500));
+            while !done.load(std::sync::atomic::Ordering::SeqCst) {
+                std::thread::sleep(nap);
+                if last.elapsed() >= every {
+                    extra.add(last.elapsed());
+                    last = Instant::now();
+                }
+            }
+            last
+        });
+        let out = wait();
+        done.store(true, std::sync::atomic::Ordering::SeqCst);
+        let last = ticker.join().unwrap_or_else(|_| Instant::now());
+        extra.add(last.elapsed());
+        out
+    })
+}
+
 struct CheckSlots {
     d: Arc<Daemon>,
     task: TaskId,
@@ -4275,6 +4305,20 @@ mod tests {
 
     fn uses_of(pairs: &[(&str, u32)]) -> std::collections::BTreeMap<String, u32> {
         pairs.iter().map(|(k, n)| (k.to_string(), *n)).collect()
+    }
+
+    #[test]
+    fn a_check_wait_is_credited_while_it_waits() {
+        // s417: credit reaches the deadline before the wait ends, not only after it.
+        let extra = mason_adapter_api::DeadlineExtra::default();
+        let seen = credit_wait(&extra, Duration::ZERO, || {
+            while extra.get().is_zero() {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            extra.get()
+        });
+        assert!(!seen.is_zero());
+        assert!(extra.get() >= seen);
     }
 
     fn def_with(extra: &str) -> Definition {

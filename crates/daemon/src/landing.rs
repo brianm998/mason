@@ -26,7 +26,7 @@ use mason_landing::audit::{self, Removal};
 use mason_landing::batch::{Assembled, Batch, BatchTask, Finish};
 use mason_landing::config::{self, LandingConfig, Rung};
 use mason_landing::git;
-use mason_landing::plan::{self, Bisect, Candidate, Footprint, Formation};
+use mason_landing::plan::{self, Candidate, Footprint, Formation};
 use mason_testing::Selection;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -1100,6 +1100,14 @@ struct OpenPr {
     ref_id: u64,
 }
 
+/// What a split red batch came to.
+enum Settled {
+    /// Tasks sent back; the batch's note.
+    Parked(String),
+    /// A base red: why nothing lands.
+    Base(String),
+}
+
 struct Parked {
     task: u64,
     reason: String,
@@ -1351,6 +1359,7 @@ impl Runner {
         let mut rounds = 0usize;
         let limit = self.cfg.max_fold as usize + ids.len() + 3;
         let mut note = String::new();
+        let mut split_note = String::new();
         let mut commit = String::new();
         let force = self.kind == "force";
         // How long to wait before assembling again when the remote cannot be fetched.
@@ -1492,6 +1501,14 @@ impl Runner {
             if vr.green && !vr.notes.is_empty() {
                 note = vr.notes.join("; ");
             }
+            // What splitting a red found stays in the closing note through later rounds.
+            if !split_note.is_empty() && !note.contains(&split_note) {
+                note = if note.is_empty() {
+                    split_note.clone()
+                } else {
+                    format!("{split_note}; {note}")
+                };
+            }
             if !vr.green {
                 self.point("batch_red");
                 self.record(
@@ -1539,7 +1556,6 @@ impl Runner {
                 // s213: a red confined to CI jobs that map to local suites is searched for
                 // locally. CI still has the last word: the next round verifies the remaining
                 // union through it once.
-                let mut local_why: Option<String> = None;
                 if !self.real_ci_red.load(std::sync::atomic::Ordering::SeqCst) {
                     if let Some(mapped) = self.local_suites(&def, &vr.failed) {
                         let jobs: Vec<String> = vr.failed.iter().cloned().collect();
@@ -1587,46 +1603,35 @@ impl Runner {
                             self.park(&mut parked, &mut active, &[id], batch_id, &vr);
                             continue 'outer;
                         }
-                        let ids: Vec<u64> = active.iter().map(|t| t.id).collect();
-                        let mut red = |subset: &[u64]| -> bool {
-                            let sub: Vec<BatchTask> = active
-                                .iter()
-                                .filter(|t| subset.contains(&t.id))
-                                .cloned()
-                                .collect();
-                            let a = {
-                                let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
-                                batch.assemble(&sub, &|_| {})
-                            };
-                            let Ok(a) = a else { return false };
-                            !self
-                                .run_local(
-                                    &def,
-                                    &mapped,
-                                    &int_wt,
-                                    &a.base_tip,
-                                    &log_dir,
-                                    &format!("b{batch_id}-r{rounds}-locbis"),
-                                )
-                                .green
-                        };
-                        let found = plan::bisect(&ids, &mut red);
+                        let (found, runs) = self.pin_red(
+                            &def,
+                            &batch,
+                            &lock,
+                            &active,
+                            &int_wt,
+                            &log_dir,
+                            batch_id,
+                            rounds,
+                            Some(&mapped),
+                        );
                         if let Some(e) = self.take_service_error() {
                             break 'outer Err(e);
                         }
-                        if let Bisect::Culprit(id) = found {
-                            self.park(&mut parked, &mut active, &[id], batch_id, &vr);
-                            continue 'outer;
+                        match self.settle_pin(found, &runs, &mut parked, &mut active, batch_id, &vr)
+                        {
+                            Settled::Parked(n) => {
+                                split_note = n.clone();
+                                note = n;
+                                continue 'outer;
+                            }
+                            Settled::Base(why) => {
+                                self.raise_base(&why);
+                                break 'outer Err(why);
+                            }
                         }
-                        local_why = Some(format!(
-                            "batch #{batch_id} is red in {jobs_list}, {suites_list} reproduces it here, and the red cannot be pinned on one task"
-                        ));
                     }
                 }
                 for rung in &self.cfg.ladder {
-                    if local_why.is_some() {
-                        break;
-                    }
                     // A red the CI judged a real failure is not rerun, blamed or bisected
                     // by guesswork: the tasks hear of it now.
                     if self.real_ci_red.load(std::sync::atomic::Ordering::SeqCst) {
@@ -1699,37 +1704,30 @@ impl Runner {
                                 self.park(&mut parked, &mut active, &[id], batch_id, &vr);
                                 continue 'outer;
                             }
-                            let ids: Vec<u64> = active.iter().map(|t| t.id).collect();
-                            let mut red = |subset: &[u64]| -> bool {
-                                let sub: Vec<BatchTask> = active
-                                    .iter()
-                                    .filter(|t| subset.contains(&t.id))
-                                    .cloned()
-                                    .collect();
-                                let a = {
-                                    let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
-                                    batch.assemble(&sub, &|_| {})
-                                };
-                                let Ok(a) = a else { return false };
-                                let s = self.suites_for(&def, &batch, &a);
-                                !self
-                                    .verify(
-                                        &def,
-                                        &s,
-                                        &int_wt,
-                                        &a.base_tip,
-                                        &log_dir,
-                                        &format!("b{batch_id}-r{rounds}-bis"),
-                                    )
-                                    .green
-                            };
-                            let found = plan::bisect(&ids, &mut red);
+                            let (found, runs) = self.pin_red(
+                                &def, &batch, &lock, &active, &int_wt, &log_dir, batch_id, rounds,
+                                None,
+                            );
                             if let Some(e) = self.take_service_error() {
                                 break 'outer Err(e);
                             }
-                            if let Bisect::Culprit(id) = found {
-                                self.park(&mut parked, &mut active, &[id], batch_id, &vr);
-                                continue 'outer;
+                            match self.settle_pin(
+                                found,
+                                &runs,
+                                &mut parked,
+                                &mut active,
+                                batch_id,
+                                &vr,
+                            ) {
+                                Settled::Parked(n) => {
+                                    split_note = n.clone();
+                                    note = n;
+                                    continue 'outer;
+                                }
+                                Settled::Base(why) => {
+                                    self.raise_base(&why);
+                                    break 'outer Err(why);
+                                }
                             }
                         }
                         Rung::Ask => break,
@@ -1750,8 +1748,6 @@ impl Runner {
                                 .collect::<Vec<_>>()
                                 .join("; ")
                         )
-                    } else if let Some(w) = local_why.clone() {
-                        w
                     } else {
                         format!(
                             "batch #{batch_id} is red in {failed_list} and the red cannot be pinned on one task"
@@ -3111,6 +3107,148 @@ impl Runner {
             });
         }
         active.retain(|t| !blamed.contains(&t.id));
+    }
+
+    fn raise_base(&self, why: &str) {
+        self.d.landing.raise(
+            self.pid,
+            "redbase",
+            "landing",
+            &format!("{}: {why}", self.project().id),
+        );
+        self.d.poke();
+    }
+
+    /// Split a red batch (decision 0387): run the suites over subsets of it (the integration
+    /// branch rebuilt from each) until the task or tasks that reproduce the red are known.
+    /// `mapped`: the local suites a CI red maps to; none: the batch's own suites. Returns
+    /// what was found and, for each subset that was red, its tasks and its output.
+    #[allow(clippy::too_many_arguments)]
+    fn pin_red(
+        &self,
+        def: &mason_definition::Definition,
+        batch: &Batch,
+        lock: &crate::daemon::RepoLock,
+        active: &[BatchTask],
+        int_wt: &Path,
+        log_dir: &Path,
+        batch_id: u64,
+        rounds: usize,
+        mapped: Option<&[String]>,
+    ) -> (plan::Pin, Vec<(Vec<u64>, Vec<String>)>) {
+        let ids: Vec<u64> = active.iter().map(|t| t.id).collect();
+        let mut runs: Vec<(Vec<u64>, Vec<String>)> = vec![];
+        let mut tried = 0usize;
+        let mut red = |subset: &[u64]| -> bool {
+            let sub: Vec<BatchTask> = active
+                .iter()
+                .filter(|t| subset.contains(&t.id))
+                .cloned()
+                .collect();
+            let a = {
+                let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+                batch.assemble(&sub, &|_| {})
+            };
+            let Ok(a) = a else { return false };
+            tried += 1;
+            let which = subset
+                .iter()
+                .map(|t| format!("#{t}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            self.say(&format!(
+                "batch #{batch_id} is red: splitting it to find the task (run {tried}: {which})"
+            ));
+            let prefix = format!("b{batch_id}-r{rounds}-bis{tried}");
+            let r = match mapped {
+                Some(m) => self.run_local(def, m, int_wt, &a.base_tip, log_dir, &prefix),
+                None => {
+                    let s = self.suites_for(def, batch, &a);
+                    self.verify(def, &s, int_wt, &a.base_tip, log_dir, &prefix)
+                }
+            };
+            if !r.green {
+                let mut k = subset.to_vec();
+                k.sort_unstable();
+                runs.push((k, r.notes.clone()));
+            }
+            !r.green
+        };
+        let found = plan::pin(&ids, &mut red);
+        (found, runs)
+    }
+
+    /// Act on what splitting found: send back the task or tasks that reproduce the red
+    /// (with the output of the run that showed it) and keep the rest; or, for a base red,
+    /// blame nobody. Returns the batch's closing note, or the reason nothing lands.
+    fn settle_pin(
+        &self,
+        found: plan::Pin,
+        runs: &[(Vec<u64>, Vec<String>)],
+        parked: &mut Vec<Parked>,
+        active: &mut Vec<BatchTask>,
+        batch_id: u64,
+        vr: &crate::suites::OverRun,
+    ) -> Settled {
+        let groups = match found {
+            plan::Pin::Base => {
+                return Settled::Base(format!(
+                    "batch #{batch_id} is red in {} and every task in it reproduces the red alone: it is the base's own, nobody is blamed and nothing lands until it is fixed",
+                    vr.failed.iter().cloned().collect::<Vec<_>>().join(", ")
+                ));
+            }
+            plan::Pin::Groups(g) => g,
+        };
+        let red_in = vr.failed.iter().cloned().collect::<Vec<_>>().join(", ");
+        let mut said = vec![];
+        for g in &groups {
+            let mut k = g.clone();
+            k.sort_unstable();
+            let out = runs
+                .iter()
+                .find(|(ids, _)| *ids == k)
+                .map_or(&vr.notes, |(_, n)| n)
+                .join("\n");
+            let names = g
+                .iter()
+                .map(|t| format!("#{t}"))
+                .collect::<Vec<_>>()
+                .join(" and ");
+            let (reason, feedback) = if g.len() == 1 {
+                (
+                    format!("red in batch #{batch_id}: {red_in}"),
+                    format!(
+                        "Your change made {red_in} red on its own, when the batch (#{batch_id}) was split to find it.\n{out}"
+                    ),
+                )
+            } else {
+                (
+                    format!("red in batch #{batch_id} together with {names}: {red_in}"),
+                    format!(
+                        "Your change makes {red_in} red together with {names} (batch #{batch_id}); no one of them does alone. Bring in the latest base branch and make them work together.\n{out}"
+                    ),
+                )
+            };
+            for t in g {
+                parked.push(Parked {
+                    task: *t,
+                    reason: reason.clone(),
+                    feedback: feedback.clone(),
+                    conflict: false,
+                });
+            }
+            said.push(if g.len() == 1 {
+                format!("{names} reproduces it alone")
+            } else {
+                format!("{names} reproduce it only together")
+            });
+        }
+        let all: Vec<u64> = groups.iter().flatten().copied().collect();
+        active.retain(|t| !all.contains(&t.id));
+        Settled::Parked(format!(
+            "batch #{batch_id} was red in {red_in}; split to find it: {}; the rest went on",
+            said.join("; ")
+        ))
     }
 
     /// The post-land tier: suites on the base after it moved. Red freezes
