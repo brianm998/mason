@@ -2551,6 +2551,180 @@ pub fn skip(
         .map_err(|e| e.to_string())
 }
 
+/// The suites a debt's scope names in `def`.
+fn debt_suites(def: &Definition, scope: &str) -> Vec<Suite> {
+    let (kind, name) = scope.split_once(':').unwrap_or(("", ""));
+    match kind {
+        "suite" => def.testing.suite(name).cloned().into_iter().collect(),
+        "step" => def
+            .step(name)
+            .map(|s| {
+                s.suites
+                    .iter()
+                    .filter_map(|n| def.testing.suite(n).cloned())
+                    .collect()
+            })
+            .unwrap_or_default(),
+        _ => vec![],
+    }
+}
+
+/// The commit a debt's task landed, when the base branch `tip` contains it. Recorded on the
+/// debt the first time it is seen; `None` when the task's branch is gone or never landed, so a
+/// debt without proof of landing is never closed.
+fn debt_landed(
+    d: &Arc<Daemon>,
+    p: &crate::config::ProjectCfg,
+    row: &mason_store::DebtRow,
+    tip: &str,
+) -> Option<String> {
+    let landed = if row.landed.is_empty() {
+        let c = git::run(
+            &p.path,
+            &[
+                "rev-parse",
+                "--verify",
+                &format!("{}^{{commit}}", p.branch(row.task)),
+            ],
+        )
+        .ok()?;
+        c.trim().to_string()
+    } else {
+        row.landed.clone()
+    };
+    if !git::is_ancestor(&p.path, &landed, tip) {
+        return None;
+    }
+    if row.landed.is_empty() {
+        let _ = d.store.set_debt_landed(row.id, &landed);
+    }
+    Some(landed)
+}
+
+/// Close every open debt whose suites (all of its step's, for a step) have been recorded
+/// green at a base that contains the commit its task landed. The proof is written on the
+/// debt. Returns how many were closed.
+pub fn settle_debts(d: &Arc<Daemon>) -> usize {
+    let Ok(rows) = d.store.debts(None, true) else {
+        return 0;
+    };
+    let mut closed = 0;
+    for row in rows {
+        let Some(pid) = d.project_id_by_name(&row.project) else {
+            continue;
+        };
+        let Some(p) = d.project(pid).cloned() else {
+            continue;
+        };
+        let suites = debt_suites(&d.current_def(pid), &row.scope);
+        if suites.is_empty() {
+            continue;
+        }
+        let Ok(tip) = git::run(&p.path, &["rev-parse", &p.base_ref()]) else {
+            continue;
+        };
+        let Some(landed) = debt_landed(d, &p, &row, tip.trim()) else {
+            continue;
+        };
+        let mut proofs = vec![];
+        for s in &suites {
+            let greens = d
+                .store
+                .suite_green_bases(&row.project, &s.name)
+                .unwrap_or_default();
+            let hit = greens
+                .iter()
+                .find(|(base, _)| git::is_ancestor(&p.path, &landed, base));
+            match hit {
+                Some((base, _)) => proofs.push(format!(
+                    "{} green on {} at {} since",
+                    s.name,
+                    p.base,
+                    &base[..base.len().min(10)]
+                )),
+                None => break,
+            }
+        }
+        if proofs.len() == suites.len() {
+            let how = format!(
+                "{} (base holds the task's commit {})",
+                proofs.join("; "),
+                &landed[..landed.len().min(10)]
+            );
+            if d.store.pay_debt(row.id, now_ms(), &how).unwrap_or(false) {
+                closed += 1;
+            }
+        }
+    }
+    closed
+}
+
+static IDLE_RUN: AtomicBool = AtomicBool::new(false);
+
+/// Run the debts still open, one at a time, as work below every task: only while the compile
+/// queue is empty and a slot is free, and each debt once (a debt a run found red keeps
+/// `tried_at` and waits for the owner). Only debts whose task landed are run.
+pub fn run_idle_debts(d: &Arc<Daemon>) {
+    if IDLE_RUN.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            IDLE_RUN.store(false, Ordering::SeqCst);
+        }
+    }
+    let _reset = Reset;
+    loop {
+        settle_debts(d);
+        let c = d.broker.compilation();
+        // A limit of 0 means no `compile` pool is declared: nothing to wait for.
+        if !c.pending.is_empty() || (c.limit > 0 && c.used >= c.limit) {
+            return;
+        }
+        let Ok(rows) = d.store.debts(None, true) else {
+            return;
+        };
+        let next = rows.into_iter().find(|row| {
+            row.tried_at == 0
+                && d.project_id_by_name(&row.project)
+                    .and_then(|pid| d.project(pid).cloned())
+                    .and_then(|p| {
+                        let tip = git::run(&p.path, &["rev-parse", &p.base_ref()]).ok()?;
+                        debt_landed(d, &p, row, tip.trim())
+                    })
+                    .is_some()
+        });
+        let Some(row) = next else { return };
+        match pay(d, row.id) {
+            Ok(m) => tracing::info!(debt = row.id, "idle run: {m}"),
+            Err(e) => {
+                let _ = d.store.debt_tried(row.id, now_ms());
+                tracing::warn!(debt = row.id, "idle run: {e}");
+            }
+        }
+    }
+}
+
+/// Look at the open debts once an hour (`debt_interval`), the first time soon after start.
+pub fn spawn_debts(d: &Arc<Daemon>) {
+    let every = d.cfg.debt_interval;
+    let mut first = true;
+    crate::bg::spawn_loop(d, "debts", move |weak| {
+        std::thread::sleep(if first {
+            every.min(Duration::from_secs(60))
+        } else {
+            every
+        });
+        first = false;
+        let Some(d) = weak.upgrade() else {
+            return false;
+        };
+        run_idle_debts(&d);
+        true
+    });
+}
+
 /// Pay a debt by running the skipped suite on the base branch's tip. Green
 /// pays it; red leaves it open and says why.
 pub fn pay(d: &Arc<Daemon>, debt: u64) -> Result<String, String> {
@@ -2569,20 +2743,7 @@ pub fn pay(d: &Arc<Daemon>, debt: u64) -> Result<String, String> {
         .ok_or("its project is gone")?;
     let p = d.project(pid).ok_or("its project is gone")?.clone();
     let def = d.current_def(pid);
-    let (kind, name) = row.scope.split_once(':').unwrap_or(("", ""));
-    let suites: Vec<Suite> = match kind {
-        "suite" => def.testing.suite(name).cloned().into_iter().collect(),
-        "step" => def
-            .step(name)
-            .map(|s| {
-                s.suites
-                    .iter()
-                    .filter_map(|n| def.testing.suite(n).cloned())
-                    .collect()
-            })
-            .unwrap_or_default(),
-        _ => vec![],
-    };
+    let suites = debt_suites(&def, &row.scope);
     if suites.is_empty() {
         return Err("the debt's suite no longer exists in the definition".into());
     }
@@ -2659,11 +2820,17 @@ pub fn pay(d: &Arc<Daemon>, debt: u64) -> Result<String, String> {
     }
     let _ = who.project;
     if all_green {
+        let how = format!(
+            "green when run on {} at {}",
+            p.base_ref(),
+            &tip[..tip.len().min(10)]
+        );
         d.store
-            .pay_debt(debt, now_ms())
+            .pay_debt(debt, now_ms(), &how)
             .map_err(|e| e.to_string())?;
         Ok(format!("paid: {}", verdicts.join("; ")))
     } else {
+        let _ = d.store.debt_tried(debt, now_ms());
         Err(format!("still owed: {}", verdicts.join("; ")))
     }
 }
@@ -2683,6 +2850,38 @@ pub fn after_landing(d: &Arc<Daemon>, task: TaskId) {
                 Err(e) => tracing::warn!(task = task.0, "ledger run: {e}"),
             });
     }
+    // The commit this task landed, kept on each of its open debts: the task's branch may be
+    // gone by the time a later green could close them.
+    if let Ok(rows) = d.store.debts(Some(task.0), true) {
+        for r in rows.iter().filter(|r| r.landed.is_empty()) {
+            let p = d
+                .project_id_by_name(&r.project)
+                .and_then(|id| d.project(id).cloned());
+            if let Some(c) = p.and_then(|p| {
+                git::run(
+                    &p.path,
+                    &[
+                        "rev-parse",
+                        "--verify",
+                        &format!("{}^{{commit}}", p.branch(task.0)),
+                    ],
+                )
+                .ok()
+            }) {
+                let _ = d.store.set_debt_landed(r.id, c.trim());
+            }
+        }
+    }
+    // A landing may be what a suite's green was waiting for: close what is now proven.
+    let d3 = d.clone();
+    let _ = std::thread::Builder::new()
+        .name(format!("debts-settle-{}", task.0))
+        .spawn(move || {
+            let n = settle_debts(&d3);
+            if n > 0 {
+                tracing::info!(closed = n, "debts closed by a later green");
+            }
+        });
     let Ok(rows) = d.store.debts(Some(task.0), true) else {
         return;
     };

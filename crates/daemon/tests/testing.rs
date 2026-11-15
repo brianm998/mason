@@ -776,6 +776,69 @@ fn a_task_test_step_runs_only_the_tests_its_change_needs_and_proves_nothing_for_
     assert!(note.contains("narrowed to 1 of 3 test units"), "{note}");
 }
 
+fn two_tasks_world() -> Scratch {
+    world(
+        vec![
+            commit(HELLO, "add hello"),
+            commit("echo b > b.txt", "add b"),
+        ],
+        &[],
+        &def("", "", ""),
+    )
+}
+
+#[test]
+fn a_debt_closes_by_itself_when_the_suite_later_goes_green_on_a_base_with_the_task() {
+    let s = two_tasks_world();
+    let d = start(&s);
+    let t = file_it(&d, "Skip the checks");
+    mason_daemon::suites::skip(&d, t, "suite:checks", "later", "brian", false).unwrap();
+    wait_state(&d, t, State::Landed, 120);
+    assert_eq!(d.store.debts(Some(t.0), false).unwrap()[0].status, "open");
+    // The next task's own run of the suite is green at a base that holds the first task.
+    let t2 = file_it(&d, "Second");
+    wait_state(&d, t2, State::Landed, 120);
+    wait_for("the debt to close by itself", 60, || {
+        mason_daemon::suites::settle_debts(&d);
+        d.store.debts(Some(t.0), false).unwrap()[0].status == "paid"
+    });
+    let how = d.store.debts(Some(t.0), false).unwrap()[0].how.clone();
+    assert!(how.contains("checks green on"), "{how}");
+}
+
+#[test]
+fn a_debt_never_closes_on_a_green_at_a_base_without_the_tasks_commit() {
+    let s = two_tasks_world();
+    let d = start(&s);
+    let t = file_it(&d, "Add hello");
+    wait_state(&d, t, State::Landed, 120);
+    // The task's own test step was green, at a base from before the task.
+    let debt = mason_daemon::suites::skip(&d, t, "suite:checks", "later", "brian", false).unwrap();
+    assert_eq!(mason_daemon::suites::settle_debts(&d), 0);
+    let row = d.store.debts(Some(t.0), false).unwrap().remove(0);
+    assert_eq!((row.id, row.status.as_str()), (debt, "open"));
+}
+
+#[test]
+fn a_debt_whose_suite_is_still_red_stays_open_and_is_run_once_when_idle() {
+    let s = two_tasks_world();
+    let d = start(&s);
+    let t = file_it(&d, "Skip the checks");
+    mason_daemon::suites::skip(&d, t, "suite:checks", "later", "brian", false).unwrap();
+    wait_state(&d, t, State::Landed, 120);
+    // The base goes red after the landing.
+    s.push_files(&[("legacy.broken", "x\n")], "break the base");
+    assert_eq!(mason_daemon::suites::settle_debts(&d), 0);
+    mason_daemon::suites::run_idle_debts(&d);
+    let row = d.store.debts(Some(t.0), false).unwrap().remove(0);
+    assert_eq!(row.status, "open");
+    assert!(row.tried_at > 0, "the idle run never tried it");
+    // Once is enough: a second pass leaves it alone.
+    mason_daemon::suites::run_idle_debts(&d);
+    let again = d.store.debts(Some(t.0), false).unwrap().remove(0);
+    assert_eq!(again.tried_at, row.tried_at);
+}
+
 #[test]
 fn a_test_red_in_three_tasks_but_green_at_the_base_is_not_made_known_red() {
     // `mine` already failed on every run in two other tasks; this task's first attempt breaks
