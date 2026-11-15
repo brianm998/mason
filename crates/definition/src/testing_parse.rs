@@ -6,8 +6,8 @@
 use crate::model::{parse_duration, Problem};
 use crate::parse::unknown_key;
 use mason_testing::{
-    Binding, DeviceType, EnvKind, Environment, ImpactMap, ParserKind, Signature, Suite, Testing,
-    When,
+    Binding, DeviceType, EnvKind, Environment, ImpactMap, Narrow, ParserKind, Signature, Suite,
+    Testing, When,
 };
 use std::collections::BTreeMap;
 use toml_edit::{DocumentMut, Item};
@@ -31,6 +31,12 @@ pub const SUITE_KEYS: &[&str] = &[
     "progress",
     "test_paths",
     "pty",
+    "narrow_command",
+    "narrow_tests",
+    "narrow_root",
+    "narrow_split",
+    "narrow_each",
+    "narrow_never",
 ];
 const ENV_KEYS: &[&str] = &[
     "type",
@@ -130,6 +136,60 @@ fn plugin_name(v: &str) -> Option<&str> {
     })
 }
 
+/// A suite's `narrow_*` keys as one [`Narrow`] (s386), or `None` when it has none. Any of them
+/// without `narrow_command` and `narrow_tests`, a command without `{tests}`, an `each` without
+/// `{}` or a `split` that is no regex is refused.
+fn narrow(
+    base: &str,
+    [command, tests, root, split, each]: [Option<String>; 5],
+    never: Vec<String>,
+    out: &mut Vec<Problem>,
+) -> Option<Narrow> {
+    let any = command.is_some()
+        || tests.is_some()
+        || root.is_some()
+        || split.is_some()
+        || each.is_some()
+        || !never.is_empty();
+    if !any {
+        return None;
+    }
+    let (Some(command), Some(tests)) = (command, tests) else {
+        out.push(Problem::new(
+            format!("{base}.narrow_command"),
+            "narrowing needs both `narrow_command` and `narrow_tests`",
+        ));
+        return None;
+    };
+    if !command.contains("{tests}") {
+        out.push(Problem::new(
+            format!("{base}.narrow_command"),
+            "must contain `{tests}`, which becomes the picked tests",
+        ));
+        return None;
+    }
+    let each = each.unwrap_or_else(|| "{}".into());
+    if !each.contains("{}") {
+        out.push(Problem::new(
+            format!("{base}.narrow_each"),
+            "must contain `{}`, which becomes one test's name",
+        ));
+        return None;
+    }
+    if let Some(Err(e)) = split.as_deref().map(mason_testing::parse::check_regex) {
+        out.push(Problem::new(format!("{base}.narrow_split"), e));
+        return None;
+    }
+    Some(Narrow {
+        tests,
+        root,
+        split,
+        command,
+        each,
+        never,
+    })
+}
+
 pub fn parse(doc: &DocumentMut, out: &mut Vec<Problem>) -> Testing {
     let mut t = Testing::default();
 
@@ -141,6 +201,9 @@ pub fn parse(doc: &DocumentMut, out: &mut Vec<Problem>) -> Testing {
         };
         let mut s = Suite::new(name, "", ParserKind::Junit);
         let (mut have_cmd, mut have_parser) = (false, false);
+        // The `narrow_*` keys (s386), put together once the table is read.
+        let mut nw: [Option<String>; 5] = Default::default();
+        let mut never: Vec<String> = vec![];
         for (k, v) in tbl.iter() {
             let path = format!("{base}.{k}");
             match k {
@@ -194,6 +257,12 @@ pub fn parse(doc: &DocumentMut, out: &mut Vec<Problem>) -> Testing {
                     Some(b) => s.pty = b,
                     None => out.push(Problem::new(&path, "must be true or false")),
                 },
+                "narrow_command" => nw[0] = string(v, &path, out),
+                "narrow_tests" => nw[1] = string(v, &path, out),
+                "narrow_root" => nw[2] = string(v, &path, out),
+                "narrow_split" => nw[3] = string(v, &path, out),
+                "narrow_each" => nw[4] = string(v, &path, out),
+                "narrow_never" => never = strings(v, &path, out),
                 other => out.push(unknown_key(&base, other, SUITE_KEYS)),
             }
         }
@@ -206,6 +275,7 @@ pub fn parse(doc: &DocumentMut, out: &mut Vec<Problem>) -> Testing {
                 "required: how its output is read, so a pass can be proven",
             ));
         }
+        s.narrow = narrow(&base, nw, never, out);
         t.suites.push(s);
     }
 
