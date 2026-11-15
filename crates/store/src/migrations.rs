@@ -676,6 +676,12 @@ const STEPS: &[&str] = &[
          at_ms   INTEGER NOT NULL
      );
      CREATE INDEX suite_times_key ON suite_times(project, suite, phase, at_ms);",
+    // 37: how a debt was paid and what it waits on (s393): `how` is the proof text of a paid
+    // debt, `landed` the commit its task landed (empty: not known, so it never closes by itself),
+    // `tried_at` when the idle run last tried it (0: never). Additive.
+    "ALTER TABLE debts ADD COLUMN how TEXT NOT NULL DEFAULT '';
+     ALTER TABLE debts ADD COLUMN landed TEXT NOT NULL DEFAULT '';
+     ALTER TABLE debts ADD COLUMN tried_at INTEGER NOT NULL DEFAULT 0;",
 ];
 
 pub const SCHEMA_VERSION: u32 = STEPS.len() as u32;

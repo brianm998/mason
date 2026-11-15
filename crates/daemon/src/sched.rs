@@ -1968,6 +1968,16 @@ impl Broker {
             .collect()
     }
 
+    /// The `compile` count in force now.
+    pub fn compile_capacity(&self) -> Option<u64> {
+        let st = lock(&self.st);
+        st.ledger
+            .snapshot()
+            .capacity
+            .get(COMPILE)
+            .map(|c| u64::from(c.units))
+    }
+
     /// The idle check's latest reading, by lease.
     pub fn set_idle(&self, idle: HashMap<u64, u64>) {
         lock(&self.st).idle = idle;
@@ -2862,6 +2872,17 @@ mod tests {
             .unwrap();
         let first = b.lease_open("first", &one);
         assert!(matches!(b.lease_poll(first), LeaseState::Granted { .. }));
+        // The pass that grants `first` changes the holder set while the lock files
+        // are read, so it leaves the adoption of the outside holder to the next
+        // pass. Poll (each poll runs a pass) until the ledger counts it: wait on
+        // the state, bounded by attempts, not by time.
+        for _ in 0..2000 {
+            if b.used("compile") == 2 {
+                break;
+            }
+            assert!(matches!(b.lease_poll(first), LeaseState::Granted { .. }));
+            std::thread::yield_now();
+        }
         assert_eq!(b.used("compile"), 2, "the outside holder counts");
         let second = b.lease_open("second", &one);
         assert!(
