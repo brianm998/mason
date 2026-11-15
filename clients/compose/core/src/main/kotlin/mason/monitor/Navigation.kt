@@ -11,6 +11,7 @@ sealed class Page {
     data object Usage : Page()
     data object Pipeline : Page()
     data object Health : Page()
+    data object Settings : Page()
 
     /** The `mason://` address of a page, for deep links from notifications. */
     val url: String
@@ -21,6 +22,7 @@ sealed class Page {
             Usage -> "mason://usage"
             Pipeline -> "mason://pipeline"
             Health -> "mason://health"
+            Settings -> "mason://settings"
         }
 
     companion object {
@@ -37,6 +39,7 @@ sealed class Page {
                 "usage" -> if (rest.isEmpty()) Usage else null
                 "pipeline" -> if (rest.isEmpty()) Pipeline else null
                 "health" -> if (rest.isEmpty()) Health else null
+                "settings" -> if (rest.isEmpty()) Settings else null
                 else -> null
             }
         }

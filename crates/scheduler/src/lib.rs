@@ -16,7 +16,8 @@ mod plan;
 mod rank;
 
 pub use explain::{
-    describe_command, explain, label_parts, ordinal, since, Wait, WaitCause, DESCRIPTION_LIMIT,
+    cause_class, describe_command, explain, label_parts, ordinal, since, Wait, WaitCause,
+    DESCRIPTION_LIMIT,
 };
 pub use ledger::{Ledger, Snapshot, Stall};
 pub use plan::{

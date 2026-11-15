@@ -208,6 +208,9 @@ public final class PinnedSocket: MonitorSocket {
         var req = URLRequest(url: URL(string: "wss://\(daemon.host):\(daemon.port)/ws")!)
         req.setValue("Bearer \(daemon.token)", forHTTPHeaderField: "Authorization")
         let t = session.webSocketTask(with: req)
+        // URLSession refuses a message over 1 MiB by default; the daemon's first view of a busy
+        // pipeline is larger (2026-11-15: 40 tasks landing, "Message too long" on every connect).
+        t.maximumMessageSize = monitorMaxMessage
         task = t
         t.resume()
     }

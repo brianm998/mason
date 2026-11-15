@@ -57,6 +57,8 @@ enum ViewKind {
   LANDING = 5;
   USAGE = 6;
   EDITOR = 7;
+  // The CPU readings over `Subscribe.cpu_span_ms`; asked for only while the graph shows.
+  CPU_HISTORY = 8;
 }
 
 // Which views to keep sending. Replaces any earlier subscription.
@@ -68,6 +70,8 @@ message Subscribe {
   uint64 task = 3;
   // The step selected in the editor, for EDITOR's inspector (empty: none).
   string editor_step = 4;
+  // The span for CPU_HISTORY, in ms (0: an hour).
+  uint64 cpu_span_ms = 5;
 }
 
 message Ping {
@@ -83,7 +87,8 @@ message Command {
     AddTask add_task = 2;
     TaskRef cancel = 3;
     Retry retry = 4;
-    TaskRef approve = 5;
+    // Approve a proposed (or deferred) task, optionally choosing its priority.
+    ApproveTask approve = 5;
     Reject reject = 6;
     TaskRef explore_anyway = 7;
     Answer answer = 8;
@@ -102,6 +107,9 @@ message Command {
     TaskRef revive = 18;
     // Change a compile gate while masond runs, or go back to resources.toml.
     SetGate set_gate = 19;
+    // Proposed to deferred, and back. Owner decisions; no timer.
+    TaskRef defer = 20;
+    TaskRef undefer = 21;
     Raw raw = 30;
   }
   // Who is acting and, optionally, why (recorded with overrides).
@@ -111,6 +119,12 @@ message Command {
 
 message TaskRef {
   uint64 task = 1;
+}
+
+message ApproveTask {
+  uint64 task = 1;
+  // urgent, high, normal or low; empty keeps the task's own priority.
+  string priority = 2;
 }
 
 message Unblock {
@@ -327,6 +341,7 @@ message View {
     LandingView landing = 5;
     UsageView usage = 6;
     EditorView editor = 7;
+    CpuHistory cpu_history = 8;
   }
 }
 
@@ -730,6 +745,8 @@ message CpuShare {
   string title = 4;
   // Of the whole machine: 1000 is every core busy.
   uint32 permille = 5;
+  // The task's project name (empty for a fixed bucket).
+  string project = 6;
 }
 
 // Where the machine's CPU went over the last sampling period.
@@ -741,6 +758,23 @@ message CpuUsage {
   uint64 sampled_ms = 3;
   // Highest first; ties by task id, then kind. Under 1 permille is left out.
   repeated CpuShare shares = 4;
+}
+
+// One reading in the CPU history: each share by key (kind, task) with its
+// permille. Title and project are not repeated here; they come from `CpuUsage`.
+message CpuPoint {
+  uint64 at_ms = 1;
+  int32 busy_permille = 2;
+  repeated CpuShare shares = 3;
+}
+
+// The CPU readings over a span, oldest first, served by `GET /cpu/history?span=`.
+// Served on request, never pushed with the home view.
+message CpuHistory {
+  uint64 span_ms = 1;
+  // The gap between points: the sampling period, or a minute for old data.
+  uint64 step_ms = 2;
+  repeated CpuPoint points = 3;
 }
 
 // Who holds a `compile` slot.
@@ -1000,6 +1034,31 @@ message LandingView {
   // The project filter this view was computed for (empty: all projects). A client drops a view
   // whose project is not its current selection.
   string project = 10;
+  // What each task in the landing queue is doing: queued, or in a batch and its phase.
+  repeated TaskLanding items = 11;
+}
+
+// One landing task: either queued (with a position and why) or in a running batch.
+message TaskLanding {
+  uint64 task = 1;
+  string key = 2;
+  string title = 3;
+  string project = 4;
+  // "queued" | "in_batch"
+  string status = 5;
+  // Queued: 1-based position among the project's queued tasks.
+  uint32 position = 6;
+  // Queued: why it waits, e.g. "behind 1 batch", "frozen until #12 lands".
+  string why = 7;
+  uint64 batch = 8;
+  // Batch phase name ("integrating", "running suites", ...) and its place among `phase_total`.
+  string phase = 9;
+  uint32 phase_index = 10;
+  uint32 phase_total = 11;
+  // Milliseconds since the batch formed (the store keeps no per-phase start).
+  uint64 phase_ms = 12;
+  // The batch CI's state: queued, running, green, red; empty when none.
+  string ci_state = 13;
 }
 
 message ProviderStatus {

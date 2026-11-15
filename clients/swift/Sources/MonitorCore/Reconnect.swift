@@ -69,6 +69,9 @@ public protocol MonitorSocket: AnyObject {
     func close()
 }
 
+/// The largest message a monitor socket accepts: well past any view the daemon sends.
+let monitorMaxMessage = 64 << 20
+
 @MainActor
 final class URLSessionSocket: MonitorSocket {
     private let session = URLSession(configuration: .ephemeral)
@@ -76,6 +79,9 @@ final class URLSessionSocket: MonitorSocket {
 
     func open(port: UInt16) {
         let t = session.webSocketTask(with: URL(string: "ws://127.0.0.1:\(port)/ws")!)
+        // URLSession refuses a message over 1 MiB by default; the daemon's first view of a busy
+        // pipeline is larger (2026-11-15: 40 tasks landing, "Message too long" on every connect).
+        t.maximumMessageSize = monitorMaxMessage
         task = t
         t.resume()
     }

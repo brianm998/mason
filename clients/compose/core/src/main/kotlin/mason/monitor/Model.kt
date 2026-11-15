@@ -31,12 +31,24 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     /** Each task's colour in the CPU bar while it is among the shares. */
     var cpuColors by mutableStateOf<Map<Long, Int>>(emptyMap())
     private val cpuPalette = CpuColors()
+    /** The latest CPU history for [cpuSpan]; the graph is built from it off the main thread. */
+    var cpuHistory by mutableStateOf<mason.v1.CpuHistory?>(null)
+    var cpuSpan by mutableStateOf(CpuSpan.Hour)
     var taskDetail by mutableStateOf<TaskDetailView?>(null)
     var landing by mutableStateOf<LandingView?>(null)
     var usage by mutableStateOf<UsageView?>(null)
     var editor by mutableStateOf<EditorView?>(null)
     var health by mutableStateOf<HealthSnapshot?>(null)
     var introspection by mutableStateOf<IntrospectionSnapshot?>(null)
+    /** The Settings page (s430): the picked project's settings, the notification routes, and what the last change said. */
+    var settings by mutableStateOf<SettingsSnapshot?>(null)
+    var notifySettings by mutableStateOf<NotifySettings?>(null)
+    var settingsNotice by mutableStateOf<String?>(null)
+    /** The Devices section (s433): LAN state, paired devices, the code on show, and what the last action said. */
+    var lanStatus by mutableStateOf<LanStatus?>(null)
+    var devices by mutableStateOf<DeviceList?>(null)
+    var pairOffer by mutableStateOf<PairOffer?>(null)
+    var devicesNotice by mutableStateOf<String?>(null)
     var lastSeq by mutableStateOf(0L)
     var connected by mutableStateOf(false)
     /** Down and being retried: the daemon is restarting or has not answered. Shown as "reconnecting", never as an error. */
@@ -298,6 +310,13 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     fun linkify(text: String): List<LinkSegment> =
         Linkify.segments(text, { isKnownTask(it) }, taskDetail?.ci_links ?: emptyList())
 
+    /** Pick the CPU graph's span and ask the daemon for that range. */
+    fun pickCpuSpan(s: CpuSpan) {
+        if (s == cpuSpan) return
+        cpuSpan = s
+        cpuHistory = null
+        subscribe?.invoke()
+    }
     fun goBack() { history = history.goBack(); subscribe?.invoke() }
     fun goForward() { history = history.goForward(); subscribe?.invoke() }
     fun goHome() { history = history.goHome(); subscribe?.invoke() }
@@ -470,7 +489,11 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
 
     fun cancel(task: Long) = send(Command(cancel = TaskRef(task = task)))
     fun retry(task: Long, from: String = "", seen: Long = 0) = send(Command(retry = Retry(task = task, from = from, seen = seen)))
-    fun approve(task: Long) = send(Command(approve = TaskRef(task = task)))
+    fun approve(task: Long, priority: String = "") = send(Command(approve = ApproveTask(task = task, priority = priority)))
+    /** Put a proposed task aside; it comes back only by hand. */
+    fun deferTask(task: Long) = send(Command(defer = TaskRef(task = task)))
+    /** Move a deferred task back to proposed. */
+    fun undefer(task: Long) = send(Command(undefer = TaskRef(task = task)))
     /**
      * The tasks the Add blocker picker offers for [row]: any task in the sidebar that is not itself,
      * not already a blocker, and could still land (not landed, canceled or failed).
@@ -492,7 +515,7 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
         send(Command(approve_hold = ApproveHold(task = task, diff_hash = diffHash)))
 
     /** What Approve sends for an approval: the held diff's hash when there is one, else a plain approve. */
-    fun approve(task: Long, a: Approval) = if (a.diff_hash.isEmpty()) approve(task) else approveHold(task, a.diff_hash)
+    fun approve(task: Long, a: Approval, priority: String = MonitorModel.DEFAULT_APPROVAL_PRIORITY) = if (a.diff_hash.isEmpty()) approve(task, priority) else approveHold(task, a.diff_hash)
 
     /** The first task that needs the owner, in the Home queue's order. */
     val firstNeedingYou: Long? get() = if (connected) home?.attention?.firstOrNull()?.task?.id else null
@@ -624,6 +647,55 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
 
     fun raw(method: String, path: String, id: String = "", json: String = "") =
         send(Command(id = id, raw = Raw(method = method, path = path, json = json)))
+
+    // ---- settings (s430) ----
+
+    /** Ask for the Settings page's data: the project's settings and the notification routes. */
+    fun loadSettings() {
+        val p = editorProject
+        if (p.isNotEmpty()) raw("GET", SettingsPayload.path(p), id = "settings")
+        raw("GET", "/notify/settings", id = "notify-settings")
+    }
+
+    /** Change one project setting (a body from [SettingsPayload]); the page reloads on the answer. */
+    fun changeProjectSetting(body: String) {
+        settingsNotice = null
+        raw("POST", SettingsPayload.path(editorProject), id = "settings-save", json = body)
+    }
+
+    fun changeNotifySetting(body: String) {
+        settingsNotice = null
+        raw("POST", "/notify/settings", id = "notify-save", json = body)
+    }
+
+    fun testNotification(channel: String) {
+        settingsNotice = null
+        raw("POST", "/notify/test", id = "notify-test", json = SettingsPayload.test(channel))
+    }
+
+    /** Ask for the LAN state and the paired devices. */
+    fun loadDevices() {
+        raw("GET", "/lan", id = "lan")
+        raw("GET", "/devices", id = "devices")
+    }
+
+    /** Make a pairing code for a new device; [role] is "owner" or "viewer". */
+    fun issuePairCode(role: String) {
+        devicesNotice = null
+        raw("POST", "/pair/codes", id = "pair-code", json = Codec.body(mapOf("role" to role)))
+    }
+
+    fun closePairing() { pairOffer = null }
+
+    fun revokeDevice(id: Long) {
+        devicesNotice = null
+        raw("POST", "/devices/$id/revoke", id = "device-revoke:$id", json = "{}")
+    }
+
+    fun runSchedule(name: String) {
+        settingsNotice = null
+        raw("POST", "/schedules/run", id = "schedule-run", json = SettingsPayload.runSchedule(editorProject, name))
+    }
 
     // ---- the pipeline editor (Part 18) ----
 
@@ -790,6 +862,23 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
             }
             if (r.id == "health" && r.ok) health = HealthSnapshot.parse(r.json)
             if (r.id == "introspection" && r.ok) introspection = IntrospectionSnapshot.parse(r.json)
+            if (r.id == "settings" && r.ok) settings = SettingsSnapshot.parse(r.json)
+            if (r.id == "lan" && r.ok) lanStatus = LanStatus.parse(r.json)
+            if (r.id == "devices" && r.ok) devices = DeviceList.parse(r.json)
+            if (r.id == "pair-code") {
+                if (r.ok) {
+                    pairOffer = PairOffer.parse(r.json, System.currentTimeMillis())
+                    if (pairOffer == null) devicesNotice = "The daemon sent a pairing code this monitor could not read."
+                } else devicesNotice = r.error
+            }
+            if (r.id.startsWith("device-revoke:")) {
+                if (r.ok) { devicesNotice = "Revoked."; loadDevices() } else devicesNotice = r.error
+            }
+            if (r.id == "notify-settings" && r.ok) notifySettings = NotifySettings.parse(r.json)
+            if (r.id in SETTINGS_RESULTS) {
+                settingsNotice = if (r.ok) SettingsPayload.done(r.id) else r.error
+                if (r.ok && (r.id == "settings-save" || r.id == "notify-save")) loadSettings()
+            }
             if (r.id.startsWith("publish:") && r.ok) publishPreview = PublishPreview.parse(r.json)
             onResult?.invoke(r)
         }
@@ -839,6 +928,7 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
             taskDetail = d
             liveLog = d.log_tail.split("\n").dropLastWhile { it.isEmpty() }.takeLast(LOG_KEEP)
         }
+        v.cpu_history?.let { cpuHistory = it }
         v.landing?.let { landing = it }
         v.usage?.let { usage = it }
         v.editor?.let { editor = it }
@@ -851,6 +941,9 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     }
 
     companion object {
+        /** The priorities the approval picker offers, and the one it starts at. */
+        val APPROVAL_PRIORITIES = listOf("urgent", "high", "normal", "low")
+        const val DEFAULT_APPROVAL_PRIORITY = "normal"
         /** The CPU gate's range in the monitor, and the most the settle stepper asks for. */
         const val CPU_GATE_MIN = 10
         const val CPU_GATE_MAX = 100

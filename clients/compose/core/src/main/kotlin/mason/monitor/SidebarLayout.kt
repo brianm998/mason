@@ -38,6 +38,7 @@ fun MonitorModel.sidebarEntries(): List<SidebarEntry> = buildList {
     add(SidebarEntry.PageLink("LLM usage", Page.Usage))
     add(SidebarEntry.PageLink("Pipeline", Page.Pipeline))
     add(SidebarEntry.PageLink("Health", Page.Health))
+    add(SidebarEntry.PageLink("Settings", Page.Settings))
 }
 
 /** Where a Home tile's section is in the scrolling part, or -1 when it is not there. */

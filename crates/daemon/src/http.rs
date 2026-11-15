@@ -575,7 +575,7 @@ async fn proposal_act(
                 "approve" | "reject" => {
                     let w = d2.world().map_err(store_err)?;
                     let st = w.tasks.get(&TaskId(task)).map(|t| t.state);
-                    if st != Some(State::Proposed) {
+                    if !matches!(st, Some(State::Proposed | State::Deferred)) {
                         return Err(fail(
                             StatusCode::CONFLICT,
                             format!("task #{task} is not waiting for you ({st:?})"),
@@ -910,6 +910,15 @@ async fn approve(
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default()
         .to_string();
+    // The priority the owner chose with the approval (empty: the task keeps its own).
+    let chosen = body
+        .as_ref()
+        .and_then(|b| b["priority"].as_str())
+        .filter(|p| !p.is_empty())
+        .map(String::from);
+    let chosen = chosen
+        .map(|n| parse_priority(&n).map(|(p, l)| (p, l, n)))
+        .transpose()?;
     let d2 = d.clone();
     d.pool
         .run(move || {
@@ -937,9 +946,16 @@ async fn approve(
                 .tasks
                 .get(&TaskId(id))
                 .ok_or_else(|| fail(StatusCode::NOT_FOUND, format!("no task #{id}")))?;
-            if t.state == State::Proposed {
+            if matches!(t.state, State::Proposed | State::Deferred) {
+                if chosen.is_some() {
+                    owner_only(&d2, &who, "choose a priority")?;
+                }
                 d2.emit(EventKind::Approved { task: TaskId(id) })
                     .map_err(store_err)?;
+                // The same as `task priority` right after the approval.
+                if let Some((prio, level, name)) = &chosen {
+                    apply_priority(&d2, id, *prio, *level, name)?;
+                }
                 crate::proposals::note_decision(&d2, id, true, "");
                 Ok(())
             } else {
@@ -951,6 +967,48 @@ async fn approve(
                 )
                 .map_err(|e| fail(StatusCode::CONFLICT, e))
             }
+        })
+        .await
+        .map_err(pool_err)??;
+    Ok(Json(json!({"ok": true})))
+}
+
+/// `defer` (Proposed to Deferred) and `undefer` (back): the owner puts a proposal aside, or
+/// takes it up again. Nothing brings it back by itself.
+async fn defer_task(Shared(d): Shared<Arc<Daemon>>, Path(id): Path<u64>) -> Res {
+    flip_deferred(d, id, true).await
+}
+
+async fn undefer_task(Shared(d): Shared<Arc<Daemon>>, Path(id): Path<u64>) -> Res {
+    flip_deferred(d, id, false).await
+}
+
+async fn flip_deferred(d: Arc<Daemon>, id: u64, defer: bool) -> Res {
+    let d2 = d.clone();
+    d.pool
+        .run(move || {
+            let w = d2.world().map_err(store_err)?;
+            let t = w
+                .tasks
+                .get(&TaskId(id))
+                .ok_or_else(|| fail(StatusCode::NOT_FOUND, format!("no task #{id}")))?;
+            let (from, ev) = if defer {
+                (State::Proposed, EventKind::Deferred { task: TaskId(id) })
+            } else {
+                (State::Deferred, EventKind::Undeferred { task: TaskId(id) })
+            };
+            if t.state != from {
+                return Err(fail(
+                    StatusCode::CONFLICT,
+                    format!(
+                        "task #{id} is {}, not {}",
+                        mason_store::state_name(t.state),
+                        mason_store::state_name(from)
+                    ),
+                ));
+            }
+            d2.emit(ev).map_err(store_err)?;
+            Ok(())
         })
         .await
         .map_err(pool_err)??;
@@ -981,7 +1039,7 @@ async fn reject(
                 .tasks
                 .get(&TaskId(id))
                 .ok_or_else(|| fail(StatusCode::NOT_FOUND, format!("no task #{id}")))?;
-            if t.state == State::Proposed {
+            if matches!(t.state, State::Proposed | State::Deferred) {
                 d2.emit(EventKind::Rejected { task: TaskId(id) })
                     .map_err(store_err)?;
                 crate::proposals::note_decision(&d2, id, false, &reason);
@@ -1109,7 +1167,21 @@ async fn task_priority(
 ) -> Res {
     let who = who_of(&headers);
     let name = b["priority"].as_str().unwrap_or_default().to_string();
-    let (prio, level) = match name.as_str() {
+    let (prio, level) = parse_priority(&name)?;
+    let d2 = d.clone();
+    let reranked = d
+        .pool
+        .run(move || {
+            owner_only(&d2, &who, "change a task's priority")?;
+            apply_priority(&d2, id, prio, level, &name)
+        })
+        .await
+        .map_err(pool_err)??;
+    Ok(Json(json!({"ok": true, "reranked": reranked})))
+}
+
+fn parse_priority(name: &str) -> Result<(Priority, u8), (StatusCode, Json<Value>)> {
+    Ok(match name {
         "urgent" => (Priority::Urgent, 0u8),
         "high" => (Priority::High, 1),
         "normal" => (Priority::Normal, 2),
@@ -1120,48 +1192,50 @@ async fn task_priority(
                 format!("priority must be urgent, high, normal or low, not {other:?}"),
             ))
         }
-    };
-    let d2 = d.clone();
-    let reranked = d
-        .pool
-        .run(move || {
-            owner_only(&d2, &who, "change a task's priority")?;
-            let w = d2.world().map_err(store_err)?;
-            let t = w
-                .tasks
-                .get(&TaskId(id))
-                .ok_or_else(|| fail(StatusCode::NOT_FOUND, format!("no task #{id}")))?;
-            if t.state.is_terminal() {
-                return Err(fail(
-                    StatusCode::BAD_REQUEST,
-                    format!("task #{id} is over; its priority cannot change"),
-                ));
-            }
-            d2.emit(EventKind::TrackerEdited {
-                task: TaskId(id),
-                title: t.title.clone(),
-                body: t.body.clone(),
-                priority: prio,
-            })
-            .map_err(store_err)?;
-            if let Some(p) = d2.project(t.project) {
-                let row = d2
-                    .store
-                    .tracker_items(&p.id)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .find(|r| r.task == id);
-                if let Some(mut row) = row {
-                    row.priority = name.clone();
-                    d2.store.put_tracker_item(&row).map_err(store_err)?;
-                    d2.tracker.set_owner_priority(t.project, row.number, &name);
-                }
-            }
-            Ok::<_, (StatusCode, Json<Value>)>(d2.broker.set_task_priority(TaskId(id), level))
-        })
-        .await
-        .map_err(pool_err)??;
-    Ok(Json(json!({"ok": true, "reranked": reranked})))
+    })
+}
+
+/// Set a task's priority: the event, the tracker row and label, and the rank of its waiting
+/// requests. Returns how many requests were re-ranked. The caller has checked who may.
+fn apply_priority(
+    d2: &Arc<Daemon>,
+    id: u64,
+    prio: Priority,
+    level: u8,
+    name: &str,
+) -> Result<usize, (StatusCode, Json<Value>)> {
+    let w = d2.world().map_err(store_err)?;
+    let t = w
+        .tasks
+        .get(&TaskId(id))
+        .ok_or_else(|| fail(StatusCode::NOT_FOUND, format!("no task #{id}")))?;
+    if t.state.is_terminal() {
+        return Err(fail(
+            StatusCode::BAD_REQUEST,
+            format!("task #{id} is over; its priority cannot change"),
+        ));
+    }
+    d2.emit(EventKind::TrackerEdited {
+        task: TaskId(id),
+        title: t.title.clone(),
+        body: t.body.clone(),
+        priority: prio,
+    })
+    .map_err(store_err)?;
+    if let Some(p) = d2.project(t.project) {
+        let row = d2
+            .store
+            .tracker_items(&p.id)
+            .unwrap_or_default()
+            .into_iter()
+            .find(|r| r.task == id);
+        if let Some(mut row) = row {
+            row.priority = name.to_string();
+            d2.store.put_tracker_item(&row).map_err(store_err)?;
+            d2.tracker.set_owner_priority(t.project, row.number, name);
+        }
+    }
+    Ok(d2.broker.set_task_priority(TaskId(id), level))
 }
 
 fn project_of(d: &Daemon, name: &str) -> Result<ProjectId, (StatusCode, Json<Value>)> {
@@ -1568,6 +1642,8 @@ fn override_kind(path: &str) -> Option<(&'static str, Option<u64>)> {
                 "retry" => "retry",
                 "approve" => "approve",
                 "reject" => "reject",
+                "defer" => "defer",
+                "undefer" => "undefer",
                 "explore-anyway" => "explore_anyway",
                 "overrides" => "task_override",
                 "priority" => "task_priority",
@@ -2754,6 +2830,63 @@ async fn notify_status(Shared(d): Shared<Arc<Daemon>>) -> Res {
     Ok(Json(v))
 }
 
+/// The notification settings the Settings page edits (routes, quiet hours, reminders, speech, stall).
+async fn notify_settings_get(Shared(d): Shared<Arc<Daemon>>) -> Res {
+    let d2 = d.clone();
+    let v = d
+        .pool
+        .run(move || crate::settings::get_notify(&d2))
+        .await
+        .map_err(pool_err)?;
+    Ok(Json(v))
+}
+
+/// Change `notify.toml` in place. Owner only; the next notify tick uses it.
+async fn notify_settings_set(
+    Shared(d): Shared<Arc<Daemon>>,
+    headers: axum::http::HeaderMap,
+    Json(b): Json<Value>,
+) -> Res {
+    owner_only(&d, &who_of(&headers), "change notification settings")?;
+    let d2 = d.clone();
+    let r = d
+        .pool
+        .run(move || crate::settings::set_notify(&d2, &b))
+        .await
+        .map_err(pool_err)?;
+    r.map(Json).map_err(|(c, m)| fail(code(c), m))
+}
+
+async fn project_settings_get(Shared(d): Shared<Arc<Daemon>>, Path(name): Path<String>) -> Res {
+    project_of(&d, &name)?;
+    let d2 = d.clone();
+    let r = d
+        .pool
+        .run(move || crate::settings::get_project(&d2, &name))
+        .await
+        .map_err(pool_err)?;
+    r.map(Json).map_err(|(c, m)| fail(code(c), m))
+}
+
+/// Change a project's proposal policy, schedule cadence or tracker settings in its
+/// registration file, and apply them without a restart. Owner only.
+async fn project_settings_set(
+    Shared(d): Shared<Arc<Daemon>>,
+    headers: axum::http::HeaderMap,
+    Path(name): Path<String>,
+    Json(b): Json<Value>,
+) -> Res {
+    owner_only(&d, &who_of(&headers), "change project settings")?;
+    project_of(&d, &name)?;
+    let d2 = d.clone();
+    let r = d
+        .pool
+        .run(move || crate::settings::set_project(&d2, &name, &b))
+        .await
+        .map_err(pool_err)?;
+    r.map(Json).map_err(|(c, m)| fail(code(c), m))
+}
+
 async fn notify_test(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res {
     owner_only(
         &d,
@@ -2932,6 +3065,23 @@ async fn cpu_usage(Shared(d): Shared<Arc<Daemon>>) -> Res {
         .await
         .map_err(pool_err)??;
     Ok(Json(v))
+}
+
+/// The CPU readings over `?span=` (ms, or 5m / 1h / 6h / 24h; default 1h), oldest
+/// first, as proto3 JSON. The monitors ask while the graph is on screen.
+async fn cpu_history(
+    Shared(d): Shared<Arc<Daemon>>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Res {
+    let span = match q.get("span") {
+        None => 3_600_000,
+        Some(s) => crate::cpuhistory::parse_span(s)
+            .ok_or_else(|| fail(StatusCode::BAD_REQUEST, format!("span {s:?} is not a span")))?,
+    };
+    let h = d.cpu_history(crate::daemon::now_ms(), span);
+    serde_json::to_value(&h)
+        .map(Json)
+        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
 /// The home view, as the monitors get it (proto3 JSON).
@@ -3502,6 +3652,8 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/tasks/{id}/diagnoses/{did}/{what}", post(decide_diagnosis))
         .route("/tasks/{id}/approve", post(approve))
         .route("/tasks/{id}/reject", post(reject))
+        .route("/tasks/{id}/defer", post(defer_task))
+        .route("/tasks/{id}/undefer", post(undefer_task))
         .route("/tasks/{id}/explore-anyway", post(explore_anyway))
         .route("/tasks/{id}/overrides", post(task_override))
         .route("/tasks/{id}/priority", post(task_priority))
@@ -3532,6 +3684,7 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/tasks/{id}/progress", get(task_progress))
         .route("/resources", get(resources))
         .route("/cpu", get(cpu_usage))
+        .route("/cpu/history", get(cpu_history))
         .route("/views/home", get(home_view))
         .route("/targets", get(targets))
         .route("/health", get(health))
@@ -3567,6 +3720,14 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/announce/claim", post(announce_claim))
         .route("/notify", get(notify_status))
         .route("/notify/test", post(notify_test))
+        .route(
+            "/notify/settings",
+            get(notify_settings_get).post(notify_settings_set),
+        )
+        .route(
+            "/projects/{name}/settings",
+            get(project_settings_get).post(project_settings_set),
+        )
         .route("/metrics", get(metrics))
         .route("/demo", get(demo_status))
         .route("/demo/next", post(demo_next))

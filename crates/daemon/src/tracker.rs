@@ -137,6 +137,25 @@ pub struct Summary {
 }
 
 impl Hub {
+    /// A changed `interval_s` takes effect for the running poller (its next look onward).
+    pub fn set_interval(&self, p: ProjectId, interval_s: u64) {
+        self.pollers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(p)
+            .or_insert_with(|| Poller::new(interval_s))
+            .interval_s = interval_s;
+        self.cv.notify_all();
+    }
+
+    pub fn interval(&self, p: ProjectId) -> Option<u64> {
+        self.pollers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&p)
+            .map(|po| po.interval_s)
+    }
+
     /// Hold off a poll while the owner changes blockers, so the poll cannot read the
     /// old overrides and put a released blocker back.
     pub fn quiet(&self) -> std::sync::MutexGuard<'_, ()> {
@@ -966,7 +985,10 @@ pub fn sync_with_rule(
         }
         let task = TaskId(row.task);
         let state = w.as_ref().and_then(|w| w.tasks.get(&task).map(|t| t.state));
-        if !matches!(state, Some(State::Proposed | State::Queued)) {
+        if !matches!(
+            state,
+            Some(State::Proposed | State::Deferred | State::Queued)
+        ) {
             alerts.push(format!(
                 "the dependencies of issue #{} changed on the tracker (now {}) but task #{} is already {}, so it is not pulled back; the change is not applied",
                 it.number,

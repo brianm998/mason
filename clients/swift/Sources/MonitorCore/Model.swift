@@ -52,6 +52,16 @@ public final class MonitorModel: ObservableObject {
     @Published public var editor: EditorView?
     @Published public var health: HealthSnapshot?
     @Published public var introspection: IntrospectionSnapshot?
+    /// The Settings page (s430): the picked project's settings, the global notification routes,
+    /// and what the last change or test said.
+    @Published public var settings: SettingsSnapshot?
+    @Published public var notifySettings: NotifySettings?
+    @Published public var settingsNotice: String?
+    /// The Devices section (s433): LAN state, paired devices, the code on show, and what the last action said.
+    @Published public var lanStatus: LanStatus?
+    @Published public var devices: DeviceList?
+    @Published public var pairOffer: PairOffer?
+    @Published public var devicesNotice: String?
     /// The high-frequency state (last sequence number, live log, clock offset) lives in its own
     /// object, so a change to it redraws only the views that show it, never the sidebar rows.
     public let live = LiveState()
@@ -415,6 +425,8 @@ public final class MonitorModel: ObservableObject {
     }
 
     public func go(_ p: Page) { history.go(p); subscribe?() }
+    /// Pick the CPU graph's span and ask the daemon for that range.
+    public func setCpuSpan(_ s: CpuSpan) { cpu.setSpan(s); subscribe?() }
     public func goBack() { history.goBack(); subscribe?() }
     public func goForward() { history.goForward(); subscribe?() }
     public func goHome() { history.goHome(); subscribe?() }
@@ -614,7 +626,14 @@ public final class MonitorModel: ObservableObject {
 
     public func cancel(_ task: UInt64) { command { $0.cancel = .with { $0.task = task } } }
     public func retry(_ task: UInt64, from: String = "", seen: UInt64 = 0) { command { $0.retry = .with { $0.task = task; $0.from = from; $0.seen = seen } } }
-    public func approve(_ task: UInt64) { command { $0.approve = .with { $0.task = task } } }
+    public func approve(_ task: UInt64, priority: String = "") { command { $0.approve = .with { $0.task = task; $0.priority = priority } } }
+    /// Put a proposed task aside; it comes back only by hand.
+    public func deferTask(_ task: UInt64) { command { $0.defer = .with { $0.task = task } } }
+    /// Move a deferred task back to proposed.
+    public func undefer(_ task: UInt64) { command { $0.undefer = .with { $0.task = task } } }
+    /// The priorities the approval picker offers; it starts at `defaultApprovalPriority`.
+    public static let approvalPriorities = ["urgent", "high", "normal", "low"]
+    public static let defaultApprovalPriority = "normal"
     /// The tasks the Add blocker picker offers for `row`: any task in the sidebar that is not
     /// itself, not already a blocker, and could still land (not landed, canceled or failed).
     public func blockerCandidates(for row: TaskRow) -> [TaskRow] {
@@ -654,8 +673,8 @@ public final class MonitorModel: ObservableObject {
     }
 
     /// What Approve sends for an approval: the held diff's hash when there is one, else a plain approve.
-    public func approve(_ task: UInt64, _ a: Mason_V1_Approval) {
-        if a.diffHash.isEmpty { approve(task) } else { approveHold(task, diffHash: a.diffHash) }
+    public func approve(_ task: UInt64, _ a: Mason_V1_Approval, priority: String = MonitorModel.defaultApprovalPriority) {
+        if a.diffHash.isEmpty { approve(task, priority: priority) } else { approveHold(task, diffHash: a.diffHash) }
     }
 
     /// The first task that needs the owner, in the Home queue's order.
@@ -831,8 +850,51 @@ public final class MonitorModel: ObservableObject {
         return String(t.dropFirst().dropLast())
     }
 
-    public func raw(_ method: String, _ path: String, json: String = "") {
-        command { $0.raw = .with { $0.method = method; $0.path = path; $0.json = json } }
+    /// Ask for the Settings page's data: the project's settings and the notification routes.
+    public func loadSettings() {
+        let p = editorProject
+        if !p.isEmpty { raw("GET", SettingsPayload.settingsPath(project: p), id: "settings") }
+        raw("GET", "/notify/settings", id: "notify-settings")
+    }
+    /// Change one project setting (a body from `SettingsPayload`); the page reloads on the answer.
+    public func changeProjectSetting(_ body: String) {
+        settingsNotice = nil
+        raw("POST", SettingsPayload.settingsPath(project: editorProject), json: body, id: "settings-save")
+    }
+    public func changeNotifySetting(_ body: String) {
+        settingsNotice = nil
+        raw("POST", "/notify/settings", json: body, id: "notify-save")
+    }
+    public func testNotification(channel: String) {
+        settingsNotice = nil
+        raw("POST", "/notify/test", json: SettingsPayload.testNotification(channel: channel), id: "notify-test")
+    }
+    public func runSchedule(_ name: String) {
+        settingsNotice = nil
+        raw("POST", "/schedules/run", json: SettingsPayload.runSchedule(project: editorProject, name: name), id: "schedule-run")
+    }
+
+    /// Ask for the LAN state and the paired devices.
+    public func loadDevices() {
+        raw("GET", "/lan", id: "lan")
+        raw("GET", "/devices", id: "devices")
+    }
+    /// Make a pairing code for a new device; `role` is "owner" or "viewer".
+    public func issuePairCode(role: String) {
+        devicesNotice = nil
+        raw("POST", "/pair/codes", json: "{\"role\":\"\(role)\"}", id: "pair-code")
+    }
+    public func closePairing() { pairOffer = nil }
+    public func revokeDevice(_ id: UInt64) {
+        devicesNotice = nil
+        raw("POST", "/devices/\(id)/revoke", json: "{}", id: "device-revoke:\(id)")
+    }
+
+    public func raw(_ method: String, _ path: String, json: String = "", id: String = "") {
+        command {
+            if !id.isEmpty { $0.id = id }
+            $0.raw = .with { $0.method = method; $0.path = path; $0.json = json }
+        }
     }
 
     // MARK: the pipeline editor (Part 18)
@@ -1029,6 +1091,8 @@ public final class MonitorModel: ObservableObject {
         case .home(let x)?:
             home = x
             cpu.update(x)
+        case .cpuHistory(let x)?:
+            cpu.update(history: x)
         case .taskDetail(let x)?:
             // A different task's page starts its log over; the same task's view carries the tail again.
             taskDetail = x
@@ -1039,6 +1103,14 @@ public final class MonitorModel: ObservableObject {
         case .usage(let x)?: usage = x
         case .editor(let x)?: editor = x
         default: break
+        }
+    }
+
+    static func settingsDone(_ id: String) -> String {
+        switch id {
+        case "notify-test": return "Test notification sent."
+        case "schedule-run": return "Started."
+        default: return "Saved. It applies now, with no restart."
         }
     }
 
@@ -1069,6 +1141,23 @@ public final class MonitorModel: ObservableObject {
         }
         if r.id == "health", r.ok { health = HealthSnapshot(json: r.json) }
         if r.id == "introspection", r.ok { introspection = IntrospectionSnapshot(json: r.json) }
+        if r.id == "settings", r.ok { settings = SettingsSnapshot(json: r.json) }
+        if r.id == "lan", r.ok { lanStatus = LanStatus(json: r.json) }
+        if r.id == "devices", r.ok { devices = DeviceList(json: r.json) }
+        if r.id == "pair-code" {
+            if r.ok {
+                pairOffer = PairOffer(json: r.json, nowMs: UInt64(Date().timeIntervalSince1970 * 1000))
+                if pairOffer == nil { devicesNotice = "The daemon sent a pairing code this monitor could not read." }
+            } else { devicesNotice = r.error }
+        }
+        if r.id.hasPrefix("device-revoke:") {
+            if r.ok { devicesNotice = "Revoked."; loadDevices() } else { devicesNotice = r.error }
+        }
+        if r.id == "notify-settings", r.ok { notifySettings = NotifySettings(json: r.json) }
+        if ["settings-save", "notify-save", "notify-test", "schedule-run"].contains(r.id) {
+            settingsNotice = r.ok ? Self.settingsDone(r.id) : r.error
+            if r.ok, r.id == "settings-save" || r.id == "notify-save" { loadSettings() }
+        }
     }
 
     public func disconnected(now: Date = Date()) {

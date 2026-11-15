@@ -14,7 +14,7 @@ use mason_store::state_name;
 
 /// The sections of the sidebar, in order. Needs-you comes first and is not a
 /// state of its own: it is `needs_attention`.
-const ORDER: [State; 10] = [
+const ORDER: [State; 11] = [
     State::NeedsAttention,
     State::Queued,
     State::Exploring,
@@ -23,6 +23,7 @@ const ORDER: [State; 10] = [
     State::Review,
     State::Landing,
     State::Proposed,
+    State::Deferred,
     State::Failed,
     State::Landed,
 ];
@@ -43,6 +44,7 @@ fn title_of(s: State) -> &'static str {
         State::Review => "Review",
         State::Landing => "Landing",
         State::Proposed => "Proposed",
+        State::Deferred => "Deferred",
         State::Failed => "Failed",
         State::Canceled => "Canceled",
         State::Landed => "Landed",
@@ -70,6 +72,7 @@ fn tooltip_of(s: State) -> &'static str {
         State::Review => "A reviewer is looking at the change.",
         State::Landing => "The change is being merged.",
         State::Proposed => "Filed by an agent or a tracker, waiting for your approval.",
+        State::Deferred => "Put aside by you. It comes back only when you approve, reject or move it back to Proposed.",
         State::Failed => "Stopped, and needs a decision: retry or cancel.",
         State::Landed => "Merged.",
         State::Canceled => "Stopped on purpose.",
@@ -225,7 +228,8 @@ impl<'a> Ctx<'a> {
     /// it are refused, and every client draws exactly these buttons.
     pub fn allowed_actions(&self, t: &Task) -> Vec<String> {
         let mut a: Vec<&str> = match t.state {
-            State::Proposed => vec!["approve", "reject", "edit"],
+            State::Proposed => vec!["approve", "defer", "reject", "edit"],
+            State::Deferred => vec!["approve", "reject", "undefer"],
             State::Queued => vec!["cancel"],
             State::Exploring | State::Developing | State::Review => {
                 vec!["cancel", "retry", "open_session"]
@@ -790,7 +794,7 @@ impl<'a> Ctx<'a> {
             state: state_name(s).into(),
             title: title_of(s).into(),
             count: tasks.len() as u32,
-            collapsed: is_history(s),
+            collapsed: is_history(s) || s == State::Deferred,
             rows: tasks
                 .iter()
                 .take(if is_history(s) {
@@ -851,6 +855,7 @@ impl<'a> Ctx<'a> {
         for s in u.shares.iter_mut().filter(|s| s.kind == "task") {
             if let Some(t) = self.w.tasks.get(&TaskId(s.task)) {
                 s.title = t.title.clone();
+                s.project = self.project_name(t);
             }
         }
         u
@@ -1127,6 +1132,7 @@ impl<'a> Ctx<'a> {
                 .filter(|t| t.state == State::Landing && self.matches(t, project))
                 .map(|t| self.row(t))
                 .collect(),
+            items: self.landing_items(project),
             modes,
             trackers,
             batches: self
@@ -1157,6 +1163,87 @@ impl<'a> Ctx<'a> {
             freezes,
             queue_idle_ms: idle,
         }
+    }
+
+    /// Each landing task's status: in a running batch (phase, CI, time) or queued (position and
+    /// why). Read through existing accessors; nothing is changed.
+    fn landing_items(&self, project: &str) -> Vec<TaskLanding> {
+        let batches = self.d.store.batches(None, 200).unwrap_or_default();
+        let freezes = self.d.store.freezes().unwrap_or_default();
+        let ids = |s: &str| -> Vec<u64> { s.split(',').filter_map(|x| x.parse().ok()).collect() };
+        let mut out = vec![];
+        for (pid, p) in &self.d.projects() {
+            if !project.is_empty() && p.id != project {
+                continue;
+            }
+            let live: Vec<_> = batches
+                .iter()
+                .filter(|b| b.project == p.id && b.finished_at.is_none())
+                .collect();
+            let frozen = freezes
+                .iter()
+                .find(|f| f.project == p.id)
+                .map(|f| f.fix_task);
+            let cfg = crate::landing::load_config(self.d, *pid).ok();
+            let mut seen = std::collections::BTreeSet::new();
+            for b in &live {
+                let (index, phase) = batch_phase(&b.phase);
+                let ci = self
+                    .d
+                    .landing
+                    .ci
+                    .get(b.id)
+                    .map(|c| crate::batch_ci::to_proto(&c).state)
+                    .unwrap_or_default();
+                let done: Vec<u64> = ids(&b.landed).into_iter().chain(ids(&b.parked)).collect();
+                for id in ids(&b.tasks).into_iter().filter(|i| !done.contains(i)) {
+                    let Some(t) = self.w.tasks.get(&TaskId(id)) else {
+                        continue;
+                    };
+                    seen.insert(id);
+                    out.push(TaskLanding {
+                        task: id,
+                        key: format!("#{id}"),
+                        title: t.title.clone(),
+                        project: p.id.clone(),
+                        status: "in_batch".into(),
+                        batch: b.id,
+                        phase: phase.into(),
+                        phase_index: index,
+                        phase_total: LANDING_PHASES,
+                        phase_ms: self.now.saturating_sub(b.at),
+                        ci_state: ci.clone(),
+                        ..Default::default()
+                    });
+                }
+            }
+            let mut position = 0;
+            for id in self.d.landing().queued(*pid) {
+                let Some(t) = self.w.tasks.get(&id) else {
+                    continue;
+                };
+                if !seen.insert(id.0) {
+                    continue;
+                }
+                position += 1;
+                out.push(TaskLanding {
+                    task: id.0,
+                    key: format!("#{}", id.0),
+                    title: t.title.clone(),
+                    project: p.id.clone(),
+                    status: "queued".into(),
+                    position,
+                    why: queued_why(
+                        frozen,
+                        self.d.landing().draining(),
+                        live.len(),
+                        cfg.as_ref().map(|c| (c.parallel, c.window.as_secs())),
+                    ),
+                    ..Default::default()
+                });
+            }
+        }
+        out
     }
 
     pub fn usage(&self) -> UsageView {
@@ -1315,7 +1402,14 @@ impl<'a> Ctx<'a> {
         }
     }
 
-    pub fn view(&self, kind: ViewKind, project: &str, task: u64, step: &str) -> Option<View> {
+    pub fn view(
+        &self,
+        kind: ViewKind,
+        project: &str,
+        task: u64,
+        step: &str,
+        cpu_span_ms: u64,
+    ) -> Option<View> {
         use mason_protocol::view::Body;
         let body = match kind {
             ViewKind::Header => Body::Header(self.header(project)),
@@ -1325,6 +1419,14 @@ impl<'a> Ctx<'a> {
             ViewKind::Landing => Body::Landing(self.landing(project)),
             ViewKind::Usage => Body::Usage(self.usage()),
             ViewKind::Editor => Body::Editor(self.editor(project, step)),
+            ViewKind::CpuHistory => Body::CpuHistory(self.d.cpu_history(
+                self.now,
+                if cpu_span_ms == 0 {
+                    3_600_000
+                } else {
+                    cpu_span_ms
+                },
+            )),
             _ => return None,
         };
         Some(View { body: Some(body) })
@@ -1423,6 +1525,77 @@ pub fn summarize(kind: &EventKind) -> (String, String, u64) {
     };
     let _ = card::ASK_MAX;
     (name, summary, task)
+}
+
+/// Phases a batch goes through while landing: forming, integrating, running suites, landing.
+const LANDING_PHASES: u32 = 4;
+
+/// The batch row's phase as (index, words), matching the progress cells in landing.rs.
+fn batch_phase(phase: &str) -> (u32, &'static str) {
+    match phase {
+        "merged" => (1, "integrating"),
+        "verifying" | "red" => (2, "running suites"),
+        "promoting" => (3, "landing"),
+        "landed" => (LANDING_PHASES, "landed"),
+        _ => (0, "forming"),
+    }
+}
+
+/// Why a queued task waits. `frozen` is the freeze's fix task when the project is frozen;
+/// `config` is (batches at once, window seconds), absent when landing.toml is unreadable.
+fn queued_why(
+    frozen: Option<Option<u64>>,
+    paused: bool,
+    live: usize,
+    config: Option<(usize, u64)>,
+) -> String {
+    if let Some(fix) = frozen {
+        return match fix {
+            Some(n) => format!("frozen until #{n} lands"),
+            None => "frozen".into(),
+        };
+    }
+    if paused {
+        return "paused".into();
+    }
+    if live > 0 && config.is_none_or(|(par, _)| live >= par.max(1)) {
+        return format!("behind {live} batch{}", if live == 1 { "" } else { "es" });
+    }
+    match config {
+        Some((_, w)) if w > 0 => format!("waiting for the {w}s window to close"),
+        _ => "waiting for the next batch".into(),
+    }
+}
+
+#[cfg(test)]
+mod batch_phase_tests {
+    use super::*;
+
+    #[test]
+    fn suites_are_phase_two_of_four() {
+        assert_eq!(batch_phase("verifying"), (2, "running suites"));
+        assert_eq!(batch_phase("forming"), (0, "forming"));
+        assert_eq!(batch_phase("promoting").0, 3);
+    }
+
+    #[test]
+    fn a_queued_task_says_why_it_waits() {
+        assert_eq!(queued_why(None, false, 1, Some((1, 30))), "behind 1 batch");
+        assert_eq!(queued_why(None, false, 2, Some((2, 0))), "behind 2 batches");
+        assert_eq!(
+            queued_why(Some(Some(12)), false, 1, Some((1, 0))),
+            "frozen until #12 lands"
+        );
+        assert_eq!(queued_why(None, true, 0, None), "paused");
+        assert_eq!(
+            queued_why(None, false, 0, Some((1, 30))),
+            "waiting for the 30s window to close"
+        );
+        assert_eq!(
+            queued_why(None, false, 1, Some((2, 30))),
+            "waiting for the 30s window to close"
+        );
+    }
 }
 
 /// Whether a task is waiting: the same activities `why_waiting` explains.
