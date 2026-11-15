@@ -613,7 +613,7 @@ fn execute(c: &Ctx, step: State) {
             && crate::suites::builds_per_suite(&c.project, &c.def, &c.step, &c.branch))
     {
         // A test step with a build queues phase by phase in `command_job`, and one whose
-        // suites build, suite by suite in `suites::run`.
+        // suites build or need the whole machine, suite by suite in `suites::run`.
         match acquire(c) {
             Ok(l) => *c.lease.lock().unwrap_or_else(|e| e.into_inner()) = Some(l),
             Err(_) => return, // the task was cancelled or retried while it waited
@@ -862,6 +862,29 @@ pub(crate) fn acquire_needs_while(
     needs: mason_scheduler::Needs,
     wanted: &dyn Fn() -> bool,
 ) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
+    acquire_needs_as(c, needs, wanted, false, None)
+}
+
+/// [`acquire_needs_while`] with how long the work is expected to hold the lease (s385);
+/// `beside`: one of several leases the step holds at once (s345), recorded beside the
+/// step's own so it never takes the step's place in the broker.
+pub(crate) fn acquire_needs_expecting(
+    c: &Ctx,
+    needs: mason_scheduler::Needs,
+    wanted: &dyn Fn() -> bool,
+    beside: bool,
+    expected_ms: Option<u64>,
+) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
+    acquire_needs_as(c, needs, wanted, beside, expected_ms)
+}
+
+fn acquire_needs_as(
+    c: &Ctx,
+    needs: mason_scheduler::Needs,
+    wanted: &dyn Fn() -> bool,
+    beside: bool,
+    expected_ms: Option<u64>,
+) -> Result<crate::sched::Lease, crate::sched::Cancelled> {
     let d = &c.d;
     // Device pools are sized by what the provider lists, never by a default.
     if needs.amounts.keys().any(|n| n.starts_with("device:")) {
@@ -886,7 +909,7 @@ pub(crate) fn acquire_needs_while(
     };
     let mut waited = false;
     let asked = needs.clone();
-    let lease = d.broker.acquire(
+    let lease = d.broker.acquire_expecting(
         c.task,
         &format!("#{}", c.task.0),
         rank,
@@ -899,6 +922,8 @@ pub(crate) fn acquire_needs_while(
                 class: Some(crate::targets::wait_class(d, &asked, c.task)),
             });
         },
+        beside,
+        expected_ms,
     )?;
     if waited {
         c.emit(EventKind::WaitEnded { task: c.task });
@@ -2497,6 +2522,16 @@ fn agent_job(c: &Ctx) {
         .as_ref()
         .map(|t| crate::cmdreuse::command_key(t.build.as_deref(), &t.test));
     let deadline_extra = mason_adapter_api::DeadlineExtra::default();
+    // The agent's own `mason run` commands that wait in the queue add to it too (s363),
+    // until this step ends.
+    c.d.broker.credit_waits_to(c.task, deadline_extra.clone());
+    struct StopCrediting<'a>(&'a Ctx);
+    impl Drop for StopCrediting<'_> {
+        fn drop(&mut self) {
+            self.0.d.broker.stop_crediting_waits(self.0.task);
+        }
+    }
+    let _credit = StopCrediting(c);
     let checks = Box::new(TestChecks {
         cmd: tests_cmd,
         wt: c.wt.clone(),
