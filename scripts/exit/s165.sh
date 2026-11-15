@@ -71,14 +71,14 @@ t=$(m task add "Flaky once" --project flaky --explored --body "x" | task_id)
 wait_for 180 "the task to land" state_is "$t" landed
 [ "$(cat "$root/flaky.args")" = "$(printf '\nalpha')" ] || fail "the rerun's arguments were: $(cat "$root/flaky.args")"
 [ "$(cat "$root/flaky.runs")" = 2 ] || fail "the command ran $(cat "$root/flaky.runs") times"
-m health | grep -q 'flaky::alpha' || fail "mason health does not list alpha as flaky"
-m health | grep -q 'flaky::beta' && fail "beta did not fail and must not be listed"
+m health | grep -q 'test::alpha' || fail "mason health does not list alpha as flaky"
+m health | grep -q 'test::beta' && fail "beta did not fail and must not be listed"
 m health | grep 'alpha' | sed 's/^/   /'
 echo "   landed; alpha is flaky"
 
 echo "== 2. alpha fails every time: the task is sent back, and the feedback names alpha"
 t=$(m task add "Broken" --project broken --explored --body "x" | task_id)
-wait_for 180 "the feedback" has_feedback "$t" 'failed every time: alpha'
+wait_for 180 "the feedback" has_feedback "$t" 'failed on all 2 runs: alpha'
 st=$(m task show "$t" --json | jq_state)
 [ "$st" != landed ] || fail "a red task landed"
 grep -q beta "$root/d/t/$t/feedback.txt" && fail "the feedback names beta, which passed"
