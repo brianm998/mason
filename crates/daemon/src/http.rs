@@ -1585,7 +1585,7 @@ fn debt_json(x: &mason_store::DebtRow) -> Value {
     json!({
         "id": x.id, "task": x.task, "project": x.project, "scope": x.scope,
         "reason": x.reason, "owner": x.owner, "deferred": x.deferred,
-        "status": x.status, "at": x.at,
+        "status": x.status, "at": x.at, "how": x.how, "landed": x.landed,
     })
 }
 

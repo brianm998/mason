@@ -2200,6 +2200,9 @@ fn main() {
                         },
                         x["reason"].as_str().unwrap_or("")
                     );
+                    if let Some(how) = x["how"].as_str().filter(|h| !h.is_empty()) {
+                        println!("      paid: {how}");
+                    }
                 }
             }
             Some("run") => {

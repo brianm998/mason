@@ -559,9 +559,21 @@ impl Replayer {
                     .or_default() += 1;
             }
             EventKind::Retried { task, auto, .. } if in_window => {
-                let class = match w.tasks.get(task).and_then(|t| t.failure_class) {
-                    Some(FailClass::Code) => "code",
-                    Some(FailClass::Outside) => "outside",
+                let class = match w.tasks.get(task) {
+                    Some(t) => match (t.state, t.failure_class) {
+                        (_, Some(FailClass::Code)) => "code",
+                        (_, Some(FailClass::Outside)) => "outside",
+                        // A failure logged before classes existed: classify its text.
+                        (State::Failed, None) => match t.failure.as_deref() {
+                            Some(f) => match FailClass::classify(t.state, f) {
+                                FailClass::Outside => "outside",
+                                FailClass::Code => "code",
+                            },
+                            None => "unclassified",
+                        },
+                        (State::NeedsAttention, None) => "needs_attention",
+                        (_, None) => "running",
+                    },
                     None => "unclassified",
                 };
                 let e = r
@@ -670,6 +682,7 @@ fn stats_from(d: &Daemon, rep: &Replay, project: Option<&str>, from: u64, to: u6
             by
         },
         active_ms: sumo(&rep.state_ms),
+        compile_cap: d.broker.compile_capacity(),
     }
 }
 

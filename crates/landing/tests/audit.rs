@@ -138,6 +138,53 @@ fn lines_the_base_itself_removed_later_are_not_the_tasks_to_keep() {
     assert_eq!(audit(&p.path, &mb, &b, &t, None, &t, &[]).unwrap().len(), 1);
 }
 
+/// Audit, then pair what was dropped with what replaced it, as the review step is shown.
+fn pairs(base: &str, result: &str) -> (Vec<String>, Vec<mason_landing::audit::Replaced>) {
+    let repo = Repo::new();
+    let p = &repo.path;
+    let mb = commit(p, "f.rs", START);
+    let b = commit(p, "f.rs", base);
+    sh(p, &["checkout", "-q", "-b", "task", &mb]);
+    let t = commit(p, "f.rs", START);
+    let r = commit(p, "f.rs", result);
+    let d = audit(p, &mb, &b, &t, None, &r, &[]).unwrap();
+    let names = d.iter().map(|x| x.line.clone()).collect();
+    (
+        names,
+        mason_landing::audit::replacements(p, &b, &r, &d).unwrap(),
+    )
+}
+
+#[test]
+fn a_landed_line_rewritten_in_place_is_paired_and_settles_by_removes() {
+    let base = "fn run() {\n    setup();\n    pin_value(\"alpha\", 1);\n    finish();\n}\n";
+    let result = "fn run() {\n    setup();\n    pin_value(\"beta\", 2);\n    finish();\n}\n";
+    let (dropped, pairs) = pairs(base, result);
+    assert_eq!(dropped, vec!["    pin_value(\"alpha\", 1);"]);
+    assert_eq!(pairs.len(), 1);
+    assert_eq!(pairs[0].replacement, "    pin_value(\"beta\", 2);");
+    // The reviewer's approval declares it: the audit then reports nothing.
+    let repo = Repo::new();
+    let d = repo.run(
+        base,
+        START,
+        result,
+        &[Removal {
+            file: "f.rs".into(),
+            line: pairs[0].line.clone(),
+        }],
+    );
+    assert!(d.is_empty());
+}
+
+#[test]
+fn a_landed_line_simply_lost_has_no_replacement() {
+    let base = "fn run() {\n    setup();\n    pin_value(\"alpha\", 1);\n    finish();\n}\n";
+    let (dropped, pairs) = pairs(base, START);
+    assert_eq!(dropped.len(), 1);
+    assert!(pairs.is_empty());
+}
+
 #[test]
 fn a_line_the_task_moved_to_a_file_it_split_off_is_kept() {
     // The base adds a test to f.rs; the task splits f.rs, moving everything, the new test
