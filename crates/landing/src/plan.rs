@@ -135,6 +135,62 @@ pub fn bisect(ids: &[u64], red: &mut dyn FnMut(&[u64]) -> bool) -> Bisect {
     }
 }
 
+/// What splitting a red batch found.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Pin {
+    /// Each group reproduces the red and nothing smaller in it does: a group of one is a
+    /// task that breaks it alone, a larger group tasks that break it only together. Tasks
+    /// in no group are not to blame.
+    Groups(Vec<Vec<u64>>),
+    /// Every task reproduces it alone (of a batch of more than one): the red is the
+    /// base's, not any task's.
+    Base,
+}
+
+/// Split a red batch (`ids`, known red as a whole) to find who breaks it. `red(ids)` runs
+/// the suites over just those tasks and says whether they fail. A half that is red is
+/// searched further; if neither half is red the red needs several tasks, and the set is
+/// shrunk one task at a time to the ones that are needed.
+pub fn pin(ids: &[u64], red: &mut dyn FnMut(&[u64]) -> bool) -> Pin {
+    let mut groups: Vec<Vec<u64>> = vec![];
+    pin_into(ids, red, &mut groups);
+    if ids.len() > 1 && groups.len() == ids.len() && groups.iter().all(|g| g.len() == 1) {
+        return Pin::Base;
+    }
+    Pin::Groups(groups)
+}
+
+fn pin_into(ids: &[u64], red: &mut dyn FnMut(&[u64]) -> bool, out: &mut Vec<Vec<u64>>) {
+    match ids {
+        [] => {}
+        [one] => out.push(vec![*one]),
+        _ => {
+            let (a, b) = ids.split_at(ids.len() / 2);
+            let (ra, rb) = (red(a), red(b));
+            if !ra && !rb {
+                let mut cur = ids.to_vec();
+                for id in ids {
+                    if cur.len() <= 2 {
+                        break;
+                    }
+                    let without: Vec<u64> = cur.iter().copied().filter(|x| x != id).collect();
+                    if red(&without) {
+                        cur = without;
+                    }
+                }
+                out.push(cur);
+                return;
+            }
+            if ra {
+                pin_into(a, red, out);
+            }
+            if rb {
+                pin_into(b, red, out);
+            }
+        }
+    }
+}
+
 /// After the base moved under a verified batch, must the suites run again?
 /// Yes if a moved path is one the batch touches, or impacts a suite the batch
 /// selected. `impacts` maps a path to the suites it impacts.
@@ -247,6 +303,31 @@ mod tests {
         // Red only when 1 and 4 are together.
         let r = bisect(&[1, 2, 3, 4], &mut |s| s.contains(&1) && s.contains(&4));
         assert_eq!(r, Bisect::Unclear);
+    }
+
+    #[test]
+    fn pin_names_the_one_task_that_breaks_it() {
+        let r = pin(&[1, 2, 3], &mut |s| s.contains(&2));
+        assert_eq!(r, Pin::Groups(vec![vec![2]]));
+    }
+
+    #[test]
+    fn pin_names_tasks_that_break_it_only_together() {
+        let r = pin(&[1, 2, 3, 4], &mut |s| s.contains(&2) && s.contains(&4));
+        assert_eq!(r, Pin::Groups(vec![vec![2, 4]]));
+        let r = pin(&[1, 2, 3], &mut |s| s.contains(&1) && s.contains(&3));
+        assert_eq!(r, Pin::Groups(vec![vec![1, 3]]));
+    }
+
+    #[test]
+    fn pin_names_two_independent_culprits() {
+        let r = pin(&[1, 2, 3, 4], &mut |s| s.contains(&1) || s.contains(&4));
+        assert_eq!(r, Pin::Groups(vec![vec![1], vec![4]]));
+    }
+
+    #[test]
+    fn a_red_every_task_reproduces_is_the_bases() {
+        assert_eq!(pin(&[1, 2, 3], &mut |_| true), Pin::Base);
     }
 
     #[test]
