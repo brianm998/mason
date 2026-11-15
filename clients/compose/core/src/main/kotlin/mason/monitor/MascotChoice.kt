@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 package mason.monitor
 
+import mason.v1.StateCount
+
 /**
  * Which mascot picture a screen shows, chosen only from the daemon's own state. The ids are
  * names in clients/mascot.toml; the views load them with `Mascot.illustration`, which gives
@@ -40,7 +42,7 @@ val MonitorModel.busiestState: Pair<String, Int>?
         if (!connected) return null
         val counts = header?.counts ?: return null
         return counts.filter { it.count > 0 && it.state in ACTIVE_STATES_IN_ORDER }
-            .maxWithOrNull(compareBy({ it.count }, { ACTIVE_STATES_IN_ORDER.indexOf(it.state) }))
+            .maxWithOrNull(compareBy<StateCount>({ it.count }, { ACTIVE_STATES_IN_ORDER.indexOf(it.state) }))
             ?.let { it.state to it.count }
     }
 

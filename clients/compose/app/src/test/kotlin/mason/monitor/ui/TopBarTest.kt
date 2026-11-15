@@ -57,7 +57,7 @@ class TopBarTest {
         val m = model("testing" to 7, "developing" to 3, "landed" to 40)
         assertEquals("testing", m.topBarMascot?.id)
         assertNotNull(Mascot.illustration("testing"))
-        assertEquals(85.dp, topBarMascotSide(100.dp, 1000.dp))
-        assertEquals(50.dp, topBarMascotSide(96.dp, 50.dp))
+        assertEquals(85f, topBarMascotSide(100.dp, 1000.dp).value, 0.01f)
+        assertEquals(50f, topBarMascotSide(96.dp, 50.dp).value, 0.01f)
     }
 }
