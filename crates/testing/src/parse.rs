@@ -526,7 +526,7 @@ mod build_failure_names {
         assert_eq!(names(&a), ["/src/View.swift:42", "build", "build"]);
         assert_eq!(names(&a), names(&b));
         assert!(
-            a.iter().all(|c| c.status == Status::Fail),
+            a.iter().all(|c| matches!(c.status, Status::Fail(_))),
             "counts and verdicts unchanged"
         );
     }
