@@ -149,7 +149,15 @@ fn compute(d: &Daemon, sub: &Sub) -> (u64, Vec<View>) {
     let views = sub
         .views
         .iter()
-        .filter_map(|k| ctx.view(*k, &sub.project, sub.task, &sub.editor_step, sub.cpu_span_ms))
+        .filter_map(|k| {
+            ctx.view(
+                *k,
+                &sub.project,
+                sub.task,
+                &sub.editor_step,
+                sub.cpu_span_ms,
+            )
+        })
         .collect();
     (seq, views)
 }

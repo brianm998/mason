@@ -157,7 +157,10 @@ pub fn parse_span(s: &str) -> Option<u64> {
         'd' => (&s[..s.len() - 1], 86_400_000),
         _ => (s, 1),
     };
-    num.parse::<u64>().ok()?.checked_mul(mult).filter(|v| *v > 0)
+    num.parse::<u64>()
+        .ok()?
+        .checked_mul(mult)
+        .filter(|v| *v > 0)
 }
 
 #[cfg(test)]
@@ -188,7 +191,10 @@ mod tests {
         let mut r = CpuRing::default();
         let n = FINE_CAP as u64 + 10;
         for i in 1..=n {
-            r.push(i * FINE_STEP_MS, &usage(100, &[("task", 1, i as u32 % 900 + 1)]));
+            r.push(
+                i * FINE_STEP_MS,
+                &usage(100, &[("task", 1, i as u32 % 900 + 1)]),
+            );
         }
         let h = r.query(n * FINE_STEP_MS, 3_600_000);
         assert_eq!(h.points.len(), FINE_CAP);
@@ -200,7 +206,10 @@ mod tests {
     fn a_span_returns_only_readings_inside_it_in_order() {
         let mut r = CpuRing::default();
         for i in 1..=100u64 {
-            r.push(i * FINE_STEP_MS, &usage(500, &[("task", 7, 300), ("other", 0, 200)]));
+            r.push(
+                i * FINE_STEP_MS,
+                &usage(500, &[("task", 7, 300), ("other", 0, 200)]),
+            );
         }
         let now = 100 * FINE_STEP_MS;
         let h = r.query(now, 300_000);
@@ -220,7 +229,10 @@ mod tests {
         let total = 3 * 3600 / 5;
         for i in 1..=total as u64 {
             let p = if i % 2 == 0 { 100 } else { 201 };
-            r.push(i * FINE_STEP_MS, &usage(400, &[("task", 3, p), ("masond", 0, 50)]));
+            r.push(
+                i * FINE_STEP_MS,
+                &usage(400, &[("task", 3, p), ("masond", 0, 50)]),
+            );
         }
         let now = total as u64 * FINE_STEP_MS;
         let h = r.query(now, 6 * 3_600_000);
@@ -230,11 +242,18 @@ mod tests {
             assert!(p.at_ms > prev || prev == 0);
             prev = p.at_ms;
         }
-        let full: Vec<&CpuPoint> = h.points.iter().filter(|p| p.at_ms % MINUTE_MS == 0 && p.shares.len() == 2).collect();
+        let full: Vec<&CpuPoint> = h
+            .points
+            .iter()
+            .filter(|p| p.at_ms % MINUTE_MS == 0 && p.shares.len() == 2)
+            .collect();
         assert!(full.len() > 100);
         for p in full.iter().take(100) {
             let t3 = p.shares.iter().find(|s| s.task == 3).unwrap().permille;
-            assert!((148..=153).contains(&t3), "mean of 100 and 201 is 150.5, got {t3}");
+            assert!(
+                (148..=153).contains(&t3),
+                "mean of 100 and 201 is 150.5, got {t3}"
+            );
             assert_eq!(p.busy_permille, 400);
         }
     }

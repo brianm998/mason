@@ -9,7 +9,11 @@ import java.security.cert.X509Certificate
 import javax.net.ssl.X509TrustManager
 
 /** What `mason pair` shows as a QR code: `mason://pair?host=H&port=P&fp=SHA256HEX&code=12345678`. */
-data class PairUrl(val host: String, val port: Int, val fingerprint: String, val code: String) {
+data class PairUrl(
+    val host: String, val port: Int, val fingerprint: String, val code: String,
+    /** Other names the daemon can be reached at (`alt=` in the URL), after `host`. */
+    val alternates: List<String> = emptyList(),
+) {
     companion object {
         /** null for anything that is not a well-formed pairing address. */
         fun parse(text: String): PairUrl? {
@@ -18,12 +22,14 @@ data class PairUrl(val host: String, val port: Int, val fingerprint: String, val
             val q = (uri.rawQuery ?: return null).split("&").mapNotNull {
                 val i = it.indexOf('=')
                 if (i < 0) null else it.substring(0, i) to URLDecoder.decode(it.substring(i + 1), "UTF-8")
-            }.toMap()
-            val host = q["host"]?.takeIf { it.isNotEmpty() } ?: return null
-            val port = q["port"]?.toIntOrNull()?.takeIf { it in 1..65535 } ?: return null
-            val fp = q["fp"]?.lowercase()?.takeIf(Pin::isFingerprint) ?: return null
-            val code = q["code"]?.takeIf(Pin::isCode) ?: return null
-            return PairUrl(host, port, fp, code)
+            }
+            val m = q.toMap()
+            val alts = q.filter { it.first == "alt" && it.second.isNotEmpty() }.map { it.second }
+            val host = m["host"]?.takeIf { it.isNotEmpty() } ?: return null
+            val port = m["port"]?.toIntOrNull()?.takeIf { it in 1..65535 } ?: return null
+            val fp = m["fp"]?.lowercase()?.takeIf(Pin::isFingerprint) ?: return null
+            val code = m["code"]?.takeIf(Pin::isCode) ?: return null
+            return PairUrl(host, port, fp, code, alts)
         }
     }
 }
@@ -56,7 +62,20 @@ class PinningTrustManager(private val pinned: String) : X509TrustManager {
 }
 
 /** A paired daemon: where it is, the certificate to expect, and our token. */
-data class PairedDaemon(val host: String, val port: Int, val fingerprint: String, val token: String, val role: String)
+data class PairedDaemon(
+    val host: String, val port: Int, val fingerprint: String, val token: String, val role: String,
+    val alternates: List<String> = emptyList(),
+) {
+    /** Every name, `host` first. */
+    val hosts: List<String> get() = listOf(host) + alternates
+}
+
+/** The order to try a paired daemon's addresses in. Pure. */
+object Reach {
+    /** The mDNS-resolved endpoint first (when there is one), then `.local`, then each extra host; no repeats. */
+    fun order(paired: PairedDaemon, bonjour: String?): List<String> =
+        (listOfNotNull(bonjour) + paired.hosts).filter { it.isNotEmpty() }.distinct()
+}
 
 /** Where tokens live (the Keystore-backed store on Android). Keyed by fingerprint: another certificate means pairing again. */
 interface TokenStore {

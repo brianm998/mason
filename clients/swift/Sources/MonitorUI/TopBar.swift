@@ -149,8 +149,8 @@ struct BannersView: View {
                 }
             }
             if let text = monitorUpdateText {
-                updateRow(text, button: model.updateAvailable && model.updating == nil ? "Update monitor" : nil, id: "monitor-update", icon: "update") {
-                    model.updateMonitor()
+                updateRow(text, button: model.canCancelMonitorUpdate ? "Cancel" : (model.updateAvailable && model.updating == nil ? "Update monitor" : nil), id: "monitor-update", icon: "update") {
+                    if model.canCancelMonitorUpdate { model.cancelMonitorUpdate() } else { model.updateMonitor() }
                 }
             }
             ForEach(Array((model.header?.banners ?? []).enumerated()), id: \.offset) { i, b in

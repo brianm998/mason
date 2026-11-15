@@ -2019,7 +2019,8 @@ impl Broker {
             .iter()
             .filter(|h| compiles(&h.needs))
             .map(|h| CompileHolder {
-                label: h.label.clone(),
+                label: mason_scheduler::label_parts(&h.label).0,
+                command: mason_scheduler::label_parts(&h.label).1,
                 task: task_of.get(&h.id).copied().unwrap_or(0),
                 since_ms: h.since,
                 interactive: is_person(&st, h.id),
@@ -2039,7 +2040,8 @@ impl Broker {
                     None => ("", "starting".to_string()),
                 };
                 CompileWaiter {
-                    label: r.label.clone(),
+                    label: mason_scheduler::label_parts(&r.label).0,
+                    command: mason_scheduler::label_parts(&r.label).1,
                     task: task_of.get(&r.id).copied().unwrap_or(0),
                     since_ms: r.since,
                     position: i as u32 + 1,
@@ -2151,8 +2153,10 @@ impl Broker {
             .holders
             .iter()
             .map(|h| {
+                let (label, command) = mason_scheduler::label_parts(&h.label);
                 json!({
-                    "label": h.label,
+                    "label": label,
+                    "command": command,
                     "pipeline": pipeline_of(&st, h.id),
                     "since_ms": h.since,
                     "uses": h.needs.amounts,
@@ -2172,8 +2176,10 @@ impl Broker {
                     }),
                     (_, w) => w.map(|w| explain(w, now)),
                 };
+                let (label, command) = mason_scheduler::label_parts(&r.label);
                 json!({
-                    "label": r.label,
+                    "label": label,
+                    "command": command,
                     "pipeline": pipeline,
                     "since_ms": r.since,
                     "interactive": r.rank.interactive(),
@@ -2212,7 +2218,17 @@ fn compile_reason(w: &mason_scheduler::Wait, now: u64, limit: u32) -> (&'static 
         WaitCause::Behind { .. } => (
             "behind",
             match w.behind.first() {
-                Some(a) => format!("behind {} in line", a.label),
+                Some(a) => {
+                    // "behind " + " in line" take 15 of the 50 characters a reason may use.
+                    let d = mason_scheduler::label_parts(&a.label).0;
+                    let d = if d.chars().count() > 35 {
+                        let cut: String = d.chars().take(34).collect();
+                        format!("{}…", cut.trim_end())
+                    } else {
+                        d
+                    };
+                    format!("behind {d} in line")
+                }
                 None => "behind an earlier request".into(),
             },
         ),

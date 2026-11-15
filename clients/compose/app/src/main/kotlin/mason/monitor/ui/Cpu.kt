@@ -35,7 +35,7 @@ fun CpuSection(model: MonitorModel) {
     val layout = cpuLayout(model.cpu, model.daemonNow(), model.cpuColors) ?: return
     var expanded by remember { mutableStateOf(false) }
     var tip by remember { mutableStateOf<String?>(null) }
-    Section("CPU") {
+    Section("CPU (all projects)") {
         Text(layout.header, style = theme.body(color = theme.muted))
         val hidden = layout.hidden
         if (hidden != null) {

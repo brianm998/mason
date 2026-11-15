@@ -1167,13 +1167,37 @@ pub fn session_for(d: &Daemon, task: TaskId) -> Result<Value, String> {
         })
     });
     let running = w.open_run(task).is_some_and(|r| d.has_job(r));
+    let agent = p.agent();
+    let (provider, bin) = match agent.provider {
+        crate::config::Provider::Claude => ("claude", p.claude_bin.clone()),
+        crate::config::Provider::Codex => ("codex", agent.codex_bin.clone()),
+    };
+    let bin = bin.unwrap_or_else(|| std::path::PathBuf::from(provider));
+    let argv = resume_argv(provider, &bin.display().to_string(), session.as_deref());
     Ok(json!({
         "worktree": p.worktree(&d.cfg, task.0).display().to_string(),
         "branch": p.branch(task.0),
         "session": session,
         "idle": !running,
+        "provider": provider,
+        "bin": bin.display().to_string(),
+        // The exact command to run in the worktree: a resume when there is a
+        // session id, else a fresh session of the same provider.
+        "argv": argv,
         "claude": p.claude_bin.as_ref().map(|b| b.display().to_string()),
     }))
+}
+
+/// The command that resumes `session` (or starts a fresh session when none) for a provider.
+pub fn resume_argv(provider: &str, bin: &str, session: Option<&str>) -> Vec<String> {
+    let mut v = vec![bin.to_string()];
+    if let Some(sid) = session {
+        match provider {
+            "codex" => v.extend(["resume".into(), sid.into()]),
+            _ => v.extend(["--resume".into(), sid.into()]),
+        }
+    }
+    v
 }
 
 #[cfg(test)]

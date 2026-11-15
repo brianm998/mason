@@ -2744,10 +2744,8 @@ fn agent_job(c: &Ctx) {
         .map(|t| crate::cmdreuse::command_key(t.build.as_deref(), &t.test));
     // Kept in the task's folder per run, so a re-attach after a daemon restart keeps what
     // was credited before it (s417).
-    let deadline_extra = mason_adapter_api::DeadlineExtra::kept_in(
-        c.task_dir()
-            .join(credit_file_name(c.run.0)),
-    );
+    let deadline_extra =
+        mason_adapter_api::DeadlineExtra::kept_in(c.task_dir().join(credit_file_name(c.run.0)));
     // The agent's own `mason run` commands that wait in the queue add to it too (s363),
     // until this step ends.
     c.d.broker.credit_waits_to(c.task, deadline_extra.clone());
@@ -3267,7 +3265,7 @@ fn finish_agent(c: &Ctx, report: StepReport, dir: &Path) {
     };
     finish_agent_inner(c, report, dir);
     // The analyst's findings (Part 14), read from the file it wrote in its worktree.
-    crate::introspect::ingest_analyst(&c.d, c.task, &c.project.id, &c.title, &c.wt, dir);
+    crate::introspect::ingest_analyst(&c.d, c.task, &c.project.id, &c.wt, dir);
     // Triage (off unless the project turns it on) only records what it would do; the
     // question is the owner's either way.
     if let Some(q) = asked {

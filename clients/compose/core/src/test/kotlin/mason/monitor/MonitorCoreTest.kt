@@ -492,6 +492,23 @@ class MonitorCoreTest {
         assertFalse(m.updateAvailable)
     }
 
+    @Test fun homeShowsTheDaemonsShortCommit() {
+        val m = MonitorModel()
+        m.ownVersion = "dev"
+        assertEquals("", m.versionLine)
+        m.apply(ServerMessage(welcome = Welcome(protocol = 1, resume = ResumeKind.UP_TO_DATE, min_protocol = 1, version = "64b3068a5c0ffee1234")))
+        assertTrue(m.versionLine.contains("masond 64b3068a"))
+        assertFalse(m.versionLine.contains("64b3068a5"))
+        assertTrue(m.versionTip.contains("64b3068a5c0ffee1234"))
+        assertTrue(m.versionLine.contains("monitor (unversioned build)"))
+        m.ownVersion = "abcdef0123456"
+        assertTrue(m.versionLine.contains("monitor abcdef01"))
+        m.apply(update("x", daemon = "masond is 3 commits behind develop"))
+        assertTrue(m.versionLine.contains("3 commits behind develop"))
+        m.apply(ServerMessage(welcome = Welcome(protocol = 1, resume = ResumeKind.UP_TO_DATE, min_protocol = 1, version = "dev")))
+        assertTrue(m.versionLine.contains("masond (unversioned build)"))
+    }
+
     @Test fun theDaemonButtonIsTheOwnersAndSendsTheUpdate() {
         val m = MonitorModel()
         val sent = mutableListOf<Command>()
@@ -1061,6 +1078,69 @@ class MonitorCoreTest {
         m.apply(p.copy(log = (0 until 60).map { "l$it" }), local = 1_000_000)
         assertEquals(40, m.liveLog.size)
         assertEquals("l59", m.liveLog.last())
+    }
+
+    @Test fun framesAreDecodedOffTheUiThreadAndAppliedOnIt() {
+        val uiThread = java.util.concurrent.atomic.AtomicReference<Thread?>(null)
+        val ui = java.util.concurrent.Executors.newSingleThreadExecutor { r -> Thread(r, "fake-ui").also { uiThread.set(it) } }
+        val decodedOn = java.util.concurrent.CopyOnWriteArrayList<Thread>()
+        val appliedOn = java.util.concurrent.CopyOnWriteArrayList<Thread>()
+        val seen = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val m = MonitorModel(MemoryPreferences())
+        m.onResult = { appliedOn += Thread.currentThread(); seen += it.id }
+        val sockets = java.util.concurrent.CopyOnWriteArrayList<FakeSocket>()
+        val conn = MonitorConnection(
+            m, { DaemonInfo(7423, 1, 10) },
+            ConnectionTiming(pingEverySeconds = 0.05, watchEverySeconds = 0.02, pauseScale = 0.01),
+            { port, ev -> FakeSocket(port, ev).also { sockets += it } },
+            decode = { decodedOn += Thread.currentThread(); Codec.decode(it) },
+            ui = ui,
+        )
+        conn.start()
+        waitFor("a socket") { sockets.size == 1 }
+        val socketThread = Thread { for (i in 1..20) sockets[0].events.onMessage("""{"result":{"id":"r$i","ok":true}}""") }
+        socketThread.start()
+        socketThread.join()
+        waitFor("all results") { seen.size == 20 }
+        conn.stop()
+        ui.shutdown()
+        assertEquals((1..20).map { "r$it" }, seen, "same messages, same order")
+        assertEquals(20, decodedOn.size)
+        assertTrue(decodedOn.none { it === uiThread.get() }, "decoding stays off the UI thread")
+        assertTrue(appliedOn.all { it === uiThread.get() }, "apply runs on the UI thread")
+    }
+
+    @Test fun aHundredProgressUpdatesWhileBusyPublishTheSidebarOnce() {
+        val m = model()
+        val c = cell(done = 1, total = 400, totalSrc = ProgressSource.SOURCE_REPORTED)
+        m.sidebar = m.sidebar!!.copy(sections = m.sidebar!!.sections.mapIndexed { i, sec ->
+            if (i == 0) sec.copy(rows = sec.rows.mapIndexed { j, r -> if (j == 0) r.copy(progress = listOf(c)) else r }) else sec
+        })
+        val scheduled = ArrayList<() -> Unit>()
+        m.scheduleProgressFlush = { scheduled += it }
+        val before = m.sidebar
+        for (i in 1..100) m.apply(ServerMessage(step_progress = StepProgress(task = 1, progress = c.copy(done = i), log = listOf("l$i"))))
+        assertSame(before, m.sidebar, "nothing is published while the frame is not due")
+        assertEquals(1, scheduled.size, "one flush is asked for, not one per message")
+        scheduled[0]()
+        assertNotSame(before, m.sidebar)
+        assertEquals(100, m.sidebar!!.sections[0].rows[0].progress.first().done, "the last value wins")
+        val after = m.sidebar
+        m.flushProgress()
+        assertSame(after, m.sidebar, "a second flush has nothing to publish")
+    }
+
+    @Test fun aViewArrivingAfterHeldProgressSeesTheProgressFirst() {
+        val m = model()
+        val c = cell(done = 1, total = 4, totalSrc = ProgressSource.SOURCE_REPORTED)
+        m.sidebar = m.sidebar!!.copy(sections = m.sidebar!!.sections.mapIndexed { i, sec ->
+            if (i == 0) sec.copy(rows = sec.rows.mapIndexed { j, r -> if (j == 0) r.copy(progress = listOf(c)) else r }) else sec
+        })
+        m.scheduleProgressFlush = { }
+        m.apply(ServerMessage(step_progress = StepProgress(task = 1, progress = c.copy(done = 3))))
+        assertEquals(1, m.sidebar!!.sections[0].rows[0].progress.first().done, "held")
+        m.apply(ServerMessage(welcome = Welcome(version = "x")))
+        assertEquals(3, m.sidebar!!.sections[0].rows[0].progress.first().done, "flushed before the next message")
     }
 
     @Test fun progressItemsHaveNoClockText() {

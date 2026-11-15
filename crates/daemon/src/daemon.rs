@@ -58,6 +58,8 @@ pub struct Daemon {
     emit_lock: Mutex<()>,
     admitting: AtomicBool,
     admit_again: AtomicBool,
+    /// When each queued task was first held back for a shared file (s398); the hold's clock.
+    pub(crate) file_held: Mutex<HashMap<TaskId, Instant>>,
     fetch_locks: Mutex<HashMap<PathBuf, Arc<Mutex<Option<std::time::Instant>>>>>,
     /// Per project: when its fetches began failing (ms) and the last error. A success removes it.
     fetch_failures: Mutex<HashMap<ProjectId, (u64, String)>>,
@@ -285,6 +287,7 @@ impl Daemon {
             emit_lock: Mutex::default(),
             admitting: AtomicBool::new(false),
             admit_again: AtomicBool::new(false),
+            file_held: Mutex::default(),
             repo_locks: Mutex::default(),
             fetch_locks: Mutex::default(),
             fetch_failures: Mutex::default(),
@@ -1042,6 +1045,9 @@ impl Daemon {
             })
             // A project whose check queue is long starts nothing new (s256).
             .filter(|t| self.check_hold(w, t).is_none())
+            // A task that changes the same files as one in testing, review or landing waits
+            // for it to land (s398).
+            .filter(|t| self.file_hold(w, t).is_none())
             .min_by_key(|t| self.queued_rank(t))
             .map(|t| t.id)
     }

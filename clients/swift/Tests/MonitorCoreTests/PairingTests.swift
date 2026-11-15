@@ -12,6 +12,22 @@ final class PairingTests: XCTestCase {
         XCTAssertEqual(u, PairURL(host: "studio.local", port: 7424, fingerprint: fp, code: "12345678"))
     }
 
+    func testPairURLReadsAltHosts() {
+        let u = PairURL.parse("mason://pair?host=studio.local&port=7424&fp=\(fp)&code=12345678&alt=mac.ts.net&alt=100.64.0.1")
+        XCTAssertEqual(u?.alternates, ["mac.ts.net", "100.64.0.1"])
+        XCTAssertEqual(u?.host, "studio.local")
+        XCTAssertEqual(PairURL.parse("mason://pair?host=h&port=1&fp=\(fp)&code=12345678")?.alternates, [])
+    }
+
+    func testReachOrder() {
+        let d = PairedDaemon(host: "m.local", port: 1, fingerprint: fp, token: "t", role: "owner", alternates: ["m.ts.net", "100.1.1.1"])
+        XCTAssertEqual(Reach.order(paired: d, bonjour: "192.168.1.5"), ["192.168.1.5", "m.local", "m.ts.net", "100.1.1.1"])
+        XCTAssertEqual(Reach.order(paired: d, bonjour: nil), ["m.local", "m.ts.net", "100.1.1.1"])
+        XCTAssertEqual(Reach.order(paired: d, bonjour: "m.local"), ["m.local", "m.ts.net", "100.1.1.1"])
+        let bare = PairedDaemon(host: "m.local", port: 1, fingerprint: fp, token: "t", role: "owner")
+        XCTAssertEqual(Reach.order(paired: bare, bonjour: nil), ["m.local"])
+    }
+
     func testBadPairURLsAreRefused() {
         for bad in [
             "https://pair?host=h&port=1&fp=\(fp)&code=12345678",

@@ -131,4 +131,42 @@ mod tests {
         assert!(decode_client(&[0xFF, 0xFF, 0xFF], Encoding::Protobuf).is_err());
         assert!(decode_client(b"not json", Encoding::Json).is_err());
     }
+
+    #[test]
+    fn a_compile_row_carries_its_command_and_an_old_payload_lacks_it() {
+        let w = CompileWaiter {
+            label: "python3 - <<'EOF' …".into(),
+            command: "python3 - <<'EOF'\nprint(1)\nEOF".into(),
+            ..Default::default()
+        };
+        let h = CompileHolder {
+            command: "cargo build".into(),
+            ..Default::default()
+        };
+        for e in [Encoding::Protobuf, Encoding::Json] {
+            let (bw, bh) = match e {
+                Encoding::Protobuf => (w.encode_to_vec(), h.encode_to_vec()),
+                Encoding::Json => (
+                    serde_json::to_vec(&w).unwrap(),
+                    serde_json::to_vec(&h).unwrap(),
+                ),
+            };
+            let (dw, dh): (CompileWaiter, CompileHolder) = match e {
+                Encoding::Protobuf => (
+                    CompileWaiter::decode(&*bw).unwrap(),
+                    CompileHolder::decode(&*bh).unwrap(),
+                ),
+                Encoding::Json => (
+                    serde_json::from_slice(&bw).unwrap(),
+                    serde_json::from_slice(&bh).unwrap(),
+                ),
+            };
+            assert_eq!((dw, dh), (w.clone(), h.clone()), "{e:?}");
+        }
+        // A payload from a daemon before the field existed.
+        let old: CompileWaiter = serde_json::from_str(r##"{"label":"#5","position":1}"##).unwrap();
+        assert_eq!(old.command, "");
+        let old: CompileHolder = serde_json::from_str(r##"{"label":"#5"}"##).unwrap();
+        assert_eq!(old.command, "");
+    }
 }

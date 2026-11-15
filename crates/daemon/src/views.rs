@@ -646,6 +646,7 @@ impl<'a> Ctx<'a> {
             });
         }
         HeaderView {
+            project: project.to_string(),
             attention,
             counts: ORDER
                 .iter()
@@ -762,6 +763,7 @@ impl<'a> Ctx<'a> {
         }
         sections.push(self.section(State::Canceled, project));
         SidebarView {
+            project: project.to_string(),
             sections,
             pages: ["landing", "usage", "pipeline", "health"]
                 .map(String::from)
@@ -835,6 +837,7 @@ impl<'a> Ctx<'a> {
         });
         let llm_holders = self.d.broker.llm_holders();
         HomeView {
+            project: project.to_string(),
             status: self.header(project).status,
             attention: attention
                 .iter()
@@ -1045,6 +1048,7 @@ impl<'a> Ctx<'a> {
             .collect();
         let ids = |s: &str| -> Vec<u64> { s.split(',').filter_map(|x| x.parse().ok()).collect() };
         LandingView {
+            project: project.to_string(),
             debts: self
                 .d
                 .store
@@ -1258,7 +1262,14 @@ impl<'a> Ctx<'a> {
         }
     }
 
-    pub fn view(&self, kind: ViewKind, project: &str, task: u64, step: &str, cpu_span_ms: u64) -> Option<View> {
+    pub fn view(
+        &self,
+        kind: ViewKind,
+        project: &str,
+        task: u64,
+        step: &str,
+        cpu_span_ms: u64,
+    ) -> Option<View> {
         use mason_protocol::view::Body;
         let body = match kind {
             ViewKind::Header => Body::Header(self.header(project)),
@@ -1270,7 +1281,11 @@ impl<'a> Ctx<'a> {
             ViewKind::Editor => Body::Editor(self.editor(project, step)),
             ViewKind::CpuHistory => Body::CpuHistory(self.d.cpu_history(
                 self.now,
-                if cpu_span_ms == 0 { 3_600_000 } else { cpu_span_ms },
+                if cpu_span_ms == 0 {
+                    3_600_000
+                } else {
+                    cpu_span_ms
+                },
             )),
             _ => return None,
         };

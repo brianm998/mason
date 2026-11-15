@@ -20,3 +20,4 @@ mason init --workflow reviewed-pr --landing pr --tracker github --yes --no-prove
 git checkout -q "$(git symbolic-ref --short refs/remotes/origin/HEAD | cut -d/ -f2)"
 git merge --ff-only mason/setup && git push origin HEAD
 echo "Now start masond, then: mason init --prove-only, and watch the pull request open and merge."
+echo "RESULT s26-real: the reviewed-pr setup ran against $S26_REPO, now run init --prove-only $(date +%F)"

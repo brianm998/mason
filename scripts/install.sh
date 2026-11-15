@@ -4,7 +4,7 @@
 # checks its SHA-256 against the release's SHA256SUMS, and only then copies the binaries.
 #
 #   curl -fsSL https://<release host>/install.sh | bash
-#   bash install.sh [--version X.Y.Z] [--prefix DIR] [--base-url URL]
+#   bash install.sh [--version X.Y.Z] [--prefix DIR] [--base-url URL] [--profile|--no-profile]
 #
 # --base-url (or MASON_RELEASE_URL) is a folder holding mason-<version>-<target>.tar.gz and
 # SHA256SUMS; https://, http:// and file:// all work, which is how the test runs against a local
@@ -17,11 +17,16 @@
 # is given, it says plainly that the signature was NOT verified. The placeholder is never used as
 # a key. The checksum alone proves a download matches the checksum file, not that it is the owner's.
 #
-# It never uses sudo and never edits your shell profile; it says what to add to PATH.
+# It never uses sudo. It edits your shell profile only on an explicit yes: --profile, or "Y" at the
+# question it asks when stdin is a terminal (--no-profile, a non-interactive run, or "n" edits nothing).
+# The edit is one block between `# >>> mason >>>` and `# <<< mason <<<` holding a `mason()` function
+# that runs the daemon's current runtime (runtimes/current), falling back to ~/.config/mason/bin/mason.
+# A block already there is replaced in place; nothing outside the markers is touched.
 set -euo pipefail
 
 version="${MASON_VERSION:-latest}"
 prefix="${MASON_PREFIX:-$HOME/.local}"
+profile_mode=ask   # ask | yes | no
 base_url="${MASON_RELEASE_URL:-https://github.com/brianm998/mason/releases}"
 # The owner's minisign public key (the second line of minisign.pub; see docs/RELEASING.md).
 # TRUST: change only with the owner's approval. Until they pin it, this placeholder is not a key.
@@ -38,7 +43,10 @@ while [ $# -gt 0 ]; do
     --version) [ $# -ge 2 ] || die "--version needs a value"; version=$2; shift 2 ;;
     --prefix) [ $# -ge 2 ] || die "--prefix needs a value"; prefix=$2; shift 2 ;;
     --base-url) [ $# -ge 2 ] || die "--base-url needs a value"; base_url=$2; shift 2 ;;
-    -h|--help) sed -n '3,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --profile) profile_mode=yes; shift ;;
+    --no-profile) profile_mode=no; shift ;;
+    --yes|-y) shift ;;   # accepts defaults; adds nothing to the profile unless --profile is also given
+    -h|--help) sed -n '3,24p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "unknown option $1 (try --help)" ;;
   esac
 done
@@ -91,6 +99,80 @@ report_clash() {  # DEST_BIN_DIR
       say "    - or call MASON by its full path: $dest/mason (an alias such as  alias mason-pipeline=$dest/mason  works too)"
       say "    - for Dart's mason_cli:  dart pub global deactivate mason_cli"
       ;;
+  esac
+}
+
+profile_file() {
+  case "$(basename "${SHELL:-}")" in
+    zsh) echo "$HOME/.zprofile" ;;
+    bash) if [ -e "$HOME/.bash_profile" ]; then echo "$HOME/.bash_profile"; else echo "$HOME/.profile"; fi ;;
+    *) echo "$HOME/.profile" ;;
+  esac
+}
+
+# The block text. The runtime root is written with $HOME (and XDG_DATA_HOME) unexpanded, so the
+# profile keeps working if the home directory moves.
+profile_block() {
+  local root
+  case "$(uname -s)" in
+    Darwin) root='$HOME/Library/Application Support/mason' ;;
+    *) root='${XDG_DATA_HOME:-$HOME/.local/share}/mason' ;;
+  esac
+  cat <<BLOCK
+# >>> mason >>>
+# Added by MASON's install.sh: always run the daemon's current runtime.
+mason () {
+    local M="$root" R
+    if [ -r "\$M/runtimes/current" ] && R="\$M/runtimes/\$(cat "\$M/runtimes/current")/mason" && [ -x "\$R" ]; then
+        "\$R" "\$@"
+    else
+        "\$HOME/.config/mason/bin/mason" "\$@"
+    fi
+}
+# <<< mason <<<
+BLOCK
+}
+
+# Append the block to FILE, or replace the marked block already there. Nothing else is touched.
+install_profile_block() {  # FILE
+  local f=$1 blk new
+  blk=$(mktemp "${TMPDIR:-/tmp}/mason-block.XXXXXX")
+  profile_block > "$blk"
+  if [ -f "$f" ] && grep -qx '# >>> mason >>>' "$f"; then
+    grep -qx '# <<< mason <<<' "$f" || { rm -f "$blk"; die "$f has a mason start marker but no end marker; fix it by hand. Nothing was changed"; }
+    new=$(mktemp "${TMPDIR:-/tmp}/mason-profile.XXXXXX")
+    awk -v blk="$blk" '
+      $0 == "# >>> mason >>>" && !done { while ((getline l < blk) > 0) print l; skip = 1; done = 1; next }
+      skip { if ($0 == "# <<< mason <<<") skip = 0; next }
+      { print }' "$f" > "$new"
+    cat "$new" > "$f"; rm -f "$new"
+    say "replaced the mason block in $f"
+  else
+    if [ -s "$f" ] && [ -n "$(tail -c 1 "$f")" ]; then echo >> "$f"; fi
+    cat "$blk" >> "$f"
+    say "added the mason block to $f"
+  fi
+  rm -f "$blk"
+  say "open a new shell (or: source $f) so \`mason\` runs the current runtime"
+}
+
+maybe_profile() {
+  local f answer
+  f=$(profile_file)
+  case "$profile_mode" in
+    no) return 0 ;;
+    yes) install_profile_block "$f" ;;
+    ask)
+      # MASON_INSTALL_PROMPT=1 asks even when stdin is not a terminal (the tests answer on stdin).
+      if [ -t 0 ] || [ "${MASON_INSTALL_PROMPT:-}" = 1 ]; then
+        printf 'install: Add a `mason` shell function to %s so `mason` always runs the current runtime? [Y/n] ' "$f"
+        # End of input without an answer is a no, never a default yes.
+        if read -r answer; then
+          case "$answer" in ""|y|Y|yes|YES|Yes) install_profile_block "$f" ;; *) say "left $f alone" ;; esac
+        else
+          echo; say "no answer; left $f alone"
+        fi
+      fi ;;
   esac
 }
 
@@ -154,4 +236,5 @@ for b in $BINS; do
 done
 say "installed:$installed in $dest"
 report_clash "$dest"
+maybe_profile
 say "next: cd your-project && mason init   (and \`mason doctor\` rechecks the setup any time)"
