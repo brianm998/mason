@@ -51,7 +51,7 @@ pub const EXCLUSIVE: &str = "exclusive";
 /// stall_ms = 2000        # no further compile while the build disk is this slow (0: off)
 /// [order]    # who goes first when work waits for a resource
 /// priority_first = false # true: tracker priority before steps remaining
-/// max_wait_s = 1800      # a request waiting this long goes ahead of other pipeline work (0: never)
+/// max_wait_s = 1800      # a request waiting this long goes ahead of other work as far along (0: never)
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResourceCfg {
