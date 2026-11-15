@@ -23,6 +23,7 @@ final class Session: ObservableObject {
         if model.ownVersion == "dev", let build = Bundle.main.object(forInfoDictionaryKey: "MasonBuild") as? String, !build.isEmpty {
             model.ownVersion = build
         }
+        model.ownPath = Bundle.main.executablePath ?? ""
         model.onAttention = {
             if let s = NSSound(named: NSSound.Name("Glass")) { s.play() } else { NSSound.beep() }
         }
@@ -68,6 +69,11 @@ final class Session: ObservableObject {
     /// The daemon has built a new monitor at `path`: put it where this one is, so
     /// that the Dock and `mason://` links get it too, start it, and close this one.
     func install(_ path: String) {
+        // A bare binary rebuilt in place: the daemon already put the new one at this path.
+        if let own = Bundle.main.executableURL?.resolvingSymlinksInPath().path, own == path {
+            relaunchInPlace(path)
+            return
+        }
         let built = URL(fileURLWithPath: path)
         let own = Bundle.main.bundleURL
         Task.detached {
@@ -83,6 +89,19 @@ final class Session: ObservableObject {
                     }
                 }
             }
+        }
+    }
+
+    /// Start the binary at `path` again, with this one's arguments, and close this one.
+    func relaunchInPlace(_ path: String) {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: path)
+        p.arguments = Array(CommandLine.arguments.dropFirst())
+        do {
+            try p.run()
+            NSApp.terminate(nil)
+        } catch {
+            model.monitorUpdateFailed("The new monitor would not start; this one keeps running.")
         }
     }
 

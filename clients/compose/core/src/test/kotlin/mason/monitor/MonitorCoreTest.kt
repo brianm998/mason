@@ -534,6 +534,23 @@ class MonitorCoreTest {
         assertFalse(m.updateAvailable)
     }
 
+    @Test fun homeShowsTheDaemonsShortCommit() {
+        val m = MonitorModel()
+        m.ownVersion = "dev"
+        assertEquals("", m.versionLine)
+        m.apply(ServerMessage(welcome = Welcome(protocol = 1, resume = ResumeKind.UP_TO_DATE, min_protocol = 1, version = "64b3068a5c0ffee1234")))
+        assertTrue(m.versionLine.contains("masond 64b3068a"))
+        assertFalse(m.versionLine.contains("64b3068a5"))
+        assertTrue(m.versionTip.contains("64b3068a5c0ffee1234"))
+        assertTrue(m.versionLine.contains("monitor (unversioned build)"))
+        m.ownVersion = "abcdef0123456"
+        assertTrue(m.versionLine.contains("monitor abcdef01"))
+        m.apply(update("x", daemon = "masond is 3 commits behind develop"))
+        assertTrue(m.versionLine.contains("3 commits behind develop"))
+        m.apply(ServerMessage(welcome = Welcome(protocol = 1, resume = ResumeKind.UP_TO_DATE, min_protocol = 1, version = "dev")))
+        assertTrue(m.versionLine.contains("masond (unversioned build)"))
+    }
+
     @Test fun theDaemonButtonIsTheOwnersAndSendsTheUpdate() {
         val m = MonitorModel()
         val sent = mutableListOf<Command>()

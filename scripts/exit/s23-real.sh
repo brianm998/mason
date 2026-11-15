@@ -60,3 +60,4 @@ if [ -n "${MASON_REAL_SPEECH:-}" ]; then
 fi
 [ "$ran" = 1 ] || { echo "nothing to test: set at least one of the MASON_REAL_* settings above" >&2; exit 2; }
 echo "Now check: the email arrived (and its headers show no password), the phone got the push, the webhook receiver verified its X-Mason-Signature, and the sentence was spoken once."
+echo "RESULT s23-real: the notification test was sent, now check delivery by hand $(date +%F)"

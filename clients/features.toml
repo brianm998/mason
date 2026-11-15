@@ -360,3 +360,8 @@ compose = "done"
 description = "Back and forward put each page in the history back where it was scrolled when it was left (Home, a task, Landing, LLM usage, Health); the same page twice in the history keeps two positions; a new selection starts at the top; restored once, after the page's content has arrived, never over the owner's own scrolling"
 swift = "done"
 compose = "done"
+
+[feature.home-daemon-version]
+description = "Home shows a small selectable line under the status, 'masond 64b3068a · monitor abcdef01': the short (8 character) commit of the running masond from the welcome version and of this monitor (ownVersion), with both full hashes in the tooltip; a version of 'dev' reads 'masond (unversioned build)' (likewise 'monitor (unversioned build)'); when the update banner's daemon text says N commits behind develop, '(N commits behind develop)' follows masond's hash; nothing before the welcome"
+swift = "done"
+compose = "done"

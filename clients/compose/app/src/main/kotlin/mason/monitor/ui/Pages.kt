@@ -9,6 +9,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.TooltipArea
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -93,6 +94,7 @@ private fun Scrolling(model: MonitorModel, ready: Boolean = true, content: @Comp
  * step, the session-limit stepper, the landing queue, and detail for the tasks in each
  * stage. (Counts and task lists live in the top bar and the sidebar, not here.)
  */
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 fun HomePage(model: MonitorModel) {
     val theme = LocalTheme.current
@@ -118,6 +120,15 @@ fun HomePage(model: MonitorModel) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(theme.spacingLarge)) {
                 MascotPicture(pic.id, theme.mascotStatus)
                 statusLine()
+            }
+        }
+        if (model.versionLine.isNotEmpty()) {
+            TooltipArea(tooltip = {
+                Text(model.versionTip, style = theme.small(color = theme.text), modifier = Modifier.background(theme.surface).padding(theme.spacing))
+            }) {
+                SelectionContainer {
+                    Text(model.versionLine, style = theme.small(), modifier = Modifier.testTag("home:version"))
+                }
             }
         }
         if (adding) AddTaskDialog(model) { adding = false }
@@ -152,7 +163,7 @@ fun HomePage(model: MonitorModel) {
                 SessionStepper(model)
             }
             Section("Landing queue") {
-                val queue = model.landing?.queue ?: h?.stages?.firstOrNull { it.state == "landing" }?.rows.orEmpty()
+                val queue = h?.stages?.firstOrNull { it.state == "landing" }?.rows.orEmpty()
                 if (queue.isEmpty()) Text("Nothing is landing.", style = theme.body(color = theme.muted))
                 queue.forEach { r -> Link("${r.key} ${r.title}") { model.go(Page.Task(r.id)) } }
             }
@@ -186,7 +197,7 @@ fun SessionStepper(model: MonitorModel) {
     val limit = model.home?.sessions_limit ?: 0
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(theme.spacing),
         modifier = Modifier.testTag("sessions")) {
-        Text("Sessions: $used of", style = theme.body())
+        Text("Sessions (all projects): $used of", style = theme.body())
         Pill("−", modifier = Modifier.testTag("sessions:decrease")) { model.setSessionLimit(if (limit > 0) limit - 1 else 0) }
         Text("$limit", style = theme.body(FontWeight.SemiBold))
         Pill("+", modifier = Modifier.testTag("sessions:increase")) { model.setSessionLimit(limit + 1) }
@@ -207,7 +218,7 @@ fun CompilationSection(model: MonitorModel, c: Compilation) {
         else Text(label, style = theme.body(), maxLines = 1, overflow = TextOverflow.Ellipsis,
             modifier = Modifier.widthIn(max = 480.dp))
     }
-    Section("Compilation") {
+    Section("Compilation (all projects)") {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(theme.spacing),
             modifier = Modifier.testTag("compile")) {
             Text("Compiling: ${c.used} of at most", style = theme.body())
@@ -304,8 +315,9 @@ private fun TaskDetail(model: MonitorModel, d: TaskDetailView) {
         Text(cpuTaskLine(d.cpu_permille), style = theme.body(color = theme.muted), modifier = Modifier.testTag("cpu"))
         Row(horizontalArrangement = Arrangement.spacedBy(theme.spacingLarge)) {
             CopyButton(r.key, r.key)
-            if (d.branch.isNotEmpty()) CopyButton("branch", d.branch)
-            if (d.worktree.isNotEmpty()) CopyButton("worktree", d.worktree)
+            CopyTarget.detail(d.branch, d.worktree).forEach { t ->
+                CopyValueButton(t) { (model.copier ?: ::copyToClipboard)(it) }
+            }
         }
     }
     }

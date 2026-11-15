@@ -106,6 +106,23 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     /** The commit a monitor update would go to. */
     val latestMonitor: String get() = monitorBuild?.latest ?: ""
 
+    /** How many commits behind develop the daemon says it is (parsed from its sentence); null when it does not say. */
+    val daemonCommitsBehind: Int?
+        get() = Regex("""(\d+) commits? behind""").find(daemonUpdateText)?.groupValues?.get(1)?.toIntOrNull()
+
+    /** Home's version line: masond's short commit (or "unversioned build"), how far behind develop, and this monitor's own commit. Empty before a welcome. */
+    val versionLine: String
+        get() {
+            if (daemonVersion.isEmpty()) return ""
+            var d = if (daemonVersion == "dev") "masond (unversioned build)" else "masond ${daemonVersion.take(8)}"
+            daemonCommitsBehind?.let { d += " ($it commit${if (it == 1) "" else "s"} behind develop)" }
+            val o = if (ownVersion == "dev") "monitor (unversioned build)" else "monitor ${ownVersion.take(8)}"
+            return "$d · $o"
+        }
+
+    /** The full hashes, for the tooltip. */
+    val versionTip: String get() = if (daemonVersion.isEmpty()) "" else "masond $daemonVersion\nmonitor $ownVersion"
+
     /** What to say about the daemon's own version; empty when there is nothing to say. */
     val daemonUpdateText: String get() = updateInfo?.daemon_text ?: ""
     val canUpdateDaemon: Boolean get() = canAct && updateInfo?.daemon_can_update == true
@@ -195,7 +212,12 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
         private set
     var project: String
         get() = projectState
-        set(v) { projectState = v; attentionSeen = null }
+        set(v) {
+            val changed = v != projectState
+            projectState = v
+            attentionSeen = null
+            if (changed) clearProjectScoped()
+        }
     private var projectState by mutableStateOf("")
     /** Called when something new needs the owner and the monitor is not muted: a task asked a
      *  question, waits for approval, was proposed, or failed. The app plays its sound here. */
@@ -691,6 +713,19 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
         }
     }
 
+    /** Forget every number computed for the previous selection, so it never shows under the new
+     *  name. The header keeps its project list and banners (the picker needs them); its counts go. */
+    internal fun clearProjectScoped() {
+        header = header?.copy(counts = emptyList(), attention = 0, status = "", project = projectState)
+        sidebar = null
+        home = null
+        landing = null
+    }
+
+    /** The project a view was computed for, when it is one of the project-scoped views. */
+    private fun scopeOf(v: View): String? =
+        v.header_?.project ?: v.sidebar?.project ?: v.home?.project ?: v.landing?.project
+
     /** Chime once when a task that needs the owner appears that was not there before. */
     internal fun noteAttention(s: SidebarView) {
         val ids = s.sections.filter { it.state in WANTING }.flatMap { it.rows.map { r -> r.id } }.toSet()
@@ -700,6 +735,9 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     }
 
     fun apply(v: View) {
+        // A view computed for another filter (a rebuild in flight when the picker changed, or
+        // one resumed after a reconnect) is dropped.
+        scopeOf(v)?.let { if (it != projectState) return }
         v.header_?.let {
             header = it
             noteMonitorBuild()
