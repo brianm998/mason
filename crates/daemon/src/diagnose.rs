@@ -13,8 +13,7 @@
 //! * `ask`: only the owner can decide, recommendation first.
 //!
 //! A `retry` is applied by itself when the failure was not the code (any project), or when the
-//! diagnosis says no code change is needed (MASON's own project: always), at most once per task
-//! per day. Every other verdict waits as a pending diagnosis: the alert says what it suggests, and the owner
+//! diagnosis says no code change is needed, at most once per task per day. Every other verdict waits as a pending diagnosis: the alert says what it suggests, and the owner
 //! applies or dismisses it (`mason task diagnosis`). A failed task cannot hold a question in the
 //! engine, so the card is that alert and these two actions, not a `QuestionAsked`.
 
@@ -58,8 +57,8 @@ pub struct Facts<'a> {
 }
 
 /// Only a `retry` is applied by itself, and then only when the failure was not the task's code
-/// (any project), or when it was and the diagnosis says no code change is needed (and for MASON's
-/// own project, whatever it says), once per task per day. Everything else is a card.
+/// (any project), or when it was and the diagnosis says no code change is needed, once per task
+/// per day. Everything else is a card.
 pub fn decide(f: Facts) -> Action {
     if f.verdict != "retry" {
         return Action::Card;
@@ -68,7 +67,7 @@ pub fn decide(f: Facts) -> Action {
         // The retry loop makes this one; a second here would be two for one failure.
         FailClass::Outside if f.auto_retry_pending => Action::Card,
         FailClass::Outside => Action::Apply,
-        FailClass::Code if (f.is_self || f.no_code_change) && !f.applied_recently => Action::Apply,
+        FailClass::Code if f.no_code_change && !f.applied_recently => Action::Apply,
         FailClass::Code => Action::Card,
     }
 }
@@ -581,10 +580,13 @@ mod tests {
     }
 
     #[test]
-    fn a_code_failure_retry_is_applied_only_for_self_or_when_no_code_change_is_needed() {
-        assert_eq!(decide(facts(true, FailClass::Code, "retry")), Action::Apply);
-        assert_eq!(decide(facts(false, FailClass::Code, "retry")), Action::Card);
+    fn a_code_failure_retry_is_applied_only_when_no_code_change_is_needed() {
         for is_self in [true, false] {
+            assert_eq!(
+                decide(facts(is_self, FailClass::Code, "retry")),
+                Action::Card,
+                "without no_code_change, self or not"
+            );
             let mut f = facts(is_self, FailClass::Code, "retry");
             f.no_code_change = true;
             assert_eq!(decide(f), Action::Apply);
