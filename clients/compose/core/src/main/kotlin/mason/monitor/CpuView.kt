@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 package mason.monitor
 
+import mason.v1.CpuHistory
 import mason.v1.CpuUsage
 
 /**
@@ -25,11 +26,16 @@ data class CpuRow(
     val name: String,
     val task: Long,
     val title: String,
+    /** The task's project; empty for a fixed bucket. */
+    val project: String,
     val permille: Int,
     val color: String,
 ) {
-    /** "#287 Scheduler: … 23.4%", for a hover or a tap. */
-    val tip: String get() = (if (title.isEmpty()) name else "$name $title") + " " + Format.permille(permille)
+    /** "#287 (star)" for a task, the fixed name otherwise: what the legend and tips lead with. */
+    val heading: String get() = if (project.isEmpty()) name else "$name ($project)"
+
+    /** "#287 (star) Scheduler: … 23.4%", for a hover or a tap. */
+    val tip: String get() = (if (title.isEmpty()) heading else "$heading $title") + " " + Format.permille(permille)
 }
 
 data class CpuLayout(
@@ -97,6 +103,7 @@ fun cpuLayout(u: CpuUsage?, nowMs: Long, colors: Map<Long, Int>): CpuLayout? {
             name = if (task) s.label else fixedName(s.kind),
             task = if (task) s.task else 0,
             title = if (task) s.title else "",
+            project = if (task) s.project else "",
             permille = s.permille,
             color = if (task) ((colors[s.task] ?: (s.task % CPU_TASK_COLOURS).toInt()) + 1).toString() else s.kind,
         )
@@ -114,3 +121,71 @@ fun cpuLayout(u: CpuUsage?, nowMs: Long, colors: Map<Long, Int>): CpuLayout? {
 /** The task page's line: "CPU: 23.4% of the machine", or "CPU: not running". */
 fun cpuTaskLine(permille: Int): String =
     if (permille < 0) "CPU: not running" else "CPU: ${Format.permille(permille)} of the machine"
+
+/** The spans the graph offers. */
+enum class CpuSpan(val ms: Long, val label: String) {
+    FiveMinutes(300_000, "5 min"), Hour(3_600_000, "1 h"), SixHours(21_600_000, "6 h"), Day(86_400_000, "24 h"),
+}
+
+/** One series of the graph: a share's permille at each time, in the same colour as its bar segment. */
+data class CpuSeries(
+    val key: String,
+    val heading: String,
+    val title: String,
+    val color: String,
+    /** One value per entry of [CpuChart.times] (0 where the share was absent). */
+    val values: List<Int>,
+) {
+    /** "#287 (star) Scheduler: … 23.4%" at [index]. */
+    fun tip(index: Int): String = (if (title.isEmpty()) heading else "$heading $title") + " " + Format.permille(values[index])
+}
+
+/** The CPU history, ready to draw: points in time order and a series per share, biggest total first (at the bottom). */
+data class CpuChart(val spanMs: Long, val times: List<Long>, val series: List<CpuSeries>, val maxStack: Int)
+
+private fun shareKey(kind: String, task: Long) = if (kind == "task") "task:$task" else kind
+
+/**
+ * The chart for [h]. Titles and projects come from [usage] (the history carries neither); a task in
+ * [colors] keeps the colour its bar segment has, any other the id-based fallback the bar uses.
+ * Pure, so the app runs it off the main thread.
+ */
+fun cpuChart(h: CpuHistory, usage: CpuUsage?, colors: Map<Long, Int>): CpuChart {
+    val info = usage?.shares.orEmpty().associateBy { shareKey(it.kind, it.task) }
+    val first = linkedMapOf<String, mason.v1.CpuShare>()
+    val totals = mutableMapOf<String, Long>()
+    for (p in h.points) for (s in p.shares) {
+        val k = shareKey(s.kind, s.task)
+        first.putIfAbsent(k, s)
+        totals[k] = (totals[k] ?: 0L) + s.permille
+    }
+    val order = first.keys.sortedWith(compareBy({ -(totals[it] ?: 0L) }, { it }))
+    val stack = IntArray(h.points.size)
+    val series = order.map { k ->
+        val s = first.getValue(k)
+        val task = s.kind == "task"
+        val values = h.points.mapIndexed { i, p ->
+            val v = p.shares.firstOrNull { shareKey(it.kind, it.task) == k }?.permille ?: 0
+            stack[i] += v
+            v
+        }
+        val name = if (task) s.label else fixedName(s.kind)
+        val project = if (task) info[k]?.project.orEmpty() else ""
+        CpuSeries(
+            key = k,
+            heading = if (project.isEmpty()) name else "$name ($project)",
+            title = if (task) info[k]?.title.orEmpty() else "",
+            color = if (task) ((colors[s.task] ?: (s.task % CPU_TASK_COLOURS).toInt()) + 1).toString() else s.kind,
+            values = values,
+        )
+    }
+    return CpuChart(h.span_ms, h.points.map { it.at_ms }, series, maxOf(1, stack.maxOrNull() ?: 1))
+}
+
+/** The index of the point nearest to [fraction] (0..1) of the chart's width; null for an empty chart. */
+fun cpuChartIndex(c: CpuChart, fraction: Double): Int? {
+    val first = c.times.firstOrNull() ?: return null
+    val last = c.times.last()
+    val at = first + fraction.coerceIn(0.0, 1.0) * (last - first)
+    return c.times.indices.minByOrNull { kotlin.math.abs(c.times[it] - at) }
+}
