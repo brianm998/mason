@@ -497,7 +497,11 @@ fn subject_and_detail(d: &Daemon, key: &str, kind: &str, text: &str) -> (String,
         .and_then(|r| r.parse::<u64>().ok());
     if let (Some(id), Ok(w)) = (id, d.world()) {
         if let Some(t) = w.tasks.get(&TaskId(id)) {
-            let subject = format!("{} {}", t.title, id);
+            let project = d
+                .project(t.project)
+                .map(|p| p.id.clone())
+                .unwrap_or_default();
+            let subject = n::spoken_subject(&project, id, &t.title);
             let detail = match kind {
                 "needs_you" if key.starts_with("approval:") || key.starts_with("proposed:") => {
                     String::new()
@@ -841,7 +845,18 @@ fn announce_landed(d: &Daemon, s: &Settings, now: u64) {
             .any(|r| r.channel.audible());
         for id in landed.difference(before) {
             if let (true, Some(t)) = (speaks, w.tasks.get(&TaskId(*id))) {
-                let line = n::sentence("landed", &format!("{} {}", t.title, id), "", false);
+                let line = n::sentence(
+                    "landed",
+                    &n::spoken_subject(
+                        &d.project(t.project)
+                            .map(|p| p.id.clone())
+                            .unwrap_or_default(),
+                        *id,
+                        &t.title,
+                    ),
+                    "",
+                    false,
+                );
                 let sound = s
                     .routing
                     .rules("landed")
