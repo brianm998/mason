@@ -682,10 +682,32 @@ const STEPS: &[&str] = &[
     "ALTER TABLE debts ADD COLUMN how TEXT NOT NULL DEFAULT '';
      ALTER TABLE debts ADD COLUMN landed TEXT NOT NULL DEFAULT '';
      ALTER TABLE debts ADD COLUMN tried_at INTEGER NOT NULL DEFAULT 0;",
-
     // 38: which rule chose a proposal's disposition (s295, decision 0289). Additive.
     "ALTER TABLE proposals ADD COLUMN decided_by TEXT NOT NULL DEFAULT '';",
-
+    // 39: the owner's chat sessions with an agent (s364, decision 0357) and their messages.
+    // `task` is NULL for a session about no task. `state` is open, working or ended. Additive.
+    "CREATE TABLE owner_sessions (
+         id          INTEGER PRIMARY KEY AUTOINCREMENT,
+         task        INTEGER,
+         kind        TEXT NOT NULL,
+         account     TEXT NOT NULL,
+         adapter_session TEXT NOT NULL DEFAULT '',
+         opened_by   TEXT NOT NULL,
+         opened_ms   INTEGER NOT NULL,
+         last_ms     INTEGER NOT NULL,
+         turns       INTEGER NOT NULL DEFAULT 0,
+         state       TEXT NOT NULL,
+         ended_ms    INTEGER NOT NULL DEFAULT 0
+     );
+     CREATE INDEX owner_sessions_task ON owner_sessions(task);
+     CREATE TABLE owner_messages (
+         id      INTEGER PRIMARY KEY AUTOINCREMENT,
+         session INTEGER NOT NULL,
+         role    TEXT NOT NULL,
+         text    TEXT NOT NULL,
+         at_ms   INTEGER NOT NULL
+     );
+     CREATE INDEX owner_messages_session ON owner_messages(session, id);",
 ];
 
 pub const SCHEMA_VERSION: u32 = STEPS.len() as u32;

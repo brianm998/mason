@@ -2347,6 +2347,118 @@ async fn open_session(Shared(d): Shared<Arc<Daemon>>, Path(id): Path<u64>) -> Re
     Ok(Json(v))
 }
 
+/// Open the owner's chat session about a task, or return the open one, with the drafted first
+/// message while the owner has not written yet (s364). With the step running it asks first: 409
+/// and `step_running`, then again with `{"confirm": true}`.
+async fn owner_session_open(
+    Shared(d): Shared<Arc<Daemon>>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<u64>,
+    body: Option<Json<Value>>,
+) -> Res {
+    let who = who_of(&headers);
+    owner_only(&d, &who, "open a session")?;
+    let confirm = body.is_some_and(|b| b.0["confirm"].as_bool() == Some(true));
+    let d2 = d.clone();
+    let r = d
+        .pool
+        .run(move || crate::usersession::open_for_task(&d2, TaskId(id), &who, confirm))
+        .await
+        .map_err(pool_err)?;
+    match r {
+        Ok(o) => {
+            let mut v = crate::usersession::session_json(&o.session);
+            v["draft"] = json!(o.draft);
+            v["created"] = json!(o.created);
+            Ok(Json(json!({"session": v})))
+        }
+        Err(crate::usersession::OpenError::StepRunning) => Err((
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": "the task's step is running; opening a session beside it needs a confirm",
+                "step_running": true,
+            })),
+        )),
+        Err(crate::usersession::OpenError::Other(e)) => Err(fail(StatusCode::NOT_FOUND, e)),
+    }
+}
+
+async fn owner_sessions_list(Shared(d): Shared<Arc<Daemon>>) -> Res {
+    let d2 = d.clone();
+    let rows = d
+        .pool
+        .run(move || d2.store.open_owner_sessions())
+        .await
+        .map_err(pool_err)?
+        .map_err(store_err)?;
+    Ok(Json(json!({
+        "sessions": rows.iter().map(crate::usersession::session_json).collect::<Vec<_>>(),
+    })))
+}
+
+/// A session and its messages after `?after=<message id>` (default: all).
+async fn owner_session_show(
+    Shared(d): Shared<Arc<Daemon>>,
+    Path(id): Path<u64>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Res {
+    let after: u64 = q.get("after").and_then(|a| a.parse().ok()).unwrap_or(0);
+    let d2 = d.clone();
+    let r = d
+        .pool
+        .run(move || {
+            let s = d2.store.owner_session(id)?;
+            let m = d2.store.owner_messages(id, after)?;
+            Ok::<_, mason_store::StoreError>((s, m))
+        })
+        .await
+        .map_err(pool_err)?
+        .map_err(store_err)?;
+    let (Some(s), m) = r else {
+        return Err(fail(StatusCode::NOT_FOUND, "no such session"));
+    };
+    let mut v = crate::usersession::session_json(&s);
+    v["messages"] = json!(m
+        .iter()
+        .map(crate::usersession::message_json)
+        .collect::<Vec<_>>());
+    Ok(Json(json!({"session": v})))
+}
+
+async fn owner_session_post(
+    Shared(d): Shared<Arc<Daemon>>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<u64>,
+    Json(b): Json<Value>,
+) -> Res {
+    let who = who_of(&headers);
+    owner_only(&d, &who, "write in a session")?;
+    let text = b["text"].as_str().unwrap_or_default().to_string();
+    let d2 = d.clone();
+    d.pool
+        .run(move || crate::usersession::post(&d2, id, &text, &who))
+        .await
+        .map_err(pool_err)?
+        .map_err(|e| fail(StatusCode::CONFLICT, e))?;
+    Ok(Json(json!({"accepted": true})))
+}
+
+async fn owner_session_end(
+    Shared(d): Shared<Arc<Daemon>>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<u64>,
+) -> Res {
+    let who = who_of(&headers);
+    owner_only(&d, &who, "end a session")?;
+    let d2 = d.clone();
+    d.pool
+        .run(move || crate::usersession::end(&d2, id, &who))
+        .await
+        .map_err(pool_err)?
+        .map_err(|e| fail(StatusCode::NOT_FOUND, e))?;
+    Ok(Json(json!({"ended": true})))
+}
+
 /// The keys that could be used for the project's remote (owner only).
 async fn ssh_keys_list(
     Shared(d): Shared<Arc<Daemon>>,
@@ -3369,6 +3481,11 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/tasks/{id}/skip", post(skip_task))
         .route("/tasks/{id}/answer", post(answer_task))
         .route("/tasks/{id}/session", get(open_session))
+        .route("/tasks/{id}/owner-session", post(owner_session_open))
+        .route("/sessions", get(owner_sessions_list))
+        .route("/sessions/{id}", get(owner_session_show))
+        .route("/sessions/{id}/messages", post(owner_session_post))
+        .route("/sessions/{id}/end", post(owner_session_end))
         .route("/tasks/{id}/{kind}", post(land_override))
         .route("/account/hold", post(account_hold))
         .route("/account/release", post(account_release))

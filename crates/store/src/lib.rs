@@ -14,6 +14,7 @@ pub mod devices;
 pub mod introspect;
 pub mod migrations;
 pub mod notify;
+pub mod owner_sessions;
 
 use mason_core::*;
 use mason_engine::{reduce_in_place, ReduceError, Touched, World};

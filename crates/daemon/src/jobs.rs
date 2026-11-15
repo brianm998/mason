@@ -670,6 +670,10 @@ fn execute(c: &Ctx, step: State) {
     if let Err(()) = wait_while_paused(c) {
         return;
     }
+    // An agent step does not launch while the owner's session about this task is replying.
+    if c.step.kind == StepType::Agent && wait_while_owner_replies(c).is_err() {
+        return;
+    }
     // Everything the step needs, acquired at once, in rank order across every
     // project. Time spent waiting is outside every timeout below: they all
     // start after this returns. An approval waits for a person, not for the
@@ -825,6 +829,33 @@ fn wait_while_paused(c: &Ctx) -> Result<(), ()> {
                 .map(|w| w.open_run(c.task) == Some(c.run))
                 .unwrap_or(true);
         if !alive {
+            return Err(());
+        }
+    }
+    if announced {
+        c.emit(EventKind::WaitEnded { task: c.task });
+    }
+    Ok(())
+}
+
+/// Hold an agent step back while an owner session about the task has a turn in flight (s364).
+/// The wait is shown on the task; an open session that is idle holds nothing. `Err` means the
+/// task went away meanwhile.
+fn wait_while_owner_replies(c: &Ctx) -> Result<(), ()> {
+    let mut announced = false;
+    while crate::usersession::replying(&c.d, c.task) {
+        if !announced {
+            announced = true;
+            if !c.emit(EventKind::WaitStarted {
+                task: c.task,
+                on: crate::usersession::HOLD_REASON.into(),
+                class: Some("owner-session".into()),
+            }) {
+                return Err(());
+            }
+        }
+        std::thread::sleep(Duration::from_millis(200));
+        if !still_open(c) {
             return Err(());
         }
     }
@@ -2495,15 +2526,24 @@ struct WeakeningCheck {
 /// The agent CLI for this project's provider, under the step host and, if the
 /// project asks for one, an OS sandbox.
 pub(crate) fn adapter(c: &Ctx) -> Box<dyn AgentAdapter> {
-    let agent = c.project.agent();
+    adapter_for(&c.d, &c.project, &c.wt)
+}
+
+/// The same for a session that is not a step of the graph (an owner session, s364).
+pub(crate) fn adapter_for(
+    d: &Daemon,
+    project: &ProjectCfg,
+    wt: &std::path::Path,
+) -> Box<dyn AgentAdapter> {
+    let agent = project.agent();
     let host = HostLaunch {
-        host_bin: c.d.cfg.host_bin.clone(),
-        root: c.d.cfg.hosts_dir(),
-        heartbeat: c.d.cfg.heartbeat,
+        host_bin: d.cfg.host_bin.clone(),
+        root: d.cfg.hosts_dir(),
+        heartbeat: d.cfg.heartbeat,
         linger: Duration::from_secs(600),
     };
     let sandbox = (agent.sandbox != SandboxKind::None).then(|| {
-        let mut p = SandboxPolicy::new(agent.sandbox, &c.wt, &c.d.cfg.agent_state_dir());
+        let mut p = SandboxPolicy::new(agent.sandbox, wt, &d.cfg.agent_state_dir());
         if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
             p.extra = [".claude", ".claude.json", ".codex"]
                 .iter()
@@ -2511,24 +2551,23 @@ pub(crate) fn adapter(c: &Ctx) -> Box<dyn AgentAdapter> {
                 .collect();
         }
         // A worktree's commits are written into the main repository's `.git`.
-        p.extra.push(c.project.path.join(".git"));
+        p.extra.push(project.path.join(".git"));
         p
     });
     match agent.provider {
         Provider::Claude => {
-            let bin = c
-                .project
+            let bin = project
                 .claude_bin
                 .clone()
                 .unwrap_or_else(|| PathBuf::from("claude"));
-            let mut a = ClaudeAdapter::new(bin, c.d.cfg.mcp_bin.clone(), c.d.cfg.agent_state_dir())
+            let mut a = ClaudeAdapter::new(bin, d.cfg.mcp_bin.clone(), d.cfg.agent_state_dir())
                 .with_host(host);
             a.sandbox = sandbox;
             Box::new(a)
         }
         Provider::Codex => {
             let bin = agent.codex_bin.unwrap_or_else(|| PathBuf::from("codex"));
-            let mut a = CodexAdapter::new(bin, c.d.cfg.mcp_bin.clone(), c.d.cfg.agent_state_dir())
+            let mut a = CodexAdapter::new(bin, d.cfg.mcp_bin.clone(), d.cfg.agent_state_dir())
                 .with_host(host);
             a.sandbox = sandbox;
             Box::new(a)
@@ -2614,6 +2653,7 @@ fn agent_job(c: &Ctx) {
         StepKind::Explore => "explore",
         // A diagnosis session is run by `diagnose`, not as a step of the graph.
         StepKind::Diagnose => "diagnose",
+        StepKind::Chat => "chat",
     };
     // Only while the feedback it was written with is still there.
     let round_reason = if conflicts.is_some() {
@@ -2677,7 +2717,7 @@ fn agent_job(c: &Ctx) {
             StepKind::Explore => {
                 crate::prompts::explore_prompt(c.task.0, &c.title, &c.body, c.trust, &c.project)
             }
-            StepKind::Diagnose => String::new(),
+            StepKind::Diagnose | StepKind::Chat => String::new(),
         }
     };
 

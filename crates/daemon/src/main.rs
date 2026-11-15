@@ -182,6 +182,14 @@ fn main() {
             std::process::exit(1);
         }
     }
+    match mason_daemon::config::load_idle_end_h(&cfg.config_dir) {
+        Ok(Some(n)) => cfg.idle_end_h = n,
+        Ok(None) => {}
+        Err(e) => {
+            eprintln!("masond: {}: {e}", cfg.config_dir.display());
+            std::process::exit(1);
+        }
+    }
     cfg.port = mason_daemon::config::resolve_port(cli_port, file_port, demo);
     // LAN access: daemon.toml `[lan]`, or --lan. Off by default.
     cfg.lan = match mason_daemon::config::load_lan(&cfg.config_dir) {
