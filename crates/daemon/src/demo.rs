@@ -39,6 +39,7 @@ fn card(ask: &str, why: &str, options: &[(&str, bool)], evidence: &[&str]) -> St
         key: String::new(),
         origin: Origin::Agent,
         problems: vec![],
+        multi_select: false,
     }
     .to_text()
 }
