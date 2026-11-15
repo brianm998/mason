@@ -531,6 +531,40 @@ final class MonitorCoreTests: XCTestCase {
         XCTAssertFalse(m.updateAvailable, "a development monitor does not nag")
     }
 
+    func testABuildInPlaceShowsItsProgressAndCanBeCancelled() {
+        func building(_ f: (inout Mason_V1_MonitorBuild) -> Void) -> Mason_V1_ServerMessage {
+            var v = Mason_V1_View()
+            v.header = .with {
+                $0.update = .with {
+                    $0.monitors = [.with { b in b.kind = "swift"; b.latest = "bbb222"; b.phase = "building"; f(&b) }]
+                }
+            }
+            var u = Mason_V1_ViewUpdate()
+            u.view = v
+            var m = Mason_V1_ServerMessage()
+            m.view = u
+            return m
+        }
+        let m = MonitorModel()
+        m.onInstall = { _ in }
+        m.ownVersion = "aaa111"
+        m.apply(owner())
+        m.apply(update(latest: "bbb222"))
+        m.updateMonitor()
+        m.apply(result(id: "update-monitor", ok: true))
+        XCTAssertTrue(m.canCancelMonitorUpdate)
+        m.apply(building { $0.step = "fetching" })
+        XCTAssertEqual(m.updating, "Fetching the new source…")
+        m.apply(building { $0.step = "compiling"; $0.done = 12; $0.total = 48; $0.lastLine = "[12/48] Compiling Model.swift" })
+        XCTAssertEqual(m.updating, "Compiling 12 of 48… [12/48] Compiling Model.swift")
+        m.apply(building { $0.step = "installing" })
+        XCTAssertEqual(m.updating, "Installing the new monitor…")
+        var failed = Mason_V1_MonitorBuild()
+        failed.error = "boom"
+        failed.log = "/tmp/x.log"
+        XCTAssertEqual(MonitorModel.failureText(failed), "The new monitor did not build: boom (log: /tmp/x.log)")
+    }
+
     func testOnlyTheOwnersDesktopMonitorOnTheSameMachineIsOffered() {
         let m = MonitorModel()
         m.ownVersion = "aaa111"
@@ -544,6 +578,23 @@ final class MonitorCoreTests: XCTestCase {
         w.welcome.owner = false
         m.apply(w)
         XCTAssertFalse(m.updateAvailable, "not the owner")
+    }
+
+    func testHomeShowsTheDaemonsShortCommit() {
+        let m = MonitorModel()
+        m.ownVersion = "dev"
+        XCTAssertEqual(m.versionLine, "")
+        m.apply(welcome(version: "64b3068a5c0ffee1234"))
+        XCTAssertTrue(m.versionLine.contains("masond 64b3068a"))
+        XCTAssertFalse(m.versionLine.contains("64b3068a5"))
+        XCTAssertTrue(m.versionTip.contains("64b3068a5c0ffee1234"))
+        XCTAssertTrue(m.versionLine.contains("monitor (unversioned build)"))
+        m.ownVersion = "abcdef0123456"
+        XCTAssertTrue(m.versionLine.contains("monitor abcdef01"))
+        m.apply(update(latest: "x", daemon: "masond is 3 commits behind develop"))
+        XCTAssertTrue(m.versionLine.contains("3 commits behind develop"))
+        m.apply(welcome(version: "dev"))
+        XCTAssertTrue(m.versionLine.contains("masond (unversioned build)"))
     }
 
     func testTheDaemonButtonIsTheOwnersAndSendsTheUpdate() {

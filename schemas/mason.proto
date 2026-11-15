@@ -555,8 +555,11 @@ message HeaderView {
   // Whether MASON itself is behind its update channel, and any update under way
   // (additive). Absent when the daemon has no update.toml.
   UpdateInfo update = 8;
+  // The project filter this view was computed for (empty: all projects). A client drops a view
+  // whose project is not its current selection.
+  string project = 9;
   // How many owner chat sessions are open (s364). Additive.
-  uint32 open_owner_sessions = 9;
+  uint32 open_owner_sessions = 10;
 }
 
 // What the daemon found the last time it looked at its update channel.
@@ -589,8 +592,18 @@ message MonitorBuild {
   // "" (nothing asked for), "building", "ready" or "failed".
   string phase = 3;
   string error = 4;
-  // When ready: the finished build, on the daemon's own disk.
+  // When ready: the finished build, on the daemon's own disk. For a bare binary built in
+  // place, the path of the binary that now holds the new build (the one the monitor runs from).
   string path = 5;
+  // While building: "fetching", "waiting" (for a compile slot), "compiling", "linking" or
+  // "installing" (additive).
+  string step = 6;
+  // Compile progress, `done` of `total` build steps, when the build tool says (additive).
+  uint32 done = 7;
+  uint32 total = 8;
+  // The build's last log line, and the log file (additive).
+  string last_line = 9;
+  string log = 10;
 }
 
 message PendingIssue {
@@ -616,6 +629,9 @@ message SidebarSection {
 message SidebarView {
   repeated SidebarSection sections = 1;
   repeated string pages = 2;
+  // The project filter this view was computed for (empty: all projects). A client drops a view
+  // whose project is not its current selection.
+  string project = 3;
 }
 
 message CardOption {
@@ -677,6 +693,9 @@ message HomeView {
   Compilation compilation = 7;
   // Each task's share of the machine's CPU, and the fixed buckets.
   CpuUsage cpu = 8;
+  // The project filter this view was computed for (empty: all projects). A client drops a view
+  // whose project is not its current selection.
+  string project = 9;
 }
 
 // One bucket's share of the machine's CPU.
@@ -952,6 +971,9 @@ message LandingView {
   uint64 queue_idle_ms = 8;
   // One line per project: tracker off, polling (with counts), or stopped (with why).
   repeated string trackers = 9;
+  // The project filter this view was computed for (empty: all projects). A client drops a view
+  // whose project is not its current selection.
+  string project = 10;
 }
 
 message ProviderStatus {

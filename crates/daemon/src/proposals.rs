@@ -64,6 +64,24 @@ pub fn parse_cfg(id: &str, doc: &DocumentMut) -> Result<Cfg, String> {
                     .map(|n| n as u32)
                     .ok_or_else(|| format!("{id}: `[proposals] {k}` must be a whole number from 1"))
             };
+            if k == "introspection" {
+                let Some(sub) = v.as_table_like() else {
+                    return Err(format!("{id}: `[proposals] introspection` must be a table"));
+                };
+                for (ik, iv) in sub.iter() {
+                    let d = iv.as_str().and_then(parse_disposition).ok_or_else(|| {
+                        format!(
+                            "{id}: `[proposals.introspection] {ik}` must be \"proposed\" or \"queued\""
+                        )
+                    })?;
+                    if !policy.introspection.set(ik, d) {
+                        return Err(format!(
+                            "{id}: unknown key `[proposals.introspection] {ik}`; use low_small, low_large, high_small or high_large"
+                        ));
+                    }
+                }
+                continue;
+            }
             match k {
                 "agent_normal" => policy.agent_normal = disp(v)?,
                 "agent_blocks" => policy.agent_blocks = disp(v)?,
@@ -146,6 +164,9 @@ pub struct Filing {
     pub evidence: String,
     pub blocks_task: bool,
     pub explored: bool,
+    /// For an introspection finding: its estimated impact and cost. The owner's
+    /// `[proposals.introspection]` table then decides proposed or queued.
+    pub estimate: Option<(Impact, Cost)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -273,7 +294,22 @@ pub fn file(d: &Arc<Daemon>, f: &Filing) -> Result<Filed, String> {
     } else {
         Severity::Normal
     };
-    let proposed = cfg_here.policy.decide(Source::Agent, severity) == Disposition::Proposed;
+    let (disposition, severity_name, rule) = match f.estimate {
+        Some((impact, cost)) => (
+            cfg_here.policy.introspection.decide(impact, cost),
+            impact.name(),
+            format!(
+                "proposals.introspection.{}",
+                IntrospectionPolicy::key(impact, cost)
+            ),
+        ),
+        None => (
+            cfg_here.policy.decide(Source::Agent, severity),
+            severity.name(),
+            format!("proposals.agent_{}", severity.name()),
+        ),
+    };
+    let proposed = disposition == Disposition::Proposed;
     if tproj.self_cfg.is_some() {
         crate::selfguard::check_filing_as(d, tid, TrustSource::OwnerAgent)?;
     }
@@ -306,7 +342,7 @@ pub fn file(d: &Arc<Daemon>, f: &Filing) -> Result<Filed, String> {
             task: task.0,
             project: tproj.id.clone(),
             source: Source::Agent.name().into(),
-            severity: severity.name().into(),
+            severity: severity_name.into(),
             route: route.name().into(),
             filed_by: f.from_task.map(|t| t.0),
             title,
@@ -321,6 +357,7 @@ pub fn file(d: &Arc<Daemon>, f: &Filing) -> Result<Filed, String> {
             pr: None,
             pr_state: String::new(),
             at: now,
+            decided_by: rule,
         })
         .map_err(|e| e.to_string())?;
     Ok(Filed {
@@ -358,6 +395,7 @@ pub fn file_from_report(
             evidence: text("evidence"),
             blocks_task: p["blocks_task"].as_bool().unwrap_or(false),
             explored: p["explored"].as_bool().unwrap_or(false),
+            estimate: None,
         };
         match file(d, &f) {
             Ok(done) => tracing::info!(
@@ -497,11 +535,37 @@ pub fn row_json(w: &mason_engine::World, r: &ProposalRow) -> Value {
         "route": r.route, "filed_by": r.filed_by, "title": r.title, "body": r.body,
         "evidence": r.evidence, "status": r.status, "reject_reason": r.reject_reason,
         "publish_state": r.publish_state, "access": r.access, "branch": r.branch,
-        "pr": r.pr, "pr_state": r.pr_state, "state": state, "at": r.at,
+        "pr": r.pr, "pr_state": r.pr_state, "decided_by": r.decided_by, "state": state, "at": r.at,
     })
 }
 
 /// A short tag for a task row: `agent · blocks · pipeline`.
 pub fn tag(r: &ProposalRow) -> String {
     format!("{} · {} · {}", r.source, r.severity, r.route)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg(text: &str) -> Result<Cfg, String> {
+        parse_cfg("p", &text.parse::<DocumentMut>().unwrap())
+    }
+
+    #[test]
+    fn the_introspection_table_is_read_and_bad_entries_are_load_errors() {
+        let c = cfg("[proposals.introspection]\nlow_small = \"queued\"\n").unwrap();
+        let i = c.policy.introspection;
+        assert_eq!(i.decide(Impact::Low, Cost::Small), Disposition::Queued);
+        assert_eq!(i.decide(Impact::High, Cost::Large), Disposition::Proposed);
+        assert_eq!(
+            cfg("").unwrap().policy.introspection,
+            IntrospectionPolicy::default()
+        );
+        let e = cfg("[proposals.introspection]\nmedium_small = \"queued\"\n").unwrap_err();
+        assert!(e.contains("medium_small"), "{e}");
+        let e = cfg("[proposals.introspection]\nlow_small = \"now\"\n").unwrap_err();
+        assert!(e.contains("low_small"), "{e}");
+        assert!(cfg("[proposals]\nintrospection = \"queued\"\n").is_err());
+    }
 }

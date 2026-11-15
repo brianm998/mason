@@ -682,7 +682,9 @@ const STEPS: &[&str] = &[
     "ALTER TABLE debts ADD COLUMN how TEXT NOT NULL DEFAULT '';
      ALTER TABLE debts ADD COLUMN landed TEXT NOT NULL DEFAULT '';
      ALTER TABLE debts ADD COLUMN tried_at INTEGER NOT NULL DEFAULT 0;",
-    // 38: the owner's chat sessions with an agent (s364, decision 0357) and their messages.
+    // 38: which rule chose a proposal's disposition (s295, decision 0289). Additive.
+    "ALTER TABLE proposals ADD COLUMN decided_by TEXT NOT NULL DEFAULT '';",
+    // 39: the owner's chat sessions with an agent (s364, decision 0357) and their messages.
     // `task` is NULL for a session about no task. `state` is open, working or ended. Additive.
     "CREATE TABLE owner_sessions (
          id          INTEGER PRIMARY KEY AUTOINCREMENT,

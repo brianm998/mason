@@ -68,3 +68,4 @@ echo "task #0 resumed after the monitor's answer and landed"
 m task show 0 | grep -E 'state|failures'
 m metrics | head -3
 echo "s12-real OK"
+echo "RESULT s12-real: a monitor answer resumed a task and it landed, passed $(date +%F)"

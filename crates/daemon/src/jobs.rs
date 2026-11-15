@@ -3307,7 +3307,7 @@ fn finish_agent(c: &Ctx, report: StepReport, dir: &Path) {
     };
     finish_agent_inner(c, report, dir);
     // The analyst's findings (Part 14), read from the file it wrote in its worktree.
-    crate::introspect::ingest_analyst(&c.d, c.task, &c.project.id, &c.title, &c.wt, dir);
+    crate::introspect::ingest_analyst(&c.d, c.task, &c.project.id, &c.wt, dir);
     // Triage (off unless the project turns it on) only records what it would do; the
     // question is the owner's either way.
     if let Some(q) = asked {
