@@ -117,7 +117,7 @@ struct HomePage: View {
                         ForEach(active, id: \.task) { a in
                             HStack(spacing: theme.spacing) {
                                 Text(a.display.isEmpty ? a.model : a.display).font(theme.body(.semibold))
-                                Button("\(a.project) #\(a.task)") { model.go(.task(a.task)) }.buttonStyle(.link)
+                                TaskLink(title: "\(a.project) #\(a.task)") { model.go(.task(a.task)) }
                                 Text(a.step).foregroundStyle(theme.muted)
                             }
                             .font(theme.body())
@@ -133,7 +133,7 @@ struct HomePage: View {
                             let queue = model.home?.stages.first { $0.state == "landing" }?.rows ?? []
                             if queue.isEmpty { Text("Nothing is landing.").font(theme.body()).foregroundStyle(theme.muted) }
                             ForEach(queue, id: \.id) { r in
-                                Button("\(r.key) \(r.title)") { model.go(.task(r.id)) }.buttonStyle(.link).font(theme.body())
+                                TaskLink(title: "\(r.key) \(r.title)", font: theme.body()) { model.go(.task(r.id)) }
                             }
                         }
                     }
@@ -222,13 +222,11 @@ struct CompilationSection: View {
 
     @ViewBuilder private func who(_ label: String, task: UInt64, command: String = "") -> some View {
         if task > 0 {
-            Button("#\(task)") { model.go(.task(task)) }.buttonStyle(.link)
+            TaskLink(title: "#\(task)") { model.go(.task(task)) }
         } else if !command.isEmpty {
             Button(label) { model.openCommand(label: label, command: command) }
-                .buttonStyle(.link).lineLimit(1).help("Show the whole command")
-                #if canImport(AppKit)
-                .onHover { inside in if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() } }
-                #endif
+                .buttonStyle(.plain).linkStyle()
+                .lineLimit(1).help("Show the whole command")
                 .accessibilityIdentifier("compile:command")
         } else {
             Text(label).lineLimit(1).truncationMode(.middle).help(label)
@@ -429,8 +427,7 @@ struct TaskDetailPage: View {
                 HStack(spacing: theme.spacingSmall) {
                     Text("waiting for").font(theme.body()).foregroundStyle(theme.muted)
                     ForEach(r.blockers, id: \.self) { b in
-                        Button("#\(b)") { model.go(.task(b)) }
-                            .buttonStyle(.link).font(theme.body())
+                        TaskLink(title: "#\(b)", font: theme.body()) { model.go(.task(b)) }
                     }
                 }
                 .accessibilityElement(children: .combine)
@@ -442,8 +439,7 @@ struct TaskDetailPage: View {
                 HStack(spacing: theme.spacingSmall) {
                     Text("blocks").font(theme.body()).foregroundStyle(theme.muted)
                     ForEach(r.blocks, id: \.self) { b in
-                        Button("#\(b)") { model.go(.task(b)) }
-                            .buttonStyle(.link).font(theme.body())
+                        TaskLink(title: "#\(b)", font: theme.body()) { model.go(.task(b)) }
                     }
                 }
                 .accessibilityElement(children: .combine)
@@ -561,7 +557,7 @@ struct LandingPage: View {
                             Text("Nothing is landing.").font(theme.body()).foregroundStyle(theme.muted)
                         }
                         ForEach(l.queue, id: \.id) { r in
-                            Button("\(r.key) \(r.title)") { model.go(.task(r.id)) }.buttonStyle(.link)
+                            TaskLink(title: "\(r.key) \(r.title)") { model.go(.task(r.id)) }
                         }
                     }
                     if !l.items.isEmpty {
@@ -575,7 +571,7 @@ struct LandingPage: View {
                                 HStack(spacing: theme.spacing) {
                                     Text(batchCiText(b.ci)).font(theme.body())
                                         .foregroundStyle(batchCiFailed(b.ci) ? theme.attention : theme.muted)
-                                    if let url = batchCiURL(b.ci) { Link("CI run", destination: url) }
+                                    if let url = batchCiURL(b.ci) { WebLink(title: "CI run", url: url) }
                                 }
                             }
                         }
@@ -836,13 +832,13 @@ struct LandingItems: View {
             if !g.landing.isEmpty {
                 Text("Landing now").font(theme.body()).foregroundStyle(theme.muted)
                 ForEach(g.landing, id: \.task) { i in
-                    Button(landingItemText(i)) { model.go(.task(i.task)) }.buttonStyle(.link).font(theme.body())
+                    TaskLink(title: landingItemText(i), font: theme.body()) { model.go(.task(i.task)) }
                 }
             }
             if !g.queued.isEmpty {
                 Text("Queued").font(theme.body()).foregroundStyle(theme.muted)
                 ForEach(g.queued, id: \.task) { i in
-                    Button(landingItemText(i)) { model.go(.task(i.task)) }.buttonStyle(.link).font(theme.body())
+                    TaskLink(title: landingItemText(i), font: theme.body()) { model.go(.task(i.task)) }
                 }
             }
         }
@@ -891,7 +887,7 @@ struct SectionPage: View {
                         ForEach(active, id: \.task) { a in
                             HStack(spacing: theme.spacing) {
                                 Text(a.display.isEmpty ? a.model : a.display).font(theme.body(.semibold))
-                                Button("\(a.project) #\(a.task)") { model.go(.task(a.task)) }.buttonStyle(.link)
+                                TaskLink(title: "\(a.project) #\(a.task)") { model.go(.task(a.task)) }
                                 Text(a.step).foregroundStyle(theme.muted)
                             }
                             .font(theme.body())
