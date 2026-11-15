@@ -26,7 +26,7 @@ fun main(args: Array<String>) = application {
             it.launcher = { argv -> openTerminal(argv) }
         }
     }
-    remember { UiWatchdog({ javax.swing.SwingUtilities.invokeLater(it) }).also { it.start() }; 0 }
+    remember { UiWatchdog({ job -> javax.swing.SwingUtilities.invokeLater(Runnable { job() }) }).also { it.start() }; 0 }
     LaunchedEffect(Unit) {
         while (true) {
             kotlinx.coroutines.delay(1000)
@@ -54,7 +54,7 @@ fun main(args: Array<String>) = application {
         while (true) {
             // daemon.json is read on an IO thread, not the UI's.
             if (kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { Discovery.info(args.toList()) } != null) {
-                MonitorConnection(model, { Discovery.info(args.toList()) }, ui = { javax.swing.SwingUtilities.invokeLater(it) }).start()
+                MonitorConnection(model, { Discovery.info(args.toList()) }, ui = java.util.concurrent.Executor { javax.swing.SwingUtilities.invokeLater(it) }).start()
                 break
             }
             kotlinx.coroutines.delay(1000)

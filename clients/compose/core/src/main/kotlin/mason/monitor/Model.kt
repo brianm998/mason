@@ -650,7 +650,7 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
         }
         sidebar?.let { s ->
             val latest = HashMap<Long, MutableList<ProgressCell>>()
-            for (p in withCell) latest.getOrPut(p.task) { ArrayList() } += p.progress!!
+            for (p in withCell) latest.getOrPut(p.task) { ArrayList() }.add(p.progress!!)
             var changed = false
             val sections = s.sections.map { sec ->
                 sec.copy(rows = sec.rows.map { row ->
