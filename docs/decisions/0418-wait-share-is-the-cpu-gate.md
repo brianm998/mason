@@ -1,0 +1,3 @@
+# 0418: Do not retune the scheduler or the wait_share gate for #430
+
+Task #430 repeats the finding of 0176 and 0283: 62% of active time waiting, 79% of it on `cpu`, 19% on `compile`, 2% `exclusive`, 0% queue. The `cpu` wait is the compile gate holding a build while the machine is busier than `compile_cpu_max`; the owner sets that gate (`resources.toml`, `Broker::set_gate`) and it fails closed on purpose (0120). The share falls when the load that fills the machine falls or the owner raises the gate, not when `sched.rs` gains a second rule here. The metric and the 60% threshold stay as they are, because moving either would hide the problem (0176). No code changed.

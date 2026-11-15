@@ -1,0 +1,7 @@
+# 0372: the LAN listener names extra hosts and can bind chosen addresses (s379)
+
+**Decision.** `[lan] hosts = [...]` lists extra names or addresses a phone may reach the daemon at. They follow `<host>.local` in `hosts` of `POST /pair/codes` and `GET /lan`, and in the pairing URL as repeated `alt=` parameters; `host=` stays first so older clients still parse it. `[lan] bind = [...]` lists the addresses to listen on, one listener each, sharing the router and TLS config. Both are parsed strictly and a bad value stops `masond` naming `daemon.toml`. Clients try the mDNS endpoint, then `.local`, then each extra host (`Reach.order`).
+
+**Why.** mDNS works only on the local network, so a phone paired at home cannot reach the daemon elsewhere. A private overlay network (Tailscale) gives it an address without port forwarding.
+
+**Trust.** This touches network exposure, so: the listener still serves paired devices only (every route but `POST /pair` needs a token; codes, roles and revocation are unchanged). `hosts` only changes what is advertised; it opens nothing. `bind` defaults to `["0.0.0.0"]`, exactly today's behaviour, and the LAN listener stays off unless `[lan] enabled = true`. Setting `bind` can only narrow where it listens (or add an address on an interface that already exists). Clients still pin the certificate by fingerprint, so a name that is not in the certificate neither helps nor hurts an attacker. None of the touched paths are in `PROTECTED`.

@@ -136,6 +136,8 @@ fn a_task_conflicting_with_the_base_is_ejected() {
     assert_eq!(a.ejected.len(), 1);
     assert_eq!(a.ejected[0].id, 2);
     assert_eq!(a.ejected[0].files, "shared.txt");
+    // It says which base commit changed the file.
+    assert_eq!(a.ejected[0].base_changes.lines().count(), 1);
 }
 
 #[test]

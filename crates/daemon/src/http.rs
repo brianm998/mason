@@ -91,6 +91,12 @@ fn task_json(d: &Daemon, w: &World, t: &Task, detail: bool) -> Value {
             (State::Queued, Activity::Waiting(WaitReason::Slot), Some((n, limit))) => {
                 format!("held: {n} checks are waiting (limit {limit})")
             }
+            (State::Queued, Activity::Waiting(WaitReason::Slot), None) => {
+                match d.file_hold(w, t) {
+                    Some((other, file)) => format!("waits for #{} (both change {file})", other.0),
+                    None => activity_text(&t.activity),
+                }
+            }
             _ => activity_text(&t.activity),
         },
         "landed": t.landed.map(|l| match l { LandedOutcome::Merged => "merged", LandedOutcome::ClosedNoChange => "closed with no change" }),
@@ -530,6 +536,7 @@ async fn proposal_file(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> 
                 evidence: text("evidence"),
                 blocks_task: b["blocks_task"].as_bool().unwrap_or(false),
                 explored: b["explored"].as_bool().unwrap_or(false),
+                           estimate: None,
             };
             match crate::proposals::file(&d2, &f) {
                 Ok(done) => Ok(json!({"task": done.task.0, "route": done.route, "proposed": done.proposed, "project": done.project})),
@@ -1584,7 +1591,7 @@ fn debt_json(x: &mason_store::DebtRow) -> Value {
     json!({
         "id": x.id, "task": x.task, "project": x.project, "scope": x.scope,
         "reason": x.reason, "owner": x.owner, "deferred": x.deferred,
-        "status": x.status, "at": x.at,
+        "status": x.status, "at": x.at, "how": x.how, "landed": x.landed,
     })
 }
 
@@ -1712,8 +1719,27 @@ async fn monitor_update_start(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Valu
                 "a monitor kind is `swift` or `compose`",
             )
         })?;
+    // A monitor that is a bare binary in a checkout is rebuilt in place; any other (the
+    // bundled app) gets the bundle the daemon builds.
+    if let Some(target) = (kind.name == "swift")
+        .then(|| b["own_path"].as_str())
+        .flatten()
+        .and_then(|p| crate::monitor_inplace::locate(std::path::Path::new(p)))
+    {
+        let own = b["own_version"].as_str().unwrap_or_default().to_string();
+        crate::monitor_inplace::start(&d, kind, target, own)
+            .map_err(|e| fail(StatusCode::CONFLICT, e))?;
+        return Ok(Json(json!({"started": true, "in_place": true})));
+    }
     crate::update::start_monitor_build(&d, kind).map_err(|e| fail(StatusCode::CONFLICT, e))?;
     Ok(Json(json!({"started": true})))
+}
+
+/// The owner's Cancel while a monitor is being built in place.
+async fn monitor_update_cancel(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res {
+    let kind = b["kind"].as_str().unwrap_or_default().to_string();
+    let stopped = crate::monitor_inplace::cancel(&d, &kind);
+    Ok(Json(json!({"cancelled": stopped})))
 }
 
 /// The owner's "Update now": an update waiting for landing batches stops waiting and takes
@@ -3368,6 +3394,7 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/update/ack", post(update_ack))
         .route("/update/now", post(update_now))
         .route("/update/monitor", post(monitor_update_start))
+        .route("/update/monitor/cancel", post(monitor_update_cancel))
         .route("/tasks/{id}/refresh", post(refresh_tracker))
         .route("/tasks/{id}/relink", post(relink_task))
         .route("/tasks/{id}/unblock", post(unblock_task))

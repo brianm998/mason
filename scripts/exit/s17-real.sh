@@ -108,3 +108,4 @@ n=$(git -C "$root/origin.git" log --format=%s main | grep -c "change from task 1
 [ "$n" = 1 ] || { echo "task 1 is on main $n times" >&2; exit 1; }
 [ "$(m update status --json | sed -n 's/.*"running": "\(.*\)",/\1/p')" = "$before" ] || echo "(running runtime is the build of main as of the update: $(m update status --json | sed -n 's/.*"running": "\(.*\)",/\1/p'))"
 echo "s17-real OK"
+echo "RESULT s17-real: the self-update ran against a local origin, passed $(date +%F)"
