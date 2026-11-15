@@ -885,3 +885,83 @@ fn a_request_behind_a_paused_one_names_it_and_the_reason_not_a_holder() {
         "Waiting for compile slot: 2nd in line, behind #2 (memory is low)"
     );
 }
+
+// ---- backfill while the machine drains (s385) --------------------------------------------
+
+/// A holder expected to be done at 1_000, and an exclusive request waiting for the machine.
+fn draining(holder_estimate: Option<u64>) -> (Ledger, u64) {
+    let mut l = Ledger::new();
+    l.set_capacity("compile", 3, Kind::Machine);
+    l.set_capacity("test-suite", 2, Kind::Machine);
+    let h = l.submit(
+        Rank::new(false, 1, 2, 0, 0, false),
+        Needs::of(&[("test-suite", 1)]),
+        "holder",
+        0,
+    );
+    l.set_expected(h, holder_estimate);
+    assert_eq!(l.schedule(0, None, None).grants, vec![h]);
+    let x = l.submit(
+        Rank::new(false, 2, 2, 1, 1, false),
+        Needs {
+            exclusive: true,
+            amounts: BTreeMap::new(),
+        },
+        "exclusive",
+        50,
+    );
+    (l, x)
+}
+
+#[test]
+fn short_work_runs_while_the_machine_drains_and_long_or_unknown_work_waits() {
+    let (mut l, x) = draining(Some(1_000));
+    let later = |l: &mut Ledger, id: u64, e: Option<u64>| {
+        let r = l.submit(
+            Rank::new(false, 3, 2, id, id, false),
+            Needs::of(&[("compile", 1)]),
+            &format!("c{id}"),
+            100,
+        );
+        l.set_expected(r, e);
+        r
+    };
+    let short = later(&mut l, 2, Some(500));
+    let long = later(&mut l, 3, Some(2_000));
+    let unknown = later(&mut l, 4, None);
+    let p = l.schedule(100, None, None);
+    assert_eq!(
+        p.grants,
+        vec![short],
+        "done by 600, before the drain ends at 1_000"
+    );
+    assert!(p.waits.contains_key(&x));
+    assert_eq!(
+        p.waits[&long].cause,
+        WaitCause::Exclusive,
+        "would run past the drain"
+    );
+    assert_eq!(p.waits[&unknown].cause, WaitCause::Exclusive, "no estimate");
+    // Once the holders are done, the exclusive request goes first, as before.
+    let held: Vec<u64> = l.snapshot().holders.iter().map(|h| h.id).collect();
+    for id in held {
+        l.release(id);
+    }
+    assert_eq!(l.schedule(1_000, None, None).grants, vec![x]);
+}
+
+#[test]
+fn nothing_passes_a_waiting_exclusive_request_when_a_holder_has_no_estimate() {
+    let (mut l, x) = draining(None);
+    let c = l.submit(
+        Rank::new(false, 3, 2, 2, 2, false),
+        Needs::of(&[("compile", 1)]),
+        "c",
+        100,
+    );
+    l.set_expected(c, Some(10));
+    let p = l.schedule(100, None, None);
+    assert!(p.grants.is_empty(), "{p:?}");
+    assert_eq!(p.waits[&c].cause, WaitCause::Exclusive);
+    assert!(p.waits.contains_key(&x));
+}

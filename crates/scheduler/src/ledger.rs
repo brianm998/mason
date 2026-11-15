@@ -113,8 +113,16 @@ impl Ledger {
             needs,
             label: label.to_string(),
             since: now,
+            expected_ms: None,
         });
         id
+    }
+
+    /// How long a waiting request is expected to hold what it asks for (s385).
+    pub fn set_expected(&mut self, id: u64, ms: Option<u64>) {
+        if let Some(r) = self.waiting.iter_mut().find(|r| r.id == id) {
+            r.expected_ms = ms;
+        }
     }
 
     /// A holder that already runs (adopted after a restart, or one the caller
@@ -128,6 +136,7 @@ impl Ledger {
             needs,
             label: label.to_string(),
             since: now,
+            expected_ms: None,
         });
         id
     }
@@ -189,6 +198,7 @@ impl Ledger {
                     needs: r.needs,
                     label: r.label,
                     since: now,
+                    expected_ms: r.expected_ms,
                 });
             }
         }
