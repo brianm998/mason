@@ -2522,6 +2522,16 @@ fn agent_job(c: &Ctx) {
         .as_ref()
         .map(|t| crate::cmdreuse::command_key(t.build.as_deref(), &t.test));
     let deadline_extra = mason_adapter_api::DeadlineExtra::default();
+    // The agent's own `mason run` commands that wait in the queue add to it too (s363),
+    // until this step ends.
+    c.d.broker.credit_waits_to(c.task, deadline_extra.clone());
+    struct StopCrediting<'a>(&'a Ctx);
+    impl Drop for StopCrediting<'_> {
+        fn drop(&mut self) {
+            self.0.d.broker.stop_crediting_waits(self.0.task);
+        }
+    }
+    let _credit = StopCrediting(c);
     let checks = Box::new(TestChecks {
         cmd: tests_cmd,
         wt: c.wt.clone(),
