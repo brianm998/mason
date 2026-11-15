@@ -316,12 +316,14 @@ struct Ran {
     /// How long the command ran, from its host's own records (so a run collected late, after
     /// a daemon restart, is not counted as instant). `None` when they cannot be read.
     ran_ms: Option<u64>,
+    /// It ran only some of the suite's tests (s386): its time is not the suite's.
+    narrowed: bool,
 }
 
 /// Record how long a suite's build or run took, when it finished on its own (s385): the
 /// scheduler's estimates come from these.
 fn record_time(who: &Who, suite: &str, phase: &str, ran: &Ran) {
-    if ran.stop != Stop::No || ran.timed_out || ran.stalled.is_some() {
+    if ran.stop != Stop::No || ran.timed_out || ran.stalled.is_some() || ran.narrowed {
         return;
     }
     if let Some(ms) = ran.ran_ms {
@@ -563,6 +565,7 @@ fn run_hosted_once(
             (Ok(h), Ok(e)) => Some(e.ended_ms.saturating_sub(h.started_ms)),
             _ => None,
         },
+        narrowed: false,
     })
 }
 
@@ -1003,7 +1006,11 @@ fn baseline(
     lock: &crate::daemon::RepoLock,
     dev: Option<&Dev>,
 ) -> Option<(Vec<String>, Vec<String>)> {
-    if let Ok(Some(b)) = who.d.store.baseline(base, &suite.name) {
+    // A narrowed run's tests are this change's pick, not the suite's: never cached (s386).
+    if let Some(b) = (!suite.narrowed)
+        .then(|| who.d.store.baseline(base, &suite.name).ok().flatten())
+        .flatten()
+    {
         return Some(b);
     }
     let wt = who.log_dir.join(format!("base-{}", suite.name));
@@ -1061,10 +1068,12 @@ fn baseline(
         git::remove_worktree(c_repo, &wt);
     }
     let (failing, names, executed) = outcome?;
-    let _ = who
-        .d
-        .store
-        .put_baseline(base, &suite.name, &failing, &names, executed, now_ms());
+    if !suite.narrowed {
+        let _ = who
+            .d
+            .store
+            .put_baseline(base, &suite.name, &failing, &names, executed, now_ms());
+    }
     Some((failing, names))
 }
 
@@ -1237,6 +1246,10 @@ fn run_suite(
                 };
             }
         };
+        let ran = Ran {
+            narrowed: suite.narrowed,
+            ..ran
+        };
         record_time(who, &suite.name, "run", &ran);
         match ran.stop {
             Stop::Skipped => {
@@ -1281,21 +1294,25 @@ fn run_suite(
                 let _ = d
                     .store
                     .note_passing(&suite.name, &j.results.names(), now_ms());
-                let _ = d.store.put_suite_green(
-                    &who.project,
-                    &suite.name,
-                    &tree.base,
-                    j.results.executed(),
-                    now_ms(),
-                );
-                let _ = d.store.put_evidence(
-                    &tree.tree,
-                    &suite.name,
-                    j.results.executed(),
-                    j.results.passed(),
-                    who.task.map_or(0, |t| t.0 .0),
-                    now_ms(),
-                );
+                // A narrowed run proves only the tests it ran: no evidence for the tree, and no
+                // record that the suite is green at its base (s386).
+                if !suite.narrowed {
+                    let _ = d.store.put_suite_green(
+                        &who.project,
+                        &suite.name,
+                        &tree.base,
+                        j.results.executed(),
+                        now_ms(),
+                    );
+                    let _ = d.store.put_evidence(
+                        &tree.tree,
+                        &suite.name,
+                        j.results.executed(),
+                        j.results.passed(),
+                        who.task.map_or(0, |t| t.0 .0),
+                        now_ms(),
+                    );
+                }
                 SuiteRun::Done {
                     outcome: SuiteOutcome::Proven,
                     results: Some(j.results.clone()),
@@ -1652,6 +1669,67 @@ fn lease(c: &Ctx, needs: Needs) -> bool {
 
 /// The step's `MASON_*` variables, with `MASON_HELD` naming what is leased for the
 /// command about to run (not just the step's own `uses`).
+/// The narrowed copy of `suite` for this task's test step (s386), with a note naming what it
+/// runs, or `None` to run it whole: no `narrow_*` keys, the change unreadable, or
+/// [`mason_testing::narrow::select`] picks nothing or most of it.
+fn narrow_for_step(c: &Ctx, suite: &Suite) -> Option<(Suite, String)> {
+    let n = suite.narrow.as_ref()?;
+    let base = git::run(&c.wt, &["merge-base", &c.project.base_ref(), "HEAD"]).ok()?;
+    let base = base.trim();
+    let paths = worktree_paths(&c.wt, &c.project.base_ref())?;
+    let listed = git::run(&c.wt, &["ls-files"]).ok()?;
+    let files: std::collections::BTreeMap<String, String> = listed
+        .lines()
+        .filter(|p| mason_testing::glob::matches(&n.tests, p))
+        .filter_map(|p| Some((p.to_string(), std::fs::read_to_string(c.wt.join(p)).ok()?)))
+        .collect();
+    let mut added: std::collections::BTreeMap<String, Vec<u32>> = Default::default();
+    for p in paths.iter().filter(|p| files.contains_key(*p)) {
+        let diff = git::run(&c.wt, &["diff", "-U0", base, "--", p]).unwrap_or_default();
+        added.insert(p.clone(), added_lines(&diff));
+    }
+    let change = mason_testing::narrow::Change {
+        paths: &paths,
+        added: &added,
+    };
+    let picked = mason_testing::narrow::select(n, &files, &change)?;
+    let total = mason_testing::narrow::units(n, &files).len();
+    let mut s = suite.clone();
+    s.command = mason_testing::narrow::command(n, &picked);
+    s.min_tests = 1;
+    s.narrowed = true;
+    let names: Vec<&str> = picked.iter().take(8).map(|u| u.name.as_str()).collect();
+    let more = picked.len().saturating_sub(names.len());
+    let note = format!(
+        "{}: narrowed to {} of {} test units ({}{}); the landing batch runs it whole",
+        suite.name,
+        picked.len(),
+        total,
+        names.join(", "),
+        if more > 0 {
+            format!(" and {more} more")
+        } else {
+            String::new()
+        }
+    );
+    Some((s, note))
+}
+
+/// The new-file line numbers a `git diff -U0` adds or changes (`@@ -a,b +c,d @@`).
+fn added_lines(diff: &str) -> Vec<u32> {
+    let mut out = vec![];
+    for l in diff.lines().filter(|l| l.starts_with("@@")) {
+        let Some(plus) = l.split_whitespace().find(|w| w.starts_with('+')) else {
+            continue;
+        };
+        let mut it = plus[1..].split(',');
+        let start: u32 = it.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+        let count: u32 = it.next().and_then(|v| v.parse().ok()).unwrap_or(1);
+        out.extend(start..start + count);
+    }
+    out
+}
+
 /// Is `suite` already green for this exact tree? Then `run_suite` reuses that result without
 /// running anything, so it needs no lease (s380).
 fn proven(d: &Daemon, tree: &Tree, suite: &str) -> bool {
@@ -1970,6 +2048,17 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
         let suite = match with_project_test(&sel.suite, project_test.as_deref()) {
             Ok(s) => s,
             Err(why) => return c.fail(why),
+        };
+        // Only the tests this change needs, when the suite says how (s386). The landing batch
+        // runs it whole.
+        let suite = match narrow_for_step(c, &suite) {
+            Some((narrowed, note)) => {
+                // Said in the closing note too: a narrowed green is not the whole suite's.
+                details.push(note.clone());
+                notes.push(note);
+                narrowed
+            }
+            None => suite,
         };
         let ran_beside = side.remove(&name);
         if per_suite && ran_beside.is_none() {
@@ -2844,6 +2933,7 @@ mod lossy_tests {
             timed_out: false,
             stalled: None,
             ran_ms: None,
+            narrowed: false,
         };
         (ran, dir)
     }
