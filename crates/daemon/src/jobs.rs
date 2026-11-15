@@ -2630,7 +2630,12 @@ fn agent_job(c: &Ctx) {
     let reuse_key = tests_cmd
         .as_ref()
         .map(|t| crate::cmdreuse::command_key(t.build.as_deref(), &t.test));
-    let deadline_extra = mason_adapter_api::DeadlineExtra::default();
+    // Kept in the task's folder per run, so a re-attach after a daemon restart keeps what
+    // was credited before it (s417).
+    let deadline_extra = mason_adapter_api::DeadlineExtra::kept_in(
+        c.task_dir()
+            .join(format!("deadline-credit-r{}.txt", c.run.0)),
+    );
     // The agent's own `mason run` commands that wait in the queue add to it too (s363),
     // until this step ends.
     c.d.broker.credit_waits_to(c.task, deadline_extra.clone());
@@ -3543,16 +3548,27 @@ fn command_job(c: &Ctx) {
                 // round, counted across tasks, and on the last round run at the merge base.
                 if is_test && !rest_new.is_empty() {
                     crate::exhausted::record_round(c, &rest_new);
-                    crate::exhausted::record_persistent(c, &c.step.name, &rest_new);
+                    let repeated = crate::exhausted::record_persistent(c, &c.step.name, &rest_new);
+                    let build = builds_first(c);
+                    let cmd_for = |t: &[String]| {
+                        if filter_off {
+                            cmd.clone()
+                        } else {
+                            crate::rerun::command(&cmd, filter, t)
+                        }
+                    };
+                    if !crate::exhausted::is_last_round(c) && !repeated.is_empty() {
+                        // Failing in many tasks is not proof: known red only if red at the
+                        // base too (s416).
+                        crate::exhausted::repeated_at_base(
+                            c,
+                            &c.step.name,
+                            build.as_deref(),
+                            &cmd_for,
+                            &repeated,
+                        );
+                    }
                     if crate::exhausted::is_last_round(c) {
-                        let build = builds_first(c);
-                        let cmd_for = |t: &[String]| {
-                            if filter_off {
-                                cmd.clone()
-                            } else {
-                                crate::rerun::command(&cmd, filter, t)
-                            }
-                        };
                         let ex = crate::exhausted::on_last_round(
                             c,
                             &c.step.name,
