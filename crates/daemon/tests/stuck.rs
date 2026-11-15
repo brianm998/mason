@@ -105,7 +105,7 @@ fn a_full_disk_is_shown_in_status_resources_and_notify_and_clears_with_room() {
             .as_array()
             .into_iter()
             .flatten()
-            .any(|a| a.to_string().contains("MASON is stopped"))
+            .any(|a| a.to_string().contains("mason is stopped"))
     });
 
     std::fs::write(&disk, "40\n").unwrap();
