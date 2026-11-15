@@ -418,17 +418,37 @@ fn regex_pair(suite: &Suite) -> Result<RegexPair, String> {
     Ok(RegexPair { pass, fail })
 }
 
-fn regex_line(r: &RegexPair, l: &str) -> Option<Case> {
-    let name_of = |c: &regex::Captures, l: &str| {
+/// The location a compiler-style diagnostic names: `path:line:col: error: ...`
+/// gives `path:line`. Anything else gives `None`.
+fn compiler_location(l: &str) -> Option<String> {
+    static RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    let re = RE.get_or_init(|| {
+        Regex::new(r"^\s*(\S+?):(\d+)(?::\d+)?:\s*(?:fatal\s+)?error\b").expect("a fixed pattern")
+    });
+    let c = re.captures(l)?;
+    Some(format!("{}:{}", &c[1], &c[2]))
+}
+
+/// The name of a failure. A compiler diagnostic is named by its location, a
+/// capture by the capture, and anything else (a line of source, a linker
+/// message) by one fixed name, so the same broken build gets the same names
+/// on every run and no line of code reaches the flake records.
+fn regex_fail_name(c: &regex::Captures, l: &str) -> String {
+    compiler_location(l).unwrap_or_else(|| {
         c.get(1)
-            .map_or_else(|| l.trim().to_string(), |m| m.as_str().to_string())
-    };
+            .map_or_else(|| "build".to_string(), |m| m.as_str().to_string())
+    })
+}
+
+fn regex_line(r: &RegexPair, l: &str) -> Option<Case> {
     if let Some(c) = r.fail.as_ref().and_then(|r| r.captures(l)) {
-        Some(Case::fail(name_of(&c, l), "matched fail_regex"))
-    } else {
-        let c = r.pass.as_ref().and_then(|r| r.captures(l))?;
-        Some(Case::pass(name_of(&c, l)))
+        return Some(Case::fail(regex_fail_name(&c, l), "matched fail_regex"));
     }
+    let c = r.pass.as_ref().and_then(|r| r.captures(l))?;
+    let name = c
+        .get(1)
+        .map_or_else(|| l.trim().to_string(), |m| m.as_str().to_string());
+    Some(Case::pass(name))
 }
 
 fn regex_lines(text: &str, suite: &Suite) -> Result<Vec<Case>, String> {
@@ -481,5 +501,33 @@ impl LineParser {
             LineParser::Gradle(r) => gradle_line(r, l),
             LineParser::Regex(r) => regex_line(r, l),
         }
+    }
+}
+
+#[cfg(test)]
+mod build_failure_names {
+    use super::*;
+
+    fn suite() -> Suite {
+        let mut s = Suite::new("s", "x", ParserKind::Regex);
+        s.fail_regex = Some(r"error:|await viewModel".into());
+        s
+    }
+
+    const LOG: &str = "/src/View.swift:42:17: error: cannot find 'localized' in scope\n\
+        await viewModel.report(error: localized(\"ui.render_failed\", error))\n\
+        ld: error: undefined symbol\n";
+
+    #[test]
+    fn a_compiler_line_is_named_by_path_and_line_and_the_name_is_stable() {
+        let a = regex_lines(LOG, &suite()).unwrap();
+        let b = regex_lines(LOG, &suite()).unwrap();
+        let names = |v: &[Case]| v.iter().map(|c| c.name.clone()).collect::<Vec<_>>();
+        assert_eq!(names(&a), ["/src/View.swift:42", "build", "build"]);
+        assert_eq!(names(&a), names(&b));
+        assert!(
+            a.iter().all(|c| c.status == Status::Fail),
+            "counts and verdicts unchanged"
+        );
     }
 }
