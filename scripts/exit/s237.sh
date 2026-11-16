@@ -12,7 +12,7 @@ sw=clients/swift/Sources
   || { echo "s237: RowView observes the whole model" >&2; exit 1; }
 ! grep -n 'TimelineView' $sw/MonitorUI/Components.swift || { echo "s237: a timer per row is back" >&2; exit 1; }
 ! grep -n 'id: \\.offset' <(grep -n 'sidebarEntries' $sw/MonitorUI/Sidebar.swift) || { echo "s237: sidebar keyed by position" >&2; exit 1; }
-if [ "$(uname)" = Darwin ] && command -v swift >/dev/null; then
+if [ "$(uname)" = Darwin ] && command -v swift >/dev/null && [ -z "${MASON_SKIP_SWIFT:-}" ]; then
   out=$(mktemp); trap 'rm -f "$out"' EXIT
   if ! (cd clients/swift && swift test --filter 'RowRedrawTests|MonitorCoreTests') >"$out" 2>&1; then
     # A sandbox with no network cannot fetch swift-protobuf: that is not a red test.
