@@ -2362,9 +2362,11 @@ async fn land_override(
         .map(String::from)
         .unwrap_or_else(|| d.cfg.owner_names.first().cloned().unwrap_or_default());
     let d2 = d.clone();
+    let kind2 = kind.clone();
     let debt = d
         .pool
         .run(move || {
+            let kind = kind2;
             let w = d2.world().map_err(store_err)?;
             let t = w
                 .tasks
@@ -2394,14 +2396,31 @@ async fn land_override(
                 .map_err(store_err)?;
             d2.landing.wake();
             d2.poke();
-            Ok(debt)
+            Ok((debt, d2.landing.in_batch(TaskId(id))))
         })
         .await
         .map_err(pool_err)??;
+    let (debt, in_batch) = debt;
+    // A running batch reads `force` while it verifies (it stops, and lands); `now` only picks
+    // a batch, so it changes nothing for a task already in one.
+    let (applied, note) = match (in_batch, kind.as_str()) {
+        (true, "land-now") => (
+            false,
+            "already in a running landing batch; it is running, so land now changes nothing (skip its testing or force it); the debt stays open",
+        ),
+        (true, _) => (
+            true,
+            "marked; the running landing batch stops verifying and lands it, and the debt stays open",
+        ),
+        _ => (
+            true,
+            "marked; the landing engine acts on it when the task is in the landing step, and the debt stays open",
+        ),
+    };
     Ok(Json(json!({
         "debt": debt,
-        "applied": true,
-        "note": "marked; the landing engine acts on it when the task is in the landing step, and the debt stays open",
+        "applied": applied,
+        "note": note,
     })))
 }
 
