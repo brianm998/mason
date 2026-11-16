@@ -111,10 +111,20 @@ pub fn cached_jwt(
     team_id: &str,
     now_ms: u64,
 ) -> Result<String, String> {
+    cached_in(&CACHE, key_pem, key_id, team_id, now_ms)
+}
+
+fn cached_in(
+    cache: &Mutex<Option<Cached>>,
+    key_pem: &str,
+    key_id: &str,
+    team_id: &str,
+    now_ms: u64,
+) -> Result<String, String> {
     let digest = ring::digest::digest(&ring::digest::SHA256, key_pem.as_bytes())
         .as_ref()
         .to_vec();
-    let mut g = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut g = cache.lock().unwrap_or_else(|e| e.into_inner());
     if let Some((d, k, t, at, jwt)) = g.as_ref() {
         if *d == digest && k == key_id && t == team_id && now_ms >= *at && now_ms - *at < JWT_TTL_MS
         {
@@ -243,8 +253,9 @@ mod tests {
     fn two_keys_with_the_same_kid_and_team_each_get_their_own_jwt() {
         let (pem_a, pub_a) = key();
         let (pem_b, pub_b) = key();
-        let ja = cached_jwt(&pem_a, "SAMEKID123", "SAMETEAM12", 1_000_000).unwrap();
-        let jb = cached_jwt(&pem_b, "SAMEKID123", "SAMETEAM12", 1_000_000).unwrap();
+        let local = Mutex::new(None);
+        let ja = cached_in(&local, &pem_a, "SAMEKID123", "SAMETEAM12", 1_000_000).unwrap();
+        let jb = cached_in(&local, &pem_b, "SAMEKID123", "SAMETEAM12", 1_000_000).unwrap();
         assert_ne!(ja, jb);
         for (jwt, public) in [(&ja, &pub_a), (&jb, &pub_b)] {
             let (input, sig) = jwt.rsplit_once('.').unwrap();
@@ -323,12 +334,13 @@ mod tests {
         )
         .is_err());
         let (pem, _) = key();
-        let a = cached_jwt(&pem, "cache-kid", "T", 1_000_000).unwrap();
-        let b = cached_jwt(&pem, "cache-kid", "T", 1_000_000 + JWT_TTL_MS - 1).unwrap();
+        let local = Mutex::new(None);
+        let a = cached_in(&local, &pem, "cache-kid", "T", 1_000_000).unwrap();
+        let b = cached_in(&local, &pem, "cache-kid", "T", 1_000_000 + JWT_TTL_MS - 1).unwrap();
         assert_eq!(a, b);
-        let c = cached_jwt(&pem, "cache-kid", "T", 1_000_000 + JWT_TTL_MS + 5000).unwrap();
+        let c = cached_in(&local, &pem, "cache-kid", "T", 1_000_000 + JWT_TTL_MS + 5000).unwrap();
         assert_ne!(a, c);
-        let d = cached_jwt(&pem, "other-kid", "T", 1_000_000 + JWT_TTL_MS + 5000).unwrap();
+        let d = cached_in(&local, &pem, "other-kid", "T", 1_000_000 + JWT_TTL_MS + 5000).unwrap();
         assert_ne!(c, d);
     }
 
