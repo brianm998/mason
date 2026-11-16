@@ -307,7 +307,8 @@ fn check_at_base(
             "`{t}` {what} in `{scope}`, and also fails at `{base}` (the merge base), so it fails \
              without the task's change. It is now known red (tasks that fail only on it are \
              excused) until a run proves it green.\n\n\
-             Output tail:\n```\n{tail}\n```\n\nFiled by the test step's {by}."
+             Output tail:\n```\n{tail}\n```\n\nFiled by the test step's {by}.{guard}",
+            guard = basecheck::client_guard_note(&format!("{scope} {t} {tail}"))
         );
         let fix = file_fix(c, t, &base, &body);
         if let Some(f) = &fix {
