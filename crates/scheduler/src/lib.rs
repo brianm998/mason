@@ -23,7 +23,7 @@ pub use explain::{
 };
 pub use ledger::{Ledger, Snapshot, Stall};
 pub use plan::{
-    plan, Capacity, CompilePace, CpuGate, DiskGate, Holder, Kind, Needs, Plan, Request, StallGate,
-    World, COMPILE,
+    plan, Capacity, CompilePace, CpuGate, DiskGate, Holder, Kind, Needs, Plan, PolicyGate, Request,
+    StallGate, World, COMPILE,
 };
 pub use rank::Rank;

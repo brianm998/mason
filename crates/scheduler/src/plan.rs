@@ -97,6 +97,9 @@ pub struct World<'a> {
     /// Measured by the caller: how slowly the build disk has been answering.
     /// `None` means no stall gate.
     pub stall: Option<StallGate>,
+    /// Measured by the caller: how busy macOS's `syspolicyd` is checking new programs.
+    /// `None` means no syspolicyd gate.
+    pub policy: Option<PolicyGate>,
     /// A request that has waited this long (same unit as `now`) moves ahead of
     /// all other pipeline work that is not a landing, oldest first
     /// (`order.max_wait_s`). `None` means requests do not age.
@@ -111,6 +114,17 @@ pub struct World<'a> {
 pub struct StallGate {
     pub slow_ms: u64,
     pub max_ms: u64,
+}
+
+/// macOS's `syspolicyd` scans every new executable the first time it runs, signed or not, at
+/// about 0.3 to 0.8 CPU s per 40 MB test binary. Each workspace build links about 180 of them,
+/// and ten tasks building at once kept it at 7 cores until WindowServer's watchdog killed the
+/// owner's session (2026-11-16). Like a stall, it is only a reason to wait while a compile is
+/// running, so a busy syspolicyd that is not ours can never hold the queue for good.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PolicyGate {
+    pub busy_pct: u32,
+    pub max_pct: u32,
 }
 
 /// The disk floor. Below it no `compile` and no LLM session is granted, even when nothing
@@ -401,6 +415,12 @@ pub fn plan(world: &World, waiting: &[Request]) -> Plan {
             Some(g) if compiles && compile_running && g.slow_ms >= g.max_ms => Some(g),
             _ => None,
         };
+        let checking = match world.policy {
+            Some(g) if compiles && compile_running && g.max_pct > 0 && g.busy_pct >= g.max_pct => {
+                Some(g)
+            }
+            _ => None,
+        };
         // The pacing lets a started compile show in the CPU reading; with none running
         // there is nothing to wait for.
         let settling = world
@@ -447,6 +467,13 @@ pub fn plan(world: &World, waiting: &[Request]) -> Plan {
                 Some(WaitCause::DiskStall {
                     slow_ms: g.slow_ms,
                     max_ms: g.max_ms,
+                })
+            }
+            (Fit::Yes, None, _) if checking.is_some() => {
+                let g = checking.expect("checked");
+                Some(WaitCause::Policy {
+                    busy_pct: g.busy_pct,
+                    max_pct: g.max_pct,
                 })
             }
             (Fit::Yes, None, _) if settling.is_some() => Some(WaitCause::Settling {
@@ -505,6 +532,7 @@ fn build_wait(
         | WaitCause::Cpu { .. }
         | WaitCause::Settling { .. }
         | WaitCause::DiskStall { .. }
+        | WaitCause::Policy { .. }
         | WaitCause::Disk { .. } => true,
         _ => false,
     };
