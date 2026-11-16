@@ -24,6 +24,9 @@ use std::time::{Duration, Instant};
 /// How often the process table is read.
 pub const CPU_EVERY: Duration = Duration::from_secs(5);
 
+/// The history file is written every this many readings (5 minutes).
+const SAVE_EVERY: u64 = 60;
+
 /// A share changing by this much (permille) is worth pushing a new home view.
 pub const PUSH_PERMILLE: u32 = 10;
 
@@ -126,6 +129,8 @@ pub fn read_table() -> Option<Table> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Bucket {
     Task(u64),
+    /// A landing batch's floor, retest and baseline builds ("batch #N").
+    Batch(u64),
     Masond,
     Monitor,
     Sccache,
@@ -134,8 +139,30 @@ pub enum Bucket {
 /// A running step host's command: its task, and the process it started.
 #[derive(Clone, Copy, Debug)]
 pub struct HostRoot {
-    pub task: u64,
+    pub bucket: Bucket,
     pub child_pid: u32,
+}
+
+/// The bucket a step host's id puts its tree in: `t<task>r<run>-...` (a step or a
+/// check) and `ledger<task>...` are the task's; `debt<task>-...` is the debt's task;
+/// `b<batch>-...` (floor, retest, baseline builds) is the batch's.
+pub fn host_bucket(id: &str) -> Option<Bucket> {
+    if let Some((task, _)) = crate::sweep::parse_host_id(id) {
+        return Some(Bucket::Task(task));
+    }
+    let num = |prefix: &str| {
+        let rest = id.strip_prefix(prefix)?;
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        // A number, then the end or a `-` (not `debt1x`).
+        let after = &rest[digits.len()..];
+        (!digits.is_empty() && (after.is_empty() || after.starts_with('-')))
+            .then(|| digits.parse().ok())
+            .flatten()
+    };
+    num("debt")
+        .or_else(|| num("ledger"))
+        .map(Bucket::Task)
+        .or_else(|| num("b").map(Bucket::Batch))
 }
 
 /// Paths that name a task in a command line.
@@ -205,7 +232,7 @@ pub fn attribute(table: &Table, hosts: &[HostRoot], roots: &Roots) -> HashMap<u3
     let mut out: HashMap<u32, Bucket> = HashMap::new();
     for h in hosts.iter().filter(|h| h.child_pid > 0) {
         for p in tree_of(&table.procs, h.child_pid) {
-            out.entry(p.pid).or_insert(Bucket::Task(h.task));
+            out.entry(p.pid).or_insert(h.bucket);
         }
     }
     for (p, cmd) in table.procs.iter().zip(&table.commands) {
@@ -320,6 +347,7 @@ pub fn build_reading(
         .iter()
         .map(|(b, p)| match b {
             Bucket::Task(t) => share(*t, "task", format!("#{t}"), *p),
+            Bucket::Batch(n) => share(*n, "batch", format!("batch #{n}"), *p),
             Bucket::Masond => share(0, "masond", "masond".into(), *p),
             Bucket::Monitor => share(0, "monitor", "monitor".into(), *p),
             Bucket::Sccache => share(0, "sccache", "sccache".into(), *p),
@@ -422,9 +450,8 @@ fn running_hosts(d: &Daemon) -> Vec<HostRoot> {
         .into_iter()
         .filter(|h| h.state == HostState::Running)
         .filter_map(|h| {
-            let (task, _) = crate::sweep::parse_host_id(&h.info.id)?;
             Some(HostRoot {
-                task,
+                bucket: host_bucket(&h.info.id)?,
                 child_pid: h.info.child_pid,
             })
         })
@@ -441,6 +468,7 @@ pub fn spawn(d: &Arc<Daemon>) {
     let mut fake_now = 0u64;
     let mut first = true;
     let mut pushed: Option<CpuUsage> = None;
+    let mut readings = 0u64;
     crate::bg::spawn_loop(d, "cpu-by-task", move |weak| {
         if !std::mem::take(&mut first) {
             std::thread::sleep(CPU_EVERY);
@@ -472,6 +500,10 @@ pub fn spawn(d: &Arc<Daemon>) {
             pushed = Some(reading.usage.clone());
         }
         d.record_cpu(reading);
+        readings += 1;
+        if readings % SAVE_EVERY == 0 {
+            d.save_cpu_history();
+        }
         if push {
             d.poke();
         }
@@ -525,7 +557,7 @@ mod tests {
              \x20 30     1    30   0:00.00 S    unrelated\n",
         );
         let hosts = [HostRoot {
-            task: 5,
+            bucket: Bucket::Task(5),
             child_pid: 21,
         }];
         let a = attribute(&t, &hosts, &roots());
@@ -534,6 +566,51 @@ mod tests {
         assert_eq!(a.get(&23), Some(&Bucket::Task(5)), "same process group");
         assert_eq!(a.get(&20), Some(&Bucket::Masond), "the step host itself");
         assert_eq!(a.get(&30), None);
+    }
+
+    #[test]
+    fn batch_debt_and_check_hosts_are_attributed_by_their_id() {
+        assert_eq!(
+            host_bucket("t445r3063-check-cargo-workspace-build0"),
+            Some(Bucket::Task(445))
+        );
+        assert_eq!(
+            host_bucket("b303-r1-floor-cargo-workspace0"),
+            Some(Bucket::Batch(303))
+        );
+        assert_eq!(host_bucket("b12-r2-base-x"), Some(Bucket::Batch(12)));
+        assert_eq!(
+            host_bucket("debt146-u-cargo-workspace"),
+            Some(Bucket::Task(146))
+        );
+        assert_eq!(host_bucket("ledger7-b-x"), Some(Bucket::Task(7)));
+        assert_eq!(host_bucket("debtx"), None);
+        assert_eq!(host_bucket("bogus"), None);
+        let t = table(
+            "  60     1    60   0:00.00 S    step-host b303-r1-floor-cargo-workspace0\n\
+             \x20 61    60    61   0:00.00 S    sh -c cargo build\n\
+             \x20 62    61    61   0:00.00 S    rustc --crate-name a src/lib.rs --target-dir mason-target/mason-b0\n\
+             \x20 70     1    70   0:00.00 S    sh\n\
+             \x20 71    70    70   0:00.00 S    rustc --crate-name b src/lib.rs\n\
+             \x20 80     1    80   0:00.00 S    WindowServer\n",
+        );
+        let hosts = [
+            HostRoot {
+                bucket: host_bucket("b303-r1-floor-cargo-workspace0").unwrap(),
+                child_pid: 61,
+            },
+            HostRoot {
+                bucket: host_bucket("debt146-u-cargo-workspace").unwrap(),
+                child_pid: 70,
+            },
+        ];
+        let a = attribute(&t, &hosts, &roots());
+        assert_eq!(a.get(&62), Some(&Bucket::Batch(303)));
+        assert_eq!(a.get(&71), Some(&Bucket::Task(146)));
+        assert_eq!(a.get(&80), None, "really other");
+        let r = build_reading(&BTreeMap::from([(Bucket::Batch(303), 400)]), Some(50), 8, 1);
+        let s = r.usage.shares.iter().find(|s| s.kind == "batch").unwrap();
+        assert_eq!((s.task, s.label.as_str()), (303, "batch #303"));
     }
 
     #[test]
@@ -556,7 +633,7 @@ mod tests {
              \x20 51    50    50   0:00.00 S    rustc /data/mason/w/mason/9/src/lib.rs\n",
         );
         let hosts = [HostRoot {
-            task: 5,
+            bucket: Bucket::Task(5),
             child_pid: 50,
         }];
         let a = attribute(&t, &hosts, &roots());
@@ -584,7 +661,7 @@ mod tests {
     #[test]
     fn nine_core_seconds_in_five_on_eighteen_cores_is_a_tenth() {
         let hosts = [HostRoot {
-            task: 5,
+            bucket: Bucket::Task(5),
             child_pid: 21,
         }];
         let before =
@@ -602,7 +679,7 @@ mod tests {
     #[test]
     fn a_pid_whose_time_went_down_starts_from_zero() {
         let hosts = [HostRoot {
-            task: 5,
+            bucket: Bucket::Task(5),
             child_pid: 21,
         }];
         let before = table("  21     1    21  1:40.00 S    cargo\n");
