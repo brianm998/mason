@@ -398,6 +398,7 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s446**: an XcodeGen spec builds one universal iPhone and iPad app from `clients/swift` with `make ios`, picking the phone or iPad root by size class, after the first real iOS compile fixes.
 - **s447**: `monitor-tool snapshot --ipad` renders the monitor offscreen at 1366×1024 and 1180×820 (scale 2, light and dark), and tests can check the top bar fits an iPad width.
 - **s448**: `monitor_inplace.rs` no longer uses `std::os::unix` directly: the build is started with `mason_platform::process::spawn_group` and cancelled with `signal_group`, and the tests' chmod helper is gated with `#[cfg(unix)]`, so the Windows CI job builds again.
+- **s450**: exit scripts s220, s237, s270, s273, s433, s438-s440 and s96 now skip under MASON_SKIP_SWIFT/MASON_SKIP_COMPOSE, scripts/check-exit-guards.sh keeps it so, and known-red fix tasks carry the guard requirement.
 - **s452**: s09, s19, s54 and s130 (scripts) and s393 and s396 (their daemon tests) are pointed at what the code does now, and s09, s19, s40 and s130 say why they fail; the code needed no change.
 - **s453**: s430's exit script now routes `failed` (routable) and checks that routing the monitor-only `paused` is refused with a message saying so; the settings API refuses `MONITOR_ONLY` conditions with that message and still refuses unknown ones.
 - **s455**: A new `iOS` workflow (`monitor-ios`, macos-15, 25 min) runs `make ios` on pull requests and develop pushes that touch `clients/swift/**`, cancelling superseded runs.
