@@ -98,8 +98,9 @@ pub fn make_jwt(key_pem: &str, key_id: &str, team_id: &str, now_ms: u64) -> Resu
     Ok(format!("{input}.{}", b64(sig.as_ref())))
 }
 
-/// (key id, team id, made at, token): the one token in use, so a burst of alerts signs once.
-type Cached = (String, String, u64, String);
+/// (key id, team id, made at, token, key text): the one token in use, so a burst of alerts signs
+/// once. The key text is part of the match: a token signed with another key must not be reused.
+type Cached = (String, String, u64, String, String);
 static CACHE: Mutex<Option<Cached>> = Mutex::new(None);
 
 /// The cached provider token, or a new one when it is 50 minutes old or for other settings.
@@ -110,13 +111,24 @@ pub fn cached_jwt(
     now_ms: u64,
 ) -> Result<String, String> {
     let mut g = CACHE.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some((k, t, at, jwt)) = g.as_ref() {
-        if k == key_id && t == team_id && now_ms >= *at && now_ms - *at < JWT_TTL_MS {
+    if let Some((k, t, at, jwt, pem)) = g.as_ref() {
+        if k == key_id
+            && t == team_id
+            && pem == key_pem
+            && now_ms >= *at
+            && now_ms - *at < JWT_TTL_MS
+        {
             return Ok(jwt.clone());
         }
     }
     let jwt = make_jwt(key_pem, key_id, team_id, now_ms)?;
-    *g = Some((key_id.into(), team_id.into(), now_ms, jwt.clone()));
+    *g = Some((
+        key_id.into(),
+        team_id.into(),
+        now_ms,
+        jwt.clone(),
+        key_pem.into(),
+    ));
     Ok(jwt)
 }
 
