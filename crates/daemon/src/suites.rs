@@ -2666,10 +2666,31 @@ fn task_touched(
     tip: &str,
     skipped: &[String],
 ) -> Option<String> {
-    let Ok(mb) = git::run(&p.path, &["merge-base", landed, tip]) else {
-        return skipped.first().cloned();
+    // The first commit on the base's first-parent line that holds the task's commit: a merge
+    // (its first parent is the base before the task) or the task's own commit when fast-forwarded.
+    let range = format!("{landed}..{tip}");
+    let entry = if landed == tip {
+        landed.to_string()
+    } else {
+        match git::run(
+            &p.path,
+            &["rev-list", "--first-parent", "--ancestry-path", &range],
+        ) {
+            Ok(l) => match l.lines().last().map(str::trim) {
+                // Only a merge that took the task's commit as its second parent is the entry;
+                // otherwise the task's commit is itself on the line (fast-forwarded).
+                Some(c)
+                    if git::run(&p.path, &["rev-parse", &format!("{c}^2")])
+                        .is_ok_and(|x| x.trim() == landed) =>
+                {
+                    c.to_string()
+                }
+                _ => landed.to_string(),
+            },
+            Err(_) => return skipped.first().cloned(),
+        }
     };
-    let Ok(diff) = git::run(&p.path, &["diff", "-U0", mb.trim(), landed]) else {
+    let Ok(diff) = git::run(&p.path, &["diff", "-U0", &format!("{entry}^1"), &entry]) else {
         return skipped.first().cloned();
     };
     let changed: Vec<&str> = diff
