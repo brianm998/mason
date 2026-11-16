@@ -838,9 +838,20 @@ fn a_debt_is_paid_by_a_green_that_skipped_a_quarantined_test_and_the_test_is_nam
     let t = file_it(&d, "Skip the checks");
     mason_daemon::suites::skip(&d, t, "suite:checks", "later", "brian", false).unwrap();
     wait_state(&d, t, State::Landed, 120);
-    // No whole-suite green has been recorded at a base holding this task.
+    // Landing runs the debt once on its own thread (s426); let that finish, then put the debt
+    // back as it was when nothing could pay it.
+    wait_for("the landing's own run of the debt", 60, || {
+        d.store.debts(Some(t.0), false).unwrap()[0].status == "paid"
+    });
     d.store
-        .write(|c| c.execute("DELETE FROM suite_green", []).map(|_| ()))
+        .write(|c| {
+            c.execute("DELETE FROM suite_green", [])?;
+            c.execute(
+                "UPDATE debts SET status = 'open', how = '', paid_at = NULL",
+                [],
+            )
+            .map(|_| ())
+        })
         .unwrap();
     record_skip_green_at_tip(&d, &["net::flaky_dns"]);
     assert_eq!(mason_daemon::suites::settle_debts(&d), 1);
