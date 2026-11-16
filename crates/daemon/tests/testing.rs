@@ -867,7 +867,13 @@ fn a_debt_whose_task_added_the_skipped_test_is_not_paid_by_a_green_that_skipped_
         .unwrap();
     record_skip_green_at_tip(&d, &["net::flaky_dns"]);
     assert_eq!(mason_daemon::suites::settle_debts(&d), 0);
-    assert_eq!(d.store.debts(Some(t.0), false).unwrap()[0].status, "open");
+    // (An idle run may pay it by running the whole suite; it never pays it on the skip.)
+    let row = d.store.debts(Some(t.0), false).unwrap().remove(0);
+    assert!(
+        row.status == "open" || !row.how.contains("flaky_dns"),
+        "{}",
+        row.how
+    );
 }
 
 #[test]
