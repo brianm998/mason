@@ -59,4 +59,7 @@ distributions {
 
 tasks.test {
     useJUnitPlatform()
+    // The tests load images through Skia, whose native library skiko loads; allow that
+    // the way the desktop run does (decision 0487).
+    jvmArgs("--enable-native-access=ALL-UNNAMED")
 }
