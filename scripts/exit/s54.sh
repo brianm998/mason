@@ -11,6 +11,7 @@
 #     one after another in order.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
+unset MASON_TASK MASON_STEP MASON_TITLE MASON_STEP_KIND  # a task's own, which the daemon would pass on
 root=$(mktemp -d /tmp/mason-s54.XXXXXX); daemon=""
 cleanup() {
   [ -n "$daemon" ] && kill -9 "$daemon" 2>/dev/null || true
@@ -54,6 +55,9 @@ start = "work"
 type = "command"
 category = "developing"
 command = '''
+# The start step is also run as a worktree setup step (s312), in MASON's own checkouts, with
+# no task: there is nothing to do there, and waiting for a gate named for no task never ends.
+[ -n "\${MASON_TITLE:-}" ] || exit 0
 while [ ! -f "$root/gate/\$MASON_TITLE" ]; do sleep 0.2; done
 echo "\$MASON_TITLE" > "work-\$MASON_TASK.txt"
 git add -A && git -c user.name=t -c user.email=t@t commit -qm "work \$MASON_TASK"
