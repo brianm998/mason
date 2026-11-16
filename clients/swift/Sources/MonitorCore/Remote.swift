@@ -177,6 +177,8 @@ public final class RemoteSession: ObservableObject {
     private var watch: AnyCancellable?
     private var instance = ""
     private var reachedHost: String?
+    /// Told to delete this device's push registration before a Forget clears the pairing.
+    public var push: PushRegistrar?
 
     public init(
         model: MonitorModel, store: PairedStore, tokens: TokenStore, source: ServiceSource?,
@@ -238,8 +240,17 @@ public final class RemoteSession: ObservableObject {
         activate()
     }
 
-    /// The user unpairs.
+    /// The user unpairs. With push set up, the daemon is told first (DELETE), then the pairing is
+    /// cleared; the token is still needed for that call.
     public func unpair() {
+        guard let push else { finishUnpair(); return }
+        Task { @MainActor in
+            await push.clear()
+            finishUnpair()
+        }
+    }
+
+    private func finishUnpair() {
         if let r = store.load() { tokens.setToken(nil, forFingerprint: r.fingerprint) }
         forget()
     }
@@ -251,7 +262,7 @@ public final class RemoteSession: ObservableObject {
     }
 
     /// The daemon answered 401: the token was revoked. Forget the pairing; the pairing screen shows.
-    private func revoked() { unpair() }
+    private func revoked() { finishUnpair() }
 
     private func forget() {
         if let r = store.load() { tokens.setToken(nil, forFingerprint: r.fingerprint) }

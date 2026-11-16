@@ -21,13 +21,13 @@ struct TopBar: View {
             // Home on top; back and forward in a row under it.
             VStack(alignment: .leading, spacing: theme.spacingSmall) {
                 Button { model.goHome() } label: { Label("Home", systemImage: "house") }
-                    .help("Home").accessibilityIdentifier("nav:home")
+                    .touchTarget().hint("Home").accessibilityIdentifier("nav:home")
                 HStack(spacing: theme.spacingSmall) {
                     Button { model.goBack() } label: { Image(systemName: "chevron.left") }
-                        .keyboardShortcut("[", modifiers: .command).disabled(!model.canGoBack).help("Back (⌘[)")
+                        .keyboardShortcut("[", modifiers: .command).disabled(!model.canGoBack).touchTarget().hint("Back (⌘[)")
                         .accessibilityIdentifier("nav:back")
                     Button { model.goForward() } label: { Image(systemName: "chevron.right") }
-                        .keyboardShortcut("]", modifiers: .command).disabled(!model.canGoForward).help("Forward (⌘])")
+                        .keyboardShortcut("]", modifiers: .command).disabled(!model.canGoForward).touchTarget().hint("Forward (⌘])")
                         .accessibilityIdentifier("nav:forward")
                 }
             }
@@ -47,7 +47,7 @@ struct TopBar: View {
                         }
                     }
                     .buttonStyle(.plain)
-                    .help("Open the first task that needs you")
+                    .touchTarget().hint("Open the first task that needs you")
                     .accessibilityIdentifier("attention")
                 }
 
@@ -89,19 +89,19 @@ struct TopBar: View {
             Grid(horizontalSpacing: theme.spacingSmall, verticalSpacing: theme.spacingSmall) {
                 GridRow {
                     Button { adding = true } label: { Image(systemName: "plus") }
-                        .help("Add task").accessibilityIdentifier("add-task")
+                        .touchTarget().hint("Add task").accessibilityIdentifier("add-task")
                     if !model.selfProject.isEmpty {
                         Button { improving = true } label: { Image(systemName: "wand.and.stars") }
-                            .help("Improve the pipeline").accessibilityIdentifier("improve-pipeline")
+                            .touchTarget().hint("Improve the pipeline").accessibilityIdentifier("improve-pipeline")
                     } else {
                         Color.clear.frame(width: 1, height: 1)
                     }
                 }
                 GridRow {
                     Button { model.muted.toggle() } label: { Image(systemName: model.muted ? "speaker.slash" : "speaker.wave.2") }
-                        .help(model.muted ? "Unmute" : "Mute").accessibilityIdentifier("mute")
+                        .touchTarget().hint(model.muted ? "Unmute" : "Mute").accessibilityIdentifier("mute")
                     Button { voices = true } label: { Image(systemName: "waveform") }
-                        .help("Sounds and voice").accessibilityIdentifier("voice-settings")
+                        .touchTarget().hint("Sounds and voice").accessibilityIdentifier("voice-settings")
                         .popover(isPresented: $voices) { SpeechSettingsView(model: model) }
                 }
             }
@@ -128,7 +128,7 @@ extension TopBar {
             }
             .layoutPriority(-2)
             .buttonStyle(.plain)
-            .help(model.topBarMascotTooltip)
+            .touchTarget().hint(model.topBarMascotTooltip)
             .accessibilityLabel(model.topBarMascotTooltip)
             .accessibilityIdentifier("topbar-mascot:\(choice.id)")
         }
@@ -222,7 +222,7 @@ struct BannersView: View {
 
     func collapsedPauseIcon(_ b: Mason_V1_Banner, index: Int) -> some View {
         bannerImage(BannerIcons.id(forDaemonKind: b.kind), hidden: false)
-            .help(b.text)
+            .touchTarget().hint(b.text)
             .accessibilityLabel(b.text)
             .accessibilityAddTraits(.isButton)
             .accessibilityAction(named: "Expand") { model.setPauseCollapsed(project: b.project, mode: b.mode, false) }
@@ -242,7 +242,7 @@ struct BannersView: View {
             }
             Button { model.setPauseCollapsed(project: b.project, mode: b.mode, true) } label: { Image(systemName: "xmark") }
                 .buttonStyle(.borderless)
-                .help("Collapse")
+                .touchTarget().hint("Collapse")
                 .accessibilityLabel("Collapse")
                 .accessibilityIdentifier("collapse-pause:\(index)")
         }
