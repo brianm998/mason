@@ -204,10 +204,8 @@ pub fn gather(d: &Arc<Daemon>, now: u64) -> Facts {
         ));
     }
     // Overload.
-    (x.load_pct, x.load_source) = load_reading(
-        d.cfg.cpu.as_deref(),
-        std::env::var_os("MASON_CPU_FILE"),
-    );
+    (x.load_pct, x.load_source) =
+        load_reading(d.cfg.cpu.as_deref(), std::env::var_os("MASON_CPU_FILE"));
     x.mem_free_mb = crate::sched::measure_free_memory_mb();
     x.stall_ms = disk_probe_ms(d);
     let launching = mason_step_host::launcher::launching();
@@ -1131,10 +1129,7 @@ mod load_tests {
         std::fs::create_dir_all(&dir).unwrap();
         let f = dir.join("cpu");
         std::fs::write(&f, "37\n").unwrap();
-        assert_eq!(
-            load_reading(None, Some(f.into())),
-            (Some(37), Some("file"))
-        );
+        assert_eq!(load_reading(None, Some(f.into())), (Some(37), Some("file")));
         std::fs::remove_dir_all(&dir).ok();
     }
 }
