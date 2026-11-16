@@ -415,4 +415,6 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s470**: A new workflow `ios-testflight.yml` archives the iOS app with automatic signing through an App Store Connect API key and uploads it to TestFlight from `develop`, building unsigned with a warning when the secrets are absent; the owner's one-time steps are in `docs/ios-testflight.md`.
 - **s474**: The workspace `[profile.dev]` now sets `debug = "line-tables-only"` and `[profile.dev.package."*"] debug = false`, which cut the target dir of a cold workspace test build by about 20% and the wall time by about 7%.
 - **s477**: Stage 477: shorter real-time waits in the daemon tests
+- **s480**: A measurement spike (decision 0473) shows `CARGO_INCREMENTAL=0` lets sccache hit workspace library crates across per-task target dirs, `SCCACHE_BASEDIRS` does not help, and run_check's edit rebuild gets about 60% slower, so nothing is switched on.
+- **s482**: The kill test now waits until the hold is stored and both tasks have launched twice before it kills the daemon.
 <!-- status:end -->
