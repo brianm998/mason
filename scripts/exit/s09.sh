@@ -7,6 +7,8 @@
 #  4. A baseline failure is excused (it fails at the merge base too).
 #  5. A force skip stops a running suite, keeps the green lane and records a debt.
 set -euo pipefail
+# A failing command under `set -e` would end the script with no word: say which one.
+trap 'rc=$?; [ "$rc" -eq 0 ] || echo "FAILED (exit $rc) at line $LINENO: $BASH_COMMAND" >&2' ERR
 cd "$(git rev-parse --show-toplevel)"
 root=$(mktemp -d /tmp/mason-s09.XXXXXX); daemon=""
 cleanup() {
@@ -246,6 +248,16 @@ wait_state "$l" landed 150
 m task show "$l" | grep 'tests '
 m task show "$l" | grep -q 'tests     unverified: .*checks: excused, also failing at the merge base'
 echo "(the base's failures are worked out once per commit and cached)"
+# The known-red ledger files a fix task for the failure it excused (decision 0225). It takes the
+# next task number, which the scripted agent and suite read their mode from, so the script
+# waits for it, counts it, and cancels it: this script is about the testing steps.
+fix=$next; end=$((SECONDS + 60))
+until m task show "$fix" 2>/dev/null | grep -q 'legacy fails on'; do
+  [ $SECONDS -lt $end ] || { m task list >&2; echo "no fix task #$fix was filed for the excused failure" >&2; exit 1; }
+  sleep 0.2
+done
+m task cancel "$fix" >/dev/null
+next=$((next + 1))
 
 echo "== 5. a force skip stops a running suite, keeps the green lane, records a debt"
 # A task whose definition runs checks and slow; slow takes two minutes while the flag exists.

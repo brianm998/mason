@@ -212,6 +212,10 @@ fn an_invalid_value_is_refused_and_the_file_is_byte_identical() {
     for body in [
         json!({"routing": {"paused": {"fax": "0"}}}),
         json!({"routing": {"no_such_condition": {"sound": "0"}}}),
+        // monitor-only conditions (`notify::MONITOR_ONLY`) have no routes to edit
+        json!({"routing": {"paused": {"sound": "0"}}}),
+        json!({"routing": {"debt": {"sound": "0"}}}),
+        json!({"routing": {"provider_hold": {"sound": "0"}}}),
         json!({"routing": {"paused": {"sound": "whenever"}}}),
         json!({"quiet": {"sound": "late"}}),
         json!({"password": "hunter2"}),
@@ -297,7 +301,7 @@ fn a_notify_route_change_is_used_by_the_next_tick() {
         "POST",
         &owner,
         "/notify/settings",
-        json!({"routing": {"paused": {"webhook": "0"}}, "quiet": {"sound": "22:00-07:00"}}),
+        json!({"routing": {"failed": {"webhook": "0"}}, "quiet": {"sound": "22:00-07:00"}}),
     );
     assert_eq!(code, 200, "{v}");
     let text = std::fs::read_to_string(s.config_dir.join("notify.toml")).unwrap();
@@ -305,6 +309,13 @@ fn a_notify_route_change_is_used_by_the_next_tick() {
         text.contains("# my webhook") && text.contains("webhook = \"0\""),
         "{text}"
     );
+    // `paused` is monitor-only and not routable through the API, so the tick is shown using a
+    // route by writing one for it in the file, which the tick re-reads.
+    std::fs::write(
+        s.config_dir.join("notify.toml"),
+        format!("{text}\n[routing.paused]\nwebhook = \"0\"\n"),
+    )
+    .unwrap();
     notify::tick_at(&d, t0 + 1);
     assert_eq!(got.lock().unwrap().len(), 1, "the new route was used");
 

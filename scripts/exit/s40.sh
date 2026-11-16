@@ -11,6 +11,8 @@
 #  3. The two clients are in parity on the feature list.
 # The monitors themselves are driven against a real daemon by s40-real.sh.
 set -euo pipefail
+# A failing command under `set -e` would end the script with no word: say which one.
+trap 'rc=$?; [ "$rc" -eq 0 ] || echo "FAILED (exit $rc) at line $LINENO: $BASH_COMMAND" >&2' ERR
 cd "$(git rev-parse --show-toplevel)"
 root=$(mktemp -d /tmp/mason-s40.XXXXXX); daemon=""
 cleanup() { [ -n "$daemon" ] && kill -9 "$daemon" 2>/dev/null || true; rm -rf "$root"; }
@@ -19,10 +21,17 @@ trap cleanup EXIT
 cargo build -q -p mason-daemon -p mason-conformance
 bin=target/debug
 
+# Run cargo test; on a failure (or a run that prints no result) show everything it said.
+tests() {  # PATTERN CARGO-TEST-ARGS...
+  local pat=$1 out; shift
+  out=$(cargo test -q "$@" 2>&1) || { printf '%s\n' "$out" >&2; echo "FAILED: cargo test $*" >&2; exit 1; }
+  printf '%s\n' "$out" | grep -E "$pat" | head -${TESTS_LINES:-20} || { printf '%s\n' "$out" >&2; echo "FAILED: cargo test $* printed no test result" >&2; exit 1; }
+}
+
 echo "== 1. answers, approvals and rejections through the protocol"
-cargo test -q -p mason-daemon --test it approvals:: 2>&1 | grep -E "test result|FAILED|panicked"
-cargo test -q -p mason-daemon --test it an_answer_carries_the_card_hash 2>&1 | grep -E "test result|FAILED|panicked"
-cargo test -q -p mason-conformance 2>&1 | grep -E "test result" | head -1
+tests "test result|FAILED|panicked" -p mason-daemon --test it approvals::
+tests "test result|FAILED|panicked" -p mason-daemon --test it an_answer_carries_the_card_hash
+TESTS_LINES=1 tests "test result" -p mason-conformance
 
 echo "== 2. the owner is offered the buttons and a non-owner sees the card and none"
 rm -rf "$root/d"; mkdir -p "$root/d"

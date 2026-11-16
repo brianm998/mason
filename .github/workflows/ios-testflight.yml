@@ -1,0 +1,112 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+name: iOS TestFlight
+
+# Archives the universal iOS app from clients/swift and uploads it to TestFlight.
+# Without the App Store Connect secrets (a fork, or before the owner adds them) it builds
+# unsigned for the simulator, uploads nothing, and says so in a warning.
+on:
+  push:
+    branches: [develop]
+    paths:
+      - "clients/swift/**"
+  workflow_dispatch:
+
+concurrency:
+  group: testflight
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  testflight:
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+      ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+      ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      IOS_BUNDLE_ID: ${{ vars.IOS_BUNDLE_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/ios-setup
+      - name: Decide signed or unsigned
+        id: mode
+        run: |
+          set -euo pipefail
+          if [ -n "$ASC_KEY_ID" ] && [ -n "$ASC_ISSUER_ID" ] && [ -n "$ASC_KEY_P8" ] \
+             && [ -n "$APPLE_TEAM_ID" ] && [ -n "$IOS_BUNDLE_ID" ]; then
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::App Store Connect secrets or IOS_BUNDLE_ID are absent: building UNSIGNED for the simulator, nothing is uploaded to TestFlight."
+          fi
+      - name: Versions
+        id: ver
+        run: |
+          set -euo pipefail
+          v=$(sed -n '/^\[workspace.package\]/,/^\[/{s/^version *= *"\(.*\)"/\1/p;}' Cargo.toml | head -n1)
+          test -n "$v" || { echo "no workspace version in Cargo.toml" >&2; exit 1; }
+          echo "short=$v" >> "$GITHUB_OUTPUT"
+          echo "MARKETING_VERSION=$v CURRENT_PROJECT_VERSION=${{ github.run_number }}"
+      - name: Unsigned build (no secrets)
+        if: steps.mode.outputs.signed != 'true'
+        working-directory: clients/swift
+        run: make ios IOS_SETTINGS="MARKETING_VERSION=${{ steps.ver.outputs.short }} CURRENT_PROJECT_VERSION=${{ github.run_number }}"
+      - name: Write the API key
+        if: steps.mode.outputs.signed == 'true'
+        run: |
+          set -euo pipefail
+          umask 077
+          printf '%s' "$ASC_KEY_P8" > "$RUNNER_TEMP/AuthKey.p8"
+          chmod 0600 "$RUNNER_TEMP/AuthKey.p8"
+      - name: Generate the project
+        if: steps.mode.outputs.signed == 'true'
+        working-directory: clients/swift/ios
+        run: xcodegen generate --spec project.yml
+      - name: Archive
+        if: steps.mode.outputs.signed == 'true'
+        working-directory: clients/swift
+        run: |
+          set -euo pipefail
+          xcodebuild archive -project ios/MasonIOS.xcodeproj -scheme MasonIOS \
+            -destination 'generic/platform=iOS' -configuration Release \
+            -archivePath "$RUNNER_TEMP/MasonIOS.xcarchive" \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$RUNNER_TEMP/AuthKey.p8" \
+            -authenticationKeyID "$ASC_KEY_ID" \
+            -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
+            CODE_SIGN_STYLE=Automatic \
+            DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
+            MASON_IOS_BUNDLE_ID="$IOS_BUNDLE_ID" \
+            MARKETING_VERSION="${{ steps.ver.outputs.short }}" \
+            CURRENT_PROJECT_VERSION="${{ github.run_number }}"
+      - name: Export and upload to TestFlight
+        if: steps.mode.outputs.signed == 'true'
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/ExportOptions.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key><string>app-store-connect</string>
+            <key>destination</key><string>upload</string>
+            <key>teamID</key><string>$APPLE_TEAM_ID</string>
+            <key>signingStyle</key><string>automatic</string>
+            <key>manageAppVersionAndBuildNumber</key><false/>
+          </dict>
+          </plist>
+          PLIST
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/MasonIOS.xcarchive" \
+            -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist" \
+            -exportPath "$RUNNER_TEMP/export" \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$RUNNER_TEMP/AuthKey.p8" \
+            -authenticationKeyID "$ASC_KEY_ID" \
+            -authenticationKeyIssuerID "$ASC_ISSUER_ID"
+      - name: Delete the API key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/AuthKey.p8"
