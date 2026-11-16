@@ -15,6 +15,9 @@ use std::time::Duration;
 
 const CHECKS: &str = r#"#!/bin/sh
 n="$1"
+# `hang.NAME` holds a path: record this shell's pid there, then block until killed.
+f="$(find . -name "hang.$n" -not -path "./.git/*" | head -1)"
+if [ -n "$f" ]; then echo $$ > "$(cat "$f")"; sleep 600; fi
 [ -n "$(find . -name "slow.$n" -not -path "./.git/*")" ] && sleep 3
 echo "1..1"
 if [ -n "$(find . -name "red.$n" -not -path "./.git/*")" ]; then echo "not ok 1 - $n"; exit 1; fi
@@ -58,6 +61,9 @@ max_rounds = 3
 const BUILDS: &str = r#"#!/bin/sh
 n="$1"
 has() { [ -n "$(find . -name "$1" -not -path "./.git/*")" ]; }
+# `hang.build.NAME` holds a path: record this shell's pid there, then block until killed.
+f="$(find . -name "hang.build.$n" -not -path "./.git/*" | head -1)"
+if [ -n "$f" ]; then echo $$ > "$(cat "$f")"; sleep 600; fi
 if has "red.build.$n"; then
   echo "Compiling $n"
   echo "error[E0061]: this function takes 6 arguments but 5 arguments were supplied"
