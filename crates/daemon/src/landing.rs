@@ -192,6 +192,11 @@ impl Landing {
         idle(&g)
     }
 
+    /// Is this task a member of a batch that is running (and owes it a verdict)?
+    pub fn in_batch(&self, t: TaskId) -> bool {
+        self.lock().owed.contains(&t)
+    }
+
     pub fn running_batches(&self, p: ProjectId) -> usize {
         self.lock().running.get(&p).map_or(0, Vec::len)
     }
@@ -1831,7 +1836,7 @@ impl Runner {
                         })
                 });
             let mut reverify = |moved: &[String]| -> bool {
-                if force {
+                if force || self.forced() {
                     return true;
                 }
                 let outside = self.cfg.mode.uses_candidate_ref();
@@ -1841,15 +1846,29 @@ impl Runner {
                     };
                     // Under a step host, so a restarted daemon finds the run again.
                     let tree = crate::hostedcheck::tree_key(&wt_for_cmd);
-                    let spec = |prefix: &str, cmd: &str| crate::hostedcheck::CheckSpec {
-                        id_prefix: format!("b{batch_id}-{prefix}"),
-                        log_dir: log_dir.clone(),
-                        cmd: cmd.to_string(),
-                        cwd: wt_for_cmd.clone(),
-                        env: vec![],
-                        limit: p.test_timeout,
-                        tree: tree.clone(),
-                    };
+                    let members = self.members(&def);
+                    // `skippable`: a skip (not only a force) stops it. The rebuild is not: a
+                    // skipped test leaves the build a batch must still pass.
+                    let spec =
+                        |prefix: &str, cmd: &str, skippable: bool| crate::hostedcheck::CheckSpec {
+                            id_prefix: format!("b{batch_id}-{prefix}"),
+                            log_dir: log_dir.clone(),
+                            cmd: cmd.to_string(),
+                            cwd: wt_for_cmd.clone(),
+                            env: vec![],
+                            limit: p.test_timeout,
+                            tree: tree.clone(),
+                            stop: {
+                                let (d, m) = (d.clone(), members.clone());
+                                Some(Arc::new(move || {
+                                    if skippable {
+                                        m.stop(&d, "")
+                                    } else {
+                                        m.forced(&d)
+                                    }
+                                }))
+                            },
+                        };
                     // A build first, as the test step does, holding one `compile`
                     // slot; the re-test then holds the rest of what the test step uses.
                     if let Some(build) = &cmds.build {
@@ -1864,7 +1883,15 @@ impl Runner {
                                 return false;
                             }
                         };
-                        match crate::hostedcheck::run(d, &spec("rebuild", build)) {
+                        match crate::hostedcheck::run(d, &spec("rebuild", build, false)) {
+                            Ok(o) if o.stopped.is_some() => {
+                                tracing::info!(
+                                    batch = batch_id,
+                                    "the rebuild was stopped: {}",
+                                    o.stopped.unwrap_or_default()
+                                );
+                                return true;
+                            }
                             Ok(o) if o.passed && tests_skipped => {
                                 tracing::info!(
                                     batch = batch_id,
@@ -1897,8 +1924,16 @@ impl Runner {
                             return false;
                         }
                     };
-                    let spec = spec("retest", &cmds.test);
+                    let spec = spec("retest", &cmds.test, true);
                     return match crate::hostedcheck::run(d, &spec) {
+                        Ok(o) if o.stopped.is_some() => {
+                            tracing::info!(
+                                batch = batch_id,
+                                "the re-test was stopped, green for the batch: {}",
+                                o.stopped.unwrap_or_default()
+                            );
+                            true
+                        }
                         Ok(o) => {
                             if o.passed {
                                 if let Some(t) = crate::cmdreuse::content_tree(&wt_for_cmd) {
@@ -2231,11 +2266,25 @@ impl Runner {
                     &format!("{prefix}-{n}"),
                     self.sink(),
                     true,
+                    &self.members(def),
                 );
                 stop.store(true, std::sync::atomic::Ordering::SeqCst);
                 r
             })
         }
+    }
+
+    /// The batch's tasks, for what the owner does to them while it verifies.
+    fn members(&self, def: &mason_definition::Definition) -> crate::suites::Members {
+        crate::suites::Members::new(&self.member_tasks, def)
+    }
+
+    /// Is any member of the batch forced? Read live, as the owner may press Force while the
+    /// batch is already verifying; the batch then lands as a forced one would.
+    fn forced(&self) -> bool {
+        self.member_tasks
+            .iter()
+            .any(|t| self.d.store.landing_flag(t.0).ok().flatten().as_deref() == Some("force"))
     }
 
     fn verify(
@@ -2253,10 +2302,18 @@ impl Runner {
             notes: vec![],
         };
         // Force lands past verification, CI included.
-        if self.kind == "force" {
+        if self.kind == "force" || self.forced() {
             return green();
         }
         let mut r = self.run_local(def, suites, wt, base, log_dir, prefix);
+        // Forced while it ran: the suites were stopped, and nothing else is run.
+        if self.forced() {
+            r.green = true;
+            r.failed.clear();
+            r.notes
+                .push("forced by the owner: landing without verification".into());
+            return r;
+        }
         if !r.green {
             return r;
         }
@@ -2350,13 +2407,14 @@ impl Runner {
             Selection::All => step.suites.clone(),
             Selection::Some(v) => v,
         };
-        self.build_suites(def, &names, wt, log_dir, prefix, "the batch")
+        self.build_suites(def, &names, wt, log_dir, prefix, "the batch", true)
     }
 
     /// Run the `build` of each named suite in `wt`, holding one `compile` slot for each. `what`
     /// is what is being built, for the notes. A build that fails (or times out) is red for its
     /// suite, with the end of its output; a build that cannot be run ends the batch, as any
     /// service that cannot answer does.
+    #[allow(clippy::too_many_arguments)]
     fn build_suites(
         &self,
         def: &mason_definition::Definition,
@@ -2365,8 +2423,15 @@ impl Runner {
         log_dir: &Path,
         prefix: &str,
         what: &str,
+        // The owner's skips and force stop the builds (the batch's floor, not the base's).
+        stoppable: bool,
     ) -> crate::suites::OverRun {
         let d = &self.d;
+        let members = if stoppable {
+            self.members(def)
+        } else {
+            crate::suites::Members::default()
+        };
         let mut out = crate::suites::OverRun {
             green: true,
             failed: BTreeSet::new(),
@@ -2405,6 +2470,10 @@ impl Runner {
             let Some(build) = build else {
                 continue;
             };
+            if let Some(why) = members.stop(d, name) {
+                out.notes.push(format!("{name}: {what} not built: {why}"));
+                continue;
+            }
             let _lease = match self.hold(
                 def,
                 crate::sched::needs_of(&crate::jobs::build_uses(), None),
@@ -2426,8 +2495,16 @@ impl Runner {
                 env: vec![],
                 limit: self.project().test_timeout,
                 tree: crate::hostedcheck::tree_key(wt),
+                stop: stoppable.then(|| {
+                    let (d, m, name) = (d.clone(), members.clone(), name.clone());
+                    Arc::new(move || m.stop(&d, &name)) as crate::hostedcheck::StopFn
+                }),
             };
             match crate::hostedcheck::run(d, &spec) {
+                Ok(o) if o.stopped.is_some() => out.notes.push(format!(
+                    "{name}: {what} not built to the end: {}",
+                    o.stopped.unwrap_or_default()
+                )),
                 Ok(o) if o.passed => out.notes.push(format!("{name}: {what} builds")),
                 Ok(o) => {
                     out.green = false;
@@ -2476,7 +2553,7 @@ impl Runner {
                 format!("could not check out {branch} to see whether it builds: {e}")
             })?;
         }
-        let r = self.build_suites(def, names, wt, log_dir, prefix, "the base");
+        let r = self.build_suites(def, names, wt, log_dir, prefix, "the base", false);
         {
             let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
             git::run(wt, &["checkout", "--force", "--detach", head]).map_err(|e| {
@@ -3345,6 +3422,7 @@ impl Runner {
             None,
             // `commit` is the tree under test: only a known-red test may excuse a red.
             false,
+            &crate::suites::Members::default(),
         );
         {
             let _g = lock.lock().unwrap_or_else(|e| e.into_inner());

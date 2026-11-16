@@ -1706,6 +1706,7 @@ impl TestChecks {
                 env: vec![("MASON_HELD".to_string(), held_text(uses))],
                 limit,
                 tree: tree.clone(),
+                stop: None,
             }
         };
         let mut lines: Vec<String> = vec![];
@@ -2050,6 +2051,7 @@ impl TestChecks {
                 env: vec![("MASON_HELD".to_string(), held_text(uses))],
                 limit: self.timeout,
                 tree: tree.clone(),
+                stop: None,
             }
         };
         // A build first, holding one `compile` slot; the tests then hold the

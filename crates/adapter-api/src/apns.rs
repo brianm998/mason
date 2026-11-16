@@ -98,13 +98,19 @@ pub fn make_jwt(key_pem: &str, key_id: &str, team_id: &str, now_ms: u64) -> Resu
     Ok(format!("{input}.{}", b64(sig.as_ref())))
 }
 
-/// (SHA-256 of the key text, key id, team id, made at, token): the one token in use, so a burst
-/// of alerts signs once. The key is held as a digest, not as text.
-type Cached = (Vec<u8>, String, String, u64, String);
+/// (key fingerprint, key id, team id, made at, token): the one token in use, so a burst of
+/// alerts signs once. Only a SHA-256 of the key is kept, never its text.
+type Cached = ([u8; 32], String, String, u64, String);
+
+fn fingerprint(key_pem: &str) -> [u8; 32] {
+    let d = ring::digest::digest(&ring::digest::SHA256, key_pem.as_bytes());
+    let mut out = [0u8; 32];
+    out.copy_from_slice(d.as_ref());
+    out
+}
 static CACHE: Mutex<Option<Cached>> = Mutex::new(None);
 
-/// The cached provider token, or a new one when it is 50 minutes old or for another key,
-/// key id or team.
+/// The cached provider token, or a new one when it is 50 minutes old or for other settings.
 pub fn cached_jwt(
     key_pem: &str,
     key_id: &str,
@@ -121,18 +127,15 @@ fn cached_in(
     team_id: &str,
     now_ms: u64,
 ) -> Result<String, String> {
-    let digest = ring::digest::digest(&ring::digest::SHA256, key_pem.as_bytes())
-        .as_ref()
-        .to_vec();
     let mut g = cache.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some((d, k, t, at, jwt)) = g.as_ref() {
-        if *d == digest && k == key_id && t == team_id && now_ms >= *at && now_ms - *at < JWT_TTL_MS
-        {
+    let fp = fingerprint(key_pem);
+    if let Some((f, k, t, at, jwt)) = g.as_ref() {
+        if *f == fp && k == key_id && t == team_id && now_ms >= *at && now_ms - *at < JWT_TTL_MS {
             return Ok(jwt.clone());
         }
     }
     let jwt = make_jwt(key_pem, key_id, team_id, now_ms)?;
-    *g = Some((digest, key_id.into(), team_id.into(), now_ms, jwt.clone()));
+    *g = Some((fp, key_id.into(), team_id.into(), now_ms, jwt.clone()));
     Ok(jwt)
 }
 
@@ -249,23 +252,6 @@ mod tests {
         (pem, pair.public_key().as_ref().to_vec())
     }
 
-    #[test]
-    fn two_keys_with_the_same_kid_and_team_each_get_their_own_jwt() {
-        let (pem_a, pub_a) = key();
-        let (pem_b, pub_b) = key();
-        let local = Mutex::new(None);
-        let ja = cached_in(&local, &pem_a, "SAMEKID123", "SAMETEAM12", 1_000_000).unwrap();
-        let jb = cached_in(&local, &pem_b, "SAMEKID123", "SAMETEAM12", 1_000_000).unwrap();
-        assert_ne!(ja, jb);
-        for (jwt, public) in [(&ja, &pub_a), (&jb, &pub_b)] {
-            let (input, sig) = jwt.rsplit_once('.').unwrap();
-            let sig = URL_SAFE_NO_PAD.decode(sig).unwrap();
-            UnparsedPublicKey::new(&ECDSA_P256_SHA256_FIXED, public)
-                .verify(input.as_bytes(), &sig)
-                .unwrap();
-        }
-    }
-
     fn msg() -> Message {
         Message {
             key: "question:204".into(),
@@ -324,6 +310,22 @@ mod tests {
     }
 
     #[test]
+    fn two_keys_with_the_same_ids_each_get_a_token_that_verifies_against_their_own_key() {
+        let (pem_a, pub_a) = key();
+        let (pem_b, pub_b) = key();
+        let a = cached_jwt(&pem_a, "pair-kid", "PAIRTEAM", 5_000_000).unwrap();
+        let b = cached_jwt(&pem_b, "pair-kid", "PAIRTEAM", 5_000_000).unwrap();
+        assert_ne!(a, b);
+        for (jwt, public) in [(&a, &pub_a), (&b, &pub_b)] {
+            let p: Vec<&str> = jwt.split('.').collect();
+            let sig = URL_SAFE_NO_PAD.decode(p[2]).unwrap();
+            UnparsedPublicKey::new(&ECDSA_P256_SHA256_FIXED, public)
+                .verify(format!("{}.{}", p[0], p[1]).as_bytes(), &sig)
+                .expect("signature");
+        }
+    }
+
+    #[test]
     fn a_bad_key_file_is_named_and_a_token_is_reused_until_it_is_old() {
         assert!(make_jwt("hello", "k", "t", 0).unwrap_err().contains("PEM"));
         assert!(make_jwt(
@@ -334,6 +336,7 @@ mod tests {
         )
         .is_err());
         let (pem, _) = key();
+        // A local cache: the sender tests use the shared one at the same time.
         let local = Mutex::new(None);
         let a = cached_in(&local, &pem, "cache-kid", "T", 1_000_000).unwrap();
         let b = cached_in(&local, &pem, "cache-kid", "T", 1_000_000 + JWT_TTL_MS - 1).unwrap();
