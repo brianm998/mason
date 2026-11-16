@@ -1524,7 +1524,7 @@ impl Store {
                         b,
                         f.lines().map(String::from).collect(),
                         n.lines().map(String::from).collect(),
-                        e as usize,
+                        e,
                     )
                 })
             })
