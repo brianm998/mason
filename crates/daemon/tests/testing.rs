@@ -796,7 +796,13 @@ fn a_debt_closes_by_itself_when_the_suite_later_goes_green_on_a_base_with_the_ta
     wait_state(&d, t, State::Landed, 120);
     // The debt exists. It may already be paid: since s426 landing runs every open debt of the
     // task once at the new base, on its own thread, so its status here is not fixed.
-    assert_eq!(d.store.debts(Some(t.0), false).unwrap().len(), 1);
+    let rows = d.store.debts(Some(t.0), false).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert!(
+        matches!(rows[0].status.as_str(), "open" | "paid"),
+        "{}",
+        rows[0].status
+    );
     // The next task's own run of the suite is green at a base that holds the first task.
     let t2 = file_it(&d, "Second");
     wait_state(&d, t2, State::Landed, 120);
@@ -845,6 +851,7 @@ fn a_debt_whose_suite_is_still_red_stays_open_and_is_run_once_when_idle() {
     });
     let row = d.store.debts(Some(t.0), false).unwrap().remove(0);
     assert_eq!(row.status, "open");
+    assert!(row.tried_at > 0, "nothing ever tried it");
     // Once is enough: a second pass leaves it alone.
     mason_daemon::suites::run_idle_debts(&d);
     let again = d.store.debts(Some(t.0), false).unwrap().remove(0);
