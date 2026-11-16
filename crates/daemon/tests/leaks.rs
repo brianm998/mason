@@ -50,6 +50,8 @@ fn dropping_a_scratch_world_stops_its_hosts_agents_and_daemon() {
     wait_for("every process of the scratch world to be gone", 60, || {
         std::thread::sleep(Duration::from_millis(100));
         command_lines_with(&needle).is_empty()
-            && pids.iter().all(|p| !mason_step_host::registry::pid_alive(*p))
+            && pids
+                .iter()
+                .all(|p| !mason_step_host::registry::pid_alive(*p))
     });
 }
