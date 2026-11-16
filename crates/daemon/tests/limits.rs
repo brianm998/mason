@@ -5,6 +5,7 @@
 //! is injected: nothing here reads the machine's real load.
 
 use mason_daemon::cpu::FakeCpu;
+use mason_daemon::policyd::FakePolicy;
 use mason_daemon::sched::{Broker, LeaseState, ResourceCfg};
 use mason_daemon::stall::FakeStall;
 use std::collections::BTreeMap;
@@ -194,6 +195,41 @@ fn a_stalled_disk_holds_further_compiles_but_never_the_first() {
     // Started: a stall does not take it back.
     stall.set(60_000);
     assert!(matches!(b.lease_poll(first), LeaseState::Granted { .. }));
+}
+
+#[test]
+fn a_busy_syspolicyd_holds_further_compiles_but_never_the_first() {
+    let dir = scratch("policyd");
+    let cfg = mason_daemon::sched::parse_resource_cfg(
+        "[cpu]\ncompile_settle_s = 0\nsyspolicyd_max_pct = 250\n",
+    )
+    .unwrap();
+    assert_eq!(cfg.syspolicyd_max_pct, 250);
+    let b = broker(&dir, &cfg, &FakeCpu::replacing_compile_count(0));
+    let busy = FakePolicy::new(700);
+    b.set_policy(busy.clone(), cfg.syspolicyd_max_pct);
+    let first = b.lease_open("cc1", &compile());
+    assert!(
+        matches!(b.lease_poll(first), LeaseState::Granted { .. }),
+        "with no compile running a busy syspolicyd is not ours to wait out"
+    );
+    let second = b.lease_open("cc2", &compile());
+    match b.lease_poll(second) {
+        LeaseState::Waiting { explain } => assert_eq!(
+            explain,
+            "compile waiting: syspolicyd is at 700% CPU checking new programs (limit 250%)"
+        ),
+        other => panic!("should wait: {other:?}"),
+    }
+    // The owner can turn it off while masond runs, and back on.
+    b.set_gate("syspolicyd_max_pct", Some(0)).unwrap();
+    assert!(matches!(b.lease_poll(second), LeaseState::Granted { .. }));
+    b.set_gate("syspolicyd_max_pct", Some(250)).unwrap();
+    let third = b.lease_open("cc3", &compile());
+    assert!(matches!(b.lease_poll(third), LeaseState::Waiting { .. }));
+    busy.set(80);
+    assert!(matches!(b.lease_poll(third), LeaseState::Granted { .. }));
+    assert!(b.set_gate("syspolicyd_max_pct", Some(-1)).is_err());
 }
 
 #[test]
