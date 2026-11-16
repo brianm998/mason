@@ -36,14 +36,14 @@ level = "unit"
 env = "iphone"
 
 [suite.android-emu]
-command = "cd android && ANDROID_SERIAL=\"$MASON_DEVICE\" ./gradlew --console=plain testDebugUnitTest connectedDebugAndroidTest 2>&1"
+command = "cd android && ANDROID_SERIAL=\"$MASON_DEVICE\" gradle --console=plain testDebugUnitTest connectedDebugAndroidTest 2>&1"
 parser = "gradle"
 min_tests = 3
 level = "unit"
 env = "emulator"
 
 [suite.android-phone]
-command = "cd android && ANDROID_SERIAL=\"$MASON_DEVICE\" ./gradlew --console=plain testDebugUnitTest connectedDebugAndroidTest 2>&1"
+command = "cd android && ANDROID_SERIAL=\"$MASON_DEVICE\" gradle --console=plain testDebugUnitTest connectedDebugAndroidTest 2>&1"
 parser = "gradle"
 min_tests = 3
 level = "unit"

@@ -98,10 +98,16 @@ pub fn make_jwt(key_pem: &str, key_id: &str, team_id: &str, now_ms: u64) -> Resu
     Ok(format!("{input}.{}", b64(sig.as_ref())))
 }
 
-/// (key file text, key id, team id, made at, token): the one token in use, so a burst of alerts
-/// signs once. The key itself is part of the identity: a replaced key file must not keep a token
-/// signed by the old one.
-type Cached = (String, String, String, u64, String);
+/// (key fingerprint, key id, team id, made at, token): the one token in use, so a burst of
+/// alerts signs once. Only a SHA-256 of the key is kept, never its text.
+type Cached = ([u8; 32], String, String, u64, String);
+
+fn fingerprint(key_pem: &str) -> [u8; 32] {
+    let d = ring::digest::digest(&ring::digest::SHA256, key_pem.as_bytes());
+    let mut out = [0u8; 32];
+    out.copy_from_slice(d.as_ref());
+    out
+}
 static CACHE: Mutex<Option<Cached>> = Mutex::new(None);
 
 /// The cached provider token, or a new one when it is 50 minutes old or for other settings.
@@ -112,24 +118,14 @@ pub fn cached_jwt(
     now_ms: u64,
 ) -> Result<String, String> {
     let mut g = CACHE.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some((pem, k, t, at, jwt)) = g.as_ref() {
-        if pem == key_pem
-            && k == key_id
-            && t == team_id
-            && now_ms >= *at
-            && now_ms - *at < JWT_TTL_MS
-        {
+    let fp = fingerprint(key_pem);
+    if let Some((f, k, t, at, jwt)) = g.as_ref() {
+        if *f == fp && k == key_id && t == team_id && now_ms >= *at && now_ms - *at < JWT_TTL_MS {
             return Ok(jwt.clone());
         }
     }
     let jwt = make_jwt(key_pem, key_id, team_id, now_ms)?;
-    *g = Some((
-        key_pem.into(),
-        key_id.into(),
-        team_id.into(),
-        now_ms,
-        jwt.clone(),
-    ));
+    *g = Some((fp, key_id.into(), team_id.into(), now_ms, jwt.clone()));
     Ok(jwt)
 }
 
@@ -304,6 +300,22 @@ mod tests {
     }
 
     #[test]
+    fn two_keys_with_the_same_ids_each_get_a_token_that_verifies_against_their_own_key() {
+        let (pem_a, pub_a) = key();
+        let (pem_b, pub_b) = key();
+        let a = cached_jwt(&pem_a, "pair-kid", "PAIRTEAM", 5_000_000).unwrap();
+        let b = cached_jwt(&pem_b, "pair-kid", "PAIRTEAM", 5_000_000).unwrap();
+        assert_ne!(a, b);
+        for (jwt, public) in [(&a, &pub_a), (&b, &pub_b)] {
+            let p: Vec<&str> = jwt.split('.').collect();
+            let sig = URL_SAFE_NO_PAD.decode(p[2]).unwrap();
+            UnparsedPublicKey::new(&ECDSA_P256_SHA256_FIXED, public)
+                .verify(format!("{}.{}", p[0], p[1]).as_bytes(), &sig)
+                .expect("signature");
+        }
+    }
+
+    #[test]
     fn a_bad_key_file_is_named_and_a_token_is_reused_until_it_is_old() {
         assert!(make_jwt("hello", "k", "t", 0).unwrap_err().contains("PEM"));
         assert!(make_jwt(
@@ -321,16 +333,6 @@ mod tests {
         assert_ne!(a, c);
         let d = cached_jwt(&pem, "other-kid", "T", 1_000_000 + JWT_TTL_MS + 5000).unwrap();
         assert_ne!(c, d);
-        // A replaced key file with the same ids does not keep the old key's token.
-        let (pem2, public2) = key();
-        let e = cached_jwt(&pem2, "other-kid", "T", 1_000_000 + JWT_TTL_MS + 5001).unwrap();
-        let p: Vec<&str> = e.split('.').collect();
-        UnparsedPublicKey::new(&ECDSA_P256_SHA256_FIXED, &public2)
-            .verify(
-                format!("{}.{}", p[0], p[1]).as_bytes(),
-                &URL_SAFE_NO_PAD.decode(p[2]).unwrap(),
-            )
-            .expect("signed by the new key");
     }
 
     #[test]
