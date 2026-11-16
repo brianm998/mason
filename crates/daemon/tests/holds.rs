@@ -28,10 +28,11 @@ fn now() -> u64 {
         .as_secs()
 }
 
-/// How long the usage-limit hold in the kill test lasts: long enough that a slow restart on a busy
-/// machine still finds it in force, short enough to wait out (the rate-limit window re-holds the
-/// account until its reset, so a hand release cannot end it early).
-const HOLD_S: u64 = 120;
+/// How long the usage-limit hold in the kill test lasts: it must outlast a restart of the daemon
+/// on a busy or stalled machine (the restart runs a git fetch and process launches with no bound).
+/// The test ends the hold itself by moving its end to two seconds from now, so the length adds no
+/// wait.
+const HOLD_S: u64 = 3600;
 
 /// The reset is `resets_in` seconds after the fake agent emits the event, never an
 /// absolute time fixed at test start (the daemon drops resets already past).
