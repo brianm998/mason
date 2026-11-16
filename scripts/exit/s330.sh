@@ -4,6 +4,6 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 cargo test -q -p mason-store --lib -- a_later_round_replaces
-cargo test -q -p mason-daemon --test notify -- reminders_queued_while_muted
-cargo test -q -p mason-daemon --test notify -- a_never_heard_alert_plays_at_most_once
+cargo test -q -p mason-daemon --test it -- reminders_queued_while_muted
+cargo test -q -p mason-daemon --test it -- a_never_heard_alert_plays_at_most_once
 echo "s330 OK"

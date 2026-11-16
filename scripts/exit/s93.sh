@@ -15,11 +15,11 @@ run() {
 }
 
 run "kill -9 during run_check: the command ran once, the task lands, no temp files left" \
-    -p mason-daemon --test hosted_check kill_9_while_run_check_runs_the_command_once_and_the_task_lands
+    -p mason-daemon --test it kill_9_while_run_check_runs_the_command_once_and_the_task_lands
 run "a second call attaches; a different tree runs afresh" \
-    -p mason-daemon --test hosted_check a_second_call_attaches_and_a_different_tree_runs_afresh
+    -p mason-daemon --test it a_second_call_attaches_and_a_different_tree_runs_afresh
 run "a hung check ends at the limit" \
-    -p mason-daemon --test hosted_check a_hung_check_ends_at_the_limit
+    -p mason-daemon --test it a_hung_check_ends_at_the_limit
 run "the host id suffix is understood by the sweep" \
     -p mason-daemon --lib sweep
 

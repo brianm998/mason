@@ -22,7 +22,7 @@ if [ -z "${MASON_TESTS_ALREADY_RAN:-}" ]; then
   cargo test -q -p mason-landing --lib auth_tests 2>&1 | tail -3 | grep -q 'test result: ok'
 fi
 echo "== 3. hold and lift"
-t mason-daemon push_auth
+t mason-daemon it push_auth::
 echo "== 4. keys and the passphrase"
 t mason-daemon ssh_keys
 echo "s158 OK"

@@ -15,5 +15,5 @@ run() {
 }
 
 run "the threshold, the reason, the lift" -p mason-daemon --lib -- autoquarantine
-run "a daemon quarantines, files once, and keeps the guards" -p mason-daemon --test auto_quarantine
+run "a daemon quarantines, files once, and keeps the guards" -p mason-daemon --test it auto_quarantine::
 echo "s253 OK"

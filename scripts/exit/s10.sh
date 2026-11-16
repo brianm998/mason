@@ -200,6 +200,6 @@ m metrics | grep -q ' per landed task'
 trap - EXIT; cleanup
 if [ -z "${MASON_TESTS_ALREADY_RAN:-}" ]; then
   cargo test -p mason-adapter-api card
-  cargo test -p mason-daemon --test attention
+  cargo test -p mason-daemon --test it attention::
 fi
 echo "s10 OK"

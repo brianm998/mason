@@ -5,5 +5,5 @@
 # develop run. The test makes a local bare remote whose pre-receive hook rejects pushes.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-cargo test -q -p mason-daemon --test retry_outside
+cargo test -q -p mason-daemon --test it retry_outside::
 echo "s168: ok"

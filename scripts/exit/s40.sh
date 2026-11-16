@@ -20,8 +20,8 @@ cargo build -q -p mason-daemon -p mason-conformance
 bin=target/debug
 
 echo "== 1. answers, approvals and rejections through the protocol"
-cargo test -q -p mason-daemon --test approvals 2>&1 | grep -E "test result|FAILED|panicked"
-cargo test -q -p mason-daemon --test protocol an_answer_carries_the_card_hash 2>&1 | grep -E "test result|FAILED|panicked"
+cargo test -q -p mason-daemon --test it approvals:: 2>&1 | grep -E "test result|FAILED|panicked"
+cargo test -q -p mason-daemon --test it an_answer_carries_the_card_hash 2>&1 | grep -E "test result|FAILED|panicked"
 cargo test -q -p mason-conformance 2>&1 | grep -E "test result" | head -1
 
 echo "== 2. the owner is offered the buttons and a non-owner sees the card and none"

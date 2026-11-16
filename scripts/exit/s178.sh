@@ -17,11 +17,11 @@ run() {
     echo "$out" | grep -E '^test result' | tail -1
 }
 run "1+3. run_check and the test step run only the suite the change's path selects" \
-    -p mason-daemon --test suite_builds run_check_runs_only_the_development_suites_the_impact_map_selects
+    -p mason-daemon --test it run_check_runs_only_the_development_suites_the_impact_map_selects
 run "2. compile is held during the build and released before the run; one build is shared" \
-    -p mason-daemon --test suite_builds a_build_holds_compile_and_the_run_holds_only_the_suites_own_uses
+    -p mason-daemon --test it a_build_holds_compile_and_the_run_holds_only_the_suites_own_uses
 run "no development binding: run_check keeps the single command" \
-    -p mason-daemon --test suite_builds run_check_without_a_development_binding_keeps_the_single_command
+    -p mason-daemon --test it run_check_without_a_development_binding_keeps_the_single_command
 run "4. a suite's build parses and validates; MASON's own impact map" \
     -p mason-definition --test testing_tables
 echo "s178 OK"

@@ -5,4 +5,4 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 cargo test -q -p mason-pipeline --bin mason open_session_tests
-cargo test -q -p mason-daemon --test attention the_resume_command_is_the_providers_own
+cargo test -q -p mason-daemon --test it the_resume_command_is_the_providers_own

@@ -15,10 +15,10 @@ run() {
     echo "$out" | grep -E '^test result' | tail -1
 }
 
-run "below the floor a task waits, the alert shows, then it lands and the alert clears" -p mason-daemon --test disk below_the_floor
-run "at the floor a task runs" -p mason-daemon --test disk at_the_floor
+run "below the floor a task waits, the alert shows, then it lands and the alert clears" -p mason-daemon --test it below_the_floor
+run "at the floor a task runs" -p mason-daemon --test it at_the_floor
 run "the scheduler holds and explains" -p mason-scheduler disk
-run "an old cancelled directory goes, a young one stays, a revived one is untouched" -p mason-daemon --test taskcache canceled
-run "a revived task's directory is untouched" -p mason-daemon --test taskcache revived
+run "an old cancelled directory goes, a young one stays, a revived one is untouched" -p mason-daemon --test it canceled
+run "a revived task's directory is untouched" -p mason-daemon --test it revived
 run "the readers" -p mason-daemon --lib disk
 echo "s85 OK"

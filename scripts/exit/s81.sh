@@ -11,8 +11,8 @@ cargo test -q -p mason-landing -- deadline_tests proc::tests
 echo "== a CPU reading older than 30 seconds is unknown"
 cargo test -q -p mason-daemon --lib cpu::tests::an_old_reading_is_unknown
 echo "== a stalled fetch does not block another task's cleanup"
-cargo test -q -p mason-daemon --test fetch_deadline
+cargo test -q -p mason-daemon --test it fetch_deadline::
 echo "== real masond: port opens at once, the fetch stops at its deadline, cancel is not held up"
-cargo test -q -p mason-daemon --test fetch_stall
+cargo test -q -p mason-daemon --test it fetch_stall::
 
 echo "s81 OK"

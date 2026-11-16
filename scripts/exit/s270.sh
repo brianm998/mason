@@ -8,7 +8,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
-cargo test -q -p mason-daemon --test pause_banners
+cargo test -q -p mason-daemon --test it pause_banners::
 
 if [ "$(uname)" = Darwin ] && command -v swift >/dev/null; then
   (cd clients/swift && swift test --filter PauseCollapseTests)
