@@ -4,6 +4,9 @@
 # model pass their tests, and the conformance features check passes with the new row.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
+if [ -n "${MASON_SKIP_COMPOSE:-}" ] || ! command -v gradle >/dev/null; then
+  echo "s433 skipped: needs Gradle (not run by CI's Linux exit-scripts job)"; exit 0
+fi
 grep -q '^\[feature.settings-devices\]' clients/features.toml || { echo "FAILED: no settings-devices row" >&2; exit 1; }
 for f in clients/swift/Sources/MonitorUI/DevicesSection.swift clients/compose/app/src/main/kotlin/mason/monitor/ui/Devices.kt; do
   [ -f "$f" ] || { echo "FAILED: $f is missing" >&2; exit 1; }
