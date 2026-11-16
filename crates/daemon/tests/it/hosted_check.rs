@@ -29,6 +29,7 @@ fn spec(
         env: vec![],
         limit: Duration::from_secs(secs),
         tree: tree.into(),
+        stop: None,
     }
 }
 

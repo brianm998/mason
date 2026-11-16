@@ -722,6 +722,68 @@ struct Who {
     /// A red that also fails at `Tree::base` is excused. Off when `base` is the very tree
     /// under test (the post-land tier), where every red would "also fail at the base".
     trust_base: bool,
+    /// For a landing batch's run (`task` is `None`): the tasks it verifies, whose skips and
+    /// forces stop it.
+    members: Members,
+}
+
+/// The tasks of a landing batch, and the name of the definition's Test step. A batch's
+/// verification belongs to no task, so what the owner does to its members is read here: it
+/// is stopped when every member has a skip debt for the suite (or the whole Test step), or
+/// when any member is forced. A batch with some members skipped keeps running: the others
+/// still need their tests.
+#[derive(Clone, Default)]
+pub struct Members {
+    pub tasks: Vec<TaskId>,
+    pub step: String,
+}
+
+impl Members {
+    pub fn new(tasks: &[TaskId], def: &Definition) -> Members {
+        Members {
+            tasks: tasks.to_vec(),
+            step: test_step_name(def).unwrap_or_default(),
+        }
+    }
+
+    /// Why the batch is to be landed without verification, if it is: a member is forced.
+    pub fn forced(&self, d: &Daemon) -> Option<String> {
+        self.tasks
+            .iter()
+            .find(|t| d.store.landing_flag(t.0).ok().flatten().as_deref() == Some("force"))
+            .map(|t| {
+                format!(
+                    "forced by the owner (task #{}): landing without verification",
+                    t.0
+                )
+            })
+    }
+
+    /// Why the batch's run of `suite` (`""`: every suite, a build) is to stop, if it is.
+    pub fn stop(&self, d: &Daemon, suite: &str) -> Option<String> {
+        if self.tasks.is_empty() {
+            return None;
+        }
+        if let Some(why) = self.forced(d) {
+            return Some(why);
+        }
+        let debts: Option<Vec<u64>> = self
+            .tasks
+            .iter()
+            .map(|t| skip_for(d, *t, suite, &self.step))
+            .collect();
+        debts
+            .and_then(|v| v.first().copied())
+            .map(|id| format!("skipped by the owner (debt #{id})"))
+    }
+}
+
+/// The name of the definition's Test step.
+pub(crate) fn test_step_name(def: &Definition) -> Option<String> {
+    def.steps
+        .iter()
+        .find(|s| s.kind == mason_definition::StepType::Test)
+        .map(|s| s.name.clone())
 }
 
 impl Who {
@@ -764,15 +826,21 @@ impl Who {
     }
 
     fn check(&self, suite: &str) -> Check {
-        let (d, task, step, suite) = (
+        let (d, task, step, suite, members) = (
             self.d.clone(),
             self.task,
             self.step.clone(),
             suite.to_string(),
+            self.members.clone(),
         );
         Arc::new(move || {
             let Some((t, run)) = task else {
-                return Stop::No;
+                // A batch's run: stopped by what the owner did to its members.
+                return if members.stop(&d, &suite).is_some() {
+                    Stop::Skipped
+                } else {
+                    Stop::No
+                };
             };
             if d.world()
                 .map(|w| w.open_run(t) != Some(run))
@@ -2059,6 +2127,7 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
         sink: None,
         env: vec![],
         trust_base: true,
+        members: Members::default(),
     };
     let head = |rev: &str| git::run(&c.wt, &["rev-parse", rev]).map(|s| s.trim().to_string());
     let (Ok(tree_hash), Ok(head_sha)) = (head("HEAD^{tree}"), head("HEAD")) else {
@@ -2696,9 +2765,28 @@ pub fn skip(
         "suite" | "step" => {}
         _ => return Err("scope is `suite:NAME` or `step:NAME`".into()),
     }
+    let scope = landing_scope(&def, t.state, scope);
     d.store
-        .add_debt(task.0, &project, scope, reason, owner, deferred, now_ms())
+        .add_debt(task.0, &project, &scope, reason, owner, deferred, now_ms())
         .map_err(|e| e.to_string())
+}
+
+/// The scope a skip is recorded against. A task in landing is shown with its landing step, and
+/// the clients send that step's name, but what landing can honour is a skip of the Test step
+/// (`tests_skipped`, and a batch's verification, read `step:<Test step>`). So a `step:` scope
+/// that names a step other than the Test step is, for a task in landing, the Test step's.
+/// Every other scope stays as it was.
+pub fn landing_scope(def: &Definition, state: State, scope: &str) -> String {
+    let Some(("step", name)) = scope.split_once(':') else {
+        return scope.to_string();
+    };
+    let named_is_test = def
+        .step(name)
+        .is_some_and(|s| s.kind == mason_definition::StepType::Test);
+    match test_step_name(def) {
+        Some(test) if state == State::Landing && !named_is_test => format!("step:{test}"),
+        _ => scope.to_string(),
+    }
 }
 
 /// The suites a debt's scope names in `def`.
@@ -2929,6 +3017,7 @@ pub fn pay(d: &Arc<Daemon>, debt: u64) -> Result<String, String> {
         sink: None,
         env: vec![],
         trust_base: true,
+        members: Members::default(),
     };
     let tree_hash = git::run(&wt, &["rev-parse", "HEAD^{tree}"])
         .map(|s| s.trim().to_string())
@@ -3105,6 +3194,7 @@ pub fn ledger_run(d: &Arc<Daemon>, task: TaskId) -> Result<String, String> {
         sink: None,
         env: vec![],
         trust_base: true,
+        members: Members::default(),
     };
     let tree = Tree {
         tree: git::run(&wt, &["rev-parse", "HEAD^{tree}"])
@@ -3203,7 +3293,9 @@ pub struct OverRun {
 
 /// Run the named suites in `wt` (a batch's integration worktree, at the tree
 /// to be landed) once, as the landing engine does over a batch's union diff.
-/// They belong to no task: nothing can skip them. Evidence is by tree, so a
+/// They belong to no task, so a skip is read from `members`: the run stops when every member
+/// has skipped the suite (or the Test step), and is green with a note naming the debt; a
+/// forced member stops it too. Evidence is by tree, so a
 /// tree that was green is not run twice, whoever asks. `base` is where the
 /// batch started (baselines are taken there). A suite whose only reds are excused (also red
 /// at `base`, or known red) is green for the batch, with a note naming them; `base_excuses`
@@ -3220,6 +3312,7 @@ pub fn run_over(
     id_prefix: &str,
     sink: Option<StepRunId>,
     base_excuses: bool,
+    members: &Members,
 ) -> OverRun {
     let lock = d.repo_lock(d.project_id_by_name(&p.id).unwrap_or(ProjectId(0)));
     let tree_hash = git::run(wt, &["rev-parse", "HEAD^{tree}"])
@@ -3239,6 +3332,7 @@ pub fn run_over(
         sink,
         env: vec![],
         trust_base: base_excuses,
+        members: members.clone(),
     };
     let _ = std::fs::create_dir_all(log_dir);
     let mut out = OverRun {
@@ -3266,6 +3360,14 @@ pub fn run_over(
                 notes,
                 ..
             } => out.notes.push(notes.join("; ")),
+            SuiteRun::Done {
+                outcome: SuiteOutcome::Skipped,
+                notes,
+                ..
+            } => out.notes.push(match members.stop(d, name) {
+                Some(why) => format!("{name}: {why}"),
+                None => notes.join("; "),
+            }),
             SuiteRun::Done { notes, .. } => {
                 out.green = false;
                 out.failed.insert(name.clone());
