@@ -465,6 +465,43 @@ pub async fn devices(State(d): State<Arc<Daemon>>) -> Res {
     })).collect::<Vec<_>>()})))
 }
 
+/// The calling device's own row, and nothing else: the LAN guard names the caller. A request
+/// that did not come over the LAN has no device to speak for.
+fn own_device(peer: Option<axum::Extension<Peer>>) -> Result<u64, (StatusCode, Json<Value>)> {
+    peer.map(|p| p.0.device)
+        .ok_or_else(|| fail(403, "only a paired device can register its own push token"))
+}
+
+/// `POST /devices/self/push {token, env}`: this device wants alerts pushed to it (APNs).
+pub async fn set_push(
+    State(d): State<Arc<Daemon>>,
+    peer: Option<axum::Extension<Peer>>,
+    Json(b): Json<Value>,
+) -> Res {
+    let id = own_device(peer)?;
+    let token = b["token"].as_str().unwrap_or_default().to_string();
+    let env = b["env"].as_str().unwrap_or_default().to_string();
+    let d2 = d.clone();
+    d.pool
+        .run(move || crate::notify::set_own_push(&d2, id, Some((&token, &env))))
+        .await
+        .map_err(|_| fail(503, "the daemon is busy; try again"))?
+        .map_err(|e| fail(400, e))?;
+    Ok(Json(json!({"device": id, "push": true})))
+}
+
+/// `DELETE /devices/self/push`: this device wants no more pushes.
+pub async fn clear_push(State(d): State<Arc<Daemon>>, peer: Option<axum::Extension<Peer>>) -> Res {
+    let id = own_device(peer)?;
+    let d2 = d.clone();
+    d.pool
+        .run(move || crate::notify::set_own_push(&d2, id, None))
+        .await
+        .map_err(|_| fail(503, "the daemon is busy; try again"))?
+        .map_err(|e| fail(500, e))?;
+    Ok(Json(json!({"device": id, "push": false})))
+}
+
 pub async fn revoke(State(d): State<Arc<Daemon>>, Path(id): Path<u64>) -> Res {
     let (d2, now) = (d.clone(), now_ms());
     let done = d

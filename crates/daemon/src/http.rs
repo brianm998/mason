@@ -3644,6 +3644,10 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/pair/codes", post(crate::lan::issue_code))
         .route("/devices", get(crate::lan::devices))
         .route("/devices/{id}/revoke", post(crate::lan::revoke))
+        .route(
+            "/devices/self/push",
+            post(crate::lan::set_push).delete(crate::lan::clear_push),
+        )
         .route("/tasks", get(list_tasks).post(add_task))
         .route("/tasks/{id}", get(task_detail))
         .route("/tasks/{id}/cancel", post(cancel))

@@ -868,7 +868,7 @@ A routing table of conditions and channels, with rules that keep alerts trustwor
 
 ### Push and email
 
-Email goes over SMTP with your server. Phone push uses **ntfy** first, since it can be self-hosted. Apple's push service needs credentials tied to one app publisher, which a self-hosted open-source tool can't share with its users. A direct APNs route could be added for an official App Store build.
+Email goes over SMTP with your server. Phone push uses **ntfy** first, since it can be self-hosted. Apple's push service needs credentials tied to one app publisher, which a self-hosted open-source tool can't share with its users. The direct APNs route is the `[apns]` channel (s460, decision 0453): the owner builds the iOS app with their own developer team, so the daemon signs APNs requests with the owner's own key and sends straight to Apple, with no relay. A daemon that is down cannot send its own "daemon down" push; that limitation stays.
 
 ## Part 20: Mobile clients
 
