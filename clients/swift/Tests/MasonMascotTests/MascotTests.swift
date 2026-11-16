@@ -104,7 +104,7 @@ final class MascotTests: XCTestCase {
         func testTheIosIconStaysOpaqueAndFullBleed() throws {
             var url = URL(fileURLWithPath: #filePath)
             for _ in 0..<3 { url.deleteLastPathComponent() }  // .../clients/swift
-            url.appendPathComponent("ios/MasonIOS/AppIcon-1024.png")
+            url.appendPathComponent("ios/MasonIOS/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png")
             let rep = try XCTUnwrap(NSBitmapImageRep(data: try Data(contentsOf: url)))
             XCTAssertEqual(rep.pixelsWide, 1024)
             XCTAssertFalse(rep.hasAlpha)

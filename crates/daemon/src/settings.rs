@@ -354,6 +354,11 @@ fn apply_notify(doc: &mut DocumentMut, change: &Value) -> Result<(), Refused> {
         match section.as_str() {
             "routing" => {
                 for (cond, chans) in obj(body, "routing")? {
+                    if mason_core::notify::MONITOR_ONLY.contains(&cond.as_str()) {
+                        return Err(bad(format!(
+                            "`{cond}` is monitor-only: it is shown on the monitor and has no routes to edit"
+                        )));
+                    }
                     if !mason_core::notify::CONDITIONS.contains(&cond.as_str()) {
                         return Err(bad(format!("unknown condition `{cond}`")));
                     }
