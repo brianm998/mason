@@ -59,4 +59,14 @@ distributions {
 
 tasks.test {
     useJUnitPlatform()
+    // Skia's native library is unpacked at run time and then dlopen'ed. Unpack it into the
+    // build directory (a path this build owns and can execute from) rather than the user's
+    // home or the system temp directory, so the load does not depend on either.
+    val skikoDir = layout.buildDirectory.dir("skiko").get().asFile
+    doFirst { skikoDir.mkdirs() }
+    systemProperty("skiko.data.path", skikoDir.absolutePath)
+    systemProperty("java.io.tmpdir", skikoDir.absolutePath)
+    testLogging {
+        exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+    }
 }
