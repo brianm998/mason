@@ -151,7 +151,22 @@ proptest! {
                     );
                 }
                 for r in needs_of[g].amounts.keys() {
-                    let reserved: u32 = earlier.iter().map(|w| w.amounts.get(r).copied().unwrap_or(0)).sum();
+                    // s471: a waiter sets aside only what it is short of. Here that is the
+                    // resources its holders alone leave too little of; the planner tests
+                    // cover the first-in-line and behind-a-reservation cases.
+                    let reserved: u32 = earlier
+                        .iter()
+                        .filter(|w| {
+                            w.amounts.iter().any(|(k, a)| {
+                                before.used.get(k).copied().unwrap_or(0) + a
+                                    > before.capacity[k].units
+                            }) && w.amounts.get(r).is_some_and(|a| {
+                                before.used.get(r).copied().unwrap_or(0) + a
+                                    > before.capacity[r].units
+                            })
+                        })
+                        .map(|w| w.amounts.get(r).copied().unwrap_or(0))
+                        .sum();
                     if reserved > 0 {
                         prop_assert!(
                             used[r] + reserved <= before.capacity[r].units,
@@ -768,8 +783,8 @@ fn a_task_in_test_of_a_longer_route_is_not_behind_a_task_in_develop_of_a_shorter
 }
 
 /// 2026-11-13: two waiters that need one `compile` and one `test-suite` each, with every
-/// test-suite slot taken, held back every compile-only request with `compile` idle. Now they set
-/// aside one compile slot each, and the rest go to the requests behind them.
+/// test-suite slot taken, held back every compile-only request with `compile` idle. Then they set
+/// aside one compile slot each; since s471 only the first in line does.
 #[test]
 fn waiters_set_aside_what_they_need_and_the_rest_is_used() {
     let mut l = Ledger::new();
@@ -792,17 +807,126 @@ fn waiters_set_aside_what_they_need_and_the_rest_is_used() {
         })
         .collect();
     let p = l.schedule(2, None, None);
-    // Five compile slots, two set aside for #2 and #3: three compiles start, two wait.
-    assert_eq!(p.grants, compiles[..3].to_vec());
+    // Five compile slots; only #2, first in line for the test-suite slot, sets one aside
+    // (s471, decision 0464): four compiles start, one waits.
+    assert_eq!(p.grants, compiles[..4].to_vec());
     assert!(p.waits.contains_key(&a) && p.waits.contains_key(&b));
     assert!(matches!(
-        p.waits[&compiles[3]].cause,
+        p.waits[&compiles[4]].cause,
         WaitCause::Behind { ref resource } if resource == "compile"
     ));
     // The suite ends: #2 gets the test-suite slot and a compile slot it was promised.
     l.release(suite);
     let p = l.schedule(3, None, None);
     assert_eq!(p.grants, vec![a]);
+}
+
+/// s471: the overnight shape. Compile 6, test-suite 4 of 4 held, mixed waiters ranked ahead of
+/// compile-only ones. Mixed waiters wait for `test-suite` and set aside no more `compile` than
+/// the first in line needs.
+fn overnight(mixed: u64, compiles: u64) -> (Ledger, Vec<u64>, Vec<u64>) {
+    let mut l = Ledger::new();
+    l.set_capacity("compile", 6, Kind::Machine);
+    l.set_capacity("test-suite", 4, Kind::Machine);
+    let rank = |s, id| Rank::new(false, s, 2, id, id, false);
+    for i in 1..=4 {
+        l.submit(rank(1, i), Needs::of(&[("test-suite", 1)]), "held", 0);
+    }
+    assert_eq!(l.schedule(0, None, None).grants.len(), 4);
+    let m: Vec<u64> = (0..mixed)
+        .map(|i| {
+            l.submit(
+                rank(2, 10 + i),
+                Needs::of(&[("compile", 1), ("test-suite", 1)]),
+                "mixed",
+                1,
+            )
+        })
+        .collect();
+    let c: Vec<u64> = (0..compiles)
+        .map(|i| l.submit(rank(3, 100 + i), Needs::of(&[("compile", 1)]), "build", 1))
+        .collect();
+    (l, m, c)
+}
+
+#[test]
+fn waiters_short_of_test_suite_do_not_reserve_every_compile_slot() {
+    let (mut l, m, c) = overnight(8, 3);
+    let p = l.schedule(2, None, None);
+    assert_eq!(p.grants, c);
+    for id in &m {
+        assert!(matches!(
+            p.waits[id].cause,
+            WaitCause::Full { ref resource } if resource == "test-suite"
+        ));
+    }
+}
+
+#[test]
+fn the_overnight_ledger_grants_every_compile_only_waiter_that_fits() {
+    let (mut l, m, c) = overnight(25, 10);
+    let p = l.schedule(2, None, None);
+    // Six compile slots, one set aside for the first mixed waiter.
+    assert_eq!(p.grants, c[..5].to_vec());
+    assert!(matches!(
+        p.waits[&c[5]].cause,
+        WaitCause::Behind { ref resource } if resource == "compile"
+    ));
+    for id in &m {
+        assert!(matches!(
+            p.waits[id].cause,
+            WaitCause::Full { ref resource } if resource == "test-suite"
+        ));
+    }
+}
+
+#[test]
+fn the_first_mixed_waiter_is_granted_when_test_suite_frees_despite_new_compiles() {
+    let (mut l, m, c) = overnight(3, 5);
+    let p = l.schedule(2, None, None);
+    assert_eq!(p.grants, c);
+    // Compile-only requests keep arriving and fill what is left.
+    for i in 0..4 {
+        l.submit(
+            Rank::new(false, 3, 2, 200 + i, 200 + i, false),
+            Needs::of(&[("compile", 1)]),
+            "later",
+            3,
+        );
+    }
+    let p = l.schedule(3, None, None);
+    assert!(p.grants.is_empty());
+    // One test-suite unit frees: the first mixed waiter gets it and its compile slot.
+    l.release(1);
+    let p = l.schedule(4, None, None);
+    assert_eq!(p.grants, vec![m[0]]);
+}
+
+#[test]
+fn an_exclusive_waiter_still_blocks_machine_class_work() {
+    let mut l = Ledger::new();
+    l.set_capacity("compile", 6, Kind::Machine);
+    l.set_capacity("test-suite", 4, Kind::Machine);
+    let h = l.submit(
+        Rank::new(false, 1, 2, 1, 1, false),
+        Needs::of(&[("test-suite", 1)]),
+        "held",
+        0,
+    );
+    assert_eq!(l.schedule(0, None, None).grants, vec![h]);
+    let mut ex = Needs::of(&[("test-suite", 1)]);
+    ex.exclusive = true;
+    let e = l.submit(Rank::new(false, 2, 2, 2, 2, false), ex, "exclusive", 1);
+    let c = l.submit(
+        Rank::new(false, 3, 2, 3, 3, false),
+        Needs::of(&[("compile", 1)]),
+        "build",
+        1,
+    );
+    let p = l.schedule(2, None, None);
+    assert!(p.grants.is_empty());
+    assert!(p.waits.contains_key(&e));
+    assert!(matches!(p.waits[&c].cause, WaitCause::Exclusive));
 }
 
 fn paced_ledger() -> (Ledger, CpuGate) {
