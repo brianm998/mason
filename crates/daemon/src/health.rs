@@ -89,8 +89,10 @@ fn load_reading(
 /// Everything the judgement needs. Takes no broker lock: the wait reasons are the published
 /// snapshot.
 pub fn gather(d: &Arc<Daemon>, now: u64) -> Facts {
-    let mut x = Facts::default();
-    x.cpu_gate_held_ms = d.broker.cpu_gate_held_ms();
+    let mut x = Facts {
+        cpu_gate_held_ms: d.broker.cpu_gate_held_ms(),
+        ..Default::default()
+    };
     let Ok(w) = d.world() else { return x };
     let ix = crate::views::RunIndex::build(w.step_runs.values());
     let waits = d.broker.waits_snapshot();
