@@ -139,6 +139,8 @@ pub struct Facts {
     /// Slot waits: (task, slot, ms).
     pub slot_waits: Vec<(u64, String, u64)>,
     pub load_pct: Option<u32>,
+    /// `load_pct` is the sampler's assumed-busy fallback, not a measurement.
+    pub load_assumed: bool,
     /// Where `load_pct` was read from (`mach`, `loadavg`, `assumed-busy`, ...).
     pub load_source: Option<&'static str>,
     pub stall_ms: u64,
@@ -296,10 +298,7 @@ pub fn judge(x: &Facts, l: &Limits) -> Vec<Finding> {
         ));
     }
     // An assumed-busy reading is a placeholder, not a measurement: no finding.
-    if let Some(p) = x
-        .load_pct
-        .filter(|p| x.load_source != Some("assumed-busy") && *p >= l.load_pct)
-    {
+    if let Some(p) = x.load_pct.filter(|p| !x.load_assumed && *p >= l.load_pct) {
         let summary = format!("the machine is at {p}% load");
         let evidence = match x.load_source {
             Some(src) => vec![format!("CPU reading from {src}")],
@@ -643,6 +642,7 @@ mod tests {
     fn assumed_load_is_not_a_finding() {
         let x = Facts {
             load_pct: Some(100),
+            load_assumed: true,
             load_source: Some("assumed-busy"),
             ..Default::default()
         };
@@ -653,6 +653,7 @@ mod tests {
     fn measured_load_still_shows() {
         let x = Facts {
             load_pct: Some(100),
+            load_assumed: false,
             load_source: Some("mach"),
             ..Default::default()
         };

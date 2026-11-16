@@ -206,6 +206,7 @@ pub fn gather(d: &Arc<Daemon>, now: u64) -> Facts {
     // Overload.
     (x.load_pct, x.load_source) =
         load_reading(d.cfg.cpu.as_deref(), std::env::var_os("MASON_CPU_FILE"));
+    x.load_assumed = x.load_source == Some("assumed-busy");
     x.mem_free_mb = crate::sched::measure_free_memory_mb();
     x.stall_ms = disk_probe_ms(d);
     let launching = mason_step_host::launcher::launching();
