@@ -461,8 +461,17 @@ fn a_real_daemon_keeps_a_hold_across_a_kill_and_the_cli_holds_and_releases() {
     s.wait_daemon(&mut m);
     s.mason_ok(&["task", "add", "First"]);
     s.mason_ok(&["task", "add", "Second"]);
-    wait_for("the account to be held", 60, || {
-        usage_of(&s, "claude")["status"] == "blocked"
+    // Wait until the hold is stored and both tasks have launched twice (explore, then develop), so
+    // the kill cannot come before the second task has met the limit.
+    wait_for("both tasks held and the hold stored", 60, || {
+        if usage_of(&s, "claude")["status"] != "blocked" {
+            return false;
+        }
+        let Ok(store) = mason_store::Store::open(s.data_dir.join("store.db")) else {
+            return false;
+        };
+        !store.account_holds().unwrap_or_default().is_empty()
+            && (0..2).all(|t| store.launches_for_task(t).map_or(0, |l| l.len()) >= 2)
     });
     let p = usage_of(&s, "claude");
     assert!(
