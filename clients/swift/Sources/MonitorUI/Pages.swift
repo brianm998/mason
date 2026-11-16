@@ -36,7 +36,7 @@ func section<Content: View>(_ title: String, theme: Theme, state: String? = nil,
             if let open {
                 // The title and the '>' next to it both open the section's page.
                 Button(action: open) { Text(title).font(theme.title()).foregroundStyle(theme.text) }
-                    .buttonStyle(.plain).help("Open the \(title) page")
+                    .buttonStyle(.plain).touchTarget().hint("Open the \(title) page")
                     .accessibilityIdentifier("section-title:\(title)")
             } else {
                 Text(title).font(theme.title()).foregroundStyle(theme.text)
@@ -44,7 +44,7 @@ func section<Content: View>(_ title: String, theme: Theme, state: String? = nil,
             if let state { StateIcon(state: state) }
             if let open {
                 Button(action: open) { Image(systemName: "chevron.right").font(theme.body(.semibold)).foregroundStyle(theme.muted) }
-                    .buttonStyle(.plain).help("Open the \(title) page")
+                    .buttonStyle(.plain).touchTarget().hint("Open the \(title) page")
                     .accessibilityLabel("Open \(title)")
                     .accessibilityIdentifier("section-open:\(title)")
             }
@@ -60,6 +60,8 @@ func section<Content: View>(_ title: String, theme: Theme, state: String? = nil,
 struct HomePage: View {
     @Environment(\.theme) var theme
     @ObservedObject var model: MonitorModel
+    /// A phone: the two side-by-side sections stack and each stage row is a column.
+    var compact = false
     @State private var adding = false
 
     var statusLine: some View {
@@ -71,7 +73,7 @@ struct HomePage: View {
     @ViewBuilder var versionLine: some View {
         if !model.versionLine.isEmpty {
             Text(model.versionLine).font(theme.small()).foregroundStyle(theme.muted)
-                .textSelection(.enabled).help(model.versionTip)
+                .textSelection(.enabled).hint(model.versionTip)
                 .accessibilityIdentifier("home:version")
         }
     }
@@ -110,12 +112,18 @@ struct HomePage: View {
                     }
                 }
 
-                HStack(alignment: .top, spacing: theme.spacingLarge * 2) {
+                let pair = compact
+                    ? AnyLayout(VStackLayout(alignment: .leading, spacing: theme.spacingLarge))
+                    : AnyLayout(HStackLayout(alignment: .top, spacing: theme.spacingLarge * 2))
+                pair {
                     section("Active models", theme: theme, open: { model.go(.section("active_models")) }) {
                         let active = model.home?.active ?? []
                         if active.isEmpty { Text("Nothing is running.").font(theme.body()).foregroundStyle(theme.muted) }
                         ForEach(active, id: \.task) { a in
-                            HStack(spacing: theme.spacing) {
+                            let line = compact
+                                ? AnyLayout(VStackLayout(alignment: .leading, spacing: theme.spacingSmall))
+                                : AnyLayout(HStackLayout(spacing: theme.spacing))
+                            line {
                                 Text(a.display.isEmpty ? a.model : a.display).font(theme.body(.semibold))
                                 TaskLink(title: "\(a.project) #\(a.task)") { model.go(.task(a.task)) }
                                 Text(a.step).foregroundStyle(theme.muted)
@@ -123,7 +131,7 @@ struct HomePage: View {
                             .font(theme.body())
                             .accessibilityIdentifier("active:\(a.task)")
                         }
-                        SessionStepper(model: model)
+                        if compact { PhoneSessionStepper(model: model) } else { SessionStepper(model: model) }
                     }
                     section("Landing queue", theme: theme, open: { model.go(.landing) }) {
                         let items = model.landing?.items ?? []
@@ -149,10 +157,13 @@ struct HomePage: View {
                     section(st.title, theme: theme, state: st.state, open: Page.sectionPage(st.state).map { p in { model.go(p) } }) {
                         ForEach(st.rows, id: \.id) { r in
                             Button { model.go(.task(r.id)) } label: {
-                                HStack(spacing: theme.spacing) {
+                                let line = compact
+                                    ? AnyLayout(VStackLayout(alignment: .leading, spacing: theme.spacingSmall))
+                                    : AnyLayout(HStackLayout(spacing: theme.spacing))
+                                line {
                                     ProgressCells(clock: model.live, cells: r.progress, slow: r.slow)
                                     Text("\(r.project) \(r.key)").font(theme.body(.semibold))
-                                    Text(r.title).font(theme.body())
+                                    Text(r.title).font(theme.body()).multilineTextAlignment(.leading)
                                     Text(r.whyWaiting.isEmpty ? Format.duration(ms: r.inStateMs) : "\(r.whyWaiting), \(Format.duration(ms: r.inStateMs))")
                                         .font(theme.small()).foregroundStyle(r.slow ? theme.slow : theme.muted)
                                 }
@@ -193,15 +204,15 @@ struct SessionStepper: View {
         let limit = model.home?.sessionsLimit ?? 0
         HStack(spacing: theme.spacing) {
             Text("Sessions (all projects): \(used) of")
-            Button { model.setSessionLimit(limit > 0 ? limit - 1 : 0) } label: { Image(systemName: "minus") }
+            Button { model.stepSessionLimit(by: -1) } label: { Image(systemName: "minus") }.touchTarget()
                 .accessibilityIdentifier("sessions:decrease")
             Text("\(limit)").font(theme.body(.semibold))
-            Button { model.setSessionLimit(limit + 1) } label: { Image(systemName: "plus") }
+            Button { model.stepSessionLimit(by: 1) } label: { Image(systemName: "plus") }.touchTarget()
                 .accessibilityIdentifier("sessions:increase")
         }
         .font(theme.body())
         .buttonStyle(.bordered)
-        .help("Lowering the limit never stops anything running; it holds back new work until the count falls.")
+        .hint("Lowering the limit never stops anything running; it holds back new work until the count falls.")
         .accessibilityIdentifier("sessions")
     }
 }
@@ -226,10 +237,10 @@ struct CompilationSection: View {
         } else if !command.isEmpty {
             Button(label) { model.openCommand(label: label, command: command) }
                 .buttonStyle(.plain).linkStyle()
-                .lineLimit(1).help("Show the whole command")
+                .lineLimit(1).hint("Show the whole command")
                 .accessibilityIdentifier("compile:command")
         } else {
-            Text(label).lineLimit(1).truncationMode(.middle).help(label)
+            Text(label).lineLimit(1).truncationMode(.middle).hint(label)
         }
     }
 
@@ -237,41 +248,41 @@ struct CompilationSection: View {
         section("Compilation (all projects)", theme: theme, open: open) {
             HStack(spacing: theme.spacing) {
                 Text("Compiling: \(c.used) of at most")
-                Button { model.setCompileLimit(c.limit > 1 ? c.limit - 1 : 1) } label: { Image(systemName: "minus") }
+                Button { model.setCompileLimit(c.limit > 1 ? c.limit - 1 : 1) } label: { Image(systemName: "minus") }.touchTarget()
                     .disabled(c.limit <= 1)
                     .accessibilityIdentifier("compile:decrease")
                 Text("\(c.limit)").font(theme.body(.semibold))
-                Button { model.setCompileLimit(c.limit + 1) } label: { Image(systemName: "plus") }
+                Button { model.setCompileLimit(c.limit + 1) } label: { Image(systemName: "plus") }.touchTarget()
                     .accessibilityIdentifier("compile:increase")
                 Text(c.cpuLine).foregroundStyle(theme.muted)
             }
             .font(theme.body())
             .buttonStyle(.bordered)
-            .help("Lowering the limit never stops a compile that is running; it holds back new ones until the count falls.")
+            .hint("Lowering the limit never stops a compile that is running; it holds back new ones until the count falls.")
             .accessibilityIdentifier("compile")
 
             HStack(spacing: theme.spacing) {
                 Text("Start another compile below")
-                Button { model.setCompileCpuGate(Int(c.cpuMaxPct) - 5) } label: { Image(systemName: "minus") }
+                Button { model.setCompileCpuGate(Int(c.cpuMaxPct) - 5) } label: { Image(systemName: "minus") }.touchTarget()
                     .disabled(Int(c.cpuMaxPct) <= MonitorModel.cpuGateRange.lowerBound)
                     .accessibilityIdentifier("compile:cpu:decrease")
                 Text("\(c.cpuMaxPct)% CPU").font(theme.body(.semibold))
-                Button { model.setCompileCpuGate(Int(c.cpuMaxPct) + 5) } label: { Image(systemName: "plus") }
+                Button { model.setCompileCpuGate(Int(c.cpuMaxPct) + 5) } label: { Image(systemName: "plus") }.touchTarget()
                     .disabled(Int(c.cpuMaxPct) >= MonitorModel.cpuGateRange.upperBound)
                     .accessibilityIdentifier("compile:cpu:increase")
             }
             .font(theme.body())
             .buttonStyle(.bordered)
-            .help("A compile starts only while CPU use is below this. Kept across restarts; resources.toml has the starting value.")
+            .hint("A compile starts only while CPU use is below this. Kept across restarts; resources.toml has the starting value.")
             .accessibilityIdentifier("compile:cpu")
 
             HStack(spacing: theme.spacing) {
                 Text("and wait")
-                Button { model.setCompileSettle(Int(c.settleS) - 5) } label: { Image(systemName: "minus") }
+                Button { model.setCompileSettle(Int(c.settleS) - 5) } label: { Image(systemName: "minus") }.touchTarget()
                     .disabled(c.settleS == 0)
                     .accessibilityIdentifier("compile:settle:decrease")
                 Text("\(c.settleS) s").font(theme.body(.semibold))
-                Button { model.setCompileSettle(Int(c.settleS) + 5) } label: { Image(systemName: "plus") }
+                Button { model.setCompileSettle(Int(c.settleS) + 5) } label: { Image(systemName: "plus") }.touchTarget()
                     .disabled(Int(c.settleS) >= MonitorModel.settleMax)
                     .accessibilityIdentifier("compile:settle:increase")
                 Text("after the last one started")
@@ -294,7 +305,7 @@ struct CompilationSection: View {
                     who(r.label, task: r.task, command: r.command)
                     let detail = Format.compileHolder(project: r.project, title: r.title)
                     if r.task > 0 && !detail.isEmpty {
-                        Text(detail).help(r.title.isEmpty ? r.project : "\(r.project) - \(r.title)")
+                        Text(detail).hint(r.title.isEmpty ? r.project : "\(r.project) - \(r.title)")
                     }
                     if r.interactive { Text("interactive").foregroundStyle(theme.muted) }
                     Text("for \(age(r.sinceMs))").foregroundStyle(theme.muted)
@@ -373,6 +384,8 @@ struct TaskDetailPage: View {
     @Environment(\.theme) var theme
     @ObservedObject var model: MonitorModel
     let id: UInt64
+    /// A phone: the picture sits above the text and a step's parts wrap, so nothing is wider than the screen.
+    var compact = false
 
     var body: some View {
         RestoringScroll(model: model, ready: model.taskDetail?.hasRow == true && model.taskDetail?.row.id == id) {
@@ -388,10 +401,14 @@ struct TaskDetailPage: View {
     @ViewBuilder func content(_ d: TaskDetailView) -> some View {
         let r = d.row
         VStack(alignment: .leading, spacing: theme.spacingLarge) {
-            HStack(alignment: .top, spacing: theme.spacingLarge) {
+            let header = compact
+                ? AnyLayout(VStackLayout(alignment: .leading, spacing: theme.spacing))
+                : AnyLayout(HStackLayout(alignment: .top, spacing: theme.spacingLarge))
+            header {
             if let art = Mascot.illustration(r.state) {
+                let side = compact ? theme.illustration / 2 : theme.illustration
                 art.resizable().scaledToFit()
-                    .frame(width: theme.illustration, height: theme.illustration)
+                    .frame(width: side, height: side)
                     .accessibilityHidden(true)
             }
             VStack(alignment: .leading, spacing: theme.spacingSmall) {
@@ -406,7 +423,10 @@ struct TaskDetailPage: View {
                 }
                 Text(Format.cpuTaskLine(permille: d.cpuPermille)).font(theme.body()).foregroundStyle(theme.muted)
                     .accessibilityIdentifier("cpu")
-                HStack(spacing: theme.spacingLarge) {
+                let copies = compact
+                    ? AnyLayout(VStackLayout(alignment: .leading, spacing: theme.spacingSmall))
+                    : AnyLayout(HStackLayout(spacing: theme.spacingLarge))
+                copies {
                     CopyButton(label: r.key, value: r.key)
                     ForEach(CopyTarget.detail(branch: d.branch, worktree: d.worktree), id: \.label) { t in
                         CopyValueButton(target: t) { (model.copier ?? copyToPasteboard)($0) }
@@ -415,7 +435,10 @@ struct TaskDetailPage: View {
             }
             }
 
-            HStack(spacing: theme.spacing) {
+            let progressRow = compact
+                ? AnyLayout(VStackLayout(alignment: .leading, spacing: theme.spacingSmall))
+                : AnyLayout(HStackLayout(spacing: theme.spacing))
+            progressRow {
                 ProgressCells(clock: model.live, cells: r.progress, slow: r.slow)
                 if !r.typical.isEmpty { Text(r.typical).font(theme.small()).foregroundStyle(theme.muted) }
             }
@@ -482,7 +505,10 @@ struct TaskDetailPage: View {
             }
             section("Steps", theme: theme) {
                 ForEach(d.steps, id: \.run) { s in
-                    HStack(spacing: theme.spacing) {
+                    let stepRow = compact
+                        ? AnyLayout(VStackLayout(alignment: .leading, spacing: 0))
+                        : AnyLayout(HStackLayout(spacing: theme.spacing))
+                    stepRow {
                         Text("run \(s.run)").foregroundStyle(theme.muted)
                         Text(s.name.isEmpty ? s.category : s.name).font(theme.body(.semibold))
                         Text("attempt \(s.attempt)").foregroundStyle(theme.muted)
@@ -629,6 +655,7 @@ func batchCiURL(_ ci: Mason_V1_BatchCi) -> URL? {
 struct UsagePage: View {
     @Environment(\.theme) var theme
     @ObservedObject var model: MonitorModel
+    var compact = false
 
     var body: some View {
         RestoringScroll(model: model) {
@@ -638,7 +665,7 @@ struct UsagePage: View {
                     UsageAccount(p: p)
                 }
                 if let n = model.usage?.note { Text(n).font(theme.body()).foregroundStyle(theme.muted) }
-                SessionStepper(model: model)
+                if compact { PhoneSessionStepper(model: model) } else { SessionStepper(model: model) }
             }
             .padding(theme.spacingLarge)
         }
@@ -875,6 +902,8 @@ struct SectionPage: View {
     @Environment(\.theme) var theme
     @ObservedObject var model: MonitorModel
     let name: String
+    /// A phone: each row is a column, not one wide line.
+    var compact = false
 
     var body: some View {
         ScrollView {
@@ -906,7 +935,7 @@ struct SectionPage: View {
                         }
                     }
                 default:
-                    StageRows(model: model, name: name)
+                    StageRows(model: model, name: name, compact: compact)
                 }
             }
             .padding(theme.spacingLarge)
@@ -920,6 +949,7 @@ struct StageRows: View {
     @Environment(\.theme) var theme
     @ObservedObject var model: MonitorModel
     let name: String
+    var compact = false
 
     var body: some View {
         let rows = model.sectionRows(name)
@@ -934,13 +964,16 @@ struct StageRows: View {
     }
 
     @ViewBuilder func row(_ r: TaskRow) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: theme.spacing) {
+        let layout = compact
+            ? AnyLayout(VStackLayout(alignment: .leading, spacing: theme.spacingSmall))
+            : AnyLayout(HStackLayout(alignment: .firstTextBaseline, spacing: theme.spacing))
+        layout {
             ProgressCells(clock: model.live, cells: r.progress, slow: r.slow)
             Button { model.go(.task(r.id)) } label: {
                 Text("\(r.project) \(r.key)  \(r.title)").font(theme.body()).lineLimit(3)
                     .multilineTextAlignment(.leading)
             }.buttonStyle(.plain)
-            Spacer(minLength: 0)
+            if !compact { Spacer(minLength: 0) }
             detail(r)
             if name == "testing", model.canAct, r.allowedActions.contains("skip_test") {
                 Button("Skip testing") { model.skipTest(r.id, step: r.step) }

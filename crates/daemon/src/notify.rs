@@ -5,6 +5,7 @@
 //! around. The decisions are in `mason_core::notify`; this does the sending and the remembering.
 
 use crate::daemon::{now_ms, Daemon};
+use mason_adapter_api::apns::{Apns, Context, PushError, Target};
 use mason_adapter_api::http::Curl;
 use mason_adapter_api::notify_channels::{CurlMail, Email, Ntfy, Webhook};
 use mason_adapter_api::notify_kit::{Message, Notifier, SendError};
@@ -180,6 +181,21 @@ pub struct EmailCfg {
     pub require_tls: bool,
 }
 
+/// `[apns]`: the owner's own key, signed for Apple's push service by the daemon itself.
+#[derive(Clone, Debug)]
+pub struct ApnsCfg {
+    /// The `.p8` file; it must be readable by its owner alone.
+    pub key_file: String,
+    pub key_id: String,
+    pub team_id: String,
+    /// The app's bundle id.
+    pub topic: String,
+    /// Viewer devices get the push too (owner devices always do).
+    pub viewers: bool,
+    /// Replaces both Apple hosts: for tests and exit scripts, which point it at a loopback fake.
+    pub endpoint: Option<String>,
+}
+
 #[derive(Clone, Debug)]
 pub struct Settings {
     pub routing: Routing,
@@ -194,6 +210,10 @@ pub struct Settings {
     pub email: Option<EmailCfg>,
     pub ntfy: Option<(String, String, Option<String>)>,
     pub webhook: Option<(String, Option<String>)>,
+    pub apns: Option<ApnsCfg>,
+    /// At least one device that `apns` would reach has registered a token. Filled in by `load`,
+    /// which can see the store.
+    pub apns_has_device: bool,
     /// `[stall] long_wait`: a wait is long when its resource has granted nothing for this
     /// long. 0 turns the alert off.
     pub long_wait_ms: u64,
@@ -214,6 +234,8 @@ impl Default for Settings {
             email: None,
             ntfy: None,
             webhook: None,
+            apns: None,
+            apns_has_device: false,
             long_wait_ms: DEFAULT_LONG_WAIT_MS,
         }
     }
@@ -226,6 +248,7 @@ impl Settings {
         self.ntfy.is_some()
             || self.email.is_some()
             || self.webhook.is_some()
+            || (self.apns.is_some() && self.apns_has_device)
             || (self.daemon_speech && !self.speech_command.is_empty())
     }
 }
@@ -283,7 +306,7 @@ pub fn parse(src: &str) -> Result<Settings, String> {
                     let mut out = vec![];
                     for (ch, delay) in rt.iter() {
                         let channel = Channel::parse(ch).ok_or_else(|| {
-                            format!("routing.{kind}: unknown channel `{ch}` (monitor, sound, speech, push, email, webhook)")
+                            format!("routing.{kind}: unknown channel `{ch}` (monitor, sound, speech, push, email, webhook, apns)")
                         })?;
                         out.push(Rule {
                             channel,
@@ -400,6 +423,25 @@ pub fn parse(src: &str) -> Result<Settings, String> {
                     secret(t, "secret")?,
                 ));
             }
+            "apns" => {
+                let need = |k: &str| text(t, k).ok_or_else(|| format!("apns: `{k}` is required"));
+                for (k, _) in t.iter() {
+                    if !matches!(
+                        k,
+                        "key_file" | "key_id" | "team_id" | "topic" | "viewers" | "endpoint"
+                    ) {
+                        return Err(format!("notify.toml: unknown setting apns.{k}"));
+                    }
+                }
+                s.apns = Some(ApnsCfg {
+                    key_file: need("key_file")?,
+                    key_id: need("key_id")?,
+                    team_id: need("team_id")?,
+                    topic: need("topic")?,
+                    viewers: t.get("viewers").and_then(|v| v.as_bool()).unwrap_or(false),
+                    endpoint: text(t, "endpoint"),
+                });
+            }
             "stall" => {
                 for (k, v) in t.iter() {
                     match k {
@@ -422,10 +464,159 @@ pub fn parse(src: &str) -> Result<Settings, String> {
 }
 
 pub fn load(d: &Daemon) -> Result<Settings, String> {
-    match std::fs::read_to_string(d.cfg.config_dir.join("notify.toml")) {
-        Ok(t) => parse(&t),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Settings::default()),
-        Err(e) => Err(format!("notify.toml: {e}")),
+    let mut s = match std::fs::read_to_string(d.cfg.config_dir.join("notify.toml")) {
+        Ok(t) => parse(&t)?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Settings::default(),
+        Err(e) => return Err(format!("notify.toml: {e}")),
+    };
+    if let Some(a) = &s.apns {
+        s.apns_has_device = !apns_targets(d, a).is_empty();
+    }
+    Ok(s)
+}
+
+// ---- apns ------------------------------------------------------------------------------
+
+/// The devices a push goes to: owner devices that have a token, and viewers too when `viewers`.
+fn apns_targets(d: &Daemon, cfg: &ApnsCfg) -> Vec<(u64, Target)> {
+    d.store
+        .push_targets()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|t| t.role == "owner" || (cfg.viewers && t.role == "viewer"))
+        .map(|t| {
+            (
+                t.device,
+                Target {
+                    token: t.token,
+                    env: t.env,
+                },
+            )
+        })
+        .collect()
+}
+
+/// The key file's text, refused unless only its owner can read it.
+fn read_key(path: &str) -> Result<String, String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(path)
+            .map_err(|e| format!("apns key_file {path}: {e}"))?
+            .permissions()
+            .mode();
+        if mode & 0o077 != 0 {
+            return Err(format!(
+                "apns key_file {path} is mode {:o}; it must be 0600 (chmod 600 it)",
+                mode & 0o777
+            ));
+        }
+    }
+    std::fs::read_to_string(path).map_err(|e| format!("apns key_file {path}: {e}"))
+}
+
+/// The task an alert key names (`question:204`, `failed:204`, ...).
+fn task_of_key(key: &str) -> Option<u64> {
+    let (p, rest) = key.split_once(':')?;
+    matches!(
+        p,
+        "question" | "failed" | "environment" | "landed" | "approval" | "proposed"
+    )
+    .then_some(rest)?
+    .parse()
+    .ok()
+}
+
+/// What the push carries beyond the text: the project (as the thread) and the task.
+fn push_context(d: &Daemon, key: &str) -> Context {
+    let task = task_of_key(key);
+    let project = task
+        .zip(d.world().ok())
+        .and_then(|(id, w)| {
+            let t = w.tasks.get(&TaskId(id))?;
+            d.project(t.project).map(|p| p.id.clone())
+        })
+        .unwrap_or_default();
+    Context { project, task }
+}
+
+/// Send to every device `apns` reaches. `None` when `[apns]` is not set up or no device has a
+/// token (nothing to record, as for any channel not configured). A token Apple calls dead is
+/// cleared. The send counts as made if any device took it.
+fn send_apns(
+    d: &Daemon,
+    s: &Settings,
+    m: &Message,
+    ctx: &Context,
+) -> Option<Result<(), SendError>> {
+    let cfg = s.apns.as_ref()?;
+    let targets = apns_targets(d, cfg);
+    if targets.is_empty() {
+        return None;
+    }
+    let key_pem = match read_key(&cfg.key_file) {
+        Ok(k) => k,
+        Err(e) => return Some(Err(SendError::Permanent(e))),
+    };
+    let sender = Apns {
+        key_pem,
+        key_id: cfg.key_id.clone(),
+        team_id: cfg.team_id.clone(),
+        topic: cfg.topic.clone(),
+        endpoint: cfg.endpoint.clone(),
+        http: Arc::new(Curl {
+            http2: true,
+            ..Curl::default()
+        }),
+    };
+    let now = now_ms();
+    let mut sent = 0;
+    let mut worst: Option<SendError> = None;
+    for (id, t) in targets {
+        match sender.send_to(&t, m, ctx, now) {
+            Ok(()) => sent += 1,
+            Err(PushError::Gone(why)) => {
+                tracing::info!(
+                    device = id,
+                    "APNs says the token is dead ({why}); cleared it"
+                );
+                let _ = d.store.clear_push_token(id, &t.token);
+                worst.get_or_insert(SendError::Permanent(format!("device #{id}: {why}")));
+            }
+            Err(PushError::Send(e)) => {
+                // A transient failure anywhere is worth another try; a permanent one is not.
+                if !matches!(worst, Some(SendError::Transient(_))) {
+                    worst = Some(e);
+                }
+            }
+        }
+    }
+    Some(match (sent, worst) {
+        (0, Some(e)) => Err(e),
+        _ => Ok(()),
+    })
+}
+
+/// A device registers (or, with `None`, forgets) its own push token.
+pub fn set_own_push(d: &Daemon, device: u64, reg: Option<(&str, &str)>) -> Result<(), String> {
+    match reg {
+        Some((token, env)) => {
+            if token.is_empty()
+                || token.len() > 200
+                || !token.bytes().all(|b| b.is_ascii_hexdigit())
+            {
+                return Err("`token` is the device token in hex".into());
+            }
+            if !matches!(env, "sandbox" | "production") {
+                return Err("`env` is `sandbox` or `production`".into());
+            }
+            match d.store.set_push(device, &token.to_ascii_lowercase(), env) {
+                Ok(true) => Ok(()),
+                Ok(false) => Err("no such device".into()),
+                Err(e) => Err(e.to_string()),
+            }
+        }
+        None => d.store.clear_push(device).map_err(|e| e.to_string()),
     }
 }
 
@@ -715,10 +906,17 @@ pub fn tick_at(d: &Arc<Daemon>, now: u64) {
                 };
                 // A routed channel that is not set up is not a failed delivery on every alert:
                 // `mason doctor`, `mason notify status` and the monitors say so once.
-                let Some(nt) = notifier(&settings, c) else {
-                    continue;
+                let r = if c == Channel::Apns {
+                    match send_apns(d, &settings, &m, &push_context(d, &a.key)) {
+                        Some(r) => r,
+                        None => continue,
+                    }
+                } else {
+                    let Some(nt) = notifier(&settings, c) else {
+                        continue;
+                    };
+                    nt.send(&m)
                 };
-                let r = nt.send(&m);
                 record(d, &a.key, a.since, c, delivery, r, now);
             }
             if reminder {
@@ -1101,6 +1299,29 @@ pub fn test(d: &Arc<Daemon>, channel: &str) -> Result<Value, String> {
                 .map_err(|e| e.to_string())?;
             Ok(json!({"channel": channel, "queued": line}))
         }
+        Channel::Apns => {
+            let cfg = s
+                .apns
+                .as_ref()
+                .ok_or_else(|| "apns is not configured in notify.toml".to_string())?;
+            let m = Message {
+                key: "test".into(),
+                kind: "info".into(),
+                title: "MASON: test".into(),
+                body: "This is a test notification from MASON.".into(),
+                reminder: false,
+                at_ms: now,
+            };
+            let n_devices = apns_targets(d, cfg).len();
+            match send_apns(d, &s, &m, &Context::default()) {
+                None => Err(
+                    "no device has registered for push yet (open the app on the phone or iPad)"
+                        .into(),
+                ),
+                Some(Ok(())) => Ok(json!({"channel": "apns", "sent": true, "devices": n_devices})),
+                Some(Err(e)) => Err(e.to_string()),
+            }
+        }
         _ => {
             let nt = notifier(&s, c)
                 .ok_or_else(|| format!("{channel} is not configured in notify.toml"))?;
@@ -1139,7 +1360,8 @@ pub fn status(d: &Daemon) -> Value {
         "repeating": n::REPEATING,
         "daemon_speech": s.daemon_speech && !s.speech_command.is_empty(),
         "reaches_without_monitor": s.reaches_without_monitor(),
-        "configured": {"email": s.email.is_some(), "push": s.ntfy.is_some(), "webhook": s.webhook.is_some()},
+        "configured": {"email": s.email.is_some(), "push": s.ntfy.is_some(), "webhook": s.webhook.is_some(), "apns": s.apns.is_some()},
+        "apns_devices": s.apns.as_ref().map_or(0, |a| apns_targets(d, a).len()),
         "speaker": *d.notify.speaker.lock().unwrap_or_else(|e| e.into_inner()),
         "last_played": d.store.last_played().unwrap_or_default(),
         "deliveries": d.store.recent_audible_deliveries(20).unwrap_or_default().iter().map(|r| json!({
