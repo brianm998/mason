@@ -7,7 +7,7 @@
 # order, fingerprint filtering, 401 and resume-on-foreground. macOS only (it builds the Swift package).
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
-[ "$(uname)" = Darwin ] || { echo "s456 SKIP: needs macOS for the Swift package"; exit 0; }
+[ "$(uname)" = Darwin ] && [ -z "${MASON_SKIP_SWIFT:-}" ] || { echo "s456 SKIP: needs macOS for the Swift package"; exit 0; }
 root=$(mktemp -d /tmp/mason-s456.XXXXXX); daemon=""
 cleanup() { [ -n "$daemon" ] && kill -9 "$daemon" 2>/dev/null || true; rm -rf "$root"; }
 trap cleanup EXIT
