@@ -1463,7 +1463,7 @@ fn main() {
             match a.pos().as_deref() {
                 Some("test") => {
                     let Some(channel) = a.pos() else {
-                        die("mason notify test CHANNEL  (sound, speech, push, email, webhook)")
+                        die("mason notify test CHANNEL  (sound, speech, push, email, webhook, apns)")
                     };
                     finish(&a);
                     let r =

@@ -719,6 +719,10 @@ const STEPS: &[&str] = &[
          detail  TEXT NOT NULL DEFAULT ''
      );
      CREATE INDEX health_log_kind ON health_log(kind, at_ms);",
+    // 41: the APNs token a paired iPhone or iPad registered for itself (s460, decision 0453),
+    // and which Apple host it belongs to (`sandbox` or `production`). Additive, nullable.
+    "ALTER TABLE devices ADD COLUMN push_token TEXT;
+     ALTER TABLE devices ADD COLUMN push_env TEXT;",
 ];
 
 pub const SCHEMA_VERSION: u32 = STEPS.len() as u32;
