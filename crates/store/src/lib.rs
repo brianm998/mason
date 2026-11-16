@@ -1512,6 +1512,71 @@ impl Store {
         })
     }
 
+    /// [`Store::put_baseline`] with the hash of the suite's definition (s478).
+    #[allow(clippy::too_many_arguments)]
+    pub fn put_baseline_hashed(
+        &self,
+        base: &str,
+        suite: &str,
+        failing: &[String],
+        names: &[String],
+        executed: usize,
+        now_ms: u64,
+        def_hash: &str,
+    ) -> Result<(), StoreError> {
+        let (b, s, f, n, h) = (
+            base.to_string(),
+            suite.to_string(),
+            failing.join("\n"),
+            names.join("\n"),
+            def_hash.to_string(),
+        );
+        self.write(move |c| {
+            c.execute(
+                "INSERT OR REPLACE INTO baselines(base, suite, failing, names, executed, at, def_hash) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                params![b, s, f, n, executed as i64, now_ms as i64, h],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// The newest baselines of a suite taken with this definition hash, newest first:
+    /// `(base, failing, names, executed)` (s478).
+    #[allow(clippy::type_complexity)]
+    pub fn ancestor_baselines(
+        &self,
+        suite: &str,
+        def_hash: &str,
+        limit: usize,
+    ) -> Result<Vec<(String, Vec<String>, Vec<String>, usize)>, StoreError> {
+        let (s, h) = (suite.to_string(), def_hash.to_string());
+        self.read(move |c| {
+            let mut st = c.prepare(
+                "SELECT base, failing, names, executed FROM baselines
+                 WHERE suite = ?1 AND def_hash = ?2 AND def_hash != '' ORDER BY at DESC LIMIT ?3",
+            )?;
+            let rows = st.query_map(params![s, h, limit as i64], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)? as usize,
+                ))
+            })?;
+            rows.map(|r| {
+                r.map(|(b, f, n, e)| {
+                    (
+                        b,
+                        f.lines().map(String::from).collect(),
+                        n.lines().map(String::from).collect(),
+                        e as usize,
+                    )
+                })
+            })
+            .collect()
+        })
+    }
+
     /// `(failing, all test names)` at a base commit, if it was worked out.
     #[allow(clippy::type_complexity)]
     pub fn baseline(
