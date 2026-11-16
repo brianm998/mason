@@ -61,6 +61,27 @@ fn ci_cancels_superseded_runs() {
         .join("\n");
     assert!(block.contains("group: ci-${{ github.ref }}"), "{block}");
     assert!(block.contains("cancel-in-progress: true"), "{block}");
+    // The nightly run must not share a group with pushes.
+    assert!(
+        block.contains("github.event_name == 'schedule' && 'nightly' || 'push'"),
+        "{block}"
+    );
+}
+
+#[test]
+fn push_trigger_ignores_readme_only_commits() {
+    let t = ci();
+    let on = &t[t.find("\non:").expect("on:")..t.find("\nconcurrency:").unwrap()];
+    let push = &on[on.find("\n  push:").expect("push trigger")..];
+    let push = &push[..push[1..]
+        .find("\n  pull_request")
+        .map_or(push.len(), |i| i + 1)];
+    assert!(push.contains("paths-ignore: [\"README.md\"]"), "{push}");
+    let pr = &on[on.find("\n  pull_request:").unwrap()..];
+    assert!(
+        !pr.contains("paths-ignore"),
+        "pull_request must not ignore paths"
+    );
 }
 
 #[test]

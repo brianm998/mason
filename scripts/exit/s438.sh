@@ -2,6 +2,9 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # s438: the monitor update test parses the request body.
 set -euo pipefail
+if [ -n "${MASON_SKIP_SWIFT:-}" ] || [ "$(uname)" != Darwin ] || ! command -v swift >/dev/null; then
+  echo "s438 skipped: needs macOS and Swift (not run by CI's Linux exit-scripts job)"; exit 0
+fi
 cd "$(git rev-parse --show-toplevel)"
 cd clients/swift && swift test --filter MonitorCoreTests.MonitorCoreTests/testTheMonitorButtonFollowsTheBuildAndInstallsItOnce
 echo "s438 OK"
