@@ -195,6 +195,14 @@ impl Wait {
     pub fn class(&self) -> String {
         cause_class(&self.cause)
     }
+
+    /// Held by the CPU gate or its settle pause. Decided on the cause, never on the text.
+    pub fn is_cpu(&self) -> bool {
+        matches!(
+            self.cause,
+            WaitCause::Cpu { .. } | WaitCause::Settling { .. }
+        )
+    }
 }
 
 /// The one function from a wait's cause to its class. Never empty: a resource with no name is

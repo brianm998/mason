@@ -144,6 +144,7 @@ pub struct Facts {
     pub frozen_launches: Vec<(Option<u64>, u64)>,
     pub syspolicyd_down: bool,
     pub mem_free_mb: Option<u64>,
+    /// The most time one task has spent under a CPU cause (gate or settle) in its current wait.
     pub cpu_gate_held_ms: u64,
     pub failed: Vec<FailedFact>,
     /// Pending diagnoses: (diagnosis id, task, age ms).
