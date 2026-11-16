@@ -18,7 +18,7 @@ public enum IPadSnapshot {
 
     /// `RootView` laid out at exactly `size`, light or dark.
     public static func view(_ model: MonitorModel, size: CGSize, dark: Bool) -> some View {
-        RootView(model: model)
+        RootView(model: model, features: .iPad)
             .environment(\.colorScheme, dark ? .dark : .light)
             .frame(width: size.width, height: size.height)
     }

@@ -66,7 +66,7 @@ struct PlanSection: View {
                             Text(f).font(theme.mono()).textSelection(.enabled)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                             Button { copyToPasteboard(f) } label: { Image(systemName: "doc.on.doc") }
-                                .buttonStyle(.plain).foregroundStyle(theme.muted).help("Copy \(f)")
+                                .buttonStyle(.plain).foregroundStyle(theme.muted).hint("Copy \(f)")
                         }
                     }
                 }

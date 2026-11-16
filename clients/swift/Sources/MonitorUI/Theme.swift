@@ -89,9 +89,53 @@ private struct ThemeKey: EnvironmentKey {
     static let defaultValue = Theme(dark: false, scale: 1)
 }
 
+private struct FeaturesKey: EnvironmentKey {
+    static let defaultValue = PlatformFeatures.mac
+}
+
 extension EnvironmentValues {
+    /// What this platform offers (the Mac: everything; the iPad: no agent sessions, no graph editing).
+    var features: PlatformFeatures {
+        get { self[FeaturesKey.self] }
+        set { self[FeaturesKey.self] = newValue }
+    }
     var theme: Theme {
         get { self[ThemeKey.self] }
         set { self[ThemeKey.self] = newValue }
     }
+}
+
+/// A hit area of at least 44 pt on touch screens, made with padding around the drawing (the
+/// drawing keeps its size). On the Mac it changes nothing.
+struct TouchTarget: ViewModifier {
+    func body(content: Content) -> some View {
+        #if canImport(AppKit)
+        content
+        #else
+        content
+            .frame(minWidth: CGFloat(PlatformFeatures.minTouchTarget), minHeight: CGFloat(PlatformFeatures.minTouchTarget))
+            .contentShape(Rectangle())
+        #endif
+    }
+}
+
+extension View {
+    func touchTarget() -> some View { modifier(TouchTarget()) }
+}
+
+/// The tooltip on the Mac (hover); on a touch screen the same words come from a long press.
+struct Hint: ViewModifier {
+    let text: String
+
+    func body(content: Content) -> some View {
+        #if canImport(AppKit)
+        content.help(text)
+        #else
+        content.contextMenu { Button(text) {} }
+        #endif
+    }
+}
+
+extension View {
+    func hint(_ text: String) -> some View { modifier(Hint(text: text)) }
 }
