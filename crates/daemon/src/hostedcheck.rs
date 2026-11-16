@@ -40,7 +40,13 @@ pub struct CheckSpec {
     pub limit: Duration,
     /// What the command runs on, from [`tree_key`].
     pub tree: String,
+    /// Polled while the command runs: `Some(note)` stops it (the owner skipped or forced
+    /// what it belongs to). The outcome then carries the note in `stopped`.
+    pub stop: Option<StopFn>,
 }
+
+/// See [`CheckSpec::stop`].
+pub type StopFn = Arc<dyn Fn() -> Option<String> + Send + Sync>;
 
 #[derive(Clone, Debug)]
 pub struct CheckOutcome {
@@ -50,6 +56,9 @@ pub struct CheckOutcome {
     pub output: String,
     /// The id of the host that ran it.
     pub id: String,
+    /// Why it was stopped before it ended, when [`CheckSpec::stop`] stopped it. Such a run
+    /// did not pass or fail; it was not finished.
+    pub stopped: Option<String>,
 }
 
 type Shared = Result<CheckOutcome, String>;
@@ -241,10 +250,19 @@ fn collect(d: &Arc<Daemon>, spec: &CheckSpec, id: &str) -> Shared {
     // Stop it when the limit, counted from the host's start, has passed.
     let done = Arc::new(AtomicBool::new(false));
     let fired = Arc::new(AtomicBool::new(false));
+    let stopped: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     {
         let (done, fired, sock) = (done.clone(), fired.clone(), dir.join("sock"));
+        let (stop, stopped) = (spec.stop.clone(), stopped.clone());
         std::thread::spawn(move || loop {
             if done.load(Ordering::SeqCst) {
+                return;
+            }
+            if let Some(note) = stop.as_ref().and_then(|f| f()) {
+                *stopped.lock().unwrap_or_else(|e| e.into_inner()) = Some(note);
+                if let Ok(mut h) = HostClient::connect(&sock, PREVIOUS, CURRENT, "daemon") {
+                    let _ = h.stop(1000);
+                }
                 return;
             }
             if now_ms() >= deadline {
@@ -268,12 +286,15 @@ fn collect(d: &Arc<Daemon>, spec: &CheckSpec, id: &str) -> Shared {
         }
         Err(e) => return Err(format!("cannot collect the check's result: {e}")),
     };
-    let timed_out = fired.load(Ordering::SeqCst)
-        || (rec.signal != 0 && rec.ended_ms > 0 && rec.ended_ms + 1500 >= deadline);
+    let stopped = stopped.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let timed_out = stopped.is_none()
+        && (fired.load(Ordering::SeqCst)
+            || (rec.signal != 0 && rec.ended_ms > 0 && rec.ended_ms + 1500 >= deadline));
     Ok(CheckOutcome {
-        passed: rec.code == 0 && rec.signal == 0 && !timed_out,
+        passed: stopped.is_none() && rec.code == 0 && rec.signal == 0 && !timed_out,
         timed_out,
         output: crate::jobs::tail(&std::fs::read_to_string(&log).unwrap_or_default(), 40),
         id: id.to_string(),
+        stopped,
     })
 }
