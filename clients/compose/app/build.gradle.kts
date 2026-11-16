@@ -59,4 +59,10 @@ distributions {
 
 tasks.test {
     useJUnitPlatform()
+    // Skiko unpacks its native library into a shared directory; concurrent or stale
+    // extractions there make the load fail with UnsatisfiedLinkError. Give the test JVM its own.
+    val skikoDir = layout.buildDirectory.dir("tmp/skiko-test").get().asFile
+    systemProperty("skiko.data.path", skikoDir.path)
+    systemProperty("java.io.tmpdir", skikoDir.path)
+    doFirst { skikoDir.mkdirs() }
 }
