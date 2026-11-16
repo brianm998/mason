@@ -54,6 +54,7 @@ pub mod numbers;
 pub mod outside;
 pub mod plan_view;
 pub mod plugins;
+pub mod policyd;
 pub mod pool;
 pub mod progress;
 pub mod prompts;
