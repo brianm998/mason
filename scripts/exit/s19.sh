@@ -7,10 +7,12 @@
 #     by the owner (a stranger is refused), then it runs and its result is used.
 #  3. Changing any file in its folder changes the hash and needs a new approval.
 #  4. An extension that exists only on a task branch never runs and is not offered.
-#  5. A plugin that provides a parser is refused as not yet supported; the rest loads.
+#  5. A plugin that provides a parser but says protocol 1 is refused (parsers need protocol 3); the rest loads.
 #  6. Script steps get MASON_* variables and a JSON result file; the conformance kit
 #     passes the example and names what is wrong with a broken one.
 set -euo pipefail
+# A failing command under `set -e` would end the script with no word: say which one.
+trap 'rc=$?; [ "$rc" -eq 0 ] || echo "FAILED (exit $rc) at line $LINENO: $BASH_COMMAND" >&2' ERR
 cd "$(git rev-parse --show-toplevel)"
 if ! command -v python3 >/dev/null; then echo "s19 needs python3 (the plugin is a Python program)" >&2; exit 1; fi
 root=$(mktemp -d /tmp/mason-s19.XXXXXX); daemon=""
@@ -54,7 +56,7 @@ git clone -q "$root/origin.git" "$root/repo" 2>/dev/null
 git -C "$root/repo" checkout -q -b main
 mkdir -p "$root/repo/.mason/extensions" "$root/repo/migrations"
 cp -R docs/examples/plugins/migration-check "$root/repo/.mason/extensions/migration-check"
-# An extension that provides a parser: not supported yet, so refused (and harmless).
+# An extension that provides a parser at protocol 1: parsers need protocol 3, so refused (and harmless).
 mkdir -p "$root/repo/.mason/extensions/junit-parser"
 cat > "$root/repo/.mason/extensions/junit-parser/manifest.toml" <<'TOML'
 name = "junit-parser"
@@ -147,9 +149,9 @@ if out=$(m editor op '{"op":"set_field","step":"check-two","key":"directory","va
 echo "   refused: $out"; echo "$out" | grep -q 'directory must be a string'
 m editor discard
 
-echo "== 5. a plugin that provides a parser is refused as not yet supported; the rest loads"
+echo "== 5. a plugin that provides a parser at protocol 1 is refused (parsers need protocol 3); the rest loads"
 m extension list | grep -q '^junit-parser  refused'
-m extension list | grep -q 'not yet supported'
+m extension list | grep -q 'needs protocol 3'
 m extension list | sed -n '/^junit-parser/,+1p'
 m definition show | grep -q 'check'
 if out=$(m extension approve junit-parser 2>&1); then echo "a refused extension was approved" >&2; exit 1; fi
