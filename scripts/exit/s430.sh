@@ -38,7 +38,7 @@ kind = "task"
 every = "daily"
 title = "Nightly sweep"
 TOML
-printf '# my routes\n[routing.paused]\nsound = "0"\n' > "$root/c/notify.toml"
+printf '# my routes\n[routing.failed]\nsound = "0"\n' > "$root/c/notify.toml"
 
 MASON_CPU_FILE="$root/cpu" "$bin/masond" --port 0 --data-dir "$root/d" --config-dir "$root/c" \
   --heartbeat-ms 100 --sweep-ms 3600000 2>>"$root/masond.log" &
@@ -63,7 +63,9 @@ before=$(cat "$root/c/projects/scratch.toml" "$root/c/notify.toml")
 echo "   refused"
 
 echo "== 2. one change each"
-[ "$(api "$owner" POST /notify/settings '{"routing":{"paused":{"speech":"30s"}}}')" = 200 ] || fail "route: $(cat "$root/out")"
+[ "$(api "$owner" POST /notify/settings '{"routing":{"paused":{"speech":"30s"}}}')" = 400 ] || fail "a monitor-only condition was routed"
+grep -q 'monitor-only' "$root/out" || fail "the refusal does not say why: $(cat "$root/out")"
+[ "$(api "$owner" POST /notify/settings '{"routing":{"failed":{"speech":"30s"}}}')" = 200 ] || fail "route: $(cat "$root/out")"
 [ "$(api "$owner" POST /projects/scratch/settings '{"proposals":{"agent_normal":"queued","per_day":7}}')" = 200 ] || fail "proposals: $(cat "$root/out")"
 [ "$(api "$owner" POST /projects/scratch/settings '{"schedules":{"nightly":{"every":"6h"}}}')" = 200 ] || fail "schedule: $(cat "$root/out")"
 echo "   applied"
@@ -85,7 +87,7 @@ api "$owner" GET /notify/settings >/dev/null
 python3 -I - "$root/out" <<'PY' || fail "GET /notify/settings does not show the route"
 import json, sys
 v = json.load(open(sys.argv[1]))
-r = [x for x in v["routing"] if x["condition"] == "paused"][0]["rules"]
+r = [x for x in v["routing"] if x["condition"] == "failed"][0]["rules"]
 assert any(x["channel"] == "speech" and x["after_s"] == 30 for x in r), r
 PY
 echo "   reflected"
