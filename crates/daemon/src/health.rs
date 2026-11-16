@@ -90,6 +90,7 @@ fn load_reading(
 /// snapshot.
 pub fn gather(d: &Arc<Daemon>, now: u64) -> Facts {
     let mut x = Facts::default();
+    x.cpu_gate_held_ms = d.broker.cpu_gate_held_ms();
     let Ok(w) = d.world() else { return x };
     let ix = crate::views::RunIndex::build(w.step_runs.values());
     let waits = d.broker.waits_snapshot();
@@ -175,9 +176,6 @@ pub fn gather(d: &Arc<Daemon>, now: u64) -> Facts {
             } else {
                 in_state
             };
-            if health::is_cpu_cause(&r) {
-                x.cpu_gate_held_ms = x.cpu_gate_held_ms.max(ms);
-            }
             x.slot_waits.push((t.id.0, r, ms));
         }
     }
