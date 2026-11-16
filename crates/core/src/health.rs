@@ -139,6 +139,8 @@ pub struct Facts {
     /// Slot waits: (task, slot, ms).
     pub slot_waits: Vec<(u64, String, u64)>,
     pub load_pct: Option<u32>,
+    /// `load_pct` is the sampler's assumed-busy fallback, not a measurement.
+    pub load_assumed: bool,
     pub stall_ms: u64,
     /// Launches that have not finished: (task, ms).
     pub frozen_launches: Vec<(Option<u64>, u64)>,
@@ -175,6 +177,11 @@ fn f(
         summary,
         evidence,
     }
+}
+
+/// A wait reason that names the CPU gate.
+pub fn is_cpu_cause(reason: &str) -> bool {
+    reason.to_lowercase().contains("cpu")
 }
 
 fn mins(ms: u64) -> u64 {
@@ -270,6 +277,7 @@ pub fn judge(x: &Facts, l: &Limits) -> Vec<Finding> {
         .iter()
         .filter(|(_, _, ms)| *ms > l.slot_wait_ms)
         .collect();
+    let cpu_listed = slow.iter().any(|(_, s, _)| is_cpu_cause(s));
     if !slow.is_empty() {
         out.push(f(
             "overloaded:slots".into(),
@@ -277,11 +285,18 @@ pub fn judge(x: &Facts, l: &Limits) -> Vec<Finding> {
             Severity::Warn,
             format!("{} tasks wait long for a slot", slow.len()),
             slow.iter()
-                .map(|(t, s, ms)| format!("#{t} waits {} min for {s}", mins(*ms)))
+                .map(|(t, s, ms)| {
+                    let held = if is_cpu_cause(s) {
+                        "; held by the CPU gate"
+                    } else {
+                        ""
+                    };
+                    format!("#{t} waits {} min for {s}{held}", mins(*ms))
+                })
                 .collect(),
         ));
     }
-    if let Some(p) = x.load_pct.filter(|p| *p >= l.load_pct) {
+    if let Some(p) = x.load_pct.filter(|p| !x.load_assumed && *p >= l.load_pct) {
         out.push(f(
             "overloaded:load".into(),
             "overloaded",
@@ -335,7 +350,7 @@ pub fn judge(x: &Facts, l: &Limits) -> Vec<Finding> {
             vec![],
         ));
     }
-    if x.cpu_gate_held_ms >= l.cpu_gate_ms {
+    if x.cpu_gate_held_ms >= l.cpu_gate_ms && !cpu_listed {
         out.push(f(
             "overloaded:cpu-gate".into(),
             "overloaded",
@@ -589,6 +604,38 @@ mod tests {
         );
         let launches = v.iter().find(|f| f.key == "overloaded:launches").unwrap();
         assert!(launches.evidence.iter().any(|e| e.contains("syspolicyd")));
+    }
+
+    #[test]
+    fn one_wait_is_one_finding() {
+        let x = Facts {
+            slot_waits: vec![(439, "cpu gate".into(), 90 * MIN)],
+            cpu_gate_held_ms: 90 * MIN,
+            ..Default::default()
+        };
+        let v = judge(&x, &l());
+        assert_eq!(keys(&v), ["overloaded:slots"]);
+        assert!(v[0].evidence.iter().any(|e| e.contains("CPU gate")));
+    }
+
+    #[test]
+    fn assumed_load_is_not_a_finding() {
+        let x = Facts {
+            load_pct: Some(100),
+            load_assumed: true,
+            ..Default::default()
+        };
+        assert!(judge(&x, &l()).is_empty());
+    }
+
+    #[test]
+    fn measured_load_still_shows() {
+        let x = Facts {
+            load_pct: Some(100),
+            load_assumed: false,
+            ..Default::default()
+        };
+        assert_eq!(keys(&judge(&x, &l())), ["overloaded:load"]);
     }
 
     #[test]

@@ -180,6 +180,11 @@ pub fn gather(d: &Arc<Daemon>, now: u64) -> Facts {
         ));
     }
     // Overload.
+    x.load_assumed = d
+        .cfg
+        .cpu
+        .as_ref()
+        .is_some_and(|c| c.source() == "assumed-busy");
     x.load_pct = match (&d.cfg.cpu, std::env::var_os("MASON_CPU_FILE")) {
         (Some(c), _) => c.busy_pct(),
         (None, Some(f)) => crate::cpu::FileCpu(f.into()).busy_pct(),

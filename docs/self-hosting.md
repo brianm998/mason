@@ -136,3 +136,7 @@ Self-proposals stay in the local tracker. Nothing about a self-task, and nothing
 A stop by SIGTERM or SIGINT (`launchctl kickstart -k`, `launchctl stop`, ctrl-C) logs `masond stopping: SIGTERM` (or `SIGINT`) at INFO, writes `stopped` for the running sha to `<data>/runtimes/boots.log` and exits 0. A stop is not a crash: `stopped` ends a start in the three-crashes-in-five-minutes count, so restarts do not roll back a good build. Step hosts keep running. A restart with no such line was not a stop by masond: look for a crash.
 
 To apply an edit to a registration file (`~/.config/mason/projects/<P>.toml`) do not restart: run `mason project reload [--project P]`. It applies the file to tasks admitted from then on and says which top-level keys changed. `path`, `base`, `remote` and `[self]` cannot change live: the command refuses, names them, and a restart is then needed. A new registration file also needs a restart.
+
+## Debug info in dev and test builds
+
+The workspace `[profile.dev]` uses `debug = "line-tables-only"`, and dependencies get no debug info. Panics and backtraces still show file and line. To get full debug info back for a local debugging session, set `CARGO_PROFILE_DEV_DEBUG=2`. The `release` profile used by self-update is unchanged.
