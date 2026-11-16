@@ -116,8 +116,9 @@ public struct PairedDaemonSettingsView: View {
     let record: PairedRecord?
     let host: String?
     let forget: () -> Void
-    public init(record: PairedRecord?, host: String?, forget: @escaping () -> Void) {
-        self.record = record; self.host = host; self.forget = forget
+    let push: PushRegistrar?
+    public init(record: PairedRecord?, host: String?, push: PushRegistrar? = nil, forget: @escaping () -> Void) {
+        self.record = record; self.host = host; self.push = push; self.forget = forget
     }
 
     public var body: some View {
@@ -129,6 +130,7 @@ public struct PairedDaemonSettingsView: View {
                     LabeledContent("Fingerprint", value: PairingScreenState.shortFingerprint(r.fingerprint))
                     if let h = host { LabeledContent("Last used", value: h) }
                 }
+                if let push { PushSettingsSection(push: push) }
                 Section {
                     Button("Forget this daemon", role: .destructive, action: forget)
                         .accessibilityIdentifier("settings:forget")
@@ -178,3 +180,45 @@ struct QRScannerView: UIViewControllerRepresentable {
     }
 }
 #endif
+
+/// Settings > Notifications: on or off for this device, and a test push.
+struct PushSettingsSection: View {
+    @ObservedObject var push: PushRegistrar
+    @State private var on = false
+
+    var body: some View {
+        Section("Notifications") {
+            Toggle("Notify this device", isOn: Binding(get: { on }, set: { v in
+                on = v
+                Task { await push.setEnabled(v) }
+            }))
+            .accessibilityIdentifier("settings:notify")
+            Button("Send a test") { Task { await push.sendTest() } }
+                .disabled(!on)
+                .accessibilityIdentifier("settings:notify-test")
+            if let r = push.testResult { Text(r).font(.footnote).foregroundStyle(.secondary) }
+        }
+        .onAppear { on = push.enabled }
+    }
+}
+
+/// Shown once, before the system asks for permission.
+public struct PushExplainView: View {
+    let answer: (Bool) -> Void
+    public init(answer: @escaping (Bool) -> Void) { self.answer = answer }
+
+    public var body: some View {
+        VStack(spacing: 20) {
+            Image(systemName: "bell.badge").font(.system(size: 48))
+            Text("Get told when MASON needs you").font(.title2.bold()).multilineTextAlignment(.center)
+            Text("MASON can send a notification when a task needs your decision, a task fails or a landing stops, or the daemon goes down. Tapping one opens that task. You can turn this off in Settings.")
+                .multilineTextAlignment(.center)
+            Button("Turn on notifications") { answer(true) }
+                .buttonStyle(.borderedProminent)
+                .accessibilityIdentifier("push:allow")
+            Button("Not now") { answer(false) }
+                .accessibilityIdentifier("push:decline")
+        }
+        .padding(32)
+    }
+}
