@@ -723,6 +723,10 @@ const STEPS: &[&str] = &[
     // and which Apple host it belongs to (`sandbox` or `production`). Additive, nullable.
     "ALTER TABLE devices ADD COLUMN push_token TEXT;
      ALTER TABLE devices ADD COLUMN push_env TEXT;",
+    // 42: a hash of the suite's definition on each baseline (s478), so a baseline may be
+    // reused at a later base only while the suite is defined the same way. Additive; an older
+    // row has '' and is never reused.
+    "ALTER TABLE baselines ADD COLUMN def_hash TEXT NOT NULL DEFAULT '';",
 ];
 
 pub const SCHEMA_VERSION: u32 = STEPS.len() as u32;

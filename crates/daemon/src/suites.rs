@@ -722,6 +722,68 @@ struct Who {
     /// A red that also fails at `Tree::base` is excused. Off when `base` is the very tree
     /// under test (the post-land tier), where every red would "also fail at the base".
     trust_base: bool,
+    /// For a landing batch's run (`task` is `None`): the tasks it verifies, whose skips and
+    /// forces stop it.
+    members: Members,
+}
+
+/// The tasks of a landing batch, and the name of the definition's Test step. A batch's
+/// verification belongs to no task, so what the owner does to its members is read here: it
+/// is stopped when every member has a skip debt for the suite (or the whole Test step), or
+/// when any member is forced. A batch with some members skipped keeps running: the others
+/// still need their tests.
+#[derive(Clone, Default)]
+pub struct Members {
+    pub tasks: Vec<TaskId>,
+    pub step: String,
+}
+
+impl Members {
+    pub fn new(tasks: &[TaskId], def: &Definition) -> Members {
+        Members {
+            tasks: tasks.to_vec(),
+            step: test_step_name(def).unwrap_or_default(),
+        }
+    }
+
+    /// Why the batch is to be landed without verification, if it is: a member is forced.
+    pub fn forced(&self, d: &Daemon) -> Option<String> {
+        self.tasks
+            .iter()
+            .find(|t| d.store.landing_flag(t.0).ok().flatten().as_deref() == Some("force"))
+            .map(|t| {
+                format!(
+                    "forced by the owner (task #{}): landing without verification",
+                    t.0
+                )
+            })
+    }
+
+    /// Why the batch's run of `suite` (`""`: every suite, a build) is to stop, if it is.
+    pub fn stop(&self, d: &Daemon, suite: &str) -> Option<String> {
+        if self.tasks.is_empty() {
+            return None;
+        }
+        if let Some(why) = self.forced(d) {
+            return Some(why);
+        }
+        let debts: Option<Vec<u64>> = self
+            .tasks
+            .iter()
+            .map(|t| skip_for(d, *t, suite, &self.step))
+            .collect();
+        debts
+            .and_then(|v| v.first().copied())
+            .map(|id| format!("skipped by the owner (debt #{id})"))
+    }
+}
+
+/// The name of the definition's Test step.
+pub(crate) fn test_step_name(def: &Definition) -> Option<String> {
+    def.steps
+        .iter()
+        .find(|s| s.kind == mason_definition::StepType::Test)
+        .map(|s| s.name.clone())
 }
 
 impl Who {
@@ -764,15 +826,21 @@ impl Who {
     }
 
     fn check(&self, suite: &str) -> Check {
-        let (d, task, step, suite) = (
+        let (d, task, step, suite, members) = (
             self.d.clone(),
             self.task,
             self.step.clone(),
             suite.to_string(),
+            self.members.clone(),
         );
         Arc::new(move || {
             let Some((t, run)) = task else {
-                return Stop::No;
+                // A batch's run: stopped by what the owner did to its members.
+                return if members.stop(&d, &suite).is_some() {
+                    Stop::Skipped
+                } else {
+                    Stop::No
+                };
             };
             if d.world()
                 .map(|w| w.open_run(t) != Some(run))
@@ -1006,12 +1074,106 @@ fn baseline(
     lock: &crate::daemon::RepoLock,
     dev: Option<&Dev>,
 ) -> Option<(Vec<String>, Vec<String>)> {
+    baseline_noted(who, c_repo, def, suite, base, lock, dev, &mut None)
+}
+
+/// A stable hash of everything that defines how a suite runs, so a stored baseline is
+/// never carried across a change to its command or settings (s478).
+fn suite_def_hash(def: &Definition, suite: &Suite) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    format!("{suite:?}").hash(&mut h);
+    if !suite.env.is_empty() {
+        format!("{:?}", def.testing.environment(&suite.env)).hash(&mut h);
+    }
+    format!("{:016x}", h.finish())
+}
+
+/// Whether a change to `paths` leaves `suite` alone, by the definition's impact map. A path
+/// the map does not name, or one under `.mason/` (the definition itself), touches it.
+fn untouched_by(def: &Definition, suite: &Suite, paths: &[String]) -> bool {
+    if paths.iter().any(|p| p.starts_with(".mason/")) {
+        return false;
+    }
+    matches!(
+        def.testing.impact.select(paths, std::slice::from_ref(&suite.name)),
+        Selection::Some(v) if v.is_empty()
+    )
+}
+
+/// The newest stored baseline of this suite at an ancestor of `base`, with the same
+/// definition hash, when nothing between the two touches the suite (s478).
+fn reusable_baseline(
+    store: &mason_store::Store,
+    c_repo: &Path,
+    def: &Definition,
+    suite: &Suite,
+    hash: &str,
+    base: &str,
+) -> Option<(String, Vec<String>, Vec<String>, usize)> {
+    let cands = store.ancestor_baselines(&suite.name, hash, 40).ok()?;
+    for (cand, failing, names, executed) in cands {
+        if cand == base {
+            continue;
+        }
+        if git::run(c_repo, &["merge-base", "--is-ancestor", &cand, base]).is_err() {
+            continue;
+        }
+        let Ok(out) = git::run(c_repo, &["diff", "--name-only", &format!("{cand}..{base}")]) else {
+            continue;
+        };
+        let paths: Vec<String> = out
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(String::from)
+            .collect();
+        if untouched_by(def, suite, &paths) {
+            return Some((cand, failing, names, executed));
+        }
+    }
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
+fn baseline_noted(
+    who: &Who,
+    c_repo: &Path,
+    def: &Definition,
+    suite: &Suite,
+    base: &str,
+    lock: &crate::daemon::RepoLock,
+    dev: Option<&Dev>,
+    note: &mut Option<String>,
+) -> Option<(Vec<String>, Vec<String>)> {
+    let hash = suite_def_hash(def, suite);
     // A narrowed run's tests are this change's pick, not the suite's: never cached (s386).
     if let Some(b) = (!suite.narrowed)
         .then(|| who.d.store.baseline(base, &suite.name).ok().flatten())
         .flatten()
     {
         return Some(b);
+    }
+    if !suite.narrowed {
+        if let Some((from, failing, names, executed)) =
+            reusable_baseline(&who.d.store, c_repo, def, suite, &hash, base)
+        {
+            let _ = who.d.store.put_baseline_hashed(
+                base,
+                &suite.name,
+                &failing,
+                &names,
+                executed,
+                now_ms(),
+                &hash,
+            );
+            *note = Some(format!(
+                "{}: baseline reused from {}, nothing between it and {} touches the suite",
+                suite.name,
+                &from[..from.len().min(10)],
+                &base[..base.len().min(10)]
+            ));
+            return Some((failing, names));
+        }
     }
     let wt = who.log_dir.join(format!("base-{}", suite.name));
     {
@@ -1069,10 +1231,15 @@ fn baseline(
     }
     let (failing, names, executed) = outcome?;
     if !suite.narrowed {
-        let _ = who
-            .d
-            .store
-            .put_baseline(base, &suite.name, &failing, &names, executed, now_ms());
+        let _ = who.d.store.put_baseline_hashed(
+            base,
+            &suite.name,
+            &failing,
+            &names,
+            executed,
+            now_ms(),
+            &hash,
+        );
     }
     Some((failing, names))
 }
@@ -1366,20 +1533,29 @@ fn run_suite(
                 };
                 // A known-red failure needs no base run: the ledger already excuses it.
                 let unexcused = persistent.iter().any(|t| !quarantined.contains(t));
+                let mut reuse_note: Option<String> = None;
                 let base = if persistent.is_empty() || !unexcused || !who.trust_base {
                     None
                 } else {
-                    baseline(who, c_repo, def, suite, &tree.base, repo_lock, dev.as_ref()).map(
-                        |b| {
-                            // The fix task's own step is not excused for its tests.
-                            let own = who.task.map_or(vec![], |(t, _)| {
-                                crate::basecheck::own_tests(&d.store, &suite.name, t.0)
-                            });
-                            b.0.into_iter()
-                                .filter(|t| !own.contains(t))
-                                .collect::<Vec<String>>()
-                        },
+                    baseline_noted(
+                        who,
+                        c_repo,
+                        def,
+                        suite,
+                        &tree.base,
+                        repo_lock,
+                        dev.as_ref(),
+                        &mut reuse_note,
                     )
+                    .map(|b| {
+                        // The fix task's own step is not excused for its tests.
+                        let own = who.task.map_or(vec![], |(t, _)| {
+                            crate::basecheck::own_tests(&d.store, &suite.name, t.0)
+                        });
+                        b.0.into_iter()
+                            .filter(|t| !own.contains(t))
+                            .collect::<Vec<String>>()
+                    })
                 };
                 let class = classify(&Inputs {
                     failing: failures,
@@ -1435,13 +1611,15 @@ fn run_suite(
                     RedClass::Baseline { tests } => SuiteRun::Done {
                         outcome: SuiteOutcome::Excused,
                         results: None,
-                        notes: vec![format!(
+                        notes: std::iter::once(format!(
                             "{}: excused, also failing at the merge base ({}): {}{}",
                             suite.name,
                             &tree.base[..tree.base.len().min(10)],
                             tests.join(", "),
                             fixes
-                        )],
+                        ))
+                        .chain(reuse_note.clone())
+                        .collect(),
                     },
                     RedClass::Quarantined { tests } => SuiteRun::Done {
                         outcome: SuiteOutcome::Excused,
@@ -1473,6 +1651,9 @@ fn run_suite(
                                 " Flaked and passed on rerun: {}.",
                                 flaky.join(", ")
                             ));
+                        }
+                        if let Some(n) = &reuse_note {
+                            extra.push_str(&format!(" {n}."));
                         }
                         extra.push('\n');
                         // A red that names no test is compared with the base by its first error.
@@ -1946,6 +2127,7 @@ fn run_once(c: &Ctx, again: &std::cell::Cell<bool>, pass: u32) {
         sink: None,
         env: vec![],
         trust_base: true,
+        members: Members::default(),
     };
     let head = |rev: &str| git::run(&c.wt, &["rev-parse", rev]).map(|s| s.trim().to_string());
     let (Ok(tree_hash), Ok(head_sha)) = (head("HEAD^{tree}"), head("HEAD")) else {
@@ -2583,9 +2765,28 @@ pub fn skip(
         "suite" | "step" => {}
         _ => return Err("scope is `suite:NAME` or `step:NAME`".into()),
     }
+    let scope = landing_scope(&def, t.state, scope);
     d.store
-        .add_debt(task.0, &project, scope, reason, owner, deferred, now_ms())
+        .add_debt(task.0, &project, &scope, reason, owner, deferred, now_ms())
         .map_err(|e| e.to_string())
+}
+
+/// The scope a skip is recorded against. A task in landing is shown with its landing step, and
+/// the clients send that step's name, but what landing can honour is a skip of the Test step
+/// (`tests_skipped`, and a batch's verification, read `step:<Test step>`). So a `step:` scope
+/// that names a step other than the Test step is, for a task in landing, the Test step's.
+/// Every other scope stays as it was.
+pub fn landing_scope(def: &Definition, state: State, scope: &str) -> String {
+    let Some(("step", name)) = scope.split_once(':') else {
+        return scope.to_string();
+    };
+    let named_is_test = def
+        .step(name)
+        .is_some_and(|s| s.kind == mason_definition::StepType::Test);
+    match test_step_name(def) {
+        Some(test) if state == State::Landing && !named_is_test => format!("step:{test}"),
+        _ => scope.to_string(),
+    }
 }
 
 /// The suites a debt's scope names in `def`.
@@ -2816,6 +3017,7 @@ pub fn pay(d: &Arc<Daemon>, debt: u64) -> Result<String, String> {
         sink: None,
         env: vec![],
         trust_base: true,
+        members: Members::default(),
     };
     let tree_hash = git::run(&wt, &["rev-parse", "HEAD^{tree}"])
         .map(|s| s.trim().to_string())
@@ -2992,6 +3194,7 @@ pub fn ledger_run(d: &Arc<Daemon>, task: TaskId) -> Result<String, String> {
         sink: None,
         env: vec![],
         trust_base: true,
+        members: Members::default(),
     };
     let tree = Tree {
         tree: git::run(&wt, &["rev-parse", "HEAD^{tree}"])
@@ -3090,7 +3293,9 @@ pub struct OverRun {
 
 /// Run the named suites in `wt` (a batch's integration worktree, at the tree
 /// to be landed) once, as the landing engine does over a batch's union diff.
-/// They belong to no task: nothing can skip them. Evidence is by tree, so a
+/// They belong to no task, so a skip is read from `members`: the run stops when every member
+/// has skipped the suite (or the Test step), and is green with a note naming the debt; a
+/// forced member stops it too. Evidence is by tree, so a
 /// tree that was green is not run twice, whoever asks. `base` is where the
 /// batch started (baselines are taken there). A suite whose only reds are excused (also red
 /// at `base`, or known red) is green for the batch, with a note naming them; `base_excuses`
@@ -3107,6 +3312,7 @@ pub fn run_over(
     id_prefix: &str,
     sink: Option<StepRunId>,
     base_excuses: bool,
+    members: &Members,
 ) -> OverRun {
     let lock = d.repo_lock(d.project_id_by_name(&p.id).unwrap_or(ProjectId(0)));
     let tree_hash = git::run(wt, &["rev-parse", "HEAD^{tree}"])
@@ -3126,6 +3332,7 @@ pub fn run_over(
         sink,
         env: vec![],
         trust_base: base_excuses,
+        members: members.clone(),
     };
     let _ = std::fs::create_dir_all(log_dir);
     let mut out = OverRun {
@@ -3153,6 +3360,14 @@ pub fn run_over(
                 notes,
                 ..
             } => out.notes.push(notes.join("; ")),
+            SuiteRun::Done {
+                outcome: SuiteOutcome::Skipped,
+                notes,
+                ..
+            } => out.notes.push(match members.stop(d, name) {
+                Some(why) => format!("{name}: {why}"),
+                None => notes.join("; "),
+            }),
             SuiteRun::Done { notes, .. } => {
                 out.green = false;
                 out.failed.insert(name.clone());
@@ -3264,5 +3479,120 @@ mod results_file_tests {
         // No match reads as "not written", as a missing plain file does.
         assert!(read_results(dir.path(), pattern).is_err());
         assert!(read_results(dir.path(), "missing.xml").is_err());
+    }
+}
+
+#[cfg(test)]
+mod reuse_tests {
+    use super::*;
+    use mason_testing::{ImpactMap, ParserKind};
+
+    fn def_with_impact() -> Definition {
+        let mut def = Definition::empty();
+        def.testing.impact = ImpactMap {
+            entries: vec![("crates/**".into(), vec!["cargo".into()])],
+        };
+        def
+    }
+
+    fn git_in(dir: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{args:?}: {out:?}");
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    }
+
+    fn commit(dir: &Path, file: &str) -> String {
+        let p = dir.join(file);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, file).unwrap();
+        git_in(dir, &["add", "-A"]);
+        git_in(dir, &["commit", "-qm", file]);
+        git_in(dir, &["rev-parse", "HEAD"])
+    }
+
+    fn reuse(
+        def: &Definition,
+        suite: &Suite,
+        dir: &Path,
+        store: &mason_store::Store,
+        base: &str,
+    ) -> Option<String> {
+        let hash = suite_def_hash(def, suite);
+        reusable_baseline(store, dir, def, suite, &hash, base).map(|r| r.0)
+    }
+
+    #[test]
+    fn a_readme_commit_reuses_the_baseline_and_a_crate_change_or_definition_change_does_not() {
+        let dir = tempfile::tempdir().unwrap();
+        git_in(dir.path(), &["init", "-q"]);
+        let a = commit(dir.path(), "crates/x/src/lib.rs");
+        let db = tempfile::tempdir().unwrap();
+        let store = mason_store::Store::open(db.path().join("s.db")).unwrap();
+        let def = def_with_impact();
+        let suite = Suite::new("cargo", "cargo test", ParserKind::Tap);
+        let hash = suite_def_hash(&def, &suite);
+        store
+            .put_baseline_hashed(
+                &a,
+                "cargo",
+                &["t1".into()],
+                &["t1".into(), "t2".into()],
+                2,
+                1,
+                &hash,
+            )
+            .unwrap();
+
+        // Same base: handled by the exact lookup, not here.
+        assert_eq!(reuse(&def, &suite, dir.path(), &store, &a), None);
+        // A README-only commit reuses it.
+        let b = commit(dir.path(), "README.md");
+        // README.md is unmapped, so the impact map says it touches everything...
+        assert_eq!(reuse(&def, &suite, dir.path(), &store, &b), None);
+        // ...unless the map names it as touching no suite.
+        let mut def2 = def.clone();
+        def2.testing.impact.entries.push(("*.md".into(), vec![]));
+        assert_eq!(
+            reuse(&def2, &suite, dir.path(), &store, &b),
+            Some(a.clone())
+        );
+        // A change under crates/ does not.
+        let c = commit(dir.path(), "crates/x/src/more.rs");
+        assert_eq!(reuse(&def2, &suite, dir.path(), &store, &c), None);
+        // A change to the suite's definition does not.
+        let mut changed = suite.clone();
+        changed.command = "cargo test --all".into();
+        assert_eq!(reuse(&def2, &changed, dir.path(), &store, &b), None);
+        // A change under .mason/ does not.
+        let d = commit(dir.path(), ".mason/testing.toml");
+        let mut def3 = def2.clone();
+        def3.testing
+            .impact
+            .entries
+            .push((".mason/**".into(), vec![]));
+        assert_eq!(reuse(&def3, &suite, dir.path(), &store, &d), None);
+    }
+
+    #[test]
+    fn an_unhashed_baseline_is_never_reused() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = mason_store::Store::open(dir.path().join("s.db")).unwrap();
+        store.put_baseline("abc", "cargo", &[], &[], 0, 1).unwrap();
+        assert!(store
+            .ancestor_baselines("cargo", "", 10)
+            .unwrap()
+            .is_empty());
     }
 }
