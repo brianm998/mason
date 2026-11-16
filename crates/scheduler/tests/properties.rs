@@ -151,7 +151,22 @@ proptest! {
                     );
                 }
                 for r in needs_of[g].amounts.keys() {
-                    let reserved: u32 = earlier.iter().map(|w| w.amounts.get(r).copied().unwrap_or(0)).sum();
+                    // s471: a waiter sets aside only what it is short of. Here that is the
+                    // resources its holders alone leave too little of; the planner tests
+                    // cover the first-in-line and behind-a-reservation cases.
+                    let reserved: u32 = earlier
+                        .iter()
+                        .filter(|w| {
+                            w.amounts.iter().any(|(k, a)| {
+                                before.used.get(k).copied().unwrap_or(0) + a
+                                    > before.capacity[k].units
+                            }) && w.amounts.get(r).is_some_and(|a| {
+                                before.used.get(r).copied().unwrap_or(0) + a
+                                    > before.capacity[r].units
+                            })
+                        })
+                        .map(|w| w.amounts.get(r).copied().unwrap_or(0))
+                        .sum();
                     if reserved > 0 {
                         prop_assert!(
                             used[r] + reserved <= before.capacity[r].units,
@@ -768,8 +783,8 @@ fn a_task_in_test_of_a_longer_route_is_not_behind_a_task_in_develop_of_a_shorter
 }
 
 /// 2026-11-13: two waiters that need one `compile` and one `test-suite` each, with every
-/// test-suite slot taken, held back every compile-only request with `compile` idle. Now they set
-/// aside one compile slot each, and the rest go to the requests behind them.
+/// test-suite slot taken, held back every compile-only request with `compile` idle. Then they set
+/// aside one compile slot each; since s471 only the first in line does.
 #[test]
 fn waiters_set_aside_what_they_need_and_the_rest_is_used() {
     let mut l = Ledger::new();
@@ -792,11 +807,12 @@ fn waiters_set_aside_what_they_need_and_the_rest_is_used() {
         })
         .collect();
     let p = l.schedule(2, None, None);
-    // Five compile slots, two set aside for #2 and #3: three compiles start, two wait.
-    assert_eq!(p.grants, compiles[..3].to_vec());
+    // Five compile slots; only #2, first in line for the test-suite slot, sets one aside
+    // (s471, decision 0464): four compiles start, one waits.
+    assert_eq!(p.grants, compiles[..4].to_vec());
     assert!(p.waits.contains_key(&a) && p.waits.contains_key(&b));
     assert!(matches!(
-        p.waits[&compiles[3]].cause,
+        p.waits[&compiles[4]].cause,
         WaitCause::Behind { ref resource } if resource == "compile"
     ));
     // The suite ends: #2 gets the test-suite slot and a compile slot it was promised.
