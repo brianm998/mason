@@ -25,12 +25,17 @@ class MonitorConnection(
     private val factory: SocketFactory = OkHttpSocketFactory(),
     private val decode: (String) -> ServerMessage? = Codec::decode,
     private val ui: Executor = Executor { it.run() },
+    /** Called when an attempt ends; true if the daemon welcomed us (a remote link moves to its next address on false). */
+    private val onAttemptEnd: ((Boolean) -> Unit)? = null,
+    /** Called with the HTTP status when the daemon refused the upgrade with 401; the connection then stops. */
+    private val onRefused: ((Int) -> Unit)? = null,
 ) {
     /** A fixed port, for callers that were given one. */
     constructor(model: MonitorModel, port: Int) : this(model, { DaemonInfo(port) })
 
     @Volatile private var socket: MonitorSocket? = null
     @Volatile private var running = false
+    @Volatile private var lastRefusal: Int? = null
     private var nextId = 1
     private var pings = 0L
 
@@ -57,7 +62,16 @@ class MonitorConnection(
             if (info == null) {
                 ui.execute { model.disconnected() }
             } else {
-                if (session(info)) policy.reset()
+                val welcomed = session(info)
+                if (welcomed) policy.reset()
+                onAttemptEnd?.invoke(welcomed)
+                val refused = lastRefusal
+                if (refused == 401 && onRefused != null) {
+                    running = false
+                    ui.execute { model.disconnected() }
+                    onRefused.invoke(refused)
+                    break
+                }
                 ui.execute { model.disconnected() }
             }
             if (!running) break
@@ -105,7 +119,7 @@ class MonitorConnection(
 
             override fun onClosed() { closed.countDown() }
         }
-        val s = factory.open(info.port, events)
+        val s = factory.open(info, events)
         mine.set(s)
         socket = s
         ready.countDown()
@@ -122,6 +136,7 @@ class MonitorConnection(
             val quiet = (System.nanoTime() - heard.get()) / 1e9
             if (quiet > timing.stallAfterSeconds) break  // a stall: show reconnecting
         }
+        lastRefusal = s.refusal
         s.close()
         return welcomed.get()
     }

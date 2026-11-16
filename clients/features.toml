@@ -11,42 +11,53 @@ description = "Connects over the protocol, resumes from its last sequence number
 swift = "done"
 compose = "done"
 ios = "done"
+android = "done"
 
 [feature.reconnect-on-restart]
 description = "After a daemon restart or stall it re-reads daemon.json and retries (1, 2, 4, 8 s, then every 10), shows 'Daemon restarting, reconnecting', follows a changed pid, start time or port, and resumes from its last sequence number without a relaunch"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "todo"
+android_reason = "The reconnect schedule is shared, but the Daemon restarting text is not shown and a LAN daemon.json is not readable, so a changed port is found by discovery instead"
 
 [feature.top-bar]
 description = "Back, forward, home; attention indicator; project filter; LLM usage; add task; mute"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 
 [feature.attention-sound]
 description = "A sound when a task newly needs the owner (a question, an approval, a proposal, a failure); silent when muted, on first load, and when the project filter changes"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 
 [feature.count-tiles]
 description = "One tile per state, sized to its label, tinted when it wants you, a dash while disconnected"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "done"
 
 [feature.tile-double-click]
 description = "Double-click a non-zero count tile to reveal its section and open the task when it holds exactly one; tooltip says so for a count of one"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "n/a"
+android_reason = "A phone has no double-click; a tap on a tile opens its page or reveals its section"
 
 [feature.banners]
 description = "New version, provider outage, landing frozen, connection lost, paused"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "done"
 
 [feature.health-session-banner]
 description = "While the pipeline's health session needs the owner (or has replied and waits), a banner of kind health with a one-line summary and an Open session button that opens the owner-session dialog on that session; it goes when the session ends"
@@ -55,6 +66,8 @@ compose = "done"
 ios = "difference"
 ios_ipad = "ipad.agent-sessions"
 ios_iphone = "phone.agent-sessions"
+android = "difference"
+android_phone = "phone.agent-sessions"
 
 [feature.active-sessions-panel]
 description = "A section pinned at the bottom of the sidebar, titled Active sessions (N), listing every open owner session (a task's, the pipeline's health) with its task or Pipeline health and a marker while it is replying or waiting for the owner; clicking one opens the dialog; hidden when N is 0"
@@ -63,162 +76,210 @@ compose = "done"
 ios = "difference"
 ios_ipad = "ipad.agent-sessions"
 ios_iphone = "phone.agent-sessions"
+android = "difference"
+android_phone = "phone.agent-sessions"
 
 [feature.sidebar-sections]
 description = "A section per state, needs-you first, collapsible, collapse choices remembered per device"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "done"
 
 [feature.sidebar-sort]
 description = "Queued in queue order (what the daemon admits first on top); every other section newest entry first; failed, landed and canceled collapsed"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 
 [feature.search]
 description = "Filters every section by name, title or body, each with its own checkbox"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 
 [feature.history-cap]
 description = "A history section holds at most the newest 500 rows the daemon sends; when the true count is more, the header reads '500 of 2000' (while searching, '3 in newest 500'), and search covers only the rows sent"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 
 [feature.home-view]
 description = "Status, attention queue, active models, session stepper, landing queue, tasks per stage"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "done"
 
 [feature.home-compilation]
 description = "Home's Compilation section: what holds a compile slot (and how long it has used no CPU), what waits for one and why, in line order (a landing marked), the CPU reading, what the daemon stopped lately, and a stepper for how many compiles may run at once"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 
 [feature.runtime-gates]
 description = "Home's Compilation section has steppers for the CPU gate (start another compile below N% CPU, steps of 5, 10-100) and the settle time; the daemon keeps them across restarts and a refusal shows beside them"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 
 [feature.cpu-by-task]
 description = "Home's CPU section: one bar for the whole machine split by task and fixed bucket (masond, monitors, sccache, everything else), highest first, with a legend (top 8, the rest folded) in the same order and stable colours; the task page says its CPU share or 'not running'"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 
 [feature.cpu-history]
 description = "Home's CPU section graphs every share over time as a stacked area chart in the bar's colours, with a span picker (5 min, 1 h, 6 h, 24 h) and the time and value on hover or tap; legend rows name the task's project, e.g. '#200 (star) Title'"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 
 [feature.task-detail]
 description = "Steps, activity, live log, plan, checks, tests, history, decision card, actions"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "done"
 
 [feature.readable-plan]
 description = "A task's plan as a document: summary, numbered steps, files (copy each), acceptance criteria as a checklist, other keys; Copy plan (Markdown) and Copy JSON; no JSON on screen"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 
 [feature.task-dependencies]
 description = "Task detail says \"waiting for #N\" and \"blocks #M\", each a link to that task"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 
 [feature.decision-card]
 description = "Ask, why, 2 to 4 options with one recommended, other, evidence; answers carry the card hash"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "done"
 
 [feature.progress-cells]
 description = "Filled, part, hatched and empty cells; a running cell fills in proportion to a real total, lighter for a typical one, outline for none; a percentage only from a real total, the count and typical range for a history total, the count alone for none; a progress line per running step with a counting time; amber and never red when slow or quiet"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 
 [feature.live-tokens]
 description = "A running step's progress line shows the tokens its LLM session has used so far, compact as '12.2k in, 988 out' (in is input plus cache read plus cache write); the task page shows input, output, cache read and cache write, and cost when reported; nothing when none were reported; a filter or search finds it"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 
 [feature.overrides]
 description = "Cancel, retry, skip test, land now, force, pause, open session, from the allowed actions"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 
 [feature.landing-page]
 description = "Queue, batches, phases, debts and freeze status"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "done"
 
 [feature.landing-batch-ci]
 description = "The landing page shows each batch's CI under it: per workflow the jobs queued, running, passed and failed (failed in the alert colour), 'queued for a runner' while none has started, and a link that opens the run's http(s) address"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 
 [feature.tracker-state]
 description = "The landing page shows one tracker line per project: off (with the config path to add [tracker] to), polling with imported, ignored, unchanged and waiting-for-a-slot counts, or stopped with the reason"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 
 [feature.monitor-update]
 description = "A banner when the monitor's own source changed on the update channel, with a button that has the daemon build it and relaunches into it; read-only, with the reason, when the protocol is too old"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 
 [feature.daemon-update]
 description = "A banner when masond is behind its update channel, with an owner's button that updates it and says how far along it is"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 
 [feature.usage-page]
 description = "Provider status, limit windows, tokens by project, task, step and model"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "done"
 
 [feature.model-display]
 description = "Wherever a model is shown (task row, home's active models, each run in the task detail with every launch and ladder retry, the editor's inspector for an agent step) the monitor shows the daemon's display string, such as `deep (Opus medium)`, and maps no tier itself; a step not yet started shows what it is expected to use, marked expected"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 
 [feature.usage-windows]
 description = "Each provider account's limit windows as bars with the percent used when reported (a window with no percentage shows its state and reset only), the time until each resets and the clock time, the trend, overage, why an account is blocked and until when, spend against the monthly budget for api accounts, and the age of every figure"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 
 [feature.usage-tokens]
 description = "Tokens (input, output, cache read, cache write) and cost, only as reported, for the current window and the last 7 days, by project, by model and the top tasks; a task's detail shows its own steps' tokens"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 
 [feature.usage-top-bar]
 description = "The top bar shows the most constrained window per account (\"claude 5-hour 82%, resets 1 h 10 m\"), else its sessions"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 
 [feature.pipeline-editor]
 description = "The graphical editor of the definition (Part 18): canvas with swimlanes, palette, inspector forms from JSON Schema, test grid, landing editor, simulate, diff and impact, undo and redo, apply"
@@ -227,139 +288,186 @@ compose = "done"
 ios = "difference"
 ios_ipad = "ipad.graph-editing"
 ios_iphone = "phone.graph-editing"
+android = "difference"
+android_phone = "phone.graph-editing"
 
 [feature.health-page]
 description = "Digest, detector findings, runtime version, resources and who holds them"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 
 [feature.health-introspection]
 description = "The Health page also shows the detectors' and analyst's findings with the verdict on each fix (open, this fix worked, this fix didn't help), the recurring jobs and when they last ran, the digest (landed, median claim-to-land, interventions, exploring skips by route with how many came back, forced landings with reasons; tokens shown as not recorded), and whether triage is on with how many suggestions wait for review"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 
 [feature.health-limits]
 description = "Health shows the CPU reading and the compile limit next to the waits (a compile waits while CPU use is at or above it); the LLM session limit is a resource line"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 
 [feature.deep-links]
 description = "mason://task/... opens from any notification"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "done"
 
 [feature.text-scaling]
 description = "Text scales and reflows so it stays sharp from across the room"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 
 [feature.decision-card-keyboard]
 description = "Arrow keys move the selection and Return answers; Other has a multi-line box (Enter sends, Shift-Enter a new line); a non-owner sees the card and no buttons"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "n/a"
+android_reason = "A phone has no arrow keys; every option is a button and Other has its own box"
 
 [feature.decision-card-multi-select]
 description = "A card that takes several answers shows a checkbox per option; Space toggles the highlighted one, Return sends the checked set (\"1,3\"), Other keeps its box; monitor tools take the same list"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 
 [feature.approval-view]
 description = "A task waiting on a proposal, an approval step or a self-hosting hold shows what it waits on in full, with Approve (the diff hash shown) and Reject with a reason, for the owner only"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 
 [feature.attention-link]
 description = "The top bar says how many tasks need the owner; clicking it opens the first one"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 
 [feature.reserved-numbers]
 description = "The task detail lists the stage, exit-script and decision numbers MASON reserved for the task; a cancelled task's are shown as released, never reused"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 
 [feature.provider-accounts]
 description = "The usage page lists every LLM provider account with its adapter, billing kind, sessions in use, warn level, overage setting and monthly budget"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 
 [feature.proposal-rows-and-detail]
 description = "A proposal's row says where it came from (source, severity, route); its detail shows the evidence, who filed it, and for an improvement the branch, the upstream pull request and the channel being followed; Approve and Reject are the approval box's"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 
 [feature.proposal-edit]
 description = "Edit changes only a waiting proposal's title, text and evidence (evidence still needs a file or line); offered only while the task's allowed actions include edit"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 
 [feature.improve-the-pipeline]
 description = "An 'Improve the pipeline' box in the top bar files a task on MASON's own repository; without write access the detail shows the redacted preview and sends upstream only on a second, explicit action"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 
 [feature.tracker-imports]
 description = "Tracker imports are listed apart as Proposed from the tracker, each with its issue link and (for the owner) Approve; a not-imported tile and list name the open issues a limit kept out, or whose task was cancelled, with the reason"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 
 [feature.task-release]
 description = "A held task's page lists each blocker with its state and where it came from (from GitHub, set by you); the owner gets Release on each, Revive on a canceled one, Retry on a failed one, and an Add blocker field with a task picker; a non-owner sees the list and no controls"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 
 [feature.speech-queue]
 description = "A short sound, then one sentence naming the task, what is wrong and what to do; announcements queue and never overlap; 'wants a decision' and 'broke' use different sounds; muting silences sound and speech and leaves every banner and the attention count"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 
 [feature.speech-settings]
 description = "Which conditions make noise, which sound each family uses and which voice speaks are configurable, with voices listed from the operating system"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 
 [feature.speaker-claim]
 description = "Asks the daemon whether it is the one device that speaks (a muted monitor never is) and says what the daemon queued for it, in order; the plain attention chime is used only for a daemon that sends no announcements"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 
 [feature.daemon-down-alert]
 description = "After 15 seconds of failed reconnects the monitor raises 'daemon down' itself: a banner, and a sound and sentence unless muted; clears when the connection returns"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 
 [feature.sidebar-resize]
 description = "The left panel is resized by dragging its divider (220 to 640 before text zoom, the main view keeps 360, the width is remembered per device), and Home and search are pinned above the scrolling list"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "n/a"
+android_reason = "A phone has no side panel to drag wider: the sidebar is its own screen"
 
 # The iOS app (one universal app built from clients/swift; iPad landscape, iPhone portrait) is the
 # third column, `ios`. "done" means the feature appears on both the iPad and the iPhone. Where it
 # does not, `ios = "difference"` and `ios_ipad` / `ios_iphone` each say "done" or name a table
 # below: `ipad.*` for the iPad, `phone.*` for the iPhone. Each such table needs a
-# `platform_reason`, and the gate fails on a missing one or an unknown name. Android is not a
-# column (out of scope; Compose's phone side is not built).
+# `platform_reason`, and the gate fails on a missing one or an unknown name.
+#
+# The Android phone app (clients/compose/android) is the fourth column, `android`. It is a phone
+# only, so its deliberate differences are the `phone.*` tables: `android = "difference"` and
+# `android_phone` names one. `todo` and `n/a` each need an `android_reason`; a `todo` is a feature
+# the Android app does not have yet, recorded rather than hidden (docs/stages/s469.md).
 [phone.graph-editing]
 status = "deliberate-difference"
 description = "The pipeline editor's graph canvas"
@@ -390,99 +498,131 @@ description = "Until the first header arrives the window shows the start image (
 swift = "done"
 compose = "done"
 ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 
 [feature.mascot-art]
 description = "The approved mascot art (clients/mascot.toml, one copy in clients/swift/Sources/MasonMascot/Art) and one loader per client: icon(id, size), bannerIcon(id) and illustration(id), nothing for an unknown id; no visible UI yet"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 
 [feature.mascot-banner-icons]
 description = "Each banner under the top bar starts with a decorative 20 pt mascot icon (scaled with the text zoom) chosen only by its kind: connection, daemon-down, read-only and monitor-update by their own ids; paused, definition, landing_frozen and the provider_* kinds from Banner.kind; an unknown kind or the two provider notes show text alone. The daemon now emits a landing_frozen banner while landing is frozen"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 
 [feature.mascot-state-icons]
 description = "Each ticket state as a mascot icon: a 20 pt overlay on the count tile top-left corner (not part of its layout, so tile width is unchanged), the needs_attention icon in the top bar and on decision cards, after the sidebar section chevron, at the end of the sidebar row time and cells line, and on Home stage headings; phone: 20 pt in tiles and headers, 24 pt on rows"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 
 [feature.app-icon]
 description = "The mascot app icon: MASON.app has an .icns (Finder, Dock), the unbundled monitor sets the Dock icon, the Compose window has it; the iOS icon file sits beside its Info.plist for when a project exists"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "done"
 
 [feature.mascot-status-pictures]
 description = "The Home status picture (not_connected, needs_attention, developing, no_tasks with Add task, otherwise all_clear), nothing_landing on an empty Landing page, all_clear on Health with no findings, and no_results with 'Nothing matched.' for a sidebar search that matches nothing; all decorative, scaled with the text zoom"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 
 [feature.readme-banner]
 description = "The mascot banner at the top of README.md and the social card in docs/images; repository art only, no client UI"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 
 [feature.push-auth-key-picker]
 description = "A banner for a project whose landing is held because the host refused the push (kind push_auth, text '<project>: GitHub refused the push: it saw X, ...') carries a 'Choose SSH key…' action (owner only); it opens a sheet listing GET /projects/<p>/ssh-keys: path, fingerprint, comment, a badge for the repository owner's account and for the account GitHub saw, a lock for a passphrase; Use POSTs the key, says 'Enter the passphrase in the dialog on <host>' while it waits, and shows the probe's result. The passphrase is never typed in the monitor"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 
 [feature.mascot-state-illustration]
 description = "The task page shows the ticket's state as a 96 pt illustration (scaled with text zoom) left of the title block, chosen by the daemon's state and changing with it; the phone task screen shows it with the state name at the top; decorative, nothing for an unknown state"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 
 [feature.update-wait-for-landing]
 description = "While a built and tested masond update waits for landing batches the daemon banner says so (names the batches and the latest time it goes ahead) and the button reads 'Update now' (UpdateInfo.daemon_button); when UpdateInfo.daemon_confirm is set, pressing it opens a dialog with the daemon's words and two buttons, 'Update now' (POST /update/now) and 'Keep waiting' (nothing sent); the update requests carry a command id and a refusal shows under the banner (updateError)"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 
 [feature.task-detail-links]
 description = "On a task's page every task number (#N, for a task the monitor knows) opens that task's page, and every CI reference (the batch pull request, a failed check, a bare URL) and the tracker issue open in the default browser, in why-waiting, failure, tests, plan, body, log, step launches, proposal evidence, the decision card and approval text, debts and filed-by; a CI line lists every link; PR, pull request, Batch, debt and run numbers are never taken for tasks; selectable text stays selectable"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 
 [feature.paused-collapse]
 description = "Each paused banner has, at its trailing edge, a Resume text button (only when the monitor can act; it sends ResumeWork with that pause's project and mode, so it lifts exactly that pause) and an X icon button ('Collapse', tooltip and accessibility label) that collapses the banner to just its paused icon without lifting the pause; collapsed icons line up in banner order at the leading edge of the first expanded pause's row, or share one icon-only row when every pause is collapsed; each collapsed icon has the full banner text as tooltip and accessibility label, and a double click (double tap on touch) expands that one pause while a single click does nothing; the collapse is kept per device across launches, keyed paused:<project>:<mode>, and forgotten once the pause leaves the header; the item listing still lists every pause"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 
 [feature.back-restores-scroll]
 description = "Back and forward put each page in the history back where it was scrolled when it was left (Home, a task, Landing, LLM usage, Health); the same page twice in the history keeps two positions; a new selection starts at the top; restored once, after the page's content has arrived, never over the owner's own scrolling"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 
 [feature.topbar-busiest-mascot]
 description = "At the left of the top bar, the task page's illustration for the active state (queued, exploring, developing, testing, review, landing, needs attention, failed, proposed; never landed or canceled) holding the most tasks in the header's counts (so it follows the project filter), a tie going to the later stage, at 85% of the illustration size or the bar's height if less; the idle art (all_clear) with no tasks, nothing while disconnected; tooltip 'Most tasks: testing (7)'; clicking reveals that state's sidebar section"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 
 [feature.home-daemon-version]
 description = "Home shows a small selectable line under the status, 'masond 64b3068a · monitor abcdef01': the short (8 character) commit of the running masond from the welcome version and of this monitor (ownVersion), with both full hashes in the tooltip; a version of 'dev' reads 'masond (unversioned build)' (likewise 'monitor (unversioned build)'); when the update banner's daemon text says N commits behind develop, '(N commits behind develop)' follows masond's hash; nothing before the welcome"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 
 [feature.settings-devices]
 description = "Settings has a Devices section: whether LAN access is on (and how to turn it on when it is off), the paired devices with role and last seen, revoked ones apart, and Revoke after a confirmation. 'Pair a device…' (owner or viewer) shows the mason://pair URL as a QR code, the 8-digit code in large type, the hosts and a countdown to expiry that then offers a new code; the list refreshes every few seconds while the sheet is open"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no screen for it yet"
 
 [feature.section-detail-pages]
 description = "Each home section has a detail page, mason://section/<name> for active_models, queued, cpu, compilation, exploring, developing, testing and review (landing is the Landing page): only that section with more room. The home section title and a > icon (chevron.right) to its right open it, as does a > at the trailing end of the sidebar section header. A double click on a count tile opens the stage page, or the task when the stage holds exactly one; a single click still reveals the sidebar section. The Testing page lists tasks in the sidebar order, shows suites done of total and has Skip testing per row and for all, sending the sidebar skip command"
 swift = "done"
 compose = "done"
 ios = "done"
+android = "done"
