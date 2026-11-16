@@ -794,7 +794,15 @@ fn a_debt_closes_by_itself_when_the_suite_later_goes_green_on_a_base_with_the_ta
     let t = file_it(&d, "Skip the checks");
     mason_daemon::suites::skip(&d, t, "suite:checks", "later", "brian", false).unwrap();
     wait_state(&d, t, State::Landed, 120);
-    assert_eq!(d.store.debts(Some(t.0), false).unwrap()[0].status, "open");
+    // The debt exists. It may already be paid: since s426 landing runs every open debt of the
+    // task once at the new base, on its own thread, so its status here is not fixed.
+    let rows = d.store.debts(Some(t.0), false).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert!(
+        matches!(rows[0].status.as_str(), "open" | "paid"),
+        "{}",
+        rows[0].status
+    );
     // The next task's own run of the suite is green at a base that holds the first task.
     let t2 = file_it(&d, "Second");
     wait_state(&d, t2, State::Landed, 120);
@@ -802,8 +810,14 @@ fn a_debt_closes_by_itself_when_the_suite_later_goes_green_on_a_base_with_the_ta
         mason_daemon::suites::settle_debts(&d);
         d.store.debts(Some(t.0), false).unwrap()[0].status == "paid"
     });
+    // Closed by a green at a base holding the task's commit: either the recorded green of a
+    // later run ("checks green on origin/main at <sha> since") or the run landing makes of it
+    // ("green when run on origin/main at <sha>").
     let how = d.store.debts(Some(t.0), false).unwrap()[0].how.clone();
-    assert!(how.contains("checks green on"), "{how}");
+    assert!(
+        how.contains("checks green on") || how.contains("green when run on"),
+        "{how}"
+    );
 }
 
 fn record_skip_green_at_tip(d: &std::sync::Arc<mason_daemon::daemon::Daemon>, tests: &[&str]) {
@@ -873,16 +887,21 @@ fn a_debt_never_closes_on_a_green_at_a_base_without_the_tasks_commit() {
 fn a_debt_whose_suite_is_still_red_stays_open_and_is_run_once_when_idle() {
     let s = two_tasks_world();
     let d = start(&s);
+    // The base is red before the task lands: since s426 landing runs every open debt of the
+    // task once at the new base, so a base that went red only afterwards would race that run.
+    s.push_files(&[("legacy.broken", "x\n")], "break the base");
     let t = file_it(&d, "Skip the checks");
     mason_daemon::suites::skip(&d, t, "suite:checks", "later", "brian", false).unwrap();
     wait_state(&d, t, State::Landed, 120);
-    // The base goes red after the landing.
-    s.push_files(&[("legacy.broken", "x\n")], "break the base");
     assert_eq!(mason_daemon::suites::settle_debts(&d), 0);
-    mason_daemon::suites::run_idle_debts(&d);
+    // The run at landing (or, failing that, an idle run) tries it once and it stays owed.
+    wait_for("the debt to be tried", 60, || {
+        mason_daemon::suites::run_idle_debts(&d);
+        d.store.debts(Some(t.0), false).unwrap()[0].tried_at > 0
+    });
     let row = d.store.debts(Some(t.0), false).unwrap().remove(0);
     assert_eq!(row.status, "open");
-    assert!(row.tried_at > 0, "the idle run never tried it");
+    assert!(row.tried_at > 0, "nothing ever tried it");
     // Once is enough: a second pass leaves it alone.
     mason_daemon::suites::run_idle_debts(&d);
     let again = d.store.debts(Some(t.0), false).unwrap().remove(0);
@@ -932,10 +951,13 @@ fn a_task_test_step_runs_only_the_crates_its_change_touches_and_their_dependents
     let d = start(&s);
     let t = file_it(&d, "Packages");
     wait_state(&d, t, State::Landed, 120);
+    // The step may run the command more than once (a rerun, a run at the base to tell its
+    // red from the task's own); what matters is which crates it named: only the leaf.
     let ran = std::fs::read_to_string(&log).unwrap_or_default();
+    let crates: std::collections::BTreeSet<&str> = ran.lines().map(str::trim).collect();
     assert_eq!(
-        ran.trim(),
-        "dev -p leaf",
+        crates.into_iter().collect::<Vec<_>>(),
+        vec!["dev -p leaf"],
         "only the leaf crate ran: {ran:?}"
     );
     let (_, note) = closing(&d, t);
