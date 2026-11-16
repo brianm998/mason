@@ -29,10 +29,19 @@ fn dropping_a_scratch_world_stops_its_hosts_agents_and_daemon() {
     s.wait_daemon(&mut m);
     s.mason_ok(&["task", "add", "Slow explore"]);
     s.wait_task(0, "exploring", 60);
+    // The registry, not `ps`, says when a host runs: it names the pids to check after.
+    let reg = mason_step_host::registry::Registry::new(s.data_dir.join("h"));
+    let mut pids: Vec<u32> = vec![];
     wait_for("a running step host", 60, || {
-        !command_lines_with(&format!("--dir {needle}/d/h")).is_empty()
+        pids = reg
+            .scan()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|h| h.state == mason_step_host::registry::HostState::Running)
+            .flat_map(|h| [h.info.host_pid, h.info.child_pid])
+            .collect();
+        !pids.is_empty()
     });
-    assert!(!command_lines_with(&needle).is_empty());
 
     drop(m);
     drop(s);
@@ -41,5 +50,6 @@ fn dropping_a_scratch_world_stops_its_hosts_agents_and_daemon() {
     wait_for("every process of the scratch world to be gone", 60, || {
         std::thread::sleep(Duration::from_millis(100));
         command_lines_with(&needle).is_empty()
+            && pids.iter().all(|p| !mason_step_host::registry::pid_alive(*p))
     });
 }
