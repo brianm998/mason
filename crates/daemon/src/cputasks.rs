@@ -501,7 +501,7 @@ pub fn spawn(d: &Arc<Daemon>) {
         }
         d.record_cpu(reading);
         readings += 1;
-        if readings % SAVE_EVERY == 0 {
+        if readings.is_multiple_of(SAVE_EVERY) {
             d.save_cpu_history();
         }
         if push {
