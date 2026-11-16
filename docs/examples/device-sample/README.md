@@ -16,7 +16,7 @@ android/   Gradle app: greeting(), an activity, a JUnit test and an instrumented
 
 ```
 cd ios && swift test                       # runs on the Mac, no device
-cd android && ./gradlew testDebugUnitTest  # runs on the JVM, no device
+cd android && gradle testDebugUnitTest  # runs on the JVM, no device
 ```
 
 ## Try it with MASON

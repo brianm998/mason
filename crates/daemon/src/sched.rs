@@ -417,6 +417,10 @@ pub struct Broker {
     /// Wait explanation per waiting task, republished by every `pass`. Readers
     /// clone the `Arc` and never take `st`.
     waits_snap: std::sync::RwLock<Arc<BTreeMap<TaskId, String>>>,
+    /// Time each task has spent under a CPU cause, updated by every `pass`.
+    cpu_hold: Mutex<mason_scheduler::CpuHold>,
+    /// The largest of those, for readers that must not take `st`.
+    cpu_held_ms: std::sync::atomic::AtomicU64,
     /// Scheduling passes run so far (a test counter).
     pass_count: std::sync::atomic::AtomicUsize,
     /// A waiter's pass interval in ms.
@@ -636,6 +640,8 @@ impl Broker {
             locks,
             limits_file,
             waits_snap: Default::default(),
+            cpu_hold: Default::default(),
+            cpu_held_ms: Default::default(),
             pass_count: Default::default(),
             tick_ms: std::sync::atomic::AtomicU64::new(100),
             #[cfg(test)]
@@ -1149,6 +1155,21 @@ impl Broker {
             .filter_map(|(id, w)| by_id.get(id).map(|t| (*t, explain(w, now))))
             .collect();
         *self.waits_snap.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(snap);
+        let mut hold = self.cpu_hold.lock().unwrap_or_else(|e| e.into_inner());
+        hold.observe(
+            now,
+            waits
+                .waits
+                .iter()
+                .filter_map(|(id, w)| by_id.get(id).map(|t| (t.0, w.is_cpu()))),
+        );
+        self.cpu_held_ms
+            .store(hold.max_held_ms(), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The most time one waiting task has spent under a CPU cause (at most one pass old).
+    pub fn cpu_gate_held_ms(&self) -> u64 {
+        self.cpu_held_ms.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// The published wait explanations (at most one pass old).
