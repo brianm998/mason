@@ -17,7 +17,7 @@ struct MasonIOSApp: App {
     @Environment(\.scenePhase) private var phase
 
     init() {
-        let model = MonitorModel(preferences: DefaultsPreferences())
+        let model = MonitorModel(preferences: DefaultsPreferences(), defaultTextScale: PlatformFeatures.iPadTextScale)
         let store = DefaultsPairedStore()
         let tokens = KeychainTokenStore()
         let source = BonjourServiceSource()
@@ -60,7 +60,7 @@ struct AppRoot: View {
     var body: some View {
         Group {
             switch RootChoice.choose(regularWidth: sizeClass.map { $0 == .regular }) {
-            case .pad: RootView(model: model)
+            case .pad: RootView(model: model, features: .iPad)
             case .phone: PhoneRootView(model: model)
             }
         }
