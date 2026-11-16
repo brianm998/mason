@@ -9,11 +9,13 @@
 
 use crate::cpu::CpuSource;
 use crate::disk::DiskSource;
+use crate::policyd::PolicySource;
 use crate::stall::StallSource;
 use mason_core::TaskId;
 use mason_resources::{Held, Locks, Take, TakeError};
 use mason_scheduler::{
-    explain, since, CpuGate, DiskGate, Kind, Ledger, Needs, Rank, StallGate, WaitCause, COMPILE,
+    explain, since, CpuGate, DiskGate, Kind, Ledger, Needs, PolicyGate, Rank, StallGate, WaitCause,
+    COMPILE,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -75,6 +77,9 @@ pub struct ResourceCfg {
     pub disk_floor_gb: u64,
     /// How slow an answer from the build disk, in ms, holds further compiles (0: never).
     pub disk_stall_ms: u64,
+    /// How busy macOS's `syspolicyd` may be, in percent of one core, before further compiles
+    /// wait (0: never). It scans each new executable's first launch.
+    pub syspolicyd_max_pct: u32,
     /// Order waiting work by tracker priority before steps remaining. It applies to
     /// every project at once, since one queue serves them all.
     pub priority_first: bool,
@@ -105,6 +110,11 @@ pub const DEFAULT_COMPILE_JOBS: u32 = 3;
 /// the machine loaded; the stalls this exists for lasted 20 seconds and more.
 pub const DEFAULT_DISK_STALL_MS: u64 = 2000;
 
+/// The default `syspolicyd_max_pct`: three cores. A quiet machine reads under 50%; the
+/// 2026-11-16 session loss came at 640 to 770%, and a single cold workspace build's test run
+/// reaches about 100 to 200%.
+pub const DEFAULT_SYSPOLICYD_MAX_PCT: u32 = 300;
+
 /// How often an open `mason run` wait is added to its task's deadline while it waits (s417).
 /// Anything longer than this of a wait in progress is lost if the daemon restarts.
 pub const CREDIT_EVERY: Duration = Duration::from_secs(30);
@@ -122,6 +132,7 @@ impl Default for ResourceCfg {
             compile_idle_kill_s: DEFAULT_COMPILE_IDLE_KILL_S,
             disk_floor_gb: crate::disk::DEFAULT_FLOOR_GB,
             disk_stall_ms: DEFAULT_DISK_STALL_MS,
+            syspolicyd_max_pct: DEFAULT_SYSPOLICYD_MAX_PCT,
             priority_first: false,
             from_file: Default::default(),
             max_wait_s: DEFAULT_MAX_WAIT_S,
@@ -172,6 +183,7 @@ pub fn parse_resource_cfg(text: &str) -> Result<ResourceCfg, String> {
                 "cpu" if name == "compile_settle_s" => c.compile_settle_s = n as u32,
                 "cpu" if name == "compile_jobs" => c.compile_jobs = n as u32,
                 "cpu" if name == "compile_idle_kill_s" => c.compile_idle_kill_s = n as u32,
+                "cpu" if name == "syspolicyd_max_pct" => c.syspolicyd_max_pct = n as u32,
                 "disk" if name == "floor_gb" => c.disk_floor_gb = n as u64,
                 "disk" if name == "stall_ms" => c.disk_stall_ms = n as u64,
                 other => return Err(format!("resources.toml: unknown setting {other}.{name}")),
@@ -189,6 +201,7 @@ pub const GATES: &[&str] = &[
     "compile_settle_s",
     "compile_jobs",
     "compile_idle_kill_s",
+    "syspolicyd_max_pct",
     "stall_ms",
     "memory.floor_mb",
     "disk.floor_gb",
@@ -220,7 +233,7 @@ fn check_gate(name: &str, v: i64) -> Result<(), String> {
         return Err(format!("{name} must be a whole number, 0 or more"));
     } else if matches!(
         name,
-        "compile_settle_s" | "compile_jobs" | "compile_idle_kill_s"
+        "compile_settle_s" | "compile_jobs" | "compile_idle_kill_s" | "syspolicyd_max_pct"
     ) && v > i64::from(u32::MAX)
     {
         return Err(format!("{name} is too large"));
@@ -235,6 +248,7 @@ fn base_gate(c: &ResourceCfg, name: &str) -> Option<i64> {
         "compile_settle_s" => i64::from(c.compile_settle_s),
         "compile_jobs" => i64::from(c.compile_jobs),
         "compile_idle_kill_s" => i64::from(c.compile_idle_kill_s),
+        "syspolicyd_max_pct" => i64::from(c.syspolicyd_max_pct),
         "stall_ms" => c.disk_stall_ms as i64,
         "memory.floor_mb" => c.memory_floor_mb? as i64,
         _ => c.disk_floor_gb as i64,
@@ -338,6 +352,9 @@ struct State {
     wait_class: HashMap<TaskId, String>,
     /// The build disk's responsiveness and the limit on it. `None`: no stall gate.
     stall: Option<Arc<dyn StallSource>>,
+    /// How busy `syspolicyd` is, and the limit on it. `None`: no syspolicyd gate.
+    policy: Option<Arc<dyn PolicySource>>,
+    policy_max: u32,
     /// When the last scheduling pass ran. A waiter skips its own pass while this is
     /// younger than the broker's tick (see `acquire`).
     last_pass: Option<Instant>,
@@ -512,6 +529,7 @@ fn apply_gate(st: &mut State, name: &str) {
         }
         "compile_idle_kill_s" => st.compile_idle_kill_s = v.unwrap_or(0) as u32,
         "stall_ms" => st.stall_ms = v.unwrap_or(0) as u64,
+        "syspolicyd_max_pct" => st.policy_max = v.unwrap_or(0) as u32,
         "memory.floor_mb" => {
             st.floor_mb = v.map(|n| n as u64);
             st.mem = None;
@@ -632,6 +650,8 @@ impl Broker {
                 kernel_waits: HashMap::new(),
                 wait_class: HashMap::new(),
                 stall: None,
+                policy: None,
+                policy_max: cfg.syspolicyd_max_pct,
                 last_pass: None,
                 pass_running: false,
                 passes: 0,
@@ -896,6 +916,19 @@ impl Broker {
         self.cv.notify_all();
     }
 
+    /// Turn the syspolicyd gate on: no further compile while `source` reads at or above `max_pct`.
+    pub fn set_policy(&self, source: Arc<dyn PolicySource>, max_pct: u32) {
+        let mut st = lock(&self.st);
+        st.policy = Some(source);
+        st.policy_max = st
+            .overrides
+            .get("syspolicyd_max_pct")
+            .map_or(max_pct, |v| *v as u32);
+        st = self.pass(st);
+        drop(st);
+        self.cv.notify_all();
+    }
+
     /// Read the CPU and stall sources afresh. Every plan is made right after
     /// this, so the ledger's stall reading is always current.
     fn cpu_gate(&self, st: &mut State) -> Option<CpuGate> {
@@ -906,6 +939,17 @@ impl Broker {
                 .map(|slow_ms| StallGate { slow_ms, max_ms })
         });
         st.ledger.set_stall(stall);
+        let max_pct = st.policy_max;
+        let policy = st
+            .policy
+            .as_ref()
+            .filter(|_| max_pct > 0)
+            .and_then(|source| {
+                source
+                    .busy_pct()
+                    .map(|busy_pct| PolicyGate { busy_pct, max_pct })
+            });
+        st.ledger.set_policy(policy);
         st.cpu_busy = st.cpu.busy_pct();
         st.cpu_busy.map(|busy_pct| CpuGate {
             busy_pct,
@@ -2107,6 +2151,12 @@ impl Broker {
         if st.stall.is_some() && st.stall_ms > 0 {
             rules.push_str(", and not while the build disk is slow");
         }
+        if st.policy.is_some() && st.policy_max > 0 {
+            rules.push_str(&format!(
+                ", and not while macOS's syspolicyd uses {}% CPU or more checking new programs",
+                st.policy_max
+            ));
+        }
         if st.compile_idle_kill_s > 0 {
             rules.push_str(&format!(
                 ". A task's command that uses no CPU for {} while holding a slot is stopped",
@@ -2288,6 +2338,12 @@ fn compile_reason(w: &mason_scheduler::Wait, now: u64, limit: u32) -> (&'static 
                 "the build disk is slow ({:.1} s to answer, limit {:.1} s)",
                 *slow_ms as f64 / 1000.0,
                 *max_ms as f64 / 1000.0
+            ),
+        ),
+        WaitCause::Policy { busy_pct, max_pct } => (
+            "syspolicyd",
+            format!(
+                "macOS's syspolicyd is at {busy_pct}% CPU checking new programs (limit {max_pct}%)"
             ),
         ),
         WaitCause::Disk { free_mb, floor_mb } => (
