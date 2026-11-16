@@ -806,6 +806,56 @@ fn a_debt_closes_by_itself_when_the_suite_later_goes_green_on_a_base_with_the_ta
     assert!(how.contains("checks green on"), "{how}");
 }
 
+fn record_skip_green_at_tip(d: &std::sync::Arc<mason_daemon::daemon::Daemon>, tests: &[&str]) {
+    let pid = d.project_id_by_name("scratch").unwrap();
+    let p = d.project(pid).unwrap().clone();
+    let tip = mason_landing::git::run(&p.path, &["rev-parse", &p.base_ref()]).unwrap();
+    let tests: Vec<String> = tests.iter().map(|t| t.to_string()).collect();
+    d.store
+        .put_suite_skip_green("scratch", "checks", tip.trim(), 5, &tests, 1)
+        .unwrap();
+}
+
+#[test]
+fn a_debt_is_paid_by_a_green_that_skipped_a_quarantined_test_and_the_test_is_named() {
+    // s476: while a test is quarantined no whole-suite green is recorded, so nothing was paid.
+    let s = two_tasks_world();
+    let d = start(&s);
+    let t = file_it(&d, "Skip the checks");
+    mason_daemon::suites::skip(&d, t, "suite:checks", "later", "brian", false).unwrap();
+    wait_state(&d, t, State::Landed, 120);
+    // No whole-suite green has been recorded at a base holding this task.
+    d.store
+        .write(|c| c.execute("DELETE FROM suite_green", []).map(|_| ()))
+        .unwrap();
+    record_skip_green_at_tip(&d, &["net::flaky_dns"]);
+    assert_eq!(mason_daemon::suites::settle_debts(&d), 1);
+    let how = d.store.debts(Some(t.0), false).unwrap()[0].how.clone();
+    assert!(how.contains("net::flaky_dns"), "{how}");
+}
+
+#[test]
+fn a_debt_whose_task_added_the_skipped_test_is_not_paid_by_a_green_that_skipped_it() {
+    let s = world(
+        vec![commit(
+            "echo 'fn flaky_dns() {}' > added_test.rs",
+            "add the test",
+        )],
+        &[],
+        &def("", "", ""),
+    );
+    let d = start(&s);
+    let t = file_it(&d, "Add a test");
+    mason_daemon::suites::skip(&d, t, "suite:checks", "later", "brian", false).unwrap();
+    wait_state(&d, t, State::Landed, 120);
+    d.store
+        .write(|c| c.execute("DELETE FROM suite_green", []).map(|_| ()))
+        .unwrap();
+    record_skip_green_at_tip(&d, &["net::flaky_dns"]);
+    assert_eq!(mason_daemon::suites::settle_debts(&d), 0);
+    assert_eq!(d.store.debts(Some(t.0), false).unwrap()[0].status, "open");
+}
+
 #[test]
 fn a_debt_never_closes_on_a_green_at_a_base_without_the_tasks_commit() {
     let s = two_tasks_world();

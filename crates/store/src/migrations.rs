@@ -723,6 +723,18 @@ const STEPS: &[&str] = &[
     // and which Apple host it belongs to (`sandbox` or `production`). Additive, nullable.
     "ALTER TABLE devices ADD COLUMN push_token TEXT;
      ALTER TABLE devices ADD COLUMN push_env TEXT;",
+    // 42: a suite that went green at a base with known-red tests skipped (s476, decision 0469):
+    // the base, the count that ran, and the skipped tests, one per line. Not the whole suite's
+    // green, so kept apart from `suite_green`.
+    "CREATE TABLE suite_skip_green (
+         project  TEXT NOT NULL,
+         suite    TEXT NOT NULL,
+         base     TEXT NOT NULL,
+         executed INTEGER NOT NULL,
+         skipped  TEXT NOT NULL,
+         at_ms    INTEGER NOT NULL,
+         PRIMARY KEY (project, suite, base)
+     );",
 ];
 
 pub const SCHEMA_VERSION: u32 = STEPS.len() as u32;
