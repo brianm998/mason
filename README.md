@@ -393,6 +393,7 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s438**: The monitor-button update test now checks `kind`, `own_version` and `own_path` of the parsed request body instead of an exact string that predated s326.
 - **s439**: the Swift top bar's mascot picture no longer counts toward the bar's minimum width, so TopBarFitTests passes again at the 1000 pt window minimum.
 - **s440**: the Swift top bar's busiest-state picture shrinks in a narrow window, so the bar fits the 1000 pt main window minimum again (it needed 1079.6 pt).
+- **s441**: The cpuhistory test's `.filter(...)` closure is joined onto one line as rustfmt wants, so `workspace_is_fmt_clean` passes again.
 - **s443**: MonitorUI's AppKit calls (click count, pasteboard, occlusion, cursors) are behind `#if canImport(AppKit)` with iOS equivalents, and `MonitorUI` is now a library product.
 - **s446**: an XcodeGen spec builds one universal iPhone and iPad app from `clients/swift` with `make ios`, picking the phone or iPad root by size class, after the first real iOS compile fixes.
 - **s447**: `monitor-tool snapshot --ipad` renders the monitor offscreen at 1366×1024 and 1180×820 (scale 2, light and dark), and tests can check the top bar fits an iPad width.
@@ -402,6 +403,7 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s458**: The iPad root is the Mac's `RootView` with the iPad's feature flags (no agent sessions, read-only pipeline graph), a 0.9 default text scale, 44 pt hit areas, a touch-draggable sidebar handle and long-press equivalents for hover tooltips.
 - **s459**: the iPhone root is a navigation stack (sidebar first, a row pushes its page) over the Mac monitor's own pages in one narrow column, with a status line, banners, the session-limit stepper and tile taps, and speech stays off.
 - **s460**: The daemon can now push alerts straight to paired iPhones and iPads through Apple's push service with the owner's own key (new `apns` channel, per-device tokens a device registers for itself, dead tokens cleared), on by default for needs-attention, failed, landing, stalled and daemon-down once `[apns]` is set up.
+- **s461**: `testTheIosIconStaysOpaqueAndFullBleed` now reads the icon from the asset catalog path it moved to in s446, so it passes again.
 - **s466**: The iPhone/iPad app now asks once (with an explanation screen) for notification permission, sends its hex APNs token and sandbox/production env to the daemon it is paired with (re-sending when the token changes, deleting it on Forget or when switched off), opens the task's page when a notification is tapped, and shows a foreground banner only when that item is not already on screen.
 - **s467**: `conformance features` now checks three clients (swift, compose, ios) and reads the `[ipad.*]` and `[phone.*]` deliberate-difference tables, so a feature missing on the iPad or iPhone without a recorded reason fails the gate.
 <!-- status:end -->
