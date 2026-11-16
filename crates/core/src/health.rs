@@ -139,6 +139,8 @@ pub struct Facts {
     /// Slot waits: (task, slot, ms).
     pub slot_waits: Vec<(u64, String, u64)>,
     pub load_pct: Option<u32>,
+    /// Where `load_pct` was read from (`mach`, `loadavg`, `assumed-busy`, ...).
+    pub load_source: Option<&'static str>,
     pub stall_ms: u64,
     /// Launches that have not finished: (task, ms).
     pub frozen_launches: Vec<(Option<u64>, u64)>,
@@ -281,12 +283,23 @@ pub fn judge(x: &Facts, l: &Limits) -> Vec<Finding> {
         ));
     }
     if let Some(p) = x.load_pct.filter(|p| *p >= l.load_pct) {
+        let (summary, evidence) = match x.load_source {
+            Some("assumed-busy") => (
+                "CPU unreadable".to_string(),
+                vec!["CPU reading: assumed-busy (no reading; 100 is a placeholder)".to_string()],
+            ),
+            Some(src) => (
+                format!("the machine is at {p}% load"),
+                vec![format!("CPU reading from {src}")],
+            ),
+            None => (format!("the machine is at {p}% load"), vec![]),
+        };
         out.push(f(
             "overloaded:load".into(),
             "overloaded",
             Severity::Warn,
-            format!("the machine is at {p}% load"),
-            vec![],
+            summary,
+            evidence,
         ));
     }
     if x.stall_ms >= l.stall_ms {
@@ -492,6 +505,32 @@ mod tests {
 
     fn l() -> Limits {
         Limits::default()
+    }
+
+    #[test]
+    fn load_finding_says_unreadable_when_assumed_busy() {
+        let x = Facts {
+            load_pct: Some(100),
+            load_source: Some("assumed-busy"),
+            ..Default::default()
+        };
+        let out = judge(&x, &l());
+        let f = out.iter().find(|f| f.key == "overloaded:load").unwrap();
+        assert!(f.summary.contains("CPU unreadable"));
+        assert!(!f.summary.contains("% load"));
+    }
+
+    #[test]
+    fn load_finding_names_a_known_source() {
+        let x = Facts {
+            load_pct: Some(99),
+            load_source: Some("loadavg"),
+            ..Default::default()
+        };
+        let out = judge(&x, &l());
+        let f = out.iter().find(|f| f.key == "overloaded:load").unwrap();
+        assert_eq!(f.summary, "the machine is at 99% load");
+        assert!(f.evidence.iter().any(|e| e.contains("loadavg")));
     }
 
     #[test]

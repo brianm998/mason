@@ -66,6 +66,28 @@ pub fn signature(failure: &str) -> String {
 
 /// Everything the judgement needs. Takes no broker lock: the wait reasons are the published
 /// snapshot.
+/// The CPU percentage and where it came from: the configured source, else the
+/// `MASON_CPU_FILE` test file, else the load average.
+fn load_reading(
+    cpu: Option<&dyn CpuSource>,
+    cpu_file: Option<std::ffi::OsString>,
+) -> (Option<u32>, Option<&'static str>) {
+    match (cpu, cpu_file) {
+        (Some(c), _) => {
+            let (p, s) = c.reading();
+            (p, Some(s))
+        }
+        (None, Some(f)) => {
+            let p = crate::cpu::FileCpu(f.into()).busy_pct();
+            (p, p.map(|_| "file"))
+        }
+        (None, None) => {
+            let p = crate::cpu::read_loadavg();
+            (p, p.map(|_| "loadavg"))
+        }
+    }
+}
+
 pub fn gather(d: &Arc<Daemon>, now: u64) -> Facts {
     let mut x = Facts::default();
     let Ok(w) = d.world() else { return x };
@@ -182,11 +204,10 @@ pub fn gather(d: &Arc<Daemon>, now: u64) -> Facts {
         ));
     }
     // Overload.
-    x.load_pct = match (&d.cfg.cpu, std::env::var_os("MASON_CPU_FILE")) {
-        (Some(c), _) => c.busy_pct(),
-        (None, Some(f)) => crate::cpu::FileCpu(f.into()).busy_pct(),
-        (None, None) => crate::cpu::read_loadavg(),
-    };
+    (x.load_pct, x.load_source) = load_reading(
+        d.cfg.cpu.as_deref(),
+        std::env::var_os("MASON_CPU_FILE"),
+    );
     x.mem_free_mb = crate::sched::measure_free_memory_mb();
     x.stall_ms = disk_probe_ms(d);
     let launching = mason_step_host::launcher::launching();
@@ -1075,4 +1096,45 @@ pub fn history_json(d: &Daemon, n: usize) -> Value {
         })
         .collect();
     json!({"history": shown})
+}
+
+#[cfg(test)]
+mod load_tests {
+    use super::*;
+
+    #[derive(Debug)]
+    struct Fixed(u32, &'static str);
+
+    impl CpuSource for Fixed {
+        fn busy_pct(&self) -> Option<u32> {
+            Some(self.0)
+        }
+        fn source(&self) -> &'static str {
+            self.1
+        }
+    }
+
+    #[test]
+    fn load_reading_carries_the_source() {
+        let busy = Fixed(100, "assumed-busy");
+        assert_eq!(
+            load_reading(Some(&busy), None),
+            (Some(100), Some("assumed-busy"))
+        );
+        let mach = Fixed(40, "mach");
+        assert_eq!(load_reading(Some(&mach), None), (Some(40), Some("mach")));
+    }
+
+    #[test]
+    fn file_reading_is_called_file() {
+        let dir = std::env::temp_dir().join(format!("mason-load-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("cpu");
+        std::fs::write(&f, "37\n").unwrap();
+        assert_eq!(
+            load_reading(None, Some(f.into())),
+            (Some(37), Some("file"))
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
