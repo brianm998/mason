@@ -107,7 +107,7 @@ fn a_limit_with_a_reset_holds_the_account_until_the_reset() {
     let t0 = now();
     let s = Scratch::new(
         "test -f hello.txt",
-        script(vec![limit_turn(14), develop_turn()]),
+        script(vec![limit_turn(8), develop_turn()]),
     );
     let d = s.start();
     let tasks: Vec<TaskId> = (1..=3)
@@ -119,7 +119,7 @@ fn a_limit_with_a_reset_holds_the_account_until_the_reset() {
     let h = holds::hold_of(&d, "claude").unwrap();
     assert_eq!(h.kind, "limit");
     let reset = h.until_ms.expect("a reset") / 1000;
-    assert!((t0 + 14..=now() + 14).contains(&reset), "{reset} vs {t0}");
+    assert!((t0 + 8..=now() + 8).contains(&reset), "{reset} vs {t0}");
     // The daemon runs two tasks at once: two wait on the account, the third is queued.
     wait_for("the running tasks to wait on the account", 12, || {
         let w = d.world().unwrap();
@@ -461,8 +461,17 @@ fn a_real_daemon_keeps_a_hold_across_a_kill_and_the_cli_holds_and_releases() {
     s.wait_daemon(&mut m);
     s.mason_ok(&["task", "add", "First"]);
     s.mason_ok(&["task", "add", "Second"]);
-    wait_for("the account to be held", 60, || {
-        usage_of(&s, "claude")["status"] == "blocked"
+    // Wait until the hold is stored and both tasks have launched twice (explore, then develop), so
+    // the kill cannot come before the second task has met the limit.
+    wait_for("both tasks held and the hold stored", 60, || {
+        if usage_of(&s, "claude")["status"] != "blocked" {
+            return false;
+        }
+        let Ok(store) = mason_store::Store::open(s.data_dir.join("store.db")) else {
+            return false;
+        };
+        !store.account_holds().unwrap_or_default().is_empty()
+            && (0..2).all(|t| store.launches_for_task(t).map_or(0, |l| l.len()) >= 2)
     });
     let p = usage_of(&s, "claude");
     assert!(
@@ -501,8 +510,14 @@ fn a_real_daemon_keeps_a_hold_across_a_kill_and_the_cli_holds_and_releases() {
     let during: usize = (0..2)
         .map(|t| store.launches_for_task(t).unwrap().len())
         .sum();
-    drop(store);
     assert_eq!(during, before, "no session starts during the hold");
+    // The restart found the hold in force and kept it; there is no need to also wait out the rest
+    // of its 120 s. Move its end to two seconds from now and let the daemon see it expire.
+    for mut h in store.account_holds().unwrap() {
+        h.until_ms = Some((now() + 2) * 1000);
+        store.put_account_hold(h).unwrap();
+    }
+    drop(store);
     s.wait_task(0, "landed", 300);
     s.wait_task(1, "landed", 300);
     assert_eq!(usage_of(&s, "claude")["status"], "ok");

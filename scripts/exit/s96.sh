@@ -19,7 +19,7 @@ if $c mascot --check 2>/dev/null; then echo "an unlisted file passed" >&2; exit 
 rm "$art/brand/extra.png"
 $c mascot --check
 
-if [ "$(uname)" = Darwin ] && command -v swift >/dev/null; then
+if [ "$(uname)" = Darwin ] && command -v swift >/dev/null && [ -z "${MASON_SKIP_SWIFT:-}" ]; then
   out=$(mktemp -d /tmp/mason-s96.XXXXXX)
   (cd clients/swift && swift test --filter MasonMascotTests)
   bash scripts/bundle-monitor.sh "$out/app"

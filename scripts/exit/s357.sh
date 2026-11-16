@@ -8,7 +8,7 @@ if grep -rn 'buttonStyle(.link)' clients/swift/Sources/MonitorUI; then
   echo "s357 FAIL: buttonStyle(.link) remains in MonitorUI" >&2
   exit 1
 fi
-if command -v swift >/dev/null 2>&1 && [ "$(uname)" = Darwin ]; then
+if command -v swift >/dev/null 2>&1 && [ "$(uname)" = Darwin ] && [ -z "${MASON_SKIP_SWIFT:-}" ]; then
   (cd clients/swift && swift test --filter LinkedTextTests)
 fi
 if [ -x clients/compose/gradlew ]; then

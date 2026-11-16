@@ -14,3 +14,12 @@ unsafe_code = "deny"
 
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }
+
+# Line tables keep file and line in panics and backtraces; full debug info only
+# slowed rustc and the linker and filled the target dir. For full info locally:
+# CARGO_PROFILE_DEV_DEBUG=2 cargo test (see docs/self-hosting.md).
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
