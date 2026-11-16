@@ -11,10 +11,11 @@ import okhttp3.WebSocketListener
  * What `daemon.json` says about the running daemon. `pid` and `startedMs` are null
  * when the port was given by hand (`--port`), so there is nothing to watch.
  */
-data class DaemonInfo(val port: Int, val pid: Long? = null, val startedMs: Long? = null) {
+data class DaemonInfo(val port: Int, val pid: Long? = null, val startedMs: Long? = null, val host: String? = null) {
     /** A different daemon (or a restarted one) than [old]. */
     fun replaces(old: DaemonInfo): Boolean =
         port != old.port ||
+            (host != null && old.host != null && host != old.host) ||
             (pid != null && old.pid != null && pid != old.pid) ||
             (startedMs != null && old.startedMs != null && startedMs != old.startedMs)
 }
@@ -60,10 +61,15 @@ interface SocketEvents {
 interface MonitorSocket {
     fun send(text: String): Boolean
     fun close()
+    /** The HTTP status of a refused upgrade (401: the token was revoked); null when there was none. */
+    val refusal: Int? get() = null
 }
 
 fun interface SocketFactory {
     fun open(port: Int, events: SocketEvents): MonitorSocket
+
+    /** Opens the host and port chosen for this attempt; a local factory ignores the host. */
+    fun open(info: DaemonInfo, events: SocketEvents): MonitorSocket = open(info.port, events)
 }
 
 class OkHttpSocketFactory : SocketFactory {
