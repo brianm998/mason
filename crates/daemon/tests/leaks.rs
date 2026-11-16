@@ -28,6 +28,7 @@ fn dropping_a_scratch_world_stops_its_hosts_agents_and_daemon() {
     let mut m = s.masond(&[], &[]);
     s.wait_daemon(&mut m);
     s.mason_ok(&["task", "add", "Slow explore"]);
+    s.wait_task(0, "exploring", 60);
     wait_for("a running step host", 60, || {
         !command_lines_with(&format!("--dir {needle}/d/h")).is_empty()
     });
