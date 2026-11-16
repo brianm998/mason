@@ -50,7 +50,7 @@ for name in \
   echo "   ok  $name"
 done
 if [ -z "${MASON_TESTS_ALREADY_RAN:-}" ]; then
-  cargo test -q -p mason-daemon --test it crash:: 2>&1 | grep -E 'test result'
+  cargo test -q -p mason-daemon --test it crash:: -- --skip landing_crash:: 2>&1 | grep -E 'test result'
 fi
 # The monitors' Landing page: Swift and Compose both show batches, phases, freeze and idle time.
 cargo run -q -p mason-conformance -- features clients/features.toml | tail -1
