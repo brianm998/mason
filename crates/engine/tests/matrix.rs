@@ -13,6 +13,8 @@ fn events(t: TaskId, other: TaskId, decision: DecisionId) -> Vec<(&'static str, 
     vec![
         ("Approved", E::Approved { task: t }),
         ("Rejected", E::Rejected { task: t }),
+        ("Deferred", E::Deferred { task: t }),
+        ("Undeferred", E::Undeferred { task: t }),
         (
             "Admitted",
             E::Admitted {
@@ -159,8 +161,10 @@ fn expected(from: State, ev: &str) -> Option<State> {
     let step = from.is_step();
     let live = step || matches!(from, S::Queued | S::NeedsAttention);
     match ev {
-        "Approved" if from == S::Proposed => Some(S::Queued),
-        "Rejected" if from == S::Proposed => Some(S::Canceled),
+        "Approved" if matches!(from, S::Proposed | S::Deferred) => Some(S::Queued),
+        "Rejected" if matches!(from, S::Proposed | S::Deferred) => Some(S::Canceled),
+        "Deferred" if from == S::Proposed => Some(S::Deferred),
+        "Undeferred" if from == S::Deferred => Some(S::Proposed),
         "Admitted" if from == S::Queued => Some(S::Exploring),
         "StepSucceeded" => match from {
             S::Exploring => Some(S::Developing),
@@ -180,7 +184,9 @@ fn expected(from: State, ev: &str) -> Option<State> {
         "Answered" if from == S::NeedsAttention => Some(S::Developing),
         "StepFailed" if step => Some(S::Failed),
         "Retried" if step || matches!(from, S::NeedsAttention | S::Failed) => Some(S::Testing),
-        "Canceled" if live || matches!(from, S::Proposed | S::Failed) => Some(S::Canceled),
+        "Canceled" if live || matches!(from, S::Proposed | S::Deferred | S::Failed) => {
+            Some(S::Canceled)
+        }
         "ClosedNoChange" if live => Some(S::Landed),
         "Paused" if live => Some(from),
         "ExploreAnyway" if from == S::Queued => Some(from), // before it starts; after a skip is tested separately
@@ -190,7 +196,7 @@ fn expected(from: State, ev: &str) -> Option<State> {
         "BlockersChanged" if matches!(from, S::Proposed | S::Queued) => Some(from),
         "Repinned" if step || matches!(from, S::NeedsAttention | S::Failed) => Some(from),
         "Revived" if from == S::Canceled => Some(S::Queued),
-        "TrackerEdited" if live || from == S::Proposed => Some(from),
+        "TrackerEdited" if live || matches!(from, S::Proposed | S::Deferred) => Some(from),
         "Tick" => Some(from),
         _ => None, // includes Resumed (never paused) and WaitEnded (no wait)
     }
@@ -231,5 +237,5 @@ fn every_state_and_event_pair() {
             checked += 1;
         }
     }
-    assert_eq!(checked, 11 * 24);
+    assert_eq!(checked, 12 * 26);
 }
