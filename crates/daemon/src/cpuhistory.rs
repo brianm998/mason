@@ -137,7 +137,11 @@ impl CpuRing {
                     .chars()
                     .map(|c| if c.is_control() { ' ' } else { c })
                     .collect();
-                let kind: String = s.kind.chars().filter(|c| *c != ':' && !c.is_control()).collect();
+                let kind: String = s
+                    .kind
+                    .chars()
+                    .filter(|c| *c != ':' && !c.is_control())
+                    .collect();
                 out.push_str(&format!("\t{kind}:{}:{}:{label}", s.task, s.permille));
             }
             out.push('\n');
@@ -158,8 +162,7 @@ impl CpuRing {
             let (Ok(at_ms), Ok(busy_permille)) = (at.parse::<u64>(), busy.parse::<i32>()) else {
                 continue;
             };
-            if at_ms < from || at_ms > now_ms || r.coarse.back().is_some_and(|b| b.at_ms >= at_ms)
-            {
+            if at_ms < from || at_ms > now_ms || r.coarse.back().is_some_and(|b| b.at_ms >= at_ms) {
                 continue;
             }
             let mut shares = vec![];
@@ -365,7 +368,10 @@ mod tests {
         while at <= now {
             r.push(
                 at,
-                &usage(500, &[("task", 7, 300), ("batch", 303, 100), ("other", 0, 100)]),
+                &usage(
+                    500,
+                    &[("task", 7, 300), ("batch", 303, 100), ("other", 0, 100)],
+                ),
             );
             at += 20_000;
         }

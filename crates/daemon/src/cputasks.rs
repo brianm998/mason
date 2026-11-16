@@ -570,10 +570,19 @@ mod tests {
 
     #[test]
     fn batch_debt_and_check_hosts_are_attributed_by_their_id() {
-        assert_eq!(host_bucket("t445r3063-check-cargo-workspace-build0"), Some(Bucket::Task(445)));
-        assert_eq!(host_bucket("b303-r1-floor-cargo-workspace0"), Some(Bucket::Batch(303)));
+        assert_eq!(
+            host_bucket("t445r3063-check-cargo-workspace-build0"),
+            Some(Bucket::Task(445))
+        );
+        assert_eq!(
+            host_bucket("b303-r1-floor-cargo-workspace0"),
+            Some(Bucket::Batch(303))
+        );
         assert_eq!(host_bucket("b12-r2-base-x"), Some(Bucket::Batch(12)));
-        assert_eq!(host_bucket("debt146-u-cargo-workspace"), Some(Bucket::Task(146)));
+        assert_eq!(
+            host_bucket("debt146-u-cargo-workspace"),
+            Some(Bucket::Task(146))
+        );
         assert_eq!(host_bucket("ledger7-b-x"), Some(Bucket::Task(7)));
         assert_eq!(host_bucket("debtx"), None);
         assert_eq!(host_bucket("bogus"), None);
