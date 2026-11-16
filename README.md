@@ -413,5 +413,6 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s467**: `conformance features` now checks three clients (swift, compose, ios) and reads the `[ipad.*]` and `[phone.*]` deliberate-difference tables, so a feature missing on the iPad or iPhone without a recorded reason fails the gate.
 - **s469**: The Android module is now a real app in the Compose project (`-Pmason.android=true`): phone screens over the shared core, NSD discovery with the extra-host fallback and a pinned `wss` link, QR or typed-code pairing with tokens sealed by the Android Keystore, and `android` is a fourth column in the parity gate.
 - **s470**: A new workflow `ios-testflight.yml` archives the iOS app with automatic signing through an App Store Connect API key and uploads it to TestFlight from `develop`, building unsigned with a warning when the secrets are absent; the owner's one-time steps are in `docs/ios-testflight.md`.
+- **s474**: The workspace `[profile.dev]` now sets `debug = "line-tables-only"` and `[profile.dev.package."*"] debug = false`, which cut the target dir of a cold workspace test build by about 20% and the wall time by about 7%.
 - **s477**: Stage 477: shorter real-time waits in the daemon tests
 <!-- status:end -->
