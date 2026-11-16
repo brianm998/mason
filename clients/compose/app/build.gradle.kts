@@ -12,6 +12,7 @@ dependencies {
     implementation(compose.material3)
     implementation("org.json:json:20240303")
     testImplementation(kotlin("test"))
+    testImplementation("org.junit.platform:junit-platform-launcher")
     @OptIn(org.jetbrains.compose.ExperimentalComposeLibrary::class)
     testImplementation(compose.uiTest)
 }
