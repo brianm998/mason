@@ -1767,6 +1767,7 @@ async fn update_status(Shared(d): Shared<Arc<Daemon>>) -> Res {
             let s = d2.update_status.lock().unwrap_or_else(|e| e.into_inner()).clone();
             let c = d2.update_check.lock().unwrap_or_else(|e| e.into_inner()).clone();
             let (waiting, daemon_button, daemon_confirm) = crate::update::wait_view(&s, c.outdated);
+            let held = *d2.update_held.lock().unwrap_or_else(|e| e.into_inner());
             json!({
                 "waiting": waiting, "daemon_button": daemon_button, "daemon_confirm": daemon_confirm,
                 "latest": c.latest, "behind": c.behind, "outdated": c.outdated,
@@ -1777,6 +1778,7 @@ async fn update_status(Shared(d): Shared<Arc<Daemon>>) -> Res {
                 "bad": rt.bad(),
                 "alert": rt.alert(),
                 "channel": crate::update::UpdateCfg::load(&d2.cfg.config_dir).ok().map(|c| c.channel.name()),
+                "held_since_ms": held.map(|h| h.0), "next_window_ms": held.map(|h| h.1),
                 "phase": s.phase, "target": s.target, "error": s.error, "log": s.log,
             })
         })
@@ -1870,6 +1872,7 @@ async fn update_start(
         rollback: b["rollback"].as_bool().unwrap_or(false),
         check_only: b["check"].as_bool().unwrap_or(false),
         now: b["now"].as_bool().unwrap_or(false),
+        auto: b["auto"].as_bool().unwrap_or(false),
     };
     if matches!(
         d.update_status
