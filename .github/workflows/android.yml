@@ -1,0 +1,46 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+name: Android
+
+# Builds the Android phone app's debug APK and runs its unit tests (JVM only: no emulator, no
+# device, no signing) when the Android module or the Compose core it shares changes. A workflow of
+# its own so the path filter is possible (ci.yml must run on every change); a newer push cancels
+# the older run.
+on:
+  pull_request:
+    paths:
+      - "clients/compose/android/**"
+      - "clients/compose/core/**"
+      - "clients/compose/*.kts"
+      - "clients/compose/gradle.properties"
+      - "schemas/**"
+      - ".github/workflows/android.yml"
+  push:
+    branches: [develop]
+    paths:
+      - "clients/compose/android/**"
+      - "clients/compose/core/**"
+      - "clients/compose/*.kts"
+      - "clients/compose/gradle.properties"
+      - "schemas/**"
+      - ".github/workflows/android.yml"
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  monitor-android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: "21" }
+      - uses: gradle/actions/setup-gradle@v4
+        with: { gradle-version: "8.12" }
+      # The runner image carries the Android SDK (ANDROID_HOME). Build and unit tests only.
+      - run: gradle --no-daemon -Pmason.android=true :android:assembleDebug :android:testDebugUnitTest
+        working-directory: clients/compose

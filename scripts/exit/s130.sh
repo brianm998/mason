@@ -6,7 +6,12 @@
 # "Waiting for compile slot:", has "in line" and "held by", no "behind", neither queued command,
 # and is under 200 characters.
 set -euo pipefail
+# A failing command under `set -e` would end the script with no word: say which one.
+trap 'rc=$?; [ "$rc" -eq 0 ] || echo "FAILED (exit $rc) at line $LINENO: $BASH_COMMAND" >&2' ERR
 cd "$(git rev-parse --show-toplevel)"
+# Run from inside a MASON task, `mason run` would register as that task, not as an
+# interactive run: the holder is then "held by task N", not "held by interactive".
+unset MASON_TASK MASON_STEP MASON_TITLE MASON_STEP_KIND
 command -v python3 >/dev/null || { echo "s130 needs python3" >&2; exit 1; }
 root=$(mktemp -d /tmp/mason-s130.XXXXXX); daemon=""
 cleanup() {
@@ -117,7 +122,8 @@ for w in "$list" "$detail"; do
   case "$w" in *"in line"*) ;; *) fail "no position: $w";; esac
   case "$w" in *"held by"*) ;; *) fail "no holder: $w";; esac
   case "$w" in *behind*) fail "still names who is ahead: $w";; esac
-  case "$w" in *mason-s130-first*|*mason-s130-second*|*xxxxxxxxxx*) fail "names a queued command: $w";; esac
+  # The holder's own command is shown, cut short (its first 10 x's are fine); a queued one is not.
+  case "$w" in *mason-s130-first*|*mason-s130-second*|*xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx*) fail "names a queued command, or the holder's in full: $w";; esac
   [ "${#w}" -lt 200 ] || fail "${#w} characters: $w"
 done
 
