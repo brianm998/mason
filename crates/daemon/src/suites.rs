@@ -170,14 +170,13 @@ fn queues_per_suite(def: &Definition, step: &Step, chosen: &[Suite]) -> bool {
         || chosen.iter().filter(|s| compile_only(def, step, s)).count() > 1
 }
 
-/// What one suite's run holds in a step that queues suite by suite: the step's `uses`
-/// (without `compile` when the suite built first) and the suite's own.
+/// What one suite's run holds in a step that queues suite by suite: the step's `uses` and the
+/// suite's own. The step's `compile` is dropped for every suite: one that built first has had
+/// its compile slot already, and one with no build does not compile, so holding `compile` for it
+/// only reserved slots the compile queue needed (s471). A suite that does compile without a
+/// build of its own says so in its own `uses` (`compile = 1`).
 pub(crate) fn run_needs(def: &Definition, step: &Step, suite: &Suite) -> Needs {
-    let mut uses = if suite.build.is_some() {
-        crate::jobs::tests_uses(&step.uses)
-    } else {
-        step.uses.clone()
-    };
+    let mut uses = crate::jobs::tests_uses(&step.uses);
     for (k, v) in suite_uses(def, suite) {
         let have = uses.entry(k).or_insert(0);
         *have = (*have).max(v);

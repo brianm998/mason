@@ -13,6 +13,8 @@ fn events(t: TaskId, other: TaskId, decision: DecisionId) -> Vec<(&'static str, 
     vec![
         ("Approved", E::Approved { task: t }),
         ("Rejected", E::Rejected { task: t }),
+        ("Deferred", E::Deferred { task: t }),
+        ("Undeferred", E::Undeferred { task: t }),
         (
             "Admitted",
             E::Admitted {
@@ -163,6 +165,8 @@ fn expected(from: State, ev: &str) -> Option<State> {
     match ev {
         "Approved" if matches!(from, S::Proposed | S::Deferred) => Some(S::Queued),
         "Rejected" if matches!(from, S::Proposed | S::Deferred) => Some(S::Canceled),
+        "Deferred" if from == S::Proposed => Some(S::Deferred),
+        "Undeferred" if from == S::Deferred => Some(S::Proposed),
         "Admitted" if from == S::Queued => Some(S::Exploring),
         "StepSucceeded" => match from {
             S::Exploring => Some(S::Developing),
@@ -195,8 +199,6 @@ fn expected(from: State, ev: &str) -> Option<State> {
         "Repinned" if step || matches!(from, S::NeedsAttention | S::Failed) => Some(from),
         "Revived" if from == S::Canceled => Some(S::Queued),
         "TrackerEdited" if live || matches!(from, S::Proposed | S::Deferred) => Some(from),
-        "Deferred" if from == S::Proposed => Some(S::Deferred),
-        "Undeferred" if from == S::Deferred => Some(S::Proposed),
         "Tick" => Some(from),
         _ => None, // includes Resumed (never paused) and WaitEnded (no wait)
     }
