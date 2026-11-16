@@ -2,8 +2,8 @@
 
 use crate::explain::{explain, WaitCause};
 use crate::plan::{
-    plan, Capacity, CompilePace, CpuGate, DiskGate, Holder, Kind, Needs, Plan, Request, StallGate,
-    World, COMPILE,
+    plan, Capacity, CompilePace, CpuGate, DiskGate, Holder, Kind, Needs, Plan, PolicyGate, Request,
+    StallGate, World, COMPILE,
 };
 use crate::rank::Rank;
 use std::collections::BTreeMap;
@@ -21,6 +21,7 @@ pub struct Ledger {
     last_compile_start: Option<u64>,
     disk: Option<DiskGate>,
     stall: Option<StallGate>,
+    policy: Option<PolicyGate>,
     /// When each resource last had a grant. Only observed, never consulted by `plan`.
     last_grant: BTreeMap<String, u64>,
     last_any_grant: Option<u64>,
@@ -93,6 +94,11 @@ impl Ledger {
     /// The caller's latest reading of how slowly the build disk answers.
     pub fn set_stall(&mut self, stall: Option<StallGate>) {
         self.stall = stall;
+    }
+
+    /// The caller's latest reading of how busy `syspolicyd` is checking new programs.
+    pub fn set_policy(&mut self, policy: Option<PolicyGate>) {
+        self.policy = policy;
     }
 
     pub fn capacity(&self, name: &str) -> Option<Capacity> {
@@ -182,6 +188,7 @@ impl Ledger {
                 compile_pace: self.compile_pace(),
                 disk: self.disk,
                 stall: self.stall,
+                policy: self.policy,
                 max_wait: self.max_wait_ms,
             },
             &self.waiting,
@@ -240,7 +247,7 @@ impl Ledger {
                 WaitCause::Full { resource } | WaitCause::Behind { resource } => {
                     (resource.clone(), false, self.last_grant.get(resource))
                 }
-                WaitCause::Cpu { .. } | WaitCause::Settling { .. } => {
+                WaitCause::Cpu { .. } | WaitCause::Settling { .. } | WaitCause::Policy { .. } => {
                     (COMPILE.to_string(), false, self.last_grant.get(COMPILE))
                 }
                 WaitCause::Exclusive => ("exclusive".into(), false, self.last_any_grant.as_ref()),
@@ -320,6 +327,7 @@ impl Ledger {
                 compile_pace: self.compile_pace(),
                 disk: self.disk,
                 stall: self.stall,
+                policy: self.policy,
                 max_wait: self.max_wait_ms,
             },
             &self.waiting,

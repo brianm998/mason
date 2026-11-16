@@ -3,7 +3,9 @@
 //! The ordering rule, the passing rule, and "no deadlock, no lost lease",
 //! checked over random workloads by simulating the whole run.
 
-use mason_scheduler::{explain, CpuGate, Kind, Ledger, Needs, Rank, StallGate, WaitCause};
+use mason_scheduler::{
+    explain, CpuGate, Kind, Ledger, Needs, PolicyGate, Rank, StallGate, WaitCause,
+};
 use proptest::prelude::*;
 use std::collections::BTreeMap;
 
@@ -461,6 +463,51 @@ fn a_disk_stall_holds_only_a_further_compile() {
         max_ms: 2_000,
     }));
     assert_eq!(l.schedule(2, None, None).grants, vec![second]);
+}
+
+#[test]
+fn a_busy_syspolicyd_holds_only_a_further_compile() {
+    let mut l = Ledger::new();
+    l.set_capacity("llm:claude", 2, Kind::Llm);
+    l.set_capacity("compile", 4, Kind::Machine);
+    l.set_policy(Some(PolicyGate {
+        busy_pct: 640,
+        max_pct: 300,
+    }));
+    let compile = |n: u64| Rank::new(false, 1, 2, n, n, false);
+    let first = l.submit(compile(1), Needs::of(&[("compile", 1)]), "#1", 0);
+    assert_eq!(
+        l.schedule(0, None, None).grants,
+        vec![first],
+        "the first compile starts: nothing of ours is running, so the queue is never held for good"
+    );
+    let second = l.submit(compile(2), Needs::of(&[("compile", 1)]), "#2", 1);
+    let agent = l.submit(compile(3), Needs::of(&[("llm:claude", 1)]), "#3", 1);
+    let p = l.schedule(1, None, None);
+    assert_eq!(p.grants, vec![agent], "agents are not held by syspolicyd");
+    let w = &p.waits[&second];
+    assert!(matches!(w.cause, WaitCause::Policy { .. }), "{:?}", w.cause);
+    let text = explain(w, 1);
+    assert!(
+        text.contains("syspolicyd is at 640% CPU") && text.contains("limit 300%"),
+        "{text}"
+    );
+    // A limit of 0 turns the gate off.
+    l.set_policy(Some(PolicyGate {
+        busy_pct: 640,
+        max_pct: 0,
+    }));
+    assert_eq!(l.schedule(2, None, None).grants, vec![second]);
+    let third = l.submit(compile(4), Needs::of(&[("compile", 1)]), "#4", 3);
+    l.set_policy(Some(PolicyGate {
+        busy_pct: 120,
+        max_pct: 300,
+    }));
+    assert_eq!(
+        l.schedule(3, None, None).grants,
+        vec![third],
+        "below the limit"
+    );
 }
 
 #[test]
