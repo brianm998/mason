@@ -21,6 +21,8 @@ pub enum WaitCause {
     Settling { until: u64 },
     /// The build disk has been answering slowly and a compile is already running.
     DiskStall { slow_ms: u64, max_ms: u64 },
+    /// macOS's `syspolicyd` is busy checking new programs and a compile is already running.
+    Policy { busy_pct: u32, max_pct: u32 },
     /// Needs more of the resource than its limit, so it cannot run until the
     /// limit is raised.
     TooBig {
@@ -218,6 +220,7 @@ pub fn cause_class(cause: &WaitCause) -> String {
         WaitCause::Disk { .. } => "disk-floor".into(),
         WaitCause::Cpu { .. } | WaitCause::Settling { .. } => "cpu".into(),
         WaitCause::DiskStall { .. } => "disk-stall".into(),
+        WaitCause::Policy { .. } => "syspolicyd".into(),
     }
 }
 
@@ -230,6 +233,7 @@ fn reason(cause: &WaitCause, now_ms: u64) -> Option<String> {
         )),
         WaitCause::Cpu { busy_pct, max_pct } => Some(format!("CPU {busy_pct}% > {max_pct}%")),
         WaitCause::DiskStall { .. } => Some("the build disk is slow".into()),
+        WaitCause::Policy { .. } => Some("macOS is busy checking new programs".into()),
         WaitCause::Disk { .. } => Some("disk is low".into()),
         WaitCause::Memory { .. } => Some("memory is low".into()),
         _ => None,
@@ -302,6 +306,9 @@ fn explain_cause(w: &Wait, now_ms: u64) -> String {
             *slow_ms as f64 / 1000.0,
             *max_ms as f64 / 1000.0
         ),
+        WaitCause::Policy { busy_pct, max_pct } => format!(
+            "compile waiting: syspolicyd is at {busy_pct}% CPU checking new programs (limit {max_pct}%)"
+        ),
         WaitCause::Settling { until } => format!(
             "compile waiting: letting the last compile show in CPU use ({} s)",
             until.saturating_sub(now_ms).div_ceil(1000)
@@ -355,6 +362,10 @@ mod tests {
             WaitCause::DiskStall {
                 slow_ms: 3000,
                 max_ms: 1000,
+            },
+            WaitCause::Policy {
+                busy_pct: 640,
+                max_pct: 300,
             },
             WaitCause::TooBig {
                 resource: r("compile"),
