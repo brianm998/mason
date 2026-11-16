@@ -63,3 +63,5 @@ tokio = { version = "1.54.1", features = ["test-util"] }
 mason-conformance = { version = "0.1.0", path = "../conformance" }
 rusqlite = "0.41.1"
 tempfile = "3.27.0"
+ring = "0.17"
+base64 = "0.22"

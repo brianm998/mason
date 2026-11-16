@@ -16,6 +16,16 @@ pub struct DeviceRow {
     pub revoked_at: Option<u64>,
 }
 
+/// A device a push can go to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PushTarget {
+    pub device: u64,
+    pub role: String,
+    pub token: String,
+    /// `sandbox` or `production`.
+    pub env: String,
+}
+
 fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<DeviceRow> {
     Ok(DeviceRow {
         id: r.get::<_, i64>(0)? as u64,
@@ -74,10 +84,84 @@ impl Store {
     pub fn revoke_device(&self, id: u64, now: u64) -> Result<bool, StoreError> {
         self.write(move |c| {
             let n = c.execute(
-                "UPDATE devices SET revoked_at = ?2 WHERE id = ?1 AND revoked_at IS NULL",
+                "UPDATE devices SET revoked_at = ?2, push_token = NULL, push_env = NULL
+                 WHERE id = ?1 AND revoked_at IS NULL",
                 params![id as i64, now as i64],
             )?;
             Ok(n > 0)
+        })
+    }
+
+    /// Record the push token of a live device. False when there is no such live device.
+    pub fn set_push(&self, id: u64, token: &str, env: &str) -> Result<bool, StoreError> {
+        let (token, env) = (token.to_string(), env.to_string());
+        self.write(move |c| {
+            let n = c.execute(
+                "UPDATE devices SET push_token = ?2, push_env = ?3
+                 WHERE id = ?1 AND revoked_at IS NULL",
+                params![id as i64, token, env],
+            )?;
+            Ok(n > 0)
+        })
+    }
+
+    /// Forget a device's push token.
+    pub fn clear_push(&self, id: u64) -> Result<(), StoreError> {
+        self.write(move |c| {
+            c.execute(
+                "UPDATE devices SET push_token = NULL, push_env = NULL WHERE id = ?1",
+                params![id as i64],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Forget a token Apple said is dead, unless the device has registered a new one since.
+    pub fn clear_push_token(&self, id: u64, token: &str) -> Result<(), StoreError> {
+        let token = token.to_string();
+        self.write(move |c| {
+            c.execute(
+                "UPDATE devices SET push_token = NULL, push_env = NULL
+                 WHERE id = ?1 AND push_token = ?2",
+                params![id as i64, token],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// The live devices that have a push token, in id order.
+    pub fn push_targets(&self) -> Result<Vec<PushTarget>, StoreError> {
+        self.read(move |c| {
+            let mut st = c.prepare(
+                "SELECT id, role, push_token, push_env FROM devices
+                 WHERE revoked_at IS NULL AND push_token IS NOT NULL ORDER BY id",
+            )?;
+            let rows = st.query_map([], |r| {
+                Ok(PushTarget {
+                    device: r.get::<_, i64>(0)? as u64,
+                    role: r.get(1)?,
+                    token: r.get(2)?,
+                    env: r.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                })
+            })?;
+            rows.collect()
+        })
+    }
+
+    /// The push token of one device (for tests and `GET`-less checks).
+    pub fn push_of(&self, id: u64) -> Result<Option<(String, String)>, StoreError> {
+        self.read(move |c| {
+            let mut st = c.prepare("SELECT push_token, push_env FROM devices WHERE id = ?1")?;
+            let mut rows = st.query_map(params![id as i64], |r| {
+                Ok((
+                    r.get::<_, Option<String>>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                ))
+            })?;
+            Ok(rows
+                .next()
+                .transpose()?
+                .and_then(|(t, e)| t.map(|t| (t, e.unwrap_or_default()))))
         })
     }
 

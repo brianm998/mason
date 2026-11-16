@@ -1,0 +1,5 @@
+# 0450: The pairing screen is a pure state struct; the exchange runs in a small model
+
+`PairingScreenState` holds the path (scan or nearby), the chosen daemon or scanned address, the code and the last error, and changes only through methods, so it is tested without a UI. `PairingModel` is the only part that does I/O: it calls `Pairing.pair`, stores the `PairedRecord`, and tells `RemoteSession`. A `mason://pair` link fills the fields and waits for the user to press Pair, instead of pairing at once, because a link from anywhere should not spend a code unseen.
+
+A Nearby choice pairs against the fingerprint from the unauthenticated mDNS record, so the screen warns of it and shows the first 8 characters to compare with `mason lan status`; a QR code or link carries the full fingerprint and is the stronger path. Errors keep the daemon's own message and add a lead-in chosen by status (400 wrong code, 410 expired, 429 locked). Settings and Forget live in a sheet opened from a gear in the iOS app target, because the phone target has no settings page yet. Rejected: auto-pairing on a scanned code (a misread or hostile QR would pair without a look).
