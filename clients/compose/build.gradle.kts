@@ -4,6 +4,19 @@
 // SwiftUI client, for macOS, Windows and Linux. `core` is everything that is not drawing
 // (the connection, state, navigation, search, the conformance items); `app` is the
 // Compose views, the window, and `monitor-tool`.
+// The Android Gradle plugin is put on the build's classpath, and only when `:android` is in the
+// build (settings.gradle.kts includes it with -Pmason.android=true), so the desktop build never
+// resolves it. It has to be here, beside the Kotlin plugin, to share a class loader with it.
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+    if (gradle.rootProject.findProject(":android") != null || findProject(":android") != null) {
+        dependencies { classpath("com.android.tools.build:gradle:8.5.2") }
+    }
+}
+
 plugins {
     kotlin("jvm") version "2.1.0" apply false
     id("org.jetbrains.compose") version "1.7.3" apply false
