@@ -41,9 +41,19 @@ pub enum Access {
     Refuse(u16, String),
 }
 
+/// The one change a viewer may make: set or clear the push token of its own device. The route
+/// names no device; the daemon applies it to the caller's own row (the LAN guard's peer), so a
+/// viewer cannot touch anyone else's.
+pub fn is_self_push(method: &str, path: &str) -> bool {
+    path == "/devices/self/push" && matches!(method, "POST" | "DELETE")
+}
+
 /// May a device with this role make this request? Anything that is not a plain read is a
 /// change. Managing devices and pairing codes is the owner's alone.
 pub fn decide(role: Role, method: &str, path: &str) -> Access {
+    if is_self_push(method, path) {
+        return Access::Allow;
+    }
     let read = matches!(method, "GET" | "HEAD");
     let admin = path == "/devices"
         || path.starts_with("/devices/")
@@ -162,6 +172,27 @@ mod tests {
             decide(Role::Owner, "POST", "/tasks/3/cancel"),
             Access::Allow
         );
+    }
+
+    #[test]
+    fn a_device_may_set_and_clear_its_own_push_token_whatever_its_role() {
+        for role in [Role::Owner, Role::Viewer] {
+            assert_eq!(decide(role, "POST", "/devices/self/push"), Access::Allow);
+            assert_eq!(decide(role, "DELETE", "/devices/self/push"), Access::Allow);
+        }
+        // Only that exact route, and only those methods.
+        for (m, p) in [
+            ("GET", "/devices/self/push"),
+            ("PUT", "/devices/self/push"),
+            ("POST", "/devices/3/push"),
+            ("POST", "/devices/self/push/x"),
+            ("POST", "/devices/3/revoke"),
+        ] {
+            assert!(
+                matches!(decide(Role::Viewer, m, p), Access::Refuse(403, _)),
+                "{m} {p}"
+            );
+        }
     }
 
     #[test]
