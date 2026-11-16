@@ -64,8 +64,6 @@ pub fn signature(failure: &str) -> String {
     s.chars().take(80).collect()
 }
 
-/// Everything the judgement needs. Takes no broker lock: the wait reasons are the published
-/// snapshot.
 /// The CPU percentage and where it came from: the configured source, else the
 /// `MASON_CPU_FILE` test file, else the load average.
 fn load_reading(
@@ -88,6 +86,8 @@ fn load_reading(
     }
 }
 
+/// Everything the judgement needs. Takes no broker lock: the wait reasons are the published
+/// snapshot.
 pub fn gather(d: &Arc<Daemon>, now: u64) -> Facts {
     let mut x = Facts::default();
     let Ok(w) = d.world() else { return x };
