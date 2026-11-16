@@ -59,17 +59,25 @@ PY
 
 edit() { echo "// spike edit $1" >>"$2/crates/daemon/src/lib.rs"; }
 
+# SPIKE_STEPS picks what a variant runs (default "a b edit"): a = cold build in worktree a,
+# b = cold build in worktree b, edit = the one-line daemon edit rebuilt in a. A second run
+# that only wants "b" reuses the disk cache the first run filled.
+steps=${SPIKE_STEPS:-a b edit}
+want() { case " $steps " in *" $1 "*) return 0 ;; esac; return 1; }
+
 variant() { # <name> <port> <env...>
   local name=$1 p=$2
   shift 2
+  case " ${SPIKE_VARIANTS:-A B C D} " in *" $name "*) ;; *) return 0 ;; esac
   SCCACHE_SERVER_PORT=$p sccache --stop-server >/dev/null 2>&1
   env SCCACHE_SERVER_PORT="$p" "$@" sccache --start-server >/dev/null
-  rm -rf "$out/t-$name-a" "$out/t-$name-b"
-  build "$name-cold-a" "$p" "$wa" "$out/t-$name-a" "$@"
-  build "$name-cold-b" "$p" "$wb" "$out/t-$name-b" "$@"
-  edit "$name" "$wa"
-  build "$name-edit-a" "$p" "$wa" "$out/t-$name-a" "$@"
-  git -C "$wa" checkout -- crates/daemon/src/lib.rs
+  want a && { rm -rf "$out/t-$name-a"; build "$name-cold-a" "$p" "$wa" "$out/t-$name-a" "$@"; }
+  want b && { rm -rf "$out/t-$name-b"; build "$name-cold-b" "$p" "$wb" "$out/t-$name-b" "$@"; }
+  if want edit; then
+    edit "$name" "$wa"
+    build "$name-edit-a" "$p" "$wa" "$out/t-$name-a" "$@"
+    git -C "$wa" checkout -- crates/daemon/src/lib.rs
+  fi
   SCCACHE_SERVER_PORT=$p sccache --stop-server >/dev/null 2>&1
 }
 
