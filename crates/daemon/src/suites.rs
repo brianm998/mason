@@ -2035,6 +2035,10 @@ fn held_env(c: &Ctx, held: &Needs) -> Vec<(String, String)> {
 fn run_build(who: &Who, suite: &Suite, build: &str, n: usize, cwd: &Path) -> Built {
     let id = format!("{}-b{n}-{}", who.id_prefix, suite.name);
     let limit = suite.timeout.unwrap_or(Duration::from_secs(1800));
+    // Object sets of older crate hashes pile up in a task's build directory (#476).
+    if let (Some((task, _)), Some(p)) = (who.task, who.project_cfg()) {
+        crate::taskcache::prune_task_objects(&who.d, &p, task.0, now_ms());
+    }
     let ran = match run_hosted(
         &who.d,
         &id,
