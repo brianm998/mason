@@ -23,6 +23,23 @@ fn slow_develop() -> serde_json::Value {
     json!({"steps": {"explore": [explore_turn()], "develop": [turn]}})
 }
 
+/// Like `slow_develop`, but the last pause waits (up to about 120 s) for `release` to exist,
+/// so the test decides when the step may end instead of a sleep that a loaded machine overruns.
+fn gated_develop(release: &std::path::Path) -> serde_json::Value {
+    let gate = format!(
+        "for i in $(seq 1 1200); do [ -f '{}' ] && exit 0; sleep 0.1; done",
+        release.display()
+    );
+    let mut turn = vec![
+        json!({"say": "first"}),
+        json!({"sleep_ms": 1500}),
+        json!({"say": "second"}),
+        json!({"sh": gate}),
+    ];
+    turn.extend(develop_turn().as_array().unwrap().iter().cloned());
+    json!({"steps": {"explore": [explore_turn()], "develop": [turn]}})
+}
+
 fn live_tokens(
     d: &std::sync::Arc<mason_daemon::Daemon>,
     t: TaskId,
@@ -32,7 +49,9 @@ fn live_tokens(
 
 #[test]
 fn a_running_steps_cell_gains_tokens_before_it_ends() {
-    let s = Scratch::new("test -f hello.txt", slow_develop());
+    let release = std::env::temp_dir().join(format!("mason-live-tokens-{}", std::process::id()));
+    let _ = std::fs::remove_file(&release);
+    let s = Scratch::new("test -f hello.txt", gated_develop(&release));
     let d = s.start();
     let t = file_task(&d, "Live tokens");
     // While the step is still running, the tokens the session has used are in its cell.
@@ -41,16 +60,12 @@ fn a_running_steps_cell_gains_tokens_before_it_ends() {
         if state_of(&d, t) == State::Landed {
             panic!("the step ended before its tokens were seen");
         }
-        seen = live_tokens(&d, t).filter(|k| k.output.is_some_and(|o| o >= 25));
+        seen = live_tokens(&d, t).filter(|k| k.input == Some(4) && k.output == Some(50));
         seen.is_some()
     });
     let seen = seen.unwrap();
-    // One message is input 2, cache read 1000, cache write 50, output 25.
-    assert_eq!(seen.input.unwrap() % 2, 0);
-    assert!(
-        seen.output.unwrap() >= 25 && seen.output.unwrap() <= 50,
-        "{seen:?}"
-    );
+    // One message is input 2, cache read 1000, cache write 50, output 25; both have been said.
+    assert_eq!((seen.input, seen.output), (Some(4), Some(50)), "{seen:?}");
     // The cell the monitors get carries it, with the output figures free of stream events.
     let p = d.progress_of_task(t).pop().unwrap();
     let cell = mason_daemon::progress::cell_of(&p, mason_protocol::CellState::Part, "running");
@@ -63,7 +78,10 @@ fn a_running_steps_cell_gains_tokens_before_it_ends() {
             .any(|b| b.starts_with(b"{\"type\":\"stream_event\"")),
         "stream events are not kept as output"
     );
+    // Let the step finish.
+    std::fs::write(&release, b"go").unwrap();
     wait_state(&d, t, State::Landed, 90);
+    let _ = std::fs::remove_file(&release);
 }
 
 /// The tokens of the task's running step, as `mason task show --json` has them.
