@@ -1378,7 +1378,10 @@ pub(crate) fn prepare_worktree_only(c: &Ctx) -> Result<(), String> {
         let lock = c.d.repo_lock(c.project_id);
         let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
         git::ensure_worktree(&c.project.path, &c.wt, &c.branch, &c.project.base_ref())
-    })
+    })?;
+    // The agent's own cargo builds into the task's directory too, not into `<worktree>/target`.
+    crate::taskcache::point_cargo_at_task_cache(&c.d, &c.project, c.task.0, &c.wt);
+    Ok(())
 }
 
 /// How long a worktree setup step may take when it has no `budget`.
