@@ -30,7 +30,7 @@ class RemoteSessionTest {
             object : SocketFactory {
                 override fun open(port: Int, events: SocketEvents): MonitorSocket = error("unused")
                 override fun open(info: DaemonInfo, events: SocketEvents): MonitorSocket =
-                    Sock(info, events, refusal).also { sockets += it; if (refusal != null) Thread { Thread.sleep(20); events.onClosed() }.start() }
+                    Sock(info, events, refusal).also { sockets += it; if (refusal != null) Thread { events.onClosed() }.start() }
             }
         }, timing = timing)
         return Triple(s, store, tokens)

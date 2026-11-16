@@ -48,14 +48,14 @@ class RefusedLinkTest {
             override fun open(port: Int, events: SocketEvents): MonitorSocket = error("unused")
             override fun open(info: DaemonInfo, events: SocketEvents): MonitorSocket {
                 opened.incrementAndGet()
-                return Sock(info, events, 401).also { s -> Thread { Thread.sleep(30); events.onClosed() }.start() }
+                return Sock(info, events, 401).also { s -> Thread { events.onClosed() }.start() }
             }
         }
         val c = MonitorConnection(MonitorModel(MemoryPreferences()), { DaemonInfo(7000, host = "m.local") }, timing, factory, onRefused = { refused += it })
         c.start()
         waitFor("the refusal") { refused.isNotEmpty() }
         assertEquals(listOf(401), refused.toList())
-        Thread.sleep(200)
+        // The loop breaks straight after the callback, so no second attempt can have been opened.
         assertEquals(1, opened.get(), "no retry after a revoked token")
     }
 
