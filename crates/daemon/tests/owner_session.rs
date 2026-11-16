@@ -237,6 +237,13 @@ fn provider_flow(codex: bool) {
             ),
         )
         .unwrap();
+        // The project names the codex adapter, so an account must use it.
+        std::fs::write(
+            s.config_dir.join("providers.toml"),
+            "[provider.claude]\nadapter = \"claude\"\nbilling = \"subscription\"\n\n\
+             [provider.codex]\nadapter = \"codex\"\nbilling = \"subscription\"\n",
+        )
+        .unwrap();
     }
     let d = start(&s);
     // A task that has run no agent yet: nothing to resume.
