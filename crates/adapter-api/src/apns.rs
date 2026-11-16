@@ -98,25 +98,31 @@ pub fn make_jwt(key_pem: &str, key_id: &str, team_id: &str, now_ms: u64) -> Resu
     Ok(format!("{input}.{}", b64(sig.as_ref())))
 }
 
-/// (key id, team id, made at, token): the one token in use, so a burst of alerts signs once.
-type Cached = (String, String, u64, String);
+/// (SHA-256 of the key text, key id, team id, made at, token): the one token in use, so a burst
+/// of alerts signs once. The key is held as a digest, not as text.
+type Cached = (Vec<u8>, String, String, u64, String);
 static CACHE: Mutex<Option<Cached>> = Mutex::new(None);
 
-/// The cached provider token, or a new one when it is 50 minutes old or for other settings.
+/// The cached provider token, or a new one when it is 50 minutes old or for another key,
+/// key id or team.
 pub fn cached_jwt(
     key_pem: &str,
     key_id: &str,
     team_id: &str,
     now_ms: u64,
 ) -> Result<String, String> {
+    let digest = ring::digest::digest(&ring::digest::SHA256, key_pem.as_bytes())
+        .as_ref()
+        .to_vec();
     let mut g = CACHE.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some((k, t, at, jwt)) = g.as_ref() {
-        if k == key_id && t == team_id && now_ms >= *at && now_ms - *at < JWT_TTL_MS {
+    if let Some((d, k, t, at, jwt)) = g.as_ref() {
+        if *d == digest && k == key_id && t == team_id && now_ms >= *at && now_ms - *at < JWT_TTL_MS
+        {
             return Ok(jwt.clone());
         }
     }
     let jwt = make_jwt(key_pem, key_id, team_id, now_ms)?;
-    *g = Some((key_id.into(), team_id.into(), now_ms, jwt.clone()));
+    *g = Some((digest, key_id.into(), team_id.into(), now_ms, jwt.clone()));
     Ok(jwt)
 }
 
@@ -231,6 +237,22 @@ mod tests {
             STANDARD.encode(der.as_ref())
         );
         (pem, pair.public_key().as_ref().to_vec())
+    }
+
+    #[test]
+    fn two_keys_with_the_same_kid_and_team_each_get_their_own_jwt() {
+        let (pem_a, pub_a) = key();
+        let (pem_b, pub_b) = key();
+        let ja = cached_jwt(&pem_a, "SAMEKID123", "SAMETEAM12", 1_000_000).unwrap();
+        let jb = cached_jwt(&pem_b, "SAMEKID123", "SAMETEAM12", 1_000_000).unwrap();
+        assert_ne!(ja, jb);
+        for (jwt, public) in [(&ja, &pub_a), (&jb, &pub_b)] {
+            let (input, sig) = jwt.rsplit_once('.').unwrap();
+            let sig = URL_SAFE_NO_PAD.decode(sig).unwrap();
+            UnparsedPublicKey::new(&ECDSA_P256_SHA256_FIXED, public)
+                .verify(input.as_bytes(), &sig)
+                .unwrap();
+        }
     }
 
     fn msg() -> Message {
