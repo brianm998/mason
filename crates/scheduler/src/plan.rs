@@ -204,6 +204,14 @@ fn uses_machine(capacity: &BTreeMap<String, Capacity>, n: &Needs) -> bool {
 /// resources, however many units were free. Two waiters needing one `compile` and one
 /// `test-suite` each, with every test-suite slot taken, held back 16 compile-only builds with
 /// `compile` at 0 of 5 and the CPU 81% idle.
+///
+/// A waiter reserves only on the resources it is short of (s471): those where the holders and
+/// earlier waiters leave too little for it, the `Full` or `Behind` one. Units of a resource that
+/// would fit are not set aside, or N waiting for a full `test-suite` would set aside N `compile`
+/// units with `compile` idle. To keep it from starving, the waiter first in line for its short
+/// resources (no earlier waiter reserved any of it) also reserves its other units, so when the
+/// short resource frees, the rest is there for it in the same pass. A waiter held for no resource
+/// (the CPU, the disk, the machine) reserves everything it needs.
 #[derive(Default)]
 struct Blocked {
     reserved: BTreeMap<String, u32>,
@@ -218,9 +226,31 @@ struct Blocked {
 }
 
 impl Blocked {
-    fn add(&mut self, capacity: &BTreeMap<String, Capacity>, n: &Needs, holders: &[Holder]) {
+    fn add(
+        &mut self,
+        capacity: &BTreeMap<String, Capacity>,
+        usage: &Usage,
+        n: &Needs,
+        holders: &[Holder],
+    ) {
+        let short: Vec<&String> = n
+            .amounts
+            .iter()
+            .filter(|(r, a)| {
+                let reserved = self.reserved.get(*r).copied().unwrap_or(0);
+                let used = usage.used.get(*r).copied().unwrap_or(0);
+                let units = capacity.get(*r).map_or(0, |c| c.units);
+                used + reserved + **a > units
+            })
+            .map(|(r, _)| r)
+            .collect();
+        let first = short
+            .iter()
+            .all(|r| self.reserved.get(*r).copied().unwrap_or(0) == 0);
         for (r, a) in &n.amounts {
-            *self.reserved.entry(r.clone()).or_insert(0) += a;
+            if short.is_empty() || first || short.contains(&r) {
+                *self.reserved.entry(r.clone()).or_insert(0) += a;
+            }
         }
         if n.exclusive && !self.machine_all {
             self.machine_all = true;
@@ -450,7 +480,7 @@ pub fn plan(world: &World, waiting: &[Request]) -> Plan {
                 out.waits.insert(r.id, wait);
                 // A request that can never fit must not hold up the others.
                 if !matches!(fitted, Fit::Never(_)) {
-                    blocked.add(capacity, &r.needs, &holders);
+                    blocked.add(capacity, &usage, &r.needs, &holders);
                     ahead.push((r, cause));
                 }
             }

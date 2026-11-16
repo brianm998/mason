@@ -151,6 +151,8 @@ fn events(t: TaskId, other: TaskId, decision: DecisionId) -> Vec<(&'static str, 
                 priority: Priority::High,
             },
         ),
+        ("Deferred", E::Deferred { task: t }),
+        ("Undeferred", E::Undeferred { task: t }),
         ("Tick", E::Tick),
     ]
 }
