@@ -3,8 +3,9 @@
 //! The CPU readings over time, for the monitors' graph. Recent readings are kept
 //! as sampled (`FINE_CAP` of them, an hour at 5 s); every reading is also folded
 //! into one-minute buckets (`COARSE_CAP`, 24 h), each the mean of its readings with
-//! a share missing from a reading counting as 0. Held in memory only: a restart
-//! starts the graph afresh (decision 0321).
+//! a share missing from a reading counting as 0. The minute buckets are saved to a
+//! file under the data dir and loaded on start (decision 0465, replacing the
+//! memory-only rule of 0321); the fine ring is memory only.
 
 use mason_protocol::{CpuHistory, CpuPoint, CpuShare, CpuUsage};
 use std::collections::{BTreeMap, VecDeque};
@@ -18,6 +19,9 @@ pub const MINUTE_MS: u64 = 60_000;
 pub const FINE_STEP_MS: u64 = 5_000;
 /// The longest span served.
 pub const MAX_SPAN_MS: u64 = COARSE_CAP as u64 * MINUTE_MS;
+
+/// The file under the data dir.
+pub const FILE: &str = "cpu-history.txt";
 
 type Key = (String, u64);
 
@@ -94,7 +98,12 @@ impl CpuRing {
         let minute = at_ms / MINUTE_MS;
         if self.acc.as_ref().is_some_and(|a| a.minute != minute) {
             if let Some(done) = self.acc.take() {
-                self.coarse.push_back(done.point());
+                let pt = done.point();
+                // A bucket restored from the file for the same minute is replaced.
+                if self.coarse.back().is_some_and(|b| b.at_ms >= pt.at_ms) {
+                    self.coarse.pop_back();
+                }
+                self.coarse.push_back(pt);
                 while self.coarse.len() > COARSE_CAP {
                     self.coarse.pop_front();
                 }
@@ -112,6 +121,93 @@ impl CpuRing {
                 .entry((s.kind.clone(), s.task))
                 .or_insert_with(|| (s.label.clone(), 0));
             e.1 += s.permille as u64;
+        }
+    }
+
+    /// The minute buckets (and the open minute's so far), one line each:
+    /// `at_ms TAB busy TAB kind:task:permille:label ...`.
+    pub fn to_text(&self) -> String {
+        let mut out = String::new();
+        let open = self.acc.as_ref().map(Bucket::point);
+        for p in self.coarse.iter().chain(open.iter()) {
+            out.push_str(&format!("{}\t{}", p.at_ms, p.busy_permille));
+            for s in &p.shares {
+                let label: String = s
+                    .label
+                    .chars()
+                    .map(|c| if c.is_control() { ' ' } else { c })
+                    .collect();
+                let kind: String = s.kind.chars().filter(|c| *c != ':' && !c.is_control()).collect();
+                out.push_str(&format!("\t{kind}:{}:{}:{label}", s.task, s.permille));
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    /// Buckets from [`CpuRing::to_text`], dropping those older than 24 h before
+    /// `now_ms`, those out of order and any line that does not parse.
+    pub fn from_text(text: &str, now_ms: u64) -> CpuRing {
+        let from = now_ms.saturating_sub(MAX_SPAN_MS);
+        let mut r = CpuRing::default();
+        for l in text.lines() {
+            let mut f = l.split('\t');
+            let (Some(at), Some(busy)) = (f.next(), f.next()) else {
+                continue;
+            };
+            let (Ok(at_ms), Ok(busy_permille)) = (at.parse::<u64>(), busy.parse::<i32>()) else {
+                continue;
+            };
+            if at_ms < from || at_ms > now_ms || r.coarse.back().is_some_and(|b| b.at_ms >= at_ms)
+            {
+                continue;
+            }
+            let mut shares = vec![];
+            for s in f {
+                let mut q = s.splitn(4, ':');
+                let (Some(k), Some(t), Some(pm), Some(label)) =
+                    (q.next(), q.next(), q.next(), q.next())
+                else {
+                    continue;
+                };
+                let (Ok(task), Ok(permille)) = (t.parse(), pm.parse()) else {
+                    continue;
+                };
+                shares.push(CpuShare {
+                    task,
+                    kind: k.to_string(),
+                    label: label.to_string(),
+                    title: String::new(),
+                    project: String::new(),
+                    permille,
+                });
+            }
+            r.coarse.push_back(CpuPoint {
+                at_ms,
+                busy_permille,
+                shares,
+            });
+            while r.coarse.len() > COARSE_CAP {
+                r.coarse.pop_front();
+            }
+        }
+        r
+    }
+
+    /// Read the file; an absent or unreadable one gives an empty ring.
+    pub fn load(path: &std::path::Path, now_ms: u64) -> CpuRing {
+        std::fs::read_to_string(path)
+            .map(|t| CpuRing::from_text(&t, now_ms))
+            .unwrap_or_default()
+    }
+
+    /// Write the file (through a temporary one, so a crash leaves the old). A
+    /// failure is logged and the memory copy kept.
+    pub fn save(&self, path: &std::path::Path) {
+        let tmp = path.with_extension("tmp");
+        let r = std::fs::write(&tmp, self.to_text()).and_then(|()| std::fs::rename(&tmp, path));
+        if let Err(e) = r {
+            tracing::warn!("cannot save the CPU history to {}: {e}", path.display());
         }
     }
 
@@ -258,6 +354,42 @@ mod tests {
             );
             assert_eq!(p.busy_permille, 400);
         }
+    }
+
+    #[test]
+    fn the_buckets_round_trip_through_the_file_and_old_ones_are_dropped() {
+        let mut r = CpuRing::default();
+        let now = 30 * 3_600_000u64;
+        // Hours 2..30 of readings, one per minute-and-a-bit; the first hours are over 24 h old.
+        let mut at = 2 * 3_600_000u64;
+        while at <= now {
+            r.push(
+                at,
+                &usage(500, &[("task", 7, 300), ("batch", 303, 100), ("other", 0, 100)]),
+            );
+            at += 20_000;
+        }
+        let text = r.to_text();
+        let back = CpuRing::from_text(&text, now);
+        let h = back.query(now, MAX_SPAN_MS);
+        assert!(!h.points.is_empty());
+        assert!(h.points.iter().all(|p| p.at_ms >= now - MAX_SPAN_MS));
+        assert!(back.coarse.front().unwrap().at_ms >= now - MAX_SPAN_MS);
+        let last = h.points.last().unwrap();
+        assert_eq!(last.busy_permille, 500);
+        let b = last.shares.iter().find(|s| s.kind == "batch").unwrap();
+        assert_eq!((b.task, b.permille, b.label.as_str()), (303, 100, "#303"));
+        // Garbage lines are skipped.
+        let junk = CpuRing::from_text(&format!("x\ny\tz\n{text}"), now);
+        assert_eq!(junk.coarse.len(), back.coarse.len());
+        // And the file itself.
+        let dir = std::env::temp_dir().join(format!("mason-cpuhist-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join(FILE);
+        r.save(&f);
+        assert_eq!(CpuRing::load(&f, now).coarse.len(), back.coarse.len());
+        assert!(CpuRing::load(&dir.join("none"), now).coarse.is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
