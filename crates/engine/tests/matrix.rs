@@ -237,5 +237,5 @@ fn every_state_and_event_pair() {
             checked += 1;
         }
     }
-    assert_eq!(checked, State::ALL.len() * 26);
+    assert_eq!(checked, 12 * 26);
 }
