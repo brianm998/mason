@@ -23,5 +23,8 @@ PY
 grep -q 'macOS {' desktop/build.gradle.kts
 grep -q 'mason-monitor.icns' desktop/build.gradle.kts
 grep -q 'ic_launcher' android/src/main/AndroidManifest.xml
-if grep -q 'include(":android")' settings.gradle.kts; then echo "android must stay out of settings" >&2; exit 1; fi
+# The Android module is in the build only on request (-Pmason.android=true), never unconditionally,
+# so the desktop build does not need the Android SDK or plugin (stage 469 puts it in on request).
+if grep -qE '^include\(":android"\)' settings.gradle.kts; then echo "android must not be included unconditionally" >&2; exit 1; fi
+grep -q 'mason.android' settings.gradle.kts
 echo "s351 OK"

@@ -105,8 +105,8 @@ fn main() {
                 std::fs::read_to_string(&file).unwrap_or_else(|e| die(&format!("{file}: {e}")));
             let r = features::check(&text).unwrap_or_else(|e| die(&format!("{file}: {e}")));
             println!(
-                "{} features; done in swift {}, in compose {}, in ios {}",
-                r.features, r.done[0], r.done[1], r.done[2]
+                "{} features; done in swift {}, in compose {}, in ios {}, in android {}",
+                r.features, r.done[0], r.done[1], r.done[2], r.done[3]
             );
             for p in &r.problems {
                 eprintln!("  {p}");
