@@ -29,7 +29,7 @@ struct ProgressCells: View {
                 Cell(state: c.state, fill: c.state == .part ? c.fill : .outline,
                      tint: (slow || quiet) && c.state == .part ? theme.slow : theme.accent)
                     .frame(width: theme.cell, height: theme.cell)
-                    .help(helpText(c))
+                    .hint(helpText(c))
                     .accessibilityLabel(c.spokenLabel)
             }
         }
@@ -284,7 +284,7 @@ struct CountTile: View {
         }
         .contentShape(Rectangle())
         .modifier(TileTap(model: model, state: count.state))
-        .help(model.tileTooltip(count))
+        .hint(model.tileTooltip(count))
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(model.tileCount(count)) \(label)")
         .accessibilityIdentifier("tile:\(count.state)")
@@ -305,6 +305,7 @@ struct Pill: ViewModifier {
             .background(RoundedRectangle(cornerRadius: theme.radius).fill(prominent ? theme.accent : theme.surface))
             .foregroundStyle(prominent ? Color.white : theme.text)
             .overlay(RoundedRectangle(cornerRadius: theme.radius).stroke(theme.border, lineWidth: prominent ? 0 : 1))
+            .touchTarget()
     }
 }
 
@@ -360,9 +361,9 @@ struct CopyButton: View {
             }
             .font(theme.small())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.plain).touchTarget()
         .foregroundStyle(theme.muted)
-        .help("Copy \(value)")
+        .hint("Copy \(value)")
     }
 }
 
@@ -405,7 +406,7 @@ struct CopyValueButton: View {
             .font(theme.small())
         }
         .buttonStyle(.bordered)
-        .help(target.value)
+        .hint(target.value)
         .accessibilityIdentifier("copy:\(target.label)")
     }
 }
@@ -667,23 +668,21 @@ struct ApprovalView: View {
 /// The actions a task offers now: exactly the daemon's `allowed_actions`.
 struct ActionButtons: View {
     @Environment(\.theme) var theme
+    @Environment(\.features) var features
     @ObservedObject var model: MonitorModel
     let row: TaskRow
     var hasApprovalView = false
 
+    /// The daemon's actions this platform may show: with agent sessions off there is no Open session.
+    static func offered(_ actions: [String], features: PlatformFeatures) -> [String] {
+        actions.filter { features.allows(action: $0) }
+    }
+
     var body: some View {
-        HStack(spacing: theme.spacing) {
-            // Approve and Reject have their own view (ApprovalView) wherever there is one; a
-            // non-owner sees no buttons at all for what only the owner may do.
-            ForEach(row.allowedActions.filter { shown($0) }, id: \.self) { a in
-                Button { run(a) } label: { Text(label(a)).pill(prominent: a == "approve") }
-                    .buttonStyle(.plain)
-                    .accessibilityIdentifier("action:\(row.id):\(a)")
-            }
-            if let notice = model.sessionNotice {
-                Text(notice).font(theme.small()).foregroundStyle(theme.attention)
-                    .accessibilityIdentifier("action:\(row.id):open_session:notice")
-            }
+        // One row when it fits; on a phone, too many buttons for the width stack in a column.
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: theme.spacing) { buttons }
+            VStack(alignment: .leading, spacing: theme.spacing) { buttons }
         }
         .alert(OpenSession.confirmQuestion, isPresented: Binding(
             get: { model.sessionPrompt == row.id },
@@ -691,6 +690,20 @@ struct ActionButtons: View {
         )) {
             Button("Open anyway") { model.answerSessionPrompt(true) }
             Button("Cancel", role: .cancel) {}
+        }
+    }
+
+    /// Approve and Reject have their own view (ApprovalView) wherever there is one; a
+    /// non-owner sees no buttons at all for what only the owner may do.
+    @ViewBuilder var buttons: some View {
+        ForEach(Self.offered(row.allowedActions, features: features).filter { shown($0) }, id: \.self) { a in
+            Button { run(a) } label: { Text(label(a)).pill(prominent: a == "approve") }
+                .buttonStyle(.plain).touchTarget()
+                .accessibilityIdentifier("action:\(row.id):\(a)")
+        }
+        if let notice = model.sessionNotice {
+            Text(notice).font(theme.small()).foregroundStyle(theme.attention)
+                .accessibilityIdentifier("action:\(row.id):open_session:notice")
         }
     }
 
@@ -745,7 +758,7 @@ struct BlockersView: View {
             VStack(alignment: .leading, spacing: theme.spacingSmall) {
                 ForEach(row.blockerLinks, id: \.task) { l in
                     HStack(spacing: theme.spacing) {
-                        Button("#\(l.task)") { model.go(.task(l.task)) }.buttonStyle(.link).font(theme.body())
+                        TaskLink(title: "#\(l.task)", font: theme.body()) { model.go(.task(l.task)) }
                         Text("\(l.state), \(l.origin)").font(theme.small()).foregroundStyle(theme.muted)
                         if model.canAct {
                             ForEach(l.actions, id: \.self) { a in
@@ -906,7 +919,7 @@ struct EditProposalSheet: View {
             }
         }
         .padding(theme.spacingLarge)
-        .frame(width: 520)
+        .sheetWidth(520)
     }
 }
 
@@ -938,7 +951,7 @@ struct ImproveSheet: View {
             }
         }
         .padding(theme.spacingLarge)
-        .frame(width: 480)
+        .sheetWidth(480)
     }
 }
 
@@ -988,6 +1001,83 @@ struct SSHKeySheet: View {
     }
 }
 
+/// The pointing hand over a view, pushed on hover and popped on leaving or disappearing, balanced
+/// the way the split-bar handle's cursor is (`Root.swift`). There is no hover on touch screens.
+struct PointingHand: ViewModifier {
+    @State private var inside = false
+
+    func body(content: Content) -> some View {
+        #if canImport(AppKit)
+        content
+            .onHover { over in
+                if over && !inside { NSCursor.pointingHand.push() }
+                if !over && inside { NSCursor.pop() }
+                inside = over
+            }
+            .onDisappear { if inside { NSCursor.pop(); inside = false } }
+        #else
+        content
+        #endif
+    }
+}
+
+/// The one look of a link: the link colour (`theme.link`), underlined, and the pointing hand on
+/// hover. Everything that opens a task's page or the tracker uses this, so a new link cannot forget
+/// a part of it.
+struct LinkStyle: ViewModifier {
+    @Environment(\.theme) var theme
+
+    func body(content: Content) -> some View {
+        content.foregroundStyle(theme.link).underline().modifier(PointingHand())
+    }
+}
+
+/// Only the colour and underline, for the title inside a row that is clickable as a whole (the row
+/// itself takes `pointingHand()`).
+struct LinkLook: ViewModifier {
+    @Environment(\.theme) var theme
+
+    func body(content: Content) -> some View {
+        content.foregroundStyle(theme.link).underline()
+    }
+}
+
+extension View {
+    /// Link colour, underline and pointing hand.
+    func linkStyle() -> some View { modifier(LinkStyle()) }
+    /// Link colour and underline, no cursor of its own.
+    func linkLook() -> some View { modifier(LinkLook()) }
+    /// The pointing hand on hover.
+    func pointingHand() -> some View { modifier(PointingHand()) }
+}
+
+/// A reference that opens a task's page in the monitor.
+struct TaskLink: View {
+    let title: String
+    var font: Font? = nil
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) { Text(title).linkStyle() }
+            .buttonStyle(.plain)
+            .font(font)
+    }
+}
+
+/// A reference that opens a web page (the tracker, a CI run) in the default browser.
+struct WebLink: View {
+    @Environment(\.openURL) private var openURL
+    let title: String
+    let url: URL
+    var font: Font? = nil
+
+    var body: some View {
+        Button { openURL(url) } label: { Text(title).linkStyle() }
+            .buttonStyle(.plain)
+            .font(font)
+    }
+}
+
 /// Text whose task numbers and CI references are links (`Linkify`): a task opens its page in the
 /// monitor (so back and forward work), a CI reference opens in the default browser. Selection is
 /// kept when `selectable`.
@@ -1013,10 +1103,12 @@ struct LinkedText: View {
             case .task(let id, _):
                 a.link = URL(string: "\(taskScheme)://\(id)")
                 a.foregroundColor = linkColor
+                a.underlineStyle = .single
             case .url(let u, _):
                 if let url = URL(string: u) {
                     a.link = url
                     a.foregroundColor = linkColor
+                    a.underlineStyle = .single
                 }
             }
             out += a
@@ -1042,15 +1134,16 @@ struct LinkedText: View {
             let end = out.characters.index(start, offsetBy: n)
             out[start..<end].link = target
             out[start..<end].foregroundColor = linkColor
+            out[start..<end].underlineStyle = .single
         }
         return out
     }
 
     private var styled: Text {
         if let base {
-            return Text(Self.link(base, model.linkify(String(base.characters)), linkColor: theme.accent))
+            return Text(Self.link(base, model.linkify(String(base.characters)), linkColor: theme.link))
         }
-        return Text(Self.attributed(model.linkify(text), linkColor: theme.accent))
+        return Text(Self.attributed(model.linkify(text), linkColor: theme.link))
     }
 
     var body: some View {
@@ -1078,7 +1171,7 @@ struct CiLinksLine: View {
         HStack(spacing: theme.spacingSmall) {
             if issue != 0 {
                 if Linkify.isWebURL(issueURL), let u = URL(string: issueURL) {
-                    Link("issue #\(issue)", destination: u).font(theme.body())
+                    WebLink(title: "issue #\(issue)", url: u, font: theme.body())
                         .accessibilityIdentifier("detail:issue")
                 } else {
                     Text("issue #\(issue)").font(theme.body()).foregroundStyle(theme.muted)
@@ -1089,7 +1182,7 @@ struct CiLinksLine: View {
                 Text("CI").font(theme.body()).foregroundStyle(theme.muted)
                 ForEach(Array(shown.enumerated()), id: \.offset) { _, l in
                     if let u = URL(string: l.url) {
-                        Link(l.label.isEmpty ? l.url : l.label, destination: u).font(theme.body())
+                        WebLink(title: l.label.isEmpty ? l.url : l.label, url: u, font: theme.body())
                     }
                 }
             }
@@ -1142,5 +1235,17 @@ final class SharedTick: ObservableObject {
             timer?.invalidate()
             timer = nil
         }
+    }
+}
+
+extension View {
+    /// A sheet's width: fixed on the Mac, where a sheet is as wide as its content says; on iOS it
+    /// is at most this wide and never wider than the screen (a phone is narrower than 460 pt).
+    @ViewBuilder func sheetWidth(_ width: CGFloat) -> some View {
+        #if os(macOS)
+        frame(width: width)
+        #else
+        frame(maxWidth: width)
+        #endif
     }
 }

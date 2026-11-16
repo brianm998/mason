@@ -81,7 +81,7 @@ struct SidebarPane: View {
                 .padding(theme.spacing)
                 .background(model.page == .home ? theme.accent.opacity(0.18) : Color.clear)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.plain).touchTarget()
         .accessibilityIdentifier("sidebar:home")
     }
 
@@ -93,7 +93,7 @@ struct SidebarPane: View {
                 .padding(.horizontal, theme.spacing).padding(.vertical, theme.spacingSmall + 2)
                 .background(model.page == page ? theme.accent.opacity(0.18) : Color.clear)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.plain).touchTarget()
         .accessibilityIdentifier("sidebar:\(title.lowercased().replacingOccurrences(of: " ", with: "-"))")
     }
 }
@@ -146,7 +146,7 @@ struct SectionHeader: View {
             .padding(.leading, theme.spacing).padding(.vertical, theme.spacingSmall + 2)
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.plain).touchTarget()
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(section.title), \(model.countText(section)), \(open ? "expanded" : "collapsed")")
         .accessibilityIdentifier("section:\(section.state)")
@@ -156,7 +156,7 @@ struct SectionHeader: View {
                     .padding(.horizontal, theme.spacing).padding(.vertical, theme.spacingSmall + 2)
                     .contentShape(Rectangle())
             }
-            .buttonStyle(.plain).help("Open the \(section.title) page")
+            .buttonStyle(.plain).touchTarget().hint("Open the \(section.title) page")
             .accessibilityLabel("Open \(section.title)")
             .accessibilityIdentifier("section-open:\(section.state)")
         } else {
@@ -196,8 +196,8 @@ struct RowView: View, Equatable {
             Button { go(.task(row.id)) } label: {
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(alignment: .firstTextBaseline, spacing: theme.spacingSmall) {
-                        Text(row.key).font(theme.body(.semibold)).foregroundStyle(theme.muted).fixedSize()
-                        Text(row.title).font(theme.body()).foregroundStyle(theme.text).lineLimit(2)
+                        Text(row.key).font(theme.body(.semibold)).linkLook().fixedSize()
+                        Text(row.title).font(theme.body()).linkLook().lineLimit(2)
                     }
                     Text("\(row.project), \(activity)")
                         .font(theme.small()).foregroundStyle(theme.muted).lineLimit(2)
@@ -211,18 +211,19 @@ struct RowView: View, Equatable {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.plain).touchTarget()
+            .pointingHand()
             if row.issue != 0 {
                 HStack(spacing: theme.spacing) {
                     if let url = URL(string: row.issueURL), !row.issueURL.isEmpty {
-                        Link("issue #\(row.issue)", destination: url).font(theme.small())
+                        WebLink(title: "issue #\(row.issue)", url: url, font: theme.small())
                             .accessibilityIdentifier("issue:\(row.id)")
                     } else {
                         Text("issue #\(row.issue)").font(theme.small()).foregroundStyle(theme.muted)
                     }
                     if row.state == "proposed" && canAct && row.allowedActions.contains("approve") {
                         Button { approve(row.id) } label: { Text("Approve").pill(prominent: true) }
-                            .buttonStyle(.plain)
+                            .buttonStyle(.plain).touchTarget()
                             .accessibilityIdentifier("row:\(row.id):approve")
                     }
                 }
@@ -231,8 +232,7 @@ struct RowView: View, Equatable {
                 HStack(spacing: theme.spacingSmall) {
                     Text("blocked by").font(theme.small()).foregroundStyle(theme.muted)
                     ForEach(row.blockers, id: \.self) { b in
-                        Button("#\(b)") { go(.task(b)) }
-                            .buttonStyle(.link).font(theme.small())
+                        TaskLink(title: "#\(b)", font: theme.small()) { go(.task(b)) }
                     }
                 }
             }
@@ -313,7 +313,7 @@ struct ActiveSessionsPanel: View {
                         .padding(.horizontal, theme.spacing).padding(.vertical, theme.spacing / 2)
                         .contentShape(Rectangle())
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.plain).touchTarget()
                     .accessibilityIdentifier("active-session:\(s.id)")
                 }
             }

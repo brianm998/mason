@@ -623,7 +623,7 @@ fun BlockersView(model: MonitorModel, row: TaskRow) {
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.testTag("blocker:${row.id}:${l.task}"),
             ) {
-                Text("#${l.task}", style = theme.body(color = theme.accent), modifier = Modifier.clickable { model.go(mason.monitor.Page.Task(l.task)) })
+                Link("#${l.task}") { model.go(mason.monitor.Page.Task(l.task)) }
                 Text("${l.state}, ${l.origin}", style = theme.small())
                 if (model.canAct) l.actions.forEach { a ->
                     Pill(a.replaceFirstChar { it.uppercase() }, modifier = Modifier.testTag("blocker:${row.id}:${l.task}:$a")) {

@@ -17,6 +17,7 @@ let package = Package(
         .library(name: "MonitorPhone", targets: ["MonitorPhone"]),
         .library(name: "MonitorUI", targets: ["MonitorUI"]),
         .library(name: "MonitorCore", targets: ["MonitorCore"]),
+        .library(name: "MasonMascot", targets: ["MasonMascot"]),
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-protobuf.git", from: "1.28.0"),
@@ -32,7 +33,7 @@ let package = Package(
         // Resources, never through the build-directory path SwiftPM bakes in.
         .target(name: "MasonMascot", resources: [.copy("Art")]),
         .target(name: "MonitorCore", dependencies: ["MasonProtocol", "MasonTokens"]),
-        .target(name: "MonitorPhone", dependencies: ["MonitorCore", "MasonTokens", "MasonMascot"]),
+        .target(name: "MonitorPhone", dependencies: ["MonitorUI", "MonitorCore", "MasonTokens", "MasonMascot"]),
         .target(name: "MonitorUI", dependencies: ["MonitorCore", "MasonTokens", "MasonMascot"]),
         .executableTarget(name: "MasonMonitor", dependencies: ["MonitorUI", "MonitorCore", "MasonMascot"]),
         .executableTarget(name: "MonitorTool", dependencies: ["MonitorUI", "MonitorCore", "MasonMascot"]),

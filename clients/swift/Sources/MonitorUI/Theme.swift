@@ -36,6 +36,8 @@ public struct Theme {
     public var text: Color { c(MasonTokens.colorLightText, MasonTokens.colorDarkText) }
     public var muted: Color { c(MasonTokens.colorLightTextMuted, MasonTokens.colorDarkTextMuted) }
     public var accent: Color { c(MasonTokens.colorLightAccent, MasonTokens.colorDarkAccent) }
+    /// A link: a task or issue reference that opens a page. Not the accent, which also tints selected rows.
+    public var link: Color { c(MasonTokens.colorLightLink, MasonTokens.colorDarkLink) }
     public var attention: Color { c(MasonTokens.colorLightAttention, MasonTokens.colorDarkAttention) }
     public var attentionTint: Color { c(MasonTokens.colorLightAttentionTint, MasonTokens.colorDarkAttentionTint) }
     public var slow: Color { c(MasonTokens.colorLightSlow, MasonTokens.colorDarkSlow) }
@@ -87,9 +89,53 @@ private struct ThemeKey: EnvironmentKey {
     static let defaultValue = Theme(dark: false, scale: 1)
 }
 
+private struct FeaturesKey: EnvironmentKey {
+    static let defaultValue = PlatformFeatures.mac
+}
+
 extension EnvironmentValues {
+    /// What this platform offers (the Mac: everything; the iPad: no agent sessions, no graph editing).
+    var features: PlatformFeatures {
+        get { self[FeaturesKey.self] }
+        set { self[FeaturesKey.self] = newValue }
+    }
     var theme: Theme {
         get { self[ThemeKey.self] }
         set { self[ThemeKey.self] = newValue }
     }
+}
+
+/// A hit area of at least 44 pt on touch screens, made with padding around the drawing (the
+/// drawing keeps its size). On the Mac it changes nothing.
+struct TouchTarget: ViewModifier {
+    func body(content: Content) -> some View {
+        #if canImport(AppKit)
+        content
+        #else
+        content
+            .frame(minWidth: CGFloat(PlatformFeatures.minTouchTarget), minHeight: CGFloat(PlatformFeatures.minTouchTarget))
+            .contentShape(Rectangle())
+        #endif
+    }
+}
+
+extension View {
+    func touchTarget() -> some View { modifier(TouchTarget()) }
+}
+
+/// The tooltip on the Mac (hover); on a touch screen the same words come from a long press.
+struct Hint: ViewModifier {
+    let text: String
+
+    func body(content: Content) -> some View {
+        #if canImport(AppKit)
+        content.help(text)
+        #else
+        content.contextMenu { Button(text) {} }
+        #endif
+    }
+}
+
+extension View {
+    func hint(_ text: String) -> some View { modifier(Hint(text: text)) }
 }

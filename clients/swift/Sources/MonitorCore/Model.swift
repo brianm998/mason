@@ -84,6 +84,9 @@ public final class MonitorModel: ObservableObject {
     /// The connection is down and being retried: the daemon is restarting or has
     /// not answered. Shown as "reconnecting", never as a hard error.
     @Published public var reconnecting = false
+    /// What the remote link is doing ("Looking for MASON on studio…", "Reached through studio.local"),
+    /// or nil for the loopback connection. The start and banner views say it when set.
+    @Published public var linkStatus: String?
     /// Whether the daemon took this connection's identity for the owner's (its welcome says).
     /// Only then are the answer, approve and reject buttons drawn: anyone else sees the card.
     @Published public var isOwner = false
@@ -371,9 +374,9 @@ public final class MonitorModel: ObservableObject {
     public static let scaleRange: ClosedRange<Double> = 0.8...2.4
     public static let scaleStep = 0.1
 
-    public init(preferences: Preferences = MemoryPreferences()) {
+    public init(preferences: Preferences = MemoryPreferences(), defaultTextScale: Double = 1.0) {
         prefs = preferences
-        textScale = preferences.double(Keys.scale) ?? 1.0
+        textScale = preferences.double(Keys.scale) ?? defaultTextScale
         muted = preferences.bool(Keys.mute) ?? false
         sidebarWidth = Self.clampSidebar(preferences.double(Keys.sidebarWidth) ?? Double(MasonTokens.sizeSidebarWidth))
         let box = MuteBox()
@@ -715,6 +718,12 @@ public final class MonitorModel: ObservableObject {
     public func setSessionLimit(_ units: UInt32) {
         let name = usage?.providers.first?.name ?? "claude"
         command { $0.setLimit = .with { $0.resource = "llm:\(name)"; $0.units = units } }
+    }
+    /// The session stepper's minus (`by: -1`) and plus (`by: 1`), the one rule for the Mac and the
+    /// phone: the limit moves by `delta` and never goes below 0.
+    public func stepSessionLimit(by delta: Int) {
+        let limit = Int(home?.sessionsLimit ?? 0)
+        setSessionLimit(UInt32(max(0, limit + delta)))
     }
     /// How many compiles may run at once (the daemon refuses 0).
     public func setCompileLimit(_ units: UInt32) {

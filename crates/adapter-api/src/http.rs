@@ -84,17 +84,34 @@ pub trait Http: Send + Sync {
 /// config file, so nothing secret appears in the process list.
 pub struct Curl {
     pub timeout_s: u32,
+    /// Ask for HTTP/2 (`http2` in the config; APNs needs it).
+    pub http2: bool,
 }
 
 impl Default for Curl {
     fn default() -> Self {
-        Curl { timeout_s: 30 }
+        Curl {
+            timeout_s: 30,
+            http2: false,
+        }
     }
 }
 
-impl Http for Curl {
-    fn send(&self, r: &Request) -> Result<Response, Transport> {
-        netguard::check(&r.url).map_err(|e| Transport(e.to_string()))?;
+impl Curl {
+    /// The curl to run. One that speaks HTTP/2 is needed when `http2` is set, and a `curl` found
+    /// first on PATH may be an old one without it (MacPorts shipped 7.46, which answers
+    /// "Unsupported protocol"), so the system's is preferred then.
+    fn program(&self) -> &'static str {
+        if self.http2 && std::path::Path::new("/usr/bin/curl").exists() {
+            "/usr/bin/curl"
+        } else {
+            "curl"
+        }
+    }
+
+    /// The config sent to curl on stdin: the URL, method, headers (the token among them) and
+    /// body. Kept apart so a test can check what is, and is not, in it.
+    pub fn config(&self, r: &Request) -> Result<String, Transport> {
         let mut cfg = String::new();
         let q = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
         cfg.push_str(&format!(
@@ -102,27 +119,38 @@ impl Http for Curl {
             q(&r.url),
             q(&r.method)
         ));
+        if self.http2 {
+            cfg.push_str("http2\n");
+        }
         for (k, v) in &r.headers {
             if k.contains(['\n', '\r']) || v.contains(['\n', '\r']) {
                 return Err(Transport("a header contains a newline".into()));
             }
             cfg.push_str(&format!("header = \"{}: {}\"\n", q(k), q(v)));
         }
-        let hdr =
-            std::env::temp_dir().join(format!("mason-curl-{}-{}", std::process::id(), nonce()));
-        let mut cmd = Command::new("curl");
-        cmd.args(["-sS", "--max-time", &self.timeout_s.to_string(), "-D"])
-            .arg(&hdr)
-            .args(["-K", "-"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
         if let Some(b) = &r.body {
             cfg.push_str(&format!(
                 "data-binary = \"{}\"\n",
                 q(b).replace('\n', "\\n")
             ));
         }
+        Ok(cfg)
+    }
+}
+
+impl Http for Curl {
+    fn send(&self, r: &Request) -> Result<Response, Transport> {
+        netguard::check(&r.url).map_err(|e| Transport(e.to_string()))?;
+        let cfg = self.config(r)?;
+        let hdr =
+            std::env::temp_dir().join(format!("mason-curl-{}-{}", std::process::id(), nonce()));
+        let mut cmd = Command::new(self.program());
+        cmd.args(["-sS", "--max-time", &self.timeout_s.to_string(), "-D"])
+            .arg(&hdr)
+            .args(["-K", "-"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         let mut child = cmd
             .spawn()
             .map_err(|e| Transport(format!("cannot run curl: {e}")))?;
