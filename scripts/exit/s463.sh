@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
-# s463 exit test: the load finding names its CPU source and says "CPU unreadable" when assumed-busy.
+# s463 exit test: the load finding names its CPU source.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 cargo test -q -p mason-core load_finding

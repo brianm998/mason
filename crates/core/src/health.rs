@@ -178,6 +178,11 @@ fn f(
     }
 }
 
+/// A wait reason that names the CPU gate.
+pub fn is_cpu_cause(reason: &str) -> bool {
+    reason.to_lowercase().contains("cpu")
+}
+
 fn mins(ms: u64) -> u64 {
     ms / MIN
 }
@@ -271,6 +276,7 @@ pub fn judge(x: &Facts, l: &Limits) -> Vec<Finding> {
         .iter()
         .filter(|(_, _, ms)| *ms > l.slot_wait_ms)
         .collect();
+    let cpu_listed = slow.iter().any(|(_, s, _)| is_cpu_cause(s));
     if !slow.is_empty() {
         out.push(f(
             "overloaded:slots".into(),
@@ -278,21 +284,26 @@ pub fn judge(x: &Facts, l: &Limits) -> Vec<Finding> {
             Severity::Warn,
             format!("{} tasks wait long for a slot", slow.len()),
             slow.iter()
-                .map(|(t, s, ms)| format!("#{t} waits {} min for {s}", mins(*ms)))
+                .map(|(t, s, ms)| {
+                    let held = if is_cpu_cause(s) {
+                        "; held by the CPU gate"
+                    } else {
+                        ""
+                    };
+                    format!("#{t} waits {} min for {s}{held}", mins(*ms))
+                })
                 .collect(),
         ));
     }
-    if let Some(p) = x.load_pct.filter(|p| *p >= l.load_pct) {
-        let (summary, evidence) = match x.load_source {
-            Some("assumed-busy") => (
-                "CPU unreadable".to_string(),
-                vec!["CPU reading: assumed-busy (no reading; 100 is a placeholder)".to_string()],
-            ),
-            Some(src) => (
-                format!("the machine is at {p}% load"),
-                vec![format!("CPU reading from {src}")],
-            ),
-            None => (format!("the machine is at {p}% load"), vec![]),
+    // An assumed-busy reading is a placeholder, not a measurement: no finding.
+    if let Some(p) = x
+        .load_pct
+        .filter(|p| x.load_source != Some("assumed-busy") && *p >= l.load_pct)
+    {
+        let summary = format!("the machine is at {p}% load");
+        let evidence = match x.load_source {
+            Some(src) => vec![format!("CPU reading from {src}")],
+            None => vec![],
         };
         out.push(f(
             "overloaded:load".into(),
@@ -347,7 +358,7 @@ pub fn judge(x: &Facts, l: &Limits) -> Vec<Finding> {
             vec![],
         ));
     }
-    if x.cpu_gate_held_ms >= l.cpu_gate_ms {
+    if x.cpu_gate_held_ms >= l.cpu_gate_ms && !cpu_listed {
         out.push(f(
             "overloaded:cpu-gate".into(),
             "overloaded",
@@ -508,19 +519,6 @@ mod tests {
     }
 
     #[test]
-    fn load_finding_says_unreadable_when_assumed_busy() {
-        let x = Facts {
-            load_pct: Some(100),
-            load_source: Some("assumed-busy"),
-            ..Default::default()
-        };
-        let out = judge(&x, &l());
-        let f = out.iter().find(|f| f.key == "overloaded:load").unwrap();
-        assert!(f.summary.contains("CPU unreadable"));
-        assert!(!f.summary.contains("% load"));
-    }
-
-    #[test]
     fn load_finding_names_a_known_source() {
         let x = Facts {
             load_pct: Some(99),
@@ -627,6 +625,38 @@ mod tests {
         );
         let launches = v.iter().find(|f| f.key == "overloaded:launches").unwrap();
         assert!(launches.evidence.iter().any(|e| e.contains("syspolicyd")));
+    }
+
+    #[test]
+    fn one_wait_is_one_finding() {
+        let x = Facts {
+            slot_waits: vec![(439, "cpu gate".into(), 90 * MIN)],
+            cpu_gate_held_ms: 90 * MIN,
+            ..Default::default()
+        };
+        let v = judge(&x, &l());
+        assert_eq!(keys(&v), ["overloaded:slots"]);
+        assert!(v[0].evidence.iter().any(|e| e.contains("CPU gate")));
+    }
+
+    #[test]
+    fn assumed_load_is_not_a_finding() {
+        let x = Facts {
+            load_pct: Some(100),
+            load_source: Some("assumed-busy"),
+            ..Default::default()
+        };
+        assert!(judge(&x, &l()).is_empty());
+    }
+
+    #[test]
+    fn measured_load_still_shows() {
+        let x = Facts {
+            load_pct: Some(100),
+            load_source: Some("mach"),
+            ..Default::default()
+        };
+        assert_eq!(keys(&judge(&x, &l())), ["overloaded:load"]);
     }
 
     #[test]

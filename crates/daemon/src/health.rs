@@ -175,7 +175,7 @@ pub fn gather(d: &Arc<Daemon>, now: u64) -> Facts {
             } else {
                 in_state
             };
-            if r.to_lowercase().contains("cpu") {
+            if health::is_cpu_cause(&r) {
                 x.cpu_gate_held_ms = x.cpu_gate_held_ms.max(ms);
             }
             x.slot_waits.push((t.id.0, r, ms));

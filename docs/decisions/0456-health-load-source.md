@@ -1,5 +1,3 @@
-# 0456: The load finding names its CPU source and does not report a placeholder as a measurement
+# 0456: the load finding names its CPU source
 
-When the sampler has no fresh reading and the load average fails, it answers 100 with source `assumed-busy`. The finding "overloaded:load" used to read "the machine is at 100% load" then. Now `Facts.load_source` carries the source: for `assumed-busy` the finding says "CPU unreadable"; otherwise the wording is kept and the evidence says "CPU reading from <source>".
-
-The threshold (`Limits.load_pct` = 95) and the detector are kept, so the finding still fires on `assumed-busy`; it is just worded honestly. Percentage and source come from one `CpuSource::reading` call.
+`Facts.load_source` carries where the load reading came from. The "overloaded:load" finding adds "CPU reading from <source>" as evidence. A reading with source `assumed-busy` is a placeholder, so (as 0458 decided) no finding is raised for it. The threshold (`Limits.load_pct` = 95) is unchanged. Percentage and source come from one `CpuSource::reading` call.
