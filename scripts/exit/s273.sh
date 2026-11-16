@@ -5,7 +5,7 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 ! grep -n 'RowView(model:' clients/swift/Tests/MonitorUITests/SidebarFitTests.swift \
   || { echo "s273: stale RowView(model:) call" >&2; exit 1; }
-if [ "$(uname)" = Darwin ] && command -v swift >/dev/null; then
+if [ "$(uname)" = Darwin ] && command -v swift >/dev/null && [ -z "${MASON_SKIP_SWIFT:-}" ]; then
   out=$(mktemp); trap 'rm -f "$out"' EXIT
   if ! (cd clients/swift && swift test --filter SidebarFitTests) >"$out" 2>&1; then
     if grep -q 'Failed to clone repository\|Couldn.t fetch updates' "$out"; then

@@ -111,6 +111,31 @@ fn existing_fix_in(
         .map(|it| Fix::Issue(it.number))
 }
 
+/// What a fix task's exit script must do when the failing suite is the Swift or the Compose
+/// client: CI's `exit-scripts` job (Linux) sets `MASON_SKIP_SWIFT` / `MASON_SKIP_COMPOSE`
+/// because the clients have jobs of their own, and `scripts/check-exit-guards.sh` fails an
+/// exit script that runs `swift` or `gradle` without testing the matching variable.
+/// Empty when `text` (the command, step or test name) names neither client.
+pub(crate) fn client_guard_note(text: &str) -> String {
+    let t = text.to_lowercase();
+    let mut out = String::new();
+    if t.contains("swift") {
+        out.push_str(
+            "\n\nExit script: it runs `swift`, so it must start with the skip guard of \
+             scripts/exit/s12.sh: print a reason and `exit 0` when `MASON_SKIP_SWIFT` is set, \
+             `uname` is not Darwin or `swift` is missing.",
+        );
+    }
+    if t.contains("gradle") || t.contains("compose") || t.contains("kotlin") {
+        out.push_str(
+            "\n\nExit script: it runs `gradle`, so it must start with the skip guard of \
+             scripts/exit/s79.sh: print a reason and `exit 0` when `MASON_SKIP_COMPOSE` is set or \
+             `gradle` is missing.",
+        );
+    }
+    out
+}
+
 /// Where a base failure was seen: enough to file its fix task.
 pub struct Seen<'a> {
     pub project: ProjectId,
@@ -142,9 +167,10 @@ fn file_fix(d: &std::sync::Arc<crate::daemon::Daemon>, s: &Seen, test: &str) -> 
          task that runs `{}` there. Tasks that hit it are excused (it fails without their \
          change) until this lands. This task's own test step is not excused for it: \
          `{test}` must pass.\n\nCommand at the base:\n```\n{}\n```\n\nOutput tail:\n```\n{}\n```\n\n\
-         Filed by the known-red ledger (decision 0225).{}",
+         Filed by the known-red ledger (decision 0225).{}{}",
         s.base, s.step, s.cmd, s.log_tail,
-        s.follows.map_or(String::new(), |n| format!("\n\nFollow-up to task #{n}, which landed while this test was still red."))
+        s.follows.map_or(String::new(), |n| format!("\n\nFollow-up to task #{n}, which landed while this test was still red.")),
+        client_guard_note(&format!("{} {} {test}", s.step, s.cmd))
     );
     let a = d
         .emit(EventKind::TaskFiled {
@@ -464,6 +490,15 @@ pub fn recorded(dir: &std::path::Path) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_client_suite_gets_the_exit_script_guard_requirement() {
+        let sw = client_guard_note("swift test --filter TopBarFitTests");
+        assert!(sw.contains("MASON_SKIP_SWIFT") && !sw.contains("MASON_SKIP_COMPOSE"));
+        let kt = client_guard_note("cd clients/compose && gradle :core:test");
+        assert!(kt.contains("MASON_SKIP_COMPOSE") && !kt.contains("MASON_SKIP_SWIFT"));
+        assert_eq!(client_guard_note("cargo test -p mason-core"), "");
+    }
 
     #[test]
     fn a_failure_is_excused_only_when_every_failing_test_fails_at_the_base() {
