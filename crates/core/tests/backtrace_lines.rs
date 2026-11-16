@@ -6,7 +6,7 @@
 use std::process::Command;
 
 #[test]
-#[ignore = "run by the parent test, with MASON_BT_CHILD set"]
+/// Does nothing unless the parent test sets MASON_BT_CHILD.
 fn child_panics() {
     if std::env::var_os("MASON_BT_CHILD").is_none() {
         return;
@@ -22,7 +22,7 @@ fn child_panics() {
 fn a_panicking_test_names_file_and_line() {
     let exe = std::env::current_exe().unwrap();
     let out = Command::new(exe)
-        .args(["--ignored", "--exact", "child_panics", "--nocapture"])
+        .args(["--exact", "child_panics", "--nocapture"])
         .env("MASON_BT_CHILD", "1")
         .env("RUST_BACKTRACE", "1")
         .output()
