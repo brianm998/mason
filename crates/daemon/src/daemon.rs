@@ -124,7 +124,7 @@ pub struct Daemon {
     pub targets: crate::targets::Targets,
     /// Each task's share of the machine's CPU, as the sampling thread last read it.
     cpu_reading: std::sync::RwLock<Arc<crate::cputasks::Reading>>,
-    /// The readings over the last 24 hours, for the monitors' graph (not persisted).
+    /// The readings over the last 24 hours, for the monitors' graph (the minute buckets are saved to `cpu-history.txt`, decision 0465).
     cpu_history: std::sync::Mutex<crate::cpuhistory::CpuRing>,
 }
 
@@ -328,7 +328,10 @@ impl Daemon {
             lan: crate::lan::LanState::new(),
             targets,
             cpu_reading: std::sync::RwLock::new(Arc::new(crate::cputasks::Reading::none())),
-            cpu_history: std::sync::Mutex::new(crate::cpuhistory::CpuRing::default()),
+            cpu_history: std::sync::Mutex::new(crate::cpuhistory::CpuRing::load(
+                &cfg.data_dir.join(crate::cpuhistory::FILE),
+                now_ms(),
+            )),
             update_status: Mutex::new(crate::update::Status {
                 phase: "idle".into(),
                 ..Default::default()
@@ -396,6 +399,12 @@ impl Daemon {
             .unwrap_or_else(|e| e.into_inner())
             .push(at, &r.usage);
         self.set_cpu_reading(r);
+    }
+
+    /// Write the CPU history's minute buckets to the data dir (every few minutes, and on stop).
+    pub fn save_cpu_history(&self) {
+        let ring = self.cpu_history.lock().unwrap_or_else(|e| e.into_inner());
+        ring.save(&self.cfg.data_dir.join(crate::cpuhistory::FILE));
     }
 
     /// The readings in the `span_ms` before `now_ms`, oldest first.

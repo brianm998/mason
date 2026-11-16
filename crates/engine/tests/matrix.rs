@@ -151,6 +151,8 @@ fn events(t: TaskId, other: TaskId, decision: DecisionId) -> Vec<(&'static str, 
                 priority: Priority::High,
             },
         ),
+        ("Deferred", E::Deferred { task: t }),
+        ("Undeferred", E::Undeferred { task: t }),
         ("Tick", E::Tick),
     ]
 }
@@ -184,7 +186,9 @@ fn expected(from: State, ev: &str) -> Option<State> {
         "Answered" if from == S::NeedsAttention => Some(S::Developing),
         "StepFailed" if step => Some(S::Failed),
         "Retried" if step || matches!(from, S::NeedsAttention | S::Failed) => Some(S::Testing),
-        "Canceled" if live || matches!(from, S::Proposed | S::Deferred | S::Failed) => Some(S::Canceled),
+        "Canceled" if live || matches!(from, S::Proposed | S::Deferred | S::Failed) => {
+            Some(S::Canceled)
+        }
         "ClosedNoChange" if live => Some(S::Landed),
         "Paused" if live => Some(from),
         "ExploreAnyway" if from == S::Queued => Some(from), // before it starts; after a skip is tested separately

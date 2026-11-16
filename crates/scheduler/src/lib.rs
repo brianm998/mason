@@ -10,11 +10,13 @@
 //! * [`explain`] turns a wait into the sentence the owner reads.
 //! * [`Ledger`] is the stateful wrapper the daemon holds.
 
+mod cpu_hold;
 mod explain;
 mod ledger;
 mod plan;
 mod rank;
 
+pub use cpu_hold::{CpuHold, MAX_GAP_MS};
 pub use explain::{
     cause_class, describe_command, explain, label_parts, ordinal, since, Wait, WaitCause,
     DESCRIPTION_LIMIT,

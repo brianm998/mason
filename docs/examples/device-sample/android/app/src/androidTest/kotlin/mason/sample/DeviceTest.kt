@@ -6,7 +6,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
-/** Runs on the leased emulator or phone (`./gradlew connectedDebugAndroidTest` with ANDROID_SERIAL set). */
+/** Runs on the leased emulator or phone (`gradle :app:connectedDebugAndroidTest` with ANDROID_SERIAL set). */
 class DeviceTest {
     @Test
     fun theAppIsInstalledUnderItsOwnName() {
