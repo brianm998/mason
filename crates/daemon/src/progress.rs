@@ -17,7 +17,8 @@ use mason_core::progress::{
 };
 use mason_core::*;
 use mason_protocol::{
-    CellState, JobCounts, ProgressCell, ProgressSource, ProgressSub, TodoItem as PbTodo, TokenLine,
+    CellState, CheckLine, JobCounts, ProgressCell, ProgressSource, ProgressSub, TodoItem as PbTodo,
+    TokenLine,
 };
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
@@ -83,7 +84,8 @@ fn source(s: Source) -> ProgressSource {
 /// total only when every sub-count has one.
 pub fn rollup(p: &mut Progress) {
     // A landing batch counts its own phases; its sub-counts (suites, checks) are beside them.
-    if p.subs.is_empty() || p.unit == "phases" {
+    // An agent's figure is its own (tool calls); a check's counts beside it are not its count.
+    if p.subs.is_empty() || p.unit == "phases" || p.agent {
         return;
     }
     let unit = p.subs[0].unit.clone();
@@ -262,6 +264,28 @@ pub fn cell_of(p: &Progress, state: CellState, label: &str) -> ProgressCell {
                 status: t.status.clone(),
             })
             .collect(),
+        checks: p
+            .checks
+            .iter()
+            .enumerate()
+            .map(|(i, c)| CheckLine {
+                n: c.n,
+                scope: c.scope.clone(),
+                phase: c.phase.name().to_string(),
+                started_ms: c.started_ms,
+                waited_ms: c.waited_ms,
+                ran_ms: c.ran_ms,
+                wait: c.wait.clone(),
+                current: c.current.clone(),
+                result: c.result.clone(),
+                failed: c.failed,
+                failing: c.failing.clone(),
+                text: p.check_line(i, now_ms()),
+            })
+            .collect(),
+        tool: p.tool.clone(),
+        tool_ms: p.tool_ms,
+        doing: p.doing_text(now_ms()),
         total_low: n(p.total_low),
         history_samples: p.history_samples,
         stale_after_ms: p.stale_after_ms,
@@ -514,6 +538,37 @@ impl Daemon {
                 p.updated_at_ms = now;
             }
             change
+        });
+    }
+
+    /// The develop run `run` starts a `run_check` call: a new entry, waiting. Its index.
+    pub fn check_begin(&self, run: StepRunId, scope: &str) -> usize {
+        let at = std::cell::Cell::new(0usize);
+        self.progress_report(run, |p, now| {
+            at.set(p.check_start(scope, now));
+            Change::Urgent
+        });
+        at.get()
+    }
+
+    /// Change check `i` of `run` (a phase, a wait text, the executable it is on).
+    pub fn check_edit(
+        &self,
+        run: StepRunId,
+        i: usize,
+        f: impl FnOnce(&mut mason_core::checks::CheckEntry, u64),
+    ) {
+        self.progress_report(run, |p, now| {
+            let Some(c) = p.checks.get_mut(i) else {
+                return Change::None;
+            };
+            let before = c.clone();
+            f(c, now);
+            if *c == before {
+                return Change::None;
+            }
+            p.updated_at_ms = now;
+            Change::Urgent
         });
     }
 

@@ -1174,8 +1174,17 @@ fn baseline_noted(
             return Some((failing, names));
         }
     }
-    let (failing, names, executed) =
-        run_on_base(who, c_repo, def, suite, base, lock, dev, &suite.command, "b")?;
+    let (failing, names, executed) = run_on_base(
+        who,
+        c_repo,
+        def,
+        suite,
+        base,
+        lock,
+        dev,
+        &suite.command,
+        "b",
+    )?;
     if !suite.narrowed {
         let _ = who.d.store.put_baseline_hashed(
             base,
@@ -1205,7 +1214,11 @@ fn run_on_base(
     cmd: &str,
     tag: &str,
 ) -> Option<(Vec<String>, Vec<String>, usize)> {
-    let wt = who.log_dir.join(format!("base-{}{}", suite.name, if tag == "b" { "" } else { "-t" }));
+    let wt = who.log_dir.join(format!(
+        "base-{}{}",
+        suite.name,
+        if tag == "b" { "" } else { "-t" }
+    ));
     {
         let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
         git::remove_worktree(c_repo, &wt);
@@ -1230,10 +1243,7 @@ fn run_on_base(
         let ran = run_hosted(
             &who.d,
             &id,
-            &crate::jobs::pty_wrap(
-                suite.pty,
-                &lifecycle::with_device(cmd, dev_id(dev)),
-            ),
+            &crate::jobs::pty_wrap(suite.pty, &lifecycle::with_device(cmd, dev_id(dev))),
             &wt,
             suite.timeout.unwrap_or(Duration::from_secs(1800)),
             &who.log_dir,

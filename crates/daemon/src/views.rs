@@ -462,6 +462,7 @@ impl<'a> Ctx<'a> {
         // What the step really launched (or, before it starts, what it is expected
         // to use). The old `model` above stays as it was for older clients.
         let model_use = crate::launchview::task_use(self.d, self.w, t);
+        let live = self.develop_record(t);
         TaskRow {
             id: t.id.0,
             key: format!("#{}", t.id.0),
@@ -481,6 +482,12 @@ impl<'a> Ctx<'a> {
             allowed_actions: self.allowed_actions(t),
             blockers: t.blockers.iter().map(|b| b.0).collect(),
             last_run: crate::http::latest_run(self.w, t.id),
+            check: live
+                .as_ref()
+                .map_or_else(String::new, |p| p.check_short(self.now)),
+            doing: live
+                .as_ref()
+                .map_or_else(String::new, |p| p.doing_text(self.now)),
             owner_session: self
                 .owner_sessions
                 .iter()
@@ -883,6 +890,18 @@ impl<'a> Ctx<'a> {
         c
     }
 
+    /// The live record of a developing task's current step.
+    fn develop_record(&self, t: &Task) -> Option<mason_core::progress::Progress> {
+        if t.state != State::Developing {
+            return None;
+        }
+        self.d
+            .progress_of_task(t.id)
+            .into_iter()
+            .rev()
+            .find(|p| p.step == t.step)
+    }
+
     pub fn home(&self, project: &str) -> HomeView {
         let tasks: Vec<&Task> = self
             .w
@@ -938,6 +957,19 @@ impl<'a> Ctx<'a> {
                     }
                 })
                 .collect(),
+            developing: {
+                let kinds: Vec<mason_core::checks::PhaseKind> = tasks
+                    .iter()
+                    .filter(|t| t.state == State::Developing)
+                    .map(|t| {
+                        self.develop_record(t)
+                            .map_or(mason_core::checks::PhaseKind::Editing, |p| {
+                                p.phase_kind(self.now)
+                            })
+                    })
+                    .collect();
+                mason_core::checks::phase_summary(&kinds)
+            },
             sessions_used,
             sessions_limit,
             compilation: Some(self.compilation_named()),

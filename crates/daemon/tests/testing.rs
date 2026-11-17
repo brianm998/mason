@@ -1087,7 +1087,10 @@ fn a_develop_run_that_is_killed_does_not_count_the_round_against_the_task() {
         &[],
         &rerun_def(),
     );
-    s.push_files(&[("checks.sh", &checks_with_names(&rec, true))], "kill at base");
+    s.push_files(
+        &[("checks.sh", &checks_with_names(&rec, true))],
+        "kill at base",
+    );
     let d = start(&s);
     let t = file_it(&d, "Killed at develop");
     wait_state(&d, t, State::Landed, 90);
@@ -1110,7 +1113,10 @@ fn a_develop_run_of_only_the_failing_tests_that_fails_the_same_test_excuses_it()
         &[("legacy.broken", "known\n")],
         &rerun_def(),
     );
-    s.push_files(&[("checks.sh", &checks_with_names(&rec, false))], "record at base");
+    s.push_files(
+        &[("checks.sh", &checks_with_names(&rec, false))],
+        "record at base",
+    );
     let d = start(&s);
     let t = file_it(&d, "Same red at develop");
     wait_state(&d, t, State::Landed, 90);

@@ -1713,6 +1713,8 @@ struct TestChecks {
     /// and named them. The next unscoped `run_check` re-runs only these and the changed crates
     /// (s523). `None` after a green run, so the one after that is the full run.
     last_red: std::sync::Mutex<Option<Vec<String>>>,
+    /// The tests the check in hand failed, for its history entry.
+    check_failing: std::sync::Mutex<Vec<String>>,
 }
 
 /// A command that runs `rerun` (the failing tests) and `dev` (the changed crates) one after the
@@ -1784,6 +1786,33 @@ impl TestChecks {
             .collect();
         self.reds
             .saw(scope, &crate::rerun::failing_names(&text), &known);
+    }
+
+    /// Move the check in hand to `p`.
+    fn phase(&self, p: mason_core::checks::CheckPhase) {
+        self.edit_check(|c, now| c.enter(p, now));
+    }
+
+    fn edit_check(&self, f: impl FnOnce(&mut mason_core::checks::CheckEntry, u64)) {
+        let open = *self.slots.check.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(i) = open {
+            self.slots.d.check_edit(StepRunId(self.run), i, f);
+        }
+    }
+
+    /// Where the live counts of the check in hand go.
+    fn check_progress(
+        &self,
+        name: &str,
+        suite: Option<mason_testing::Suite>,
+    ) -> Option<crate::hostedcheck::CheckProgress> {
+        let check = (*self.slots.check.lock().unwrap_or_else(|e| e.into_inner()))?;
+        Some(crate::hostedcheck::CheckProgress {
+            run: StepRunId(self.run),
+            check,
+            name: name.to_string(),
+            suite,
+        })
     }
 
     /// How long a build or run of `suite` is expected to take at most, from the test step's
@@ -1982,6 +2011,7 @@ impl TestChecks {
                             limit,
                         );
                         let queue = !crate::hostedcheck::pending(&self.slots.d, &bspec);
+                        self.phase(mason_core::checks::CheckPhase::Waiting);
                         let merges = self.reds.merges();
                         let swapped = self.queued(|| {
                             self.slots
@@ -2000,6 +2030,8 @@ impl TestChecks {
                                 limit,
                             )
                         };
+                        self.phase(mason_core::checks::CheckPhase::Building);
+                        self.phase(mason_core::checks::CheckPhase::Building);
                         let res = crate::hostedcheck::run(&self.slots.d, &bspec);
                         drop(lease);
                         let ok = matches!(&res, Ok(o) if o.passed);
@@ -2045,6 +2077,7 @@ impl TestChecks {
                 limit,
             );
             let queue = !crate::hostedcheck::pending(&self.slots.d, &rspec);
+            self.phase(mason_core::checks::CheckPhase::Waiting);
             let merges = self.reds.merges();
             let swapped = self.queued(|| {
                 self.slots
@@ -2063,7 +2096,11 @@ impl TestChecks {
                     limit,
                 )
             };
-            let res = crate::hostedcheck::run(&self.slots.d, &rspec);
+            self.phase(mason_core::checks::CheckPhase::Running);
+            let usual = self.estimate(&name, "run").unwrap_or(0);
+            self.edit_check(|c, _| c.usual_ms = usual);
+            let pr = self.check_progress(&format!("check {name}"), Some(suite.clone()));
+            let res = crate::hostedcheck::run_with(&self.slots.d, &rspec, pr.as_ref());
             drop(lease);
             match &res {
                 Ok(o) if o.passed => self.reds.passed(&name),
@@ -2100,6 +2137,12 @@ impl TestChecks {
                 "No suite is selected for your changes, so none ran.".into(),
             );
         }
+        {
+            let mut shown = failing.clone();
+            shown.sort();
+            shown.dedup();
+            *self.check_failing.lock().unwrap_or_else(|e| e.into_inner()) = shown;
+        }
         if tracks {
             failing.sort();
             failing.dedup();
@@ -2125,6 +2168,19 @@ impl TestChecks {
             passed: !failed,
             summary: lines.join("\n"),
         }
+    }
+}
+
+/// What a check asked to run, in words: "full", "changed packages", "2 packages", "tests: a, b".
+fn scope_text(s: &CheckScope) -> String {
+    if !s.tests.is_empty() {
+        format!("tests: {}", s.tests.join(", "))
+    } else if !s.packages.is_empty() {
+        format!("{} packages", s.packages.len())
+    } else if s.changed {
+        "changed packages".to_string()
+    } else {
+        "full".to_string()
     }
 }
 
@@ -2222,6 +2278,34 @@ impl TestChecks {
                 return not_run_skipped(debt);
             }
         }
+        // The call is one entry of the round's check history, from the wait to the result.
+        let entry = self
+            .slots
+            .d
+            .check_begin(StepRunId(self.run), &scope_text(scope));
+        *self.slots.check.lock().unwrap_or_else(|e| e.into_inner()) = Some(entry);
+        self.check_failing
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        let out = self.check_replaced(name, scope);
+        *self.slots.check.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        let failing =
+            std::mem::take(&mut *self.check_failing.lock().unwrap_or_else(|e| e.into_inner()));
+        let result = match &out {
+            CheckRun::Done { passed: true, .. } => "green",
+            CheckRun::Done { summary, .. } if summary == STEP_OVER => "ended",
+            _ => "red",
+        };
+        self.slots
+            .d
+            .check_edit(StepRunId(self.run), entry, |c, now| {
+                c.finish(result, &failing, now)
+            });
+        out
+    }
+
+    fn check_replaced(&self, name: &str, scope: &CheckScope) -> CheckRun {
         let r = self.check_unskipped(name, scope);
         // Only a check whose wait was ended is replaced; one that ran keeps its result.
         let ended = matches!(&r, CheckRun::Done { passed: false, summary } if summary == STEP_OVER);
@@ -2304,6 +2388,7 @@ impl TestChecks {
             Some(build) => {
                 let bspec = spec(format!("{}build", self.id_prefix), build, &build_uses());
                 let queue = !crate::hostedcheck::pending(&self.slots.d, &bspec);
+                self.phase(mason_core::checks::CheckPhase::Waiting);
                 let swapped = self.queued(|| self.slots.swap_for(queue, &build_uses(), None));
                 let Ok(lease) = swapped else {
                     return over();
@@ -2314,6 +2399,7 @@ impl TestChecks {
                     ctree = crate::cmdreuse::content_tree(&self.wt);
                     spec(format!("{}build", self.id_prefix), build, &build_uses())
                 };
+                self.phase(mason_core::checks::CheckPhase::Building);
                 let res = crate::hostedcheck::run(&self.slots.d, &bspec);
                 drop(lease);
                 if let Some(t) = ctree.as_deref() {
@@ -2368,7 +2454,9 @@ impl TestChecks {
             ctree = crate::cmdreuse::content_tree(&self.wt);
             spec(self.id_prefix.clone(), &cmds.test, &uses)
         };
-        let res = crate::hostedcheck::run(&self.slots.d, &tspec);
+        self.phase(mason_core::checks::CheckPhase::Running);
+        let pr = self.check_progress("check tests", None);
+        let res = crate::hostedcheck::run_with(&self.slots.d, &tspec, pr.as_ref());
         drop(test_lease);
         self.slots.take_agent_slot_back();
         if let (Ok(o), Some(t)) = (&res, &ctree) {
@@ -2484,6 +2572,8 @@ struct CheckSlots {
     /// and landing of every other task, and waited hours for a slot.
     test_step: Option<String>,
     lease: StepLease,
+    /// The entry of the check history that a queue for slots belongs to, while one is going.
+    check: std::sync::Mutex<Option<usize>>,
 }
 
 impl CheckSlots {
@@ -2506,6 +2596,7 @@ impl CheckSlots {
             test_uses,
             test_step: test.map(|s| s.name.clone()),
             lease: c.lease.clone(),
+            check: Default::default(),
         }
     }
 
@@ -2547,12 +2638,22 @@ impl CheckSlots {
             needs,
             &alive,
             &mut |why| {
+                let text = crate::targets::wait_text(d, &asked, why);
+                // The check in hand shows the same wait text as the task does.
+                let open = *self.check.lock().unwrap_or_else(|e| e.into_inner());
+                if let (true, Some(i)) = (end_on_skip, open) {
+                    let t = text.clone();
+                    d.check_edit(run, i, move |c, now| {
+                        c.enter(mason_core::checks::CheckPhase::Waiting, now);
+                        c.wait = t;
+                    });
+                }
                 waited = d.emit_for_run(
                     task,
                     run,
                     EventKind::WaitStarted {
                         task,
-                        on: crate::targets::wait_text(d, &asked, why),
+                        on: text,
                         class: Some(crate::targets::wait_class(d, &asked, task)),
                     },
                 );
@@ -3064,6 +3165,7 @@ fn agent_job(c: &Ctx) {
         project: c.project.id.clone(),
         reds: Default::default(),
         last_red: std::sync::Mutex::new(None),
+        check_failing: Default::default(),
     });
     let validator = (kind == StepKind::Develop).then(|| {
         change_validator(
@@ -3603,7 +3705,10 @@ fn settle_all(
                 // Only what is verifiably the recorded process: the CLI the dead
                 // host left running must not work beside its replacement.
                 tracing::warn!(host = %newest, "reaping a lost host before its replacement");
-                mason_step_host::registry::reap_dir_by(&root.join(&newest), "daemon: reaping a lost host");
+                mason_step_host::registry::reap_dir_by(
+                    &root.join(&newest),
+                    "daemon: reaping a lost host",
+                );
                 silent = mason_adapters::hosted::silent_stop(&root.join(&newest)).is_some();
                 c.release_lease();
                 if get_lease(c).is_err() {
