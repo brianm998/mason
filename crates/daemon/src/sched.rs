@@ -466,6 +466,8 @@ pub struct Broker {
     /// Wait explanation per waiting task, republished by every `pass`. Readers
     /// clone the `Arc` and never take `st`.
     waits_snap: std::sync::RwLock<Arc<BTreeMap<TaskId, String>>>,
+    /// Per waiting task: its holders' grant times and the waiting count of its class.
+    waits_holders: std::sync::RwLock<Arc<BTreeMap<TaskId, (Vec<u64>, u32)>>>,
     /// Time each task has spent under a CPU cause, updated by every `pass`.
     cpu_hold: Mutex<mason_scheduler::CpuHold>,
     /// The largest of those, for readers that must not take `st`.
@@ -708,6 +710,7 @@ impl Broker {
             locks,
             limits_file,
             waits_snap: Default::default(),
+            waits_holders: Default::default(),
             cpu_hold: Default::default(),
             cpu_held_ms: Default::default(),
             pass_count: Default::default(),
@@ -1247,6 +1250,31 @@ impl Broker {
             .filter_map(|(id, w)| by_id.get(id).map(|t| (*t, explain(w, now))))
             .collect();
         *self.waits_snap.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(snap);
+        let mut depth: HashMap<String, u32> = HashMap::new();
+        for (id, w) in waits.waits.iter() {
+            if by_id.contains_key(id) {
+                *depth.entry(w.class()).or_default() += 1;
+            }
+        }
+        let holders: BTreeMap<TaskId, (Vec<u64>, u32)> = waits
+            .waits
+            .iter()
+            .filter_map(|(id, w)| {
+                by_id.get(id).map(|t| {
+                    (
+                        *t,
+                        (
+                            w.held_by.iter().map(|h| h.since).collect(),
+                            depth.get(&w.class()).copied().unwrap_or(0),
+                        ),
+                    )
+                })
+            })
+            .collect();
+        *self
+            .waits_holders
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = Arc::new(holders);
         let mut hold = self.cpu_hold.lock().unwrap_or_else(|e| e.into_inner());
         hold.observe(
             now,
@@ -1262,6 +1290,14 @@ impl Broker {
     /// The most time one waiting task has spent under a CPU cause (at most one pass old).
     pub fn cpu_gate_held_ms(&self) -> u64 {
         self.cpu_held_ms.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Holder grant times and class queue depth per waiting task (at most one pass old).
+    pub fn waits_holders(&self) -> Arc<BTreeMap<TaskId, (Vec<u64>, u32)>> {
+        self.waits_holders
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// The published wait explanations (at most one pass old).

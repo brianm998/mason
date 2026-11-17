@@ -399,6 +399,7 @@ pub fn parse_health(text: &str) -> Result<Option<HealthCfg>, String> {
             "stuck_factor" => l.stuck_factor = n,
             "stuck_min_m" => l.stuck_min_ms = n * M,
             "wait_m" => l.wait_ms = n * M,
+            "aged_wait_h" => l.aged_wait_ms = n * H,
             "queue_idle_m" => l.queue_idle_ms = n * M,
             "host_silent_m" => l.host_silent_ms = n * M,
             "slot_wait_m" => l.slot_wait_ms = n * M,
