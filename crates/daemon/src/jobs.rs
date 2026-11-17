@@ -1908,7 +1908,16 @@ impl TestChecks {
 /// the suite or test step the ledger keeps them under.
 fn known_header(d: &Daemon, log_dir: &Path, id: &str, scope: &str) -> Option<String> {
     let text = read_whole_log(&log_dir.join(format!("{id}.log")))?;
-    crate::knownred::header(&text, &crate::knownred::known_for(&d.store, scope))
+    let known = crate::knownred::known_for(&d.store, scope);
+    let develop = d.store.latest_baseline(scope).ok().flatten();
+    let parts: Vec<String> = [
+        crate::knownred::header(&text, &known),
+        crate::knownred::red_on_develop_header(&text, develop.as_ref(), &known),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    (!parts.is_empty()).then(|| parts.join("\n"))
 }
 
 /// A name from a validated scope (letters, digits, `_ : . - /`), quoted all the same.
