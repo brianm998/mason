@@ -440,10 +440,14 @@ struct TaskDetailPage: View {
                 ? AnyLayout(VStackLayout(alignment: .leading, spacing: theme.spacingSmall))
                 : AnyLayout(HStackLayout(spacing: theme.spacing))
             progressRow {
-                ProgressCells(clock: model.live, cells: r.progress, slow: r.slow)
+                LiveProgress(live: model.progress.detail, fallback: r.progress) {
+                    ProgressCells(clock: model.live, cells: $0, slow: r.slow)
+                }
                 if !r.typical.isEmpty { Text(r.typical).font(theme.small()).foregroundStyle(theme.muted) }
             }
-            if let c = r.progress.running { ProgressDetail(model: model, cell: c) }
+            LiveProgress(live: model.progress.detail, fallback: r.progress) { cells in
+                if let c = cells.running { ProgressDetail(model: model, cell: c) }
+            }
 
             ActionButtons(model: model, row: r, hasApprovalView: d.hasApproval)
 
@@ -514,9 +518,11 @@ struct TaskDetailPage: View {
                         Text(s.name.isEmpty ? s.category : s.name).font(theme.body(.semibold))
                         Text("attempt \(s.attempt)").foregroundStyle(theme.muted)
                         Text(s.outcome)
-                        if let c = r.progress.first(where: { $0.step == s.name && $0.state == .part && $0.run == s.run }) {
-                            Text(c.countText).foregroundStyle(theme.muted)
-                            Text(c.timeText(now: model.daemonNow())).foregroundStyle(c.isStale(now: model.daemonNow()) ? theme.slow : theme.muted)
+                        LiveProgress(live: model.progress.detail, fallback: r.progress) { cells in
+                            if let c = cells.first(where: { $0.step == s.name && $0.state == .part && $0.run == s.run }) {
+                                Text(c.countText).foregroundStyle(theme.muted)
+                                Text(c.timeText(now: model.daemonNow())).foregroundStyle(c.isStale(now: model.daemonNow()) ? theme.slow : theme.muted)
+                            }
                         }
                     }
                     .font(theme.body())
@@ -970,7 +976,9 @@ struct StageRows: View {
             ? AnyLayout(VStackLayout(alignment: .leading, spacing: theme.spacingSmall))
             : AnyLayout(HStackLayout(alignment: .firstTextBaseline, spacing: theme.spacing))
         layout {
-            ProgressCells(clock: model.live, cells: r.progress, slow: r.slow)
+            LiveProgress(live: model.progress.entry(r.id), fallback: r.progress) {
+                ProgressCells(clock: model.live, cells: $0, slow: r.slow)
+            }
             Button { model.go(.task(r.id)) } label: {
                 Text("\(r.project) \(r.key)  \(r.title)").font(theme.body()).lineLimit(3)
                     .multilineTextAlignment(.leading)

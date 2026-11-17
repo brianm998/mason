@@ -15,7 +15,15 @@ struct TopBar: View {
     @State private var improving = false
     @State private var voices = false
 
+    #if DEBUG
+    /// Body evaluations, for the offscreen test that counts them.
+    nonisolated(unsafe) static var evaluations = 0
+    #endif
+
     var body: some View {
+        #if DEBUG
+        let _ = { Self.evaluations += 1 }()
+        #endif
         HStack(spacing: theme.spacing) {
             topBarMascot
             // Home on top; back and forward in a row under it.
