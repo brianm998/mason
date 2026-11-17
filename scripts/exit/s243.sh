@@ -4,4 +4,4 @@
 # still answers pings and delivers the TASK_DETAIL view.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-cargo test -q -p mason-daemon --test protocol -- a_blocked_command a_burst_of_ticks
+cargo test -q -p mason-daemon --test it -- a_blocked_command a_burst_of_ticks

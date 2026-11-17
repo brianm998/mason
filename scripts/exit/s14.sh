@@ -25,15 +25,15 @@ t() {  # PACKAGE TEST-FILE TEST-NAME
 }
 
 echo "== 1. a batch of five: three land, the conflict and the culprit are sent back"
-t mason-daemon landing a_batch_of_five_lands_three_defers_the_mate_conflict_and_parks_the_culprit
+t mason-daemon it landing::a_batch_of_five_lands_three_defers_the_mate_conflict_and_parks_the_culprit
 echo "   t1, t2, t3 landed once each; t4 conflicted with t3 and went back; t5 broke the suite and went back alone"
 
 echo "== 2. disjoint batches run in parallel, overlapping ones wait"
-t mason-daemon landing disjoint_batches_run_in_parallel_and_overlapping_ones_wait
+t mason-daemon it landing::disjoint_batches_run_in_parallel_and_overlapping_ones_wait
 echo "   a second batch ran beside a slow one; a batch sharing its suite did not"
 
 echo "== 3. kill -9 at every landing phase of a batch with a culprit"
-t mason-daemon landing_crash killing_the_daemon_at_each_landing_phase_of_a_batch_with_a_culprit_loses_and_repeats_nothing
+t mason-daemon it landing_crash::killing_the_daemon_at_each_landing_phase_of_a_batch_with_a_culprit_loses_and_repeats_nothing
 echo "   batch_formed batch_merged batch_red batch_verified batch_before_promote batch_after_promote land_before_event: each recovered"
 
 echo "== 4. the rest of the engine"
@@ -46,11 +46,11 @@ for name in \
   a_tier_that_names_ci_is_refused_with_a_pointer_to_the_ci_mode \
   a_mode_that_needs_a_service_the_project_lacks_is_refused_naming_it \
   landing_with_no_config_is_the_old_direct_landing; do
-  t mason-daemon landing "$name"
+  t mason-daemon it "landing::$name"
   echo "   ok  $name"
 done
 if [ -z "${MASON_TESTS_ALREADY_RAN:-}" ]; then
-  cargo test -q -p mason-daemon --test crash 2>&1 | grep -E 'test result'
+  cargo test -q -p mason-daemon --test it crash:: -- --skip landing_crash:: 2>&1 | grep -E 'test result'
 fi
 # The monitors' Landing page: Swift and Compose both show batches, phases, freeze and idle time.
 cargo run -q -p mason-conformance -- features clients/features.toml | tail -1

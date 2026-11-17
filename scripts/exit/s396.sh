@@ -4,5 +4,5 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 cargo test -q -p mason-definition --test testing_tables -- narrow_packages
-cargo test -q -p mason-daemon --test testing -- a_task_test_step_runs_only_the_crates_its_change_touches_and_their_dependents
+cargo test -q -p mason-daemon --test it -- a_task_test_step_runs_only_the_crates_its_change_touches_and_their_dependents
 echo "s396 OK"

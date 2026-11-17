@@ -12,6 +12,6 @@
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 cargo test -q -p mason-core red_base
-cargo test -q -p mason-daemon --test red_base
+cargo test -q -p mason-daemon --test it red_base::
 cargo test -q -p mason-adapters --test github -- with_the_judge_off
 echo "s174 OK"
