@@ -408,7 +408,7 @@ extension View {
     }
 }
 
-/// One layout for the row's meta line, replacing a ViewThatFits of four variants.
+/// One layout for the row's meta line, replacing four alternative variants.
 struct MetaLayout: Layout {
     let spacing: CGFloat
     let lineSpacing: CGFloat

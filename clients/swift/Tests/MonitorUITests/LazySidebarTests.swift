@@ -69,12 +69,19 @@ final class LazySidebarTests: XCTestCase {
     func testScrollingToAHeaderFarDownRealisesIt() {
         let m = fixture()
         let h = host(m, height: 600)
+        // A window that is never ordered in, so the scroll view has a window to scroll in.
+        let w = NSWindow(contentRect: h.frame, styleMask: [.titled], backing: .buffered, defer: true)
+        w.contentView = h
+        w.isReleasedWhenClosed = false
         settle(h)
         SectionHeader.realised = []
         m.scrollTarget = "canceled"
-        settle(h)
-        settle(h)
-        XCTAssertTrue(SectionHeader.realised.contains("canceled"))
+        for _ in 0..<10 where !SectionHeader.realised.contains("canceled") { settle(h) }
+        func scrollers(_ v: NSView) -> [NSScrollView] {
+            (v as? NSScrollView).map { [$0] } ?? [] + v.subviews.flatMap(scrollers)
+        }
+        let ys = scrollers(h).map { $0.contentView.bounds.origin.y }
+        XCTAssertTrue(SectionHeader.realised.contains("canceled"), "scroll offsets \(ys), realised \(SectionHeader.realised)")
         XCTAssertNil(m.scrollTarget)
     }
 
