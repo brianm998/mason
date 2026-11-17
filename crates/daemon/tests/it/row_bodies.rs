@@ -2,12 +2,12 @@
 
 //! Stage 561: history rows leave their body out unless asked; a row says when it entered its state.
 
-mod support;
+use crate::support;
 use mason_core::*;
 use mason_daemon::views::Ctx;
 use support::*;
 
-fn file(d: &mason_daemon::Daemon, title: &str, body: &str) -> TaskId {
+fn file(d: &std::sync::Arc<mason_daemon::Daemon>, title: &str, body: &str) -> TaskId {
     let pid = d.project_id_by_name("scratch").unwrap();
     let a = d
         .emit(EventKind::TaskFiled {
