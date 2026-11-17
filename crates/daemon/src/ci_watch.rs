@@ -10,13 +10,16 @@ use crate::daemon::{now_ms, Daemon};
 use mason_adapter_api::http::Curl;
 use mason_adapters::github::{ActionsJob, ActionsRun, GitHub};
 use mason_core::ci_watch::{
-    self as rules, Ctx, File, Filed, JobRec, JobState, RunRec, RunRef, Why,
+    self as rules, Ctx, File, Filed, JobRec, JobState, RecentTask, RunRec, RunRef, Why,
 };
 use mason_core::*;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
+
+/// How long a landed or closed task still counts as having covered a red (s551).
+pub const LOOKBACK_MS: u64 = 7 * 24 * 3_600_000;
 
 /// Lines of a failed job's log put in the task.
 const LOG_LINES: usize = 60;
@@ -146,6 +149,8 @@ pub fn encode(s: &Saved) -> String {
                             "sha": js.last_red.sha, "url": js.last_red.url,
                             "ticket": opt(js.ticket), "checked": opt(js.checked),
                             "freeze": js.freeze,
+                            "covered": js.covered, "landed_ms": opt(js.landed_ms),
+                            "at_ms": js.last_red.at_ms,
                         }),
                     )
                 })
@@ -197,10 +202,13 @@ pub fn decode(text: &str) -> Saved {
                         job: u(&jv["job"]),
                         sha: jv["sha"].as_str().unwrap_or_default().to_string(),
                         url: jv["url"].as_str().unwrap_or_default().to_string(),
+                        at_ms: u(&jv["at_ms"]),
                     },
                     ticket: jv["ticket"].as_u64(),
                     checked: jv["checked"].as_u64(),
                     freeze: jv["freeze"].as_bool().unwrap_or(false),
+                    covered: u(&jv["covered"]),
+                    landed_ms: jv["landed_ms"].as_u64(),
                 },
             );
         }
@@ -343,6 +351,7 @@ pub fn pass(
         }
     }
     let (named, open_auto) = who_names(d, pid, &saved, &recs);
+    let (recent, landed) = recent_tasks(d, pid, now);
     let files = rules::step(
         &mut saved.state,
         &recs,
@@ -351,6 +360,8 @@ pub fn pass(
             now_ms: now,
             named: &named,
             open_auto,
+            recent: &recent,
+            landed: &landed,
         },
     );
     for f in &files {
@@ -385,6 +396,36 @@ pub fn pass(
     saved.checked_at = now;
     save(d, &p.id, &saved);
     Ok(())
+}
+
+/// Tasks of the project that landed or closed within the lookback, and when those that landed
+/// with a change did. A task whose body cites a run, or whose title names a job, has covered it.
+pub(crate) fn recent_tasks(
+    d: &Daemon,
+    pid: ProjectId,
+    now: u64,
+) -> (Vec<RecentTask>, BTreeMap<u64, u64>) {
+    let mut recent = vec![];
+    let mut landed = BTreeMap::new();
+    if let Ok(w) = d.world() {
+        for t in w.tasks.values() {
+            if t.project != pid
+                || !t.state.is_terminal()
+                || now.saturating_sub(t.state_entered_at.0) > LOOKBACK_MS
+            {
+                continue;
+            }
+            if t.state == State::Landed && t.landed == Some(LandedOutcome::Merged) {
+                landed.insert(t.id.0, t.state_entered_at.0);
+            }
+            recent.push(RecentTask {
+                id: t.id.0,
+                title: t.title.clone(),
+                body: t.body.clone(),
+            });
+        }
+    }
+    (recent, landed)
 }
 
 /// The open tasks and issues that name each job, and how many auto-filed tasks are open.
@@ -562,8 +603,13 @@ pub fn view(d: &Daemon, pid: ProjectId) -> Value {
         .into_iter()
         .find(|f| f.project == p.id && f.source == "ci")
         .map(|f| json!({"reason": f.reason, "fix_task": f.fix_task, "since": f.since}));
+    let held: Vec<Value> = rules::held_back(&s.state, &r)
+        .into_iter()
+        .map(|(k, run, t)| json!({"job": k, "run": run, "task": t, "text": rules::held_text(&k, run, t)}))
+        .collect();
     json!({
         "enabled": true,
+        "held_back": held,
         "workflows": watched,
         "excluded": r.exclude,
         "gate": r.gate,

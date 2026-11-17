@@ -13,3 +13,11 @@ window   = "30s"
 # tasks finish together.
 max_size = 10
 parallel = 1
+
+# Every batch is linted before it lands, whether its tests ran or were skipped (s521): the
+# `command` of each suite named here, in the batch's worktree (so its build directory is reused).
+# A red parks the batch with the files and lines in its note. Not a `batch` tier: that would
+# replace the build floor and the rebuild-only rule for skipped tests (s429).
+[[tier]]
+name   = "lint"
+suites = ["lint"]

@@ -1136,3 +1136,116 @@ fn nothing_passes_a_waiting_exclusive_request_when_a_holder_has_no_estimate() {
     assert_eq!(p.waits[&c].cause, WaitCause::Exclusive);
     assert!(p.waits.contains_key(&x));
 }
+
+// ---- a waiting exclusive request must not idle free slots or freeze the queue (s552) ------
+
+const MIN: u64 = 60_000;
+
+fn work(l: &mut Ledger, id: u64, uses: &[(&str, u32)], expected: Option<u64>, now: u64) -> u64 {
+    let r = l.submit(
+        Rank::new(false, 3, 2, id, id, false),
+        Needs::of(uses),
+        &format!("w{id}"),
+        now,
+    );
+    l.set_expected(r, expected);
+    r
+}
+
+#[test]
+fn holders_that_overran_do_not_stop_backfill_for_good() {
+    let (mut l, x) = draining(Some(1_000));
+    // The holder is expected done at 1_000; at 2_000 it still runs. The drain end moves to
+    // one more expected run from now, 3_000, instead of staying in the past.
+    let fits = work(&mut l, 2, &[("compile", 1)], Some(900), 2_000);
+    let too_long = work(&mut l, 3, &[("compile", 1)], Some(1_500), 2_000);
+    let p = l.schedule(2_000, None, None);
+    assert_eq!(p.grants, vec![fits], "{p:?}");
+    assert_eq!(p.waits[&too_long].cause, WaitCause::Exclusive);
+    assert!(p.waits.contains_key(&x));
+}
+
+#[test]
+fn an_exclusive_request_gives_up_its_freeze_after_its_bound_and_still_goes_first() {
+    // A holder with no estimate: nothing passes before the bound (s385) ...
+    let (mut l, x) = draining(None);
+    l.set_exclusive_max_wait(Some(600));
+    let c = work(&mut l, 2, &[("compile", 1)], Some(10), 100);
+    let unknown = work(&mut l, 3, &[("compile", 1)], None, 100);
+    let p = l.schedule(100, None, None);
+    assert!(p.grants.is_empty(), "{p:?}");
+    assert_eq!(p.waits[&x].thawed_ms, None);
+    // ... and after it, work with an estimate runs again, and the request says so.
+    let p = l.schedule(650, None, None);
+    assert_eq!(p.grants, vec![c], "{p:?}");
+    assert_eq!(p.waits[&unknown].cause, WaitCause::Exclusive, "no estimate");
+    let w = &p.waits[&x];
+    assert_eq!(w.thawed_ms, Some(600));
+    assert!(
+        explain(w, 650).contains("work runs again until the machine drains"),
+        "{}",
+        explain(w, 650)
+    );
+    // Once the holders are done, it goes first, ahead of work that arrived later.
+    let held: Vec<u64> = l.snapshot().holders.iter().map(|h| h.id).collect();
+    for id in held {
+        l.release(id);
+    }
+    let late = work(&mut l, 9, &[("compile", 1)], Some(10), 700);
+    let p = l.schedule(700, None, None);
+    assert_eq!(p.grants, vec![x], "{p:?}");
+    assert!(p.waits.contains_key(&late));
+}
+
+/// The 2026-11-17 09:22 case: 3 of 6 `test-suite` slots held (1 h, 48 min and 44 min, all past
+/// their expected end), `compile` and `test-small` idle, an agent's exclusive `xcodebuild`
+/// request first in line for 13 min, and ordinary waiters behind it.
+fn replay_0922(max_wait: Option<u64>) -> (Ledger, u64, Vec<u64>, u64) {
+    let now = 100 * MIN;
+    let mut l = Ledger::new();
+    l.set_capacity("compile", 6, Kind::Machine);
+    l.set_capacity("test-suite", 6, Kind::Machine);
+    l.set_capacity("test-small", 2, Kind::Machine);
+    l.set_exclusive_max_wait(max_wait);
+    for (i, ago) in [60u64, 48, 44].into_iter().enumerate() {
+        let h = work(&mut l, i as u64, &[("test-suite", 1)], Some(40 * MIN), 0);
+        assert_eq!(l.schedule(now - ago * MIN, None, None).grants, vec![h]);
+    }
+    let x = l.submit(
+        Rank::new(false, 0, 0, 0, 10, false),
+        Needs::exclusive(),
+        "xcodebuild archive",
+        now - 13 * MIN,
+    );
+    let waiters: Vec<u64> = (20..23)
+        .map(|i| {
+            work(
+                &mut l,
+                i,
+                &[("test-suite", 1)],
+                Some(30 * MIN),
+                now - 12 * MIN,
+            )
+        })
+        .collect();
+    (l, x, waiters, now)
+}
+
+#[test]
+fn the_0922_case_starts_the_waiters_at_once() {
+    for bound in [None, Some(10 * MIN)] {
+        let (mut l, x, waiters, now) = replay_0922(bound);
+        let p = l.schedule(now, None, None);
+        assert_eq!(p.grants, waiters, "bound {bound:?}: {p:?}");
+        assert!(p.waits.contains_key(&x));
+        // Everything running ends; the exclusive request is next, ahead of anything new.
+        let held: Vec<u64> = l.snapshot().holders.iter().map(|h| h.id).collect();
+        for id in held {
+            l.release(id);
+        }
+        let late = work(&mut l, 50, &[("compile", 1)], Some(MIN), now);
+        let p = l.schedule(now + MIN, None, None);
+        assert_eq!(p.grants, vec![x]);
+        assert!(p.waits.contains_key(&late));
+    }
+}
