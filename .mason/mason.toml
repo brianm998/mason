@@ -120,7 +120,9 @@ parser = "regex"
 pass_regex = '^$'
 fail_regex = '^error'
 min_tests = 1
-level = "unit"
+# Not "unit": [binding.unit] would also bind it to run_check and the test step. No binding
+# names this level, so only the landing tier runs it.
+level = "landing"
 
 [binding.unit]
 when = ["development", "test_step"]
