@@ -739,6 +739,19 @@ const STEPS: &[&str] = &[
          at_ms    INTEGER NOT NULL,
          PRIMARY KEY (project, suite, base)
      );",
+    // 44: the result of each full `run_check` of a develop step (s511, decision 0504): one row
+    // per run, `tests` the failing tests as `suite<TAB>test` lines (empty when green or when no
+    // name could be read). Read to tell an agent going round in circles on the same failing
+    // tests. Additive.
+    "CREATE TABLE check_runs (
+         id    INTEGER PRIMARY KEY AUTOINCREMENT,
+         task  INTEGER NOT NULL,
+         run   INTEGER NOT NULL,
+         at_ms INTEGER NOT NULL,
+         green INTEGER NOT NULL,
+         tests TEXT NOT NULL
+     );
+     CREATE INDEX check_runs_task ON check_runs(task, id);",
 ];
 
 pub const SCHEMA_VERSION: u32 = STEPS.len() as u32;
