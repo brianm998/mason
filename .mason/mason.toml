@@ -105,6 +105,17 @@ min_tests = 1
 level = "unit"
 uses = { test-suite = 1 }
 
+# Run by the landing `lint` tier (.mason/landing.toml) over every batch, not by the test step: six
+# lint errors and five unformatted files landed in two days because neither the batch's tests nor
+# the rebuild of a skipped batch ran them (s521).
+[suite.lint]
+command = "cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings"
+parser = "regex"
+pass_regex = '^$'
+fail_regex = '^error'
+min_tests = 1
+level = "unit"
+
 [binding.unit]
 when = ["development", "test_step"]
 
