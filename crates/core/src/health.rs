@@ -74,6 +74,10 @@ pub struct Limits {
     pub cannot_land: u32,
     /// A finding handled within this long is not raised again.
     pub cooldown_ms: u64,
+    /// This many compiles in uninterruptible wait with next to no CPU...
+    pub blocked_compiles: u32,
+    /// ...for at least this long.
+    pub blocked_compile_ms: u64,
 }
 
 const MIN: u64 = 60_000;
@@ -103,6 +107,8 @@ impl Default for Limits {
             late_loops: 3,
             cannot_land: 3,
             cooldown_ms: 6 * H,
+            blocked_compiles: 4,
+            blocked_compile_ms: 10 * MIN,
         }
     }
 }
@@ -192,6 +198,95 @@ pub struct Facts {
     pub landed: u32,
     pub launch_blocked: bool,
     pub update_blocked: bool,
+    /// Processes in uninterruptible wait (see [`parse_ps`]), for the stalled-compile finding.
+    pub procs: Vec<ProcFact>,
+}
+
+/// One process from `ps -axo pid=,stat=,etime=,time=,command=`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProcFact {
+    pub pid: u32,
+    /// The state letters (`U`, `S`, `R+`...).
+    pub state: String,
+    pub elapsed_s: u64,
+    pub cpu_s: u64,
+    pub command: String,
+}
+
+/// `[[dd-]hh:]mm:ss` (ps's `etime` and `time`) in seconds.
+fn clock_s(t: &str) -> Option<u64> {
+    let (days, rest) = match t.split_once('-') {
+        Some((d, r)) => (d.parse::<u64>().ok()?, r),
+        None => (0, t),
+    };
+    let mut s = 0u64;
+    for part in rest.split(':') {
+        // `time` can carry a fraction: `0:01.50`.
+        let n: f64 = part.parse().ok()?;
+        s = s * 60 + n as u64;
+    }
+    Some(days * 86_400 + s)
+}
+
+/// Parse the output of `ps -axo pid=,stat=,etime=,time=,command=`; lines that do not fit are skipped.
+pub fn parse_ps(text: &str) -> Vec<ProcFact> {
+    text.lines()
+        .filter_map(|line| {
+            let mut it = line.split_whitespace();
+            let pid = it.next()?.parse().ok()?;
+            let state = it.next()?.to_string();
+            let elapsed_s = clock_s(it.next()?)?;
+            let cpu_s = clock_s(it.next()?)?;
+            let command = it.collect::<Vec<_>>().join(" ");
+            Some(ProcFact {
+                pid,
+                state,
+                elapsed_s,
+                cpu_s,
+                command,
+            })
+        })
+        .collect()
+}
+
+/// The directory a rustc command searches (`-L dependency=<dir>`).
+pub fn dependency_dir(command: &str) -> Option<&str> {
+    let mut it = command.split_whitespace();
+    while let Some(w) = it.next() {
+        if w == "-L" {
+            if let Some(d) = it.next().and_then(|a| a.strip_prefix("dependency=")) {
+                return Some(d);
+            }
+        } else if let Some(d) = w.strip_prefix("-Ldependency=") {
+            return Some(d);
+        }
+    }
+    None
+}
+
+/// Compiles stuck in uninterruptible wait with next to no CPU, grouped by the directory their
+/// `-L dependency=` names: (directory, count, longest elapsed seconds). A rustc counts when its
+/// state has `U`, it has run at least `min_s`, and it used under 5% of that in CPU.
+pub fn blocked_compiles(procs: &[ProcFact], min_s: u64) -> Vec<(String, u32, u64)> {
+    let mut by: std::collections::BTreeMap<String, (u32, u64)> = Default::default();
+    for p in procs {
+        if !p.state.contains('U') || p.elapsed_s < min_s || p.cpu_s * 20 > p.elapsed_s {
+            continue;
+        }
+        if !p
+            .command
+            .split_whitespace()
+            .next()
+            .is_some_and(|c| c.rsplit('/').next() == Some("rustc"))
+        {
+            continue;
+        }
+        let dir = dependency_dir(&p.command).unwrap_or("(no -L dependency=)");
+        let e = by.entry(dir.to_string()).or_default();
+        e.0 += 1;
+        e.1 = e.1.max(p.elapsed_s);
+    }
+    by.into_iter().map(|(d, (n, t))| (d, n, t)).collect()
 }
 
 fn f(
@@ -410,6 +505,23 @@ pub fn judge(x: &Facts, l: &Limits) -> Vec<Finding> {
             ev,
         ));
     }
+    for (dir, n, secs) in blocked_compiles(&x.procs, l.blocked_compile_ms / 1000) {
+        if n >= l.blocked_compiles {
+            out.push(f(
+                format!("overloaded:blocked-compiles:{dir}"),
+                "overloaded",
+                Severity::Severe,
+                format!(
+                    "{n} compiles have sat in uninterruptible wait for up to {} min with no CPU, listing `{dir}`",
+                    secs / 60
+                ),
+                vec![
+                    format!("their `-L dependency=` is `{dir}`; a build directory with hundreds of thousands of files stalls rustc's directory listing"),
+                    "check the size of that directory's own entry (`ls -ld`); rename it aside to unblock them".into(),
+                ],
+            ));
+        }
+    }
     if let Some(m) = x.mem_free_mb.filter(|m| *m < l.mem_free_mb) {
         out.push(f(
             "overloaded:memory".into(),
@@ -591,6 +703,50 @@ mod tests {
         let f = out.iter().find(|f| f.key == "overloaded:load").unwrap();
         assert_eq!(f.summary, "the machine is at 99% load");
         assert!(f.evidence.iter().any(|e| e.contains("loadavg")));
+    }
+
+    fn rustc(pid: u32, state: &str, elapsed_s: u64, cpu_s: u64, dir: &str) -> ProcFact {
+        ProcFact {
+            pid,
+            state: state.into(),
+            elapsed_s,
+            cpu_s,
+            command: format!("/x/bin/rustc --crate-name a -L dependency={dir} src/lib.rs"),
+        }
+    }
+
+    #[test]
+    fn many_compiles_in_uninterruptible_wait_name_their_directory() {
+        let dir = "/c/mason-target.noindex/base-cargo-workspace/debug/deps";
+        let mut procs: Vec<ProcFact> = (1..=5).map(|i| rustc(i, "U", 2760, 3, dir)).collect();
+        // Busy, sleeping and too-young ones do not count.
+        procs.push(rustc(10, "R", 2760, 2000, dir));
+        procs.push(rustc(11, "U", 30, 0, dir));
+        procs.push(rustc(12, "U", 2760, 3, "/c/other/debug/deps"));
+        let x = Facts {
+            procs,
+            ..Default::default()
+        };
+        let out = judge(&x, &l());
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].key, format!("overloaded:blocked-compiles:{dir}"));
+        assert!(out[0].summary.starts_with("5 compiles"));
+        assert!(out[0].summary.contains(dir));
+        // Fewer than the limit: quiet.
+        let x = Facts {
+            procs: vec![rustc(1, "U", 2760, 3, dir)],
+            ..Default::default()
+        };
+        assert!(judge(&x, &l()).is_empty());
+    }
+
+    #[test]
+    fn ps_rows_parse() {
+        let v = parse_ps("  42 U     46:00 0:01.50 /x/rustc -L dependency=/d/deps a.rs\n 7 Ss 1-02:03:04 10:00 launchd\njunk\n");
+        assert_eq!(v.len(), 2);
+        assert_eq!((v[0].pid, v[0].elapsed_s, v[0].cpu_s), (42, 2760, 1));
+        assert_eq!(dependency_dir(&v[0].command), Some("/d/deps"));
+        assert_eq!(v[1].elapsed_s, 93_784);
     }
 
     #[test]

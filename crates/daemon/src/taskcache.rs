@@ -225,6 +225,183 @@ pub fn prune_task_objects(d: &Daemon, p: &ProjectCfg, task: u64, now_ms: u64) {
     }
 }
 
+/// A build directory whose `deps` entry (the directory's own size, from one `stat`) is over this
+/// many bytes is renamed aside before the build. A task's is about 0.5 MB (15k entries); the ones
+/// that stalled every compile on 2026-11-17 were 12.9 to 24.9 MB (390k to 750k entries).
+pub const DEPS_LIMIT_BYTES: u64 = 2 * 1024 * 1024;
+
+/// The size of `<dir>/debug/deps` as the directory's own entry reports it, never by listing it.
+/// `None` when there is no such directory.
+pub fn deps_size(dir: &Path) -> Option<u64> {
+    std::fs::metadata(dir.join("debug").join("deps"))
+        .ok()
+        .map(|m| m.len())
+}
+
+/// What [`prepare_dir`] did.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Prepared {
+    /// Nothing there yet.
+    Absent,
+    /// Within the limit; this many stale object files were removed.
+    Pruned(usize),
+    /// Over the limit: renamed to this path, to be removed in the background.
+    RenamedAside { size: u64, aside: PathBuf },
+}
+
+/// Get a build directory ready for the build that is about to run in it. `size` reads the `deps`
+/// size (tests give a fake), `remove` is called once with the renamed directory (it must not
+/// block).
+///
+/// Over [`DEPS_LIMIT_BYTES`] the directory is renamed aside and not listed at all: listing it is
+/// the call that stalls. Otherwise its stale object sets are pruned ([`stale_objects`]).
+pub fn prepare_dir(
+    dir: &Path,
+    now_ms: u64,
+    limit: u64,
+    size: &dyn Fn(&Path) -> Option<u64>,
+    remove: &mut dyn FnMut(PathBuf),
+) -> Prepared {
+    let Some(sz) = size(dir) else {
+        return Prepared::Absent;
+    };
+    if sz <= limit {
+        return Prepared::Pruned(prune_objects(dir, now_ms));
+    }
+    let name = dir
+        .file_name()
+        .map_or("dir".into(), |n| n.to_string_lossy().into_owned());
+    let aside = dir.with_file_name(format!("{ASIDE}{name}-{now_ms}"));
+    match std::fs::rename(dir, &aside) {
+        Ok(()) => {
+            remove(aside.clone());
+            Prepared::RenamedAside { size: sz, aside }
+        }
+        Err(e) => {
+            eprintln!("cannot rename {} aside: {e}", dir.display());
+            Prepared::Pruned(0)
+        }
+    }
+}
+
+/// The prefix of a directory renamed aside; the sweep finds leftovers by it.
+const ASIDE: &str = ".removing-";
+
+/// Remove `path` one at a time, at background I/O priority (`taskpolicy -b`), on a thread of its
+/// own. A million unlinks at normal priority starve the builds that share the disk.
+pub fn remove_aside_in_background(path: PathBuf) {
+    let name = format!("aside-{}", path.display());
+    in_background(name, move || {
+        let ok = std::process::Command::new("/usr/sbin/taskpolicy")
+            .args(["-b", "/bin/rm", "-rf"])
+            .arg(&path)
+            .status()
+            .is_ok_and(|s| s.success());
+        if !ok {
+            let _ = std::fs::remove_dir_all(&path);
+        }
+    });
+}
+
+/// Queue the removal of every directory a restart left renamed aside in `parent`.
+fn resume_removals(parent: &Path) {
+    let Ok(rd) = std::fs::read_dir(parent) else {
+        return;
+    };
+    for e in rd.flatten() {
+        if e.file_name().to_string_lossy().starts_with(ASIDE) {
+            remove_aside_in_background(e.path());
+        }
+    }
+}
+
+/// The directory a build run in `cwd` uses, by the project's convention
+/// `<task_cache parent>/<basename of cwd>`: `base-<suite>`, `<project>-b<slot>`, `wt` or a task's
+/// own number. `None` when the project names no `task_cache` or the path rules refuse it.
+pub fn build_dir_for(d: &Daemon, p: &ProjectCfg, cwd: &Path) -> Option<PathBuf> {
+    let name = cwd.file_name()?.to_str()?;
+    let parent = shared_parent(p)?;
+    check_path(
+        &format!("{}/{name}", parent.display()),
+        &home(),
+        &keep_list(d, p),
+    )
+    .ok()
+}
+
+/// The directory that holds every build directory of the project: what comes before `{task}` in
+/// its `task_cache`. Task directories (a number) and the shared ones (`base-<suite>`,
+/// `<project>-b<slot>`, `wt`) live side by side in it.
+pub fn shared_parent(p: &ProjectCfg) -> Option<PathBuf> {
+    let (before, _) = p.task_cache.as_ref()?.split_once("{task}")?;
+    let e = expand(before.trim_end_matches('/'), 0, &home());
+    (!e.is_empty()).then(|| PathBuf::from(e))
+}
+
+/// Words for a `deps` size, with the limit.
+pub fn deps_note(name: &str, bytes: u64) -> String {
+    let mb = bytes as f64 / (1024.0 * 1024.0);
+    if bytes > DEPS_LIMIT_BYTES {
+        format!(
+            "build directory {name}: deps listing {mb:.1} MB, OVER the {} MB limit (it is renamed aside before the next build there)",
+            DEPS_LIMIT_BYTES / (1024 * 1024)
+        )
+    } else {
+        format!("build directory {name}: deps listing {mb:.1} MB")
+    }
+}
+
+/// Prepare the shared build directory of a build about to run in `cwd`: prune it or, if its
+/// `deps` is over the limit, rename it aside (see [`prepare_dir`]). Logged, and noted for the
+/// home page when a directory is renamed.
+pub fn prepare_for_build(d: &Daemon, p: &ProjectCfg, cwd: &Path, now_ms: u64) {
+    let Some(dir) = build_dir_for(d, p, cwd) else {
+        return;
+    };
+    if let Some(parent) = dir.parent() {
+        resume_removals(parent);
+    }
+    match prepare_dir(
+        &dir,
+        now_ms,
+        DEPS_LIMIT_BYTES,
+        &deps_size,
+        &mut remove_aside_in_background,
+    ) {
+        Prepared::Absent | Prepared::Pruned(0) => {}
+        Prepared::Pruned(n) => eprintln!("pruned {n} stale object files in {}", dir.display()),
+        Prepared::RenamedAside { size, aside } => {
+            let text = format!(
+                "build directory {} had a deps listing of {} MB; renamed to {} and removed in the background (the next build there is cold)",
+                dir.display(),
+                size / (1024 * 1024),
+                aside.display()
+            );
+            eprintln!("{text}");
+            d.broker.note(now_ms, text);
+        }
+    }
+}
+
+/// The shared build directories under the project's `task_cache` parent (every one whose name is
+/// not a task number) and the size of each `deps`, for the Compilation section and `doctor`.
+pub fn shared_deps_sizes(parent: &Path) -> Vec<(String, u64)> {
+    let mut v: Vec<(String, u64)> = std::fs::read_dir(parent)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().into_string().ok()?;
+            if name.starts_with('.') || name.parse::<u64>().is_ok() {
+                return None;
+            }
+            Some((name, deps_size(&e.path())?))
+        })
+        .collect();
+    v.sort();
+    v
+}
+
 /// Remove `task`'s directory now, on this thread. Logged, never an error.
 pub fn remove_now(d: &Daemon, p: &ProjectCfg, task: u64) -> bool {
     let path = match target(d, p, task) {
@@ -678,6 +855,92 @@ mod tests {
         assert!(check_template("$HOME/c/{task}").is_ok());
         assert!(check_template("$HOME/c").is_err());
         assert!(check_template("").is_err());
+    }
+
+    fn touch(dir: &Path, name: &str, at_ms: u64) {
+        let f = std::fs::File::create(dir.join(name)).unwrap();
+        f.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_millis(at_ms))
+            .unwrap();
+    }
+
+    /// A landing slot and a `base-*` directory prune the same way a task's does: the older hash's
+    /// set goes, the newest stays.
+    #[test]
+    fn stale_sets_go_from_a_landing_slot_and_a_base_directory() {
+        let t = tempfile::tempdir().unwrap();
+        let now = 10 * 24 * 3600 * 1000;
+        for name in ["mason-b0", "base-cargo-workspace"] {
+            let deps = t.path().join(name).join("debug").join("deps");
+            std::fs::create_dir_all(&deps).unwrap();
+            touch(&deps, "mason_core-aaaa.1.rcgu.o", now - 5 * 3600 * 1000);
+            touch(&deps, "mason_core-aaaa.2.rcgu.o", now - 5 * 3600 * 1000);
+            touch(&deps, "mason_core-bbbb.1.rcgu.o", now - 3600 * 1000);
+            touch(&deps, "libmason_core-bbbb.rlib", now - 3600 * 1000);
+            let r = prepare_dir(
+                &t.path().join(name),
+                now,
+                DEPS_LIMIT_BYTES,
+                &|_| Some(4096),
+                &mut |_| panic!("not over the limit"),
+            );
+            assert_eq!(r, Prepared::Pruned(2));
+            let mut left: Vec<String> = std::fs::read_dir(&deps)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().into_string().unwrap())
+                .collect();
+            left.sort();
+            assert_eq!(
+                left,
+                ["libmason_core-bbbb.rlib", "mason_core-bbbb.1.rcgu.o"]
+            );
+        }
+    }
+
+    /// A directory over the limit is renamed aside without being listed, the build sees no
+    /// `deps`, and the background removal is asked for once, with the renamed path.
+    #[test]
+    fn a_directory_over_the_limit_is_renamed_aside_and_removed_once() {
+        let t = tempfile::tempdir().unwrap();
+        let dir = t.path().join("mason-b0");
+        let deps = dir.join("debug").join("deps");
+        std::fs::create_dir_all(&deps).unwrap();
+        touch(&deps, "x-aaaa.1.rcgu.o", 1);
+        let mut removed = vec![];
+        let r = prepare_dir(
+            &dir,
+            99,
+            DEPS_LIMIT_BYTES,
+            &|_| Some(25 * 1024 * 1024),
+            &mut |p| removed.push(p),
+        );
+        let aside = t.path().join(".removing-mason-b0-99");
+        assert_eq!(
+            r,
+            Prepared::RenamedAside {
+                size: 25 * 1024 * 1024,
+                aside: aside.clone()
+            }
+        );
+        assert_eq!(removed, [aside.clone()]);
+        assert!(!dir.exists(), "the build starts with no deps at all");
+        assert!(aside.join("debug/deps/x-aaaa.1.rcgu.o").exists());
+        // Nothing there: nothing to do and nothing removed.
+        let r = prepare_dir(&dir, 100, DEPS_LIMIT_BYTES, &|_| None, &mut |_| panic!());
+        assert_eq!(r, Prepared::Absent);
+    }
+
+    #[test]
+    fn shared_directories_are_sized_and_flagged() {
+        let t = tempfile::tempdir().unwrap();
+        for n in ["7", "wt", ".removing-wt-1"] {
+            std::fs::create_dir_all(t.path().join(n).join("debug/deps")).unwrap();
+        }
+        std::fs::create_dir_all(t.path().join("mason-b0")).unwrap(); // never built: no deps
+        let v = shared_deps_sizes(t.path());
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].0, "wt");
+        assert!(deps_note("x", DEPS_LIMIT_BYTES + 1).contains("OVER"));
+        assert!(!deps_note("x", 10).contains("OVER"));
     }
 
     /// A removal already queued or running is not started again, and removals never overlap.

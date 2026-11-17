@@ -1227,6 +1227,10 @@ fn run_on_base(
             remove_results(&wt, f);
         }
         let id = format!("{}-{tag}-{}", who.id_prefix, suite.name);
+        // The develop comparison's directory (`base-<suite>`) is never a task's: prepare it (#556).
+        if let Some(p) = who.project_cfg() {
+            crate::taskcache::prepare_for_build(&who.d, &p, &wt, now_ms());
+        }
         let ran = run_hosted(
             &who.d,
             &id,
@@ -2163,9 +2167,13 @@ fn held_env(c: &Ctx, held: &Needs) -> Vec<(String, String)> {
 fn run_build(who: &Who, suite: &Suite, build: &str, n: usize, cwd: &Path) -> Built {
     let id = format!("{}-b{n}-{}", who.id_prefix, suite.name);
     let limit = suite.timeout.unwrap_or(Duration::from_secs(1800));
-    // Object sets of older crate hashes pile up in a task's build directory (#476).
-    if let (Some((task, _)), Some(p)) = (who.task, who.project_cfg()) {
-        crate::taskcache::prune_task_objects(&who.d, &p, task.0, now_ms());
+    // Object sets of older crate hashes pile up in a build directory (#476). Every directory a
+    // build runs in is prepared: a task's, a landing slot's, `wt`'s (#556).
+    if let Some(p) = who.project_cfg() {
+        crate::taskcache::prepare_for_build(&who.d, &p, cwd, now_ms());
+        if let Some((task, _)) = who.task {
+            crate::taskcache::prune_task_objects(&who.d, &p, task.0, now_ms());
+        }
     }
     let ran = match run_hosted(
         &who.d,

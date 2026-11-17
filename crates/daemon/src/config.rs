@@ -417,6 +417,8 @@ pub fn parse_health(text: &str) -> Result<Option<HealthCfg>, String> {
             "late_loops" => l.late_loops = n as u32,
             "cannot_land" => l.cannot_land = n as u32,
             "cooldown_h" => l.cooldown_ms = n * H,
+            "blocked_compiles" => l.blocked_compiles = n as u32,
+            "blocked_compile_m" => l.blocked_compile_ms = n * M,
             other => return Err(format!("daemon.toml: health.{other} is not a known key")),
         }
     }
