@@ -23,7 +23,7 @@ t() {  # PACKAGE TEST-FILE TEST-NAME
   cargo test -q -p "$1" --test "$2" -- --exact "$3" 2>&1 | tail -3 | grep -q 'test result: ok. 1 passed' \
     || { echo "FAILED: $2::$3" >&2; cargo test -p "$1" --test "$2" -- --exact "$3" 2>&1 | tail -30 >&2; exit 1; }
 }
-m() { t mason-daemon landing_modes "$1"; }
+m() { t mason-daemon it "landing_modes::$1"; }
 
 echo "== 1. the seven landing modes"
 echo "-- direct          green batch, red culprit parked, moved base folded in"
@@ -52,7 +52,7 @@ echo "-- a mode whose service is missing is refused, naming it"
 m a_ci_mode_without_a_remote_or_ci_section_is_refused_naming_what_is_missing
 
 echo "== 2. kill -9 during CI and during a pull request"
-t mason-daemon landing_crash killing_the_daemon_during_ci_or_a_pull_request_leaves_nothing_behind_and_lands_once
+t mason-daemon it landing_crash::killing_the_daemon_during_ci_or_a_pull_request_leaves_nothing_behind_and_lands_once
 echo "   direct-ci: ci_pushed ci_finished batch_red before/after promote; pr-batch: pr_pushed pr_opened pr_checked ...; host-queue: pr_opened ...: each recovered, nothing left on the host"
 
 echo "== 3. the adapters on recorded responses"
@@ -63,7 +63,7 @@ fi
 echo "   conformance kits (host, tracker, build system), 404 stops the poll at once, rate limit waits as told, outage backs off, signatures verified"
 
 echo "== 4. the tracker"
-[ -n "${MASON_TESTS_ALREADY_RAN:-}" ] || cargo test -q -p mason-daemon --test tracker 2>&1 | grep 'test result'
+[ -n "${MASON_TESTS_ALREADY_RAN:-}" ] || cargo test -q -p mason-daemon --test it tracker:: 2>&1 | grep 'test result'
 
 echo "== 5. mason doctor"
 if [ -z "${MASON_TESTS_ALREADY_RAN:-}" ]; then

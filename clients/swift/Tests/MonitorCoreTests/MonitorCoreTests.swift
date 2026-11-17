@@ -358,6 +358,8 @@ final class MonitorCoreTests: XCTestCase {
         m.skipAllTests(m.sectionRows("testing"))
         XCTAssertEqual(sent.map { $0.skip.task }, [10, 12])
         XCTAssertEqual(sent.map { $0.skip.step }, ["test", "test"])
+        // masond answers the first two (task #522: a second click while one is pending sends nothing).
+        for c in sent { var r = Mason_V1_CommandResult(); r.id = c.id; r.ok = false; r.error = "no"; var sm = Mason_V1_ServerMessage(); sm.result = r; m.apply(sm) }
         m.skipTest(10, step: "test")
         XCTAssertEqual(sent.last?.skip.task, 10, "one row's button sends the same command")
         XCTAssertEqual(MonitorModel.suiteProgress(a), "3 of 8 suites")
@@ -542,6 +544,19 @@ final class MonitorCoreTests: XCTestCase {
         XCTAssertEqual(Format.duration(ms: 9 * 60_000), "9 min")
         XCTAssertEqual(Format.duration(ms: 3 * 3_600_000 + 10 * 60_000), "3h10")
         XCTAssertEqual(Format.duration(ms: 2 * 3_600_000), "2h")
+    }
+
+    func testTheSyspolicydLineShowsTheReadingAndTheLimit() {
+        var c = Mason_V1_Compilation()
+        XCTAssertNil(c.policyLine, "no gate")
+        c.syspolicydMaxPct = 300
+        c.syspolicydPct = 640
+        XCTAssertEqual(c.policyLine, "syspolicyd 640% — holding compiles over 300%")
+        c.syspolicydPct = 20
+        XCTAssertEqual(c.policyLine, "syspolicyd 20% — compiles held over 300%")
+        let h = HealthSnapshot(json: ##"{"cpu":{"busy_pct":10,"compile_max_pct":50,"syspolicyd_pct":640,"syspolicyd_max_pct":300}}"##)
+        XCTAssertEqual(h.policyLine, "syspolicyd 640% — holding compiles over 300%")
+        XCTAssertNil(HealthSnapshot(json: ##"{"cpu":{"busy_pct":10,"compile_max_pct":50}}"##).policyLine)
     }
 
     func testTheHealthPageReadsTheDaemonsResourceReport() {
@@ -980,6 +995,8 @@ final class MonitorCoreTests: XCTestCase {
         XCTAssertEqual([h.task, UInt64(h.diffHash == "abc123" ? 1 : 0)], [3, 1])
         guard case .approve(let p)? = sent()[1].body else { return XCTFail() }
         XCTAssertEqual(p.task, 4)
+        XCTAssertEqual(p.priority, MonitorModel.defaultApprovalPriority)
+        XCTAssertEqual(p.priority, "normal")
     }
 
     func testRejectSendsTheReason() {
@@ -1665,8 +1682,13 @@ final class MonitorCoreTests: XCTestCase {
 
     func testReleaseAddBlockerAndReviveSendTheOwnersCommands() {
         let (m, sent) = ownerModel()
-        m.release(11, blocker: 8)
-        m.addBlocker(11, after: 5)
+        // masond answers each before the next click (a task with a command pending takes no second one).
+        func answered() {
+            var r = Mason_V1_CommandResult(); r.id = sent().last!.id; r.ok = false; r.error = "no"
+            var sm = Mason_V1_ServerMessage(); sm.result = r; m.apply(sm)
+        }
+        m.release(11, blocker: 8); answered()
+        m.addBlocker(11, after: 5); answered()
         m.revive(8)
         guard case .unblock(let u)? = sent()[0].body else { return XCTFail() }
         XCTAssertEqual([u.task, u.from[0]], [11, 8])

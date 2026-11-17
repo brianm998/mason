@@ -9,7 +9,7 @@ for name in \
   a_build_that_crashes_is_rolled_back_by_itself_with_an_alert \
   an_update_while_an_agent_session_runs_does_not_interrupt_it; do
   for i in $(seq 1 "$n"); do
-    if cargo test -q -p mason-daemon --test update "$name" -- --exact >/dev/null 2>&1; then
+    if cargo test -q -p mason-daemon --test it "update::$name" -- --exact >/dev/null 2>&1; then
       echo "$name run $i: green"
     else
       echo "$name run $i: RED"

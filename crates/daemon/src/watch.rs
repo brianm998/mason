@@ -137,6 +137,9 @@ pub fn cont(pid: u32) -> bool {
 }
 
 /// SIGKILL a process group (a `mason run` child's tree, which leads its own).
+///
+/// No kill-ledger line is written here: the call sites hold a process group, not the
+/// host directory (s555).
 pub fn kill_group(pgid: u32) {
     let _ = mason_platform::process::signal_group(pgid, mason_platform::process::Signal::Kill);
 }

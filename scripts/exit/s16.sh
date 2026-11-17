@@ -26,21 +26,21 @@ t() {  # PACKAGE TEST-FILE TEST-NAME
 }
 
 echo "== 1. an update while an agent session runs"
-t mason-daemon update an_update_while_an_agent_session_runs_does_not_interrupt_it
+t mason-daemon it update::an_update_while_an_agent_session_runs_does_not_interrupt_it
 echo "   same pid after exec, same step host, one attempt, landed once, database backed up"
 echo "== 2. a build that crashes is rolled back by itself"
-t mason-daemon update a_build_that_crashes_is_rolled_back_by_itself_with_an_alert
+t mason-daemon it update::a_build_that_crashes_is_rolled_back_by_itself_with_an_alert
 echo "   three crashes in five minutes: back on the previous runtime, an alert, the bad build refused"
 echo "== 3. a build that fails its self-test never takes over"
-t mason-daemon update a_build_that_fails_its_self_test_never_takes_over
+t mason-daemon it update::a_build_that_fails_its_self_test_never_takes_over
 echo "== 4. no accidental downgrades"
-t mason-daemon update the_updater_refuses_to_go_backwards_unless_told_to_roll_back
+t mason-daemon it update::the_updater_refuses_to_go_backwards_unless_told_to_roll_back
 echo "== 5. the self-test"
-t mason-daemon update the_self_test_runs_on_a_copy_and_a_bad_database_fails_it
+t mason-daemon it update::the_self_test_runs_on_a_copy_and_a_bad_database_fails_it
 
 echo "== 6. versions on the wire, and the monitors"
-t mason-daemon protocol the_welcome_names_the_daemons_build_and_the_oldest_client_it_serves
-t mason-daemon protocol a_client_too_old_gets_a_welcome_it_can_read_then_an_explanation_and_no_views
+t mason-daemon it protocol::the_welcome_names_the_daemons_build_and_the_oldest_client_it_serves
+t mason-daemon it protocol::a_client_too_old_gets_a_welcome_it_can_read_then_an_explanation_and_no_views
 if [ -z "${MASON_TESTS_ALREADY_RAN:-}" ]; then
   cargo test -q -p mason-daemon --lib update 2>&1 | grep 'test result'
   cargo test -q -p mason-protocol 2>&1 | grep 'test result' | head -1

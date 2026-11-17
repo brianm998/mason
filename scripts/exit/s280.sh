@@ -11,5 +11,5 @@ for m in progress doctor; do
   l=$(grep -n "^    fn $m(" "$f" | cut -d: -f1)
   [ "$l" -gt "$start" ] && [ "$l" -lt "$end" ]
 done
-grep -q 'trim(), "6"' crates/daemon/tests/e2e.rs
+grep -q 'trim(), "6"' crates/daemon/tests/it/e2e.rs
 echo "s280 OK"

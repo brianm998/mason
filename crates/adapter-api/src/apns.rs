@@ -117,7 +117,17 @@ pub fn cached_jwt(
     team_id: &str,
     now_ms: u64,
 ) -> Result<String, String> {
-    let mut g = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    cached_in(&CACHE, key_pem, key_id, team_id, now_ms)
+}
+
+fn cached_in(
+    cache: &Mutex<Option<Cached>>,
+    key_pem: &str,
+    key_id: &str,
+    team_id: &str,
+    now_ms: u64,
+) -> Result<String, String> {
+    let mut g = cache.lock().unwrap_or_else(|e| e.into_inner());
     let fp = fingerprint(key_pem);
     if let Some((f, k, t, at, jwt)) = g.as_ref() {
         if *f == fp && k == key_id && t == team_id && now_ms >= *at && now_ms - *at < JWT_TTL_MS {
@@ -326,12 +336,28 @@ mod tests {
         )
         .is_err());
         let (pem, _) = key();
-        let a = cached_jwt(&pem, "cache-kid", "T", 1_000_000).unwrap();
-        let b = cached_jwt(&pem, "cache-kid", "T", 1_000_000 + JWT_TTL_MS - 1).unwrap();
+        // A local cache: the sender tests use the shared one at the same time.
+        let local = Mutex::new(None);
+        let a = cached_in(&local, &pem, "cache-kid", "T", 1_000_000).unwrap();
+        let b = cached_in(&local, &pem, "cache-kid", "T", 1_000_000 + JWT_TTL_MS - 1).unwrap();
         assert_eq!(a, b);
-        let c = cached_jwt(&pem, "cache-kid", "T", 1_000_000 + JWT_TTL_MS + 5000).unwrap();
+        let c = cached_in(
+            &local,
+            &pem,
+            "cache-kid",
+            "T",
+            1_000_000 + JWT_TTL_MS + 5000,
+        )
+        .unwrap();
         assert_ne!(a, c);
-        let d = cached_jwt(&pem, "other-kid", "T", 1_000_000 + JWT_TTL_MS + 5000).unwrap();
+        let d = cached_in(
+            &local,
+            &pem,
+            "other-kid",
+            "T",
+            1_000_000 + JWT_TTL_MS + 5000,
+        )
+        .unwrap();
         assert_ne!(c, d);
     }
 

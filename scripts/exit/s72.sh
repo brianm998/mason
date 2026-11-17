@@ -17,7 +17,7 @@ run "a banner is compared without its clock" \
 run "a slot held outside the broker is not granted again" \
     -p mason-daemon --lib a_slot_held_outside_the_broker_is_not_granted_again
 echo "== the conflict tests pass without a git identity (as on a CI runner)"
-out=$(GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 cargo test -q -p mason-daemon --test e2e conflict 2>&1) \
+out=$(GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 cargo test -q -p mason-daemon --test it conflict 2>&1) \
     || { echo "$out" >&2; echo "FAILED: the conflict tests need a git identity" >&2; exit 1; }
 echo "$out" | grep -E '^test result' | tail -1
 if command -v cargo-deny >/dev/null; then

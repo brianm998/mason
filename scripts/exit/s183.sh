@@ -18,7 +18,7 @@ run() {  # PACKAGE TEST-NAME [TEST-FILE]
     || { echo "FAILED: $2" >&2; cargo test "${args[@]}" -- --exact "$2" 2>&1 | tail -30 >&2; exit 1; }
 }
 echo "== 1. a union-only red is caught before CI"
-run mason-daemon direct_ci_batch_red_only_on_the_union_is_not_pushed_and_both_tasks_are_told landing_modes
+run mason-daemon landing_modes::direct_ci_batch_red_only_on_the_union_is_not_pushed_and_both_tasks_are_told it
 echo "== 2. star's batch tier and the doctor warning"
 run mason-pipeline doctor::tests::star_example_has_a_cheap_batch_tier_the_impact_map_narrows
 run mason-pipeline doctor::tests::doctor_warns_when_a_ci_or_pr_mode_has_no_batch_tier

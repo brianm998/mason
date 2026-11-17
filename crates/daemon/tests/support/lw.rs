@@ -47,7 +47,7 @@ max_rounds = 3
 "c/**" = ["alpha"]
 "#,
     );
-    for n in ["alpha", "beta", "integration", "smoke"] {
+    for n in ["alpha", "beta", "integration", "smoke", "lint"] {
         s.push_str(&format!(
             "\n[suite.{n}]\ncommand = \"sh checks.sh {n}\"\nparser = \"tap\"\nmin_tests = 1\nlevel = \"unit\"\n"
         ));

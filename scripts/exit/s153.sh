@@ -17,9 +17,9 @@ t() {  # PACKAGE TEST-FILE TEST-NAME
 }
 
 echo "== 1. runner lost: rerun once, lands green"
-t mason-daemon ci_infra a_runner_lost_red_is_rerun_once_and_lands_green
+t mason-daemon it ci_infra::a_runner_lost_red_is_rerun_once_and_lands_green
 echo "== 2. a real red: sent back, one trigger"
-t mason-daemon ci_infra a_real_red_is_sent_back_without_a_second_run
+t mason-daemon it ci_infra::a_real_red_is_sent_back_without_a_second_run
 echo "== 3. the judge on recorded GitHub responses"
 for n in a_timed_out_job_is_infrastructure_without_fetching_its_log \
   a_failure_whose_log_says_the_runner_was_shut_down_is_infrastructure \

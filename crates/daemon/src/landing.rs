@@ -623,9 +623,21 @@ fn check_dropped(c: &Ctx) -> Option<Verdict> {
     if dropped.is_empty() {
         return None;
     }
+    let repo = &c.project.path;
+    let mut pairs = vec![];
+    for d in dropped.iter().take(audit::MAX_LISTED) {
+        if let Ok(one) = audit::replacements(
+            repo,
+            &c.project.base_ref(),
+            &c.branch,
+            std::slice::from_ref(d),
+        ) {
+            pairs.extend(one);
+        }
+    }
     Some(Verdict::SentBack {
         reason: audit::reason(&dropped),
-        feedback: audit::feedback(&dropped),
+        feedback: audit::feedback_with(&dropped, &pairs),
     })
 }
 
@@ -1886,6 +1898,21 @@ impl Runner {
                                 }))
                             },
                         };
+                    // The base moved: the union is linted again, tests skipped or not (s521).
+                    let lint = self.lint_checks(
+                        &def,
+                        &wt_for_cmd,
+                        &log_dir,
+                        &format!("b{batch_id}-r{rounds}-relint"),
+                    );
+                    if !lint.green {
+                        tracing::warn!(
+                            batch = batch_id,
+                            "the lint check is red after the base moved: {}",
+                            lint.notes.join("; ")
+                        );
+                        return false;
+                    }
                     // A build first, as the test step does, holding one `compile`
                     // slot; the re-test then holds the rest of what the test step uses.
                     if let Some(build) = &cmds.build {
@@ -2342,6 +2369,15 @@ impl Runner {
         if !r.green {
             return r;
         }
+        // The lint tier runs on every batch, tests skipped or not (s521).
+        let l = self.lint_checks(def, wt, log_dir, prefix);
+        if !l.green {
+            r.green = false;
+            r.failed.extend(l.failed);
+            r.notes.extend(l.notes);
+            return r;
+        }
+        r.notes.extend(l.notes);
         let outside = if self.cfg.mode.uses_candidate_ref() {
             self.ci_verify(wt)
         } else if self.cfg.mode.uses_pr() {
@@ -2490,6 +2526,94 @@ impl Runner {
                 }
                 Err(e) => {
                     let why = format!("{name}: the fast tier gave no result: {e}");
+                    self.fail_service(why.clone());
+                    out.green = false;
+                    out.notes.push(why);
+                    return out;
+                }
+            }
+        }
+        out
+    }
+
+    /// The lint tier (`[[tier]] name = "lint"` in `.mason/landing.toml`): the `command` of each
+    /// suite it names runs in the batch's worktree on every batch, whether or not its tests
+    /// were skipped; only the owner's force stops it. A red names the files and lines the
+    /// output points at, so the parked batch says what to fix.
+    fn lint_checks(
+        &self,
+        def: &mason_definition::Definition,
+        wt: &Path,
+        log_dir: &Path,
+        prefix: &str,
+    ) -> crate::suites::OverRun {
+        let d = &self.d;
+        let mut out = crate::suites::OverRun {
+            green: true,
+            failed: BTreeSet::new(),
+            notes: vec![],
+        };
+        let Some(tier) = self.cfg.tier("lint") else {
+            return out;
+        };
+        let members = self.members(def);
+        for name in &tier.suites {
+            let Some(suite) = def.testing.suite(name) else {
+                out.green = false;
+                out.failed.insert(name.clone());
+                out.notes.push(format!(
+                    "{name}: the lint tier names a suite the definition does not have"
+                ));
+                continue;
+            };
+            if let Some(why) = members.forced(d) {
+                out.notes.push(format!("{name}: not run: {why}"));
+                continue;
+            }
+            let _lease = match self.hold(
+                def,
+                crate::sched::needs_of(&crate::jobs::build_uses(), None),
+                true,
+            ) {
+                Ok(l) => l,
+                Err(e) => {
+                    self.fail_service(e.clone());
+                    out.green = false;
+                    out.notes.push(e);
+                    return out;
+                }
+            };
+            let spec = crate::hostedcheck::CheckSpec {
+                id_prefix: format!("{prefix}-lint-{name}"),
+                log_dir: log_dir.to_path_buf(),
+                cmd: suite.command.clone(),
+                cwd: wt.to_path_buf(),
+                env: vec![],
+                limit: self.project().test_timeout,
+                tree: crate::hostedcheck::tree_key(wt),
+                stop: Some({
+                    let (d, m) = (d.clone(), members.clone());
+                    Arc::new(move || m.forced(&d)) as crate::hostedcheck::StopFn
+                }),
+            };
+            match crate::hostedcheck::run(d, &spec) {
+                Ok(o) if o.stopped.is_some() => out.notes.push(format!(
+                    "{name}: not run to the end: {}",
+                    o.stopped.unwrap_or_default()
+                )),
+                Ok(o) if o.passed => out.notes.push(format!("{name}: clean")),
+                Ok(o) => {
+                    out.green = false;
+                    out.failed.insert(name.clone());
+                    out.notes.push(format!(
+                        "{name}: the batch is not lint clean{}{}\n{}",
+                        if o.timed_out { " (timed out)" } else { "" },
+                        lint_places(&o.output),
+                        crate::jobs::tail(&o.output, 15)
+                    ));
+                }
+                Err(e) => {
+                    let why = format!("{name}: the lint check gave no result: {e}");
                     self.fail_service(why.clone());
                     out.green = false;
                     out.notes.push(why);
@@ -3706,9 +3830,54 @@ mod idle_tests {
     }
 }
 
+/// The `file:line` places a lint's output points at: clippy's `--> file:line:col` and
+/// rustfmt's `Diff in file:line`. At most ten, as ` (at a.rs:1, b.rs:2)`; empty when none.
+fn lint_places(output: &str) -> String {
+    let mut seen: Vec<String> = vec![];
+    for l in output.lines() {
+        let t = l.trim();
+        let place = if let Some(r) = t.strip_prefix("--> ") {
+            r.rsplitn(2, ':').nth(1).map(String::from)
+        } else if let Some(r) = t.strip_prefix("Diff in ") {
+            r.split(" at line ")
+                .next()
+                .map(|f| f.trim_end_matches(':').to_string())
+                .map(|f| match t.rsplit_once(" at line ") {
+                    Some((_, n)) => format!("{f}:{}", n.trim_end_matches(':')),
+                    None => f,
+                })
+        } else {
+            None
+        };
+        if let Some(p) = place {
+            if !seen.contains(&p) {
+                seen.push(p);
+            }
+        }
+        if seen.len() == 10 {
+            break;
+        }
+    }
+    if seen.is_empty() {
+        String::new()
+    } else {
+        format!(" (at {})", seen.join(", "))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lint_places_names_the_files_and_lines_of_clippy_and_rustfmt() {
+        let out = "warning: x\n  --> crates/store/src/lib.rs:1527:9\n   |\nDiff in /w/crates/a.rs at line 12:\n  --> crates/store/src/lib.rs:1527:9\n";
+        assert_eq!(
+            lint_places(out),
+            " (at crates/store/src/lib.rs:1527, /w/crates/a.rs:12)"
+        );
+        assert_eq!(lint_places("all fine"), "");
+    }
 
     #[test]
     fn the_jobs_summary_names_states_with_jobs_and_keeps_failed_visible() {

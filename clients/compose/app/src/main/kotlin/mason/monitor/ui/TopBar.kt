@@ -412,6 +412,7 @@ private fun SpeechSettingsDialog(model: MonitorModel, onClose: () -> Unit) {
     val theme = LocalTheme.current
     val a = model.announcer
     val s = a.settings
+    androidx.compose.runtime.LaunchedEffect(Unit) { a.loadVoices(model.background) }
     AlertDialog(
         onDismissRequest = onClose,
         title = { Text("Sound and speech", style = theme.title()) },
@@ -432,7 +433,7 @@ private fun SpeechSettingsDialog(model: MonitorModel, onClose: () -> Unit) {
                         a.update(s.copy(sounds = s.sounds + (family to it)))
                     }
                 }
-                Picker("Voice", s.voice.ifEmpty { "System default" }, listOf("System default") + a.availableVoices(), "speech-voice") {
+                Picker("Voice", s.voice.ifEmpty { "System default" }, listOf("System default") + (a.voices ?: emptyList()), "speech-voice") {
                     a.update(s.copy(voice = if (it == "System default") "" else it))
                 }
                 a.noChannelLine?.let { Text(it, style = theme.small()) }

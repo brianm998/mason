@@ -694,7 +694,11 @@ fn subject_and_detail(d: &Daemon, key: &str, kind: &str, text: &str) -> (String,
                 .unwrap_or_default();
             let subject = n::spoken_subject(&project, id, &t.title);
             let detail = match kind {
-                "needs_you" if key.starts_with("approval:") || key.starts_with("proposed:") => {
+                "needs_you"
+                    if key.starts_with("approval:")
+                        || key.starts_with("proposed:")
+                        || key.starts_with("circling:") =>
+                {
                     String::new()
                 }
                 "needs_you" => crate::attention::card_of(d, t)

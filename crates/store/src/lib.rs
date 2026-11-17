@@ -1379,6 +1379,53 @@ impl Store {
         })
     }
 
+    /// Record one full `run_check` of a develop step (s511): `tests` are the failing tests as
+    /// `suite<TAB>test` entries.
+    pub fn put_check_run(
+        &self,
+        task: u64,
+        run: u64,
+        at_ms: u64,
+        green: bool,
+        tests: &[String],
+    ) -> Result<(), StoreError> {
+        let t = tests.join("\n");
+        self.write(move |c| {
+            c.execute(
+                "INSERT INTO check_runs(task, run, at_ms, green, tests) VALUES (?1,?2,?3,?4,?5)",
+                params![task as i64, run as i64, at_ms as i64, green as i64, t],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// The recorded full runs of the step run that recorded last for `task`, oldest first:
+    /// `(at_ms, green, failing tests)`.
+    pub fn check_runs(&self, task: u64) -> Result<Vec<(u64, bool, Vec<String>)>, StoreError> {
+        self.read(move |c| {
+            let last: Option<i64> = c
+                .query_row(
+                    "SELECT run FROM check_runs WHERE task = ?1 ORDER BY id DESC LIMIT 1",
+                    params![task as i64],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let Some(last) = last else { return Ok(vec![]) };
+            let mut st = c.prepare(
+                "SELECT at_ms, green, tests FROM check_runs WHERE task = ?1 AND run = ?2 ORDER BY id",
+            )?;
+            let rows = st.query_map(params![task as i64, last], |r| {
+                let t: String = r.get(2)?;
+                Ok((
+                    r.get::<_, i64>(0)? as u64,
+                    r.get::<_, i64>(1)? != 0,
+                    t.lines().map(str::to_string).collect(),
+                ))
+            })?;
+            rows.collect()
+        })
+    }
+
     /// `(green, source, failing tests)` of the last recorded run of this command on this tree.
     pub fn command_run(
         &self,
@@ -1439,6 +1486,51 @@ impl Store {
                 |r| Ok(r.get::<_, i64>(0)? as usize),
             )
             .optional()
+        })
+    }
+
+    /// A suite went green at this base with these known-red tests skipped. Not the whole
+    /// suite's green: `suite_green` is left alone.
+    pub fn put_suite_skip_green(
+        &self,
+        project: &str,
+        suite: &str,
+        base: &str,
+        executed: usize,
+        skipped: &[String],
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
+        let (p, s, b) = (project.to_string(), suite.to_string(), base.to_string());
+        let skipped = skipped.join("\n");
+        self.write(move |c| {
+            c.execute(
+                "INSERT OR REPLACE INTO suite_skip_green(project, suite, base, executed, skipped, at_ms) VALUES (?1,?2,?3,?4,?5,?6)",
+                params![p, s, b, executed as i64, skipped, now_ms as i64],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// Every base a suite was green at with tests skipped, newest first, with those tests.
+    pub fn suite_skip_green_bases(
+        &self,
+        project: &str,
+        suite: &str,
+    ) -> Result<Vec<(String, Vec<String>)>, StoreError> {
+        let (p, s) = (project.to_string(), suite.to_string());
+        self.read(move |c| {
+            let mut st = c.prepare(
+                "SELECT base, skipped FROM suite_skip_green WHERE project = ?1 AND suite = ?2
+                 ORDER BY at_ms DESC",
+            )?;
+            let rows = st.query_map(params![p, s], |r| {
+                let skipped: String = r.get(1)?;
+                Ok((
+                    r.get::<_, String>(0)?,
+                    skipped.lines().map(str::to_string).collect(),
+                ))
+            })?;
+            rows.collect()
         })
     }
 

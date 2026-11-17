@@ -10,7 +10,7 @@ green=0
 out=$(mktemp /tmp/s99.XXXXXX)
 trap 'rm -f "$out"' EXIT
 for i in $(seq 1 "$n"); do
-  if cargo test -q -p mason-daemon --test update >"$out" 2>&1; then
+  if cargo test -q -p mason-daemon --test it update:: >"$out" 2>&1; then
     green=$((green + 1))
     echo "run $i: green"
   else

@@ -25,13 +25,21 @@ final class FakeSink: SpeechSink {
         pending.append(then)
     }
     func stop() { stopped += 1; pending.removeAll() }
-    func voices() -> [String] { ["Samantha", "Daniel"] }
+    var voiceQueries = 0
+    func voices() -> [String] { voiceQueries += 1; return ["Samantha", "Daniel"] }
     /// The current sound or sentence ends.
     func finish() { let f = pending.removeFirst(); f() }
 }
 
 @MainActor
 final class SpeechTests: XCTestCase {
+    func testTheVoiceListIsAskedOfTheSinkOnce() {
+        let sink = FakeSink()
+        let a = Announcer(sink: sink, preferences: nil)
+        for _ in 0..<10 { XCTAssertEqual(a.availableVoices(), ["Samantha", "Daniel"]) }
+        XCTAssertEqual(sink.voiceQueries, 1)
+    }
+
     func announcer(_ sink: FakeSink, muted: @escaping () -> Bool = { false }) -> Announcer {
         Announcer(sink: sink, isMuted: muted, preferences: MemoryPreferences())
     }

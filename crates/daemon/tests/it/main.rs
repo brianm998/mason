@@ -1,0 +1,92 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+//! The daemon's integration tests, merged into one executable (s475).
+//!
+//! Each file is a module here, so the test names are `module::test_name`. The files that need a
+//! process of their own stay beside this directory as separate targets: those that set
+//! environment variables (`git_blips`, `ssh_keys`) and those in `.mason/serial-tests.txt`.
+
+#[path = "../support/mod.rs"]
+mod support;
+
+mod apns;
+mod approvals;
+mod attention;
+mod audit_e2e;
+mod auto_quarantine;
+mod auto_retry;
+mod base_red;
+mod blockers;
+mod bug_alerts;
+mod ci_infra;
+mod ci_schedule;
+mod ci_watch;
+mod crash;
+mod credentials;
+mod deadline_extension;
+mod definitions;
+mod diagnose_retry;
+mod disk;
+mod e2e;
+mod editor;
+mod escalate;
+mod fdlimit;
+mod fetch_alert;
+mod fetch_stall;
+mod gates;
+mod health;
+mod history_cap;
+mod host_loss;
+mod hostarchive;
+mod hosted_check;
+mod idle;
+mod introspection_policy;
+mod landing;
+mod landing_crash;
+mod landing_floor;
+mod landing_modes;
+mod landing_split;
+mod lease_pid;
+mod limits;
+mod live_tokens;
+mod notify;
+mod outside;
+mod owner_session;
+mod panics;
+mod pause_banners;
+mod plugin_adapters;
+mod plugins;
+mod port;
+mod process;
+mod prompt_packs;
+mod proposals;
+mod protocol;
+mod pty;
+mod push_auth;
+mod red_base;
+mod registration;
+mod repin;
+mod replay;
+mod report;
+mod restart_limit;
+mod retry_idempotent;
+mod retry_outside;
+mod selfguard;
+mod settings;
+mod single;
+mod stall;
+mod stop;
+mod stuck;
+mod suite_builds;
+mod sweep;
+mod takeover_drain;
+mod targets;
+mod task_priority;
+mod taskcache;
+mod testing;
+mod tracker;
+mod update;
+mod update_release;
+mod usage;
+mod version_flag;
+mod waits_snapshot;

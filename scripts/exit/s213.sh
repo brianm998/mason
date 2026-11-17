@@ -13,6 +13,6 @@
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 cargo test -q -p mason-landing --lib ci_local
-cargo test -q -p mason-daemon --test landing_modes -- ci_red_in_a_mapped ci_red_in_an_unmapped mapped_suites_green
-cargo test -q -p mason-daemon --test red_base -- base_red_jobs red_in_the_latest_base green_missing
+cargo test -q -p mason-daemon --test it -- ci_red_in_a_mapped ci_red_in_an_unmapped mapped_suites_green
+cargo test -q -p mason-daemon --test it -- base_red_jobs red_in_the_latest_base green_missing
 echo "s213 OK"

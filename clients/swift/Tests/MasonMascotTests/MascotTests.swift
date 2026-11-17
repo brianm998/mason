@@ -9,6 +9,16 @@ import XCTest
 @testable import MasonMascot
 
 final class MascotTests: XCTestCase {
+    func testImagesAreBuiltOnceAndThenServedFromTheCache() {
+        XCTAssertNotNil(Mascot.illustration("all_clear"))
+        let after = Mascot.imageLoads
+        for _ in 0..<10 {
+            XCTAssertNotNil(Mascot.illustration("all_clear"))
+            XCTAssertNotNil(Mascot.icon("queued", size: 24))
+        }
+        XCTAssertEqual(Mascot.imageLoads, after + 1, "only the first icon call builds an image")
+    }
+
     func testTheArtIsFound() {
         XCTAssertNotNil(Mascot.artRoot)
     }
