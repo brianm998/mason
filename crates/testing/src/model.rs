@@ -89,6 +89,11 @@ pub struct Suite {
     pub dev_command: Option<String>,
     /// The build of `dev_command` (also with `{packages}`); without it the suite's `build` runs.
     pub dev_build: Option<String>,
+    /// The suite's fast unit tier: a command (no placeholders) that runs only the quick tests, in
+    /// seconds to a minute. A landing batch whose every task had its testing skipped runs it after
+    /// the build floor, so a bad merge of two green tasks is caught without the full run, which
+    /// stays owed. Its failing tests are named by `fail_regex` (or the output's tail).
+    pub fast_command: Option<String>,
     /// For the `regex` parser: lines matching `pass_regex` and `fail_regex`
     /// each count one test, named by the first capture group.
     pub pass_regex: Option<String>,
@@ -151,6 +156,7 @@ impl Suite {
             skip: None,
             dev_command: None,
             dev_build: None,
+            fast_command: None,
             pass_regex: None,
             fail_regex: None,
             timeout: None,
