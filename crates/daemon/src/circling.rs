@@ -69,7 +69,11 @@ pub fn of_task(d: &Daemon, task: TaskId) -> Option<Circle> {
         .check_runs(task.0)
         .ok()?
         .into_iter()
-        .map(|(at_ms, green, tests)| Run { at_ms, green, tests })
+        .map(|(at_ms, green, tests)| Run {
+            at_ms,
+            green,
+            tests,
+        })
         .collect();
     detect(&runs, RUNS)
 }
@@ -146,7 +150,11 @@ mod tests {
 
     #[test]
     fn three_red_runs_with_the_same_set_make_a_circle() {
-        let runs = [red(1, &["a", "b"]), red(2, &["b", "a"]), red(3, &["a", "b"])];
+        let runs = [
+            red(1, &["a", "b"]),
+            red(2, &["b", "a"]),
+            red(3, &["a", "b"]),
+        ];
         let c = detect(&runs, 3).unwrap();
         assert_eq!((c.runs, c.since_ms, c.tests.len()), (3, 1, 2));
         assert!(detect(&runs[1..], 3).is_none(), "two runs are not enough");
@@ -171,7 +179,13 @@ mod tests {
 
     #[test]
     fn a_longer_streak_counts_all_its_runs() {
-        let runs = [green(0), red(1, &["a"]), red(2, &["a"]), red(3, &["a"]), red(4, &["a"])];
+        let runs = [
+            green(0),
+            red(1, &["a"]),
+            red(2, &["a"]),
+            red(3, &["a"]),
+            red(4, &["a"]),
+        ];
         let c = detect(&runs, 3).unwrap();
         assert_eq!((c.runs, c.since_ms), (4, 1));
     }
