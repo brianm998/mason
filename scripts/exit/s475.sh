@@ -23,7 +23,7 @@ for e in exes:
     r = subprocess.run([e, "--list"], capture_output=True, text=True, cwd="crates/daemon", check=True)
     tests += sum(1 for x in r.stdout.splitlines() if x.endswith(": test"))
 print(f"test executables: {len(exes)}, tests: {tests}")
-assert len(exes) <= 12, "the daemon's tests are not merged"
+assert len(exes) <= 13, "the daemon's tests are not merged"
 assert tests >= 931, "tests were dropped (931 before the merge)"
 PY
 echo "s475 OK"

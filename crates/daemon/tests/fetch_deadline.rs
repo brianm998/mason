@@ -3,7 +3,7 @@
 //! A remote that accepts connections and never answers stalls a fetch, but only up to
 //! its deadline, and not the cleanup of another task in the same repository.
 
-use crate::support;
+mod support;
 use mason_core::*;
 use mason_landing::git;
 use serde_json::json;
@@ -12,7 +12,7 @@ use support::*;
 
 #[test]
 fn a_stalled_fetch_neither_blocks_cleanup_nor_outlives_its_deadline() {
-    // This binary holds only this test, so the process-wide default is ours to set.
+    // This binary holds only this test (it is not part of `it` for that reason), so the process-wide default is ours to set.
     git::set_default_deadline(Duration::from_secs(5));
     let s = Scratch::new("true", json!({"steps": {}}));
     let d = s.start();

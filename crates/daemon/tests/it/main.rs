@@ -32,7 +32,6 @@ mod editor;
 mod escalate;
 mod fdlimit;
 mod fetch_alert;
-mod fetch_deadline;
 mod fetch_stall;
 mod gates;
 mod health;
