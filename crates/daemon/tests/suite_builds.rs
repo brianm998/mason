@@ -336,7 +336,7 @@ fn after_a_red_full_run_an_unscoped_check_reruns_only_the_failures_and_the_chang
     s.push_files(
         &[
             (".mason/mason.toml", def.as_str()),
-            ("checks.sh", CHECKS),
+            ("checks.sh", checks.as_str()),
             (
                 "Cargo.toml",
                 "[workspace]\nmembers = [\"crates/pk\"]\nresolver = \"2\"\n",
