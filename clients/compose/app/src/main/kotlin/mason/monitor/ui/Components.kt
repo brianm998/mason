@@ -37,6 +37,12 @@ import androidx.compose.ui.unit.dp
 import mason.monitor.CellFill
 import mason.monitor.Format
 import mason.monitor.MonitorModel
+import mason.monitor.PendingCommand
+import mason.monitor.PendingStage
+import mason.monitor.actionError
+import mason.monitor.isBusy
+import mason.monitor.pendingCommand
+import mason.monitor.pendingLabel
 import mason.monitor.countText
 import mason.monitor.fill
 import mason.monitor.isStale
@@ -289,19 +295,32 @@ fun CountTile(model: MonitorModel, count: StateCount) {
 }
 
 @Composable
-fun Pill(text: String, prominent: Boolean = false, modifier: Modifier = Modifier, onClick: () -> Unit) {
+fun Pill(text: String, prominent: Boolean = false, modifier: Modifier = Modifier, enabled: Boolean = true, working: Boolean = false, onClick: () -> Unit) {
     val theme = LocalTheme.current
     val shape = RoundedCornerShape(theme.radius)
     Row(
         modifier = modifier
             .background(if (prominent) theme.accent else theme.surface, shape)
             .border(BorderStroke(if (prominent) 0.dp else 1.dp, theme.border), shape)
-            .clickable(onClick = onClick)
+            .clickable(enabled = enabled, onClick = onClick)
             .padding(horizontal = theme.spacing, vertical = theme.spacingSmall),
         verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
     ) {
+        if (working) androidx.compose.material3.CircularProgressIndicator(modifier = Modifier.size(12.dp), strokeWidth = 2.dp)
         Text(text, style = theme.body(if (prominent) FontWeight.SemiBold else FontWeight.Normal, if (prominent) Color.White else theme.text))
     }
+}
+
+/**
+ * A pill for a command about [task]: while the command is pending it says what is happening
+ * (a progress indicator while sent, the accepted label once masond said yes), and every control
+ * for the task is disabled so a second click cannot send a second command (task #522).
+ */
+@Composable
+fun PendingPill(model: MonitorModel, task: Long, action: String, text: String, prominent: Boolean = false, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    val p = model.pendingCommand(task, action)
+    Pill(p?.label ?: text, prominent, modifier, enabled = !model.isBusy(task), working = p?.stage == PendingStage.SENDING, onClick = onClick)
 }
 
 @Composable
@@ -511,14 +530,14 @@ fun ApprovalView(model: MonitorModel, task: Long, approval: Approval) {
         }
         if (model.canAct) {
             Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing)) {
-                Pill("Approve", prominent = true, modifier = Modifier.testTag("approval:$task:approve")) { model.approve(task, approval, priority) }
+                PendingPill(model, task, "approve", "Approve", prominent = true, modifier = Modifier.testTag("approval:$task:approve")) { model.approve(task, approval, priority) }
                 if (approval.diff_hash.isEmpty()) {
                     MonitorModel.APPROVAL_PRIORITIES.forEach { p ->
                         Pill(p, prominent = p == priority, modifier = Modifier.testTag("approval:$task:priority:$p")) { priority = p }
                     }
-                    Pill("Defer", modifier = Modifier.testTag("approval:$task:defer")) { model.deferTask(task) }
+                    PendingPill(model, task, "defer", "Defer", modifier = Modifier.testTag("approval:$task:defer")) { model.deferTask(task) }
                 }
-                Pill("Reject", modifier = Modifier.testTag("approval:$task:reject")) { rejecting = !rejecting }
+                PendingPill(model, task, "reject", "Reject", modifier = Modifier.testTag("approval:$task:reject")) { rejecting = !rejecting }
             }
             if (rejecting) Row(horizontalArrangement = Arrangement.spacedBy(theme.spacing), verticalAlignment = Alignment.CenterVertically) {
                 androidx.compose.foundation.text.BasicTextField(
@@ -545,7 +564,7 @@ fun ApprovalView(model: MonitorModel, task: Long, approval: Approval) {
         } else if (model.connected) {
             Text("Only the owner can approve or reject. You are connected as ${model.identity}.", style = theme.small())
         }
-        model.lastResult?.let { Text(it, style = theme.body(color = theme.attention), modifier = Modifier.testTag("approval:$task:refused")) }
+        (model.actionError(task) ?: model.lastResult)?.let { Text(it, style = theme.body(color = theme.attention), modifier = Modifier.testTag("approval:$task:refused")) }
     }
 }
 
@@ -562,7 +581,10 @@ fun ActionButtons(model: MonitorModel, row: TaskRow, hasApprovalView: Boolean = 
                 !(hasApprovalView && (it == "approve" || it == "reject")) &&
                 !(!model.canAct && (it == "approve" || it == "reject"))
         }.forEach { a ->
-            Pill(label(a), prominent = a == "approve", modifier = Modifier.testTag("action:${row.id}:$a")) { run(model, row, a) }
+            PendingPill(model, row.id, a, label(a), prominent = a == "approve", modifier = Modifier.testTag("action:${row.id}:$a")) { run(model, row, a) }
+        }
+        model.actionError(row.id)?.let {
+            Text(it, style = theme.small(color = theme.attention), modifier = Modifier.testTag("action:${row.id}:error"))
         }
         model.sessionNotice?.let {
             Text(it, style = theme.small(color = theme.attention), modifier = Modifier.testTag("action:${row.id}:open_session:notice"))
@@ -626,7 +648,11 @@ fun BlockersView(model: MonitorModel, row: TaskRow) {
                 Link("#${l.task}") { model.go(mason.monitor.Page.Task(l.task)) }
                 Text("${l.state}, ${l.origin}", style = theme.small())
                 if (model.canAct) l.actions.forEach { a ->
-                    Pill(a.replaceFirstChar { it.uppercase() }, modifier = Modifier.testTag("blocker:${row.id}:${l.task}:$a")) {
+                    Pill(
+                        model.pendingLabel(l.task, a) ?: a.replaceFirstChar { it.uppercase() },
+                        modifier = Modifier.testTag("blocker:${row.id}:${l.task}:$a"),
+                        enabled = !model.isBusy(row.id) && !model.isBusy(l.task),
+                    ) {
                         when (a) {
                             "release" -> model.release(row.id, l.task)
                             "revive" -> model.revive(l.task)
@@ -652,7 +678,7 @@ fun BlockersView(model: MonitorModel, row: TaskRow) {
                         }
                     }
                 }
-                Pill("Add blocker", prominent = picked != null, modifier = Modifier.testTag("add-blocker:${row.id}")) {
+                Pill("Add blocker", prominent = picked != null, modifier = Modifier.testTag("add-blocker:${row.id}"), enabled = !model.isBusy(row.id)) {
                     picked?.let { model.addBlocker(row.id, it); picked = null }
                 }
             }

@@ -12,7 +12,7 @@ use support::*;
 
 #[test]
 fn a_stalled_fetch_neither_blocks_cleanup_nor_outlives_its_deadline() {
-    // This binary holds only this test, so the process-wide default is ours to set.
+    // This binary holds only this test (it is not part of `it` for that reason), so the process-wide default is ours to set.
     git::set_default_deadline(Duration::from_secs(5));
     let s = Scratch::new("true", json!({"steps": {}}));
     let d = s.start();

@@ -10,6 +10,8 @@ use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Severity {
+    /// Worth seeing, never worth a session.
+    Note,
     Warn,
     Severe,
 }
@@ -17,6 +19,7 @@ pub enum Severity {
 impl Severity {
     pub fn name(self) -> &'static str {
         match self {
+            Severity::Note => "note",
             Severity::Warn => "warn",
             Severity::Severe => "severe",
         }
@@ -43,6 +46,8 @@ pub struct Limits {
     pub stuck_min_ms: u64,
     /// A task waiting on a slot or a hold for longer than this.
     pub wait_ms: u64,
+    /// A wait this old while the holders progress is noted (never a session).
+    pub aged_wait_ms: u64,
     /// A queue with work and free slots that started nothing for this long.
     pub queue_idle_ms: u64,
     /// A step host alive but silent for this long.
@@ -80,6 +85,7 @@ impl Default for Limits {
             stuck_factor: 3,
             stuck_min_ms: 30 * MIN,
             wait_ms: 2 * H,
+            aged_wait_ms: 6 * H,
             queue_idle_ms: 15 * MIN,
             host_silent_ms: 30 * MIN,
             slot_wait_ms: 30 * MIN,
@@ -114,6 +120,29 @@ pub struct TaskFact {
     pub silent_ms: u64,
     /// What it waits for (a slot, a hold) and for how long.
     pub waiting: Option<(String, u64)>,
+    /// The holders of the slot it waits for; `None` when the wait has none (a gate, a pause).
+    pub holders: Option<HolderFact>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HolderFact {
+    /// Age of the newest holder grant.
+    pub last_grant_ms: u64,
+    /// The longest current holder run.
+    pub run_ms: u64,
+    /// Waiting tasks in the same class.
+    pub queue_depth: u32,
+}
+
+/// Holder facts from the grant times (`since`) of a slot's holders; `None` without holders.
+pub fn holder_fact(held_since: &[u64], now: u64, queue_depth: u32) -> Option<HolderFact> {
+    let newest = held_since.iter().max()?;
+    let oldest = held_since.iter().min()?;
+    Some(HolderFact {
+        last_grant_ms: now.saturating_sub(*newest),
+        run_ms: now.saturating_sub(*oldest),
+        queue_depth,
+    })
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -141,6 +170,8 @@ pub struct Facts {
     pub load_pct: Option<u32>,
     /// `load_pct` is the sampler's assumed-busy fallback, not a measurement.
     pub load_assumed: bool,
+    /// Where `load_pct` was read from (`mach`, `loadavg`, `assumed-busy`, ...).
+    pub load_source: Option<&'static str>,
     pub stall_ms: u64,
     /// Launches that have not finished: (task, ms).
     pub frozen_launches: Vec<(Option<u64>, u64)>,
@@ -202,13 +233,45 @@ pub fn judge(x: &Facts, l: &Limits) -> Vec<Finding> {
     for t in &x.tasks {
         if let Some((what, ms)) = &t.waiting {
             if *ms > l.wait_ms {
-                out.push(f(
-                    format!("stuck:wait:{}", t.id),
-                    "stuck",
-                    Severity::Warn,
-                    format!("#{} has waited {} min for {what}", t.id, mins(*ms)),
-                    vec![format!("#{} is {}; the wait is `{what}`", t.id, t.state)],
-                ));
+                let bound = t.holders.as_ref().map(|h| {
+                    (h.queue_depth as u64)
+                        .saturating_mul(h.run_ms)
+                        .max(l.wait_ms)
+                });
+                let quiet = t
+                    .holders
+                    .as_ref()
+                    .is_none_or(|h| h.last_grant_ms >= l.wait_ms);
+                if quiet || bound.is_some_and(|b| *ms > b) {
+                    let mut ev = vec![format!("#{} is {}; the wait is `{what}`", t.id, t.state)];
+                    if let (Some(h), Some(b)) = (&t.holders, bound) {
+                        ev.push(format!(
+                            "newest holder grant {} min ago, longest holder run {} min, bound {} min",
+                            mins(h.last_grant_ms),
+                            mins(h.run_ms),
+                            mins(b)
+                        ));
+                    }
+                    out.push(f(
+                        format!("stuck:wait:{}", t.id),
+                        "stuck",
+                        Severity::Warn,
+                        format!("#{} has waited {} min for {what}", t.id, mins(*ms)),
+                        ev,
+                    ));
+                } else if *ms > l.aged_wait_ms {
+                    out.push(f(
+                        format!("stuck:aged-wait:{}", t.id),
+                        "stuck",
+                        Severity::Note,
+                        format!(
+                            "#{} has waited {} min for {what}; holders are progressing",
+                            t.id,
+                            mins(*ms)
+                        ),
+                        vec![format!("#{} is {}; the wait is `{what}`", t.id, t.state)],
+                    ));
+                }
                 continue;
             }
         }
@@ -296,13 +359,19 @@ pub fn judge(x: &Facts, l: &Limits) -> Vec<Finding> {
                 .collect(),
         ));
     }
+    // An assumed-busy reading is a placeholder, not a measurement: no finding.
     if let Some(p) = x.load_pct.filter(|p| !x.load_assumed && *p >= l.load_pct) {
+        let summary = format!("the machine is at {p}% load");
+        let evidence = match x.load_source {
+            Some(src) => vec![format!("CPU reading from {src}")],
+            None => vec![],
+        };
         out.push(f(
             "overloaded:load".into(),
             "overloaded",
             Severity::Warn,
-            format!("the machine is at {p}% load"),
-            vec![],
+            summary,
+            evidence,
         ));
     }
     if x.stall_ms >= l.stall_ms {
@@ -466,6 +535,7 @@ pub fn fresh(
 ) -> Vec<Finding> {
     findings
         .iter()
+        .filter(|fd| fd.severity != Severity::Note)
         .filter(|fd| {
             !handled
                 .iter()
@@ -511,6 +581,19 @@ mod tests {
     }
 
     #[test]
+    fn load_finding_names_a_known_source() {
+        let x = Facts {
+            load_pct: Some(99),
+            load_source: Some("loadavg"),
+            ..Default::default()
+        };
+        let out = judge(&x, &l());
+        let f = out.iter().find(|f| f.key == "overloaded:load").unwrap();
+        assert_eq!(f.summary, "the machine is at 99% load");
+        assert!(f.evidence.iter().any(|e| e.contains("loadavg")));
+    }
+
+    #[test]
     fn healthy_facts_give_no_findings() {
         assert!(judge(&Facts::default(), &l()).is_empty());
         let x = Facts {
@@ -522,6 +605,7 @@ mod tests {
                 typical_hi_ms: Some(20 * MIN),
                 silent_ms: MIN,
                 waiting: None,
+                holders: None,
             }],
             load_pct: Some(40),
             ..Default::default()
@@ -539,6 +623,7 @@ mod tests {
             typical_hi_ms: Some(20 * MIN),
             silent_ms: 2 * H,
             waiting: None,
+            holders: None,
         };
         let x = Facts {
             tasks: vec![t.clone()],
@@ -559,6 +644,49 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(keys(&judge(&x, &l())), ["stuck:wait:7"]);
+    }
+
+    fn waiter(id: u64, wait: u64, h: Option<HolderFact>) -> TaskFact {
+        TaskFact {
+            id,
+            state: "developing".into(),
+            is_step: true,
+            in_state_ms: wait,
+            typical_hi_ms: None,
+            silent_ms: MIN,
+            waiting: Some(("compile".into(), wait)),
+            holders: h,
+        }
+    }
+
+    fn crowd(wait: u64, grant: u64) -> Vec<Finding> {
+        let h = holder_fact(&[100 * H - grant, 100 * H - 20 * MIN], 100 * H, 23);
+        let x = Facts {
+            tasks: (1..=23).map(|i| waiter(i, wait, h.clone())).collect(),
+            ..Default::default()
+        };
+        judge(&x, &l())
+    }
+
+    #[test]
+    fn waiters_behind_progressing_holders_are_not_stuck() {
+        assert!(crowd(3 * H, 10 * MIN).is_empty());
+        assert_eq!(crowd(3 * H, 3 * H).len(), 23);
+        // Past queue_depth * run (23 * 20 min = 460 min).
+        let f = crowd(9 * H, 10 * MIN);
+        assert!(f.iter().all(|x| x.key.starts_with("stuck:wait:")));
+        assert_eq!(f.len(), 23);
+    }
+
+    #[test]
+    fn an_old_progressing_wait_is_a_note_that_starts_no_session() {
+        let f = crowd(7 * H, 10 * MIN);
+        assert_eq!(f.len(), 23);
+        assert!(f
+            .iter()
+            .all(|x| x.severity == Severity::Note && x.key.starts_with("stuck:aged-wait:")));
+        assert!(fresh(&f, &[], 0, H).is_empty());
+        assert!(!severe(&f));
     }
 
     #[test]
@@ -623,6 +751,7 @@ mod tests {
         let x = Facts {
             load_pct: Some(100),
             load_assumed: true,
+            load_source: Some("assumed-busy"),
             ..Default::default()
         };
         assert!(judge(&x, &l()).is_empty());
@@ -633,6 +762,7 @@ mod tests {
         let x = Facts {
             load_pct: Some(100),
             load_assumed: false,
+            load_source: Some("mach"),
             ..Default::default()
         };
         assert_eq!(keys(&judge(&x, &l())), ["overloaded:load"]);

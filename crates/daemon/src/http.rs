@@ -3103,6 +3103,22 @@ async fn cpu_history(
         .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
+/// The free space per volume over `?span=` (as `/cpu/history`), oldest first, as proto3 JSON.
+async fn disk_history(
+    Shared(d): Shared<Arc<Daemon>>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Res {
+    let span = match q.get("span") {
+        None => 3_600_000,
+        Some(s) => crate::diskhistory::parse_span(s)
+            .ok_or_else(|| fail(StatusCode::BAD_REQUEST, format!("span {s:?} is not a span")))?,
+    };
+    let h = d.disk_history(crate::daemon::now_ms(), span);
+    serde_json::to_value(&h)
+        .map(Json)
+        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
 /// The home view, as the monitors get it (proto3 JSON).
 async fn home_view(
     Shared(d): Shared<Arc<Daemon>>,
@@ -3232,6 +3248,9 @@ async fn lease_open(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res
     // not a live task is treated as no task at all (a person's request).
     let task = b["task"].as_u64();
     let pid = b["pid"].as_u64().unwrap_or(0) as u32;
+    // Who is really waiting (s552): `person` or any other origin (`agent`, `hook`, `task`,
+    // `no-terminal`, ...). A request that names none is a person's, as before.
+    let origin = b["origin"].as_str().map(str::to_string);
     // Another pipeline's work: ranked as pipeline work, never a person's, and
     // `task` is ignored (it names a MASON task).
     if let Some(name) = b["pipeline"].as_str() {
@@ -3251,7 +3270,7 @@ async fn lease_open(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res
     }
     let cmd = run_command(&b);
     let d2 = d.clone();
-    let (id, th) = d
+    let (opened, th) = d
         .pool
         .run(move || {
             let standing = task.and_then(|t| d2.lease_standing(TaskId(t)));
@@ -3263,9 +3282,10 @@ async fn lease_open(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res
                     .ok()
                     .flatten()
             });
-            let id = d2
-                .broker
-                .lease_open_expecting(&label, &uses, standing, expected);
+            let opened =
+                d2.broker
+                    .lease_open_from(&label, &uses, standing, expected, origin.as_deref());
+            let id = opened.id;
             d2.broker.lease_set_pid(id, pid);
             if let (Some(t), Some(_)) = (task, standing) {
                 d2.broker.lease_set_task(id, TaskId(t));
@@ -3273,12 +3293,13 @@ async fn lease_open(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res
             let th = task
                 .map(|t| d2.stall_thresholds(TaskId(t)))
                 .unwrap_or_default();
-            (id, th)
+            (opened, th)
         })
         .await
         .map_err(pool_err)?;
     Ok(Json(json!({
-        "id": id,
+        "id": opened.id, "rank": opened.rank, "origin": b["origin"],
+        "converted": opened.converted,
         "cont_after_s": th.cont_after_ms / 1000, "kill_after_s": th.kill_after_ms / 1000,
     })))
 }
@@ -3708,6 +3729,7 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/resources", get(resources))
         .route("/cpu", get(cpu_usage))
         .route("/cpu/history", get(cpu_history))
+        .route("/disk/history", get(disk_history))
         .route("/views/home", get(home_view))
         .route("/targets", get(targets))
         .route("/health", get(health))

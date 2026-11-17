@@ -24,6 +24,11 @@ pub trait CpuSource: Send + Sync + std::fmt::Debug {
         "fake"
     }
 
+    /// The percentage and its source from one call, so they cannot disagree.
+    fn reading(&self) -> (Option<u32>, &'static str) {
+        (self.busy_pct(), self.source())
+    }
+
     /// Primary reads that have failed since the daemon started.
     fn failed_reads(&self) -> u64 {
         0
@@ -476,6 +481,10 @@ impl CpuSource for Sampler {
     }
     fn source(&self) -> &'static str {
         self.current().1
+    }
+    fn reading(&self) -> (Option<u32>, &'static str) {
+        let (p, s) = self.current();
+        (Some(p), s)
     }
     fn failed_reads(&self) -> u64 {
         Sampler::failed_reads(self)

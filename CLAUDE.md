@@ -15,6 +15,13 @@ The running daemon updates itself from **GitHub** `develop`, not the local branc
 live only after it is pushed. `mason update --check` builds and self-tests only; `mason update`
 is what takes over.
 
+## Config edits
+
+Apply an edit to a registration file (`~/.config/mason/projects/<P>.toml`) with
+`mason project reload --project P`. Do not `launchctl kickstart -k` masond for it: every restart
+re-queues the in-flight test steps. Restart only for a change to `path`, `base`, `remote` or
+`[self]`, a new registration file, or a new build, and batch those.
+
 ## Tests
 
 - **No timing assertions.** They go red when the machine is busy, which it usually is.

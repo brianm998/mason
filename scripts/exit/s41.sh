@@ -145,6 +145,6 @@ m self
 trap - EXIT; cleanup
 if [ -z "${MASON_TESTS_ALREADY_RAN:-}" ]; then
   cargo test -q -p mason-daemon --lib protect 2>&1 | grep 'test result'
-  cargo test -q -p mason-daemon --test selfguard 2>&1 | grep 'test result'
+  cargo test -q -p mason-daemon --test it selfguard:: 2>&1 | grep 'test result'
 fi
 echo "s41 OK"

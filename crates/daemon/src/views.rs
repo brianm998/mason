@@ -641,6 +641,15 @@ impl<'a> Ctx<'a> {
                     ..Default::default()
                 });
             }
+            for h in v["held_back"].as_array().into_iter().flatten() {
+                if let Some(t) = h["text"].as_str() {
+                    banners.push(Banner {
+                        kind: "ci_watch".into(),
+                        text: format!("{}: {t}", p.id),
+                        ..Default::default()
+                    });
+                }
+            }
             if let Some(e) = v["error"].as_str() {
                 banners.push(Banner {
                     kind: "ci_watch".into(),
@@ -1409,6 +1418,7 @@ impl<'a> Ctx<'a> {
         task: u64,
         step: &str,
         cpu_span_ms: u64,
+        disk_span_ms: u64,
     ) -> Option<View> {
         use mason_protocol::view::Body;
         let body = match kind {
@@ -1425,6 +1435,14 @@ impl<'a> Ctx<'a> {
                     3_600_000
                 } else {
                     cpu_span_ms
+                },
+            )),
+            ViewKind::DiskHistory => Body::DiskHistory(self.d.disk_history(
+                self.now,
+                if disk_span_ms == 0 {
+                    3_600_000
+                } else {
+                    disk_span_ms
                 },
             )),
             _ => return None,

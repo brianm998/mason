@@ -142,7 +142,7 @@ remote = "$root/mason-origin.git"
 checks = "sh checks.sh"
 TOML
 # The update channel: a build is a copy of the binaries already built here. Signed
-# for the reason given on `BUILD` in crates/daemon/tests/update.rs.
+# for the reason given on `BUILD` in crates/daemon/tests/it/update.rs.
 bindir="$PWD/$bin"
 cat > "$root/c/update.toml" <<TOML
 repo = "$root/mason-origin.git"

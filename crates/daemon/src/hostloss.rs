@@ -66,6 +66,27 @@ pub fn note_daemon_start(hosts_root: &Path, at_ms: u64) {
     let _ = std::fs::write(&p, lines[keep..].join("\n") + "\n");
 }
 
+/// Record that a daemon stops now, with the sender text from `stopsig`. Keeps the last 200.
+pub fn note_daemon_stop(hosts_root: &Path, at_ms: u64, what: &str) {
+    let p = hosts_root
+        .parent()
+        .unwrap_or(hosts_root)
+        .join("daemon-stops");
+    let mut lines: Vec<String> = std::fs::read_to_string(&p)
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_string)
+        .collect();
+    lines.push(format!("{at_ms} {}", what.replace('\n', " ")));
+    let keep = lines.len().saturating_sub(200);
+    let _ = std::fs::write(&p, lines[keep..].join("\n") + "\n");
+}
+
+/// What is known of who ended a lost host; see `registry::attribute`.
+pub fn attribute(kills: &[String], stops: &str, last_beat: Option<u64>, seen: u64) -> String {
+    mason_step_host::registry::attribute(kills, stops, last_beat, seen, RESTART_WINDOW_MS)
+}
+
 /// Whether a host last heard from at `last_ms` (or seen gone at `seen_ms` when it never
 /// beat) was lost at a daemon restart. Several hosts lost at one start are one event:
 /// each is judged against the same start, none counts against its task.
@@ -318,5 +339,37 @@ mod tests {
         let n = interrupted_note(1_794_652_800_000);
         assert!(n.contains("lost at 2026-11-14 10:40:00 UTC"), "{n}");
         assert!(n.contains("git status"), "{n}");
+    }
+}
+
+#[cfg(test)]
+mod attribution_tests {
+    use super::*;
+
+    #[test]
+    fn a_ledger_line_names_the_sender() {
+        let k = vec!["1000 step-host-ctl_reap_ROOT pid=5 child=6 signal=9".to_string()];
+        let a = attribute(&k, "900 x", Some(800), 2000);
+        assert!(a.contains("step-host-ctl_reap_ROOT"), "{a}");
+    }
+
+    #[test]
+    fn a_stop_after_the_last_beat_is_named() {
+        let a = attribute(&[], "5000 SIGTERM from pid 1\n", Some(2000), 9000);
+        assert!(a.contains("daemon stop (SIGTERM from pid 1)"), "{a}");
+        assert!(a.contains("3 s before it"), "{a}");
+    }
+
+    #[test]
+    fn a_stop_outside_the_window_or_before_the_beat_is_not() {
+        let a = attribute(&[], &format!("{} x", RESTART_WINDOW_MS * 3), Some(0), RESTART_WINDOW_MS * 4);
+        assert!(a.contains("no kill recorded"), "{a}");
+        let b = attribute(&[], "100 x", Some(500), 900);
+        assert!(b.contains("no kill recorded"), "{b}");
+    }
+
+    #[test]
+    fn nothing_recorded_says_so() {
+        assert!(attribute(&[], "", None, 10).contains("no kill recorded"));
     }
 }

@@ -312,6 +312,8 @@ class MonitorCoreTest {
         m.sender = { sent += it }
         m.skipAllTests(m.sectionRows("testing"))
         assertEquals(listOf(10L, 12L), sent.map { it.skip?.task })
+        // masond answers the first two (task #522: a second click while one is pending sends nothing).
+        sent.toList().forEach { m.apply(ServerMessage(result = CommandResult(id = it.id, ok = false, error = "no"))) }
         m.skipTest(10, "test")
         assertEquals(10L, sent.last().skip?.task)
         assertEquals("3 of 8 suites", SectionPages.suiteProgress(a))
@@ -516,6 +518,15 @@ class MonitorCoreTest {
         assertEquals("9 min", Format.duration(9 * 60_000))
         assertEquals("3h10", Format.duration(3 * 3_600_000 + 10 * 60_000))
         assertEquals("2h", Format.duration(2 * 3_600_000))
+    }
+
+    @Test fun theSyspolicydLineShowsTheReadingAndTheLimit() {
+        assertNull(Compilation().policyLine, "no gate")
+        assertEquals("syspolicyd 640% — holding compiles over 300%", Compilation(syspolicyd_pct = 640, syspolicyd_max_pct = 300).policyLine)
+        assertEquals("syspolicyd 20% — compiles held over 300%", Compilation(syspolicyd_pct = 20, syspolicyd_max_pct = 300).policyLine)
+        val h = HealthSnapshot.parse("""{"cpu":{"busy_pct":10,"compile_max_pct":50,"syspolicyd_pct":640,"syspolicyd_max_pct":300}}""")
+        assertEquals("syspolicyd 640% — holding compiles over 300%", h.policyLine)
+        assertNull(HealthSnapshot.parse("""{"cpu":{"busy_pct":10,"compile_max_pct":50}}""").policyLine)
     }
 
     @Test fun theHealthPageReadsTheDaemonsResourceReport() {
@@ -1360,8 +1371,10 @@ class MonitorCoreTest {
         m.identity = "brian"
         val sent = mutableListOf<Command>()
         m.sender = { sent += it }
-        m.release(11, 8)
-        m.addBlocker(11, 5)
+        // masond answers each before the next click (a task with a command pending takes no second one).
+        fun answered() = m.apply(ServerMessage(result = CommandResult(id = sent.last().id, ok = false, error = "no")))
+        m.release(11, 8); answered()
+        m.addBlocker(11, 5); answered()
         m.revive(8)
         assertEquals(listOf(8L), sent[0].unblock?.from)
         assertEquals(11L, sent[0].unblock?.task)

@@ -35,9 +35,7 @@ final class Session: ObservableObject {
                 model?.sessionNotice = OpenSession.copiedNotice(line)
             }
         }
-        #if DEBUG
         MainThreadWatchdog.shared.start()
-        #endif
         pulse = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak model] _ in
             Task { @MainActor in model?.pulse() }
         }
