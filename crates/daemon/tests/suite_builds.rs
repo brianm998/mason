@@ -310,7 +310,7 @@ fn after_a_red_full_run_an_unscoped_check_reruns_only_the_failures_and_the_chang
     );
     let run = json!({"call": {"tool": "run_check", "args": {"name": "tests"}}});
     let turns = json!([
-        {"sh": "mkdir src && printf '[package]\\nname = \"pk\"\\nversion = \"0.1.0\"\\nedition = \"2021\"\\n' > Cargo.toml && : > src/lib.rs && git add -A && git -c user.name=t -c user.email=t@t commit -qm crate"},
+        {"sh": "mkdir -p crates/pk/src && printf '[package]\\nname = \"pk\"\\nversion = \"0.1.0\"\\nedition = \"2021\"\\n' > crates/pk/Cargo.toml && : > crates/pk/src/lib.rs && git add -A && git -c user.name=t -c user.email=t@t commit -qm crate"},
         // Full, red: no hello.txt yet.
         run,
         // Narrowed to the one failure and the changed crate; still red.
@@ -323,8 +323,27 @@ fn after_a_red_full_run_an_unscoped_check_reruns_only_the_failures_and_the_chang
         {"call": {"tool": "run_check", "args": {"name": "tests", "full": true}}},
         {"call": {"tool": "submit_change", "args": {"summary": "change", "head": "$HEAD"}}}
     ]);
-    let (_s, d) = start(vec![turns], &def);
-    let t = file_task_as(&d, "Rerun", "Please do it.", true, TrustSource::Owner, false);
+    let s = Scratch::new("false", json!({"steps": {"develop": vec![turns]}}));
+    s.push_files(
+        &[
+            (".mason/mason.toml", def.as_str()),
+            ("checks.sh", CHECKS),
+            (
+                "Cargo.toml",
+                "[workspace]\nmembers = [\"crates/pk\"]\nresolver = \"2\"\n",
+            ),
+        ],
+        "project setup",
+    );
+    let d = s.start_with(|c| c.env_retry = Duration::from_millis(200));
+    let t = file_task_as(
+        &d,
+        "Rerun",
+        "Please do it.",
+        true,
+        TrustSource::Owner,
+        false,
+    );
     wait_state(&d, t, State::Landed, 120);
     let logs = render_logs(&d, t.0);
     assert_eq!(
