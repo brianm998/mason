@@ -1249,3 +1249,45 @@ extension View {
         #endif
     }
 }
+
+
+/// The cause of a wait as a small badge on a task row (s527).
+struct WaitBadge: View {
+    @Environment(\.theme) var theme
+    let cause: String
+
+    var body: some View {
+        Text(QueueWait.badge(cause))
+            .font(theme.small())
+            .padding(.horizontal, 6).padding(.vertical, 1)
+            .background(Capsule().fill(theme.attention.opacity(0.15)))
+            .foregroundStyle(theme.attention)
+            .accessibilityIdentifier("wait:badge")
+    }
+}
+
+/// One line at the top of home when most waiting work is held by one request, one gate or one
+/// red test: what holds it, for how long, and how many tasks wait behind it (s527).
+struct QueueHoldBanner: View {
+    @Environment(\.theme) var theme
+    @ObservedObject var model: MonitorModel
+    let hold: Mason_V1_QueueHold
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: theme.spacingSmall) {
+            LinkedText(model: model, text: hold.summary, font: theme.body(.semibold), color: theme.attention)
+                .accessibilityIdentifier("home:queue-hold")
+            if hold.hasParty && hold.party.lease {
+                Text(QueueWait.lease(hold.party, now: model.daemonNow()))
+                    .font(theme.small()).foregroundStyle(theme.muted)
+                    .accessibilityIdentifier("home:queue-hold:lease")
+            }
+            ForEach(hold.tasks.filter { _ in hold.kind == "red" }.prefix(8), id: \.self) { t in
+                TaskLink(title: "#\(t)") { model.go(.task(t)) }
+            }
+        }
+        .padding(theme.spacing)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 6).fill(theme.attention.opacity(0.12)))
+    }
+}

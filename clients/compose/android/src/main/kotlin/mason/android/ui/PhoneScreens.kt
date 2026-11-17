@@ -82,7 +82,7 @@ private fun SectionHeader(text: String, open: Boolean, onClick: () -> Unit) {
 fun TaskRowItem(r: TaskRow, onClick: () -> Unit) {
     Column(Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 24.dp, vertical = 8.dp)) {
         Text("#${r.id}  ${r.title}", style = MaterialTheme.typography.bodyLarge)
-        val sub = r.why_waiting.ifEmpty { r.activity }
+        val sub = mason.monitor.QueueWait.line(r)
         if (sub.isNotEmpty()) Text(sub, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
@@ -115,6 +115,13 @@ private fun HomePage(model: MonitorModel, open: (Page) -> Unit) {
     val home = model.home
     Text(home?.status ?: model.header?.status.orEmpty(), Modifier.padding(16.dp), style = MaterialTheme.typography.titleLarge)
     if (home == null) return
+    home.queue_hold?.let { h ->
+        Text(h.summary, Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+            color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium)
+        h.party?.takeIf { it.lease }?.let {
+            Text(mason.monitor.QueueWait.lease(it, model.daemonNow()), Modifier.padding(horizontal = 24.dp), style = MaterialTheme.typography.bodySmall)
+        }
+    }
     if (home.attention.isNotEmpty()) {
         Heading("Needs you")
         for (a in home.attention) a.task?.let { TaskRowItem(it) { open(Page.Task(it.id)) } }
@@ -204,6 +211,10 @@ private fun TaskPage(model: MonitorModel, id: Long) {
     Text("#${row.id}  ${row.state}  ${row.project}", Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.bodySmall)
     val sub = row.why_waiting.ifEmpty { row.activity }
     if (sub.isNotEmpty()) Text(sub, Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
+    row.wait?.let { w ->
+        Text(mason.monitor.QueueWait.badge(w.cause), Modifier.padding(horizontal = 16.dp), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelMedium)
+        for (line in mason.monitor.QueueWait.chain(w, row.key)) Text(line, Modifier.padding(horizontal = 24.dp, vertical = 1.dp), style = MaterialTheme.typography.bodySmall)
+    }
     d.card?.takeIf { it.ask.isNotEmpty() || it.options.isNotEmpty() }?.let { DecisionCardView(model, id, it) }
     if (d.failure.isNotEmpty()) Text(d.failure, Modifier.padding(16.dp), color = MaterialTheme.colorScheme.error)
     if (d.closing.isNotEmpty()) Text(d.closing, Modifier.padding(horizontal = 16.dp, vertical = 4.dp))

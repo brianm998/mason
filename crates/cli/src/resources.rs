@@ -60,11 +60,17 @@ fn acquire(
     task: Option<u64>,
     outside: Option<&OutsideArgs>,
     cmd: &[String],
+    origin: Option<&str>,
 ) -> Result<(u64, mason_resources::Held, mason_daemon::watch::Thresholds), String> {
     let mut body = json!({"uses": uses, "label": label, "task": task, "pid": std::process::id()});
     // The command and where it runs, so the daemon can estimate it from earlier runs (s400).
     body["cmd"] = json!(cmd);
     body["cwd"] = json!(cwd());
+    // Who asked (`--origin starpipe`, `hook`), so the monitor can say where a lease with no
+    // task came from; the daemon adds the working directory (s527).
+    if let Some(o) = origin {
+        body["origin"] = json!(o);
+    }
     if let Some(o) = outside {
         body["pipeline"] = json!(o.pipeline);
         body["priority"] = json!(o.priority);
@@ -159,6 +165,7 @@ pub fn run(
     label: Option<String>,
     cmd: &[String],
     outside: Option<&OutsideArgs>,
+    origin: Option<&str>,
 ) -> Result<i32, String> {
     // A run made by a task's agent (MASON_TASK is in the step environment) is
     // that task's pipeline work; without it, it is a person's. Another
@@ -170,7 +177,7 @@ pub fn run(
         Some(t) => format!("task {t} `{}`", cmd.join(" ")),
         None => format!("interactive `{}`", cmd.join(" ")),
     });
-    let (id, held, th) = acquire(d, &uses, &label, task, outside, cmd)?;
+    let (id, held, th) = acquire(d, &uses, &label, task, outside, cmd, origin)?;
     let began = Instant::now();
     let status = run_watched(d, &cmd[0], &cmd[1..], th, task.is_some());
     drop(held);
@@ -273,7 +280,7 @@ pub fn hold(
     outside: &OutsideArgs,
 ) -> Result<(), String> {
     use std::io::{Read, Write};
-    let (id, held, _) = acquire(d, &uses, label, None, Some(outside), &[])?;
+    let (id, held, _) = acquire(d, &uses, label, None, Some(outside), &[], None)?;
     println!("granted");
     let _ = std::io::stdout().flush();
     let (tx, rx) = std::sync::mpsc::channel::<()>();
@@ -540,7 +547,7 @@ pub fn hook_bash(input: &str, needs: &str, mason: &str) -> Option<Value> {
     }
     let mut input = v["tool_input"].clone();
     input["command"] = json!(format!(
-        "{} run --needs {needs} -- bash -c {}",
+        "{} run --needs {needs} --origin hook -- bash -c {}",
         if mason
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || "/._-".contains(c))
@@ -704,7 +711,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             cmd,
-            "mason run --needs compile -- bash -c 'cargo test -p x'"
+            "mason run --needs compile --origin hook -- bash -c 'cargo test -p x'"
         );
         assert_eq!(out["hookSpecificOutput"]["permissionDecision"], "ask");
         let quoted = hook_bash(&input("make it's"), "compile", "mason").unwrap();
@@ -727,7 +734,7 @@ mod tests {
         assert!(abs["hookSpecificOutput"]["updatedInput"]["command"]
             .as_str()
             .unwrap()
-            .starts_with("'/a b/mason' run --needs compile -- bash -c"));
+            .starts_with("'/a b/mason' run --needs compile --origin hook -- bash -c"));
         assert!(hook_bash(&input("echo cargo"), "compile", "mason").is_none());
         // Quoted text is not a command, and some cargo commands compile nothing.
         for c in [

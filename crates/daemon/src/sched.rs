@@ -314,6 +314,9 @@ struct State {
     by_task: HashMap<TaskId, u64>,
     /// The task a `mason run` lease was opened for, when it names one.
     lease_tasks: HashMap<u64, TaskId>,
+    /// Where a `mason run` lease came from (`--origin`, else the caller's working directory),
+    /// by lease id (s527).
+    origins: HashMap<u64, String>,
     /// An agent step's deadline, by task, while it runs: a `mason run` of that task's
     /// waits in the queue are added to it when granted (s363).
     wait_credit: HashMap<TaskId, mason_adapter_api::DeadlineExtra>,
@@ -434,6 +437,9 @@ pub struct Broker {
     /// Wait explanation per waiting task, republished by every `pass`. Readers
     /// clone the `Arc` and never take `st`.
     waits_snap: std::sync::RwLock<Arc<BTreeMap<TaskId, String>>>,
+    /// The same waits as data, with the chain behind each, the leases that belong to no task
+    /// and the queue-held summary (s527). Written with `waits_snap`, so the two agree.
+    waits_view: std::sync::RwLock<Arc<crate::waitview::WaitsView>>,
     /// Time each task has spent under a CPU cause, updated by every `pass`.
     cpu_hold: Mutex<mason_scheduler::CpuHold>,
     /// The largest of those, for readers that must not take `st`.
@@ -636,6 +642,7 @@ impl Broker {
                 cpu_busy: None,
                 priority_first: cfg.priority_first,
                 lease_tasks: HashMap::new(),
+                origins: HashMap::new(),
                 wait_credit: HashMap::new(),
                 idle: HashMap::new(),
                 compile_idle_kill_s: cfg.compile_idle_kill_s,
@@ -660,6 +667,7 @@ impl Broker {
             locks,
             limits_file,
             waits_snap: Default::default(),
+            waits_view: Default::default(),
             cpu_hold: Default::default(),
             cpu_held_ms: Default::default(),
             pass_count: Default::default(),
@@ -1199,6 +1207,8 @@ impl Broker {
             .filter_map(|(id, w)| by_id.get(id).map(|t| (*t, explain(w, now))))
             .collect();
         *self.waits_snap.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(snap);
+        let view = Self::wait_view_of(st, &waits.waits, now);
+        *self.waits_view.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(view);
         let mut hold = self.cpu_hold.lock().unwrap_or_else(|e| e.into_inner());
         hold.observe(
             now,
@@ -1214,6 +1224,70 @@ impl Broker {
     /// The most time one waiting task has spent under a CPU cause (at most one pass old).
     pub fn cpu_gate_held_ms(&self) -> u64 {
         self.cpu_held_ms.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Build the structured view of one plan from the broker's state.
+    fn wait_view_of(
+        st: &mut State,
+        waits: &BTreeMap<u64, mason_scheduler::Wait>,
+        now: u64,
+    ) -> crate::waitview::WaitsView {
+        let State {
+            ledger,
+            meta,
+            by_task,
+            lease_tasks,
+            origins,
+            ..
+        } = st;
+        origins.retain(|id, _| meta.contains_key(id));
+        let snap = ledger.snapshot_at(now);
+        let step_tasks: HashMap<u64, u64> = by_task.iter().map(|(t, id)| (*id, t.0)).collect();
+        let task_of: HashMap<u64, u64> = step_tasks
+            .iter()
+            .map(|(id, t)| (*id, *t))
+            .chain(lease_tasks.iter().map(|(id, t)| (*id, t.0)))
+            .collect();
+        let leases: HashMap<u64, String> = meta
+            .iter()
+            .filter_map(|(id, m)| match m {
+                Meta::External { pipeline, .. } => Some((
+                    *id,
+                    origins
+                        .get(id)
+                        .cloned()
+                        .or_else(|| pipeline.clone())
+                        .unwrap_or_else(|| "cli".into()),
+                )),
+                Meta::Outside { .. } => Some((*id, "held outside the queue".into())),
+                Meta::Task => None,
+            })
+            .collect();
+        crate::waitview::build(&crate::waitview::Inputs {
+            now,
+            snap: &snap,
+            waits,
+            task_of: &task_of,
+            step_tasks: &step_tasks,
+            leases: &leases,
+        })
+    }
+
+    /// The waits as data (at most one pass old): what each waiting task is held back by, the
+    /// leases that belong to no task, and what most of the queue is held by.
+    pub fn wait_view(&self) -> Arc<crate::waitview::WaitsView> {
+        self.waits_view
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Say where lease `id` came from.
+    pub fn lease_set_origin(&self, id: u64, origin: &str) {
+        let mut st = lock(&self.st);
+        if st.meta.contains_key(&id) && !origin.trim().is_empty() {
+            st.origins.insert(id, origin.trim().to_string());
+        }
     }
 
     /// The published wait explanations (at most one pass old).
@@ -2122,6 +2196,7 @@ impl Broker {
                 }
             })
             .collect();
+        let leases = Self::wait_view_of(&mut st, &waits.waits, now).leases;
         let settle = st.compile_settle_s;
         let mut rules = format!(
             "At most {limit} at once. The first compile always starts; another starts only \
@@ -2171,6 +2246,7 @@ impl Broker {
                 .rev()
                 .map(|(at, t)| format!("{} ago: {t}", since(now, *at)))
                 .collect(),
+            leases,
         }
     }
 
@@ -3138,5 +3214,122 @@ mod tests {
             "{}",
             a[0].text
         );
+    }
+
+    /// A task's step asking for `uses`, queued directly (as the pipeline does).
+    fn queue_task(b: &Broker, t: u64, uses: &BTreeMap<String, u32>) -> u64 {
+        let mut st = lock(&b.st);
+        st.rank_seq += 1;
+        let rank = order(&st, Rank::new(false, 3, 0, t, st.rank_seq, false));
+        let id = st
+            .ledger
+            .submit(rank, needs_of(uses, None), &format!("#{t}"), t);
+        st.meta.insert(id, Meta::Task);
+        st.by_task.insert(TaskId(t), id);
+        drop(b.pass(st));
+        id
+    }
+
+    fn compile_broker(dir: &Path, units: u32) -> Arc<Broker> {
+        compile_broker_at(dir, units, 0)
+    }
+
+    fn compile_broker_at(dir: &Path, units: u32, cpu_pct: u32) -> Arc<Broker> {
+        let cfg = ResourceCfg {
+            machine: BTreeMap::from([("compile".to_string(), units)]),
+            ..Default::default()
+        };
+        Broker::new(
+            dir.join("locks"),
+            dir.join("limits.kv"),
+            &cfg,
+            2,
+            crate::cpu::FakeCpu::new(cpu_pct),
+            &[],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn ten_compiles_behind_a_waiting_exclusive_lease_all_name_it() {
+        // 2026-11-16: an exclusive `mason run` with no task waited for #510's compile slot, and
+        // every task behind it read "waiting for compile slot" with slots free.
+        let dir = tempfile::tempdir().unwrap();
+        let b = compile_broker(dir.path(), 6);
+        let one = BTreeMap::from([("compile".to_string(), 1)]);
+        let holder = queue_task(&b, 510, &one);
+        let excl = b.lease_open(
+            "interactive `starpipe heavy`",
+            &BTreeMap::from([("exclusive".to_string(), 1)]),
+        );
+        b.lease_set_origin(excl, "starpipe in /work/star");
+        assert!(matches!(b.lease_poll(excl), LeaseState::Waiting { .. }));
+        for t in 1..=10 {
+            queue_task(&b, t, &one);
+        }
+        let v = b.wait_view();
+        assert_eq!(v.tasks.len(), 10, "{:?}", v.tasks.keys());
+        for (t, w) in &v.tasks {
+            assert_eq!(w.cause, "behind-exclusive", "#{t}: {}", w.sentence);
+            let blocker = w.blocker.as_ref().expect("names the lease");
+            assert!(blocker.lease && blocker.exclusive && !blocker.holding);
+            assert_eq!(blocker.label, "starpipe heavy");
+            assert_eq!(blocker.origin, "starpipe in /work/star");
+            assert!(w.sentence.contains("exclusive request"), "{}", w.sentence);
+            assert!(w.sentence.contains("starpipe heavy"), "{}", w.sentence);
+            assert_eq!(w.holders.len(), 1);
+            assert_eq!(w.holders[0].task, 510);
+            assert_eq!(w.chain[0].party.as_ref().unwrap().label, "starpipe heavy");
+            // The chain goes on: the lease waits for #510, which is running.
+            assert_eq!(w.chain[1].party.as_ref().unwrap().task, 510);
+            assert!(w.chain[1].sentence.is_empty());
+        }
+        let hold = v.hold.clone().expect("one queue-blocked summary");
+        assert_eq!(hold.kind, "exclusive-request");
+        assert_eq!(hold.waiting, 10);
+        assert_eq!(hold.party.as_ref().unwrap().label, "starpipe heavy");
+        assert_eq!(hold.holders[0].task, 510);
+        assert!(hold.summary.contains("starpipe heavy"), "{}", hold.summary);
+        assert!(
+            hold.summary.contains("#510's compile slot"),
+            "{}",
+            hold.summary
+        );
+        assert!(
+            hold.summary.contains("10 tasks wait behind it"),
+            "{}",
+            hold.summary
+        );
+        // The lease belongs to no task, and is listed with where it came from.
+        assert_eq!(v.leases.len(), 1);
+        assert_eq!(v.leases[0].needs, "exclusive");
+        assert!(v.leases[0].lease && v.leases[0].origin.starts_with("starpipe"));
+
+        // The holder goes: no row, chain or summary names it on the next snapshot.
+        b.release(holder, Some(TaskId(510)));
+        let v = b.wait_view();
+        let shown = format!("{:?}", v.tasks);
+        assert!(!shown.contains("510"), "{shown}");
+        assert!(!v.hold.as_ref().is_some_and(|h| h.summary.contains("#510")));
+    }
+
+    #[test]
+    fn a_gate_holding_most_waiting_work_is_the_queue_summary() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = compile_broker_at(dir.path(), 6, 90);
+        let one = BTreeMap::from([("compile".to_string(), 1)]);
+        // The first compile always starts; the CPU gate holds the ones after it.
+        queue_task(&b, 500, &one);
+        for t in 1..=5 {
+            queue_task(&b, t, &one);
+        }
+        let v = b.wait_view();
+        let hold = v.hold.clone().expect("the CPU gate holds the queue");
+        assert_eq!(hold.kind, "gate");
+        assert_eq!(hold.cause, "cpu");
+        assert!(hold.summary.contains("CPU at 90%"), "{}", hold.summary);
+        for w in v.tasks.values() {
+            assert_eq!(w.cause, "cpu");
+        }
     }
 }

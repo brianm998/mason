@@ -3232,6 +3232,7 @@ async fn lease_open(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res
     // not a live task is treated as no task at all (a person's request).
     let task = b["task"].as_u64();
     let pid = b["pid"].as_u64().unwrap_or(0) as u32;
+    let origin = lease_origin(&b);
     // Another pipeline's work: ranked as pipeline work, never a person's, and
     // `task` is ignored (it names a MASON task).
     if let Some(name) = b["pipeline"].as_str() {
@@ -3243,6 +3244,7 @@ async fn lease_open(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res
             .run(move || {
                 let id = d2.broker.lease_open_outside(&label, &uses, &o);
                 d2.broker.lease_set_pid(id, pid);
+                d2.broker.lease_set_origin(id, &origin);
                 id
             })
             .await
@@ -3267,6 +3269,7 @@ async fn lease_open(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res
                 .broker
                 .lease_open_expecting(&label, &uses, standing, expected);
             d2.broker.lease_set_pid(id, pid);
+            d2.broker.lease_set_origin(id, &origin);
             if let (Some(t), Some(_)) = (task, standing) {
                 d2.broker.lease_set_task(id, TaskId(t));
             }
@@ -3324,6 +3327,19 @@ async fn lease_poll(Shared(d): Shared<Arc<Daemon>>, Path(id): Path<u64>) -> Res 
 }
 
 /// The command and working directory a `mason run` request or release names.
+/// Where a `mason run` came from: its `origin` ("starpipe", "hook"), then the working
+/// directory it ran in, as "origin in /dir" when both are given (s527).
+fn lease_origin(b: &Value) -> String {
+    let origin = b["origin"].as_str().unwrap_or("").trim();
+    let cwd = b["cwd"].as_str().unwrap_or("").trim();
+    match (origin.is_empty(), cwd.is_empty()) {
+        (false, false) => format!("{origin} in {cwd}"),
+        (false, true) => origin.to_string(),
+        (true, false) => format!("cli in {cwd}"),
+        (true, true) => String::new(),
+    }
+}
+
 fn run_command(b: &Value) -> Option<(Vec<String>, String)> {
     let cmd: Vec<String> = b["cmd"]
         .as_array()?
