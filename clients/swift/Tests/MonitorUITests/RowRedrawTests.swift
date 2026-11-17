@@ -87,16 +87,58 @@ final class RowRedrawTests: XCTestCase {
         XCTAssertEqual(RowView.evaluations, before)
     }
 
-    func testAProgressPushEvaluatesOnlyItsRow() {
+    func testAProgressPushEvaluatesOnlyItsProgressViews() {
         let m = fixture()
         let h = host(m)
         settle(h)
-        let before = RowView.evaluations
+        let rows = RowView.evaluations
+        let live = LiveProgressCounter.n
+        let pane = SidebarPane.evaluations
         m.apply(progress: progress(task: 7, done: 5))
         settle(h)
-        let used = RowView.evaluations - before
+        XCTAssertEqual(RowView.evaluations, rows, "no row body runs")
+        XCTAssertEqual(SidebarPane.evaluations, pane)
+        let used = LiveProgressCounter.n - live
         XCTAssertGreaterThan(used, 0)
-        XCTAssertLessThanOrEqual(used, 2)
+        XCTAssertLessThanOrEqual(used, 4, "only task 7's progress views")
+    }
+
+    /// Exit test: a 500-row sidebar, then a burst for the 25 running tasks. No sidebar publish, no row,
+    /// pane or top-bar body; progress views are evaluated in proportion to the tasks touched.
+    func testBurstForRunningTasksRedrawsOnlyTheirProgressViews() {
+        let m = fixture()
+        var sec = SidebarSection()
+        sec.state = "landed"
+        sec.title = "Landed"
+        for id in 1000..<1475 {
+            var r = TaskRow()
+            r.id = UInt64(id)
+            r.key = "#\(id)"
+            r.title = "landed \(id)"
+            r.state = "landed"
+            sec.rows.append(r)
+        }
+        m.sidebar?.sections.append(sec)
+        let h = host(m)
+        settle(h)
+        var publishes = 0
+        let sub = m.$sidebar.dropFirst().sink { _ in publishes += 1 }
+        let rows = RowView.evaluations
+        let pane = SidebarPane.evaluations
+        let bar = TopBar.evaluations
+        let live = LiveProgressCounter.n
+        for round in 1...5 {
+            for t in 1...25 { m.apply(progress: progress(task: UInt64(t), done: UInt32(1 + round))) }
+            settle(h)
+        }
+        sub.cancel()
+        XCTAssertEqual(publishes, 0)
+        XCTAssertEqual(RowView.evaluations, rows)
+        XCTAssertEqual(SidebarPane.evaluations, pane)
+        XCTAssertEqual(TopBar.evaluations, bar)
+        let used = LiveProgressCounter.n - live
+        XCTAssertGreaterThan(used, 0)
+        XCTAssertLessThanOrEqual(used, 5 * 25 * 4, "progress views of touched rows only")
     }
 
     /// The exit test: a recorded stream of about 2,000 messages for 25 running tasks.
