@@ -14,7 +14,11 @@ data class LatenessWindow(val pings: Int = 0, val late: Int = 0, val worstMs: Do
  * How late the UI thread was, from the watchdog's pings. Pure, so it can be tested: the clock is passed in
  * and the rolling window drops pings older than [windowMs].
  */
-class LatenessStats(val thresholdMs: Double, val windowMs: Double = 600_000.0) {
+class LatenessStats(
+    val thresholdMs: Double,
+    val windowMs: Double = WINDOW_MS,
+) {
+    companion object { const val WINDOW_MS = 10 * 60_000.0 }
     var samples = 0; private set
     var late = 0; private set
     var worstMs = 0.0; private set

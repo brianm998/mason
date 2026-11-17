@@ -30,7 +30,9 @@ public struct LatenessStats: Equatable, Sendable {
     public let windowMs: Double
     private var recent: [(at: Double, ms: Double)] = []
 
-    public init(thresholdMs: Double, windowMs: Double = 600_000) {
+    public static let defaultWindowMs = 10 * 60_000.0
+
+    public init(thresholdMs: Double, windowMs: Double = LatenessStats.defaultWindowMs) {
         self.thresholdMs = thresholdMs
         self.windowMs = windowMs
     }
