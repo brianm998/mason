@@ -56,6 +56,31 @@ fun MainPane(model: MonitorModel, modifier: Modifier = Modifier) {
     }
 }
 
+/**
+ * Home's CPU and disk sections: side by side (CPU about 3:2 wider) when the page is at least
+ * [HOME_TWO_COLUMN_MIN_DP] wide, stacked with CPU first below that. With no CPU reading the disk
+ * section takes the whole width, and the other way round.
+ */
+@Composable
+internal fun CpuDiskRow(model: MonitorModel) {
+    val theme = LocalTheme.current
+    val cpu: @Composable () -> Unit = { CpuSection(model, open = { model.go(Page.Section("cpu")) }) }
+    val disk: @Composable () -> Unit = { DiskSection(model, open = { model.go(Page.Section("disk")) }) }
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        if (maxWidth.value >= HOME_TWO_COLUMN_MIN_DP && model.cpu != null && model.diskSeen) {
+            Row(Modifier.fillMaxWidth().testTag("home:cpu-disk-row"), horizontalArrangement = Arrangement.spacedBy(theme.spacingLarge * 2)) {
+                Box(Modifier.weight(HOME_CPU_WEIGHT).testTag("home:cpu-column")) { cpu() }
+                Box(Modifier.weight(HOME_DISK_WEIGHT).testTag("home:disk-column")) { disk() }
+            }
+        } else {
+            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(theme.spacing)) {
+                cpu()
+                disk()
+            }
+        }
+    }
+}
+
 @Composable
 internal fun Section(title: String, state: String? = null, open: (() -> Unit)? = null, content: @Composable ColumnScope.() -> Unit) {
     val theme = LocalTheme.current
@@ -205,7 +230,7 @@ fun HomePage(model: MonitorModel) {
                 }
             }
         }
-        CpuSection(model, open = { model.go(Page.Section("cpu")) })
+        CpuDiskRow(model)
         h?.compilation?.let { CompilationSection(model, it, open = { model.go(Page.Section("compilation")) }) }
         h?.stages?.forEach { st ->
             Section(st.title, st.state, open = Page.sectionPage(st.state)?.let { p -> { model.go(p) } }) {
@@ -881,6 +906,7 @@ fun SectionPage(model: MonitorModel, name: String) {
                 SessionStepper(model)
             }
             "cpu" -> CpuSection(model)
+            "disk" -> DiskSection(model)
             "compilation" -> {
                 val c = model.home?.compilation
                 if (c != null) CompilationSection(model, c)

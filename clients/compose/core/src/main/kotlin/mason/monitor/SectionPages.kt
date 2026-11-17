@@ -13,6 +13,7 @@ object SectionPages {
         "landing" -> "Landing queue"
         "queued" -> "Queued"
         "cpu" -> "CPU"
+        "disk" -> "Disk"
         "compilation" -> "Compilation"
         "exploring" -> "Exploring"
         "developing" -> "Developing"
