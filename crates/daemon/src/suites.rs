@@ -1174,7 +1174,38 @@ fn baseline_noted(
             return Some((failing, names));
         }
     }
-    let wt = who.log_dir.join(format!("base-{}", suite.name));
+    let (failing, names, executed) =
+        run_on_base(who, c_repo, def, suite, base, lock, dev, &suite.command, "b")?;
+    if !suite.narrowed {
+        let _ = who.d.store.put_baseline_hashed(
+            base,
+            &suite.name,
+            &failing,
+            &names,
+            executed,
+            now_ms(),
+            &hash,
+        );
+    }
+    Some((failing, names))
+}
+
+/// Run `cmd` in a checkout of `base`: what failed, every name seen, and how many tests ran.
+/// `None` if the checkout, the run or its time limit did not give a result (a signal, a
+/// timeout). `tag` names the run's job id: `b` for the whole suite, `t` for a targeted one.
+#[allow(clippy::too_many_arguments)]
+fn run_on_base(
+    who: &Who,
+    c_repo: &Path,
+    def: &Definition,
+    suite: &Suite,
+    base: &str,
+    lock: &crate::daemon::RepoLock,
+    dev: Option<&Dev>,
+    cmd: &str,
+    tag: &str,
+) -> Option<(Vec<String>, Vec<String>, usize)> {
+    let wt = who.log_dir.join(format!("base-{}{}", suite.name, if tag == "b" { "" } else { "-t" }));
     {
         let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
         git::remove_worktree(c_repo, &wt);
@@ -1195,13 +1226,13 @@ fn baseline_noted(
         if let Some(f) = &suite.results_file {
             remove_results(&wt, f);
         }
-        let id = format!("{}-b-{}", who.id_prefix, suite.name);
+        let id = format!("{}-{tag}-{}", who.id_prefix, suite.name);
         let ran = run_hosted(
             &who.d,
             &id,
             &crate::jobs::pty_wrap(
                 suite.pty,
-                &lifecycle::with_device(&suite.command, dev_id(dev)),
+                &lifecycle::with_device(cmd, dev_id(dev)),
             ),
             &wt,
             suite.timeout.unwrap_or(Duration::from_secs(1800)),
@@ -1228,19 +1259,7 @@ fn baseline_noted(
         let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
         git::remove_worktree(c_repo, &wt);
     }
-    let (failing, names, executed) = outcome?;
-    if !suite.narrowed {
-        let _ = who.d.store.put_baseline_hashed(
-            base,
-            &suite.name,
-            &failing,
-            &names,
-            executed,
-            now_ms(),
-            &hash,
-        );
-    }
-    Some((failing, names))
+    outcome
 }
 
 #[allow(clippy::too_many_arguments)]

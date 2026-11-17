@@ -992,3 +992,67 @@ fn a_passed_build_is_remembered_per_tree_and_worktree_and_a_failed_one_is_not() 
         "a failed build is not reused"
     );
 }
+
+/// `CHECKS` taking test names (a rerun): at the merge base (no `hello.txt`) it records the
+/// names it was given in `rec`, and, when `kill` is set, dies by a signal there as a run
+/// stopped by the load does.
+fn checks_with_names(rec: &std::path::Path, kill: bool) -> String {
+    let at_base = format!(
+        "if [ $# -gt 0 ] && [ ! -f hello.txt ]; then echo \"$@\" >> {}; {} fi\n",
+        rec.display(),
+        if kill { "kill -TERM $$;" } else { "" }
+    );
+    CHECKS.replacen("[ -f skip.flag ]", &format!("{at_base}[ -f skip.flag ]"), 1)
+}
+
+fn rerun_def() -> String {
+    def("rerun = \"sh checks.sh {tests}\"", "", "")
+}
+
+#[test]
+fn a_develop_run_that_is_killed_does_not_count_the_round_against_the_task() {
+    let rec = s_counter();
+    let s = world(
+        vec![commit(
+            &format!("{HELLO} && echo x > mine.broken"),
+            "add hello (and break mine)",
+        )],
+        &[],
+        &rerun_def(),
+    );
+    s.push_files(&[("checks.sh", &checks_with_names(&rec, true))], "kill at base");
+    let d = start(&s);
+    let t = file_it(&d, "Killed at develop");
+    wait_state(&d, t, State::Landed, 90);
+    // No trip back to development: the round was not the task's.
+    assert_eq!(steps_run(&d, t), vec!["develop", "test", "land"]);
+    let (v, note) = closing(&d, t);
+    assert_eq!(v, "unverified", "{note}");
+    assert!(note.contains("not counted against the task"), "{note}");
+    // Tried twice, each time with only the failing test.
+    let seen = std::fs::read_to_string(&rec).unwrap();
+    let lines: Vec<&str> = seen.lines().collect();
+    assert_eq!(lines, vec!["mine", "mine"], "{seen}");
+}
+
+#[test]
+fn a_develop_run_of_only_the_failing_tests_that_fails_the_same_test_excuses_it() {
+    let rec = s_counter();
+    let s = world(
+        vec![commit(HELLO, "add hello")],
+        &[("legacy.broken", "known\n")],
+        &rerun_def(),
+    );
+    s.push_files(&[("checks.sh", &checks_with_names(&rec, false))], "record at base");
+    let d = start(&s);
+    let t = file_it(&d, "Same red at develop");
+    wait_state(&d, t, State::Landed, 90);
+    assert_eq!(steps_run(&d, t), vec!["develop", "test", "land"]);
+    let (v, note) = closing(&d, t);
+    assert_eq!(v, "unverified", "{note}");
+    assert!(note.contains("failures excused"), "{note}");
+    let seen = std::fs::read_to_string(&rec).unwrap();
+    assert_eq!(seen.lines().collect::<Vec<_>>(), vec!["legacy"], "{seen}");
+    let ledger = d.store.ledger().unwrap();
+    assert!(ledger.iter().any(|e| e.test == "legacy"), "{ledger:?}");
+}
