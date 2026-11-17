@@ -428,6 +428,108 @@ pub fn sweep(d: &Arc<Daemon>, w: &mason_engine::World) -> usize {
     n
 }
 
+/// First line of the `.cargo/config.toml` MASON writes, so a later run knows the file is its own.
+const CARGO_CONFIG_MARK: &str = "# Written by MASON: this task's build directory. Not committed.";
+
+/// The text of the cargo config that points `[build] target-dir` at `dir`. The path is a TOML
+/// basic string, so `\` and `"` and control characters are escaped.
+pub fn cargo_config_text(dir: &str) -> String {
+    let mut q = String::new();
+    for c in dir.chars() {
+        match c {
+            '\\' => q.push_str("\\\\"),
+            '"' => q.push_str("\\\""),
+            '\n' => q.push_str("\\n"),
+            '\r' => q.push_str("\\r"),
+            '\t' => q.push_str("\\t"),
+            c if (c as u32) < 0x20 || c as u32 == 0x7f => {
+                q.push_str(&format!("\\u{:04X}", c as u32));
+            }
+            c => q.push(c),
+        }
+    }
+    format!("{CARGO_CONFIG_MARK}\n[build]\ntarget-dir = \"{q}\"\n")
+}
+
+fn git_out(wt: &Path, args: &[&str]) -> Result<(bool, String), String> {
+    let o = std::process::Command::new("git")
+        .args(args)
+        .current_dir(wt)
+        .output()
+        .map_err(|e| format!("git {}: {e}", args.join(" ")))?;
+    Ok((
+        o.status.success(),
+        String::from_utf8_lossy(&o.stdout).trim().to_string(),
+    ))
+}
+
+/// Point cargo in the checkout `wt` at `task`'s build directory by writing an untracked
+/// `.cargo/config.toml` (a config-file `target-dir`, not `CARGO_TARGET_DIR`: sccache hashes every
+/// `CARGO_*` variable) and listing it in the repository's `info/exclude`. Returns whether a file
+/// was written. A repository that tracks its own `.cargo/config.toml` keeps it (`Ok(false)`).
+pub fn write_cargo_config(
+    wt: &Path,
+    template: &str,
+    task: u64,
+    home: &Path,
+    keep: &[PathBuf],
+) -> Result<bool, String> {
+    let dir = check_path(&expand(template, task, home), home, keep)
+        .map_err(|why| format!("task_cache directory refused: {why}"))?;
+    let rel = ".cargo/config.toml";
+    let (tracked, _) = git_out(wt, &["ls-files", "--error-unmatch", "--", rel])?;
+    if tracked {
+        return Ok(false);
+    }
+    let file = wt.join(rel);
+    if let Ok(old) = std::fs::read_to_string(&file) {
+        if !old.starts_with(CARGO_CONFIG_MARK) {
+            return Ok(false); // someone else's untracked file
+        }
+    }
+    let (ok, ex) = git_out(wt, &["rev-parse", "--git-path", "info/exclude"])?;
+    if !ok || ex.is_empty() {
+        return Err("git would not say where info/exclude is".into());
+    }
+    let ex = wt.join(ex);
+    let cur = std::fs::read_to_string(&ex).unwrap_or_default();
+    if !cur.lines().any(|l| l.trim() == "/.cargo/config.toml") {
+        if let Some(parent) = ex.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let sep = if cur.is_empty() || cur.ends_with('\n') {
+            ""
+        } else {
+            "\n"
+        };
+        std::fs::write(&ex, format!("{cur}{sep}/.cargo/config.toml\n"))
+            .map_err(|e| format!("{}: {e}", ex.display()))?;
+    }
+    std::fs::create_dir_all(wt.join(".cargo")).map_err(|e| e.to_string())?;
+    std::fs::write(&file, cargo_config_text(&dir.to_string_lossy()))
+        .map_err(|e| format!("{}: {e}", file.display()))?;
+    Ok(true)
+}
+
+/// [`write_cargo_config`] for a task's worktree, when its project has a `task_cache`. Logged,
+/// never fatal.
+pub fn point_cargo_at_task_cache(d: &Daemon, p: &ProjectCfg, task: u64, wt: &Path) {
+    let Some(t) = p.task_cache.as_ref() else {
+        return;
+    };
+    match write_cargo_config(wt, t, task, &home(), &keep_list(d, p)) {
+        Ok(true) => {}
+        Ok(false) => eprintln!(
+            "task {task}: {} has its own .cargo/config.toml; leaving it",
+            wt.display()
+        ),
+        Err(e) => eprintln!(
+            "task {task}: no .cargo/config.toml in {}: {e}",
+            wt.display()
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -613,5 +715,77 @@ mod tests {
         end_rx.recv().unwrap();
         assert_eq!(RAN.load(Ordering::SeqCst), 2);
         assert_eq!(MOST.load(Ordering::SeqCst), 1);
+    }
+
+    fn repo() -> PathBuf {
+        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let d = std::env::temp_dir().join(format!(
+            "mason-cc-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&d).unwrap();
+        for a in [
+            &["init", "-q"][..],
+            &["config", "user.email", "t@t"],
+            &["config", "user.name", "t"],
+            &["commit", "-q", "--allow-empty", "-m", "x"],
+        ] {
+            assert!(git_out(&d, a).unwrap().0);
+        }
+        d
+    }
+
+    #[test]
+    fn the_cargo_config_text_escapes_the_path() {
+        let t = cargo_config_text("/a b/\"q\"/c\\d");
+        assert!(t.contains("target-dir = \"/a b/\\\"q\\\"/c\\\\d\""), "{t}");
+    }
+
+    #[test]
+    fn a_task_worktree_gets_an_untracked_cargo_config() {
+        let wt = repo();
+        let h = home();
+        assert_eq!(
+            write_cargo_config(&wt, "$HOME/.cache/t/{task}", 9, &h, &keep()),
+            Ok(true)
+        );
+        let t = std::fs::read_to_string(wt.join(".cargo/config.toml")).unwrap();
+        assert!(t.contains("target-dir = \"/Users/me/.cache/t/9\""), "{t}");
+        assert_eq!(git_out(&wt, &["status", "--porcelain"]).unwrap().1, "");
+        // Again: same file, one exclude line.
+        assert_eq!(
+            write_cargo_config(&wt, "$HOME/.cache/t/{task}", 9, &h, &keep()),
+            Ok(true)
+        );
+        let ex = std::fs::read_to_string(wt.join(".git/info/exclude")).unwrap();
+        assert_eq!(ex.matches("/.cargo/config.toml").count(), 1);
+        let _ = std::fs::remove_dir_all(&wt);
+    }
+
+    #[test]
+    fn a_tracked_cargo_config_is_kept_byte_for_byte() {
+        let wt = repo();
+        std::fs::create_dir_all(wt.join(".cargo")).unwrap();
+        let mine = "[build]\njobs = 3\n";
+        std::fs::write(wt.join(".cargo/config.toml"), mine).unwrap();
+        assert!(git_out(&wt, &["add", ".cargo/config.toml"]).unwrap().0);
+        assert_eq!(
+            write_cargo_config(&wt, "/x/{task}", 9, &home(), &keep()),
+            Ok(false)
+        );
+        assert_eq!(
+            std::fs::read_to_string(wt.join(".cargo/config.toml")).unwrap(),
+            mine
+        );
+        let _ = std::fs::remove_dir_all(&wt);
+    }
+
+    #[test]
+    fn a_refused_directory_writes_nothing() {
+        let wt = repo();
+        assert!(write_cargo_config(&wt, "cache/{task}", 9, &home(), &keep()).is_err());
+        assert!(!wt.join(".cargo").exists());
+        let _ = std::fs::remove_dir_all(&wt);
     }
 }
