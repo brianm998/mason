@@ -192,6 +192,42 @@ fn a_build_the_base_also_fails_the_same_way_waits_and_a_second_task_files_nothin
     wait_state(&d, b, State::Landed, 180);
 }
 
+/// 2026-11-17: the monitor's "Skip testing for all" sent an empty step for rows waiting in
+/// `base-red`, and the daemon refused it. An empty step now means the task's test step.
+#[test]
+fn a_skip_with_no_step_name_ends_the_base_red_wait_and_records_the_debt() {
+    let (_s, d) = start(
+        "echo hi > hello.txt && echo x > u-$(basename \"$PWD\").txt",
+        &[("broken.txt", "broken"), ("checks.sh", GOOD_CHECKS)],
+    );
+    let t = file_task_as(
+        &d,
+        "Skipped",
+        "Please do it.",
+        true,
+        TrustSource::Owner,
+        false,
+    );
+    wait_for("the base-red wait", 180, || {
+        !waits(&d, "base-red").is_empty()
+    });
+    assert!(d.store.base_red(t.0).unwrap().is_some());
+    let debt = mason_daemon::suites::skip(&d, t, "step:", "base is red", "owner", false).unwrap();
+    wait_for("the wait to end", 120, || {
+        d.store.base_red(t.0).unwrap().is_none()
+    });
+    let debts = d.store.debts(Some(t.0), true).unwrap();
+    let row = debts.iter().find(|x| x.id == debt).unwrap();
+    assert_eq!(row.scope, "step:test", "the empty step is the test step");
+    let ended = d
+        .store
+        .read_since(0, 100_000)
+        .unwrap()
+        .iter()
+        .any(|e| matches!(&e.event.kind, EventKind::WaitEnded { task } if *task == t));
+    assert!(ended, "the wait ended");
+}
+
 #[test]
 fn a_build_red_only_on_the_branch_is_still_sent_back() {
     // The base builds; the change breaks it.

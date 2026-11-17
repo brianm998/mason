@@ -960,9 +960,15 @@ struct StageRows: View {
     var body: some View {
         let rows = model.sectionRows(name)
         section(MonitorModel.sectionTitle(name), theme: theme, state: name) {
-            if name == "testing", model.canAct, model.skippableRows(rows).count > 0 {
+            if name == "testing", !rows.isEmpty {
                 Button("Skip testing for all") { model.skipAllTests(rows) }
                     .buttonStyle(.bordered).accessibilityIdentifier("testing:skip-all")
+                    .disabled(model.skipDisabledReason != nil)
+                    .help(model.skipDisabledReason ?? "Skip testing for every task here that allows it")
+                if let n = model.skipNotice ?? model.lastResult {
+                    Text(n).font(theme.body()).foregroundStyle(theme.attention)
+                        .accessibilityIdentifier("testing:skip-notice")
+                }
             }
             if rows.isEmpty { Text("Nothing here.").font(theme.body()).foregroundStyle(theme.muted) }
             ForEach(rows, id: \.id) { r in row(r) }

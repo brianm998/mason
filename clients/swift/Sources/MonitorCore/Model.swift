@@ -338,6 +338,9 @@ public final class MonitorModel: ObservableObject {
     /// Where the sidebar should scroll to (a tile was clicked).
     @Published public var scrollTarget: String?
     @Published public var lastResult: String?
+    /// What the last Skip testing click did ("Skipped testing for 4 tasks", "Nothing to skip: ..."),
+    /// kept apart from `lastResult` so the daemon's next ok result does not wipe it.
+    @Published public var skipNotice: String?
     /// A long command opened from a Compilation row; nil: the dialog is closed.
     @Published public var commandDialog: CommandDialog?
     /// Open session found the step running: the task to ask about. Answer with `answerSessionPrompt`.

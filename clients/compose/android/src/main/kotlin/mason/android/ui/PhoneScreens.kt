@@ -147,8 +147,9 @@ private fun SessionStepper(model: MonitorModel, home: HomeView) {
 private fun SectionPage(model: MonitorModel, name: String, open: (Page) -> Unit) {
     val rows = model.sectionRows(name)
     if (rows.isEmpty()) Text("Nothing here.", Modifier.padding(16.dp))
-    if (name == "testing" && model.canAct && model.skippableRows(rows).isNotEmpty()) {
-        OutlinedButton(onClick = { model.skipAllTests(rows) }, Modifier.padding(horizontal = 16.dp)) { Text("Skip testing for all") }
+    if (name == "testing" && rows.isNotEmpty()) {
+        OutlinedButton(onClick = { model.skipAllTests(rows) }, Modifier.padding(horizontal = 16.dp), enabled = model.skipDisabledReason == null) { Text("Skip testing for all") }
+        (model.skipDisabledReason ?: model.skipNotice ?: model.lastResult)?.let { Text(it, Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.bodySmall) }
     }
     for (r in rows) {
         TaskRowItem(r) { open(Page.Task(r.id)) }

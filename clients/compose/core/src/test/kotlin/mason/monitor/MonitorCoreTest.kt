@@ -318,6 +318,41 @@ class MonitorCoreTest {
         assertEquals("", SectionPages.suiteProgress(b))
     }
 
+    @Test fun skipAllOverRowsWithNoStepSendsOnePerTaskAndSaysSo() {
+        val m = model()
+        m.isOwner = true
+        m.sidebar = m.sidebar!!.copy(sections = m.sidebar!!.sections + section("testing", rows = listOf(
+            row(20, "testing", actions = listOf("skip_test")), row(21, "testing", actions = listOf("skip_test")))))
+        val sent = mutableListOf<Command>()
+        m.sender = { sent += it }
+        m.skipAllTests(m.sectionRows("testing"))
+        assertEquals(listOf(20L, 21L), sent.map { it.skip?.task })
+        assertEquals(listOf("", ""), sent.map { it.skip?.step }, "the daemon reads an empty step as the test step")
+        assertEquals("Skipped testing for 2 tasks", m.skipNotice)
+    }
+
+    @Test fun skipAllSaysWhyWhenItCannotAct() {
+        val m = model()
+        m.sidebar = m.sidebar!!.copy(sections = m.sidebar!!.sections + section("testing", rows = listOf(row(20, "testing", actions = listOf("skip_test")))))
+        val sent = mutableListOf<Command>()
+        m.sender = { sent += it }
+        m.isOwner = false
+        assertNotNull(m.skipDisabledReason)
+        m.skipAllTests(m.sectionRows("testing"))
+        assertTrue(sent.isEmpty())
+        assertEquals(m.skipDisabledReason, m.skipNotice)
+        m.isOwner = true
+        m.sidebar = m.sidebar!!.copy(sections = m.sidebar!!.sections.filter { it.state != "testing" } + section("testing", rows = listOf(row(21, "testing", actions = listOf("cancel")))))
+        m.skipAllTests(m.sectionRows("testing"))
+        assertEquals("Nothing to skip: no task here allows it", m.skipNotice)
+    }
+
+    @Test fun aRefusedCommandResultIsAMessage() {
+        val m = model()
+        m.apply(ServerMessage(result = CommandResult(id = "m1", ok = false, error = "there is no step `x`")))
+        assertEquals("there is no step `x`", m.lastResult)
+    }
+
     @Test fun doubleClickOnAnEmptyStateChangesNothingBeyondTheReveal() {
         val m = model()
         m.sidebar = m.sidebar!!.copy(sections = m.sidebar!!.sections + section("canceled", collapsed = true))

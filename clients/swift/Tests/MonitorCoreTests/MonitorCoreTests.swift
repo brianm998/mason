@@ -364,6 +364,43 @@ final class MonitorCoreTests: XCTestCase {
         XCTAssertEqual(MonitorModel.suiteProgress(b), "")
     }
 
+    func testSkipAllOverRowsWithNoStepSendsOnePerTaskAndSaysSo() {
+        let m = model()
+        m.isOwner = true
+        let rows = [row(20, state: "testing", actions: ["skip_test"]), row(21, state: "testing", actions: ["skip_test"])]
+        m.sidebar!.sections.append(section("testing", rows: rows))
+        var sent: [Mason_V1_Command] = []
+        m.sender = { sent.append($0) }
+        m.skipAllTests(m.sectionRows("testing"))
+        XCTAssertEqual(sent.map { $0.skip.task }, [20, 21])
+        XCTAssertEqual(sent.map { $0.skip.step }, ["", ""], "the daemon reads an empty step as the test step")
+        XCTAssertEqual(m.skipNotice, "Skipped testing for 2 tasks")
+    }
+
+    func testSkipAllSaysWhyWhenItCannotAct() {
+        let m = model()
+        m.sidebar!.sections.append(section("testing", rows: [row(20, state: "testing", actions: ["skip_test"])]))
+        var sent: [Mason_V1_Command] = []
+        m.sender = { sent.append($0) }
+        m.isOwner = false
+        XCTAssertNotNil(m.skipDisabledReason)
+        m.skipAllTests(m.sectionRows("testing"))
+        XCTAssertTrue(sent.isEmpty)
+        XCTAssertEqual(m.skipNotice, m.skipDisabledReason)
+        m.isOwner = true
+        m.sidebar!.sections[m.sidebar!.sections.count - 1].rows = [row(21, state: "testing", actions: ["cancel"])]
+        m.skipAllTests(m.sectionRows("testing"))
+        XCTAssertEqual(m.skipNotice, "Nothing to skip: no task here allows it")
+    }
+
+    func testARefusedCommandResultIsAMessage() {
+        let m = model()
+        var f = Mason_V1_ServerMessage()
+        f.result = .with { $0.id = "m1"; $0.ok = false; $0.error = "there is no step `x`" }
+        m.apply(f)
+        XCTAssertEqual(m.lastResult, "there is no step `x`")
+    }
+
     func testDoubleClickOnAnEmptyStateChangesNothingBeyondTheReveal() {
         let m = model()
         m.sidebar!.sections.append(section("canceled", collapsed: true))

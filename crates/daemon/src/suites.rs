@@ -2756,6 +2756,17 @@ pub fn skip(
     let def = d
         .pinned_def(&t.def)
         .unwrap_or_else(|| d.current_def(t.project));
+    // A client that has no step name for the row (a task waiting in `base-red` shows none)
+    // leaves it empty: that means the task's test step.
+    let test_scope;
+    let (scope, name) = if kind == "step" && name.is_empty() {
+        let test = test_step_name(&def).ok_or("this project has no test step")?;
+        test_scope = format!("step:{test}");
+        (test_scope.as_str(), test)
+    } else {
+        (scope, name.to_string())
+    };
+    let name = name.as_str();
     match kind {
         "suite" if def.testing.suite(name).is_none() => {
             return Err(format!("there is no suite `{name}`"))
