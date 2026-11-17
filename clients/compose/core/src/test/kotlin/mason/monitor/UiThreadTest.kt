@@ -93,6 +93,7 @@ class UiThreadTest {
     @Test fun isExpandedReadsEachKeyOnce() {
         val prefs = CountingPrefs()
         val m = MonitorModel(prefs)
+        prefs.reads.clear()  // building the model reads the mute flag once; the test counts isExpanded's reads
         val sec = SidebarSection(state = "running", collapsed = true)
         repeat(50) { assertFalse(m.isExpanded(sec)) }
         assertEquals(1, prefs.reads.values.sum())
