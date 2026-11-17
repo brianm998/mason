@@ -1489,6 +1489,51 @@ impl Store {
         })
     }
 
+    /// A suite went green at this base with these known-red tests skipped. Not the whole
+    /// suite's green: `suite_green` is left alone.
+    pub fn put_suite_skip_green(
+        &self,
+        project: &str,
+        suite: &str,
+        base: &str,
+        executed: usize,
+        skipped: &[String],
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
+        let (p, s, b) = (project.to_string(), suite.to_string(), base.to_string());
+        let skipped = skipped.join("\n");
+        self.write(move |c| {
+            c.execute(
+                "INSERT OR REPLACE INTO suite_skip_green(project, suite, base, executed, skipped, at_ms) VALUES (?1,?2,?3,?4,?5,?6)",
+                params![p, s, b, executed as i64, skipped, now_ms as i64],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// Every base a suite was green at with tests skipped, newest first, with those tests.
+    pub fn suite_skip_green_bases(
+        &self,
+        project: &str,
+        suite: &str,
+    ) -> Result<Vec<(String, Vec<String>)>, StoreError> {
+        let (p, s) = (project.to_string(), suite.to_string());
+        self.read(move |c| {
+            let mut st = c.prepare(
+                "SELECT base, skipped FROM suite_skip_green WHERE project = ?1 AND suite = ?2
+                 ORDER BY at_ms DESC",
+            )?;
+            let rows = st.query_map(params![p, s], |r| {
+                let skipped: String = r.get(1)?;
+                Ok((
+                    r.get::<_, String>(0)?,
+                    skipped.lines().map(str::to_string).collect(),
+                ))
+            })?;
+            rows.collect()
+        })
+    }
+
     /// What fails at a base commit, cached so it is only worked out once.
     pub fn put_baseline(
         &self,

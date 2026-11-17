@@ -124,4 +124,25 @@ final class LinkedTextTests: XCTestCase {
         let r = ImageRenderer(content: view)
         XCTAssertNotNil(r.cgImage)
     }
+
+    func testLinkifyIsMemoisedUntilTheSidebarOrTaskChanges() {
+        let model = MonitorModel()
+        let text = String(repeating: "see #12 and #77 ", count: 125)
+        let first = model.linkify(text)
+        let passes = model.linkifyPasses
+        let calls = model.isKnownTaskCalls
+        for _ in 0..<10 { XCTAssertEqual(model.linkify(text), first) }
+        XCTAssertEqual(model.linkifyPasses, passes)
+        XCTAssertEqual(model.isKnownTaskCalls, calls)
+        var side = SidebarView()
+        var sec = SidebarSection()
+        var row = TaskRow()
+        row.id = 77
+        sec.rows = [row]
+        side.sections = [sec]
+        model.sidebar = side
+        let after = model.linkify(text)
+        XCTAssertEqual(model.linkifyPasses, passes + 1)
+        XCTAssertTrue(after.contains { if case .task(77, _) = $0 { return true } else { return false } })
+    }
 }

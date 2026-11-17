@@ -727,7 +727,19 @@ const STEPS: &[&str] = &[
     // reused at a later base only while the suite is defined the same way. Additive; an older
     // row has '' and is never reused.
     "ALTER TABLE baselines ADD COLUMN def_hash TEXT NOT NULL DEFAULT '';",
-    // 43: the result of each full `run_check` of a develop step (s511, decision 0504): one row
+    // 43: a suite that went green at a base with known-red tests skipped (s476, decision 0469):
+    // the base, the count that ran, and the skipped tests, one per line. Not the whole suite's
+    // green, so kept apart from `suite_green`.
+    "CREATE TABLE suite_skip_green (
+         project  TEXT NOT NULL,
+         suite    TEXT NOT NULL,
+         base     TEXT NOT NULL,
+         executed INTEGER NOT NULL,
+         skipped  TEXT NOT NULL,
+         at_ms    INTEGER NOT NULL,
+         PRIMARY KEY (project, suite, base)
+     );",
+    // 44: the result of each full `run_check` of a develop step (s511, decision 0504): one row
     // per run, `tests` the failing tests as `suite<TAB>test` lines (empty when green or when no
     // name could be read). Read to tell an agent going round in circles on the same failing
     // tests. Additive.

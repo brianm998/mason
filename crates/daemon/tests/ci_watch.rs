@@ -324,8 +324,82 @@ fn a_long_red_is_filed_on_the_injected_clock_and_not_again_before_another_thresh
     .unwrap();
     pass(&d, pid, &r, &b, 4 * h).unwrap();
     assert_eq!(tasks(&d).len(), 1);
+    // The same run is never filed twice, however long it stays red.
     pass(&d, pid, &r, &b, 6 * h + 3_000).unwrap();
-    assert_eq!(tasks(&d).len(), 2);
+    assert_eq!(tasks(&d).len(), 1);
+}
+
+#[test]
+fn ten_passes_past_the_threshold_file_one_task_for_a_run_and_a_newer_run_files_one_more() {
+    let (_s, d, pid) = start();
+    let (b, r) = (Base::default(), rules());
+    let h = 3_600_000;
+    b.run(1, "CI", "success", &[("unit", "success")]);
+    pass(&d, pid, &r, &b, 0).unwrap();
+    b.run(2, "CI", "failure", &[("unit", "failure")]);
+    pass(&d, pid, &r, &b, 1_000).unwrap();
+    pass(&d, pid, &r, &b, 4 * h).unwrap();
+    let t = titled(&d, "CI/unit");
+    assert_eq!(t.len(), 1);
+    // The task is over (closed); the job stays red on the same run.
+    d.emit(EventKind::Canceled {
+        task: t[0].id,
+        delete_branch: false,
+    })
+    .unwrap();
+    for i in 1..=10 {
+        pass(&d, pid, &r, &b, 4 * h + i * 4 * h).unwrap();
+    }
+    assert_eq!(titled(&d, "CI/unit").len(), 1);
+    // The held-back reason is in the view.
+    let v = mason_daemon::ci_watch::view(&d, pid);
+    let text = v["held_back"][0]["text"].as_str().unwrap().to_string();
+    assert!(
+        text.contains("CI/unit still red on run 2") && text.contains("waiting for a newer run"),
+        "{text}"
+    );
+    // A newer red run is new evidence: exactly one more.
+    b.run(3, "CI", "failure", &[("unit", "failure")]);
+    for i in 11..=20 {
+        pass(&d, pid, &r, &b, 4 * h + i * 4 * h).unwrap();
+    }
+    assert_eq!(titled(&d, "CI/unit").len(), 2);
+}
+
+#[test]
+fn a_closed_task_citing_the_run_stops_a_refile_after_the_state_is_lost() {
+    let (_s, d, pid) = start();
+    let (b, r) = (Base::default(), rules());
+    let h = 3_600_000;
+    b.run(1, "CI", "success", &[("unit", "success")]);
+    pass(&d, pid, &r, &b, 0).unwrap();
+    b.run(2, "CI", "failure", &[("unit", "failure")]);
+    pass(&d, pid, &r, &b, 1_000).unwrap();
+    pass(&d, pid, &r, &b, 4 * h).unwrap();
+    let t = titled(&d, "CI/unit");
+    d.emit(EventKind::Canceled {
+        task: t[0].id,
+        delete_branch: false,
+    })
+    .unwrap();
+    // Forget what the watch knew of its ticket: the task itself still cites the run.
+    let mut saved =
+        mason_daemon::ci_watch::decode(&d.store.ci_watch_state("scratch").unwrap().unwrap());
+    let js = saved
+        .state
+        .workflows
+        .get_mut("CI")
+        .unwrap()
+        .jobs
+        .get_mut("unit")
+        .unwrap();
+    js.covered = 0;
+    js.ticket = None;
+    d.store
+        .put_ci_watch_state("scratch", &mason_daemon::ci_watch::encode(&saved), 1)
+        .unwrap();
+    pass(&d, pid, &r, &b, 9 * h).unwrap();
+    assert_eq!(titled(&d, "CI/unit").len(), 1);
 }
 
 #[test]
