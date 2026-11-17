@@ -65,6 +65,11 @@ fn a_running_steps_cell_gains_tokens_before_it_ends() {
     });
     let seen = seen.unwrap();
     // One message is input 2, cache read 1000, cache write 50, output 25; both have been said.
+    assert_eq!(seen.input.unwrap() % 2, 0);
+    assert!(
+        seen.output.unwrap() >= 25 && seen.output.unwrap() <= 50,
+        "{seen:?}"
+    );
     assert_eq!((seen.input, seen.output), (Some(4), Some(50)), "{seen:?}");
     // The cell the monitors get carries it, with the output figures free of stream events.
     let p = d.progress_of_task(t).pop().unwrap();
