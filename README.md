@@ -423,4 +423,6 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s480**: A measurement spike (decision 0473) shows `CARGO_INCREMENTAL=0` lets sccache hit workspace library crates across per-task target dirs, `SCCACHE_BASEDIRS` does not help, and run_check's edit rebuild gets about 60% slower, so nothing is switched on.
 - **s482**: The kill test now waits until the hold is stored and both tasks have launched twice before it kills the daemon.
 - **s484**: The APNs provider-token cache now also compares a SHA-256 fingerprint of the key, so parallel tests (or a changed key) no longer get a token signed by another key.
+- **s491**: The Compose app tests pass the native-access flag and a build-owned temp directory to the test JVM so Skiko's native library loads and EditorSnapshotTest passes.
+- **s502**: a new `compile` gate holds further compiles while `syspolicyd` uses 300% CPU or more (`[cpu] syspolicyd_max_pct`), so MASON's builds and test runs cannot swamp the Mac's code checks again.
 <!-- status:end -->
