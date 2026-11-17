@@ -16,6 +16,7 @@ pub mod bg;
 pub mod blockers;
 pub mod ci_schedule;
 pub mod ci_watch;
+pub mod circling;
 pub mod closer;
 pub mod cmdreuse;
 pub mod config;

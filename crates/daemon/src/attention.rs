@@ -787,6 +787,15 @@ pub fn alerts_now(d: &Daemon) -> Vec<(String, String, String)> {
                 format!("Task #{} waits for your approval", t.id.0),
             ));
         }
+        if t.state == State::Developing {
+            if let Some(c) = crate::circling::of_task(d, t.id) {
+                out.push((
+                    format!("circling:{}", t.id.0),
+                    "needs_you".into(),
+                    crate::circling::text(d, t.id, &c, crate::daemon::now_ms()),
+                ));
+            }
+        }
         if let Some(text) = crate::blockers::alert_text(&w, t) {
             // One per task, from the world as it is: it clears when the task is released
             // or the blocker is revived or retried.
