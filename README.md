@@ -398,6 +398,7 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s446**: an XcodeGen spec builds one universal iPhone and iPad app from `clients/swift` with `make ios`, picking the phone or iPad root by size class, after the first real iOS compile fixes.
 - **s447**: `monitor-tool snapshot --ipad` renders the monitor offscreen at 1366×1024 and 1180×820 (scale 2, light and dark), and tests can check the top bar fits an iPad width.
 - **s448**: `monitor_inplace.rs` no longer uses `std::os::unix` directly: the build is started with `mason_platform::process::spawn_group` and cancelled with `signal_group`, and the tests' chmod helper is gated with `#[cfg(unix)]`, so the Windows CI job builds again.
+- **s449**: the state-matrix, codec and daemon protocol tests now cover the Deferred state and its two events, which s325 left red.
 - **s450**: exit scripts s220, s237, s270, s273, s433, s438-s440 and s96 now skip under MASON_SKIP_SWIFT/MASON_SKIP_COMPOSE, scripts/check-exit-guards.sh keeps it so, and known-red fix tasks carry the guard requirement.
 - **s451**: The Android device sample now has the missing AndroidManifest.xml (MainActivity as launcher) and a Java 17 target, so `assembleDebug` and `testDebugUnitTest` pass locally; its config and README call `gradle` because no wrapper is checked in.
 - **s452**: s09, s19, s54 and s130 (scripts) and s393 and s396 (their daemon tests) are pointed at what the code does now, and s09, s19, s40 and s130 say why they fail; the code needed no change.
