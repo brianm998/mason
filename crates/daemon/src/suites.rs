@@ -1503,17 +1503,31 @@ fn run_suite(
             )
         };
         let result = match &j.verdict {
-            Verdict::Green if skipped_cmd.is_some() => SuiteRun::Done {
-                // Not the whole suite's green: no proof is recorded for the tree or the base.
-                outcome: SuiteOutcome::Proven,
-                results: Some(j.results.clone()),
-                notes: vec![format!(
-                    "{}: green, {} tests ran; skipped, known red: {}",
-                    suite.name,
-                    j.results.executed(),
-                    quarantined.join(", ")
-                )],
-            },
+            Verdict::Green if skipped_cmd.is_some() => {
+                // Not the whole suite's green: no proof is recorded for the tree, and no
+                // `suite_green` for the base. A whole, unnarrowed run at a base is recorded
+                // apart, with the tests it skipped (s476).
+                if !suite.narrowed {
+                    let _ = d.store.put_suite_skip_green(
+                        &who.project,
+                        &suite.name,
+                        &tree.base,
+                        j.results.executed(),
+                        &quarantined,
+                        now_ms(),
+                    );
+                }
+                SuiteRun::Done {
+                    outcome: SuiteOutcome::Proven,
+                    results: Some(j.results.clone()),
+                    notes: vec![format!(
+                        "{}: green, {} tests ran; skipped, known red: {}",
+                        suite.name,
+                        j.results.executed(),
+                        quarantined.join(", ")
+                    )],
+                }
+            }
             Verdict::Green => {
                 // What a green run ran passed: the proof that these names are tests (s253).
                 let _ = d
@@ -2149,6 +2163,10 @@ fn held_env(c: &Ctx, held: &Needs) -> Vec<(String, String)> {
 fn run_build(who: &Who, suite: &Suite, build: &str, n: usize, cwd: &Path) -> Built {
     let id = format!("{}-b{n}-{}", who.id_prefix, suite.name);
     let limit = suite.timeout.unwrap_or(Duration::from_secs(1800));
+    // Object sets of older crate hashes pile up in a task's build directory (#476).
+    if let (Some((task, _)), Some(p)) = (who.task, who.project_cfg()) {
+        crate::taskcache::prune_task_objects(&who.d, &p, task.0, now_ms());
+    }
     let ran = match run_hosted(
         &who.d,
         &id,
@@ -2952,9 +2970,114 @@ fn debt_landed(
     Some(landed)
 }
 
+/// The part of a test's name that appears in source: the last `::` or `.` segment.
+fn test_leaf(test: &str) -> &str {
+    let t = test.rsplit("::").next().unwrap_or(test);
+    t.rsplit('.').next().unwrap_or(t).trim()
+}
+
+/// Whether the debt's own task added or changed one of these tests: a line its diff against
+/// the base adds or removes names the test. Errs toward yes (an unreadable diff counts).
+fn task_touched(
+    p: &crate::config::ProjectCfg,
+    landed: &str,
+    tip: &str,
+    skipped: &[String],
+) -> Option<String> {
+    // The first commit on the base's first-parent line that holds the task's commit: a merge
+    // (its first parent is the base before the task) or the task's own commit when fast-forwarded.
+    let range = format!("{landed}..{tip}");
+    let entry = if landed == tip {
+        landed.to_string()
+    } else {
+        match git::run(
+            &p.path,
+            &["rev-list", "--first-parent", "--ancestry-path", &range],
+        ) {
+            Ok(l) => match l.lines().last().map(str::trim) {
+                // Only a merge that took the task's commit as its second parent is the entry;
+                // otherwise the task's commit is itself on the line (fast-forwarded).
+                Some(c)
+                    if git::run(&p.path, &["rev-parse", &format!("{c}^2")])
+                        .is_ok_and(|x| x.trim() == landed) =>
+                {
+                    c.to_string()
+                }
+                _ => landed.to_string(),
+            },
+            Err(_) => return skipped.first().cloned(),
+        }
+    };
+    let Ok(diff) = git::run(&p.path, &["diff", "-U0", &format!("{entry}^1"), &entry]) else {
+        return skipped.first().cloned();
+    };
+    let changed: Vec<&str> = diff
+        .lines()
+        .filter(|l| {
+            (l.starts_with('+') && !l.starts_with("+++"))
+                || (l.starts_with('-') && !l.starts_with("---"))
+        })
+        .collect();
+    skipped
+        .iter()
+        .find(|t| {
+            let leaf = test_leaf(t);
+            !leaf.is_empty() && changed.iter().any(|l| l.contains(leaf))
+        })
+        .cloned()
+}
+
+/// How one suite stands for a debt whose task landed as `landed`: the proof line when the suite
+/// is green at a base holding that commit, either whole or with known-red tests skipped
+/// (named in the line), and none when the task itself touched a skipped test.
+fn suite_proof(
+    d: &Arc<Daemon>,
+    p: &crate::config::ProjectCfg,
+    row: &mason_store::DebtRow,
+    suite: &str,
+    landed: &str,
+    tip: &str,
+) -> Option<String> {
+    let short = |b: &str| b[..b.len().min(10)].to_string();
+    let greens = d
+        .store
+        .suite_green_bases(&row.project, suite)
+        .unwrap_or_default();
+    if let Some((base, _)) = greens
+        .iter()
+        .find(|(base, _)| git::is_ancestor(&p.path, landed, base))
+    {
+        return Some(format!(
+            "{suite} green on {} at {} since",
+            p.base,
+            short(base)
+        ));
+    }
+    let skips = d
+        .store
+        .suite_skip_green_bases(&row.project, suite)
+        .unwrap_or_default();
+    for (base, skipped) in skips {
+        if !git::is_ancestor(&p.path, landed, &base) {
+            continue;
+        }
+        if task_touched(p, landed, tip, &skipped).is_some() {
+            continue;
+        }
+        return Some(format!(
+            "{suite} green on {} at {} since, with known-red tests skipped: {}",
+            p.base,
+            short(&base),
+            skipped.join(", ")
+        ));
+    }
+    None
+}
+
 /// Close every open debt whose suites (all of its step's, for a step) have been recorded
-/// green at a base that contains the commit its task landed. The proof is written on the
-/// debt. Returns how many were closed.
+/// green at a base that contains the commit its task landed. A green with known-red tests
+/// skipped counts too, unless the debt's own task touched a skipped test; the skipped tests
+/// are written in `how`. The proof is written on the debt. Returns how many were closed.
 pub fn settle_debts(d: &Arc<Daemon>) -> usize {
     let Ok(rows) = d.store.debts(None, true) else {
         return 0;
@@ -2974,25 +3097,14 @@ pub fn settle_debts(d: &Arc<Daemon>) -> usize {
         let Ok(tip) = git::run(&p.path, &["rev-parse", &p.base_ref()]) else {
             continue;
         };
-        let Some(landed) = debt_landed(d, &p, &row, tip.trim()) else {
+        let tip = tip.trim().to_string();
+        let Some(landed) = debt_landed(d, &p, &row, &tip) else {
             continue;
         };
         let mut proofs = vec![];
         for s in &suites {
-            let greens = d
-                .store
-                .suite_green_bases(&row.project, &s.name)
-                .unwrap_or_default();
-            let hit = greens
-                .iter()
-                .find(|(base, _)| git::is_ancestor(&p.path, &landed, base));
-            match hit {
-                Some((base, _)) => proofs.push(format!(
-                    "{} green on {} at {} since",
-                    s.name,
-                    p.base,
-                    &base[..base.len().min(10)]
-                )),
+            match suite_proof(d, &p, &row, &s.name, &landed, &tip) {
+                Some(x) => proofs.push(x),
                 None => break,
             }
         }
@@ -3026,6 +3138,9 @@ pub fn run_idle_debts(d: &Arc<Daemon>) {
         }
     }
     let _reset = Reset;
+    // (project, scope, tip) already run in this pass: the same suites never run twice on one
+    // tip. The result is settled onto every debt the tip holds before another is chosen (s476).
+    let mut ran: Vec<(String, String, String)> = vec![];
     loop {
         settle_debts(d);
         let c = d.broker.compilation();
@@ -3042,11 +3157,22 @@ pub fn run_idle_debts(d: &Arc<Daemon>) {
                     .and_then(|pid| d.project(pid).cloned())
                     .and_then(|p| {
                         let tip = git::run(&p.path, &["rev-parse", &p.base_ref()]).ok()?;
-                        debt_landed(d, &p, row, tip.trim())
+                        let tip = tip.trim().to_string();
+                        debt_landed(d, &p, row, &tip)?;
+                        let key = (row.project.clone(), row.scope.clone(), tip);
+                        (!ran.contains(&key)).then_some(())
                     })
                     .is_some()
         });
         let Some(row) = next else { return };
+        let key = d
+            .project_id_by_name(&row.project)
+            .and_then(|pid| d.project(pid).cloned())
+            .and_then(|p| git::run(&p.path, &["rev-parse", &p.base_ref()]).ok())
+            .map(|t| (row.project.clone(), row.scope.clone(), t.trim().to_string()));
+        if let Some(k) = key {
+            ran.push(k);
+        }
         match pay(d, row.id) {
             Ok(m) => tracing::info!(debt = row.id, "idle run: {m}"),
             Err(e) => {
@@ -3171,12 +3297,42 @@ pub fn pay(d: &Arc<Daemon>, debt: u64) -> Result<String, String> {
         git::remove_worktree(&p.path, &wt);
     }
     let _ = who.project;
+    // Tests a green run skipped as known red at this tip. A debt whose own task touched one of
+    // them is not paid by a run that never ran it (s476).
+    let mut skipped_at_tip: Vec<String> = vec![];
     if all_green {
-        let how = format!(
+        for s in &suites {
+            let skips = d
+                .store
+                .suite_skip_green_bases(&row.project, &s.name)
+                .unwrap_or_default();
+            if let Some((_, sk)) = skips.into_iter().find(|(b, _)| *b == tip) {
+                skipped_at_tip.extend(sk);
+            }
+        }
+        if let Some(landed) = debt_landed(d, &p, &row, &tip) {
+            if let Some(t) = task_touched(&p, &landed, &tip, &skipped_at_tip) {
+                let _ = d.store.debt_tried(debt, now_ms());
+                return Err(format!(
+                    "still owed: the task touched `{t}`, which the run skipped as known red"
+                ));
+            }
+        }
+    }
+    if all_green {
+        let mut how = format!(
             "green when run on {} at {}",
             p.base_ref(),
             &tip[..tip.len().min(10)]
         );
+        if !skipped_at_tip.is_empty() {
+            skipped_at_tip.sort();
+            skipped_at_tip.dedup();
+            how.push_str(&format!(
+                ", with known-red tests skipped: {}",
+                skipped_at_tip.join(", ")
+            ));
+        }
         d.store
             .pay_debt(debt, now_ms(), &how)
             .map_err(|e| e.to_string())?;
