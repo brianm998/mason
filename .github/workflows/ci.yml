@@ -15,11 +15,15 @@ on:
   schedule:
     - cron: "17 3 * * *"
 
-# A newer push to the same ref cancels the older run. The nightly run has its
-# own group, so a landing never cancels it (decision 0447).
+# A newer push to the same ref cancels the older run, except on develop. The
+# nightly run has its own group, so a landing never cancels it (decision 0447).
+# develop is not cancelled (2026-11-17): landings push about every 20 minutes and
+# a run takes about 50, so cancelling left almost no finished run for the
+# base-branch CI watch to read. Without cancelling, the group still holds one
+# running and at most one pending run; a newer push replaces the pending one.
 concurrency:
   group: ci-${{ github.ref }}-${{ github.event_name == 'schedule' && 'nightly' || 'push' }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/develop' }}
 
 permissions:
   contents: read
