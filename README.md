@@ -398,6 +398,7 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s446**: an XcodeGen spec builds one universal iPhone and iPad app from `clients/swift` with `make ios`, picking the phone or iPad root by size class, after the first real iOS compile fixes.
 - **s447**: `monitor-tool snapshot --ipad` renders the monitor offscreen at 1366×1024 and 1180×820 (scale 2, light and dark), and tests can check the top bar fits an iPad width.
 - **s448**: `monitor_inplace.rs` no longer uses `std::os::unix` directly: the build is started with `mason_platform::process::spawn_group` and cancelled with `signal_group`, and the tests' chmod helper is gated with `#[cfg(unix)]`, so the Windows CI job builds again.
+- **s449**: the state-matrix, codec and daemon protocol tests now cover the Deferred state and its two events, which s325 left red.
 - **s450**: exit scripts s220, s237, s270, s273, s433, s438-s440 and s96 now skip under MASON_SKIP_SWIFT/MASON_SKIP_COMPOSE, scripts/check-exit-guards.sh keeps it so, and known-red fix tasks carry the guard requirement.
 - **s451**: The Android device sample now has the missing AndroidManifest.xml (MainActivity as launcher) and a Java 17 target, so `assembleDebug` and `testDebugUnitTest` pass locally; its config and README call `gradle` because no wrapper is checked in.
 - **s452**: s09, s19, s54 and s130 (scripts) and s393 and s396 (their daemon tests) are pointed at what the code does now, and s09, s19, s40 and s130 say why they fail; the code needed no change.
@@ -423,4 +424,8 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s480**: A measurement spike (decision 0473) shows `CARGO_INCREMENTAL=0` lets sccache hit workspace library crates across per-task target dirs, `SCCACHE_BASEDIRS` does not help, and run_check's edit rebuild gets about 60% slower, so nothing is switched on.
 - **s482**: The kill test now waits until the hold is stored and both tasks have launched twice before it kills the daemon.
 - **s484**: The APNs provider-token cache now also compares a SHA-256 fingerprint of the key, so parallel tests (or a changed key) no longer get a token signed by another key.
+- **s491**: The Compose app tests pass the native-access flag and a build-owned temp directory to the test JVM so Skiko's native library loads and EditorSnapshotTest passes.
+- **s494**: The Compose app's test JVM now allows native access, so the Skia-backed MascotTest and TopBarTest tests stop failing with UnsatisfiedLinkError.
+- **s502**: a new `compile` gate holds further compiles while `syspolicyd` uses 300% CPU or more (`[cpu] syspolicyd_max_pct`), so MASON's builds and test runs cannot swamp the Mac's code checks again.
+- **s507**: `every_state_and_event_pair` passes again because `events()` in the engine matrix test no longer lists `Deferred` and `Undeferred` twice, and a duplicate name now fails with a clear message.
 <!-- status:end -->

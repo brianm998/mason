@@ -59,9 +59,10 @@ distributions {
 
 tasks.test {
     useJUnitPlatform()
-    // Skia's native library is unpacked at run time and then dlopen'ed. Unpack it into the
-    // build directory (a path this build owns and can execute from) rather than the user's
-    // home or the system temp directory, so the load does not depend on either.
+    // Skiko extracts and loads its native library in the test JVM, as the desktop run does.
+    jvmArgs("--enable-native-access=ALL-UNNAMED")
+    // Unpack Skia's native library into the build directory (a path this build owns and can
+    // execute from), so a shared, read-only or noexec home or /tmp cannot break the load.
     val skikoDir = layout.buildDirectory.dir("skiko").get().asFile
     doFirst { skikoDir.mkdirs() }
     systemProperty("skiko.data.path", skikoDir.absolutePath)
