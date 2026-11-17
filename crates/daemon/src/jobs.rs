@@ -1227,6 +1227,9 @@ fn prepare_locked(c: &Ctx) -> Result<Option<String>, git::GitError> {
     let repo = &c.project.path;
     let base = c.project.base_ref();
     git::ensure_worktree(repo, &c.wt, &c.branch, &base)?;
+    // The agent's own cargo builds into the task's directory too, not into `<worktree>/target`.
+    // Written before the status check below: `info/exclude` keeps it out of `git status`.
+    crate::taskcache::point_cargo_at_task_cache(&c.d, &c.project, c.task.0, &c.wt);
     // Uncommitted changes are an agent's work in progress: a step re-entered after
     // the daemon restarted (a self-update, say) finds its agent's edits not yet
     // committed. Merging the base into them fails ("your local changes would be
