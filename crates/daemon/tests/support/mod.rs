@@ -359,26 +359,148 @@ pub fn steps_run(d: &Arc<Daemon>, t: TaskId) -> Vec<String> {
 /// launch on a busy or syspolicyd-stalled Mac, and that is not a test failure.
 const MIN_WAIT_SECS: u64 = 900;
 
-pub fn wait_for(what: &str, secs: u64, mut f: impl FnMut() -> bool) {
-    let secs = secs.max(MIN_WAIT_SECS);
-    let end = Instant::now() + Duration::from_secs(secs);
-    while !f() {
-        assert!(
-            Instant::now() < end,
-            "timed out after {secs}s waiting for {what}"
-        );
-        std::thread::sleep(Duration::from_millis(50));
+/// What one look at a wait's condition found.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Poll {
+    /// What the test waits for has happened.
+    Done,
+    /// Not yet, but it still can.
+    Pending,
+    /// It can no longer happen, for this reason: fail now rather than sit out the floor.
+    Never(String),
+}
+
+/// The loop under every wait. `expired` and `pause` are injected so the helper's own tests
+/// run on a fake clock and count polls instead of measuring time.
+fn wait_loop(
+    what: &str,
+    secs: u64,
+    expired: &mut dyn FnMut() -> bool,
+    pause: &mut dyn FnMut(),
+    poll: &mut dyn FnMut() -> Poll,
+) -> Result<(), String> {
+    loop {
+        match poll() {
+            Poll::Done => return Ok(()),
+            Poll::Never(why) => return Err(format!("gave up waiting for {what}: {why}")),
+            Poll::Pending => {}
+        }
+        if expired() {
+            return Err(format!("timed out after {secs}s waiting for {what}"));
+        }
+        pause();
     }
+}
+
+fn real_wait(
+    what: &str,
+    secs: u64,
+    pause_ms: u64,
+    mut poll: impl FnMut() -> Poll,
+) {
+    let end = Instant::now() + Duration::from_secs(secs);
+    let mut polls = 0u32;
+    let mut watched = |p: &mut dyn FnMut() -> Poll| -> Poll {
+        match p() {
+            Poll::Pending => {
+                polls += 1;
+                // One `ps` per second at most, not one per poll.
+                if polls % 20 == 0 {
+                    if let Some(why) = daemon_gone() {
+                        return Poll::Never(why);
+                    }
+                }
+                Poll::Pending
+            }
+            other => other,
+        }
+    };
+    let r = wait_loop(
+        what,
+        secs,
+        &mut || Instant::now() >= end,
+        &mut || std::thread::sleep(Duration::from_millis(pause_ms)),
+        &mut || watched(&mut poll),
+    );
+    if let Err(m) = r {
+        panic!("{m}");
+    }
+}
+
+thread_local! {
+    /// The scratch daemons this test thread started and has not dropped.
+    static DAEMONS: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// A test daemon of this thread that has exited and is still waiting to be reaped: it died
+/// on its own (a panic, a crash), because a test that stops one reaps it at once. A daemon
+/// already reaped is not reported.
+fn daemon_gone() -> Option<String> {
+    let pids = DAEMONS.with(|d| d.borrow().clone());
+    for pid in pids {
+        let o = Command::new("/bin/ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .ok()?;
+        if String::from_utf8_lossy(&o.stdout).trim_start().starts_with('Z') {
+            return Some(format!("the test daemon (pid {pid}) exited while waiting"));
+        }
+    }
+    None
+}
+
+/// Wait for `f`, at least [`MIN_WAIT_SECS`] if it stays possible. Fails at once when a scratch
+/// daemon of this test has exited.
+pub fn wait_for(what: &str, secs: u64, mut f: impl FnMut() -> bool) {
+    wait_poll(what, secs, || {
+        if f() {
+            Poll::Done
+        } else {
+            Poll::Pending
+        }
+    });
+}
+
+/// As [`wait_for`], and the condition can also say the wait can no longer succeed.
+pub fn wait_poll(what: &str, secs: u64, poll: impl FnMut() -> Poll) {
+    real_wait(what, secs.max(MIN_WAIT_SECS), 50, poll);
+}
+
+/// As [`wait_for`] with exactly `secs` (no floor), for waits on things that need no step host.
+pub fn wait_for_exact(what: &str, secs: u64, pause_ms: u64, mut f: impl FnMut() -> bool) {
+    real_wait(what, secs, pause_ms, || {
+        if f() {
+            Poll::Done
+        } else {
+            Poll::Pending
+        }
+    });
 }
 
 pub fn state_of(d: &Arc<Daemon>, t: TaskId) -> State {
     d.world().unwrap().tasks[&t].state
 }
 
+fn terminal(s: State) -> bool {
+    matches!(s, State::Failed | State::Canceled | State::Landed)
+}
+
 pub fn wait_state(d: &Arc<Daemon>, t: TaskId, want: State, secs: u64) {
+    wait_state_settled(d, t, want, secs, |_| false);
+}
+
+/// Wait for task `t` to reach `want`. Fails at once if it is in another terminal state, or in
+/// a state `settled` says it will not leave without the test acting.
+pub fn wait_state_settled(
+    d: &Arc<Daemon>,
+    t: TaskId,
+    want: State,
+    secs: u64,
+    settled: impl Fn(State) -> bool,
+) {
     wait_for(&format!("task {t} to reach {want:?}"), secs, || {
         let s = state_of(d, t);
-        if s != want && matches!(s, State::Failed | State::Canceled | State::Landed) {
+        if s != want && (terminal(s) || settled(s)) {
             let evs: Vec<String> = d
                 .store
                 .read_since(0, 1000)
@@ -387,13 +509,106 @@ pub fn wait_state(d: &Arc<Daemon>, t: TaskId, want: State, secs: u64) {
                 .map(|e| format!("{}: {:?}", e.seq, e.event.kind))
                 .collect();
             panic!(
-                "task {t} ended in {s:?} instead of {want:?}\nevents:\n{}\nlogs:\n{}",
+                "task {t} reached {s:?} while waiting for {want:?}\nevents:\n{}\nlogs:\n{}",
                 evs.join("\n"),
                 mason_daemon::http::render_logs(d, t.0)
             );
         }
         s == want
     });
+}
+
+#[cfg(test)]
+mod wait_tests {
+    use super::*;
+
+    #[test]
+    fn a_wait_that_can_no_longer_succeed_stops_at_once() {
+        let mut polls = 0;
+        let mut ticks = 0;
+        let r = wait_loop(
+            "task 3 to reach Failed",
+            900,
+            &mut || false, // the floor never runs out in this test
+            &mut || ticks += 1,
+            &mut || {
+                polls += 1;
+                if polls == 3 {
+                    Poll::Never("task 3 reached Landed".into())
+                } else {
+                    Poll::Pending
+                }
+            },
+        );
+        let e = r.unwrap_err();
+        assert!(e.contains("task 3 reached Landed"), "{e}");
+        assert!(!e.contains("timed out"), "{e}");
+        assert_eq!(polls, 3);
+        assert_eq!(ticks, 2);
+    }
+
+    #[test]
+    fn a_wait_still_able_to_succeed_runs_to_its_deadline() {
+        let mut polls = 0;
+        let mut left = 5;
+        let r = wait_loop(
+            "x",
+            900,
+            &mut || {
+                left -= 1;
+                left == 0
+            },
+            &mut || {},
+            &mut || {
+                polls += 1;
+                Poll::Pending
+            },
+        );
+        assert_eq!(r.unwrap_err(), "timed out after 900s waiting for x");
+        assert_eq!(polls, 5);
+    }
+
+    #[test]
+    fn a_wait_that_succeeds_late_still_succeeds() {
+        let mut polls = 0;
+        let r = wait_loop("x", 900, &mut || false, &mut || {}, &mut || {
+            polls += 1;
+            if polls == 40 {
+                Poll::Done
+            } else {
+                Poll::Pending
+            }
+        });
+        assert!(r.is_ok());
+        assert_eq!(polls, 40);
+    }
+
+    #[test]
+    fn a_daemon_that_exited_is_named() {
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "exit 3"])
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        DAEMONS.with(|d| d.borrow_mut().push(pid));
+        // Let it exit without reaping it, as a crashed daemon would be.
+        let mut why = None;
+        let r = wait_loop("a thing", 900, &mut || false, &mut || {
+            std::thread::sleep(Duration::from_millis(20))
+        }, &mut || match daemon_gone() {
+            Some(w) => {
+                why = Some(w.clone());
+                Poll::Never(w)
+            }
+            None => Poll::Pending,
+        });
+        let e = r.unwrap_err();
+        assert!(e.contains("exited") && e.contains(&pid.to_string()), "{e}");
+        assert!(!e.contains("timed out"), "{e}");
+        DAEMONS.with(|d| d.borrow_mut().clear());
+        let _ = child.wait();
+        assert!(why.is_some());
+    }
 }
 
 // ---- running the real binaries ----
@@ -407,6 +622,8 @@ pub struct Masond {
 
 impl Drop for Masond {
     fn drop(&mut self) {
+        let pid = self.child.id();
+        DAEMONS.with(|d| d.borrow_mut().retain(|p| *p != pid));
         let _ = self.child.kill();
         let _ = self.child.wait();
         kill_hosts(&self.data_dir);
@@ -503,6 +720,7 @@ impl Scratch {
             cmd.env(k, v);
         }
         let child = cmd.spawn().expect("masond starts");
+        DAEMONS.with(|d| d.borrow_mut().push(child.id()));
         Masond {
             child,
             data_dir: self.data_dir.clone(),

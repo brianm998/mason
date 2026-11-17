@@ -237,14 +237,9 @@ fn ready_runtimes(s: &Scratch) -> Vec<String> {
 }
 
 fn wait_for(what: &str, f: impl Fn() -> bool) {
-    let end = std::time::Instant::now() + std::time::Duration::from_secs(120);
-    while !f() {
-        assert!(
-            std::time::Instant::now() < end,
-            "timed out waiting for {what}"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(200));
-    }
+    // The shared helper: the same 120 s and 200 ms as before, and it fails at once when a
+    // scratch daemon of this test has exited.
+    support::wait_for_exact(what, 120, 200, f);
 }
 
 #[test]
