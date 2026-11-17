@@ -70,6 +70,7 @@ pub mod rerun;
 pub mod runtimes;
 pub mod sched;
 pub mod schedule;
+pub mod affected;
 pub mod scope;
 pub mod selfguard;
 pub mod selftest;
