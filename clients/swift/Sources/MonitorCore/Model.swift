@@ -65,6 +65,14 @@ public final class MonitorModel: ObservableObject {
     /// The high-frequency state (last sequence number, live log, clock offset) lives in its own
     /// object, so a change to it redraws only the views that show it, never the sidebar rows.
     public let live = LiveState()
+    /// Live progress cells by task id, apart from `sidebar` and `taskDetail` (task #517).
+    public let progress = ProgressStore()
+    /// A task's cells as shown now: live ones if a progress message set them, else its last view's.
+    public func progressCells(task id: UInt64) -> [ProgressCell] {
+        if let c = progress.cells(id) { return c }
+        for sec in sidebar?.sections ?? [] { if let r = sec.rows.first(where: { $0.id == id }) { return r.progress } }
+        return []
+    }
     public var lastSeq: UInt64 {
         get { live.lastSeq }
         set { live.lastSeq = newValue }
@@ -313,6 +321,7 @@ public final class MonitorModel: ObservableObject {
             h.project = project
             header = h
         }
+        progress.resetAll()
         sidebar = nil
         home = nil
         landing = nil
@@ -1004,47 +1013,37 @@ public final class MonitorModel: ObservableObject {
         if let last = ps.last(where: { $0.nowMs > 0 }) { anchor(daemonNow: last.nowMs, local: local) }
         let withCell = ps.filter { $0.hasProgress }
         guard !withCell.isEmpty else { return }
-        func merged(_ old: [ProgressCell], _ cell: ProgressCell) -> [ProgressCell]? {
-            guard let i = old.firstIndex(where: { $0.step == cell.step }) else { return nil }
-            var c = cell
-            // A finished or stopped run says what it ended as on the next view; until then, no "running".
-            if c.state != .part { c.label = "" }
-            var out = old
-            out[i] = c
-            return out
-        }
-        if var d = taskDetail, d.hasRow {
+        if let d = taskDetail, d.hasRow {
+            var cells = progress.detail.cells ?? d.row.progress
             var changed = false
             var lines: [String] = []
             for p in withCell where d.row.id == p.task {
-                if let cells = merged(d.row.progress, p.progress) {
-                    d.row.progress = cells
+                if let next = ProgressStore.merged(cells, p.progress) {
+                    cells = next
                     changed = true
                 }
                 lines += p.log
             }
-            if changed { taskDetail = d }
+            if changed { progress.detail.cells = cells }
             appendLog(lines)
         }
-        if var s = sidebar {
-            var latest: [UInt64: [Mason_V1_ProgressCell]] = [:]
-            for p in withCell { latest[p.task, default: []].append(p.progress) }
-            var changed = false
-            for si in s.sections.indices {
-                for ri in s.sections[si].rows.indices {
-                    guard let cells = latest[s.sections[si].rows[ri].id] else { continue }
-                    var progress = s.sections[si].rows[ri].progress
-                    var hit = false
-                    for cell in cells {
-                        if let next = merged(progress, cell) { progress = next; hit = true }
-                    }
-                    if hit {
-                        s.sections[si].rows[ri].progress = progress
-                        changed = true
-                    }
-                }
+        var latest: [UInt64: [Mason_V1_ProgressCell]] = [:]
+        for p in withCell { latest[p.task, default: []].append(p.progress) }
+        // Base cells: the live entry if there is one, else the row of the last sidebar (read, never copied).
+        var base: [UInt64: [ProgressCell]] = [:]
+        for id in latest.keys { if let c = progress.cells(id) { base[id] = c } }
+        if base.count < latest.count, let s = sidebar {
+            for sec in s.sections {
+                for r in sec.rows where latest[r.id] != nil && base[r.id] == nil { base[r.id] = r.progress }
             }
-            if changed { sidebar = s }
+        }
+        for (id, cells) in latest {
+            guard var current = base[id] else { continue }
+            var hit = false
+            for cell in cells {
+                if let next = ProgressStore.merged(current, cell) { current = next; hit = true }
+            }
+            if hit { progress.entry(id).cells = current }
         }
     }
 
@@ -1126,6 +1125,7 @@ public final class MonitorModel: ObservableObject {
             // An open dialog follows the session: a reply arrives as a new header.
             if ownerSessionDialog != nil { refreshOwnerSession() }
         case .sidebar(let x)?:
+            progress.reset(tasks: x.sections.flatMap { $0.rows.map(\.id) })
             sidebar = x
             noteAttention(x)
             settleAfterView()
@@ -1136,6 +1136,7 @@ public final class MonitorModel: ObservableObject {
             cpu.update(history: x)
         case .taskDetail(let x)?:
             // A different task's page starts its log over; the same task's view carries the tail again.
+            progress.resetDetail()
             taskDetail = x
             liveLog = x.logTail.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
             if liveLog.last == "" { liveLog.removeLast() }

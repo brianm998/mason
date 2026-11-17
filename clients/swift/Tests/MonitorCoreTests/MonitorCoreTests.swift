@@ -1197,7 +1197,7 @@ final class MonitorCoreTests: XCTestCase {
         XCTAssertFalse(log.all.contains(true), "decoding never runs on the main thread")
     }
 
-    func testAHundredProgressUpdatesWhileBusyPublishTheSidebarOnce() {
+    func testAHundredProgressUpdatesWhileBusyNeverPublishTheSidebar() {
         let m = model()
         var c = cell(done: 1, total: 400, totalSrc: .sourceReported)
         c.step = "develop"
@@ -1214,11 +1214,14 @@ final class MonitorCoreTests: XCTestCase {
             p.progress = n
             m.apply(.with { $0.stepProgress = p })
         }
+        let revision = m.sidebarRevision
         XCTAssertEqual(publishes, 0, "nothing is published while the frame is not due")
         XCTAssertEqual(scheduled.count, 1, "one flush is asked for, not one per message")
         scheduled[0]()
-        XCTAssertEqual(publishes, 1)
-        XCTAssertEqual(m.sidebar?.sections[0].rows[0].progress.first?.done, 100)
+        XCTAssertEqual(publishes, 0, "live progress never assigns the sidebar")
+        XCTAssertEqual(m.sidebarRevision, revision)
+        XCTAssertEqual(m.progressCells(task: 1).first?.done, 100)
+        XCTAssertEqual(m.sidebar?.sections[0].rows[0].progress.first?.done, 1, "the view's own cells are untouched")
         sub.cancel()
     }
 
@@ -1441,8 +1444,8 @@ final class MonitorCoreTests: XCTestCase {
         p.log = ["a", "b"]
         let at = Date(timeIntervalSince1970: 1_000)
         m.apply(progress: p, local: at)
-        XCTAssertEqual(m.taskDetail?.row.progress.first?.done, 3)
-        XCTAssertEqual(m.sidebar?.sections[0].rows[0].progress.first?.done, 3)
+        XCTAssertEqual(m.progress.detail.cells?.first?.done, 3)
+        XCTAssertEqual(m.progressCells(task: 1).first?.done, 3)
         XCTAssertEqual(m.liveLog, ["a", "b"])
         // The daemon's clock is 4,999,000 ms ahead of this device's at the anchor, and then counts up.
         XCTAssertEqual(m.daemonNow(at), 5_000_000)
@@ -1474,8 +1477,9 @@ final class MonitorCoreTests: XCTestCase {
         p.nowMs = 5_000_000
         m.apply(progress: p)
         XCTAssertEqual(m.sidebar?.sections[0].rows[1], other, "task 2's row is untouched")
-        XCTAssertNotEqual(m.sidebar?.sections[0].rows[0].progress.first?.done, 1)
-        XCTAssertEqual(sidebarChanges, 1)
+        XCTAssertEqual(m.progressCells(task: 1).first?.done, 3)
+        XCTAssertEqual(m.progressCells(task: 2).first?.done, 1)
+        XCTAssertEqual(sidebarChanges, 0)
         // A sequence bump and a log line change the live state and not the sidebar.
         sidebarChanges = 0
         m.lastSeq = 99
@@ -1486,6 +1490,27 @@ final class MonitorCoreTests: XCTestCase {
         XCTAssertGreaterThan(liveChanges, 0)
         sub.cancel()
         liveSub.cancel()
+    }
+
+    func testASidebarViewAfterProgressShowsTheViewsCellsNotStaleOnes() {
+        let m = model()
+        var c = cell(done: 1, total: 4, totalSrc: .sourceReported)
+        c.step = "develop"
+        m.sidebar?.sections[0].rows[0].progress = [c]
+        var p = Mason_V1_StepProgress()
+        p.task = 1
+        var n = c
+        n.done = 3
+        p.progress = n
+        m.apply(progress: p)
+        XCTAssertEqual(m.progressCells(task: 1).first?.done, 3)
+        var sb = m.sidebar!
+        var fresh = c
+        fresh.done = 2
+        sb.sections[0].rows[0].progress = [fresh]
+        m.apply(Mason_V1_View.with { $0.sidebar = sb })
+        XCTAssertNil(m.progress.cells(1))
+        XCTAssertEqual(m.progressCells(task: 1).first?.done, 2)
     }
 
     func testSidebarEntriesAreIdentifiedByWhatTheyAreNotWhereTheyAre() {
