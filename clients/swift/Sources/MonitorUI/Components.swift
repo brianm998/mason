@@ -43,6 +43,30 @@ struct ProgressCells: View {
     }
 }
 
+/// Reads a task's live cells from its own observed entry, falling back to the cells of the view
+/// that drew it. Only this view's body runs when a progress message names the task.
+struct LiveProgress<Content: View>: View {
+    @ObservedObject var live: TaskProgress
+    let fallback: [Mason_V1_ProgressCell]
+    @ViewBuilder let content: ([Mason_V1_ProgressCell]) -> Content
+
+    #if DEBUG
+    /// Body evaluations, for the offscreen test that counts them.
+    static var evaluations: Int { get { LiveProgressCounter.n } set { LiveProgressCounter.n = newValue } }
+    #endif
+
+    var body: some View {
+        #if DEBUG
+        let _ = { LiveProgressCounter.n += 1 }()
+        #endif
+        content(live.cells ?? fallback)
+    }
+}
+
+#if DEBUG
+enum LiveProgressCounter { nonisolated(unsafe) static var n = 0 }
+#endif
+
 extension Array where Element == Mason_V1_ProgressCell {
     /// The step that is running now and has a live record.
     var running: Mason_V1_ProgressCell? { first { $0.state == .part && $0.run != 0 } }
