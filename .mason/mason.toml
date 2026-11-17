@@ -68,8 +68,9 @@ rerun = "{project_test} {tests}"
 # everything. `run_check` with `changed: true` runs that set. With `narrow_packages` the test step
 # runs it too, plus the smoke set in `.mason/smoke-tests.txt` (owner-edited). The whole suite runs
 # once per landing batch (`[[tier]] batch` in landing.toml).
-dev_command = "{project_test} {tests_for_change}"
-dev_build = "{project_test} {tests_for_change} --no-run"
+# `: {packages}` is a no-op that a daemon older than s546 needs to accept the key.
+dev_command = ": {packages}; {project_test} {tests_for_change}"
+dev_build = ": {packages}; {project_test} {tests_for_change} --no-run"
 narrow_packages = true
 parser = "regex"
 pass_regex = '^test (.+) \.\.\. ok$'
