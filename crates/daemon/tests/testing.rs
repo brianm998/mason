@@ -820,6 +820,73 @@ fn a_debt_closes_by_itself_when_the_suite_later_goes_green_on_a_base_with_the_ta
     );
 }
 
+fn record_skip_green_at_tip(d: &std::sync::Arc<mason_daemon::daemon::Daemon>, tests: &[&str]) {
+    let pid = d.project_id_by_name("scratch").unwrap();
+    let p = d.project(pid).unwrap().clone();
+    let tip = mason_landing::git::run(&p.path, &["rev-parse", &p.base_ref()]).unwrap();
+    let tests: Vec<String> = tests.iter().map(|t| t.to_string()).collect();
+    d.store
+        .put_suite_skip_green("scratch", "checks", tip.trim(), 5, &tests, 1)
+        .unwrap();
+}
+
+#[test]
+fn a_debt_is_paid_by_a_green_that_skipped_a_quarantined_test_and_the_test_is_named() {
+    // s476: while a test is quarantined no whole-suite green is recorded, so nothing was paid.
+    let s = two_tasks_world();
+    let d = start(&s);
+    let t = file_it(&d, "Skip the checks");
+    mason_daemon::suites::skip(&d, t, "suite:checks", "later", "brian", false).unwrap();
+    wait_state(&d, t, State::Landed, 120);
+    // Landing runs the debt once on its own thread (s426); let that finish, then put the debt
+    // back as it was when nothing could pay it.
+    wait_for("the landing's own run of the debt", 60, || {
+        d.store.debts(Some(t.0), false).unwrap()[0].status == "paid"
+    });
+    d.store
+        .write(|c| {
+            c.execute("DELETE FROM suite_green", [])?;
+            c.execute(
+                "UPDATE debts SET status = 'open', how = '', paid_at = NULL",
+                [],
+            )
+            .map(|_| ())
+        })
+        .unwrap();
+    record_skip_green_at_tip(&d, &["net::flaky_dns"]);
+    assert_eq!(mason_daemon::suites::settle_debts(&d), 1);
+    let how = d.store.debts(Some(t.0), false).unwrap()[0].how.clone();
+    assert!(how.contains("net::flaky_dns"), "{how}");
+}
+
+#[test]
+fn a_debt_whose_task_added_the_skipped_test_is_not_paid_by_a_green_that_skipped_it() {
+    let s = world(
+        vec![commit(
+            "echo 'fn flaky_dns() {}' > added_test.rs",
+            "add the test",
+        )],
+        &[],
+        &def("", "", ""),
+    );
+    let d = start(&s);
+    let t = file_it(&d, "Add a test");
+    mason_daemon::suites::skip(&d, t, "suite:checks", "later", "brian", false).unwrap();
+    wait_state(&d, t, State::Landed, 120);
+    d.store
+        .write(|c| c.execute("DELETE FROM suite_green", []).map(|_| ()))
+        .unwrap();
+    record_skip_green_at_tip(&d, &["net::flaky_dns"]);
+    assert_eq!(mason_daemon::suites::settle_debts(&d), 0);
+    // (An idle run may pay it by running the whole suite; it never pays it on the skip.)
+    let row = d.store.debts(Some(t.0), false).unwrap().remove(0);
+    assert!(
+        row.status == "open" || !row.how.contains("flaky_dns"),
+        "{}",
+        row.how
+    );
+}
+
 #[test]
 fn a_debt_never_closes_on_a_green_at_a_base_without_the_tasks_commit() {
     let s = two_tasks_world();
@@ -991,4 +1058,72 @@ fn a_passed_build_is_remembered_per_tree_and_worktree_and_a_failed_one_is_not() 
         !build_green_for(&d, "tree-a", &key, wt),
         "a failed build is not reused"
     );
+}
+
+/// `CHECKS` taking test names (a rerun): at the merge base (no `hello.txt`) it records the
+/// names it was given in `rec`, and, when `kill` is set, dies by a signal there as a run
+/// stopped by the load does.
+fn checks_with_names(rec: &std::path::Path, kill: bool) -> String {
+    let at_base = format!(
+        "if [ $# -gt 0 ] && [ ! -f hello.txt ]; then echo \"$@\" >> {}; {} fi\n",
+        rec.display(),
+        if kill { "kill -TERM $$;" } else { "" }
+    );
+    CHECKS.replacen("[ -f skip.flag ]", &format!("{at_base}[ -f skip.flag ]"), 1)
+}
+
+fn rerun_def() -> String {
+    def("rerun = \"sh checks.sh {tests}\"", "", "")
+}
+
+#[test]
+fn a_develop_run_that_is_killed_does_not_count_the_round_against_the_task() {
+    let rec = s_counter();
+    let s = world(
+        vec![commit(
+            &format!("{HELLO} && echo x > mine.broken"),
+            "add hello (and break mine)",
+        )],
+        &[],
+        &rerun_def(),
+    );
+    s.push_files(&[("checks.sh", &checks_with_names(&rec, true))], "kill at base");
+    let d = start(&s);
+    let t = file_it(&d, "Killed at develop");
+    wait_state(&d, t, State::Landed, 90);
+    // No trip back to development: the round was not the task's.
+    assert_eq!(steps_run(&d, t), vec!["develop", "test", "land"]);
+    let (v, note) = closing(&d, t);
+    assert_eq!(v, "unverified", "{note}");
+    assert!(note.contains("not counted against the task"), "{note}");
+    // Tried twice, each time with only the failing test.
+    let seen = std::fs::read_to_string(&rec).unwrap();
+    let lines: Vec<&str> = seen.lines().collect();
+    assert_eq!(lines, vec!["mine", "mine"], "{seen}");
+}
+
+#[test]
+fn a_develop_run_of_only_the_failing_tests_that_fails_the_same_test_excuses_it() {
+    let rec = s_counter();
+    let s = world(
+        vec![commit(HELLO, "add hello")],
+        &[("legacy.broken", "known\n")],
+        &rerun_def(),
+    );
+    s.push_files(&[("checks.sh", &checks_with_names(&rec, false))], "record at base");
+    let d = start(&s);
+    let t = file_it(&d, "Same red at develop");
+    wait_state(&d, t, State::Landed, 90);
+    assert_eq!(steps_run(&d, t), vec!["develop", "test", "land"]);
+    let (v, note) = closing(&d, t);
+    assert_eq!(v, "unverified", "{note}");
+    assert!(note.contains("failures excused"), "{note}");
+    let seen = std::fs::read_to_string(&rec).unwrap();
+    // Whatever the number of runs, develop was only ever given the failing test's name.
+    assert!(
+        !seen.is_empty() && seen.lines().all(|l| l == "legacy"),
+        "{seen}"
+    );
+    let ledger = d.store.ledger().unwrap();
+    assert!(ledger.iter().any(|e| e.test == "legacy"), "{ledger:?}");
 }

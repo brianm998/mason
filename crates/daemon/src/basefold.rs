@@ -67,7 +67,7 @@ pub fn fold(wt: &Path, base: &str) -> BaseFold {
 
 /// The files a merge of `base` into `HEAD` would conflict in, or `None` if it merges cleanly.
 /// `git merge-tree --write-tree` writes only objects: the worktree and the index are untouched.
-fn would_conflict(wt: &Path, base: &str) -> Result<Option<String>, String> {
+pub(crate) fn would_conflict(wt: &Path, base: &str) -> Result<Option<String>, String> {
     let out = Command::new("git")
         .arg("-C")
         .arg(wt)

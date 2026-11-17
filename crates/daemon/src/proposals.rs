@@ -263,8 +263,18 @@ pub fn file(d: &Arc<Daemon>, f: &Filing) -> Result<Filed, String> {
         let live = !matches!(t.state, State::Landed | State::Canceled | State::Failed);
         let recently_rejected =
             row.status == "rejected" && now.saturating_sub(row.at) < REJECTED_MEMORY_MS;
-        if (live || recently_rejected) && similar(&title, &f.body, &row.title, &row.body) {
-            return Err(if live {
+        // A task that landed or was closed within the lookback has already answered it (s551).
+        let recently_over = matches!(t.state, State::Landed | State::Canceled)
+            && now.saturating_sub(t.state_entered_at.0) < REJECTED_MEMORY_MS;
+        if (live || recently_rejected || recently_over)
+            && similar(&title, &f.body, &row.title, &row.body)
+        {
+            return Err(if recently_over && !live && !recently_rejected {
+                format!(
+                    "duplicate of #{}: {:?}, which already landed or was closed in the last 7 days; do not file it again",
+                    row.task, row.title
+                )
+            } else if live {
                 format!(
                     "duplicate of #{}: {:?}; add to that task instead of filing again",
                     row.task, row.title

@@ -350,6 +350,12 @@ fun TaskDetailPage(model: MonitorModel, id: Long) {
     val d = model.taskDetail
     val row = d?.row
     if (d == null || row == null || row.id != id) {
+        // The sidebar already has this task: draw it now, fill in the rest when masond sends the page.
+        val known = if (model.connected) model.sidebarRow(id) else null
+        if (known != null) {
+            Scrolling(model) { TaskDetail(model, TaskDetailView(row = known), loading = true) }
+            return
+        }
         Text(if (model.connected) "Loading task #$id…" else "Not connected", style = theme.body(color = theme.muted),
             modifier = Modifier.padding(theme.spacingLarge))
         return
@@ -358,7 +364,7 @@ fun TaskDetailPage(model: MonitorModel, id: Long) {
 }
 
 @Composable
-private fun TaskDetail(model: MonitorModel, d: TaskDetailView) {
+private fun TaskDetail(model: MonitorModel, d: TaskDetailView, loading: Boolean = false) {
     val theme = LocalTheme.current
     val r = d.row ?: return
     Row(horizontalArrangement = Arrangement.spacedBy(theme.spacingLarge), verticalAlignment = Alignment.Top) {
@@ -386,6 +392,7 @@ private fun TaskDetail(model: MonitorModel, d: TaskDetailView) {
     }
     r.progress.running?.let { ProgressDetail(model, it) }
     ActionButtons(model, r, hasApprovalView = d.approval != null)
+    if (loading) Text("Loading details…", style = theme.body(color = theme.muted), modifier = Modifier.testTag("detail:loading"))
     if (r.blockers.isNotEmpty()) {
         Row(horizontalArrangement = Arrangement.spacedBy(theme.spacingSmall), modifier = Modifier.testTag("waiting-for")) {
             Text("waiting for", style = theme.body(color = theme.muted))

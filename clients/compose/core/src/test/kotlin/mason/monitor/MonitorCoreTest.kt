@@ -312,6 +312,8 @@ class MonitorCoreTest {
         m.sender = { sent += it }
         m.skipAllTests(m.sectionRows("testing"))
         assertEquals(listOf(10L, 12L), sent.map { it.skip?.task })
+        // masond answers the first two (task #522: a second click while one is pending sends nothing).
+        sent.toList().forEach { m.apply(ServerMessage(result = CommandResult(id = it.id, ok = false, error = "no"))) }
         m.skipTest(10, "test")
         assertEquals(10L, sent.last().skip?.task)
         assertEquals("3 of 8 suites", SectionPages.suiteProgress(a))
@@ -1360,8 +1362,10 @@ class MonitorCoreTest {
         m.identity = "brian"
         val sent = mutableListOf<Command>()
         m.sender = { sent += it }
-        m.release(11, 8)
-        m.addBlocker(11, 5)
+        // masond answers each before the next click (a task with a command pending takes no second one).
+        fun answered() = m.apply(ServerMessage(result = CommandResult(id = sent.last().id, ok = false, error = "no")))
+        m.release(11, 8); answered()
+        m.addBlocker(11, 5); answered()
         m.revive(8)
         assertEquals(listOf(8L), sent[0].unblock?.from)
         assertEquals(11L, sent[0].unblock?.task)

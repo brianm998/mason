@@ -39,7 +39,7 @@ final class SystemSink: NSObject, SpeechSink, NSSoundDelegate, AVSpeechSynthesiz
         let u = AVSpeechUtterance(string: sentence)
         u.volume = Float(volume)
         if !voice.isEmpty {
-            u.voice = AVSpeechSynthesisVoice.speechVoices().first { $0.name == voice }
+            u.voice = cachedVoice(named: voice)
         }
         speechDone = then
         synth.speak(u)
@@ -64,7 +64,14 @@ final class SystemSink: NSObject, SpeechSink, NSSoundDelegate, AVSpeechSynthesiz
         speechDone = nil
     }
 
+    /// The OS voice list is an XPC round trip: asked once, then kept.
+    private lazy var osVoices: [AVSpeechSynthesisVoice] = AVSpeechSynthesisVoice.speechVoices()
+
+    private func cachedVoice(named name: String) -> AVSpeechSynthesisVoice? {
+        osVoices.first { $0.name == name }
+    }
+
     func voices() -> [String] {
-        Array(Set(AVSpeechSynthesisVoice.speechVoices().map(\.name))).sorted()
+        Array(Set(osVoices.map(\.name))).sorted()
     }
 }

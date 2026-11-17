@@ -641,6 +641,15 @@ impl<'a> Ctx<'a> {
                     ..Default::default()
                 });
             }
+            for h in v["held_back"].as_array().into_iter().flatten() {
+                if let Some(t) = h["text"].as_str() {
+                    banners.push(Banner {
+                        kind: "ci_watch".into(),
+                        text: format!("{}: {t}", p.id),
+                        ..Default::default()
+                    });
+                }
+            }
             if let Some(e) = v["error"].as_str() {
                 banners.push(Banner {
                     kind: "ci_watch".into(),
