@@ -24,7 +24,7 @@ fn main() {
     }
     if args[0] == "reap" {
         // Kill only the hosts under ROOT that are verifiably the recorded processes.
-        for r in mason_step_host::registry::reap_verified(&PathBuf::from(&args[1])) {
+        for r in mason_step_host::registry::reap_verified_by(&PathBuf::from(&args[1]), "step-host-ctl reap ROOT") {
             println!(
                 "{} host_killed={} child_group_killed={}",
                 r.id, r.host_killed, r.child_group_killed
