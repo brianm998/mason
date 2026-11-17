@@ -660,11 +660,14 @@ fun UsageAccount(p: mason.v1.ProviderStatus) {
 }
 
 @Composable
-fun HealthPage(model: MonitorModel) {
+fun HealthPage(model: MonitorModel, lateness: () -> LatenessWindow = { UiLateness.recent() }) {
     val theme = LocalTheme.current
     Scrolling(model) {
         Text("Health", style = theme.title())
         Text(if (model.connected) "Connected to masond. Event log at #${model.lastSeq}." else "Not connected.", style = theme.body())
+        // Read again whenever the page redraws (the health poll and the event log do that).
+        val window = remember(model.health, model.lastSeq) { lateness() }
+        Text(window.line(windowMinutes = 10), style = theme.body(), modifier = Modifier.testTag("health:ui-thread"))
         model.health?.let { h ->
             Section("Resources") { h.resources.forEach { Text("${it.name} (${it.kind}): ${it.used} of ${it.limit} in use", style = theme.body()) } }
             Text(h.cpuLine, style = theme.body())
