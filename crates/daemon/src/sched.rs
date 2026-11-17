@@ -452,6 +452,9 @@ pub struct WaitAlert {
 /// After this long on a kernel lock the task's wait says what it waits for.
 const KERNEL_WAIT_SAYS_AFTER: Duration = Duration::from_secs(60);
 
+/// Per waiting task: its holders' grant times and the waiting count of its class.
+type WaitHolders = BTreeMap<TaskId, (Vec<u64>, u32)>;
+
 struct DiskCfg {
     source: Arc<dyn DiskSource>,
     /// The data directory and each project's `task_cache` directory.
@@ -471,7 +474,7 @@ pub struct Broker {
     /// clone the `Arc` and never take `st`.
     waits_snap: std::sync::RwLock<Arc<BTreeMap<TaskId, String>>>,
     /// Per waiting task: its holders' grant times and the waiting count of its class.
-    waits_holders: std::sync::RwLock<Arc<BTreeMap<TaskId, (Vec<u64>, u32)>>>,
+    waits_holders: std::sync::RwLock<Arc<WaitHolders>>,
     /// Time each task has spent under a CPU cause, updated by every `pass`.
     cpu_hold: Mutex<mason_scheduler::CpuHold>,
     /// The largest of those, for readers that must not take `st`.

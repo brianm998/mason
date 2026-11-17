@@ -159,7 +159,8 @@ fn unit_crate(unit: &str) -> &str {
 /// Which of `files` (name, modified ms) are stale codegen-unit objects. Cargo's macOS default
 /// leaves each unit's `.rcgu.o` beside the executable because the debug info is read from it,
 /// one more set per crate hash. For each crate the set with the newest object is the live one
-/// and stays; sets of older hashes go, except any object modified within the grace period.
+/// and stays; sets of older hashes go, except any object modified within the grace period, and
+/// none of a crate's older sets go while its newest set is itself within the grace period.
 pub fn stale_objects(files: &[(String, u64)], now_ms: u64) -> Vec<String> {
     let mut newest: std::collections::BTreeMap<&str, (&str, u64)> = Default::default();
     for (f, t) in files {
@@ -175,10 +176,11 @@ pub fn stale_objects(files: &[(String, u64)], now_ms: u64) -> Vec<String> {
             let Some(unit) = object_unit(f) else {
                 return false;
             };
-            newest
-                .get(unit_crate(unit))
-                .is_some_and(|(live, _)| *live != unit)
-                && now_ms.saturating_sub(*t) >= OBJECT_GRACE_MS
+            // While a crate's newest set is still within the grace period a build may be
+            // writing it, and the set before it is the last complete one: keep both until then.
+            newest.get(unit_crate(unit)).is_some_and(|(live, live_t)| {
+                *live != unit && now_ms.saturating_sub(*live_t) >= OBJECT_GRACE_MS
+            }) && now_ms.saturating_sub(*t) >= OBJECT_GRACE_MS
         })
         .map(|(f, _)| f.clone())
         .collect()

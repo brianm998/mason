@@ -816,7 +816,13 @@ mod tests {
     }
 
     fn crowd(wait: u64, grant: u64) -> Vec<Finding> {
-        let h = holder_fact(&[100 * H - grant, 100 * H - 20 * MIN], 100 * H, 23);
+        // Two holders: the newest granted `grant` ago, the oldest at least 20 min ago, so
+        // `grant` alone says how long since the last grant.
+        let h = holder_fact(
+            &[100 * H - grant, 100 * H - grant.max(20 * MIN)],
+            100 * H,
+            23,
+        );
         let x = Facts {
             tasks: (1..=23).map(|i| waiter(i, wait, h.clone())).collect(),
             ..Default::default()
