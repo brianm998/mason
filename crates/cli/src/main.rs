@@ -3991,6 +3991,9 @@ fn print_ci_watch(project: &str, w: &Value) {
             p["agreement"]
         );
     }
+    for h in w["held_back"].as_array().into_iter().flatten() {
+        println!("  {}", h["text"].as_str().unwrap_or("?"));
+    }
     for f in w["filed"].as_array().into_iter().flatten().take(5) {
         println!(
             "  filed: {} as {}{}{}",
