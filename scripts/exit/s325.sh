@@ -5,5 +5,5 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 cargo test -q -p mason-engine --test behaviour -- deferred_is_not_admitted a_priority_chosen_at_approval
 cargo test -q -p mason-store codec
-cargo test -q -p mason-daemon --test attention -- a_deferred_task_raises_no_alert
+cargo test -q -p mason-daemon --test it -- a_deferred_task_raises_no_alert
 echo "s325 OK"

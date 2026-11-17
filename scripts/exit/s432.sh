@@ -33,7 +33,7 @@ echo "PASS: no findings on a healthy daemon, and history is readable"
 kill "$daemon"; wait "$daemon" 2>/dev/null || true; daemon=""
 
 echo "== 2. stuck task, one tick, session, banner, count, proposal, end"
-out=$(cargo test -q -p mason-daemon --test health 2>&1) || { echo "$out" >&2; fail "the health tests failed"; }
+out=$(cargo test -q -p mason-daemon --test it health:: 2>&1) || { echo "$out" >&2; fail "the health tests failed"; }
 echo "$out" | grep -E '^test result' | tail -2
 out=$(cargo test -q -p mason-core --lib -- health 2>&1) || { echo "$out" >&2; fail "the core health tests failed"; }
 echo "$out" | grep -E '^test result' | tail -1

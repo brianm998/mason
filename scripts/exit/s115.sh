@@ -14,7 +14,7 @@ run() {
     echo "$out" | grep -E '^test result' | tail -1
 }
 
-run "a quiet pipeline raises stalled naming the disk, and clears when it moves" -p mason-daemon --test stall
+run "a quiet pipeline raises stalled naming the disk, and clears when it moves" -p mason-daemon --test it stall:: -- --skip fetch_stall::
 run "the pure decision" -p mason-daemon --lib attention
 run "stalled is routed to every channel" -p mason-core notify
 run "stall.after is read" -p mason-daemon --lib notify
