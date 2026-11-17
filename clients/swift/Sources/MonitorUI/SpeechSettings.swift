@@ -17,8 +17,7 @@ struct SpeechSettingsView: View {
     static let sounds = ["Glass", "Basso", "Tink", "Ping", "Pop", "Submarine", "Sosumi", "Funk"]
 
     var body: some View {
-        _ = model.announcerRevision
-        _ = model.announcerRevision
+        let _ = model.announcerRevision
         let a = model.announcer
         VStack(alignment: .leading, spacing: theme.spacing) {
             Text("Sound and speech").font(theme.body(.semibold))
