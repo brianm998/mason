@@ -537,10 +537,7 @@ fn daemon_gone() -> Option<String> {
             .args(["-o", "stat=", "-p", &pid.to_string()])
             .output()
             .ok()?;
-        if String::from_utf8_lossy(&o.stdout)
-            .trim_start()
-            .starts_with('Z')
-        {
+        if String::from_utf8_lossy(&o.stdout).trim_start().starts_with('Z') {
             return Some(format!("the test daemon (pid {pid}) exited while waiting"));
         }
     }
@@ -550,7 +547,13 @@ fn daemon_gone() -> Option<String> {
 /// Wait for `f`, at least [`MIN_WAIT_SECS`] if it stays possible. Fails at once when a scratch
 /// daemon of this test has exited.
 pub fn wait_for(what: &str, secs: u64, mut f: impl FnMut() -> bool) {
-    wait_poll(what, secs, || if f() { Poll::Done } else { Poll::Pending });
+    wait_poll(what, secs, || {
+        if f() {
+            Poll::Done
+        } else {
+            Poll::Pending
+        }
+    });
 }
 
 /// As [`wait_for`], and the condition can also say the wait can no longer succeed.
@@ -701,19 +704,15 @@ mod wait_tests {
         DAEMONS.with(|d| d.borrow_mut().push(pid));
         // Let it exit without reaping it, as a crashed daemon would be.
         let mut why = None;
-        let r = wait_loop(
-            "a thing",
-            900,
-            &mut || false,
-            &mut || std::thread::sleep(Duration::from_millis(20)),
-            &mut || match daemon_gone() {
-                Some(w) => {
-                    why = Some(w.clone());
-                    Poll::Never(w)
-                }
-                None => Poll::Pending,
-            },
-        );
+        let r = wait_loop("a thing", 900, &mut || false, &mut || {
+            std::thread::sleep(Duration::from_millis(20))
+        }, &mut || match daemon_gone() {
+            Some(w) => {
+                why = Some(w.clone());
+                Poll::Never(w)
+            }
+            None => Poll::Pending,
+        });
         let e = r.unwrap_err();
         assert!(e.contains("exited") && e.contains(&pid.to_string()), "{e}");
         assert!(!e.contains("timed out"), "{e}");

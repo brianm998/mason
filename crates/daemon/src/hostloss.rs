@@ -362,12 +362,7 @@ mod attribution_tests {
 
     #[test]
     fn a_stop_outside_the_window_or_before_the_beat_is_not() {
-        let a = attribute(
-            &[],
-            &format!("{} x", RESTART_WINDOW_MS * 3),
-            Some(0),
-            RESTART_WINDOW_MS * 4,
-        );
+        let a = attribute(&[], &format!("{} x", RESTART_WINDOW_MS * 3), Some(0), RESTART_WINDOW_MS * 4);
         assert!(a.contains("no kill recorded"), "{a}");
         let b = attribute(&[], "100 x", Some(500), 900);
         assert!(b.contains("no kill recorded"), "{b}");

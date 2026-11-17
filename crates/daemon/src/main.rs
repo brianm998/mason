@@ -321,11 +321,7 @@ fn main() {
         tokio::spawn(async move {
             let what = mason_daemon::stopsig::wait().await;
             tracing::info!("masond stopping: {what}");
-            mason_daemon::hostloss::note_daemon_stop(
-                &d_stop.cfg.hosts_dir(),
-                mason_daemon::daemon::now_ms(),
-                &what,
-            );
+            mason_daemon::hostloss::note_daemon_stop(&d_stop.cfg.hosts_dir(), mason_daemon::daemon::now_ms(), &what);
             let d_save = d_stop.clone();
             let _ = tokio::task::spawn_blocking(move || {
                 d_save.save_cpu_history();
