@@ -425,6 +425,7 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s482**: The kill test now waits until the hold is stored and both tasks have launched twice before it kills the daemon.
 - **s484**: The APNs provider-token cache now also compares a SHA-256 fingerprint of the key, so parallel tests (or a changed key) no longer get a token signed by another key.
 - **s491**: The Compose app tests pass the native-access flag and a build-owned temp directory to the test JVM so Skiko's native library loads and EditorSnapshotTest passes.
+- **s493**: The Compose app tests give Skiko a fresh data directory in the build tree so its native library loads and MascotTest passes.
 - **s494**: The Compose app's test JVM now allows native access, so the Skia-backed MascotTest and TopBarTest tests stop failing with UnsatisfiedLinkError.
 - **s502**: a new `compile` gate holds further compiles while `syspolicyd` uses 300% CPU or more (`[cpu] syspolicyd_max_pct`), so MASON's builds and test runs cannot swamp the Mac's code checks again.
 - **s507**: `every_state_and_event_pair` passes again because `events()` in the engine matrix test no longer lists `Deferred` and `Undeferred` twice, and a duplicate name now fails with a clear message.
