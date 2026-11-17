@@ -12,7 +12,15 @@ struct SidebarPane: View {
     @ObservedObject var model: MonitorModel
     let width: CGFloat
 
+    #if DEBUG
+    /// Body evaluations, for the offscreen test that counts them.
+    nonisolated(unsafe) static var evaluations = 0
+    #endif
+
     var body: some View {
+        #if DEBUG
+        let _ = { Self.evaluations += 1 }()
+        #endif
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 0) {
                 homeRow
@@ -54,7 +62,7 @@ struct SidebarPane: View {
         case .header(let sec): SectionHeader(model: model, section: sec).id(sec.state)
         case .row(let r):
             RowView(
-                row: r, selected: model.page == .task(r.id), canAct: model.canAct, clock: model.live,
+                row: r, selected: model.page == .task(r.id), canAct: model.canAct, clock: model.live, store: model.progress,
                 go: { [model] p in model.go(p) }, approve: { [model] id in model.approve(id) }
             ).equatable()
         case .rule: Divider().padding(.vertical, theme.spacing)
@@ -175,12 +183,13 @@ struct RowView: View, Equatable {
     let canAct: Bool
     /// Read for the clock offset only; never observed, so a change to it does not redraw the row.
     let clock: LiveState
+    let store: ProgressStore
     let go: (Page) -> Void
     let approve: (UInt64) -> Void
 
     /// Rows are redrawn only when what they show changes; the closures and the clock do not count.
     static func == (a: RowView, b: RowView) -> Bool {
-        a.row == b.row && a.selected == b.selected && a.canAct == b.canAct && a.clock === b.clock
+        a.row == b.row && a.selected == b.selected && a.canAct == b.canAct && a.clock === b.clock && a.store === b.store
     }
 
     #if DEBUG
@@ -206,7 +215,9 @@ struct RowView: View, Equatable {
                             .accessibilityIdentifier("row:\(row.id):proposal")
                     }
                     metaLine
-                    if let c = row.progress.running { ProgressLine(clock: clock, cell: c) }
+                    LiveProgress(live: store.entry(row.id), fallback: row.progress) { cells in
+                        if let c = cells.running { ProgressLine(clock: clock, cell: c) }
+                    }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
@@ -254,7 +265,9 @@ struct RowView: View, Equatable {
             metaRow(typical: false, model: false)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: theme.spacing) { durationText; Spacer(minLength: 0); StateIcon(state: row.state) }
-                ProgressCells(clock: clock, cells: row.progress, slow: row.slow)
+                LiveProgress(live: store.entry(row.id), fallback: row.progress) {
+                    ProgressCells(clock: clock, cells: $0, slow: row.slow)
+                }
             }
         }
     }
@@ -271,7 +284,9 @@ struct RowView: View, Equatable {
             if typical && !row.typical.isEmpty {
                 Text(row.typical).font(theme.small()).foregroundStyle(theme.muted).lineLimit(1)
             }
-            ProgressCells(clock: clock, cells: row.progress, slow: row.slow).fixedSize()
+            LiveProgress(live: store.entry(row.id), fallback: row.progress) {
+                ProgressCells(clock: clock, cells: $0, slow: row.slow)
+            }.fixedSize()
             if showModel && (!row.display.isEmpty || !row.model.isEmpty) {
                 Text(row.display.isEmpty ? row.model : row.display)
                     .font(theme.small()).foregroundStyle(theme.muted)
