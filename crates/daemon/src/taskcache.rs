@@ -414,7 +414,11 @@ pub fn write_cargo_config(
         if let Some(parent) = ex.parent() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
-        let sep = if cur.is_empty() || cur.ends_with('\n') { "" } else { "\n" };
+        let sep = if cur.is_empty() || cur.ends_with('\n') {
+            ""
+        } else {
+            "\n"
+        };
         std::fs::write(&ex, format!("{cur}{sep}/.cargo/config.toml\n"))
             .map_err(|e| format!("{}: {e}", ex.display()))?;
     }
@@ -436,7 +440,10 @@ pub fn point_cargo_at_task_cache(d: &Daemon, p: &ProjectCfg, task: u64, wt: &Pat
             "task {task}: {} has its own .cargo/config.toml; leaving it",
             wt.display()
         ),
-        Err(e) => eprintln!("task {task}: no .cargo/config.toml in {}: {e}", wt.display()),
+        Err(e) => eprintln!(
+            "task {task}: no .cargo/config.toml in {}: {e}",
+            wt.display()
+        ),
     }
 }
 
