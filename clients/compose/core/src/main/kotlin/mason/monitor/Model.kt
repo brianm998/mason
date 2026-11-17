@@ -242,6 +242,8 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     /** Where the sidebar should scroll to (a tile was clicked). */
     var scrollTarget by mutableStateOf<String?>(null)
     var lastResult by mutableStateOf<String?>(null)
+    /** What the last Skip testing click did; kept apart from [lastResult] so the next ok result does not wipe it. */
+    var skipNotice by mutableStateOf<String?>(null)
     /** Commands sent and not yet settled, by id (task #522). */
     var pending by mutableStateOf<Map<String, PendingCommand>>(emptyMap())
         internal set

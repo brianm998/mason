@@ -137,6 +137,20 @@ pub fn world_full(
 /// with a `build` (`sh build.sh NAME`, red when `red.build.NAME` is in the tree): what the
 /// landing build floor runs when the landing config has no batch tier.
 pub fn world_built(landing_toml: &str, files: &[(&str, &str)]) -> W {
+    world_built_fast(landing_toml, files, false)
+}
+
+/// What `alpha`'s fast tier runs: red, naming the test, when `red.fast` is in the tree or when
+/// `joint.a` and `joint.b` both are (a merge that two green tasks each cleared alone).
+const FAST: &str = r#"#!/bin/sh
+has() { [ -n "$(find . -name "$1" -not -path "./.git/*")" ]; }
+echo "1..1"
+if has red.fast || { has joint.a && has joint.b; }; then echo "not ok 1 - matrix_events"; exit 1; fi
+echo "ok 1 - matrix_events"
+"#;
+
+/// `world_built`, and when `fast`, `alpha` declares `fast_command = "sh fast.sh"`.
+pub fn world_built_fast(landing_toml: &str, files: &[(&str, &str)], fast: bool) -> W {
     let s = Scratch::new("true", json!({"steps": {}}));
     s.write_project("scratch", "true", "");
     let mut definition = def().replacen(
@@ -149,7 +163,14 @@ pub fn world_built(landing_toml: &str, files: &[(&str, &str)]) -> W {
         assert!(definition.contains(&header), "suite {n} in the definition");
         definition = definition.replacen(
             &header,
-            &format!("[suite.{n}]\nbuild = \"sh build.sh {n}\"\ncommand = \"sh checks.sh {n}\"\n"),
+            &format!(
+                "[suite.{n}]\nbuild = \"sh build.sh {n}\"\ncommand = \"sh checks.sh {n}\"\n{}",
+                if fast && n == "alpha" {
+                    "fast_command = \"sh fast.sh\"\n"
+                } else {
+                    ""
+                }
+            ),
             1,
         );
     }
@@ -161,6 +182,7 @@ pub fn world_built(landing_toml: &str, files: &[(&str, &str)]) -> W {
         (".mason/landing.toml", landing_toml),
         ("checks.sh", CHECKS),
         ("build.sh", BUILDS),
+        ("fast.sh", FAST),
         ("shared.txt", "base\n"),
     ];
     all.extend_from_slice(files);

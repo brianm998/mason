@@ -42,8 +42,22 @@ extension MonitorModel {
     }
 
     /// Skip testing for every row that allows it: the sidebar's command, once per task.
+    /// An empty `step` is sent as it is: the daemon reads it as the task's test step.
     public func skipAllTests(_ rows: [TaskRow]) {
-        guard canAct else { return }
-        for r in skippableRows(rows) { skipTest(r.id, step: r.step) }
+        if let why = skipDisabledReason { skipNotice = why; return }
+        let targets = skippableRows(rows)
+        guard !targets.isEmpty else {
+            skipNotice = "Nothing to skip: no task here allows it"
+            return
+        }
+        for r in targets { skipTest(r.id, step: r.step) }
+        skipNotice = "Skipped testing for \(targets.count) task\(targets.count == 1 ? "" : "s")"
+    }
+
+    /// Why Skip testing cannot be used, or nil when it can; the button is disabled with this as its help.
+    public var skipDisabledReason: String? {
+        if let why = readOnlyReason { return "Read-only: \(why)" }
+        if !isOwner { return "Only the owner can skip testing" }
+        return nil
     }
 }
