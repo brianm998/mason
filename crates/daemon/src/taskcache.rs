@@ -142,6 +142,89 @@ fn target(d: &Daemon, p: &ProjectCfg, task: u64) -> Option<Result<PathBuf, Refus
     Some(check_path(&expand(t, task, &h), &h, &keep_list(d, p)))
 }
 
+/// Objects younger than this are never pruned: a build may be writing them.
+const OBJECT_GRACE_MS: u64 = 15 * 60 * 1000;
+
+/// The crate-and-hash part of a codegen-unit object's name (`name-hash.cgu.rcgu.o`), or `None`
+/// for any other file.
+fn object_unit(file: &str) -> Option<&str> {
+    let stem = file.strip_suffix(".rcgu.o")?;
+    stem.split('.').next().filter(|u| !u.is_empty())
+}
+
+fn unit_crate(unit: &str) -> &str {
+    unit.rsplit_once('-').map_or(unit, |(n, _)| n)
+}
+
+/// Which of `files` (name, modified ms) are stale codegen-unit objects. Cargo's macOS default
+/// leaves each unit's `.rcgu.o` beside the executable because the debug info is read from it,
+/// one more set per crate hash. For each crate the set with the newest object is the live one
+/// and stays; sets of older hashes go, except any object modified within the grace period.
+pub fn stale_objects(files: &[(String, u64)], now_ms: u64) -> Vec<String> {
+    let mut newest: std::collections::BTreeMap<&str, (&str, u64)> = Default::default();
+    for (f, t) in files {
+        let Some(unit) = object_unit(f) else { continue };
+        let e = newest.entry(unit_crate(unit)).or_insert((unit, *t));
+        if *t > e.1 {
+            *e = (unit, *t);
+        }
+    }
+    files
+        .iter()
+        .filter(|(f, t)| {
+            let Some(unit) = object_unit(f) else {
+                return false;
+            };
+            newest
+                .get(unit_crate(unit))
+                .is_some_and(|(live, _)| *live != unit)
+                && now_ms.saturating_sub(*t) >= OBJECT_GRACE_MS
+        })
+        .map(|(f, _)| f.clone())
+        .collect()
+}
+
+/// Delete the stale codegen-unit objects in `<dir>/debug/deps` (see [`stale_objects`]). Called
+/// before a suite build in a task's build directory. Returns the count removed.
+pub fn prune_objects(dir: &Path, now_ms: u64) -> usize {
+    let deps = dir.join("debug").join("deps");
+    let Ok(rd) = std::fs::read_dir(&deps) else {
+        return 0;
+    };
+    let files: Vec<(String, u64)> = rd
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().into_string().ok()?;
+            if !name.ends_with(".rcgu.o") {
+                return None;
+            }
+            let m = e.metadata().ok()?.modified().ok()?;
+            let ms = m.duration_since(std::time::UNIX_EPOCH).ok()?.as_millis() as u64;
+            Some((name, ms))
+        })
+        .collect();
+    let mut n = 0;
+    for f in stale_objects(&files, now_ms) {
+        if std::fs::remove_file(deps.join(&f)).is_ok() {
+            n += 1;
+        }
+    }
+    n
+}
+
+/// Prune the build directory of `task` before one of its suite builds, if the project names one.
+pub fn prune_task_objects(d: &Daemon, p: &ProjectCfg, task: u64, now_ms: u64) {
+    if let Some(Ok(dir)) = target(d, p, task) {
+        let n = prune_objects(&dir, now_ms);
+        if n > 0 {
+            eprintln!(
+                "task {task}: pruned {n} stale object files in {}",
+                dir.display()
+            );
+        }
+    }
+}
+
 /// Remove `task`'s directory now, on this thread. Logged, never an error.
 pub fn remove_now(d: &Daemon, p: &ProjectCfg, task: u64) -> bool {
     let path = match target(d, p, task) {
@@ -360,6 +443,45 @@ mod tests {
     }
     fn chk(s: &str) -> Result<PathBuf, Refused> {
         check_path(s, &home(), &keep())
+    }
+
+    #[test]
+    fn only_objects_of_older_hashes_are_pruned_and_a_running_build_keeps_its_files() {
+        let now = 10_000_000_000u64;
+        let old = now - 2 * OBJECT_GRACE_MS;
+        let f = |n: &str, t: u64| (n.to_string(), t);
+        let files = vec![
+            f("mason_daemon-aaa.x-cgu.0.rcgu.o", old),
+            f("mason_daemon-aaa.x-cgu.1.rcgu.o", old),
+            f("mason_daemon-bbb.x-cgu.0.rcgu.o", old + 5),
+            f("mason_core-ccc.y-cgu.0.rcgu.o", old),
+            // an older set that is still being written, and a file that is no object
+            f("mason_core-ddd.y-cgu.0.rcgu.o", now - 1000),
+            f("libmason_core-ccc.rlib", old - 9),
+        ];
+        let mut gone = stale_objects(&files, now);
+        gone.sort();
+        assert_eq!(
+            gone,
+            vec![
+                "mason_daemon-aaa.x-cgu.0.rcgu.o".to_string(),
+                "mason_daemon-aaa.x-cgu.1.rcgu.o".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn pruning_a_directory_removes_only_object_files() {
+        let t = tempfile::tempdir().unwrap();
+        let deps = t.path().join("debug/deps");
+        std::fs::create_dir_all(&deps).unwrap();
+        for n in ["k-1.a.rcgu.o", "k-2.a.rcgu.o", "libk-1.rlib"] {
+            std::fs::write(deps.join(n), b"x").unwrap();
+        }
+        let n = prune_objects(t.path(), u64::MAX / 4);
+        assert!(n <= 1);
+        assert!(deps.join("libk-1.rlib").exists());
+        assert_eq!(prune_objects(&t.path().join("none"), 0), 0);
     }
 
     #[test]

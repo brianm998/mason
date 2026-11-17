@@ -73,6 +73,7 @@ tasks.test {
     val skikoTmp = layout.buildDirectory.dir("skiko-tmp").get().asFile
     doFirst { skikoTmp.mkdirs() }
     systemProperty("java.io.tmpdir", skikoTmp.absolutePath)
+    systemProperty("skiko.data.path", skikoTmp.absolutePath)
     testLogging {
         exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
     }
