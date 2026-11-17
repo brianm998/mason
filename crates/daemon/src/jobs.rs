@@ -1341,6 +1341,9 @@ pub(crate) fn wait_out_environment<T>(
     }
 }
 
+/// How often a queued check looks for a fix that reached the base.
+const FIX_POLL: Duration = Duration::from_secs(2);
+
 /// How long one tool call of an agent step may take. A develop step's
 /// `run_check` runs the whole test command, which is only cut off at
 /// `test_timeout`; a shorter tool timeout made the agent give up on a run that
@@ -1639,9 +1642,69 @@ struct TestChecks {
     base_fold: Option<(ProjectId, String)>,
     /// The project's name, for the suites' recorded run times.
     project: String,
+    /// The known-red tests the last checks failed, and the base merges made for them while a
+    /// check was queued (s525).
+    reds: crate::fixsync::Reds,
 }
 
 impl TestChecks {
+    /// `wait`, a check queueing for its slots, with its time credited to the deadline (see
+    /// [`credit_wait`]). While it waits the agent is idle, so when a known-red test the last
+    /// check failed is fixed on the base, the base is merged in (s525). The poller has ended
+    /// before this returns: a merge is never half done when the check runs.
+    fn queued<T>(&self, wait: impl FnOnce() -> T) -> T {
+        let done = std::sync::atomic::AtomicBool::new(false);
+        std::thread::scope(|s| {
+            let poll = s.spawn(|| {
+                let mut last = Instant::now();
+                while !done.load(std::sync::atomic::Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(50));
+                    if last.elapsed() >= FIX_POLL && !done.load(std::sync::atomic::Ordering::SeqCst)
+                    {
+                        last = Instant::now();
+                        self.sync_fixed();
+                    }
+                }
+            });
+            let out = credit_wait(&self.extra, crate::sched::CREDIT_EVERY, wait);
+            done.store(true, std::sync::atomic::Ordering::SeqCst);
+            let _ = poll.join();
+            out
+        })
+    }
+
+    /// Merge the base into the worktree if a test the last check failed has left the ledger.
+    fn sync_fixed(&self) {
+        let Some((pid, base)) = &self.base_fold else {
+            return;
+        };
+        if !self.reds.any() {
+            return;
+        }
+        let lock = self.slots.d.repo_lock(*pid);
+        let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let store = &self.slots.d.store;
+        if let Some(fold) = self.reds.sync(&self.wt, base, &|scope| {
+            crate::knownred::known_for(store, scope)
+                .into_iter()
+                .map(|k| k.test)
+                .collect()
+        }) {
+            tracing::info!(task = self.task, run = self.run, ?fold, "run_check: base merged for a fixed test");
+        }
+    }
+
+    /// Remember which known-red tests the run `id` of `scope` failed, from its whole log.
+    fn remember_red(&self, scope: &str, id: &str) {
+        let text = read_whole_log(&self.log_dir.join(format!("{id}.log"))).unwrap_or_default();
+        let known: Vec<String> = crate::knownred::known_for(&self.slots.d.store, scope)
+            .into_iter()
+            .map(|k| k.test)
+            .collect();
+        self.reds
+            .saw(scope, &crate::rerun::failing_names(&text), &known);
+    }
+
     /// How long a build or run of `suite` is expected to take at most, from the test step's
     /// recorded times (s422). A check's build is incremental, so this errs long.
     fn estimate(&self, suite: &str, phase: &str) -> Option<u64> {
@@ -1941,13 +2004,17 @@ impl CheckHandler for TestChecks {
             }
             _ => None,
         };
-        match (note, self.check(name, scope)) {
-            (Some(n), CheckRun::Done { passed, summary }) => CheckRun::Done {
-                passed,
-                summary: format!("{n}\n\n{summary}"),
-            },
-            (_, r) => r,
+        let mut r = self.check(name, scope);
+        // What was merged while the check waited, told on its result (s525).
+        let mut notes: Vec<String> = note.into_iter().collect();
+        notes.extend(self.reds.take_notes());
+        if let (false, CheckRun::Done { passed, summary }) = (notes.is_empty(), &r) {
+            r = CheckRun::Done {
+                passed: *passed,
+                summary: format!("{}\n\n{summary}", notes.join("\n\n")),
+            };
         }
+        r
     }
 }
 
@@ -2812,6 +2879,7 @@ fn agent_job(c: &Ctx) {
         run: c.run.0,
         base_fold: (kind == StepKind::Develop).then(|| (c.project_id, c.project.base_ref())),
         project: c.project.id.clone(),
+        reds: Default::default(),
     });
     let validator = (kind == StepKind::Develop).then(|| {
         change_validator(
