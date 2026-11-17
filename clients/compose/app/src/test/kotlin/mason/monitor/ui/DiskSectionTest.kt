@@ -110,7 +110,7 @@ class DiskSectionTest {
         assertTrue(kotlin.math.abs(disk.top.value - cpu.top.value) < 1f)
         val cpuCol = onNodeWithTag("home:cpu-column").getBoundsInRoot()
         val diskCol = onNodeWithTag("home:disk-column").getBoundsInRoot()
-        assertTrue(cpuCol.width > diskCol.width)
+        assertTrue(cpuCol.right - cpuCol.left > diskCol.right - diskCol.left)
         // The CPU section keeps its legend and chart at the narrower width.
         onNodeWithTag("cpu-legend:#7").assertExists()
         onNodeWithTag("cpu-chart").assertExists()
