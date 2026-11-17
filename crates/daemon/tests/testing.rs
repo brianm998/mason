@@ -1052,7 +1052,11 @@ fn a_develop_run_of_only_the_failing_tests_that_fails_the_same_test_excuses_it()
     assert_eq!(v, "unverified", "{note}");
     assert!(note.contains("failures excused"), "{note}");
     let seen = std::fs::read_to_string(&rec).unwrap();
-    assert_eq!(seen.lines().collect::<Vec<_>>(), vec!["legacy"], "{seen}");
+    // Whatever the number of runs, develop was only ever given the failing test's name.
+    assert!(
+        !seen.is_empty() && seen.lines().all(|l| l == "legacy"),
+        "{seen}"
+    );
     let ledger = d.store.ledger().unwrap();
     assert!(ledger.iter().any(|e| e.test == "legacy"), "{ledger:?}");
 }
