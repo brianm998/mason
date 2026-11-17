@@ -88,7 +88,17 @@ pub struct ResourceCfg {
     /// Seconds after which a waiting request goes ahead of all other pipeline
     /// work that is not a landing, oldest first (0: requests do not age).
     pub max_wait_s: u64,
+    /// Seconds a waiting exclusive request freezes ordinary work before it gives that up, and
+    /// work runs again until the machine drains (0: no bound), `[order] exclusive_max_wait_s`.
+    pub exclusive_max_wait_s: u64,
+    /// Origins (`[order] exclusive_origins`) that may take the whole machine with `--exclusive`
+    /// when they are not a person. Any other non-person request is bounded to all `compile`
+    /// units instead.
+    pub exclusive_origins: Vec<String>,
 }
+
+/// The default `order.exclusive_max_wait_s`: ten minutes.
+pub const DEFAULT_EXCLUSIVE_MAX_WAIT_S: u64 = 600;
 
 /// The default `order.max_wait_s`: half an hour.
 pub const DEFAULT_MAX_WAIT_S: u64 = 1800;
@@ -136,6 +146,8 @@ impl Default for ResourceCfg {
             priority_first: false,
             from_file: Default::default(),
             max_wait_s: DEFAULT_MAX_WAIT_S,
+            exclusive_max_wait_s: DEFAULT_EXCLUSIVE_MAX_WAIT_S,
+            exclusive_origins: vec![],
         }
     }
 }
@@ -158,6 +170,26 @@ pub fn parse_resource_cfg(text: &str) -> Result<ResourceCfg, String> {
                 c.max_wait_s = v.as_integer().filter(|n| *n >= 0).ok_or_else(|| {
                     "resources.toml: order.max_wait_s must be a whole number".to_string()
                 })? as u64;
+                continue;
+            }
+            if key == "order" && name == "exclusive_max_wait_s" {
+                c.exclusive_max_wait_s = v.as_integer().filter(|n| *n >= 0).ok_or_else(|| {
+                    "resources.toml: order.exclusive_max_wait_s must be a whole number".to_string()
+                })? as u64;
+                continue;
+            }
+            if key == "order" && name == "exclusive_origins" {
+                c.exclusive_origins = v
+                    .as_array()
+                    .and_then(|a| {
+                        a.iter()
+                            .map(|x| x.as_str().map(str::to_string))
+                            .collect::<Option<Vec<_>>>()
+                    })
+                    .ok_or_else(|| {
+                        "resources.toml: order.exclusive_origins must be a list of names"
+                            .to_string()
+                    })?;
                 continue;
             }
             let n = v
@@ -490,6 +522,19 @@ pub struct Standing {
     pub priority: u8,
 }
 
+/// The origin of a request made by a person at a terminal (s552).
+pub const PERSON: &str = "person";
+
+/// A request just queued by [`Broker::lease_open_from`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Opened {
+    pub id: u64,
+    /// The rank chosen: `person` or `pipeline`.
+    pub rank: &'static str,
+    /// What was changed on the request, when its `--exclusive` was bounded.
+    pub converted: Option<String>,
+}
+
 /// What an interactive caller sees of its request.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LeaseState {
@@ -613,6 +658,9 @@ impl Broker {
             if cfg.compile_settle_s > 0 {
                 ledger.pace_compiles(u64::from(cfg.compile_settle_s) * 1000);
             }
+        }
+        if cfg.exclusive_max_wait_s > 0 {
+            ledger.set_exclusive_max_wait(Some(cfg.exclusive_max_wait_s.saturating_mul(1000)));
         }
         if cfg.max_wait_s > 0 {
             ledger.set_max_wait(Some(cfg.max_wait_s.saturating_mul(1000)));
@@ -1785,21 +1833,74 @@ impl Broker {
         standing: Option<Standing>,
         expected_ms: Option<u64>,
     ) -> u64 {
-        self.open_lease(label, uses, None, expected_ms, |st, now| match standing {
-            None => Rank::new(true, 0, 0, now, st.rank_seq, false),
-            Some(s) => order(
+        self.lease_open_from(label, uses, standing, expected_ms, None)
+            .id
+    }
+
+    /// [`Broker::lease_open_expecting`] with who is really waiting (s552). `origin` is `None` or
+    /// `person` for a person at a terminal: ranked first, and `--exclusive` takes the whole
+    /// machine. Any other origin (an agent, a hook, no terminal, a task's environment) is
+    /// ranked as pipeline work, next after landings (the task's own standing when it has one),
+    /// and its `--exclusive` becomes all `compile` units unless `[order] exclusive_origins`
+    /// names the origin. What was chosen is returned and shown on the request's label.
+    pub fn lease_open_from(
+        &self,
+        label: &str,
+        uses: &BTreeMap<String, u32>,
+        standing: Option<Standing>,
+        expected_ms: Option<u64>,
+        origin: Option<&str>,
+    ) -> Opened {
+        let person = standing.is_none() && origin.is_none_or(|o| o == PERSON);
+        let (uses, converted) = match origin {
+            Some(o) if o != PERSON => self.bound_exclusive(uses, o),
+            _ => (uses.clone(), None),
+        };
+        let shown = match &converted {
+            Some(c) => format!("{label} [{c}]"),
+            None => label.to_string(),
+        };
+        let id = self.open_lease(&shown, &uses, None, expected_ms, |st, now| {
+            if person {
+                return Rank::new(true, 0, 0, now, st.rank_seq, false);
+            }
+            let (steps, priority, span) =
+                standing.map_or((0, 0, 1), |s| (s.steps_remaining, s.priority, s.span));
+            order(
                 st,
-                Rank::new(
-                    false,
-                    s.steps_remaining,
-                    s.priority,
-                    now,
-                    st.rank_seq,
-                    false,
-                )
-                .with_span(s.span),
-            ),
-        })
+                Rank::new(false, steps, priority, now, st.rank_seq, false).with_span(span),
+            )
+        });
+        Opened {
+            id,
+            rank: if person { "person" } else { "pipeline" },
+            converted,
+        }
+    }
+
+    /// A non-person request for the whole machine, unless the owner allows `origin`, asks for
+    /// every `compile` unit instead (s552). Returns the uses to queue and what was changed.
+    pub fn bound_exclusive(
+        &self,
+        uses: &BTreeMap<String, u32>,
+        origin: &str,
+    ) -> (BTreeMap<String, u32>, Option<String>) {
+        let st = lock(&self.st);
+        if uses.get(EXCLUSIVE).copied().unwrap_or(0) == 0
+            || st.base.exclusive_origins.iter().any(|o| o == origin)
+        {
+            return (uses.clone(), None);
+        }
+        let all = st.ledger.capacity(COMPILE).map_or(1, |c| c.units.max(1));
+        let mut out = uses.clone();
+        out.remove(EXCLUSIVE);
+        out.insert(COMPILE.to_string(), all);
+        (
+            out,
+            Some(format!(
+                "exclusive from {origin} is all {all} compile units, not the machine"
+            )),
+        )
     }
 
     /// Queue a request from another pipeline. It is ranked as pipeline work,
@@ -1812,7 +1913,13 @@ impl Broker {
         uses: &BTreeMap<String, u32>,
         o: &crate::outside::Outside,
     ) -> u64 {
-        let shown = crate::outside::display_label(&o.pipeline, label);
+        let (uses, converted) = self.bound_exclusive(uses, &o.pipeline);
+        let uses = &uses;
+        let label = match &converted {
+            Some(c) => format!("{label} [{c}]"),
+            None => label.to_string(),
+        };
+        let shown = crate::outside::display_label(&o.pipeline, &label);
         self.open_lease(&shown, uses, Some(o.pipeline.clone()), None, |st, now| {
             order(
                 st,

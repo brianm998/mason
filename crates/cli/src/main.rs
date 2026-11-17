@@ -22,7 +22,7 @@
 //! mason health | mason digest [--days N] [--project P] | mason schedule list | run <name>
 //! mason triage list | review <id> (--agree | --disagree)
 //! mason status [--json] [--watch]
-//! mason run --needs compile[=N],... [--exclusive] [--label L] -- <cmd>...
+//! mason run --needs compile[=N],... [--exclusive] [--label L] [--origin O] -- <cmd>...
 //! mason hold --needs R[,R...] [--exclusive] --pipeline NAME --label L [--pid P]
 //! mason targets list [--json]
 //! mason cpu [--json] | mason resources [--json] | mason resources limit <resource> <units>
@@ -126,7 +126,7 @@ mason: command-line client for the MASON pipeline
   mason init --prove-only             file the one harmless first task, once masond knows the project
   mason adopt [--id ID] [--base B] [--test CMD]   register a project that already has .mason/ (never writes it)
   mason remove [--yes] [--id ID]      delete the project file, .mason/ and the Filing notes (lists first without --yes)
-  mason run --needs compile[=N],... [--exclusive] [--label L] -- <cmd>...
+  mason run --needs compile[=N],... [--exclusive] [--label L] [--origin O] -- <cmd>...
                                       queue for the pipeline's resources, ahead of its work
   mason run ... --pipeline NAME [--priority urgent|high|normal|low] [--progress 0-6]
                                       the same for another pipeline's work: ranked with MASON's tasks, behind a person's
@@ -568,13 +568,15 @@ fn main() {
             uses.insert("exclusive".into(), 1);
         }
         let label = a.opt("--label");
+        let origin = a.opt("--origin");
         let outside = outside_args(&mut a);
         finish(&a);
         let command = run_tail.filter(|c| !c.is_empty()).unwrap_or_else(|| {
             die("give the command after `--`: mason run --needs compile -- cargo build")
         });
         exit(
-            resources::run(&d, uses, label, &command, outside.as_ref()).unwrap_or_else(|e| die(&e)),
+            resources::run(&d, uses, label, &command, outside.as_ref(), origin)
+                .unwrap_or_else(|e| die(&e)),
         );
     }
     if cmd == "hold" {
