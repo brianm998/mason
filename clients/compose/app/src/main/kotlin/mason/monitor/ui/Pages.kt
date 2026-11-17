@@ -897,8 +897,11 @@ private fun StageRows(model: MonitorModel, name: String) {
     val theme = LocalTheme.current
     val rows = model.sectionRows(name)
     Section(SectionPages.title(name), name) {
-        if (name == "testing" && model.canAct && model.skippableRows(rows).isNotEmpty()) {
+        if (name == "testing" && rows.isNotEmpty()) {
             Pill("Skip testing for all", modifier = Modifier.testTag("testing:skip-all")) { model.skipAllTests(rows) }
+            (model.skipDisabledReason ?: model.skipNotice ?: model.lastResult)?.let {
+                Text(it, style = theme.body(color = theme.attention), modifier = Modifier.testTag("testing:skip-notice"))
+            }
         }
         if (rows.isEmpty()) Text("Nothing here.", style = theme.body(color = theme.muted))
         rows.forEach { r ->
