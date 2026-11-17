@@ -223,6 +223,7 @@ public final class MonitorConnection {
         s.task = taskId
         s.editorStep = model.editorStep
         s.cpuSpanMs = model.cpu.span.ms
+        s.rowBodies = model.search.wantsRowBodies
         var m = Mason_V1_ClientMessage()
         m.subscribe = s
         write(m)

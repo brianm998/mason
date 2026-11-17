@@ -164,7 +164,7 @@ struct HomePage: View {
                                     ProgressCells(clock: model.live, cells: r.progress, slow: r.slow)
                                     Text("\(r.project) \(r.key)").font(theme.body(.semibold))
                                     Text(r.title).font(theme.body()).multilineTextAlignment(.leading)
-                                    Text(r.whyWaiting.isEmpty ? Format.duration(ms: r.inStateMs) : "\(r.whyWaiting), \(Format.duration(ms: r.inStateMs))")
+                                    Text(r.whyWaiting.isEmpty ? Format.duration(ms: r.inState(now: model.daemonNow())) : "\(r.whyWaiting), \(Format.duration(ms: r.inState(now: model.daemonNow())))")
                                         .font(theme.small()).foregroundStyle(r.slow ? theme.slow : theme.muted)
                                 }
                             }.buttonStyle(.plain)
@@ -423,7 +423,7 @@ struct TaskDetailPage: View {
             }
             VStack(alignment: .leading, spacing: theme.spacingSmall) {
                 Text("\(r.key) \(r.title)").font(theme.title()).accessibilityIdentifier("detail:\(r.id)")
-                Text("\(r.project), \(r.state.replacingOccurrences(of: "_", with: " ")), \(Format.duration(ms: r.inStateMs)) in this state")
+                Text("\(r.project), \(r.state.replacingOccurrences(of: "_", with: " ")), \(Format.duration(ms: r.inState(now: model.daemonNow()))) in this state")
                     .font(theme.body()).foregroundStyle(theme.muted)
                 if !r.whyWaiting.isEmpty {
                     LinkedText(model: model, text: r.whyWaiting).accessibilityIdentifier("detail:why-waiting")
@@ -1010,7 +1010,7 @@ struct StageRows: View {
         let parts = [r.step.isEmpty ? "" : r.step,
                      MonitorModel.suiteProgress(r),
                      r.whyWaiting,
-                     Format.duration(ms: r.inStateMs),
+                     Format.duration(ms: r.inState(now: model.daemonNow())),
                      r.display.isEmpty ? r.model : r.display]
             .filter { !$0.isEmpty }
         Text(parts.joined(separator: " · ")).font(theme.small())

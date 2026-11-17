@@ -290,7 +290,10 @@ public final class MonitorModel: ObservableObject {
 
     // The user's.
     @Published public private(set) var history = NavHistory()
-    @Published public var search = SearchState()
+    @Published public var search = SearchState() {
+        // The daemon leaves history-row bodies out unless a body search needs them.
+        didSet { if oldValue.wantsRowBodies != search.wantsRowBodies { subscribe?() } }
+    }
     @Published public var textScale: Double { didSet { prefs.setDouble(textScale, for: Keys.scale) } }
     /// The panel's width before text-zoom scaling; always inside the token limits.
     @Published public private(set) var sidebarWidth: Double
@@ -1239,6 +1242,15 @@ extension Double {
     }
 }
 
+extension Mason_V1_TaskRow {
+    /// How long the task has been in its state at daemon time `now` (ms): from `stateSinceMs`,
+    /// or the daemon's own figure (`inStateMs`) when it did not send one.
+    public func inState(now: UInt64) -> UInt64 {
+        if stateSinceMs == 0 { return inStateMs }
+        return now > stateSinceMs ? now - stateSinceMs : 0
+    }
+}
+
 /// The search box and its three checkboxes: name, title, body.
 public struct SearchState: Equatable, Sendable {
     public var text = ""
@@ -1249,6 +1261,9 @@ public struct SearchState: Equatable, Sendable {
     public init() {}
 
     public var isActive: Bool { !text.trimmingCharacters(in: .whitespaces).isEmpty }
+
+    /// Whether the daemon must send history rows with their bodies: only while a body search runs.
+    public var wantsRowBodies: Bool { inBody && isActive }
 
     public func matches(_ r: TaskRow) -> Bool {
         let q = text.trimmingCharacters(in: .whitespaces).lowercased()

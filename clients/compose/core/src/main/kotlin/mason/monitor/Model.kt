@@ -214,7 +214,15 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     // The user's.
     var history by mutableStateOf(NavHistory())
         private set
-    var search by mutableStateOf(SearchState())
+    private var searchState by mutableStateOf(SearchState())
+    /** The sidebar search. Turning body search on or off re-subscribes: the daemon sends history-row bodies only then. */
+    var search: SearchState
+        get() = searchState
+        set(v) {
+            val was = searchState.wantsRowBodies
+            searchState = v
+            if (was != v.wantsRowBodies) subscribe?.invoke()
+        }
     var textScale by mutableStateOf(prefs.double(KEY_SCALE) ?: 1.0)
         private set
     /** The panel's width before text-zoom scaling; always inside the token limits. */
@@ -1068,6 +1076,9 @@ data class SearchState(
 ) {
     val isActive get() = text.isNotBlank()
 
+    /** Whether the daemon must send history rows with their bodies: only while a body search runs. */
+    val wantsRowBodies get() = inBody && isActive
+
     fun matches(r: TaskRow): Boolean {
         val q = text.trim().lowercase()
         if (q.isEmpty()) return true
@@ -1077,3 +1088,6 @@ data class SearchState(
         return false
     }
 }
+
+/** How long the task has been in its state at daemon time [now] (ms): from `state_since_ms`, or the daemon's own `in_state_ms` when it sent none. */
+fun TaskRow.inState(now: Long): Long = if (state_since_ms == 0L) in_state_ms else maxOf(0L, now - state_since_ms)

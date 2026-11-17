@@ -419,6 +419,26 @@ final class MonitorCoreTests: XCTestCase {
         XCTAssertEqual(m.countText(m.sidebar!.sections[0]), "2")
     }
 
+    func testTimeInStateCountsFromStateSinceAndBodySearchTogglesRowBodies() {
+        var r = TaskRow(); r.inStateMs = 120_000; r.stateSinceMs = 5_000_000
+        XCTAssertEqual(r.inState(now: 5_090_000), 90_000, "from state_since_ms and the daemon clock")
+        XCTAssertEqual(r.inState(now: 4_000_000), 0, "never negative")
+        r.stateSinceMs = 0
+        XCTAssertEqual(r.inState(now: 9_000_000), 120_000, "an older daemon: its own figure")
+        let m = MonitorModel()
+        var subscribed = 0
+        m.subscribe = { subscribed += 1 }
+        m.search.inBody = true
+        XCTAssertEqual(subscribed, 0, "no text yet: no bodies needed")
+        m.search.text = "x"
+        XCTAssertEqual(subscribed, 1, "body search on")
+        m.search.text = "xy"
+        XCTAssertEqual(subscribed, 1, "still on: no change")
+        m.search.inBody = false
+        XCTAssertEqual(subscribed, 2, "body search off")
+        XCTAssertFalse(m.search.wantsRowBodies)
+    }
+
     func testACappedSectionSaysSoInItsHeaderAndSearchSaysWhereItLooked() {
         let m = MonitorModel()
         var a = TaskRow(); a.id = 9; a.title = "newest"

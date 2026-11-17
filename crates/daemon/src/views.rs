@@ -97,6 +97,8 @@ pub struct Ctx<'a> {
     blocks: std::collections::HashMap<TaskId, Vec<u64>>,
     /// The broker's wait reasons, taken once per build.
     waits: std::sync::Arc<std::collections::BTreeMap<TaskId, String>>,
+    /// Whether history rows keep their body (default); the sidebar search asks for them.
+    pub row_bodies: bool,
 }
 
 type LogCache = std::collections::HashMap<u64, (Vec<crate::http::LogStamp>, String)>;
@@ -202,6 +204,7 @@ impl<'a> Ctx<'a> {
             runs: RunIndex::build(w.step_runs.values()),
             blocks,
             waits: d.broker.waits_snapshot(),
+            row_bodies: true,
         }
     }
 
@@ -471,7 +474,9 @@ impl<'a> Ctx<'a> {
             activity: crate::http::activity_text(&t.activity),
             why_waiting: self.why_waiting(t),
             enqueued_ms: t.enqueued_at.0,
-            in_state_ms: in_state,
+            // Whole minutes, so a sidebar that changed in nothing else hashes the same.
+            in_state_ms: in_state / 60_000 * 60_000,
+            state_since_ms: since,
             model,
             display: model_use
                 .as_ref()
@@ -811,7 +816,13 @@ impl<'a> Ctx<'a> {
                 } else {
                     usize::MAX
                 })
-                .map(|t| self.row(t))
+                .map(|t| {
+                    let mut r = self.row(t);
+                    if !self.row_bodies && (is_history(s) || s == State::Deferred) {
+                        r.body.clear();
+                    }
+                    r
+                })
                 .collect(),
         }
     }

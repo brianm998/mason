@@ -76,6 +76,10 @@ message Subscribe {
   uint64 cpu_span_ms = 5;
   // The span for DISK_HISTORY, in ms (0: an hour).
   uint64 disk_span_ms = 6;
+  // Send the body of every sidebar row. When false, rows in the history sections
+  // (landed, canceled, deferred, failed) have an empty body; active sections keep theirs.
+  // Set only while the sidebar's body search is on. Additive (s561).
+  bool row_bodies = 7;
 }
 
 message Ping {
@@ -495,6 +499,10 @@ message TaskRow {
   uint64 last_run = 25;
   // The owner's open chat session about this task, when there is one (s364). Additive.
   OwnerSessionInfo owner_session = 26;
+  // When the task entered its state, in daemon time (0: not known). Clients work out the
+  // time in state from it and their clock offset; `in_state_ms` is rounded to whole
+  // minutes for older clients. Additive (s561).
+  uint64 state_since_ms = 27;
 }
 
 // An owner session as a task row, the task page and the sidebar show it (s364).

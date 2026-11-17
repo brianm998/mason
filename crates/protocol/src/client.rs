@@ -140,6 +140,21 @@ impl Client {
         cpu_span_ms: u64,
         disk_span_ms: u64,
     ) -> Result<(), String> {
+        self.subscribe_full(views, project, task, editor_step, cpu_span_ms, disk_span_ms, true)
+    }
+
+    /// Subscribe with everything, including whether history rows carry their bodies.
+    #[allow(clippy::too_many_arguments)]
+    pub fn subscribe_full(
+        &mut self,
+        views: &[ViewKind],
+        project: &str,
+        task: u64,
+        editor_step: &str,
+        cpu_span_ms: u64,
+        disk_span_ms: u64,
+        row_bodies: bool,
+    ) -> Result<(), String> {
         self.send(&ClientMessage {
             body: Some(client_message::Body::Subscribe(Subscribe {
                 views: views.iter().map(|v| *v as i32).collect(),
@@ -148,6 +163,7 @@ impl Client {
                 editor_step: editor_step.into(),
                 cpu_span_ms,
                 disk_span_ms,
+                row_bodies,
             })),
         })
     }
