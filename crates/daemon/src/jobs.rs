@@ -1690,7 +1690,12 @@ impl TestChecks {
                 .map(|k| k.test)
                 .collect()
         }) {
-            tracing::info!(task = self.task, run = self.run, ?fold, "run_check: base merged for a fixed test");
+            tracing::info!(
+                task = self.task,
+                run = self.run,
+                ?fold,
+                "run_check: base merged for a fixed test"
+            );
         }
     }
 
@@ -1759,7 +1764,7 @@ impl TestChecks {
         let mut touched: Option<Option<Vec<String>>> = None;
         let mut narrowed: Vec<String> = vec![];
         let project_test = self.cmd.as_ref().map(|c| c.test.as_str());
-        let tree = crate::hostedcheck::tree_key(&self.wt);
+        // The tree is read when a spec is made: a merge while a check waited changes it.
         let spec = |prefix: String, cmd: &str, uses: &BTreeMap<String, u32>, limit: Duration| {
             crate::hostedcheck::CheckSpec {
                 id_prefix: prefix,
@@ -1768,7 +1773,7 @@ impl TestChecks {
                 cwd: self.wt.clone(),
                 env: vec![("MASON_HELD".to_string(), held_text(uses))],
                 limit,
-                tree: tree.clone(),
+                tree: crate::hostedcheck::tree_key(&self.wt),
                 stop: None,
             }
         };
@@ -1865,12 +1870,23 @@ impl TestChecks {
                             limit,
                         );
                         let queue = !crate::hostedcheck::pending(&self.slots.d, &bspec);
-                        let swapped = credit_wait(&self.extra, crate::sched::CREDIT_EVERY, || {
+                        let merges = self.reds.merges();
+                        let swapped = self.queued(|| {
                             self.slots
                                 .swap_for(queue, &build_uses(), self.estimate(&name, "build"))
                         });
                         let Ok(lease) = swapped else {
                             return over();
+                        };
+                        let bspec = if self.reds.merges() == merges {
+                            bspec
+                        } else {
+                            spec(
+                                format!("{}-{name}-build", self.id_prefix),
+                                b,
+                                &build_uses(),
+                                limit,
+                            )
                         };
                         let res = crate::hostedcheck::run(&self.slots.d, &bspec);
                         drop(lease);
@@ -1917,15 +1933,31 @@ impl TestChecks {
                 limit,
             );
             let queue = !crate::hostedcheck::pending(&self.slots.d, &rspec);
-            let swapped = credit_wait(&self.extra, crate::sched::CREDIT_EVERY, || {
+            let merges = self.reds.merges();
+            let swapped = self.queued(|| {
                 self.slots
                     .swap_for(queue, &uses, self.estimate(&name, "run"))
             });
             let Ok(lease) = swapped else {
                 return over();
             };
+            let rspec = if self.reds.merges() == merges {
+                rspec
+            } else {
+                spec(
+                    format!("{}-{name}", self.id_prefix),
+                    &suite.command,
+                    &uses,
+                    limit,
+                )
+            };
             let res = crate::hostedcheck::run(&self.slots.d, &rspec);
             drop(lease);
+            match &res {
+                Ok(o) if o.passed => self.reds.passed(&name),
+                Ok(o) => self.remember_red(&name, &o.id),
+                Err(_) => {}
+            }
             match res {
                 Ok(o) if o.passed => lines.push(format!("{name}: passed")),
                 Ok(o) => {
@@ -2104,7 +2136,7 @@ impl TestChecks {
         // The exact content tree and command already went green (here, in the test step or in
         // landing's re-test): the answer is that result, and nothing runs.
         let key = crate::cmdreuse::command_key(cmds.build.as_deref(), &cmds.test);
-        let ctree = crate::cmdreuse::content_tree(&self.wt);
+        let mut ctree = crate::cmdreuse::content_tree(&self.wt);
         if let Some(src) = ctree
             .as_deref()
             .and_then(|t| crate::cmdreuse::green_for(&self.slots.d, t, &key))
@@ -2117,7 +2149,7 @@ impl TestChecks {
             };
         }
         // Under a step host, so that a restarted daemon finds the run again.
-        let tree = crate::hostedcheck::tree_key(&self.wt);
+        // Read when a spec is made: a merge while a check waited changes the tree.
         let spec = |prefix: String, cmd: &str, uses: &std::collections::BTreeMap<String, u32>| {
             crate::hostedcheck::CheckSpec {
                 id_prefix: prefix,
@@ -2126,10 +2158,11 @@ impl TestChecks {
                 cwd: self.wt.clone(),
                 env: vec![("MASON_HELD".to_string(), held_text(uses))],
                 limit: self.timeout,
-                tree: tree.clone(),
+                tree: crate::hostedcheck::tree_key(&self.wt),
                 stop: None,
             }
         };
+        let merges = self.reds.merges();
         // A build first, holding one `compile` slot; the tests then hold the
         // rest of what the test step uses.
         let uses = match &cmds.build {
@@ -2141,11 +2174,15 @@ impl TestChecks {
             Some(build) => {
                 let bspec = spec(format!("{}build", self.id_prefix), build, &build_uses());
                 let queue = !crate::hostedcheck::pending(&self.slots.d, &bspec);
-                let swapped = credit_wait(&self.extra, crate::sched::CREDIT_EVERY, || {
-                    self.slots.swap_for(queue, &build_uses(), None)
-                });
+                let swapped = self.queued(|| self.slots.swap_for(queue, &build_uses(), None));
                 let Ok(lease) = swapped else {
                     return over();
+                };
+                let bspec = if self.reds.merges() == merges {
+                    bspec
+                } else {
+                    ctree = crate::cmdreuse::content_tree(&self.wt);
+                    spec(format!("{}build", self.id_prefix), build, &build_uses())
                 };
                 let res = crate::hostedcheck::run(&self.slots.d, &bspec);
                 drop(lease);
@@ -2186,18 +2223,22 @@ impl TestChecks {
                 tests_uses(&self.slots.test_uses)
             }
         };
-        let spec = spec(self.id_prefix.clone(), &cmds.test, &uses);
+        let tspec = spec(self.id_prefix.clone(), &cmds.test, &uses);
         // The same call sent again after a restart attaches to the run already
         // going (or takes its result) at once: it starts nothing, so it does not
         // queue behind other work for a slot the run it joins already took.
-        let queue = !crate::hostedcheck::pending(&self.slots.d, &spec);
-        let swapped = credit_wait(&self.extra, crate::sched::CREDIT_EVERY, || {
-            self.slots.swap_for(queue, &uses, None)
-        });
+        let queue = !crate::hostedcheck::pending(&self.slots.d, &tspec);
+        let swapped = self.queued(|| self.slots.swap_for(queue, &uses, None));
         let Ok(test_lease) = swapped else {
             return over();
         };
-        let res = crate::hostedcheck::run(&self.slots.d, &spec);
+        let tspec = if self.reds.merges() == merges {
+            tspec
+        } else {
+            ctree = crate::cmdreuse::content_tree(&self.wt);
+            spec(self.id_prefix.clone(), &cmds.test, &uses)
+        };
+        let res = crate::hostedcheck::run(&self.slots.d, &tspec);
         drop(test_lease);
         self.slots.take_agent_slot_back();
         if let (Ok(o), Some(t)) = (&res, &ctree) {
@@ -2206,13 +2247,16 @@ impl TestChecks {
                 crate::cmdreuse::record_green(&self.slots.d, t, &key, &src);
             }
         }
+        let step = self.slots.test_step.as_deref().unwrap_or("test");
+        match &res {
+            Ok(o) if o.passed => self.reds.passed(step),
+            Ok(o) => self.remember_red(step, &o.id),
+            Err(_) => {}
+        }
         let header = match &res {
-            Ok(o) if !o.passed => {
-                let step = self.slots.test_step.as_deref().unwrap_or("test");
-                known_header(&self.slots.d, &self.log_dir, &o.id, step)
-                    .map(|h| format!("{h}\n\n"))
-                    .unwrap_or_default()
-            }
+            Ok(o) if !o.passed => known_header(&self.slots.d, &self.log_dir, &o.id, step)
+                .map(|h| format!("{h}\n\n"))
+                .unwrap_or_default(),
             _ => String::new(),
         };
         match res {

@@ -62,7 +62,11 @@ impl Reds {
 
     /// Is any test remembered? (False means [`Reds::sync`] has nothing to look at.)
     pub fn any(&self) -> bool {
-        !self.red.lock().unwrap_or_else(|e| e.into_inner()).is_empty()
+        !self
+            .red
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty()
     }
 
     /// If a remembered test is no longer known red on the base (`still_known(scope)` lists the
@@ -114,10 +118,7 @@ impl Reds {
             }),
         };
         if let Some(n) = note {
-            self.notes
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .push(n);
+            self.notes.lock().unwrap_or_else(|e| e.into_inner()).push(n);
         }
         Some(fold)
     }
@@ -245,7 +246,10 @@ mod tests {
         // A merge commit with a sign-off, and the agent's own commit is still under it.
         let msg = git(&wt, &["log", "-1", "--format=%B"]);
         assert!(msg.contains("Signed-off-by:"), "{msg}");
-        assert_eq!(git(&wt, &["rev-list", "--count", "--merges", "HEAD^1..HEAD"]), "1");
+        assert_eq!(
+            git(&wt, &["rev-list", "--count", "--merges", "HEAD^1..HEAD"]),
+            "1"
+        );
         let notes = r.take_notes();
         assert_eq!(notes.len(), 1);
         assert!(notes[0].contains("m::t") && notes[0].contains("merged into your branch"));
@@ -271,13 +275,22 @@ mod tests {
         std::fs::write(wt.join("mine.txt"), "edited\n").unwrap();
         let head = git(&wt, &["rev-parse", "HEAD"]);
         let r = reds();
-        assert_eq!(r.sync(&wt, "base", &nothing), Some(BaseFold::Uncommitted(1)));
+        assert_eq!(
+            r.sync(&wt, "base", &nothing),
+            Some(BaseFold::Uncommitted(1))
+        );
         assert_eq!(git(&wt, &["rev-parse", "HEAD"]), head);
-        assert_eq!(std::fs::read_to_string(wt.join("mine.txt")).unwrap(), "edited\n");
+        assert_eq!(
+            std::fs::read_to_string(wt.join("mine.txt")).unwrap(),
+            "edited\n"
+        );
         assert!(!wt.join("fix.txt").exists());
         assert_eq!(r.merges(), 0);
         let n = r.take_notes();
-        assert!(n[0].contains("not merged") && n[0].contains("uncommitted"), "{n:?}");
+        assert!(
+            n[0].contains("not merged") && n[0].contains("uncommitted"),
+            "{n:?}"
+        );
     }
 
     #[test]
@@ -301,7 +314,9 @@ mod tests {
         ));
         assert_eq!(git(&wt, &["status", "--porcelain"]), status);
         assert_eq!(
-            std::fs::read_to_string(wt.join("a.txt")).unwrap().contains("<<<<<<<"),
+            std::fs::read_to_string(wt.join("a.txt"))
+                .unwrap()
+                .contains("<<<<<<<"),
             true
         );
         assert_eq!(r.merges(), 0);
@@ -350,6 +365,9 @@ mod tests {
         let before = key(&wt);
         r.sync(&wt, "base", &nothing);
         assert_ne!(key(&wt), before);
-        assert_eq!(std::fs::read_to_string(wt.join("fix.txt")).unwrap(), "fixed\n");
+        assert_eq!(
+            std::fs::read_to_string(wt.join("fix.txt")).unwrap(),
+            "fixed\n"
+        );
     }
 }
