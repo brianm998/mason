@@ -4912,7 +4912,7 @@ mod signaled_tests {
 mod review_diff_tests {
     #[test]
     fn develop_tool_timeout_covers_the_queue_wait_and_the_whole_check() {
-        let m = |n| Duration::from_secs(n * 60);
+        let m = |n: u64| Duration::from_secs(n * 60);
         // 30 min budget, 50 min tests: a check queued for the step's whole extended life
         // (60 min) and then run to its limit still fits in one tool call.
         let limit = develop_tool_timeout(m(10), m(30), m(50));
