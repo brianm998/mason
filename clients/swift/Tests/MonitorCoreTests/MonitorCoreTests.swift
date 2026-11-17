@@ -358,6 +358,8 @@ final class MonitorCoreTests: XCTestCase {
         m.skipAllTests(m.sectionRows("testing"))
         XCTAssertEqual(sent.map { $0.skip.task }, [10, 12])
         XCTAssertEqual(sent.map { $0.skip.step }, ["test", "test"])
+        // masond answers the first two (task #522: a second click while one is pending sends nothing).
+        for c in sent { var r = Mason_V1_CommandResult(); r.id = c.id; r.ok = false; r.error = "no"; var sm = Mason_V1_ServerMessage(); sm.result = r; m.apply(sm) }
         m.skipTest(10, step: "test")
         XCTAssertEqual(sent.last?.skip.task, 10, "one row's button sends the same command")
         XCTAssertEqual(MonitorModel.suiteProgress(a), "3 of 8 suites")
