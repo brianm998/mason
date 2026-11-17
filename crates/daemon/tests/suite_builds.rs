@@ -312,8 +312,11 @@ fn after_a_red_full_run_an_unscoped_check_reruns_only_the_failures_and_the_chang
         )
         .replace(
             "rerun = \"echo RAN-RERUN {tests};",
-            "rerun = \"echo RAN-RERUN {tests}; [ -f hello.txt ] || echo 'test a::b ... FAILED';",
-        );
+            "rerun = \"echo RAN-RERUN {tests}; [ -f crates/pk/hello.txt ] || echo 'test a::b ... FAILED';",
+        )
+        .replace(r#""hello.txt" = ["only"]"#, r#""crates/**" = ["only"]"#);
+    // Every changed path belongs to the one crate, so the changed packages can be named.
+    let checks = CHECKS.replace("hello.txt", "crates/pk/hello.txt");
     let run = json!({"call": {"tool": "run_check", "args": {"name": "tests"}}});
     let turns = json!([
         {"sh": "mkdir -p crates/pk/src && printf '[package]\\nname = \"pk\"\\nversion = \"0.1.0\"\\nedition = \"2021\"\\n' > crates/pk/Cargo.toml && : > crates/pk/src/lib.rs && git add -A && git -c user.name=t -c user.email=t@t commit -qm crate"},
@@ -321,7 +324,7 @@ fn after_a_red_full_run_an_unscoped_check_reruns_only_the_failures_and_the_chang
         run,
         // Narrowed to the one failure and the changed crate; still red.
         run,
-        {"sh": "echo hello > hello.txt && git add -A && git -c user.name=t -c user.email=t@t commit -qm fix"},
+        {"sh": "echo hello > crates/pk/hello.txt && git add -A && git -c user.name=t -c user.email=t@t commit -qm fix"},
         // Narrowed again (the last run was red); green.
         run,
         // Green last time: full.
