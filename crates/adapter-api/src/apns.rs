@@ -341,9 +341,23 @@ mod tests {
         let a = cached_in(&local, &pem, "cache-kid", "T", 1_000_000).unwrap();
         let b = cached_in(&local, &pem, "cache-kid", "T", 1_000_000 + JWT_TTL_MS - 1).unwrap();
         assert_eq!(a, b);
-        let c = cached_in(&local, &pem, "cache-kid", "T", 1_000_000 + JWT_TTL_MS + 5000).unwrap();
+        let c = cached_in(
+            &local,
+            &pem,
+            "cache-kid",
+            "T",
+            1_000_000 + JWT_TTL_MS + 5000,
+        )
+        .unwrap();
         assert_ne!(a, c);
-        let d = cached_in(&local, &pem, "other-kid", "T", 1_000_000 + JWT_TTL_MS + 5000).unwrap();
+        let d = cached_in(
+            &local,
+            &pem,
+            "other-kid",
+            "T",
+            1_000_000 + JWT_TTL_MS + 5000,
+        )
+        .unwrap();
         assert_ne!(c, d);
     }
 
