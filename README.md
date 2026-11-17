@@ -428,4 +428,5 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s494**: The Compose app's test JVM now allows native access, so the Skia-backed MascotTest and TopBarTest tests stop failing with UnsatisfiedLinkError.
 - **s502**: a new `compile` gate holds further compiles while `syspolicyd` uses 300% CPU or more (`[cpu] syspolicyd_max_pct`), so MASON's builds and test runs cannot swamp the Mac's code checks again.
 - **s507**: `every_state_and_event_pair` passes again because `events()` in the engine matrix test no longer lists `Deferred` and `Undeferred` twice, and a duplicate name now fails with a clear message.
+- **s520**: `run_check` names each failing test that also failed in develop's latest recorded result for the suite ("red on develop at <sha> too: not your change; merge develop when it is fixed"), without waiting for the test to be quarantined.
 <!-- status:end -->
