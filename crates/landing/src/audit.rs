@@ -455,9 +455,69 @@ pub fn feedback(d: &[Dropped]) -> String {
     s
 }
 
+/// A ready-to-paste `removes` array for the lines the task's own diff replaced: one
+/// `{"file","line","reason"}` entry each, `reason` left to fill in. Empty when none.
+pub fn removes_block(pairs: &[Replaced]) -> String {
+    if pairs.is_empty() {
+        return String::new();
+    }
+    let entries: Vec<serde_json::Value> = pairs
+        .iter()
+        .take(MAX_LISTED)
+        .map(|p| {
+            serde_json::json!({"file": p.file, "line": p.line, "reason": "<fill in>"})
+        })
+        .collect();
+    serde_json::to_string_pretty(&entries).unwrap_or_default()
+}
+
+/// [`feedback`] plus, for the dropped lines the task's own change replaced, the `removes`
+/// entries to paste if the replacement was on purpose.
+pub fn feedback_with(d: &[Dropped], replaced: &[Replaced]) -> String {
+    let mut s = feedback(d);
+    if replaced.is_empty() {
+        return s;
+    }
+    s.push_str(
+        "\n\nThese listed lines were replaced by a changed line at the same place in your \
+         diff. If your change replaced them on purpose, paste these entries into `removes` \
+         when you submit, replacing <fill in> with the reason. If it did not, restore the \
+         lines instead.\n",
+    );
+    for p in replaced.iter().take(MAX_LISTED) {
+        s.push_str(&format!(
+            "\n{}:\n  was:         {}\n  replaced by: {}",
+            p.file,
+            p.line.trim_end(),
+            p.replacement.replace('\n', "\n               ").trim_end()
+        ));
+    }
+    s.push_str("\n\nremoves:\n");
+    s.push_str(&removes_block(replaced));
+    s
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_replaced_dropped_line_yields_a_removes_block_that_parses() {
+        let diff = "diff --git a/f.rs b/f.rs\n--- a/f.rs\n+++ b/f.rs\n@@ -3 +3 @@\n-old line\n+new line\n";
+        let d = vec![Dropped {
+            file: "f.rs".into(),
+            line: "old line".into(),
+        }];
+        let r = replaced_in(&d, &parse_hunks(diff));
+        let text = feedback_with(&d, &r);
+        let json = &text[text.find("removes:\n").unwrap() + 9..];
+        let v: Vec<serde_json::Value> = serde_json::from_str(json).unwrap();
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0]["file"], "f.rs");
+        assert_eq!(v[0]["line"], "old line");
+        assert!(v[0]["reason"].is_string());
+        assert_eq!(feedback_with(&d, &[]), feedback(&d));
+    }
 
     fn one(file: &str, lines: &[&str]) -> BTreeMap<String, Vec<String>> {
         BTreeMap::from([(
