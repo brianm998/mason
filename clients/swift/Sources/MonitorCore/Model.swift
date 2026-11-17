@@ -39,14 +39,22 @@ public final class LiveState: ObservableObject {
 public final class MonitorModel: ObservableObject {
     // From the daemon.
     @Published public var header: HeaderView? { didSet { prunePauseCollapse() } }
-    @Published public var sidebar: SidebarView? { didSet { sidebarRevision &+= 1 } }
+    @Published public var sidebar: SidebarView? { didSet { sidebarRevision &+= 1; linkRevision &+= 1 } }
     /// Bumped on every new sidebar, so derived layouts know when to be rebuilt.
     var sidebarRevision: UInt64 = 0
+    /// Bumped when the sidebar or the open task changes: what `isKnownTask` and `linkify` depend on.
+    var linkRevision: UInt64 = 0
+    private var knownTaskCache: (revision: UInt64, ids: Set<UInt64>)?
+    private var linkCache: (revision: UInt64, segments: [String: [LinkSegment]]) = (0, [:])
+    /// How many times `linkify` actually ran `Linkify.segments` (for tests and the exit test).
+    public private(set) var linkifyPasses = 0
+    /// How many task-id lookups `linkify` made.
+    public private(set) var isKnownTaskCalls = 0
     var sidebarEntriesCache: (key: SidebarEntriesKey, entries: [SidebarEntry])?
     @Published public var home: HomeView?
     /// The CPU shares, observed apart from the whole model: the CPU section watches only this.
     public let cpu = CpuModel()
-    @Published public var taskDetail: TaskDetailView?
+    @Published public var taskDetail: TaskDetailView? { didSet { linkRevision &+= 1 } }
     @Published public var landing: LandingView?
     @Published public var usage: UsageView?
     @Published public var editor: EditorView?
@@ -341,6 +349,11 @@ public final class MonitorModel: ObservableObject {
     /// What the last Skip testing click did ("Skipped testing for 4 tasks", "Nothing to skip: ..."),
     /// kept apart from `lastResult` so the daemon's next ok result does not wipe it.
     @Published public var skipNotice: String?
+    /// Commands sent and not yet settled, by id (task #522).
+    @Published public internal(set) var pending: [String: PendingCommand] = [:]
+    /// The daemon's refusal of the last command about a task, by task id (0: not about a task).
+    @Published public internal(set) var actionErrors: [UInt64: String] = [:]
+    var nextActionId = 0
     /// A long command opened from a Compilation row; nil: the dialog is closed.
     @Published public var commandDialog: CommandDialog?
     /// Open session found the step running: the task to ask about. Answer with `answerSessionPrompt`.
@@ -423,20 +436,33 @@ public final class MonitorModel: ObservableObject {
     /// Whether `n` is a task this monitor has heard of (in the sidebar, or named by the open
     /// task's page), so a `#n` in text can be a link to its page.
     public func isKnownTask(_ n: UInt64) -> Bool {
-        if sidebar?.sections.contains(where: { $0.rows.contains { $0.id == n } }) == true { return true }
+        isKnownTaskCalls += 1
+        if let c = knownTaskCache, c.revision == linkRevision { return c.ids.contains(n) }
+        var ids = Set<UInt64>()
+        for sec in sidebar?.sections ?? [] { for r in sec.rows { ids.insert(r.id) } }
         if let d = taskDetail, d.hasRow {
             let r = d.row
-            if r.id == n || r.blockers.contains(n) || r.blocks.contains(n) { return true }
-            if d.debts.contains(where: { $0.task == n }) { return true }
-            if d.hasProposal && d.proposal.filedBy == n { return true }
+            ids.insert(r.id)
+            ids.formUnion(r.blockers)
+            ids.formUnion(r.blocks)
+            for debt in d.debts { ids.insert(debt.task) }
+            if d.hasProposal { ids.insert(d.proposal.filedBy) }
         }
-        return false
+        knownTaskCache = (linkRevision, ids)
+        return ids.contains(n)
     }
 
-    /// `text` as plain text, task links and URL links, for the open task's page.
+    /// `text` as plain text, task links and URL links, for the open task's page. The result is
+    /// kept per text until the sidebar or the open task changes.
     public func linkify(_ text: String) -> [LinkSegment] {
-        Linkify.segments(text, isKnownTask: { [unowned self] in self.isKnownTask($0) },
-                         ciLinks: taskDetail?.ciLinks ?? [])
+        if linkCache.revision != linkRevision { linkCache = (linkRevision, [:]) }
+        if let hit = linkCache.segments[text] { return hit }
+        linkifyPasses += 1
+        let made = Linkify.segments(text, isKnownTask: { [unowned self] in self.isKnownTask($0) },
+                                    ciLinks: taskDetail?.ciLinks ?? [])
+        if linkCache.segments.count > 512 { linkCache.segments.removeAll() }
+        linkCache.segments[text] = made
+        return made
     }
 
     /// Where the shown page is scrolled now. Not published: it changes every frame of a scroll,
@@ -651,6 +677,9 @@ public final class MonitorModel: ObservableObject {
         }
         var c = c
         if c.actor.isEmpty { c.actor = identity }
+        // Recorded before the write, so the pressed control redraws at once; a second click
+        // while one is in flight sends nothing.
+        guard beginPending(&c) else { return }
         sender?(c)
     }
 
@@ -668,8 +697,8 @@ public final class MonitorModel: ObservableObject {
     /// Move a deferred task back to proposed.
     public func undefer(_ task: UInt64) { command { $0.undefer = .with { $0.task = task } } }
     /// The priorities the approval picker offers; it starts at `defaultApprovalPriority`.
-    public static let approvalPriorities = ["urgent", "high", "normal", "low"]
-    public static let defaultApprovalPriority = "normal"
+    nonisolated public static let approvalPriorities = ["urgent", "high", "normal", "low"]
+    nonisolated public static let defaultApprovalPriority = "normal"
     /// The tasks the Add blocker picker offers for `row`: any task in the sidebar that is not
     /// itself, not already a blocker, and could still land (not landed, canceled or failed).
     public func blockerCandidates(for row: TaskRow) -> [TaskRow] {
@@ -1060,6 +1089,7 @@ public final class MonitorModel: ObservableObject {
             connected = true
             reconnecting = false
             announcer.connectionRestored()
+            pending = [:]
             if w.resume == .snapshot { lastSeq = 0 }
             daemonVersion = w.version
             localDaemon = w.role.isEmpty
@@ -1080,6 +1110,7 @@ public final class MonitorModel: ObservableObject {
             apply(u.view)
         case .result(let r)?:
             lastResult = r.ok ? nil : r.error
+            settle(result: r)
             handle(result: r)
             onResult?(r)
         default:
@@ -1121,6 +1152,7 @@ public final class MonitorModel: ObservableObject {
             progress.reset(tasks: x.sections.flatMap { $0.rows.map(\.id) })
             sidebar = x
             noteAttention(x)
+            settleAfterView()
         case .home(let x)?:
             home = x
             cpu.update(x)
@@ -1133,6 +1165,7 @@ public final class MonitorModel: ObservableObject {
             liveLog = x.logTail.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
             if liveLog.last == "" { liveLog.removeLast() }
             liveLog = Array(liveLog.suffix(Self.logKeep))
+            settleAfterView()
         case .landing(let x)?: landing = x
         case .usage(let x)?: usage = x
         case .editor(let x)?: editor = x
@@ -1197,6 +1230,7 @@ public final class MonitorModel: ObservableObject {
     public func disconnected(now: Date = Date()) {
         connected = false
         reconnecting = true
+        markPendingNotSent()
         announcer.connectionLost(at: now)
     }
 }
@@ -1246,6 +1280,12 @@ public struct HealthSnapshot: Equatable, Sendable {
     public var compileCpuMax: Int = 50
     /// Where the reading comes from (`mach`, `proc`, `top`, `loadavg`, `assumed-busy`); empty if not said.
     public var cpuSource: String = ""
+    /// syspolicyd's CPU use and the limit on it, when the daemon gates on it.
+    public var syspolicydPct: Int? = nil
+    public var syspolicydMaxPct: Int = 0
+
+    /// The syspolicyd line of the Health page's CPU section; nil with no gate.
+    public var policyLine: String? { policyReadingLine(busy: syspolicydPct, max: syspolicydMaxPct) }
 
     /// The CPU line of the Health page.
     public var cpuLine: String {
@@ -1271,6 +1311,8 @@ public struct HealthSnapshot: Equatable, Sendable {
             cpuBusy = c["busy_pct"] as? Int
             compileCpuMax = c["compile_max_pct"] as? Int ?? 50
             cpuSource = c["source"] as? String ?? ""
+            syspolicydPct = c["syspolicyd_pct"] as? Int
+            syspolicydMaxPct = c["syspolicyd_max_pct"] as? Int ?? 0
         }
     }
 }

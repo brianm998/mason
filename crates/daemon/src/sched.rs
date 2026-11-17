@@ -88,7 +88,17 @@ pub struct ResourceCfg {
     /// Seconds after which a waiting request goes ahead of all other pipeline
     /// work that is not a landing, oldest first (0: requests do not age).
     pub max_wait_s: u64,
+    /// Seconds a waiting exclusive request freezes ordinary work before it gives that up, and
+    /// work runs again until the machine drains (0: no bound), `[order] exclusive_max_wait_s`.
+    pub exclusive_max_wait_s: u64,
+    /// Origins (`[order] exclusive_origins`) that may take the whole machine with `--exclusive`
+    /// when they are not a person. Any other non-person request is bounded to all `compile`
+    /// units instead.
+    pub exclusive_origins: Vec<String>,
 }
+
+/// The default `order.exclusive_max_wait_s`: ten minutes.
+pub const DEFAULT_EXCLUSIVE_MAX_WAIT_S: u64 = 600;
 
 /// The default `order.max_wait_s`: half an hour.
 pub const DEFAULT_MAX_WAIT_S: u64 = 1800;
@@ -136,6 +146,8 @@ impl Default for ResourceCfg {
             priority_first: false,
             from_file: Default::default(),
             max_wait_s: DEFAULT_MAX_WAIT_S,
+            exclusive_max_wait_s: DEFAULT_EXCLUSIVE_MAX_WAIT_S,
+            exclusive_origins: vec![],
         }
     }
 }
@@ -158,6 +170,26 @@ pub fn parse_resource_cfg(text: &str) -> Result<ResourceCfg, String> {
                 c.max_wait_s = v.as_integer().filter(|n| *n >= 0).ok_or_else(|| {
                     "resources.toml: order.max_wait_s must be a whole number".to_string()
                 })? as u64;
+                continue;
+            }
+            if key == "order" && name == "exclusive_max_wait_s" {
+                c.exclusive_max_wait_s = v.as_integer().filter(|n| *n >= 0).ok_or_else(|| {
+                    "resources.toml: order.exclusive_max_wait_s must be a whole number".to_string()
+                })? as u64;
+                continue;
+            }
+            if key == "order" && name == "exclusive_origins" {
+                c.exclusive_origins = v
+                    .as_array()
+                    .and_then(|a| {
+                        a.iter()
+                            .map(|x| x.as_str().map(str::to_string))
+                            .collect::<Option<Vec<_>>>()
+                    })
+                    .ok_or_else(|| {
+                        "resources.toml: order.exclusive_origins must be a list of names"
+                            .to_string()
+                    })?;
                 continue;
             }
             let n = v
@@ -355,6 +387,10 @@ struct State {
     /// How busy `syspolicyd` is, and the limit on it. `None`: no syspolicyd gate.
     policy: Option<Arc<dyn PolicySource>>,
     policy_max: u32,
+    /// The latest `syspolicyd` reading: (busy %, limit %), `None` with no gate or no reading.
+    policy_read: Option<(u32, u32)>,
+    /// When the reading first went to the limit or over it and has stayed there since.
+    policy_since: Option<u64>,
     /// When the last scheduling pass ran. A waiter skips its own pass while this is
     /// younger than the broker's tick (see `acquire`).
     last_pass: Option<Instant>,
@@ -434,6 +470,8 @@ pub struct Broker {
     /// Wait explanation per waiting task, republished by every `pass`. Readers
     /// clone the `Arc` and never take `st`.
     waits_snap: std::sync::RwLock<Arc<BTreeMap<TaskId, String>>>,
+    /// Per waiting task: its holders' grant times and the waiting count of its class.
+    waits_holders: std::sync::RwLock<Arc<BTreeMap<TaskId, (Vec<u64>, u32)>>>,
     /// Time each task has spent under a CPU cause, updated by every `pass`.
     cpu_hold: Mutex<mason_scheduler::CpuHold>,
     /// The largest of those, for readers that must not take `st`.
@@ -488,6 +526,19 @@ pub struct Standing {
     /// Steps on the shortest start-to-landed path of the task's definition.
     pub span: u32,
     pub priority: u8,
+}
+
+/// The origin of a request made by a person at a terminal (s552).
+pub const PERSON: &str = "person";
+
+/// A request just queued by [`Broker::lease_open_from`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Opened {
+    pub id: u64,
+    /// The rank chosen: `person` or `pipeline`.
+    pub rank: &'static str,
+    /// What was changed on the request, when its `--exclusive` was bounded.
+    pub converted: Option<String>,
 }
 
 /// What an interactive caller sees of its request.
@@ -614,6 +665,9 @@ impl Broker {
                 ledger.pace_compiles(u64::from(cfg.compile_settle_s) * 1000);
             }
         }
+        if cfg.exclusive_max_wait_s > 0 {
+            ledger.set_exclusive_max_wait(Some(cfg.exclusive_max_wait_s.saturating_mul(1000)));
+        }
         if cfg.max_wait_s > 0 {
             ledger.set_max_wait(Some(cfg.max_wait_s.saturating_mul(1000)));
         }
@@ -652,6 +706,8 @@ impl Broker {
                 stall: None,
                 policy: None,
                 policy_max: cfg.syspolicyd_max_pct,
+                policy_read: None,
+                policy_since: None,
                 last_pass: None,
                 pass_running: false,
                 passes: 0,
@@ -660,6 +716,7 @@ impl Broker {
             locks,
             limits_file,
             waits_snap: Default::default(),
+            waits_holders: Default::default(),
             cpu_hold: Default::default(),
             cpu_held_ms: Default::default(),
             pass_count: Default::default(),
@@ -950,11 +1007,28 @@ impl Broker {
                     .map(|busy_pct| PolicyGate { busy_pct, max_pct })
             });
         st.ledger.set_policy(policy);
+        st.policy_read = policy.map(|p| (p.busy_pct, p.max_pct));
+        match policy {
+            Some(p) if p.busy_pct >= p.max_pct => {
+                if st.policy_since.is_none() {
+                    st.policy_since = Some(crate::daemon::now_ms());
+                }
+            }
+            _ => st.policy_since = None,
+        }
         st.cpu_busy = st.cpu.busy_pct();
         st.cpu_busy.map(|busy_pct| CpuGate {
             busy_pct,
             max_pct: st.cpu_max,
         })
+    }
+
+    /// The `syspolicyd` reading, read afresh: (busy %, limit %, since when it has been at or
+    /// over the limit). `None` while there is no gate or no reading.
+    pub fn policy_hold(&self) -> Option<(u32, u32, Option<u64>)> {
+        let mut st = lock(&self.st);
+        self.cpu_gate(&mut st);
+        st.policy_read.map(|(b, m)| (b, m, st.policy_since))
     }
 
     /// The overall CPU reading the compile gate uses, to read from outside the broker.
@@ -1199,6 +1273,31 @@ impl Broker {
             .filter_map(|(id, w)| by_id.get(id).map(|t| (*t, explain(w, now))))
             .collect();
         *self.waits_snap.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(snap);
+        let mut depth: HashMap<String, u32> = HashMap::new();
+        for (id, w) in waits.waits.iter() {
+            if by_id.contains_key(id) {
+                *depth.entry(w.class()).or_default() += 1;
+            }
+        }
+        let holders: BTreeMap<TaskId, (Vec<u64>, u32)> = waits
+            .waits
+            .iter()
+            .filter_map(|(id, w)| {
+                by_id.get(id).map(|t| {
+                    (
+                        *t,
+                        (
+                            w.held_by.iter().map(|h| h.since).collect(),
+                            depth.get(&w.class()).copied().unwrap_or(0),
+                        ),
+                    )
+                })
+            })
+            .collect();
+        *self
+            .waits_holders
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = Arc::new(holders);
         let mut hold = self.cpu_hold.lock().unwrap_or_else(|e| e.into_inner());
         hold.observe(
             now,
@@ -1214,6 +1313,14 @@ impl Broker {
     /// The most time one waiting task has spent under a CPU cause (at most one pass old).
     pub fn cpu_gate_held_ms(&self) -> u64 {
         self.cpu_held_ms.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Holder grant times and class queue depth per waiting task (at most one pass old).
+    pub fn waits_holders(&self) -> Arc<BTreeMap<TaskId, (Vec<u64>, u32)>> {
+        self.waits_holders
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// The published wait explanations (at most one pass old).
@@ -1785,21 +1892,74 @@ impl Broker {
         standing: Option<Standing>,
         expected_ms: Option<u64>,
     ) -> u64 {
-        self.open_lease(label, uses, None, expected_ms, |st, now| match standing {
-            None => Rank::new(true, 0, 0, now, st.rank_seq, false),
-            Some(s) => order(
+        self.lease_open_from(label, uses, standing, expected_ms, None)
+            .id
+    }
+
+    /// [`Broker::lease_open_expecting`] with who is really waiting (s552). `origin` is `None` or
+    /// `person` for a person at a terminal: ranked first, and `--exclusive` takes the whole
+    /// machine. Any other origin (an agent, a hook, no terminal, a task's environment) is
+    /// ranked as pipeline work, next after landings (the task's own standing when it has one),
+    /// and its `--exclusive` becomes all `compile` units unless `[order] exclusive_origins`
+    /// names the origin. What was chosen is returned and shown on the request's label.
+    pub fn lease_open_from(
+        &self,
+        label: &str,
+        uses: &BTreeMap<String, u32>,
+        standing: Option<Standing>,
+        expected_ms: Option<u64>,
+        origin: Option<&str>,
+    ) -> Opened {
+        let person = standing.is_none() && origin.is_none_or(|o| o == PERSON);
+        let (uses, converted) = match origin {
+            Some(o) if o != PERSON => self.bound_exclusive(uses, o),
+            _ => (uses.clone(), None),
+        };
+        let shown = match &converted {
+            Some(c) => format!("{label} [{c}]"),
+            None => label.to_string(),
+        };
+        let id = self.open_lease(&shown, &uses, None, expected_ms, |st, now| {
+            if person {
+                return Rank::new(true, 0, 0, now, st.rank_seq, false);
+            }
+            let (steps, priority, span) =
+                standing.map_or((0, 0, 1), |s| (s.steps_remaining, s.priority, s.span));
+            order(
                 st,
-                Rank::new(
-                    false,
-                    s.steps_remaining,
-                    s.priority,
-                    now,
-                    st.rank_seq,
-                    false,
-                )
-                .with_span(s.span),
-            ),
-        })
+                Rank::new(false, steps, priority, now, st.rank_seq, false).with_span(span),
+            )
+        });
+        Opened {
+            id,
+            rank: if person { "person" } else { "pipeline" },
+            converted,
+        }
+    }
+
+    /// A non-person request for the whole machine, unless the owner allows `origin`, asks for
+    /// every `compile` unit instead (s552). Returns the uses to queue and what was changed.
+    pub fn bound_exclusive(
+        &self,
+        uses: &BTreeMap<String, u32>,
+        origin: &str,
+    ) -> (BTreeMap<String, u32>, Option<String>) {
+        let st = lock(&self.st);
+        if uses.get(EXCLUSIVE).copied().unwrap_or(0) == 0
+            || st.base.exclusive_origins.iter().any(|o| o == origin)
+        {
+            return (uses.clone(), None);
+        }
+        let all = st.ledger.capacity(COMPILE).map_or(1, |c| c.units.max(1));
+        let mut out = uses.clone();
+        out.remove(EXCLUSIVE);
+        out.insert(COMPILE.to_string(), all);
+        (
+            out,
+            Some(format!(
+                "exclusive from {origin} is all {all} compile units, not the machine"
+            )),
+        )
     }
 
     /// Queue a request from another pipeline. It is ranked as pipeline work,
@@ -1812,7 +1972,13 @@ impl Broker {
         uses: &BTreeMap<String, u32>,
         o: &crate::outside::Outside,
     ) -> u64 {
-        let shown = crate::outside::display_label(&o.pipeline, label);
+        let (uses, converted) = self.bound_exclusive(uses, &o.pipeline);
+        let uses = &uses;
+        let label = match &converted {
+            Some(c) => format!("{label} [{c}]"),
+            None => label.to_string(),
+        };
+        let shown = crate::outside::display_label(&o.pipeline, &label);
         self.open_lease(&shown, uses, Some(o.pipeline.clone()), None, |st, now| {
             order(
                 st,
@@ -2165,6 +2331,8 @@ impl Broker {
             settle_s: settle,
             rules,
             cpu_source: st.cpu.source().to_string(),
+            syspolicyd_pct: st.policy_read.map_or(-1, |(b, _)| b as i32),
+            syspolicyd_max_pct: st.policy_read.map_or(0, |(_, m)| m),
             notes: st
                 .notes
                 .iter()
@@ -2276,6 +2444,8 @@ impl Broker {
                 "compile_max_pct": st.cpu_max,
                 "source": st.cpu.source(),
                 "failed_reads": st.cpu.failed_reads(),
+                "syspolicyd_pct": st.policy_read.map(|(b, _)| b),
+                "syspolicyd_max_pct": st.policy_read.map(|(_, m)| m),
             },
             "now_ms": now,
         })

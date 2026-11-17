@@ -24,6 +24,9 @@ fun main(args: Array<String>) = application {
             it.announcer.sink = SystemSink()
             it.copier = { text -> mason.monitor.ui.copyToClipboard(text) }
             it.launcher = { argv -> openTerminal(argv) }
+            val pool = java.util.concurrent.Executors.newCachedThreadPool { r -> Thread(r, "monitor-bg").also { t -> t.isDaemon = true } }
+            it.background = pool
+            it.ui = java.util.concurrent.Executor { r -> javax.swing.SwingUtilities.invokeLater(r) }
         }
     }
     remember { UiWatchdog({ job -> javax.swing.SwingUtilities.invokeLater(Runnable { job() }) }).also { it.start() }; 0 }
@@ -102,10 +105,14 @@ internal fun shortcut(model: MonitorModel, e: KeyEvent): Boolean {
 
 /** The daemon has built a new monitor at [path]: start it and close this one. */
 fun installMonitor(model: MonitorModel, path: String) {
-    val started = runCatching {
-        ProcessBuilder(path).redirectErrorStream(true).redirectOutput(ProcessBuilder.Redirect.DISCARD).start()
-    }.isSuccess
-    if (started) kotlin.system.exitProcess(0) else model.monitorUpdateFailed("The new monitor would not start; this one keeps running.")
+    model.background.execute {
+        val started = runCatching {
+            ProcessBuilder(path).redirectErrorStream(true).redirectOutput(ProcessBuilder.Redirect.DISCARD).start()
+        }.isSuccess
+        model.ui.execute {
+            if (started) kotlin.system.exitProcess(0) else model.monitorUpdateFailed("The new monitor would not start; this one keeps running.")
+        }
+    }
 }
 
 /**

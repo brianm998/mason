@@ -338,8 +338,13 @@ pub struct LostReport {
     /// The journal's last byte is not a newline: the child was cut off mid-line.
     pub ends_mid_line: bool,
     pub last_heartbeat_ms: Option<u64>,
-    /// When the host was seen gone (ms since the epoch).
+    /// When the host was seen gone (ms since the epoch): the detection time, not the
+    /// time of death, which lies between the last heartbeat and this.
     pub at_ms: u64,
+    /// The last lines of the host's `kills` ledger: who signalled it, and when.
+    pub kills: Vec<String>,
+    /// Where the loss is put down to: the ledger, a daemon stop, or no record.
+    pub attribution: String,
 }
 
 impl std::fmt::Display for LostReport {
@@ -360,6 +365,13 @@ impl std::fmt::Display for LostReport {
             None => write!(f, ", signal unknown")?,
         }
         write!(f, ", no exit record")?;
+        match self.last_heartbeat_ms {
+            Some(h) => write!(f, ", last heartbeat {}", clock(h))?,
+            None => write!(f, ", no heartbeat")?,
+        }
+        if !self.attribution.is_empty() {
+            write!(f, "; {}", self.attribution)?;
+        }
         write!(
             f,
             "; child pid {} {}",
@@ -400,6 +412,25 @@ pub fn lost_report(dir: &Path) -> io::Result<LostReport> {
     };
     let (signal, seen) = crate::launcher::exit_signal_within(dir, wait)
         .map_or((None, None), |(s, at)| (s, Some(at)));
+    let last_heartbeat_ms: Option<u64> = fs::read_to_string(dir.join("hb"))
+        .ok()
+        .and_then(|s| s.trim().parse().ok());
+    let at_ms = seen.unwrap_or_else(now_ms);
+    let kills: Vec<String> = {
+        let all: Vec<String> = fs::read_to_string(dir.join("kills"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        all[all.len().saturating_sub(5)..].to_vec()
+    };
+    // The daemon-stops file sits beside daemon-starts: in the hosts directory's parent.
+    let stops = dir
+        .parent()
+        .and_then(Path::parent)
+        .and_then(|p| fs::read_to_string(p.join("daemon-stops")).ok())
+        .unwrap_or_default();
+    let attribution = attribute(&kills, &stops, last_heartbeat_ms, at_ms, STOP_WINDOW_MS);
     Ok(LostReport {
         id: info.id.clone(),
         host_pid: info.host_pid,
@@ -409,11 +440,74 @@ pub fn lost_report(dir: &Path) -> io::Result<LostReport> {
         signal,
         journal_len: journal.len() as u64,
         ends_mid_line: journal.last().is_some_and(|b| *b != b'\n'),
-        last_heartbeat_ms: fs::read_to_string(dir.join("hb"))
-            .ok()
-            .and_then(|s| s.trim().parse().ok()),
-        at_ms: seen.unwrap_or_else(now_ms),
+        last_heartbeat_ms,
+        at_ms,
+        kills,
+        attribution,
     })
+}
+
+/// How soon after a host's last heartbeat (ms) a daemon stop must lie to be named
+/// as the likely cause. Same as `hostloss::RESTART_WINDOW_MS`.
+pub const STOP_WINDOW_MS: u64 = 120_000;
+
+/// Say what is known of who ended a lost host. In order: a sender named in the
+/// host's kill ledger; a daemon stop (`<ms> <what>` per line of `stops`) after the
+/// last heartbeat and within `window` ms of it; otherwise that nothing was recorded.
+pub fn attribute(
+    kills: &[String],
+    stops: &str,
+    last_beat: Option<u64>,
+    seen: u64,
+    window: u64,
+) -> String {
+    if let Some(k) = kills.last() {
+        let mut it = k.splitn(3, ' ');
+        let at = it.next().and_then(|t| t.parse::<u64>().ok());
+        let who = it.next().unwrap_or("?");
+        let rest = it.next().unwrap_or("");
+        return match at {
+            Some(t) => format!("killed by {who} at {} ({rest})", clock(t)),
+            None => format!("killed by {who} ({rest})"),
+        };
+    }
+    if let Some(beat) = last_beat {
+        let stop = stops
+            .lines()
+            .filter_map(|l| {
+                let (t, what) = l.split_once(' ').unwrap_or((l, ""));
+                Some((t.trim().parse::<u64>().ok()?, what.trim()))
+            })
+            .filter(|(t, _)| *t >= beat && *t <= seen && *t - beat <= window)
+            .min_by_key(|(t, _)| *t);
+        if let Some((t, what)) = stop {
+            return format!(
+                "daemon stop ({what}) at {}, last heartbeat {} s before it",
+                clock(t),
+                (t - beat) / 1000
+            );
+        }
+    }
+    "no kill recorded; not at a daemon stop (the death is between the last heartbeat and the time seen gone)".into()
+}
+
+/// Append a line naming the sender to the host directory's `kills` ledger, before a
+/// signal is sent. Errors are ignored: the kill goes ahead regardless.
+pub fn note_kill(dir: &Path, who: &str, signal: i32) {
+    use std::io::Write;
+    let (host, child) = HostInfo::read(dir).map_or((0, 0), |i| (i.host_pid, i.child_pid));
+    let line = format!(
+        "{} {} pid={host} child={child} signal={signal}\n",
+        now_ms(),
+        who.replace(' ', "_")
+    );
+    if let Ok(mut f) = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("kills"))
+    {
+        let _ = f.write_all(line.as_bytes());
+    }
 }
 
 /// What `reap_dir` did with one registry entry.
@@ -431,6 +525,11 @@ pub struct Reaped {
 /// or our own process group is never signalled, and an entry without start
 /// strings (written by an older host) is left alone.
 pub fn reap_dir(dir: &Path) -> Reaped {
+    reap_dir_by(dir, "reap_dir")
+}
+
+/// [`reap_dir`] naming the sender `who` in the host's `kills` ledger.
+pub fn reap_dir_by(dir: &Path, who: &str) -> Reaped {
     use mason_platform::process::{own_group, signal_group, signal_process, Signal};
     let mut out = Reaped {
         id: dir
@@ -457,6 +556,7 @@ pub fn reap_dir(dir: &Path) -> Reaped {
         && start_ok("child_start", child)
         && proc_pgid(child) == Some(child)
     {
+        note_kill(dir, who, 9);
         out.child_group_killed = signal_group(child, Signal::Kill).is_ok();
     }
     let host = info.host_pid;
@@ -468,6 +568,7 @@ pub fn reap_dir(dir: &Path) -> Reaped {
         && proc_command(host)
             .is_some_and(|c| c.contains("step-host") && (cfg!(windows) || c.contains(&dir_s)))
     {
+        note_kill(dir, who, 9);
         out.host_killed = signal_process(host, Signal::Kill).is_ok();
     }
     out
@@ -475,12 +576,17 @@ pub fn reap_dir(dir: &Path) -> Reaped {
 
 /// `reap_dir` for every host under `root`.
 pub fn reap_verified(root: &Path) -> Vec<Reaped> {
+    reap_verified_by(root, "reap_verified")
+}
+
+/// [`reap_verified`] naming the sender `who` in each host's `kills` ledger.
+pub fn reap_verified_by(root: &Path, who: &str) -> Vec<Reaped> {
     let mut out = vec![];
     if let Ok(entries) = fs::read_dir(root) {
         for e in entries.flatten() {
             let p = e.path();
             if p.join("host.kv").exists() {
-                out.push(reap_dir(&p));
+                out.push(reap_dir_by(&p, who));
             }
         }
     }

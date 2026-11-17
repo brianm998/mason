@@ -214,6 +214,17 @@ class Announcer(
 
     fun availableVoices(): List<String> = sink.voices()
 
+    /** The system voices once loaded; null until then. */
+    var voices by mutableStateOf<List<String>?>(null)
+        private set
+    private val voicesRequested = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /** Ask the sink for its voices on [background], once; later calls do nothing. */
+    fun loadVoices(background: java.util.concurrent.Executor) {
+        if (!voicesRequested.compareAndSet(false, true)) return
+        background.execute { voices = runCatching { sink.voices() }.getOrDefault(emptyList()) }
+    }
+
     private fun load(p: Preferences): SpeechSettings {
         val d = SpeechSettings()
         var kinds = p.string("speech.kinds")?.split(",")?.filter { it.isNotEmpty() }?.toSet() ?: d.kinds

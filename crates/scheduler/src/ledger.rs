@@ -26,6 +26,7 @@ pub struct Ledger {
     last_grant: BTreeMap<String, u64>,
     last_any_grant: Option<u64>,
     max_wait_ms: Option<u64>,
+    exclusive_max_wait_ms: Option<u64>,
 }
 
 /// A wait the owner should hear about.
@@ -84,6 +85,12 @@ impl Ledger {
     /// (`None`: requests do not age).
     pub fn set_max_wait(&mut self, ms: Option<u64>) {
         self.max_wait_ms = ms;
+    }
+
+    /// A waiting exclusive request that has waited this long gives up its freeze (s552)
+    /// (`None`: the freeze has no bound).
+    pub fn set_exclusive_max_wait(&mut self, ms: Option<u64>) {
+        self.exclusive_max_wait_ms = ms;
     }
 
     /// The caller's latest disk reading against its floor, used by every plan after this.
@@ -190,6 +197,7 @@ impl Ledger {
                 stall: self.stall,
                 policy: self.policy,
                 max_wait: self.max_wait_ms,
+                exclusive_max_wait: self.exclusive_max_wait_ms,
             },
             &self.waiting,
         );
@@ -329,6 +337,7 @@ impl Ledger {
                 stall: self.stall,
                 policy: self.policy,
                 max_wait: self.max_wait_ms,
+                exclusive_max_wait: self.exclusive_max_wait_ms,
             },
             &self.waiting,
         )

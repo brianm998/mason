@@ -1241,3 +1241,77 @@ fn views_are_stamped_and_none_for_the_old_project_follows_the_new_one() {
         "an old-project view followed the new one: {seen:?}"
     );
 }
+
+/// Two fake volumes read twice, as a daemon's sampler would.
+fn disk_history_fixture(d: &Arc<Daemon>) {
+    use mason_daemon::disk::FakeDisk;
+    let fake = FakeDisk::new_gb(1);
+    let a = d.cfg.data_dir.clone();
+    fake.set_volume(&a, "alpha", 40, 100);
+    let now = mason_daemon::daemon::now_ms();
+    mason_daemon::diskhistory::take(d, &*fake, now - 60_000);
+    fake.set_volume(&a, "alpha", 38, 100);
+    mason_daemon::diskhistory::take(d, &*fake, now - 30_000);
+}
+
+#[test]
+fn disk_history_is_served_over_http_and_as_a_view() {
+    let (d, port, _dir) = demo();
+    disk_history_fixture(&d);
+    let h = d.disk_history(mason_daemon::daemon::now_ms(), 300_000);
+    assert_eq!(h.volumes.len(), 1);
+    assert_eq!(h.volumes[0].name, "alpha");
+    assert_eq!(h.volumes[0].roles, vec!["data"]);
+    assert_eq!(h.points.len(), 2);
+    let gb = 1024u64 * 1024 * 1024;
+    assert_eq!(h.points[0].readings[0].free_bytes, 40 * gb);
+    assert_eq!(h.points[1].readings[0].free_bytes, 38 * gb);
+    assert_eq!(h.points[1].readings[0].total_bytes, 100 * gb);
+
+    let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    use std::io::{Read, Write};
+    write!(s, "GET /disk/history?span=5m HTTP/1.0\r\nHost: x\r\n\r\n").unwrap();
+    let mut body = String::new();
+    s.read_to_string(&mut body).unwrap();
+    let v: serde_json::Value =
+        serde_json::from_str(body.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+    assert_eq!(v["volumes"][0]["name"], "alpha");
+    assert_eq!(v["points"].as_array().unwrap().len(), 2);
+    assert_eq!(v["spanMs"].to_string().trim_matches('"'), "300000");
+
+    let w = d.world().unwrap();
+    let view = Ctx::new(&d, &w)
+        .view(ViewKind::DiskHistory, "", 0, "", 0, 300_000)
+        .unwrap();
+    match view.body {
+        Some(Body::DiskHistory(v)) => assert_eq!((v.volumes, v.points), (h.volumes, h.points)),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn changing_the_disk_span_resubscribes() {
+    let (d, port, _dir) = demo();
+    disk_history_fixture(&d);
+    let mut c = Client::connect(port, Encoding::Protobuf).unwrap();
+    c.hello(0, false).unwrap();
+    let spans = |msgs: &[ServerMessage]| -> Vec<u64> {
+        views_of(msgs)
+            .into_iter()
+            .filter_map(|v| match v.body {
+                Some(Body::DiskHistory(h)) => Some(h.span_ms),
+                _ => None,
+            })
+            .collect()
+    };
+    c.subscribe_spans(&[ViewKind::DiskHistory], "", 0, "", 0, 300_000)
+        .unwrap();
+    let got = collect(&mut c, Duration::from_secs(10), |m| !spans(m).is_empty());
+    assert_eq!(spans(&got).first(), Some(&300_000));
+    c.subscribe_spans(&[ViewKind::DiskHistory], "", 0, "", 0, 600_000)
+        .unwrap();
+    let got = collect(&mut c, Duration::from_secs(10), |m| {
+        spans(m).contains(&600_000)
+    });
+    assert!(spans(&got).contains(&600_000), "{:?}", spans(&got));
+}

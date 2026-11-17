@@ -169,7 +169,7 @@ extension MonitorModel {
                 let c = h.compilation
                 out.append(Item(
                     id: "compile",
-                    texts: ["\(c.used) of \(c.limit)", c.cpuLine],
+                    texts: ["\(c.used) of \(c.limit)", c.cpuLine] + (c.policyLine.map { [$0] } ?? []),
                     actions: ["increase", "decrease"]
                 ))
                 for (i, r) in c.running.enumerated() {

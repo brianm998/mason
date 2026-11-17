@@ -255,6 +255,7 @@ struct CompilationSection: View {
                 Button { model.setCompileLimit(c.limit + 1) } label: { Image(systemName: "plus") }.touchTarget()
                     .accessibilityIdentifier("compile:increase")
                 Text(c.cpuLine).foregroundStyle(theme.muted)
+                if let p = c.policyLine { Text(p).foregroundStyle(theme.muted) }
             }
             .font(theme.body())
             .buttonStyle(.bordered)
@@ -391,6 +392,9 @@ struct TaskDetailPage: View {
         RestoringScroll(model: model, ready: model.taskDetail?.hasRow == true && model.taskDetail?.row.id == id) {
             if let d = model.taskDetail, d.hasRow, d.row.id == id {
                 content(d)
+            } else if model.connected, let r = model.sidebarRow(id) {
+                // The sidebar already has this task: draw it now, fill in the rest when masond sends the page.
+                content(Self.placeholder(r), loading: true)
             } else {
                 Text(model.connected ? "Loading task #\(id)…" : "Not connected")
                     .font(theme.body()).foregroundStyle(theme.muted).padding(theme.spacingLarge)
@@ -398,7 +402,13 @@ struct TaskDetailPage: View {
         }
     }
 
-    @ViewBuilder func content(_ d: TaskDetailView) -> some View {
+    static func placeholder(_ r: TaskRow) -> TaskDetailView {
+        var d = TaskDetailView()
+        d.row = r
+        return d
+    }
+
+    @ViewBuilder func content(_ d: TaskDetailView, loading: Bool = false) -> some View {
         let r = d.row
         VStack(alignment: .leading, spacing: theme.spacingLarge) {
             let header = compact
@@ -449,6 +459,10 @@ struct TaskDetailPage: View {
             }
 
             ActionButtons(model: model, row: r, hasApprovalView: d.hasApproval)
+            if loading {
+                Text("Loading details…").font(theme.body()).foregroundStyle(theme.muted)
+                    .accessibilityIdentifier("detail:loading")
+            }
 
             if !r.blockers.isEmpty {
                 HStack(spacing: theme.spacingSmall) {
@@ -782,6 +796,7 @@ struct HealthPage: View {
                         }
                     }
                     Text(h.cpuLine).font(theme.body())
+                    if let p = h.policyLine { Text(p).font(theme.body()) }
                     section("Waiting", theme: theme) {
                         if h.waiting.isEmpty { Text("Nothing is waiting.").font(theme.body()).foregroundStyle(theme.muted) }
                         ForEach(h.waiting, id: \.self) { Text($0).font(theme.body()) }

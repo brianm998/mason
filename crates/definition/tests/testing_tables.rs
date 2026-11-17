@@ -555,3 +555,18 @@ fn narrow_packages_parses_and_needs_a_dev_command() {
     let p = problems(&text);
     assert!(p.iter().any(|x| x.contains("needs `dev_command`")), "{p:?}");
 }
+
+// s524: MASON's own definition watches its CI on develop, with the landing freeze off.
+#[test]
+fn masons_own_ci_watch_is_on_with_no_freeze() {
+    let text = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../.mason/mason.toml"
+    ))
+    .unwrap();
+    let d = parse(&text).unwrap();
+    let w = d.watch_ci.expect("[watch.ci] is enabled");
+    assert!(!w.freeze_on_gate);
+    assert_eq!(w.gate.as_deref(), Some("CI"));
+    assert_eq!(w.max_open_auto, 2);
+}

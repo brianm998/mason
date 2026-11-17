@@ -44,6 +44,9 @@ public nonisolated enum Mason_V1_ViewKind: SwiftProtobuf.Enum, Swift.CaseIterabl
 
   /// The CPU readings over `Subscribe.cpu_span_ms`; asked for only while the graph shows.
   case cpuHistory // = 8
+
+  /// The free disk space per volume over `Subscribe.disk_span_ms`; asked for only while the graph shows.
+  case diskHistory // = 9
   case UNRECOGNIZED(Int)
 
   public init() {
@@ -61,6 +64,7 @@ public nonisolated enum Mason_V1_ViewKind: SwiftProtobuf.Enum, Swift.CaseIterabl
     case 6: self = .usage
     case 7: self = .editor
     case 8: self = .cpuHistory
+    case 9: self = .diskHistory
     default: self = .UNRECOGNIZED(rawValue)
     }
   }
@@ -76,6 +80,7 @@ public nonisolated enum Mason_V1_ViewKind: SwiftProtobuf.Enum, Swift.CaseIterabl
     case .usage: return 6
     case .editor: return 7
     case .cpuHistory: return 8
+    case .diskHistory: return 9
     case .UNRECOGNIZED(let i): return i
     }
   }
@@ -91,6 +96,7 @@ public nonisolated enum Mason_V1_ViewKind: SwiftProtobuf.Enum, Swift.CaseIterabl
     .usage,
     .editor,
     .cpuHistory,
+    .diskHistory,
   ]
 
 }
@@ -376,6 +382,9 @@ public nonisolated struct Mason_V1_Subscribe: Sendable {
 
   /// The span for CPU_HISTORY, in ms (0: an hour).
   public var cpuSpanMs: UInt64 = 0
+
+  /// The span for DISK_HISTORY, in ms (0: an hour).
+  public var diskSpanMs: UInt64 = 0
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -1250,6 +1259,14 @@ public nonisolated struct Mason_V1_View: Sendable {
     set {body = .cpuHistory(newValue)}
   }
 
+  public var diskHistory: Mason_V1_DiskHistory {
+    get {
+      if case .diskHistory(let v)? = body {return v}
+      return Mason_V1_DiskHistory()
+    }
+    set {body = .diskHistory(newValue)}
+  }
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public nonisolated enum OneOf_Body: Equatable, Sendable {
@@ -1261,6 +1278,7 @@ public nonisolated struct Mason_V1_View: Sendable {
     case usage(Mason_V1_UsageView)
     case editor(Mason_V1_EditorView)
     case cpuHistory(Mason_V1_CpuHistory)
+    case diskHistory(Mason_V1_DiskHistory)
 
   }
 
@@ -2345,6 +2363,82 @@ public nonisolated struct Mason_V1_CpuHistory: Sendable {
   public init() {}
 }
 
+/// A physical volume MASON cares about: where its data, caches, projects or worktrees live.
+public nonisolated struct Mason_V1_DiskVolume: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  /// Stable for the volume (a device id, or a drive on Windows).
+  public var id: String = String()
+
+  /// For display: the mount point's last component, the volume's label, or the drive letter.
+  public var name: String = String()
+
+  public var mount: String = String()
+
+  /// Which of `data`, `cache`, `project` and `worktrees` live on it, for a tooltip.
+  public var roles: [String] = []
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public nonisolated struct Mason_V1_DiskReading: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  /// `DiskVolume.id`.
+  public var volume: String = String()
+
+  public var freeBytes: UInt64 = 0
+
+  public var totalBytes: UInt64 = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// One sampling. A volume that could not be read then is absent.
+public nonisolated struct Mason_V1_DiskPoint: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var atMs: UInt64 = 0
+
+  public var readings: [Mason_V1_DiskReading] = []
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// The free space of each volume over a span, oldest first, served by `GET /disk/history?span=`.
+/// Served on request, never pushed with the home view.
+public nonisolated struct Mason_V1_DiskHistory: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var spanMs: UInt64 = 0
+
+  /// The gap between points: the sampling period, or a minute for old data.
+  public var stepMs: UInt64 = 0
+
+  /// Every volume seen in the span, in a stable order, even one with a gap.
+  public var volumes: [Mason_V1_DiskVolume] = []
+
+  public var points: [Mason_V1_DiskPoint] = []
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
 /// Who holds a `compile` slot.
 public nonisolated struct Mason_V1_CompileHolder: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
@@ -2453,6 +2547,13 @@ public nonisolated struct Mason_V1_Compilation: Sendable {
   /// What the daemon did about the queue lately, newest first ("Stopped #95's
   /// command ...: it used no CPU for 30 min while holding a compile slot").
   public var notes: [String] = []
+
+  /// macOS's syspolicyd CPU use in percent of one core (700 is seven cores); -1 when there
+  /// is no reading or no gate.
+  public var syspolicydPct: Int32 = 0
+
+  /// A further compile waits while syspolicyd is at or above this; 0: no gate.
+  public var syspolicydMaxPct: UInt32 = 0
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -3578,7 +3679,7 @@ public nonisolated struct Mason_V1_EditorView: @unchecked Sendable {
 fileprivate nonisolated let _protobuf_package = "mason.v1"
 
 nonisolated extension Mason_V1_ViewKind: SwiftProtobuf._ProtoNameProviding {
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0VIEW_UNSPECIFIED\0\u{1}HEADER\0\u{1}SIDEBAR\0\u{1}HOME\0\u{1}TASK_DETAIL\0\u{1}LANDING\0\u{1}USAGE\0\u{1}EDITOR\0\u{1}CPU_HISTORY\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0VIEW_UNSPECIFIED\0\u{1}HEADER\0\u{1}SIDEBAR\0\u{1}HOME\0\u{1}TASK_DETAIL\0\u{1}LANDING\0\u{1}USAGE\0\u{1}EDITOR\0\u{1}CPU_HISTORY\0\u{1}DISK_HISTORY\0")
 }
 
 nonisolated extension Mason_V1_ResumeKind: SwiftProtobuf._ProtoNameProviding {
@@ -3786,7 +3887,7 @@ nonisolated extension Mason_V1_Hello: SwiftProtobuf.Message, SwiftProtobuf._Mess
 
 nonisolated extension Mason_V1_Subscribe: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".Subscribe"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}views\0\u{1}project\0\u{1}task\0\u{3}editor_step\0\u{3}cpu_span_ms\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}views\0\u{1}project\0\u{1}task\0\u{3}editor_step\0\u{3}cpu_span_ms\0\u{3}disk_span_ms\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -3799,6 +3900,7 @@ nonisolated extension Mason_V1_Subscribe: SwiftProtobuf.Message, SwiftProtobuf._
       case 3: try { try decoder.decodeSingularUInt64Field(value: &self.task) }()
       case 4: try { try decoder.decodeSingularStringField(value: &self.editorStep) }()
       case 5: try { try decoder.decodeSingularUInt64Field(value: &self.cpuSpanMs) }()
+      case 6: try { try decoder.decodeSingularUInt64Field(value: &self.diskSpanMs) }()
       default: break
       }
     }
@@ -3820,6 +3922,9 @@ nonisolated extension Mason_V1_Subscribe: SwiftProtobuf.Message, SwiftProtobuf._
     if self.cpuSpanMs != 0 {
       try visitor.visitSingularUInt64Field(value: self.cpuSpanMs, fieldNumber: 5)
     }
+    if self.diskSpanMs != 0 {
+      try visitor.visitSingularUInt64Field(value: self.diskSpanMs, fieldNumber: 6)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -3829,6 +3934,7 @@ nonisolated extension Mason_V1_Subscribe: SwiftProtobuf.Message, SwiftProtobuf._
     if lhs.task != rhs.task {return false}
     if lhs.editorStep != rhs.editorStep {return false}
     if lhs.cpuSpanMs != rhs.cpuSpanMs {return false}
+    if lhs.diskSpanMs != rhs.diskSpanMs {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -5455,7 +5561,7 @@ nonisolated extension Mason_V1_Error: SwiftProtobuf.Message, SwiftProtobuf._Mess
 
 nonisolated extension Mason_V1_View: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".View"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}header\0\u{1}sidebar\0\u{1}home\0\u{3}task_detail\0\u{1}landing\0\u{1}usage\0\u{1}editor\0\u{3}cpu_history\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}header\0\u{1}sidebar\0\u{1}home\0\u{3}task_detail\0\u{1}landing\0\u{1}usage\0\u{1}editor\0\u{3}cpu_history\0\u{3}disk_history\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -5567,6 +5673,19 @@ nonisolated extension Mason_V1_View: SwiftProtobuf.Message, SwiftProtobuf._Messa
           self.body = .cpuHistory(v)
         }
       }()
+      case 9: try {
+        var v: Mason_V1_DiskHistory?
+        var hadOneofValue = false
+        if let current = self.body {
+          hadOneofValue = true
+          if case .diskHistory(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.body = .diskHistory(v)
+        }
+      }()
       default: break
       }
     }
@@ -5609,6 +5728,10 @@ nonisolated extension Mason_V1_View: SwiftProtobuf.Message, SwiftProtobuf._Messa
     case .cpuHistory?: try {
       guard case .cpuHistory(let v)? = self.body else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 8)
+    }()
+    case .diskHistory?: try {
+      guard case .diskHistory(let v)? = self.body else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 9)
     }()
     case nil: break
     }
@@ -7606,6 +7729,171 @@ nonisolated extension Mason_V1_CpuHistory: SwiftProtobuf.Message, SwiftProtobuf.
   }
 }
 
+nonisolated extension Mason_V1_DiskVolume: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".DiskVolume"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{1}name\0\u{1}mount\0\u{1}roles\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.id) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.name) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.mount) }()
+      case 4: try { try decoder.decodeRepeatedStringField(value: &self.roles) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.id.isEmpty {
+      try visitor.visitSingularStringField(value: self.id, fieldNumber: 1)
+    }
+    if !self.name.isEmpty {
+      try visitor.visitSingularStringField(value: self.name, fieldNumber: 2)
+    }
+    if !self.mount.isEmpty {
+      try visitor.visitSingularStringField(value: self.mount, fieldNumber: 3)
+    }
+    if !self.roles.isEmpty {
+      try visitor.visitRepeatedStringField(value: self.roles, fieldNumber: 4)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Mason_V1_DiskVolume, rhs: Mason_V1_DiskVolume) -> Bool {
+    if lhs.id != rhs.id {return false}
+    if lhs.name != rhs.name {return false}
+    if lhs.mount != rhs.mount {return false}
+    if lhs.roles != rhs.roles {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Mason_V1_DiskReading: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".DiskReading"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}volume\0\u{3}free_bytes\0\u{3}total_bytes\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.volume) }()
+      case 2: try { try decoder.decodeSingularUInt64Field(value: &self.freeBytes) }()
+      case 3: try { try decoder.decodeSingularUInt64Field(value: &self.totalBytes) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.volume.isEmpty {
+      try visitor.visitSingularStringField(value: self.volume, fieldNumber: 1)
+    }
+    if self.freeBytes != 0 {
+      try visitor.visitSingularUInt64Field(value: self.freeBytes, fieldNumber: 2)
+    }
+    if self.totalBytes != 0 {
+      try visitor.visitSingularUInt64Field(value: self.totalBytes, fieldNumber: 3)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Mason_V1_DiskReading, rhs: Mason_V1_DiskReading) -> Bool {
+    if lhs.volume != rhs.volume {return false}
+    if lhs.freeBytes != rhs.freeBytes {return false}
+    if lhs.totalBytes != rhs.totalBytes {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Mason_V1_DiskPoint: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".DiskPoint"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}at_ms\0\u{1}readings\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularUInt64Field(value: &self.atMs) }()
+      case 2: try { try decoder.decodeRepeatedMessageField(value: &self.readings) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if self.atMs != 0 {
+      try visitor.visitSingularUInt64Field(value: self.atMs, fieldNumber: 1)
+    }
+    if !self.readings.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.readings, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Mason_V1_DiskPoint, rhs: Mason_V1_DiskPoint) -> Bool {
+    if lhs.atMs != rhs.atMs {return false}
+    if lhs.readings != rhs.readings {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Mason_V1_DiskHistory: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".DiskHistory"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}span_ms\0\u{3}step_ms\0\u{1}volumes\0\u{1}points\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularUInt64Field(value: &self.spanMs) }()
+      case 2: try { try decoder.decodeSingularUInt64Field(value: &self.stepMs) }()
+      case 3: try { try decoder.decodeRepeatedMessageField(value: &self.volumes) }()
+      case 4: try { try decoder.decodeRepeatedMessageField(value: &self.points) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if self.spanMs != 0 {
+      try visitor.visitSingularUInt64Field(value: self.spanMs, fieldNumber: 1)
+    }
+    if self.stepMs != 0 {
+      try visitor.visitSingularUInt64Field(value: self.stepMs, fieldNumber: 2)
+    }
+    if !self.volumes.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.volumes, fieldNumber: 3)
+    }
+    if !self.points.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.points, fieldNumber: 4)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Mason_V1_DiskHistory, rhs: Mason_V1_DiskHistory) -> Bool {
+    if lhs.spanMs != rhs.spanMs {return false}
+    if lhs.stepMs != rhs.stepMs {return false}
+    if lhs.volumes != rhs.volumes {return false}
+    if lhs.points != rhs.points {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
 nonisolated extension Mason_V1_CompileHolder: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".CompileHolder"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}label\0\u{1}task\0\u{3}since_ms\0\u{1}interactive\0\u{3}idle_ms\0\u{1}project\0\u{1}title\0\u{1}command\0")
@@ -7748,7 +8036,7 @@ nonisolated extension Mason_V1_CompileWaiter: SwiftProtobuf.Message, SwiftProtob
 
 nonisolated extension Mason_V1_Compilation: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".Compilation"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}limit\0\u{1}used\0\u{1}running\0\u{1}pending\0\u{3}cpu_busy_pct\0\u{3}cpu_max_pct\0\u{3}settle_s\0\u{1}rules\0\u{3}cpu_source\0\u{1}notes\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}limit\0\u{1}used\0\u{1}running\0\u{1}pending\0\u{3}cpu_busy_pct\0\u{3}cpu_max_pct\0\u{3}settle_s\0\u{1}rules\0\u{3}cpu_source\0\u{1}notes\0\u{3}syspolicyd_pct\0\u{3}syspolicyd_max_pct\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -7766,6 +8054,8 @@ nonisolated extension Mason_V1_Compilation: SwiftProtobuf.Message, SwiftProtobuf
       case 8: try { try decoder.decodeSingularStringField(value: &self.rules) }()
       case 9: try { try decoder.decodeSingularStringField(value: &self.cpuSource) }()
       case 10: try { try decoder.decodeRepeatedStringField(value: &self.notes) }()
+      case 11: try { try decoder.decodeSingularInt32Field(value: &self.syspolicydPct) }()
+      case 12: try { try decoder.decodeSingularUInt32Field(value: &self.syspolicydMaxPct) }()
       default: break
       }
     }
@@ -7802,6 +8092,12 @@ nonisolated extension Mason_V1_Compilation: SwiftProtobuf.Message, SwiftProtobuf
     if !self.notes.isEmpty {
       try visitor.visitRepeatedStringField(value: self.notes, fieldNumber: 10)
     }
+    if self.syspolicydPct != 0 {
+      try visitor.visitSingularInt32Field(value: self.syspolicydPct, fieldNumber: 11)
+    }
+    if self.syspolicydMaxPct != 0 {
+      try visitor.visitSingularUInt32Field(value: self.syspolicydMaxPct, fieldNumber: 12)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -7816,6 +8112,8 @@ nonisolated extension Mason_V1_Compilation: SwiftProtobuf.Message, SwiftProtobuf
     if lhs.rules != rhs.rules {return false}
     if lhs.cpuSource != rhs.cpuSource {return false}
     if lhs.notes != rhs.notes {return false}
+    if lhs.syspolicydPct != rhs.syspolicydPct {return false}
+    if lhs.syspolicydMaxPct != rhs.syspolicydMaxPct {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

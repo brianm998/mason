@@ -475,3 +475,49 @@ fn a_batch_whose_testing_was_skipped_is_rebuilt_but_not_retested_when_the_base_m
         "a batch with its testing skipped was re-tested"
     );
 }
+
+const LINT_TIER: &str = "window = \"1s\"\n[[tier]]\nname = \"lint\"\nsuites = [\"lint\"]\n";
+
+#[test]
+fn a_batch_that_is_not_lint_clean_is_parked_with_the_lint_in_its_note() {
+    // s521: a lint error landed because neither the tests nor the rebuild ran the linter.
+    let w = world_full(LINT_TIER, &|_| String::new(), &[], "true", false);
+    let t = w.task("dirty", &[("x/red.lint", "1")]);
+    wait_for("the batch to be sent back", 90, || w.sent_back(t).is_some());
+    assert!(
+        !w.on_main("x/red.lint"),
+        "a batch that is not lint clean landed"
+    );
+    let why = w.sent_back(t).unwrap();
+    assert!(why.contains("lint"), "the reason names the lint: {why}");
+}
+
+#[test]
+fn a_lint_clean_batch_lands() {
+    let w = world_full(LINT_TIER, &|_| String::new(), &[], "true", false);
+    let t = w.task("clean", &[("x/c.txt", "1")]);
+    wait_for("the batch to land", 90, || w.landed(t));
+    assert!(w.on_main("x/c.txt"));
+}
+
+#[test]
+fn a_batch_whose_testing_was_skipped_still_runs_the_lint_check() {
+    let w = world_full(LINT_TIER, &|_| String::new(), &[], "true", true);
+    let t = w.task("skipped and dirty", &[("x/red.lint", "1")]);
+    w.d.store
+        .add_debt(
+            t.0,
+            "scratch",
+            "step:test",
+            "owner skipped",
+            "brian",
+            false,
+            0,
+        )
+        .unwrap();
+    wait_for("the batch to be sent back", 90, || w.sent_back(t).is_some());
+    assert!(
+        !w.on_main("x/red.lint"),
+        "a skipped batch landed past the lint"
+    );
+}
