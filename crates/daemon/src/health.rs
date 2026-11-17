@@ -74,6 +74,7 @@ pub fn gather(d: &Arc<Daemon>, now: u64) -> Facts {
     let Ok(w) = d.world() else { return x };
     let ix = crate::views::RunIndex::build(w.step_runs.values());
     let waits = d.broker.waits_snapshot();
+    let holders = d.broker.waits_holders();
     let diagnoses = d.store.diagnoses(None).unwrap_or_default();
     let self_pid = crate::proposals::self_project(d).map(|(p, _)| p);
     let mut landing_failed = 0;
@@ -82,6 +83,9 @@ pub fn gather(d: &Arc<Daemon>, now: u64) -> Facts {
         let in_state = now.saturating_sub(t.state_entered_at.0);
         let last_start = ix.last_start_of(t.id);
         let wait = waits.get(&t.id).cloned();
+        let hf = holders
+            .get(&t.id)
+            .and_then(|(since, depth)| health::holder_fact(since, now, *depth));
         let since_run = now.saturating_sub(t.state_entered_at.0.max(last_start));
         match t.state {
             State::Queued => {
@@ -136,6 +140,7 @@ pub fn gather(d: &Arc<Daemon>, now: u64) -> Facts {
                 typical_hi_ms: ix.typical_hi(&t.step),
                 silent_ms: silent,
                 waiting: wait.clone().map(|r| (r, since_run)),
+                holders: hf.clone(),
             });
         } else if t.state == State::Queued {
             if let Some(r) = wait.clone() {
@@ -147,6 +152,7 @@ pub fn gather(d: &Arc<Daemon>, now: u64) -> Facts {
                     typical_hi_ms: None,
                     silent_ms: in_state,
                     waiting: Some((r, in_state)),
+                    holders: hf.clone(),
                 });
             }
         }
