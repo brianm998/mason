@@ -471,4 +471,5 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s554**: stuck:wait no longer fires for tasks whose slot holders are changing; very old progressing waits give a note that never starts a health session.
 - **s556**: CLAUDE.md and docs/self-hosting.md now tell sessions to apply registration edits with `mason project reload` and to restart masond only for a fixed-key change, a new registration file or a new build (decision 0549).
 - **s557**: `MonitorModel.approvalPriorities` and `defaultApprovalPriority` are `nonisolated`, so using the default as a default argument of `approve` no longer warns under Swift 6 rules; the plain-approve test now pins the sent priority to "normal".
+- **s563**: UiThreadTest.isExpandedReadsEachKeyOnce now baselines the preference read count after constructing the model, so the constructor's mute read no longer fails it while any extra read per isExpanded call still does.
 <!-- status:end -->

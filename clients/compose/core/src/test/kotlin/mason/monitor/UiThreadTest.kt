@@ -93,12 +93,14 @@ class UiThreadTest {
     @Test fun isExpandedReadsEachKeyOnce() {
         val prefs = CountingPrefs()
         val m = MonitorModel(prefs)
+        // The constructor reads the mute preference; only reads after it belong to isExpanded.
+        val base = prefs.reads.values.sum()
         val sec = SidebarSection(state = "running", collapsed = true)
         repeat(50) { assertFalse(m.isExpanded(sec)) }
-        assertEquals(1, prefs.reads.values.sum())
+        assertEquals(base + 1, prefs.reads.values.sum())
         m.setExpanded("running", true)
         assertTrue(m.isExpanded(sec))
-        assertEquals(1, prefs.reads.values.sum())
+        assertEquals(base + 1, prefs.reads.values.sum())
     }
 
     @Test fun knownIdsAreRebuiltOnlyWhenTheViewsChange() {
