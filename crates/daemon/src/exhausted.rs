@@ -273,9 +273,14 @@ fn check_at_base(
             break;
         }
         let r = {
-            let _g = basecheck::BASE_RUN
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let _g = basecheck::BASE_RUN.take(
+                c,
+                &format!(
+                    "{} at {}",
+                    basecheck::command_label(&cmd_for(&left)),
+                    basecheck::short(&base)
+                ),
+            );
             basecheck::run_at_base(c, &base, build, &cmd_for(&left), &left)
         }
         .and_then(|(failing, t, ran)| {
