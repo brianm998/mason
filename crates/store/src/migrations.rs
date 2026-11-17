@@ -727,6 +727,19 @@ const STEPS: &[&str] = &[
     // reused at a later base only while the suite is defined the same way. Additive; an older
     // row has '' and is never reused.
     "ALTER TABLE baselines ADD COLUMN def_hash TEXT NOT NULL DEFAULT '';",
+    // 43: the result of each full `run_check` of a develop step (s511, decision 0504): one row
+    // per run, `tests` the failing tests as `suite<TAB>test` lines (empty when green or when no
+    // name could be read). Read to tell an agent going round in circles on the same failing
+    // tests. Additive.
+    "CREATE TABLE check_runs (
+         id    INTEGER PRIMARY KEY AUTOINCREMENT,
+         task  INTEGER NOT NULL,
+         run   INTEGER NOT NULL,
+         at_ms INTEGER NOT NULL,
+         green INTEGER NOT NULL,
+         tests TEXT NOT NULL
+     );
+     CREATE INDEX check_runs_task ON check_runs(task, id);",
 ];
 
 pub const SCHEMA_VERSION: u32 = STEPS.len() as u32;

@@ -181,6 +181,13 @@ fn task_json(d: &Daemon, w: &World, t: &Task, detail: bool) -> Value {
             Value::Null,
             |h| json!({"reasons": h.reasons, "approved_by": h.approved_by, "since": h.at}),
         );
+        v["circling"] = crate::circling::of_task(d, t.id).map_or(Value::Null, |c| {
+            json!({
+                "runs": c.runs, "since_ms": c.since_ms,
+                "text": crate::circling::text(d, t.id, &c, crate::daemon::now_ms()),
+                "tests": c.tests.iter().map(|e| e.replace('\t', " :: ")).collect::<Vec<_>>(),
+            })
+        });
         v["failure"] = t.failure.as_ref().map_or(Value::Null, |f| json!(f));
         v["failure_class"] = t.failure_class.map_or(Value::Null, |c| json!(c.name()));
         v["excused"] = json!(crate::basecheck::recorded(&d.task_dir(t.id)));
