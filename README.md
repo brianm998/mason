@@ -427,6 +427,7 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s482**: The kill test now waits until the hold is stored and both tasks have launched twice before it kills the daemon.
 - **s484**: The APNs provider-token cache now also compares a SHA-256 fingerprint of the key, so parallel tests (or a changed key) no longer get a token signed by another key.
 - **s485**: APNs provider-token reuse now keys on the signing key as well as key id and team, so the daemon's apns tests no longer verify each other's JWT and the flaky test is unquarantined.
+- **s488**: MASON now writes an untracked `<worktree>/.cargo/config.toml` with `[build] target-dir` set to the task's expanded `task_cache`, so the agent's own cargo builds share the task's directory instead of making a second copy of the workspace in `<worktree>/target`.
 - **s489**: Before each suite build MASON deletes the `.rcgu.o` object sets of older crate hashes from a task's build directory, since `split-debuginfo = "packed"` broke the build and `off` lost backtrace lines (decision 0482).
 - **s491**: The Compose app tests pass the native-access flag and a build-owned temp directory to the test JVM so Skiko's native library loads and EditorSnapshotTest passes.
 - **s492**: The Compose test JVM unpacks Skia's native library into the build directory so MascotTest's image tests load it.
@@ -440,8 +441,10 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s510**: a dropped-line send-back now includes a ready-to-paste `removes` JSON block for each listed line the task's own diff replaced in place.
 - **s513**: on Intel Macs the linker now signs every Rust output ad hoc (`.cargo/config.toml`), and the monitor build signs `MASON.app`, so an unsigned Mach-O can no longer crash `syspolicyd` when deleted mid-scan.
 - **s520**: `run_check` names each failing test that also failed in develop's latest recorded result for the suite ("red on develop at <sha> too: not your change; merge develop when it is fixed"), without waiting for the test to be quarantined.
+- **s521**: a `lint` tier in `.mason/landing.toml` runs the format check and clippy (`-D warnings`) on every batch, including batches whose testing was skipped, and parks a red one with the files and lines in its note.
 - **s522**: A develop agent's tool-call limit now covers the step's whole extended life plus the test timeout, so a `run_check` queued for a slot is no longer cut off while it runs.
 - **s526**: a step already running now reads `test_timeout_s`, `test_reruns`, `step_timeout_s` and `tool_timeout_s` from the live registry each time it uses them, so a registration reload reaches it without a restart.
 - **s530**: Live progress moves out of `sidebar` and `taskDetail` into a `ProgressStore` with one observed `TaskProgress` per task, so a StepProgress message no longer republishes the sidebar, bumps `sidebarRevision` or redraws any row body; only the named tasks' progress views redraw.
 - **s536**: Taking the one-base-run-at-a-time lock when another task holds it now emits a `WaitStarted` (class `base-run`) naming the holder, what it runs and for how long, and a `WaitEnded` when the lock is ours. Before, the waiter showed "running, no output for N min" with `wait: null`.
+- **s551**: A red job is filed again only for a run newer than the one its last ticket covered (and, if that ticket landed a change, of a commit at or after the landing); landed and closed tasks of the last 7 days count as covering a run they cite, and the held-back reason shows in `mason status` and the monitor banners.
 <!-- status:end -->
