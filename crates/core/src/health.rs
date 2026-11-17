@@ -170,6 +170,8 @@ pub struct Facts {
     pub load_pct: Option<u32>,
     /// `load_pct` is the sampler's assumed-busy fallback, not a measurement.
     pub load_assumed: bool,
+    /// Where `load_pct` was read from (`mach`, `loadavg`, `assumed-busy`, ...).
+    pub load_source: Option<&'static str>,
     pub stall_ms: u64,
     /// Launches that have not finished: (task, ms).
     pub frozen_launches: Vec<(Option<u64>, u64)>,
@@ -357,13 +359,19 @@ pub fn judge(x: &Facts, l: &Limits) -> Vec<Finding> {
                 .collect(),
         ));
     }
+    // An assumed-busy reading is a placeholder, not a measurement: no finding.
     if let Some(p) = x.load_pct.filter(|p| !x.load_assumed && *p >= l.load_pct) {
+        let summary = format!("the machine is at {p}% load");
+        let evidence = match x.load_source {
+            Some(src) => vec![format!("CPU reading from {src}")],
+            None => vec![],
+        };
         out.push(f(
             "overloaded:load".into(),
             "overloaded",
             Severity::Warn,
-            format!("the machine is at {p}% load"),
-            vec![],
+            summary,
+            evidence,
         ));
     }
     if x.stall_ms >= l.stall_ms {
@@ -573,6 +581,19 @@ mod tests {
     }
 
     #[test]
+    fn load_finding_names_a_known_source() {
+        let x = Facts {
+            load_pct: Some(99),
+            load_source: Some("loadavg"),
+            ..Default::default()
+        };
+        let out = judge(&x, &l());
+        let f = out.iter().find(|f| f.key == "overloaded:load").unwrap();
+        assert_eq!(f.summary, "the machine is at 99% load");
+        assert!(f.evidence.iter().any(|e| e.contains("loadavg")));
+    }
+
+    #[test]
     fn healthy_facts_give_no_findings() {
         assert!(judge(&Facts::default(), &l()).is_empty());
         let x = Facts {
@@ -730,6 +751,7 @@ mod tests {
         let x = Facts {
             load_pct: Some(100),
             load_assumed: true,
+            load_source: Some("assumed-busy"),
             ..Default::default()
         };
         assert!(judge(&x, &l()).is_empty());
@@ -740,6 +762,7 @@ mod tests {
         let x = Facts {
             load_pct: Some(100),
             load_assumed: false,
+            load_source: Some("mach"),
             ..Default::default()
         };
         assert_eq!(keys(&judge(&x, &l())), ["overloaded:load"]);
