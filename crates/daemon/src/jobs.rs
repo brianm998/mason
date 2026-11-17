@@ -1357,6 +1357,22 @@ pub(crate) fn tool_timeout_for(kind: StepKind, project: &ProjectCfg) -> Duration
     }
 }
 
+/// The tool-call limit of a develop agent once the step's budget is known. A `run_check`
+/// may queue for a slot for as long as the step lives (queue waits are credited to the
+/// step's deadline, which the extender lets grow to twice the budget), and only then runs
+/// for up to `test_timeout`; the call's limit is fixed when the agent starts, so it must
+/// cover both. Before, the queue wait counted against `test_timeout + 60 s` and the agent
+/// was cut off while its check was still running (#497).
+pub(crate) fn develop_tool_timeout(
+    current: Duration,
+    budget: Duration,
+    test_timeout: Duration,
+) -> Duration {
+    current
+        .max(budget)
+        .max(budget * 2 + test_timeout + Duration::from_secs(60))
+}
+
 /// What the develop agent is told when its branch does not merge cleanly
 /// with the base.
 pub(crate) fn conflict_note(base: &str, files: &str) -> String {
@@ -3051,10 +3067,12 @@ fn agent_job(c: &Ctx) {
         }
         StopExtending(stop)
     });
-    // A `run_check` may queue for a long time before it runs, so no tool call is
-    // cut off before the step's own deadline would have ended it.
     if kind == StepKind::Develop {
-        spec.tool_timeout = spec.tool_timeout.max(spec.deadline.unwrap_or_default());
+        spec.tool_timeout = develop_tool_timeout(
+            spec.tool_timeout,
+            spec.deadline.unwrap_or_default(),
+            c.project.test_timeout,
+        );
     }
     spec.run_key = Some(key.clone());
     spec.tools = c.step.tools.clone();
@@ -4974,6 +4992,18 @@ mod signaled_tests {
 
 #[cfg(test)]
 mod review_diff_tests {
+    #[test]
+    fn develop_tool_timeout_covers_the_queue_wait_and_the_whole_check() {
+        let m = |n: u64| Duration::from_secs(n * 60);
+        // 30 min budget, 50 min tests: a check queued for the step's whole extended life
+        // (60 min) and then run to its limit still fits in one tool call.
+        let limit = develop_tool_timeout(m(10), m(30), m(50));
+        assert!(limit >= m(60) + m(50) + Duration::from_secs(60));
+        // Never below what it was, or the step's budget.
+        assert!(develop_tool_timeout(m(500), m(30), m(50)) >= m(500));
+        assert!(develop_tool_timeout(m(10), m(30), Duration::ZERO) >= m(30));
+    }
+
     use super::*;
 
     fn git(cwd: &Path, args: &[&str]) {

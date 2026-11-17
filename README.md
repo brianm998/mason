@@ -431,5 +431,6 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s502**: a new `compile` gate holds further compiles while `syspolicyd` uses 300% CPU or more (`[cpu] syspolicyd_max_pct`), so MASON's builds and test runs cannot swamp the Mac's code checks again.
 - **s507**: `every_state_and_event_pair` passes again because `events()` in the engine matrix test no longer lists `Deferred` and `Undeferred` twice, and a duplicate name now fails with a clear message.
 - **s520**: `run_check` names each failing test that also failed in develop's latest recorded result for the suite ("red on develop at <sha> too: not your change; merge develop when it is fixed"), without waiting for the test to be quarantined.
+- **s522**: A develop agent's tool-call limit now covers the step's whole extended life plus the test timeout, so a `run_check` queued for a slot is no longer cut off while it runs.
 - **s530**: Live progress moves out of `sidebar` and `taskDetail` into a `ProgressStore` with one observed `TaskProgress` per task, so a StepProgress message no longer republishes the sidebar, bumps `sidebarRevision` or redraws any row body; only the named tasks' progress views redraw.
 <!-- status:end -->
