@@ -12,7 +12,7 @@ import SwiftUI
 /// Every page the Mac monitor has is here but the pipeline editor (`PhoneLayout.phoneHasNo`).
 /// Speech is off on the phone: this app never installs a speech sink or claims to speak.
 public struct PhoneRootView: View {
-    @ObservedObject var model: MonitorModel
+    let model: MonitorModel
     @Environment(\.colorScheme) private var scheme
     @State private var nav = PhoneNav()
     @State private var adding = false
@@ -98,7 +98,7 @@ extension MonitorModel {
 /// the first task that needs the owner while any does.
 struct PhoneStatusLine: View {
     @Environment(\.theme) var theme
-    @ObservedObject var model: MonitorModel
+    let model: MonitorModel
     let open: () -> Void
 
     var text: String {
@@ -128,7 +128,7 @@ extension View {
 }
 
 struct PhoneChrome: ViewModifier {
-    @ObservedObject var model: MonitorModel
+    @Bindable var model: MonitorModel
     let title: String
     let open: () -> Void
     let add: () -> Void
@@ -164,7 +164,7 @@ struct PhoneChrome: ViewModifier {
 /// plain deep-blue ground (the robot is left, the word right, so no crop), the real connection
 /// status beneath it, and no progress bar. Later disconnects never bring it back.
 struct PhoneStartView: View {
-    @ObservedObject var model: MonitorModel
+    let model: MonitorModel
     @ScaledMetric(relativeTo: .body) private var gap = CGFloat(MasonTokens.sizeSpacingLarge)
 
     var body: some View {
@@ -249,7 +249,7 @@ struct PhoneTaskRow: View {
 
 struct PhoneSidebarScreen: View {
     @Environment(\.theme) var theme
-    @ObservedObject var model: MonitorModel
+    @Bindable var model: MonitorModel
     let choose: (Page) -> Void
 
     var body: some View {

@@ -9,7 +9,7 @@ import SwiftUI
 /// The main view: exactly one of Home, a task's detail, or another page.
 struct MainPane: View {
     @Environment(\.theme) var theme
-    @ObservedObject var model: MonitorModel
+    let model: MonitorModel
 
     var body: some View {
         Group {
@@ -59,7 +59,7 @@ func section<Content: View>(_ title: String, theme: Theme, state: String? = nil,
 /// bar and the sidebar, not here.)
 struct HomePage: View {
     @Environment(\.theme) var theme
-    @ObservedObject var model: MonitorModel
+    let model: MonitorModel
     /// A phone: the two side-by-side sections stack and each stage row is a column.
     var compact = false
     @State private var adding = false
@@ -78,7 +78,15 @@ struct HomePage: View {
         }
     }
 
+    #if DEBUG
+    /// Body evaluations, for the offscreen test that counts them.
+    nonisolated(unsafe) static var evaluations = 0
+    #endif
+
     var body: some View {
+        #if DEBUG
+        let _ = { Self.evaluations += 1 }()
+        #endif
         RestoringScroll(model: model, ready: model.home != nil) {
             VStack(alignment: .leading, spacing: theme.spacingLarge) {
                 let pic = model.homeMascot
@@ -197,7 +205,7 @@ struct MascotPicture: View {
 /// "Active models: 3 of [-] 4 [+]": changes how many LLM sessions may be held.
 struct SessionStepper: View {
     @Environment(\.theme) var theme
-    @ObservedObject var model: MonitorModel
+    let model: MonitorModel
 
     var body: some View {
         let used = model.home?.sessionsUsed ?? 0
@@ -221,7 +229,7 @@ struct SessionStepper: View {
 /// and why (in line order), the CPU reading, and the limit's stepper.
 struct CompilationSection: View {
     @Environment(\.theme) var theme
-    @ObservedObject var model: MonitorModel
+    let model: MonitorModel
     let c: Mason_V1_Compilation
     /// Set on home: the title and its '>' open the Compilation page.
     var open: (() -> Void)? = nil
@@ -383,7 +391,7 @@ struct CommandSheet: View {
 /// the decision card and the actions; copy buttons; why exploring was skipped.
 struct TaskDetailPage: View {
     @Environment(\.theme) var theme
-    @ObservedObject var model: MonitorModel
+    let model: MonitorModel
     let id: UInt64
     /// A phone: the picture sits above the text and a step's parts wrap, so nothing is wider than the screen.
     var compact = false
@@ -576,7 +584,7 @@ struct TaskDetailPage: View {
 
 struct LandingPage: View {
     @Environment(\.theme) var theme
-    @ObservedObject var model: MonitorModel
+    let model: MonitorModel
 
     var body: some View {
         RestoringScroll(model: model) {
@@ -674,7 +682,7 @@ func batchCiURL(_ ci: Mason_V1_BatchCi) -> URL? {
 
 struct UsagePage: View {
     @Environment(\.theme) var theme
-    @ObservedObject var model: MonitorModel
+    let model: MonitorModel
     var compact = false
 
     var body: some View {
@@ -782,7 +790,7 @@ struct UsageAccount: View {
 
 struct HealthPage: View {
     @Environment(\.theme) var theme
-    @ObservedObject var model: MonitorModel
+    let model: MonitorModel
 
     var body: some View {
         RestoringScroll(model: model) {
@@ -837,7 +845,7 @@ struct HealthPage: View {
 struct LiveLogSection: View {
     @Environment(\.theme) var theme
     let model: MonitorModel
-    @ObservedObject var live: LiveState
+    let live: LiveState
 
     var body: some View {
         if !live.liveLog.isEmpty {
@@ -854,8 +862,8 @@ struct LiveLogSection: View {
 /// The Health page's connection line, which shows the sequence number.
 struct HealthConnectionLine: View {
     @Environment(\.theme) var theme
-    @ObservedObject var model: MonitorModel
-    @ObservedObject var live: LiveState
+    let model: MonitorModel
+    let live: LiveState
 
     init(model: MonitorModel) {
         self.model = model
@@ -870,7 +878,7 @@ struct HealthConnectionLine: View {
 
 /// "Landing now" (in a batch) above "Queued", one line per task.
 struct LandingItems: View {
-    @ObservedObject var model: MonitorModel
+    let model: MonitorModel
     let items: [Mason_V1_TaskLanding]
     @Environment(\.theme) private var theme
 
@@ -921,7 +929,7 @@ func landingItemText(_ i: Mason_V1_TaskLanding) -> String {
 /// and model on one wide row. The rows are the sidebar's, so they come in its order.
 struct SectionPage: View {
     @Environment(\.theme) var theme
-    @ObservedObject var model: MonitorModel
+    let model: MonitorModel
     let name: String
     /// A phone: each row is a column, not one wide line.
     var compact = false
@@ -968,7 +976,7 @@ struct SectionPage: View {
 /// The wide task rows of a stage page. Testing adds suite progress and Skip testing.
 struct StageRows: View {
     @Environment(\.theme) var theme
-    @ObservedObject var model: MonitorModel
+    let model: MonitorModel
     let name: String
     var compact = false
 

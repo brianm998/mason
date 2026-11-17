@@ -7,7 +7,7 @@ import SwiftUI
 /// "Pair a device…", which shows the `mason://pair` URL as a QR code with the 8-digit code.
 struct DevicesSection: View {
     @Environment(\.theme) var theme
-    @ObservedObject var model: MonitorModel
+    let model: MonitorModel
     @State private var pairing = false
     @State private var revoking: PairedDevice?
 
@@ -61,7 +61,7 @@ struct DevicesSection: View {
 /// device that pairs appears.
 struct PairSheet: View {
     @Environment(\.theme) var theme
-    @ObservedObject var model: MonitorModel
+    let model: MonitorModel
     let close: () -> Void
     @State private var viewer = false
     @State private var now = Date()

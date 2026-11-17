@@ -9,7 +9,7 @@ import SwiftUI
 /// then the other pages. `width` is the drawn width, already fitted to the window.
 struct SidebarPane: View {
     @Environment(\.theme) var theme
-    @ObservedObject var model: MonitorModel
+    let model: MonitorModel
     let width: CGFloat
 
     #if DEBUG
@@ -111,7 +111,7 @@ struct SidebarPane: View {
 
 struct SearchBox: View {
     @Environment(\.theme) var theme
-    @ObservedObject var model: MonitorModel
+    @Bindable var model: MonitorModel
 
     var body: some View {
         VStack(alignment: .leading, spacing: theme.spacingSmall) {
@@ -138,17 +138,19 @@ struct SearchBox: View {
 
 struct SectionHeader: View {
     @Environment(\.theme) var theme
-    @ObservedObject var model: MonitorModel
+    let model: MonitorModel
     let section: SidebarSection
 
     #if DEBUG
     /// Section states whose header body has run, for the offscreen scroll test.
     nonisolated(unsafe) static var realised = Set<String>()
+    /// Body evaluations, for the offscreen test that counts them.
+    nonisolated(unsafe) static var evaluations = 0
     #endif
 
     var body: some View {
         #if DEBUG
-        let _ = { Self.realised.insert(section.state) }()
+        let _ = { Self.realised.insert(section.state); Self.evaluations += 1 }()
         #endif
         let open = model.isExpanded(section)
         HStack(spacing: 0) {
@@ -307,7 +309,7 @@ struct RowView: View, Equatable {
 /// for the owner. Hidden when there are none. Clicking one opens its dialog.
 struct ActiveSessionsPanel: View {
     @Environment(\.theme) var theme
-    @ObservedObject var model: MonitorModel
+    let model: MonitorModel
 
     var body: some View {
         let sessions = model.header?.activeSessions ?? []
@@ -342,7 +344,7 @@ struct ActiveSessionsPanel: View {
 /// The owner-session dialog (s364): the transcript, a field to write in and the End button.
 struct OwnerSessionSheet: View {
     @Environment(\.theme) var theme
-    @ObservedObject var model: MonitorModel
+    let model: MonitorModel
     @State private var draft = ""
 
     var body: some View {

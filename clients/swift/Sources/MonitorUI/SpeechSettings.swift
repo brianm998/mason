@@ -6,7 +6,7 @@ import SwiftUI
 /// Which conditions make noise, which sound each family uses, and which OS voice speaks (Part 19).
 struct SpeechSettingsView: View {
     @Environment(\.theme) var theme
-    @ObservedObject var model: MonitorModel
+    let model: MonitorModel
 
     static let kinds: [(String, String)] = [
         ("needs_you", "Needs a decision"), ("failed", "Task failed"), ("landing", "Landing frozen"),
@@ -17,6 +17,8 @@ struct SpeechSettingsView: View {
     static let sounds = ["Glass", "Basso", "Tink", "Ping", "Pop", "Submarine", "Sosumi", "Funk"]
 
     var body: some View {
+        _ = model.announcerRevision
+        _ = model.announcerRevision
         let a = model.announcer
         VStack(alignment: .leading, spacing: theme.spacing) {
             Text("Sound and speech").font(theme.body(.semibold))
@@ -25,7 +27,7 @@ struct SpeechSettingsView: View {
                     get: { a.settings.kinds.contains(kind) },
                     set: { on in
                         if on { a.settings.kinds.insert(kind) } else { a.settings.kinds.remove(kind) }
-                        model.objectWillChange.send()
+                        model.announcerSettingsChanged()
                     }
                 ))
             }
@@ -33,12 +35,12 @@ struct SpeechSettingsView: View {
             ForEach([("decision", "Wants a decision"), ("broke", "Broke"), ("info", "Other")], id: \.0) { family, label in
                 Picker(label, selection: Binding(
                     get: { a.settings.sounds[family] ?? "Tink" },
-                    set: { a.settings.sounds[family] = $0; model.objectWillChange.send() }
+                    set: { a.settings.sounds[family] = $0; model.announcerSettingsChanged() }
                 )) { ForEach(Self.sounds, id: \.self) { Text($0).tag($0) } }
             }
             Picker("Voice", selection: Binding(
                 get: { a.settings.voice },
-                set: { a.settings.voice = $0; model.objectWillChange.send() }
+                set: { a.settings.voice = $0; model.announcerSettingsChanged() }
             )) {
                 Text("System default").tag("")
                 ForEach(a.availableVoices(), id: \.self) { Text($0).tag($0) }
@@ -52,7 +54,7 @@ struct SpeechSettingsView: View {
                 Text("Volume")
                 Slider(value: Binding(
                     get: { a.settings.volume },
-                    set: { a.settings.volume = min(1, max(0, $0)); model.objectWillChange.send() }
+                    set: { a.settings.volume = min(1, max(0, $0)); model.announcerSettingsChanged() }
                 ), in: 0...1)
                 .accessibilityIdentifier("speech-volume")
                 Text("\(Int((a.settings.volume * 100).rounded()))%")

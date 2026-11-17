@@ -121,8 +121,7 @@ final class RowRedrawTests: XCTestCase {
         m.sidebar?.sections.append(sec)
         let h = host(m)
         settle(h)
-        var publishes = 0
-        let sub = m.$sidebar.dropFirst().sink { _ in publishes += 1 }
+        let sub = ChangeCounter { _ = m.sidebar }
         let rows = RowView.evaluations
         let pane = SidebarPane.evaluations
         let bar = TopBar.evaluations
@@ -132,7 +131,7 @@ final class RowRedrawTests: XCTestCase {
             settle(h)
         }
         sub.cancel()
-        XCTAssertEqual(publishes, 0)
+        XCTAssertEqual(sub.count, 0)
         XCTAssertEqual(RowView.evaluations, rows)
         XCTAssertEqual(SidebarPane.evaluations, pane)
         XCTAssertEqual(TopBar.evaluations, bar)
