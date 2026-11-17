@@ -250,7 +250,14 @@ public final class Announcer {
     }
 
     /// The OS voices, for the settings list.
-    public func availableVoices() -> [String] { sink.voices() }
+    /// The list is asked of the OS once and kept: the voice picker reads it on every redraw.
+    public func availableVoices() -> [String] {
+        if let v = voiceCache { return v }
+        let v = sink.voices()
+        voiceCache = v
+        return v
+    }
+    private var voiceCache: [String]?
 }
 
 /// A sink that makes no noise and completes at once (the default until the app supplies one).

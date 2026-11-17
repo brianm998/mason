@@ -59,27 +59,61 @@ public enum Mascot {
 
     // MARK: Images
 
+    /// Images are immutable bundle files, so each is built once per file set and size and kept.
+    private final class Cache: @unchecked Sendable {
+        let lock = NSLock()
+        var images: [String: Image?] = [:]
+        var loads = 0
+    }
+    private static let cache = Cache()
+
+    /// How many images were built from files (not served from the cache); for tests.
+    public static var imageLoads: Int {
+        cache.lock.lock()
+        defer { cache.lock.unlock() }
+        return cache.loads
+    }
+
+    private static func cached(_ key: String, _ build: () -> Image?) -> Image? {
+        cache.lock.lock()
+        if let hit = cache.images[key] {
+            cache.lock.unlock()
+            return hit
+        }
+        cache.lock.unlock()
+        let made = build()
+        cache.lock.lock()
+        cache.images[key] = .some(made)
+        cache.loads += 1
+        cache.lock.unlock()
+        return made
+    }
+
     /// The icon for a task state (`needs_attention`, `queued`, ...) at 20 or 24 points.
     public static func icon(_ id: String, size: Int) -> Image? {
-        make(iconFiles(id, size: size), points: size)
+        cached("icon:\(id)@\(size)") { make(iconFiles(id, size: size), points: size) }
     }
 
     /// The icon for a banner kind (`connection_lost`, `paused`, ...), 20 points.
     public static func bannerIcon(_ id: String) -> Image? {
-        make(bannerIconFiles(id), points: 20)
+        cached("banner:\(id)") { make(bannerIconFiles(id), points: 20) }
     }
 
     /// The 512 x 512 illustration for a state or an empty view (`all_clear`, `no_tasks`, ...).
     public static func illustration(_ id: String) -> Image? {
-        guard let f = illustrationFile(id), let d = data(f) else { return nil }
-        return image(from: [(1, d)], points: 512)
+        cached("illustration:\(id)") {
+            guard let f = illustrationFile(id), let d = data(f) else { return nil }
+            return image(from: [(1, d)], points: 512)
+        }
     }
 
     /// A brand image (`start_image`), the whole picture at 3:2; nil for an unknown id.
     public static func brand(_ id: String) -> Image? {
-        let f = "brand/\(id).png"
-        guard MascotManifest.brandIds.contains(id), let d = data(f) else { return nil }
-        return image(from: [(1, d)], points: 768)
+        cached("brand:\(id)") {
+            let f = "brand/\(id).png"
+            guard MascotManifest.brandIds.contains(id), let d = data(f) else { return nil }
+            return image(from: [(1, d)], points: 768)
+        }
     }
 
     /// The 1024 px app icon (`brand/app_icon.png`), for the Dock when the monitor runs unbundled.

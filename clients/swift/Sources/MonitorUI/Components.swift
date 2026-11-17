@@ -260,17 +260,9 @@ struct StateIcon: View {
     }
 }
 
-/// Decoding a PNG on every redraw would be wasteful; images are looked up once per state and size.
+/// State icons are cached by `Mascot` itself, so this is a thin alias kept for the call sites.
 @MainActor enum StateIconCache {
-    private static var images: [String: Image?] = [:]
-
-    static func image(_ state: String, size: Int) -> Image? {
-        let key = "\(state)@\(size)"
-        if let hit = images[key] { return hit }
-        let made = Mascot.icon(state, size: size)
-        images[key] = .some(made)
-        return made
-    }
+    static func image(_ state: String, size: Int) -> Image? { Mascot.icon(state, size: size) }
 }
 
 /// The colour of a tile's number: the attention colour when the state wants the owner, gray
