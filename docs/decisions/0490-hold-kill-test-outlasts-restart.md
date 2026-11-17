@@ -6,7 +6,9 @@ Status: accepted
 The test stored a usage-limit hold of 120 s, then killed and restarted the daemon. The restart runs
 a git fetch and process launches with no bound, so on a busy or stalled machine it could outlast
 120 s. The hold then lapsed, the tasks started their develop turn, and the "still blocked"
-assertion failed. The hold is now 240 s. It cannot be much longer: the fake agent's five-hour
-window stays rejected until its reset, so moving the stored hold's end earlier does not lift the
-account, and the test waits out the rest (inside its 300 s landing waits). A first try at 3600 s
-timed out there. The flake was not reproduced here; the cause comes from reading the code.
+assertion failed. Lengthening the reported hold does not help: the fake agent's five-hour window
+stays rejected until its reset, so the test would wait that long (3600 s timed out, 240 s ran
+about 270 s and failed once). Instead the test now reports a 60 s hold and, after checking its
+reset, pushes the stored hold's end an hour out before the kill, so the restart can take any
+time. After the restart check it moves the end to two seconds out as before, and the window
+lapses within its 60 s. The flake was not reproduced here; the cause comes from reading the code.
