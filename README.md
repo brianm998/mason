@@ -419,6 +419,7 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s471**: A waiting request now reserves only the resources it is short of (the first in line also keeps its other units), and build-less suites no longer hold the step's `compile`, so compile slots no longer idle behind test-suite waiters.
 - **s472**: The CPU history's minute buckets are saved to the data dir and reloaded on start, and batch, debt and ledger step hosts are attributed to "batch #N" or their task instead of "other".
 - **s474**: The workspace `[profile.dev]` now sets `debug = "line-tables-only"` and `[profile.dev.package."*"] debug = false`, which cut the target dir of a cold workspace test build by about 20% and the wall time by about 7%.
+- **s476**: A suite green at a base with known-red tests skipped is now recorded apart (`suite_skip_green`), `settle_debts` pays a debt from it with the skipped tests named in `how` unless the debt's task touched one of them, and `run_idle_debts` never runs the same scope twice on one tip.
 - **s477**: Stage 477: shorter real-time waits in the daemon tests
 - **s478**: A baseline is reused from the newest ancestor base with the same suite-definition hash when no file changed since falls under the suite's impact paths, and the step's notes say so.
 - **s479**: A test's `Scratch` now reaps the step hosts (and their agents) its data dir started when it is dropped, even on a panic, and the first scratch world of a test binary kills step hosts and test daemons whose `/tmp/ms*` dir is already gone.
@@ -426,14 +427,17 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s482**: The kill test now waits until the hold is stored and both tasks have launched twice before it kills the daemon.
 - **s484**: The APNs provider-token cache now also compares a SHA-256 fingerprint of the key, so parallel tests (or a changed key) no longer get a token signed by another key.
 - **s485**: APNs provider-token reuse now keys on the signing key as well as key id and team, so the daemon's apns tests no longer verify each other's JWT and the flaky test is unquarantined.
+- **s489**: Before each suite build MASON deletes the `.rcgu.o` object sets of older crate hashes from a task's build directory, since `split-debuginfo = "packed"` broke the build and `off` lost backtrace lines (decision 0482).
 - **s491**: The Compose app tests pass the native-access flag and a build-owned temp directory to the test JVM so Skiko's native library loads and EditorSnapshotTest passes.
 - **s492**: The Compose test JVM unpacks Skia's native library into the build directory so MascotTest's image tests load it.
 - **s493**: The Compose app tests give Skiko a fresh data directory in the build tree so its native library loads and MascotTest passes.
 - **s494**: The Compose app's test JVM now allows native access, so the Skia-backed MascotTest and TopBarTest tests stop failing with UnsatisfiedLinkError.
+- **s495**: The Compose test JVM gets its own skiko data and temp directory so the Skia native library loads and MascotTest and TopBarTest pass.
 - **s496**: The Compose test JVM loads Skiko's native library at launcher-session start, so TopBarTest and MascotTest no longer fail with UnsatisfiedLinkError.
 - **s497**: The kill test now stores an hour-long hold before the kill, so a slow daemon restart cannot outlast it.
 - **s502**: a new `compile` gate holds further compiles while `syspolicyd` uses 300% CPU or more (`[cpu] syspolicyd_max_pct`), so MASON's builds and test runs cannot swamp the Mac's code checks again.
 - **s507**: `every_state_and_event_pair` passes again because `events()` in the engine matrix test no longer lists `Deferred` and `Undeferred` twice, and a duplicate name now fails with a clear message.
+- **s510**: a dropped-line send-back now includes a ready-to-paste `removes` JSON block for each listed line the task's own diff replaced in place.
 - **s513**: on Intel Macs the linker now signs every Rust output ad hoc (`.cargo/config.toml`), and the monitor build signs `MASON.app`, so an unsigned Mach-O can no longer crash `syspolicyd` when deleted mid-scan.
 - **s520**: `run_check` names each failing test that also failed in develop's latest recorded result for the suite ("red on develop at <sha> too: not your change; merge develop when it is fixed"), without waiting for the test to be quarantined.
 - **s522**: A develop agent's tool-call limit now covers the step's whole extended life plus the test timeout, so a `run_check` queued for a slot is no longer cut off while it runs.
