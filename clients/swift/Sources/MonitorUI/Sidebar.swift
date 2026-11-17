@@ -65,6 +65,7 @@ struct SidebarPane: View {
         case .row(let r):
             RowView(
                 row: r, selected: model.page == .task(r.id), canAct: model.canAct, clock: model.live, store: model.progress,
+                approving: model.pendingLabel(task: r.id, action: "approve"), busy: model.isBusy(task: r.id),
                 go: { [model] p in model.go(p) }, approve: { [model] id in model.approve(id) }
             ).equatable()
         case .rule: Divider().padding(.vertical, theme.spacing)
@@ -194,12 +195,16 @@ struct RowView: View, Equatable {
     /// Read for the clock offset only; never observed, so a change to it does not redraw the row.
     let clock: LiveState
     let store: ProgressStore
+    /// Task #522: what the row's Approve says while its command is pending (nil: nothing pending).
+    var approving: String? = nil
+    var busy = false
     let go: (Page) -> Void
     let approve: (UInt64) -> Void
 
     /// Rows are redrawn only when what they show changes; the closures and the clock do not count.
     static func == (a: RowView, b: RowView) -> Bool {
-        a.row == b.row && a.selected == b.selected && a.canAct == b.canAct && a.clock === b.clock && a.store === b.store
+        a.row == b.row && a.selected == b.selected && a.canAct == b.canAct && a.approving == b.approving && a.busy == b.busy
+            && a.clock === b.clock && a.store === b.store
     }
 
     #if DEBUG
@@ -243,8 +248,9 @@ struct RowView: View, Equatable {
                         Text("issue #\(row.issue)").font(theme.small()).foregroundStyle(theme.muted)
                     }
                     if row.state == "proposed" && canAct && row.allowedActions.contains("approve") {
-                        Button { approve(row.id) } label: { Text("Approve").pill(prominent: true) }
+                        Button { approve(row.id) } label: { Text(approving ?? "Approve").pill(prominent: true) }
                             .buttonStyle(.plain).touchTarget()
+                            .disabled(busy)
                             .accessibilityIdentifier("row:\(row.id):approve")
                     }
                 }

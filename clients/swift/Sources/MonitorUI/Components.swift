@@ -644,8 +644,9 @@ struct ApprovalView: View {
             }
             if model.canAct {
                 HStack(spacing: theme.spacing) {
-                    Button { model.approve(task, approval, priority: priority) } label: { Text("Approve").pill(prominent: true) }
+                    Button { model.approve(task, approval, priority: priority) } label: { PendingLabel(text: "Approve", pending: model.pendingCommand(task: task, action: "approve"), prominent: true) }
                         .buttonStyle(.plain)
+                        .disabled(model.isBusy(task: task))
                         .accessibilityIdentifier("approval:\(task):approve")
                     if approval.diffHash.isEmpty {
                         Picker("Priority", selection: $priority) {
@@ -653,12 +654,14 @@ struct ApprovalView: View {
                         }
                         .pickerStyle(.menu).fixedSize()
                         .accessibilityIdentifier("approval:\(task):priority")
-                        Button { model.deferTask(task) } label: { Text("Defer").pill(prominent: false) }
+                        Button { model.deferTask(task) } label: { PendingLabel(text: "Defer", pending: model.pendingCommand(task: task, action: "defer")) }
                             .buttonStyle(.plain)
+                            .disabled(model.isBusy(task: task))
                             .accessibilityIdentifier("approval:\(task):defer")
                     }
-                    Button { rejecting.toggle() } label: { Text("Reject").pill(prominent: false) }
+                    Button { rejecting.toggle() } label: { PendingLabel(text: "Reject", pending: model.pendingCommand(task: task, action: "reject")) }
                         .buttonStyle(.plain)
+                        .disabled(model.isBusy(task: task))
                         .accessibilityIdentifier("approval:\(task):reject")
                 }
                 if rejecting {
@@ -675,7 +678,7 @@ struct ApprovalView: View {
                 Text("Only the owner can approve or reject. You are connected as \(model.identity).")
                     .font(theme.small()).foregroundStyle(theme.muted)
             }
-            if let refused = model.lastResult {
+            if let refused = model.actionError(task: task) ?? model.lastResult {
                 Text(refused).font(theme.body()).foregroundStyle(theme.attention)
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("approval:\(task):refused")
@@ -721,9 +724,14 @@ struct ActionButtons: View {
     /// non-owner sees no buttons at all for what only the owner may do.
     @ViewBuilder var buttons: some View {
         ForEach(Self.offered(row.allowedActions, features: features).filter { shown($0) }, id: \.self) { a in
-            Button { run(a) } label: { Text(label(a)).pill(prominent: a == "approve") }
+            Button { run(a) } label: { PendingLabel(text: label(a), pending: model.pendingCommand(task: row.id, action: a), prominent: a == "approve") }
                 .buttonStyle(.plain).touchTarget()
+                .disabled(model.isBusy(task: row.id))
                 .accessibilityIdentifier("action:\(row.id):\(a)")
+        }
+        if let why = model.actionError(task: row.id) {
+            Text(why).font(theme.small()).foregroundStyle(theme.attention)
+                .accessibilityIdentifier("action:\(row.id):error")
         }
         if let notice = model.sessionNotice {
             Text(notice).font(theme.small()).foregroundStyle(theme.attention)
@@ -786,8 +794,9 @@ struct BlockersView: View {
                         Text("\(l.state), \(l.origin)").font(theme.small()).foregroundStyle(theme.muted)
                         if model.canAct {
                             ForEach(l.actions, id: \.self) { a in
-                                Button { run(l, a) } label: { Text(label(a)).pill() }
+                                Button { run(l, a) } label: { PendingLabel(text: label(a), pending: model.pendingCommand(task: l.task, action: a)) }
                                     .buttonStyle(.plain)
+                                    .disabled(model.isBusy(task: row.id) || model.isBusy(task: l.task))
                                     .accessibilityIdentifier("blocker:\(row.id):\(l.task):\(a)")
                             }
                         }
@@ -808,7 +817,7 @@ struct BlockersView: View {
                             if pick != 0 { model.addBlocker(row.id, after: pick); pick = 0 }
                         } label: { Text("Add blocker").pill() }
                             .buttonStyle(.plain)
-                            .disabled(pick == 0)
+                            .disabled(pick == 0 || model.isBusy(task: row.id))
                             .accessibilityIdentifier("add-blocker:\(row.id)")
                     }
                 }
@@ -1271,5 +1280,21 @@ extension View {
         #else
         frame(maxWidth: width)
         #endif
+    }
+}
+
+/// A pill that says what is happening while its command is pending: a working label and a small
+/// progress indicator while it is sent, the accepted label once masond said yes (task #522).
+struct PendingLabel: View {
+    let text: String
+    let pending: PendingCommand?
+    var prominent = false
+
+    var body: some View {
+        HStack(spacing: 4) {
+            if pending?.stage == .sending { ProgressView().controlSize(.small) }
+            Text(pending?.label ?? text)
+        }
+        .pill(prominent: prominent)
     }
 }
