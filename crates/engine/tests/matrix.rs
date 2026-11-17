@@ -204,6 +204,14 @@ fn expected(from: State, ev: &str) -> Option<State> {
 
 #[test]
 fn every_state_and_event_pair() {
+    let mut names: Vec<&str> = events(TaskId(0), TaskId(0), DecisionId(0))
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect();
+    let listed = names.len();
+    names.sort_unstable();
+    names.dedup();
+    assert_eq!(listed, names.len(), "events() lists an event name twice");
     let mut checked = 0;
     for from in State::ALL {
         for (name, _) in events(TaskId(0), TaskId(0), DecisionId(0)) {
