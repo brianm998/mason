@@ -39,14 +39,22 @@ public final class LiveState: ObservableObject {
 public final class MonitorModel: ObservableObject {
     // From the daemon.
     @Published public var header: HeaderView? { didSet { prunePauseCollapse() } }
-    @Published public var sidebar: SidebarView? { didSet { sidebarRevision &+= 1 } }
+    @Published public var sidebar: SidebarView? { didSet { sidebarRevision &+= 1; linkRevision &+= 1 } }
     /// Bumped on every new sidebar, so derived layouts know when to be rebuilt.
     var sidebarRevision: UInt64 = 0
+    /// Bumped when the sidebar or the open task changes: what `isKnownTask` and `linkify` depend on.
+    var linkRevision: UInt64 = 0
+    private var knownTaskCache: (revision: UInt64, ids: Set<UInt64>)?
+    private var linkCache: (revision: UInt64, segments: [String: [LinkSegment]]) = (0, [:])
+    /// How many times `linkify` actually ran `Linkify.segments` (for tests and the exit test).
+    public private(set) var linkifyPasses = 0
+    /// How many task-id lookups `linkify` made.
+    public private(set) var isKnownTaskCalls = 0
     var sidebarEntriesCache: (key: SidebarEntriesKey, entries: [SidebarEntry])?
     @Published public var home: HomeView?
     /// The CPU shares, observed apart from the whole model: the CPU section watches only this.
     public let cpu = CpuModel()
-    @Published public var taskDetail: TaskDetailView?
+    @Published public var taskDetail: TaskDetailView? { didSet { linkRevision &+= 1 } }
     @Published public var landing: LandingView?
     @Published public var usage: UsageView?
     @Published public var editor: EditorView?
@@ -425,20 +433,33 @@ public final class MonitorModel: ObservableObject {
     /// Whether `n` is a task this monitor has heard of (in the sidebar, or named by the open
     /// task's page), so a `#n` in text can be a link to its page.
     public func isKnownTask(_ n: UInt64) -> Bool {
-        if sidebar?.sections.contains(where: { $0.rows.contains { $0.id == n } }) == true { return true }
+        isKnownTaskCalls += 1
+        if let c = knownTaskCache, c.revision == linkRevision { return c.ids.contains(n) }
+        var ids = Set<UInt64>()
+        for sec in sidebar?.sections ?? [] { for r in sec.rows { ids.insert(r.id) } }
         if let d = taskDetail, d.hasRow {
             let r = d.row
-            if r.id == n || r.blockers.contains(n) || r.blocks.contains(n) { return true }
-            if d.debts.contains(where: { $0.task == n }) { return true }
-            if d.hasProposal && d.proposal.filedBy == n { return true }
+            ids.insert(r.id)
+            ids.formUnion(r.blockers)
+            ids.formUnion(r.blocks)
+            for debt in d.debts { ids.insert(debt.task) }
+            if d.hasProposal { ids.insert(d.proposal.filedBy) }
         }
-        return false
+        knownTaskCache = (linkRevision, ids)
+        return ids.contains(n)
     }
 
-    /// `text` as plain text, task links and URL links, for the open task's page.
+    /// `text` as plain text, task links and URL links, for the open task's page. The result is
+    /// kept per text until the sidebar or the open task changes.
     public func linkify(_ text: String) -> [LinkSegment] {
-        Linkify.segments(text, isKnownTask: { [unowned self] in self.isKnownTask($0) },
-                         ciLinks: taskDetail?.ciLinks ?? [])
+        if linkCache.revision != linkRevision { linkCache = (linkRevision, [:]) }
+        if let hit = linkCache.segments[text] { return hit }
+        linkifyPasses += 1
+        let made = Linkify.segments(text, isKnownTask: { [unowned self] in self.isKnownTask($0) },
+                                    ciLinks: taskDetail?.ciLinks ?? [])
+        if linkCache.segments.count > 512 { linkCache.segments.removeAll() }
+        linkCache.segments[text] = made
+        return made
     }
 
     /// Where the shown page is scrolled now. Not published: it changes every frame of a scroll,
