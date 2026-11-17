@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# s495 exit test: the Skia native library loads in the Compose test JVM.
+set -euo pipefail
+cd "$(dirname "$0")/../.."
+if [ -n "${MASON_SKIP_COMPOSE:-}" ] || ! command -v gradle >/dev/null; then
+    echo "== (Compose tests skipped: MASON_SKIP_COMPOSE is set or gradle is missing)"
+    exit 0
+fi
+(cd clients/compose && gradle :app:test --tests 'mason.monitor.ui.MascotTest' \
+  --tests 'mason.monitor.ui.TopBarTest' --console=plain > "${TMPDIR:-/tmp}/s495-gradle.log" 2>&1) \
+  || { grep -E "FAILED|tests completed" "${TMPDIR:-/tmp}/s495-gradle.log" >&2; exit 1; }
+echo "s495 OK"
