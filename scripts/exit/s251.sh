@@ -14,5 +14,5 @@ run() {
 }
 
 run "the round decision and the key" -p mason-daemon --lib -- last_round escalate_model
-run "the last round is escalated, the earlier ones are not" -p mason-daemon --test escalate
+run "the last round is escalated, the earlier ones are not" -p mason-daemon --test it escalate::
 echo "s251 OK"

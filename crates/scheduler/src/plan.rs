@@ -104,6 +104,10 @@ pub struct World<'a> {
     /// all other pipeline work that is not a landing, oldest first
     /// (`order.max_wait_s`). `None` means requests do not age.
     pub max_wait: Option<u64>,
+    /// A waiting exclusive request that has waited this long (same unit as `now`) gives up its
+    /// freeze (s552): ordinary work may start again as long as it is done before the machine
+    /// has drained. `None`: the freeze has no bound.
+    pub exclusive_max_wait: Option<u64>,
 }
 
 /// The build disk has stopped answering promptly. A stall shows up as *less* CPU
@@ -236,6 +240,8 @@ struct Blocked {
     /// When the first waiting exclusive request can start at the earliest: the latest
     /// expected end of the machine-class holders when it began to wait (s385). Work sure to be
     /// done by then may pass it, since it delays nothing. `None`: unknown, nothing passes.
+    /// A holder that has run past its expected end counts as ending one more expected run from
+    /// now, so the end never falls into the past and stops all backfill (s552).
     drain_end: Option<u64>,
 }
 
@@ -246,6 +252,8 @@ impl Blocked {
         usage: &Usage,
         n: &Needs,
         holders: &[Holder],
+        now: u64,
+        thawed: Option<u64>,
     ) {
         let short: Vec<&String> = n
             .amounts
@@ -268,7 +276,7 @@ impl Blocked {
         }
         if n.exclusive && !self.machine_all {
             self.machine_all = true;
-            self.drain_end = drain_end(capacity, holders);
+            self.drain_end = drain_end(capacity, holders, now, thawed);
         }
         if uses_machine(capacity, n) {
             self.machine_any = true;
@@ -330,10 +338,32 @@ impl Blocked {
 
 /// When the machine-class holders are expected to be done, the latest of them: `None` when
 /// any of them has no estimate, since then the drain's end is unknown (s385).
-fn drain_end(capacity: &BTreeMap<String, Capacity>, holders: &[Holder]) -> Option<u64> {
+///
+/// A holder past its expected end is not done "in the past": it is taken to need one more
+/// expected run from `now` (s552). Before that, `drain_end` slid behind `now` once the holders
+/// overran, which is the usual case for test runs of 20 to 90 min, and nothing could ever pass
+/// the waiting exclusive request again. With `unknown_ms` (the request has given up its
+/// freeze), a holder with no estimate is taken to end that long from `now`.
+fn drain_end(
+    capacity: &BTreeMap<String, Capacity>,
+    holders: &[Holder],
+    now: u64,
+    unknown_ms: Option<u64>,
+) -> Option<u64> {
     let mut end = 0u64;
     for h in holders.iter().filter(|h| uses_machine(capacity, &h.needs)) {
-        end = end.max(h.since.saturating_add(h.expected_ms?));
+        let e = match h.expected_ms {
+            Some(e) => {
+                let due = h.since.saturating_add(e);
+                if due < now {
+                    now.saturating_add(e)
+                } else {
+                    due
+                }
+            }
+            None => now.saturating_add(unknown_ms?),
+        };
+        end = end.max(e);
     }
     Some(end)
 }
@@ -535,10 +565,21 @@ pub fn plan(world: &World, waiting: &[Request]) -> Plan {
                 if rank_of(r).is_aged() && !matches!(fitted, Fit::Never(_)) {
                     wait.aged_ms = Some(world.now.saturating_sub(r.since));
                 }
+                // An exclusive request past its bound gives up the freeze and says so.
+                let thaw = match world.exclusive_max_wait {
+                    Some(m) if r.needs.exclusive && !matches!(fitted, Fit::Never(_)) => {
+                        let waited = world.now.saturating_sub(r.since);
+                        (waited >= m).then_some(m)
+                    }
+                    _ => None,
+                };
+                if thaw.is_some() && !blocked.machine_all {
+                    wait.thawed_ms = Some(world.now.saturating_sub(r.since));
+                }
                 out.waits.insert(r.id, wait);
                 // A request that can never fit must not hold up the others.
                 if !matches!(fitted, Fit::Never(_)) {
-                    blocked.add(capacity, &usage, &r.needs, &holders);
+                    blocked.add(capacity, &usage, &r.needs, &holders, world.now, thaw);
                     ahead.push((r, cause));
                 }
             }
@@ -627,5 +668,6 @@ fn build_wait(
         behind: ahead_of_me.iter().map(to_ahead).collect(),
         held_by,
         aged_ms: None,
+        thawed_ms: None,
     }
 }

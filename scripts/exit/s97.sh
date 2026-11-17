@@ -10,7 +10,7 @@ set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 echo "== 0. cargo tests"
 cargo test -q -p mason-daemon --lib views::
-cargo test -q -p mason-daemon --test history_cap
+cargo test -q -p mason-daemon --test it history_cap::
 root=$(mktemp -d /tmp/mason-s97.XXXXXX); daemon=""
 cleanup() { [ -n "$daemon" ] && kill -9 "$daemon" 2>/dev/null || true; rm -rf "$root"; }
 trap cleanup EXIT

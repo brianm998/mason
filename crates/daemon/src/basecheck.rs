@@ -16,13 +16,141 @@ use crate::jobs::{pty_wrap, step_env_pairs, Ctx};
 use mason_core::*;
 use mason_landing::git;
 use std::process::{Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard, TryLockError};
 use std::time::{Duration, Instant};
 
 /// One base run at a time, and one filing at a time: a second task with the same base
 /// waits, then finds the first one's result (or the first one's fix task).
-pub(crate) static BASE_RUN: Mutex<()> = Mutex::new(());
+pub(crate) static BASE_RUN: BaseRunLock = BaseRunLock::new();
 pub(crate) static FILING: Mutex<()> = Mutex::new(());
+
+/// Who holds the base-run lock: the task, what it runs there, and since when.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct BaseHolder {
+    pub task: u64,
+    /// For example "`cargo-workspace` at 7f5d57d812".
+    pub what: String,
+    pub since_ms: u64,
+}
+
+/// The lock behind "one base run at a time" that also remembers its holder, so a task that
+/// has to wait for it can say who it waits for (s536, decision 0529).
+pub(crate) struct BaseRunLock {
+    lock: Mutex<()>,
+    holder: Mutex<Option<BaseHolder>>,
+}
+
+/// Held for the length of one base run; clears the holder when dropped.
+pub(crate) struct BaseRunGuard<'a> {
+    owner: &'a BaseRunLock,
+    _held: MutexGuard<'a, ()>,
+}
+
+impl Drop for BaseRunGuard<'_> {
+    // Runs before the fields drop, so the holder is cleared while the lock is still held.
+    fn drop(&mut self) {
+        *self.owner.holder.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+}
+
+/// "Waiting for the base check: #452 is running `cargo-workspace` at 7f5d57d (22 min)".
+pub(crate) fn base_wait_text(holder: Option<&BaseHolder>, now_ms: u64) -> String {
+    match holder {
+        Some(h) => {
+            let mins = now_ms.saturating_sub(h.since_ms) / 60_000;
+            let age = if mins == 0 {
+                "under 1 min".to_string()
+            } else {
+                format!("{mins} min")
+            };
+            format!(
+                "Waiting for the base check: #{} is running {} ({age})",
+                h.task, h.what
+            )
+        }
+        None => "Waiting for the base check: another task is running one (holder unknown)".into(),
+    }
+}
+
+/// A command shortened to its first line and 60 characters, for a wait text.
+pub(crate) fn command_label(cmd: &str) -> String {
+    let line = cmd.lines().next().unwrap_or("").trim();
+    let mut out: String = line.chars().take(60).collect();
+    if out.len() < line.len() {
+        out.push_str("...");
+    }
+    format!("`{out}`")
+}
+
+impl BaseRunLock {
+    pub(crate) const fn new() -> Self {
+        BaseRunLock {
+            lock: Mutex::new(()),
+            holder: Mutex::new(None),
+        }
+    }
+
+    pub(crate) fn holder(&self) -> Option<BaseHolder> {
+        self.holder
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Take the lock for `task` running `what` (which already names the base). Free: no
+    /// callback runs. Held: `on_wait` gets the text and says whether it announced a wait,
+    /// then this blocks, and `on_end` runs once the lock is ours if it did.
+    pub(crate) fn take_with(
+        &self,
+        task: u64,
+        what: &str,
+        now_ms: impl Fn() -> u64,
+        on_wait: impl FnOnce(String) -> bool,
+        on_end: impl FnOnce(),
+    ) -> BaseRunGuard<'_> {
+        let held = match self.lock.try_lock() {
+            Ok(g) => g,
+            Err(TryLockError::Poisoned(e)) => e.into_inner(),
+            Err(TryLockError::WouldBlock) => {
+                let text = base_wait_text(self.holder().as_ref(), now_ms());
+                let waiting = on_wait(text);
+                let g = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+                if waiting {
+                    on_end();
+                }
+                g
+            }
+        };
+        *self.holder.lock().unwrap_or_else(|e| e.into_inner()) = Some(BaseHolder {
+            task,
+            what: what.to_string(),
+            since_ms: now_ms(),
+        });
+        BaseRunGuard {
+            owner: self,
+            _held: held,
+        }
+    }
+
+    /// As `take_with`, announcing a wait through the step's own events (class `base-run`).
+    pub(crate) fn take(&self, c: &Ctx, what: &str) -> BaseRunGuard<'_> {
+        self.take_with(
+            c.task.0,
+            what,
+            crate::daemon::now_ms,
+            |text| {
+                c.emit(EventKind::WaitStarted {
+                    task: c.task,
+                    on: text,
+                    class: Some("base-run".into()),
+                })
+            },
+            || {
+                c.emit(EventKind::WaitEnded { task: c.task });
+            },
+        )
+    }
+}
 
 /// The name a command's base result is kept under in `baselines.suite`.
 pub fn key_of(cmd: &str) -> String {
@@ -76,6 +204,29 @@ pub fn is_fix_title(title: &str, test: &str) -> bool {
     title.contains(test) && title.contains(" fails on ")
 }
 
+/// The test class (or file) of a test name: everything before the last `::`, ` > `, `/` or
+/// `.`, in that order of preference. `None` for a name with no such part.
+pub fn class_of(test: &str) -> Option<String> {
+    for sep in ["::", " > ", "/", "."] {
+        if let Some((head, tail)) = test.rsplit_once(sep) {
+            if !head.is_empty() && !tail.is_empty() {
+                return Some(head.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// The line in a fix task's body that says which class and base it covers.
+fn class_marker(class: &str, base: &str) -> String {
+    format!("Test class: `{class}` at base `{}`", short(base))
+}
+
+/// Does a grouped fix task's body list `test`?
+fn lists_test(t: &Task, test: &str) -> bool {
+    t.title.contains(" fail on ") && t.body.contains(&format!("\n- `{test}`\n"))
+}
+
 pub(crate) fn short(sha: &str) -> &str {
     &sha[..sha.len().min(10)]
 }
@@ -96,7 +247,7 @@ fn existing_fix_in(
             .tasks
             .values()
             .filter(|t| t.project == project && !t.state.is_terminal())
-            .filter(|t| is_fix_title(&t.title, test))
+            .filter(|t| is_fix_title(&t.title, test) || lists_test(t, test))
             .collect();
         open.sort_by_key(|t| t.id.0);
         if let Some(t) = open.first() {
@@ -153,29 +304,102 @@ pub struct Seen<'a> {
 
 /// The fix for `test` failing at the base: the one already open, or a new urgent task.
 fn file_fix(d: &std::sync::Arc<crate::daemon::Daemon>, s: &Seen, test: &str) -> Option<Fix> {
+    file_group(d, s, &[test.to_string()])
+}
+
+/// The open task for a class and base, if one was filed (s512).
+fn existing_group(d: &std::sync::Arc<crate::daemon::Daemon>, s: &Seen, class: &str) -> Option<Fix> {
+    let marker = class_marker(class, s.base);
+    let w = d.world().ok()?;
+    let mut open: Vec<&Task> = w
+        .tasks
+        .values()
+        .filter(|t| t.project == s.project && !t.state.is_terminal())
+        .filter(|t| t.body.contains(&marker))
+        .collect();
+    open.sort_by_key(|t| t.id.0);
+    open.first().map(|t| Fix::Task(t.id.0))
+}
+
+/// One fix for `tests`, which failed together at one base (s512): a task already open for
+/// any of them, or for their class at this base, or one new urgent task naming all of them.
+/// Tests of different classes are filed separately by the caller.
+fn file_group(
+    d: &std::sync::Arc<crate::daemon::Daemon>,
+    s: &Seen,
+    tests: &[String],
+) -> Option<Fix> {
     let _g = FILING.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(f) = existing_fix_in(d, s.project, s.project_name, test) {
-        return Some(f);
+    for t in tests {
+        if let Some(f) = existing_fix_in(d, s.project, s.project_name, t) {
+            return Some(f);
+        }
+    }
+    let class = tests.first().and_then(|t| class_of(t));
+    if let Some(c) = &class {
+        if let Some(f) = existing_group(d, s, c) {
+            return Some(f);
+        }
     }
     let found = if s.task == 0 {
         "a run over the base".to_string()
     } else {
         format!("the merge base of task #{} in {}", s.task, s.project_name)
     };
+    let (title, names, verb) = match tests {
+        [one] => (
+            format!("{one} fails on {}", short(s.base)),
+            format!("`{one}`"),
+            "fails",
+        ),
+        many => (
+            format!(
+                "{}: {} tests fail on {}",
+                class.as_deref().unwrap_or("tests"),
+                many.len(),
+                short(s.base)
+            ),
+            many.iter()
+                .map(|t| format!("`{t}`"))
+                .collect::<Vec<_>>()
+                .join(", "),
+            "fail",
+        ),
+    };
+    let list = if tests.len() > 1 {
+        let lines: Vec<String> = tests.iter().map(|t| format!("- `{t}`")).collect();
+        format!(
+            "\n\nThe tests, all of one class, to fix together:\n{}\n",
+            lines.join("\n")
+        )
+    } else {
+        String::new()
+    };
+    let marker = class.as_ref().map_or(String::new(), |c| {
+        format!("\n\n{}", class_marker(c, s.base))
+    });
+    let all = tests.join(" ");
     let body = format!(
-        "`{test}` fails on `{}` ({found}), so it fails for every \
+        "{names} {verb} on `{}` ({found}), so {} for every \
          task that runs `{}` there. Tasks that hit it are excused (it fails without their \
-         change) until this lands. This task's own test step is not excused for it: \
-         `{test}` must pass.\n\nCommand at the base:\n```\n{}\n```\n\nOutput tail:\n```\n{}\n```\n\n\
-         Filed by the known-red ledger (decision 0225).{}{}",
-        s.base, s.step, s.cmd, s.log_tail,
+         change) until this lands. This task's own test step is not excused for {}: \
+         {} must pass.{list}{marker}\n\nCommand at the base:\n```\n{}\n```\n\nOutput tail:\n```\n{}\n```\n\n\
+         Filed by the known-red ledger (decision 0225). Reds of the same class at this base \
+         are added to this task rather than filed again (decision 0505).{}{}",
+        s.base,
+        if tests.len() > 1 { "they fail" } else { "it fails" },
+        s.step,
+        if tests.len() > 1 { "them" } else { "it" },
+        if tests.len() > 1 { "each of them" } else { names.as_str() },
+        s.cmd,
+        s.log_tail,
         s.follows.map_or(String::new(), |n| format!("\n\nFollow-up to task #{n}, which landed while this test was still red.")),
-        client_guard_note(&format!("{} {} {test}", s.step, s.cmd))
+        client_guard_note(&format!("{} {} {all}", s.step, s.cmd))
     );
     let a = d
         .emit(EventKind::TaskFiled {
             project: s.project,
-            title: format!("{test} fails on {}", short(s.base)),
+            title,
             body,
             priority: Priority::Urgent,
             trust: TrustSource::Owner,
@@ -247,7 +471,9 @@ pub fn record_red(
     tests: &[String],
 ) -> Vec<(String, Option<Fix>)> {
     let now = crate::daemon::now_ms();
-    let mut out = vec![];
+    let mut out: Vec<(String, Option<Fix>)> = vec![];
+    // Tests with no fix yet, in order; grouped by class below.
+    let mut todo: Vec<String> = vec![];
     for t in tests {
         if !mason_testing::gates::is_test_name(t) {
             continue;
@@ -266,17 +492,31 @@ pub fn record_red(
             .into_iter()
             .find(|r| r.suite == ledger_suite && &r.test == t)
             .and_then(|r| r.fix_task);
-        let fix = match known {
-            Some(n) => Some(Fix::Task(n)),
-            None => {
-                let f = file_fix(d, s, t);
-                if let Some(Fix::Task(n)) = &f {
-                    let _ = d.store.ledger_set_fix(ledger_suite, t, *n);
-                }
-                f
+        match known {
+            Some(n) => out.push((t.clone(), Some(Fix::Task(n)))),
+            None => todo.push(t.clone()),
+        }
+    }
+    let mut groups: Vec<Vec<String>> = vec![];
+    for t in todo {
+        let class = class_of(&t);
+        match class.as_ref().and_then(|c| {
+            groups
+                .iter_mut()
+                .find(|g| class_of(&g[0]).as_ref() == Some(c))
+        }) {
+            Some(g) => g.push(t),
+            None => groups.push(vec![t]),
+        }
+    }
+    for g in groups {
+        let f = file_group(d, s, &g);
+        for t in g {
+            if let Some(Fix::Task(n)) = &f {
+                let _ = d.store.ledger_set_fix(ledger_suite, &t, *n);
             }
-        };
-        out.push((t.clone(), fix));
+            out.push((t, f.clone()));
+        }
     }
     out
 }
@@ -415,7 +655,10 @@ pub fn excuse(
     });
     let mut tail = String::new();
     let failing = {
-        let _g = BASE_RUN.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = BASE_RUN.take(
+            c,
+            &format!("{} at {}", command_label(base_cmd), short(&base)),
+        );
         cached_failures(&c.d.store, &base, &key, &mut || {
             let (names, t, _) = run_at_base(c, &base, build, base_cmd, &[])?;
             tail = t;
@@ -492,6 +735,69 @@ mod tests {
     use super::*;
 
     #[test]
+    fn an_uncontended_base_run_take_announces_nothing() {
+        let lock = BaseRunLock::new();
+        let mut waits = 0;
+        let mut ends = 0;
+        let g = lock.take_with(
+            7,
+            "`x` at abc",
+            || 5,
+            |_| {
+                waits += 1;
+                true
+            },
+            || ends += 1,
+        );
+        assert_eq!(lock.holder().map(|h| h.task), Some(7));
+        drop(g);
+        assert_eq!((waits, ends), (0, 0));
+        assert_eq!(lock.holder(), None);
+    }
+
+    #[test]
+    fn a_task_waiting_for_the_base_run_names_the_holder_and_takes_over() {
+        use std::sync::mpsc::channel;
+        let lock = BaseRunLock::new();
+        let (text_tx, text_rx) = channel::<String>();
+        let (end_tx, end_rx) = channel::<()>();
+        std::thread::scope(|s| {
+            let a = lock.take_with(452, "`cargo-workspace` at 7f5d57d", || 0, |_| true, || {});
+            let b = s.spawn(|| {
+                let g = lock.take_with(
+                    451,
+                    "`other` at 7f5d57d",
+                    || 22 * 60_000,
+                    |t| {
+                        text_tx.send(t).unwrap();
+                        true
+                    },
+                    || end_tx.send(()).unwrap(),
+                );
+                let holder = lock.holder();
+                drop(g);
+                holder
+            });
+            let text = text_rx.recv().unwrap();
+            assert_eq!(
+                text,
+                "Waiting for the base check: #452 is running `cargo-workspace` at 7f5d57d (22 min)"
+            );
+            drop(a);
+            let holder = b.join().unwrap();
+            assert_eq!(holder.map(|h| h.task), Some(451));
+        });
+        end_rx.recv().unwrap();
+        assert!(end_rx.try_recv().is_err(), "on_end ran once");
+        assert_eq!(lock.holder(), None);
+    }
+
+    #[test]
+    fn an_unknown_holder_is_said_to_be_unknown() {
+        assert!(base_wait_text(None, 0).contains("holder unknown"));
+    }
+
+    #[test]
     fn a_client_suite_gets_the_exit_script_guard_requirement() {
         let sw = client_guard_note("swift test --filter TopBarFitTests");
         assert!(sw.contains("MASON_SKIP_SWIFT") && !sw.contains("MASON_SKIP_COMPOSE"));
@@ -543,6 +849,21 @@ mod tests {
         let mut none = || None;
         assert_eq!(cached_failures(&store, "b3", &k, &mut none), None);
         assert!(store.baseline("b3", &k).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_test_class_is_what_precedes_the_last_separator() {
+        assert_eq!(class_of("MascotTest > a b").as_deref(), Some("MascotTest"));
+        assert_eq!(class_of("a::b::c").as_deref(), Some("a::b"));
+        assert_eq!(
+            class_of("pkg.MascotTest.go").as_deref(),
+            Some("pkg.MascotTest")
+        );
+        assert_eq!(
+            class_of("MascotTests/testA").as_deref(),
+            Some("MascotTests")
+        );
+        assert_eq!(class_of("plain"), None);
     }
 
     #[test]

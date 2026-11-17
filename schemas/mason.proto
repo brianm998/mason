@@ -59,6 +59,8 @@ enum ViewKind {
   EDITOR = 7;
   // The CPU readings over `Subscribe.cpu_span_ms`; asked for only while the graph shows.
   CPU_HISTORY = 8;
+  // The free disk space per volume over `Subscribe.disk_span_ms`; asked for only while the graph shows.
+  DISK_HISTORY = 9;
 }
 
 // Which views to keep sending. Replaces any earlier subscription.
@@ -72,6 +74,8 @@ message Subscribe {
   string editor_step = 4;
   // The span for CPU_HISTORY, in ms (0: an hour).
   uint64 cpu_span_ms = 5;
+  // The span for DISK_HISTORY, in ms (0: an hour).
+  uint64 disk_span_ms = 6;
 }
 
 message Ping {
@@ -312,6 +316,9 @@ message ViewUpdate {
   View view = 2;
 }
 
+// Results are sent as commands finish, not in send order: the daemon runs a connection's
+// commands concurrently (a few at a time) and keeps send order only among commands about
+// the same task. Match a result to its command by `id`.
 message CommandResult {
   string id = 1;
   bool ok = 2;
@@ -342,6 +349,7 @@ message View {
     UsageView usage = 6;
     EditorView editor = 7;
     CpuHistory cpu_history = 8;
+    DiskHistory disk_history = 9;
   }
 }
 
@@ -854,6 +862,41 @@ message CpuHistory {
   repeated CpuPoint points = 3;
 }
 
+// A physical volume MASON cares about: where its data, caches, projects or worktrees live.
+message DiskVolume {
+  // Stable for the volume (a device id, or a drive on Windows).
+  string id = 1;
+  // For display: the mount point's last component, the volume's label, or the drive letter.
+  string name = 2;
+  string mount = 3;
+  // Which of `data`, `cache`, `project` and `worktrees` live on it, for a tooltip.
+  repeated string roles = 4;
+}
+
+message DiskReading {
+  // `DiskVolume.id`.
+  string volume = 1;
+  uint64 free_bytes = 2;
+  uint64 total_bytes = 3;
+}
+
+// One sampling. A volume that could not be read then is absent.
+message DiskPoint {
+  uint64 at_ms = 1;
+  repeated DiskReading readings = 2;
+}
+
+// The free space of each volume over a span, oldest first, served by `GET /disk/history?span=`.
+// Served on request, never pushed with the home view.
+message DiskHistory {
+  uint64 span_ms = 1;
+  // The gap between points: the sampling period, or a minute for old data.
+  uint64 step_ms = 2;
+  // Every volume seen in the span, in a stable order, even one with a gap.
+  repeated DiskVolume volumes = 3;
+  repeated DiskPoint points = 4;
+}
+
 // Who holds a `compile` slot.
 message CompileHolder {
   // `#88`, or the command line of an interactive caller.
@@ -917,9 +960,14 @@ message Compilation {
   // What the daemon did about the queue lately, newest first ("Stopped #95's
   // command ...: it used no CPU for 30 min while holding a compile slot").
   repeated string notes = 10;
+  // macOS's syspolicyd CPU use in percent of one core (700 is seven cores); -1 when there
+  // is no reading or no gate.
+  int32 syspolicyd_pct = 11;
+  // A further compile waits while syspolicyd is at or above this; 0: no gate.
+  uint32 syspolicyd_max_pct = 12;
   // Leases that belong to no task, held or waiting, for any resource (a person's `mason run`,
   // `starpipe heavy`, a hook), oldest first.
-  repeated WaitParty leases = 11;
+  repeated WaitParty leases = 13;
 }
 
 message StepLine {

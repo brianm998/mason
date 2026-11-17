@@ -293,7 +293,14 @@ impl<'a> Ctx<'a> {
     /// sections, which are marked as wanting you.) A held task is in a step state, so
     /// without this it counted in the header but never showed in the section or the tile.
     fn needs_you(&self, t: &Task) -> bool {
-        t.state == State::NeedsAttention || (t.state != State::Proposed && self.needs_approval(t))
+        t.state == State::NeedsAttention
+            || (t.state != State::Proposed && self.needs_approval(t))
+            || self.circling(t)
+    }
+
+    /// Is the develop step going round in circles on the same failing tests (s511)?
+    fn circling(&self, t: &Task) -> bool {
+        t.state == State::Developing && crate::circling::of_task(self.d, t.id).is_some()
     }
 
     /// Does the task belong in sidebar section `s`? Each task is in exactly one.
@@ -579,6 +586,7 @@ impl<'a> Ctx<'a> {
                     t.state,
                     State::NeedsAttention | State::Failed | State::Proposed
                 ) || self.needs_approval(t)
+                    || self.circling(t)
             })
             .count() as u32;
         let mut banners = vec![];
@@ -648,6 +656,15 @@ impl<'a> Ctx<'a> {
                     ),
                     ..Default::default()
                 });
+            }
+            for h in v["held_back"].as_array().into_iter().flatten() {
+                if let Some(t) = h["text"].as_str() {
+                    banners.push(Banner {
+                        kind: "ci_watch".into(),
+                        text: format!("{}: {t}", p.id),
+                        ..Default::default()
+                    });
+                }
             }
             if let Some(e) = v["error"].as_str() {
                 banners.push(Banner {
@@ -1463,6 +1480,7 @@ impl<'a> Ctx<'a> {
         task: u64,
         step: &str,
         cpu_span_ms: u64,
+        disk_span_ms: u64,
     ) -> Option<View> {
         use mason_protocol::view::Body;
         let body = match kind {
@@ -1479,6 +1497,14 @@ impl<'a> Ctx<'a> {
                     3_600_000
                 } else {
                     cpu_span_ms
+                },
+            )),
+            ViewKind::DiskHistory => Body::DiskHistory(self.d.disk_history(
+                self.now,
+                if disk_span_ms == 0 {
+                    3_600_000
+                } else {
+                    disk_span_ms
                 },
             )),
             _ => return None,

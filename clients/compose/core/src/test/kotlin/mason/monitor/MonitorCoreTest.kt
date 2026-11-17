@@ -312,10 +312,47 @@ class MonitorCoreTest {
         m.sender = { sent += it }
         m.skipAllTests(m.sectionRows("testing"))
         assertEquals(listOf(10L, 12L), sent.map { it.skip?.task })
+        // masond answers the first two (task #522: a second click while one is pending sends nothing).
+        sent.toList().forEach { m.apply(ServerMessage(result = CommandResult(id = it.id, ok = false, error = "no"))) }
         m.skipTest(10, "test")
         assertEquals(10L, sent.last().skip?.task)
         assertEquals("3 of 8 suites", SectionPages.suiteProgress(a))
         assertEquals("", SectionPages.suiteProgress(b))
+    }
+
+    @Test fun skipAllOverRowsWithNoStepSendsOnePerTaskAndSaysSo() {
+        val m = model()
+        m.isOwner = true
+        m.sidebar = m.sidebar!!.copy(sections = m.sidebar!!.sections + section("testing", rows = listOf(
+            row(20, "testing", actions = listOf("skip_test")), row(21, "testing", actions = listOf("skip_test")))))
+        val sent = mutableListOf<Command>()
+        m.sender = { sent += it }
+        m.skipAllTests(m.sectionRows("testing"))
+        assertEquals(listOf(20L, 21L), sent.map { it.skip?.task })
+        assertEquals(listOf("", ""), sent.map { it.skip?.step }, "the daemon reads an empty step as the test step")
+        assertEquals("Skipped testing for 2 tasks", m.skipNotice)
+    }
+
+    @Test fun skipAllSaysWhyWhenItCannotAct() {
+        val m = model()
+        m.sidebar = m.sidebar!!.copy(sections = m.sidebar!!.sections + section("testing", rows = listOf(row(20, "testing", actions = listOf("skip_test")))))
+        val sent = mutableListOf<Command>()
+        m.sender = { sent += it }
+        m.isOwner = false
+        assertNotNull(m.skipDisabledReason)
+        m.skipAllTests(m.sectionRows("testing"))
+        assertTrue(sent.isEmpty())
+        assertEquals(m.skipDisabledReason, m.skipNotice)
+        m.isOwner = true
+        m.sidebar = m.sidebar!!.copy(sections = m.sidebar!!.sections.filter { it.state != "testing" } + section("testing", rows = listOf(row(21, "testing", actions = listOf("cancel")))))
+        m.skipAllTests(m.sectionRows("testing"))
+        assertEquals("Nothing to skip: no task here allows it", m.skipNotice)
+    }
+
+    @Test fun aRefusedCommandResultIsAMessage() {
+        val m = model()
+        m.apply(ServerMessage(result = CommandResult(id = "m1", ok = false, error = "there is no step `x`")))
+        assertEquals("there is no step `x`", m.lastResult)
     }
 
     @Test fun doubleClickOnAnEmptyStateChangesNothingBeyondTheReveal() {
@@ -516,6 +553,15 @@ class MonitorCoreTest {
         assertEquals("9 min", Format.duration(9 * 60_000))
         assertEquals("3h10", Format.duration(3 * 3_600_000 + 10 * 60_000))
         assertEquals("2h", Format.duration(2 * 3_600_000))
+    }
+
+    @Test fun theSyspolicydLineShowsTheReadingAndTheLimit() {
+        assertNull(Compilation().policyLine, "no gate")
+        assertEquals("syspolicyd 640% — holding compiles over 300%", Compilation(syspolicyd_pct = 640, syspolicyd_max_pct = 300).policyLine)
+        assertEquals("syspolicyd 20% — compiles held over 300%", Compilation(syspolicyd_pct = 20, syspolicyd_max_pct = 300).policyLine)
+        val h = HealthSnapshot.parse("""{"cpu":{"busy_pct":10,"compile_max_pct":50,"syspolicyd_pct":640,"syspolicyd_max_pct":300}}""")
+        assertEquals("syspolicyd 640% — holding compiles over 300%", h.policyLine)
+        assertNull(HealthSnapshot.parse("""{"cpu":{"busy_pct":10,"compile_max_pct":50}}""").policyLine)
     }
 
     @Test fun theHealthPageReadsTheDaemonsResourceReport() {
@@ -1360,8 +1406,10 @@ class MonitorCoreTest {
         m.identity = "brian"
         val sent = mutableListOf<Command>()
         m.sender = { sent += it }
-        m.release(11, 8)
-        m.addBlocker(11, 5)
+        // masond answers each before the next click (a task with a command pending takes no second one).
+        fun answered() = m.apply(ServerMessage(result = CommandResult(id = sent.last().id, ok = false, error = "no")))
+        m.release(11, 8); answered()
+        m.addBlocker(11, 5); answered()
         m.revive(8)
         assertEquals(listOf(8L), sent[0].unblock?.from)
         assertEquals(11L, sent[0].unblock?.task)

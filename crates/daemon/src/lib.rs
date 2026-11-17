@@ -6,6 +6,7 @@
 //! agent sessions, test runs) on bounded worker pools and reports back as new
 //! events. Nothing blocks the async event loop.
 
+pub mod affected;
 pub mod attention;
 pub mod autoquarantine;
 pub mod autoretry;
@@ -16,6 +17,7 @@ pub mod bg;
 pub mod blockers;
 pub mod ci_schedule;
 pub mod ci_watch;
+pub mod circling;
 pub mod closer;
 pub mod cmdreuse;
 pub mod config;
@@ -29,10 +31,12 @@ pub mod defs;
 pub mod demo;
 pub mod diagnose;
 pub mod disk;
+pub mod diskhistory;
 pub mod editor;
 pub mod exhausted;
 pub mod fdlimit;
 pub mod file_hold;
+pub mod fixsync;
 pub mod health;
 pub mod holds;
 pub mod hostarchive;

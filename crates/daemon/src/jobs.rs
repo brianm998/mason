@@ -126,7 +126,11 @@ pub struct Ctx {
     pub state: State,
     /// How many times this step has run for the task, this run included.
     pub attempt: u32,
+    /// The project as the step started: what must not change mid-step (path, base,
+    /// remote). Limits that may change are read through `Ctx::live`.
     pub project: ProjectCfg,
+    /// Set once the step has logged that a live limit differs from its start value.
+    pub(crate) live_noted: std::sync::atomic::AtomicBool,
     pub project_id: ProjectId,
     pub title: String,
     pub body: String,
@@ -143,6 +147,43 @@ pub struct Ctx {
 }
 
 impl Ctx {
+    /// The project's settings as registered now, for limits that are safe to change
+    /// mid-step (`test_timeout`, `test_reruns`, `step_timeout`, `tool_timeout`):
+    /// a registration reload reaches a step that is already running. Falls back to
+    /// the step's own copy if the project is gone. Logs once per step when a live
+    /// value differs from the one the step started with.
+    pub fn live(&self) -> &ProjectCfg {
+        let Some(now) = self.d.project(self.project_id) else {
+            return &self.project;
+        };
+        let p = &self.project;
+        if (
+            now.test_timeout,
+            now.test_reruns,
+            now.step_timeout,
+            now.tool_timeout,
+        ) != (
+            p.test_timeout,
+            p.test_reruns,
+            p.step_timeout,
+            p.tool_timeout,
+        ) && !self
+            .live_noted
+            .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            tracing::info!(
+                task = self.task.0,
+                run = self.run.0,
+                test_timeout_s = ?(p.test_timeout.as_secs(), now.test_timeout.as_secs()),
+                test_reruns = ?(p.test_reruns, now.test_reruns),
+                step_timeout_s = ?(p.step_timeout.as_secs(), now.step_timeout.as_secs()),
+                tool_timeout_s = ?(p.tool_timeout.as_secs(), now.tool_timeout.as_secs()),
+                "step now uses project limits changed since it started (was, now)"
+            );
+        }
+        now
+    }
+
     /// Hand the step's resources back and let a waiting task have them.
     pub(crate) fn release_lease(&self) {
         let l = self.lease.lock().unwrap_or_else(|e| e.into_inner()).take();
@@ -563,7 +604,7 @@ fn repin_for_send_back(
     }
 }
 
-pub(crate) fn ctx(d: &Arc<Daemon>, task: TaskId, run: StepRunId) -> Result<Ctx, String> {
+pub fn ctx(d: &Arc<Daemon>, task: TaskId, run: StepRunId) -> Result<Ctx, String> {
     let w = d.world().map_err(|e| e.to_string())?;
     let t = w.tasks.get(&task).ok_or("the task is gone")?;
     let r = w.step_runs.get(&run).ok_or("the step run is gone")?;
@@ -626,6 +667,7 @@ pub(crate) fn ctx(d: &Arc<Daemon>, task: TaskId, run: StepRunId) -> Result<Ctx, 
         wt: project.worktree(&d.cfg, task.0),
         branch: project.branch(task.0),
         project,
+        live_noted: std::sync::atomic::AtomicBool::new(false),
         project_id: t.project,
         title: t.title.clone(),
         body: t.body.clone(),
@@ -1227,6 +1269,9 @@ fn prepare_locked(c: &Ctx) -> Result<Option<String>, git::GitError> {
     let repo = &c.project.path;
     let base = c.project.base_ref();
     git::ensure_worktree(repo, &c.wt, &c.branch, &base)?;
+    // The agent's own cargo builds into the task's directory too, not into `<worktree>/target`.
+    // Written before the status check below: `info/exclude` keeps it out of `git status`.
+    crate::taskcache::point_cargo_at_task_cache(&c.d, &c.project, c.task.0, &c.wt);
     // Uncommitted changes are an agent's work in progress: a step re-entered after
     // the daemon restarted (a self-update, say) finds its agent's edits not yet
     // committed. Merging the base into them fails ("your local changes would be
@@ -1341,6 +1386,9 @@ pub(crate) fn wait_out_environment<T>(
     }
 }
 
+/// How often a queued check looks for a fix that reached the base.
+const FIX_POLL: Duration = Duration::from_secs(2);
+
 /// How long one tool call of an agent step may take. A develop step's
 /// `run_check` runs the whole test command, which is only cut off at
 /// `test_timeout`; a shorter tool timeout made the agent give up on a run that
@@ -1352,6 +1400,22 @@ pub(crate) fn tool_timeout_for(kind: StepKind, project: &ProjectCfg) -> Duration
             .max(project.test_timeout + Duration::from_secs(60)),
         _ => project.tool_timeout,
     }
+}
+
+/// The tool-call limit of a develop agent once the step's budget is known. A `run_check`
+/// may queue for a slot for as long as the step lives (queue waits are credited to the
+/// step's deadline, which the extender lets grow to twice the budget), and only then runs
+/// for up to `test_timeout`; the call's limit is fixed when the agent starts, so it must
+/// cover both. Before, the queue wait counted against `test_timeout + 60 s` and the agent
+/// was cut off while its check was still running (#497).
+pub(crate) fn develop_tool_timeout(
+    current: Duration,
+    budget: Duration,
+    test_timeout: Duration,
+) -> Duration {
+    current
+        .max(budget)
+        .max(budget * 2 + test_timeout + Duration::from_secs(60))
 }
 
 /// What the develop agent is told when its branch does not merge cleanly
@@ -1378,7 +1442,10 @@ pub(crate) fn prepare_worktree_only(c: &Ctx) -> Result<(), String> {
         let lock = c.d.repo_lock(c.project_id);
         let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
         git::ensure_worktree(&c.project.path, &c.wt, &c.branch, &c.project.base_ref())
-    })
+    })?;
+    // The agent's own cargo builds into the task's directory too, not into `<worktree>/target`.
+    crate::taskcache::point_cargo_at_task_cache(&c.d, &c.project, c.task.0, &c.wt);
+    Ok(())
 }
 
 /// How long a worktree setup step may take when it has no `budget`.
@@ -1639,9 +1706,86 @@ struct TestChecks {
     base_fold: Option<(ProjectId, String)>,
     /// The project's name, for the suites' recorded run times.
     project: String,
+    /// The known-red tests the last checks failed, and the base merges made for them while a
+    /// check was queued (s525).
+    reds: crate::fixsync::Reds,
+    /// The tests that failed in the last full (or automatically narrowed) run, when it was red
+    /// and named them. The next unscoped `run_check` re-runs only these and the changed crates
+    /// (s523). `None` after a green run, so the one after that is the full run.
+    last_red: std::sync::Mutex<Option<Vec<String>>>,
+}
+
+/// A command that runs `rerun` (the failing tests) and `dev` (the changed crates) one after the
+/// other, and passes only when both do. Both always run, so one failure does not hide the other.
+fn both_commands(rerun: &str, dev: &str) -> String {
+    format!(
+        "( {rerun} ); mason_a=$?; ( {dev} ); mason_b=$?; [ $mason_a -eq 0 ] && [ $mason_b -eq 0 ]"
+    )
 }
 
 impl TestChecks {
+    /// `wait`, a check queueing for its slots, with its time credited to the deadline (see
+    /// [`credit_wait`]). While it waits the agent is idle, so when a known-red test the last
+    /// check failed is fixed on the base, the base is merged in (s525). The poller has ended
+    /// before this returns: a merge is never half done when the check runs.
+    fn queued<T>(&self, wait: impl FnOnce() -> T) -> T {
+        let done = std::sync::atomic::AtomicBool::new(false);
+        std::thread::scope(|s| {
+            let poll = s.spawn(|| {
+                let mut last = Instant::now();
+                while !done.load(std::sync::atomic::Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(50));
+                    if last.elapsed() >= FIX_POLL && !done.load(std::sync::atomic::Ordering::SeqCst)
+                    {
+                        last = Instant::now();
+                        self.sync_fixed();
+                    }
+                }
+            });
+            let out = credit_wait(&self.extra, crate::sched::CREDIT_EVERY, wait);
+            done.store(true, std::sync::atomic::Ordering::SeqCst);
+            let _ = poll.join();
+            out
+        })
+    }
+
+    /// Merge the base into the worktree if a test the last check failed has left the ledger.
+    fn sync_fixed(&self) {
+        let Some((pid, base)) = &self.base_fold else {
+            return;
+        };
+        if !self.reds.any() {
+            return;
+        }
+        let lock = self.slots.d.repo_lock(*pid);
+        let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let store = &self.slots.d.store;
+        if let Some(fold) = self.reds.sync(&self.wt, base, &|scope| {
+            crate::knownred::known_for(store, scope)
+                .into_iter()
+                .map(|k| k.test)
+                .collect()
+        }) {
+            tracing::info!(
+                task = self.task,
+                run = self.run,
+                ?fold,
+                "run_check: base merged for a fixed test"
+            );
+        }
+    }
+
+    /// Remember which known-red tests the run `id` of `scope` failed, from its whole log.
+    fn remember_red(&self, scope: &str, id: &str) {
+        let text = read_whole_log(&self.log_dir.join(format!("{id}.log"))).unwrap_or_default();
+        let known: Vec<String> = crate::knownred::known_for(&self.slots.d.store, scope)
+            .into_iter()
+            .map(|k| k.test)
+            .collect();
+        self.reds
+            .saw(scope, &crate::rerun::failing_names(&text), &known);
+    }
+
     /// How long a build or run of `suite` is expected to take at most, from the test step's
     /// recorded times (s422). A check's build is incremental, so this errs long.
     fn estimate(&self, suite: &str, phase: &str) -> Option<u64> {
@@ -1692,11 +1836,22 @@ impl TestChecks {
             paths.clone(),
             mason_testing::When::Development,
         );
-        // Packages the diff touches, found once and only if a suite asks for them.
-        let mut touched: Option<Option<Vec<String>>> = None;
+        // What the diff touches (whole packages, or test targets for `{tests_for_change}`),
+        // found once for each kind and only if a suite asks for it.
+        let mut touched: BTreeMap<bool, Option<crate::scope::Narrow>> = BTreeMap::new();
         let mut narrowed: Vec<String> = vec![];
+        // After a red full run, an unscoped check re-runs the failures and the changed crates.
+        let red = self
+            .last_red
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .filter(|r| !r.is_empty() && scope.is_empty() && !scope.full);
+        let tracks = scope.is_empty() || scope.full;
+        let mut failing: Vec<String> = vec![];
+        let mut auto_narrowed = false;
         let project_test = self.cmd.as_ref().map(|c| c.test.as_str());
-        let tree = crate::hostedcheck::tree_key(&self.wt);
+        // The tree is read when a spec is made: a merge while a check waited changes it.
         let spec = |prefix: String, cmd: &str, uses: &BTreeMap<String, u32>, limit: Duration| {
             crate::hostedcheck::CheckSpec {
                 id_prefix: prefix,
@@ -1705,7 +1860,7 @@ impl TestChecks {
                 cwd: self.wt.clone(),
                 env: vec![("MASON_HELD".to_string(), held_text(uses))],
                 limit,
-                tree: tree.clone(),
+                tree: crate::hostedcheck::tree_key(&self.wt),
                 stop: None,
             }
         };
@@ -1731,19 +1886,68 @@ impl TestChecks {
             let limit = suite.timeout.unwrap_or(self.timeout).min(self.timeout);
             let before = suite.command.clone();
             // Only this develop-phase check narrows. The test step runs `command` whole.
-            if !scope.is_empty() {
-                let mut packages = |scope: &CheckScope| -> Option<Vec<String>> {
-                    if !scope.packages.is_empty() {
-                        return Some(scope.packages.clone());
-                    }
-                    touched
-                        .get_or_insert_with(|| {
-                            paths
-                                .as_deref()
-                                .and_then(|p| crate::scope::changed_packages(&self.wt, p))
+            if let Some(names) = &red {
+                if let (Some(t), Some(dc)) = (suite.rerun.clone(), suite.dev_command.clone()) {
+                    let tests_mode = crate::scope::wants_tests(&dc);
+                    let pk = touched
+                        .entry(tests_mode)
+                        .or_insert_with(|| {
+                            paths.as_deref().and_then(|p| {
+                                crate::scope::narrow_for(&self.wt, p, tests_mode, false)
+                            })
                         })
-                        .clone()
-                };
+                        .clone();
+                    if let Some(pk) = pk {
+                        let tests = names
+                            .iter()
+                            .map(|n| shell_word(n))
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        suite.command = both_commands(
+                            &t.replace("{tests}", &tests),
+                            &crate::scope::expand(&dc, &pk, false),
+                        );
+                        if let Some(db) = &suite.dev_build {
+                            suite.build = Some(crate::scope::expand(db, &pk, true));
+                        }
+                        auto_narrowed = true;
+                    }
+                }
+            } else if !scope.is_empty() {
+                let mut narrow =
+                    |scope: &CheckScope, tests_mode: bool| -> Option<crate::scope::Narrow> {
+                        use crate::scope::Narrow;
+                        let changed = if scope.changed || scope.packages.is_empty() {
+                            touched
+                                .entry(tests_mode)
+                                .or_insert_with(|| {
+                                    paths.as_deref().and_then(|p| {
+                                        crate::scope::narrow_for(&self.wt, p, tests_mode, false)
+                                    })
+                                })
+                                .clone()
+                        } else {
+                            None
+                        };
+                        if scope.packages.is_empty() {
+                            return changed;
+                        }
+                        // Packages the agent names run whole, beside what the change affects.
+                        if !tests_mode {
+                            return Some(Narrow::Packages(scope.packages.clone()));
+                        }
+                        let mut groups = match changed {
+                            Some(Narrow::Targets(t)) => t,
+                            _ => vec![],
+                        };
+                        for p in &scope.packages {
+                            let own = format!("-p {p}");
+                            if !groups.contains(&own) {
+                                groups.push(own);
+                            }
+                        }
+                        Some(Narrow::Targets(groups))
+                    };
                 if let (false, Some(t)) = (scope.tests.is_empty(), &suite.rerun) {
                     suite.command = t.replace(
                         "{tests}",
@@ -1762,18 +1966,13 @@ impl TestChecks {
                     scope.changed || !scope.packages.is_empty(),
                     suite.dev_command.clone(),
                 ) {
-                    match packages(scope) {
-                        Some(pk) => {
-                            let flags = crate::scope::flags(&pk);
-                            suite.command = dc.replace("{packages}", &flags);
+                    match narrow(scope, crate::scope::wants_tests(&dc)) {
+                        Some(n) => {
+                            suite.command = crate::scope::expand(&dc, &n, false);
                             if let Some(db) = &suite.dev_build {
-                                suite.build = Some(db.replace("{packages}", &flags));
+                                suite.build = Some(crate::scope::expand(db, &n, true));
                             }
-                            narrowed.push(format!(
-                                "{name}: {} packages ({})",
-                                pk.len(),
-                                pk.join(", ")
-                            ));
+                            narrowed.push(format!("{name}: {}", n.describe()));
                         }
                         None => lines.push(format!(
                             "{name}: no packages found for your changes, so it runs whole"
@@ -1802,12 +2001,23 @@ impl TestChecks {
                             limit,
                         );
                         let queue = !crate::hostedcheck::pending(&self.slots.d, &bspec);
-                        let swapped = credit_wait(&self.extra, crate::sched::CREDIT_EVERY, || {
+                        let merges = self.reds.merges();
+                        let swapped = self.queued(|| {
                             self.slots
                                 .swap_for(queue, &build_uses(), self.estimate(&name, "build"))
                         });
                         let Ok(lease) = swapped else {
                             return over();
+                        };
+                        let bspec = if self.reds.merges() == merges {
+                            bspec
+                        } else {
+                            spec(
+                                format!("{}-{name}-build", self.id_prefix),
+                                b,
+                                &build_uses(),
+                                limit,
+                            )
                         };
                         let res = crate::hostedcheck::run(&self.slots.d, &bspec);
                         drop(lease);
@@ -1854,19 +2064,39 @@ impl TestChecks {
                 limit,
             );
             let queue = !crate::hostedcheck::pending(&self.slots.d, &rspec);
-            let swapped = credit_wait(&self.extra, crate::sched::CREDIT_EVERY, || {
+            let merges = self.reds.merges();
+            let swapped = self.queued(|| {
                 self.slots
                     .swap_for(queue, &uses, self.estimate(&name, "run"))
             });
             let Ok(lease) = swapped else {
                 return over();
             };
+            let rspec = if self.reds.merges() == merges {
+                rspec
+            } else {
+                spec(
+                    format!("{}-{name}", self.id_prefix),
+                    &suite.command,
+                    &uses,
+                    limit,
+                )
+            };
             let res = crate::hostedcheck::run(&self.slots.d, &rspec);
             drop(lease);
+            match &res {
+                Ok(o) if o.passed => self.reds.passed(&name),
+                Ok(o) => self.remember_red(&name, &o.id),
+                Err(_) => {}
+            }
             match res {
                 Ok(o) if o.passed => lines.push(format!("{name}: passed")),
                 Ok(o) => {
                     failed = true;
+                    if let Some(text) = read_whole_log(&self.log_dir.join(format!("{}.log", o.id)))
+                    {
+                        failing.extend(crate::rerun::failing_names(&text));
+                    }
                     lines.push(format!(
                         "{name}: FAILED{}. Last output:\n{}",
                         if o.timed_out { " (timed out)" } else { "" },
@@ -1889,6 +2119,20 @@ impl TestChecks {
                 "No suite is selected for your changes, so none ran.".into(),
             );
         }
+        if tracks {
+            failing.sort();
+            failing.dedup();
+            *self.last_red.lock().unwrap_or_else(|e| e.into_inner()) =
+                (failed && !failing.is_empty()).then(|| failing.clone());
+        }
+        if auto_narrowed {
+            let n = red.as_ref().map_or(0, |r| r.len());
+            lines.push(format!(
+                "Your last full run was red, so this re-ran the {n} tests that failed and the \
+                 crates you changed; the full run comes before you submit. Call run_check again \
+                 (or with full: true) for it; it is the test step's check."
+            ));
+        }
         if !narrowed.is_empty() {
             lines.push(format!(
                 "Scoped ({}): this green is not the test step's. The test step runs the whole \
@@ -1908,7 +2152,16 @@ impl TestChecks {
 /// the suite or test step the ledger keeps them under.
 fn known_header(d: &Daemon, log_dir: &Path, id: &str, scope: &str) -> Option<String> {
     let text = read_whole_log(&log_dir.join(format!("{id}.log")))?;
-    crate::knownred::header(&text, &crate::knownred::known_for(&d.store, scope))
+    let known = crate::knownred::known_for(&d.store, scope);
+    let develop = d.store.latest_baseline(scope).ok().flatten();
+    let parts: Vec<String> = [
+        crate::knownred::header(&text, &known),
+        crate::knownred::red_on_develop_header(&text, develop.as_ref(), &known),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    (!parts.is_empty()).then(|| parts.join("\n"))
 }
 
 /// A name from a validated scope (letters, digits, `_ : . - /`), quoted all the same.
@@ -1941,13 +2194,17 @@ impl CheckHandler for TestChecks {
             }
             _ => None,
         };
-        match (note, self.check(name, scope)) {
-            (Some(n), CheckRun::Done { passed, summary }) => CheckRun::Done {
-                passed,
-                summary: format!("{n}\n\n{summary}"),
-            },
-            (_, r) => r,
+        let mut r = self.check(name, scope);
+        // What was merged while the check waited, told on its result (s525).
+        let mut notes: Vec<String> = note.into_iter().collect();
+        notes.extend(self.reds.take_notes());
+        if let (false, CheckRun::Done { passed, summary }) = (notes.is_empty(), &r) {
+            r = CheckRun::Done {
+                passed: *passed,
+                summary: format!("{}\n\n{summary}", notes.join("\n\n")),
+            };
         }
+        r
     }
 }
 
@@ -2028,7 +2285,7 @@ impl TestChecks {
         // The exact content tree and command already went green (here, in the test step or in
         // landing's re-test): the answer is that result, and nothing runs.
         let key = crate::cmdreuse::command_key(cmds.build.as_deref(), &cmds.test);
-        let ctree = crate::cmdreuse::content_tree(&self.wt);
+        let mut ctree = crate::cmdreuse::content_tree(&self.wt);
         if let Some(src) = ctree
             .as_deref()
             .and_then(|t| crate::cmdreuse::green_for(&self.slots.d, t, &key))
@@ -2041,7 +2298,7 @@ impl TestChecks {
             };
         }
         // Under a step host, so that a restarted daemon finds the run again.
-        let tree = crate::hostedcheck::tree_key(&self.wt);
+        // Read when a spec is made: a merge while a check waited changes the tree.
         let spec = |prefix: String, cmd: &str, uses: &std::collections::BTreeMap<String, u32>| {
             crate::hostedcheck::CheckSpec {
                 id_prefix: prefix,
@@ -2050,10 +2307,11 @@ impl TestChecks {
                 cwd: self.wt.clone(),
                 env: vec![("MASON_HELD".to_string(), held_text(uses))],
                 limit: self.timeout,
-                tree: tree.clone(),
+                tree: crate::hostedcheck::tree_key(&self.wt),
                 stop: None,
             }
         };
+        let merges = self.reds.merges();
         // A build first, holding one `compile` slot; the tests then hold the
         // rest of what the test step uses.
         let uses = match &cmds.build {
@@ -2065,11 +2323,15 @@ impl TestChecks {
             Some(build) => {
                 let bspec = spec(format!("{}build", self.id_prefix), build, &build_uses());
                 let queue = !crate::hostedcheck::pending(&self.slots.d, &bspec);
-                let swapped = credit_wait(&self.extra, crate::sched::CREDIT_EVERY, || {
-                    self.slots.swap_for(queue, &build_uses(), None)
-                });
+                let swapped = self.queued(|| self.slots.swap_for(queue, &build_uses(), None));
                 let Ok(lease) = swapped else {
                     return over();
+                };
+                let bspec = if self.reds.merges() == merges {
+                    bspec
+                } else {
+                    ctree = crate::cmdreuse::content_tree(&self.wt);
+                    spec(format!("{}build", self.id_prefix), build, &build_uses())
                 };
                 let res = crate::hostedcheck::run(&self.slots.d, &bspec);
                 drop(lease);
@@ -2110,18 +2372,22 @@ impl TestChecks {
                 tests_uses(&self.slots.test_uses)
             }
         };
-        let spec = spec(self.id_prefix.clone(), &cmds.test, &uses);
+        let tspec = spec(self.id_prefix.clone(), &cmds.test, &uses);
         // The same call sent again after a restart attaches to the run already
         // going (or takes its result) at once: it starts nothing, so it does not
         // queue behind other work for a slot the run it joins already took.
-        let queue = !crate::hostedcheck::pending(&self.slots.d, &spec);
-        let swapped = credit_wait(&self.extra, crate::sched::CREDIT_EVERY, || {
-            self.slots.swap_for(queue, &uses, None)
-        });
+        let queue = !crate::hostedcheck::pending(&self.slots.d, &tspec);
+        let swapped = self.queued(|| self.slots.swap_for(queue, &uses, None));
         let Ok(test_lease) = swapped else {
             return over();
         };
-        let res = crate::hostedcheck::run(&self.slots.d, &spec);
+        let tspec = if self.reds.merges() == merges {
+            tspec
+        } else {
+            ctree = crate::cmdreuse::content_tree(&self.wt);
+            spec(self.id_prefix.clone(), &cmds.test, &uses)
+        };
+        let res = crate::hostedcheck::run(&self.slots.d, &tspec);
         drop(test_lease);
         self.slots.take_agent_slot_back();
         if let (Ok(o), Some(t)) = (&res, &ctree) {
@@ -2130,13 +2396,16 @@ impl TestChecks {
                 crate::cmdreuse::record_green(&self.slots.d, t, &key, &src);
             }
         }
+        let step = self.slots.test_step.as_deref().unwrap_or("test");
+        match &res {
+            Ok(o) if o.passed => self.reds.passed(step),
+            Ok(o) => self.remember_red(step, &o.id),
+            Err(_) => {}
+        }
         let header = match &res {
-            Ok(o) if !o.passed => {
-                let step = self.slots.test_step.as_deref().unwrap_or("test");
-                known_header(&self.slots.d, &self.log_dir, &o.id, step)
-                    .map(|h| format!("{h}\n\n"))
-                    .unwrap_or_default()
-            }
+            Ok(o) if !o.passed => known_header(&self.slots.d, &self.log_dir, &o.id, step)
+                .map(|h| format!("{h}\n\n"))
+                .unwrap_or_default(),
             _ => String::new(),
         };
         match res {
@@ -2802,7 +3071,7 @@ fn agent_job(c: &Ctx) {
     let checks = Box::new(TestChecks {
         cmd: tests_cmd,
         wt: c.wt.clone(),
-        timeout: c.project.test_timeout,
+        timeout: c.live().test_timeout,
         slots: CheckSlots::new(c),
         extra: deadline_extra.clone(),
         id_prefix: format!("t{}r{}-check", c.task.0, c.run.0),
@@ -2812,6 +3081,8 @@ fn agent_job(c: &Ctx) {
         run: c.run.0,
         base_fold: (kind == StepKind::Develop).then(|| (c.project_id, c.project.base_ref())),
         project: c.project.id.clone(),
+        reds: Default::default(),
+        last_red: std::sync::Mutex::new(None),
     });
     let validator = (kind == StepKind::Develop).then(|| {
         change_validator(
@@ -2918,12 +3189,12 @@ fn agent_job(c: &Ctx) {
         "MASON_TASK_CACHE".into(),
         crate::taskcache::own_dir(&c.d, c.task.0),
     ));
-    spec.tool_timeout = tool_timeout_for(kind, &c.project);
+    spec.tool_timeout = tool_timeout_for(kind, c.live());
     let budget = c
         .res
         .budget
         .as_ref()
-        .map_or(c.project.step_timeout, |a| a.value);
+        .map_or(c.live().step_timeout, |a| a.value);
     spec.deadline = Some(budget);
     // The host counts the limit from when it started, so what was credited and granted
     // before a daemon restart is read back and kept on disk (s401).
@@ -2969,10 +3240,12 @@ fn agent_job(c: &Ctx) {
         }
         StopExtending(stop)
     });
-    // A `run_check` may queue for a long time before it runs, so no tool call is
-    // cut off before the step's own deadline would have ended it.
     if kind == StepKind::Develop {
-        spec.tool_timeout = spec.tool_timeout.max(spec.deadline.unwrap_or_default());
+        spec.tool_timeout = develop_tool_timeout(
+            spec.tool_timeout,
+            spec.deadline.unwrap_or_default(),
+            c.project.test_timeout,
+        );
     }
     spec.run_key = Some(key.clone());
     spec.tools = c.step.tools.clone();
@@ -3349,7 +3622,10 @@ fn settle_all(
                 // Only what is verifiably the recorded process: the CLI the dead
                 // host left running must not work beside its replacement.
                 tracing::warn!(host = %newest, "reaping a lost host before its replacement");
-                mason_step_host::registry::reap_dir(&root.join(&newest));
+                mason_step_host::registry::reap_dir_by(
+                    &root.join(&newest),
+                    "daemon: reaping a lost host",
+                );
                 silent = mason_adapters::hosted::silent_stop(&root.join(&newest)).is_some();
                 c.release_lease();
                 if get_lease(c).is_err() {
@@ -3649,7 +3925,7 @@ fn command_job(c: &Ctx) {
             uses
         }
     };
-    let reruns = if is_test { c.project.test_reruns } else { 0 };
+    let reruns = if is_test { c.live().test_reruns } else { 0 };
     let filter = c.project.rerun_filter.as_deref();
     let mut earlier: Vec<String> = vec![];
     // The tests that failed in every run so far (None: the first run's names were not
@@ -4118,7 +4394,7 @@ fn run_command_on(
         .res
         .budget
         .as_ref()
-        .map_or(c.project.test_timeout, |a| a.value);
+        .map_or(c.live().test_timeout, |a| a.value);
     if !dir.join("host.kv").exists() {
         let _ = std::fs::remove_file(result_file(c));
         let _ = std::fs::remove_file(progress_file(c));
@@ -4892,6 +5168,18 @@ mod signaled_tests {
 
 #[cfg(test)]
 mod review_diff_tests {
+    #[test]
+    fn develop_tool_timeout_covers_the_queue_wait_and_the_whole_check() {
+        let m = |n: u64| Duration::from_secs(n * 60);
+        // 30 min budget, 50 min tests: a check queued for the step's whole extended life
+        // (60 min) and then run to its limit still fits in one tool call.
+        let limit = develop_tool_timeout(m(10), m(30), m(50));
+        assert!(limit >= m(60) + m(50) + Duration::from_secs(60));
+        // Never below what it was, or the step's budget.
+        assert!(develop_tool_timeout(m(500), m(30), m(50)) >= m(500));
+        assert!(develop_tool_timeout(m(10), m(30), Duration::ZERO) >= m(30));
+    }
+
     use super::*;
 
     fn git(cwd: &Path, args: &[&str]) {

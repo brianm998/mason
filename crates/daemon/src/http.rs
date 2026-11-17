@@ -181,6 +181,13 @@ fn task_json(d: &Daemon, w: &World, t: &Task, detail: bool) -> Value {
             Value::Null,
             |h| json!({"reasons": h.reasons, "approved_by": h.approved_by, "since": h.at}),
         );
+        v["circling"] = crate::circling::of_task(d, t.id).map_or(Value::Null, |c| {
+            json!({
+                "runs": c.runs, "since_ms": c.since_ms,
+                "text": crate::circling::text(d, t.id, &c, crate::daemon::now_ms()),
+                "tests": c.tests.iter().map(|e| e.replace('\t', " :: ")).collect::<Vec<_>>(),
+            })
+        });
         v["failure"] = t.failure.as_ref().map_or(Value::Null, |f| json!(f));
         v["failure_class"] = t.failure_class.map_or(Value::Null, |c| json!(c.name()));
         v["excused"] = json!(crate::basecheck::recorded(&d.task_dir(t.id)));
@@ -1767,6 +1774,7 @@ async fn update_status(Shared(d): Shared<Arc<Daemon>>) -> Res {
             let s = d2.update_status.lock().unwrap_or_else(|e| e.into_inner()).clone();
             let c = d2.update_check.lock().unwrap_or_else(|e| e.into_inner()).clone();
             let (waiting, daemon_button, daemon_confirm) = crate::update::wait_view(&s, c.outdated);
+            let held = *d2.update_held.lock().unwrap_or_else(|e| e.into_inner());
             json!({
                 "waiting": waiting, "daemon_button": daemon_button, "daemon_confirm": daemon_confirm,
                 "latest": c.latest, "behind": c.behind, "outdated": c.outdated,
@@ -1777,6 +1785,7 @@ async fn update_status(Shared(d): Shared<Arc<Daemon>>) -> Res {
                 "bad": rt.bad(),
                 "alert": rt.alert(),
                 "channel": crate::update::UpdateCfg::load(&d2.cfg.config_dir).ok().map(|c| c.channel.name()),
+                "held_since_ms": held.map(|h| h.0), "next_window_ms": held.map(|h| h.1),
                 "phase": s.phase, "target": s.target, "error": s.error, "log": s.log,
             })
         })
@@ -1870,6 +1879,7 @@ async fn update_start(
         rollback: b["rollback"].as_bool().unwrap_or(false),
         check_only: b["check"].as_bool().unwrap_or(false),
         now: b["now"].as_bool().unwrap_or(false),
+        auto: b["auto"].as_bool().unwrap_or(false),
     };
     if matches!(
         d.update_status
@@ -3103,6 +3113,22 @@ async fn cpu_history(
         .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
+/// The free space per volume over `?span=` (as `/cpu/history`), oldest first, as proto3 JSON.
+async fn disk_history(
+    Shared(d): Shared<Arc<Daemon>>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Res {
+    let span = match q.get("span") {
+        None => 3_600_000,
+        Some(s) => crate::diskhistory::parse_span(s)
+            .ok_or_else(|| fail(StatusCode::BAD_REQUEST, format!("span {s:?} is not a span")))?,
+    };
+    let h = d.disk_history(crate::daemon::now_ms(), span);
+    serde_json::to_value(&h)
+        .map(Json)
+        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
 /// The home view, as the monitors get it (proto3 JSON).
 async fn home_view(
     Shared(d): Shared<Arc<Daemon>>,
@@ -3232,7 +3258,10 @@ async fn lease_open(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res
     // not a live task is treated as no task at all (a person's request).
     let task = b["task"].as_u64();
     let pid = b["pid"].as_u64().unwrap_or(0) as u32;
-    let origin = lease_origin(&b);
+    let shown = lease_origin(&b);
+    // Who is really waiting (s552): `person` or any other origin (`agent`, `hook`, `task`,
+    // `no-terminal`, ...). A request that names none is a person's, as before.
+    let origin = b["origin"].as_str().map(str::to_string);
     // Another pipeline's work: ranked as pipeline work, never a person's, and
     // `task` is ignored (it names a MASON task).
     if let Some(name) = b["pipeline"].as_str() {
@@ -3244,7 +3273,7 @@ async fn lease_open(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res
             .run(move || {
                 let id = d2.broker.lease_open_outside(&label, &uses, &o);
                 d2.broker.lease_set_pid(id, pid);
-                d2.broker.lease_set_origin(id, &origin);
+                d2.broker.lease_set_origin(id, &shown);
                 id
             })
             .await
@@ -3253,7 +3282,7 @@ async fn lease_open(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res
     }
     let cmd = run_command(&b);
     let d2 = d.clone();
-    let (id, th) = d
+    let (opened, th) = d
         .pool
         .run(move || {
             let standing = task.and_then(|t| d2.lease_standing(TaskId(t)));
@@ -3265,23 +3294,25 @@ async fn lease_open(Shared(d): Shared<Arc<Daemon>>, Json(b): Json<Value>) -> Res
                     .ok()
                     .flatten()
             });
-            let id = d2
-                .broker
-                .lease_open_expecting(&label, &uses, standing, expected);
+            let opened =
+                d2.broker
+                    .lease_open_from(&label, &uses, standing, expected, origin.as_deref());
+            let id = opened.id;
             d2.broker.lease_set_pid(id, pid);
-            d2.broker.lease_set_origin(id, &origin);
+            d2.broker.lease_set_origin(id, &shown);
             if let (Some(t), Some(_)) = (task, standing) {
                 d2.broker.lease_set_task(id, TaskId(t));
             }
             let th = task
                 .map(|t| d2.stall_thresholds(TaskId(t)))
                 .unwrap_or_default();
-            (id, th)
+            (opened, th)
         })
         .await
         .map_err(pool_err)?;
     Ok(Json(json!({
-        "id": id,
+        "id": opened.id, "rank": opened.rank, "origin": b["origin"],
+        "converted": opened.converted,
         "cont_after_s": th.cont_after_ms / 1000, "kill_after_s": th.kill_after_ms / 1000,
     })))
 }
@@ -3724,6 +3755,7 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/resources", get(resources))
         .route("/cpu", get(cpu_usage))
         .route("/cpu/history", get(cpu_history))
+        .route("/disk/history", get(disk_history))
         .route("/views/home", get(home_view))
         .route("/targets", get(targets))
         .route("/health", get(health))

@@ -321,8 +321,17 @@ fn main() {
         tokio::spawn(async move {
             let what = mason_daemon::stopsig::wait().await;
             tracing::info!("masond stopping: {what}");
+            mason_daemon::hostloss::note_daemon_stop(
+                &d_stop.cfg.hosts_dir(),
+                mason_daemon::daemon::now_ms(),
+                &what,
+            );
             let d_save = d_stop.clone();
-            let _ = tokio::task::spawn_blocking(move || d_save.save_cpu_history()).await;
+            let _ = tokio::task::spawn_blocking(move || {
+                d_save.save_cpu_history();
+                d_save.save_disk_history();
+            })
+            .await;
             let _ = tx.send(());
         });
         let stopped = std::sync::Arc::new(tokio::sync::Notify::new());

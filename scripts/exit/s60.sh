@@ -13,16 +13,16 @@ run() {
 }
 
 run "a base conflict goes to the agent, which merges, and the task lands" \
-    -p mason-daemon --test e2e a_branch_that_conflicts_with_the_base_goes_to_the_agent_to_merge_and_lands
+    -p mason-daemon --test it a_branch_that_conflicts_with_the_base_goes_to_the_agent_to_merge_and_lands
 run "run_check runs the test command the owner overrode at runtime" \
-    -p mason-daemon --test e2e run_check_runs_the_test_command_the_owner_overrode_at_runtime
+    -p mason-daemon --test it run_check_runs_the_test_command_the_owner_overrode_at_runtime
 run "a claim is never handed out without a free session" \
-    -p mason-daemon --test e2e admission_respects_the_concurrency_limit
+    -p mason-daemon --test it admission_respects_the_concurrency_limit
 run "the hand-off is driven by the step's end" \
-    -p mason-daemon --test protocol when_a_step_ends_the_next_task_is_the_next_one_admitted
+    -p mason-daemon --test it when_a_step_ends_the_next_task_is_the_next_one_admitted
 run "a waiting step's activity names what it waits for" \
     -p mason-daemon --test scheduling a_step_waits_for_a_held_class_and_says_why_then_lands
 run "the update self-test, with its reasons" \
-    -p mason-daemon --test update
+    -p mason-daemon --test it update::
 
 echo "s60 OK"

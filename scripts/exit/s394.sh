@@ -8,5 +8,5 @@
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 cargo test -q -p mason-landing --lib pin
-cargo test -q -p mason-daemon --test landing_split
+cargo test -q -p mason-daemon --test it landing_split::
 echo "s394 OK"

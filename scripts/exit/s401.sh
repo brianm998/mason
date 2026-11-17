@@ -4,5 +4,5 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 cargo test -q -p mason-daemon --lib -- deadline::tests
-cargo test -q -p mason-daemon --test deadline_extension
+cargo test -q -p mason-daemon --test it deadline_extension::
 echo "s401 OK"

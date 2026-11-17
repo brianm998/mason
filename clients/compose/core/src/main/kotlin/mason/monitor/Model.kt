@@ -242,6 +242,15 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     /** Where the sidebar should scroll to (a tile was clicked). */
     var scrollTarget by mutableStateOf<String?>(null)
     var lastResult by mutableStateOf<String?>(null)
+    /** What the last Skip testing click did; kept apart from [lastResult] so the next ok result does not wipe it. */
+    var skipNotice by mutableStateOf<String?>(null)
+    /** Commands sent and not yet settled, by id (task #522). */
+    var pending by mutableStateOf<Map<String, PendingCommand>>(emptyMap())
+        internal set
+    /** The daemon's refusal of the last command about a task, by task id (0: not about a task). */
+    var actionErrors by mutableStateOf<Map<Long, String>>(emptyMap())
+        internal set
+    internal var nextActionId = 0
     /** A long command opened from a Compilation row; null: the dialog is closed. */
     var commandDialog by mutableStateOf<CommandDialog?>(null)
         private set
@@ -257,6 +266,10 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
         private set
     /** Starts a terminal running this argument vector; false when it could not. The app sets it. */
     var launcher: ((List<String>) -> Boolean)? = null
+    /** Where process launches run. The app sets a worker pool; the default runs inline. */
+    var background: java.util.concurrent.Executor = java.util.concurrent.Executor { it.run() }
+    /** Where results of [background] work come back (the UI thread). The app sets it; the default runs inline. */
+    var ui: java.util.concurrent.Executor = java.util.concurrent.Executor { it.run() }
     /** Puts text on the clipboard. The app sets it. */
     var copier: ((String) -> Unit)? = null
     /** The CLI by its full path. */
@@ -314,11 +327,30 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
 
     fun go(p: Page) = navigate { h, s -> h.go(p, s) }
     /** Whether [n] is a task this monitor has heard of (in the sidebar, or named by the open task's page). */
-    fun isKnownTask(n: Long): Boolean {
-        if (sidebar?.sections?.any { sec -> sec.rows.any { it.id == n } } == true) return true
-        val d = taskDetail ?: return false
-        val r = d.row ?: return false
-        return r.id == n || n in r.blockers || n in r.blocks || d.debts.any { it.task == n } || d.proposal?.filed_by == n
+    fun isKnownTask(n: Long): Boolean = n in knownIds()
+
+    /** How many times the known-id set was rebuilt (tests). */
+    internal var knownRebuilds = 0
+        private set
+    private var knownSidebar: SidebarView? = null
+    private var knownDetail: TaskDetailView? = null
+    private var knownSet: Set<Long>? = null
+
+    /** The ids this monitor has heard of, rebuilt only when the sidebar or the task page is a new value. */
+    private fun knownIds(): Set<Long> {
+        val sb = sidebar
+        val d = taskDetail
+        knownSet?.let { if (sb === knownSidebar && d === knownDetail) return it }
+        knownRebuilds++
+        val ids = HashSet<Long>()
+        sb?.sections?.forEach { sec -> sec.rows.forEach { ids += it.id } }
+        d?.row?.let { r ->
+            ids += r.id; ids += r.blockers; ids += r.blocks
+            d.debts.forEach { ids += it.task }
+            d.proposal?.filed_by?.let { ids += it }
+        }
+        knownSidebar = sb; knownDetail = d; knownSet = ids
+        return ids
     }
 
     /** [text] as plain text, task links and URL links, for the open task's page. */
@@ -400,11 +432,20 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
 
     // ---- sidebar sections ----
 
-    fun isExpanded(s: SidebarSection): Boolean =
-        prefs.bool(sectionKey(s.state)) ?: overrides[s.state] ?: !s.collapsed
+    /** Stored section flags, each read from the store once (the store is a native call on macOS). */
+    private val storedExpanded = HashMap<String, Boolean?>()
+
+    fun isExpanded(s: SidebarSection): Boolean {
+        val over = overrides[s.state]  // read first: the state read is what recomposes on a change
+        val key = sectionKey(s.state)
+        val stored = if (storedExpanded.containsKey(key)) storedExpanded[key]
+            else prefs.bool(key).also { storedExpanded[key] = it }
+        return stored ?: over ?: !s.collapsed
+    }
 
     fun setExpanded(state: String, open: Boolean) {
         overrides = overrides + (state to open)
+        storedExpanded[sectionKey(state)] = open
         prefs.setBool(sectionKey(state), open)
     }
 
@@ -506,7 +547,11 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
             lastResult = "Read-only: $it"
             return
         }
-        sender?.invoke(if (c.actor.isEmpty()) c.copy(actor = identity) else c)
+        val withActor = if (c.actor.isEmpty()) c.copy(actor = identity) else c
+        // Recorded before the write, so the pressed control redraws at once; a second click
+        // while one is in flight sends nothing.
+        val out = beginPending(withActor) ?: return
+        sender?.invoke(out)
     }
 
     fun cancel(task: Long) = send(Command(cancel = TaskRef(task = task)))
@@ -609,10 +654,17 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     }
 
     private fun launchSession(task: Long, anyway: Boolean) {
-        if (launcher?.invoke(OpenSession.argv(cliPath, task, anyway)) == true) return
-        val line = OpenSession.commandLine(cliPath, task, anyway)
-        copier?.invoke(line)
-        sessionNotice = OpenSession.copiedNotice(line)
+        val argv = OpenSession.argv(cliPath, task, anyway)
+        val launch = launcher
+        val cli = cliPath
+        background.execute {
+            val ok = runCatching { launch?.invoke(argv) == true }.getOrDefault(false)
+            if (!ok) ui.execute {
+                val line = OpenSession.commandLine(cli, task, anyway)
+                copier?.invoke(line)
+                sessionNotice = OpenSession.copiedNotice(line)
+            }
+        }
     }
 
     /** Open the key sheet for [project] and ask the daemon which keys it could use. */
@@ -839,6 +891,7 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
             connected = true
             reconnecting = false
             announcer.connectionRestored()
+            pending = emptyMap()
             if (w.resume == ResumeKind.SNAPSHOT) lastSeq = 0
             daemonVersion = w.version
             localDaemon = w.role.isEmpty()
@@ -861,6 +914,7 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
         }
         m.result?.let { r ->
             lastResult = if (r.ok) null else r.error
+            settle(r)
             if (r.id.startsWith("session:")) r.id.removePrefix("session:").toLongOrNull()?.let { task ->
                 when (val d = OpenSession.decide(r.ok, r.json, r.error)) {
                     OpenSession.Decision.Confirm -> sessionPrompt = task
@@ -937,7 +991,7 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
             // An open dialog follows the session: a reply arrives as a new header.
             if (ownerSessionDialog != null) refreshOwnerSession()
         }
-        v.sidebar?.let { sidebar = it; noteAttention(it) }
+        v.sidebar?.let { sidebar = it; noteAttention(it); settleAfterView() }
         v.home?.let {
             home = it
             if (it.cpu != cpu) {
@@ -949,6 +1003,7 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
             // A different task's page starts its log over; the same task's view carries the tail again.
             taskDetail = d
             liveLog = d.log_tail.split("\n").dropLastWhile { it.isEmpty() }.takeLast(LOG_KEEP)
+            settleAfterView()
         }
         v.cpu_history?.let { cpuHistory = it }
         v.landing?.let { landing = it }
@@ -959,6 +1014,7 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     fun disconnected(nowMs: Long = System.currentTimeMillis()) {
         connected = false
         reconnecting = true
+        markPendingNotSent()
         announcer.connectionLost(nowMs)
     }
 

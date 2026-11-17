@@ -7,5 +7,5 @@
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 cargo test -q -p mason-daemon --lib a_waiting_update_says_so_offers_update_now_and_confirms
-cargo test -q -p mason-daemon --test takeover_drain
-cargo test -q -p mason-daemon --test update update_now_with_no_update_waiting_is_a_409_with_a_reason
+cargo test -q -p mason-daemon --test it takeover_drain::
+cargo test -q -p mason-daemon --test it update_now_with_no_update_waiting_is_a_409_with_a_reason

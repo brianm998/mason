@@ -358,10 +358,49 @@ final class MonitorCoreTests: XCTestCase {
         m.skipAllTests(m.sectionRows("testing"))
         XCTAssertEqual(sent.map { $0.skip.task }, [10, 12])
         XCTAssertEqual(sent.map { $0.skip.step }, ["test", "test"])
+        // masond answers the first two (task #522: a second click while one is pending sends nothing).
+        for c in sent { var r = Mason_V1_CommandResult(); r.id = c.id; r.ok = false; r.error = "no"; var sm = Mason_V1_ServerMessage(); sm.result = r; m.apply(sm) }
         m.skipTest(10, step: "test")
         XCTAssertEqual(sent.last?.skip.task, 10, "one row's button sends the same command")
         XCTAssertEqual(MonitorModel.suiteProgress(a), "3 of 8 suites")
         XCTAssertEqual(MonitorModel.suiteProgress(b), "")
+    }
+
+    func testSkipAllOverRowsWithNoStepSendsOnePerTaskAndSaysSo() {
+        let m = model()
+        m.isOwner = true
+        let rows = [row(20, state: "testing", actions: ["skip_test"]), row(21, state: "testing", actions: ["skip_test"])]
+        m.sidebar!.sections.append(section("testing", rows: rows))
+        var sent: [Mason_V1_Command] = []
+        m.sender = { sent.append($0) }
+        m.skipAllTests(m.sectionRows("testing"))
+        XCTAssertEqual(sent.map { $0.skip.task }, [20, 21])
+        XCTAssertEqual(sent.map { $0.skip.step }, ["", ""], "the daemon reads an empty step as the test step")
+        XCTAssertEqual(m.skipNotice, "Skipped testing for 2 tasks")
+    }
+
+    func testSkipAllSaysWhyWhenItCannotAct() {
+        let m = model()
+        m.sidebar!.sections.append(section("testing", rows: [row(20, state: "testing", actions: ["skip_test"])]))
+        var sent: [Mason_V1_Command] = []
+        m.sender = { sent.append($0) }
+        m.isOwner = false
+        XCTAssertNotNil(m.skipDisabledReason)
+        m.skipAllTests(m.sectionRows("testing"))
+        XCTAssertTrue(sent.isEmpty)
+        XCTAssertEqual(m.skipNotice, m.skipDisabledReason)
+        m.isOwner = true
+        m.sidebar!.sections[m.sidebar!.sections.count - 1].rows = [row(21, state: "testing", actions: ["cancel"])]
+        m.skipAllTests(m.sectionRows("testing"))
+        XCTAssertEqual(m.skipNotice, "Nothing to skip: no task here allows it")
+    }
+
+    func testARefusedCommandResultIsAMessage() {
+        let m = model()
+        var f = Mason_V1_ServerMessage()
+        f.result = .with { $0.id = "m1"; $0.ok = false; $0.error = "there is no step `x`" }
+        m.apply(f)
+        XCTAssertEqual(m.lastResult, "there is no step `x`")
     }
 
     func testDoubleClickOnAnEmptyStateChangesNothingBeyondTheReveal() {
@@ -542,6 +581,19 @@ final class MonitorCoreTests: XCTestCase {
         XCTAssertEqual(Format.duration(ms: 9 * 60_000), "9 min")
         XCTAssertEqual(Format.duration(ms: 3 * 3_600_000 + 10 * 60_000), "3h10")
         XCTAssertEqual(Format.duration(ms: 2 * 3_600_000), "2h")
+    }
+
+    func testTheSyspolicydLineShowsTheReadingAndTheLimit() {
+        var c = Mason_V1_Compilation()
+        XCTAssertNil(c.policyLine, "no gate")
+        c.syspolicydMaxPct = 300
+        c.syspolicydPct = 640
+        XCTAssertEqual(c.policyLine, "syspolicyd 640% — holding compiles over 300%")
+        c.syspolicydPct = 20
+        XCTAssertEqual(c.policyLine, "syspolicyd 20% — compiles held over 300%")
+        let h = HealthSnapshot(json: ##"{"cpu":{"busy_pct":10,"compile_max_pct":50,"syspolicyd_pct":640,"syspolicyd_max_pct":300}}"##)
+        XCTAssertEqual(h.policyLine, "syspolicyd 640% — holding compiles over 300%")
+        XCTAssertNil(HealthSnapshot(json: ##"{"cpu":{"busy_pct":10,"compile_max_pct":50}}"##).policyLine)
     }
 
     func testTheHealthPageReadsTheDaemonsResourceReport() {
@@ -980,6 +1032,8 @@ final class MonitorCoreTests: XCTestCase {
         XCTAssertEqual([h.task, UInt64(h.diffHash == "abc123" ? 1 : 0)], [3, 1])
         guard case .approve(let p)? = sent()[1].body else { return XCTFail() }
         XCTAssertEqual(p.task, 4)
+        XCTAssertEqual(p.priority, MonitorModel.defaultApprovalPriority)
+        XCTAssertEqual(p.priority, "normal")
     }
 
     func testRejectSendsTheReason() {
@@ -1197,7 +1251,7 @@ final class MonitorCoreTests: XCTestCase {
         XCTAssertFalse(log.all.contains(true), "decoding never runs on the main thread")
     }
 
-    func testAHundredProgressUpdatesWhileBusyPublishTheSidebarOnce() {
+    func testAHundredProgressUpdatesWhileBusyNeverPublishTheSidebar() {
         let m = model()
         var c = cell(done: 1, total: 400, totalSrc: .sourceReported)
         c.step = "develop"
@@ -1214,11 +1268,14 @@ final class MonitorCoreTests: XCTestCase {
             p.progress = n
             m.apply(.with { $0.stepProgress = p })
         }
+        let revision = m.sidebarRevision
         XCTAssertEqual(publishes, 0, "nothing is published while the frame is not due")
         XCTAssertEqual(scheduled.count, 1, "one flush is asked for, not one per message")
         scheduled[0]()
-        XCTAssertEqual(publishes, 1)
-        XCTAssertEqual(m.sidebar?.sections[0].rows[0].progress.first?.done, 100)
+        XCTAssertEqual(publishes, 0, "live progress never assigns the sidebar")
+        XCTAssertEqual(m.sidebarRevision, revision)
+        XCTAssertEqual(m.progressCells(task: 1).first?.done, 100)
+        XCTAssertEqual(m.sidebar?.sections[0].rows[0].progress.first?.done, 1, "the view's own cells are untouched")
         sub.cancel()
     }
 
@@ -1441,8 +1498,8 @@ final class MonitorCoreTests: XCTestCase {
         p.log = ["a", "b"]
         let at = Date(timeIntervalSince1970: 1_000)
         m.apply(progress: p, local: at)
-        XCTAssertEqual(m.taskDetail?.row.progress.first?.done, 3)
-        XCTAssertEqual(m.sidebar?.sections[0].rows[0].progress.first?.done, 3)
+        XCTAssertEqual(m.progress.detail.cells?.first?.done, 3)
+        XCTAssertEqual(m.progressCells(task: 1).first?.done, 3)
         XCTAssertEqual(m.liveLog, ["a", "b"])
         // The daemon's clock is 4,999,000 ms ahead of this device's at the anchor, and then counts up.
         XCTAssertEqual(m.daemonNow(at), 5_000_000)
@@ -1474,8 +1531,9 @@ final class MonitorCoreTests: XCTestCase {
         p.nowMs = 5_000_000
         m.apply(progress: p)
         XCTAssertEqual(m.sidebar?.sections[0].rows[1], other, "task 2's row is untouched")
-        XCTAssertNotEqual(m.sidebar?.sections[0].rows[0].progress.first?.done, 1)
-        XCTAssertEqual(sidebarChanges, 1)
+        XCTAssertEqual(m.progressCells(task: 1).first?.done, 3)
+        XCTAssertEqual(m.progressCells(task: 2).first?.done, 1)
+        XCTAssertEqual(sidebarChanges, 0)
         // A sequence bump and a log line change the live state and not the sidebar.
         sidebarChanges = 0
         m.lastSeq = 99
@@ -1486,6 +1544,27 @@ final class MonitorCoreTests: XCTestCase {
         XCTAssertGreaterThan(liveChanges, 0)
         sub.cancel()
         liveSub.cancel()
+    }
+
+    func testASidebarViewAfterProgressShowsTheViewsCellsNotStaleOnes() {
+        let m = model()
+        var c = cell(done: 1, total: 4, totalSrc: .sourceReported)
+        c.step = "develop"
+        m.sidebar?.sections[0].rows[0].progress = [c]
+        var p = Mason_V1_StepProgress()
+        p.task = 1
+        var n = c
+        n.done = 3
+        p.progress = n
+        m.apply(progress: p)
+        XCTAssertEqual(m.progressCells(task: 1).first?.done, 3)
+        var sb = m.sidebar!
+        var fresh = c
+        fresh.done = 2
+        sb.sections[0].rows[0].progress = [fresh]
+        m.apply(Mason_V1_View.with { $0.sidebar = sb })
+        XCTAssertNil(m.progress.cells(1))
+        XCTAssertEqual(m.progressCells(task: 1).first?.done, 2)
     }
 
     func testSidebarEntriesAreIdentifiedByWhatTheyAreNotWhereTheyAre() {
@@ -1640,8 +1719,13 @@ final class MonitorCoreTests: XCTestCase {
 
     func testReleaseAddBlockerAndReviveSendTheOwnersCommands() {
         let (m, sent) = ownerModel()
-        m.release(11, blocker: 8)
-        m.addBlocker(11, after: 5)
+        // masond answers each before the next click (a task with a command pending takes no second one).
+        func answered() {
+            var r = Mason_V1_CommandResult(); r.id = sent().last!.id; r.ok = false; r.error = "no"
+            var sm = Mason_V1_ServerMessage(); sm.result = r; m.apply(sm)
+        }
+        m.release(11, blocker: 8); answered()
+        m.addBlocker(11, after: 5); answered()
         m.revive(8)
         guard case .unblock(let u)? = sent()[0].body else { return XCTFail() }
         XCTAssertEqual([u.task, u.from[0]], [11, 8])

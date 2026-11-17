@@ -3,13 +3,34 @@
 # after the tests. Changes to gates wait for the owner before they get this far
 # (see docs/self-hosting.md).
 mode     = "direct"
-# The window is short because MASON's own landing has no landing suites: a batch
-# shares no verification, so a longer wait saves nothing (it was a median 10 min
-# per task for 1.4 tasks per batch). 30s still lets tasks that finish together
-# share a batch.
-window   = "30s"
+# The whole `cargo-workspace` suite runs here, once per batch (decision 0539), so a batch now
+# shares a verification and a longer wait does pay: one 22-35 min run is split over every task
+# that joins. Each task's own test step runs only the tests its change affects plus the smoke set.
+# 10 min is a guess to be checked against batch size and wait: the suite takes 22-35 min and
+# tasks reached landing about every 2.4 h on 2026-11-17 (10 landed that day), so a window shorter
+# than the run mostly collects tasks that finish while it runs, and one much longer only adds
+# latency to a task waiting alone. Raise it if batches stay at 1-2 tasks.
+window   = "10m"
 # Up to 10 tasks per batch (owner, 2026-11-15). Tasks arrive tested, so a red batch is rare and
 # is split to find the culprit (s394); a larger batch means fewer build cycles when several
 # tasks finish together.
 max_size = 10
 parallel = 1
+
+# What proves a change before it reaches `develop`: the whole workspace suite over the batch's
+# union (the impact map still picks the swift/compose suites for their paths only, and picks
+# `cargo-workspace` for any change that touches a crate). A red is rerun, blamed by impact, then
+# split to find the culprit; a red the base shows too blames nobody (run_over excuses it).
+[[tier]]
+name   = "batch"
+suites = ["cargo-workspace"]
+
+[on_red]
+ladder = ["rerun-failed", "blame-by-impact", "bisect"]
+
+# Every batch is linted before it lands, whether its tests ran or were skipped (s521): the
+# `command` of each suite named here, in the batch's worktree (so its build directory is reused).
+# A red parks the batch with the files and lines in its note. Separate from the `batch` tier above (s429).
+[[tier]]
+name   = "lint"
+suites = ["lint"]

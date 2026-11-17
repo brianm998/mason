@@ -59,6 +59,9 @@ impl Channel {
 /// Ten minutes: a fetch of a bare mirror is cheap, and landings are not minutes apart for long.
 pub const DEFAULT_CHECK_INTERVAL_S: u64 = 600;
 
+/// The least time between two automatic self-updates: two hours (s473).
+pub const DEFAULT_MIN_GAP_S: u64 = 7200;
+
 /// `<config dir>/update.toml`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UpdateCfg {
@@ -73,6 +76,9 @@ pub struct UpdateCfg {
     pub bins: Vec<String>,
     /// How often to look for a newer version, in seconds; 0 never looks.
     pub check_interval_s: u64,
+    /// The least time between two automatic self-updates, in seconds (`min_gap_s`, default 2 h;
+    /// 0 turns the gap off). `mason update` without `--auto` ignores it.
+    pub min_gap_s: u64,
     /// Run in a clean copy of the source to build the Swift monitor (replaces the default).
     pub monitor_swift_build: Option<String>,
     /// The same for the Compose monitor.
@@ -134,6 +140,10 @@ impl UpdateCfg {
                 .get("check_interval_s")
                 .and_then(|v| v.as_integer())
                 .map_or(DEFAULT_CHECK_INTERVAL_S, |n| n.max(0) as u64),
+            min_gap_s: doc
+                .get("min_gap_s")
+                .and_then(|v| v.as_integer())
+                .map_or(DEFAULT_MIN_GAP_S, |n| n.max(0) as u64),
             monitor_swift_build: s("monitor_swift_build"),
             monitor_compose_build: s("monitor_compose_build"),
             takeover_wait_s: doc
@@ -591,6 +601,128 @@ pub fn build(cfg: &UpdateCfg, rt: &Runtimes, sha: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// [`build`] under a `compile` lease ranked below all task work (s473): the release build is
+/// the heaviest thing a self-update does, and it used to run outside the broker, so the CPU
+/// gate and the queue never saw it. A build that is already complete asks for nothing.
+pub fn build_leased(d: &Daemon, cfg: &UpdateCfg, rt: &Runtimes, sha: &str) -> Result<(), String> {
+    if rt.is_ready(sha) {
+        return Ok(());
+    }
+    with_compile_lease(&d.broker, "self-update build", || build(cfg, rt, sha))
+}
+
+/// Wait for a `compile` slot as the lowest pipeline work (the most steps remaining, the
+/// lowest priority, and this request's own arrival), run `f`, give the slot back.
+pub fn with_compile_lease<T>(
+    broker: &crate::sched::Broker,
+    label: &str,
+    f: impl FnOnce() -> T,
+) -> T {
+    let uses = std::collections::BTreeMap::from([("compile".to_string(), 1u32)]);
+    let rank = crate::outside::Outside {
+        pipeline: "mason".into(),
+        steps: crate::outside::MAX_PROGRESS,
+        priority: 3,
+    };
+    let lease = broker.lease_open_outside(label, &uses, &rank);
+    loop {
+        match broker.lease_poll(lease) {
+            crate::sched::LeaseState::Granted { .. } => break,
+            // Closed under us (a daemon shutting down): build anyway rather than hang.
+            crate::sched::LeaseState::Gone => break,
+            _ => std::thread::sleep(Duration::from_millis(500)),
+        }
+    }
+    let r = f();
+    broker.lease_close(lease);
+    r
+}
+
+/// What decides whether an automatic self-update goes now (s473).
+#[derive(Clone, Debug)]
+pub struct GapInput {
+    /// When the daemon last took over to a new runtime; `None`: never, or unknown.
+    pub last_update_ms: Option<u64>,
+    pub now_ms: u64,
+    pub min_gap_s: u64,
+    /// The waiting update fixes the updater or a takeover bug.
+    pub urgent: bool,
+    /// Pipeline tasks holding resources now.
+    pub steps_running: usize,
+    /// No agent is past its first hour and no landing is verifying.
+    pub quiet: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Gap {
+    Take(&'static str),
+    /// Not before `next_ms`, the end of the gap.
+    Wait {
+        next_ms: u64,
+    },
+}
+
+/// Take the update, or wait. Urgent updates, a machine with no step running, a first update
+/// and a gap of 0 go at once; otherwise the update waits out the gap, except that from the
+/// gap's half-way mark a quiet moment is taken.
+pub fn gap_decision(i: &GapInput) -> Gap {
+    if i.urgent {
+        return Gap::Take("urgent");
+    }
+    if i.steps_running == 0 {
+        return Gap::Take("no step is running");
+    }
+    let Some(last) = i.last_update_ms else {
+        return Gap::Take("no earlier update");
+    };
+    let gap_ms = i.min_gap_s.saturating_mul(1000);
+    let next_ms = last.saturating_add(gap_ms);
+    let since = i.now_ms.saturating_sub(last);
+    if gap_ms == 0 || since >= gap_ms {
+        return Gap::Take("the gap is over");
+    }
+    if i.quiet && since >= gap_ms / 2 {
+        return Gap::Take("a quiet moment");
+    }
+    Gap::Wait { next_ms }
+}
+
+/// The commits `running..target` carry an `Update-Urgent:` line in their messages.
+pub fn is_urgent(mirror: &Path, running: Option<&str>, target: &str) -> bool {
+    let Some(running) = running else { return false };
+    let range = format!("{running}..{target}");
+    git::run(mirror, &["log", "--format=%B", &range])
+        .map(|t| {
+            t.lines()
+                .any(|l| l.trim_start().starts_with("Update-Urgent:"))
+        })
+        .unwrap_or(false)
+}
+
+/// Where the daemon stands for the gap: last takeover from the boot log, tasks, a quiet moment.
+fn gap_input(d: &Daemon, cfg: &UpdateCfg, urgent: bool) -> GapInput {
+    let rt = Runtimes::new(&d.cfg.data_dir);
+    let now = now_ms();
+    let last = Boots::new(&rt)
+        .all()
+        .iter()
+        .rev()
+        .find(|b| b.event == "start")
+        .map(|b| b.at_ms);
+    let (n, oldest) = d.broker.task_work(now);
+    GapInput {
+        last_update_ms: last,
+        now_ms: now,
+        min_gap_s: cfg.min_gap_s,
+        urgent,
+        steps_running: n,
+        quiet: oldest < 3_600_000 && d.landing.busy_projects().is_empty(),
+    }
+}
+
+/// The prefix of the error of an automatic update that is held for the gap.
+pub const HELD: &str = "held for the update window";
+
 /// Run the new build's own self-test (`masond selftest --db COPY`) on a copy of
 /// the database, with a time limit. Ok carries what it said.
 pub fn selftest(
@@ -795,6 +927,8 @@ pub struct Request {
     pub check_only: bool,
     /// Take over without waiting for running landing batches (they are abandoned).
     pub now: bool,
+    /// Asked by a follower, not the owner: the gap between updates applies (s473).
+    pub auto: bool,
 }
 
 fn say(d: &Daemon, phase: &str, line: &str) {
@@ -871,12 +1005,29 @@ pub fn run(d: &Arc<Daemon>, req: &Request) -> Result<String, String> {
             if mv == Move::Same && !req.rollback {
                 return Err(format!("already running {target}"));
             }
+            if req.auto && !req.check_only && !req.rollback {
+                let urgent = is_urgent(&rt.mirror(), running.as_deref(), &target);
+                match gap_decision(&gap_input(d, &cfg, urgent)) {
+                    Gap::Take(why) => {
+                        *d.update_held.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                        tracing::info!("self-update goes now: {why}");
+                    }
+                    Gap::Wait { next_ms } => {
+                        let mut h = d.update_held.lock().unwrap_or_else(|e| e.into_inner());
+                        let since = h.map_or_else(now_ms, |(s, _)| s);
+                        *h = Some((since, next_ms));
+                        drop(h);
+                        d.poke();
+                        return Err(format!("{HELD} (next window {})", clock_at(next_ms)));
+                    }
+                }
+            }
             say(
                 d,
                 "building",
                 &format!("building {target} into runtimes/{target}/"),
             );
-            build(&cfg, &rt, &target)?;
+            build_leased(d, &cfg, &rt, &target)?;
             (target, running)
         };
         // Prove it on a copy of the real database, in a sandbox, before it is allowed near the real one.
@@ -936,6 +1087,15 @@ pub fn run(d: &Arc<Daemon>, req: &Request) -> Result<String, String> {
     };
     match go() {
         Ok(t) => Ok(t),
+        Err(e) if e.starts_with(HELD) => {
+            // Not a failure: the update waits for its window.
+            d.update_status
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .phase = "idle".into();
+            d.poke();
+            Err(e)
+        }
         Err(e) => Err(fail(d, e)),
     }
 }
@@ -1075,7 +1235,8 @@ pub const MONITORS: [MonitorKind; 2] = [
         name: "swift",
         // The generated Swift protocol code and tokens are checked in under clients/swift.
         paths: &["clients/swift", "scripts/bundle-monitor.sh"],
-        build: "bash scripts/bundle-monitor.sh \"$MASON_MONITOR_OUT\"",
+        // Signed ad hoc unless MASON_SIGN_IDENTITY names a Developer ID (s513).
+        build: "SIGN_APP=1 SIGN_IDENTITY=\"${MASON_SIGN_IDENTITY:--}\" bash scripts/bundle-monitor.sh \"$MASON_MONITOR_OUT\"",
         product: "MASON.app",
     },
     MonitorKind {
@@ -1733,6 +1894,19 @@ fn wait_info(d: &Daemon, deadline: &str) -> Wait {
         batches,
         deadline: deadline.into(),
     }
+}
+
+/// The local clock time of `at_ms`, `HH:MM` (UTC if `date` cannot say).
+pub fn clock_at(at_ms: u64) -> String {
+    let at = at_ms / 1000;
+    let local = Command::new("date")
+        .args(["-r", &at.to_string(), "+%H:%M"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|t| !t.is_empty());
+    local.unwrap_or_else(|| format!("{:02}:{:02} UTC", at / 3600 % 24, at / 60 % 60))
 }
 
 /// The local clock time `after` from now, `HH:MM` (UTC if `date` cannot say).
@@ -2485,5 +2659,96 @@ mod tests {
         // Building what is built is a no-op.
         cfg.build = "exit 1".into();
         build(&cfg, &rt, &s[0]).unwrap();
+    }
+    fn gap(last: Option<u64>, now: u64, urgent: bool, steps: usize, quiet: bool) -> Gap {
+        gap_decision(&GapInput {
+            last_update_ms: last,
+            now_ms: now,
+            min_gap_s: 7200,
+            urgent,
+            steps_running: steps,
+            quiet,
+        })
+    }
+
+    #[test]
+    fn two_commits_ten_minutes_apart_give_one_update() {
+        let h = 3_600_000u64;
+        let last = 10 * h;
+        // The first update was just taken; the next commit arrives 10 minutes later.
+        assert_eq!(
+            gap(Some(last), last + 600_000, false, 3, false),
+            Gap::Wait {
+                next_ms: last + 2 * h
+            }
+        );
+        // Still waiting at 20 minutes, busy, and the window is the same one.
+        assert_eq!(
+            gap(Some(last), last + 1_200_000, false, 3, true),
+            Gap::Wait {
+                next_ms: last + 2 * h
+            }
+        );
+    }
+
+    #[test]
+    fn the_gap_ends_urgent_idle_and_quiet_updates_go() {
+        let h = 3_600_000u64;
+        let last = 10 * h;
+        assert_eq!(
+            gap(Some(last), last + 600_000, true, 3, false),
+            Gap::Take("urgent")
+        );
+        assert!(matches!(
+            gap(Some(last), last + 600_000, false, 0, false),
+            Gap::Take(_)
+        ));
+        assert!(matches!(gap(None, last, false, 3, false), Gap::Take(_)));
+        assert!(matches!(
+            gap(Some(last), last + 2 * h, false, 3, false),
+            Gap::Take(_)
+        ));
+        // A quiet moment counts only from half the gap.
+        assert!(matches!(
+            gap(Some(last), last + h / 2, false, 3, true),
+            Gap::Wait { .. }
+        ));
+        assert!(matches!(
+            gap(Some(last), last + h, false, 3, true),
+            Gap::Take("a quiet moment")
+        ));
+        assert!(matches!(
+            gap(Some(last), last + h, false, 3, false),
+            Gap::Wait { .. }
+        ));
+    }
+
+    #[test]
+    fn min_gap_defaults_to_two_hours_and_reads_from_update_toml() {
+        let c = UpdateCfg::parse("repo = \"x\"\n").unwrap();
+        assert_eq!(c.min_gap_s, 7200);
+        let c = UpdateCfg::parse("repo = \"x\"\nmin_gap_s = 0\n").unwrap();
+        assert_eq!(c.min_gap_s, 0);
+    }
+
+    #[test]
+    fn the_build_asks_the_broker_for_compile() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = crate::sched::broker_with_waiting(dir.path(), 0);
+        let seen = with_compile_lease(&b, "self-update build", || b.compile_holders());
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert!(seen[0].label.contains("self-update build"), "{seen:?}");
+        assert!(
+            !seen[0].interactive,
+            "it ranks as pipeline work, not a person's"
+        );
+        assert!(b.compile_holders().is_empty(), "the slot is given back");
+    }
+
+    #[test]
+    fn an_urgent_marker_in_a_commit_message_is_found() {
+        let (_t, rt, _cfg, shas) = source();
+        assert!(!is_urgent(&rt.mirror(), Some(&shas[0]), &shas[1]));
+        assert!(!is_urgent(&rt.mirror(), None, &shas[1]));
     }
 }

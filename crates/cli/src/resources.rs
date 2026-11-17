@@ -60,23 +60,22 @@ fn acquire(
     task: Option<u64>,
     outside: Option<&OutsideArgs>,
     cmd: &[String],
-    origin: Option<&str>,
+    origin: &str,
 ) -> Result<(u64, mason_resources::Held, mason_daemon::watch::Thresholds), String> {
     let mut body = json!({"uses": uses, "label": label, "task": task, "pid": std::process::id()});
+    body["origin"] = json!(origin);
     // The command and where it runs, so the daemon can estimate it from earlier runs (s400).
     body["cmd"] = json!(cmd);
     body["cwd"] = json!(cwd());
-    // Who asked (`--origin starpipe`, `hook`), so the monitor can say where a lease with no
-    // task came from; the daemon adds the working directory (s527).
-    if let Some(o) = origin {
-        body["origin"] = json!(o);
-    }
     if let Some(o) = outside {
         body["pipeline"] = json!(o.pipeline);
         body["priority"] = json!(o.priority);
         body["progress"] = json!(o.progress);
     }
     let opened = d.call("POST", "/leases", Some(&body)).map_err(say)?;
+    if let Some(c) = opened["converted"].as_str() {
+        eprintln!("mason: {c}");
+    }
     let id = opened["id"].as_u64().ok_or("the daemon sent no lease id")?;
     let release = |d: &Daemon| {
         let _ = d.call("POST", &format!("/leases/{id}/release"), Some(&json!({})));
@@ -158,6 +157,41 @@ fn held_label(label: &str, outside: Option<&OutsideArgs>) -> String {
     }
 }
 
+/// Who is waiting, when `--origin` does not say (s552): only a person at a terminal is a
+/// `person`. Another pipeline (`--pipeline`), a task's step (`MASON_TASK`), a Claude Code
+/// session (`CLAUDECODE`) or a command with no terminal is not, and is ranked as pipeline work.
+pub fn default_origin(pipeline: bool) -> String {
+    use std::io::IsTerminal;
+    let set = |k: &str| std::env::var(k).is_ok_and(|v| !v.trim().is_empty());
+    origin_of(
+        pipeline,
+        set("MASON_TASK"),
+        set("CLAUDECODE"),
+        std::io::stdin().is_terminal(),
+    )
+    .to_string()
+}
+
+/// The decision in [`default_origin`], from what it reads.
+pub fn origin_of(
+    pipeline: bool,
+    mason_task: bool,
+    claude_code: bool,
+    terminal: bool,
+) -> &'static str {
+    if pipeline {
+        "pipeline"
+    } else if mason_task {
+        "task"
+    } else if claude_code {
+        "agent"
+    } else if !terminal {
+        "no-terminal"
+    } else {
+        "person"
+    }
+}
+
 /// Run `cmd` once the resources are ours. Returns the command's exit code.
 pub fn run(
     d: &Daemon,
@@ -165,7 +199,7 @@ pub fn run(
     label: Option<String>,
     cmd: &[String],
     outside: Option<&OutsideArgs>,
-    origin: Option<&str>,
+    origin: Option<String>,
 ) -> Result<i32, String> {
     // A run made by a task's agent (MASON_TASK is in the step environment) is
     // that task's pipeline work; without it, it is a person's. Another
@@ -177,7 +211,8 @@ pub fn run(
         Some(t) => format!("task {t} `{}`", cmd.join(" ")),
         None => format!("interactive `{}`", cmd.join(" ")),
     });
-    let (id, held, th) = acquire(d, &uses, &label, task, outside, cmd, origin)?;
+    let origin = origin.unwrap_or_else(|| default_origin(outside.is_some()));
+    let (id, held, th) = acquire(d, &uses, &label, task, outside, cmd, &origin)?;
     let began = Instant::now();
     let status = run_watched(d, &cmd[0], &cmd[1..], th, task.is_some());
     drop(held);
@@ -280,7 +315,7 @@ pub fn hold(
     outside: &OutsideArgs,
 ) -> Result<(), String> {
     use std::io::{Read, Write};
-    let (id, held, _) = acquire(d, &uses, label, None, Some(outside), &[], None)?;
+    let (id, held, _) = acquire(d, &uses, label, None, Some(outside), &[], &outside.pipeline)?;
     println!("granted");
     let _ = std::io::stdout().flush();
     let (tx, rx) = std::sync::mpsc::channel::<()>();
@@ -767,5 +802,14 @@ mod tests {
         )
         .is_none());
         assert!(hook_bash("not json", "compile", "mason").is_none());
+    }
+
+    #[test]
+    fn only_a_person_at_a_terminal_is_a_person() {
+        assert_eq!(origin_of(false, false, false, true), "person");
+        assert_eq!(origin_of(false, false, false, false), "no-terminal");
+        assert_eq!(origin_of(false, false, true, true), "agent");
+        assert_eq!(origin_of(false, true, true, true), "task");
+        assert_eq!(origin_of(true, false, false, true), "pipeline");
     }
 }
