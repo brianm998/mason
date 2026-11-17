@@ -139,3 +139,15 @@ type = "landing"
 category = "landing"
 max_rounds = 3
 on_red = "develop"
+
+# The base branch's own GitHub CI is watched (s524, decision 0517). `gate = "CI"` is every job in the
+# CI workflow (the watch takes one workflow, or one `workflow/job`): a red there files at once. Other
+# workflows (Android, iOS) are watched with the default agreement. The freeze is off: MASON lands
+# `direct` and fixes its own CI through the pipeline, so freezing on a red gate would stop the tasks
+# that fix it. Turn it on with `freeze_on_gate = true`. It also needs a `[ci]` section of kind
+# `github-actions` in the machine's project file for `mason`.
+[watch.ci]
+enabled = true
+gate = "CI"
+freeze_on_gate = false
+max_open_auto = 2
