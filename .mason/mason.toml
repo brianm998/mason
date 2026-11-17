@@ -61,11 +61,16 @@ next = "land"
 build = "{project_test} --no-run"
 command = "{project_test}"
 rerun = "{project_test} {tests}"
-# `run_check` while developing, asked for with `changed: true`: only the crates the diff touches
-# and their dependents. The test step runs `command` whole (decision 0205). Enabled by the owner
-# on 2026-11-13, once the running daemon knew the keys (s210, #265).
-dev_command = "{project_test} {packages}"
-dev_build = "{project_test} {packages} --no-run"
+# The affected tests, not the whole workspace (decision 0539, superseding 0205). `{tests_for_change}`
+# is the test targets a change can affect, found by a static source scan (crates/daemon/src/affected.rs):
+# a changed test file runs itself, a changed `src` file runs its crate's unit tests and the targets
+# of that crate and its dependents that mention it; Cargo.*, build.rs, tests/support and the like run
+# everything. `run_check` with `changed: true` runs that set. With `narrow_packages` the test step
+# runs it too, plus the smoke set in `.mason/smoke-tests.txt` (owner-edited). The whole suite runs
+# once per landing batch (`[[tier]] batch` in landing.toml).
+dev_command = "{project_test} {tests_for_change}"
+dev_build = "{project_test} {tests_for_change} --no-run"
+narrow_packages = true
 parser = "regex"
 pass_regex = '^test (.+) \.\.\. ok$'
 fail_regex = '^test (.+) \.\.\. FAILED$'
@@ -108,8 +113,9 @@ uses = { test-suite = 1 }
 [binding.unit]
 when = ["development", "test_step"]
 
-# Which suites a change needs. A path no line names runs everything. Docs-only changes keep
-# the cargo suite for now: running none there would relax the gate (decision 0173).
+# Which suites a change needs. A path no line names runs everything. Docs-only changes still
+# select the cargo suite, which then runs only the smoke set per task (decisions 0173, 0539); the
+# landing batch runs it whole.
 [impact]
 "crates/**" = ["cargo-workspace"]
 "Cargo.*" = ["cargo-workspace"]
