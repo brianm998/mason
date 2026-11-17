@@ -69,9 +69,10 @@ tasks.test {
 
     // Skiko extracts and loads its native library in the test JVM, as the desktop run does.
     jvmArgs("--enable-native-access=ALL-UNNAMED")
-    // Unpack Skia's native library into the build directory (a path this build owns and can
-    // execute from), so a shared, read-only or noexec home or /tmp cannot break the load.
-    systemProperty("java.io.tmpdir", skikoDir.absolutePath)
+    // Extract it somewhere this build owns, so a shared or read-only /tmp cannot break the load.
+    val skikoTmp = layout.buildDirectory.dir("skiko-tmp").get().asFile
+    doFirst { skikoTmp.mkdirs() }
+    systemProperty("java.io.tmpdir", skikoTmp.absolutePath)
     testLogging {
         exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
     }
