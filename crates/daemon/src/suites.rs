@@ -1262,6 +1262,46 @@ fn run_on_base(
     outcome
 }
 
+/// What develop says of the tests that stayed red on the task's tree.
+enum AtBase {
+    /// The tests that failed there (empty: they all passed).
+    Failing(Vec<String>),
+    /// No run finished with the tests' names read.
+    Unknown,
+}
+
+/// Run only `tests` at `base`, with the suite's `rerun` command (`{tests}` filled in). A run
+/// that did not finish (a signal, a timeout) or read no names is tried once more; if that
+/// one fails the same way the answer is [`AtBase::Unknown`], not "green" (#494).
+#[allow(clippy::too_many_arguments)]
+fn failing_at_base(
+    who: &Who,
+    c_repo: &Path,
+    def: &Definition,
+    suite: &Suite,
+    base: &str,
+    lock: &crate::daemon::RepoLock,
+    dev: Option<&Dev>,
+    template: &str,
+    tests: &[String],
+) -> AtBase {
+    let cmd = template.replace(
+        "{tests}",
+        &tests.iter().map(|x| quote(x)).collect::<Vec<_>>().join(" "),
+    );
+    for _ in 0..2 {
+        let tag = format!("t{}", now_ms());
+        if let Some((failing, _, executed)) =
+            run_on_base(who, c_repo, def, suite, base, lock, dev, &cmd, &tag)
+        {
+            if executed > 0 {
+                return AtBase::Failing(failing);
+            }
+        }
+    }
+    AtBase::Unknown
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_suite(
     who: &Who,
@@ -1552,8 +1592,45 @@ fn run_suite(
                 // A known-red failure needs no base run: the ledger already excuses it.
                 let unexcused = persistent.iter().any(|t| !quarantined.contains(t));
                 let mut reuse_note: Option<String> = None;
+                let mut unknown_at_base: Vec<String> = vec![];
+                // A whole-suite baseline already known for this base is used as is.
+                let cached = !suite.narrowed
+                    && d.store
+                        .baseline(&tree.base, &suite.name)
+                        .ok()
+                        .flatten()
+                        .is_some();
                 let base = if persistent.is_empty() || !unexcused || !who.trust_base {
                     None
+                } else if let (Some(tpl), false) = (suite.rerun.as_deref(), cached) {
+                    // Only the tests that failed, not the suite (#494).
+                    let ask: Vec<String> = persistent
+                        .iter()
+                        .filter(|t| !quarantined.contains(t))
+                        .cloned()
+                        .collect();
+                    match failing_at_base(
+                        who,
+                        c_repo,
+                        def,
+                        suite,
+                        &tree.base,
+                        repo_lock,
+                        dev.as_ref(),
+                        tpl,
+                        &ask,
+                    ) {
+                        AtBase::Failing(f) => {
+                            let own = who.task.map_or(vec![], |(t, _)| {
+                                crate::basecheck::own_tests(&d.store, &suite.name, t.0)
+                            });
+                            Some(f.into_iter().filter(|t| !own.contains(t)).collect())
+                        }
+                        AtBase::Unknown => {
+                            unknown_at_base = ask;
+                            None
+                        }
+                    }
                 } else {
                     baseline_noted(
                         who,
@@ -1653,6 +1730,24 @@ fn run_suite(
                         excused,
                         flaky,
                     } => {
+                        // develop's answer is unknown (the run on it did not finish twice):
+                        // the round is not the task's to answer for (#494).
+                        if tests.iter().any(|t| unknown_at_base.contains(t)) {
+                            env_down(who, def, suite, cwd, dev.as_ref());
+                            if waiting {
+                                on_wait(None);
+                            }
+                            return SuiteRun::Done {
+                                outcome: SuiteOutcome::Excused,
+                                results: None,
+                                notes: vec![format!(
+                                    "{}: red on `{}`, but the run of those tests on develop ({}) did not finish twice, so this round is not counted against the task",
+                                    suite.name,
+                                    tests.join("`, `"),
+                                    &tree.base[..tree.base.len().min(10)]
+                                )],
+                            };
+                        }
                         let mut extra = format!("`{}` is red ({why}).", suite.name);
                         if !tests.is_empty() {
                             extra.push_str(&format!(" Failing: {}.", tests.join(", ")));
