@@ -28,10 +28,10 @@ fn now() -> u64 {
         .as_secs()
 }
 
-/// How long the usage-limit hold in the kill test lasts: long enough that a slow restart on a busy
-/// machine still finds it in force, short enough to wait out (the rate-limit window re-holds the
-/// account until its reset, so a hand release cannot end it early).
-const HOLD_S: u64 = 120;
+/// How long the usage-limit hold the fake agent reports lasts, and so how long the rate-limit
+/// window keeps the account blocked: the kill test waits this out after the restart. The restart
+/// itself must not depend on it: the test moves the stored hold's end an hour out before the kill.
+const HOLD_S: u64 = 60;
 
 /// The reset is `resets_in` seconds after the fake agent emits the event, never an
 /// absolute time fixed at test start (the daemon drops resets already past).
@@ -498,6 +498,15 @@ fn a_real_daemon_keeps_a_hold_across_a_kill_and_the_cli_holds_and_releases() {
         "{reset} vs {t0}"
     );
 
+    // A restart on a busy or stalled machine (a git fetch and process launches, no bound) can take
+    // longer than the hold. Push the stored hold's end out so the restart always finds it in force.
+    let store = mason_store::Store::open(s.data_dir.join("store.db")).unwrap();
+    for mut h in store.account_holds().unwrap() {
+        h.until_ms = Some((now() + 3600) * 1000);
+        store.put_account_hold(h).unwrap();
+    }
+    drop(store);
+
     let mut m2 = s.masond(&[], &[]);
     s.wait_daemon(&mut m2);
     assert_eq!(
@@ -512,7 +521,8 @@ fn a_real_daemon_keeps_a_hold_across_a_kill_and_the_cli_holds_and_releases() {
         .sum();
     assert_eq!(during, before, "no session starts during the hold");
     // The restart found the hold in force and kept it; there is no need to also wait out the rest
-    // of its 120 s. Move its end to two seconds from now and let the daemon see it expire.
+    // of the stored hold. Move its end to two seconds from now and let the daemon see it expire.
+    // The rate-limit window still holds the account until HOLD_S after the event.
     for mut h in store.account_holds().unwrap() {
         h.until_ms = Some((now() + 2) * 1000);
         store.put_account_hold(h).unwrap();
