@@ -772,13 +772,19 @@ fn a_reap_writes_the_kills_ledger_and_an_unmatched_one_writes_nothing() {
     // A host whose recorded start strings match nothing: nothing is signalled or written.
     write_kv(
         &dir.join("host.kv"),
-        &[("host_start", "no such start".into()), ("child_start", "no such start".into())],
+        &[
+            ("host_start", "no such start".into()),
+            ("child_start", "no such start".into()),
+        ],
     )
     .unwrap();
     mason_step_host::registry::reap_dir_by(&dir, "test sender");
     assert!(!dir.join("kills").exists());
     mason_step_host::registry::note_kill(&dir, "test sender", 9);
     let text = std::fs::read_to_string(dir.join("kills")).unwrap();
-    assert!(text.contains("test_sender") && text.contains("signal=9"), "{text}");
+    assert!(
+        text.contains("test_sender") && text.contains("signal=9"),
+        "{text}"
+    );
     let _ = std::fs::remove_dir_all(&r);
 }
