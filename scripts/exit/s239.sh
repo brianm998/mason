@@ -16,6 +16,6 @@ run() {
     echo "$out" | grep -E '^test result' | tail -1
 }
 run "1+2. broker: idle start, paused beside a running compile" \
-    -p mason-daemon --test limits the_pause_between_compile_starts
+    -p mason-daemon --test it the_pause_between_compile_starts
 run "3+4. planner and wait text" -p mason-scheduler
 echo "s239 OK"

@@ -19,6 +19,6 @@ run "adapter: each login-failure fixture is NotLoggedIn, stderr wording too, a p
     -p mason-adapters --lib claude
 run "real masond and mason with fake-claude refusing login: two tasks stay unfailed, mason alerts \
 shows credentials, both land once the fake works; release clears at once" \
-    -p mason-daemon --test credentials
+    -p mason-daemon --test it credentials::
 
 echo "s107 OK"

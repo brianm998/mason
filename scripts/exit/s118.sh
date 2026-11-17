@@ -13,7 +13,7 @@ run() {
     echo "$out" | grep -E '^test result' | tail -1
 }
 
-run "a lasting stall repeats to a claiming client until acknowledged" -p mason-daemon --test stall a_lasting_stall
+run "a lasting stall repeats to a claiming client until acknowledged" -p mason-daemon --test it a_lasting_stall
 run "the repeat rule" -p mason-core notify
 run "reminder.repeat is read" -p mason-daemon --lib notify
 echo "s118 OK"

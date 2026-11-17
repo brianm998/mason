@@ -18,7 +18,7 @@ run() {
 run -p mason-landing audit
 run -p mason-landing --test audit
 run -p mason-landing --test batch
-run -p mason-daemon --test audit_e2e
+run -p mason-daemon --test it audit_e2e::
 run -p mason-adapter-api contract
 if [ "$fail" -eq 0 ]; then echo "s131: green"; else echo "s131: RED"; fi
 [ "$fail" -eq 0 ]

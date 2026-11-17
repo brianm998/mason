@@ -7,5 +7,5 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 cargo test -q -p mason-store --test store panic 2>&1 | tail -3
-cargo test -q -p mason-daemon --test panics 2>&1 | tail -5
+cargo test -q -p mason-daemon --test it panics:: 2>&1 | tail -5
 echo "s86 OK"

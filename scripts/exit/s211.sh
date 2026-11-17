@@ -14,15 +14,15 @@ run() {
     echo "$out" | grep -E '^test result' | tail -1
 }
 run "a+b. send-back repins; a running step keeps its pin" \
-    -p mason-daemon --test repin a_task_sent_back_runs_the_definition_on_the_base_now
+    -p mason-daemon --test it a_task_sent_back_runs_the_definition_on_the_base_now
 run "c. a red in a changed suite is rerun once" \
-    -p mason-daemon --test repin a_red_in_a_suite_that_changed_is_rerun_once
+    -p mason-daemon --test it a_red_in_a_suite_that_changed_is_rerun_once
 run "d. a red in an unchanged suite is sent back" \
-    -p mason-daemon --test repin a_red_in_a_suite_that_did_not_change
+    -p mason-daemon --test it a_red_in_a_suite_that_did_not_change
 run "note for .mason/ changes" \
-    -p mason-daemon --test repin only_a_project_without
+    -p mason-daemon --test it only_a_project_without
 run "red reason parsing" \
-    -p mason-daemon --test repin the_suite_a_red_names
+    -p mason-daemon --test it the_suite_a_red_names
 run "the event round-trips" \
     -p mason-store every_event_kind_round_trips
 run "reducer matrix" -p mason-engine --test matrix

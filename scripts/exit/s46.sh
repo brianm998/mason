@@ -10,5 +10,5 @@
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 cargo test -q -p mason-daemon --lib plan_view
-cargo test -q -p mason-daemon --test protocol the_task_detail_carries_the_plan
+cargo test -q -p mason-daemon --test it the_task_detail_carries_the_plan
 echo "s46 ok"

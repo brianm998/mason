@@ -4,5 +4,5 @@
 # own landing test freezes a real landing and asserts the header carries that banner.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
-cargo test -q -p mason-daemon --test landing a_red_post_land_tier_freezes_landing_until_the_fix_lands
+cargo test -q -p mason-daemon --test it a_red_post_land_tier_freezes_landing_until_the_fix_lands
 echo "s126 OK"
