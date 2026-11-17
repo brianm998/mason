@@ -52,3 +52,16 @@ fn two_tasks_that_break_it_only_together_both_go_back_named_together() {
     assert!(w.sent_back(t1).is_none());
     assert!(!w.on_main("x/joint.a") && !w.on_main("x/joint.b"));
 }
+
+#[test]
+fn a_batch_tier_red_the_base_shows_too_blames_no_task() {
+    // Decision 0539: the whole suite runs at the batch, so a red the base already has must not
+    // send anyone back. `integration` is red at the base (`x/red.integration` is in it) and
+    // red the same way in the batch: it is excused as also failing at the merge base.
+    let w = world(TOML, &[("x/red.integration", "the base is red")]);
+    let t1 = w.task("one", &[("x/one.txt", "1")]);
+    let t2 = w.task("two", &[("x/two.txt", "2")]);
+    wait_for("both to land", 120, || w.landed(t1) && w.landed(t2));
+    assert!(w.sent_back(t1).is_none() && w.sent_back(t2).is_none());
+    assert!(w.on_main("x/one.txt") && w.on_main("x/two.txt"));
+}
