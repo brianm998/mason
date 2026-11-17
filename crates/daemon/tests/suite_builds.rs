@@ -304,10 +304,16 @@ fn a_scoped_run_check_runs_the_narrowed_command_and_the_test_step_still_runs_it_
 /// always full.
 #[test]
 fn after_a_red_full_run_an_unscoped_check_reruns_only_the_failures_and_the_changed_crates() {
-    let def = narrowable().replace(
-        r#"command = "echo RAN-FULL; sh checks.sh""#,
-        r#"command = "echo RAN-FULL; echo 'test a::b ... FAILED'; sh checks.sh""#,
-    );
+    // The failing test is named by the full command and by the re-run, until `hello.txt` exists.
+    let def = narrowable()
+        .replace(
+            r#"command = "echo RAN-FULL; sh checks.sh""#,
+            r#"command = "echo RAN-FULL; echo 'test a::b ... FAILED'; sh checks.sh""#,
+        )
+        .replace(
+            "rerun = \"echo RAN-RERUN {tests};",
+            "rerun = \"echo RAN-RERUN {tests}; [ -f hello.txt ] || echo 'test a::b ... FAILED';",
+        );
     let run = json!({"call": {"tool": "run_check", "args": {"name": "tests"}}});
     let turns = json!([
         {"sh": "mkdir -p crates/pk/src && printf '[package]\\nname = \"pk\"\\nversion = \"0.1.0\"\\nedition = \"2021\"\\n' > crates/pk/Cargo.toml && : > crates/pk/src/lib.rs && git add -A && git -c user.name=t -c user.email=t@t commit -qm crate"},
