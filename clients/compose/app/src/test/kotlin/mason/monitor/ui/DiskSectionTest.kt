@@ -4,6 +4,9 @@ package mason.monitor.ui
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertIsOff
@@ -95,10 +98,10 @@ class DiskSectionTest {
 
     @Test fun diskSitsRightOfCpuWhenWideAndBelowWhenNarrow() = runComposeUiTest {
         val m = model(sp, hd)
-        var width by androidx.compose.runtime.mutableStateOf(1000)
+        var boxWidth by mutableStateOf(1000)
         setContent {
             CompositionLocalProvider(LocalTheme provides Theme(false, 1.0)) {
-                Box(Modifier.width(width.dp)) { CpuDiskRow(m) }
+                Box(Modifier.width(boxWidth.dp)) { CpuDiskRow(m) }
             }
         }
         val cpu = onNodeWithTag("section-title:CPU (all projects)").getBoundsInRoot()
@@ -113,7 +116,7 @@ class DiskSectionTest {
         onNodeWithTag("cpu-chart").assertExists()
         onNodeWithTag("disk-chart").assertExists()
 
-        width = 600
+        boxWidth = 600
         waitForIdle()
         val cpu2 = onNodeWithTag("section-title:CPU (all projects)").getBoundsInRoot()
         val disk2 = onNodeWithTag("section-title:Disk (all projects)").getBoundsInRoot()
