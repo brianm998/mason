@@ -18,7 +18,9 @@
 //! - **Other jobs need agreement.** The first red after green is pending; `agreement`
 //!   distinct runs red with no green between file it. A green clears it as a flake.
 //! - **Long reds.** A job red for `red_ticket_after` with no open ticket naming it is
-//!   filed, and looked at again only after another threshold.
+//!   filed, and looked at again only after another threshold, and then only for a run
+//!   newer than the one its last ticket covered (and, if that ticket landed a change, of
+//!   a commit at or after the landing). The same run is never filed twice.
 //! - **Dedupe and caps.** Nothing is filed while an open task or issue names the job; with
 //!   `max_open_auto` auto-filed tasks open, a red is filed `proposed`.
 //! - **Excluded workflows** keep their baseline but are never filed and never freeze.
@@ -91,6 +93,8 @@ pub struct RunRef {
     pub job: u64,
     pub sha: String,
     pub url: String,
+    /// When the run was created (ms).
+    pub at_ms: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
@@ -109,6 +113,12 @@ pub struct JobState {
     pub checked: Option<u64>,
     /// The gate went red and the freeze holds until it is green.
     pub freeze: bool,
+    /// The newest run a ticket was filed for or found for (0: none known). The long-red
+    /// rule files again only for a run newer than this.
+    pub covered: u64,
+    /// When that ticket landed with a change, once seen: a newer run must be of a commit
+    /// at or after it.
+    pub landed_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
@@ -168,6 +178,25 @@ pub struct Ctx<'a> {
     /// `workflow/job` to the open task or issue naming it (`None`: an issue, no task).
     pub named: &'a BTreeMap<String, Option<u64>>,
     pub open_auto: u32,
+    /// Tasks that landed or closed within the lookback.
+    pub recent: &'a [RecentTask],
+    /// Tasks that landed with a change, to when (ms).
+    pub landed: &'a BTreeMap<u64, u64>,
+}
+
+/// A task that is over (landed or closed) and recent enough to count as having covered a red.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecentTask {
+    pub id: u64,
+    pub title: String,
+    pub body: String,
+}
+
+impl RecentTask {
+    /// Its body cites this run.
+    pub fn cites(&self, run: u64) -> bool {
+        run != 0 && self.body.contains(&format!("/runs/{run}"))
+    }
 }
 
 /// The runs that need their jobs read: for a workflow not yet seeded, the newest finished
@@ -205,6 +234,7 @@ fn job_run_ref(r: &RunRec, j: &JobRec) -> RunRef {
         job: j.id,
         sha: r.sha.clone(),
         url: r.url.clone(),
+        at_ms: r.created_ms,
     }
 }
 
@@ -233,6 +263,17 @@ pub fn step(state: &mut State, runs: &[RunRec], ctx: &Ctx) -> Vec<File> {
             if js.ticket.is_none() {
                 js.ticket = *t;
             }
+            js.covered = js.covered.max(f.at.run);
+            return;
+        }
+        // An over task covered this run (its body cites it), or, for a long red whose
+        // history is unknown, its title names the job: record it, file nothing.
+        if let Some(t) = ctx.recent.iter().find(|t| {
+            t.cites(f.at.run) || (f.why == Why::LongRed && js.covered == 0 && t.title.contains(&k))
+        }) {
+            js.ticket = Some(t.id);
+            js.covered = js.covered.max(f.at.run);
+            js.landed_ms = ctx.landed.get(&t.id).copied();
             return;
         }
         if !decided.insert(k) {
@@ -360,6 +401,15 @@ pub fn step(state: &mut State, runs: &[RunRec], ctx: &Ctx) -> Vec<File> {
         }
     }
 
+    // A ticket that landed with a change: remember when.
+    for ws in state.workflows.values_mut() {
+        for js in ws.jobs.values_mut() {
+            if let (Some(t), None) = (js.ticket, js.landed_ms) {
+                js.landed_ms = ctx.landed.get(&t).copied();
+            }
+        }
+    }
+
     // Long reds.
     let mut due: Vec<(String, String, bool, RunRef)> = vec![];
     for (w, ws) in &state.workflows {
@@ -368,7 +418,10 @@ pub fn step(state: &mut State, runs: &[RunRec], ctx: &Ctx) -> Vec<File> {
         }
         for (name, js) in &ws.jobs {
             let from = js.checked.unwrap_or(js.red_since);
-            if js.red && ctx.now_ms.saturating_sub(from) >= rules.red_ticket_after_ms {
+            if js.red
+                && ctx.now_ms.saturating_sub(from) >= rules.red_ticket_after_ms
+                && !held(js)
+            {
                 due.push((
                     w.clone(),
                     name.clone(),
@@ -396,6 +449,38 @@ pub fn step(state: &mut State, runs: &[RunRec], ctx: &Ctx) -> Vec<File> {
     // A job that went green clears its freeze with the rest of its state (above), and a
     // job that is red and checked is not looked at again until another threshold.
     out
+}
+
+/// A red job whose latest red run is already covered by a ticket: no new evidence, so the
+/// long-red rule does not file it again.
+fn held(js: &JobState) -> bool {
+    js.covered != 0
+        && (js.last_red.run <= js.covered
+            || js.landed_ms.is_some_and(|l| js.last_red.at_ms < l))
+}
+
+/// Red jobs the long-red rule holds back: `(key, run, ticket)`.
+pub fn held_back(state: &State, rules: &Rules) -> Vec<(String, u64, Option<u64>)> {
+    let mut v = vec![];
+    for (w, ws) in &state.workflows {
+        if rules.excluded(w) {
+            continue;
+        }
+        for (j, js) in &ws.jobs {
+            if js.red && js.ticket.is_some() && held(js) {
+                v.push((key(w, j), js.last_red.run, js.ticket));
+            }
+        }
+    }
+    v
+}
+
+/// The text the status shows for a held-back job.
+pub fn held_text(key: &str, run: u64, ticket: Option<u64>) -> String {
+    match ticket {
+        Some(t) => format!("{key} still red on run {run}; #{t} covered it; waiting for a newer run"),
+        None => format!("{key} still red on run {run}; waiting for a newer run"),
+    }
 }
 
 /// The jobs whose red holds the freeze: `workflow/job` and the task that fixes it.
@@ -435,6 +520,8 @@ pub fn filed(state: &mut State, f: &File, task: Option<u64>, now_ms: u64, url: &
         .and_then(|w| w.jobs.get_mut(&f.job))
     {
         js.ticket = task;
+        js.covered = js.covered.max(f.at.run);
+        js.landed_ms = None;
     }
     state.filed.push(Filed {
         key: f.key(),
@@ -502,6 +589,8 @@ mod tests {
                 now_ms: now,
                 named,
                 open_auto: open,
+                recent: &[],
+                landed: &BTreeMap::new(),
             },
         )
     }
@@ -601,6 +690,8 @@ mod tests {
                     now_ms: 9000,
                     named: &named,
                     open_auto: 0,
+                    recent: &[],
+                    landed: &BTreeMap::new(),
                 },
             )
         };
@@ -766,9 +857,122 @@ mod tests {
         assert_eq!(f.len(), 1);
         assert_eq!(f[0].why, Why::LongRed);
         filed(&mut s, &f[0], Some(5), 3 * h + 2000, "u");
-        // Closed and still red: not again until another threshold.
+        // Still red on the same run: never again, however long.
         assert!(go(&mut s, &[], 4 * h, &none(), 0).is_empty());
-        assert_eq!(go(&mut s, &[], 6 * h + 3000, &none(), 0).len(), 1);
+        assert!(go(&mut s, &[], 60 * h, &none(), 0).is_empty());
+        // A newer red run is new evidence.
+        go(
+            &mut s,
+            &[run(3, "CI", "failure", &[("a", "failure")])],
+            61 * h,
+            &none(),
+            0,
+        );
+        assert_eq!(go(&mut s, &[], 70 * h, &none(), 0).len(), 1);
+    }
+
+    const H: u64 = 3_600_000;
+
+    fn go_r(
+        s: &mut State,
+        runs: &[RunRec],
+        now: u64,
+        recent: &[RecentTask],
+        landed: &BTreeMap<u64, u64>,
+    ) -> Vec<File> {
+        let r = rules();
+        step(
+            s,
+            runs,
+            &Ctx {
+                rules: &r,
+                now_ms: now,
+                named: &none(),
+                open_auto: 0,
+                recent,
+                landed,
+            },
+        )
+    }
+
+    fn red_filed(s: &mut State, task: u64) {
+        go(s, &[run(1, "CI", "success", &[("a", "success")])], 0, &none(), 0);
+        go(s, &[run(2, "CI", "failure", &[("a", "failure")])], 1000, &none(), 0);
+        let f = go_r(s, &[], 4 * H, &[], &BTreeMap::new());
+        assert_eq!(f.len(), 1);
+        filed(s, &f[0], Some(task), 4 * H, "u");
+    }
+
+    #[test]
+    fn a_landed_ticket_with_no_newer_run_files_nothing() {
+        let mut s = State::default();
+        red_filed(&mut s, 5);
+        let landed: BTreeMap<u64, u64> = [(5, 5 * H)].into();
+        let recent = [RecentTask {
+            id: 5,
+            title: "CI/a red on develop".into(),
+            body: "Run: https://x/runs/2".into(),
+        }];
+        for i in 1..=10 {
+            assert!(go_r(&mut s, &[], 5 * H + i * 4 * H, &recent, &landed).is_empty());
+        }
+        assert_eq!(held_back(&s, &rules()), vec![("CI/a".to_string(), 2, Some(5))]);
+        // A newer red run, of a commit after the landing: filed once.
+        let mut r3 = run(3, "CI", "failure", &[("a", "failure")]);
+        r3.created_ms = 6 * H;
+        go_r(&mut s, &[r3], 50 * H, &recent, &landed);
+        let f = go_r(&mut s, &[], 60 * H, &recent, &landed);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].at.run, 3);
+        filed(&mut s, &f[0], Some(6), 60 * H, "u");
+        assert!(go_r(&mut s, &[], 90 * H, &recent, &landed).is_empty());
+    }
+
+    #[test]
+    fn a_newer_run_of_a_commit_before_the_landing_is_held() {
+        let mut s = State::default();
+        red_filed(&mut s, 5);
+        let landed: BTreeMap<u64, u64> = [(5, 50 * H)].into();
+        let mut r3 = run(3, "CI", "failure", &[("a", "failure")]);
+        r3.created_ms = 10 * H;
+        go_r(&mut s, &[r3], 60 * H, &[], &landed);
+        assert!(go_r(&mut s, &[], 70 * H, &[], &landed).is_empty());
+    }
+
+    #[test]
+    fn a_task_closed_citing_the_run_is_recorded_not_refiled() {
+        let mut s = State::default();
+        go(&mut s, &[run(1, "CI", "success", &[("a", "success")])], 0, &none(), 0);
+        go(&mut s, &[run(2, "CI", "failure", &[("a", "failure")])], 1000, &none(), 0);
+        let recent = [RecentTask {
+            id: 9,
+            title: "something else".into(),
+            body: "Run: https://x/runs/2".into(),
+        }];
+        assert!(go_r(&mut s, &[], 4 * H, &recent, &BTreeMap::new()).is_empty());
+        let js = &s.workflows["CI"].jobs["a"];
+        assert_eq!((js.ticket, js.covered), (Some(9), 2));
+    }
+
+    #[test]
+    fn a_terminal_task_outside_the_lookback_does_not_hold_a_newer_run() {
+        // The daemon passes only tasks inside the lookback, so an older one is absent.
+        let mut s = State::default();
+        go(&mut s, &[run(1, "CI", "success", &[("a", "success")])], 0, &none(), 0);
+        go(&mut s, &[run(2, "CI", "failure", &[("a", "failure")])], 1000, &none(), 0);
+        assert_eq!(go_r(&mut s, &[], 4 * H, &[], &BTreeMap::new()).len(), 1);
+    }
+
+    #[test]
+    fn the_gate_freeze_holds_while_a_refile_is_held_back() {
+        let mut s = State::default();
+        go(&mut s, &[run(1, "CI", "success", &[("pr-gate", "success")])], 0, &none(), 0);
+        let f = go(&mut s, &[run(2, "CI", "failure", &[("pr-gate", "failure")])], 1000, &none(), 0);
+        assert_eq!(f.len(), 1);
+        filed(&mut s, &f[0], Some(4), 1000, "u");
+        assert!(go_r(&mut s, &[], 100 * H, &[], &BTreeMap::new()).is_empty());
+        assert_eq!(freezing(&s), vec![("CI/pr-gate".to_string(), Some(4))]);
+        assert_eq!(held_back(&s, &rules()).len(), 1);
     }
 
     #[test]
