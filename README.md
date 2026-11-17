@@ -419,6 +419,7 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s471**: A waiting request now reserves only the resources it is short of (the first in line also keeps its other units), and build-less suites no longer hold the step's `compile`, so compile slots no longer idle behind test-suite waiters.
 - **s472**: The CPU history's minute buckets are saved to the data dir and reloaded on start, and batch, debt and ledger step hosts are attributed to "batch #N" or their task instead of "other".
 - **s474**: The workspace `[profile.dev]` now sets `debug = "line-tables-only"` and `[profile.dev.package."*"] debug = false`, which cut the target dir of a cold workspace test build by about 20% and the wall time by about 7%.
+- **s475**: 81 of the 89 files in `crates/daemon/tests` are now modules of one test executable (`tests/it/main.rs`), so a `-p mason-daemon --no-run` build links 11 executables (lib, bin, `it` and eight separate tests) instead of 91, with the same 931 tests.
 - **s476**: A suite green at a base with known-red tests skipped is now recorded apart (`suite_skip_green`), `settle_debts` pays a debt from it with the skipped tests named in `how` unless the debt's task touched one of them, and `run_idle_debts` never runs the same scope twice on one tip.
 - **s477**: Stage 477: shorter real-time waits in the daemon tests
 - **s478**: A baseline is reused from the newest ancestor base with the same suite-definition hash when no file changed since falls under the suite's impact paths, and the step's notes say so.
