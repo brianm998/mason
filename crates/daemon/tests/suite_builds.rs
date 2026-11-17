@@ -298,3 +298,41 @@ fn a_scoped_run_check_runs_the_narrowed_command_and_the_test_step_still_runs_it_
     // Neither scoped green stood in for the test step: it ran the whole suite.
     assert!(logs.contains("RAN-FULL"), "{logs}");
 }
+
+/// s523: after a red full run, an unscoped `run_check` re-runs only the failing tests and the
+/// changed packages (in the small lane); after a green run it is full again; `full: true` is
+/// always full.
+#[test]
+fn after_a_red_full_run_an_unscoped_check_reruns_only_the_failures_and_the_changed_crates() {
+    let def = narrowable().replace(
+        r#"command = "echo RAN-FULL; sh checks.sh""#,
+        r#"command = "echo RAN-FULL; echo 'test a::b ... FAILED'; sh checks.sh""#,
+    );
+    let run = json!({"call": {"tool": "run_check", "args": {"name": "tests"}}});
+    let turns = json!([
+        {"sh": "mkdir src && printf '[package]\\nname = \"pk\"\\nversion = \"0.1.0\"\\nedition = \"2021\"\\n' > Cargo.toml && : > src/lib.rs && git add -A && git -c user.name=t -c user.email=t@t commit -qm crate"},
+        // Full, red: no hello.txt yet.
+        run,
+        // Narrowed to the one failure and the changed crate; still red.
+        run,
+        {"sh": "echo hello > hello.txt && git add -A && git -c user.name=t -c user.email=t@t commit -qm fix"},
+        // Narrowed again (the last run was red); green.
+        run,
+        // Green last time: full.
+        run,
+        {"call": {"tool": "run_check", "args": {"name": "tests", "full": true}}},
+        {"call": {"tool": "submit_change", "args": {"summary": "change", "head": "$HEAD"}}}
+    ]);
+    let (_s, d) = start(vec![turns], &def);
+    let t = file_task_as(&d, "Rerun", "Please do it.", true, TrustSource::Owner, false);
+    wait_state(&d, t, State::Landed, 120);
+    let logs = render_logs(&d, t.0);
+    assert_eq!(
+        logs.matches("this re-ran the 1 tests that failed and the crates you changed")
+            .count(),
+        2,
+        "{logs}"
+    );
+    assert!(logs.contains("RAN-RERUN a::b"), "{logs}");
+    assert!(logs.contains("RAN-DEV -p pk"), "{logs}");
+}

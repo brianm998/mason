@@ -1639,6 +1639,18 @@ struct TestChecks {
     base_fold: Option<(ProjectId, String)>,
     /// The project's name, for the suites' recorded run times.
     project: String,
+    /// The tests that failed in the last full (or automatically narrowed) run, when it was red
+    /// and named them. The next unscoped `run_check` re-runs only these and the changed crates
+    /// (s523). `None` after a green run, so the one after that is the full run.
+    last_red: std::sync::Mutex<Option<Vec<String>>>,
+}
+
+/// A command that runs `rerun` (the failing tests) and `dev` (the changed crates) one after the
+/// other, and passes only when both do. Both always run, so one failure does not hide the other.
+fn both_commands(rerun: &str, dev: &str) -> String {
+    format!(
+        "( {rerun} ); mason_a=$?; ( {dev} ); mason_b=$?; [ $mason_a -eq 0 ] && [ $mason_b -eq 0 ]"
+    )
 }
 
 impl TestChecks {
@@ -1695,6 +1707,16 @@ impl TestChecks {
         // Packages the diff touches, found once and only if a suite asks for them.
         let mut touched: Option<Option<Vec<String>>> = None;
         let mut narrowed: Vec<String> = vec![];
+        // After a red full run, an unscoped check re-runs the failures and the changed crates.
+        let red = self
+            .last_red
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .filter(|r| !r.is_empty() && scope.is_empty() && !scope.full);
+        let tracks = scope.is_empty() || scope.full;
+        let mut failing: Vec<String> = vec![];
+        let mut auto_narrowed = false;
         let project_test = self.cmd.as_ref().map(|c| c.test.as_str());
         let tree = crate::hostedcheck::tree_key(&self.wt);
         let spec = |prefix: String, cmd: &str, uses: &BTreeMap<String, u32>, limit: Duration| {
@@ -1731,7 +1753,33 @@ impl TestChecks {
             let limit = suite.timeout.unwrap_or(self.timeout).min(self.timeout);
             let before = suite.command.clone();
             // Only this develop-phase check narrows. The test step runs `command` whole.
-            if !scope.is_empty() {
+            if let Some(names) = &red {
+                if let (Some(t), Some(dc)) = (suite.rerun.clone(), suite.dev_command.clone()) {
+                    let pk = touched
+                        .get_or_insert_with(|| {
+                            paths
+                                .as_deref()
+                                .and_then(|p| crate::scope::changed_packages(&self.wt, p))
+                        })
+                        .clone();
+                    if let Some(pk) = pk {
+                        let flags = crate::scope::flags(&pk);
+                        let tests = names
+                            .iter()
+                            .map(|n| shell_word(n))
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        suite.command = both_commands(
+                            &t.replace("{tests}", &tests),
+                            &dc.replace("{packages}", &flags),
+                        );
+                        if let Some(db) = &suite.dev_build {
+                            suite.build = Some(db.replace("{packages}", &flags));
+                        }
+                        auto_narrowed = true;
+                    }
+                }
+            } else if !scope.is_empty() {
                 let mut packages = |scope: &CheckScope| -> Option<Vec<String>> {
                     if !scope.packages.is_empty() {
                         return Some(scope.packages.clone());
@@ -1867,6 +1915,10 @@ impl TestChecks {
                 Ok(o) if o.passed => lines.push(format!("{name}: passed")),
                 Ok(o) => {
                     failed = true;
+                    if let Some(text) = read_whole_log(&self.log_dir.join(format!("{}.log", o.id)))
+                    {
+                        failing.extend(crate::rerun::failing_names(&text));
+                    }
                     lines.push(format!(
                         "{name}: FAILED{}. Last output:\n{}",
                         if o.timed_out { " (timed out)" } else { "" },
@@ -1888,6 +1940,20 @@ impl TestChecks {
                 0,
                 "No suite is selected for your changes, so none ran.".into(),
             );
+        }
+        if tracks {
+            failing.sort();
+            failing.dedup();
+            *self.last_red.lock().unwrap_or_else(|e| e.into_inner()) =
+                (failed && !failing.is_empty()).then(|| failing.clone());
+        }
+        if auto_narrowed {
+            let n = red.as_ref().map_or(0, |r| r.len());
+            lines.push(format!(
+                "Your last full run was red, so this re-ran the {n} tests that failed and the \
+                 crates you changed; the full run comes before you submit. Call run_check again \
+                 (or with full: true) for it; it is the test step's check."
+            ));
         }
         if !narrowed.is_empty() {
             lines.push(format!(
@@ -2812,6 +2878,7 @@ fn agent_job(c: &Ctx) {
         run: c.run.0,
         base_fold: (kind == StepKind::Develop).then(|| (c.project_id, c.project.base_ref())),
         project: c.project.id.clone(),
+        last_red: std::sync::Mutex::new(None),
     });
     let validator = (kind == StepKind::Develop).then(|| {
         change_validator(
