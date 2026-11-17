@@ -122,3 +122,35 @@ fn mason_project_reload_applies_the_edit_through_the_daemon() {
     assert!(!o.status.success());
     assert!(String::from_utf8_lossy(&o.stdout).contains("`base`"));
 }
+
+#[test]
+fn a_running_step_reads_limits_changed_by_a_registration_reload() {
+    use std::time::Duration;
+    let s = Scratch::new("true", happy_script());
+    let d = s.start();
+    let t = file_task(&d, "limits");
+    // Any step run of the task will do: the context is built from the registry.
+    let mut run = None;
+    wait_for("a step run", 60, || {
+        run = d.world().unwrap().step_runs.values().next().map(|r| r.id);
+        run.is_some()
+    });
+    let c = mason_daemon::jobs::ctx(&d, t, run.unwrap()).unwrap();
+    assert_eq!(c.live().test_timeout, Duration::from_secs(60));
+    assert_eq!(c.project.test_timeout, Duration::from_secs(60));
+
+    let file = s.config_dir.join("projects/scratch.toml");
+    let text = std::fs::read_to_string(&file).unwrap();
+    std::fs::write(
+        &file,
+        text.replace("test_timeout_s = 60", "test_timeout_s = 5400"),
+    )
+    .unwrap();
+    let changed = d.reload_registration("scratch").unwrap();
+    assert_eq!(changed, vec!["test_timeout_s".to_string()]);
+    // The step's own copy is what it started with; the next check reads the live value.
+    assert_eq!(c.project.test_timeout, Duration::from_secs(60));
+    assert_eq!(c.live().test_timeout, Duration::from_secs(5400));
+    // What is fixed at start stays as it was.
+    assert_eq!(c.live().base, c.project.base);
+}
