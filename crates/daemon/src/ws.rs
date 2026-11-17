@@ -45,6 +45,7 @@ struct Sub {
     task: u64,
     editor_step: String,
     cpu_span_ms: u64,
+    disk_span_ms: u64,
 }
 
 impl Default for Sub {
@@ -55,6 +56,7 @@ impl Default for Sub {
             task: 0,
             editor_step: String::new(),
             cpu_span_ms: 0,
+            disk_span_ms: 0,
         }
     }
 }
@@ -156,6 +158,7 @@ fn compute(d: &Daemon, sub: &Sub) -> (u64, Vec<View>) {
                 sub.task,
                 &sub.editor_step,
                 sub.cpu_span_ms,
+                sub.disk_span_ms,
             )
         })
         .collect();
@@ -293,6 +296,7 @@ async fn session(d: Arc<Daemon>, mut sock: WebSocket, peer: Option<crate::lan::P
                     task: sub.task,
                     editor_step: sub.editor_step.clone(),
                     cpu_span_ms: sub.cpu_span_ms,
+                    disk_span_ms: sub.disk_span_ms,
                 },
             );
             // Never an empty snapshot: wait for room, and failing that close, so
@@ -436,6 +440,7 @@ async fn session(d: Arc<Daemon>, mut sock: WebSocket, peer: Option<crate::lan::P
                             task: s.task,
                             editor_step: s.editor_step,
                             cpu_span_ms: s.cpu_span_ms,
+                            disk_span_ms: s.disk_span_ms,
                         });
                         gen += 1;
                         // What the client did not have (or what follows the task it
@@ -445,6 +450,7 @@ async fn session(d: Arc<Daemon>, mut sock: WebSocket, peer: Option<crate::lan::P
                                 || (*k == ViewKind::TaskDetail && old.task != sub.task)
                                 || (*k == ViewKind::Editor && old.editor_step != sub.editor_step)
                                 || (*k == ViewKind::CpuHistory && old.cpu_span_ms != sub.cpu_span_ms)
+                                || (*k == ViewKind::DiskHistory && old.disk_span_ms != sub.disk_span_ms)
                         }).collect();
                         if !first.is_empty() {
                             spawn_first(&d, &out_tx, Sub { views: first, ..sub.clone() }, gen);
@@ -673,6 +679,7 @@ async fn push_views(d: &Arc<Daemon>, sock: &mut WebSocket, sub: &Sub, e: Encodin
             task: sub.task,
             editor_step: sub.editor_step.clone(),
             cpu_span_ms: sub.cpu_span_ms,
+            disk_span_ms: sub.disk_span_ms,
         },
     );
     let Ok((seq, views)) = d.view_pool.run(move || compute(&d2, &s2)).await else {

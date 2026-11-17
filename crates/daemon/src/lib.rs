@@ -29,6 +29,7 @@ pub mod defs;
 pub mod demo;
 pub mod diagnose;
 pub mod disk;
+pub mod diskhistory;
 pub mod editor;
 pub mod exhausted;
 pub mod fdlimit;
