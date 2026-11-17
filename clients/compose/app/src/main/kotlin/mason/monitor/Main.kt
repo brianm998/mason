@@ -26,7 +26,11 @@ fun main(args: Array<String>) = application {
             it.launcher = { argv -> openTerminal(argv) }
         }
     }
-    remember { UiWatchdog({ job -> javax.swing.SwingUtilities.invokeLater(Runnable { job() }) }).also { it.start() }; 0 }
+    remember {
+        UiWatchdog({ job -> javax.swing.SwingUtilities.invokeLater(Runnable { job() }) })
+            .also { it.start(); UiLateness.recent = it::recent }
+        0
+    }
     LaunchedEffect(Unit) {
         while (true) {
             kotlinx.coroutines.delay(1000)
