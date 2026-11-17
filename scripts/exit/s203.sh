@@ -12,5 +12,5 @@ grep -q "zeroCountIsMutedAndNonZeroIsNot" clients/compose/app/src/test/kotlin/ma
 grep -q "topBarUsageLines" clients/swift/Sources/MonitorUI/TopBar.swift
 grep -q "topBarUsageLines" clients/compose/app/src/main/kotlin/mason/monitor/ui/TopBar.kt
 grep -q "Grid(" clients/swift/Sources/MonitorUI/TopBar.swift
-cargo test -p mason-daemon --test usage
+cargo test -p mason-daemon --test it usage::
 echo "s203 ok"

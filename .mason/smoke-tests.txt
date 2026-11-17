@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Fast end-to-end test targets that every task's test step runs besides the tests its change
+# affects (decision 0539). One `-p PACKAGE --test TARGET` group per line (`--lib`, `--bins`
+# and `--doc` also work); `#` starts a comment. Edit freely: the whole suite still runs once
+# per landing batch.
+-p mason-store --test store
+-p mason-definition --test validate
+-p mason-landing --test batch
+-p mason-testing --test parsers
+-p mason --test init
+-p mason-daemon --test landing_floor

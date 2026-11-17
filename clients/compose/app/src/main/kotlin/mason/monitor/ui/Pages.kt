@@ -660,11 +660,14 @@ fun UsageAccount(p: mason.v1.ProviderStatus) {
 }
 
 @Composable
-fun HealthPage(model: MonitorModel) {
+fun HealthPage(model: MonitorModel, lateness: () -> LatenessWindow = { UiLateness.recent() }) {
     val theme = LocalTheme.current
     Scrolling(model) {
         Text("Health", style = theme.title())
         Text(if (model.connected) "Connected to masond. Event log at #${model.lastSeq}." else "Not connected.", style = theme.body())
+        // Read again whenever the page redraws (the health poll and the event log do that).
+        val window = remember(model.health, model.lastSeq) { lateness() }
+        Text(window.line(windowMinutes = 10), style = theme.body(), modifier = Modifier.testTag("health:ui-thread"))
         model.health?.let { h ->
             Section("Resources") { h.resources.forEach { Text("${it.name} (${it.kind}): ${it.used} of ${it.limit} in use", style = theme.body()) } }
             Text(h.cpuLine, style = theme.body())
@@ -894,8 +897,11 @@ private fun StageRows(model: MonitorModel, name: String) {
     val theme = LocalTheme.current
     val rows = model.sectionRows(name)
     Section(SectionPages.title(name), name) {
-        if (name == "testing" && model.canAct && model.skippableRows(rows).isNotEmpty()) {
+        if (name == "testing" && rows.isNotEmpty()) {
             Pill("Skip testing for all", modifier = Modifier.testTag("testing:skip-all")) { model.skipAllTests(rows) }
+            (model.skipDisabledReason ?: model.skipNotice ?: model.lastResult)?.let {
+                Text(it, style = theme.body(color = theme.attention), modifier = Modifier.testTag("testing:skip-notice"))
+            }
         }
         if (rows.isEmpty()) Text("Nothing here.", style = theme.body(color = theme.muted))
         rows.forEach { r ->

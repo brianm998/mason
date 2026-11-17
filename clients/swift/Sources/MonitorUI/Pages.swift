@@ -783,12 +783,24 @@ struct UsageAccount: View {
 struct HealthPage: View {
     @Environment(\.theme) var theme
     @ObservedObject var model: MonitorModel
+    /// Where the UI-thread numbers come from; tests inject fixed ones.
+    var lateness: @MainActor () -> LatenessWindow = { MainThreadWatchdog.shared.recent() }
+
+    init(model: MonitorModel, lateness: (@MainActor () -> LatenessWindow)? = nil) {
+        self.model = model
+        if let lateness { self.lateness = lateness }
+    }
+
+    static func uiThreadLine(_ w: LatenessWindow) -> String { w.line(windowMinutes: 10) }
 
     var body: some View {
         RestoringScroll(model: model) {
             VStack(alignment: .leading, spacing: theme.spacingLarge) {
                 Text("Health").font(theme.title())
                 HealthConnectionLine(model: model)
+                TimelineView(.periodic(from: .now, by: 2)) { _ in
+                    Text(Self.uiThreadLine(lateness())).font(theme.body())
+                }
                 if let h = model.health {
                     section("Resources", theme: theme) {
                         ForEach(h.resources, id: \.name) { r in
@@ -975,9 +987,15 @@ struct StageRows: View {
     var body: some View {
         let rows = model.sectionRows(name)
         section(MonitorModel.sectionTitle(name), theme: theme, state: name) {
-            if name == "testing", model.canAct, model.skippableRows(rows).count > 0 {
+            if name == "testing", !rows.isEmpty {
                 Button("Skip testing for all") { model.skipAllTests(rows) }
                     .buttonStyle(.bordered).accessibilityIdentifier("testing:skip-all")
+                    .disabled(model.skipDisabledReason != nil)
+                    .help(model.skipDisabledReason ?? "Skip testing for every task here that allows it")
+                if let n = model.skipNotice ?? model.lastResult {
+                    Text(n).font(theme.body()).foregroundStyle(theme.attention)
+                        .accessibilityIdentifier("testing:skip-notice")
+                }
             }
             if rows.isEmpty { Text("Nothing here.").font(theme.body()).foregroundStyle(theme.muted) }
             ForEach(rows, id: \.id) { r in row(r) }

@@ -1379,6 +1379,53 @@ impl Store {
         })
     }
 
+    /// Record one full `run_check` of a develop step (s511): `tests` are the failing tests as
+    /// `suite<TAB>test` entries.
+    pub fn put_check_run(
+        &self,
+        task: u64,
+        run: u64,
+        at_ms: u64,
+        green: bool,
+        tests: &[String],
+    ) -> Result<(), StoreError> {
+        let t = tests.join("\n");
+        self.write(move |c| {
+            c.execute(
+                "INSERT INTO check_runs(task, run, at_ms, green, tests) VALUES (?1,?2,?3,?4,?5)",
+                params![task as i64, run as i64, at_ms as i64, green as i64, t],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// The recorded full runs of the step run that recorded last for `task`, oldest first:
+    /// `(at_ms, green, failing tests)`.
+    pub fn check_runs(&self, task: u64) -> Result<Vec<(u64, bool, Vec<String>)>, StoreError> {
+        self.read(move |c| {
+            let last: Option<i64> = c
+                .query_row(
+                    "SELECT run FROM check_runs WHERE task = ?1 ORDER BY id DESC LIMIT 1",
+                    params![task as i64],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let Some(last) = last else { return Ok(vec![]) };
+            let mut st = c.prepare(
+                "SELECT at_ms, green, tests FROM check_runs WHERE task = ?1 AND run = ?2 ORDER BY id",
+            )?;
+            let rows = st.query_map(params![task as i64, last], |r| {
+                let t: String = r.get(2)?;
+                Ok((
+                    r.get::<_, i64>(0)? as u64,
+                    r.get::<_, i64>(1)? != 0,
+                    t.lines().map(str::to_string).collect(),
+                ))
+            })?;
+            rows.collect()
+        })
+    }
+
     /// `(green, source, failing tests)` of the last recorded run of this command on this tree.
     pub fn command_run(
         &self,

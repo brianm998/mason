@@ -5,7 +5,7 @@
 # prompts are checked. Also the definition parser and `definition check` cases.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-cargo test -q -p mason-daemon --test prompt_packs
+cargo test -q -p mason-daemon --test it prompt_packs::
 cargo test -q -p mason-daemon --lib pack_candidates
 cargo test -q -p mason-definition prompt
 cargo test -q -p mason-pipeline missing_prompt

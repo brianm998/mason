@@ -290,7 +290,14 @@ impl<'a> Ctx<'a> {
     /// sections, which are marked as wanting you.) A held task is in a step state, so
     /// without this it counted in the header but never showed in the section or the tile.
     fn needs_you(&self, t: &Task) -> bool {
-        t.state == State::NeedsAttention || (t.state != State::Proposed && self.needs_approval(t))
+        t.state == State::NeedsAttention
+            || (t.state != State::Proposed && self.needs_approval(t))
+            || self.circling(t)
+    }
+
+    /// Is the develop step going round in circles on the same failing tests (s511)?
+    fn circling(&self, t: &Task) -> bool {
+        t.state == State::Developing && crate::circling::of_task(self.d, t.id).is_some()
     }
 
     /// Does the task belong in sidebar section `s`? Each task is in exactly one.
@@ -578,6 +585,7 @@ impl<'a> Ctx<'a> {
                     t.state,
                     State::NeedsAttention | State::Failed | State::Proposed
                 ) || self.needs_approval(t)
+                    || self.circling(t)
             })
             .count() as u32;
         let mut banners = vec![];

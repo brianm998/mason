@@ -310,6 +310,6 @@ trap - EXIT; cleanup
 if [ -z "${MASON_TESTS_ALREADY_RAN:-}" ]; then
   cargo test -p mason-testing
   cargo test -p mason-definition --test testing_tables
-  cargo test -p mason-daemon --test testing
+  cargo test -p mason-daemon --test it testing::
 fi
 echo "s09 OK"

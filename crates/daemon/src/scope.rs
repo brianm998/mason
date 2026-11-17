@@ -111,6 +111,110 @@ pub fn select(meta: &Value, root: &Path, paths: &[String]) -> Option<Vec<String>
     Some(touched.into_iter().collect())
 }
 
+/// What a narrowed run covers: whole packages (`{packages}`), or test targets within them
+/// (`{tests_for_change}`, decision 0539), each entry one `cargo test` argument group.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Narrow {
+    Packages(Vec<String>),
+    Targets(Vec<String>),
+}
+
+impl Narrow {
+    pub fn describe(&self) -> String {
+        match self {
+            Narrow::Packages(p) => format!("{} packages ({})", p.len(), p.join(", ")),
+            Narrow::Targets(t) => format!("{} test groups ({})", t.len(), t.join("; ")),
+        }
+    }
+}
+
+/// The key of a command template that takes the affected test targets.
+pub const TESTS_FOR_CHANGE: &str = "{tests_for_change}";
+
+/// Whether a `dev_command` asks for test-level selection.
+pub fn wants_tests(template: &str) -> bool {
+    template.contains(TESTS_FOR_CHANGE)
+}
+
+/// `template` with its `{packages}` or `{tests_for_change}` filled in. Several target groups
+/// become several commands, one after the other: all run, and the whole passes only if each
+/// does (`build`: they are chained, as a build that fails stops the rest).
+pub fn expand(template: &str, n: &Narrow, build: bool) -> String {
+    let both = |s: &str, v: &str| s.replace("{packages}", v).replace(TESTS_FOR_CHANGE, v);
+    // The doc-test flag with `--no-run` is an error ("can't skip running doc tests"): a build
+    // does not compile doc tests, they compile when they run.
+    let group = |g: &str| {
+        if build {
+            g.replace(" --doc", "")
+        } else {
+            g.to_string()
+        }
+    };
+    match n {
+        Narrow::Packages(p) => both(template, &flags(p)),
+        Narrow::Targets(t) if t.len() == 1 => both(template, &group(&t[0])),
+        Narrow::Targets(t) if build => t
+            .iter()
+            .map(|g| format!("( {} )", both(template, &group(g))))
+            .collect::<Vec<_>>()
+            .join(" && "),
+        Narrow::Targets(t) => {
+            let runs: String = t
+                .iter()
+                .map(|g| format!("( {} ) || mason_rc=1; ", both(template, g)))
+                .collect();
+            format!("mason_rc=0; {runs}[ $mason_rc -eq 0 ]")
+        }
+    }
+}
+
+/// The narrowing for a change. With `tests`, the affected test targets (plus the smoke set when
+/// `smoke`, from `.mason/smoke-tests.txt`); otherwise the touched packages. `None` runs
+/// everything: no cargo, a path nobody can place, or nothing to run.
+pub fn narrow_for(wt: &Path, paths: &[String], tests: bool, smoke: bool) -> Option<Narrow> {
+    if !tests {
+        return changed_packages(wt, paths).map(Narrow::Packages);
+    }
+    if paths.is_empty() {
+        return None;
+    }
+    let out = std::process::Command::new("cargo")
+        .args([
+            "metadata",
+            "--no-deps",
+            "--format-version",
+            "1",
+            "--offline",
+        ])
+        .current_dir(wt)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    let meta: Value = serde_json::from_slice(&out.stdout).ok()?;
+    let root = std::fs::canonicalize(wt).ok()?;
+    let pkgs = crate::affected::packages(&meta, &root)?;
+    let listed = mason_landing::git::run(wt, &["ls-files"]).ok()?;
+    let files: Vec<String> = listed.lines().map(String::from).collect();
+    let read = |p: &str| std::fs::read_to_string(wt.join(p)).ok();
+    let crate::affected::Pick::Some(mut groups) =
+        crate::affected::select(&pkgs, paths, &files, &read)
+    else {
+        return None;
+    };
+    let mut raw = vec![];
+    if smoke {
+        if let Ok(text) = std::fs::read_to_string(wt.join(SMOKE_FILE)) {
+            raw = crate::affected::add_smoke(&mut groups, &text);
+        }
+    }
+    let mut runs = crate::affected::render(&groups);
+    runs.extend(raw);
+    (!runs.is_empty()).then_some(Narrow::Targets(runs))
+}
+
+/// The owner-edited list of fast end-to-end targets every task's test step also runs.
+pub const SMOKE_FILE: &str = ".mason/smoke-tests.txt";
+
 /// `-p a -p b`, for `{packages}`.
 pub fn flags(names: &[String]) -> String {
     names
@@ -198,5 +302,28 @@ mod tests {
     #[test]
     fn flags_are_one_p_each() {
         assert_eq!(flags(&["a".into(), "b".into()]), "-p a -p b");
+    }
+
+    #[test]
+    fn target_groups_run_one_after_the_other_and_all_must_pass() {
+        let n = Narrow::Targets(vec!["-p a --lib --doc".into(), "-p b --test t".into()]);
+        let run = expand("X {tests_for_change}", &n, false);
+        assert_eq!(
+            run,
+            "mason_rc=0; ( X -p a --lib --doc ) || mason_rc=1; ( X -p b --test t ) || mason_rc=1; [ $mason_rc -eq 0 ]"
+        );
+        let build = expand("X {tests_for_change} --no-run", &n, true);
+        assert_eq!(
+            build,
+            "( X -p a --lib --no-run ) && ( X -p b --test t --no-run )"
+        );
+        let one = Narrow::Targets(vec!["-p a --test t".into()]);
+        assert_eq!(
+            expand("x {tests_for_change}", &one, false),
+            "x -p a --test t"
+        );
+        let pk = Narrow::Packages(vec!["a".into(), "b".into()]);
+        assert_eq!(expand("x {tests_for_change}", &pk, false), "x -p a -p b");
+        assert_eq!(expand("x {packages}", &pk, true), "x -p a -p b");
     }
 }
