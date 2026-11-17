@@ -329,6 +329,11 @@ public final class MonitorModel: ObservableObject {
     /// Where the sidebar should scroll to (a tile was clicked).
     @Published public var scrollTarget: String?
     @Published public var lastResult: String?
+    /// Commands sent and not yet settled, by id (task #522).
+    @Published public internal(set) var pending: [String: PendingCommand] = [:]
+    /// The daemon's refusal of the last command about a task, by task id (0: not about a task).
+    @Published public internal(set) var actionErrors: [UInt64: String] = [:]
+    var nextActionId = 0
     /// A long command opened from a Compilation row; nil: the dialog is closed.
     @Published public var commandDialog: CommandDialog?
     /// Open session found the step running: the task to ask about. Answer with `answerSessionPrompt`.
@@ -639,6 +644,9 @@ public final class MonitorModel: ObservableObject {
         }
         var c = c
         if c.actor.isEmpty { c.actor = identity }
+        // Recorded before the write, so the pressed control redraws at once; a second click
+        // while one is in flight sends nothing.
+        guard beginPending(&c) else { return }
         sender?(c)
     }
 
@@ -1058,6 +1066,7 @@ public final class MonitorModel: ObservableObject {
             connected = true
             reconnecting = false
             announcer.connectionRestored()
+            pending = [:]
             if w.resume == .snapshot { lastSeq = 0 }
             daemonVersion = w.version
             localDaemon = w.role.isEmpty
@@ -1078,6 +1087,7 @@ public final class MonitorModel: ObservableObject {
             apply(u.view)
         case .result(let r)?:
             lastResult = r.ok ? nil : r.error
+            settle(result: r)
             handle(result: r)
             onResult?(r)
         default:
@@ -1118,6 +1128,7 @@ public final class MonitorModel: ObservableObject {
         case .sidebar(let x)?:
             sidebar = x
             noteAttention(x)
+            settleAfterView()
         case .home(let x)?:
             home = x
             cpu.update(x)
@@ -1129,6 +1140,7 @@ public final class MonitorModel: ObservableObject {
             liveLog = x.logTail.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
             if liveLog.last == "" { liveLog.removeLast() }
             liveLog = Array(liveLog.suffix(Self.logKeep))
+            settleAfterView()
         case .landing(let x)?: landing = x
         case .usage(let x)?: usage = x
         case .editor(let x)?: editor = x
@@ -1193,6 +1205,7 @@ public final class MonitorModel: ObservableObject {
     public func disconnected(now: Date = Date()) {
         connected = false
         reconnecting = true
+        markPendingNotSent()
         announcer.connectionLost(at: now)
     }
 }

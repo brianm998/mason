@@ -1640,8 +1640,13 @@ final class MonitorCoreTests: XCTestCase {
 
     func testReleaseAddBlockerAndReviveSendTheOwnersCommands() {
         let (m, sent) = ownerModel()
-        m.release(11, blocker: 8)
-        m.addBlocker(11, after: 5)
+        // masond answers each before the next click (a task with a command pending takes no second one).
+        func answered() {
+            var r = Mason_V1_CommandResult(); r.id = sent().last!.id; r.ok = false; r.error = "no"
+            var sm = Mason_V1_ServerMessage(); sm.result = r; m.apply(sm)
+        }
+        m.release(11, blocker: 8); answered()
+        m.addBlocker(11, after: 5); answered()
         m.revive(8)
         guard case .unblock(let u)? = sent()[0].body else { return XCTFail() }
         XCTAssertEqual([u.task, u.from[0]], [11, 8])

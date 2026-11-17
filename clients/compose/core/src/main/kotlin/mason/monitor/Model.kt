@@ -242,6 +242,13 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     /** Where the sidebar should scroll to (a tile was clicked). */
     var scrollTarget by mutableStateOf<String?>(null)
     var lastResult by mutableStateOf<String?>(null)
+    /** Commands sent and not yet settled, by id (task #522). */
+    var pending by mutableStateOf<Map<String, PendingCommand>>(emptyMap())
+        internal set
+    /** The daemon's refusal of the last command about a task, by task id (0: not about a task). */
+    var actionErrors by mutableStateOf<Map<Long, String>>(emptyMap())
+        internal set
+    internal var nextActionId = 0
     /** A long command opened from a Compilation row; null: the dialog is closed. */
     var commandDialog by mutableStateOf<CommandDialog?>(null)
         private set
@@ -506,7 +513,11 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
             lastResult = "Read-only: $it"
             return
         }
-        sender?.invoke(if (c.actor.isEmpty()) c.copy(actor = identity) else c)
+        val withActor = if (c.actor.isEmpty()) c.copy(actor = identity) else c
+        // Recorded before the write, so the pressed control redraws at once; a second click
+        // while one is in flight sends nothing.
+        val out = beginPending(withActor) ?: return
+        sender?.invoke(out)
     }
 
     fun cancel(task: Long) = send(Command(cancel = TaskRef(task = task)))
@@ -839,6 +850,7 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
             connected = true
             reconnecting = false
             announcer.connectionRestored()
+            pending = emptyMap()
             if (w.resume == ResumeKind.SNAPSHOT) lastSeq = 0
             daemonVersion = w.version
             localDaemon = w.role.isEmpty()
@@ -861,6 +873,7 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
         }
         m.result?.let { r ->
             lastResult = if (r.ok) null else r.error
+            settle(r)
             if (r.id.startsWith("session:")) r.id.removePrefix("session:").toLongOrNull()?.let { task ->
                 when (val d = OpenSession.decide(r.ok, r.json, r.error)) {
                     OpenSession.Decision.Confirm -> sessionPrompt = task
@@ -937,7 +950,7 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
             // An open dialog follows the session: a reply arrives as a new header.
             if (ownerSessionDialog != null) refreshOwnerSession()
         }
-        v.sidebar?.let { sidebar = it; noteAttention(it) }
+        v.sidebar?.let { sidebar = it; noteAttention(it); settleAfterView() }
         v.home?.let {
             home = it
             if (it.cpu != cpu) {
@@ -949,6 +962,7 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
             // A different task's page starts its log over; the same task's view carries the tail again.
             taskDetail = d
             liveLog = d.log_tail.split("\n").dropLastWhile { it.isEmpty() }.takeLast(LOG_KEEP)
+            settleAfterView()
         }
         v.cpu_history?.let { cpuHistory = it }
         v.landing?.let { landing = it }
@@ -959,6 +973,7 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     fun disconnected(nowMs: Long = System.currentTimeMillis()) {
         connected = false
         reconnecting = true
+        markPendingNotSent()
         announcer.connectionLost(nowMs)
     }
 
