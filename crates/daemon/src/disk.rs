@@ -46,19 +46,21 @@ pub fn volume_name(mount: &Path) -> String {
         return n.to_string_lossy().into_owned();
     }
     #[cfg(unix)]
-    if mount == Path::new("/") {
-        if let Ok(rd) = std::fs::read_dir("/Volumes") {
-            let mut names: Vec<String> = rd
-                .flatten()
-                .filter(|e| std::fs::canonicalize(e.path()).is_ok_and(|c| c == Path::new("/")))
-                .map(|e| e.file_name().to_string_lossy().into_owned())
-                .collect();
-            names.sort();
-            if let Some(n) = names.into_iter().next() {
-                return n;
+    {
+        if mount == Path::new("/") {
+            if let Ok(rd) = std::fs::read_dir("/Volumes") {
+                let mut names: Vec<String> = rd
+                    .flatten()
+                    .filter(|e| std::fs::canonicalize(e.path()).is_ok_and(|c| c == Path::new("/")))
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .collect();
+                names.sort();
+                if let Some(n) = names.into_iter().next() {
+                    return n;
+                }
             }
+            return "/".into();
         }
-        return "/".into();
     }
     mount
         .to_string_lossy()
@@ -269,7 +271,7 @@ pub fn sample_volumes(src: &dyn DiskSource, paths: &[(PathBuf, Role)]) -> Vec<Vo
             roles: vec![],
         });
         if !e.roles.contains(role) {
-            e.roles.push(role);
+            e.roles.push(*role);
         }
     }
     by.into_values().collect()
