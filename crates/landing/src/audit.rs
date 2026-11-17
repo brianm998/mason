@@ -464,9 +464,7 @@ pub fn removes_block(pairs: &[Replaced]) -> String {
     let entries: Vec<serde_json::Value> = pairs
         .iter()
         .take(MAX_LISTED)
-        .map(|p| {
-            serde_json::json!({"file": p.file, "line": p.line, "reason": "<fill in>"})
-        })
+        .map(|p| serde_json::json!({"file": p.file, "line": p.line, "reason": "<fill in>"}))
         .collect();
     serde_json::to_string_pretty(&entries).unwrap_or_default()
 }
@@ -503,7 +501,8 @@ mod tests {
 
     #[test]
     fn a_replaced_dropped_line_yields_a_removes_block_that_parses() {
-        let diff = "diff --git a/f.rs b/f.rs\n--- a/f.rs\n+++ b/f.rs\n@@ -3 +3 @@\n-old line\n+new line\n";
+        let diff =
+            "diff --git a/f.rs b/f.rs\n--- a/f.rs\n+++ b/f.rs\n@@ -3 +3 @@\n-old line\n+new line\n";
         let d = vec![Dropped {
             file: "f.rs".into(),
             line: "old line".into(),

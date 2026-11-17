@@ -618,9 +618,12 @@ fn check_dropped(c: &Ctx) -> Option<Verdict> {
     let repo = &c.project.path;
     let mut pairs = vec![];
     for d in dropped.iter().take(audit::MAX_LISTED) {
-        if let Ok(one) =
-            audit::replacements(repo, &c.project.base_ref(), &c.branch, std::slice::from_ref(d))
-        {
+        if let Ok(one) = audit::replacements(
+            repo,
+            &c.project.base_ref(),
+            &c.branch,
+            std::slice::from_ref(d),
+        ) {
             pairs.extend(one);
         }
     }
