@@ -59,7 +59,10 @@ distributions {
 
 tasks.test {
     useJUnitPlatform()
-    // The tests load images through Skia, whose native library skiko loads; allow that
-    // the way the desktop run does (decision 0487).
+    // Skiko extracts and loads its native library in the test JVM, as the desktop run does.
     jvmArgs("--enable-native-access=ALL-UNNAMED")
+    // Extract it somewhere this build owns, so a shared or read-only /tmp cannot break the load.
+    val skikoTmp = layout.buildDirectory.dir("skiko-tmp").get().asFile
+    doFirst { skikoTmp.mkdirs() }
+    systemProperty("java.io.tmpdir", skikoTmp.absolutePath)
 }
