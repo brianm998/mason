@@ -349,6 +349,9 @@ public final class MonitorModel: ObservableObject {
     /// Where the sidebar should scroll to (a tile was clicked).
     @Published public var scrollTarget: String?
     @Published public var lastResult: String?
+    /// What the last Skip testing click did ("Skipped testing for 4 tasks", "Nothing to skip: ..."),
+    /// kept apart from `lastResult` so the daemon's next ok result does not wipe it.
+    @Published public var skipNotice: String?
     /// Commands sent and not yet settled, by id (task #522).
     @Published public internal(set) var pending: [String: PendingCommand] = [:]
     /// The daemon's refusal of the last command about a task, by task id (0: not about a task).

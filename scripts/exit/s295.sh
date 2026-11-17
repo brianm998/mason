@@ -18,5 +18,5 @@ run() {
 run "the mapping and the keys" -p mason-core --lib -- introspection_defaults impact_cost_and_keys
 run "analyst drafts and estimates" -p mason-core --lib -- a_draft_gives_severity detector_findings_are
 run "the table is read and bad keys are refused" -p mason-daemon --lib -- proposals::
-run "queued and proposed, and the renamed analyst" -p mason-daemon --test introspection_policy
+run "queued and proposed, and the renamed analyst" -p mason-daemon --test it introspection_policy::
 echo "s295 OK"

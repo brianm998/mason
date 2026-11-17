@@ -19,5 +19,5 @@ run "1. scope validation and hand-over" \
 run "2. packages a change touches" -p mason-daemon --lib scope::
 run "3. dev_command and dev_build parse and validate" -p mason-definition --test testing_tables
 run "4. daemon: scoped run_check, whole test step" \
-    -p mason-daemon --test suite_builds a_scoped_run_check_runs_the_narrowed_command_and_the_test_step_still_runs_it_all
+    -p mason-daemon --test it a_scoped_run_check_runs_the_narrowed_command_and_the_test_step_still_runs_it_all
 echo "s210 OK"

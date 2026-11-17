@@ -212,10 +212,12 @@ fn validate_testing(def: &Definition, p: &mut Vec<Problem>) {
             }
         }
         for (key, v) in [("dev_command", &s.dev_command), ("dev_build", &s.dev_build)] {
-            if v.as_ref().is_some_and(|c| !c.contains("{packages}")) {
+            if v.as_ref()
+                .is_some_and(|c| !c.contains("{packages}") && !c.contains("{tests_for_change}"))
+            {
                 p.push(Problem::new(
                     format!("{base}.{key}"),
-                    "must contain `{packages}`, where the `-p` list of the touched packages goes",
+                    "must contain `{packages}`, where the `-p` list of the touched packages goes (or `{tests_for_change}`, where the affected test targets go)",
                 ));
             }
         }

@@ -2033,29 +2033,29 @@ fn narrow_for_step(c: &Ctx, suite: &Suite) -> Option<(Suite, String)> {
 fn narrow_packages_for_step(c: &Ctx, suite: &Suite) -> Option<(Suite, String)> {
     let dc = suite.dev_command.as_ref()?;
     let paths = worktree_paths(&c.wt, &c.project.base_ref())?;
-    let pk = crate::scope::changed_packages(&c.wt, &paths).filter(|p| !p.is_empty());
-    let Some(pk) = pk else {
+    // A `{tests_for_change}` command narrows to test targets and adds the smoke set (decision
+    // 0539); a `{packages}` one to whole packages.
+    let n = crate::scope::narrow_for(&c.wt, &paths, crate::scope::wants_tests(dc), true);
+    let Some(n) = n else {
         // A path outside every package (a root file) or no cargo means the suite runs whole.
         eprintln!(
-            "suite {}: package narrowing found no package list for {} changed paths; running whole",
+            "suite {}: narrowing found no list for {} changed paths; running whole",
             suite.name,
             paths.len()
         );
         return None;
     };
-    let flags = crate::scope::flags(&pk);
     let mut s = suite.clone();
-    s.command = dc.replace("{packages}", &flags);
+    s.command = crate::scope::expand(dc, &n, false);
     if let Some(db) = &suite.dev_build {
-        s.build = Some(db.replace("{packages}", &flags));
+        s.build = Some(crate::scope::expand(db, &n, true));
     }
     s.min_tests = 1;
     s.narrowed = true;
     let note = format!(
-        "{}: narrowed to {} packages ({}); the landing batch runs it whole",
+        "{}: narrowed to {}; the landing batch runs it whole",
         suite.name,
-        pk.len(),
-        pk.join(", ")
+        n.describe()
     );
     Some((s, note))
 }
@@ -2888,6 +2888,17 @@ pub fn skip(
     let def = d
         .pinned_def(&t.def)
         .unwrap_or_else(|| d.current_def(t.project));
+    // A client that has no step name for the row (a task waiting in `base-red` shows none)
+    // leaves it empty: that means the task's test step.
+    let test_scope;
+    let (scope, name) = if kind == "step" && name.is_empty() {
+        let test = test_step_name(&def).ok_or("this project has no test step")?;
+        test_scope = format!("step:{test}");
+        (test_scope.as_str(), test)
+    } else {
+        (scope, name.to_string())
+    };
+    let name = name.as_str();
     match kind {
         "suite" if def.testing.suite(name).is_none() => {
             return Err(format!("there is no suite `{name}`"))

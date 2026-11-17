@@ -15,7 +15,7 @@ run() {
     echo "$out" | grep -E '^test result' | tail -1
 }
 
-run "a real daemon says the disk has stopped it, and stops saying so with room" -p mason-daemon --test stuck
+run "a real daemon says the disk has stopped it, and stops saying so with room" -p mason-daemon --test it stuck::
 run "every held request names the disk" -p mason-scheduler every_request
 run "disk is a routed condition that sounds and speaks" -p mason-core a_full_disk
 echo "s100 OK"

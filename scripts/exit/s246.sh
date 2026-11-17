@@ -16,5 +16,5 @@ run() {
 
 run "the normalising and comparing of first errors" -p mason-testing --lib basered
 run "the daemon: base-red waits, filing, clearing, and a red the base lacks" \
-    -p mason-daemon --test base_red
+    -p mason-daemon --test it base_red::
 echo "s246 OK"

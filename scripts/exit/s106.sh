@@ -5,6 +5,6 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
-cargo test -q -p mason-daemon --test bug_alerts 2>&1 | tail -3
-cargo test -q -p mason-daemon --test panics a_panic_in_a_background_loop 2>&1 | tail -5
+cargo test -q -p mason-daemon --test it bug_alerts:: 2>&1 | tail -3
+cargo test -q -p mason-daemon --test it a_panic_in_a_background_loop 2>&1 | tail -5
 echo "s106 OK"

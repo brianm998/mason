@@ -13,6 +13,6 @@ cargo test -q -p mason-daemon --lib cpu::tests::an_old_reading_is_unknown
 echo "== a stalled fetch does not block another task's cleanup"
 cargo test -q -p mason-daemon --test fetch_deadline
 echo "== real masond: port opens at once, the fetch stops at its deadline, cancel is not held up"
-cargo test -q -p mason-daemon --test fetch_stall
+cargo test -q -p mason-daemon --test it fetch_stall::
 
 echo "s81 OK"
