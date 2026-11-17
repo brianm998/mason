@@ -127,13 +127,27 @@ impl Client {
         task: u64,
         editor_step: &str,
     ) -> Result<(), String> {
+        self.subscribe_spans(views, project, task, editor_step, 0, 0)
+    }
+
+    /// Subscribe with the spans of the CPU and disk histories (0: an hour).
+    pub fn subscribe_spans(
+        &mut self,
+        views: &[ViewKind],
+        project: &str,
+        task: u64,
+        editor_step: &str,
+        cpu_span_ms: u64,
+        disk_span_ms: u64,
+    ) -> Result<(), String> {
         self.send(&ClientMessage {
             body: Some(client_message::Body::Subscribe(Subscribe {
                 views: views.iter().map(|v| *v as i32).collect(),
                 project: project.into(),
                 task,
                 editor_step: editor_step.into(),
-                cpu_span_ms: 0,
+                cpu_span_ms,
+                disk_span_ms,
             })),
         })
     }
