@@ -105,6 +105,6 @@ fn a_fifth_red_of_the_class_joins_and_another_class_files_its_own() {
     assert_eq!(fix_tasks(&d).len(), 2);
     assert_ne!(out[0].1, Some(Fix::Task(first)));
     // The same class on another commit is its own task.
-    red(&d, "bbbbbbbbbbbbbb", &["MascotTest > a"]);
+    red(&d, "bbbbbbbbbbbbbb", &["MascotTest > z"]);
     assert_eq!(fix_tasks(&d).len(), 3);
 }
