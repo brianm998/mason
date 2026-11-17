@@ -1836,8 +1836,9 @@ impl TestChecks {
             paths.clone(),
             mason_testing::When::Development,
         );
-        // Packages the diff touches, found once and only if a suite asks for them.
-        let mut touched: Option<Option<Vec<String>>> = None;
+        // What the diff touches (whole packages, or test targets for `{tests_for_change}`),
+        // found once for each kind and only if a suite asks for it.
+        let mut touched: BTreeMap<bool, Option<crate::scope::Narrow>> = BTreeMap::new();
         let mut narrowed: Vec<String> = vec![];
         // After a red full run, an unscoped check re-runs the failures and the changed crates.
         let red = self
@@ -1887,15 +1888,16 @@ impl TestChecks {
             // Only this develop-phase check narrows. The test step runs `command` whole.
             if let Some(names) = &red {
                 if let (Some(t), Some(dc)) = (suite.rerun.clone(), suite.dev_command.clone()) {
+                    let tests_mode = crate::scope::wants_tests(&dc);
                     let pk = touched
-                        .get_or_insert_with(|| {
-                            paths
-                                .as_deref()
-                                .and_then(|p| crate::scope::changed_packages(&self.wt, p))
+                        .entry(tests_mode)
+                        .or_insert_with(|| {
+                            paths.as_deref().and_then(|p| {
+                                crate::scope::narrow_for(&self.wt, p, tests_mode, false)
+                            })
                         })
                         .clone();
                     if let Some(pk) = pk {
-                        let flags = crate::scope::flags(&pk);
                         let tests = names
                             .iter()
                             .map(|n| shell_word(n))
@@ -1903,27 +1905,49 @@ impl TestChecks {
                             .join(" ");
                         suite.command = both_commands(
                             &t.replace("{tests}", &tests),
-                            &dc.replace("{packages}", &flags),
+                            &crate::scope::expand(&dc, &pk, false),
                         );
                         if let Some(db) = &suite.dev_build {
-                            suite.build = Some(db.replace("{packages}", &flags));
+                            suite.build = Some(crate::scope::expand(db, &pk, true));
                         }
                         auto_narrowed = true;
                     }
                 }
             } else if !scope.is_empty() {
-                let mut packages = |scope: &CheckScope| -> Option<Vec<String>> {
-                    if !scope.packages.is_empty() {
-                        return Some(scope.packages.clone());
-                    }
-                    touched
-                        .get_or_insert_with(|| {
-                            paths
-                                .as_deref()
-                                .and_then(|p| crate::scope::changed_packages(&self.wt, p))
-                        })
-                        .clone()
-                };
+                let mut narrow =
+                    |scope: &CheckScope, tests_mode: bool| -> Option<crate::scope::Narrow> {
+                        use crate::scope::Narrow;
+                        let changed = if scope.changed || scope.packages.is_empty() {
+                            touched
+                                .entry(tests_mode)
+                                .or_insert_with(|| {
+                                    paths.as_deref().and_then(|p| {
+                                        crate::scope::narrow_for(&self.wt, p, tests_mode, false)
+                                    })
+                                })
+                                .clone()
+                        } else {
+                            None
+                        };
+                        if scope.packages.is_empty() {
+                            return changed;
+                        }
+                        // Packages the agent names run whole, beside what the change affects.
+                        if !tests_mode {
+                            return Some(Narrow::Packages(scope.packages.clone()));
+                        }
+                        let mut groups = match changed {
+                            Some(Narrow::Targets(t)) => t,
+                            _ => vec![],
+                        };
+                        for p in &scope.packages {
+                            let own = format!("-p {p}");
+                            if !groups.contains(&own) {
+                                groups.push(own);
+                            }
+                        }
+                        Some(Narrow::Targets(groups))
+                    };
                 if let (false, Some(t)) = (scope.tests.is_empty(), &suite.rerun) {
                     suite.command = t.replace(
                         "{tests}",
@@ -1942,18 +1966,13 @@ impl TestChecks {
                     scope.changed || !scope.packages.is_empty(),
                     suite.dev_command.clone(),
                 ) {
-                    match packages(scope) {
-                        Some(pk) => {
-                            let flags = crate::scope::flags(&pk);
-                            suite.command = dc.replace("{packages}", &flags);
+                    match narrow(scope, crate::scope::wants_tests(&dc)) {
+                        Some(n) => {
+                            suite.command = crate::scope::expand(&dc, &n, false);
                             if let Some(db) = &suite.dev_build {
-                                suite.build = Some(db.replace("{packages}", &flags));
+                                suite.build = Some(crate::scope::expand(db, &n, true));
                             }
-                            narrowed.push(format!(
-                                "{name}: {} packages ({})",
-                                pk.len(),
-                                pk.join(", ")
-                            ));
+                            narrowed.push(format!("{name}: {}", n.describe()));
                         }
                         None => lines.push(format!(
                             "{name}: no packages found for your changes, so it runs whole"

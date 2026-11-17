@@ -39,6 +39,17 @@ fun MonitorModel.skippableRows(rows: List<TaskRow>): List<TaskRow> = rows.filter
 
 /** Skip testing for every row that allows it: the sidebar's command, once per task. */
 fun MonitorModel.skipAllTests(rows: List<TaskRow>) {
-    if (!canAct) return
-    skippableRows(rows).forEach { skipTest(it.id, it.step) }
+    skipDisabledReason?.let { skipNotice = it; return }
+    val targets = skippableRows(rows)
+    if (targets.isEmpty()) {
+        skipNotice = "Nothing to skip: no task here allows it"
+        return
+    }
+    // An empty step is sent as it is: the daemon reads it as the task's test step.
+    targets.forEach { skipTest(it.id, it.step) }
+    skipNotice = "Skipped testing for ${targets.size} task${if (targets.size == 1) "" else "s"}"
 }
+
+/** Why Skip testing cannot be used, or null when it can; the button is disabled with this beside it. */
+val MonitorModel.skipDisabledReason: String?
+    get() = readOnlyReason?.let { "Read-only: $it" } ?: if (!isOwner) "Only the owner can skip testing" else null

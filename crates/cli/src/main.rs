@@ -164,7 +164,7 @@ mason: command-line client for the MASON pipeline
   mason proposal publish <id> --preview | --confirm   send an improvement upstream, redacted
   mason proposal poll                 look at the upstream pull requests now
   mason improve \"<what to improve>\" [--project P]   ask MASON to change its own code
-  mason update [--channel stable|main|release|branch:X | --sha S] [--rollback] [--check] [--now]
+  mason update [--channel stable|main|release|branch:X | --sha S] [--rollback] [--check] [--now] [--auto]
   mason update status | ack           the runtimes, a rollback alert, an update in progress
   mason config show [--project P]     every step's settings and where each came from
   mason config set <key> <value> --for 2h [--project P] [--owner O]
@@ -307,6 +307,19 @@ fn outside_args(a: &mut Args) -> Option<resources::OutsideArgs> {
         }
         None => None,
     }
+}
+
+/// `HH:MM` local time of a time in ms since the epoch (UTC if `date` cannot say).
+fn local_clock(ms: u64) -> String {
+    let at = ms / 1000;
+    std::process::Command::new("date")
+        .args(["-r", &at.to_string(), "+%H:%M"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| format!("{:02}:{:02} UTC", at / 3600 % 24, at / 60 % 60))
 }
 
 fn finish(a: &Args) {
@@ -1999,6 +2012,15 @@ fn main() {
                             .as_str()
                             .map_or(String::new(), |e| format!(": {e}"))
                     );
+                    if let (Some(since), Some(next)) =
+                        (r["held_since_ms"].as_u64(), r["next_window_ms"].as_u64())
+                    {
+                        println!(
+                            "held      update waiting since {} (next window {})",
+                            local_clock(since),
+                            local_clock(next)
+                        );
+                    }
                     if let Some(w) = r["waiting"].as_str().filter(|w| !w.is_empty()) {
                         println!("waiting   {w}");
                         println!("          `mason update --now` takes over at once and abandons those batches");
@@ -2017,8 +2039,11 @@ fn main() {
                     let check = a.flag("--check");
                     // Take over at once, abandoning any landing batch still running.
                     let now = a.flag("--now");
+                    // Ask as a follower would: the gap between updates applies.
+                    let auto = a.flag("--auto");
                     finish(&a);
-                    let mut body = json!({"rollback": rollback, "check": check, "now": now});
+                    let mut body =
+                        json!({"rollback": rollback, "check": check, "now": now, "auto": auto});
                     if let Some(c) = channel {
                         body["channel"] = json!(c);
                     }
