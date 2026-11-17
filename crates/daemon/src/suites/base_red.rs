@@ -60,7 +60,7 @@ fn profile(
     if let Some(p) = cached() {
         return Some(p);
     }
-    let _one = BASE_RUN.lock().unwrap_or_else(|e| e.into_inner());
+    let _one = BASE_RUN.take(c, &format!("`{}` at {}", suite.name, short(base)));
     if let Some(p) = cached() {
         return Some(p);
     }
