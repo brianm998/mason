@@ -125,6 +125,36 @@ pub fn header(output: &str, known: &[Known]) -> Option<String> {
     ))
 }
 
+/// For `run_check`: failing tests that also failed in develop's latest recorded result for
+/// the suite (`develop` is its `(sha, failing tests)`), and are not already named as known
+/// red. `None` when there are none.
+pub fn red_on_develop_header(
+    output: &str,
+    develop: Option<&(String, Vec<String>)>,
+    known: &[Known],
+) -> Option<String> {
+    let (sha, red) = develop?;
+    let failing = crate::rerun::failing_names(output);
+    let hit: Vec<&String> = failing
+        .iter()
+        .filter(|f| red.contains(f) && !known.iter().any(|k| &k.test == *f))
+        .collect();
+    if hit.is_empty() {
+        return None;
+    }
+    let short = &sha[..sha.len().min(10)];
+    Some(
+        hit.iter()
+            .map(|t| {
+                format!(
+                    "  {t}: red on develop at {short} too: not your change; merge develop when it is fixed."
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+}
+
 fn quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
@@ -185,6 +215,19 @@ mod tests {
         let h = header(out, &known).unwrap();
         assert!(h.contains("a::old") && h.contains("task #7") && h.contains("do not work"));
         assert!(header("test c::x ... FAILED\n", &known).is_none());
+    }
+
+    #[test]
+    fn a_test_red_on_develop_is_named() {
+        let dev = ("abcdef0123456789".to_string(), s(&["a::bad"]));
+        let out = "test a::bad ... FAILED\ntest b::mine ... FAILED\n";
+        let h = red_on_develop_header(out, Some(&dev), &[]).unwrap();
+        assert!(h.contains("a::bad: red on develop at abcdef0123 too: not your change"));
+        assert!(!h.contains("b::mine"));
+        let passed = ("abcdef0123".to_string(), vec![]);
+        assert!(red_on_develop_header(out, Some(&passed), &[]).is_none());
+        assert!(red_on_develop_header(out, None, &[]).is_none());
+        assert!(red_on_develop_header(out, Some(&dev), &[k("a::bad", None)]).is_none());
     }
 
     #[test]
