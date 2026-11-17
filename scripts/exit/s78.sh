@@ -14,9 +14,9 @@ run() {
     echo "$out" | grep -E '^test result' | tail -1
 }
 
-run "a landed task's directory is gone" -p mason-daemon --test taskcache the_directory_is_gone_after_landing
-run "a canceled task's directory remains" -p mason-daemon --test taskcache a_landed_tasks_directory_is_removed_and_a_canceled_tasks_stays
-run "the sweep removes a landed task's leftover" -p mason-daemon --test taskcache the_sweep_removes_a_landed_tasks_leftover
-run "the sweep leaves a live task's directory" -p mason-daemon --test taskcache the_sweep_leaves_a_live_tasks_directory
+run "a landed task's directory is gone" -p mason-daemon --test it the_directory_is_gone_after_landing
+run "a canceled task's directory remains" -p mason-daemon --test it a_landed_tasks_directory_is_removed_and_a_canceled_tasks_stays
+run "the sweep removes a landed task's leftover" -p mason-daemon --test it the_sweep_removes_a_landed_tasks_leftover
+run "the sweep leaves a live task's directory" -p mason-daemon --test it the_sweep_leaves_a_live_tasks_directory
 run "each path rule" -p mason-daemon --lib taskcache
 echo "s78 OK"

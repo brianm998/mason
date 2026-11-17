@@ -4,5 +4,5 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 cargo build -q --workspace --bins
-cargo test -q -p mason-daemon --test testing -- paying_a_debt_writes_in_the_projects_test_command
+cargo test -q -p mason-daemon --test it -- paying_a_debt_writes_in_the_projects_test_command
 echo "s271 OK"

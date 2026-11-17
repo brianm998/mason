@@ -5,4 +5,4 @@
 # needs `restart`; a retry of a failed task without `seen` still works.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
-cargo test -q -p mason-daemon --test retry_idempotent
+cargo test -q -p mason-daemon --test it retry_idempotent::

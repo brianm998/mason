@@ -15,9 +15,9 @@ run10() {
     done
 }
 
-run10 mason-daemon crash killing_the_daemon_at_every_effect_boundary_loses_nothing_and_repeats_nothing
-run10 mason-daemon sweep a_healthy_daemon_files_no_bugs_across_many_passes
+run10 mason-daemon it crash::killing_the_daemon_at_every_effect_boundary_loses_nothing_and_repeats_nothing
+run10 mason-daemon it sweep::a_healthy_daemon_files_no_bugs_across_many_passes
 run10 mason-daemon holds a_real_daemon_keeps_a_hold_across_a_kill_and_the_cli_holds_and_releases
-run10 mason-daemon protocol when_a_step_ends_the_next_task_is_the_next_one_admitted
+run10 mason-daemon it protocol::when_a_step_ends_the_next_task_is_the_next_one_admitted
 
 echo "s170 OK"

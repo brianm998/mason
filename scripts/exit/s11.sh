@@ -37,7 +37,7 @@ start_demo
 stop_demo
 
 echo "== 2b. when a step ends, the next task is admitted in under 100 ms"
-out=$(cargo test -q -p mason-daemon --test protocol -- --nocapture when_a_step_ends 2>&1)
+out=$(cargo test -q -p mason-daemon --test it -- --nocapture when_a_step_ends 2>&1)
 echo "$out" | grep 'admitted:'
 ms=$(echo "$out" | sed -n 's/.*the next task is admitted: \([0-9]*\) ms.*/\1/p' | head -1)
 [ -n "$ms" ] && [ "$ms" -lt 100 ] || { echo "the next task was not admitted within 100 ms" >&2; echo "$out" >&2; exit 1; }
@@ -112,6 +112,6 @@ echo "$out" | grep -q 'row:testing:1: offers .*"delete".* but may offer exactly'
 trap - EXIT; cleanup
 if [ -z "${MASON_TESTS_ALREADY_RAN:-}" ]; then
   cargo test -q -p mason-protocol -p mason-conformance
-  cargo test -q -p mason-daemon --test protocol
+  cargo test -q -p mason-daemon --test it protocol::
 fi
 echo "s11 OK"

@@ -4,5 +4,5 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 grep -q "string project = 10;" schemas/mason.proto
-cargo test -q -p mason-daemon --test protocol views_are_stamped_and_none_for_the_old_project
+cargo test -q -p mason-daemon --test it views_are_stamped_and_none_for_the_old_project
 echo ok
