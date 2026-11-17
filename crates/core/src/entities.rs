@@ -61,6 +61,9 @@ pub fn wait_class(on: &str, recorded: Option<&str>) -> String {
             return format!("llm:{a}");
         }
     }
+    if has("Waiting for the base check") {
+        return "base-run".into();
+    }
     if has("Waiting for the machine") {
         return "exclusive".into();
     }
@@ -180,6 +183,10 @@ mod wait_class_tests {
                 "llm:claude",
             ),
             ("Waiting for the machine: 1st in line", "exclusive"),
+            (
+                "Waiting for the base check: #452 is running `cargo-workspace` at 7f5d57d (22 min)",
+                "base-run",
+            ),
             ("compile waiting: CPU 71% > 50%", "cpu"),
             (
                 "compile waiting: the build disk took 3.0 s to answer (limit 1.0 s)",
