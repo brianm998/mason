@@ -12,9 +12,12 @@ public enum SidebarEntry: Identifiable {
 
     /// The entry's identity: by what it is (a section's state, a task's id), never by position,
     /// so a task that moves to another section keeps its row.
+    /// The id of a section's header entry, for `ScrollViewReader.scrollTo`.
+    public static func headerId(_ state: String) -> String { "h:\(state)" }
+
     public var id: String {
         switch self {
-        case .header(let s): return "h:\(s.state)"
+        case .header(let s): return Self.headerId(s.state)
         case .row(let r): return "r:\(r.id)"
         case .rule: return "rule"
         case .pageLink(let t, _): return "p:\(t)"
