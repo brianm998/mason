@@ -67,7 +67,8 @@ fn only_the_owner_applies_and_an_empty_or_broken_draft_is_refused() {
         403
     );
     assert_eq!(editor::apply(&w.d, pid(&w), "", "x").unwrap_err().0, 403);
-    assert!(!sh(&w.s.origin, &["show", "main:.mason/mason.toml"]).contains("lint"));
+    // The fixture is MASON's own definition, which has a `lint` suite: look for the step.
+    assert!(!sh(&w.s.origin, &["show", "main:.mason/mason.toml"]).contains("[step.lint]"));
 }
 
 #[test]
@@ -123,7 +124,7 @@ fn where_landing_uses_pull_requests_apply_opens_one_and_changes_nothing_yet() {
         "{v}"
     );
     assert!(
-        !sh(&w.s.origin, &["show", "main:.mason/mason.toml"]).contains("lint"),
+        !sh(&w.s.origin, &["show", "main:.mason/mason.toml"]).contains("[step.lint]"),
         "the base is untouched until the PR merges"
     );
     assert!(w.d.current_def(pid(&w)).step("lint").is_none());

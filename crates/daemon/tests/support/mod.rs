@@ -498,7 +498,7 @@ fn try_wait(
             Poll::Pending => {
                 polls += 1;
                 // One `ps` per second at most, not one per poll.
-                if polls % 20 == 0 {
+                if polls.is_multiple_of(20) {
                     if let Some(why) = daemon_gone() {
                         return Poll::Never(why);
                     }
@@ -537,7 +537,10 @@ fn daemon_gone() -> Option<String> {
             .args(["-o", "stat=", "-p", &pid.to_string()])
             .output()
             .ok()?;
-        if String::from_utf8_lossy(&o.stdout).trim_start().starts_with('Z') {
+        if String::from_utf8_lossy(&o.stdout)
+            .trim_start()
+            .starts_with('Z')
+        {
             return Some(format!("the test daemon (pid {pid}) exited while waiting"));
         }
     }
@@ -547,13 +550,7 @@ fn daemon_gone() -> Option<String> {
 /// Wait for `f`, at least [`MIN_WAIT_SECS`] if it stays possible. Fails at once when a scratch
 /// daemon of this test has exited.
 pub fn wait_for(what: &str, secs: u64, mut f: impl FnMut() -> bool) {
-    wait_poll(what, secs, || {
-        if f() {
-            Poll::Done
-        } else {
-            Poll::Pending
-        }
-    });
+    wait_poll(what, secs, || if f() { Poll::Done } else { Poll::Pending });
 }
 
 /// As [`wait_for`], and the condition can also say the wait can no longer succeed.
@@ -627,99 +624,6 @@ pub fn wait_state_settled(
         }
         s == want
     });
-}
-
-#[cfg(test)]
-mod wait_tests {
-    use super::*;
-
-    #[test]
-    fn a_wait_that_can_no_longer_succeed_stops_at_once() {
-        let mut polls = 0;
-        let mut ticks = 0;
-        let r = wait_loop(
-            "task 3 to reach Failed",
-            900,
-            &mut || false, // the floor never runs out in this test
-            &mut || ticks += 1,
-            &mut || {
-                polls += 1;
-                if polls == 3 {
-                    Poll::Never("task 3 reached Landed".into())
-                } else {
-                    Poll::Pending
-                }
-            },
-        );
-        let e = r.unwrap_err();
-        assert!(e.contains("task 3 reached Landed"), "{e}");
-        assert!(!e.contains("timed out"), "{e}");
-        assert_eq!(polls, 3);
-        assert_eq!(ticks, 2);
-    }
-
-    #[test]
-    fn a_wait_still_able_to_succeed_runs_to_its_deadline() {
-        let mut polls = 0;
-        let mut left = 5;
-        let r = wait_loop(
-            "x",
-            900,
-            &mut || {
-                left -= 1;
-                left == 0
-            },
-            &mut || {},
-            &mut || {
-                polls += 1;
-                Poll::Pending
-            },
-        );
-        assert_eq!(r.unwrap_err(), "timed out after 900s waiting for x");
-        assert_eq!(polls, 5);
-    }
-
-    #[test]
-    fn a_wait_that_succeeds_late_still_succeeds() {
-        let mut polls = 0;
-        let r = wait_loop("x", 900, &mut || false, &mut || {}, &mut || {
-            polls += 1;
-            if polls == 40 {
-                Poll::Done
-            } else {
-                Poll::Pending
-            }
-        });
-        assert!(r.is_ok());
-        assert_eq!(polls, 40);
-    }
-
-    #[test]
-    fn a_daemon_that_exited_is_named() {
-        let mut child = Command::new("/bin/sh")
-            .args(["-c", "exit 3"])
-            .spawn()
-            .unwrap();
-        let pid = child.id();
-        DAEMONS.with(|d| d.borrow_mut().push(pid));
-        // Let it exit without reaping it, as a crashed daemon would be.
-        let mut why = None;
-        let r = wait_loop("a thing", 900, &mut || false, &mut || {
-            std::thread::sleep(Duration::from_millis(20))
-        }, &mut || match daemon_gone() {
-            Some(w) => {
-                why = Some(w.clone());
-                Poll::Never(w)
-            }
-            None => Poll::Pending,
-        });
-        let e = r.unwrap_err();
-        assert!(e.contains("exited") && e.contains(&pid.to_string()), "{e}");
-        assert!(!e.contains("timed out"), "{e}");
-        DAEMONS.with(|d| d.borrow_mut().clear());
-        let _ = child.wait();
-        assert!(why.is_some());
-    }
 }
 
 // ---- running the real binaries ----
@@ -906,4 +810,101 @@ pub fn maybe_record(d: &Arc<Daemon>, name: &str) {
     );
     std::fs::create_dir_all(std::path::Path::new(&path).parent().unwrap()).unwrap();
     std::fs::write(path, out).unwrap();
+}
+
+#[cfg(test)]
+mod wait_tests {
+    use super::*;
+
+    #[test]
+    fn a_wait_that_can_no_longer_succeed_stops_at_once() {
+        let mut polls = 0;
+        let mut ticks = 0;
+        let r = wait_loop(
+            "task 3 to reach Failed",
+            900,
+            &mut || false, // the floor never runs out in this test
+            &mut || ticks += 1,
+            &mut || {
+                polls += 1;
+                if polls == 3 {
+                    Poll::Never("task 3 reached Landed".into())
+                } else {
+                    Poll::Pending
+                }
+            },
+        );
+        let e = r.unwrap_err();
+        assert!(e.contains("task 3 reached Landed"), "{e}");
+        assert!(!e.contains("timed out"), "{e}");
+        assert_eq!(polls, 3);
+        assert_eq!(ticks, 2);
+    }
+
+    #[test]
+    fn a_wait_still_able_to_succeed_runs_to_its_deadline() {
+        let mut polls = 0;
+        let mut left = 5;
+        let r = wait_loop(
+            "x",
+            900,
+            &mut || {
+                left -= 1;
+                left == 0
+            },
+            &mut || {},
+            &mut || {
+                polls += 1;
+                Poll::Pending
+            },
+        );
+        assert_eq!(r.unwrap_err(), "timed out after 900s waiting for x");
+        assert_eq!(polls, 5);
+    }
+
+    #[test]
+    fn a_wait_that_succeeds_late_still_succeeds() {
+        let mut polls = 0;
+        let r = wait_loop("x", 900, &mut || false, &mut || {}, &mut || {
+            polls += 1;
+            if polls == 40 {
+                Poll::Done
+            } else {
+                Poll::Pending
+            }
+        });
+        assert!(r.is_ok());
+        assert_eq!(polls, 40);
+    }
+
+    #[test]
+    fn a_daemon_that_exited_is_named() {
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "exit 3"])
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        DAEMONS.with(|d| d.borrow_mut().push(pid));
+        // Let it exit without reaping it, as a crashed daemon would be.
+        let mut why = None;
+        let r = wait_loop(
+            "a thing",
+            900,
+            &mut || false,
+            &mut || std::thread::sleep(Duration::from_millis(20)),
+            &mut || match daemon_gone() {
+                Some(w) => {
+                    why = Some(w.clone());
+                    Poll::Never(w)
+                }
+                None => Poll::Pending,
+            },
+        );
+        let e = r.unwrap_err();
+        assert!(e.contains("exited") && e.contains(&pid.to_string()), "{e}");
+        assert!(!e.contains("timed out"), "{e}");
+        DAEMONS.with(|d| d.borrow_mut().clear());
+        let _ = child.wait();
+        assert!(why.is_some());
+    }
 }

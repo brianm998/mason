@@ -313,12 +313,9 @@ mod tests {
             Some(BaseFold::Failed(_)) | Some(BaseFold::Uncommitted(_))
         ));
         assert_eq!(git(&wt, &["status", "--porcelain"]), status);
-        assert_eq!(
-            std::fs::read_to_string(wt.join("a.txt"))
-                .unwrap()
-                .contains("<<<<<<<"),
-            true
-        );
+        assert!(std::fs::read_to_string(wt.join("a.txt"))
+            .unwrap()
+            .contains("<<<<<<<"));
         assert_eq!(r.merges(), 0);
     }
 
