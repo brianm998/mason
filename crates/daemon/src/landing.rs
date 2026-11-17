@@ -3837,7 +3837,7 @@ fn lint_places(output: &str) -> String {
     for l in output.lines() {
         let t = l.trim();
         let place = if let Some(r) = t.strip_prefix("--> ") {
-            r.rsplitn(2, ':').nth(1).map(String::from)
+            r.rsplit_once(':').map(|(f, _)| f.to_string())
         } else if let Some(r) = t.strip_prefix("Diff in ") {
             r.split(" at line ")
                 .next()
