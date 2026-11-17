@@ -665,8 +665,8 @@ public final class MonitorModel: ObservableObject {
     /// Move a deferred task back to proposed.
     public func undefer(_ task: UInt64) { command { $0.undefer = .with { $0.task = task } } }
     /// The priorities the approval picker offers; it starts at `defaultApprovalPriority`.
-    public static let approvalPriorities = ["urgent", "high", "normal", "low"]
-    public static let defaultApprovalPriority = "normal"
+    nonisolated public static let approvalPriorities = ["urgent", "high", "normal", "low"]
+    nonisolated public static let defaultApprovalPriority = "normal"
     /// The tasks the Add blocker picker offers for `row`: any task in the sidebar that is not
     /// itself, not already a blocker, and could still land (not landed, canceled or failed).
     public func blockerCandidates(for row: TaskRow) -> [TaskRow] {

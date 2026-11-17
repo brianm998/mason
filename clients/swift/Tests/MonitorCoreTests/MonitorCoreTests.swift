@@ -980,6 +980,8 @@ final class MonitorCoreTests: XCTestCase {
         XCTAssertEqual([h.task, UInt64(h.diffHash == "abc123" ? 1 : 0)], [3, 1])
         guard case .approve(let p)? = sent()[1].body else { return XCTFail() }
         XCTAssertEqual(p.task, 4)
+        XCTAssertEqual(p.priority, MonitorModel.defaultApprovalPriority)
+        XCTAssertEqual(p.priority, "normal")
     }
 
     func testRejectSendsTheReason() {
