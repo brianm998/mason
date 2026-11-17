@@ -4924,7 +4924,7 @@ mod review_diff_tests {
 
     use super::*;
 
-    fngit(cwd: &Path, args: &[&str]) {
+    fn git(cwd: &Path, args: &[&str]) {
         git::run(cwd, args).unwrap_or_else(|e| panic!("git {args:?}: {e}"));
     }
 
