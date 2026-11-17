@@ -351,9 +351,15 @@ fn ten_passes_past_the_threshold_file_one_task_for_a_run_and_a_newer_run_files_o
         pass(&d, pid, &r, &b, 4 * h + i * 4 * h).unwrap();
     }
     assert_eq!(titled(&d, "CI/unit").len(), 1);
-    // The held-back reason is in the view.
-    let v = mason_daemon::ci_watch::view(&d, pid);
-    let text = v["held_back"][0]["text"].as_str().unwrap().to_string();
+    // The held-back reason. This scratch project's definition has no `[watch.ci]` (the rules
+    // are passed to `pass` here), so `view` reports the watch as off: read the held-back list
+    // from the saved state with the same rules, as `view` does for a watching project.
+    let p = d.project(pid).unwrap();
+    let saved = mason_daemon::ci_watch::decode(&d.store.ci_watch_state(&p.id).unwrap().unwrap());
+    let held = mason_core::ci_watch::held_back(&saved.state, &r);
+    assert_eq!(held.len(), 1, "{held:?}");
+    let (k, run, t) = held[0].clone();
+    let text = mason_core::ci_watch::held_text(&k, run, t);
     assert!(
         text.contains("CI/unit still red on run 2") && text.contains("waiting for a newer run"),
         "{text}"

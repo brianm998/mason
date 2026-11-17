@@ -419,6 +419,14 @@ fn check_numbers(c: &Ctx) -> Option<Verdict> {
     })
 }
 
+/// The names of the tests a fast tier's output says failed, read with the suite's own parser
+/// (`fail_regex` for the regex parser). Empty when the parser finds none.
+fn fast_failures(suite: &mason_testing::Suite, output: &str) -> Vec<String> {
+    mason_testing::parse::parse(suite.parser, output, suite)
+        .map(|r| r.failed_names())
+        .unwrap_or_default()
+}
+
 /// A task whose branch adds unresolved merge conflict markers goes back, with the files and
 /// lines, before it joins the queue. On 2026-11-13 one landed in `landing.rs` because nothing
 /// read the text: testing was skipped and a batch that no suite verifies builds nothing.
@@ -1016,6 +1024,7 @@ fn run_batch(
                     batch_id: Default::default(),
                     ci,
                     real_ci_red: std::sync::atomic::AtomicBool::new(false),
+                    fast_tier: std::sync::atomic::AtomicBool::new(false),
                     floor_red: std::sync::atomic::AtomicBool::new(false),
                     host,
                     pr: Mutex::new(None),
@@ -1103,6 +1112,9 @@ struct Runner {
     /// Set by the last CI or PR verdict when a red job was judged a real failure (the
     /// judge is on): the red ladder then sends the batch back without a rerun.
     real_ci_red: std::sync::atomic::AtomicBool,
+    /// The batch being verified had every task's testing skipped: `verify` runs the suites' fast
+    /// unit tier after the build floor (s509).
+    fast_tier: std::sync::atomic::AtomicBool,
     /// Set when the last verification's red came from the build floor (`build_floor`): the
     /// ladder reruns that as a build, and looks at the base before it blames anyone.
     floor_red: std::sync::atomic::AtomicBool,
@@ -1496,6 +1508,25 @@ impl Runner {
                 break Ok(());
             }
 
+            // Every task in the batch had its test step skipped by the owner: when the base
+            // moves, the batch is rebuilt but not re-tested (s429). Its tests were never run
+            // for it, so the re-test was the only full run, and it held the queue for half
+            // an hour each time anyone pushed to the base during a backlog.
+            let tests_skipped = def
+                .steps
+                .iter()
+                .find(|s| s.kind == mason_definition::StepType::Test)
+                .is_some_and(|st| {
+                    !active.is_empty()
+                        && active.iter().all(|t| {
+                            crate::suites::skip_for(&self.d, TaskId(t.id), "", &st.name).is_some()
+                        })
+                });
+            // The same batches get the fast unit tier after the build floor (s509), in this
+            // verification and in every rerun of it.
+            self.fast_tier
+                .store(tests_skipped, std::sync::atomic::Ordering::SeqCst);
+
             // -- verify the union once
             let suites = if force {
                 vec![]
@@ -1833,20 +1864,6 @@ impl Runner {
             };
             let legacy = self.legacy_cmd(&def);
             let wt_for_cmd = int_wt.clone();
-            // Every task in the batch had its test step skipped by the owner: when the base
-            // moves, the batch is rebuilt but not re-tested (s429). Its tests were never run
-            // for it, so the re-test was the only full run, and it held the queue for half
-            // an hour each time anyone pushed to the base during a backlog.
-            let tests_skipped = def
-                .steps
-                .iter()
-                .find(|s| s.kind == mason_definition::StepType::Test)
-                .is_some_and(|st| {
-                    !active.is_empty()
-                        && active.iter().all(|t| {
-                            crate::suites::skip_for(&self.d, TaskId(t.id), "", &st.name).is_some()
-                        })
-                });
             let mut reverify = |moved: &[String]| -> bool {
                 if force || self.forced() {
                     return true;
@@ -1923,9 +1940,17 @@ impl Runner {
                                 tracing::info!(
                                     batch = batch_id,
                                     "the base moved: rebuilt; not re-tested, every task's \
-                                     testing was skipped"
+                                     testing was skipped; running the fast tier"
                                 );
-                                return true;
+                                // Small enough to run again on the moved base (s509).
+                                let t = self.fast_tests(
+                                    &def,
+                                    &wt_for_cmd,
+                                    &asm.base_tip,
+                                    &log_dir,
+                                    &format!("b{batch_id}-rebuild"),
+                                );
+                                return t.green;
                             }
                             Ok(o) if o.passed => {}
                             Ok(_) => return false,
@@ -2368,6 +2393,12 @@ impl Runner {
                 r.green = f.green;
                 r.failed.extend(f.failed);
                 r.notes.extend(f.notes);
+                if f.green && self.fast_tier.load(std::sync::atomic::Ordering::SeqCst) {
+                    let t = self.fast_tests(def, wt, base, log_dir, prefix);
+                    r.green = t.green;
+                    r.failed.extend(t.failed);
+                    r.notes.extend(t.notes);
+                }
             }
             return r;
         };
@@ -2390,6 +2421,119 @@ impl Runner {
             }
         }
         r
+    }
+
+    /// The fast unit tier (s509): a batch whose every task had its testing skipped is built by the
+    /// floor, which compiles test code and runs none of it. Each selected suite that declares a
+    /// `fast_command` runs it here, so a merge that breaks a quick test (two green tasks each adding
+    /// the same line to a list) is caught. The full run stays owed, as the skip debts say. A red
+    /// puts the failing tests' names in `failed` (the suite's name when none can be read).
+    fn fast_tests(
+        &self,
+        def: &mason_definition::Definition,
+        wt: &Path,
+        base: &str,
+        log_dir: &Path,
+        prefix: &str,
+    ) -> crate::suites::OverRun {
+        let d = &self.d;
+        let mut out = crate::suites::OverRun {
+            green: true,
+            failed: BTreeSet::new(),
+            notes: vec![],
+        };
+        let paths: Vec<String> =
+            match git::run(wt, &["diff", "--name-only", &format!("{base}..HEAD")]) {
+                Ok(t) => t.lines().map(String::from).collect(),
+                Err(e) => {
+                    let why = format!("the fast tier could not read the batch's diff: {e}");
+                    self.fail_service(why.clone());
+                    out.green = false;
+                    out.notes.push(why);
+                    return out;
+                }
+            };
+        let Some(step) = def
+            .steps
+            .iter()
+            .find(|s| s.kind == mason_definition::StepType::Test)
+        else {
+            return out;
+        };
+        if paths.is_empty() {
+            return out;
+        }
+        let names = match def.testing.impact.select(&paths, &step.suites) {
+            Selection::All => step.suites.clone(),
+            Selection::Some(v) => v,
+        };
+        let members = self.members(def);
+        for name in &names {
+            let Some(suite) = def.testing.suite(name) else {
+                continue;
+            };
+            let Some(cmd) = suite.fast_command.clone() else {
+                continue;
+            };
+            let _lease =
+                match self.hold(def, self.test_step_needs(def, suite.build.is_some()), true) {
+                    Ok(l) => l,
+                    Err(e) => {
+                        self.fail_service(e.clone());
+                        out.green = false;
+                        out.notes.push(e);
+                        return out;
+                    }
+                };
+            let spec = crate::hostedcheck::CheckSpec {
+                id_prefix: format!("{prefix}-fast-{name}"),
+                log_dir: log_dir.to_path_buf(),
+                cmd,
+                cwd: wt.to_path_buf(),
+                env: vec![],
+                limit: self.project().test_timeout,
+                tree: crate::hostedcheck::tree_key(wt),
+                stop: Some({
+                    let (d, m) = (d.clone(), members.clone());
+                    Arc::new(move || m.forced(&d))
+                }),
+            };
+            match crate::hostedcheck::run(d, &spec) {
+                Ok(o) if o.stopped.is_some() => out.notes.push(format!(
+                    "{name}: fast tier not run to the end: {}",
+                    o.stopped.unwrap_or_default()
+                )),
+                Ok(o) if o.passed => out.notes.push(format!("{name}: fast tier passes")),
+                Ok(o) => {
+                    out.green = false;
+                    let failing = fast_failures(suite, &o.output);
+                    // The failing tests are what is red, so the ladder bisects for the task
+                    // whose change breaks them instead of blaming everyone the suite covers.
+                    if failing.is_empty() {
+                        out.failed.insert(name.clone());
+                    } else {
+                        out.failed.extend(failing.iter().cloned());
+                    }
+                    out.notes.push(if failing.is_empty() {
+                        format!(
+                            "{name}: the fast tier failed{}\n{}",
+                            if o.timed_out { " (timed out)" } else { "" },
+                            crate::jobs::tail(&o.output, 15)
+                        )
+                    } else {
+                        format!("{name}: the fast tier failed in {}", failing.join(", "))
+                    });
+                }
+                Err(e) => {
+                    let why = format!("{name}: the fast tier gave no result: {e}");
+                    self.fail_service(why.clone());
+                    out.green = false;
+                    out.notes.push(why);
+                    return out;
+                }
+            }
+        }
+        out
     }
 
     /// The lint tier (`[[tier]] name = "lint"` in `.mason/landing.toml`): the `command` of each
@@ -3693,7 +3837,7 @@ fn lint_places(output: &str) -> String {
     for l in output.lines() {
         let t = l.trim();
         let place = if let Some(r) = t.strip_prefix("--> ") {
-            r.rsplitn(2, ':').nth(1).map(String::from)
+            r.rsplit_once(':').map(|(f, _)| f.to_string())
         } else if let Some(r) = t.strip_prefix("Diff in ") {
             r.split(" at line ")
                 .next()

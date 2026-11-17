@@ -443,6 +443,7 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s502**: a new `compile` gate holds further compiles while `syspolicyd` uses 300% CPU or more (`[cpu] syspolicyd_max_pct`), so MASON's builds and test runs cannot swamp the Mac's code checks again.
 - **s507**: `every_state_and_event_pair` passes again because `events()` in the engine matrix test no longer lists `Deferred` and `Undeferred` twice, and a duplicate name now fails with a clear message.
 - **s508**: when a task's test step is red and the suite has a `rerun` template, develop is asked about only the failing tests (not a full suite run); a run that is killed or reads no names is retried once, and if it is still unknown the round is not counted against the task and the note says so.
+- **s509**: a landing batch whose every task had its testing skipped is built and then runs a fast unit tier declared in the project file (`fast_command`), so a merge that breaks a quick test is parked naming it.
 - **s510**: a dropped-line send-back now includes a ready-to-paste `removes` JSON block for each listed line the task's own diff replaced in place.
 - **s511**: A develop step whose last three full run_check runs all end red on the same failing tests now raises a `needs_you` alert (and a task-page and needs-attention-count entry) naming the tests, how long, and whether they are red on develop; a green run clears it.
 - **s512**: Reds of one test class on one base commit now file a single fix task naming all of them, and a later red of that class joins it instead of filing another.
@@ -470,4 +471,5 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s554**: stuck:wait no longer fires for tasks whose slot holders are changing; very old progressing waits give a note that never starts a health session.
 - **s556**: CLAUDE.md and docs/self-hosting.md now tell sessions to apply registration edits with `mason project reload` and to restart masond only for a fixed-key change, a new registration file or a new build (decision 0549).
 - **s557**: `MonitorModel.approvalPriorities` and `defaultApprovalPriority` are `nonisolated`, so using the default as a default argument of `approve` no longer warns under Swift 6 rules; the plain-approve test now pins the sent priority to "normal".
+- **s563**: UiThreadTest.isExpandedReadsEachKeyOnce now baselines the preference read count after constructing the model, so the constructor's mute read no longer fails it while any extra read per isExpanded call still does.
 <!-- status:end -->

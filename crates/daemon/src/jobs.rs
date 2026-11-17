@@ -4393,8 +4393,8 @@ fn again(k: u32) -> String {
 
 /// Why one hosted run did not give a result.
 enum Unfinished {
-    /// The host was lost with no exit record: nothing was judged.
-    Lost(mason_step_host::registry::LostReport),
+    /// The host was lost with no exit record: nothing was judged. Boxed: the report is large.
+    Lost(Box<mason_step_host::registry::LostReport>),
     Other(String),
 }
 
@@ -4452,7 +4452,7 @@ fn run_command_once(
                 if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&log) {
                     let _ = f.write_all(note.as_bytes());
                 }
-                first = Some(rep);
+                first = Some(*rep);
                 host = 1;
             }
             Err(Unfinished::Lost(rep)) => {
@@ -4603,7 +4603,7 @@ fn run_command_on(
         Ok(r) => r,
         Err(ClientError::HostLost { .. }) => {
             return Err(match mason_step_host::registry::lost_report(&dir) {
-                Ok(rep) => Unfinished::Lost(rep),
+                Ok(rep) => Unfinished::Lost(Box::new(rep)),
                 Err(_) => Unfinished::Other("the command was lost (its host died)".into()),
             })
         }

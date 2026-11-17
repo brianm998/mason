@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+#![cfg(unix)]
+// Unix-only: the key file's permission bits. Windows coverage comes with the later port tasks.
 
 //! The APNs channel (s460) inside the daemon: a push goes to each eligible device through a
 //! fake APNs on loopback, with a JWT that verifies against the owner's key; a 410 clears the
