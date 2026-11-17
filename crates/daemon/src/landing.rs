@@ -615,9 +615,21 @@ fn check_dropped(c: &Ctx) -> Option<Verdict> {
     if dropped.is_empty() {
         return None;
     }
+    let repo = &c.project.path;
+    let mut pairs = vec![];
+    for d in dropped.iter().take(audit::MAX_LISTED) {
+        if let Ok(one) = audit::replacements(
+            repo,
+            &c.project.base_ref(),
+            &c.branch,
+            std::slice::from_ref(d),
+        ) {
+            pairs.extend(one);
+        }
+    }
     Some(Verdict::SentBack {
         reason: audit::reason(&dropped),
-        feedback: audit::feedback(&dropped),
+        feedback: audit::feedback_with(&dropped, &pairs),
     })
 }
 
