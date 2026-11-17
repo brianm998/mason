@@ -76,6 +76,29 @@ pub fn is_fix_title(title: &str, test: &str) -> bool {
     title.contains(test) && title.contains(" fails on ")
 }
 
+/// The test class (or file) of a test name: everything before the last `::`, ` > `, `/` or
+/// `.`, in that order of preference. `None` for a name with no such part.
+pub fn class_of(test: &str) -> Option<String> {
+    for sep in ["::", " > ", "/", "."] {
+        if let Some((head, tail)) = test.rsplit_once(sep) {
+            if !head.is_empty() && !tail.is_empty() {
+                return Some(head.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// The line in a fix task's body that says which class and base it covers.
+fn class_marker(class: &str, base: &str) -> String {
+    format!("Test class: `{class}` at base `{}`", short(base))
+}
+
+/// Does a grouped fix task's body list `test`?
+fn lists_test(t: &Task, test: &str) -> bool {
+    t.title.contains(" fail on ") && t.body.contains(&format!("\n- `{test}`\n"))
+}
+
 pub(crate) fn short(sha: &str) -> &str {
     &sha[..sha.len().min(10)]
 }
@@ -96,7 +119,7 @@ fn existing_fix_in(
             .tasks
             .values()
             .filter(|t| t.project == project && !t.state.is_terminal())
-            .filter(|t| is_fix_title(&t.title, test))
+            .filter(|t| is_fix_title(&t.title, test) || lists_test(t, test))
             .collect();
         open.sort_by_key(|t| t.id.0);
         if let Some(t) = open.first() {
@@ -153,29 +176,102 @@ pub struct Seen<'a> {
 
 /// The fix for `test` failing at the base: the one already open, or a new urgent task.
 fn file_fix(d: &std::sync::Arc<crate::daemon::Daemon>, s: &Seen, test: &str) -> Option<Fix> {
+    file_group(d, s, &[test.to_string()])
+}
+
+/// The open task for a class and base, if one was filed (s512).
+fn existing_group(d: &std::sync::Arc<crate::daemon::Daemon>, s: &Seen, class: &str) -> Option<Fix> {
+    let marker = class_marker(class, s.base);
+    let w = d.world().ok()?;
+    let mut open: Vec<&Task> = w
+        .tasks
+        .values()
+        .filter(|t| t.project == s.project && !t.state.is_terminal())
+        .filter(|t| t.body.contains(&marker))
+        .collect();
+    open.sort_by_key(|t| t.id.0);
+    open.first().map(|t| Fix::Task(t.id.0))
+}
+
+/// One fix for `tests`, which failed together at one base (s512): a task already open for
+/// any of them, or for their class at this base, or one new urgent task naming all of them.
+/// Tests of different classes are filed separately by the caller.
+fn file_group(
+    d: &std::sync::Arc<crate::daemon::Daemon>,
+    s: &Seen,
+    tests: &[String],
+) -> Option<Fix> {
     let _g = FILING.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(f) = existing_fix_in(d, s.project, s.project_name, test) {
-        return Some(f);
+    for t in tests {
+        if let Some(f) = existing_fix_in(d, s.project, s.project_name, t) {
+            return Some(f);
+        }
+    }
+    let class = tests.first().and_then(|t| class_of(t));
+    if let Some(c) = &class {
+        if let Some(f) = existing_group(d, s, c) {
+            return Some(f);
+        }
     }
     let found = if s.task == 0 {
         "a run over the base".to_string()
     } else {
         format!("the merge base of task #{} in {}", s.task, s.project_name)
     };
+    let (title, names, verb) = match tests {
+        [one] => (
+            format!("{one} fails on {}", short(s.base)),
+            format!("`{one}`"),
+            "fails",
+        ),
+        many => (
+            format!(
+                "{}: {} tests fail on {}",
+                class.as_deref().unwrap_or("tests"),
+                many.len(),
+                short(s.base)
+            ),
+            many.iter()
+                .map(|t| format!("`{t}`"))
+                .collect::<Vec<_>>()
+                .join(", "),
+            "fail",
+        ),
+    };
+    let list = if tests.len() > 1 {
+        let lines: Vec<String> = tests.iter().map(|t| format!("- `{t}`")).collect();
+        format!(
+            "\n\nThe tests, all of one class, to fix together:\n{}\n",
+            lines.join("\n")
+        )
+    } else {
+        String::new()
+    };
+    let marker = class.as_ref().map_or(String::new(), |c| {
+        format!("\n\n{}", class_marker(c, s.base))
+    });
+    let all = tests.join(" ");
     let body = format!(
-        "`{test}` fails on `{}` ({found}), so it fails for every \
+        "{names} {verb} on `{}` ({found}), so {} for every \
          task that runs `{}` there. Tasks that hit it are excused (it fails without their \
-         change) until this lands. This task's own test step is not excused for it: \
-         `{test}` must pass.\n\nCommand at the base:\n```\n{}\n```\n\nOutput tail:\n```\n{}\n```\n\n\
-         Filed by the known-red ledger (decision 0225).{}{}",
-        s.base, s.step, s.cmd, s.log_tail,
+         change) until this lands. This task's own test step is not excused for {}: \
+         {} must pass.{list}{marker}\n\nCommand at the base:\n```\n{}\n```\n\nOutput tail:\n```\n{}\n```\n\n\
+         Filed by the known-red ledger (decision 0225). Reds of the same class at this base \
+         are added to this task rather than filed again (decision 0505).{}{}",
+        s.base,
+        if tests.len() > 1 { "they fail" } else { "it fails" },
+        s.step,
+        if tests.len() > 1 { "them" } else { "it" },
+        if tests.len() > 1 { "each of them" } else { names.as_str() },
+        s.cmd,
+        s.log_tail,
         s.follows.map_or(String::new(), |n| format!("\n\nFollow-up to task #{n}, which landed while this test was still red.")),
-        client_guard_note(&format!("{} {} {test}", s.step, s.cmd))
+        client_guard_note(&format!("{} {} {all}", s.step, s.cmd))
     );
     let a = d
         .emit(EventKind::TaskFiled {
             project: s.project,
-            title: format!("{test} fails on {}", short(s.base)),
+            title,
             body,
             priority: Priority::Urgent,
             trust: TrustSource::Owner,
@@ -247,7 +343,9 @@ pub fn record_red(
     tests: &[String],
 ) -> Vec<(String, Option<Fix>)> {
     let now = crate::daemon::now_ms();
-    let mut out = vec![];
+    let mut out: Vec<(String, Option<Fix>)> = vec![];
+    // Tests with no fix yet, in order; grouped by class below.
+    let mut todo: Vec<String> = vec![];
     for t in tests {
         if !mason_testing::gates::is_test_name(t) {
             continue;
@@ -266,17 +364,31 @@ pub fn record_red(
             .into_iter()
             .find(|r| r.suite == ledger_suite && &r.test == t)
             .and_then(|r| r.fix_task);
-        let fix = match known {
-            Some(n) => Some(Fix::Task(n)),
-            None => {
-                let f = file_fix(d, s, t);
-                if let Some(Fix::Task(n)) = &f {
-                    let _ = d.store.ledger_set_fix(ledger_suite, t, *n);
-                }
-                f
+        match known {
+            Some(n) => out.push((t.clone(), Some(Fix::Task(n)))),
+            None => todo.push(t.clone()),
+        }
+    }
+    let mut groups: Vec<Vec<String>> = vec![];
+    for t in todo {
+        let class = class_of(&t);
+        match class.as_ref().and_then(|c| {
+            groups
+                .iter_mut()
+                .find(|g| class_of(&g[0]).as_ref() == Some(c))
+        }) {
+            Some(g) => g.push(t),
+            None => groups.push(vec![t]),
+        }
+    }
+    for g in groups {
+        let f = file_group(d, s, &g);
+        for t in g {
+            if let Some(Fix::Task(n)) = &f {
+                let _ = d.store.ledger_set_fix(ledger_suite, &t, *n);
             }
-        };
-        out.push((t.clone(), fix));
+            out.push((t, f.clone()));
+        }
     }
     out
 }
@@ -543,6 +655,21 @@ mod tests {
         let mut none = || None;
         assert_eq!(cached_failures(&store, "b3", &k, &mut none), None);
         assert!(store.baseline("b3", &k).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_test_class_is_what_precedes_the_last_separator() {
+        assert_eq!(class_of("MascotTest > a b").as_deref(), Some("MascotTest"));
+        assert_eq!(class_of("a::b::c").as_deref(), Some("a::b"));
+        assert_eq!(
+            class_of("pkg.MascotTest.go").as_deref(),
+            Some("pkg.MascotTest")
+        );
+        assert_eq!(
+            class_of("MascotTests/testA").as_deref(),
+            Some("MascotTests")
+        );
+        assert_eq!(class_of("plain"), None);
     }
 
     #[test]
