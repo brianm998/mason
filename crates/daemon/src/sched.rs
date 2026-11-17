@@ -2199,6 +2199,23 @@ impl Broker {
             .collect()
     }
 
+    /// The pipeline tasks holding something now: how many, and how long the oldest has held
+    /// it, in ms. The self-update's window (s473) looks at this; a person's `mason run`
+    /// and another pipeline's work do not count.
+    pub fn task_work(&self, now_ms: u64) -> (usize, u64) {
+        let st = lock(&self.st);
+        let snap = st.ledger.snapshot();
+        let mut n = 0;
+        let mut oldest = 0;
+        for h in snap.holders.iter() {
+            if matches!(st.meta.get(&h.id), Some(Meta::Task)) {
+                n += 1;
+                oldest = oldest.max(now_ms.saturating_sub(h.since));
+            }
+        }
+        (n, oldest)
+    }
+
     /// The `compile` count in force now.
     pub fn compile_capacity(&self) -> Option<u64> {
         let st = lock(&self.st);
