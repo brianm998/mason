@@ -840,6 +840,11 @@ message Compilation {
   // What the daemon did about the queue lately, newest first ("Stopped #95's
   // command ...: it used no CPU for 30 min while holding a compile slot").
   repeated string notes = 10;
+  // macOS's syspolicyd CPU use in percent of one core (700 is seven cores); -1 when there
+  // is no reading or no gate.
+  int32 syspolicyd_pct = 11;
+  // A further compile waits while syspolicyd is at or above this; 0: no gate.
+  uint32 syspolicyd_max_pct = 12;
 }
 
 message StepLine {

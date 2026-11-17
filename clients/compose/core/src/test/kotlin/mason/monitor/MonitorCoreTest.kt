@@ -518,6 +518,15 @@ class MonitorCoreTest {
         assertEquals("2h", Format.duration(2 * 3_600_000))
     }
 
+    @Test fun theSyspolicydLineShowsTheReadingAndTheLimit() {
+        assertNull(Compilation().policyLine, "no gate")
+        assertEquals("syspolicyd 640% — holding compiles over 300%", Compilation(syspolicyd_pct = 640, syspolicyd_max_pct = 300).policyLine)
+        assertEquals("syspolicyd 20% — compiles held over 300%", Compilation(syspolicyd_pct = 20, syspolicyd_max_pct = 300).policyLine)
+        val h = HealthSnapshot.parse("""{"cpu":{"busy_pct":10,"compile_max_pct":50,"syspolicyd_pct":640,"syspolicyd_max_pct":300}}""")
+        assertEquals("syspolicyd 640% — holding compiles over 300%", h.policyLine)
+        assertNull(HealthSnapshot.parse("""{"cpu":{"busy_pct":10,"compile_max_pct":50}}""").policyLine)
+    }
+
     @Test fun theHealthPageReadsTheDaemonsResourceReport() {
         val h = HealthSnapshot.parse("""{"resources":[{"name":"compile","kind":"machine","used":1,"limit":2}],"waiting":[{"label":"#4","explain":"Waiting for compile slot"}],"holders":[{"label":"#3"}]}""")
         assertEquals(listOf(HealthSnapshot.Resource("compile", "machine", 1, 2)), h.resources)

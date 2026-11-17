@@ -355,6 +355,10 @@ struct State {
     /// How busy `syspolicyd` is, and the limit on it. `None`: no syspolicyd gate.
     policy: Option<Arc<dyn PolicySource>>,
     policy_max: u32,
+    /// The latest `syspolicyd` reading: (busy %, limit %), `None` with no gate or no reading.
+    policy_read: Option<(u32, u32)>,
+    /// When the reading first went to the limit or over it and has stayed there since.
+    policy_since: Option<u64>,
     /// When the last scheduling pass ran. A waiter skips its own pass while this is
     /// younger than the broker's tick (see `acquire`).
     last_pass: Option<Instant>,
@@ -652,6 +656,8 @@ impl Broker {
                 stall: None,
                 policy: None,
                 policy_max: cfg.syspolicyd_max_pct,
+                policy_read: None,
+                policy_since: None,
                 last_pass: None,
                 pass_running: false,
                 passes: 0,
@@ -950,11 +956,28 @@ impl Broker {
                     .map(|busy_pct| PolicyGate { busy_pct, max_pct })
             });
         st.ledger.set_policy(policy);
+        st.policy_read = policy.map(|p| (p.busy_pct, p.max_pct));
+        match policy {
+            Some(p) if p.busy_pct >= p.max_pct => {
+                if st.policy_since.is_none() {
+                    st.policy_since = Some(crate::daemon::now_ms());
+                }
+            }
+            _ => st.policy_since = None,
+        }
         st.cpu_busy = st.cpu.busy_pct();
         st.cpu_busy.map(|busy_pct| CpuGate {
             busy_pct,
             max_pct: st.cpu_max,
         })
+    }
+
+    /// The `syspolicyd` reading, read afresh: (busy %, limit %, since when it has been at or
+    /// over the limit). `None` while there is no gate or no reading.
+    pub fn policy_hold(&self) -> Option<(u32, u32, Option<u64>)> {
+        let mut st = lock(&self.st);
+        self.cpu_gate(&mut st);
+        st.policy_read.map(|(b, m)| (b, m, st.policy_since))
     }
 
     /// The overall CPU reading the compile gate uses, to read from outside the broker.
@@ -2165,6 +2188,8 @@ impl Broker {
             settle_s: settle,
             rules,
             cpu_source: st.cpu.source().to_string(),
+            syspolicyd_pct: st.policy_read.map_or(-1, |(b, _)| b as i32),
+            syspolicyd_max_pct: st.policy_read.map_or(0, |(_, m)| m),
             notes: st
                 .notes
                 .iter()
@@ -2276,6 +2301,8 @@ impl Broker {
                 "compile_max_pct": st.cpu_max,
                 "source": st.cpu.source(),
                 "failed_reads": st.cpu.failed_reads(),
+                "syspolicyd_pct": st.policy_read.map(|(b, _)| b),
+                "syspolicyd_max_pct": st.policy_read.map(|(_, m)| m),
             },
             "now_ms": now,
         })

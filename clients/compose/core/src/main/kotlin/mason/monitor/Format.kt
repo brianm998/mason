@@ -258,6 +258,17 @@ val Compilation.cpuLine: String
         return cpuReadingLine(if (cpu_busy_pct < 0) null else cpu_busy_pct, cpu_source, gate)
     }
 
+/** The syspolicyd line of the Compilation section; null with no gate or no reading. */
+val Compilation.policyLine: String?
+    get() = policyReadingLine(if (syspolicyd_pct < 0) null else syspolicyd_pct, syspolicyd_max_pct)
+
+/** "syspolicyd 640% — holding compiles over 300%"; null when there is no gate or no reading. */
+fun policyReadingLine(busy: Int?, max: Int): String? = when {
+    busy == null || max <= 0 -> null
+    busy >= max -> "syspolicyd $busy% — holding compiles over $max%"
+    else -> "syspolicyd $busy% — compiles held over $max%"
+}
+
 /**
  * The CPU line shared by the Health page and the home page. A fallback source is named, so a
  * held compile is not read as a broken gauge.
