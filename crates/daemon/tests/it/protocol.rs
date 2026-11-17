@@ -346,7 +346,7 @@ fn every_entity_carries_its_allowed_actions_why_waiting_and_progress() {
         _ => None,
     });
     assert_eq!(detail.unwrap().row.unwrap().id, 1);
-    // A proposal offers approve, reject and edit, and (s75) Add blocker, since it has not
+    // A proposal offers approve, defer, reject and edit, and (s75) Add blocker, since it has not
     // started; a finished task offers nothing.
     assert_eq!(
         row(4).allowed_actions,
@@ -491,7 +491,7 @@ fn the_sidebar_is_in_queue_order_and_the_rest_newest_entry_first() {
     assert_eq!(
         collapsed,
         ["deferred", "failed", "landed", "canceled"],
-        "history starts collapsed"
+        "Deferred (s325) and history start collapsed"
     );
 
     // --- Queued is the real queue; every other section is newest entry first.
