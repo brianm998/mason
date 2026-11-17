@@ -485,12 +485,12 @@ fn wait_loop(
     }
 }
 
-fn real_wait(
+fn try_wait(
     what: &str,
     secs: u64,
     pause_ms: u64,
     mut poll: impl FnMut() -> Poll,
-) {
+) -> Result<(), String> {
     let end = Instant::now() + Duration::from_secs(secs);
     let mut polls = 0u32;
     let mut watched = |p: &mut dyn FnMut() -> Poll| -> Poll {
@@ -508,16 +508,18 @@ fn real_wait(
             other => other,
         }
     };
-    let r = wait_loop(
+    wait_loop(
         what,
         secs,
         &mut || Instant::now() >= end,
         &mut || std::thread::sleep(Duration::from_millis(pause_ms)),
         &mut || watched(&mut poll),
-    );
-    if let Err(m) = r {
-        panic!("{m}");
-    }
+    )
+}
+
+fn real_wait(what: &str, secs: u64, pause_ms: u64, poll: impl FnMut() -> Poll) {
+    let r = try_wait(what, secs, pause_ms, poll);
+    assert!(r.is_ok(), "{}", r.unwrap_err());
 }
 
 thread_local! {
@@ -557,6 +559,22 @@ pub fn wait_for(what: &str, secs: u64, mut f: impl FnMut() -> bool) {
 /// As [`wait_for`], and the condition can also say the wait can no longer succeed.
 pub fn wait_poll(what: &str, secs: u64, poll: impl FnMut() -> Poll) {
     real_wait(what, secs.max(MIN_WAIT_SECS), 50, poll);
+}
+
+/// As [`wait_for_exact`], but the failure comes back as a message.
+pub fn try_wait_for_exact(
+    what: &str,
+    secs: u64,
+    pause_ms: u64,
+    mut f: impl FnMut() -> bool,
+) -> Result<(), String> {
+    try_wait(what, secs, pause_ms, || {
+        if f() {
+            Poll::Done
+        } else {
+            Poll::Pending
+        }
+    })
 }
 
 /// As [`wait_for`] with exactly `secs` (no floor), for waits on things that need no step host.

@@ -239,7 +239,8 @@ fn ready_runtimes(s: &Scratch) -> Vec<String> {
 fn wait_for(what: &str, f: impl Fn() -> bool) {
     // The shared helper: the same 120 s and 200 ms as before, and it fails at once when a
     // scratch daemon of this test has exited.
-    support::wait_for_exact(what, 120, 200, f);
+    let r = support::try_wait_for_exact(what, 120, 200, f);
+    assert!(r.is_ok(), "{}", r.unwrap_err());
 }
 
 #[test]
