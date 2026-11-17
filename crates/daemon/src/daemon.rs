@@ -106,6 +106,8 @@ pub struct Daemon {
     pub update_now: AtomicBool,
     /// What the last look at the update channel found.
     pub update_check: Mutex<crate::update::Check>,
+    /// An automatic update held for the gap: `(waiting since, next window)`, both in ms.
+    pub update_held: Mutex<Option<(u64, u64)>>,
     /// One fetch into the source mirror at a time.
     pub update_fetch: Mutex<()>,
     /// The cancellers of the owner-session turns in flight, by session id (s364).
@@ -338,6 +340,7 @@ impl Daemon {
             }),
             update_now: AtomicBool::new(false),
             update_check: Default::default(),
+            update_held: Default::default(),
             update_fetch: Mutex::new(()),
             owner_turns: Default::default(),
             monitor_builds: Default::default(),
