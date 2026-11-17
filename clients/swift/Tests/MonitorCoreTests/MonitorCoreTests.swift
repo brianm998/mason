@@ -546,6 +546,19 @@ final class MonitorCoreTests: XCTestCase {
         XCTAssertEqual(Format.duration(ms: 2 * 3_600_000), "2h")
     }
 
+    func testTheSyspolicydLineShowsTheReadingAndTheLimit() {
+        var c = Mason_V1_Compilation()
+        XCTAssertNil(c.policyLine, "no gate")
+        c.syspolicydMaxPct = 300
+        c.syspolicydPct = 640
+        XCTAssertEqual(c.policyLine, "syspolicyd 640% — holding compiles over 300%")
+        c.syspolicydPct = 20
+        XCTAssertEqual(c.policyLine, "syspolicyd 20% — compiles held over 300%")
+        let h = HealthSnapshot(json: ##"{"cpu":{"busy_pct":10,"compile_max_pct":50,"syspolicyd_pct":640,"syspolicyd_max_pct":300}}"##)
+        XCTAssertEqual(h.policyLine, "syspolicyd 640% — holding compiles over 300%")
+        XCTAssertNil(HealthSnapshot(json: ##"{"cpu":{"busy_pct":10,"compile_max_pct":50}}"##).policyLine)
+    }
+
     func testTheHealthPageReadsTheDaemonsResourceReport() {
         let h = HealthSnapshot(json: ##"{"resources":[{"name":"compile","kind":"machine","used":1,"limit":2}],"waiting":[{"label":"#4","explain":"Waiting for compile slot"}],"holders":[{"label":"#3"}]}"##)
         XCTAssertEqual(h.resources, [.init(name: "compile", kind: "machine", used: 1, limit: 2)])
@@ -982,6 +995,8 @@ final class MonitorCoreTests: XCTestCase {
         XCTAssertEqual([h.task, UInt64(h.diffHash == "abc123" ? 1 : 0)], [3, 1])
         guard case .approve(let p)? = sent()[1].body else { return XCTFail() }
         XCTAssertEqual(p.task, 4)
+        XCTAssertEqual(p.priority, MonitorModel.defaultApprovalPriority)
+        XCTAssertEqual(p.priority, "normal")
     }
 
     func testRejectSendsTheReason() {

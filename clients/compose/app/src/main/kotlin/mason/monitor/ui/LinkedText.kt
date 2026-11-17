@@ -91,7 +91,8 @@ fun LinkedText(
     val theme = LocalTheme.current
     val actions = rememberActions(model)
     val plain = base ?: AnnotatedString(text)
-    val shown = linkedString(plain, model.linkify(plain.text), theme.link, actions)
+    val segments = androidx.compose.runtime.remember(plain.text, model.sidebar, model.taskDetail) { model.linkify(plain.text) }
+    val shown = linkedString(plain, segments, theme.link, actions)
     if (selectable) SelectionContainer { Text(shown, style = style, modifier = modifier) }
     else Text(shown, style = style, modifier = modifier)
 }

@@ -470,6 +470,33 @@ fn disk_alert(d: &Daemon, w: &mason_engine::World) -> Option<(String, String, St
     Some(("disk".into(), "disk".into(), text))
 }
 
+/// How long `syspolicyd` must have held compiles, unbroken, before the owner is told.
+pub const POLICY_HOLD_ALERT_MS: u64 = 30 * 60 * 1000;
+
+/// `syspolicyd` has held compiles for `threshold_ms` or more without a break. `hold` is the
+/// broker's (busy %, limit %, since when it has been at or over the limit).
+pub fn policy_hold_alert(
+    hold: Option<(u32, u32, Option<u64>)>,
+    now: u64,
+    threshold_ms: u64,
+) -> Option<(String, String, String)> {
+    let (busy, max, since) = hold?;
+    let since = since?;
+    let held = now.saturating_sub(since);
+    if held < threshold_ms {
+        return None;
+    }
+    Some((
+        "syspolicyd".into(),
+        "environment".into(),
+        format!(
+            "macOS's syspolicyd has used {busy}% CPU (limit {max}%) for {} minutes and is holding further compiles; \
+             something besides MASON may be swamping it",
+            held / 60_000
+        ),
+    ))
+}
+
 /// How long a launch may wait before it is called frozen. `MASON_LAUNCH_FROZEN_MS` overrides it.
 const LAUNCH_FROZEN_MS: u64 = 2 * 60 * 1000;
 
@@ -818,6 +845,11 @@ pub fn alerts_now(d: &Daemon) -> Vec<(String, String, String)> {
         out.push(("numbers".into(), "numbers".into(), text));
     }
     out.extend(disk_alert(d, &w));
+    out.extend(policy_hold_alert(
+        d.broker.policy_hold(),
+        now_ms(),
+        POLICY_HOLD_ALERT_MS,
+    ));
     out.extend(ledger_alerts(d, &w, now_ms()));
     out.extend(bug_alerts(
         &d.store
@@ -1258,6 +1290,21 @@ mod launch_frozen_tests {
             .unwrap()
             .2;
         assert!(!t.contains("syspolicyd"), "{t}");
+    }
+
+    #[test]
+    fn a_syspolicyd_hold_alerts_once_it_lasts_the_threshold() {
+        let t = POLICY_HOLD_ALERT_MS;
+        assert!(policy_hold_alert(None, 10 * t, t).is_none(), "no gate");
+        assert!(policy_hold_alert(Some((20, 300, None)), 10 * t, t).is_none());
+        assert!(policy_hold_alert(Some((640, 300, Some(1000))), 1000 + t - 1, t).is_none());
+        let (key, kind, text) =
+            policy_hold_alert(Some((640, 300, Some(1000))), 1000 + t, t).unwrap();
+        assert_eq!((key.as_str(), kind.as_str()), ("syspolicyd", "environment"));
+        assert!(
+            text.contains("640%") && text.contains("limit 300%") && text.contains("30 minutes"),
+            "{text}"
+        );
     }
 
     #[test]

@@ -387,6 +387,10 @@ struct State {
     /// How busy `syspolicyd` is, and the limit on it. `None`: no syspolicyd gate.
     policy: Option<Arc<dyn PolicySource>>,
     policy_max: u32,
+    /// The latest `syspolicyd` reading: (busy %, limit %), `None` with no gate or no reading.
+    policy_read: Option<(u32, u32)>,
+    /// When the reading first went to the limit or over it and has stayed there since.
+    policy_since: Option<u64>,
     /// When the last scheduling pass ran. A waiter skips its own pass while this is
     /// younger than the broker's tick (see `acquire`).
     last_pass: Option<Instant>,
@@ -466,6 +470,8 @@ pub struct Broker {
     /// Wait explanation per waiting task, republished by every `pass`. Readers
     /// clone the `Arc` and never take `st`.
     waits_snap: std::sync::RwLock<Arc<BTreeMap<TaskId, String>>>,
+    /// Per waiting task: its holders' grant times and the waiting count of its class.
+    waits_holders: std::sync::RwLock<Arc<BTreeMap<TaskId, (Vec<u64>, u32)>>>,
     /// Time each task has spent under a CPU cause, updated by every `pass`.
     cpu_hold: Mutex<mason_scheduler::CpuHold>,
     /// The largest of those, for readers that must not take `st`.
@@ -700,6 +706,8 @@ impl Broker {
                 stall: None,
                 policy: None,
                 policy_max: cfg.syspolicyd_max_pct,
+                policy_read: None,
+                policy_since: None,
                 last_pass: None,
                 pass_running: false,
                 passes: 0,
@@ -708,6 +716,7 @@ impl Broker {
             locks,
             limits_file,
             waits_snap: Default::default(),
+            waits_holders: Default::default(),
             cpu_hold: Default::default(),
             cpu_held_ms: Default::default(),
             pass_count: Default::default(),
@@ -998,11 +1007,28 @@ impl Broker {
                     .map(|busy_pct| PolicyGate { busy_pct, max_pct })
             });
         st.ledger.set_policy(policy);
+        st.policy_read = policy.map(|p| (p.busy_pct, p.max_pct));
+        match policy {
+            Some(p) if p.busy_pct >= p.max_pct => {
+                if st.policy_since.is_none() {
+                    st.policy_since = Some(crate::daemon::now_ms());
+                }
+            }
+            _ => st.policy_since = None,
+        }
         st.cpu_busy = st.cpu.busy_pct();
         st.cpu_busy.map(|busy_pct| CpuGate {
             busy_pct,
             max_pct: st.cpu_max,
         })
+    }
+
+    /// The `syspolicyd` reading, read afresh: (busy %, limit %, since when it has been at or
+    /// over the limit). `None` while there is no gate or no reading.
+    pub fn policy_hold(&self) -> Option<(u32, u32, Option<u64>)> {
+        let mut st = lock(&self.st);
+        self.cpu_gate(&mut st);
+        st.policy_read.map(|(b, m)| (b, m, st.policy_since))
     }
 
     /// The overall CPU reading the compile gate uses, to read from outside the broker.
@@ -1247,6 +1273,31 @@ impl Broker {
             .filter_map(|(id, w)| by_id.get(id).map(|t| (*t, explain(w, now))))
             .collect();
         *self.waits_snap.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(snap);
+        let mut depth: HashMap<String, u32> = HashMap::new();
+        for (id, w) in waits.waits.iter() {
+            if by_id.contains_key(id) {
+                *depth.entry(w.class()).or_default() += 1;
+            }
+        }
+        let holders: BTreeMap<TaskId, (Vec<u64>, u32)> = waits
+            .waits
+            .iter()
+            .filter_map(|(id, w)| {
+                by_id.get(id).map(|t| {
+                    (
+                        *t,
+                        (
+                            w.held_by.iter().map(|h| h.since).collect(),
+                            depth.get(&w.class()).copied().unwrap_or(0),
+                        ),
+                    )
+                })
+            })
+            .collect();
+        *self
+            .waits_holders
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = Arc::new(holders);
         let mut hold = self.cpu_hold.lock().unwrap_or_else(|e| e.into_inner());
         hold.observe(
             now,
@@ -1262,6 +1313,14 @@ impl Broker {
     /// The most time one waiting task has spent under a CPU cause (at most one pass old).
     pub fn cpu_gate_held_ms(&self) -> u64 {
         self.cpu_held_ms.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Holder grant times and class queue depth per waiting task (at most one pass old).
+    pub fn waits_holders(&self) -> Arc<BTreeMap<TaskId, (Vec<u64>, u32)>> {
+        self.waits_holders
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// The published wait explanations (at most one pass old).
@@ -2272,6 +2331,8 @@ impl Broker {
             settle_s: settle,
             rules,
             cpu_source: st.cpu.source().to_string(),
+            syspolicyd_pct: st.policy_read.map_or(-1, |(b, _)| b as i32),
+            syspolicyd_max_pct: st.policy_read.map_or(0, |(_, m)| m),
             notes: st
                 .notes
                 .iter()
@@ -2383,6 +2444,8 @@ impl Broker {
                 "compile_max_pct": st.cpu_max,
                 "source": st.cpu.source(),
                 "failed_reads": st.cpu.failed_reads(),
+                "syspolicyd_pct": st.policy_read.map(|(b, _)| b),
+                "syspolicyd_max_pct": st.policy_read.map(|(_, m)| m),
             },
             "now_ms": now,
         })

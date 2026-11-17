@@ -3110,6 +3110,22 @@ async fn cpu_history(
         .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
+/// The free space per volume over `?span=` (as `/cpu/history`), oldest first, as proto3 JSON.
+async fn disk_history(
+    Shared(d): Shared<Arc<Daemon>>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Res {
+    let span = match q.get("span") {
+        None => 3_600_000,
+        Some(s) => crate::diskhistory::parse_span(s)
+            .ok_or_else(|| fail(StatusCode::BAD_REQUEST, format!("span {s:?} is not a span")))?,
+    };
+    let h = d.disk_history(crate::daemon::now_ms(), span);
+    serde_json::to_value(&h)
+        .map(Json)
+        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
 /// The home view, as the monitors get it (proto3 JSON).
 async fn home_view(
     Shared(d): Shared<Arc<Daemon>>,
@@ -3720,6 +3736,7 @@ pub fn api_router(d: Arc<Daemon>) -> Router {
         .route("/resources", get(resources))
         .route("/cpu", get(cpu_usage))
         .route("/cpu/history", get(cpu_history))
+        .route("/disk/history", get(disk_history))
         .route("/views/home", get(home_view))
         .route("/targets", get(targets))
         .route("/health", get(health))

@@ -694,8 +694,8 @@ public final class MonitorModel: ObservableObject {
     /// Move a deferred task back to proposed.
     public func undefer(_ task: UInt64) { command { $0.undefer = .with { $0.task = task } } }
     /// The priorities the approval picker offers; it starts at `defaultApprovalPriority`.
-    public static let approvalPriorities = ["urgent", "high", "normal", "low"]
-    public static let defaultApprovalPriority = "normal"
+    nonisolated public static let approvalPriorities = ["urgent", "high", "normal", "low"]
+    nonisolated public static let defaultApprovalPriority = "normal"
     /// The tasks the Add blocker picker offers for `row`: any task in the sidebar that is not
     /// itself, not already a blocker, and could still land (not landed, canceled or failed).
     public func blockerCandidates(for row: TaskRow) -> [TaskRow] {
@@ -1277,6 +1277,12 @@ public struct HealthSnapshot: Equatable, Sendable {
     public var compileCpuMax: Int = 50
     /// Where the reading comes from (`mach`, `proc`, `top`, `loadavg`, `assumed-busy`); empty if not said.
     public var cpuSource: String = ""
+    /// syspolicyd's CPU use and the limit on it, when the daemon gates on it.
+    public var syspolicydPct: Int? = nil
+    public var syspolicydMaxPct: Int = 0
+
+    /// The syspolicyd line of the Health page's CPU section; nil with no gate.
+    public var policyLine: String? { policyReadingLine(busy: syspolicydPct, max: syspolicydMaxPct) }
 
     /// The CPU line of the Health page.
     public var cpuLine: String {
@@ -1302,6 +1308,8 @@ public struct HealthSnapshot: Equatable, Sendable {
             cpuBusy = c["busy_pct"] as? Int
             compileCpuMax = c["compile_max_pct"] as? Int ?? 50
             cpuSource = c["source"] as? String ?? ""
+            syspolicydPct = c["syspolicyd_pct"] as? Int
+            syspolicydMaxPct = c["syspolicyd_max_pct"] as? Int ?? 0
         }
     }
 }

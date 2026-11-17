@@ -264,6 +264,10 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
         private set
     /** Starts a terminal running this argument vector; false when it could not. The app sets it. */
     var launcher: ((List<String>) -> Boolean)? = null
+    /** Where process launches run. The app sets a worker pool; the default runs inline. */
+    var background: java.util.concurrent.Executor = java.util.concurrent.Executor { it.run() }
+    /** Where results of [background] work come back (the UI thread). The app sets it; the default runs inline. */
+    var ui: java.util.concurrent.Executor = java.util.concurrent.Executor { it.run() }
     /** Puts text on the clipboard. The app sets it. */
     var copier: ((String) -> Unit)? = null
     /** The CLI by its full path. */
@@ -321,11 +325,30 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
 
     fun go(p: Page) = navigate { h, s -> h.go(p, s) }
     /** Whether [n] is a task this monitor has heard of (in the sidebar, or named by the open task's page). */
-    fun isKnownTask(n: Long): Boolean {
-        if (sidebar?.sections?.any { sec -> sec.rows.any { it.id == n } } == true) return true
-        val d = taskDetail ?: return false
-        val r = d.row ?: return false
-        return r.id == n || n in r.blockers || n in r.blocks || d.debts.any { it.task == n } || d.proposal?.filed_by == n
+    fun isKnownTask(n: Long): Boolean = n in knownIds()
+
+    /** How many times the known-id set was rebuilt (tests). */
+    internal var knownRebuilds = 0
+        private set
+    private var knownSidebar: SidebarView? = null
+    private var knownDetail: TaskDetailView? = null
+    private var knownSet: Set<Long>? = null
+
+    /** The ids this monitor has heard of, rebuilt only when the sidebar or the task page is a new value. */
+    private fun knownIds(): Set<Long> {
+        val sb = sidebar
+        val d = taskDetail
+        knownSet?.let { if (sb === knownSidebar && d === knownDetail) return it }
+        knownRebuilds++
+        val ids = HashSet<Long>()
+        sb?.sections?.forEach { sec -> sec.rows.forEach { ids += it.id } }
+        d?.row?.let { r ->
+            ids += r.id; ids += r.blockers; ids += r.blocks
+            d.debts.forEach { ids += it.task }
+            d.proposal?.filed_by?.let { ids += it }
+        }
+        knownSidebar = sb; knownDetail = d; knownSet = ids
+        return ids
     }
 
     /** [text] as plain text, task links and URL links, for the open task's page. */
@@ -407,11 +430,20 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
 
     // ---- sidebar sections ----
 
-    fun isExpanded(s: SidebarSection): Boolean =
-        prefs.bool(sectionKey(s.state)) ?: overrides[s.state] ?: !s.collapsed
+    /** Stored section flags, each read from the store once (the store is a native call on macOS). */
+    private val storedExpanded = HashMap<String, Boolean?>()
+
+    fun isExpanded(s: SidebarSection): Boolean {
+        val over = overrides[s.state]  // read first: the state read is what recomposes on a change
+        val key = sectionKey(s.state)
+        val stored = if (storedExpanded.containsKey(key)) storedExpanded[key]
+            else prefs.bool(key).also { storedExpanded[key] = it }
+        return stored ?: over ?: !s.collapsed
+    }
 
     fun setExpanded(state: String, open: Boolean) {
         overrides = overrides + (state to open)
+        storedExpanded[sectionKey(state)] = open
         prefs.setBool(sectionKey(state), open)
     }
 
@@ -620,10 +652,17 @@ class MonitorModel(private val prefs: Preferences = MemoryPreferences()) {
     }
 
     private fun launchSession(task: Long, anyway: Boolean) {
-        if (launcher?.invoke(OpenSession.argv(cliPath, task, anyway)) == true) return
-        val line = OpenSession.commandLine(cliPath, task, anyway)
-        copier?.invoke(line)
-        sessionNotice = OpenSession.copiedNotice(line)
+        val argv = OpenSession.argv(cliPath, task, anyway)
+        val launch = launcher
+        val cli = cliPath
+        background.execute {
+            val ok = runCatching { launch?.invoke(argv) == true }.getOrDefault(false)
+            if (!ok) ui.execute {
+                val line = OpenSession.commandLine(cli, task, anyway)
+                copier?.invoke(line)
+                sessionNotice = OpenSession.copiedNotice(line)
+            }
+        }
     }
 
     /** Open the key sheet for [project] and ask the daemon which keys it could use. */

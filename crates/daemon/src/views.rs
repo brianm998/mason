@@ -1426,6 +1426,7 @@ impl<'a> Ctx<'a> {
         task: u64,
         step: &str,
         cpu_span_ms: u64,
+        disk_span_ms: u64,
     ) -> Option<View> {
         use mason_protocol::view::Body;
         let body = match kind {
@@ -1442,6 +1443,14 @@ impl<'a> Ctx<'a> {
                     3_600_000
                 } else {
                     cpu_span_ms
+                },
+            )),
+            ViewKind::DiskHistory => Body::DiskHistory(self.d.disk_history(
+                self.now,
+                if disk_span_ms == 0 {
+                    3_600_000
+                } else {
+                    disk_span_ms
                 },
             )),
             _ => return None,
