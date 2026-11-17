@@ -316,6 +316,9 @@ message ViewUpdate {
   View view = 2;
 }
 
+// Results are sent as commands finish, not in send order: the daemon runs a connection's
+// commands concurrently (a few at a time) and keeps send order only among commands about
+// the same task. Match a result to its command by `id`.
 message CommandResult {
   string id = 1;
   bool ok = 2;
