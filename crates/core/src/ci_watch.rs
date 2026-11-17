@@ -418,10 +418,7 @@ pub fn step(state: &mut State, runs: &[RunRec], ctx: &Ctx) -> Vec<File> {
         }
         for (name, js) in &ws.jobs {
             let from = js.checked.unwrap_or(js.red_since);
-            if js.red
-                && ctx.now_ms.saturating_sub(from) >= rules.red_ticket_after_ms
-                && !held(js)
-            {
+            if js.red && ctx.now_ms.saturating_sub(from) >= rules.red_ticket_after_ms && !held(js) {
                 due.push((
                     w.clone(),
                     name.clone(),
@@ -455,8 +452,7 @@ pub fn step(state: &mut State, runs: &[RunRec], ctx: &Ctx) -> Vec<File> {
 /// long-red rule does not file it again.
 fn held(js: &JobState) -> bool {
     js.covered != 0
-        && (js.last_red.run <= js.covered
-            || js.landed_ms.is_some_and(|l| js.last_red.at_ms < l))
+        && (js.last_red.run <= js.covered || js.landed_ms.is_some_and(|l| js.last_red.at_ms < l))
 }
 
 /// Red jobs the long-red rule holds back: `(key, run, ticket)`.
@@ -478,7 +474,9 @@ pub fn held_back(state: &State, rules: &Rules) -> Vec<(String, u64, Option<u64>)
 /// The text the status shows for a held-back job.
 pub fn held_text(key: &str, run: u64, ticket: Option<u64>) -> String {
     match ticket {
-        Some(t) => format!("{key} still red on run {run}; #{t} covered it; waiting for a newer run"),
+        Some(t) => {
+            format!("{key} still red on run {run}; #{t} covered it; waiting for a newer run")
+        }
         None => format!("{key} still red on run {run}; waiting for a newer run"),
     }
 }
@@ -896,8 +894,20 @@ mod tests {
     }
 
     fn red_filed(s: &mut State, task: u64) {
-        go(s, &[run(1, "CI", "success", &[("a", "success")])], 0, &none(), 0);
-        go(s, &[run(2, "CI", "failure", &[("a", "failure")])], 1000, &none(), 0);
+        go(
+            s,
+            &[run(1, "CI", "success", &[("a", "success")])],
+            0,
+            &none(),
+            0,
+        );
+        go(
+            s,
+            &[run(2, "CI", "failure", &[("a", "failure")])],
+            1000,
+            &none(),
+            0,
+        );
         let f = go_r(s, &[], 4 * H, &[], &BTreeMap::new());
         assert_eq!(f.len(), 1);
         filed(s, &f[0], Some(task), 4 * H, "u");
@@ -916,7 +926,10 @@ mod tests {
         for i in 1..=10 {
             assert!(go_r(&mut s, &[], 5 * H + i * 4 * H, &recent, &landed).is_empty());
         }
-        assert_eq!(held_back(&s, &rules()), vec![("CI/a".to_string(), 2, Some(5))]);
+        assert_eq!(
+            held_back(&s, &rules()),
+            vec![("CI/a".to_string(), 2, Some(5))]
+        );
         // A newer red run, of a commit after the landing: filed once.
         let mut r3 = run(3, "CI", "failure", &[("a", "failure")]);
         r3.created_ms = 6 * H;
@@ -942,8 +955,20 @@ mod tests {
     #[test]
     fn a_task_closed_citing_the_run_is_recorded_not_refiled() {
         let mut s = State::default();
-        go(&mut s, &[run(1, "CI", "success", &[("a", "success")])], 0, &none(), 0);
-        go(&mut s, &[run(2, "CI", "failure", &[("a", "failure")])], 1000, &none(), 0);
+        go(
+            &mut s,
+            &[run(1, "CI", "success", &[("a", "success")])],
+            0,
+            &none(),
+            0,
+        );
+        go(
+            &mut s,
+            &[run(2, "CI", "failure", &[("a", "failure")])],
+            1000,
+            &none(),
+            0,
+        );
         let recent = [RecentTask {
             id: 9,
             title: "something else".into(),
@@ -958,16 +983,40 @@ mod tests {
     fn a_terminal_task_outside_the_lookback_does_not_hold_a_newer_run() {
         // The daemon passes only tasks inside the lookback, so an older one is absent.
         let mut s = State::default();
-        go(&mut s, &[run(1, "CI", "success", &[("a", "success")])], 0, &none(), 0);
-        go(&mut s, &[run(2, "CI", "failure", &[("a", "failure")])], 1000, &none(), 0);
+        go(
+            &mut s,
+            &[run(1, "CI", "success", &[("a", "success")])],
+            0,
+            &none(),
+            0,
+        );
+        go(
+            &mut s,
+            &[run(2, "CI", "failure", &[("a", "failure")])],
+            1000,
+            &none(),
+            0,
+        );
         assert_eq!(go_r(&mut s, &[], 4 * H, &[], &BTreeMap::new()).len(), 1);
     }
 
     #[test]
     fn the_gate_freeze_holds_while_a_refile_is_held_back() {
         let mut s = State::default();
-        go(&mut s, &[run(1, "CI", "success", &[("pr-gate", "success")])], 0, &none(), 0);
-        let f = go(&mut s, &[run(2, "CI", "failure", &[("pr-gate", "failure")])], 1000, &none(), 0);
+        go(
+            &mut s,
+            &[run(1, "CI", "success", &[("pr-gate", "success")])],
+            0,
+            &none(),
+            0,
+        );
+        let f = go(
+            &mut s,
+            &[run(2, "CI", "failure", &[("pr-gate", "failure")])],
+            1000,
+            &none(),
+            0,
+        );
         assert_eq!(f.len(), 1);
         filed(&mut s, &f[0], Some(4), 1000, "u");
         assert!(go_r(&mut s, &[], 100 * H, &[], &BTreeMap::new()).is_empty());
