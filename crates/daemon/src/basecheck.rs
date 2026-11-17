@@ -16,13 +16,141 @@ use crate::jobs::{pty_wrap, step_env_pairs, Ctx};
 use mason_core::*;
 use mason_landing::git;
 use std::process::{Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard, TryLockError};
 use std::time::{Duration, Instant};
 
 /// One base run at a time, and one filing at a time: a second task with the same base
 /// waits, then finds the first one's result (or the first one's fix task).
-pub(crate) static BASE_RUN: Mutex<()> = Mutex::new(());
+pub(crate) static BASE_RUN: BaseRunLock = BaseRunLock::new();
 pub(crate) static FILING: Mutex<()> = Mutex::new(());
+
+/// Who holds the base-run lock: the task, what it runs there, and since when.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct BaseHolder {
+    pub task: u64,
+    /// For example "`cargo-workspace` at 7f5d57d812".
+    pub what: String,
+    pub since_ms: u64,
+}
+
+/// The lock behind "one base run at a time" that also remembers its holder, so a task that
+/// has to wait for it can say who it waits for (s536, decision 0529).
+pub(crate) struct BaseRunLock {
+    lock: Mutex<()>,
+    holder: Mutex<Option<BaseHolder>>,
+}
+
+/// Held for the length of one base run; clears the holder when dropped.
+pub(crate) struct BaseRunGuard<'a> {
+    owner: &'a BaseRunLock,
+    _held: MutexGuard<'a, ()>,
+}
+
+impl Drop for BaseRunGuard<'_> {
+    // Runs before the fields drop, so the holder is cleared while the lock is still held.
+    fn drop(&mut self) {
+        *self.owner.holder.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+}
+
+/// "Waiting for the base check: #452 is running `cargo-workspace` at 7f5d57d (22 min)".
+pub(crate) fn base_wait_text(holder: Option<&BaseHolder>, now_ms: u64) -> String {
+    match holder {
+        Some(h) => {
+            let mins = now_ms.saturating_sub(h.since_ms) / 60_000;
+            let age = if mins == 0 {
+                "under 1 min".to_string()
+            } else {
+                format!("{mins} min")
+            };
+            format!(
+                "Waiting for the base check: #{} is running {} ({age})",
+                h.task, h.what
+            )
+        }
+        None => "Waiting for the base check: another task is running one (holder unknown)".into(),
+    }
+}
+
+/// A command shortened to its first line and 60 characters, for a wait text.
+pub(crate) fn command_label(cmd: &str) -> String {
+    let line = cmd.lines().next().unwrap_or("").trim();
+    let mut out: String = line.chars().take(60).collect();
+    if out.len() < line.len() {
+        out.push_str("...");
+    }
+    format!("`{out}`")
+}
+
+impl BaseRunLock {
+    pub(crate) const fn new() -> Self {
+        BaseRunLock {
+            lock: Mutex::new(()),
+            holder: Mutex::new(None),
+        }
+    }
+
+    pub(crate) fn holder(&self) -> Option<BaseHolder> {
+        self.holder
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Take the lock for `task` running `what` (which already names the base). Free: no
+    /// callback runs. Held: `on_wait` gets the text and says whether it announced a wait,
+    /// then this blocks, and `on_end` runs once the lock is ours if it did.
+    pub(crate) fn take_with(
+        &self,
+        task: u64,
+        what: &str,
+        now_ms: impl Fn() -> u64,
+        on_wait: impl FnOnce(String) -> bool,
+        on_end: impl FnOnce(),
+    ) -> BaseRunGuard<'_> {
+        let held = match self.lock.try_lock() {
+            Ok(g) => g,
+            Err(TryLockError::Poisoned(e)) => e.into_inner(),
+            Err(TryLockError::WouldBlock) => {
+                let text = base_wait_text(self.holder().as_ref(), now_ms());
+                let waiting = on_wait(text);
+                let g = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+                if waiting {
+                    on_end();
+                }
+                g
+            }
+        };
+        *self.holder.lock().unwrap_or_else(|e| e.into_inner()) = Some(BaseHolder {
+            task,
+            what: what.to_string(),
+            since_ms: now_ms(),
+        });
+        BaseRunGuard {
+            owner: self,
+            _held: held,
+        }
+    }
+
+    /// As `take_with`, announcing a wait through the step's own events (class `base-run`).
+    pub(crate) fn take(&self, c: &Ctx, what: &str) -> BaseRunGuard<'_> {
+        self.take_with(
+            c.task.0,
+            what,
+            crate::daemon::now_ms,
+            |text| {
+                c.emit(EventKind::WaitStarted {
+                    task: c.task,
+                    on: text,
+                    class: Some("base-run".into()),
+                })
+            },
+            || {
+                c.emit(EventKind::WaitEnded { task: c.task });
+            },
+        )
+    }
+}
 
 /// The name a command's base result is kept under in `baselines.suite`.
 pub fn key_of(cmd: &str) -> String {
@@ -527,7 +655,10 @@ pub fn excuse(
     });
     let mut tail = String::new();
     let failing = {
-        let _g = BASE_RUN.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = BASE_RUN.take(
+            c,
+            &format!("{} at {}", command_label(base_cmd), short(&base)),
+        );
         cached_failures(&c.d.store, &base, &key, &mut || {
             let (names, t, _) = run_at_base(c, &base, build, base_cmd, &[])?;
             tail = t;
@@ -602,6 +733,69 @@ pub fn recorded(dir: &std::path::Path) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_uncontended_base_run_take_announces_nothing() {
+        let lock = BaseRunLock::new();
+        let mut waits = 0;
+        let mut ends = 0;
+        let g = lock.take_with(
+            7,
+            "`x` at abc",
+            || 5,
+            |_| {
+                waits += 1;
+                true
+            },
+            || ends += 1,
+        );
+        assert_eq!(lock.holder().map(|h| h.task), Some(7));
+        drop(g);
+        assert_eq!((waits, ends), (0, 0));
+        assert_eq!(lock.holder(), None);
+    }
+
+    #[test]
+    fn a_task_waiting_for_the_base_run_names_the_holder_and_takes_over() {
+        use std::sync::mpsc::channel;
+        let lock = BaseRunLock::new();
+        let (text_tx, text_rx) = channel::<String>();
+        let (end_tx, end_rx) = channel::<()>();
+        std::thread::scope(|s| {
+            let a = lock.take_with(452, "`cargo-workspace` at 7f5d57d", || 0, |_| true, || {});
+            let b = s.spawn(|| {
+                let g = lock.take_with(
+                    451,
+                    "`other` at 7f5d57d",
+                    || 22 * 60_000,
+                    |t| {
+                        text_tx.send(t).unwrap();
+                        true
+                    },
+                    || end_tx.send(()).unwrap(),
+                );
+                let holder = lock.holder();
+                drop(g);
+                holder
+            });
+            let text = text_rx.recv().unwrap();
+            assert_eq!(
+                text,
+                "Waiting for the base check: #452 is running `cargo-workspace` at 7f5d57d (22 min)"
+            );
+            drop(a);
+            let holder = b.join().unwrap();
+            assert_eq!(holder.map(|h| h.task), Some(451));
+        });
+        end_rx.recv().unwrap();
+        assert!(end_rx.try_recv().is_err(), "on_end ran once");
+        assert_eq!(lock.holder(), None);
+    }
+
+    #[test]
+    fn an_unknown_holder_is_said_to_be_unknown() {
+        assert!(base_wait_text(None, 0).contains("holder unknown"));
+    }
 
     #[test]
     fn a_client_suite_gets_the_exit_script_guard_requirement() {
