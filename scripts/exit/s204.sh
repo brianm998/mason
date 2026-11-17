@@ -11,8 +11,8 @@ cd "$(git rev-parse --show-toplevel)"
 
 # The daemon and the adapter.
 cargo test -q -p mason-adapters --test github a_failed_checks_details_url_is_carried_into_its_job_failure
-cargo test -q -p mason-daemon --test landing_modes a_red_batch_pull_request_gives_the_task_detail_ci_links
-cargo test -q -p mason-daemon --test editor
+cargo test -q -p mason-daemon --test it a_red_batch_pull_request_gives_the_task_detail_ci_links
+cargo test -q -p mason-daemon --test it editor::
 
 # Both clients' core targets (the fixtures are in LinkifyTests / LinkifyTest) and their
 # detail-view tests (offscreen: attributed and annotated strings, a hosting controller that is

@@ -29,8 +29,8 @@ tests() {  # PATTERN CARGO-TEST-ARGS...
 }
 
 echo "== 1. answers, approvals and rejections through the protocol"
-tests "test result|FAILED|panicked" -p mason-daemon --test approvals
-tests "test result|FAILED|panicked" -p mason-daemon --test protocol an_answer_carries_the_card_hash
+tests "test result|FAILED|panicked" -p mason-daemon --test it approvals::
+tests "test result|FAILED|panicked" -p mason-daemon --test it an_answer_carries_the_card_hash
 TESTS_LINES=1 tests "test result" -p mason-conformance
 
 echo "== 2. the owner is offered the buttons and a non-owner sees the card and none"

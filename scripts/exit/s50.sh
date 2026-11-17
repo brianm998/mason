@@ -4,6 +4,6 @@
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 cargo test -q -p mason-daemon tile_label
-cargo test -q -p mason-daemon --test protocol
+cargo test -q -p mason-daemon --test it protocol::
 cargo test -q -p mason-conformance
 echo "s50: ok"
