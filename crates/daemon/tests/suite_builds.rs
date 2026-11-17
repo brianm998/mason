@@ -298,3 +298,69 @@ fn a_scoped_run_check_runs_the_narrowed_command_and_the_test_step_still_runs_it_
     // Neither scoped green stood in for the test step: it ran the whole suite.
     assert!(logs.contains("RAN-FULL"), "{logs}");
 }
+
+/// s523: after a red full run, an unscoped `run_check` re-runs only the failing tests and the
+/// changed packages (in the small lane); after a green run it is full again; `full: true` is
+/// always full.
+#[test]
+fn after_a_red_full_run_an_unscoped_check_reruns_only_the_failures_and_the_changed_crates() {
+    // The failing test is named by the full command and by the re-run, until `hello.txt` exists.
+    let def = narrowable()
+        .replace(
+            r#"command = "echo RAN-FULL; sh checks.sh""#,
+            r#"command = "echo RAN-FULL; echo 'test a::b ... FAILED'; sh checks.sh""#,
+        )
+        .replace(
+            "rerun = \"echo RAN-RERUN {tests};",
+            "rerun = \"echo RAN-RERUN {tests}; [ -f crates/pk/hello.txt ] || echo 'test a::b ... FAILED';",
+        )
+        .replace(r#""hello.txt" = ["only"]"#, r#""crates/**" = ["only"]"#);
+    // Every changed path belongs to the one crate, so the changed packages can be named.
+    let checks = CHECKS.replace("hello.txt", "crates/pk/hello.txt");
+    let run = json!({"call": {"tool": "run_check", "args": {"name": "tests"}}});
+    let turns = json!([
+        {"sh": "mkdir -p crates/pk/src && printf '[package]\\nname = \"pk\"\\nversion = \"0.1.0\"\\nedition = \"2021\"\\n' > crates/pk/Cargo.toml && : > crates/pk/src/lib.rs && git add -A && git -c user.name=t -c user.email=t@t commit -qm crate"},
+        // Full, red: no hello.txt yet.
+        run,
+        // Narrowed to the one failure and the changed crate; still red.
+        run,
+        {"sh": "echo hello > crates/pk/hello.txt && git add -A && git -c user.name=t -c user.email=t@t commit -qm fix"},
+        // Narrowed again (the last run was red); green.
+        run,
+        // Green last time: full.
+        run,
+        {"call": {"tool": "run_check", "args": {"name": "tests", "full": true}}},
+        {"call": {"tool": "submit_change", "args": {"summary": "change", "head": "$HEAD"}}}
+    ]);
+    let s = Scratch::new("false", json!({"steps": {"develop": vec![turns]}}));
+    s.push_files(
+        &[
+            (".mason/mason.toml", def.as_str()),
+            ("checks.sh", checks.as_str()),
+            (
+                "Cargo.toml",
+                "[workspace]\nmembers = [\"crates/pk\"]\nresolver = \"2\"\n",
+            ),
+        ],
+        "project setup",
+    );
+    let d = s.start_with(|c| c.env_retry = Duration::from_millis(200));
+    let t = file_task_as(
+        &d,
+        "Rerun",
+        "Please do it.",
+        true,
+        TrustSource::Owner,
+        false,
+    );
+    wait_state(&d, t, State::Landed, 120);
+    let logs = render_logs(&d, t.0);
+    assert_eq!(
+        logs.matches("this re-ran the 1 tests that failed and the crates you changed")
+            .count(),
+        2,
+        "{logs}"
+    );
+    assert!(logs.contains("RAN-RERUN a::b"), "{logs}");
+    assert!(logs.contains("RAN-DEV -p pk"), "{logs}");
+}

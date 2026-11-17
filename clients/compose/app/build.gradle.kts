@@ -12,6 +12,7 @@ dependencies {
     implementation(compose.material3)
     implementation("org.json:json:20240303")
     testImplementation(kotlin("test"))
+    testImplementation("org.junit.platform:junit-platform-launcher")
     @OptIn(org.jetbrains.compose.ExperimentalComposeLibrary::class)
     testImplementation(compose.uiTest)
 }
@@ -59,10 +60,20 @@ distributions {
 
 tasks.test {
     useJUnitPlatform()
+    // Skiko unpacks its native library under ~/.skiko by default. Where that is not writable or
+    // not loadable (a sandboxed or shared home) every Skia-backed test dies with
+    // UnsatisfiedLinkError, so give the tests a fresh directory inside the build tree.
+    val skikoDir = layout.buildDirectory.dir("skiko").get().asFile
+    systemProperty("skiko.data.path", skikoDir.absolutePath)
+    doFirst { skikoDir.mkdirs() }
+
     // Skiko extracts and loads its native library in the test JVM, as the desktop run does.
     jvmArgs("--enable-native-access=ALL-UNNAMED")
     // Extract it somewhere this build owns, so a shared or read-only /tmp cannot break the load.
     val skikoTmp = layout.buildDirectory.dir("skiko-tmp").get().asFile
     doFirst { skikoTmp.mkdirs() }
     systemProperty("java.io.tmpdir", skikoTmp.absolutePath)
+    testLogging {
+        exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+    }
 }
