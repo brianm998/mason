@@ -4,4 +4,4 @@
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 cargo test -q -p mason-daemon --lib waiter
-cargo test -q -p mason-daemon --test lease_pid
+cargo test -q -p mason-daemon --test it lease_pid::

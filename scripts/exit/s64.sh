@@ -18,9 +18,9 @@ run "the words: ages, resets, trends, overage, blocked" -p mason-core usage_text
 run "the store: migration 16, thinned and pruned readings, per-attempt tokens" \
     -p mason-store --test store usage
 run "a real daemon with the fake agent: windows, restart with age, no-percentage window, api spend, token attribution, mason usage --json" \
-    -p mason-daemon --test usage
+    -p mason-daemon --test it usage::
 run "the demo daemon has accounts in several states and the usage items come out of them" \
-    -p mason-daemon --test protocol demo_usage
+    -p mason-daemon --test it demo_usage
 
 echo "== the usage page of each monitor against the demo daemon"
 root=$(mktemp -d /tmp/mason-s64.XXXXXX); daemon=""

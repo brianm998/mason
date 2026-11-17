@@ -133,7 +133,7 @@ fun MonitorModel.visibleItems(): List<Item> {
         }
         out += Item("sessions", listOf("${h.sessions_used} of ${h.sessions_limit}"), listOf("increase", "decrease"))
         h.compilation?.let { c ->
-            out += Item("compile", listOf("${c.used} of ${c.limit}", c.cpuLine), listOf("increase", "decrease"))
+            out += Item("compile", listOf("${c.used} of ${c.limit}", c.cpuLine) + listOfNotNull(c.policyLine), listOf("increase", "decrease"))
             val now = daemonNow()
             c.running.forEachIndexed { i, r ->
                 val texts = mutableListOf(r.label, Format.duration(maxOf(0L, now - r.since_ms)))

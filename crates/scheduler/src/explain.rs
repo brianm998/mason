@@ -61,6 +61,9 @@ pub struct Wait {
     /// How long this request has waited, when that is past `order.max_wait_s`
     /// and it has therefore moved ahead of other pipeline work.
     pub aged_ms: Option<u64>,
+    /// An exclusive request that has waited past `order.exclusive_max_wait_s`: how long it has
+    /// waited. It gave up its freeze, so other work runs again until the machine drains (s552).
+    pub thawed_ms: Option<u64>,
 }
 
 pub fn ordinal(n: usize) -> String {
@@ -243,7 +246,13 @@ fn reason(cause: &WaitCause, now_ms: u64) -> Option<String> {
 /// The sentence for one wait, like "Waiting for compile slot: 2nd in line,
 /// held by #91 for 4 min". Who is ahead is not named: `mason resources` lists it.
 pub fn explain(w: &Wait, now_ms: u64) -> String {
-    let text = explain_cause(w, now_ms);
+    let mut text = explain_cause(w, now_ms);
+    if let Some(ms) = w.thawed_ms {
+        text.push_str(&format!(
+            "; exclusive request waited {}: work runs again until the machine drains",
+            since(ms, 0)
+        ));
+    }
     match w.aged_ms {
         Some(ms) => format!(
             "{text}; waited {}: ahead of work as far along",
@@ -422,6 +431,7 @@ mod tests {
                 since: 0,
             }],
             aged_ms: None,
+            thawed_ms: None,
         }
     }
 
@@ -466,6 +476,7 @@ mod tests {
             }],
             held_by: vec![],
             aged_ms: None,
+            thawed_ms: None,
         };
         let s = explain(&w, 30_000);
         assert_eq!(

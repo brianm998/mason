@@ -45,6 +45,7 @@ struct Sub {
     task: u64,
     editor_step: String,
     cpu_span_ms: u64,
+    disk_span_ms: u64,
 }
 
 impl Default for Sub {
@@ -55,6 +56,7 @@ impl Default for Sub {
             task: 0,
             editor_step: String::new(),
             cpu_span_ms: 0,
+            disk_span_ms: 0,
         }
     }
 }
@@ -156,6 +158,7 @@ fn compute(d: &Daemon, sub: &Sub) -> (u64, Vec<View>) {
                 sub.task,
                 &sub.editor_step,
                 sub.cpu_span_ms,
+                sub.disk_span_ms,
             )
         })
         .collect();
@@ -293,6 +296,7 @@ async fn session(d: Arc<Daemon>, mut sock: WebSocket, peer: Option<crate::lan::P
                     task: sub.task,
                     editor_step: sub.editor_step.clone(),
                     cpu_span_ms: sub.cpu_span_ms,
+                    disk_span_ms: sub.disk_span_ms,
                 },
             );
             // Never an empty snapshot: wait for room, and failing that close, so
@@ -335,20 +339,23 @@ async fn session(d: Arc<Daemon>, mut sock: WebSocket, peer: Option<crate::lan::P
         _ => {}
     }
 
-    // Off the session loop: commands (one at a time, so results keep their order) and
+    // Off the session loop: commands (concurrent, ordered only within one task) and
     // view rebuilds, which come back through `out`.
     let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel::<Out>();
-    let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<Command>();
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<Command>();
     {
-        let (d2, out, peer2) = (d.clone(), out_tx.clone(), peer.clone());
-        tokio::spawn(async move {
-            while let Some(c) = cmd_rx.recv().await {
-                let r = run_command_as(&d2, c, peer2.as_ref()).await;
-                if out.send(Out::Result(r)).is_err() {
-                    break;
-                }
-            }
-        });
+        let (d2, peer2) = (d.clone(), peer.clone());
+        let run = move |c: Command| {
+            let (d3, peer3) = (d2.clone(), peer2.clone());
+            async move { run_command_as(&d3, c, peer3.as_ref()).await }
+        };
+        let out = out_tx.clone();
+        tokio::spawn(dispatch_commands(
+            cmd_rx,
+            CONN_COMMANDS_IN_FLIGHT,
+            run,
+            move |r| out.send(Out::Result(r)).is_ok(),
+        ));
     }
     // At most one rebuild queued or running; a tick meanwhile only marks it dirty.
     let mut gen: u64 = 0;
@@ -436,6 +443,7 @@ async fn session(d: Arc<Daemon>, mut sock: WebSocket, peer: Option<crate::lan::P
                             task: s.task,
                             editor_step: s.editor_step,
                             cpu_span_ms: s.cpu_span_ms,
+                            disk_span_ms: s.disk_span_ms,
                         });
                         gen += 1;
                         // What the client did not have (or what follows the task it
@@ -445,6 +453,7 @@ async fn session(d: Arc<Daemon>, mut sock: WebSocket, peer: Option<crate::lan::P
                                 || (*k == ViewKind::TaskDetail && old.task != sub.task)
                                 || (*k == ViewKind::Editor && old.editor_step != sub.editor_step)
                                 || (*k == ViewKind::CpuHistory && old.cpu_span_ms != sub.cpu_span_ms)
+                                || (*k == ViewKind::DiskHistory && old.disk_span_ms != sub.disk_span_ms)
                         }).collect();
                         if !first.is_empty() {
                             spawn_first(&d, &out_tx, Sub { views: first, ..sub.clone() }, gen);
@@ -673,6 +682,7 @@ async fn push_views(d: &Arc<Daemon>, sock: &mut WebSocket, sub: &Sub, e: Encodin
             task: sub.task,
             editor_step: sub.editor_step.clone(),
             cpu_span_ms: sub.cpu_span_ms,
+            disk_span_ms: sub.disk_span_ms,
         },
     );
     let Ok((seq, views)) = d.view_pool.run(move || compute(&d2, &s2)).await else {
@@ -884,6 +894,96 @@ fn result(
     }
 }
 
+/// Commands one connection may have running at once.
+const CONN_COMMANDS_IN_FLIGHT: usize = 4;
+/// Commands running at once across all connections, so one client cannot flood the
+/// blocking pool.
+const GLOBAL_COMMANDS_IN_FLIGHT: usize = 32;
+
+fn global_commands() -> &'static Arc<tokio::sync::Semaphore> {
+    static S: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+    S.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(GLOBAL_COMMANDS_IN_FLIGHT)))
+}
+
+/// The task a command is about, if it names one: commands on the same task keep their
+/// send order; all others may overlap.
+fn order_key(c: &Command) -> Option<u64> {
+    let call = call_for(c).ok()?;
+    if let Some((t, _)) = call.needs {
+        return Some(t);
+    }
+    let mut parts = call.path.trim_start_matches('/').split('/');
+    match (parts.next(), parts.next()) {
+        (Some("tasks" | "proposals"), Some(id)) => id.split('?').next()?.parse().ok(),
+        _ => None,
+    }
+}
+
+/// Run a connection's commands: at most `cap` at a time, in send order among those with
+/// the same `order_key`, results handed to `emit` as they finish (clients match by id).
+/// Stops when `emit` returns false or the sender is gone and all is done.
+async fn dispatch_commands<F, Fut>(
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<Command>,
+    cap: usize,
+    run: F,
+    emit: impl Fn(CommandResult) -> bool + Send,
+) where
+    F: Fn(Command) -> Fut + Send,
+    Fut: std::future::Future<Output = CommandResult> + Send + 'static,
+{
+    use std::collections::{HashSet, VecDeque};
+    let (done_tx, mut done_rx) =
+        tokio::sync::mpsc::unbounded_channel::<(Option<u64>, CommandResult)>();
+    let mut waiting: VecDeque<(Option<u64>, Command)> = VecDeque::new();
+    let mut active: HashSet<u64> = HashSet::new();
+    let mut running = 0usize;
+    let mut open = true;
+    loop {
+        // Start what may start, scanning in send order.
+        let mut i = 0;
+        while i < waiting.len() && running < cap {
+            let blocked = waiting[i].0.is_some_and(|k| active.contains(&k));
+            if blocked {
+                i += 1;
+                continue;
+            }
+            let (key, c) = waiting.remove(i).expect("in range");
+            if let Some(k) = key {
+                active.insert(k);
+            }
+            running += 1;
+            let fut = run(c);
+            let tx = done_tx.clone();
+            tokio::spawn(async move {
+                let _permit = global_commands().clone().acquire_owned().await.ok();
+                let r = fut.await;
+                let _ = tx.send((key, r));
+            });
+        }
+        if !open && running == 0 && waiting.is_empty() {
+            return;
+        }
+        tokio::select! {
+            c = rx.recv(), if open => match c {
+                Some(c) => {
+                    let k = order_key(&c);
+                    waiting.push_back((k, c));
+                }
+                None => open = false,
+            },
+            Some((key, r)) = done_rx.recv() => {
+                running -= 1;
+                if let Some(k) = key {
+                    active.remove(&k);
+                }
+                if !emit(r) {
+                    return;
+                }
+            }
+        }
+    }
+}
+
 /// Run a command through the same router the HTTP API uses.
 pub async fn run_command(d: &Arc<Daemon>, c: Command) -> CommandResult {
     run_command_as(d, c, None).await
@@ -981,6 +1081,150 @@ pub async fn run_command_as(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn cmd(id: &str, body: Cmd) -> Command {
+        Command {
+            id: id.into(),
+            body: Some(body),
+            ..Default::default()
+        }
+    }
+    fn approve(id: &str, task: u64) -> Command {
+        cmd(
+            id,
+            Cmd::Approve(mason_protocol::ApproveTask {
+                task,
+                ..Default::default()
+            }),
+        )
+    }
+    fn retry(id: &str, task: u64) -> Command {
+        cmd(
+            id,
+            Cmd::Retry(mason_protocol::Retry {
+                task,
+                ..Default::default()
+            }),
+        )
+    }
+    fn ssh(id: &str) -> Command {
+        cmd(
+            id,
+            Cmd::Raw(mason_protocol::Raw {
+                method: "POST".into(),
+                path: "/projects/x/ssh-key".into(),
+                json: String::new(),
+            }),
+        )
+    }
+
+    /// A fake runner: ids listed in `held` wait on a latch; every start is logged.
+    struct Fake {
+        latch: Arc<tokio::sync::Notify>,
+        held: Vec<String>,
+        started: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+    impl Fake {
+        fn new(held: &[&str]) -> Self {
+            Fake {
+                latch: Arc::new(tokio::sync::Notify::new()),
+                held: held.iter().map(|s| s.to_string()).collect(),
+                started: Arc::default(),
+            }
+        }
+        fn runner(
+            &self,
+        ) -> impl Fn(Command) -> std::pin::Pin<Box<dyn std::future::Future<Output = CommandResult> + Send>>
+        {
+            let (latch, held, started) =
+                (self.latch.clone(), self.held.clone(), self.started.clone());
+            move |c: Command| {
+                let (latch, held, started) = (latch.clone(), held.clone(), started.clone());
+                Box::pin(async move {
+                    started.lock().unwrap().push(c.id.clone());
+                    if held.contains(&c.id) {
+                        latch.notified().await;
+                    }
+                    result(&c.id, true, 200, "", String::new())
+                })
+            }
+        }
+    }
+
+    fn start(
+        fake: &Fake,
+        cap: usize,
+    ) -> (
+        tokio::sync::mpsc::UnboundedSender<Command>,
+        tokio::sync::mpsc::UnboundedReceiver<CommandResult>,
+    ) {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (otx, orx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(dispatch_commands(rx, cap, fake.runner(), move |r| {
+            otx.send(r).is_ok()
+        }));
+        (tx, orx)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_held_command_does_not_delay_one_for_another_task() {
+        let fake = Fake::new(&["ssh"]);
+        let (tx, mut rx) = start(&fake, 4);
+        tx.send(ssh("ssh")).unwrap();
+        tx.send(approve("a", 7)).unwrap();
+        let r = rx.recv().await.unwrap();
+        assert_eq!(r.id, "a", "results carry their command ids");
+        fake.latch.notify_one();
+        assert_eq!(rx.recv().await.unwrap().id, "ssh");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn commands_for_one_task_complete_in_send_order() {
+        let fake = Fake::new(&["a"]);
+        let (tx, mut rx) = start(&fake, 4);
+        tx.send(approve("a", 7)).unwrap();
+        tx.send(retry("b", 7)).unwrap();
+        tx.send(approve("c", 8)).unwrap();
+        assert_eq!(rx.recv().await.unwrap().id, "c");
+        // b has not started while a is held.
+        assert_eq!(*fake.started.lock().unwrap(), vec!["a", "c"]);
+        fake.latch.notify_one();
+        assert_eq!(rx.recv().await.unwrap().id, "a");
+        assert_eq!(rx.recv().await.unwrap().id, "b");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn more_than_the_cap_queue_rather_than_run() {
+        let fake = Fake::new(&["1", "2"]);
+        let (tx, mut rx) = start(&fake, 2);
+        for (i, id) in ["1", "2", "3"].iter().enumerate() {
+            tx.send(approve(id, 10 + i as u64)).unwrap();
+        }
+        // Let everything settle with 1 and 2 held: 3 is queued, not started.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(*fake.started.lock().unwrap(), vec!["1", "2"]);
+        fake.latch.notify_one();
+        assert!(rx.recv().await.is_some());
+        assert_eq!(fake.started.lock().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn order_keys_name_the_task() {
+        assert_eq!(order_key(&approve("x", 5)), Some(5));
+        assert_eq!(order_key(&ssh("x")), None);
+        let raw = |p: &str| {
+            cmd(
+                "x",
+                Cmd::Raw(mason_protocol::Raw {
+                    method: "GET".into(),
+                    path: p.into(),
+                    json: String::new(),
+                }),
+            )
+        };
+        assert_eq!(order_key(&raw("/tasks/9/session")), Some(9));
+        assert_eq!(order_key(&raw("/proposals/4/publish")), Some(4));
+    }
 
     #[tokio::test(start_paused = true)]
     async fn a_send_that_never_completes_times_out_in_virtual_time() {

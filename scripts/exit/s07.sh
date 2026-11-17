@@ -183,6 +183,6 @@ echo "refusal cleared"
 trap - EXIT; cleanup
 if [ -z "${MASON_TESTS_ALREADY_RAN:-}" ]; then
   cargo test -p mason-definition
-  cargo test -p mason-daemon --test definitions
+  cargo test -p mason-daemon --test it definitions::
 fi
 echo "s07 OK"

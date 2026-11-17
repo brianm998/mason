@@ -4,5 +4,5 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 cargo build -q --workspace --bins
-cargo test -q -p mason-daemon --test testing -- a_skip_ends_the_wait_for_a_build_slot_and_takes_no_slot
+cargo test -q -p mason-daemon --test it -- a_skip_ends_the_wait_for_a_build_slot_and_takes_no_slot
 echo "s263 OK"

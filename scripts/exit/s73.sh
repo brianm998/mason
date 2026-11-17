@@ -14,7 +14,7 @@ set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 echo "== 0. cargo tests"
 cargo test -q -p mason-engine --test state_entered
-cargo test -q -p mason-daemon --test protocol the_sidebar_is_in_queue_order_and_the_rest_newest_entry_first
+cargo test -q -p mason-daemon --test it the_sidebar_is_in_queue_order_and_the_rest_newest_entry_first
 root=$(mktemp -d /tmp/mason-s73.XXXXXX); daemon=""
 stop_daemon() {
   if [ -n "$daemon" ]; then kill -9 "$daemon" 2>/dev/null || true; wait "$daemon" 2>/dev/null || true; fi

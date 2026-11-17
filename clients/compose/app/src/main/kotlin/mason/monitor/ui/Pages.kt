@@ -264,6 +264,7 @@ fun CompilationSection(model: MonitorModel, c: Compilation, open: (() -> Unit)? 
             Text("${c.limit}", style = theme.body(FontWeight.SemiBold))
             Pill("+", modifier = Modifier.testTag("compile:increase")) { model.setCompileLimit(c.limit + 1) }
             Text(c.cpuLine, style = theme.body(color = theme.muted))
+            c.policyLine?.let { Text(it, style = theme.body(color = theme.muted)) }
         }
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(theme.spacing),
             modifier = Modifier.testTag("compile:cpu")) {
@@ -350,6 +351,12 @@ fun TaskDetailPage(model: MonitorModel, id: Long) {
     val d = model.taskDetail
     val row = d?.row
     if (d == null || row == null || row.id != id) {
+        // The sidebar already has this task: draw it now, fill in the rest when masond sends the page.
+        val known = if (model.connected) model.sidebarRow(id) else null
+        if (known != null) {
+            Scrolling(model) { TaskDetail(model, TaskDetailView(row = known), loading = true) }
+            return
+        }
         Text(if (model.connected) "Loading task #$id…" else "Not connected", style = theme.body(color = theme.muted),
             modifier = Modifier.padding(theme.spacingLarge))
         return
@@ -358,7 +365,7 @@ fun TaskDetailPage(model: MonitorModel, id: Long) {
 }
 
 @Composable
-private fun TaskDetail(model: MonitorModel, d: TaskDetailView) {
+private fun TaskDetail(model: MonitorModel, d: TaskDetailView, loading: Boolean = false) {
     val theme = LocalTheme.current
     val r = d.row ?: return
     Row(horizontalArrangement = Arrangement.spacedBy(theme.spacingLarge), verticalAlignment = Alignment.Top) {
@@ -386,6 +393,7 @@ private fun TaskDetail(model: MonitorModel, d: TaskDetailView) {
     }
     r.progress.running?.let { ProgressDetail(model, it) }
     ActionButtons(model, r, hasApprovalView = d.approval != null)
+    if (loading) Text("Loading details…", style = theme.body(color = theme.muted), modifier = Modifier.testTag("detail:loading"))
     if (r.blockers.isNotEmpty()) {
         Row(horizontalArrangement = Arrangement.spacedBy(theme.spacingSmall), modifier = Modifier.testTag("waiting-for")) {
             Text("waiting for", style = theme.body(color = theme.muted))
@@ -652,14 +660,18 @@ fun UsageAccount(p: mason.v1.ProviderStatus) {
 }
 
 @Composable
-fun HealthPage(model: MonitorModel) {
+fun HealthPage(model: MonitorModel, lateness: () -> LatenessWindow = { UiLateness.recent() }) {
     val theme = LocalTheme.current
     Scrolling(model) {
         Text("Health", style = theme.title())
         Text(if (model.connected) "Connected to masond. Event log at #${model.lastSeq}." else "Not connected.", style = theme.body())
+        // Read again whenever the page redraws (the health poll and the event log do that).
+        val window = remember(model.health, model.lastSeq) { lateness() }
+        Text(window.line(windowMinutes = 10), style = theme.body(), modifier = Modifier.testTag("health:ui-thread"))
         model.health?.let { h ->
             Section("Resources") { h.resources.forEach { Text("${it.name} (${it.kind}): ${it.used} of ${it.limit} in use", style = theme.body()) } }
             Text(h.cpuLine, style = theme.body())
+            h.policyLine?.let { Text(it, style = theme.body()) }
             Section("Waiting") {
                 if (h.waiting.isEmpty()) Text("Nothing is waiting.", style = theme.body(color = theme.muted))
                 h.waiting.forEach { Text(it, style = theme.body()) }

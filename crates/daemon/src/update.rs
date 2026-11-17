@@ -1235,7 +1235,8 @@ pub const MONITORS: [MonitorKind; 2] = [
         name: "swift",
         // The generated Swift protocol code and tokens are checked in under clients/swift.
         paths: &["clients/swift", "scripts/bundle-monitor.sh"],
-        build: "bash scripts/bundle-monitor.sh \"$MASON_MONITOR_OUT\"",
+        // Signed ad hoc unless MASON_SIGN_IDENTITY names a Developer ID (s513).
+        build: "SIGN_APP=1 SIGN_IDENTITY=\"${MASON_SIGN_IDENTITY:--}\" bash scripts/bundle-monitor.sh \"$MASON_MONITOR_OUT\"",
         product: "MASON.app",
     },
     MonitorKind {

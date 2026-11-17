@@ -15,6 +15,6 @@ run() {
 run "the parsers give live figures" -p mason-adapters --lib partial_messages
 run "stream events are not output" -p mason-core --lib progress
 run "the store keeps the tally" -p mason-store --test store
-run "live tokens end to end" -p mason-daemon --test live_tokens
+run "live tokens end to end" -p mason-daemon --test it live_tokens::
 
 echo "s76 OK"

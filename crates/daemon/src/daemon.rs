@@ -126,6 +126,8 @@ pub struct Daemon {
     cpu_reading: std::sync::RwLock<Arc<crate::cputasks::Reading>>,
     /// The readings over the last 24 hours, for the monitors' graph (the minute buckets are saved to `cpu-history.txt`, decision 0465).
     cpu_history: std::sync::Mutex<crate::cpuhistory::CpuRing>,
+    /// Free space per volume over the last 24 hours (the minute buckets are saved to `disk-history.txt`).
+    disk_history: std::sync::Mutex<crate::diskhistory::DiskRing>,
 }
 
 fn kind_name(k: &EventKind) -> String {
@@ -244,22 +246,17 @@ impl Daemon {
             cpu,
             &accounts,
         )?;
-        // The volumes that matter: the data directory (the store) and each project's build
-        // directories.
-        let mut disk_paths = vec![cfg.data_dir.clone()];
-        {
-            let home = std::env::var_os("HOME")
-                .map(PathBuf::from)
-                .unwrap_or_default();
-            for p in projects.values() {
-                if let Some(t) = &p.task_cache {
-                    let e = crate::taskcache::expand(t, 0, &home);
-                    if !e.trim().is_empty() {
-                        disk_paths.push(PathBuf::from(e));
-                    }
-                }
-            }
-        }
+        // The volumes that matter: the data directory, the caches, the projects and their
+        // worktrees (one function, so the floor, the stall prober and the history agree).
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_default();
+        let disk_paths: Vec<PathBuf> = crate::disk::relevant_paths(&cfg, projects.values(), &home)
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect();
+        let history_disk = disk.clone();
+        let sample_disk = cfg.disk.is_none();
         // A daemon whose CPU reading is injected is a test's: like the sampler, the
         // disk probe would add one set of threads per daemon, to no use.
         let measures_machine = cfg.cpu.is_none() && std::env::var_os("MASON_CPU_FILE").is_none();
@@ -329,6 +326,10 @@ impl Daemon {
             lan: crate::lan::LanState::new(),
             targets,
             cpu_reading: std::sync::RwLock::new(Arc::new(crate::cputasks::Reading::none())),
+            disk_history: std::sync::Mutex::new(crate::diskhistory::DiskRing::load(
+                &cfg.data_dir.join(crate::diskhistory::FILE),
+                now_ms(),
+            )),
             cpu_history: std::sync::Mutex::new(crate::cpuhistory::CpuRing::load(
                 &cfg.data_dir.join(crate::cpuhistory::FILE),
                 now_ms(),
@@ -364,6 +365,11 @@ impl Daemon {
                 || std::env::var_os("MASON_PS_FILE").is_some()
             {
                 crate::cputasks::spawn(&d);
+            }
+            // The disk history reads the real disk, or the file a script names; a daemon
+            // whose disk or CPU is injected in process is a test's and records by hand.
+            if sample_disk && (measures_machine || std::env::var_os("MASON_DISK_FILE").is_some()) {
+                crate::diskhistory::spawn(&d, history_disk);
             }
             crate::usage::spawn_probe(&d);
             d.spawn_watcher();
@@ -411,6 +417,28 @@ impl Daemon {
     /// The readings in the `span_ms` before `now_ms`, oldest first.
     pub fn cpu_history(&self, now_ms: u64, span_ms: u64) -> mason_protocol::CpuHistory {
         self.cpu_history
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .query(now_ms, span_ms)
+    }
+
+    /// Record one sampling of the volumes.
+    pub fn record_disk(&self, at_ms: u64, samples: &[crate::disk::VolumeSample]) {
+        self.disk_history
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(at_ms, samples);
+    }
+
+    /// Write the disk history's minute buckets to the data dir.
+    pub fn save_disk_history(&self) {
+        let ring = self.disk_history.lock().unwrap_or_else(|e| e.into_inner());
+        ring.save(&self.cfg.data_dir.join(crate::diskhistory::FILE));
+    }
+
+    /// The free space in the `span_ms` before `now_ms`, oldest first.
+    pub fn disk_history(&self, now_ms: u64, span_ms: u64) -> mason_protocol::DiskHistory {
+        self.disk_history
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .query(now_ms, span_ms)

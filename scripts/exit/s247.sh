@@ -15,5 +15,5 @@ run() {
 
 run "the failure classifier" -p mason-core --lib fail_class
 run "the retry schedule and the burst grouping" -p mason-daemon --lib autoretry
-run "the daemon retries by itself" -p mason-daemon --test auto_retry
+run "the daemon retries by itself" -p mason-daemon --test it auto_retry::
 echo "s247 OK"
