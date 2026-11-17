@@ -126,7 +126,11 @@ pub struct Ctx {
     pub state: State,
     /// How many times this step has run for the task, this run included.
     pub attempt: u32,
+    /// The project as the step started: what must not change mid-step (path, base,
+    /// remote). Limits that may change are read through `Ctx::live`.
     pub project: ProjectCfg,
+    /// Set once the step has logged that a live limit differs from its start value.
+    pub(crate) live_noted: std::sync::atomic::AtomicBool,
     pub project_id: ProjectId,
     pub title: String,
     pub body: String,
@@ -143,6 +147,43 @@ pub struct Ctx {
 }
 
 impl Ctx {
+    /// The project's settings as registered now, for limits that are safe to change
+    /// mid-step (`test_timeout`, `test_reruns`, `step_timeout`, `tool_timeout`):
+    /// a registration reload reaches a step that is already running. Falls back to
+    /// the step's own copy if the project is gone. Logs once per step when a live
+    /// value differs from the one the step started with.
+    pub fn live(&self) -> &ProjectCfg {
+        let Some(now) = self.d.project(self.project_id) else {
+            return &self.project;
+        };
+        let p = &self.project;
+        if (
+            now.test_timeout,
+            now.test_reruns,
+            now.step_timeout,
+            now.tool_timeout,
+        ) != (
+            p.test_timeout,
+            p.test_reruns,
+            p.step_timeout,
+            p.tool_timeout,
+        ) && !self
+            .live_noted
+            .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            tracing::info!(
+                task = self.task.0,
+                run = self.run.0,
+                test_timeout_s = ?(p.test_timeout.as_secs(), now.test_timeout.as_secs()),
+                test_reruns = ?(p.test_reruns, now.test_reruns),
+                step_timeout_s = ?(p.step_timeout.as_secs(), now.step_timeout.as_secs()),
+                tool_timeout_s = ?(p.tool_timeout.as_secs(), now.tool_timeout.as_secs()),
+                "step now uses project limits changed since it started (was, now)"
+            );
+        }
+        now
+    }
+
     /// Hand the step's resources back and let a waiting task have them.
     pub(crate) fn release_lease(&self) {
         let l = self.lease.lock().unwrap_or_else(|e| e.into_inner()).take();
@@ -563,7 +604,7 @@ fn repin_for_send_back(
     }
 }
 
-pub(crate) fn ctx(d: &Arc<Daemon>, task: TaskId, run: StepRunId) -> Result<Ctx, String> {
+pub fn ctx(d: &Arc<Daemon>, task: TaskId, run: StepRunId) -> Result<Ctx, String> {
     let w = d.world().map_err(|e| e.to_string())?;
     let t = w.tasks.get(&task).ok_or("the task is gone")?;
     let r = w.step_runs.get(&run).ok_or("the step run is gone")?;
@@ -626,6 +667,7 @@ pub(crate) fn ctx(d: &Arc<Daemon>, task: TaskId, run: StepRunId) -> Result<Ctx, 
         wt: project.worktree(&d.cfg, task.0),
         branch: project.branch(task.0),
         project,
+        live_noted: std::sync::atomic::AtomicBool::new(false),
         project_id: t.project,
         title: t.title.clone(),
         body: t.body.clone(),
@@ -3004,7 +3046,7 @@ fn agent_job(c: &Ctx) {
     let checks = Box::new(TestChecks {
         cmd: tests_cmd,
         wt: c.wt.clone(),
-        timeout: c.project.test_timeout,
+        timeout: c.live().test_timeout,
         slots: CheckSlots::new(c),
         extra: deadline_extra.clone(),
         id_prefix: format!("t{}r{}-check", c.task.0, c.run.0),
@@ -3122,12 +3164,12 @@ fn agent_job(c: &Ctx) {
         "MASON_TASK_CACHE".into(),
         crate::taskcache::own_dir(&c.d, c.task.0),
     ));
-    spec.tool_timeout = tool_timeout_for(kind, &c.project);
+    spec.tool_timeout = tool_timeout_for(kind, c.live());
     let budget = c
         .res
         .budget
         .as_ref()
-        .map_or(c.project.step_timeout, |a| a.value);
+        .map_or(c.live().step_timeout, |a| a.value);
     spec.deadline = Some(budget);
     // The host counts the limit from when it started, so what was credited and granted
     // before a daemon restart is read back and kept on disk (s401).
@@ -3855,7 +3897,7 @@ fn command_job(c: &Ctx) {
             uses
         }
     };
-    let reruns = if is_test { c.project.test_reruns } else { 0 };
+    let reruns = if is_test { c.live().test_reruns } else { 0 };
     let filter = c.project.rerun_filter.as_deref();
     let mut earlier: Vec<String> = vec![];
     // The tests that failed in every run so far (None: the first run's names were not
@@ -4324,7 +4366,7 @@ fn run_command_on(
         .res
         .budget
         .as_ref()
-        .map_or(c.project.test_timeout, |a| a.value);
+        .map_or(c.live().test_timeout, |a| a.value);
     if !dir.join("host.kv").exists() {
         let _ = std::fs::remove_file(result_file(c));
         let _ = std::fs::remove_file(progress_file(c));

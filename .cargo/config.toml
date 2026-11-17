@@ -1,0 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# The x86_64 linker does not sign its output (arm64 does). An unsigned Mach-O deleted while
+# syspolicyd scans it crashes syspolicyd, so ask ld for an ad hoc signature (s513).
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "link-arg=-Wl,-adhoc_codesign"]
