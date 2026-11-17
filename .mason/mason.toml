@@ -66,6 +66,11 @@ rerun = "{project_test} {tests}"
 # on 2026-11-13, once the running daemon knew the keys (s210, #265).
 dev_command = "{project_test} {packages}"
 dev_build = "{project_test} {packages} --no-run"
+# The fast unit tier (s509): a landing batch whose every task had its testing skipped runs this after
+# the build floor, so a bad merge of two green tasks is caught without the full run (which stays owed).
+# The library tests of every crate, then the engine's and the scheduler's own test targets (the
+# event-matrix test among them), the tests that read what a merge can break; about a minute.
+fast_command = "cargo test --workspace --lib && cargo test -p mason-engine -p mason-scheduler --tests"
 parser = "regex"
 pass_regex = '^test (.+) \.\.\. ok$'
 fail_regex = '^test (.+) \.\.\. FAILED$'
