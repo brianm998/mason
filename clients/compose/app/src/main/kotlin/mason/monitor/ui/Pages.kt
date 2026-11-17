@@ -264,6 +264,7 @@ fun CompilationSection(model: MonitorModel, c: Compilation, open: (() -> Unit)? 
             Text("${c.limit}", style = theme.body(FontWeight.SemiBold))
             Pill("+", modifier = Modifier.testTag("compile:increase")) { model.setCompileLimit(c.limit + 1) }
             Text(c.cpuLine, style = theme.body(color = theme.muted))
+            c.policyLine?.let { Text(it, style = theme.body(color = theme.muted)) }
         }
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(theme.spacing),
             modifier = Modifier.testTag("compile:cpu")) {
@@ -667,6 +668,7 @@ fun HealthPage(model: MonitorModel) {
         model.health?.let { h ->
             Section("Resources") { h.resources.forEach { Text("${it.name} (${it.kind}): ${it.used} of ${it.limit} in use", style = theme.body()) } }
             Text(h.cpuLine, style = theme.body())
+            h.policyLine?.let { Text(it, style = theme.body()) }
             Section("Waiting") {
                 if (h.waiting.isEmpty()) Text("Nothing is waiting.", style = theme.body(color = theme.muted))
                 h.waiting.forEach { Text(it, style = theme.body()) }

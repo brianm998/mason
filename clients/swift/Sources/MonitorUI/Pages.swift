@@ -255,6 +255,7 @@ struct CompilationSection: View {
                 Button { model.setCompileLimit(c.limit + 1) } label: { Image(systemName: "plus") }.touchTarget()
                     .accessibilityIdentifier("compile:increase")
                 Text(c.cpuLine).foregroundStyle(theme.muted)
+                if let p = c.policyLine { Text(p).foregroundStyle(theme.muted) }
             }
             .font(theme.body())
             .buttonStyle(.bordered)
@@ -795,6 +796,7 @@ struct HealthPage: View {
                         }
                     }
                     Text(h.cpuLine).font(theme.body())
+                    if let p = h.policyLine { Text(p).font(theme.body()) }
                     section("Waiting", theme: theme) {
                         if h.waiting.isEmpty { Text("Nothing is waiting.").font(theme.body()).foregroundStyle(theme.muted) }
                         ForEach(h.waiting, id: \.self) { Text($0).font(theme.body()) }

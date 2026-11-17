@@ -1277,6 +1277,12 @@ public struct HealthSnapshot: Equatable, Sendable {
     public var compileCpuMax: Int = 50
     /// Where the reading comes from (`mach`, `proc`, `top`, `loadavg`, `assumed-busy`); empty if not said.
     public var cpuSource: String = ""
+    /// syspolicyd's CPU use and the limit on it, when the daemon gates on it.
+    public var syspolicydPct: Int? = nil
+    public var syspolicydMaxPct: Int = 0
+
+    /// The syspolicyd line of the Health page's CPU section; nil with no gate.
+    public var policyLine: String? { policyReadingLine(busy: syspolicydPct, max: syspolicydMaxPct) }
 
     /// The CPU line of the Health page.
     public var cpuLine: String {
@@ -1302,6 +1308,8 @@ public struct HealthSnapshot: Equatable, Sendable {
             cpuBusy = c["busy_pct"] as? Int
             compileCpuMax = c["compile_max_pct"] as? Int ?? 50
             cpuSource = c["source"] as? String ?? ""
+            syspolicydPct = c["syspolicyd_pct"] as? Int
+            syspolicydMaxPct = c["syspolicyd_max_pct"] as? Int ?? 0
         }
     }
 }

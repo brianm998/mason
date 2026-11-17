@@ -283,6 +283,19 @@ public extension Mason_V1_Compilation {
     }
 }
 
+public extension Mason_V1_Compilation {
+    /// The syspolicyd line of the Compilation section; nil with no gate or no reading.
+    var policyLine: String? {
+        policyReadingLine(busy: syspolicydPct < 0 ? nil : Int(syspolicydPct), max: Int(syspolicydMaxPct))
+    }
+}
+
+/// "syspolicyd 640% — holding compiles over 300%"; nil when there is no gate or no reading.
+public func policyReadingLine(busy: Int?, max: Int) -> String? {
+    guard let b = busy, max > 0 else { return nil }
+    return b >= max ? "syspolicyd \(b)% — holding compiles over \(max)%" : "syspolicyd \(b)% — compiles held over \(max)%"
+}
+
 /// The CPU line shared by the Health page and the home page. A fallback source is named,
 /// so a held compile is not read as a broken gauge.
 public func cpuReadingLine(busy: Int?, source: String, gate: String) -> String {

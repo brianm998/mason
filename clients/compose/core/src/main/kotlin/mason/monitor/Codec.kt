@@ -35,7 +35,14 @@ data class HealthSnapshot(
     val compileCpuMax: Int = 50,
     /** Where the reading comes from (mach, proc, top, loadavg, assumed-busy); empty if not said. */
     val cpuSource: String = "",
+    /** syspolicyd's CPU use and the limit on it, when the daemon gates on it. */
+    val syspolicydPct: Int? = null,
+    val syspolicydMaxPct: Int = 0,
 ) {
+    /** The syspolicyd line of the Health page's CPU section; null with no gate. */
+    val policyLine: String?
+        get() = policyReadingLine(syspolicydPct, syspolicydMaxPct)
+
     /** The CPU line of the Health page. */
     val cpuLine: String
         get() = cpuReadingLine(cpuBusy, cpuSource, "a compile starts below $compileCpuMax%")
@@ -61,6 +68,8 @@ data class HealthSnapshot(
                 cpuBusy = ((v["cpu"] as? Map<String, Any?>)?.get("busy_pct") as? Number)?.toInt(),
                 compileCpuMax = ((v["cpu"] as? Map<String, Any?>)?.get("compile_max_pct") as? Number)?.toInt() ?: 50,
                 cpuSource = (v["cpu"] as? Map<String, Any?>)?.get("source") as? String ?: "",
+                syspolicydPct = ((v["cpu"] as? Map<String, Any?>)?.get("syspolicyd_pct") as? Number)?.toInt(),
+                syspolicydMaxPct = ((v["cpu"] as? Map<String, Any?>)?.get("syspolicyd_max_pct") as? Number)?.toInt() ?: 0,
             )
         }
     }

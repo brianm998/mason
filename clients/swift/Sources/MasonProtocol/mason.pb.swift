@@ -2548,6 +2548,13 @@ public nonisolated struct Mason_V1_Compilation: Sendable {
   /// command ...: it used no CPU for 30 min while holding a compile slot").
   public var notes: [String] = []
 
+  /// macOS's syspolicyd CPU use in percent of one core (700 is seven cores); -1 when there
+  /// is no reading or no gate.
+  public var syspolicydPct: Int32 = 0
+
+  /// A further compile waits while syspolicyd is at or above this; 0: no gate.
+  public var syspolicydMaxPct: UInt32 = 0
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -8029,7 +8036,7 @@ nonisolated extension Mason_V1_CompileWaiter: SwiftProtobuf.Message, SwiftProtob
 
 nonisolated extension Mason_V1_Compilation: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".Compilation"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}limit\0\u{1}used\0\u{1}running\0\u{1}pending\0\u{3}cpu_busy_pct\0\u{3}cpu_max_pct\0\u{3}settle_s\0\u{1}rules\0\u{3}cpu_source\0\u{1}notes\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}limit\0\u{1}used\0\u{1}running\0\u{1}pending\0\u{3}cpu_busy_pct\0\u{3}cpu_max_pct\0\u{3}settle_s\0\u{1}rules\0\u{3}cpu_source\0\u{1}notes\0\u{3}syspolicyd_pct\0\u{3}syspolicyd_max_pct\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -8047,6 +8054,8 @@ nonisolated extension Mason_V1_Compilation: SwiftProtobuf.Message, SwiftProtobuf
       case 8: try { try decoder.decodeSingularStringField(value: &self.rules) }()
       case 9: try { try decoder.decodeSingularStringField(value: &self.cpuSource) }()
       case 10: try { try decoder.decodeRepeatedStringField(value: &self.notes) }()
+      case 11: try { try decoder.decodeSingularInt32Field(value: &self.syspolicydPct) }()
+      case 12: try { try decoder.decodeSingularUInt32Field(value: &self.syspolicydMaxPct) }()
       default: break
       }
     }
@@ -8083,6 +8092,12 @@ nonisolated extension Mason_V1_Compilation: SwiftProtobuf.Message, SwiftProtobuf
     if !self.notes.isEmpty {
       try visitor.visitRepeatedStringField(value: self.notes, fieldNumber: 10)
     }
+    if self.syspolicydPct != 0 {
+      try visitor.visitSingularInt32Field(value: self.syspolicydPct, fieldNumber: 11)
+    }
+    if self.syspolicydMaxPct != 0 {
+      try visitor.visitSingularUInt32Field(value: self.syspolicydMaxPct, fieldNumber: 12)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -8097,6 +8112,8 @@ nonisolated extension Mason_V1_Compilation: SwiftProtobuf.Message, SwiftProtobuf
     if lhs.rules != rhs.rules {return false}
     if lhs.cpuSource != rhs.cpuSource {return false}
     if lhs.notes != rhs.notes {return false}
+    if lhs.syspolicydPct != rhs.syspolicydPct {return false}
+    if lhs.syspolicydMaxPct != rhs.syspolicydMaxPct {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

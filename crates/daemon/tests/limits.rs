@@ -233,6 +233,35 @@ fn a_busy_syspolicyd_holds_further_compiles_but_never_the_first() {
 }
 
 #[test]
+fn the_views_carry_the_syspolicyd_reading_and_limit() {
+    let dir = scratch("policyd-view");
+    let cfg = mason_daemon::sched::parse_resource_cfg(
+        "[cpu]\ncompile_settle_s = 0\nsyspolicyd_max_pct = 300\n",
+    )
+    .unwrap();
+    let b = broker(&dir, &cfg, &FakeCpu::replacing_compile_count(0));
+    let c = b.compilation();
+    assert_eq!(
+        (c.syspolicyd_pct, c.syspolicyd_max_pct),
+        (-1, 0),
+        "no gate yet"
+    );
+    let busy = FakePolicy::new(640);
+    b.set_policy(busy.clone(), cfg.syspolicyd_max_pct);
+    let c = b.compilation();
+    assert_eq!((c.syspolicyd_pct, c.syspolicyd_max_pct), (640, 300));
+    let snap = b.snapshot();
+    assert_eq!(snap["cpu"]["syspolicyd_pct"], 640);
+    assert_eq!(snap["cpu"]["syspolicyd_max_pct"], 300);
+    let (_, _, since) = b.policy_hold().unwrap();
+    assert!(since.is_some(), "over the limit starts the hold");
+    busy.set(20);
+    assert_eq!(b.compilation().syspolicyd_pct, 20);
+    let (_, _, since) = b.policy_hold().unwrap();
+    assert!(since.is_none(), "under the limit ends it");
+}
+
+#[test]
 fn compiles_start_one_at_a_time_on_an_idle_machine() {
     let dir = scratch("settle");
     let b = broker(
