@@ -1579,6 +1579,24 @@ impl Store {
         })
     }
 
+    /// The newest recorded baseline of `suite`: `(base, failing tests)`. These are runs of
+    /// the suite on the tree develop had, so it says what is red on develop (s520).
+    pub fn latest_baseline(
+        &self,
+        suite: &str,
+    ) -> Result<Option<(String, Vec<String>)>, StoreError> {
+        let s = suite.to_string();
+        self.read(move |c| {
+            c.query_row(
+                "SELECT base, failing FROM baselines WHERE suite = ?1 ORDER BY at DESC LIMIT 1",
+                params![s],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map(|o| o.map(|(b, f)| (b, f.lines().map(String::from).collect())))
+        })
+    }
+
     /// `(failing, all test names)` at a base commit, if it was worked out.
     #[allow(clippy::type_complexity)]
     pub fn baseline(

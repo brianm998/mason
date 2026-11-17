@@ -1219,3 +1219,21 @@ fn the_ledger_adds_one_entry_per_test_and_lifts_only_what_passed() {
     );
     assert_eq!(s.ledger().unwrap().len(), 1);
 }
+
+#[test]
+fn the_latest_baseline_of_a_suite_is_the_newest_by_time() {
+    let (_d, p) = db();
+    let s = Store::open(&p).unwrap();
+    assert!(s.latest_baseline("cargo").unwrap().is_none());
+    let t = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+    s.put_baseline("old", "cargo", &t(&["a"]), &t(&["a"]), 1, 10)
+        .unwrap();
+    s.put_baseline("new", "cargo", &[], &t(&["a"]), 1, 20)
+        .unwrap();
+    s.put_baseline("other", "lint", &t(&["z"]), &[], 1, 30)
+        .unwrap();
+    assert_eq!(
+        s.latest_baseline("cargo").unwrap(),
+        Some(("new".to_string(), vec![]))
+    );
+}
