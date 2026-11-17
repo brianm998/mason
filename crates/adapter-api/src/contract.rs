@@ -310,7 +310,9 @@ pub fn tool_spec(tool: &str) -> Option<(String, Value)> {
                 "packages": {"type": "array", "items": {"type": "string"},
                     "description": "Optional. Run only these packages (at most 20), on a suite that can."},
                 "changed": {"type": "boolean",
-                    "description": "Optional. Run only the packages your changes touch and what depends on them, on a suite that can."}
+                    "description": "Optional. Run only the packages your changes touch and what depends on them, on a suite that can."},
+                "full": {"type": "boolean",
+                    "description": "Optional. Run everything. After a red full run, an unscoped run_check re-runs only the tests that failed and the crates you changed; the next unscoped one, or full: true, is the full run."}
             }),
             &["name"],
         ),
@@ -688,6 +690,8 @@ pub struct CheckScope {
     pub packages: Vec<String>,
     /// Only what the worktree's changes touch.
     pub changed: bool,
+    /// Run everything, even after a red full run (s523). Not a narrowing: `is_empty` ignores it.
+    pub full: bool,
 }
 
 impl CheckScope {
@@ -706,6 +710,7 @@ impl CheckScope {
             tests: list("tests"),
             packages: list("packages"),
             changed: a.get("changed").and_then(Value::as_bool).unwrap_or(false),
+            full: a.get("full").and_then(Value::as_bool).unwrap_or(false),
         }
     }
 
@@ -1603,7 +1608,8 @@ mod tests {
             CheckScope {
                 tests: vec!["foo".into(), "a::b_c".into()],
                 packages: vec!["mason-daemon".into()],
-                changed: true
+                changed: true,
+                full: false
             }
         );
         for bad in [
