@@ -425,12 +425,15 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s482**: The kill test now waits until the hold is stored and both tasks have launched twice before it kills the daemon.
 - **s484**: The APNs provider-token cache now also compares a SHA-256 fingerprint of the key, so parallel tests (or a changed key) no longer get a token signed by another key.
 - **s491**: The Compose app tests pass the native-access flag and a build-owned temp directory to the test JVM so Skiko's native library loads and EditorSnapshotTest passes.
+- **s492**: The Compose test JVM unpacks Skia's native library into the build directory so MascotTest's image tests load it.
 - **s493**: The Compose app tests give Skiko a fresh data directory in the build tree so its native library loads and MascotTest passes.
 - **s494**: The Compose app's test JVM now allows native access, so the Skia-backed MascotTest and TopBarTest tests stop failing with UnsatisfiedLinkError.
 - **s496**: The Compose test JVM loads Skiko's native library at launcher-session start, so TopBarTest and MascotTest no longer fail with UnsatisfiedLinkError.
+- **s497**: The kill test now stores an hour-long hold before the kill, so a slow daemon restart cannot outlast it.
 - **s502**: a new `compile` gate holds further compiles while `syspolicyd` uses 300% CPU or more (`[cpu] syspolicyd_max_pct`), so MASON's builds and test runs cannot swamp the Mac's code checks again.
 - **s507**: `every_state_and_event_pair` passes again because `events()` in the engine matrix test no longer lists `Deferred` and `Undeferred` twice, and a duplicate name now fails with a clear message.
 - **s520**: `run_check` names each failing test that also failed in develop's latest recorded result for the suite ("red on develop at <sha> too: not your change; merge develop when it is fixed"), without waiting for the test to be quarantined.
 - **s522**: A develop agent's tool-call limit now covers the step's whole extended life plus the test timeout, so a `run_check` queued for a slot is no longer cut off while it runs.
 - **s530**: Live progress moves out of `sidebar` and `taskDetail` into a `ProgressStore` with one observed `TaskProgress` per task, so a StepProgress message no longer republishes the sidebar, bumps `sidebarRevision` or redraws any row body; only the named tasks' progress views redraw.
+- **s536**: Taking the one-base-run-at-a-time lock when another task holds it now emits a `WaitStarted` (class `base-run`) naming the holder, what it runs and for how long, and a `WaitEnded` when the lock is ours. Before, the waiter showed "running, no output for N min" with `wait: null`.
 <!-- status:end -->
