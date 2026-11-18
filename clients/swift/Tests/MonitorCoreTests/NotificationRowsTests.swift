@@ -9,7 +9,7 @@ import XCTest
 /// bar's height is remembered and clamped.
 @MainActor
 final class NotificationRowsTests: XCTestCase {
-    private func banner(_ kind: String, project: String = "p", mode: String = "", session: String = "", _ text: String) -> Mason_V1_Banner {
+    private func banner(_ kind: String, project: String = "p", mode: String = "", session: UInt64 = 0, _ text: String) -> Mason_V1_Banner {
         var b = Mason_V1_Banner()
         b.kind = kind
         b.project = project
