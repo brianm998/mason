@@ -43,19 +43,29 @@ final class NotificationBarTests: XCTestCase {
         view.fittingSize.height
     }
 
+    private func children(_ obj: NSObject) -> [Any] {
+        guard let p = obj as? NSAccessibilityProtocol else { return [] }
+        return p.accessibilityChildren() ?? []
+    }
+
+    private func identifier(_ obj: NSObject) -> String? {
+        guard let p = obj as? NSAccessibilityProtocol, let f = p.accessibilityIdentifier else { return nil }
+        return f()
+    }
+
     private func elements(_ root: Any) -> [NSObject] {
         var out: [NSObject] = []
         func walk(_ e: Any) {
             guard let obj = e as? NSObject else { return }
             out.append(obj)
-            for c in ((obj as? NSAccessibilityProtocol)?.accessibilityChildren?() ?? []) { walk(c) }
+            for c in children(obj) { walk(c) }
         }
         walk(root)
         return out
     }
 
     private func identifiers(_ view: NSView) -> Set<String> {
-        Set(elements(view).compactMap { ($0 as? NSAccessibilityProtocol)?.accessibilityIdentifier })
+        Set(elements(view).compactMap { identifier($0) })
     }
 
     func testTenRowsAreAsTallAsThreePlusTheHandle() {
@@ -88,7 +98,7 @@ final class NotificationBarTests: XCTestCase {
         let view = laidOut(m)
         let all = elements(view)
         func frame(_ id: String) -> CGRect? {
-            all.first { ($0 as? NSAccessibilityProtocol)?.accessibilityIdentifier == id }
+            all.first { identifier($0) == id }
                 .flatMap { ($0 as? NSAccessibilityProtocol)?.accessibilityFrame() }
         }
         guard let button = frame("show-hidden-notifications"), let text = frame("banner:0-text") else {
