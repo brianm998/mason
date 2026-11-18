@@ -11,11 +11,13 @@ cpu=$(mktemp); echo 0 > "$cpu"; export MASON_CPU_FILE="$cpu"
 trap 'rm -f "$cpu"' EXIT
 # MASON_EXIT_SHARD=i/n runs only every n-th script, starting at the i-th (CI splits them).
 shard=${MASON_EXIT_SHARD:-1/1}; si=${shard%/*}; sn=${shard#*/}
-fail=0; k=0
+fail=0; failed=""; k=0
 for s in scripts/exit/s[0-9][0-9].sh scripts/exit/s[0-9][0-9][0-9].sh; do
   [ -e "$s" ] || continue
   k=$((k + 1)); [ $(( (k - 1) % sn + 1 )) -eq "$si" ] || continue
   echo "== $s"
-  bash "$s" || { echo "FAILED: $s" >&2; fail=1; }
+  bash "$s" || { echo "FAILED: $s" >&2; fail=1; failed="$failed $s"; }
 done
+# Last stdout line, so a log tail names the failing scripts.
+[ "$fail" -eq 0 ] || echo "FAILED scripts:$failed"
 exit $fail
