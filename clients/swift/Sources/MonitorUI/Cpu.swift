@@ -101,8 +101,9 @@ struct CpuSectionBody: View {
                 Text(r.heading).font(theme.body(.semibold))
             }
             Text(r.title).font(theme.body()).foregroundStyle(theme.muted).lineLimit(1).truncationMode(.tail)
+                .layoutPriority(-1)
             Spacer(minLength: theme.spacing)
-            Text(Format.permille(r.permille)).font(theme.body()).monospacedDigit()
+            Text(Format.permille(r.permille)).font(theme.body()).monospacedDigit().lineLimit(1)
         }
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("cpu-legend:\(r.label)")
