@@ -472,13 +472,23 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s554**: stuck:wait no longer fires for tasks whose slot holders are changing; very old progressing waits give a note that never starts a health session.
 - **s556**: CLAUDE.md and docs/self-hosting.md now tell sessions to apply registration edits with `mason project reload` and to restart masond only for a fixed-key change, a new registration file or a new build (decision 0549).
 - **s557**: `MonitorModel.approvalPriorities` and `defaultApprovalPriority` are `nonisolated`, so using the default as a default argument of `approve` no longer warns under Swift 6 rules; the plain-approve test now pins the sent priority to "normal".
+- **s558**: A develop step's `run_check` calls now show their phase (waiting, building, running, done), live test counts as a `check <suite>` sub-progress, a per-call history (scope, wait, run time, result) and the agent's latest tool call with its age; rows carry the short form and the home page sums developing tasks by phase.
 - **s559**: With `task_cache_seed` on, a new task's build directory is an APFS clone of the landing area's warm build of the same commit (mtimes kept); off by default pending measurement.
+- **s560**: The Swift monitor's `MonitorModel`, `LiveState`, `CpuModel` and `TaskProgress` are `@Observable`, views take the model as a plain `let` (`@Bindable` where they bind), and daemon-fed writes (`lastResult`, `connected`, `header`, `home`, `usage`, …) are skipped when equal, so an announce claim or an identical view redraws nothing.
 - **s562**: The Compose monitor's home page shows a Disk section (free space per volume as a line chart with a span picker, a legend and per-volume checkboxes that are remembered) to the right of a narrowed CPU section, stacked below it on a narrow window, and has a `Disk` section page.
 - **s563**: UiThreadTest.isExpandedReadsEachKeyOnce now baselines the preference read count after constructing the model, so the constructor's mute read no longer fails it while any extra read per isExpanded call still does.
 - **s566**: PendingTaskPageTests now applies its sidebar view through the public `apply(Mason_V1_ServerMessage)` instead of the internal `apply(Mason_V1_View)`, so the Swift test target compiles and `swift test` prints its summary again.
 - **s567**: The s546 exit script now runs the landing_split tests through the `it` test binary, and s557 skips on Linux or with MASON_SKIP_SWIFT like the other Swift exit scripts.
+- **s571**: The s551 exit script pointed at a removed `ci_watch` test target and now runs the test through `--test it`.
 - **s572**: The Compose core tests that drive a real connection thread now wait up to 30 s instead of 5 s for their condition, so a loaded CI runner no longer fails one of them.
+- **s574**: s521 now runs the lint tests in the `it` test target, and the stuck:wait health test is confirmed fixed by 458f42b3.
+- **s575**: The shard-2 exit-scripts failure at c480ec5 could not be named from the supplied log tail and did not reproduce on current develop, so no code was changed.
+- **s576**: Exit scripts s514, s526 and s502 name the `it` test binary instead of the removed `limits` and `stop` targets, so CI/exit-scripts is green again.
+- **s577**: The s553 exit test named a deleted `base_red` test target and failed CI/exit-scripts; it now runs `--test it a_skip_with_no_step_name`.
+- **s579**: The fixsync test for a merge in progress now runs its conflicting merge with an identity and no editor or prompt, and asserts MERGE_HEAD and an unmerged entry exist before calling sync, reporting the merge's output if the setup fails.
+- **s580**: The daemon tests' orphan sweep is now compiled only on unix, with a no-op elsewhere, so the Windows `--all-targets` build no longer fails on the `nix` crate.
 - **s583**: The ci_cancels_superseded_runs test now asserts the current `cancel-in-progress: ${{ github.ref != 'refs/heads/develop' }}` rule, so CI/test on develop is green again.
 - **s584**: The smoke list named the crate `mason`, which is now `mason-pipeline`, so every cargo-workspace run failed before a test ran; it now names `mason-pipeline`, and an exit script checks each `-p` name in the smoke list against the workspace.
 - **s585**: `testImagesAreBuiltOnceAndThenServedFromTheCache` empties the shared mascot cache first, so it no longer fails when an earlier test has already built `icon:queued@24`.
+- **s596**: s12.sh step 1 now captures `swift test` output to a file and checks its exit status, instead of `grep | head -1` under pipefail.
 <!-- status:end -->

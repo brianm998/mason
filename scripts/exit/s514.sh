@@ -13,5 +13,5 @@ run() {
     echo "$out" | grep -E '^test result' | tail -1
 }
 
-run "the views carry the syspolicyd reading and limit" -p mason-daemon --test limits the_views_carry_the_syspolicyd_reading_and_limit
+run "the views carry the syspolicyd reading and limit" -p mason-daemon --test it limits::the_views_carry_the_syspolicyd_reading_and_limit
 run "a hold past the threshold raises the alert" -p mason-daemon --lib a_syspolicyd_hold_alerts

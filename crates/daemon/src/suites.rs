@@ -3154,6 +3154,59 @@ pub fn settle_debts(d: &Arc<Daemon>) -> usize {
 
 static IDLE_RUN: AtomicBool = AtomicBool::new(false);
 
+/// One debt payment at a time, machine-wide. Each is a full run of the skipped suites on the
+/// base branch's tip; a landing of several test-skipped tasks used to start them all at once,
+/// outside every broker limit, and the burst hung the machine.
+static PAYING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Hold what the definition's test step `uses` (`compile` and `test-suite` for MASON) while a
+/// debt runs, ranked behind the task's own work, so a payment queues like any test step and
+/// never runs beside a full set of them. Nothing to hold gives `Ok(None)`.
+fn hold_for_debt(
+    d: &Arc<Daemon>,
+    def: &Definition,
+    task: TaskId,
+    debt: u64,
+) -> Result<Option<crate::sched::Lease>, String> {
+    let Some(step) = def
+        .steps
+        .iter()
+        .find(|s| s.kind == mason_definition::StepType::Test)
+    else {
+        return Ok(None);
+    };
+    let needs = needs_of(&step.uses, None);
+    if !needs.exclusive && needs.amounts.is_empty() {
+        return Ok(None);
+    }
+    if needs.amounts.keys().any(|n| n.starts_with("device:")) {
+        d.targets.declare_all(d);
+    }
+    for name in needs.amounts.keys() {
+        if !name.starts_with("llm:") && !name.starts_with("device:") {
+            d.broker
+                .declare(name, def.resources.get(name).copied().unwrap_or(1));
+        }
+    }
+    let rank = match d.world().ok().and_then(|w| w.tasks.get(&task).cloned()) {
+        Some(t) => d.rank_for(&t, def, &step.name),
+        // A task the world no longer holds: behind everything, at low priority.
+        None => mason_scheduler::Rank::new(false, 100, 3, now_ms(), task.0, false),
+    };
+    // Beside: the task may still hold a step's own request (a debt paid by hand).
+    d.broker
+        .acquire_beside(
+            task,
+            &format!("debt #{debt}"),
+            rank,
+            needs,
+            &|| true,
+            &mut |_| {},
+        )
+        .map(Some)
+        .map_err(|_| "the wait for the test step's slots was cancelled".to_string())
+}
+
 /// Run the debts still open, one at a time, as work below every task: only while the compile
 /// queue is empty and a slot is free, and each debt once (a debt a run found red keeps
 /// `tried_at` and waits for the owner). Only debts whose task landed are run.
@@ -3254,6 +3307,17 @@ pub fn pay(d: &Arc<Daemon>, debt: u64) -> Result<String, String> {
     if suites.is_empty() {
         return Err("the debt's suite no longer exists in the definition".into());
     }
+    let _one = PAYING.lock().unwrap_or_else(|e| e.into_inner());
+    // Another payment may have settled this one while it waited.
+    if d.store
+        .debts(None, false)
+        .map_err(|e| e.to_string())?
+        .iter()
+        .any(|x| x.id == debt && x.status != "open")
+    {
+        return Ok("already paid".into());
+    }
+    let _lease = hold_for_debt(d, &def, TaskId(row.task), debt)?;
     if p.remote.is_some() {
         let _ = d.fetch_remote(pid);
     }
@@ -3425,15 +3489,20 @@ pub fn after_landing(d: &Arc<Daemon>, task: TaskId) {
     };
     // Every open debt of the landed task is paid, not only the deferred ones: a skipped
     // check is run once at the new base, so a skip never stays owed for good (s426).
-    for r in rows {
-        let d = d.clone();
-        let _ = std::thread::Builder::new()
-            .name(format!("debt-{}", r.id))
-            .spawn(move || match pay(&d, r.id) {
-                Ok(m) => tracing::info!(debt = r.id, "{m}"),
-                Err(e) => tracing::warn!(debt = r.id, "deferred run: {e}"),
-            });
-    }
+    // One thread pays them in turn, and `pay` itself runs one at a time behind the test
+    // step's slots: a batch of test-skipped tasks must not start a full run per debt at once.
+    let d = d.clone();
+    let _ = std::thread::Builder::new()
+        .name(format!("debts-{}", task.0))
+        .spawn(move || {
+            for r in rows {
+                match pay(&d, r.id) {
+                    Ok(m) => tracing::info!(debt = r.id, "{m}"),
+                    Err(e) => tracing::warn!(debt = r.id, "deferred run: {e}"),
+                }
+                settle_debts(&d);
+            }
+        });
 }
 
 /// Run the ledger's tests for fix `task` once on the base branch's tip. A test that passes
