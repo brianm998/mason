@@ -273,12 +273,8 @@ pub fn blocked_compiles(procs: &[ProcFact], min_s: u64) -> Vec<(String, u32, u64
         if !p.state.contains('U') || p.elapsed_s < min_s || p.cpu_s * 20 > p.elapsed_s {
             continue;
         }
-        if !p
-            .command
-            .split_whitespace()
-            .next()
-            .is_some_and(|c| c.rsplit('/').next() == Some("rustc"))
-        {
+        let first = p.command.split_whitespace().next();
+        if first.is_none_or(|c| c.rsplit('/').next() != Some("rustc")) {
             continue;
         }
         let dir = dependency_dir(&p.command).unwrap_or("(no -L dependency=)");
