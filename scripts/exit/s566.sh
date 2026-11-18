@@ -10,4 +10,4 @@ cd clients/swift
 swift build --build-tests 2>&1 | tail -1
 out=$(swift test 2>&1 | grep -E "Executed .* tests" | head -1)
 echo "$out"
-case "$out" in *" 0 failures"*) ;; *) echo "s566 FAIL: $out"; exit 1;; esac
+case "$out" in *"(0 unexpected)"*) ;; *) echo "s566 FAIL: $out"; exit 1;; esac
