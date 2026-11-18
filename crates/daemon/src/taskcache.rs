@@ -1060,7 +1060,7 @@ mod tests {
                 aside: aside.clone()
             }
         );
-        assert_eq!(removed, [aside.clone()]);
+        assert_eq!(removed, std::slice::from_ref(&aside));
         assert!(!dir.exists(), "the build starts with no deps at all");
         assert!(aside.join("debug/deps/x-aaaa.1.rcgu.o").exists());
         // Nothing there: nothing to do and nothing removed.
