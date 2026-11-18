@@ -1887,6 +1887,8 @@ impl Runner {
                             env: vec![],
                             limit: p.test_timeout,
                             tree: tree.clone(),
+                            holds: Default::default(),
+                            label: String::new(),
                             stop: {
                                 let (d, m) = (d.clone(), members.clone());
                                 Some(Arc::new(move || {
@@ -2493,6 +2495,8 @@ impl Runner {
                 env: vec![],
                 limit: self.project().test_timeout,
                 tree: crate::hostedcheck::tree_key(wt),
+                holds: Default::default(),
+                label: String::new(),
                 stop: Some({
                     let (d, m) = (d.clone(), members.clone());
                     Arc::new(move || m.forced(&d))
@@ -2591,6 +2595,8 @@ impl Runner {
                 env: vec![],
                 limit: self.project().test_timeout,
                 tree: crate::hostedcheck::tree_key(wt),
+                holds: Default::default(),
+                label: String::new(),
                 stop: Some({
                     let (d, m) = (d.clone(), members.clone());
                     Arc::new(move || m.forced(&d)) as crate::hostedcheck::StopFn
@@ -2763,6 +2769,8 @@ impl Runner {
                 env: vec![],
                 limit: self.project().test_timeout,
                 tree: crate::hostedcheck::tree_key(wt),
+                holds: Default::default(),
+                label: String::new(),
                 stop: stoppable.then(|| {
                     let (d, m, name) = (d.clone(), members.clone(), name.clone());
                     Arc::new(move || m.stop(&d, &name)) as crate::hostedcheck::StopFn
