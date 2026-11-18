@@ -270,6 +270,10 @@ impl Scratch {
         c.cpu = Some(mason_daemon::cpu::FakeCpu::new(0));
         // Nor the real disk: a full volume must not hold up the suite.
         c.disk = Some(mason_daemon::disk::FakeDisk::new_gb(1000));
+        // The launches the frozen-launch alert counts are the whole test process's: one test's
+        // host that is slow to come up on a busy Mac must not raise an alert in every other
+        // test's daemon (the notify tests count alerts and announcements exactly).
+        c.launch_frozen_alert = false;
         c
     }
 
