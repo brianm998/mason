@@ -1879,6 +1879,16 @@ impl TestChecks {
             .clone()
             .filter(|r| !r.is_empty() && scope.is_empty() && !scope.full);
         let tracks = scope.is_empty() || scope.full;
+        // An unscoped check runs what the change affects, not the whole workspace: on
+        // 2026-11-18, 87 of 111 develop checks ran every test binary (about 15 minutes each,
+        // docs-only changes too) and the queue for the test slots was hours long. `full: true`
+        // runs everything; the test step and the landing batch always do.
+        let by_default = red.is_none() && scope.is_empty() && !scope.full;
+        let defaulted = CheckScope {
+            changed: true,
+            ..scope.clone()
+        };
+        let scope: &CheckScope = if by_default { &defaulted } else { scope };
         let mut failing: Vec<String> = vec![];
         let mut auto_narrowed = false;
         let project_test = self.cmd.as_ref().map(|c| c.test.as_str());
@@ -1981,6 +1991,23 @@ impl TestChecks {
                         }
                         Some(Narrow::Targets(groups))
                     };
+                // A change no test of this suite reads (docs, markdown, exit scripts) runs none
+                // of it here; the test step still runs it whole.
+                if scope.changed
+                    && scope.tests.is_empty()
+                    && scope.packages.is_empty()
+                    && suite
+                        .dev_command
+                        .as_deref()
+                        .is_some_and(crate::scope::wants_tests)
+                    && paths.as_deref().is_some_and(crate::affected::reads_none)
+                {
+                    lines.push(format!(
+                        "{name}: not run, none of its tests reads what you changed (docs, \
+                         markdown, exit scripts); the test step runs it whole"
+                    ));
+                    continue;
+                }
                 if let (false, Some(t)) = (scope.tests.is_empty(), &suite.rerun) {
                     suite.command = t.replace(
                         "{tests}",
@@ -2180,7 +2207,13 @@ impl TestChecks {
                  (or with full: true) for it; it is the test step's check."
             ));
         }
-        if !narrowed.is_empty() {
+        if !narrowed.is_empty() && by_default {
+            lines.push(format!(
+                "Ran what your change affects ({}). The test step runs the whole workspace; \
+                 pass full: true only if you need all of it now.",
+                narrowed.join("; ")
+            ));
+        } else if !narrowed.is_empty() {
             lines.push(format!(
                 "Scoped ({}): this green is not the test step's. The test step runs the whole \
                  workspace; run one unscoped run_check before you submit.",
