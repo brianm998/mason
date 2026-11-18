@@ -476,5 +476,6 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s566**: PendingTaskPageTests now applies its sidebar view through the public `apply(Mason_V1_ServerMessage)` instead of the internal `apply(Mason_V1_View)`, so the Swift test target compiles and `swift test` prints its summary again.
 - **s567**: The s546 exit script now runs the landing_split tests through the `it` test binary, and s557 skips on Linux or with MASON_SKIP_SWIFT like the other Swift exit scripts.
 - **s583**: The ci_cancels_superseded_runs test now asserts the current `cancel-in-progress: ${{ github.ref != 'refs/heads/develop' }}` rule, so CI/test on develop is green again.
+- **s584**: The smoke list named the crate `mason`, which is now `mason-pipeline`, so every cargo-workspace run failed before a test ran; it now names `mason-pipeline`, and an exit script checks each `-p` name in the smoke list against the workspace.
 - **s585**: `testImagesAreBuiltOnceAndThenServedFromTheCache` empties the shared mascot cache first, so it no longer fails when an earlier test has already built `icon:queued@24`.
 <!-- status:end -->
