@@ -472,4 +472,7 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s556**: CLAUDE.md and docs/self-hosting.md now tell sessions to apply registration edits with `mason project reload` and to restart masond only for a fixed-key change, a new registration file or a new build (decision 0549).
 - **s557**: `MonitorModel.approvalPriorities` and `defaultApprovalPriority` are `nonisolated`, so using the default as a default argument of `approve` no longer warns under Swift 6 rules; the plain-approve test now pins the sent priority to "normal".
 - **s563**: UiThreadTest.isExpandedReadsEachKeyOnce now baselines the preference read count after constructing the model, so the constructor's mute read no longer fails it while any extra read per isExpanded call still does.
+- **s566**: PendingTaskPageTests now applies its sidebar view through the public `apply(Mason_V1_ServerMessage)` instead of the internal `apply(Mason_V1_View)`, so the Swift test target compiles and `swift test` prints its summary again.
+- **s567**: The s546 exit script now runs the landing_split tests through the `it` test binary, and s557 skips on Linux or with MASON_SKIP_SWIFT like the other Swift exit scripts.
+- **s583**: The ci_cancels_superseded_runs test now asserts the current `cancel-in-progress: ${{ github.ref != 'refs/heads/develop' }}` rule, so CI/test on develop is green again.
 <!-- status:end -->
