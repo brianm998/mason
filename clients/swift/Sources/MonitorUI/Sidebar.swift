@@ -297,7 +297,8 @@ struct RowView: View, Equatable {
         RowDuration(row: row, clock: clock, color: row.slow ? theme.slow : theme.muted)
     }
 
-    var activity: String { row.whyWaiting.isEmpty ? row.activity : row.whyWaiting }
+    var activity: String { QueueWait.line(row) }
+
 }
 
 /// Pinned at the bottom of the sidebar, under the list: every open owner session the owner is

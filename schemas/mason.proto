@@ -79,8 +79,7 @@ message Subscribe {
   // Send the body of every sidebar row. When false, rows in the history sections
   // (landed, canceled, deferred, failed) have an empty body; active sections keep theirs.
   // Set only while the sidebar's body search is on. Additive (s561).
-  bool row_bodies = 7;
-}
+  bool row_bodies = 7;}
 
 message Ping {
   uint64 nonce = 1;
@@ -499,10 +498,85 @@ message TaskRow {
   uint64 last_run = 25;
   // The owner's open chat session about this task, when there is one (s364). Additive.
   OwnerSessionInfo owner_session = 26;
+  // Why it waits, as data (`why_waiting` is made from the same data). Unset when the task is
+  // not waiting on the scheduler. Additive.
+  WaitInfo wait = 27;
   // When the task entered its state, in daemon time (0: not known). Clients work out the
   // time in state from it and their clock offset; `in_state_ms` is rounded to whole
   // minutes for older clients. Additive (s561).
-  uint64 state_since_ms = 27;
+  uint64 state_since_ms = 28;
+}
+
+// One party in a wait: a task, or a `mason run` lease that belongs to no task (a person's
+// command, `starpipe heavy`, a hook).
+message WaitParty {
+  // `#510`, or a one-line description of the command.
+  string label = 1;
+  // The task; 0 for a lease with no task.
+  uint64 task = 2;
+  // When it began to hold (a holder) or to wait (a waiter), ms since the epoch.
+  uint64 since_ms = 3;
+  // A lease that belongs to no task.
+  bool lease = 4;
+  // Where a lease came from: `cli`, `hook`, `starpipe`, ..., with the caller's working
+  // directory when known. Empty for a task.
+  string origin = 5;
+  // The whole command of a lease.
+  string command = 6;
+  // What it asks for: "exclusive", "compile", "compile, test-suite".
+  string needs = 7;
+  bool exclusive = 8;
+  // True: it holds what it asked for. False: it waits.
+  bool holding = 9;
+}
+
+// One link of a chain: who waits, and why.
+message WaitLink {
+  WaitParty party = 1;
+  // The reason code (see `WaitInfo.cause`); empty when the party is running.
+  string cause = 2;
+  // Its own wait, in words; empty when it is running.
+  string sentence = 3;
+}
+
+// A wait as data.
+message WaitInfo {
+  // full, behind, behind-exclusive, exclusive, cpu, settling, disk-stall, syspolicyd, memory,
+  // disk-floor, too-big, unknown.
+  string cause = 1;
+  // The resource it is for (`compile`, `llm:claude`, `exclusive`), or the gate (`cpu`).
+  string resource = 2;
+  // 1 is next in line.
+  uint32 position = 3;
+  // What holds the resource now.
+  repeated WaitParty holders = 4;
+  // The request it may not pass, when that is not a holder.
+  WaitParty blocker = 5;
+  // The whole chain: this task waits for X, X waits for Y. The first link is the blocker, or
+  // else the first holder.
+  repeated WaitLink chain = 6;
+  // The sentence, made from the fields above.
+  string sentence = 7;
+  // Who holds this one back (blocker, else first holder), for a badge.
+  string blocked_by = 8;
+}
+
+// What most of the waiting work is held by, for one line at the top of the home page.
+message QueueHold {
+  // exclusive-request, gate, red.
+  string kind = 1;
+  // behind-exclusive, cpu, syspolicyd, disk-stall, disk-floor, memory, settling, red.
+  string cause = 2;
+  // The line, with the numbers in it.
+  string summary = 3;
+  // How many tasks wait behind it.
+  uint32 waiting = 4;
+  // The request holding the queue (kind exclusive-request).
+  WaitParty party = 5;
+  // What that request waits for.
+  repeated WaitParty holders = 6;
+  // The tasks to link: the holders' tasks, or for a red the tasks failing the same way.
+  repeated uint64 tasks = 7;
 }
 
 // An owner session as a task row, the task page and the sidebar show it (s364).
@@ -747,6 +821,8 @@ message HomeView {
   // The project filter this view was computed for (empty: all projects). A client drops a view
   // whose project is not its current selection.
   string project = 9;
+  // What most of the waiting work is held by, when one thing holds it. Unset otherwise.
+  QueueHold queue_hold = 10;
 }
 
 // One bucket's share of the machine's CPU.
@@ -896,6 +972,9 @@ message Compilation {
   int32 syspolicyd_pct = 11;
   // A further compile waits while syspolicyd is at or above this; 0: no gate.
   uint32 syspolicyd_max_pct = 12;
+  // Leases that belong to no task, held or waiting, for any resource (a person's `mason run`,
+  // `starpipe heavy`, a hook), oldest first.
+  repeated WaitParty leases = 13;
 }
 
 message StepLine {
