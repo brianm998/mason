@@ -498,7 +498,7 @@ pub fn policy_hold_alert(
 }
 
 /// How long a launch may wait before it is called frozen. `MASON_LAUNCH_FROZEN_MS` overrides it.
-const LAUNCH_FROZEN_MS: u64 = 2 * 60 * 1000;
+pub(crate) const LAUNCH_FROZEN_MS: u64 = 2 * 60 * 1000;
 
 /// The task a host id belongs to: ids start `t<task>r<run>`.
 fn launch_task(id: &str) -> Option<u64> {
@@ -858,12 +858,9 @@ pub fn alerts_now(d: &Daemon) -> Vec<(String, String, String)> {
         now_ms(),
     ));
     out.extend(stall_alert(d.last_big_stall(), now_ms()));
-    let threshold = std::env::var("MASON_LAUNCH_FROZEN_MS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(LAUNCH_FROZEN_MS);
+    let threshold = d.cfg.launch_frozen.as_millis() as u64;
     out.extend(launch_frozen_alert(
-        &mason_step_host::launcher::launching(),
+        &mason_step_host::launcher::launching_under(&d.cfg.hosts_dir()),
         now_ms(),
         threshold,
         syspolicyd_running,

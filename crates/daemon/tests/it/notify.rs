@@ -81,12 +81,9 @@ fn pause(d: &Arc<Daemon>) {
     attention::sync_alerts(d);
 }
 
-// The daemon raises some alerts from process-wide state: `launch-frozen` reads the step-host
-// launcher's in-process list, which every other test in this executable that starts a step host
-// adds to. On a loaded machine such a launch waits past its threshold, and every daemon then
-// running here raised `launch-frozen` beside its own alert; that doubled the counts below in
-// whole-workspace runs. These tests are about the alert they raise, so they look at that kind
-// only.
+// `launch-frozen` is scoped to each daemon's own hosts directory, so other tests' step hosts no
+// longer raise it here. These tests are about the alert they raise, so they still look at that
+// kind only.
 
 /// The live alerts of `kind`, oldest first.
 fn alerts_of(d: &Daemon, kind: &str) -> Vec<mason_store::AlertRow> {
