@@ -130,6 +130,11 @@ fn ignorable(path: &str) -> bool {
     path.starts_with("docs/") || path.ends_with(".md") || path.starts_with("scripts/exit/")
 }
 
+/// Does a change touch only paths no cargo test of ours reads ([`ignorable`])? Empty: no.
+pub fn reads_none(paths: &[String]) -> bool {
+    !paths.is_empty() && paths.iter().all(|p| ignorable(p))
+}
+
 fn owner<'a>(pkgs: &'a [Pkg], path: &str) -> Option<&'a Pkg> {
     pkgs.iter()
         .filter(|p| !p.dir.is_empty())

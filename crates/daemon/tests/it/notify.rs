@@ -145,13 +145,8 @@ fn one_alert_one_delivery_one_reminder_and_silence_after_it_clears() {
 
     // A monitor plays the first announcement; only then is the sound and speech delivered, and
     // only then does a reminder follow.
-    assert_eq!(
-        notify::claim_at(&d, "mon", false, t0 + 100)["announcements"]
-            .as_array()
-            .unwrap()
-            .len(),
-        1
-    );
+    let first = notify::claim_at(&d, "mon", false, t0 + 100);
+    assert_eq!(count(&first), 1, "{first}");
     for _ in 0..3 {
         notify::tick_at(&d, t0 + 1_300);
     }
