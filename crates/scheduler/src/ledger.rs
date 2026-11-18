@@ -3,7 +3,7 @@
 use crate::explain::{explain, WaitCause};
 use crate::plan::{
     plan, Capacity, CompilePace, CpuGate, DiskGate, Holder, Kind, Needs, Plan, PolicyGate, Request,
-    StallGate, World, COMPILE,
+    StallGate, ThermalGate, World, COMPILE,
 };
 use crate::rank::Rank;
 use std::collections::BTreeMap;
@@ -22,6 +22,7 @@ pub struct Ledger {
     disk: Option<DiskGate>,
     stall: Option<StallGate>,
     policy: Option<PolicyGate>,
+    thermal: Option<ThermalGate>,
     /// When each resource last had a grant. Only observed, never consulted by `plan`.
     last_grant: BTreeMap<String, u64>,
     last_any_grant: Option<u64>,
@@ -104,6 +105,11 @@ impl Ledger {
     }
 
     /// The caller's latest reading of how busy `syspolicyd` is checking new programs.
+    /// The caller's latest reading of the CPU speed limit.
+    pub fn set_thermal(&mut self, thermal: Option<ThermalGate>) {
+        self.thermal = thermal;
+    }
+
     pub fn set_policy(&mut self, policy: Option<PolicyGate>) {
         self.policy = policy;
     }
@@ -196,6 +202,7 @@ impl Ledger {
                 disk: self.disk,
                 stall: self.stall,
                 policy: self.policy,
+                thermal: self.thermal,
                 max_wait: self.max_wait_ms,
                 exclusive_max_wait: self.exclusive_max_wait_ms,
             },
@@ -259,7 +266,9 @@ impl Ledger {
                     (COMPILE.to_string(), false, self.last_grant.get(COMPILE))
                 }
                 WaitCause::Exclusive => ("exclusive".into(), false, self.last_any_grant.as_ref()),
-                WaitCause::Memory { .. } => ("memory".into(), false, self.last_any_grant.as_ref()),
+                WaitCause::Memory { .. } | WaitCause::Thermal { .. } => {
+                    ("machine".into(), false, self.last_any_grant.as_ref())
+                }
                 WaitCause::Disk { .. } | WaitCause::DiskStall { .. } => continue,
             };
             let idle_ms = now.saturating_sub(last.copied().unwrap_or(0).max(r.since));
@@ -336,6 +345,7 @@ impl Ledger {
                 disk: self.disk,
                 stall: self.stall,
                 policy: self.policy,
+                thermal: self.thermal,
                 max_wait: self.max_wait_ms,
                 exclusive_max_wait: self.exclusive_max_wait_ms,
             },
