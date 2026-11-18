@@ -4038,7 +4038,8 @@ fn print_ci_watch(project: &str, w: &Value) {
     }
 }
 
-#[cfg(test)]
+// The fake provider is a unix shell script, so these tests only build on unix.
+#[cfg(all(test, unix))]
 mod open_session_tests {
     use super::*;
     use serde_json::json;

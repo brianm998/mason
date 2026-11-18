@@ -1007,8 +1007,8 @@ class MonitorCoreTest {
     private class FakeSocket(val port: Int, val events: SocketEvents) : MonitorSocket {
         val sent = java.util.concurrent.CopyOnWriteArrayList<String>()
         @Volatile var closed = false
-        override fun send(text: String): Boolean { if (!closed) sent += text; return !closed }
-        override fun close() { if (!closed) { closed = true; events.onClosed() } }
+        override fun send(text: String): Boolean { if (!closed) sent += text; testSignal.signal(); return !closed }
+        override fun close() { if (!closed) { closed = true; events.onClosed() }; testSignal.signal() }
     }
 
     private class Rig(val model: MonitorModel, stallAfter: Double = 15.0, var info: DaemonInfo? = DaemonInfo(7423, 1, 10)) {
@@ -1016,19 +1016,14 @@ class MonitorCoreTest {
         /** How many times the connection read daemon.json: once a session, then once a tick. */
         val discovered = java.util.concurrent.atomic.AtomicInteger()
         val conn = MonitorConnection(
-            model, { discovered.incrementAndGet(); info },
+            model, { discovered.incrementAndGet(); testSignal.signal(); info },
             ConnectionTiming(pingEverySeconds = 0.05, stallAfterSeconds = stallAfter, watchEverySeconds = 0.02, pauseScale = 0.01),
-            { port, ev -> FakeSocket(port, ev).also { sockets += it } },
+            { port, ev -> FakeSocket(port, ev).also { sockets += it; testSignal.signal() } },
         )
     }
 
-    private fun waitFor(what: String, f: () -> Boolean) {
-        val end = System.currentTimeMillis() + 30000
-        while (!f()) {
-            if (System.currentTimeMillis() > end) fail("timed out waiting for $what")
-            Thread.sleep(10)
-        }
-    }
+    private val signal = testSignal
+    private fun waitFor(@Suppress("UNUSED_PARAMETER") what: String, f: () -> Boolean) = signal.waitFor(f)
 
     private val welcome = """{"welcome":{"version":"test"}}"""
 
@@ -1231,12 +1226,12 @@ class MonitorCoreTest {
         val appliedOn = java.util.concurrent.CopyOnWriteArrayList<Thread>()
         val seen = java.util.concurrent.CopyOnWriteArrayList<String>()
         val m = MonitorModel(MemoryPreferences())
-        m.onResult = { appliedOn += Thread.currentThread(); seen += it.id }
+        m.onResult = { appliedOn += Thread.currentThread(); seen += it.id; testSignal.signal() }
         val sockets = java.util.concurrent.CopyOnWriteArrayList<FakeSocket>()
         val conn = MonitorConnection(
-            m, { DaemonInfo(7423, 1, 10) },
+            m, { testSignal.signal(); DaemonInfo(7423, 1, 10) },
             ConnectionTiming(pingEverySeconds = 0.05, watchEverySeconds = 0.02, pauseScale = 0.01),
-            { port, ev -> FakeSocket(port, ev).also { sockets += it } },
+            { port, ev -> FakeSocket(port, ev).also { sockets += it; testSignal.signal() } },
             decode = { decodedOn += Thread.currentThread(); Codec.decode(it) },
             ui = ui,
         )
