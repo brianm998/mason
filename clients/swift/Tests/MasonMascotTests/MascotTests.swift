@@ -10,6 +10,7 @@ import XCTest
 
 final class MascotTests: XCTestCase {
     func testImagesAreBuiltOnceAndThenServedFromTheCache() {
+        Mascot.emptyCacheForTests()
         XCTAssertNotNil(Mascot.illustration("all_clear"))
         let after = Mascot.imageLoads
         for _ in 0..<10 {
