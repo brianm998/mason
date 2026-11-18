@@ -45,13 +45,13 @@ final class NotificationBarTests: XCTestCase {
 
     private func children(_ obj: NSObject) -> [Any] {
         guard let p = obj as? NSAccessibilityProtocol else { return [] }
-        let c: [Any]? = p.accessibilityChildren
+        let c: [Any]? = p.accessibilityChildren()
         return c ?? []
     }
 
     private func identifier(_ obj: NSObject) -> String? {
-        guard let p = obj as? NSAccessibilityProtocol, let f = p.accessibilityIdentifier else { return nil }
-        return f()
+        guard let p = obj as? NSAccessibilityProtocol else { return nil }
+        return p.accessibilityIdentifier()
     }
 
     private func elements(_ root: Any) -> [NSObject] {
