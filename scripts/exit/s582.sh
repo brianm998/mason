@@ -4,5 +4,7 @@
 # Does not measure the xcrun-shim exec rate (see docs/stages/s582.md).
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
-cargo test -q -p mason-daemon --test world_slots
-cargo test -q -p mason-landing program_tests
+[ -n "${MASON_TESTS_ALREADY_RAN:-}" ] || {
+  cargo test -q -p mason-daemon --test world_slots
+  cargo test -q -p mason-landing program_tests
+}
