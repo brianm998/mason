@@ -480,12 +480,7 @@ pub struct Broker {
     /// and the queue-held summary (s527). Written with `waits_snap`, so the two agree.
     waits_view: std::sync::RwLock<Arc<crate::waitview::WaitsView>>,
     /// Per waiting task: its holders' grant times and the waiting count of its class.
-<<<<<<< HEAD
-    waits_holders: std::sync::RwLock<Arc<BTreeMap<TaskId, (Vec<u64>, u32)>>>,
-
-=======
     waits_holders: std::sync::RwLock<Arc<WaitHolders>>,
->>>>>>> origin/develop
     /// Time each task has spent under a CPU cause, updated by every `pass`.
     cpu_hold: Mutex<mason_scheduler::CpuHold>,
     /// The largest of those, for readers that must not take `st`.
