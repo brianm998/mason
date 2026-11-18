@@ -302,10 +302,32 @@ mod tests {
         let out = mason_landing::git::command()
             .arg("-C")
             .arg(&wt)
-            .args(["merge", "--no-edit", "base"])
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "commit.gpgsign=false",
+                "merge",
+                "--no-edit",
+                "base",
+            ])
+            .env("GIT_EDITOR", "true")
+            .env("GIT_TERMINAL_PROMPT", "0")
             .output()
             .unwrap();
-        assert!(!out.status.success());
+        let said = format!(
+            "stdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(!out.status.success(), "the merge should conflict: {said}");
+        git(&wt, &["rev-parse", "-q", "--verify", "MERGE_HEAD"]);
+        assert!(
+            git(&wt, &["status", "--porcelain"]).contains("UU a.txt"),
+            "no unmerged entry after the merge: {said}"
+        );
         let status = git(&wt, &["status", "--porcelain"]);
         let r = reds();
         assert!(matches!(
