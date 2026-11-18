@@ -479,6 +479,7 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s563**: UiThreadTest.isExpandedReadsEachKeyOnce now baselines the preference read count after constructing the model, so the constructor's mute read no longer fails it while any extra read per isExpanded call still does.
 - **s566**: PendingTaskPageTests now applies its sidebar view through the public `apply(Mason_V1_ServerMessage)` instead of the internal `apply(Mason_V1_View)`, so the Swift test target compiles and `swift test` prints its summary again.
 - **s567**: The s546 exit script now runs the landing_split tests through the `it` test binary, and s557 skips on Linux or with MASON_SKIP_SWIFT like the other Swift exit scripts.
+- **s568**: Every build directory a suite builds in (task, landing slot, develop comparison `base-*`, `wt`) is pruned before the build, one whose `deps` stat is over 2 MB is renamed aside and removed at background I/O priority, sizes show on the Compilation notes and `mason doctor`, and a health finding names the directory when many rustc sit in uninterruptible wait.
 - **s571**: The s551 exit script pointed at a removed `ci_watch` test target and now runs the test through `--test it`.
 - **s572**: The Compose core tests that drive a real connection thread now wait up to 30 s instead of 5 s for their condition, so a loaded CI runner no longer fails one of them.
 - **s574**: s521 now runs the lint tests in the `it` test target, and the stuck:wait health test is confirmed fixed by 458f42b3.
