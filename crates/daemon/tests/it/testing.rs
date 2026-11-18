@@ -696,6 +696,65 @@ fn paying_a_debt_writes_in_the_projects_test_command() {
 }
 
 #[test]
+fn a_debt_payment_waits_for_the_test_steps_slot_and_runs_once_it_is_free() {
+    // On 2026-11-18 a landing of nine test-skipped tasks started seven full test runs at
+    // once, one per debt, holding no broker slot, and the Mac hung until its watchdog reset
+    // it. A payment now queues for what the test step `uses`, like the test step itself.
+    let runs = tempfile::tempdir().unwrap();
+    let log = runs.path().join("ran");
+    let definition = def("", "uses = { compile = 1 }", "").replace(
+        "command = \"sh checks.sh\"",
+        &format!(
+            "command = \"echo debt >> {} && sh checks.sh\"",
+            log.display()
+        ),
+    );
+    let s = Scratch::new(
+        "sh checks.sh",
+        json!({"steps": {"develop": [commit(HELLO, "add hello")]}}),
+    );
+    s.push_files(
+        &[(".mason/mason.toml", &definition), ("checks.sh", CHECKS)],
+        "project setup",
+    );
+    let d = start(&s);
+    let t = file_it(&d, "Test me later");
+    wait_state(&d, t, State::Landed, 120);
+    s.push_files(&[("later.txt", "later\n")], "a later change");
+    let debt = mason_daemon::suites::skip(&d, t, "suite:checks", "owed", "brian", false).unwrap();
+    let _ = std::fs::remove_file(&log);
+    let Ok(held) = d.broker.acquire(
+        t,
+        "#holder",
+        mason_scheduler::Rank::new(false, 0, 0, 1, 1, false),
+        mason_scheduler::Needs::of(&[("compile", 1)]),
+        &|| true,
+        &mut |_| {},
+    ) else {
+        panic!("the holder was not granted the compile slot")
+    };
+    let payer = {
+        let d = d.clone();
+        std::thread::spawn(move || mason_daemon::suites::pay(&d, debt))
+    };
+    let label = format!("debt #{debt}");
+    wait_for("the payment to queue for the slot", 60, || {
+        d.broker.snapshot().to_string().contains(&label)
+    });
+    assert!(
+        !log.exists(),
+        "the debt ran its suite while the test step's slot was held"
+    );
+    drop(held);
+    let paid = payer.join().unwrap();
+    assert!(
+        paid.as_deref().is_ok_and(|m| m.starts_with("paid")),
+        "{paid:?}"
+    );
+    assert!(log.exists(), "the payment never ran the suite");
+}
+
+#[test]
 fn paying_a_debt_runs_the_worktree_setup_first() {
     // On 2026-11-14 star's base checks could never build: MASON's own checkouts skipped the
     // `setup` command step that links star's gitignored OpenCV into a worktree (s312).

@@ -42,7 +42,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
 /// `ios/project.yml` by XcodeGen (`make ios`); it is not committed.
 @main
 struct MasonIOSApp: App {
-    @StateObject private var model: MonitorModel
+    @State private var model: MonitorModel
     @StateObject private var session: RemoteSession
     @StateObject private var pairing: PairingModel
     @StateObject private var nearby: NearbyList
@@ -70,7 +70,7 @@ struct MasonIOSApp: App {
         AppDelegate.push = push
         AppDelegate.model = model
         _push = StateObject(wrappedValue: push)
-        _model = StateObject(wrappedValue: model)
+        _model = State(initialValue: model)
         _session = StateObject(wrappedValue: session)
         _pairing = StateObject(wrappedValue: PairingModel(session: session, store: store, tokens: tokens, deviceName: UIDevice.current.name))
         _nearby = StateObject(wrappedValue: NearbyList(source: source))
@@ -104,7 +104,7 @@ struct MasonIOSApp: App {
 /// Picks the layout by horizontal size class: regular is the iPad root (the shared
 /// `RootView` until the iPad layout exists), compact is the phone's. A gear opens Settings.
 struct AppRoot: View {
-    @ObservedObject var model: MonitorModel
+    let model: MonitorModel
     let session: RemoteSession
     let pairing: PairingModel
     let push: PushRegistrar

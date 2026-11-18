@@ -2,13 +2,15 @@
 
 import Foundation
 import MasonProtocol
+import Observation
 
 /// One task's live progress cells, observed apart from the model: a progress message for the task
 /// redraws the views that watch this object and nothing else. `nil` means "no live update since
 /// the last view": the view's own cells are the truth.
 @MainActor
-public final class TaskProgress: ObservableObject {
-    @Published public var cells: [ProgressCell]?
+@Observable
+public final class TaskProgress {
+    public var cells: [ProgressCell]?
     public init() {}
 }
 
