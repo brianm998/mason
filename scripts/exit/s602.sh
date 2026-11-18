@@ -17,5 +17,5 @@ echo "$out" | tail -1 | grep -qx 'FAILED scripts: scripts/exit/s02.sh scripts/ex
 rm scripts/exit/s02.sh scripts/exit/s03.sh
 out=$(bash scripts/run-exit-scripts.sh 2>&1) || fail "green tree exited nonzero"
 ! echo "$out" | grep -q 'FAILED' || fail "green run printed FAILED"
-bash "$here/scripts/exit/s585.sh" | grep -qx 's585: ok' || fail "s585 prints no verdict"
+MASON_SKIP_SWIFT=1 bash "$here/scripts/exit/s585.sh" | grep -qx 's585: ok' || fail "s585 prints no verdict"
 echo "s602: ok"
