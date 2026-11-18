@@ -31,7 +31,13 @@ pub fn check_template(t: &str) -> Result<(), String> {
 /// Expand `$HOME`, `${HOME}`, other environment variables, a leading `~` and `{task}`.
 /// A variable that is not set expands to nothing.
 pub fn expand(template: &str, task: u64, home: &Path) -> String {
-    let mut s = template.replace("{task}", &task.to_string());
+    expand_name(template, &task.to_string(), home)
+}
+
+/// [`expand`] with any name in place of `{task}` (the landing area's directories are named
+/// `<project>-b<slot>`).
+pub fn expand_name(template: &str, name: &str, home: &Path) -> String {
+    let mut s = template.replace("{task}", name);
     if s == "~" || s.starts_with("~/") {
         s = format!("{}{}", home.display(), &s[1..]);
     }
@@ -159,7 +165,8 @@ fn unit_crate(unit: &str) -> &str {
 /// Which of `files` (name, modified ms) are stale codegen-unit objects. Cargo's macOS default
 /// leaves each unit's `.rcgu.o` beside the executable because the debug info is read from it,
 /// one more set per crate hash. For each crate the set with the newest object is the live one
-/// and stays; sets of older hashes go, except any object modified within the grace period.
+/// and stays; sets of older hashes go, except any object modified within the grace period, and
+/// none of a crate's older sets go while its newest set is itself within the grace period.
 pub fn stale_objects(files: &[(String, u64)], now_ms: u64) -> Vec<String> {
     let mut newest: std::collections::BTreeMap<&str, (&str, u64)> = Default::default();
     for (f, t) in files {
@@ -175,10 +182,11 @@ pub fn stale_objects(files: &[(String, u64)], now_ms: u64) -> Vec<String> {
             let Some(unit) = object_unit(f) else {
                 return false;
             };
-            newest
-                .get(unit_crate(unit))
-                .is_some_and(|(live, _)| *live != unit)
-                && now_ms.saturating_sub(*t) >= OBJECT_GRACE_MS
+            // While a crate's newest set is still within the grace period a build may be
+            // writing it, and the set before it is the last complete one: keep both until then.
+            newest.get(unit_crate(unit)).is_some_and(|(live, live_t)| {
+                *live != unit && now_ms.saturating_sub(*live_t) >= OBJECT_GRACE_MS
+            }) && now_ms.saturating_sub(*t) >= OBJECT_GRACE_MS
         })
         .map(|(f, _)| f.clone())
         .collect()
@@ -530,6 +538,137 @@ pub fn point_cargo_at_task_cache(d: &Daemon, p: &ProjectCfg, task: u64, wt: &Pat
     }
 }
 
+/// Clone `src` to `dst` with APFS copy-on-write, keeping mtimes (`cp -c -R -p`). `dst` must not
+/// exist. On a system without `cp -c` this fails, and the caller goes on cold.
+pub fn apfs_clone(src: &Path, dst: &Path) -> Result<(), String> {
+    if !cfg!(target_os = "macos") {
+        return Err("APFS clones are macOS only".into());
+    }
+    let o = std::process::Command::new("/bin/cp")
+        .args(["-c", "-R", "-p"])
+        .arg(src)
+        .arg(dst)
+        .output()
+        .map_err(|e| format!("cp: {e}"))?;
+    if o.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&o.stderr).trim().to_string())
+    }
+}
+
+/// What [`seed_from`] did.
+#[derive(Debug, PartialEq)]
+pub enum Seeded {
+    /// Cloned from this directory.
+    From(PathBuf),
+    /// Nothing done, and why.
+    Skipped(String),
+    /// The clone failed; the task builds cold.
+    Failed(String),
+}
+
+/// Seed `dest` (a task's build directory, which must not exist) from the first of `sources`
+/// whose commit is `base`. `sources` are `(commit, build directory)` pairs. The clone goes to a
+/// sibling and is renamed into place, so a failed or killed clone leaves no half directory.
+/// `clone` is [`apfs_clone`] outside tests.
+pub fn seed_from(
+    dest: &Path,
+    base: &str,
+    sources: &[(String, PathBuf)],
+    clone: &dyn Fn(&Path, &Path) -> Result<(), String>,
+) -> Seeded {
+    if std::fs::symlink_metadata(dest).is_ok() {
+        return Seeded::Skipped("the directory already exists".into());
+    }
+    // A build of any other commit is never used: see decision 0552 on mtimes.
+    let Some((_, src)) = sources
+        .iter()
+        .find(|(c, dir)| c == base && dir.is_dir() && dir != dest)
+    else {
+        return Seeded::Skipped("no warm build of the base commit".into());
+    };
+    let Some(name) = dest.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+        return Seeded::Skipped("the directory has no name".into());
+    };
+    let tmp = dest.with_file_name(format!(".{name}.seeding"));
+    if let Some(parent) = dest.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            return Seeded::Failed(format!("{}: {e}", parent.display()));
+        }
+    }
+    let _ = std::fs::remove_dir_all(&tmp);
+    if let Err(e) = clone(src, &tmp) {
+        let _ = std::fs::remove_dir_all(&tmp);
+        return Seeded::Failed(e);
+    }
+    match std::fs::rename(&tmp, dest) {
+        Ok(()) => Seeded::From(src.clone()),
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&tmp);
+            Seeded::Failed(format!("{}: {e}", dest.display()))
+        }
+    }
+}
+
+fn head_of(dir: &Path) -> Option<String> {
+    let (ok, h) = git_out(dir, &["rev-parse", "HEAD"]).ok()?;
+    (ok && !h.is_empty()).then_some(h)
+}
+
+/// When the project's `task_cache_seed` is on and the task's directory does not exist yet, clone
+/// a landing build of the commit `wt` is at into it. Logged, never fatal.
+pub fn seed_task_cache(d: &Daemon, p: &ProjectCfg, task: u64, wt: &Path) {
+    if !p.task_cache_seed {
+        return;
+    }
+    let Some(t) = p.task_cache.as_ref() else {
+        return;
+    };
+    let Some(Ok(dest)) = target(d, p, task) else {
+        return;
+    };
+    if std::fs::symlink_metadata(&dest).is_ok() {
+        return;
+    }
+    let Some(base) = head_of(wt) else {
+        return;
+    };
+    let h = home();
+    let prefix = format!("{}-b", p.id);
+    let mut sources = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(d.cfg.landing_dir()) {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if !name.starts_with(&prefix) {
+                continue;
+            }
+            let lwt = e.path();
+            // Only a landing checkout with no edits: its build is then of exactly its HEAD.
+            let clean =
+                git_out(&lwt, &["status", "--porcelain"]).is_ok_and(|(ok, o)| ok && o.is_empty());
+            let (Some(c), true) = (head_of(&lwt), clean) else {
+                continue;
+            };
+            let dir = PathBuf::from(expand_name(t, &name, &h));
+            if check_path(&dir.to_string_lossy(), &h, &keep_list(d, p)).is_ok() {
+                sources.push((c, dir));
+            }
+        }
+    }
+    match seed_from(&dest, &base, &sources, &apfs_clone) {
+        Seeded::From(src) => eprintln!(
+            "task {task}: build directory cloned from {} ({})",
+            src.display(),
+            &base[..base.len().min(10)]
+        ),
+        Seeded::Skipped(why) => eprintln!("task {task}: build directory not seeded: {why}"),
+        Seeded::Failed(e) => {
+            eprintln!("task {task}: seeding the build directory failed, going cold: {e}")
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -787,5 +926,99 @@ mod tests {
         assert!(write_cargo_config(&wt, "cache/{task}", 9, &home(), &keep()).is_err());
         assert!(!wt.join(".cargo").exists());
         let _ = std::fs::remove_dir_all(&wt);
+    }
+
+    fn fake_build(root: &Path) -> PathBuf {
+        let src = root.join("mason-b0");
+        std::fs::create_dir_all(src.join("debug/incremental")).unwrap();
+        let f = src.join("debug/libx.rlib");
+        std::fs::write(&f, "x").unwrap();
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(86_400);
+        std::fs::File::options()
+            .write(true)
+            .open(&f)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        src
+    }
+
+    fn mtime(dir: &Path) -> std::time::SystemTime {
+        std::fs::metadata(dir.join("debug/libx.rlib"))
+            .unwrap()
+            .modified()
+            .unwrap()
+    }
+
+    fn copy_all(src: &Path, dst: &Path) -> Result<(), String> {
+        let o = std::process::Command::new("/bin/cp")
+            .args(["-R", "-p"])
+            .arg(src)
+            .arg(dst)
+            .output()
+            .map_err(|e| e.to_string())?;
+        o.status.success().then_some(()).ok_or("cp failed".into())
+    }
+
+    #[test]
+    fn a_new_directory_is_made_from_a_build_of_the_base_with_mtimes_kept() {
+        let r = tempfile::tempdir().unwrap();
+        let src = fake_build(r.path());
+        let dest = r.path().join("7");
+        let got = seed_from(&dest, "abc", &[("abc".into(), src.clone())], &copy_all);
+        assert_eq!(got, Seeded::From(src.clone()));
+        assert_eq!(mtime(&src), mtime(&dest));
+        assert!(dest.join("debug/incremental").is_dir());
+        assert!(!r.path().join(".7.seeding").exists());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_real_clone_keeps_mtimes() {
+        let r = tempfile::tempdir().unwrap();
+        let src = fake_build(r.path());
+        let dest = r.path().join("8");
+        match seed_from(&dest, "abc", &[("abc".into(), src.clone())], &apfs_clone) {
+            Seeded::From(_) => assert_eq!(mtime(&src), mtime(&dest)),
+            // A volume without clones: the task goes cold, and nothing is left.
+            Seeded::Failed(_) => assert!(!dest.exists()),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn another_commit_or_an_existing_directory_makes_nothing() {
+        let r = tempfile::tempdir().unwrap();
+        let src = fake_build(r.path());
+        let dest = r.path().join("7");
+        let got = seed_from(&dest, "abc", &[("other".into(), src.clone())], &copy_all);
+        assert!(matches!(got, Seeded::Skipped(_)));
+        assert!(!dest.exists());
+        std::fs::create_dir_all(&dest).unwrap();
+        let got = seed_from(&dest, "abc", &[("abc".into(), src)], &copy_all);
+        assert!(matches!(got, Seeded::Skipped(_)));
+        assert_eq!(std::fs::read_dir(&dest).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_failed_clone_leaves_nothing_and_is_reported() {
+        let r = tempfile::tempdir().unwrap();
+        let src = fake_build(r.path());
+        let dest = r.path().join("7");
+        let bad = |_: &Path, t: &Path| {
+            std::fs::create_dir_all(t).unwrap();
+            Err("no clones here".to_string())
+        };
+        let got = seed_from(&dest, "abc", &[("abc".into(), src)], &bad);
+        assert_eq!(got, Seeded::Failed("no clones here".into()));
+        assert!(!dest.exists() && !r.path().join(".7.seeding").exists());
+    }
+
+    #[test]
+    fn removal_still_refuses_paths_outside_the_template() {
+        assert!(chk("/Users/me").is_err());
+        assert!(chk("/Users/me/git/proj").is_err());
+        assert!(chk("relative/7").is_err());
+        assert_eq!(expand_name("/c/{task}", "mason-b0", &home()), "/c/mason-b0");
     }
 }

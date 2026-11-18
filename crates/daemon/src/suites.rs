@@ -394,7 +394,7 @@ fn run_hosted(
             Err(HostedErr::Other(e)) => return Err(e),
             Err(HostedErr::Lost(rep)) if on == id => {
                 hl::record(d, run, id, &rep, true);
-                first = Some(rep);
+                first = Some(*rep);
                 on = again_id.clone();
             }
             Err(HostedErr::Lost(rep)) => {
@@ -409,7 +409,8 @@ fn run_hosted(
 }
 
 enum HostedErr {
-    Lost(mason_step_host::registry::LostReport),
+    /// Boxed: the report is large.
+    Lost(Box<mason_step_host::registry::LostReport>),
     Other(String),
 }
 
@@ -533,7 +534,7 @@ fn run_hosted_once(
         Ok(r) => r,
         Err(ClientError::HostLost { .. }) => {
             return Err(match mason_step_host::registry::lost_report(&dir) {
-                Ok(rep) => HostedErr::Lost(rep),
+                Ok(rep) => HostedErr::Lost(Box::new(rep)),
                 Err(_) => HostedErr::Other("the command was lost (its host died)".into()),
             })
         }

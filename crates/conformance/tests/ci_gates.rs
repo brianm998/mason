@@ -60,7 +60,12 @@ fn ci_cancels_superseded_runs() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(block.contains("group: ci-${{ github.ref }}"), "{block}");
-    assert!(block.contains("cancel-in-progress: true"), "{block}");
+    // Superseded runs are cancelled on every ref except develop, which queues
+    // so the base-branch CI watch always has a finished run to read.
+    assert!(
+        block.contains("cancel-in-progress: ${{ github.ref != 'refs/heads/develop' }}"),
+        "{block}"
+    );
     // The nightly run must not share a group with pushes.
     assert!(
         block.contains("github.event_name == 'schedule' && 'nightly' || 'push'"),

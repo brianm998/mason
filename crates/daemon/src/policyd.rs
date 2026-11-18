@@ -18,6 +18,7 @@
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+#[cfg(target_os = "macos")]
 use std::time::Duration;
 
 /// A busy reading keeps counting for this long, so compiles do not pile back in the moment the
