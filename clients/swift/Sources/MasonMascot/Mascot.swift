@@ -74,6 +74,15 @@ public enum Mascot {
         return cache.loads
     }
 
+    /// Forgets every built image and the load count. For tests only, so a test can count the
+    /// builds it causes itself (the cache is shared by every test in the process).
+    static func emptyCacheForTests() {
+        cache.lock.lock()
+        cache.images = [:]
+        cache.loads = 0
+        cache.lock.unlock()
+    }
+
     private static func cached(_ key: String, _ build: () -> Image?) -> Image? {
         cache.lock.lock()
         if let hit = cache.images[key] {
