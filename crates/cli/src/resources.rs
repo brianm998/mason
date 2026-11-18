@@ -582,7 +582,7 @@ pub fn hook_bash(input: &str, needs: &str, mason: &str) -> Option<Value> {
     }
     let mut input = v["tool_input"].clone();
     input["command"] = json!(format!(
-        "{} run --needs {needs} -- bash -c {}",
+        "{} run --needs {needs} --origin hook -- bash -c {}",
         if mason
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || "/._-".contains(c))
@@ -746,7 +746,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             cmd,
-            "mason run --needs compile -- bash -c 'cargo test -p x'"
+            "mason run --needs compile --origin hook -- bash -c 'cargo test -p x'"
         );
         assert_eq!(out["hookSpecificOutput"]["permissionDecision"], "ask");
         let quoted = hook_bash(&input("make it's"), "compile", "mason").unwrap();
@@ -769,7 +769,7 @@ mod tests {
         assert!(abs["hookSpecificOutput"]["updatedInput"]["command"]
             .as_str()
             .unwrap()
-            .starts_with("'/a b/mason' run --needs compile -- bash -c"));
+            .starts_with("'/a b/mason' run --needs compile --origin hook -- bash -c"));
         assert!(hook_bash(&input("echo cargo"), "compile", "mason").is_none());
         // Quoted text is not a command, and some cargo commands compile nothing.
         for c in [

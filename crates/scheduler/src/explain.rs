@@ -36,7 +36,11 @@ pub enum WaitCause {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ahead {
+    /// The request's id in the ledger.
+    pub id: u64,
     pub label: String,
+    /// It asks for the whole machine.
+    pub exclusive: bool,
     /// `None` for an interactive caller.
     pub steps: Option<u32>,
     /// Why this one is waiting itself, when that is a pause or a gate and not a slot.
@@ -45,6 +49,8 @@ pub struct Ahead {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HeldBy {
+    /// The holder's id in the ledger.
+    pub id: u64,
     pub label: String,
     pub since: u64,
 }
@@ -58,6 +64,10 @@ pub struct Wait {
     /// In rank order.
     pub behind: Vec<Ahead>,
     pub held_by: Vec<HeldBy>,
+    /// The request this one may not pass: the first waiter ahead that holds it back by the
+    /// passing rule (an exclusive request, or the one that has set aside what this needs).
+    /// `None` when what holds it back is a holder, a gate or its own size.
+    pub blocker: Option<Ahead>,
     /// How long this request has waited, when that is past `order.max_wait_s`
     /// and it has therefore moved ahead of other pipeline work.
     pub aged_ms: Option<u64>,
@@ -194,6 +204,29 @@ pub fn resource_class(resource: &str) -> String {
 }
 
 impl Wait {
+    /// Why it waits, as a code a client can switch on: `full`, `behind`, `behind-exclusive`,
+    /// `exclusive`, `cpu`, `settling`, `disk-stall`, `syspolicyd`, `memory`, `disk-floor`,
+    /// `too-big`, `unknown`. Taken from the cause and the blocker, never from the sentence.
+    pub fn reason_code(&self) -> &'static str {
+        let behind_exclusive = self.blocker.as_ref().is_some_and(|b| b.exclusive);
+        match &self.cause {
+            WaitCause::Full { .. } => "full",
+            WaitCause::Behind { .. } | WaitCause::Exclusive if behind_exclusive => {
+                "behind-exclusive"
+            }
+            WaitCause::Behind { .. } => "behind",
+            WaitCause::Exclusive => "exclusive",
+            WaitCause::Memory { .. } => "memory",
+            WaitCause::Disk { .. } => "disk-floor",
+            WaitCause::Cpu { .. } => "cpu",
+            WaitCause::Settling { .. } => "settling",
+            WaitCause::DiskStall { .. } => "disk-stall",
+            WaitCause::Policy { .. } => "syspolicyd",
+            WaitCause::TooBig { .. } => "too-big",
+            WaitCause::Unknown { .. } => "unknown",
+        }
+    }
+
     /// What this wait is for, taken from its cause and not from the sentence: the resource
     /// (`compile`, `llm:claude`, `exclusive`, ...) or the gate (`cpu`, `disk-stall`, `disk-floor`,
     /// `memory`).
@@ -265,7 +298,7 @@ pub fn explain(w: &Wait, now_ms: u64) -> String {
 fn explain_cause(w: &Wait, now_ms: u64) -> String {
     let queue = |w: &Wait, resource: &str| {
         let mut parts = vec![format!("{} in line", ordinal(w.position))];
-        if !w.held_by.is_empty() {
+        let holders = |w: &Wait| {
             let shown: Vec<String> = w
                 .held_by
                 .iter()
@@ -273,11 +306,31 @@ fn explain_cause(w: &Wait, now_ms: u64) -> String {
                 .map(|h| format!("{} for {}", short_label(&h.label), since(now_ms, h.since)))
                 .collect();
             let more = w.held_by.len().saturating_sub(2);
-            let mut s = format!("held by {}", shown.join(" and "));
+            let mut s = shown.join(" and ");
             if more > 0 {
                 s.push_str(&format!(" and {more} more"));
             }
+            s
+        };
+        if let Some(b) = &w.blocker {
+            let mut s = format!(
+                "behind {}{}",
+                if b.exclusive {
+                    "an exclusive request "
+                } else {
+                    ""
+                },
+                short_label(&b.label)
+            );
+            if let Some(reason) = b.cause.as_ref().and_then(|c| reason(c, now_ms)) {
+                s.push_str(&format!(" ({reason})"));
+            }
             parts.push(s);
+            if !w.held_by.is_empty() {
+                parts.push(format!("which waits for {}", holders(w)));
+            }
+        } else if !w.held_by.is_empty() {
+            parts.push(format!("held by {}", holders(w)));
         } else if let Some(first) = w.behind.first() {
             // No holder: the queue waits behind a paused request, not for a slot.
             let mut s = format!("behind {}", short_label(&first.label));
@@ -394,6 +447,165 @@ mod tests {
         assert_eq!(cause_class(&WaitCause::Settling { until: 1 }), "cpu");
     }
 
+    /// The structured wait and its sentence are made from one `Wait`: for every cause the
+    /// reason code is the one expected and the sentence carries the same facts.
+    #[test]
+    fn the_sentence_and_the_structured_wait_agree_for_every_cause() {
+        let r = |n: &str| n.to_string();
+        let held = vec![HeldBy {
+            id: 7,
+            label: "#91".into(),
+            since: 0,
+        }];
+        let excl_ahead = Ahead {
+            id: 3,
+            exclusive: true,
+            label: "interactive `starpipe heavy`".into(),
+            steps: None,
+            cause: Some(WaitCause::Exclusive),
+        };
+        let plain_ahead = Ahead {
+            id: 4,
+            exclusive: false,
+            label: "#289".into(),
+            steps: Some(2),
+            cause: None,
+        };
+        let mk = |cause: WaitCause, blocker: Option<Ahead>, held_by: Vec<HeldBy>| Wait {
+            cause,
+            kind: Some(Kind::Machine),
+            position: 3,
+            behind: blocker.clone().into_iter().collect(),
+            held_by,
+            blocker,
+            aged_ms: None,
+            thawed_ms: None,
+        };
+        // (wait, the code, a fragment the sentence must have)
+        let cases = [
+            (
+                mk(
+                    WaitCause::Full {
+                        resource: r("compile"),
+                    },
+                    None,
+                    held.clone(),
+                ),
+                "full",
+                "held by #91",
+            ),
+            (
+                mk(
+                    WaitCause::Behind {
+                        resource: r("compile"),
+                    },
+                    Some(plain_ahead.clone()),
+                    vec![],
+                ),
+                "behind",
+                "behind #289",
+            ),
+            (
+                mk(WaitCause::Exclusive, Some(excl_ahead.clone()), held.clone()),
+                "behind-exclusive",
+                "behind an exclusive request interactive `starpipe heavy`, which waits for #91",
+            ),
+            (
+                mk(WaitCause::Exclusive, None, held.clone()),
+                "exclusive",
+                "held by #91",
+            ),
+            (
+                mk(
+                    WaitCause::Memory {
+                        free_mb: 1,
+                        floor_mb: 2,
+                    },
+                    None,
+                    vec![],
+                ),
+                "memory",
+                "1 MB free",
+            ),
+            (
+                mk(
+                    WaitCause::Disk {
+                        free_mb: 1024,
+                        floor_mb: 2048,
+                    },
+                    None,
+                    vec![],
+                ),
+                "disk-floor",
+                "1 GB free",
+            ),
+            (
+                mk(
+                    WaitCause::Cpu {
+                        busy_pct: 90,
+                        max_pct: 50,
+                    },
+                    None,
+                    vec![],
+                ),
+                "cpu",
+                "CPU 90% > 50%",
+            ),
+            (
+                mk(WaitCause::Settling { until: 5_000 }, None, vec![]),
+                "settling",
+                "5 s",
+            ),
+            (
+                mk(
+                    WaitCause::DiskStall {
+                        slow_ms: 3000,
+                        max_ms: 1000,
+                    },
+                    None,
+                    vec![],
+                ),
+                "disk-stall",
+                "3.0 s",
+            ),
+            (
+                mk(
+                    WaitCause::Policy {
+                        busy_pct: 640,
+                        max_pct: 300,
+                    },
+                    None,
+                    vec![],
+                ),
+                "syspolicyd",
+                "640%",
+            ),
+            (
+                mk(
+                    WaitCause::TooBig {
+                        resource: r("compile"),
+                        need: 5,
+                        limit: 2,
+                    },
+                    None,
+                    vec![],
+                ),
+                "too-big",
+                "needs 5",
+            ),
+            (
+                mk(WaitCause::Unknown { resource: r("zzz") }, None, vec![]),
+                "unknown",
+                "`zzz`",
+            ),
+        ];
+        for (w, code, fragment) in cases {
+            assert_eq!(w.reason_code(), code, "{:?}", w.cause);
+            let s = explain(&w, 0);
+            assert!(s.contains(fragment), "{code}: {s}");
+        }
+    }
+
     #[test]
     fn ordinals() {
         let got: Vec<String> = [1, 2, 3, 4, 11, 12, 13, 21, 22, 101, 111]
@@ -426,7 +638,9 @@ mod tests {
             kind: Some(Kind::Machine),
             position: behind.len() + 1,
             behind,
+            blocker: None,
             held_by: vec![HeldBy {
+                id: 0,
                 label: holder.into(),
                 since: 0,
             }],
@@ -449,6 +663,8 @@ mod tests {
     fn the_sentence_from_the_design() {
         let w = wait(
             vec![Ahead {
+                id: 0,
+                exclusive: false,
                 label: "#88".into(),
                 steps: Some(2),
                 cause: None,
@@ -469,7 +685,10 @@ mod tests {
             },
             kind: Some(Kind::Machine),
             position: 4,
+            blocker: None,
             behind: vec![Ahead {
+                id: 0,
+                exclusive: false,
                 label: "#289".into(),
                 steps: Some(2),
                 cause: Some(WaitCause::Settling { until: 37_000 }),
@@ -489,6 +708,8 @@ mod tests {
     #[test]
     fn interactive_waiters_ahead_are_not_named() {
         let ahead = |c: char| Ahead {
+            id: 0,
+            exclusive: false,
             label: format!("interactive `{}`", c.to_string().repeat(300)),
             steps: None,
             cause: None,
