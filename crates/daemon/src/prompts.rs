@@ -68,10 +68,9 @@ pub fn develop_prompt(
          run_check queues for the machine, so it can take a long time to answer; that is normal. Wait \
          for its answer. Do not run the whole workspace's tests yourself, in the background or \
          again while one is going, and do not sleep or poll for it: it takes a slot other tasks \
-         are waiting for. While you iterate, run only the tests your change touches: call run_check with \
-         `changed: true` (the packages your diff touches and what depends on them), or with `tests` \
-         (name filters) or `packages`. A scoped green is only for you; the test step still runs the \
-         whole workspace. Make one unscoped run_check at most, just before you submit.",
+         are waiting for. By default run_check runs only the tests your change affects; narrow it \
+         further with `tests` (name filters) or `packages`. A green here is only for you; the test \
+         step still runs the whole workspace, so `full: true` (everything) is rarely worth its wait.",
         progress = PROGRESS_LINE,
         proj = p.id,
         task_text = fenced(&format!("TASK #{task}: {title}"), trust, body),
