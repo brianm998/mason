@@ -12,13 +12,8 @@ class RefusedLinkTest {
         override fun close() { events.onClosed() }
     }
 
-    private fun waitFor(what: String, f: () -> Boolean) {
-        val end = System.currentTimeMillis() + 30000
-        while (!f()) {
-            if (System.currentTimeMillis() > end) fail("timed out waiting for $what")
-            Thread.sleep(10)
-        }
-    }
+    private val signal = testSignal
+    private fun waitFor(@Suppress("UNUSED_PARAMETER") what: String, f: () -> Boolean) = signal.waitFor(f)
 
     private val timing = ConnectionTiming(pingEverySeconds = 0.05, stallAfterSeconds = 15.0, watchEverySeconds = 0.02, pauseScale = 0.01)
 
@@ -28,9 +23,9 @@ class RefusedLinkTest {
         // A factory written as an object overrides the host-aware open.
         val factory = object : SocketFactory {
             override fun open(port: Int, events: SocketEvents): MonitorSocket = error("unused")
-            override fun open(info: DaemonInfo, events: SocketEvents): MonitorSocket = Sock(info, events, null).also { opened += it }
+            override fun open(info: DaemonInfo, events: SocketEvents): MonitorSocket = Sock(info, events, null).also { opened += it; signal.signal() }
         }
-        val c2 = MonitorConnection(MonitorModel(MemoryPreferences()), { DaemonInfo(7000, host = "m.local") }, timing, factory, onAttemptEnd = { ended += it })
+        val c2 = MonitorConnection(MonitorModel(MemoryPreferences()), { signal.signal(); DaemonInfo(7000, host = "m.local") }, timing, factory, onAttemptEnd = { ended += it; signal.signal() })
         c2.start()
         waitFor("a socket") { opened.isNotEmpty() }
         assertEquals("m.local", opened[0].info.host)
@@ -51,7 +46,7 @@ class RefusedLinkTest {
                 return Sock(info, events, 401).also { s -> Thread { events.onClosed() }.start() }
             }
         }
-        val c = MonitorConnection(MonitorModel(MemoryPreferences()), { DaemonInfo(7000, host = "m.local") }, timing, factory, onRefused = { refused += it })
+        val c = MonitorConnection(MonitorModel(MemoryPreferences()), { signal.signal(); DaemonInfo(7000, host = "m.local") }, timing, factory, onRefused = { refused += it; signal.signal() })
         c.start()
         waitFor("the refusal") { refused.isNotEmpty() }
         assertEquals(listOf(401), refused.toList())
