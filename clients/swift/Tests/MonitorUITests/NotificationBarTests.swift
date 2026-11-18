@@ -43,11 +43,11 @@ final class NotificationBarTests: XCTestCase {
         view.fittingSize.height
     }
 
-    private func elements(_ root: Any) -> [NSAccessibilityElementProtocol & NSObjectProtocol] {
-        var out: [NSAccessibilityElementProtocol & NSObjectProtocol] = []
+    private func elements(_ root: Any) -> [NSObject] {
+        var out: [NSObject] = []
         func walk(_ e: Any) {
             guard let obj = e as? NSObject else { return }
-            if let el = obj as? (NSAccessibilityElementProtocol & NSObjectProtocol) { out.append(el) }
+            out.append(obj)
             for c in (obj.accessibilityChildren() ?? []) { walk(c) }
         }
         walk(root)
@@ -55,7 +55,7 @@ final class NotificationBarTests: XCTestCase {
     }
 
     private func identifiers(_ view: NSView) -> Set<String> {
-        Set(elements(view).compactMap { ($0 as? NSAccessibilityProtocol)?.accessibilityIdentifier?() })
+        Set(elements(view).compactMap { ($0 as? NSAccessibilityProtocol)?.accessibilityIdentifier() })
     }
 
     func testTenRowsAreAsTallAsThreePlusTheHandle() {
@@ -88,8 +88,8 @@ final class NotificationBarTests: XCTestCase {
         let view = laidOut(m)
         let all = elements(view)
         func frame(_ id: String) -> CGRect? {
-            all.first { ($0 as? NSAccessibilityProtocol)?.accessibilityIdentifier?() == id }
-                .flatMap { ($0 as? NSAccessibilityProtocol)?.accessibilityFrame?() }
+            all.first { ($0 as? NSAccessibilityProtocol)?.accessibilityIdentifier() == id }
+                .flatMap { ($0 as? NSAccessibilityProtocol)?.accessibilityFrame() }
         }
         guard let button = frame("show-hidden-notifications"), let text = frame("banner:0-text") else {
             return XCTFail("button or top row text not found")
