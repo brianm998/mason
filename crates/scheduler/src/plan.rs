@@ -283,6 +283,22 @@ impl Blocked {
         }
     }
 
+    /// A waiting exclusive request holds `n` back: it uses the machine and cannot be done
+    /// before the machine has drained.
+    fn held_by_exclusive(
+        &self,
+        capacity: &BTreeMap<String, Capacity>,
+        n: &Needs,
+        now: u64,
+        expected_ms: Option<u64>,
+    ) -> bool {
+        let done_in_time = matches!(
+            (self.drain_end, expected_ms),
+            (Some(end), Some(e)) if !n.exclusive && now.saturating_add(e) <= end
+        );
+        self.machine_all && !n.exclusive && uses_machine(capacity, n) && !done_in_time
+    }
+
     /// The first resource of `n` that does not fit once earlier waiters' reservations are set
     /// aside, if any (or the machine, for the exclusive rules).
     fn touches(
@@ -530,7 +546,22 @@ pub fn plan(world: &World, waiting: &[Request]) -> Plan {
                 }
             }
             Some(cause) => {
-                let mut wait = build_wait(capacity, &holders, &ahead, cause.clone());
+                // Held by the passing rule, not by a full resource, a gate or its size: it has
+                // a request it may not pass. A waiting exclusive request is the root of it
+                // even for a compile that is also behind other compiles.
+                let touched = matches!(fitted, Fit::Yes)
+                    && touch.is_some()
+                    && matches!(cause, WaitCause::Behind { .. } | WaitCause::Exclusive);
+                let by_exclusive = touched
+                    && blocked.held_by_exclusive(capacity, &r.needs, world.now, r.expected_ms);
+                let mut wait = build_wait(
+                    capacity,
+                    &holders,
+                    &ahead,
+                    cause.clone(),
+                    touched,
+                    by_exclusive,
+                );
                 if rank_of(r).is_aged() && !matches!(fitted, Fit::Never(_)) {
                     wait.aged_ms = Some(world.now.saturating_sub(r.since));
                 }
@@ -562,6 +593,8 @@ fn build_wait(
     holders: &[Holder],
     ahead: &[(&Request, WaitCause)],
     cause: WaitCause,
+    touched: bool,
+    by_exclusive: bool,
 ) -> Wait {
     // The requests ahead that need what this one is stuck on.
     let same = |other: &Request| match &cause {
@@ -589,11 +622,40 @@ fn build_wait(
         .iter()
         .filter(|h| held(h))
         .map(|h| HeldBy {
+            id: h.id,
             label: h.label.clone(),
             since: h.since,
         })
         .collect();
+    let to_ahead_ref = |(o, c): &(&Request, WaitCause)| Ahead {
+        id: o.id,
+        exclusive: o.needs.exclusive,
+        label: o.label.clone(),
+        steps: (!o.rank.interactive()).then(|| o.rank.steps()),
+        cause: Some(c.clone()),
+    };
+    let to_ahead = |(o, c): &&(&Request, WaitCause)| Ahead {
+        id: o.id,
+        exclusive: o.needs.exclusive,
+        label: o.label.clone(),
+        steps: (!o.rank.interactive()).then(|| o.rank.steps()),
+        cause: Some(c.clone()),
+    };
+    // Held back by the passing rule: the first waiter ahead that it may not pass. A request
+    // that is not itself exclusive is held by a waiting exclusive one, not by any machine job.
+    let blocker = if by_exclusive {
+        // The waiting exclusive request, wherever it is in line.
+        ahead
+            .iter()
+            .find(|o| o.0.needs.exclusive)
+            .map(&to_ahead_ref)
+    } else if touched {
+        ahead_of_me.first().copied().map(&to_ahead_ref)
+    } else {
+        None
+    };
     Wait {
+        blocker,
         kind: match &cause {
             WaitCause::Full { resource }
             | WaitCause::Behind { resource }
@@ -603,14 +665,7 @@ fn build_wait(
         },
         cause,
         position: ahead_of_me.len() + 1,
-        behind: ahead_of_me
-            .iter()
-            .map(|(o, c)| Ahead {
-                label: o.label.clone(),
-                steps: (!o.rank.interactive()).then(|| o.rank.steps()),
-                cause: Some(c.clone()),
-            })
-            .collect(),
+        behind: ahead_of_me.iter().map(to_ahead).collect(),
         held_by,
         aged_ms: None,
         thawed_ms: None,
