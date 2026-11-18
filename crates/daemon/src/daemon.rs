@@ -246,6 +246,10 @@ impl Daemon {
             cpu,
             &accounts,
         )?;
+        // Commands that kept running under their step hosts while the last daemon was away
+        // hold slots the old daemon's kernel locks no longer show (s589): count them before
+        // anything can be granted.
+        broker.adopt_hosts(&crate::hostedcheck::running_holds(&cfg.hosts_dir()));
         // The volumes that matter: the data directory, the caches, the projects and their
         // worktrees (one function, so the floor, the stall prober and the history agree).
         let home = std::env::var_os("HOME")
