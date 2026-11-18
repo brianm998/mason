@@ -7,5 +7,5 @@
 -p mason-definition --test validate
 -p mason-landing --test batch
 -p mason-testing --test parsers
--p mason --test init
+-p mason-pipeline --test init
 -p mason-daemon --test landing_floor
