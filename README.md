@@ -501,4 +501,5 @@ What each stage note says it built, oldest first (generated from `docs/stages` b
 - **s605**: `scripts/exit/s576.sh` now puts `--exclude` before `--`, so grep no longer reports a missing file `--exclude=s576.sh` and the self-exclusion applies; `s605.sh` guards the whole class.
 - **s606**: The CI/windows test build no longer compiles the unix-only open_session tests, which failed on `std::os::unix` and `Permissions::from_mode`.
 - **s607**: Exit scripts s449, s484, s485, s486 and s508 ran `cargo test --test <module>` against test targets that were merged into the daemon's single `it` executable, so they failed on the Linux exit-scripts shard 4; they now name `--test it`.
+- **s611**: `scripts/exit/s580.sh` gets the missing SPDX-License-Identifier line, so the CI/lint SPDX check passes again.
 <!-- status:end -->

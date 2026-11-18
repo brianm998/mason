@@ -558,6 +558,16 @@ pub fn sign_installed(path: &Path, identity: Option<&str>) -> Result<(), String>
     Ok(())
 }
 
+/// How many jobs a self-update build may run at once: an eighth of the machine, at least 2,
+/// or `MASON_UPDATE_BUILD_JOBS`. It holds one `compile` slot, but cargo would otherwise use
+/// every core for it: on 2026-11-18 a release build of the daemon ran at about 12 cores while
+/// the owner's iMac Pro was clamped to a third of its speed for heat.
+pub fn update_build_jobs(cpus: usize, env: Option<&str>) -> usize {
+    env.and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or((cpus / 8).max(2))
+}
+
 /// Build `sha` into `runtimes/<sha>/`: a clean copy of the source at that
 /// commit, the configured build, the binaries copied, then the READY mark.
 /// Safe to repeat; an already complete runtime is left alone.
@@ -578,7 +588,17 @@ pub fn build(cfg: &UpdateCfg, rt: &Runtimes, sha: &str) -> Result<(), String> {
             src.display()
         ),
     )?;
-    sh(&src, &cfg.build)?;
+    let cpus = std::thread::available_parallelism().map_or(8, |n| n.get());
+    let jobs = update_build_jobs(
+        cpus,
+        std::env::var("MASON_UPDATE_BUILD_JOBS").ok().as_deref(),
+    );
+    shell(
+        &src,
+        &cfg.build,
+        &log,
+        &[("CARGO_BUILD_JOBS", &jobs.to_string())],
+    )?;
     let dest = rt.root.join(format!("{sha}.partial"));
     let _ = std::fs::remove_dir_all(&dest);
     std::fs::create_dir_all(&dest).map_err(|e| e.to_string())?;
@@ -2659,6 +2679,36 @@ mod tests {
         // Building what is built is a no-op.
         cfg.build = "exit 1".into();
         build(&cfg, &rt, &s[0]).unwrap();
+    }
+
+    #[test]
+    fn a_self_update_build_runs_cargo_with_a_capped_job_count() {
+        let (_d, rt, mut cfg, s) = source();
+        let seen = rt.root.join("jobs-seen");
+        cfg.build = format!(
+            "echo \"$CARGO_BUILD_JOBS\" > '{}' && mkdir -p target/release && cp a target/release/masond && cp a target/release/step-host && cp a target/release/mason-mcp",
+            seen.display()
+        );
+        build(&cfg, &rt, &s[0]).unwrap();
+        let cpus = std::thread::available_parallelism().map_or(8, |n| n.get());
+        let want = update_build_jobs(
+            cpus,
+            std::env::var("MASON_UPDATE_BUILD_JOBS").ok().as_deref(),
+        );
+        assert_eq!(
+            std::fs::read_to_string(&seen).unwrap().trim(),
+            want.to_string()
+        );
+    }
+
+    #[test]
+    fn the_update_build_job_count_is_an_eighth_of_the_machine_or_the_override() {
+        assert_eq!(update_build_jobs(36, None), 4);
+        assert_eq!(update_build_jobs(8, None), 2);
+        assert_eq!(update_build_jobs(2, None), 2);
+        assert_eq!(update_build_jobs(36, Some("6")), 6);
+        assert_eq!(update_build_jobs(36, Some("0")), 4, "0 is no override");
+        assert_eq!(update_build_jobs(36, Some("lots")), 4);
     }
     fn gap(last: Option<u64>, now: u64, urgent: bool, steps: usize, quiet: bool) -> Gap {
         gap_decision(&GapInput {
