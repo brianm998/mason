@@ -54,12 +54,9 @@ final class DiskSectionTests: XCTestCase {
     private func checkboxes(in root: NSView) -> Int {
         var n = 0
         func walk(_ e: Any?, _ depth: Int) {
-            guard depth < 40, let e else { return }
-            if let el = e as? NSAccessibilityElementProtocol {
-                if let role = (el as? NSObject)?.accessibilityRole(), role == .checkBox { n += 1 }
-            }
-            let kids = (e as? NSObject)?.accessibilityChildren() ?? []
-            for k in kids { walk(k, depth + 1) }
+            guard depth < 40, let el = e as? NSAccessibilityProtocol else { return }
+            if el.accessibilityRole() == .checkBox { n += 1 }
+            for k in el.accessibilityChildren() ?? [] { walk(k, depth + 1) }
         }
         walk(root, 0)
         return n
