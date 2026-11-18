@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import Combine
+import Observation
 import Foundation
 
 /// A paired daemon as kept in `UserDefaults`. The token is not here: it stays in the Keychain,
@@ -174,7 +175,7 @@ public final class RemoteSession: ObservableObject {
     private let timing: ConnectionTiming
     private var connection: MonitorConnection?
     private var discovery: RemoteDiscovery?
-    private var watch: AnyCancellable?
+    private var watchGeneration = 0
     private var instance = ""
     private var reachedHost: String?
     /// Told to delete this device's push registration before a Forget clears the pairing.
@@ -219,12 +220,23 @@ public final class RemoteSession: ObservableObject {
             onAttemptEnd: { discovery.attemptEnded(welcomed: $0) },
             onRefused: { [weak self] _ in self?.revoked() })
         connection = c
-        watch = model.$connected.sink { [weak self] up in
-            guard let self else { return }
-            if up, let h = self.reachedHost { self.model.linkStatus = LinkStatus.reached(host: h) }
-            else if !up, self.connection != nil { self.model.linkStatus = LinkStatus.looking(instance: self.instance) }
-        }
+        watchGeneration &+= 1
+        watchConnected(watchGeneration)
         c.start()
+    }
+
+    /// Follows `model.connected` (the current value now, then each change) and keeps the link
+    /// status line in step. Stops when `watchGeneration` moves on.
+    private func watchConnected(_ generation: Int) {
+        guard generation == watchGeneration else { return }
+        let up = withObservationTracking({ model.connected }, onChange: { [weak self] in
+            Task { @MainActor in self?.watchConnected(generation) }
+        })
+        let status: String?
+        if up, let h = reachedHost { status = LinkStatus.reached(host: h) }
+        else if !up, connection != nil { status = LinkStatus.looking(instance: instance) }
+        else { return }
+        if model.linkStatus != status { model.linkStatus = status }
     }
 
     /// The scene went to the background.
@@ -276,7 +288,7 @@ public final class RemoteSession: ObservableObject {
         connection?.stop()
         connection = nil
         discovery = nil
-        watch = nil
+        watchGeneration &+= 1
         reachedHost = nil
     }
 }

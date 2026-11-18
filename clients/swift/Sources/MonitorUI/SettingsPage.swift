@@ -8,7 +8,7 @@ import SwiftUI
 /// it to the file and applies it without a restart. A secret is never shown or typed here.
 struct SettingsPage: View {
     @Environment(\.theme) var theme
-    @ObservedObject var model: MonitorModel
+    let model: MonitorModel
 
     var body: some View {
         ScrollView {
@@ -114,7 +114,7 @@ struct SettingsPage: View {
 
 struct ScheduleRow: View {
     @Environment(\.theme) var theme
-    @ObservedObject var model: MonitorModel
+    let model: MonitorModel
     let job: SettingsSnapshot.Schedule
     @State private var every = ""
 

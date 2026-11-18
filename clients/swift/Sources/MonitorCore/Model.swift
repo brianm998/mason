@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import Foundation
+import Observation
 import MasonProtocol
 import MasonTokens
 
@@ -22,10 +23,11 @@ public typealias CiLink = Mason_V1_CiLink
 /// of the model, and every sidebar row, do not. `clockOffsetMs` is not published: the progress
 /// lines read it on their shared one-second tick.
 @MainActor
-public final class LiveState: ObservableObject {
-    @Published public var lastSeq: UInt64 = 0
-    @Published public var liveLog: [String] = []
-    public var clockOffsetMs: Int64 = 0
+@Observable
+public final class LiveState {
+    public var lastSeq: UInt64 = 0
+    public var liveLog: [String] = []
+    @ObservationIgnored public var clockOffsetMs: Int64 = 0
     public init() {}
 
     /// The daemon's time now, ms since the epoch, by this device's clock and the offset.
@@ -36,40 +38,41 @@ public final class LiveState: ObservableObject {
 }
 
 @MainActor
-public final class MonitorModel: ObservableObject {
+@Observable
+public final class MonitorModel {
     // From the daemon.
-    @Published public var header: HeaderView? { didSet { prunePauseCollapse() } }
-    @Published public var sidebar: SidebarView? { didSet { sidebarRevision &+= 1; linkRevision &+= 1 } }
+    public var header: HeaderView? { didSet { prunePauseCollapse() } }
+    public var sidebar: SidebarView? { didSet { sidebarRevision &+= 1; linkRevision &+= 1 } }
     /// Bumped on every new sidebar, so derived layouts know when to be rebuilt.
-    var sidebarRevision: UInt64 = 0
+    @ObservationIgnored var sidebarRevision: UInt64 = 0
     /// Bumped when the sidebar or the open task changes: what `isKnownTask` and `linkify` depend on.
-    var linkRevision: UInt64 = 0
-    private var knownTaskCache: (revision: UInt64, ids: Set<UInt64>)?
-    private var linkCache: (revision: UInt64, segments: [String: [LinkSegment]]) = (0, [:])
+    @ObservationIgnored var linkRevision: UInt64 = 0
+    @ObservationIgnored private var knownTaskCache: (revision: UInt64, ids: Set<UInt64>)?
+    @ObservationIgnored private var linkCache: (revision: UInt64, segments: [String: [LinkSegment]]) = (0, [:])
     /// How many times `linkify` actually ran `Linkify.segments` (for tests and the exit test).
-    public private(set) var linkifyPasses = 0
+    @ObservationIgnored public private(set) var linkifyPasses = 0
     /// How many task-id lookups `linkify` made.
-    public private(set) var isKnownTaskCalls = 0
-    var sidebarEntriesCache: (key: SidebarEntriesKey, entries: [SidebarEntry])?
-    @Published public var home: HomeView?
+    @ObservationIgnored public private(set) var isKnownTaskCalls = 0
+    @ObservationIgnored var sidebarEntriesCache: (key: SidebarEntriesKey, entries: [SidebarEntry])?
+    public var home: HomeView?
     /// The CPU shares, observed apart from the whole model: the CPU section watches only this.
     public let cpu = CpuModel()
-    @Published public var taskDetail: TaskDetailView? { didSet { linkRevision &+= 1 } }
-    @Published public var landing: LandingView?
-    @Published public var usage: UsageView?
-    @Published public var editor: EditorView?
-    @Published public var health: HealthSnapshot?
-    @Published public var introspection: IntrospectionSnapshot?
+    public var taskDetail: TaskDetailView? { didSet { linkRevision &+= 1 } }
+    public var landing: LandingView?
+    public var usage: UsageView?
+    public var editor: EditorView?
+    public var health: HealthSnapshot?
+    public var introspection: IntrospectionSnapshot?
     /// The Settings page (s430): the picked project's settings, the global notification routes,
     /// and what the last change or test said.
-    @Published public var settings: SettingsSnapshot?
-    @Published public var notifySettings: NotifySettings?
-    @Published public var settingsNotice: String?
+    public var settings: SettingsSnapshot?
+    public var notifySettings: NotifySettings?
+    public var settingsNotice: String?
     /// The Devices section (s433): LAN state, paired devices, the code on show, and what the last action said.
-    @Published public var lanStatus: LanStatus?
-    @Published public var devices: DeviceList?
-    @Published public var pairOffer: PairOffer?
-    @Published public var devicesNotice: String?
+    public var lanStatus: LanStatus?
+    public var devices: DeviceList?
+    public var pairOffer: PairOffer?
+    public var devicesNotice: String?
     /// The high-frequency state (last sequence number, live log, clock offset) lives in its own
     /// object, so a change to it redraws only the views that show it, never the sidebar rows.
     public let live = LiveState()
@@ -96,16 +99,16 @@ public final class MonitorModel: ObservableObject {
         get { live.liveLog }
         set { live.liveLog = newValue }
     }
-    @Published public var connected = false
+    public var connected = false
     /// The connection is down and being retried: the daemon is restarting or has
     /// not answered. Shown as "reconnecting", never as a hard error.
-    @Published public var reconnecting = false
+    public var reconnecting = false
     /// What the remote link is doing ("Looking for MASON on studio…", "Reached through studio.local"),
     /// or nil for the loopback connection. The start and banner views say it when set.
-    @Published public var linkStatus: String?
+    public var linkStatus: String?
     /// Whether the daemon took this connection's identity for the owner's (its welcome says).
     /// Only then are the answer, approve and reject buttons drawn: anyone else sees the card.
-    @Published public var isOwner = false
+    public var isOwner = false
     public var canAct: Bool { isOwner && readOnlyReason == nil }
 
     // About versions (Part 15).
@@ -114,26 +117,26 @@ public final class MonitorModel: ObservableObject {
     /// This monitor's own build: a commit, or "dev" for a build nobody versioned.
     /// The commit comes from the environment, else from `BuildStamp`, which every build made by
     /// the daemon or `make` stamps; a build nobody stamped stays "dev" and does not nag.
-    public var ownVersion: String = ProcessInfo.processInfo.environment["MASON_MONITOR_VERSION"]
+    @ObservationIgnored public var ownVersion: String = ProcessInfo.processInfo.environment["MASON_MONITOR_VERSION"]
         ?? (BuildStamp.commit.isEmpty ? "dev" : BuildStamp.commit)
     /// Where this monitor's executable is, so the daemon can rebuild a bare binary in place.
-    public var ownPath: String = ""
+    @ObservationIgnored public var ownPath: String = ""
     /// The daemon's build, from its welcome.
-    @Published public var daemonVersion = ""
+    public var daemonVersion = ""
     /// Set when the daemon needs a newer protocol than this monitor speaks: nothing
     /// can be sent, and this says why.
-    @Published public var readOnlyReason: String?
+    public var readOnlyReason: String?
     /// What this monitor's update is doing, while the user has asked for one.
-    @Published public var updating: String?
+    public var updating: String?
     /// Why the last update of this monitor did not happen.
-    @Published public var updateError: String?
+    public var updateError: String?
     /// Puts the finished build (a path on this machine) in place, launches it and quits.
     /// Only the desktop app sets this; a phone has no way to replace itself.
-    public var onInstall: ((String) -> Void)?
+    @ObservationIgnored public var onInstall: ((String) -> Void)?
     /// The daemon said this monitor's build is on its way.
-    private var monitorAsked = false
+    @ObservationIgnored private var monitorAsked = false
     /// The connection is to a daemon on this machine, so a path it gives is one we can open.
-    @Published public private(set) var localDaemon = true
+    public private(set) var localDaemon = true
     public static let monitorKind = "swift"
 
     var updateInfo: Mason_V1_UpdateInfo? { header?.hasUpdate == true ? header?.update : nil }
@@ -178,7 +181,7 @@ public final class MonitorModel: ObservableObject {
     /// On the `release` channel (a packaged install) there is no source to build from: the
     /// button opens the download page instead.
     public var downloadURL: String { updateInfo?.downloadURL ?? "" }
-    public var onOpenURL: ((URL) -> Void)?
+    @ObservationIgnored public var onOpenURL: ((URL) -> Void)?
     public func openDownloadPage() {
         if let u = URL(string: downloadURL), ["https", "http"].contains(u.scheme) { onOpenURL?(u) }
     }
@@ -192,7 +195,7 @@ public final class MonitorModel: ObservableObject {
     /// What to ask before the button acts; empty when it acts at once.
     public var daemonUpdateConfirm: String { updateInfo?.daemonConfirm ?? "" }
     /// The confirmation dialog is open.
-    @Published public var confirmingDaemonUpdate = false
+    public var confirmingDaemonUpdate = false
 
     /// The button was pressed: ask first if the daemon says to, else act.
     public func pressUpdateDaemon() {
@@ -289,12 +292,12 @@ public final class MonitorModel: ObservableObject {
     }
 
     // The user's.
-    @Published public private(set) var history = NavHistory()
-    @Published public var search = SearchState()
-    @Published public var textScale: Double { didSet { prefs.setDouble(textScale, for: Keys.scale) } }
+    public private(set) var history = NavHistory()
+    public var search = SearchState()
+    public var textScale: Double { didSet { prefs.setDouble(textScale, for: Keys.scale) } }
     /// The panel's width before text-zoom scaling; always inside the token limits.
-    @Published public private(set) var sidebarWidth: Double
-    @Published public var muted: Bool {
+    public private(set) var sidebarWidth: Double
+    public var muted: Bool {
         didSet {
             prefs.setBool(muted, for: Keys.mute)
             // Muting silences sound and speech at once. Banners and the attention count are
@@ -306,13 +309,13 @@ public final class MonitorModel: ObservableObject {
     /// The queue of sounds and sentences (Part 19). The app swaps in a sink that plays them.
     public let announcer: Announcer
     /// The connection has been down long enough to call the daemon down: a banner, muted or not.
-    @Published public private(set) var daemonDown = false
+    public private(set) var daemonDown = false
     /// This monitor's name when it asks to speak; one per launch.
     public let clientId = UUID().uuidString
     /// The selected project filter ("" is all projects). Everything the daemon computes for a
     /// project is stamped with it; a change clears what was computed for the old one, and
     /// `apply` drops any view stamped for another.
-    @Published public var project = "" {
+    public var project = "" {
         didSet {
             attentionSeen = nil
             if oldValue != project { clearProjectScoped() }
@@ -337,55 +340,55 @@ public final class MonitorModel: ObservableObject {
     /// Called (on the main actor) when something new needs the owner and the monitor is not
     /// muted: a task asked a question, waits for approval, was proposed, or failed. The app
     /// plays its sound here; the model only decides when.
-    public var onAttention: (() -> Void)?
+    @ObservationIgnored public var onAttention: (() -> Void)?
     /// The tasks that needed the owner at the last update; nil until the first one, so what
     /// was already waiting when the monitor opened (or the project changed) is silent.
-    private var attentionSeen: Set<UInt64>?
+    @ObservationIgnored private var attentionSeen: Set<UInt64>?
     /// Sections the user opened or closed, remembered per device.
-    @Published private var overrides: [String: Bool] = [:]
+    private var overrides: [String: Bool] = [:]
     /// Where the sidebar should scroll to (a tile was clicked).
-    @Published public var scrollTarget: String?
-    @Published public var lastResult: String?
+    public var scrollTarget: String?
+    public var lastResult: String?
     /// What the last Skip testing click did ("Skipped testing for 4 tasks", "Nothing to skip: ..."),
     /// kept apart from `lastResult` so the daemon's next ok result does not wipe it.
-    @Published public var skipNotice: String?
+    public var skipNotice: String?
     /// Commands sent and not yet settled, by id (task #522).
-    @Published public internal(set) var pending: [String: PendingCommand] = [:]
+    public internal(set) var pending: [String: PendingCommand] = [:]
     /// The daemon's refusal of the last command about a task, by task id (0: not about a task).
-    @Published public internal(set) var actionErrors: [UInt64: String] = [:]
-    var nextActionId = 0
+    public internal(set) var actionErrors: [UInt64: String] = [:]
+    @ObservationIgnored var nextActionId = 0
     /// A long command opened from a Compilation row; nil: the dialog is closed.
-    @Published public var commandDialog: CommandDialog?
+    public var commandDialog: CommandDialog?
     /// Open session found the step running: the task to ask about. Answer with `answerSessionPrompt`.
-    @Published public var sessionPrompt: UInt64?
+    public var sessionPrompt: UInt64?
     /// What Open session did or could not do, in words, until the next click.
-    @Published public var sessionNotice: String?
+    public var sessionNotice: String?
     /// Starts a terminal running this argument vector; false when it could not. The app sets it.
-    public var launcher: (([String]) -> Bool)?
+    @ObservationIgnored public var launcher: (([String]) -> Bool)?
     /// Puts text on the pasteboard. The app sets it.
-    public var copier: ((String) -> Void)?
+    @ObservationIgnored public var copier: ((String) -> Void)?
     /// The CLI by its full path.
-    public var cliPath = OpenSession.defaultCLI()
+    @ObservationIgnored public var cliPath = OpenSession.defaultCLI()
     /// What `mason proposal publish --preview` would send, in the daemon's words, once asked for.
-    @Published public var publishPreview: PublishPreview?
+    public var publishPreview: PublishPreview?
     /// The SSH key sheet after a refused push: the project it is for, the keys offered, and what
     /// choosing one said. nil project: the sheet is closed.
-    @Published public var sshKeyProject: String?
-    @Published public var sshKeys: SSHKeyList?
-    @Published public var sshKeyResult: String?
-    @Published public var sshKeyBusy = false
+    public var sshKeyProject: String?
+    public var sshKeys: SSHKeyList?
+    public var sshKeyResult: String?
+    public var sshKeyBusy = false
     /// The owner session whose dialog is open, and what the daemon last said of it (s364, s432).
-    @Published public var ownerSessionDialog: UInt64?
-    @Published public var ownerSession: OwnerSessionTranscript?
-    @Published public var ownerSessionError: String?
+    public var ownerSessionDialog: UInt64?
+    public var ownerSession: OwnerSessionTranscript?
+    public var ownerSessionError: String?
     /// The step selected in the pipeline editor (for its inspector).
-    @Published public private(set) var editorStep = ""
+    public private(set) var editorStep = ""
     /// Called with every command result (the tools read them; the app shows errors).
-    public var onResult: ((Mason_V1_CommandResult) -> Void)?
+    @ObservationIgnored public var onResult: ((Mason_V1_CommandResult) -> Void)?
 
     private let prefs: Preferences
-    public var sender: ((Mason_V1_Command) -> Void)?
-    public var subscribe: (() -> Void)?
+    @ObservationIgnored public var sender: ((Mason_V1_Command) -> Void)?
+    @ObservationIgnored public var subscribe: (() -> Void)?
 
     public enum Keys {
         static let scale = "textScale"
@@ -424,7 +427,7 @@ public final class MonitorModel: ObservableObject {
             raw("POST", "/announce/claim", json: announcer.claimBody(client: clientId))
         }
     }
-    private var lastClaim = Date.distantPast
+    @ObservationIgnored private var lastClaim = Date.distantPast
     static let claimEvery: TimeInterval = 3
 
     // MARK: navigation
@@ -467,7 +470,7 @@ public final class MonitorModel: ObservableObject {
 
     /// Where the shown page is scrolled now. Not published: it changes every frame of a scroll,
     /// and is saved into the history only when the page is left.
-    public private(set) var liveScroll: Double = 0
+    @ObservationIgnored public private(set) var liveScroll: Double = 0
     public func reportScroll(_ y: Double) { liveScroll = max(0, y) }
 
     private func navigate(_ f: (inout NavHistory, Double) -> Void) {
@@ -562,8 +565,14 @@ public final class MonitorModel: ObservableObject {
 
     /// Whether this pause's banner is collapsed to its icon (kept per device, across launches).
     public func isPauseCollapsed(project: String, mode: String) -> Bool {
-        prefs.bool(Keys.pause(project: project, mode: mode)) ?? false
+        _ = prefsRevision  // observed: a change made by `setPauseCollapsed` redraws the readers
+        return prefs.bool(Keys.pause(project: project, mode: mode)) ?? false
     }
+    /// Bumped when a preference the views read through a method (not a property) changes.
+    public private(set) var prefsRevision = 0
+    /// Bumped when the announcer's settings (kept in the announcer, not here) change.
+    public private(set) var announcerRevision = 0
+    public func announcerSettingsChanged() { announcerRevision &+= 1 }
 
     public func setPauseCollapsed(project: String, mode: String, _ collapsed: Bool) {
         let key = Keys.pause(project: project, mode: mode)
@@ -571,7 +580,7 @@ public final class MonitorModel: ObservableObject {
         if collapsed { keys.append(key) }
         prefs.setBool(collapsed, for: key)
         prefs.setString(keys.joined(separator: "\n"), for: Keys.pauseIndex)
-        objectWillChange.send()
+        prefsRevision &+= 1
     }
 
     /// One row of the pause group: banner indices. `collapsed` icons sit at the leading edge of the
@@ -668,7 +677,7 @@ public final class MonitorModel: ObservableObject {
 
     /// Who is acting. Only the owner's identity counts as an answer (Part 10),
     /// so every command says who sent it: `MASON_AS`, else the macOS user name.
-    public var identity: String = ProcessInfo.processInfo.environment["MASON_AS"] ?? NSUserName()
+    @ObservationIgnored public var identity: String = ProcessInfo.processInfo.environment["MASON_AS"] ?? NSUserName()
 
     public func send(_ c: Mason_V1_Command) {
         if let why = readOnlyReason {
@@ -1004,11 +1013,11 @@ public final class MonitorModel: ObservableObject {
 
     /// How progress messages are put off to the next frame: `flush` is run once, later, on the main actor.
     /// The app's default waits one frame (1/30 s); tests replace it to hold the model "busy".
-    public var scheduleProgressFlush: (@escaping @MainActor () -> Void) -> Void = { flush in
+    @ObservationIgnored public var scheduleProgressFlush: (@escaping @MainActor () -> Void) -> Void = { flush in
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0 / 30) { MainActor.assumeIsolated { flush() } }
     }
-    private var pendingProgress: [Mason_V1_StepProgress] = []
-    private var flushScheduled = false
+    @ObservationIgnored private var pendingProgress: [Mason_V1_StepProgress] = []
+    @ObservationIgnored private var flushScheduled = false
 
     /// A progress message from the stream: held until the next frame, so a burst costs one sidebar publish.
     func enqueue(progress p: Mason_V1_StepProgress) {
@@ -1086,30 +1095,32 @@ public final class MonitorModel: ObservableObject {
         flushProgress()
         switch m.body {
         case .welcome(let w)?:
-            connected = true
-            reconnecting = false
+            if !connected { connected = true }
+            if reconnecting { reconnecting = false }
             announcer.connectionRestored()
-            pending = [:]
-            if w.resume == .snapshot { lastSeq = 0 }
-            daemonVersion = w.version
-            localDaemon = w.role.isEmpty
+            if !pending.isEmpty { pending = [:] }
+            if w.resume == .snapshot, lastSeq != 0 { lastSeq = 0 }
+            if daemonVersion != w.version { daemonVersion = w.version }
+            if localDaemon != w.role.isEmpty { localDaemon = w.role.isEmpty }
             // A build asked for on the connection that just went has no answer coming.
             if !monitorAsked { updating = nil }
             anchor(daemonNow: w.nowMs)
-            isOwner = w.owner
-            readOnlyReason = w.minProtocol > Self.protocolVersion
+            if isOwner != w.owner { isOwner = w.owner }
+            let why: String? = w.minProtocol > Self.protocolVersion
                 ? "This monitor speaks protocol \(Self.protocolVersion), but the daemon needs \(w.minProtocol) or newer. Update the monitor; until then it can only look."
                 : nil
+            if readOnlyReason != why { readOnlyReason = why }
         case .snapshot(let s)?:
-            lastSeq = max(lastSeq, s.seq)
+            setSeq(max(lastSeq, s.seq))
             s.views.forEach(apply)
         case .events(let e)?:
-            if let last = e.events.last?.seq { lastSeq = max(lastSeq, last) }
+            if let last = e.events.last?.seq { setSeq(max(lastSeq, last)) }
         case .view(let u)?:
-            lastSeq = max(lastSeq, u.seq)
+            setSeq(max(lastSeq, u.seq))
             apply(u.view)
         case .result(let r)?:
-            lastResult = r.ok ? nil : r.error
+            let shown: String? = r.ok ? nil : r.error
+            if lastResult != shown { lastResult = shown }
             settle(result: r)
             handle(result: r)
             onResult?(r)
@@ -1138,37 +1149,42 @@ public final class MonitorModel: ObservableObject {
         }
     }
 
+    /// Writes that carry the same value are skipped: an `@Observable` property notifies on every
+    /// assignment, so an equal one would redraw every view that read it.
+    private func setSeq(_ n: UInt64) { if lastSeq != n { lastSeq = n } }
+
     func apply(_ v: Mason_V1_View) {
         // A view computed for another filter (a rebuild that was in flight when the picker
         // changed, or one resumed after a reconnect) is dropped.
         if let p = Self.scope(of: v), p != project { return }
         switch v.body {
         case .header(let x)?:
-            header = x
+            if header != x { header = x }
             noteMonitorBuild()
             // An open dialog follows the session: a reply arrives as a new header.
             if ownerSessionDialog != nil { refreshOwnerSession() }
         case .sidebar(let x)?:
             progress.reset(tasks: x.sections.flatMap { $0.rows.map(\.id) })
-            sidebar = x
+            if sidebar != x { sidebar = x }
             noteAttention(x)
             settleAfterView()
         case .home(let x)?:
-            home = x
+            if home != x { home = x }
             cpu.update(x)
         case .cpuHistory(let x)?:
             cpu.update(history: x)
         case .taskDetail(let x)?:
             // A different task's page starts its log over; the same task's view carries the tail again.
             progress.resetDetail()
-            taskDetail = x
-            liveLog = x.logTail.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-            if liveLog.last == "" { liveLog.removeLast() }
-            liveLog = Array(liveLog.suffix(Self.logKeep))
+            if taskDetail != x { taskDetail = x }
+            var lines = x.logTail.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+            if lines.last == "" { lines.removeLast() }
+            lines = Array(lines.suffix(Self.logKeep))
+            if liveLog != lines { liveLog = lines }
             settleAfterView()
-        case .landing(let x)?: landing = x
-        case .usage(let x)?: usage = x
-        case .editor(let x)?: editor = x
+        case .landing(let x)?: if landing != x { landing = x }
+        case .usage(let x)?: if usage != x { usage = x }
+        case .editor(let x)?: if editor != x { editor = x }
         default: break
         }
     }
@@ -1228,8 +1244,8 @@ public final class MonitorModel: ObservableObject {
     }
 
     public func disconnected(now: Date = Date()) {
-        connected = false
-        reconnecting = true
+        if connected { connected = false }
+        if !reconnecting { reconnecting = true }
         markPendingNotSent()
         announcer.connectionLost(at: now)
     }
