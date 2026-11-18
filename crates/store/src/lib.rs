@@ -1771,6 +1771,27 @@ impl Store {
         })
     }
 
+    /// Every task now waiting because the base is red the same way, oldest first.
+    pub fn base_reds(&self) -> Result<Vec<BaseRedWait>, StoreError> {
+        self.read(|c| {
+            let mut q = c.prepare(
+                "SELECT task, suite, kind, first_error, base, text, at_ms FROM base_red ORDER BY at_ms, task",
+            )?;
+            let rows = q.query_map([], |r| {
+                Ok(BaseRedWait {
+                    task: r.get::<_, i64>(0)? as u64,
+                    suite: r.get(1)?,
+                    kind: r.get(2)?,
+                    first_error: r.get(3)?,
+                    base: r.get(4)?,
+                    text: r.get(5)?,
+                    at_ms: r.get::<_, i64>(6)? as u64,
+                })
+            })?;
+            rows.collect()
+        })
+    }
+
     pub fn clear_base_red(&self, task: u64) -> Result<(), StoreError> {
         self.write(move |c| {
             c.execute("DELETE FROM base_red WHERE task = ?1", params![task as i64])

@@ -97,6 +97,10 @@ struct HomePage: View {
                 }
                 versionLine
 
+                if let h = model.home, h.hasQueueHold {
+                    QueueHoldBanner(model: model, hold: h.queueHold)
+                }
+
                 if let attention = model.home?.attention, !attention.isEmpty {
                     section("Needs you", theme: theme) {
                         ForEach(attention, id: \.task.id) { a in
@@ -164,6 +168,7 @@ struct HomePage: View {
                                     ProgressCells(clock: model.live, cells: r.progress, slow: r.slow)
                                     Text("\(r.project) \(r.key)").font(theme.body(.semibold))
                                     Text(r.title).font(theme.body()).multilineTextAlignment(.leading)
+                                    if r.hasWait { WaitBadge(cause: r.wait.cause) }
                                     Text(r.whyWaiting.isEmpty ? Format.duration(ms: r.inStateMs) : "\(r.whyWaiting), \(Format.duration(ms: r.inStateMs))")
                                         .font(theme.small()).foregroundStyle(r.slow ? theme.slow : theme.muted)
                                 }
@@ -333,6 +338,19 @@ struct CompilationSection: View {
                 .accessibilityIdentifier("compile:pending:\(w.position)")
             }
 
+            if !c.leases.isEmpty {
+                Text("Commands with no task").font(theme.body(.semibold)).padding(.top, theme.spacingSmall)
+            }
+            ForEach(Array(c.leases.enumerated()), id: \.offset) { i, l in
+                HStack(alignment: .firstTextBaseline, spacing: theme.spacing) {
+                    who(l.label, task: 0, command: l.command)
+                    Text(QueueWait.leaseDetail(l, now: model.daemonNow()))
+                        .foregroundStyle(theme.muted)
+                }
+                .font(theme.body())
+                .accessibilityIdentifier("compile:lease:\(i)")
+            }
+
             ForEach(Array(c.notes.enumerated()), id: \.offset) { i, n in
                 Text(n).font(theme.small()).foregroundStyle(theme.attention)
                     .fixedSize(horizontal: false, vertical: true)
@@ -426,7 +444,16 @@ struct TaskDetailPage: View {
                 Text("\(r.project), \(r.state.replacingOccurrences(of: "_", with: " ")), \(Format.duration(ms: r.inStateMs)) in this state")
                     .font(theme.body()).foregroundStyle(theme.muted)
                 if !r.whyWaiting.isEmpty {
-                    LinkedText(model: model, text: r.whyWaiting).accessibilityIdentifier("detail:why-waiting")
+                    HStack(spacing: theme.spacing) {
+                        if r.hasWait { WaitBadge(cause: r.wait.cause) }
+                        LinkedText(model: model, text: r.whyWaiting).accessibilityIdentifier("detail:why-waiting")
+                    }
+                    if r.hasWait {
+                        ForEach(Array(QueueWait.chain(r.wait, task: r.key).enumerated()), id: \.offset) { i, line in
+                            LinkedText(model: model, text: line, font: theme.small(), color: theme.muted)
+                                .accessibilityIdentifier("detail:wait-chain:\(i)")
+                        }
+                    }
                 }
                 if r.issue != 0 || !d.ciLinks.isEmpty {
                     CiLinksLine(links: d.ciLinks, issue: r.issue, issueURL: r.issueURL)

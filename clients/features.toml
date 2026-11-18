@@ -634,3 +634,25 @@ swift = "done"
 compose = "done"
 ios = "done"
 android = "done"
+
+[feature.queue-hold-banner]
+description = "One line at the top of home when most waiting work is held by one thing: an exclusive request (named, with where it came from and how long it has waited, and what it waits for), one gate (CPU, syspolicyd, the build disk, memory, the disk floor), or a test that is red on the base for many tasks; with the number of tasks behind it (s527)"
+swift = "done"
+compose = "done"
+ios = "done"
+android = "done"
+
+[feature.wait-cause-badge]
+description = "A waiting task's row carries its cause as a small badge (slot full, behind exclusive, CPU, syspolicyd, build disk slow, ...) beside the sentence, which names the blocker; the task page lists the whole chain: this task waits for X, X waits for Y (s527)"
+swift = "done"
+compose = "done"
+ios = "done"
+android = "done"
+
+[feature.no-task-leases]
+description = "The Compilation section lists every lease that belongs to no task (a person's mason run, starpipe, a hook), held or waiting, with its label, origin, what it asked for and how long (s527)"
+swift = "done"
+compose = "done"
+ios = "done"
+android = "todo"
+android_reason = "Not in the first Android phone app (stage 469): the Android module has no Compilation section yet; the queue-held banner names the lease that blocks"
