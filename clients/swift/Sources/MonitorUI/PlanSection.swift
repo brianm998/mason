@@ -14,7 +14,7 @@ func inlineMarkdown(_ s: String) -> AttributedString {
 /// A task's plan: summary, steps, files, criteria and any extra keys, as a document.
 struct PlanSection: View {
     @Environment(\.theme) var theme
-    @ObservedObject var model: MonitorModel
+    let model: MonitorModel
     let detail: Mason_V1_TaskDetailView
 
     var body: some View {

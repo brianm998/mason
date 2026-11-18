@@ -2,6 +2,7 @@
 
 import Foundation
 import MasonProtocol
+import Observation
 
 /// The home page's CPU section, as data: the bar's segments, the legend rows and the
 /// header, from the daemon's `CpuUsage` (shares in permille of the whole machine,
@@ -120,15 +121,16 @@ public func cpuLayout(_ u: Mason_V1_CpuUsage?, nowMs: UInt64, colors: [UInt64: I
 /// What the CPU section observes: only the CPU data, apart from `MonitorModel`'s whole-model
 /// publishing, so a new reading redraws the bar and legend and nothing else.
 @MainActor
-public final class CpuModel: ObservableObject {
-    @Published public private(set) var usage: Mason_V1_CpuUsage?
-    @Published public private(set) var colors: [UInt64: Int] = [:]
+@Observable
+public final class CpuModel {
+    public private(set) var usage: Mason_V1_CpuUsage?
+    public private(set) var colors: [UInt64: Int] = [:]
     /// The graph, prepared off the main thread; nil until the first history arrives.
-    @Published public private(set) var chart: CpuChart?
+    public private(set) var chart: CpuChart?
     /// The span the graph shows; a change resubscribes (see `Connection.sendSubscription`).
-    @Published public private(set) var span: CpuSpan = .hour
-    private var palette = CpuColors()
-    private var generation = 0
+    public private(set) var span: CpuSpan = .hour
+    @ObservationIgnored private var palette = CpuColors()
+    @ObservationIgnored private var generation = 0
 
     public init() {}
 
