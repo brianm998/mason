@@ -31,7 +31,17 @@ trap cleanup EXIT
 cargo build -q --workspace --bins
 bin=target/debug
 echo "== 1. the Compose project builds and its tests pass"
-(cd clients/compose && gradle --no-daemon -q :core:test :app:installDist 2>&1 | grep -vE '^$' | head -5 || true)
+# The exit status is kept: a failing Gradle run fails this step, and names its failing testcases.
+if ! (cd clients/compose && gradle --no-daemon -q :core:test :app:installDist); then
+  python3 - <<'PY'
+import glob, xml.etree.ElementTree as ET
+for p in sorted(glob.glob("clients/compose/core/build/test-results/test/*.xml")):
+    for c in ET.parse(p).getroot().iter("testcase"):
+        for k in list(c.findall("failure")) + list(c.findall("error")):
+            print("FAILED:", c.get("classname"), c.get("name"), "-", ((k.get("message") or k.text or "").splitlines() or [""])[0])
+PY
+  echo "the Compose build or its tests failed" >&2; exit 1
+fi
 kt=clients/compose/app/build/install/app/bin/app
 test -x "$kt"
 python3 - <<'PY'
@@ -41,7 +51,7 @@ for p in glob.glob("clients/compose/core/build/test-results/test/*.xml"):
     m = re.search(r'tests="(\d+)" skipped="\d+" failures="(\d+)" errors="(\d+)"', open(p).read())
     t += int(m.group(1)); f += int(m.group(2)) + int(m.group(3))
 print(f"{t} Compose tests, {f} failures")
-assert t > 0 and f == 0
+assert t > 0 and f == 0, f"{f} failures in {t} tests"
 PY
 if [ $swift_ok = 1 ]; then
   (cd clients/swift && swift build 2>&1 | tail -1)
