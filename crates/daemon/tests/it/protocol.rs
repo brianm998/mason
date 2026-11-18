@@ -1428,7 +1428,10 @@ fn history_bodies_come_with_row_bodies_and_the_sidebar_is_sent_once() {
     }
     let more = collect(&mut c, Duration::from_millis(1500), |_| false);
     assert_eq!(sidebar_views(&lean).len(), 1);
-    assert!(sidebar_views(&more).is_empty(), "sent again though unchanged");
+    assert!(
+        sidebar_views(&more).is_empty(),
+        "sent again though unchanged"
+    );
     c.subscribe_full(&[ViewKind::Sidebar], "", 0, "", 0, 0, true)
         .unwrap();
     let full = collect(&mut c, Duration::from_secs(20), |m| {

@@ -140,7 +140,15 @@ impl Client {
         cpu_span_ms: u64,
         disk_span_ms: u64,
     ) -> Result<(), String> {
-        self.subscribe_full(views, project, task, editor_step, cpu_span_ms, disk_span_ms, true)
+        self.subscribe_full(
+            views,
+            project,
+            task,
+            editor_step,
+            cpu_span_ms,
+            disk_span_ms,
+            true,
+        )
     }
 
     /// Subscribe with everything, including whether history rows carry their bodies.
