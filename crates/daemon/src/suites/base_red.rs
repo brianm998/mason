@@ -115,6 +115,11 @@ fn profile(
             if let Some(f) = &suite.results_file {
                 super::remove_results(&wt, f);
             }
+            if suite.build.is_none() {
+                if let Some(p) = who.project_cfg() {
+                    crate::taskcache::prepare_for_build(&who.d, &p, &wt, now_ms());
+                }
+            }
             let ran = run_hosted(
                 &who.d,
                 &format!("{}-bp{}-{}", who.id_prefix, short(base), suite.name),

@@ -1892,6 +1892,8 @@ impl TestChecks {
                 env: vec![("MASON_HELD".to_string(), held_text(uses))],
                 limit,
                 tree: crate::hostedcheck::tree_key(&self.wt),
+                holds: uses.clone(),
+                label: format!("#{} check", self.task),
                 stop: None,
             }
         };
@@ -2394,6 +2396,8 @@ impl TestChecks {
                 env: vec![("MASON_HELD".to_string(), held_text(uses))],
                 limit: self.timeout,
                 tree: crate::hostedcheck::tree_key(&self.wt),
+                holds: uses.clone(),
+                label: format!("#{} check", self.task),
                 stop: None,
             }
         };
@@ -2654,7 +2658,7 @@ impl CheckSlots {
         // drains for an exclusive request, if it will be done in time (s385, s422).
         let lease = d.broker.acquire_expecting(
             self.task,
-            &format!("#{}", self.task.0),
+            &format!("#{}", self.task),
             rank,
             needs,
             &alive,
