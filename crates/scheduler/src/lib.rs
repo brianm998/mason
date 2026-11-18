@@ -18,8 +18,8 @@ mod rank;
 
 pub use cpu_hold::{CpuHold, MAX_GAP_MS};
 pub use explain::{
-    cause_class, describe_command, explain, label_parts, ordinal, since, Wait, WaitCause,
-    DESCRIPTION_LIMIT,
+    cause_class, describe_command, explain, label_parts, ordinal, since, Ahead, HeldBy, Wait,
+    WaitCause, DESCRIPTION_LIMIT,
 };
 pub use ledger::{Ledger, Snapshot, Stall};
 pub use plan::{

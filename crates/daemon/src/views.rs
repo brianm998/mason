@@ -97,6 +97,8 @@ pub struct Ctx<'a> {
     blocks: std::collections::HashMap<TaskId, Vec<u64>>,
     /// The broker's wait reasons, taken once per build.
     waits: std::sync::Arc<std::collections::BTreeMap<TaskId, String>>,
+    /// The same waits as data, with the queue-held summary (s527).
+    wait_view: std::sync::Arc<crate::waitview::WaitsView>,
 }
 
 type LogCache = std::collections::HashMap<u64, (Vec<crate::http::LogStamp>, String)>;
@@ -202,6 +204,7 @@ impl<'a> Ctx<'a> {
             runs: RunIndex::build(w.step_runs.values()),
             blocks,
             waits: d.broker.waits_snapshot(),
+            wait_view: d.broker.wait_view(),
         }
     }
 
@@ -359,6 +362,10 @@ impl<'a> Ctx<'a> {
     }
 
     fn why_waiting(&self, t: &Task) -> String {
+        // The sentence comes with the structured wait, from the same plan.
+        if let Some(i) = self.wait_view.tasks.get(&t.id.0) {
+            return i.sentence.clone();
+        }
         if let Some(w) = self.waits.get(&t.id) {
             return w.clone();
         }
@@ -477,6 +484,7 @@ impl<'a> Ctx<'a> {
             state: state_name(t.state).to_string(),
             activity: crate::http::activity_text(&t.activity),
             why_waiting: self.why_waiting(t),
+            wait: self.wait_view.tasks.get(&t.id.0).cloned(),
             enqueued_ms: t.enqueued_at.0,
             in_state_ms: in_state,
             model,
@@ -902,6 +910,51 @@ impl<'a> Ctx<'a> {
         c
     }
 
+    /// What most of the waiting work is held by: the scheduler's (an exclusive request, a gate),
+    /// or a test that is red on the base for many tasks, whichever holds more of them.
+    fn queue_hold(&self, project: &str) -> Option<mason_protocol::QueueHold> {
+        let red = self.red_hold(project);
+        match (self.wait_view.hold.clone(), red) {
+            (Some(h), Some(r)) => Some(if r.waiting > h.waiting { r } else { h }),
+            (h, r) => h.or(r),
+        }
+    }
+
+    /// Tasks waiting because the base is red the same way: one line for all of them.
+    fn red_hold(&self, project: &str) -> Option<mason_protocol::QueueHold> {
+        let reds = self.d.store.base_reds().ok()?;
+        let mut groups: std::collections::BTreeMap<(String, String), Vec<u64>> = Default::default();
+        for r in reds {
+            let Some(t) = self.w.tasks.get(&TaskId(r.task)) else {
+                continue;
+            };
+            if t.state.is_terminal() || !self.matches(t, project) {
+                continue;
+            }
+            groups
+                .entry((r.suite, r.first_error))
+                .or_default()
+                .push(r.task);
+        }
+        let ((suite, error), tasks) = groups.into_iter().max_by_key(|(_, t)| t.len())?;
+        if tasks.len() < 2 {
+            return None;
+        }
+        let error: String = error.split_whitespace().collect::<Vec<_>>().join(" ");
+        let error: String = error.chars().take(120).collect();
+        let n = tasks.len();
+        Some(mason_protocol::QueueHold {
+            kind: "red".into(),
+            cause: "red".into(),
+            summary: format!(
+                "Queue held: `{suite}` is red on develop ({error}); {n} tasks fail the same way."
+            ),
+            waiting: n as u32,
+            tasks: tasks.into_iter().take(20).collect(),
+            ..Default::default()
+        })
+    }
+
     pub fn home(&self, project: &str) -> HomeView {
         let tasks: Vec<&Task> = self
             .w
@@ -960,6 +1013,7 @@ impl<'a> Ctx<'a> {
             sessions_used,
             sessions_limit,
             compilation: Some(self.compilation_named()),
+            queue_hold: self.queue_hold(project),
             cpu: Some(self.cpu_usage()),
             stages: [
                 State::Exploring,

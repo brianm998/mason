@@ -37,6 +37,27 @@ object Format {
     fun commandDialog(label: String, command: String): CommandDialog? =
         if (command.isEmpty()) null else CommandDialog(label, command)
 
+    /**
+     * Bytes in decimal units like Finder: "412 GB", "1.8 TB", "999 MB". One decimal below 10 of a unit,
+     * none from 10 up; a value that rounds to 1000 moves up a unit ("1.0 TB", not "1000 GB").
+     */
+    fun bytes(n: Long): String {
+        val units = listOf("B", "KB", "MB", "GB", "TB", "PB")
+        var v = maxOf(0L, n).toDouble()
+        var u = 0
+        while (u < units.size - 1) {
+            val shown = if (v < 10) Math.round(v * 10) / 10.0 else Math.round(v).toDouble()
+            if (v < 1000 && shown < 1000) break
+            v /= 1000.0
+            u++
+        }
+        if (u == 0) return "${v.toLong()} B"
+        return if (v < 10) String.format(java.util.Locale.ROOT, "%.1f %s", v, units[u]) else "${Math.round(v)} ${units[u]}"
+    }
+
+    /** "412 GB free of 1.8 TB". */
+    fun freeOf(free: Long, total: Long): String = "${bytes(free)} free of ${bytes(total)}"
+
     /** Time in state: "42 s", "9 min", "3h10". Always shown, never hidden. */
     fun duration(ms: Long): String {
         val s = ms / 1000
