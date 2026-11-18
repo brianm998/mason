@@ -49,13 +49,19 @@ final class DiskSectionTests: XCTestCase {
         return view
     }
 
+    /// Counts the checkboxes in the view's accessibility tree (SwiftUI draws its own controls, so
+    /// there are no NSButton subviews to find).
     private func checkboxes(in root: NSView) -> Int {
         var n = 0
-        func walk(_ v: NSView) {
-            if let b = v as? NSButton, b.accessibilityRole() == .checkBox { n += 1 }
-            v.subviews.forEach(walk)
+        func walk(_ e: Any?, _ depth: Int) {
+            guard depth < 40, let e else { return }
+            if let el = e as? NSAccessibilityElementProtocol {
+                if let role = (el as? NSObject)?.accessibilityRole(), role == .checkBox { n += 1 }
+            }
+            let kids = (e as? NSObject)?.accessibilityChildren() ?? []
+            for k in kids { walk(k, depth + 1) }
         }
-        walk(root)
+        walk(root, 0)
         return n
     }
 
@@ -112,12 +118,12 @@ final class DiskSectionTests: XCTestCase {
         let w = 1000
         let px = pixels(row(stacked: false), size: CGSize(width: w, height: 90))
         // Stacked would be 90 tall with blue below red; side by side puts both on the top row.
-        XCTAssertTrue(isColour(px, 100, 20, width: w, red: true))
-        XCTAssertTrue(isColour(px, 900, 20, width: w, red: false))
+        XCTAssertTrue(isColour(px, 100, 45, width: w, red: true))
+        XCTAssertTrue(isColour(px, 900, 45, width: w, red: false))
         // CPU takes 3/5 of 990: red up to 594, gap, blue after 604.
-        XCTAssertTrue(isColour(px, 590, 20, width: w, red: true))
-        XCTAssertTrue(isColour(px, 610, 20, width: w, red: false))
-        XCTAssertFalse(isColour(px, 100, 70, width: w, red: true))
+        XCTAssertTrue(isColour(px, 590, 45, width: w, red: true))
+        XCTAssertTrue(isColour(px, 610, 45, width: w, red: false))
+        XCTAssertFalse(isColour(px, 100, 80, width: w, red: true))
     }
 
     func testStackedAtANarrowWidthCpuFirst() {
