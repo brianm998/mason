@@ -6,6 +6,6 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 cargo test -q -p mason-adapter-api apns
 for i in $(seq 1 "${S485_RUNS:-5}"); do
-  cargo test -q -p mason-daemon --test apns
+  cargo test -q -p mason-daemon --test it apns::
   echo "run $i: green"
 done
